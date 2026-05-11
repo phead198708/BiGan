@@ -11,6 +11,7 @@ section.
 """
 
 from .schemas import (
+    SCHEMA_QUARANTINE,
     SCHEMA_RAW_CANDLES_1M,
     SCHEMA_RAW_ORDERBOOK_SNAPSHOT,
     SCHEMA_RAW_TOP_OF_BOOK,
@@ -26,14 +27,25 @@ from .transform import (
     transform_last_trade_price_event,
     transform_top_of_book_event,
 )
+from .validation import (
+    RowValidator,
+    ValidationError,
+    ValidationRule,
+    ValidationStats,
+)
 
 __all__ = [
+    "SCHEMA_QUARANTINE",
     "SCHEMA_RAW_CANDLES_1M",
     "SCHEMA_RAW_ORDERBOOK_SNAPSHOT",
     "SCHEMA_RAW_TOP_OF_BOOK",
     "SCHEMA_RAW_TRADES",
     "SCHEMA_VERSION",
     "TABLE_NAMES",
+    "RowValidator",
+    "ValidationError",
+    "ValidationRule",
+    "ValidationStats",
     "derive_top_of_book_from_book",
     "derive_top_of_book_from_price_change",
     "transform_book_event",

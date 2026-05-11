@@ -107,12 +107,14 @@ A Prometheus endpoint is exposed at `:${BIGAN_METRICS_PORT}/metrics`:
 ## Canonical warehouse (issue #3)
 
 The `src/bigan/canonical/` module provides an ETL pipeline that transforms raw NDJSON
-into four canonical Parquet tables with Hive partitioning:
+into canonical Parquet tables with Hive partitioning, plus a validation/quarantine
+layer (issue #4) that isolates anomalous rows before they reach the main tables.
 
 ```
 src/bigan/canonical/
-  schemas.py      — PyArrow schemas for the four tables
+  schemas.py      — PyArrow schemas for raw_* tables + quarantine
   transform.py    — Convert WS event payloads to canonical row dicts
+  validation.py   — Per-row rules (crossed book, negative size, dup trade_id, ...)
   writer.py       — Buffered Parquet writer with Hive partitioning
   candles.py      — 1-minute candle aggregation from top_of_book + trades
   etl.py          — Batch ETL runner (raw NDJSON -> canonical Parquet)
@@ -125,16 +127,19 @@ tests/canonical/  — pytest unit tests
 ```
 data/warehouse/
   raw_top_of_book/
-    date=YYYY-MM-DD/
+    source=<source>/dt=YYYY-MM-DD/
       part-*.parquet
   raw_orderbook_snapshot/
-    date=YYYY-MM-DD/
+    source=<source>/dt=YYYY-MM-DD/
       part-*.parquet
   raw_trades/
-    date=YYYY-MM-DD/
+    source=<source>/dt=YYYY-MM-DD/
       part-*.parquet
   raw_candles_1m/
-    date=YYYY-MM-DD/
+    source=<source>/dt=YYYY-MM-DD/
+      part-*.parquet
+  quarantine/
+    source=<source>/dt=YYYY-MM-DD/
       part-*.parquet
 ```
 
@@ -150,6 +155,26 @@ All tables share a common identity contract:
 - **raw_orderbook_snapshot**: Long-format orderbook with `side`, `level`, `price`, `size` per level
 - **raw_trades**: One row per `last_trade_price` event with `price`, `size`, `side`, `trade_id`
 - **raw_candles_1m**: Derived 1-minute OHLC candles with bid/ask/trade OHLC, VWAP, volume, counts
+- **quarantine**: Anomalous rows isolated by the validation layer with `target_table`, `rule`, `detail`, `payload_json`
+
+### Validation rules (issue #4)
+
+Every transformed row is checked against these rules before being written. If any
+rule fires, the row is redirected to `quarantine` (one quarantine row per rule
+violation) and the main `raw_*` table is unaffected:
+
+| Rule | Trigger |
+|---|---|
+| `empty_symbol` | `source_symbol` is null, empty string, or whitespace |
+| `empty_time` | `ts` is null or non-positive |
+| `crossed_book` | top-of-book row with `bid_price > ask_price` |
+| `negative_price` | top-of-book / snapshot / trade with `price < 0` (or `bid_price`/`ask_price` < 0) |
+| `negative_size` | snapshot / trade row with `size < 0` |
+| `duplicate_trade_id` | `trade_id` already seen in the same ETL batch |
+
+Trade-id dedup is **per ETL run**: re-ingesting the same NDJSON archive will
+not flag historical duplicates from a previous run. Cross-batch dedup is a
+follow-up if/when re-ETL becomes a routine workflow.
 
 ### ETL workflow
 
@@ -162,6 +187,9 @@ bigan-ingest etl-batch
 
 # Query warehouse stats
 bigan-ingest warehouse-stats
+
+# Inspect anomaly counts + recent quarantine samples
+bigan-ingest quarantine-report --limit 50
 ```
 
 ### DuckDB queries
@@ -194,4 +222,12 @@ with open_warehouse("data/warehouse") as conn:
         ORDER BY bucket_ts DESC
         LIMIT 100
     """, ["some-asset-id"]).fetchdf()
+
+    # Quarantine breakdown by rule + target table
+    df = conn.execute("""
+        SELECT target_table, rule, COUNT(*) AS n
+        FROM quarantine
+        GROUP BY target_table, rule
+        ORDER BY n DESC
+    """).fetchdf()
 ```

@@ -177,6 +177,35 @@ SCHEMA_RAW_CANDLES_1M: pa.Schema = pa.schema(
 )
 
 
+# ---------------------------------------------------------------------------
+# quarantine — abnormal rows isolated by the validation layer (issue #4)
+# ---------------------------------------------------------------------------
+#
+# Any canonical row that fails a validation rule is rerouted from its target
+# raw table into ``quarantine`` along with a machine-readable ``rule`` tag,
+# a free-form ``detail`` message, and the original payload as JSON. This
+# preserves auditability without polluting the main raw_* tables.
+#
+# Identity columns mirror the raw_* tables so the quarantine table can be
+# joined back into them by (source, source_symbol, ts).
+#
+# ``ts`` retains the offending row's event time when available, falling back
+# to ``ingest_ts`` (validator detection time) when ``ts`` is missing/zero.
+# Partitioning therefore still works for both well-formed and malformed
+# inputs.
+
+SCHEMA_QUARANTINE: pa.Schema = pa.schema(
+    [
+        *_COMMON_IDENTITY_FIELDS,
+        pa.field("target_table", pa.string(), nullable=False),
+        pa.field("rule", pa.string(), nullable=False),
+        pa.field("detail", pa.string(), nullable=True),
+        pa.field("payload_json", pa.string(), nullable=False),
+    ],
+    metadata=_table_metadata("quarantine"),
+)
+
+
 #: Stable mapping ``table_name -> pyarrow.Schema``. Kept as a tuple of pairs
 #: so the iteration order is deterministic.
 TABLE_NAMES: tuple[str, ...] = (
@@ -184,6 +213,7 @@ TABLE_NAMES: tuple[str, ...] = (
     "raw_orderbook_snapshot",
     "raw_trades",
     "raw_candles_1m",
+    "quarantine",
 )
 
 
@@ -192,4 +222,5 @@ SCHEMAS: dict[str, pa.Schema] = {
     "raw_orderbook_snapshot": SCHEMA_RAW_ORDERBOOK_SNAPSHOT,
     "raw_trades": SCHEMA_RAW_TRADES,
     "raw_candles_1m": SCHEMA_RAW_CANDLES_1M,
+    "quarantine": SCHEMA_QUARANTINE,
 }

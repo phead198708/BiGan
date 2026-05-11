@@ -12,7 +12,7 @@ import structlog
 import typer
 
 from bigan.canonical.etl import run_etl_batch
-from bigan.canonical.query import warehouse_summary
+from bigan.canonical.query import open_warehouse, warehouse_summary
 
 from .config import IngestionSettings
 from .runner import IngestionRunner
@@ -91,6 +91,8 @@ def etl_batch(
                 "files_processed": report.files_processed,
                 "records_read": report.records_read,
                 "rows_per_table": report.rows_per_table,
+                "quarantined_by_rule": report.quarantined_by_rule,
+                "quarantined_total": report.quarantined_total,
             },
             indent=2,
         )
@@ -104,6 +106,49 @@ def warehouse_stats() -> None:
     _configure_logging(settings.log_level)
     summary = warehouse_summary(settings.warehouse_dir)
     typer.echo(json.dumps(summary, indent=2))
+
+
+@app.command("quarantine-report")
+def quarantine_report(
+    limit: int = typer.Option(50, help="Max rows of detail to display."),
+) -> None:
+    """Summarise the quarantine table: counts by rule + recent samples."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    out: dict = {"by_rule": {}, "by_target_table": {}, "samples": []}
+    with open_warehouse(settings.warehouse_dir) as conn:
+        try:
+            rows = conn.execute(
+                "SELECT rule, COUNT(*) AS n FROM quarantine GROUP BY rule ORDER BY n DESC"
+            ).fetchall()
+            out["by_rule"] = {r[0]: r[1] for r in rows}
+
+            rows = conn.execute(
+                "SELECT target_table, COUNT(*) AS n FROM quarantine "
+                "GROUP BY target_table ORDER BY n DESC"
+            ).fetchall()
+            out["by_target_table"] = {r[0]: r[1] for r in rows}
+
+            samples = conn.execute(
+                "SELECT ts, source, source_symbol, target_table, rule, detail "
+                "FROM quarantine ORDER BY ts DESC LIMIT ?",
+                [limit],
+            ).fetchall()
+            out["samples"] = [
+                {
+                    "ts": r[0],
+                    "source": r[1],
+                    "source_symbol": r[2],
+                    "target_table": r[3],
+                    "rule": r[4],
+                    "detail": r[5],
+                }
+                for r in samples
+            ]
+        except Exception:  # noqa: BLE001
+            # Empty warehouse / no quarantine partition yet.
+            pass
+    typer.echo(json.dumps(out, indent=2))
 
 
 if __name__ == "__main__":

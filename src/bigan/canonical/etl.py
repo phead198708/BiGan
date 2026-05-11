@@ -30,9 +30,16 @@ import orjson
 from .candles import CandleAggregator
 from .schemas import TABLE_NAMES
 from .transform import transform_event
+from .validation import RowValidator
 from .writer import WarehouseWriter
 
 logger = logging.getLogger(__name__)
+
+#: Tables the validator inspects. ``raw_candles_1m`` is derived from already-
+#: validated rows so it does not go through per-row validation again.
+_VALIDATED_TABLES: frozenset[str] = frozenset(
+    {"raw_top_of_book", "raw_orderbook_snapshot", "raw_trades"}
+)
 
 
 @dataclass(slots=True)
@@ -42,10 +49,17 @@ class EtlReport:
     files_processed: int = 0
     records_read: int = 0
     rows_per_table: dict[str, int] = None  # type: ignore[assignment]
+    quarantined_by_rule: dict[str, int] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.rows_per_table is None:
             self.rows_per_table = dict.fromkeys(TABLE_NAMES, 0)
+        if self.quarantined_by_rule is None:
+            self.quarantined_by_rule = {}
+
+    @property
+    def quarantined_total(self) -> int:
+        return sum(self.quarantined_by_rule.values())
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +82,7 @@ def run_etl_batch(
     warehouse_dir = Path(warehouse_dir)
     report = EtlReport()
     aggregator = CandleAggregator()
+    validator = RowValidator()
     ingest_ts_now_ms = int(time.time() * 1000)
 
     files = _eligible_files(raw_dir, lag_seconds)
@@ -78,7 +93,13 @@ def run_etl_batch(
     ) as writer:
         for src in files:
             try:
-                _process_file(src, writer=writer, aggregator=aggregator, report=report)
+                _process_file(
+                    src,
+                    writer=writer,
+                    aggregator=aggregator,
+                    validator=validator,
+                    report=report,
+                )
             except Exception:  # noqa: BLE001
                 logger.exception("etl.file_failed", extra={"src": str(src)})
                 raise
@@ -93,6 +114,7 @@ def run_etl_batch(
     # Pull final per-table totals from the writer's stats.
     for table in TABLE_NAMES:
         report.rows_per_table[table] = writer.stats.rows_written.get(table, 0)
+    report.quarantined_by_rule = dict(validator.stats.rows_quarantined_by_rule)
 
     logger.info(
         "etl.done",
@@ -100,6 +122,8 @@ def run_etl_batch(
             "files": report.files_processed,
             "records": report.records_read,
             "rows": report.rows_per_table,
+            "quarantined_by_rule": report.quarantined_by_rule,
+            "quarantined_total": report.quarantined_total,
         },
     )
     return report
@@ -130,6 +154,7 @@ def _process_file(
     *,
     writer: WarehouseWriter,
     aggregator: CandleAggregator,
+    validator: RowValidator,
     report: EtlReport,
 ) -> None:
     logger.info("etl.file_start", extra={"src": str(src)})
@@ -139,14 +164,49 @@ def _process_file(
         for table_name, rows in tables.items():
             if not rows:
                 continue
-            writer.append_rows(table_name, rows)
-            if table_name == "raw_top_of_book":
-                for row in rows:
-                    aggregator.add_top_of_book(row)
-            elif table_name == "raw_trades":
-                for row in rows:
-                    aggregator.add_trade(row)
+            _route_rows(
+                table_name,
+                rows,
+                writer=writer,
+                aggregator=aggregator,
+                validator=validator,
+            )
     logger.info("etl.file_done", extra={"src": str(src)})
+
+
+def _route_rows(
+    table_name: str,
+    rows: list[dict[str, Any]],
+    *,
+    writer: WarehouseWriter,
+    aggregator: CandleAggregator,
+    validator: RowValidator,
+) -> None:
+    """Split ``rows`` into clean and quarantined groups and emit them."""
+    if table_name not in _VALIDATED_TABLES:
+        writer.append_rows(table_name, rows)
+        return
+
+    clean: list[dict[str, Any]] = []
+    quarantine: list[dict[str, Any]] = []
+    for row in rows:
+        errors = validator.validate(table_name, row)
+        if errors:
+            quarantine.extend(validator.to_quarantine_rows(table_name, row, errors))
+        else:
+            clean.append(row)
+
+    if clean:
+        writer.append_rows(table_name, clean)
+        if table_name == "raw_top_of_book":
+            for row in clean:
+                aggregator.add_top_of_book(row)
+        elif table_name == "raw_trades":
+            for row in clean:
+                aggregator.add_trade(row)
+
+    if quarantine:
+        writer.append_rows("quarantine", quarantine)
 
 
 def _iter_ndjson_gz(path: Path) -> Iterator[dict[str, Any]]:

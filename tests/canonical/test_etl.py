@@ -160,3 +160,119 @@ def test_etl_skips_in_flight_files(tmp_path: Path) -> None:
     )
     assert report.files_processed == 0
     assert report.records_read == 0
+
+
+def test_etl_quarantines_crossed_book_without_affecting_clean_rows(
+    tmp_path: Path,
+) -> None:
+    """A crossed best_bid_ask must go to quarantine; the surrounding clean
+    events must still land in their main tables and feed the candle agg."""
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    base = _ts(2026, 5, 10, 12, 0)
+    src = raw_dir / "2026-05-10.ndjson.gz"
+    _write_ndjson_gz(
+        src,
+        [
+            # Clean best_bid_ask.
+            {
+                "receive_time": base + 100,
+                "raw": {
+                    "event_type": "best_bid_ask",
+                    "asset_id": "tok-1",
+                    "market": "0xmkt",
+                    "best_bid": "0.50",
+                    "best_ask": "0.52",
+                    "spread": "0.02",
+                    "timestamp": str(base),
+                },
+            },
+            # CROSSED best_bid_ask (bid > ask) — should be quarantined.
+            {
+                "receive_time": base + 200,
+                "raw": {
+                    "event_type": "best_bid_ask",
+                    "asset_id": "tok-1",
+                    "market": "0xmkt",
+                    "best_bid": "0.60",
+                    "best_ask": "0.55",
+                    "spread": "-0.05",
+                    "timestamp": str(base + 100),
+                },
+            },
+            # Clean trade.
+            {
+                "receive_time": base + 300,
+                "raw": {
+                    "event_type": "last_trade_price",
+                    "asset_id": "tok-1",
+                    "market": "0xmkt",
+                    "price": "0.51",
+                    "size": "10",
+                    "side": "BUY",
+                    "fee_rate_bps": "0",
+                    "timestamp": str(base + 200),
+                },
+            },
+            # Duplicate trade — same trade_id => quarantined as duplicate_trade_id.
+            {
+                "receive_time": base + 400,
+                "raw": {
+                    "event_type": "last_trade_price",
+                    "asset_id": "tok-1",
+                    "market": "0xmkt",
+                    "price": "0.51",
+                    "size": "10",
+                    "side": "BUY",
+                    "fee_rate_bps": "0",
+                    "timestamp": str(base + 200),
+                },
+            },
+            # Negative-size trade — quarantined as negative_size.
+            {
+                "receive_time": base + 500,
+                "raw": {
+                    "event_type": "last_trade_price",
+                    "asset_id": "tok-1",
+                    "market": "0xmkt",
+                    "price": "0.51",
+                    "size": "-5",
+                    "side": "SELL",
+                    "fee_rate_bps": "0",
+                    "timestamp": str(base + 300),
+                },
+            },
+        ],
+    )
+
+    import os
+
+    os.utime(src, (1, 1))
+
+    warehouse = tmp_path / "warehouse"
+    report = run_etl_batch(
+        raw_dir=raw_dir, warehouse_dir=warehouse, lag_seconds=0.0
+    )
+
+    # 1 clean best_bid_ask lands; crossed is quarantined.
+    assert report.rows_per_table["raw_top_of_book"] == 1
+    # 1 clean trade; 2 quarantined trades (duplicate + negative_size).
+    assert report.rows_per_table["raw_trades"] == 1
+    # Quarantine table sees 1 (crossed_book) + 1 (duplicate) + 1 (negative_size) = 3 rows.
+    assert report.rows_per_table["quarantine"] == 3
+
+    assert report.quarantined_by_rule.get("crossed_book") == 1
+    assert report.quarantined_by_rule.get("duplicate_trade_id") == 1
+    assert report.quarantined_by_rule.get("negative_size") == 1
+    assert report.quarantined_total == 3
+
+    # Spot-check the quarantine parquet itself.
+    q_files = warehouse_files(warehouse, "quarantine")
+    assert q_files, "quarantine partition should exist"
+    q_tbl = pq.ParquetFile(q_files[0]).read().to_pylist()
+    rules = {r["rule"] for r in q_tbl}
+    assert {"crossed_book", "duplicate_trade_id", "negative_size"} <= rules
+    for r in q_tbl:
+        assert r["target_table"] in {"raw_top_of_book", "raw_trades"}
+        assert r["payload_json"]  # never empty
+        assert r["source_symbol"] == "tok-1"
