@@ -331,3 +331,100 @@ def test_dispatch_price_change_yields_top_of_book_rows() -> None:
     assert "raw_top_of_book" in out
     assert len(out["raw_top_of_book"]) == 1
     assert out["raw_top_of_book"][0]["bid_price"] == 0.49
+
+
+# ---------------------------------------------------------------------------
+# provenance propagation (issue #5)
+# ---------------------------------------------------------------------------
+
+
+def test_top_of_book_defaults_to_ws_provenance() -> None:
+    raw = {
+        "event_type": "best_bid_ask",
+        "asset_id": "1",
+        "market": "0xmkt",
+        "best_bid": "0.50",
+        "best_ask": "0.52",
+        "spread": "0.02",
+        "timestamp": "1700000000000",
+    }
+    row = transform_top_of_book_event(raw, ingest_ts=42)
+    assert row is not None
+    assert row["provenance"] == "ws"
+
+
+def test_top_of_book_propagates_backfill_provenance() -> None:
+    raw = {
+        "event_type": "best_bid_ask",
+        "asset_id": "1",
+        "market": "0xmkt",
+        "best_bid": "0.50",
+        "best_ask": "0.52",
+        "spread": "0.02",
+        "timestamp": "1700000000000",
+        "provenance": "polymarket-rest-backfill",
+    }
+    row = transform_top_of_book_event(raw, ingest_ts=42)
+    assert row is not None
+    assert row["provenance"] == "polymarket-rest-backfill"
+
+
+def test_book_event_propagates_provenance_to_all_rows() -> None:
+    raw = {
+        "event_type": "book",
+        "asset_id": "abc",
+        "market": "0xmkt",
+        "timestamp": "1",
+        "hash": "h0",
+        "bids": [{"price": "0.49", "size": "100"}],
+        "asks": [{"price": "0.51", "size": "50"}],
+        "provenance": "polymarket-rest-backfill",
+    }
+    rows = transform_book_event(raw, ingest_ts=99)
+    assert rows
+    assert all(r["provenance"] == "polymarket-rest-backfill" for r in rows)
+
+
+def test_trade_event_propagates_backfill_provenance() -> None:
+    raw = {
+        "event_type": "last_trade_price",
+        "asset_id": "x",
+        "market": "0xmkt",
+        "price": "0.51",
+        "size": "10",
+        "side": "BUY",
+        "fee_rate_bps": "0",
+        "timestamp": "1700000000000",
+        "provenance": "polymarket-rest-backfill",
+    }
+    row = transform_last_trade_price_event(raw, ingest_ts=99)
+    assert row is not None
+    assert row["provenance"] == "polymarket-rest-backfill"
+
+
+def test_price_change_derivation_propagates_provenance() -> None:
+    raw = {
+        "event_type": "price_change",
+        "market": "0xmkt",
+        "timestamp": "1700000000000",
+        "provenance": "polymarket-rest-backfill",
+        "price_changes": [
+            {
+                "asset_id": "A",
+                "best_bid": "0.50",
+                "best_ask": "0.52",
+                "price": "0.50",
+                "size": "1",
+                "side": "BUY",
+                "hash": "h",
+            }
+        ],
+    }
+    rows = derive_top_of_book_from_price_change(raw, ingest_ts=1)
+    assert rows
+    assert rows[0]["provenance"] == "polymarket-rest-backfill"
+
+
+# Source identifier sanity check (kept as the last assertion).
+def test_source_polymarket_constant() -> None:
+    assert SOURCE_POLYMARKET == "polymarket"

@@ -14,8 +14,11 @@ import typer
 from bigan.canonical.etl import run_etl_batch
 from bigan.canonical.query import open_warehouse, warehouse_summary
 
+from .backfill import BackfillService, GapWindow
+from .clob_rest import PolymarketRestClient
 from .config import IngestionSettings
 from .runner import IngestionRunner
+from .sink import NdjsonGzipSink
 
 app = typer.Typer(add_completion=False, help="BiGan ingestion service")
 
@@ -149,6 +152,63 @@ def quarantine_report(
             # Empty warehouse / no quarantine partition yet.
             pass
     typer.echo(json.dumps(out, indent=2))
+
+
+@app.command("backfill")
+def backfill(
+    asset_id: str = typer.Option(..., help="CLOB token id (asset_id) to backfill."),
+    market: str = typer.Option(
+        ..., help="Polymarket condition_id (market hash) for trade lookup."
+    ),
+    since_ms: int = typer.Option(..., help="Gap start in epoch ms (UTC)."),
+    until_ms: int = typer.Option(..., help="Gap end in epoch ms (UTC)."),
+) -> None:
+    """Manually run a REST backfill for a known [since_ms, until_ms] gap.
+
+    Synthesised NDJSON records are written into the same raw sink the
+    live WS pipeline uses. The next ETL run will pick them up.
+    """
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+
+    async def _run() -> dict:
+        sink = NdjsonGzipSink(
+            settings.raw_dir,
+            flush_interval_seconds=settings.sink_flush_interval_seconds,
+            max_buffer_records=settings.sink_max_buffer_records,
+        )
+        await sink.start_background_flusher()
+        try:
+            async with PolymarketRestClient(
+                settings.clob_rest_url,
+                timeout_seconds=settings.backfill_rest_timeout_seconds,
+            ) as rest:
+                async def resolver(_: str) -> str:
+                    return market
+
+                service = BackfillService(rest, sink, resolver)
+                report = await service.handle_gap(
+                    GapWindow(
+                        asset_id=asset_id,
+                        gap_start_ms=since_ms,
+                        gap_end_ms=until_ms,
+                    )
+                )
+                return {
+                    "asset_id": report.asset_id,
+                    "market": report.market,
+                    "gap_start_ms": report.gap_start_ms,
+                    "gap_end_ms": report.gap_end_ms,
+                    "trades_replayed": report.trades_replayed,
+                    "orderbook_replayed": report.orderbook_replayed,
+                    "errors": report.errors,
+                    "total_records": report.total_records,
+                }
+        finally:
+            await sink.close()
+
+    result = asyncio.run(_run())
+    typer.echo(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

@@ -42,6 +42,13 @@ SCHEMA_VERSION = "1"
 
 
 # Common identity columns (timestamp + symbol contract).
+#
+# ``provenance`` (#5) tags the upstream channel that produced each row:
+#   - NULL or "ws"                  → realtime WebSocket stream
+#   - "polymarket-rest-backfill"    → injected by the gap-recovery backfill
+#   - "manual"                      → operator-triggered replay via CLI
+# Downstream consumers can filter or weight rows by provenance for
+# robustness analysis. Nullable to keep historical Parquet readable.
 _COMMON_IDENTITY_FIELDS: list[pa.Field] = [
     pa.field("ts", pa.int64(), nullable=False),
     pa.field("message_ts", pa.int64(), nullable=False),
@@ -50,7 +57,14 @@ _COMMON_IDENTITY_FIELDS: list[pa.Field] = [
     pa.field("source_symbol", pa.string(), nullable=False),
     pa.field("source_market", pa.string(), nullable=True),
     pa.field("canonical_symbol", pa.string(), nullable=True),
+    pa.field("provenance", pa.string(), nullable=True),
 ]
+
+
+#: Provenance tag values used across the codebase.
+PROVENANCE_WS = "ws"
+PROVENANCE_BACKFILL = "polymarket-rest-backfill"
+PROVENANCE_MANUAL = "manual"
 
 
 def _table_metadata(table_name: str) -> dict[bytes, bytes]:

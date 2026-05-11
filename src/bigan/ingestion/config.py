@@ -92,6 +92,40 @@ class IngestionSettings(BaseSettings):
         description="On hash mismatch we resubscribe to receive a fresh snapshot; retry budget per minute.",
     )
 
+    # --- Gap detection / REST backfill (issue #5) ---
+    clob_rest_url: str = Field(
+        default="https://clob.polymarket.com",
+        description="Polymarket CLOB REST API base URL (used for backfill).",
+    )
+    gap_detection_enabled: bool = Field(
+        default=True,
+        description="Enable per-asset silence detection and REST backfill on resume.",
+    )
+    gap_silence_threshold_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        description="Asset silent for this long is considered to be in a gap.",
+    )
+    gap_min_resume_seconds: float = Field(
+        default=1.0,
+        ge=0.0,
+        description="Minimum delta from gap_start before a resume is honoured.",
+    )
+    gap_check_interval_seconds: float = Field(
+        default=5.0,
+        ge=0.5,
+        description="How often the watchdog scans for newly-silent assets.",
+    )
+    backfill_rest_timeout_seconds: float = Field(
+        default=10.0,
+        ge=1.0,
+    )
+    backfill_max_pages: int = Field(
+        default=20,
+        ge=1,
+        description="Max trade history pages to scan per gap (safety cap).",
+    )
+
     @property
     def raw_dir(self) -> Path:
         return self.data_dir / self.raw_subdir

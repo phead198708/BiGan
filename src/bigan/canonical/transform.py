@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .schemas import PROVENANCE_WS
+
 # Source identifier for Polymarket payloads. Multi-source extension (#24)
 # would add ``coinbase``, ``binance``, etc.
 SOURCE_POLYMARKET = "polymarket"
@@ -43,9 +45,18 @@ def _identity_columns(
     raw: dict[str, Any],
     ingest_ts: int,
     fallback_ts: int | None = None,
+    record_provenance: str | None = None,
 ) -> dict[str, Any] | None:
-    """Build the seven shared identity columns. Returns ``None`` if essential
+    """Build the eight shared identity columns. Returns ``None`` if essential
     fields (asset_id / timestamp) are absent — caller should skip the row.
+
+    ``provenance`` is sourced (in priority order):
+      1. ``raw["provenance"]`` — carried inside the wire payload by the
+         backfill service when it synthesises records.
+      2. ``record_provenance`` — caller-supplied default for the surrounding
+         NDJSON record (the runner sets this to ``"ws"`` for WS messages).
+      3. :data:`PROVENANCE_WS` — final fallback so provenance is never NULL
+         for rows produced by the live pipeline.
     """
     asset_id = raw.get("asset_id")
     if asset_id is None:
@@ -55,6 +66,7 @@ def _identity_columns(
         ts = fallback_ts
     if ts is None:
         return None
+    provenance = raw.get("provenance") or record_provenance or PROVENANCE_WS
     return {
         "ts": int(ts),
         "message_ts": int(ts),
@@ -65,6 +77,7 @@ def _identity_columns(
         # canonical_symbol is populated by a separate enrichment step once
         # #22's symbol_mapping table lands. Until then, leave it NULL.
         "canonical_symbol": None,
+        "provenance": str(provenance),
     }
 
 
@@ -148,6 +161,7 @@ def derive_top_of_book_from_price_change(
     ts = _as_int_ms(raw.get("timestamp"))
     if ts is None:
         return []
+    provenance = raw.get("provenance") or PROVENANCE_WS
     rows: list[dict[str, Any]] = []
     seen: dict[str, dict[str, Any]] = {}  # last best/ask per asset within event
     for entry in raw.get("price_changes") or []:
@@ -169,6 +183,7 @@ def derive_top_of_book_from_price_change(
             "source_symbol": str(asset_id),
             "source_market": str(market) if market is not None else None,
             "canonical_symbol": None,
+            "provenance": str(provenance),
             "bid_price": bid,
             "ask_price": ask,
             "spread": (

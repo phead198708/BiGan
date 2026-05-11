@@ -103,6 +103,77 @@ A Prometheus endpoint is exposed at `:${BIGAN_METRICS_PORT}/metrics`:
 - `bigan_last_event_receive_time_seconds` — gauge for liveness alarms
 - `bigan_gamma_polls_total{outcome}` — Gamma poll outcomes
 - `bigan_rollup_files_total{outcome}` — rollup outcomes
+- `bigan_gap_detected_total{asset_id}` — silence detections (#5)
+- `bigan_gap_resolved_total{asset_id}` — silence resolutions (#5)
+- `bigan_gap_silence_duration_seconds` — histogram of resolved gap durations
+- `bigan_backfill_invocations_total{outcome}` — backfill outcomes (`ok` / `partial` / `error`)
+- `bigan_backfill_records_total{kind}` — replayed record counts (`trade` / `orderbook`)
+
+## Gap detection & REST backfill (issue #5)
+
+When a previously-active asset goes silent for longer than
+`BIGAN_GAP_SILENCE_THRESHOLD_SECONDS` (default `30s`), the ingestion
+service marks the asset as **in-gap** and emits a `gap.detected`
+structured log. Once activity resumes, it computes the missed window
+`[gap_start_ms, gap_end_ms]`, fetches missed trades and a fresh
+orderbook snapshot via the CLOB REST API, and re-injects them into the
+NDJSON sink with `provenance="polymarket-rest-backfill"`. Downstream
+ETL preserves that tag in the canonical Parquet so models / features
+can filter or weight backfilled rows differently from realtime ones.
+
+```
+src/bigan/ingestion/
+  gap_detector.py — per-asset silence state machine (sync, deterministic)
+  clob_rest.py    — async PolymarketRestClient (book + paginated trades)
+  backfill.py     — orchestrates fetch -> synth -> sink replay
+```
+
+### Recovery log events
+
+Structured logs emitted by the recovery flow (use `BIGAN_LOG_LEVEL=INFO`
+or above to capture):
+
+| Event | Trigger |
+|---|---|
+| `gap.detected` | asset's silence first crosses the threshold |
+| `gap.resolved` | activity resumes after a detected gap |
+| `backfill.start` | REST recovery begins for a resolved gap |
+| `backfill.done` | REST recovery finished (counts in payload) |
+| `backfill.no_market` | gap asset unknown to Gamma cache; trades skipped |
+| `backfill.trades_fetch_failed` / `backfill.book_fetch_failed` | per-leg errors |
+
+Each event carries `asset_id`, the gap window, and (for `done`) the
+number of trades + orderbook records replayed. Combined with the
+provenance column in the warehouse this makes every backfilled row
+trivially traceable to the gap that produced it.
+
+### Manual replay
+
+For one-off historical recovery, the manual CLI bypasses the live
+runner:
+
+```bash
+bigan-ingest backfill \
+  --asset-id <token_id> \
+  --market <condition_id> \
+  --since-ms 1700000000000 \
+  --until-ms 1700000060000
+```
+
+Synthesised records flow through the same NDJSON sink the live WS
+pipeline uses, so the next ETL run picks them up automatically.
+
+### Backfill configuration
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `BIGAN_GAP_DETECTION_ENABLED` | `true` | Toggle the watchdog + auto-backfill |
+| `BIGAN_GAP_SILENCE_THRESHOLD_SECONDS` | `30` | Silence to declare a gap |
+| `BIGAN_GAP_MIN_RESUME_SECONDS` | `1` | Min delta to honour a resume packet |
+| `BIGAN_GAP_CHECK_INTERVAL_SECONDS` | `5` | Watchdog tick rate |
+| `BIGAN_CLOB_REST_URL` | `https://clob.polymarket.com` | REST base |
+| `BIGAN_BACKFILL_REST_TIMEOUT_SECONDS` | `10` | Per-request timeout |
+| `BIGAN_BACKFILL_MAX_PAGES` | `20` | Trade-history page cap per gap |
 
 ## Canonical warehouse (issue #3)
 
@@ -147,6 +218,7 @@ All tables share a common identity contract:
 
 - **Timestamps**: `ts` (event time), `message_ts` (protocol timestamp), `ingest_ts` (receive time)
 - **Symbol identity**: `source`, `source_symbol`, `source_market`, `canonical_symbol`
+- **Provenance** (#5): `provenance` — `ws` for realtime, `polymarket-rest-backfill` for recovered, `manual` for CLI replays
 - **Append-only**: ETL writes new `part-*.parquet` files; existing files are never mutated
 
 ### Table schemas
@@ -228,6 +300,14 @@ with open_warehouse("data/warehouse") as conn:
         SELECT target_table, rule, COUNT(*) AS n
         FROM quarantine
         GROUP BY target_table, rule
+        ORDER BY n DESC
+    """).fetchdf()
+
+    # Backfill coverage: how many trades came from REST recovery?
+    df = conn.execute("""
+        SELECT provenance, COUNT(*) AS n
+        FROM raw_trades
+        GROUP BY provenance
         ORDER BY n DESC
     """).fetchdf()
 ```

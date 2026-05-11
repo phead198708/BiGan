@@ -9,16 +9,28 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import time
 from contextlib import suppress
 
 from prometheus_client import start_http_server
 
+from .backfill import BackfillService, GapWindow
 from .book_state import BookRegistry
+from .clob_rest import PolymarketRestClient
 from .clob_ws import ClobWsClient, EventHandler, WsClientConfig
 from .config import IngestionSettings
 from .gamma_client import ActiveMarket, GammaClient
+from .gap_detector import GapDetector, GapEvent
 from .message_types import BookEvent, MarketEvent, PriceChangeEvent
-from .metrics import REGISTRY, WS_HASH_MISMATCH_TOTAL
+from .metrics import (
+    BACKFILL_INVOCATIONS_TOTAL,
+    BACKFILL_RECORDS_TOTAL,
+    GAP_DETECTED_TOTAL,
+    GAP_RESOLVED_TOTAL,
+    GAP_SILENCE_DURATION_SECONDS,
+    REGISTRY,
+    WS_HASH_MISMATCH_TOTAL,
+)
 from .rollup import run_rollup_worker
 from .sink import NdjsonGzipSink
 
@@ -53,6 +65,18 @@ class IngestionRunner:
         )
         self._ws = ClobWsClient(ws_cfg, self.make_handler())
 
+        # --- Gap detection / backfill (issue #5) -------------------------
+        self._gap_detector: GapDetector | None = None
+        self._asset_market_map: dict[str, str] = {}
+        if settings.gap_detection_enabled:
+            self._gap_detector = GapDetector(
+                silence_threshold_ms=int(
+                    settings.gap_silence_threshold_seconds * 1000
+                ),
+                min_gap_resume_ms=int(settings.gap_min_resume_seconds * 1000),
+                on_gap_started=self._on_gap_started,
+            )
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -80,6 +104,8 @@ class IngestionRunner:
                     ),
                     name="rollup-worker",
                 )
+            if self._gap_detector is not None:
+                tg.create_task(self._gap_watchdog(), name="gap-watchdog")
             tg.create_task(self._shutdown_watcher(), name="shutdown-watcher")
 
         await self._sink.close()
@@ -117,6 +143,18 @@ class IngestionRunner:
             # best_bid_ask / last_trade_price / tick_size_change / lifecycle:
             # raw archive is enough for v0; downstream features built in #6/#7.
 
+            # Feed gap detector — one note() per asset_id seen in this event.
+            if self._gap_detector is not None:
+                for asset_id in _asset_ids_in_event(event, raw):
+                    resolved = self._gap_detector.note(asset_id, event.receive_time)
+                    if resolved is not None:
+                        # Spawn backfill asynchronously so the live handler
+                        # never blocks on a REST round-trip.
+                        asyncio.create_task(  # noqa: RUF006 — fire-and-forget by design
+                            self._run_backfill(resolved),
+                            name=f"backfill-{resolved.asset_id}",
+                        )
+
         return handler
 
     # ------------------------------------------------------------------
@@ -132,6 +170,7 @@ class IngestionRunner:
                 try:
                     markets = await gamma.list_active_markets()
                     asset_ids = self._asset_ids_from_markets(markets)
+                    self._refresh_asset_market_map(markets)
                     await self._ws.set_subscription(asset_ids)
                     logger.info(
                         "gamma.refreshed",
@@ -156,6 +195,78 @@ class IngestionRunner:
             out.add(m.asset_id_down)
         return out
 
+    def _refresh_asset_market_map(self, markets: list[ActiveMarket]) -> None:
+        for m in markets:
+            self._asset_market_map[m.asset_id_up] = m.condition_id
+            self._asset_market_map[m.asset_id_down] = m.condition_id
+
+    async def _resolve_market(self, asset_id: str) -> str | None:
+        return self._asset_market_map.get(asset_id)
+
+    # ------------------------------------------------------------------
+    # Gap watchdog + backfill (issue #5)
+    # ------------------------------------------------------------------
+
+    async def _gap_watchdog(self) -> None:
+        """Periodically prods the gap detector so silence-into-gap
+        transitions are logged even before activity resumes.
+
+        The actual gap-resolved -> backfill trigger lives in the WS
+        handler (see :meth:`make_handler`), so this task only needs to
+        emit detection alerts.
+        """
+        if self._gap_detector is None:
+            return
+        interval = self._settings.gap_check_interval_seconds
+        while not self._stop.is_set():
+            try:
+                self._gap_detector.tick(_now_ms())
+            except Exception:  # noqa: BLE001
+                logger.exception("gap.tick_failed")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+            except TimeoutError:
+                continue
+
+    def _on_gap_started(self, asset_id: str, last_seen_ms: int) -> None:
+        GAP_DETECTED_TOTAL.labels(asset_id=asset_id).inc()
+
+    async def _run_backfill(self, gap: GapEvent) -> None:
+        GAP_RESOLVED_TOTAL.labels(asset_id=gap.asset_id).inc()
+        GAP_SILENCE_DURATION_SECONDS.observe(gap.silence_duration_ms / 1000.0)
+
+        try:
+            async with PolymarketRestClient(
+                self._settings.clob_rest_url,
+                timeout_seconds=self._settings.backfill_rest_timeout_seconds,
+            ) as rest:
+                service = BackfillService(
+                    rest,
+                    self._sink,
+                    self._resolve_market,
+                )
+                report = await service.handle_gap(
+                    GapWindow(
+                        asset_id=gap.asset_id,
+                        gap_start_ms=gap.gap_start_ms,
+                        gap_end_ms=gap.gap_end_ms,
+                    )
+                )
+        except Exception:  # noqa: BLE001
+            BACKFILL_INVOCATIONS_TOTAL.labels(outcome="error").inc()
+            logger.exception(
+                "backfill.invocation_failed",
+                extra={"asset_id": gap.asset_id},
+            )
+            return
+
+        outcome = "ok" if not report.errors else "partial"
+        BACKFILL_INVOCATIONS_TOTAL.labels(outcome=outcome).inc()
+        if report.trades_replayed:
+            BACKFILL_RECORDS_TOTAL.labels(kind="trade").inc(report.trades_replayed)
+        if report.orderbook_replayed:
+            BACKFILL_RECORDS_TOTAL.labels(kind="orderbook").inc()
+
     async def _shutdown_watcher(self) -> None:
         await self._stop.wait()
         self._ws.cancel()
@@ -166,3 +277,28 @@ class IngestionRunner:
         for sig in (signal.SIGINT, signal.SIGTERM):
             with suppress(NotImplementedError):  # Windows doesn't support add_signal_handler
                 loop.add_signal_handler(sig, self.stop)
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _asset_ids_in_event(event: MarketEvent, raw: dict) -> set[str]:
+    """Best-effort extraction of every asset_id touched by ``event``.
+
+    Most CLOB events carry ``asset_id`` at the top level. ``price_change``
+    is the exception: its asset_ids live inside the per-entry payload.
+    """
+    out: set[str] = set()
+    asset_id = raw.get("asset_id")
+    if asset_id:
+        out.add(str(asset_id))
+    for entry in raw.get("price_changes") or []:
+        if isinstance(entry, dict) and entry.get("asset_id"):
+            out.add(str(entry["asset_id"]))
+    return out

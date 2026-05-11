@@ -276,3 +276,61 @@ def test_etl_quarantines_crossed_book_without_affecting_clean_rows(
         assert r["target_table"] in {"raw_top_of_book", "raw_trades"}
         assert r["payload_json"]  # never empty
         assert r["source_symbol"] == "tok-1"
+
+
+def test_etl_preserves_provenance_in_parquet(tmp_path: Path) -> None:
+    """Records carrying ``provenance="polymarket-rest-backfill"`` must
+    land in the canonical Parquet with that tag intact (issue #5)."""
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    base = _ts(2026, 5, 10, 12, 0)
+    src = raw_dir / "2026-05-10.ndjson.gz"
+    _write_ndjson_gz(
+        src,
+        [
+            # WS-shaped trade (no provenance -> "ws").
+            {
+                "receive_time": base + 100,
+                "raw": {
+                    "event_type": "last_trade_price",
+                    "asset_id": "tok-1",
+                    "market": "0xmkt",
+                    "price": "0.51",
+                    "size": "10",
+                    "side": "BUY",
+                    "fee_rate_bps": "0",
+                    "timestamp": str(base),
+                },
+            },
+            # Backfill-shaped trade — provenance carried inside ``raw``.
+            {
+                "receive_time": base + 200,
+                "raw": {
+                    "event_type": "last_trade_price",
+                    "asset_id": "tok-1",
+                    "market": "0xmkt",
+                    "price": "0.52",
+                    "size": "5",
+                    "side": "SELL",
+                    "fee_rate_bps": "0",
+                    "timestamp": str(base + 100),
+                    "provenance": "polymarket-rest-backfill",
+                },
+            },
+        ],
+    )
+    import os
+
+    os.utime(src, (1, 1))
+
+    warehouse = tmp_path / "warehouse"
+    report = run_etl_batch(
+        raw_dir=raw_dir, warehouse_dir=warehouse, lag_seconds=0.0
+    )
+    assert report.rows_per_table["raw_trades"] == 2
+
+    trade_files = warehouse_files(warehouse, "raw_trades")
+    assert len(trade_files) == 1
+    rows = pq.ParquetFile(trade_files[0]).read().to_pylist()
+    provenances = sorted(r["provenance"] for r in rows)
+    assert provenances == ["polymarket-rest-backfill", "ws"]

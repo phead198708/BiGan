@@ -166,6 +166,8 @@ class RowValidator:
         source_market = row.get("source_market")
         canonical_symbol = row.get("canonical_symbol")
 
+        provenance = row.get("provenance")
+
         out: list[dict[str, Any]] = []
         for err in errors:
             out.append(
@@ -177,6 +179,7 @@ class RowValidator:
                     "source_symbol": source_symbol,
                     "source_market": source_market,
                     "canonical_symbol": canonical_symbol,
+                    "provenance": provenance,
                     "target_table": target_table,
                     "rule": err.rule.value,
                     "detail": err.detail,

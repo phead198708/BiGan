@@ -83,3 +83,39 @@ ROLLUP_FILES_TOTAL = Counter(
     labelnames=("outcome",),
     registry=REGISTRY,
 )
+
+# --- Gap detection / REST backfill (issue #5) ---
+
+GAP_DETECTED_TOTAL = Counter(
+    "bigan_gap_detected_total",
+    "Per-asset stream-silence detections (gap entered).",
+    labelnames=("asset_id",),
+    registry=REGISTRY,
+)
+
+GAP_RESOLVED_TOTAL = Counter(
+    "bigan_gap_resolved_total",
+    "Per-asset stream-silence resolutions (gap exited via resume).",
+    labelnames=("asset_id",),
+    registry=REGISTRY,
+)
+
+GAP_SILENCE_DURATION_SECONDS = Histogram(
+    "bigan_gap_silence_duration_seconds",
+    "Distribution of resolved gap silence durations.",
+    registry=REGISTRY,
+)
+
+BACKFILL_INVOCATIONS_TOTAL = Counter(
+    "bigan_backfill_invocations_total",
+    "Backfill service invocations partitioned by outcome.",
+    labelnames=("outcome",),
+    registry=REGISTRY,
+)
+
+BACKFILL_RECORDS_TOTAL = Counter(
+    "bigan_backfill_records_total",
+    "Records replayed by the backfill service (synthetic NDJSON writes).",
+    labelnames=("kind",),
+    registry=REGISTRY,
+)
