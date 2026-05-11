@@ -22,8 +22,9 @@ dependencies = [
     "pydantic-settings>=2.2,<3",
     "orjson>=3.10,<4",
 
-    # Storage / rollup
-    "pyarrow>=15.0,<19",
+    # Storage
+    "pyarrow>=15,<19",
+    "duckdb>=1.0,<2",
 
     # Observability
     "structlog>=24.1,<26",

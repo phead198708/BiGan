@@ -103,3 +103,95 @@ A Prometheus endpoint is exposed at `:${BIGAN_METRICS_PORT}/metrics`:
 - `bigan_last_event_receive_time_seconds` — gauge for liveness alarms
 - `bigan_gamma_polls_total{outcome}` — Gamma poll outcomes
 - `bigan_rollup_files_total{outcome}` — rollup outcomes
+
+## Canonical warehouse (issue #3)
+
+The `src/bigan/canonical/` module provides an ETL pipeline that transforms raw NDJSON
+into four canonical Parquet tables with Hive partitioning:
+
+```
+src/bigan/canonical/
+  schemas.py      — PyArrow schemas for the four tables
+  transform.py    — Convert WS event payloads to canonical row dicts
+  writer.py       — Buffered Parquet writer with Hive partitioning
+  candles.py      — 1-minute candle aggregation from top_of_book + trades
+  etl.py          — Batch ETL runner (raw NDJSON -> canonical Parquet)
+  query.py        — DuckDB helpers for querying the warehouse
+tests/canonical/  — pytest unit tests
+```
+
+### Warehouse storage layout
+
+```
+data/warehouse/
+  raw_top_of_book/
+    date=YYYY-MM-DD/
+      part-*.parquet
+  raw_orderbook_snapshot/
+    date=YYYY-MM-DD/
+      part-*.parquet
+  raw_trades/
+    date=YYYY-MM-DD/
+      part-*.parquet
+  raw_candles_1m/
+    date=YYYY-MM-DD/
+      part-*.parquet
+```
+
+All tables share a common identity contract:
+
+- **Timestamps**: `ts` (event time), `message_ts` (protocol timestamp), `ingest_ts` (receive time)
+- **Symbol identity**: `source`, `source_symbol`, `source_market`, `canonical_symbol`
+- **Append-only**: ETL writes new `part-*.parquet` files; existing files are never mutated
+
+### Table schemas
+
+- **raw_top_of_book**: One row per `best_bid_ask` event with `bid_price`, `ask_price`, `spread`
+- **raw_orderbook_snapshot**: Long-format orderbook with `side`, `level`, `price`, `size` per level
+- **raw_trades**: One row per `last_trade_price` event with `price`, `size`, `side`, `trade_id`
+- **raw_candles_1m**: Derived 1-minute OHLC candles with bid/ask/trade OHLC, VWAP, volume, counts
+
+### ETL workflow
+
+```bash
+# Run ETL on a specific date's raw NDJSON archive
+bigan-ingest etl-batch --date 2025-01-15
+
+# Or run on today's data
+bigan-ingest etl-batch
+
+# Query warehouse stats
+bigan-ingest warehouse-stats
+```
+
+### DuckDB queries
+
+```python
+from bigan.canonical.query import open_warehouse
+
+with open_warehouse("data/warehouse") as conn:
+    # Row counts per table
+    for table in ["raw_top_of_book", "raw_orderbook_snapshot", "raw_trades", "raw_candles_1m"]:
+        count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        print(f"{table}: {count}")
+
+    # Latest top-of-book per symbol
+    df = conn.execute("""
+        SELECT source_symbol, bid_price, ask_price, spread
+        FROM raw_top_of_book
+        WHERE (source_symbol, ts) IN (
+            SELECT source_symbol, MAX(ts)
+            FROM raw_top_of_book
+            GROUP BY source_symbol
+        )
+    """).fetchdf()
+
+    # 1-minute candles for a specific symbol
+    df = conn.execute("""
+        SELECT *
+        FROM raw_candles_1m
+        WHERE source_symbol = ?
+        ORDER BY bucket_ts DESC
+        LIMIT 100
+    """, ["some-asset-id"]).fetchdf()
+```

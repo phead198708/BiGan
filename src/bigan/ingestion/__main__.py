@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import sys
 
 import structlog
 import typer
+
+from bigan.canonical.etl import run_etl_batch
+from bigan.canonical.query import warehouse_summary
 
 from .config import IngestionSettings
 from .runner import IngestionRunner
@@ -61,6 +65,45 @@ def smoke(seconds: int = typer.Option(30, help="How long to run before exiting."
                 await task
 
     asyncio.run(main())
+
+
+@app.command("etl-batch")
+def etl_batch(
+    lag_seconds: float = typer.Option(
+        60.0, help="Skip NDJSON.gz files whose mtime is within this many seconds."
+    ),
+    max_rows_per_partition: int = typer.Option(
+        50_000, help="Flush a partition buffer when it exceeds this size."
+    ),
+) -> None:
+    """Convert raw NDJSON archive into the canonical Parquet warehouse."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = run_etl_batch(
+        raw_dir=settings.raw_dir,
+        warehouse_dir=settings.warehouse_dir,
+        lag_seconds=lag_seconds,
+        max_rows_per_partition=max_rows_per_partition,
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "files_processed": report.files_processed,
+                "records_read": report.records_read,
+                "rows_per_table": report.rows_per_table,
+            },
+            indent=2,
+        )
+    )
+
+
+@app.command("warehouse-stats")
+def warehouse_stats() -> None:
+    """Print row counts for each canonical table via DuckDB."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    summary = warehouse_summary(settings.warehouse_dir)
+    typer.echo(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

@@ -64,6 +64,10 @@ class IngestionSettings(BaseSettings):
     data_dir: Path = Field(default=Path("data"))
     raw_subdir: str = Field(default="raw/ws_market")
     rollup_subdir: str = Field(default="rollup/ws_market")
+    warehouse_subdir: str = Field(
+        default="warehouse",
+        description="Root for canonical Parquet tables (issue #3).",
+    )
     sink_flush_interval_seconds: float = Field(default=2.0, ge=0.1)
     sink_max_buffer_records: int = Field(default=1000, ge=1)
 
@@ -95,3 +99,7 @@ class IngestionSettings(BaseSettings):
     @property
     def rollup_dir(self) -> Path:
         return self.data_dir / self.rollup_subdir
+
+    @property
+    def warehouse_dir(self) -> Path:
+        return self.data_dir / self.warehouse_subdir
