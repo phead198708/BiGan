@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bigan"
+version = "0.1.0"
+description = "Polymarket prediction-market microstructure signal pipeline (mvp-v1)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "phead198708" }]
+
+dependencies = [
+    # Networking
+    "websockets>=12.0,<14",
+    "aiohttp>=3.9,<4",
+    "tenacity>=8.2,<10",
+
+    # Data modeling / serialization
+    "pydantic>=2.6,<3",
+    "pydantic-settings>=2.2,<3",
+    "orjson>=3.10,<4",
+
+    # Storage / rollup
+    "pyarrow>=15.0,<19",
+
+    # Observability
+    "structlog>=24.1,<26",
+    "prometheus-client>=0.20,<1",
+
+    # CLI / runtime
+    "typer>=0.12,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9",
+    "pytest-asyncio>=0.23,<1",
+    "pytest-cov>=5.0,<6",
+    "ruff>=0.6,<1",
+    "mypy>=1.10,<2",
+    "aioresponses>=0.7,<1",
+]
+
+[project.scripts]
+bigan-ingest = "bigan.ingestion.__main__:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra -q --strict-markers"
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:websockets.*",
+    "ignore::DeprecationWarning:pydantic.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "C4", "SIM", "ASYNC"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true
+warn_unused_ignores = true

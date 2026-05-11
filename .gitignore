@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Data — never committed
+data/
+*.parquet
+*.ndjson
+*.ndjson.gz
+*.db
+*.sqlite
+
+# Logs
+logs/
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Env files
+.env
+.env.local
+.env.*.local
+
+# Local notes (only progress.txt is allowed if useful)
+NOTES.md
+TODO.local.md
+
+# Rust hot path (future)
+target/
+Cargo.lock

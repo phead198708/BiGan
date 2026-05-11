@@ -1,0 +1,97 @@
+"""Ingestion service configuration.
+
+Loaded from environment variables (or a local ``.env`` file). All settings are
+prefixed with ``BIGAN_`` to avoid collision with other tooling.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class IngestionSettings(BaseSettings):
+    """Runtime configuration for the ingestion service."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="BIGAN_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # --- Endpoints ---
+    clob_ws_url: str = Field(
+        default="wss://ws-subscriptions-clob.polymarket.com/ws/market",
+        description="Polymarket CLOB market channel WebSocket endpoint.",
+    )
+    gamma_api_base: str = Field(
+        default="https://gamma-api.polymarket.com",
+        description="Polymarket Gamma REST API base URL.",
+    )
+
+    # --- Market selection ---
+    market_slug_prefix: str = Field(
+        default="btc-updown-15m-",
+        description="Only markets whose slug starts with this prefix will be subscribed.",
+    )
+    gamma_poll_interval_seconds: float = Field(
+        default=60.0,
+        ge=5.0,
+        description="How often to poll Gamma for the active market set.",
+    )
+
+    # --- WebSocket reconnect ---
+    ws_reconnect_min_seconds: float = Field(default=1.0, ge=0.1)
+    ws_reconnect_max_seconds: float = Field(default=30.0, ge=1.0)
+    ws_ping_interval_seconds: float = Field(default=20.0, ge=1.0)
+    ws_ping_timeout_seconds: float = Field(default=10.0, ge=1.0)
+    ws_message_timeout_seconds: float = Field(
+        default=60.0,
+        ge=5.0,
+        description="If no message received for this long, force a reconnect.",
+    )
+
+    # --- Subscription payload tuning ---
+    ws_custom_feature_enabled: bool = Field(
+        default=True,
+        description="When True, enables the best_bid_ask event stream.",
+    )
+
+    # --- Storage ---
+    data_dir: Path = Field(default=Path("data"))
+    raw_subdir: str = Field(default="raw/ws_market")
+    rollup_subdir: str = Field(default="rollup/ws_market")
+    sink_flush_interval_seconds: float = Field(default=2.0, ge=0.1)
+    sink_max_buffer_records: int = Field(default=1000, ge=1)
+
+    # --- Rollup ---
+    rollup_enabled: bool = Field(default=True)
+    rollup_interval_seconds: float = Field(default=3600.0, ge=60.0)
+    rollup_lag_seconds: float = Field(
+        default=300.0,
+        ge=0.0,
+        description="Only roll up files older than this many seconds (to avoid racing the sink).",
+    )
+
+    # --- Observability ---
+    metrics_port: int = Field(default=9101, ge=1, le=65535)
+    metrics_enabled: bool = Field(default=True)
+    log_level: str = Field(default="INFO")
+
+    # --- Resilience ---
+    book_hash_mismatch_max_retries: int = Field(
+        default=3,
+        ge=0,
+        description="On hash mismatch we resubscribe to receive a fresh snapshot; retry budget per minute.",
+    )
+
+    @property
+    def raw_dir(self) -> Path:
+        return self.data_dir / self.raw_subdir
+
+    @property
+    def rollup_dir(self) -> Path:
+        return self.data_dir / self.rollup_subdir
