@@ -27,6 +27,22 @@ class IngestionSettings(BaseSettings):
         default="wss://ws-subscriptions-clob.polymarket.com/ws/market",
         description="Polymarket CLOB market channel WebSocket endpoint.",
     )
+    coinbase_ws_url: str = Field(
+        default="wss://advanced-trade-ws.coinbase.com",
+        description="Coinbase Advanced Trade public market-data WebSocket.",
+    )
+    kraken_ws_url: str = Field(
+        default="wss://ws.kraken.com/v2",
+        description="Kraken WebSocket v2 endpoint.",
+    )
+    chainlink_rpc_url: str = Field(
+        default="",
+        description="Ethereum JSON-RPC URL for Chainlink BTC/USD latestRoundData.",
+    )
+    chainlink_feed_address: str = Field(
+        default="0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c",
+        description="Chainlink BTC/USD AggregatorV3 proxy address.",
+    )
     gamma_api_base: str = Field(
         default="https://gamma-api.polymarket.com",
         description="Polymarket Gamma REST API base URL.",
@@ -37,6 +53,9 @@ class IngestionSettings(BaseSettings):
         default="btc-updown-15m-",
         description="Only markets whose slug starts with this prefix will be subscribed.",
     )
+    coinbase_product_id: str = Field(default="BTC-USD")
+    kraken_symbol: str = Field(default="BTC/USD")
+    chainlink_symbol: str = Field(default="BTC/USD")
     gamma_poll_interval_seconds: float = Field(
         default=60.0,
         ge=5.0,
@@ -53,6 +72,10 @@ class IngestionSettings(BaseSettings):
         ge=5.0,
         description="If no message received for this long, force a reconnect.",
     )
+    price_reader_reconnect_min_seconds: float = Field(default=1.0, ge=0.1)
+    price_reader_reconnect_max_seconds: float = Field(default=30.0, ge=1.0)
+    chainlink_poll_interval_seconds: float = Field(default=5.0, ge=1.0)
+    chainlink_request_timeout_seconds: float = Field(default=10.0, ge=1.0)
 
     # --- Subscription payload tuning ---
     ws_custom_feature_enabled: bool = Field(

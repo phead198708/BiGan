@@ -1,6 +1,6 @@
-"""PyArrow schemas for the four canonical raw tables (issue #3).
+"""PyArrow schemas for the canonical raw tables.
 
-All four tables follow the same column-naming contract:
+All raw tables follow the same column-naming contract:
 
 - **Timestamps** (per #23 ``Timestamp Contract``):
   - ``ts``         — server / event time (UTC ms epoch)
@@ -192,6 +192,38 @@ SCHEMA_RAW_CANDLES_1M: pa.Schema = pa.schema(
 
 
 # ---------------------------------------------------------------------------
+# raw_spot_price — external BTC/USD spot reference prices (issue #24)
+# ---------------------------------------------------------------------------
+
+SCHEMA_RAW_SPOT_PRICE: pa.Schema = pa.schema(
+    [
+        *_COMMON_IDENTITY_FIELDS,
+        pa.field("price", pa.float64(), nullable=False),
+        pa.field("bid_price", pa.float64(), nullable=True),
+        pa.field("ask_price", pa.float64(), nullable=True),
+    ],
+    metadata=_table_metadata("raw_spot_price"),
+)
+
+
+# ---------------------------------------------------------------------------
+# raw_oracle_price — Chainlink oracle reference price (issue #24)
+# ---------------------------------------------------------------------------
+
+SCHEMA_RAW_ORACLE_PRICE: pa.Schema = pa.schema(
+    [
+        *_COMMON_IDENTITY_FIELDS,
+        pa.field("price", pa.float64(), nullable=False),
+        pa.field("answer", pa.int64(), nullable=False),
+        pa.field("decimals", pa.int32(), nullable=False),
+        pa.field("round_id", pa.string(), nullable=True),
+        pa.field("answered_in_round", pa.string(), nullable=True),
+    ],
+    metadata=_table_metadata("raw_oracle_price"),
+)
+
+
+# ---------------------------------------------------------------------------
 # symbol_mapping — source-native symbol -> canonical symbol lookup
 # ---------------------------------------------------------------------------
 #
@@ -253,6 +285,8 @@ TABLE_NAMES: tuple[str, ...] = (
     "raw_orderbook_snapshot",
     "raw_trades",
     "raw_candles_1m",
+    "raw_spot_price",
+    "raw_oracle_price",
     "symbol_mapping",
     "quarantine",
 )
@@ -263,6 +297,8 @@ SCHEMAS: dict[str, pa.Schema] = {
     "raw_orderbook_snapshot": SCHEMA_RAW_ORDERBOOK_SNAPSHOT,
     "raw_trades": SCHEMA_RAW_TRADES,
     "raw_candles_1m": SCHEMA_RAW_CANDLES_1M,
+    "raw_spot_price": SCHEMA_RAW_SPOT_PRICE,
+    "raw_oracle_price": SCHEMA_RAW_ORACLE_PRICE,
     "symbol_mapping": SCHEMA_SYMBOL_MAPPING,
     "quarantine": SCHEMA_QUARANTINE,
 }

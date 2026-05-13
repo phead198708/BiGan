@@ -11,13 +11,24 @@ from pathlib import Path
 
 import structlog
 import typer
+from prometheus_client import start_http_server
 
 from bigan.canonical.etl import run_etl_batch
 from bigan.canonical.query import open_warehouse, warehouse_summary
+from bigan.canonical.symbols import SymbolMapper
 
 from .backfill import BackfillService, GapWindow
 from .clob_rest import PolymarketRestClient
 from .config import IngestionSettings
+from .metrics import REGISTRY
+from .price_readers import (
+    ChainlinkOracleReader,
+    ChainlinkReaderConfig,
+    CoinbaseTickerReader,
+    KrakenTickerReader,
+    WarehousePriceSink,
+    WsPriceReaderConfig,
+)
 from .runner import IngestionRunner
 from .sink import NdjsonGzipSink
 
@@ -79,6 +90,80 @@ def smoke(seconds: int = typer.Option(30, help="How long to run before exiting."
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+    asyncio.run(main())
+
+
+@app.command("reference-prices")
+def reference_prices(
+    symbol_mapping_path: Path | None = SYMBOL_MAPPING_PATH_OPTION,
+    max_rows_per_partition: int = typer.Option(
+        1,
+        help="Flush reference-price warehouse partitions after this many rows.",
+    ),
+) -> None:
+    """Run Coinbase, Kraken, and Chainlink BTC/USD reference-price readers."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    if not settings.chainlink_rpc_url:
+        raise typer.BadParameter(
+            "BIGAN_CHAINLINK_RPC_URL must be set to run the Chainlink reader"
+        )
+
+    async def main() -> None:
+        if settings.metrics_enabled:
+            start_http_server(settings.metrics_port, registry=REGISTRY)
+        symbol_mapper = (
+            SymbolMapper.from_path(symbol_mapping_path)
+            if symbol_mapping_path is not None
+            else None
+        )
+        sink = WarehousePriceSink(
+            settings.warehouse_dir,
+            symbol_mapper=symbol_mapper,
+            max_rows_per_partition=max_rows_per_partition,
+        )
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(
+                    CoinbaseTickerReader(
+                        WsPriceReaderConfig(
+                            url=settings.coinbase_ws_url,
+                            symbol=settings.coinbase_product_id,
+                            reconnect_min_seconds=settings.price_reader_reconnect_min_seconds,
+                            reconnect_max_seconds=settings.price_reader_reconnect_max_seconds,
+                        ),
+                        sink,
+                    ).run(),
+                    name="coinbase-ticker",
+                )
+                tg.create_task(
+                    KrakenTickerReader(
+                        WsPriceReaderConfig(
+                            url=settings.kraken_ws_url,
+                            symbol=settings.kraken_symbol,
+                            reconnect_min_seconds=settings.price_reader_reconnect_min_seconds,
+                            reconnect_max_seconds=settings.price_reader_reconnect_max_seconds,
+                        ),
+                        sink,
+                    ).run(),
+                    name="kraken-ticker",
+                )
+                tg.create_task(
+                    ChainlinkOracleReader(
+                        ChainlinkReaderConfig(
+                            rpc_url=settings.chainlink_rpc_url,
+                            feed_address=settings.chainlink_feed_address,
+                            symbol=settings.chainlink_symbol,
+                            poll_interval_seconds=settings.chainlink_poll_interval_seconds,
+                            request_timeout_seconds=settings.chainlink_request_timeout_seconds,
+                        ),
+                        sink,
+                    ).run(),
+                    name="chainlink-oracle",
+                )
+        finally:
+            await sink.close()
 
     asyncio.run(main())
 

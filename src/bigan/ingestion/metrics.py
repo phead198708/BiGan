@@ -13,6 +13,8 @@ Exposes counters / gauges / histograms that operators can scrape:
   (used for liveness alarms).
 - ``bigan_ingest_lag_seconds{source=..,event_type=..}`` — local receive time
   minus upstream message timestamp.
+- ``bigan_price_reader_up{source=..,reader=..}`` — liveness for issue #24
+  reference-price readers.
 """
 
 from __future__ import annotations
@@ -127,5 +129,36 @@ BACKFILL_RECORDS_TOTAL = Counter(
     "bigan_backfill_records_total",
     "Records replayed by the backfill service (synthetic NDJSON writes).",
     labelnames=("kind",),
+    registry=REGISTRY,
+)
+
+
+# --- Reference price readers (issue #24) ---
+
+PRICE_READER_UP = Gauge(
+    "bigan_price_reader_up",
+    "Whether a reference-price reader is currently connected or polling successfully.",
+    labelnames=("source", "reader"),
+    registry=REGISTRY,
+)
+
+PRICE_READER_LAST_SUCCESS_TIME = Gauge(
+    "bigan_price_reader_last_success_time_seconds",
+    "Epoch seconds of the latest successfully written reference-price row.",
+    labelnames=("source", "reader"),
+    registry=REGISTRY,
+)
+
+PRICE_READER_MESSAGES_TOTAL = Counter(
+    "bigan_price_reader_messages_total",
+    "Reference-price rows successfully written by reader.",
+    labelnames=("source", "reader"),
+    registry=REGISTRY,
+)
+
+PRICE_READER_ERRORS_TOTAL = Counter(
+    "bigan_price_reader_errors_total",
+    "Reference-price reader errors partitioned by kind.",
+    labelnames=("source", "reader", "kind"),
     registry=REGISTRY,
 )

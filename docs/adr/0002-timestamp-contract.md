@@ -105,6 +105,7 @@
 | Polymarket CLOB WS | `payload.timestamp` | ms string → ms | `payload.timestamp` | 单一时间戳，二者相等 |
 | Binance Spot WS | `T`（trade / aggTrade 成交时间）或 `E`（无交易时间的行情事件） | ms（默认） | `E` | Binance 可用 URL 参数切到 microsecond；reader 必须统一降到 ms |
 | Coinbase Advanced Trade WS | `updates[].event_time` / `trades[].time` (RFC 3339) | RFC 3339 → ms | envelope `timestamp` | `level2` 的 `event_time` 明确为交易引擎时间 |
+| Kraken WS v2 ticker | `data[].timestamp` (RFC 3339) | RFC 3339 → ms | `data[].timestamp` | ticker timestamp 是该行情数据时间 |
 | Polygon Chainlink (`latestRoundData`) | `updatedAt` (block seconds) | s → ms | `updatedAt` | 也可写入 `block_number` 作为额外溯源（在表层补充字段） |
 
 ### 5.1 上游字段确认
@@ -112,6 +113,7 @@
 - Polymarket CLOB market channel：`book` / `price_change` / `last_trade_price` / `best_bid_ask` 示例都携带 `timestamp`，当前 reader 将其解析为 ms epoch。
 - Binance Spot WS：官方文档说明所有 time/timestamp 字段默认是 milliseconds，除非显式请求 `timeUnit=MICROSECOND`。
 - Coinbase Advanced Trade WS：消息 envelope 有 RFC 3339 `timestamp`；`market_trades` 使用 trade `time`，`level2` 使用 `event_time`，其中 `event_time` 是交易引擎记录的事件时间。
+- Kraken WS v2 ticker：`ticker` channel 提供 `bid` / `ask` / `last`，且每条 ticker data 有 RFC 3339 `timestamp`。
 - Chainlink Data Feeds：`latestRoundData()` 返回 `updatedAt`，语义是 round 更新时刻；reader 必须从 seconds 转换成 UTC ms epoch。
 
 **禁止：**
@@ -147,5 +149,6 @@
 - [Polymarket CLOB market channel documentation](https://docs.polymarket.com/developers/CLOB/websocket/market-channel-migration-guide)
 - [Binance Spot WebSocket Streams documentation](https://github.com/binance/binance-spot-api-docs/blob/master/web-socket-streams.md)
 - [Coinbase Advanced Trade WebSocket Channels documentation](https://docs.cdp.coinbase.com/coinbase-business/advanced-trade-apis/websocket/websocket-channels)
+- [Kraken WebSocket v2 Ticker documentation](https://docs.kraken.com/api/docs/websocket-v2/ticker/)
 - [Chainlink Data Feeds API Reference (`latestRoundData`)](https://docs.chain.link/data-feeds/api-reference#latestrounddata)
 - Issue #23、#22、#24、#5

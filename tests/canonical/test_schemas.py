@@ -6,7 +6,9 @@ import pyarrow as pa
 
 from bigan.canonical.schemas import (
     SCHEMA_RAW_CANDLES_1M,
+    SCHEMA_RAW_ORACLE_PRICE,
     SCHEMA_RAW_ORDERBOOK_SNAPSHOT,
+    SCHEMA_RAW_SPOT_PRICE,
     SCHEMA_RAW_TOP_OF_BOOK,
     SCHEMA_RAW_TRADES,
     SCHEMA_SYMBOL_MAPPING,
@@ -113,6 +115,17 @@ def test_candles_has_full_ohlc_columns() -> None:
         for stat in ("open", "high", "low", "close"):
             assert f"{prefix}_{stat}" in cols, f"{prefix}_{stat} missing"
     assert {"trade_volume", "trade_count", "top_of_book_count", "vwap", "bucket_ts"} <= cols
+
+
+def test_spot_price_has_reference_price_columns() -> None:
+    cols = {f.name for f in SCHEMA_RAW_SPOT_PRICE}
+    assert {"price", "bid_price", "ask_price"} <= cols
+
+
+def test_oracle_price_has_chainlink_columns() -> None:
+    cols = {f.name for f in SCHEMA_RAW_ORACLE_PRICE}
+    assert {"price", "answer", "decimals", "round_id", "answered_in_round"} <= cols
+    assert SCHEMA_RAW_ORACLE_PRICE.field("decimals").type == pa.int32()
 
 
 def test_schema_version_metadata_is_present() -> None:

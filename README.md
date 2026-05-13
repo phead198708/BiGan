@@ -58,8 +58,15 @@ Common knobs:
 | Env var | Default | Purpose |
 |---|---|---|
 | `BIGAN_CLOB_WS_URL` | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | Polymarket market channel |
+| `BIGAN_COINBASE_WS_URL` | `wss://advanced-trade-ws.coinbase.com` | Coinbase Advanced Trade market-data WebSocket |
+| `BIGAN_KRAKEN_WS_URL` | `wss://ws.kraken.com/v2` | Kraken WebSocket v2 endpoint |
+| `BIGAN_CHAINLINK_RPC_URL` | empty | Ethereum JSON-RPC URL for Chainlink BTC/USD reads |
+| `BIGAN_CHAINLINK_FEED_ADDRESS` | `0xF403...E88c` | Chainlink BTC/USD AggregatorV3 proxy |
 | `BIGAN_GAMMA_API_BASE` | `https://gamma-api.polymarket.com` | Gamma REST API |
 | `BIGAN_MARKET_SLUG_PREFIX` | `btc-updown-15m-` | Markets to subscribe |
+| `BIGAN_COINBASE_PRODUCT_ID` | `BTC-USD` | Coinbase reference-price symbol |
+| `BIGAN_KRAKEN_SYMBOL` | `BTC/USD` | Kraken reference-price symbol |
+| `BIGAN_CHAINLINK_SYMBOL` | `BTC/USD` | Chainlink source symbol for mapping |
 | `BIGAN_GAMMA_POLL_INTERVAL_SECONDS` | `60.0` | Active-set refresh cadence |
 | `BIGAN_DATA_DIR` | `data` | Output root |
 | `BIGAN_METRICS_PORT` | `9101` | Prometheus scrape port |
@@ -112,6 +119,24 @@ A Prometheus endpoint is exposed at `:${BIGAN_METRICS_PORT}/metrics`:
 - `bigan_gap_silence_duration_seconds` — histogram of resolved gap durations
 - `bigan_backfill_invocations_total{outcome}` — backfill outcomes (`ok` / `partial` / `error`)
 - `bigan_backfill_records_total{kind}` — replayed record counts (`trade` / `orderbook`)
+- `bigan_price_reader_up{source,reader}` — Coinbase/Kraken/Chainlink reader liveness
+- `bigan_price_reader_last_success_time_seconds{source,reader}` — latest successfully written reference-price row
+- `bigan_price_reader_messages_total{source,reader}` — reference-price rows written
+- `bigan_price_reader_errors_total{source,reader,kind}` — reconnect/polling failures
+
+## Reference price readers (issue #24)
+
+Coinbase, Kraken, and Chainlink BTC/USD readers can run together and write
+directly into the canonical warehouse:
+
+```bash
+BIGAN_CHAINLINK_RPC_URL=https://... \
+bigan-ingest reference-prices --symbol-mapping-path path/to/mappings.csv
+```
+
+Rows land in `raw_spot_price` (`source=coinbase` / `source=kraken`) and
+`raw_oracle_price` (`source=chainlink`). The same symbol mapping layer fills
+`canonical_symbol` when mappings are available.
 
 ## Gap detection & REST backfill (issue #5)
 
@@ -214,6 +239,12 @@ data/warehouse/
   raw_candles_1m/
     source=<source>/dt=YYYY-MM-DD/
       part-*.parquet
+  raw_spot_price/
+    source=<source>/dt=YYYY-MM-DD/
+      part-*.parquet
+  raw_oracle_price/
+    source=<source>/dt=YYYY-MM-DD/
+      part-*.parquet
   symbol_mapping/
     source=<source>/dt=YYYY-MM-DD/
       part-*.parquet
@@ -240,6 +271,8 @@ remain `NULL` in raw tables so ingestion can continue safely.
 - **raw_orderbook_snapshot**: Long-format orderbook with `side`, `level`, `price`, `size` per level
 - **raw_trades**: One row per `last_trade_price` event with `price`, `size`, `side`, `trade_id`
 - **raw_candles_1m**: Derived 1-minute OHLC candles with bid/ask/trade OHLC, VWAP, volume, counts
+- **raw_spot_price**: Coinbase/Kraken BTC spot reference ticks with `price`, `bid_price`, `ask_price`
+- **raw_oracle_price**: Chainlink BTC/USD latest-round rows with `price`, `answer`, `decimals`, `round_id`
 - **symbol_mapping**: Temporal source-symbol lookup with `effective_from_ts`, optional `effective_to_ts`, `symbol_kind`, and `metadata_json`
 - **quarantine**: Anomalous rows isolated by the validation layer with `target_table`, `rule`, `detail`, `payload_json`
 
