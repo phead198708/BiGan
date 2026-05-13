@@ -26,6 +26,14 @@ SYMBOL_MAPPING_PATH_OPTION = typer.Option(
     None,
     help="Optional CSV, JSON, JSONL, or directory of symbol_mapping rows.",
 )
+TIMESTAMP_FUTURE_GRACE_SECONDS_OPTION = typer.Option(
+    None,
+    help="Override BIGAN_TIMESTAMP_FUTURE_GRACE_SECONDS for this ETL run.",
+)
+TIMESTAMP_STALE_THRESHOLD_SECONDS_OPTION = typer.Option(
+    None,
+    help="Override BIGAN_TIMESTAMP_STALE_THRESHOLD_SECONDS for this ETL run.",
+)
 
 
 def _configure_logging(level: str) -> None:
@@ -84,6 +92,8 @@ def etl_batch(
         50_000, help="Flush a partition buffer when it exceeds this size."
     ),
     symbol_mapping_path: Path | None = SYMBOL_MAPPING_PATH_OPTION,
+    timestamp_future_grace_seconds: float | None = TIMESTAMP_FUTURE_GRACE_SECONDS_OPTION,
+    timestamp_stale_threshold_seconds: float | None = TIMESTAMP_STALE_THRESHOLD_SECONDS_OPTION,
 ) -> None:
     """Convert raw NDJSON archive into the canonical Parquet warehouse."""
     settings = IngestionSettings()
@@ -94,6 +104,16 @@ def etl_batch(
         lag_seconds=lag_seconds,
         max_rows_per_partition=max_rows_per_partition,
         symbol_mapping_path=symbol_mapping_path,
+        timestamp_future_grace_seconds=(
+            settings.timestamp_future_grace_seconds
+            if timestamp_future_grace_seconds is None
+            else timestamp_future_grace_seconds
+        ),
+        timestamp_stale_threshold_seconds=(
+            settings.timestamp_stale_threshold_seconds
+            if timestamp_stale_threshold_seconds is None
+            else timestamp_stale_threshold_seconds
+        ),
     )
     typer.echo(
         json.dumps(

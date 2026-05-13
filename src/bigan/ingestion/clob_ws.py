@@ -37,6 +37,7 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from .message_types import MarketEvent, UnknownEvent, parse_event
 from .metrics import (
+    INGEST_LAG_SECONDS,
     LAST_EVENT_RECEIVE_TIME,
     WS_MESSAGES_TOTAL,
     WS_PARSE_ERRORS_TOTAL,
@@ -56,6 +57,7 @@ class WsClientConfig:
     ping_interval_seconds: float = 20.0
     ping_timeout_seconds: float = 10.0
     message_timeout_seconds: float = 60.0
+    ingest_lag_warn_seconds: float = 0.5
 
 
 # Callback signature: (parsed_event, raw_payload_dict) -> awaitable
@@ -244,4 +246,47 @@ class ClobWsClient:
 
         WS_MESSAGES_TOTAL.labels(event_type=event.event_type.value).inc()
         LAST_EVENT_RECEIVE_TIME.set(receive_time_ms / 1000.0)
+        _observe_ingest_lag(
+            event=event,
+            payload=payload,
+            receive_time_ms=receive_time_ms,
+            warn_threshold_seconds=self._cfg.ingest_lag_warn_seconds,
+        )
         await self._handler(event, payload)
+
+
+def _observe_ingest_lag(
+    *,
+    event: MarketEvent,
+    payload: dict,
+    receive_time_ms: int,
+    warn_threshold_seconds: float,
+) -> None:
+    message_ts_ms = int(event.timestamp)
+    lag_seconds = (receive_time_ms - message_ts_ms) / 1000.0
+    event_type = event.event_type.value
+    INGEST_LAG_SECONDS.labels(source="polymarket", event_type=event_type).observe(
+        lag_seconds
+    )
+    if lag_seconds > warn_threshold_seconds:
+        logger.warning(
+            "ingest_lag.high",
+            extra={
+                "asset_id": _asset_id_for_log(event, payload),
+                "event_type": event_type,
+                "lag_ms": int(receive_time_ms - message_ts_ms),
+                "threshold_ms": int(warn_threshold_seconds * 1000),
+            },
+        )
+
+
+def _asset_id_for_log(event: MarketEvent, payload: dict) -> str | None:
+    asset_id = getattr(event, "asset_id", None)
+    if asset_id is not None:
+        return str(asset_id)
+    price_changes = payload.get("price_changes")
+    if isinstance(price_changes, list) and price_changes:
+        first = price_changes[0]
+        if isinstance(first, dict) and first.get("asset_id") is not None:
+            return str(first["asset_id"])
+    return None

@@ -76,6 +76,8 @@ def run_etl_batch(
     max_rows_per_partition: int = 50_000,
     symbol_mapper: SymbolMapper | None = None,
     symbol_mapping_path: Path | str | None = None,
+    timestamp_future_grace_seconds: float = 5.0,
+    timestamp_stale_threshold_seconds: float = 600.0,
 ) -> EtlReport:
     """Process every eligible NDJSON.gz under ``raw_dir`` into the warehouse.
 
@@ -91,7 +93,10 @@ def run_etl_batch(
 
     report = EtlReport()
     aggregator = CandleAggregator()
-    validator = RowValidator()
+    validator = RowValidator(
+        future_grace_ms=int(timestamp_future_grace_seconds * 1000),
+        stale_threshold_ms=int(timestamp_stale_threshold_seconds * 1000),
+    )
     ingest_ts_now_ms = int(time.time() * 1000)
 
     files = _eligible_files(raw_dir, lag_seconds)

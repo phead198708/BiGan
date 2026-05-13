@@ -62,6 +62,7 @@ class IngestionRunner:
             ping_interval_seconds=settings.ws_ping_interval_seconds,
             ping_timeout_seconds=settings.ws_ping_timeout_seconds,
             message_timeout_seconds=settings.ws_message_timeout_seconds,
+            ingest_lag_warn_seconds=settings.ingest_lag_warn_seconds,
         )
         self._ws = ClobWsClient(ws_cfg, self.make_handler())
 

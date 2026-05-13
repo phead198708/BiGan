@@ -18,6 +18,8 @@ Rules implemented:
 - ``empty_symbol``      — ``source_symbol`` missing / empty string
 - ``empty_time``        — ``ts`` missing / non-positive
 - ``duplicate_trade_id``— ``trade_id`` already seen in this validator instance
+- ``ts_in_future``      — ``ts > ingest_ts + future_grace`` (issue #23)
+- ``ts_too_stale``      — ``ingest_ts - ts > stale_threshold`` (issue #23)
 
 The validator is **stateful** w.r.t. trade-id dedup: callers should reuse a
 single :class:`RowValidator` for the lifetime of an ETL batch so duplicates
@@ -49,12 +51,22 @@ class ValidationRule(StrEnum):
     EMPTY_SYMBOL = "empty_symbol"
     EMPTY_TIME = "empty_time"
     DUPLICATE_TRADE_ID = "duplicate_trade_id"
+    # Timestamp Contract (issue #23) — see docs/adr/0002-timestamp-contract.md
+    TS_IN_FUTURE = "ts_in_future"
+    TS_TOO_STALE = "ts_too_stale"
 
 
 #: Placeholder substituted into the quarantine row when the offending row
 #: is missing its symbol identity. Keeps the schema's NOT NULL contract on
 #: ``source_symbol`` intact while still allowing the rule to fire.
 UNKNOWN_SYMBOL = "<unknown>"
+
+
+# Default thresholds for the Timestamp Contract checks (issue #23). Both are
+# wallclock-millisecond magnitudes; ETL callers may override via
+# :class:`RowValidator` constructor arguments.
+DEFAULT_TS_FUTURE_GRACE_MS = 5_000        # 5s tolerance for upstream clock skew
+DEFAULT_TS_STALE_THRESHOLD_MS = 600_000   # 10min — beyond this, treat as replay
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +121,29 @@ class RowValidator:
                 writer.append_rows("raw_top_of_book", [row])
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        future_grace_ms: int = DEFAULT_TS_FUTURE_GRACE_MS,
+        stale_threshold_ms: int = DEFAULT_TS_STALE_THRESHOLD_MS,
+    ) -> None:
+        """Construct a validator.
+
+        Args:
+            future_grace_ms: Tolerance (ms) for ``ts`` to lead ``ingest_ts``
+                before the row is quarantined as ``ts_in_future``. Default
+                5s, sized for typical NTP-corrected exchange clock skew.
+            stale_threshold_ms: Maximum (ms) that ``ingest_ts`` may lag
+                ``ts`` before the row is quarantined as ``ts_too_stale``.
+                Default 10min, lets normal #5 backfills through but
+                catches accidental replay of week-old data.
+        """
+        if future_grace_ms < 0:
+            raise ValueError("future_grace_ms must be non-negative")
+        if stale_threshold_ms < 0:
+            raise ValueError("stale_threshold_ms must be non-negative")
+        self._future_grace_ms = future_grace_ms
+        self._stale_threshold_ms = stale_threshold_ms
         self._seen_trade_ids: set[str] = set()
         self.stats = ValidationStats()
 
@@ -127,7 +161,13 @@ class RowValidator:
         errors: list[ValidationError] = []
 
         # Identity rules apply to every raw_* table.
-        errors.extend(_check_identity(row))
+        errors.extend(
+            _check_identity(
+                row,
+                future_grace_ms=self._future_grace_ms,
+                stale_threshold_ms=self._stale_threshold_ms,
+            )
+        )
 
         if table == "raw_top_of_book":
             errors.extend(_check_top_of_book(row))
@@ -194,7 +234,12 @@ class RowValidator:
 # ---------------------------------------------------------------------------
 
 
-def _check_identity(row: dict[str, Any]) -> list[ValidationError]:
+def _check_identity(
+    row: dict[str, Any],
+    *,
+    future_grace_ms: int,
+    stale_threshold_ms: int,
+) -> list[ValidationError]:
     errors: list[ValidationError] = []
 
     symbol = row.get("source_symbol")
@@ -206,12 +251,44 @@ def _check_identity(row: dict[str, Any]) -> list[ValidationError]:
             )
         )
 
-    ts = row.get("ts")
-    if ts is None or _int_or_zero(ts) <= 0:
+    ts_raw = row.get("ts")
+    ts_val = _int_or_zero(ts_raw)
+    if ts_raw is None or ts_val <= 0:
         errors.append(
             ValidationError(
                 rule=ValidationRule.EMPTY_TIME,
-                detail=f"ts is null or non-positive: {ts!r}",
+                detail=f"ts is null or non-positive: {ts_raw!r}",
+            )
+        )
+        # Bail out of the temporal sanity checks if we have no usable ts.
+        return errors
+
+    # Timestamp Contract checks (issue #23). We require a positive
+    # ``ingest_ts`` to evaluate either direction; if it's missing we
+    # leave it to upstream observability rather than over-quarantining.
+    ingest_ts = _int_or_zero(row.get("ingest_ts"))
+    if ingest_ts <= 0:
+        return errors
+
+    if ts_val - ingest_ts > future_grace_ms:
+        errors.append(
+            ValidationError(
+                rule=ValidationRule.TS_IN_FUTURE,
+                detail=(
+                    f"ts ({ts_val}) exceeds ingest_ts ({ingest_ts}) by "
+                    f"{ts_val - ingest_ts}ms (grace={future_grace_ms}ms)"
+                ),
+            )
+        )
+    elif ingest_ts - ts_val > stale_threshold_ms:
+        # Only raise stale if not already in_future (same row can't be both).
+        errors.append(
+            ValidationError(
+                rule=ValidationRule.TS_TOO_STALE,
+                detail=(
+                    f"ingest_ts ({ingest_ts}) lags ts ({ts_val}) by "
+                    f"{ingest_ts - ts_val}ms (threshold={stale_threshold_ms}ms)"
+                ),
             )
         )
     return errors

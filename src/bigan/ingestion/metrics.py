@@ -11,6 +11,8 @@ Exposes counters / gauges / histograms that operators can scrape:
 - ``bigan_sink_flush_seconds`` — flush latency histogram.
 - ``bigan_last_event_receive_time_seconds`` — gauge of the latest receive time
   (used for liveness alarms).
+- ``bigan_ingest_lag_seconds{source=..,event_type=..}`` — local receive time
+  minus upstream message timestamp.
 """
 
 from __future__ import annotations
@@ -67,6 +69,14 @@ SINK_FLUSH_SECONDS = Histogram(
 LAST_EVENT_RECEIVE_TIME = Gauge(
     "bigan_last_event_receive_time_seconds",
     "Receive time (epoch s) of the most recent message; used for liveness alarms.",
+    registry=REGISTRY,
+)
+
+INGEST_LAG_SECONDS = Histogram(
+    "bigan_ingest_lag_seconds",
+    "Delta between local receive time and upstream message timestamp.",
+    labelnames=("source", "event_type"),
+    buckets=(0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0),
     registry=REGISTRY,
 )
 

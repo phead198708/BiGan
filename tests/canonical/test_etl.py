@@ -415,3 +415,45 @@ def test_etl_enriches_canonical_symbol_from_mapping(tmp_path: Path) -> None:
     mapping = pq.ParquetFile(mapping_files[0]).read().to_pylist()[0]
     assert mapping["canonical_symbol"] == "polymarket-election-2026-yes"
     assert mapping["metadata_json"] == '{"outcome":"yes"}'
+
+
+def test_etl_quarantines_stale_timestamp_with_configurable_threshold(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    base = _ts(2026, 5, 10, 12, 0)
+    src = raw_dir / "2026-05-10.ndjson.gz"
+    _write_ndjson_gz(
+        src,
+        [
+            {
+                "receive_time": base + 2_000,
+                "raw": {
+                    "event_type": "best_bid_ask",
+                    "asset_id": "tok-1",
+                    "market": "0xmkt",
+                    "best_bid": "0.50",
+                    "best_ask": "0.52",
+                    "spread": "0.02",
+                    "timestamp": str(base),
+                },
+            }
+        ],
+    )
+
+    import os
+
+    os.utime(src, (1, 1))
+
+    warehouse = tmp_path / "warehouse"
+    report = run_etl_batch(
+        raw_dir=raw_dir,
+        warehouse_dir=warehouse,
+        lag_seconds=0.0,
+        timestamp_stale_threshold_seconds=1.0,
+    )
+
+    assert report.rows_per_table["raw_top_of_book"] == 0
+    assert report.rows_per_table["quarantine"] == 1
+    assert report.quarantined_by_rule == {"ts_too_stale": 1}

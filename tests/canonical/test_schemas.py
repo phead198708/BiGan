@@ -29,6 +29,24 @@ def test_all_tables_carry_three_timestamp_columns() -> None:
         assert not missing, f"{name} missing timestamp columns: {missing}"
 
 
+def test_timestamp_columns_are_int64() -> None:
+    """Timestamp contract stores UTC ms epochs, never timezone-bearing strings."""
+    timestamp_cols = {
+        "ts",
+        "message_ts",
+        "ingest_ts",
+        "bucket_ts",
+        "ts_open",
+        "ts_close",
+        "effective_from_ts",
+        "effective_to_ts",
+    }
+    for name, schema in SCHEMAS.items():
+        for field in schema:
+            if field.name in timestamp_cols:
+                assert field.type == pa.int64(), f"{name}.{field.name} must be int64"
+
+
 def test_all_tables_carry_symbol_identity_columns() -> None:
     """Per #22: every raw table must expose source / source_symbol / canonical_symbol."""
     required = {"source", "source_symbol", "canonical_symbol"}

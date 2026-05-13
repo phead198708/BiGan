@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import orjson
+import pytest
 
 from bigan.canonical.validation import (
     UNKNOWN_SYMBOL,
@@ -79,6 +80,44 @@ def test_null_ts_fires_empty_time() -> None:
     errs = v.validate("raw_top_of_book", _base_row(ts=None))
     rules = {e.rule for e in errs}
     assert ValidationRule.EMPTY_TIME in rules
+
+
+def test_future_ts_fires() -> None:
+    v = RowValidator(future_grace_ms=100)
+    errs = v.validate(
+        "raw_top_of_book",
+        _base_row(ts=1_700_000_000_200, ingest_ts=1_700_000_000_000),
+    )
+    rules = {e.rule for e in errs}
+    assert ValidationRule.TS_IN_FUTURE in rules
+
+
+def test_stale_ts_fires() -> None:
+    v = RowValidator(stale_threshold_ms=100)
+    errs = v.validate(
+        "raw_top_of_book",
+        _base_row(ts=1_700_000_000_000, ingest_ts=1_700_000_000_200),
+    )
+    rules = {e.rule for e in errs}
+    assert ValidationRule.TS_TOO_STALE in rules
+
+
+def test_timestamp_thresholds_are_tunable() -> None:
+    v = RowValidator(future_grace_ms=1_000, stale_threshold_ms=1_000)
+    assert (
+        v.validate(
+            "raw_top_of_book",
+            _base_row(ts=1_700_000_000_000, ingest_ts=1_700_000_000_900),
+        )
+        == []
+    )
+
+
+def test_invalid_timestamp_thresholds_raise() -> None:
+    with pytest.raises(ValueError, match="future_grace_ms"):
+        RowValidator(future_grace_ms=-1)
+    with pytest.raises(ValueError, match="stale_threshold_ms"):
+        RowValidator(stale_threshold_ms=-1)
 
 
 # ---------------------------------------------------------------------------

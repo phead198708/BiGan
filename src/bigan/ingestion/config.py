@@ -83,7 +83,24 @@ class IngestionSettings(BaseSettings):
     # --- Observability ---
     metrics_port: int = Field(default=9101, ge=1, le=65535)
     metrics_enabled: bool = Field(default=True)
+    ingest_lag_warn_seconds: float = Field(
+        default=0.5,
+        ge=0.0,
+        description="Warn when receive_time - message timestamp exceeds this SLA.",
+    )
     log_level: str = Field(default="INFO")
+
+    # --- Canonical timestamp contract (issue #23) ---
+    timestamp_future_grace_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        description="Allow upstream event timestamps to lead ingest time by this many seconds.",
+    )
+    timestamp_stale_threshold_seconds: float = Field(
+        default=600.0,
+        ge=0.0,
+        description="Quarantine rows whose ingest time lags event time by more than this many seconds.",
+    )
 
     # --- Resilience ---
     book_hash_mismatch_max_retries: int = Field(

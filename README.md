@@ -63,6 +63,9 @@ Common knobs:
 | `BIGAN_GAMMA_POLL_INTERVAL_SECONDS` | `60.0` | Active-set refresh cadence |
 | `BIGAN_DATA_DIR` | `data` | Output root |
 | `BIGAN_METRICS_PORT` | `9101` | Prometheus scrape port |
+| `BIGAN_INGEST_LAG_WARN_SECONDS` | `0.5` | Warn when `ingest_ts - message_ts` exceeds this SLA |
+| `BIGAN_TIMESTAMP_FUTURE_GRACE_SECONDS` | `5.0` | ETL quarantine grace for upstream clocks ahead of local ingest |
+| `BIGAN_TIMESTAMP_STALE_THRESHOLD_SECONDS` | `600.0` | ETL quarantine threshold for stale/replayed event time |
 | `BIGAN_ROLLUP_ENABLED` | `true` | Enable hourly NDJSON->Parquet |
 | `BIGAN_LOG_LEVEL` | `INFO` | Standard logging levels |
 
@@ -101,6 +104,7 @@ A Prometheus endpoint is exposed at `:${BIGAN_METRICS_PORT}/metrics`:
 - `bigan_ws_hash_mismatch_total{asset_id}` — book/delta hash failures
 - `bigan_sink_records_written_total` — persisted record count
 - `bigan_last_event_receive_time_seconds` — gauge for liveness alarms
+- `bigan_ingest_lag_seconds{source,event_type}` — `ingest_ts - message_ts` latency histogram
 - `bigan_gamma_polls_total{outcome}` — Gamma poll outcomes
 - `bigan_rollup_files_total{outcome}` — rollup outcomes
 - `bigan_gap_detected_total{asset_id}` — silence detections (#5)
@@ -253,6 +257,8 @@ violation) and the main `raw_*` table is unaffected:
 | `negative_price` | top-of-book / snapshot / trade with `price < 0` (or `bid_price`/`ask_price` < 0) |
 | `negative_size` | snapshot / trade row with `size < 0` |
 | `duplicate_trade_id` | `trade_id` already seen in the same ETL batch |
+| `ts_in_future` | `ts` leads `ingest_ts` by more than `BIGAN_TIMESTAMP_FUTURE_GRACE_SECONDS` |
+| `ts_too_stale` | `ingest_ts` lags `ts` by more than `BIGAN_TIMESTAMP_STALE_THRESHOLD_SECONDS` |
 
 Trade-id dedup is **per ETL run**: re-ingesting the same NDJSON archive will
 not flag historical duplicates from a previous run. Cross-batch dedup is a
