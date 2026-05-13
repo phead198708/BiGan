@@ -18,9 +18,9 @@ All four tables follow the same column-naming contract:
                            ``asset_id`` / CLOB token id)
   - ``source_market``    — source-specific market grouping (Polymarket
                            ``condition_id``-style market hash)
-  - ``canonical_symbol`` — cross-source canonical name. Nullable until #22
-                           lands the mapping table; downstream readers MUST
-                           tolerate NULLs.
+  - ``canonical_symbol`` — cross-source canonical name. Nullable on raw rows
+                           when a mapping is not available yet; non-null in
+                           the ``symbol_mapping`` table itself.
 
 - **Append-only**: every ETL run writes a new ``part-*.parquet`` file under
   the appropriate Hive partition directory. Existing files are never edited
@@ -192,6 +192,32 @@ SCHEMA_RAW_CANDLES_1M: pa.Schema = pa.schema(
 
 
 # ---------------------------------------------------------------------------
+# symbol_mapping — source-native symbol -> canonical symbol lookup
+# ---------------------------------------------------------------------------
+#
+# ``effective_from_ts`` / ``effective_to_ts`` make the table temporal so a
+# source can rename or recycle identifiers without rewriting old raw rows.
+# ``ts`` mirrors ``effective_from_ts`` for warehouse partitioning.
+
+SCHEMA_SYMBOL_MAPPING: pa.Schema = pa.schema(
+    [
+        pa.field("ts", pa.int64(), nullable=False),
+        pa.field("message_ts", pa.int64(), nullable=False),
+        pa.field("ingest_ts", pa.int64(), nullable=False),
+        pa.field("source", pa.string(), nullable=False),
+        pa.field("source_symbol", pa.string(), nullable=False),
+        pa.field("source_market", pa.string(), nullable=True),
+        pa.field("canonical_symbol", pa.string(), nullable=False),
+        pa.field("effective_from_ts", pa.int64(), nullable=False),
+        pa.field("effective_to_ts", pa.int64(), nullable=True),
+        pa.field("symbol_kind", pa.string(), nullable=True),
+        pa.field("metadata_json", pa.string(), nullable=True),
+    ],
+    metadata=_table_metadata("symbol_mapping"),
+)
+
+
+# ---------------------------------------------------------------------------
 # quarantine — abnormal rows isolated by the validation layer (issue #4)
 # ---------------------------------------------------------------------------
 #
@@ -227,6 +253,7 @@ TABLE_NAMES: tuple[str, ...] = (
     "raw_orderbook_snapshot",
     "raw_trades",
     "raw_candles_1m",
+    "symbol_mapping",
     "quarantine",
 )
 
@@ -236,5 +263,6 @@ SCHEMAS: dict[str, pa.Schema] = {
     "raw_orderbook_snapshot": SCHEMA_RAW_ORDERBOOK_SNAPSHOT,
     "raw_trades": SCHEMA_RAW_TRADES,
     "raw_candles_1m": SCHEMA_RAW_CANDLES_1M,
+    "symbol_mapping": SCHEMA_SYMBOL_MAPPING,
     "quarantine": SCHEMA_QUARANTINE,
 }

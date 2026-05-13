@@ -9,6 +9,7 @@ from bigan.canonical.schemas import (
     SCHEMA_RAW_ORDERBOOK_SNAPSHOT,
     SCHEMA_RAW_TOP_OF_BOOK,
     SCHEMA_RAW_TRADES,
+    SCHEMA_SYMBOL_MAPPING,
     SCHEMA_VERSION,
     SCHEMAS,
     TABLE_NAMES,
@@ -37,12 +38,30 @@ def test_all_tables_carry_symbol_identity_columns() -> None:
         assert not missing, f"{name} missing symbol columns: {missing}"
 
 
-def test_canonical_symbol_is_nullable_pending_22() -> None:
-    """Until #22 lands, canonical_symbol can be NULL in any row."""
-    for schema in SCHEMAS.values():
+def test_raw_tables_allow_unmapped_canonical_symbol() -> None:
+    """Raw rows can still be ingested before a source symbol is mapped."""
+    for name, schema in SCHEMAS.items():
+        if name == "symbol_mapping":
+            continue
         idx = schema.get_field_index("canonical_symbol")
         assert idx >= 0
         assert schema.field(idx).nullable, "canonical_symbol must be nullable"
+
+
+def test_symbol_mapping_requires_canonical_symbol() -> None:
+    idx = SCHEMA_SYMBOL_MAPPING.get_field_index("canonical_symbol")
+    assert idx >= 0
+    assert not SCHEMA_SYMBOL_MAPPING.field(idx).nullable
+
+
+def test_symbol_mapping_has_temporal_lookup_columns() -> None:
+    cols = {f.name for f in SCHEMA_SYMBOL_MAPPING}
+    assert {
+        "effective_from_ts",
+        "effective_to_ts",
+        "symbol_kind",
+        "metadata_json",
+    } <= cols
 
 
 def test_source_and_source_symbol_are_not_nullable() -> None:

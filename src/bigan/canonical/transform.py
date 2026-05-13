@@ -74,8 +74,8 @@ def _identity_columns(
         "source": SOURCE_POLYMARKET,
         "source_symbol": str(asset_id),
         "source_market": str(raw["market"]) if raw.get("market") is not None else None,
-        # canonical_symbol is populated by a separate enrichment step once
-        # #22's symbol_mapping table lands. Until then, leave it NULL.
+        # canonical_symbol is populated by the #22 symbol mapping enrichment
+        # step in the ETL runner. Unknown mappings remain NULL.
         "canonical_symbol": None,
         "provenance": str(provenance),
     }

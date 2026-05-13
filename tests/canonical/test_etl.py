@@ -15,6 +15,7 @@ import orjson
 import pyarrow.parquet as pq
 
 from bigan.canonical.etl import run_etl_batch
+from bigan.canonical.symbols import SymbolMapper, symbol_mapping_row
 from bigan.canonical.writer import warehouse_files
 
 
@@ -334,3 +335,83 @@ def test_etl_preserves_provenance_in_parquet(tmp_path: Path) -> None:
     rows = pq.ParquetFile(trade_files[0]).read().to_pylist()
     provenances = sorted(r["provenance"] for r in rows)
     assert provenances == ["polymarket-rest-backfill", "ws"]
+
+
+def test_etl_enriches_canonical_symbol_from_mapping(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    base = _ts(2026, 5, 10, 12, 0)
+    src = raw_dir / "2026-05-10.ndjson.gz"
+    _write_ndjson_gz(
+        src,
+        [
+            {
+                "receive_time": base + 100,
+                "raw": {
+                    "event_type": "best_bid_ask",
+                    "asset_id": "tok-1",
+                    "market": "0xmkt",
+                    "best_bid": "0.50",
+                    "best_ask": "0.52",
+                    "spread": "0.02",
+                    "timestamp": str(base),
+                },
+            },
+            {
+                "receive_time": base + 200,
+                "raw": {
+                    "event_type": "last_trade_price",
+                    "asset_id": "tok-1",
+                    "market": "0xmkt",
+                    "price": "0.51",
+                    "size": "10",
+                    "side": "BUY",
+                    "fee_rate_bps": "0",
+                    "timestamp": str(base + 100),
+                },
+            },
+        ],
+    )
+
+    import os
+
+    os.utime(src, (1, 1))
+
+    mapper = SymbolMapper(
+        [
+            symbol_mapping_row(
+                source="polymarket",
+                source_symbol="tok-1",
+                source_market="0xmkt",
+                canonical_symbol="polymarket-election-2026-yes",
+                effective_from_ts=base - 1,
+                symbol_kind="binary_outcome",
+                metadata={"outcome": "yes"},
+            )
+        ]
+    )
+    warehouse = tmp_path / "warehouse"
+    report = run_etl_batch(
+        raw_dir=raw_dir,
+        warehouse_dir=warehouse,
+        lag_seconds=0.0,
+        symbol_mapper=mapper,
+    )
+
+    assert report.rows_per_table["symbol_mapping"] == 1
+    assert report.rows_per_table["raw_top_of_book"] == 1
+    assert report.rows_per_table["raw_trades"] == 1
+    assert report.rows_per_table["raw_candles_1m"] == 1
+
+    tob_files = warehouse_files(warehouse, "raw_top_of_book")
+    tob = pq.ParquetFile(tob_files[0]).read().to_pylist()[0]
+    assert tob["canonical_symbol"] == "polymarket-election-2026-yes"
+
+    candle_files = warehouse_files(warehouse, "raw_candles_1m")
+    candle = pq.ParquetFile(candle_files[0]).read().to_pylist()[0]
+    assert candle["canonical_symbol"] == "polymarket-election-2026-yes"
+
+    mapping_files = warehouse_files(warehouse, "symbol_mapping")
+    mapping = pq.ParquetFile(mapping_files[0]).read().to_pylist()[0]
+    assert mapping["canonical_symbol"] == "polymarket-election-2026-yes"
+    assert mapping["metadata_json"] == '{"outcome":"yes"}'

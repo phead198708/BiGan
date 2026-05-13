@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import sys
+from pathlib import Path
 
 import structlog
 import typer
@@ -21,6 +22,10 @@ from .runner import IngestionRunner
 from .sink import NdjsonGzipSink
 
 app = typer.Typer(add_completion=False, help="BiGan ingestion service")
+SYMBOL_MAPPING_PATH_OPTION = typer.Option(
+    None,
+    help="Optional CSV, JSON, JSONL, or directory of symbol_mapping rows.",
+)
 
 
 def _configure_logging(level: str) -> None:
@@ -78,6 +83,7 @@ def etl_batch(
     max_rows_per_partition: int = typer.Option(
         50_000, help="Flush a partition buffer when it exceeds this size."
     ),
+    symbol_mapping_path: Path | None = SYMBOL_MAPPING_PATH_OPTION,
 ) -> None:
     """Convert raw NDJSON archive into the canonical Parquet warehouse."""
     settings = IngestionSettings()
@@ -87,6 +93,7 @@ def etl_batch(
         warehouse_dir=settings.warehouse_dir,
         lag_seconds=lag_seconds,
         max_rows_per_partition=max_rows_per_partition,
+        symbol_mapping_path=symbol_mapping_path,
     )
     typer.echo(
         json.dumps(

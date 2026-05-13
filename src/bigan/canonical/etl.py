@@ -29,6 +29,7 @@ import orjson
 
 from .candles import CandleAggregator
 from .schemas import TABLE_NAMES
+from .symbols import SymbolMapper
 from .transform import transform_event
 from .validation import RowValidator
 from .writer import WarehouseWriter
@@ -73,13 +74,21 @@ def run_etl_batch(
     warehouse_dir: Path | str,
     lag_seconds: float = 60.0,
     max_rows_per_partition: int = 50_000,
+    symbol_mapper: SymbolMapper | None = None,
+    symbol_mapping_path: Path | str | None = None,
 ) -> EtlReport:
     """Process every eligible NDJSON.gz under ``raw_dir`` into the warehouse.
 
     Returns an :class:`EtlReport` with per-table row counts.
     """
+    if symbol_mapper is not None and symbol_mapping_path is not None:
+        raise ValueError("pass either symbol_mapper or symbol_mapping_path, not both")
+
     raw_dir = Path(raw_dir)
     warehouse_dir = Path(warehouse_dir)
+    if symbol_mapping_path is not None:
+        symbol_mapper = SymbolMapper.from_path(symbol_mapping_path)
+
     report = EtlReport()
     aggregator = CandleAggregator()
     validator = RowValidator()
@@ -91,6 +100,11 @@ def run_etl_batch(
     with WarehouseWriter(
         warehouse_dir, max_rows_per_partition=max_rows_per_partition
     ) as writer:
+        if symbol_mapper is not None:
+            mapping_rows = symbol_mapper.to_rows()
+            if mapping_rows:
+                writer.append_rows("symbol_mapping", mapping_rows)
+
         for src in files:
             try:
                 _process_file(
@@ -98,6 +112,7 @@ def run_etl_batch(
                     writer=writer,
                     aggregator=aggregator,
                     validator=validator,
+                    symbol_mapper=symbol_mapper,
                     report=report,
                 )
             except Exception:  # noqa: BLE001
@@ -155,12 +170,15 @@ def _process_file(
     writer: WarehouseWriter,
     aggregator: CandleAggregator,
     validator: RowValidator,
+    symbol_mapper: SymbolMapper | None,
     report: EtlReport,
 ) -> None:
     logger.info("etl.file_start", extra={"src": str(src)})
     for record in _iter_ndjson_gz(src):
         report.records_read += 1
         tables = transform_event(record)
+        if symbol_mapper is not None:
+            tables = symbol_mapper.enrich_tables(tables)
         for table_name, rows in tables.items():
             if not rows:
                 continue

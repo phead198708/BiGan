@@ -184,6 +184,7 @@ layer (issue #4) that isolates anomalous rows before they reach the main tables.
 ```
 src/bigan/canonical/
   schemas.py      — PyArrow schemas for raw_* tables + quarantine
+  symbols.py      — Source-symbol -> canonical-symbol mapping lookup
   transform.py    — Convert WS event payloads to canonical row dicts
   validation.py   — Per-row rules (crossed book, negative size, dup trade_id, ...)
   writer.py       — Buffered Parquet writer with Hive partitioning
@@ -209,6 +210,9 @@ data/warehouse/
   raw_candles_1m/
     source=<source>/dt=YYYY-MM-DD/
       part-*.parquet
+  symbol_mapping/
+    source=<source>/dt=YYYY-MM-DD/
+      part-*.parquet
   quarantine/
     source=<source>/dt=YYYY-MM-DD/
       part-*.parquet
@@ -217,9 +221,14 @@ data/warehouse/
 All tables share a common identity contract:
 
 - **Timestamps**: `ts` (event time), `message_ts` (protocol timestamp), `ingest_ts` (receive time)
-- **Symbol identity**: `source`, `source_symbol`, `source_market`, `canonical_symbol`
+- **Symbol identity** (#22): `source`, `source_symbol`, `source_market`, `canonical_symbol`
 - **Provenance** (#5): `provenance` — `ws` for realtime, `polymarket-rest-backfill` for recovered, `manual` for CLI replays
 - **Append-only**: ETL writes new `part-*.parquet` files; existing files are never mutated
+
+`canonical_symbol` is filled by the optional issue #22 symbol mapping layer.
+Pass `--symbol-mapping-path path/to/mappings.csv` (also supports JSON, JSONL,
+or a directory of mapping files) to `bigan-ingest etl-batch`. Unknown mappings
+remain `NULL` in raw tables so ingestion can continue safely.
 
 ### Table schemas
 
@@ -227,6 +236,7 @@ All tables share a common identity contract:
 - **raw_orderbook_snapshot**: Long-format orderbook with `side`, `level`, `price`, `size` per level
 - **raw_trades**: One row per `last_trade_price` event with `price`, `size`, `side`, `trade_id`
 - **raw_candles_1m**: Derived 1-minute OHLC candles with bid/ask/trade OHLC, VWAP, volume, counts
+- **symbol_mapping**: Temporal source-symbol lookup with `effective_from_ts`, optional `effective_to_ts`, `symbol_kind`, and `metadata_json`
 - **quarantine**: Anomalous rows isolated by the validation layer with `target_table`, `rule`, `detail`, `payload_json`
 
 ### Validation rules (issue #4)
