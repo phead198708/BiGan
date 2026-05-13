@@ -159,6 +159,39 @@ def test_replays_trades_and_orderbook_with_backfill_provenance() -> None:
     assert rest.trades_calls == [("0xmkt", 1_700_000_000_000, 1_700_000_030_000)]
 
 
+def test_backfill_service_calls_rest_gate_before_each_fetch() -> None:
+    rest = _FakeRest(
+        trades=[_trade("tok-1", "BUY", 1_700_000_010_000)],
+        orderbook=_book("tok-1", 1_700_000_030_000),
+    )
+    sink = _RecordingSink()
+    calls = 0
+
+    async def before_rest_call() -> None:
+        nonlocal calls
+        calls += 1
+
+    service = BackfillService(
+        rest,
+        sink,
+        _resolver,
+        before_rest_call=before_rest_call,
+    )
+
+    report = asyncio.run(
+        service.handle_gap(
+            GapWindow(
+                asset_id="tok-1",
+                gap_start_ms=1_700_000_000_000,
+                gap_end_ms=1_700_000_030_000,
+            )
+        )
+    )
+
+    assert report.total_records == 2
+    assert calls == 2
+
+
 def test_falls_back_when_market_resolver_returns_none() -> None:
     rest = _FakeRest(orderbook=_book("tok-2", 1_700_000_030_000))
     sink = _RecordingSink()

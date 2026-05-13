@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 #: (or ``None`` if not currently known). Async-friendly so the runner can
 #: lazily query Gamma if the local cache misses.
 MarketResolver = Callable[[str], Awaitable[str | None]]
+BeforeRestCall = Callable[[], Awaitable[None]]
 
 
 @dataclass(slots=True)
@@ -83,12 +84,14 @@ class BackfillService:
         *,
         provenance: str = PROVENANCE_BACKFILL,
         clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+        before_rest_call: BeforeRestCall | None = None,
     ) -> None:
         self._rest = rest_client
         self._sink = sink
         self._resolver = market_resolver
         self._provenance = provenance
         self._clock_ms = clock_ms
+        self._before_rest_call = before_rest_call
 
     # ------------------------------------------------------------------
     # Public API
@@ -149,6 +152,7 @@ class BackfillService:
         report: BackfillReport,
     ) -> None:
         try:
+            await self._wait_for_rest_slot()
             trades = await self._rest.fetch_trades(
                 market,
                 since_ms=gap.gap_start_ms,
@@ -184,6 +188,7 @@ class BackfillService:
         report: BackfillReport,
     ) -> None:
         try:
+            await self._wait_for_rest_slot()
             book = await self._rest.fetch_orderbook(gap.asset_id)
         except Exception as exc:  # noqa: BLE001
             report.errors.append(f"book_fetch_failed: {exc}")
@@ -225,6 +230,10 @@ class BackfillService:
                 "provenance": self._provenance,
             },
         }
+
+    async def _wait_for_rest_slot(self) -> None:
+        if self._before_rest_call is not None:
+            await self._before_rest_call()
 
     def _synth_book_record(self, book: RestOrderbook) -> dict[str, Any]:
         return {

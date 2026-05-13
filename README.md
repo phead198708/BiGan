@@ -119,6 +119,9 @@ A Prometheus endpoint is exposed at `:${BIGAN_METRICS_PORT}/metrics`:
 - `bigan_gap_silence_duration_seconds` — histogram of resolved gap durations
 - `bigan_backfill_invocations_total{outcome}` — backfill outcomes (`ok` / `partial` / `error`)
 - `bigan_backfill_records_total{kind}` — replayed record counts (`trade` / `orderbook`)
+- `bigan_backfill_in_flight` — REST backfill invocations inside the concurrency guard
+- `bigan_backfill_circuit_state` — circuit state (`0=closed`, `1=open`, `2=half_open`)
+- `bigan_backfill_throttled_total{reason}` — backpressure events (`semaphore`, `rate_limiter`, `circuit_open`)
 - `bigan_price_reader_up{source,reader}` — Coinbase/Kraken/Chainlink reader liveness
 - `bigan_price_reader_last_success_time_seconds{source,reader}` — latest successfully written reference-price row
 - `bigan_price_reader_messages_total{source,reader}` — reference-price rows written
@@ -170,6 +173,7 @@ or above to capture):
 | `backfill.done` | REST recovery finished (counts in payload) |
 | `backfill.no_market` | gap asset unknown to Gamma cache; trades skipped |
 | `backfill.trades_fetch_failed` / `backfill.book_fetch_failed` | per-leg errors |
+| `backfill.circuit_open` | REST circuit is open; the gap recovery is skipped |
 
 Each event carries `asset_id`, the gap window, and (for `done`) the
 number of trades + orderbook records replayed. Combined with the
@@ -203,6 +207,20 @@ pipeline uses, so the next ETL run picks them up automatically.
 | `BIGAN_CLOB_REST_URL` | `https://clob.polymarket.com` | REST base |
 | `BIGAN_BACKFILL_REST_TIMEOUT_SECONDS` | `10` | Per-request timeout |
 | `BIGAN_BACKFILL_MAX_PAGES` | `20` | Trade-history page cap per gap |
+| `BIGAN_BACKFILL_MAX_CONCURRENCY` | `4` | Global concurrent backfill invocation cap |
+| `BIGAN_BACKFILL_RATE_LIMIT_PER_SECOND` | `10.0` | Global CLOB REST token-bucket rate |
+| `BIGAN_BACKFILL_CIRCUIT_FAILURE_THRESHOLD` | `5` | Consecutive REST failures before opening circuit |
+| `BIGAN_BACKFILL_CIRCUIT_COOL_DOWN_SECONDS` | `30.0` | Open-circuit cooldown before half-open probe |
+
+### Backfill failure protection
+
+When many assets resolve gaps at once (#28), the runner protects both CLOB REST
+and the local sink with three layers:
+
+- A global semaphore caps concurrent `BackfillService` invocations.
+- A token-bucket limiter gates individual REST calls before trade/orderbook fetches.
+- A circuit breaker opens after repeated REST failures, skips new backfills while
+  open, then allows one half-open probe after cooldown.
 
 ## Canonical warehouse (issue #3)
 
@@ -294,8 +312,10 @@ violation) and the main `raw_*` table is unaffected:
 | `ts_too_stale` | `ingest_ts` lags `ts` by more than `BIGAN_TIMESTAMP_STALE_THRESHOLD_SECONDS` |
 
 Trade-id dedup is **per ETL run**: re-ingesting the same NDJSON archive will
-not flag historical duplicates from a previous run. Cross-batch dedup is a
-follow-up if/when re-ETL becomes a routine workflow.
+catch duplicate trade IDs before they reach the writer. Cross-batch trade
+dedup (#27) also read-checks the target `raw_trades/source=<source>/dt=...`
+partition before writing; duplicates already present in the warehouse are
+skipped and counted as `cross_batch_duplicates_skipped` in the ETL report.
 
 ### ETL workflow
 

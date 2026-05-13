@@ -5,10 +5,9 @@ Scans the raw NDJSON tree (both the active partition root and the rollup
 into canonical row dicts, buffers via :class:`WarehouseWriter`, and finally
 runs 1-minute candle aggregation.
 
-Idempotency: this runner is **forward-only**; running it twice on the same
-input produces duplicate rows. Issue #3 acceptance only requires the tables
-to be append-only and queryable, not deduplicated. A future processed-file
-sentinel can be added in a follow-up if re-runs become a routine workflow.
+Idempotency: this runner is **append-only**. Re-running quote/orderbook inputs
+will append fresh rows, but ``raw_trades`` is guarded by a partition-local
+``trade_id`` read-check so replayed backfills do not double-count volume.
 
 Safety: a file is considered "active" (in-flight) and is skipped if its
 mtime is within ``lag_seconds`` of now. This mirrors the rollup worker's
@@ -22,10 +21,12 @@ import logging
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import orjson
+import pyarrow.parquet as pq
 
 from .candles import CandleAggregator
 from .schemas import TABLE_NAMES
@@ -49,6 +50,7 @@ class EtlReport:
 
     files_processed: int = 0
     records_read: int = 0
+    cross_batch_duplicates_skipped: int = 0
     rows_per_table: dict[str, int] = None  # type: ignore[assignment]
     quarantined_by_rule: dict[str, int] = None  # type: ignore[assignment]
 
@@ -97,6 +99,7 @@ def run_etl_batch(
         future_grace_ms=int(timestamp_future_grace_seconds * 1000),
         stale_threshold_ms=int(timestamp_stale_threshold_seconds * 1000),
     )
+    trade_deduper = CrossBatchTradeDeduper(warehouse_dir)
     ingest_ts_now_ms = int(time.time() * 1000)
 
     files = _eligible_files(raw_dir, lag_seconds)
@@ -117,6 +120,7 @@ def run_etl_batch(
                     writer=writer,
                     aggregator=aggregator,
                     validator=validator,
+                    trade_deduper=trade_deduper,
                     symbol_mapper=symbol_mapper,
                     report=report,
                 )
@@ -144,6 +148,7 @@ def run_etl_batch(
             "rows": report.rows_per_table,
             "quarantined_by_rule": report.quarantined_by_rule,
             "quarantined_total": report.quarantined_total,
+            "cross_batch_duplicates_skipped": report.cross_batch_duplicates_skipped,
         },
     )
     return report
@@ -175,6 +180,7 @@ def _process_file(
     writer: WarehouseWriter,
     aggregator: CandleAggregator,
     validator: RowValidator,
+    trade_deduper: CrossBatchTradeDeduper,
     symbol_mapper: SymbolMapper | None,
     report: EtlReport,
 ) -> None:
@@ -193,6 +199,8 @@ def _process_file(
                 writer=writer,
                 aggregator=aggregator,
                 validator=validator,
+                trade_deduper=trade_deduper,
+                report=report,
             )
     logger.info("etl.file_done", extra={"src": str(src)})
 
@@ -204,6 +212,8 @@ def _route_rows(
     writer: WarehouseWriter,
     aggregator: CandleAggregator,
     validator: RowValidator,
+    trade_deduper: CrossBatchTradeDeduper,
+    report: EtlReport,
 ) -> None:
     """Split ``rows`` into clean and quarantined groups and emit them."""
     if table_name not in _VALIDATED_TABLES:
@@ -220,6 +230,17 @@ def _route_rows(
             clean.append(row)
 
     if clean:
+        if table_name == "raw_trades":
+            filtered: list[dict[str, Any]] = []
+            for row in clean:
+                if trade_deduper.is_duplicate(row):
+                    report.cross_batch_duplicates_skipped += 1
+                    continue
+                filtered.append(row)
+            clean = filtered
+            if not clean and not quarantine:
+                return
+
         writer.append_rows(table_name, clean)
         if table_name == "raw_top_of_book":
             for row in clean:
@@ -242,3 +263,48 @@ def _iter_ndjson_gz(path: Path) -> Iterator[dict[str, Any]]:
                 yield orjson.loads(line)
             except orjson.JSONDecodeError:
                 logger.warning("etl.bad_line", extra={"path": str(path)})
+
+
+class CrossBatchTradeDeduper:
+    """Partition-aware read-before-write de-dup for ``raw_trades`` (#27)."""
+
+    def __init__(self, warehouse_dir: Path | str) -> None:
+        self._warehouse_dir = Path(warehouse_dir)
+        self._seen_by_partition: dict[tuple[str, str], set[str]] = {}
+
+    def is_duplicate(self, row: dict[str, Any]) -> bool:
+        trade_id = row.get("trade_id")
+        source = row.get("source")
+        ts = row.get("ts")
+        if not trade_id or not source or ts is None:
+            return False
+        key = (str(source), _utc_date_str(int(ts)))
+        seen = self._seen_by_partition.get(key)
+        if seen is None:
+            seen = self._load_existing_trade_ids(*key)
+            self._seen_by_partition[key] = seen
+
+        tid = str(trade_id)
+        if tid in seen:
+            return True
+        seen.add(tid)
+        return False
+
+    def _load_existing_trade_ids(self, source: str, dt: str) -> set[str]:
+        partition = self._warehouse_dir / "raw_trades" / f"source={source}" / f"dt={dt}"
+        if not partition.exists():
+            return set()
+        out: set[str] = set()
+        for path in sorted(partition.glob("part-*.parquet")):
+            try:
+                table = pq.ParquetFile(path).read(columns=["trade_id"])
+            except (FileNotFoundError, OSError, KeyError, ValueError):
+                continue
+            for trade_id in table.column("trade_id").to_pylist():
+                if trade_id:
+                    out.add(str(trade_id))
+        return out
+
+
+def _utc_date_str(ts_ms: int) -> str:
+    return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).strftime("%Y-%m-%d")

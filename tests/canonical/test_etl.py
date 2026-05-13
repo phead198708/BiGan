@@ -31,6 +31,32 @@ def _write_ndjson_gz(path: Path, records: list[dict]) -> None:
             fp.write(orjson.dumps(rec) + b"\n")
 
 
+def _trade_record(
+    *,
+    asset_id: str,
+    market: str,
+    ts: int,
+    receive_time: int | None = None,
+    price: str = "0.51",
+    size: str = "10",
+    side: str = "BUY",
+    provenance: str | None = None,
+) -> dict:
+    raw = {
+        "event_type": "last_trade_price",
+        "asset_id": asset_id,
+        "market": market,
+        "price": price,
+        "size": size,
+        "side": side,
+        "fee_rate_bps": "0",
+        "timestamp": str(ts),
+    }
+    if provenance is not None:
+        raw["provenance"] = provenance
+    return {"receive_time": receive_time or ts + 100, "raw": raw}
+
+
 def test_etl_round_trip_populates_all_four_tables(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
@@ -457,3 +483,123 @@ def test_etl_quarantines_stale_timestamp_with_configurable_threshold(
     assert report.rows_per_table["raw_top_of_book"] == 0
     assert report.rows_per_table["quarantine"] == 1
     assert report.quarantined_by_rule == {"ts_too_stale": 1}
+
+
+def test_etl_skips_cross_batch_duplicate_trade_id(tmp_path: Path) -> None:
+    base = _ts(2026, 5, 10, 12, 0)
+    warehouse = tmp_path / "warehouse"
+
+    raw_first = tmp_path / "raw-first"
+    raw_first.mkdir()
+    first_src = raw_first / "first.ndjson.gz"
+    _write_ndjson_gz(
+        first_src,
+        [_trade_record(asset_id="tok-1", market="0xmkt", ts=base)],
+    )
+
+    import os
+
+    os.utime(first_src, (1, 1))
+    first = run_etl_batch(
+        raw_dir=raw_first, warehouse_dir=warehouse, lag_seconds=0.0
+    )
+    assert first.rows_per_table["raw_trades"] == 1
+    assert first.cross_batch_duplicates_skipped == 0
+
+    raw_second = tmp_path / "raw-second"
+    raw_second.mkdir()
+    second_src = raw_second / "second.ndjson.gz"
+    _write_ndjson_gz(
+        second_src,
+        [
+            _trade_record(
+                asset_id="tok-1",
+                market="0xmkt",
+                ts=base,
+                provenance="polymarket-rest-backfill",
+            ),
+            _trade_record(
+                asset_id="tok-1",
+                market="0xmkt",
+                ts=base + 1_000,
+                price="0.52",
+                provenance="polymarket-rest-backfill",
+            ),
+        ],
+    )
+    os.utime(second_src, (1, 1))
+
+    second = run_etl_batch(
+        raw_dir=raw_second, warehouse_dir=warehouse, lag_seconds=0.0
+    )
+    assert second.cross_batch_duplicates_skipped == 1
+    assert second.rows_per_table["raw_trades"] == 1
+
+    rows = []
+    for path in warehouse_files(warehouse, "raw_trades"):
+        rows.extend(pq.ParquetFile(path).read().to_pylist())
+    trade_ids = [row["trade_id"] for row in rows]
+    assert len(trade_ids) == 2
+    assert len(set(trade_ids)) == 2
+
+
+def test_etl_skips_replayed_backfill_window(tmp_path: Path) -> None:
+    base = _ts(2026, 5, 10, 12, 0)
+    warehouse = tmp_path / "warehouse"
+    import os
+
+    for name in ("first", "second"):
+        raw_dir = tmp_path / f"raw-{name}"
+        raw_dir.mkdir()
+        src = raw_dir / f"{name}.ndjson.gz"
+        _write_ndjson_gz(
+            src,
+            [
+                _trade_record(
+                    asset_id="tok-1",
+                    market="0xmkt",
+                    ts=base,
+                    provenance="polymarket-rest-backfill",
+                )
+            ],
+        )
+        os.utime(src, (1, 1))
+        report = run_etl_batch(
+            raw_dir=raw_dir, warehouse_dir=warehouse, lag_seconds=0.0
+        )
+        if name == "first":
+            assert report.rows_per_table["raw_trades"] == 1
+            assert report.cross_batch_duplicates_skipped == 0
+        else:
+            assert report.rows_per_table["raw_trades"] == 0
+            assert report.cross_batch_duplicates_skipped == 1
+
+
+def test_etl_large_unique_trade_set_has_no_cross_batch_skips(tmp_path: Path) -> None:
+    base = _ts(2026, 5, 10, 12, 0)
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    src = raw_dir / "trades.ndjson.gz"
+    _write_ndjson_gz(
+        src,
+        [
+            _trade_record(
+                asset_id="tok-1",
+                market="0xmkt",
+                ts=base + i,
+                price=f"0.{50 + (i % 10)}",
+                size=str(i + 1),
+            )
+            for i in range(500)
+        ],
+    )
+    import os
+
+    os.utime(src, (1, 1))
+    report = run_etl_batch(
+        raw_dir=raw_dir,
+        warehouse_dir=tmp_path / "warehouse",
+        lag_seconds=0.0,
+    )
+    assert report.rows_per_table["raw_trades"] == 500
+    assert report.cross_batch_duplicates_skipped == 0

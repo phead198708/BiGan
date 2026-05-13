@@ -165,6 +165,26 @@ class IngestionSettings(BaseSettings):
         ge=1,
         description="Max trade history pages to scan per gap (safety cap).",
     )
+    backfill_max_concurrency: int = Field(
+        default=4,
+        ge=1,
+        description="Max concurrent REST backfill invocations.",
+    )
+    backfill_rate_limit_per_second: float = Field(
+        default=10.0,
+        gt=0.0,
+        description="Global CLOB REST request rate limit for backfill.",
+    )
+    backfill_circuit_failure_threshold: int = Field(
+        default=5,
+        ge=1,
+        description="Consecutive REST failures before opening the backfill circuit.",
+    )
+    backfill_circuit_cool_down_seconds: float = Field(
+        default=30.0,
+        ge=0.0,
+        description="How long the open backfill circuit waits before half-open probe.",
+    )
 
     @property
     def raw_dir(self) -> Path:

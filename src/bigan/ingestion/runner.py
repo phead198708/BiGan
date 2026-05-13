@@ -14,7 +14,12 @@ from contextlib import suppress
 
 from prometheus_client import start_http_server
 
-from .backfill import BackfillService, GapWindow
+from .backfill import BackfillReport, BackfillService, GapWindow
+from .backfill_control import (
+    BackfillCircuitOpen,
+    BackfillControlConfig,
+    BackfillCoordinator,
+)
 from .book_state import BookRegistry
 from .clob_rest import PolymarketRestClient
 from .clob_ws import ClobWsClient, EventHandler, WsClientConfig
@@ -69,6 +74,14 @@ class IngestionRunner:
         # --- Gap detection / backfill (issue #5) -------------------------
         self._gap_detector: GapDetector | None = None
         self._asset_market_map: dict[str, str] = {}
+        self._backfill_coordinator = BackfillCoordinator(
+            BackfillControlConfig(
+                max_concurrency=settings.backfill_max_concurrency,
+                rate_limit_per_second=settings.backfill_rate_limit_per_second,
+                circuit_failure_threshold=settings.backfill_circuit_failure_threshold,
+                circuit_cool_down_seconds=settings.backfill_circuit_cool_down_seconds,
+            )
+        )
         if settings.gap_detection_enabled:
             self._gap_detector = GapDetector(
                 silence_threshold_ms=int(
@@ -237,22 +250,17 @@ class IngestionRunner:
         GAP_SILENCE_DURATION_SECONDS.observe(gap.silence_duration_ms / 1000.0)
 
         try:
-            async with PolymarketRestClient(
-                self._settings.clob_rest_url,
-                timeout_seconds=self._settings.backfill_rest_timeout_seconds,
-            ) as rest:
-                service = BackfillService(
-                    rest,
-                    self._sink,
-                    self._resolve_market,
-                )
-                report = await service.handle_gap(
-                    GapWindow(
-                        asset_id=gap.asset_id,
-                        gap_start_ms=gap.gap_start_ms,
-                        gap_end_ms=gap.gap_end_ms,
-                    )
-                )
+            report = await self._backfill_coordinator.run(
+                asset_id=gap.asset_id,
+                operation=lambda before_rest_call: self._run_backfill_once(
+                    gap,
+                    before_rest_call=before_rest_call,
+                ),
+                is_failure=_backfill_report_has_rest_failure,
+            )
+        except BackfillCircuitOpen:
+            BACKFILL_INVOCATIONS_TOTAL.labels(outcome="skipped").inc()
+            return
         except Exception:  # noqa: BLE001
             BACKFILL_INVOCATIONS_TOTAL.labels(outcome="error").inc()
             logger.exception(
@@ -267,6 +275,30 @@ class IngestionRunner:
             BACKFILL_RECORDS_TOTAL.labels(kind="trade").inc(report.trades_replayed)
         if report.orderbook_replayed:
             BACKFILL_RECORDS_TOTAL.labels(kind="orderbook").inc()
+
+    async def _run_backfill_once(
+        self,
+        gap: GapEvent,
+        *,
+        before_rest_call,
+    ) -> BackfillReport:
+        async with PolymarketRestClient(
+            self._settings.clob_rest_url,
+            timeout_seconds=self._settings.backfill_rest_timeout_seconds,
+        ) as rest:
+            service = BackfillService(
+                rest,
+                self._sink,
+                self._resolve_market,
+                before_rest_call=before_rest_call,
+            )
+            return await service.handle_gap(
+                GapWindow(
+                    asset_id=gap.asset_id,
+                    gap_start_ms=gap.gap_start_ms,
+                    gap_end_ms=gap.gap_end_ms,
+                )
+            )
 
     async def _shutdown_watcher(self) -> None:
         await self._stop.wait()
@@ -303,3 +335,7 @@ def _asset_ids_in_event(event: MarketEvent, raw: dict) -> set[str]:
         if isinstance(entry, dict) and entry.get("asset_id"):
             out.add(str(entry["asset_id"]))
     return out
+
+
+def _backfill_report_has_rest_failure(report: BackfillReport) -> bool:
+    return any("fetch_failed" in error for error in report.errors)

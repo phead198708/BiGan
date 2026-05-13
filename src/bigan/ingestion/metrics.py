@@ -132,6 +132,25 @@ BACKFILL_RECORDS_TOTAL = Counter(
     registry=REGISTRY,
 )
 
+BACKFILL_IN_FLIGHT = Gauge(
+    "bigan_backfill_in_flight",
+    "Backfill invocations currently inside the global concurrency guard.",
+    registry=REGISTRY,
+)
+
+BACKFILL_CIRCUIT_STATE = Gauge(
+    "bigan_backfill_circuit_state",
+    "Backfill REST circuit state: 0=closed, 1=open, 2=half_open.",
+    registry=REGISTRY,
+)
+
+BACKFILL_THROTTLED_TOTAL = Counter(
+    "bigan_backfill_throttled_total",
+    "Backfill invocations delayed or skipped by backpressure controls.",
+    labelnames=("reason",),
+    registry=REGISTRY,
+)
+
 
 # --- Reference price readers (issue #24) ---
 

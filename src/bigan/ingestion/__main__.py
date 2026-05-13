@@ -208,6 +208,7 @@ def etl_batch(
                 "rows_per_table": report.rows_per_table,
                 "quarantined_by_rule": report.quarantined_by_rule,
                 "quarantined_total": report.quarantined_total,
+                "cross_batch_duplicates_skipped": report.cross_batch_duplicates_skipped,
             },
             indent=2,
         )
@@ -260,6 +261,15 @@ def quarantine_report(
                 }
                 for r in samples
             ]
+
+            try:
+                dupes = conn.execute(
+                    "SELECT COUNT(*) - COUNT(DISTINCT trade_id) AS duplicate_rows "
+                    "FROM raw_trades"
+                ).fetchone()
+                out["raw_trade_duplicate_rows"] = int(dupes[0])
+            except Exception:  # noqa: BLE001
+                out["raw_trade_duplicate_rows"] = 0
         except Exception:  # noqa: BLE001
             # Empty warehouse / no quarantine partition yet.
             pass
