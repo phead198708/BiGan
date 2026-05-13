@@ -49,6 +49,9 @@ bigan-ingest serve
 
 # or for a 30-second live smoke test
 bigan-ingest smoke --seconds 30
+
+# 24h operational soak evidence for issue #25
+bigan-ingest soak
 ```
 
 ## Configuration
@@ -245,11 +248,62 @@ and the local sink with three layers:
 - A circuit breaker opens after repeated REST failures, skips new backfills while
   open, then allows one half-open probe after cooldown.
 
+## 24h soak validation (issue #25)
+
+The soak command runs the normal ingestion service, samples its in-process
+Prometheus metrics to NDJSON, and writes a JSON pass/fail summary at the end.
+The default duration and thresholds match the issue #25 acceptance criteria:
+
+```bash
+# Use a fresh data dir so raw counts and rollup evidence are scoped to this run.
+BIGAN_DATA_DIR=data/soak-run \
+BIGAN_ROLLUP_INTERVAL_SECONDS=3600 \
+BIGAN_ROLLUP_LAG_SECONDS=300 \
+bigan-ingest soak
+```
+
+For a short rehearsal:
+
+```bash
+bigan-ingest soak --seconds 300 --min-duration-seconds 300
+```
+
+Evidence lands under `data/soak/`:
+
+- `soak-<timestamp>.ndjson` — metric samples captured every 60 seconds
+- `soak-<timestamp>-summary.json` — threshold checks, NDJSON decode counts,
+  rollup file counts, reconnect totals, liveness lag, hash mismatches, and RSS growth
+
+To re-check a completed run without running ingestion again:
+
+```bash
+bigan-ingest soak-report --samples-path data/soak/soak-<timestamp>.ndjson
+```
+
+`bigan-ingest soak` runs one final NDJSON-to-Parquet rollup after stopping
+ingestion by default, so the summary can include immediate Parquet evidence.
+Pass `--no-final-rollup` when preserving the raw top-level files in place is
+more important than producing the final rollup artifact during shutdown.
+
+The host should still run Prometheus against `:9101/metrics` for dashboard
+screenshots and longer retention. Minimal scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: bigan-ingestion
+    static_configs:
+      - targets: ["localhost:9101"]
+```
+
 ## Canonical warehouse (issue #3)
 
 The `src/bigan/canonical/` module provides an ETL pipeline that transforms raw NDJSON
 into canonical Parquet tables with Hive partitioning, plus a validation/quarantine
 layer (issue #4) that isolates anomalous rows before they reach the main tables.
+
+The locked v1 feature contract for downstream training and online inference is
+documented in `docs/features/feature_dictionary_v1.md` and exposed through
+`bigan.features.registry` as `FEATURE_VERSION = "bigan-mvp-v1.0.0"`.
 
 ```
 src/bigan/canonical/

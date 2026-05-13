@@ -8,7 +8,11 @@ import logging
 import orjson
 import pytest
 
-from bigan.ingestion.clob_ws import ClobWsClient, WsClientConfig
+from bigan.ingestion.clob_ws import (
+    ClobWsClient,
+    WsClientConfig,
+    _expected_connection_exception,
+)
 from bigan.ingestion.metrics import REGISTRY
 
 
@@ -53,3 +57,11 @@ def test_dispatch_observes_ingest_lag_metric_and_warns(monkeypatch, caplog) -> N
         before_sum + 0.5
     )
     assert any(record.message == "ingest_lag.high" for record in caplog.records)
+
+
+def test_expected_connection_exception_unwraps_taskgroup_exception_group() -> None:
+    expected = OSError("connection reset")
+    wrapped = ExceptionGroup("unhandled errors in a TaskGroup", [expected])
+
+    assert _expected_connection_exception(wrapped) is expected
+    assert _expected_connection_exception(ValueError("bad payload")) is None

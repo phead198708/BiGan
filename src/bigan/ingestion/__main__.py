@@ -7,11 +7,14 @@ import contextlib
 import json
 import logging
 import sys
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
 import typer
 from prometheus_client import start_http_server
+from typer import Exit
 
 from bigan.canonical.etl import run_etl_batch
 from bigan.canonical.query import open_warehouse, warehouse_summary
@@ -31,6 +34,14 @@ from .price_readers import (
 )
 from .runner import IngestionRunner
 from .sink import NdjsonGzipSink
+from .soak import (
+    SoakThresholds,
+    finalize_soak_rollup,
+    read_soak_samples,
+    record_soak_samples,
+    summarize_soak,
+    write_soak_summary,
+)
 
 app = typer.Typer(add_completion=False, help="BiGan ingestion service")
 SYMBOL_MAPPING_PATH_OPTION = typer.Option(
@@ -44,6 +55,26 @@ TIMESTAMP_FUTURE_GRACE_SECONDS_OPTION = typer.Option(
 TIMESTAMP_STALE_THRESHOLD_SECONDS_OPTION = typer.Option(
     None,
     help="Override BIGAN_TIMESTAMP_STALE_THRESHOLD_SECONDS for this ETL run.",
+)
+SOAK_OUTPUT_DIR_OPTION = typer.Option(
+    Path("data/soak"),
+    help="Directory for soak sample NDJSON and summary JSON evidence.",
+)
+SOAK_SAMPLES_PATH_OPTION = typer.Option(
+    ...,
+    help="Soak sample NDJSON emitted by soak.",
+)
+SOAK_RAW_DIR_OPTION = typer.Option(
+    None,
+    help="Raw NDJSON directory. Defaults to BIGAN_DATA_DIR/BIGAN_RAW_SUBDIR.",
+)
+SOAK_ROLLUP_DIR_OPTION = typer.Option(
+    None,
+    help="Rollup Parquet directory. Defaults to BIGAN_DATA_DIR/BIGAN_ROLLUP_SUBDIR.",
+)
+SOAK_SUMMARY_PATH_OPTION = typer.Option(
+    None,
+    help="Optional path to write the JSON summary.",
 )
 
 
@@ -92,6 +123,171 @@ def smoke(seconds: int = typer.Option(30, help="How long to run before exiting."
                 await task
 
     asyncio.run(main())
+
+
+@app.command("soak")
+def soak(
+    seconds: int = typer.Option(
+        86_400,
+        help="How long to run ingestion before producing the soak summary.",
+    ),
+    sample_interval_seconds: float = typer.Option(
+        60.0,
+        help="How often to append in-process Prometheus metric samples.",
+    ),
+    output_dir: Path = SOAK_OUTPUT_DIR_OPTION,
+    min_duration_seconds: float | None = typer.Option(
+        None,
+        help="Minimum observed duration required to pass. Defaults to --seconds.",
+    ),
+    max_reconnects: float = typer.Option(
+        24.0,
+        help="Maximum allowed WebSocket reconnects during the run.",
+    ),
+    max_last_event_lag_seconds: float = typer.Option(
+        60.0,
+        help="Maximum allowed lag of bigan_last_event_receive_time_seconds.",
+    ),
+    max_hash_mismatches: float = typer.Option(
+        0.0,
+        help="Maximum allowed WebSocket book hash mismatches.",
+    ),
+    max_rss_growth_mb: float = typer.Option(
+        256.0,
+        help="Maximum allowed increase in process max RSS.",
+    ),
+    final_rollup: bool = typer.Option(
+        True,
+        help="Run one final NDJSON-to-Parquet rollup after stopping ingestion.",
+    ),
+) -> None:
+    """Run ingestion for a soak window and write validation evidence.
+
+    The default duration is 24h for issue #25. For a local proof pass, use a
+    shorter ``--seconds`` plus matching ``--min-duration-seconds``.
+    """
+
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    started_label = _soak_timestamp_label()
+    samples_path = output_dir / f"soak-{started_label}.ndjson"
+    summary_path = output_dir / f"soak-{started_label}-summary.json"
+    thresholds = SoakThresholds(
+        min_duration_seconds=(
+            float(seconds)
+            if min_duration_seconds is None
+            else min_duration_seconds
+        ),
+        max_reconnects=max_reconnects,
+        max_last_event_lag_seconds=max_last_event_lag_seconds,
+        max_hash_mismatches=max_hash_mismatches,
+        max_rss_growth_mb=max_rss_growth_mb,
+    )
+
+    async def main() -> dict:
+        runner = IngestionRunner(settings)
+        started_at = asyncio.get_running_loop().time()
+        wall_started_at = _now_seconds()
+        stop_samples = asyncio.Event()
+        serve_task = asyncio.create_task(runner.serve(), name="soak-serve")
+        sampler_task = asyncio.create_task(
+            record_soak_samples(
+                samples_path,
+                started_at_seconds=wall_started_at,
+                interval_seconds=sample_interval_seconds,
+                stop_event=stop_samples,
+            ),
+            name="soak-sampler",
+        )
+        fatal_exit: str | None = None
+        try:
+            while True:
+                elapsed = asyncio.get_running_loop().time() - started_at
+                remaining = seconds - elapsed
+                if remaining <= 0:
+                    break
+                done, _ = await asyncio.wait(
+                    {serve_task},
+                    timeout=min(5.0, remaining),
+                )
+                if serve_task in done:
+                    exc = serve_task.exception()
+                    fatal_exit = repr(exc) if exc is not None else "serve exited early"
+                    break
+        finally:
+            runner.stop()
+            stop_samples.set()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(sampler_task, timeout=10.0)
+            if not serve_task.done():
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(serve_task, timeout=30.0)
+            if not serve_task.done():
+                serve_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await serve_task
+
+        samples = read_soak_samples(samples_path)
+        final_rollup_result = (
+            finalize_soak_rollup(settings.raw_dir, settings.rollup_dir)
+            if final_rollup
+            else {"files": 0, "records": 0, "errors": []}
+        )
+        summary = summarize_soak(
+            samples,
+            raw_dir=settings.raw_dir,
+            rollup_dir=settings.rollup_dir,
+            thresholds=thresholds,
+            fatal_exit=fatal_exit,
+        )
+        summary["final_rollup"] = final_rollup_result
+        write_soak_summary(summary_path, summary)
+        summary["samples_path"] = str(samples_path)
+        summary["summary_path"] = str(summary_path)
+        return summary
+
+    summary = asyncio.run(main())
+    typer.echo(json.dumps(summary, indent=2, sort_keys=True))
+    if not summary["passed"]:
+        raise Exit(code=1)
+
+
+@app.command("soak-report")
+def soak_report(
+    samples_path: Path = SOAK_SAMPLES_PATH_OPTION,
+    raw_dir: Path | None = SOAK_RAW_DIR_OPTION,
+    rollup_dir: Path | None = SOAK_ROLLUP_DIR_OPTION,
+    summary_path: Path | None = SOAK_SUMMARY_PATH_OPTION,
+    min_duration_seconds: float = typer.Option(
+        86_400.0,
+        help="Minimum observed duration required to pass.",
+    ),
+    max_reconnects: float = typer.Option(24.0),
+    max_last_event_lag_seconds: float = typer.Option(60.0),
+    max_hash_mismatches: float = typer.Option(0.0),
+    max_rss_growth_mb: float = typer.Option(256.0),
+) -> None:
+    """Validate a soak sample file after an operational run."""
+
+    settings = IngestionSettings()
+    thresholds = SoakThresholds(
+        min_duration_seconds=min_duration_seconds,
+        max_reconnects=max_reconnects,
+        max_last_event_lag_seconds=max_last_event_lag_seconds,
+        max_hash_mismatches=max_hash_mismatches,
+        max_rss_growth_mb=max_rss_growth_mb,
+    )
+    summary = summarize_soak(
+        read_soak_samples(samples_path),
+        raw_dir=settings.raw_dir if raw_dir is None else raw_dir,
+        rollup_dir=settings.rollup_dir if rollup_dir is None else rollup_dir,
+        thresholds=thresholds,
+    )
+    if summary_path is not None:
+        write_soak_summary(summary_path, summary)
+    typer.echo(json.dumps(summary, indent=2, sort_keys=True))
+    if not summary["passed"]:
+        raise Exit(code=1)
 
 
 @app.command("reference-prices")
@@ -274,6 +470,14 @@ def quarantine_report(
             # Empty warehouse / no quarantine partition yet.
             pass
     typer.echo(json.dumps(out, indent=2))
+
+
+def _soak_timestamp_label() -> str:
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _now_seconds() -> float:
+    return time.time()
 
 
 @app.command("backfill")

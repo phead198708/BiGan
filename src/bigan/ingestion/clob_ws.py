@@ -125,9 +125,17 @@ class ClobWsClient:
                 )
                 await self._sleep_with_jitter(backoff)
                 backoff = min(backoff * 2, self._cfg.reconnect_max_seconds)
-            except Exception:  # noqa: BLE001
-                WS_RECONNECTS_TOTAL.inc()
-                logger.exception("ws.unexpected_error", extra={"backoff_s": backoff})
+            except Exception as exc:  # noqa: BLE001
+                expected = _expected_connection_exception(exc)
+                if expected is not None:
+                    WS_RECONNECTS_TOTAL.inc()
+                    logger.warning(
+                        "ws.connection_failed",
+                        extra={"err": str(expected), "backoff_s": backoff},
+                    )
+                else:
+                    WS_RECONNECTS_TOTAL.inc()
+                    logger.exception("ws.unexpected_error", extra={"backoff_s": backoff})
                 await self._sleep_with_jitter(backoff)
                 backoff = min(backoff * 2, self._cfg.reconnect_max_seconds)
 
@@ -289,4 +297,22 @@ def _asset_id_for_log(event: MarketEvent, payload: dict) -> str | None:
         first = price_changes[0]
         if isinstance(first, dict) and first.get("asset_id") is not None:
             return str(first["asset_id"])
+    return None
+
+
+def _expected_connection_exception(exc: BaseException) -> BaseException | None:
+    """Return a reconnect-worthy exception, unwrapping TaskGroup noise.
+
+    Python 3.11+ wraps child-task exceptions in ``ExceptionGroup``. The receive
+    loop deliberately raises ``ConnectionClosed`` on message-watchdog timeout,
+    so a grouped ``ConnectionClosed`` is still a normal reconnect path.
+    """
+
+    if isinstance(exc, (ConnectionClosed, WebSocketException, OSError)):
+        return exc
+    if isinstance(exc, BaseExceptionGroup):
+        for child in exc.exceptions:
+            found = _expected_connection_exception(child)
+            if found is not None:
+                return found
     return None
