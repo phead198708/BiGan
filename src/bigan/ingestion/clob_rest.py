@@ -1,15 +1,17 @@
-"""Minimal async client for the Polymarket CLOB REST API (issue #5).
+"""Minimal async client for Polymarket REST market data (issue #5).
 
 The REST client only exists to backfill missing data when the WebSocket
 stream goes silent. It is **not** the primary data path; correctness of
 the live pipeline does not depend on it.
 
-Endpoints used (all on ``https://clob.polymarket.com``):
+Endpoints used:
 
-- ``GET /book?token_id=<asset_id>``      — current orderbook snapshot
-- ``GET /trades?market=<condition_id>``  — historical trades, paginated
+- ``GET https://clob.polymarket.com/book?token_id=<asset_id>``
+  — current orderbook snapshot
+- ``GET https://data-api.polymarket.com/trades?market=<condition_id>``
+  — public historical trades, offset-paginated
 
-Both endpoints return JSON. We project their responses into the same
+Both APIs return JSON. We project their responses into the same
 shape as the WebSocket events so the existing transform layer (and the
 canonical ETL) accept backfilled records without any new branches.
 
@@ -31,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_CLOB_REST_BASE = "https://clob.polymarket.com"
+DEFAULT_POLYMARKET_DATA_API_BASE = "https://data-api.polymarket.com"
 
 
 @dataclass(slots=True)
@@ -75,11 +78,13 @@ class PolymarketRestClient:
         self,
         base_url: str = DEFAULT_CLOB_REST_BASE,
         *,
+        data_api_base_url: str = DEFAULT_POLYMARKET_DATA_API_BASE,
         timeout_seconds: float = 10.0,
         page_size: int = 100,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._data_api_base_url = data_api_base_url.rstrip("/")
         self._timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         self._page_size = page_size
         self._owned_session = session is None
@@ -123,12 +128,16 @@ class PolymarketRestClient:
         """Yield trades for ``market_condition_id``, optionally bounded by
         the [since_ms, until_ms] inclusive window.
 
-        Pagination uses the API's ``next_cursor`` token. We stop early
+        The public Data API uses ``offset`` pagination. The parser also
+        accepts the legacy CLOB ``{"data": ..., "next_cursor": ...}``
+        shape so older tests and callers stay compatible. We stop early
         once a page reports a trade older than ``since_ms`` to avoid
         scanning the entire trade history of busy markets.
         """
-        url = f"{self._base_url}/trades"
+        url = f"{self._data_api_base_url}/trades"
         cursor: str | None = None
+        offset = 0
+        use_offset = False
         for _ in range(max_pages):
             params: dict[str, Any] = {
                 "market": market_condition_id,
@@ -136,12 +145,20 @@ class PolymarketRestClient:
             }
             if cursor is not None:
                 params["next_cursor"] = cursor
+            elif use_offset or offset:
+                params["offset"] = offset
             data = await self._get_json(url, params)
-            if not isinstance(data, dict):
+            if isinstance(data, dict):
+                entries = data.get("data") or []
+                cursor = data.get("next_cursor") or None
+            elif isinstance(data, list):
+                entries = data
+                cursor = None
+                use_offset = True
+            else:
                 return
-            trades = data.get("data") or []
             saw_old = False
-            for entry in trades:
+            for entry in entries:
                 if not isinstance(entry, dict):
                     continue
                 trade = _parse_trade(entry)
@@ -153,8 +170,12 @@ class PolymarketRestClient:
                 if until_ms is not None and trade.match_time_ms > until_ms:
                     continue
                 yield trade
-            cursor = data.get("next_cursor") or None
-            if cursor is None or saw_old:
+            if use_offset:
+                offset += self._page_size
+                if len(entries) < self._page_size or saw_old:
+                    return
+                continue
+            if cursor in (None, "LTE=") or saw_old:
                 return
 
     async def fetch_trades(
@@ -236,8 +257,8 @@ def _as_int_ms(v: Any) -> int | None:
 
 
 def _parse_trade(raw: dict[str, Any]) -> RestTrade | None:
-    asset_id = raw.get("asset_id") or raw.get("token_id")
-    market = raw.get("market") or raw.get("condition_id")
+    asset_id = raw.get("asset_id") or raw.get("token_id") or raw.get("asset")
+    market = raw.get("market") or raw.get("condition_id") or raw.get("conditionId")
     price = _as_float(raw.get("price"))
     size = _as_float(raw.get("size"))
     side = raw.get("side")

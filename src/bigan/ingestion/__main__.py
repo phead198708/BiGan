@@ -303,6 +303,7 @@ def backfill(
         try:
             async with PolymarketRestClient(
                 settings.clob_rest_url,
+                data_api_base_url=settings.polymarket_data_api_url,
                 timeout_seconds=settings.backfill_rest_timeout_seconds,
             ) as rest:
                 async def resolver(_: str) -> str:

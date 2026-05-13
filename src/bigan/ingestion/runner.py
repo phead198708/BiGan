@@ -284,6 +284,7 @@ class IngestionRunner:
     ) -> BackfillReport:
         async with PolymarketRestClient(
             self._settings.clob_rest_url,
+            data_api_base_url=self._settings.polymarket_data_api_url,
             timeout_seconds=self._settings.backfill_rest_timeout_seconds,
         ) as rest:
             service = BackfillService(

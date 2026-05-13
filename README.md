@@ -41,6 +41,9 @@ pytest
 # lint
 ruff check src tests
 
+# live REST schema checks (touches public Polymarket APIs)
+BIGAN_RUN_LIVE_TESTS=1 pytest -m live tests/integration/ -s
+
 # run ingestion (long-running)
 bigan-ingest serve
 
@@ -63,6 +66,7 @@ Common knobs:
 | `BIGAN_CHAINLINK_RPC_URL` | empty | Ethereum JSON-RPC URL for Chainlink BTC/USD reads |
 | `BIGAN_CHAINLINK_FEED_ADDRESS` | `0xF403...E88c` | Chainlink BTC/USD AggregatorV3 proxy |
 | `BIGAN_GAMMA_API_BASE` | `https://gamma-api.polymarket.com` | Gamma REST API |
+| `BIGAN_POLYMARKET_DATA_API_URL` | `https://data-api.polymarket.com` | Public trade-history API used by REST backfill |
 | `BIGAN_MARKET_SLUG_PREFIX` | `btc-updown-15m-` | Markets to subscribe |
 | `BIGAN_COINBASE_PRODUCT_ID` | `BTC-USD` | Coinbase reference-price symbol |
 | `BIGAN_KRAKEN_SYMBOL` | `BTC/USD` | Kraken reference-price symbol |
@@ -147,18 +151,36 @@ When a previously-active asset goes silent for longer than
 `BIGAN_GAP_SILENCE_THRESHOLD_SECONDS` (default `30s`), the ingestion
 service marks the asset as **in-gap** and emits a `gap.detected`
 structured log. Once activity resumes, it computes the missed window
-`[gap_start_ms, gap_end_ms]`, fetches missed trades and a fresh
-orderbook snapshot via the CLOB REST API, and re-injects them into the
-NDJSON sink with `provenance="polymarket-rest-backfill"`. Downstream
-ETL preserves that tag in the canonical Parquet so models / features
-can filter or weight backfilled rows differently from realtime ones.
+`[gap_start_ms, gap_end_ms]`, fetches missed trades via the public Data
+API plus a fresh orderbook snapshot via the CLOB REST API, and
+re-injects them into the NDJSON sink with
+`provenance="polymarket-rest-backfill"`. Downstream ETL preserves that
+tag in the canonical Parquet so models / features can filter or weight
+backfilled rows differently from realtime ones.
 
 ```
 src/bigan/ingestion/
   gap_detector.py — per-asset silence state machine (sync, deterministic)
-  clob_rest.py    — async PolymarketRestClient (book + paginated trades)
+  clob_rest.py    — async PolymarketRestClient (CLOB book + public trade history)
   backfill.py     — orchestrates fetch -> synth -> sink replay
 ```
+
+### Running live integration tests
+
+Default `pytest` runs never touch the public internet. The live REST smoke
+tests are marked `live` and stay skipped unless explicitly enabled:
+
+```bash
+BIGAN_RUN_LIVE_TESTS=1 pytest -m live tests/integration/ -s
+# or
+pytest --run-live -m live tests/integration/ -s
+```
+
+These checks discover an active market through Gamma, call public CLOB
+`/book`, call public Data API `/trades`, and print compact schema
+fingerprints. The nightly GitHub Actions workflow
+`.github/workflows/nightly-live.yml` runs the same command on a schedule and
+can also be triggered manually with `workflow_dispatch`.
 
 ### Recovery log events
 
@@ -204,7 +226,8 @@ pipeline uses, so the next ETL run picks them up automatically.
 | `BIGAN_GAP_SILENCE_THRESHOLD_SECONDS` | `30` | Silence to declare a gap |
 | `BIGAN_GAP_MIN_RESUME_SECONDS` | `1` | Min delta to honour a resume packet |
 | `BIGAN_GAP_CHECK_INTERVAL_SECONDS` | `5` | Watchdog tick rate |
-| `BIGAN_CLOB_REST_URL` | `https://clob.polymarket.com` | REST base |
+| `BIGAN_CLOB_REST_URL` | `https://clob.polymarket.com` | CLOB orderbook REST base |
+| `BIGAN_POLYMARKET_DATA_API_URL` | `https://data-api.polymarket.com` | Public trade-history REST base |
 | `BIGAN_BACKFILL_REST_TIMEOUT_SECONDS` | `10` | Per-request timeout |
 | `BIGAN_BACKFILL_MAX_PAGES` | `20` | Trade-history page cap per gap |
 | `BIGAN_BACKFILL_MAX_CONCURRENCY` | `4` | Global concurrent backfill invocation cap |

@@ -135,7 +135,11 @@ class IngestionSettings(BaseSettings):
     # --- Gap detection / REST backfill (issue #5) ---
     clob_rest_url: str = Field(
         default="https://clob.polymarket.com",
-        description="Polymarket CLOB REST API base URL (used for backfill).",
+        description="Polymarket CLOB REST API base URL for orderbook reads.",
+    )
+    polymarket_data_api_url: str = Field(
+        default="https://data-api.polymarket.com",
+        description="Polymarket public Data API base URL for trade-history reads.",
     )
     gap_detection_enabled: bool = Field(
         default=True,

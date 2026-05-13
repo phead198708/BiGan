@@ -57,6 +57,9 @@ where = ["src"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-ra -q --strict-markers"
+markers = [
+    "live: tests that call live public APIs and are skipped unless explicitly enabled",
+]
 filterwarnings = [
     "error",
     "ignore::DeprecationWarning:websockets.*",

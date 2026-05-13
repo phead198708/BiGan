@@ -104,6 +104,26 @@ def test_parse_trade_minimum_fields() -> None:
     assert trade.match_time_ms == 1_700_000_000_000
 
 
+def test_parse_trade_accepts_public_data_api_shape() -> None:
+    trade = _parse_trade(
+        {
+            "asset": "tok-1",
+            "conditionId": "0xmkt",
+            "price": 0.51,
+            "size": 10,
+            "side": "BUY",
+            "timestamp": 1_700_000_000,
+            "transactionHash": "0xabc",
+        }
+    )
+    assert isinstance(trade, RestTrade)
+    assert trade.asset_id == "tok-1"
+    assert trade.market == "0xmkt"
+    assert trade.price == 0.51
+    assert trade.size == 10.0
+    assert trade.match_time_ms == 1_700_000_000_000
+
+
 def test_parse_trade_rejects_invalid_side() -> None:
     assert (
         _parse_trade(
@@ -203,6 +223,47 @@ def test_fetch_trades_paginates_until_cursor_exhausted() -> None:
     assert len(session.calls) == 2
     # Second call carried the cursor.
     assert session.calls[1][1].get("next_cursor") == "abc"
+
+
+def test_fetch_trades_paginates_public_data_api_offsets() -> None:
+    page1 = [
+        {
+            "asset": "tok-1",
+            "conditionId": "0xmkt",
+            "price": 0.51,
+            "size": 10,
+            "side": "BUY",
+            "timestamp": 1_700_000_000,
+        }
+    ]
+    page2 = [
+        {
+            "asset": "tok-1",
+            "conditionId": "0xmkt",
+            "price": 0.50,
+            "size": 5,
+            "side": "SELL",
+            "timestamp": 1_700_000_005,
+        }
+    ]
+    session = _FakeSession([page1, page2])
+
+    async def go() -> list[RestTrade]:
+        client = PolymarketRestClient(
+            "https://clob.polymarket.com",
+            data_api_base_url="https://data-api.polymarket.com",
+            page_size=1,
+            session=session,  # type: ignore[arg-type]
+        )
+        async with client:
+            return await client.fetch_trades("0xmkt", max_pages=2)
+
+    trades = asyncio.run(go())
+    assert len(trades) == 2
+    assert {t.side for t in trades} == {"BUY", "SELL"}
+    assert session.calls[0][0] == "https://data-api.polymarket.com/trades"
+    assert session.calls[0][1] == {"market": "0xmkt", "limit": 1}
+    assert session.calls[1][1] == {"market": "0xmkt", "limit": 1, "offset": 1}
 
 
 def test_fetch_trades_filters_by_window_and_stops_early_on_old_data() -> None:
