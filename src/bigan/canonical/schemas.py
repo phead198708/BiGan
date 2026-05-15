@@ -250,6 +250,53 @@ SCHEMA_SYMBOL_MAPPING: pa.Schema = pa.schema(
 
 
 # ---------------------------------------------------------------------------
+# features_15m_v1 — minute-grain features for 15-minute prediction
+# ---------------------------------------------------------------------------
+#
+# ``feature_ts`` is the minute boundary at which the feature row is known.
+# Every feature is computed from rows with ``ts <= feature_ts`` only. ``ts``
+# mirrors ``feature_ts`` so the shared warehouse writer can partition by date.
+
+SCHEMA_FEATURES_15M_V1: pa.Schema = pa.schema(
+    [
+        pa.field("ts", pa.int64(), nullable=False),
+        pa.field("message_ts", pa.int64(), nullable=False),
+        pa.field("feature_ts", pa.int64(), nullable=False),
+        pa.field("ingest_ts", pa.int64(), nullable=False),
+        pa.field("source", pa.string(), nullable=False),
+        pa.field("source_symbol", pa.string(), nullable=False),
+        pa.field("source_market", pa.string(), nullable=True),
+        pa.field("canonical_symbol", pa.string(), nullable=True),
+        pa.field("symbol", pa.string(), nullable=False),
+        pa.field("feature_version", pa.string(), nullable=False),
+        pa.field("completeness_score", pa.float64(), nullable=False),
+        pa.field("data_gap_flag", pa.bool_(), nullable=False),
+        pa.field("quality_filter_pass", pa.bool_(), nullable=False),
+        pa.field("quote_age_ms", pa.int64(), nullable=True),
+        pa.field("depth_age_ms", pa.int64(), nullable=True),
+        pa.field("trade_age_ms", pa.int64(), nullable=True),
+        pa.field("spread", pa.float64(), nullable=True),
+        pa.field("mid_price", pa.float64(), nullable=True),
+        pa.field("microprice", pa.float64(), nullable=True),
+        pa.field("obi_l1", pa.float64(), nullable=True),
+        pa.field("obi_l5", pa.float64(), nullable=True),
+        pa.field("obi_l10", pa.float64(), nullable=True),
+        pa.field("signed_volume_1m", pa.float64(), nullable=True),
+        pa.field("trade_imbalance_1m", pa.float64(), nullable=True),
+        pa.field("trade_count_1m", pa.int32(), nullable=False),
+        pa.field("trade_volume_1m", pa.float64(), nullable=True),
+        pa.field("ret_1m", pa.float64(), nullable=True),
+        pa.field("ret_5m", pa.float64(), nullable=True),
+        pa.field("ret_15m", pa.float64(), nullable=True),
+        pa.field("rv_1m", pa.float64(), nullable=True),
+        pa.field("rv_5m", pa.float64(), nullable=True),
+        pa.field("rv_15m", pa.float64(), nullable=True),
+    ],
+    metadata=_table_metadata("features_15m_v1"),
+)
+
+
+# ---------------------------------------------------------------------------
 # quarantine — abnormal rows isolated by the validation layer (issue #4)
 # ---------------------------------------------------------------------------
 #
@@ -288,6 +335,7 @@ TABLE_NAMES: tuple[str, ...] = (
     "raw_spot_price",
     "raw_oracle_price",
     "symbol_mapping",
+    "features_15m_v1",
     "quarantine",
 )
 
@@ -300,5 +348,6 @@ SCHEMAS: dict[str, pa.Schema] = {
     "raw_spot_price": SCHEMA_RAW_SPOT_PRICE,
     "raw_oracle_price": SCHEMA_RAW_ORACLE_PRICE,
     "symbol_mapping": SCHEMA_SYMBOL_MAPPING,
+    "features_15m_v1": SCHEMA_FEATURES_15M_V1,
     "quarantine": SCHEMA_QUARANTINE,
 }

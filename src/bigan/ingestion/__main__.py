@@ -10,6 +10,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import structlog
 import typer
@@ -19,10 +20,13 @@ from typer import Exit
 from bigan.canonical.etl import run_etl_batch
 from bigan.canonical.query import open_warehouse, warehouse_summary
 from bigan.canonical.symbols import SymbolMapper
+from bigan.features import run_feature_batch, run_feature_quality_sql_checks
 
 from .backfill import BackfillService, GapWindow
 from .clob_rest import PolymarketRestClient
 from .config import IngestionSettings
+from .gamma_client import GammaClient
+from .market_compare import compare_market_coverage
 from .metrics import REGISTRY
 from .price_readers import (
     ChainlinkOracleReader,
@@ -160,6 +164,34 @@ def soak(
         True,
         help="Run one final NDJSON-to-Parquet rollup after stopping ingestion.",
     ),
+    market_coverage: bool = typer.Option(
+        True,
+        "--market-coverage/--no-market-coverage",
+        help="Run Gamma/CLOB REST coverage verification after stopping ingestion.",
+    ),
+    coverage_max_stale_seconds: float | None = typer.Option(
+        None,
+        help=(
+            "Optional per-asset raw event freshness threshold for market coverage. "
+            "Defaults to disabled for completed soak runs."
+        ),
+    ),
+    coverage_require_hash_match: bool = typer.Option(
+        False,
+        help=(
+            "Require latest raw WS book hashes to match CLOB REST during coverage "
+            "verification."
+        ),
+    ),
+    coverage_raw_end_grace_seconds: float = typer.Option(
+        120.0,
+        help="Grace window for ignoring markets opened after the raw archive ended.",
+    ),
+    coverage_rest_concurrency: int = typer.Option(
+        12,
+        min=1,
+        help="Maximum concurrent CLOB REST /book requests for coverage verification.",
+    ),
 ) -> None:
     """Run ingestion for a soak window and write validation evidence.
 
@@ -233,12 +265,27 @@ def soak(
             if final_rollup
             else {"files": 0, "records": 0, "errors": []}
         )
+        market_coverage_result = (
+            await _run_market_coverage_check(
+                settings=settings,
+                raw_dir=settings.raw_dir,
+                max_stale_seconds=coverage_max_stale_seconds,
+                require_hash_match=coverage_require_hash_match,
+                ignore_markets_opened_after_raw_end=True,
+                raw_end_grace_seconds=coverage_raw_end_grace_seconds,
+                rest_concurrency=coverage_rest_concurrency,
+                max_examples=20,
+            )
+            if market_coverage
+            else None
+        )
         summary = summarize_soak(
             samples,
             raw_dir=settings.raw_dir,
             rollup_dir=settings.rollup_dir,
             thresholds=thresholds,
             fatal_exit=fatal_exit,
+            market_coverage=market_coverage_result,
         )
         summary["final_rollup"] = final_rollup_result
         write_soak_summary(summary_path, summary)
@@ -266,6 +313,31 @@ def soak_report(
     max_last_event_lag_seconds: float = typer.Option(60.0),
     max_hash_mismatches: float = typer.Option(0.0),
     max_rss_growth_mb: float = typer.Option(256.0),
+    market_coverage: bool = typer.Option(
+        False,
+        "--market-coverage/--no-market-coverage",
+        help="Also run Gamma/CLOB REST coverage verification for this raw archive.",
+    ),
+    coverage_max_stale_seconds: float | None = typer.Option(
+        None,
+        help=(
+            "Optional per-asset raw event freshness threshold for market coverage. "
+            "Defaults to disabled for completed soak runs."
+        ),
+    ),
+    coverage_require_hash_match: bool = typer.Option(
+        False,
+        help="Require latest raw WS book hashes to match CLOB REST.",
+    ),
+    coverage_raw_end_grace_seconds: float = typer.Option(
+        120.0,
+        help="Grace window for ignoring markets opened after the raw archive ended.",
+    ),
+    coverage_rest_concurrency: int = typer.Option(
+        12,
+        min=1,
+        help="Maximum concurrent CLOB REST /book requests for coverage verification.",
+    ),
 ) -> None:
     """Validate a soak sample file after an operational run."""
 
@@ -277,16 +349,94 @@ def soak_report(
         max_hash_mismatches=max_hash_mismatches,
         max_rss_growth_mb=max_rss_growth_mb,
     )
+    report_raw_dir = settings.raw_dir if raw_dir is None else raw_dir
+    market_coverage_result = (
+        asyncio.run(
+            _run_market_coverage_check(
+                settings=settings,
+                raw_dir=report_raw_dir,
+                max_stale_seconds=coverage_max_stale_seconds,
+                require_hash_match=coverage_require_hash_match,
+                ignore_markets_opened_after_raw_end=True,
+                raw_end_grace_seconds=coverage_raw_end_grace_seconds,
+                rest_concurrency=coverage_rest_concurrency,
+                max_examples=20,
+            )
+        )
+        if market_coverage
+        else None
+    )
     summary = summarize_soak(
         read_soak_samples(samples_path),
-        raw_dir=settings.raw_dir if raw_dir is None else raw_dir,
+        raw_dir=report_raw_dir,
         rollup_dir=settings.rollup_dir if rollup_dir is None else rollup_dir,
         thresholds=thresholds,
+        market_coverage=market_coverage_result,
     )
     if summary_path is not None:
         write_soak_summary(summary_path, summary)
     typer.echo(json.dumps(summary, indent=2, sort_keys=True))
     if not summary["passed"]:
+        raise Exit(code=1)
+
+
+@app.command("market-coverage-report")
+def market_coverage_report(
+    raw_dir: Path | None = SOAK_RAW_DIR_OPTION,
+    summary_path: Path | None = SOAK_SUMMARY_PATH_OPTION,
+    max_stale_seconds: float = typer.Option(
+        120.0,
+        help="Fail if an expected token has no raw event within this many seconds.",
+    ),
+    disable_stale_check: bool = typer.Option(
+        False,
+        help="Skip freshness checks; useful when reporting on a completed short soak.",
+    ),
+    require_hash_match: bool = typer.Option(
+        False,
+        help="Fail if latest raw wire hash differs from current REST book hash.",
+    ),
+    ignore_markets_opened_after_raw_end: bool = typer.Option(
+        False,
+        help="Ignore Gamma markets created after the latest raw receive_time.",
+    ),
+    raw_end_grace_seconds: float = typer.Option(
+        120.0,
+        help="Grace window for --ignore-markets-opened-after-raw-end.",
+    ),
+    rest_concurrency: int = typer.Option(
+        12,
+        min=1,
+        help="Maximum concurrent CLOB REST /book requests.",
+    ),
+    max_examples: int = typer.Option(
+        20,
+        min=1,
+        help="Maximum example assets included for each failed bucket.",
+    ),
+) -> None:
+    """Compare Gamma active markets with raw WS coverage and CLOB REST books."""
+
+    settings = IngestionSettings()
+    report_raw_dir = settings.raw_dir if raw_dir is None else raw_dir
+
+    async def main() -> dict:
+        return await _run_market_coverage_check(
+            settings=settings,
+            raw_dir=report_raw_dir,
+            max_stale_seconds=None if disable_stale_check else max_stale_seconds,
+            require_hash_match=require_hash_match,
+            ignore_markets_opened_after_raw_end=ignore_markets_opened_after_raw_end,
+            raw_end_grace_seconds=raw_end_grace_seconds,
+            rest_concurrency=rest_concurrency,
+            max_examples=max_examples,
+        )
+
+    report = asyncio.run(main())
+    if summary_path is not None:
+        write_soak_summary(summary_path, report)
+    typer.echo(json.dumps(report, indent=2, sort_keys=True))
+    if not report["passed"]:
         raise Exit(code=1)
 
 
@@ -420,6 +570,43 @@ def warehouse_stats() -> None:
     typer.echo(json.dumps(summary, indent=2))
 
 
+@app.command("features-15m-v1")
+def features_15m_v1(
+    max_rows_per_partition: int = typer.Option(
+        50_000,
+        help="Flush feature partitions after this many rows.",
+    ),
+) -> None:
+    """Generate minute-grain features_15m_v1 rows from canonical raw tables."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = run_feature_batch(
+        settings.warehouse_dir,
+        max_rows_per_partition=max_rows_per_partition,
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "feature_version": report.feature_version,
+                "rows_generated": report.rows_generated,
+                "rows_written": report.rows_written,
+            },
+            indent=2,
+        )
+    )
+
+
+@app.command("feature-quality-report")
+def feature_quality_report() -> None:
+    """Run SQL quality checks against generated features_15m_v1 rows."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = run_feature_quality_sql_checks(settings.warehouse_dir)
+    typer.echo(json.dumps(report.to_dict(), indent=2))
+    if not report.passed:
+        raise Exit(code=1)
+
+
 @app.command("quarantine-report")
 def quarantine_report(
     limit: int = typer.Option(50, help="Max rows of detail to display."),
@@ -478,6 +665,47 @@ def _soak_timestamp_label() -> str:
 
 def _now_seconds() -> float:
     return time.time()
+
+
+async def _run_market_coverage_check(
+    *,
+    settings: IngestionSettings,
+    raw_dir: Path,
+    max_stale_seconds: float | None,
+    require_hash_match: bool,
+    ignore_markets_opened_after_raw_end: bool,
+    raw_end_grace_seconds: float,
+    rest_concurrency: int,
+    max_examples: int,
+) -> dict[str, Any]:
+    try:
+        async with GammaClient(
+            settings.gamma_api_base,
+            settings.market_slug_prefix,
+        ) as gamma:
+            markets = await gamma.list_active_markets()
+        async with PolymarketRestClient(
+            settings.clob_rest_url,
+            data_api_base_url=settings.polymarket_data_api_url,
+            timeout_seconds=settings.backfill_rest_timeout_seconds,
+        ) as rest:
+            return await compare_market_coverage(
+                markets=markets,
+                raw_dir=raw_dir,
+                rest=rest,
+                max_stale_seconds=max_stale_seconds,
+                require_hash_match=require_hash_match,
+                ignore_markets_opened_after_raw_end=ignore_markets_opened_after_raw_end,
+                raw_end_grace_seconds=raw_end_grace_seconds,
+                max_concurrency=rest_concurrency,
+                max_examples=max_examples,
+            )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "passed": False,
+            "error": repr(exc),
+            "raw": {"dir": str(raw_dir)},
+        }
 
 
 @app.command("backfill")

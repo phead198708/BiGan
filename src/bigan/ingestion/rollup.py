@@ -10,7 +10,8 @@ event_type, e.g.::
 
 The rollup is **idempotent**: if the target Parquet already exists, the source
 NDJSON.gz is moved into ``rollup/ws_market/_done/`` rather than re-processed.
-Failed rollups leave NDJSON in place; the next cycle will retry.
+Active gzip streams that have not written their end marker yet are skipped;
+other failed rollups leave NDJSON in place and the next cycle retries.
 
 Parquet schema is intentionally permissive (one column per top-level JSON
 field, plus the verbatim payload as a JSON string in ``raw_payload``). Issue
@@ -40,16 +41,23 @@ from .metrics import ROLLUP_FILES_TOTAL
 logger = logging.getLogger(__name__)
 
 
+class IncompleteGzipFile(RuntimeError):
+    """Raised when a gzip stream is readable but has not been closed yet."""
+
+
 def _iter_ndjson_gz(path: Path) -> Iterator[dict[str, Any]]:
-    with gzip.open(path, mode="rb") as fp:
-        for line in fp:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield orjson.loads(line)
-            except orjson.JSONDecodeError:
-                logger.warning("rollup.bad_line", extra={"path": str(path)})
+    try:
+        with gzip.open(path, mode="rb") as fp:
+            for line in fp:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield orjson.loads(line)
+                except orjson.JSONDecodeError:
+                    logger.warning("rollup.bad_line", extra={"path": str(path)})
+    except EOFError as exc:
+        raise IncompleteGzipFile(f"{path} is not closed yet") from exc
 
 
 def _flatten(record: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -164,6 +172,8 @@ async def run_rollup_worker(
                     )
                     ROLLUP_FILES_TOTAL.labels(outcome="ok").inc()
                     logger.info("rollup.ok", extra={"src": src.name, "records": n})
+                except IncompleteGzipFile:
+                    logger.info("rollup.skipped_incomplete", extra={"src": str(src)})
                 except Exception:  # noqa: BLE001
                     ROLLUP_FILES_TOTAL.labels(outcome="error").inc()
                     logger.exception("rollup.failed", extra={"src": str(src)})

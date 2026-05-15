@@ -111,6 +111,7 @@ def summarize_soak(
     rollup_dir: Path,
     thresholds: SoakThresholds,
     fatal_exit: str | None = None,
+    market_coverage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate collected samples and raw artifacts against soak thresholds."""
 
@@ -208,7 +209,16 @@ def summarize_soak(
         threshold=thresholds.max_rss_growth_mb,
     )
 
-    return {
+    if market_coverage is not None:
+        _add_check(
+            checks,
+            "market_coverage",
+            bool(market_coverage.get("passed")),
+            observed=_market_coverage_observed(market_coverage),
+            threshold={"passed": True},
+        )
+
+    summary = {
         "passed": all(check["passed"] for check in checks),
         "thresholds": asdict(thresholds),
         "started_at": first.get("sample_ts"),
@@ -220,6 +230,9 @@ def summarize_soak(
         "raw": raw_stats,
         "rollup": rollup_stats,
     }
+    if market_coverage is not None:
+        summary["market_coverage"] = market_coverage
+    return summary
 
 
 def write_soak_summary(path: Path, summary: Mapping[str, Any]) -> None:
@@ -252,6 +265,7 @@ def inspect_raw_archive(raw_dir: Path) -> dict[str, Any]:
     records = 0
     bad_lines = 0
     bad_files = 0
+    incomplete_files = 0
     for path in files:
         try:
             with gzip.open(path, mode="rb") as fp:
@@ -264,6 +278,8 @@ def inspect_raw_archive(raw_dir: Path) -> dict[str, Any]:
                         records += 1
                     except orjson.JSONDecodeError:
                         bad_lines += 1
+        except EOFError:
+            incomplete_files += 1
         except OSError:
             bad_files += 1
     return {
@@ -271,6 +287,7 @@ def inspect_raw_archive(raw_dir: Path) -> dict[str, Any]:
         "records": records,
         "bad_lines": bad_lines,
         "bad_files": bad_files,
+        "incomplete_files": incomplete_files,
     }
 
 
@@ -370,3 +387,39 @@ def _add_check(
             "threshold": threshold,
         }
     )
+
+
+def _market_coverage_observed(report: Mapping[str, Any]) -> dict[str, Any]:
+    observed: dict[str, Any] = {"passed": bool(report.get("passed"))}
+    if "error" in report:
+        observed["error"] = report["error"]
+
+    for section, keys in {
+        "gamma": (
+            "markets",
+            "assets",
+            "source_markets",
+            "ignored_markets_opened_after_raw_end",
+        ),
+        "raw": (
+            "records",
+            "assets_with_any_event",
+            "assets_with_book",
+            "bad_lines",
+            "bad_files",
+            "incomplete_files",
+        ),
+        "rest": ("books_ok", "books_missing"),
+        "coverage": ("missing_any_assets", "missing_book_assets"),
+        "freshness": ("stale_assets",),
+        "hash": ("required", "compared", "matches", "mismatches"),
+    }.items():
+        value = report.get(section)
+        if not isinstance(value, Mapping):
+            continue
+        observed[section] = {
+            key: value[key]
+            for key in keys
+            if key in value
+        }
+    return observed

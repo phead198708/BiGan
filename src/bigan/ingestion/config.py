@@ -70,7 +70,10 @@ class IngestionSettings(BaseSettings):
     ws_message_timeout_seconds: float = Field(
         default=60.0,
         ge=5.0,
-        description="If no message received for this long, force a reconnect.",
+        description=(
+            "If no WebSocket frame is received for this long, send a ping "
+            "probe before reconnecting."
+        ),
     )
     price_reader_reconnect_min_seconds: float = Field(default=1.0, ge=0.1)
     price_reader_reconnect_max_seconds: float = Field(default=30.0, ge=1.0)

@@ -86,6 +86,65 @@ def test_summarize_soak_passes_when_metrics_and_artifacts_are_healthy(
     assert {check["name"] for check in summary["checks"] if not check["passed"]} == set()
 
 
+def test_summarize_soak_includes_market_coverage_check(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    rollup_dir = tmp_path / "rollup"
+    _write_raw_file(raw_dir / "2026-05-13.ndjson.gz", [{"receive_time": 1, "raw": {}}])
+    parquet_path = rollup_dir / "date=2026-05-13" / "event_type=book" / "part.parquet"
+    parquet_path.parent.mkdir(parents=True)
+    parquet_path.write_bytes(b"placeholder")
+    market_coverage = {
+        "passed": True,
+        "gamma": {"markets": 1, "assets": 2},
+        "raw": {"records": 1, "assets_with_any_event": 2, "assets_with_book": 2},
+        "rest": {"books_ok": 2, "books_missing": 0},
+        "coverage": {"missing_any_assets": 0, "missing_book_assets": 0},
+        "hash": {"required": False, "compared": 2, "matches": 2, "mismatches": 0},
+    }
+
+    summary = summarize_soak(
+        [
+            _sample(1_000, records=0, rollups_ok=0, rss_mb=100),
+            _sample(1_120, records=1, rollups_ok=1, rss_mb=110),
+        ],
+        raw_dir=raw_dir,
+        rollup_dir=rollup_dir,
+        thresholds=SoakThresholds(min_duration_seconds=60),
+        market_coverage=market_coverage,
+    )
+
+    coverage_check = next(
+        check for check in summary["checks"] if check["name"] == "market_coverage"
+    )
+    assert summary["passed"] is True
+    assert coverage_check["passed"] is True
+    assert summary["market_coverage"] == market_coverage
+
+
+def test_summarize_soak_fails_failed_market_coverage(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    rollup_dir = tmp_path / "rollup"
+    _write_raw_file(raw_dir / "2026-05-13.ndjson.gz", [{"receive_time": 1, "raw": {}}])
+    parquet_path = rollup_dir / "date=2026-05-13" / "event_type=book" / "part.parquet"
+    parquet_path.parent.mkdir(parents=True)
+    parquet_path.write_bytes(b"placeholder")
+
+    summary = summarize_soak(
+        [
+            _sample(1_000, records=0, rollups_ok=0, rss_mb=100),
+            _sample(1_120, records=1, rollups_ok=1, rss_mb=110),
+        ],
+        raw_dir=raw_dir,
+        rollup_dir=rollup_dir,
+        thresholds=SoakThresholds(min_duration_seconds=60),
+        market_coverage={"passed": False, "error": "Gamma timeout"},
+    )
+
+    failed = {check["name"] for check in summary["checks"] if not check["passed"]}
+    assert summary["passed"] is False
+    assert "market_coverage" in failed
+
+
 def test_summarize_soak_fails_stale_liveness_metric(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     rollup_dir = tmp_path / "rollup"
@@ -147,7 +206,35 @@ def test_raw_archive_counts_bad_lines_and_done_files(tmp_path: Path) -> None:
 
     stats = inspect_raw_archive(raw_dir)
 
-    assert stats == {"files": 2, "records": 2, "bad_lines": 1, "bad_files": 0}
+    assert stats == {
+        "files": 2,
+        "records": 2,
+        "bad_lines": 1,
+        "bad_files": 0,
+        "incomplete_files": 0,
+    }
+
+
+def test_raw_archive_counts_unclosed_gzip_as_incomplete(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    active = raw_dir / "active.ndjson.gz"
+    fp = gzip.open(active, mode="wb")  # noqa: SIM115 - keep stream open.
+    try:
+        fp.write(orjson.dumps({"ok": True}, option=orjson.OPT_APPEND_NEWLINE))
+        fp.flush()
+
+        stats = inspect_raw_archive(raw_dir)
+    finally:
+        fp.close()
+
+    assert stats == {
+        "files": 1,
+        "records": 1,
+        "bad_lines": 0,
+        "bad_files": 0,
+        "incomplete_files": 1,
+    }
 
 
 def test_soak_sample_ndjson_round_trip(tmp_path: Path) -> None:

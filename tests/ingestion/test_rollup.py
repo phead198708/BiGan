@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,13 +10,18 @@ from pathlib import Path
 import orjson
 import pyarrow.parquet as pq
 
-from bigan.ingestion.rollup import rollup_file
+from bigan.ingestion.metrics import REGISTRY
+from bigan.ingestion.rollup import rollup_file, run_rollup_worker
 
 
 def _write_ndjson_gz(path: Path, records: list[dict]) -> None:
     with gzip.open(path, "wb") as fp:
         for rec in records:
             fp.write(orjson.dumps(rec) + b"\n")
+
+
+def _metric(name: str, labels: dict[str, str]) -> float:
+    return float(REGISTRY.get_sample_value(name, labels) or 0.0)
 
 
 def test_rollup_file_produces_partitioned_parquet(tmp_path: Path) -> None:
@@ -82,3 +88,50 @@ def test_rollup_empty_file_still_archived(tmp_path: Path) -> None:
     n = rollup_file(src, rollup_dir, done_dir=raw_dir / "_done")
     assert n == 0
     assert (raw_dir / "_done" / src.name).exists()
+
+
+def test_rollup_worker_skips_unclosed_gzip_without_error_metric(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    rollup_dir = tmp_path / "rollup"
+    raw_dir.mkdir()
+    src = raw_dir / "active.ndjson.gz"
+    before = _metric("bigan_rollup_files_total", {"outcome": "error"})
+
+    fp = gzip.open(src, "wb")  # noqa: SIM115 - keep stream open for the test.
+    try:
+        fp.write(
+            orjson.dumps(
+                {
+                    "receive_time": 1778650000000,
+                    "raw": {"event_type": "book"},
+                },
+                option=orjson.OPT_APPEND_NEWLINE,
+            )
+        )
+        fp.flush()
+
+        async def run_once() -> None:
+            stop = asyncio.Event()
+            task = asyncio.create_task(
+                run_rollup_worker(
+                    raw_dir,
+                    rollup_dir,
+                    interval_seconds=60,
+                    lag_seconds=0,
+                    stop_event=stop,
+                )
+            )
+            await asyncio.sleep(0.05)
+            stop.set()
+            await asyncio.wait_for(task, timeout=1)
+
+        asyncio.run(run_once())
+    finally:
+        fp.close()
+
+    after = _metric("bigan_rollup_files_total", {"outcome": "error"})
+    assert after == before
+    assert src.exists()
+    assert not rollup_dir.exists()

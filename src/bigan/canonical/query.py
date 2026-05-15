@@ -46,8 +46,7 @@ def open_warehouse(root: Path | str, *, read_only: bool = True) -> Iterator[duck
             glob = str(base / "**/*.parquet")
             conn.execute(
                 f"CREATE OR REPLACE VIEW {table} AS "
-                f"SELECT * FROM read_parquet(?, hive_partitioning=true)",
-                [glob],
+                f"SELECT * FROM read_parquet({_sql_string(glob)}, hive_partitioning=true)"
             )
         yield conn
     finally:
@@ -69,3 +68,7 @@ def warehouse_summary(root: Path | str) -> dict[str, int]:
                 row_count = 0
             summary[table] = int(row_count)
     return summary
+
+
+def _sql_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"

@@ -21,6 +21,9 @@ from .metrics import GAMMA_POLLS_TOTAL
 logger = logging.getLogger(__name__)
 
 
+_GAMMA_MAX_PAGE_LIMIT = 100
+
+
 @dataclass(frozen=True, slots=True)
 class ActiveMarket:
     """A minimal record of one active CLOB market relevant to ingestion."""
@@ -137,8 +140,8 @@ class GammaClient:
     async def list_active_markets(
         self,
         *,
-        page_limit: int = 200,
-        max_pages: int = 30,
+        page_limit: int = _GAMMA_MAX_PAGE_LIMIT,
+        max_pages: int = 60,
         empty_page_streak_limit: int = 3,
     ) -> list[ActiveMarket]:
         """Return all currently active markets whose slug starts with ``slug_prefix``.
@@ -149,8 +152,12 @@ class GammaClient:
         long-running markets, and the freshly-opened ``btc-updown-15m-*``
         markets cluster at the top of the newest-first ordering.
 
+        Gamma currently caps ``limit`` at 100 even if callers ask for more, so
+        we cap the request size locally and advance by the number of records
+        actually returned. That keeps us from skipping every other server page.
+
         Stops paginating when any of these is true:
-        - a page is shorter than ``page_limit`` (end of stream), or
+        - a page is shorter than the effective request limit (end of stream), or
         - we hit ``empty_page_streak_limit`` consecutive pages with zero
           slug-prefix matches (the target subset has ended), or
         - ``max_pages`` (safety cap).
@@ -162,6 +169,7 @@ class GammaClient:
         url = f"{self._base_url}/markets"
         out: list[ActiveMarket] = []
         offset = 0
+        request_limit = min(page_limit, _GAMMA_MAX_PAGE_LIMIT)
         now_ms = int(time.time() * 1000)
         empty_streak = 0
 
@@ -169,7 +177,7 @@ class GammaClient:
             params = {
                 "active": "true",
                 "closed": "false",
-                "limit": page_limit,
+                "limit": request_limit,
                 "offset": offset,
                 "order": "startDate",
                 "ascending": "false",
@@ -211,9 +219,9 @@ class GammaClient:
             else:
                 empty_streak = 0
 
-            if not records or len(records) < page_limit:
+            if not records or len(records) < request_limit:
                 break
-            offset += page_limit
+            offset += len(records)
 
         GAMMA_POLLS_TOTAL.labels(outcome="ok").inc()
         return out

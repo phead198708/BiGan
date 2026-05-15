@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+from typing import Any
+
 from bigan.ingestion.gamma_client import (
+    GammaClient,
     _market_from_gamma,
     _parse_iso8601_to_ms,
     diff_subscription_sets,
@@ -94,3 +99,94 @@ def test_diff_subscription_sets_no_op() -> None:
     add, remove = diff_subscription_sets(current=["a"], desired=["a"])
     assert add == []
     assert remove == []
+
+
+def test_list_active_markets_handles_gamma_limit_cap() -> None:
+    page0 = [
+        _gamma_record(
+            slug="btc-updown-15m-4102444800",
+            condition_id="0xbtc1",
+            up="111",
+            down="222",
+        ),
+        *[
+            _gamma_record(
+                slug=f"other-market-{idx}",
+                condition_id=f"0xother{idx}",
+                up=f"up-{idx}",
+                down=f"down-{idx}",
+            )
+            for idx in range(99)
+        ],
+    ]
+    page1 = [
+        _gamma_record(
+            slug="btc-updown-15m-4102445700",
+            condition_id="0xbtc2",
+            up="333",
+            down="444",
+        )
+    ]
+    session = _FakeGammaSession(pages={0: page0, 100: page1})
+
+    async def go() -> list[str]:
+        client = GammaClient("https://gamma.test", "btc-updown-15m-")
+        client._session = session  # type: ignore[attr-defined]  # test fake
+        markets = await client.list_active_markets(
+            page_limit=200,
+            max_pages=3,
+            empty_page_streak_limit=99,
+        )
+        return [market.slug for market in markets]
+
+    assert asyncio.run(go()) == [
+        "btc-updown-15m-4102444800",
+        "btc-updown-15m-4102445700",
+    ]
+    assert [call["limit"] for call in session.calls] == [100, 100]
+    assert [call["offset"] for call in session.calls] == [0, 100]
+
+
+class _FakeGammaSession:
+    def __init__(self, pages: dict[int, list[dict[str, Any]]]) -> None:
+        self._pages = pages
+        self.calls: list[dict[str, Any]] = []
+
+    def get(self, _url: str, *, params: dict[str, Any]) -> _FakeGammaResponse:
+        self.calls.append(dict(params))
+        return _FakeGammaResponse(self._pages.get(int(params["offset"]), []))
+
+
+class _FakeGammaResponse:
+    def __init__(self, records: list[dict[str, Any]]) -> None:
+        self._records = records
+
+    async def __aenter__(self) -> _FakeGammaResponse:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    def raise_for_status(self) -> None:
+        return None
+
+    async def read(self) -> bytes:
+        return json.dumps(self._records).encode("utf-8")
+
+
+def _gamma_record(
+    *,
+    slug: str,
+    condition_id: str,
+    up: str,
+    down: str,
+) -> dict[str, Any]:
+    return {
+        "slug": slug,
+        "conditionId": condition_id,
+        "clobTokenIds": [up, down],
+        "outcomes": ["Up", "Down"],
+        "startDate": "2099-01-01T00:00:00Z",
+        "endDate": "2099-01-01T00:15:00Z",
+        "orderPriceMinTickSize": "0.01",
+    }

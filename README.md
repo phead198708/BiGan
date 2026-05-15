@@ -272,13 +272,18 @@ Evidence lands under `data/soak/`:
 
 - `soak-<timestamp>.ndjson` — metric samples captured every 60 seconds
 - `soak-<timestamp>-summary.json` — threshold checks, NDJSON decode counts,
-  rollup file counts, reconnect totals, liveness lag, hash mismatches, and RSS growth
+  rollup file counts, reconnect totals, liveness lag, hash mismatches, market
+  coverage against Gamma/CLOB REST, and RSS growth
 
 To re-check a completed run without running ingestion again:
 
 ```bash
 bigan-ingest soak-report --samples-path data/soak/soak-<timestamp>.ndjson
 ```
+
+Add `--market-coverage` to re-run the Gamma/CLOB REST coverage comparison for
+the completed raw archive. Completed-run coverage ignores markets opened after
+the raw archive ended, so newly created rounds do not make old evidence fail.
 
 `bigan-ingest soak` runs one final NDJSON-to-Parquet rollup after stopping
 ingestion by default, so the summary can include immediate Parquet evidence.
@@ -343,6 +348,9 @@ data/warehouse/
   symbol_mapping/
     source=<source>/dt=YYYY-MM-DD/
       part-*.parquet
+  features_15m_v1/
+    source=<source>/dt=YYYY-MM-DD/
+      part-*.parquet
   quarantine/
     source=<source>/dt=YYYY-MM-DD/
       part-*.parquet
@@ -369,7 +377,33 @@ remain `NULL` in raw tables so ingestion can continue safely.
 - **raw_spot_price**: Coinbase/Kraken BTC spot reference ticks with `price`, `bid_price`, `ask_price`
 - **raw_oracle_price**: Chainlink BTC/USD latest-round rows with `price`, `answer`, `decimals`, `round_id`
 - **symbol_mapping**: Temporal source-symbol lookup with `effective_from_ts`, optional `effective_to_ts`, `symbol_kind`, and `metadata_json`
+- **features_15m_v1**: Minute-close, strictly backward-looking model feature rows with `feature_ts`, `symbol`, `feature_version`, and quality fields
 - **quarantine**: Anomalous rows isolated by the validation layer with `target_table`, `rule`, `detail`, `payload_json`
+
+## Feature aggregation (issue #7)
+
+`bigan-ingest features-15m-v1` reads canonical raw tables and appends
+minute-grain rows to `features_15m_v1`. The aggregation timestamp
+`feature_ts` is a minute boundary; every point-in-time lookup uses
+`ts <= feature_ts`, and every rolling window uses `(feature_ts - window,
+feature_ts]`.
+
+The v1 table includes `feature_ts`, `symbol`, `feature_version`, spread,
+mid-price, microprice, OBI L1/L5/L10, signed 1-minute volume, 1-minute trade
+imbalance, `ret_1m`/`ret_5m`/`ret_15m`, and realized volatility over
+1/5/15-minute windows.
+
+Issue #8 adds data-quality fields to every feature row:
+
+- `quote_age_ms`, `depth_age_ms`, `trade_age_ms` — age of the latest as-of inputs
+- `completeness_score` — weighted score in `[0, 1]`
+- `data_gap_flag` — true when required market-state inputs are missing or stale
+- `quality_filter_pass` — true when the row is trainable under the default v1 filter
+
+Run `bigan-ingest feature-quality-report` after feature generation to validate
+row count, duplicate keys, minute alignment, identity fields, score bounds,
+gap/filter consistency, and the presence of trainable rows. The SQL-only
+verification recipe lives in `docs/features/feature_sql_quality_verification.md`.
 
 ### Validation rules (issue #4)
 
@@ -405,6 +439,9 @@ bigan-ingest etl-batch
 
 # Query warehouse stats
 bigan-ingest warehouse-stats
+
+# Generate minute-grain model features
+bigan-ingest features-15m-v1
 
 # Inspect anomaly counts + recent quarantine samples
 bigan-ingest quarantine-report --limit 50

@@ -3,8 +3,8 @@
 Responsibilities:
 - Maintain a single WebSocket connection with exponential-backoff reconnect.
 - Send / refresh subscription payloads as the active market set changes.
-- Receive messages with a hard ``ws_message_timeout_seconds`` watchdog so a
-  silent connection triggers reconnect within bounded latency.
+- Receive messages with a ``ws_message_timeout_seconds`` watchdog; quiet
+  periods trigger a ping probe before the client reconnects.
 - Hand parsed events plus the verbatim payload to a caller-supplied callback.
 
 The class does **not** persist anything itself; the runner wires it up to a
@@ -205,12 +205,33 @@ class ClobWsClient:
         while not self._cancelled.is_set():
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
-            except TimeoutError as exc:
-                raise ConnectionClosed(None, None) from exc
+            except TimeoutError:
+                await self._confirm_idle_connection(ws)
+                continue
 
             raw_bytes = raw if isinstance(raw, bytes) else raw.encode("utf-8")
 
             await self._dispatch(raw_bytes)
+
+    async def _confirm_idle_connection(
+        self,
+        ws: websockets.WebSocketClientProtocol,
+    ) -> None:
+        """Probe a quiet connection before counting it as a reconnect."""
+        try:
+            pong_waiter = await ws.ping()
+            await asyncio.wait_for(
+                pong_waiter,
+                timeout=self._cfg.ping_timeout_seconds,
+            )
+        except (TimeoutError, ConnectionClosed, WebSocketException, OSError) as exc:
+            raise ConnectionClosed(None, None) from exc
+
+        LAST_EVENT_RECEIVE_TIME.set(time.time())
+        logger.debug(
+            "ws.idle_ping_ok",
+            extra={"idle_timeout_s": self._cfg.message_timeout_seconds},
+        )
 
     # Polymarket sometimes sends plain-text application-level keepalive
     # frames (e.g. ``PONG``) outside the JSON envelope. We accept any plain
@@ -219,6 +240,7 @@ class ClobWsClient:
 
     async def _dispatch(self, raw_bytes: bytes) -> None:
         receive_time_ms = int(time.time() * 1000)
+        LAST_EVENT_RECEIVE_TIME.set(receive_time_ms / 1000.0)
         stripped = raw_bytes.strip()
         if stripped in self._KEEPALIVE_TOKENS:
             return

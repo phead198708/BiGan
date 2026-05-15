@@ -59,6 +59,70 @@ def test_dispatch_observes_ingest_lag_metric_and_warns(monkeypatch, caplog) -> N
     assert any(record.message == "ingest_lag.high" for record in caplog.records)
 
 
+def test_keepalive_frame_refreshes_liveness_metric(monkeypatch) -> None:
+    async def handler(event, raw) -> None:  # type: ignore[no-untyped-def]
+        raise AssertionError("keepalive should not dispatch to handler")
+
+    client = ClobWsClient(WsClientConfig(url="ws://example.invalid"), handler)
+    monkeypatch.setattr("bigan.ingestion.clob_ws.time.time", lambda: 1_700_000_123.456)
+
+    asyncio.run(client._dispatch(b"PONG"))
+
+    assert REGISTRY.get_sample_value("bigan_last_event_receive_time_seconds") == (
+        1_700_000_123.456
+    )
+
+
+def test_non_json_frame_refreshes_liveness_metric_and_counts_parse_error(
+    monkeypatch,
+) -> None:
+    async def handler(event, raw) -> None:  # type: ignore[no-untyped-def]
+        raise AssertionError("non-json frame should not dispatch to handler")
+
+    client = ClobWsClient(WsClientConfig(url="ws://example.invalid"), handler)
+    before = _sample("bigan_ws_parse_errors_total", {"kind": "json"})
+    monkeypatch.setattr("bigan.ingestion.clob_ws.time.time", lambda: 1_700_000_456.789)
+
+    asyncio.run(client._dispatch(b"subscribed"))
+
+    assert REGISTRY.get_sample_value("bigan_last_event_receive_time_seconds") == (
+        1_700_000_456.789
+    )
+    assert _sample("bigan_ws_parse_errors_total", {"kind": "json"}) == before + 1
+
+
+def test_receive_loop_probes_idle_connection_before_reconnect() -> None:
+    pings = 0
+
+    async def handler(event, raw) -> None:  # type: ignore[no-untyped-def]
+        raise AssertionError("idle ping should not dispatch to handler")
+
+    client = ClobWsClient(
+        WsClientConfig(
+            url="ws://example.invalid",
+            message_timeout_seconds=0.01,
+            ping_timeout_seconds=0.1,
+        ),
+        handler,
+    )
+
+    class QuietWs:
+        async def recv(self):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(60)
+
+        async def ping(self):  # type: ignore[no-untyped-def]
+            nonlocal pings
+            pings += 1
+            client.cancel()
+            pong = asyncio.get_running_loop().create_future()
+            pong.set_result(None)
+            return pong
+
+    asyncio.run(client._receive_loop(QuietWs()))  # type: ignore[arg-type]
+
+    assert pings == 1
+
+
 def test_expected_connection_exception_unwraps_taskgroup_exception_group() -> None:
     expected = OSError("connection reset")
     wrapped = ExceptionGroup("unhandled errors in a TaskGroup", [expected])
