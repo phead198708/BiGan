@@ -79,13 +79,22 @@ async def compare_market_coverage(
         default=0,
     )
     filtered_markets = list(markets)
+    ignored_opened_after_raw_end = 0
+    ignored_scheduled_after_raw_end = 0
     if ignore_markets_opened_after_raw_end and raw_end_ms:
         grace_ms = int(raw_end_grace_seconds * 1000)
-        filtered_markets = [
-            market
-            for market in filtered_markets
-            if market.start_ts_ms <= raw_end_ms + grace_ms
-        ]
+        keep: list[ActiveMarket] = []
+        for market in filtered_markets:
+            opened_after_raw_end = market.start_ts_ms > raw_end_ms + grace_ms
+            scheduled_after_raw_end = (
+                _round_start_s(market) * 1000 > raw_end_ms + grace_ms
+            )
+            if opened_after_raw_end or scheduled_after_raw_end:
+                ignored_opened_after_raw_end += int(opened_after_raw_end)
+                ignored_scheduled_after_raw_end += int(scheduled_after_raw_end)
+                continue
+            keep.append(market)
+        filtered_markets = keep
 
     expected = _expected_assets(filtered_markets)
     rest_books = await _fetch_rest_books(
@@ -147,7 +156,9 @@ async def compare_market_coverage(
             "markets": len(filtered_markets),
             "assets": len(expected),
             "source_markets": len(markets),
-            "ignored_markets_opened_after_raw_end": len(markets) - len(filtered_markets),
+            "ignored_markets_after_raw_end": len(markets) - len(filtered_markets),
+            "ignored_markets_opened_after_raw_end": ignored_opened_after_raw_end,
+            "ignored_markets_scheduled_after_raw_end": ignored_scheduled_after_raw_end,
         },
         "raw": {
             "dir": str(raw_dir),

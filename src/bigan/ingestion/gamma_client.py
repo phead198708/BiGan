@@ -158,20 +158,24 @@ class GammaClient:
 
         Stops paginating when any of these is true:
         - a page is shorter than the effective request limit (end of stream), or
-        - we hit ``empty_page_streak_limit`` consecutive pages with zero
-          slug-prefix matches (the target subset has ended), or
         - ``max_pages`` (safety cap).
+
+        ``empty_page_streak_limit`` is retained for API compatibility, but the
+        scan no longer stops on empty non-target pages. Gamma sorts by market
+        creation time, and BTC 15m markets can be separated by unrelated market
+        pages; stopping early caused the runner to drop current subscriptions
+        when a future BTC cohort appeared near the top.
 
         Records whose ``endDate`` is in the past or which fail validation are
         filtered out.
         """
+        _ = empty_page_streak_limit
         assert self._session is not None, "use as async context manager"
         url = f"{self._base_url}/markets"
         out: list[ActiveMarket] = []
         offset = 0
         request_limit = min(page_limit, _GAMMA_MAX_PAGE_LIMIT)
         now_ms = int(time.time() * 1000)
-        empty_streak = 0
 
         for _ in range(max_pages):
             params = {
@@ -195,7 +199,6 @@ class GammaClient:
             if not isinstance(records, list):
                 break
 
-            page_hits = 0
             for rec in records:
                 slug = rec.get("slug") or ""
                 if not slug.startswith(self._slug_prefix):
@@ -208,16 +211,6 @@ class GammaClient:
                     # lags real-time resolution.
                     continue
                 out.append(market)
-                page_hits += 1
-
-            if page_hits == 0:
-                empty_streak += 1
-                if empty_streak >= empty_page_streak_limit and out:
-                    # We've already found matches earlier; this streak means
-                    # we've walked past the relevant cohort.
-                    break
-            else:
-                empty_streak = 0
 
             if not records or len(records) < request_limit:
                 break

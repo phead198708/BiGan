@@ -399,7 +399,9 @@ def _market_coverage_observed(report: Mapping[str, Any]) -> dict[str, Any]:
             "markets",
             "assets",
             "source_markets",
+            "ignored_markets_after_raw_end",
             "ignored_markets_opened_after_raw_end",
+            "ignored_markets_scheduled_after_raw_end",
         ),
         "raw": (
             "records",

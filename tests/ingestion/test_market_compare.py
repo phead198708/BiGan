@@ -130,7 +130,7 @@ def test_compare_market_coverage_can_ignore_markets_opened_after_raw_end(
     tmp_path: Path,
 ) -> None:
     current_market = ActiveMarket(
-        slug="btc-updown-15m-4102444800",
+        slug="btc-updown-15m-100",
         condition_id="0xmkt",
         asset_id_up="tok-up",
         asset_id_down="tok-down",
@@ -176,7 +176,62 @@ def test_compare_market_coverage_can_ignore_markets_opened_after_raw_end(
 
     assert report["passed"] is True
     assert report["gamma"]["source_markets"] == 2
+    assert report["gamma"]["ignored_markets_after_raw_end"] == 1
     assert report["gamma"]["ignored_markets_opened_after_raw_end"] == 1
+
+
+def test_compare_market_coverage_can_ignore_markets_scheduled_after_raw_end(
+    tmp_path: Path,
+) -> None:
+    current_market = ActiveMarket(
+        slug="btc-updown-15m-100",
+        condition_id="0xmkt",
+        asset_id_up="tok-up",
+        asset_id_down="tok-down",
+        start_ts_ms=50_000,
+        end_ts_ms=1_000_000,
+        tick_size="0.01",
+    )
+    future_market = ActiveMarket(
+        slug="btc-updown-15m-4102445700",
+        condition_id="0xfuture",
+        asset_id_up="future-up",
+        asset_id_down="future-down",
+        start_ts_ms=50_000,
+        end_ts_ms=4_102_446_600_000,
+        tick_size="0.01",
+    )
+    _write_raw(
+        tmp_path,
+        [
+            _book_record("tok-up", "0xmkt", "h-up", receive_time=100_000),
+            _book_record("tok-down", "0xmkt", "h-down", receive_time=100_001),
+        ],
+    )
+    rest = _FakeRest(
+        {
+            "tok-up": _rest_book("tok-up", "0xmkt", "h-up"),
+            "tok-down": _rest_book("tok-down", "0xmkt", "h-down"),
+            "future-up": _rest_book("future-up", "0xfuture", "h-fu"),
+            "future-down": _rest_book("future-down", "0xfuture", "h-fd"),
+        }
+    )
+
+    report = asyncio.run(
+        compare_market_coverage(
+            markets=[current_market, future_market],
+            raw_dir=tmp_path,
+            rest=rest,  # type: ignore[arg-type]
+            max_stale_seconds=None,
+            ignore_markets_opened_after_raw_end=True,
+            raw_end_grace_seconds=1,
+        )
+    )
+
+    assert report["passed"] is True
+    assert report["gamma"]["ignored_markets_after_raw_end"] == 1
+    assert report["gamma"]["ignored_markets_opened_after_raw_end"] == 0
+    assert report["gamma"]["ignored_markets_scheduled_after_raw_end"] == 1
 
 
 class _FakeRest:

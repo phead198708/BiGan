@@ -147,6 +147,57 @@ def test_list_active_markets_handles_gamma_limit_cap() -> None:
     assert [call["offset"] for call in session.calls] == [0, 100]
 
 
+def test_list_active_markets_keeps_scanning_after_empty_target_pages() -> None:
+    page0 = [
+        _gamma_record(
+            slug="btc-updown-15m-4102444800",
+            condition_id="0xbtc1",
+            up="111",
+            down="222",
+        ),
+        _gamma_record(
+            slug="other-market-before-gap",
+            condition_id="0xother-before",
+            up="up-before",
+            down="down-before",
+        ),
+    ]
+    page1 = [
+        _gamma_record(
+            slug=f"other-market-{idx}",
+            condition_id=f"0xother{idx}",
+            up=f"up-{idx}",
+            down=f"down-{idx}",
+        )
+        for idx in range(2)
+    ]
+    page2 = [
+        _gamma_record(
+            slug="btc-updown-15m-4102445700",
+            condition_id="0xbtc2",
+            up="333",
+            down="444",
+        )
+    ]
+    session = _FakeGammaSession(pages={0: page0, 2: page1, 4: page2})
+
+    async def go() -> list[str]:
+        client = GammaClient("https://gamma.test", "btc-updown-15m-")
+        client._session = session  # type: ignore[attr-defined]  # test fake
+        markets = await client.list_active_markets(
+            page_limit=2,
+            max_pages=3,
+            empty_page_streak_limit=1,
+        )
+        return [market.slug for market in markets]
+
+    assert asyncio.run(go()) == [
+        "btc-updown-15m-4102444800",
+        "btc-updown-15m-4102445700",
+    ]
+    assert [call["offset"] for call in session.calls] == [0, 2, 4]
+
+
 class _FakeGammaSession:
     def __init__(self, pages: dict[int, list[dict[str, Any]]]) -> None:
         self._pages = pages
