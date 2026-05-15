@@ -143,8 +143,8 @@ def test_list_active_markets_handles_gamma_limit_cap() -> None:
         "btc-updown-15m-4102444800",
         "btc-updown-15m-4102445700",
     ]
-    assert [call["limit"] for call in session.calls] == [100, 100]
-    assert [call["offset"] for call in session.calls] == [0, 100]
+    assert [call["limit"] for call in session.calls] == [100, 100, 100]
+    assert [call["offset"] for call in session.calls] == [0, 100, 200]
 
 
 def test_list_active_markets_keeps_scanning_after_empty_target_pages() -> None:

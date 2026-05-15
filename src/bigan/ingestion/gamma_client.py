@@ -6,9 +6,10 @@ client can dynamically (un)subscribe as markets open and resolve every 15 min.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -143,6 +144,7 @@ class GammaClient:
         page_limit: int = _GAMMA_MAX_PAGE_LIMIT,
         max_pages: int = 60,
         empty_page_streak_limit: int = 3,
+        page_concurrency: int = 8,
     ) -> list[ActiveMarket]:
         """Return all currently active markets whose slug starts with ``slug_prefix``.
 
@@ -173,32 +175,41 @@ class GammaClient:
         assert self._session is not None, "use as async context manager"
         url = f"{self._base_url}/markets"
         out: list[ActiveMarket] = []
-        offset = 0
         request_limit = min(page_limit, _GAMMA_MAX_PAGE_LIMIT)
         now_ms = int(time.time() * 1000)
+        seen_conditions: set[str] = set()
 
-        for _ in range(max_pages):
-            params = {
-                "active": "true",
-                "closed": "false",
-                "limit": request_limit,
-                "offset": offset,
-                "order": "startDate",
-                "ascending": "false",
-            }
-            try:
-                async with self._session.get(url, params=params) as resp:
-                    resp.raise_for_status()
-                    raw = await resp.read()
-            except (aiohttp.ClientError, TimeoutError) as exc:
-                GAMMA_POLLS_TOTAL.labels(outcome="error").inc()
-                logger.warning("gamma.poll_failed", extra={"err": str(exc)})
-                raise
+        try:
+            first_page = await self._fetch_markets_page(url, limit=request_limit, offset=0)
+            pages: list[tuple[int, Sequence[Mapping[str, Any]]]] = [(0, first_page)]
+            if len(first_page) >= request_limit and max_pages > 1:
+                semaphore = asyncio.Semaphore(max(1, page_concurrency))
 
-            records = orjson.loads(raw)
+                async def fetch_offset(
+                    page_index: int,
+                ) -> tuple[int, Sequence[Mapping[str, Any]]]:
+                    offset = page_index * request_limit
+                    async with semaphore:
+                        records = await self._fetch_markets_page(
+                            url,
+                            limit=request_limit,
+                            offset=offset,
+                        )
+                    return offset, records
+
+                pages.extend(
+                    await asyncio.gather(
+                        *(fetch_offset(page_index) for page_index in range(1, max_pages))
+                    )
+                )
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            GAMMA_POLLS_TOTAL.labels(outcome="error").inc()
+            logger.warning("gamma.poll_failed", extra={"err": str(exc)})
+            raise
+
+        for _, records in sorted(pages, key=lambda item: item[0]):
             if not isinstance(records, list):
                 break
-
             for rec in records:
                 slug = rec.get("slug") or ""
                 if not slug.startswith(self._slug_prefix):
@@ -206,18 +217,42 @@ class GammaClient:
                 market = _market_from_gamma(rec)
                 if market is None:
                     continue
+                if market.condition_id in seen_conditions:
+                    continue
                 if market.end_ts_ms and market.end_ts_ms < now_ms:
                     # Already resolved; Gamma's active=true filter occasionally
                     # lags real-time resolution.
                     continue
+                seen_conditions.add(market.condition_id)
                 out.append(market)
 
             if not records or len(records) < request_limit:
                 break
-            offset += len(records)
 
         GAMMA_POLLS_TOTAL.labels(outcome="ok").inc()
         return out
+
+    async def _fetch_markets_page(
+        self,
+        url: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> list[Mapping[str, Any]]:
+        assert self._session is not None, "use as async context manager"
+        params = {
+            "active": "true",
+            "closed": "false",
+            "limit": limit,
+            "offset": offset,
+            "order": "startDate",
+            "ascending": "false",
+        }
+        async with self._session.get(url, params=params) as resp:
+            resp.raise_for_status()
+            raw = await resp.read()
+        records = orjson.loads(raw)
+        return records if isinstance(records, list) else []
 
 
 def diff_subscription_sets(
