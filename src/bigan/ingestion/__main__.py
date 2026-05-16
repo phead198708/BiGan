@@ -21,6 +21,7 @@ from bigan.canonical.etl import run_etl_batch
 from bigan.canonical.query import open_warehouse, warehouse_summary
 from bigan.canonical.symbols import SymbolMapper
 from bigan.features import run_feature_batch, run_feature_quality_sql_checks
+from bigan.labels import run_label_batch
 
 from .backfill import BackfillService, GapWindow
 from .clob_rest import PolymarketRestClient
@@ -605,6 +606,39 @@ def feature_quality_report() -> None:
     typer.echo(json.dumps(report.to_dict(), indent=2))
     if not report.passed:
         raise Exit(code=1)
+
+
+@app.command("labels-15m-v1")
+def labels_15m_v1(
+    max_rows_per_partition: int = typer.Option(
+        50_000,
+        help="Flush label partitions after this many rows.",
+    ),
+    request_timeout_seconds: float = typer.Option(
+        10.0,
+        help="Per-request timeout when fetching Polymarket round metadata.",
+    ),
+) -> None:
+    """Generate independent labels_15m_v1 rows from Polymarket round metadata."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = run_label_batch(
+        settings.warehouse_dir,
+        max_rows_per_partition=max_rows_per_partition,
+        gamma_api_base=settings.gamma_api_base,
+        market_slug_prefix=settings.market_slug_prefix,
+        request_timeout_seconds=request_timeout_seconds,
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "label_version": report.label_version,
+                "rows_generated": report.rows_generated,
+                "rows_written": report.rows_written,
+            },
+            indent=2,
+        )
+    )
 
 
 @app.command("quarantine-report")

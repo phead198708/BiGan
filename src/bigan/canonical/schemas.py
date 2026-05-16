@@ -297,6 +297,39 @@ SCHEMA_FEATURES_15M_V1: pa.Schema = pa.schema(
 
 
 # ---------------------------------------------------------------------------
+# labels_15m_v1 — independent 15-minute direction labels (issue #9)
+# ---------------------------------------------------------------------------
+#
+# ``feature_ts`` matches the feature row timestamp, while ``target_ts`` is the
+# round close timestamp. ``ts`` and ``message_ts`` mirror ``feature_ts`` so
+# labels can be joined to features on (source, source_symbol, feature_ts).
+
+SCHEMA_LABELS_15M_V1: pa.Schema = pa.schema(
+    [
+        pa.field("ts", pa.int64(), nullable=False),
+        pa.field("message_ts", pa.int64(), nullable=False),
+        pa.field("feature_ts", pa.int64(), nullable=False),
+        pa.field("target_ts", pa.int64(), nullable=False),
+        pa.field("ingest_ts", pa.int64(), nullable=False),
+        pa.field("source", pa.string(), nullable=False),
+        pa.field("source_symbol", pa.string(), nullable=False),
+        pa.field("source_market", pa.string(), nullable=True),
+        pa.field("canonical_symbol", pa.string(), nullable=True),
+        pa.field("symbol", pa.string(), nullable=False),
+        pa.field("label_version", pa.string(), nullable=False),
+        pa.field("round_slug", pa.string(), nullable=True),
+        pa.field("round_start_ts", pa.int64(), nullable=False),
+        pa.field("round_end_ts", pa.int64(), nullable=False),
+        pa.field("start_price", pa.float64(), nullable=False),
+        pa.field("target_price", pa.float64(), nullable=False),
+        pa.field("label_up_15m", pa.bool_(), nullable=False),
+        pa.field("label_source", pa.string(), nullable=True),
+    ],
+    metadata=_table_metadata("labels_15m_v1"),
+)
+
+
+# ---------------------------------------------------------------------------
 # quarantine — abnormal rows isolated by the validation layer (issue #4)
 # ---------------------------------------------------------------------------
 #
@@ -336,6 +369,7 @@ TABLE_NAMES: tuple[str, ...] = (
     "raw_oracle_price",
     "symbol_mapping",
     "features_15m_v1",
+    "labels_15m_v1",
     "quarantine",
 )
 
@@ -349,5 +383,6 @@ SCHEMAS: dict[str, pa.Schema] = {
     "raw_oracle_price": SCHEMA_RAW_ORACLE_PRICE,
     "symbol_mapping": SCHEMA_SYMBOL_MAPPING,
     "features_15m_v1": SCHEMA_FEATURES_15M_V1,
+    "labels_15m_v1": SCHEMA_LABELS_15M_V1,
     "quarantine": SCHEMA_QUARANTINE,
 }
