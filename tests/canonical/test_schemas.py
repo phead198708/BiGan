@@ -93,6 +93,22 @@ def test_source_and_source_symbol_are_not_nullable() -> None:
             assert not schema.field(idx).nullable, f"{name}.{col} must not be nullable"
 
 
+def test_raw_event_tables_carry_nullable_source_channel() -> None:
+    """Issue #29 keeps transport channel separate from provenance."""
+    for schema in (
+        SCHEMA_RAW_TOP_OF_BOOK,
+        SCHEMA_RAW_ORDERBOOK_SNAPSHOT,
+        SCHEMA_RAW_TRADES,
+        SCHEMA_RAW_SPOT_PRICE,
+        SCHEMA_RAW_ORACLE_PRICE,
+        SCHEMAS["quarantine"],
+    ):
+        idx = schema.get_field_index("source_channel")
+        assert idx >= 0
+        assert schema.field(idx).type == pa.string()
+        assert schema.field(idx).nullable
+
+
 def test_top_of_book_has_quote_columns() -> None:
     cols = {f.name for f in SCHEMA_RAW_TOP_OF_BOOK}
     assert {"bid_price", "ask_price", "spread"} <= cols

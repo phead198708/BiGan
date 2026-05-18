@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-11
-- **Issue**: [#23](https://github.com/phead198708/BiGan/issues/23)
+- **Issue**: [#23](https://github.com/phead198708/BiGan/issues/23), [#29](https://github.com/phead198708/BiGan/issues/29)
 - **Milestone**: `mvp-v1`
 - **Owners**: data-ingestion
 
@@ -12,9 +12,9 @@
 
 | 字段 | 含义 | 来源 | 精度 | NULL 允许？ |
 |---|---|---|---|---|
-| `ts` | **Canonical 事件时间** — 下游所有特征/标签/回测的唯一时间基准 | 上游数据源服务器时间（Polymarket WS `timestamp`，Coinbase WS `time`，Chainlink `updatedAt`，等） | `int64` UTC ms epoch | **No** |
-| `message_ts` | 消息在协议层携带的原始时间戳；用于多源对齐与诊断 | WS payload 原字段（Polymarket 等同 `ts`；多源场景下可能与 `ts` 差异） | `int64` UTC ms epoch | **No** |
-| `ingest_ts` | 本地 BiGan 服务收到/解析消息并落入 NDJSON sink 的时间 | `int(time.time() * 1000)` 在 `clob_ws._dispatch` 内计算 | `int64` UTC ms epoch | **No** |
+| `ts` | **Canonical 事件时间** — 下游所有特征/标签/回测的唯一时间基准 | NDJSON 外层 `source_timestamp_ms`（legacy 回退：`raw.timestamp`） | `int64` UTC ms epoch | **No** |
+| `message_ts` | 消息在协议层携带的原始时间戳；用于多源对齐与诊断 | NDJSON 外层 `source_timestamp_ms`；Polymarket 当前等同 `ts` | `int64` UTC ms epoch | **No** |
+| `ingest_ts` | 本地 BiGan 服务收到/解析消息并落入 NDJSON sink 的时间 | NDJSON 外层 `capture_timestamp_ms`（legacy 回退：`receive_time`） | `int64` UTC ms epoch | **No** |
 
 所有时间戳：
 
@@ -22,6 +22,7 @@
 - **ms 精度**（不是 s）— REST/HF 等以 s 为单位的源在 ingestion 边界即转换
 - **单调性**：单个 asset 内 `ts` 不保证严格单调（exchange 可能乱序），但 `ingest_ts` 必须单调（本地时钟）
 - **延迟预算**：正常情况下 `ingest_ts - message_ts ≤ 500ms`；超过即触发 warn log + Prometheus 告警
+- **事实源**：ETL / coverage / compare 工具必须优先读取 NDJSON 外层 `source_timestamp_ms`、`capture_timestamp_ms`、`source_channel`、`provenance`；只有历史文件缺外层字段时才回退到 `raw.timestamp` / `receive_time` / `raw.provenance`
 
 ---
 
@@ -49,7 +50,7 @@
 
 ### 3.1 `ts` — Canonical 事件时间
 
-- **来源优先级**：原始 payload 的协议时间戳 > 上游 API 的 `updatedAt` > 不可恢复时使用 fallback（Polymarket 的某些 `book` 消息缺 `timestamp`，使用 `ingest_ts` 替代）
+- **来源优先级**：NDJSON 外层 `source_timestamp_ms` > `raw.source_timestamp_ms`（过渡期兼容）> `raw.timestamp`（legacy NDJSON）> 不可恢复时使用 fallback
 - **含义**：「这件事在它的源系统里发生于这一刻」
 - **用途**：特征工程的 `as-of` join 键、标签生成的窗口边界、回测的 walk-forward 切折锚点
 - **不变量**：
@@ -59,7 +60,7 @@
 
 ### 3.2 `message_ts` — 协议层原始时间戳
 
-- **来源**：WS payload 中标识本条消息的字段，原样照搬，不做语义解释
+- **来源**：NDJSON 外层 `source_timestamp_ms`。该字段由 reader 在 ingestion 边界从 WS payload / REST response 的协议时间戳解析并标准化为 UTC ms epoch
 - **与 `ts` 的关系**：
   - 单源（Polymarket）下 `message_ts == ts`
   - 多源（Coinbase/Kraken/Chainlink）下二者可能有 ms 级差异（撮合 vs 推送）
@@ -67,11 +68,18 @@
 
 ### 3.3 `ingest_ts` — 本地接收时间
 
-- **来源**：`int(time.time() * 1000)` 在 `clob_ws._dispatch` 内对每条消息单独计算
+- **来源**：NDJSON 外层 `capture_timestamp_ms`。WS reader 在收到/解析消息时写入；REST seed/backfill 在抓取并写入合成记录时写入
 - **用途**：
   - 监控（`bigan_ingest_lag_seconds = (ingest_ts - message_ts) / 1000`）
   - 断流检测（#5 的 `GapDetector` 内部使用 `ingest_ts` 作为「最后一次收到该 asset 消息」的判定）
-  - 重放（NDJSON `receive_time` 字段就是 `ingest_ts`）
+  - 重放（NDJSON `receive_time` 字段保留为 `capture_timestamp_ms` 的 legacy alias）
+
+### 3.4 `source_channel` 与 `provenance`
+
+- `source_channel` 描述「数据通过哪个 transport/API 进入系统」，例如 `clob-ws`、`clob-rest`
+- `provenance` 描述「这条 canonical row 为什么存在」，例如 `ws`、`polymarket-rest-seed`、`polymarket-rest-backfill`、`manual`
+- 二者不能混用：REST seed 和 REST backfill 都来自 `clob-rest`，但 `provenance` 不同；实时 WS 来自 `clob-ws`，`provenance=ws`
+- canonical raw event tables 保留 nullable `source_channel`；历史 Parquet 可能为空，下游查询必须容忍 NULL
 
 ---
 
@@ -126,9 +134,10 @@
 
 ## 6. 兼容性与迁移
 
-- v1 schema 已经包含三字段（见 `schemas.py:_COMMON_IDENTITY_FIELDS`），无需 schema migration
+- v1 schema 已经包含三字段（见 `schemas.py:_COMMON_IDENTITY_FIELDS`）；#29 增加 nullable `source_channel` 作为向后兼容字段
 - 历史 Parquet 文件无需重写；新增的两条 quarantine rule 仅作用于新 ETL 批次
 - 阈值配置默认值（5s future grace / 10min stale）经过 #5 backfill 场景验证：手动 replay 几个小时前的 gap 仍在容差内，但若 replay 跨越数天则会被 quarantine（设计意图）
+- 历史 NDJSON 文件如果没有外层 `source_timestamp_ms` / `capture_timestamp_ms`，ETL 继续按 `raw.timestamp` / `receive_time` 读取
 
 ---
 
@@ -151,4 +160,4 @@
 - [Coinbase Advanced Trade WebSocket Channels documentation](https://docs.cdp.coinbase.com/coinbase-business/advanced-trade-apis/websocket/websocket-channels)
 - [Kraken WebSocket v2 Ticker documentation](https://docs.kraken.com/api/docs/websocket-v2/ticker/)
 - [Chainlink Data Feeds API Reference (`latestRoundData`)](https://docs.chain.link/data-feeds/api-reference#latestrounddata)
-- Issue #23、#22、#24、#5
+- Issue #23、#22、#24、#5、#29

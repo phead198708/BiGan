@@ -205,6 +205,7 @@ class RowValidator:
         source_symbol = str(row.get("source_symbol") or "").strip() or UNKNOWN_SYMBOL
         source_market = row.get("source_market")
         canonical_symbol = row.get("canonical_symbol")
+        source_channel = row.get("source_channel")
 
         provenance = row.get("provenance")
 
@@ -219,6 +220,7 @@ class RowValidator:
                     "source_symbol": source_symbol,
                     "source_market": source_market,
                     "canonical_symbol": canonical_symbol,
+                    "source_channel": source_channel,
                     "provenance": provenance,
                     "target_table": target_table,
                     "rule": err.rule.value,

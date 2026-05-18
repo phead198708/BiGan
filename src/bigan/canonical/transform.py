@@ -40,33 +40,55 @@ def _as_float(v: Any) -> float | None:
         return None
 
 
+def _first_int_ms(*values: Any) -> int | None:
+    for value in values:
+        ts = _as_int_ms(value)
+        if ts is not None:
+            return ts
+    return None
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
 def _identity_columns(
     *,
     raw: dict[str, Any],
     ingest_ts: int,
+    source_timestamp_ms: int | None = None,
+    source_channel: str | None = None,
     fallback_ts: int | None = None,
     record_provenance: str | None = None,
 ) -> dict[str, Any] | None:
     """Build the eight shared identity columns. Returns ``None`` if essential
     fields (asset_id / timestamp) are absent — caller should skip the row.
 
+    Timestamps and provenance prefer the surrounding NDJSON record metadata.
+    ``raw["timestamp"]`` / ``raw["provenance"]`` remain fallbacks for legacy
+    archives written before the outer contract existed.
+
     ``provenance`` is sourced (in priority order):
-      1. ``raw["provenance"]`` — carried inside the wire payload by the
-         backfill service when it synthesises records.
-      2. ``record_provenance`` — caller-supplied default for the surrounding
+      1. ``record_provenance`` — caller-supplied default for the surrounding
          NDJSON record (the runner sets this to ``"ws"`` for WS messages).
+      2. ``raw["provenance"]`` — carried inside older synthesized records.
       3. :data:`PROVENANCE_WS` — final fallback so provenance is never NULL
          for rows produced by the live pipeline.
     """
     asset_id = raw.get("asset_id")
     if asset_id is None:
         return None
-    ts = _as_int_ms(raw.get("timestamp"))
-    if ts is None:
-        ts = fallback_ts
+    ts = _first_int_ms(
+        source_timestamp_ms,
+        raw.get("source_timestamp_ms"),
+        raw.get("timestamp"),
+        fallback_ts,
+    )
     if ts is None:
         return None
-    provenance = raw.get("provenance") or record_provenance or PROVENANCE_WS
+    provenance = record_provenance or raw.get("provenance") or PROVENANCE_WS
     return {
         "ts": int(ts),
         "message_ts": int(ts),
@@ -77,6 +99,7 @@ def _identity_columns(
         # canonical_symbol is populated by the #22 symbol mapping enrichment
         # step in the ETL runner. Unknown mappings remain NULL.
         "canonical_symbol": None,
+        "source_channel": source_channel or _optional_str(raw.get("source_channel")),
         "provenance": str(provenance),
     }
 
@@ -87,12 +110,23 @@ def _identity_columns(
 
 
 def transform_top_of_book_event(
-    raw: dict[str, Any], *, ingest_ts: int
+    raw: dict[str, Any],
+    *,
+    ingest_ts: int,
+    source_timestamp_ms: int | None = None,
+    source_channel: str | None = None,
+    record_provenance: str | None = None,
 ) -> dict[str, Any] | None:
     """Map one ``best_bid_ask`` event to a single ``raw_top_of_book`` row."""
     if raw.get("event_type") != "best_bid_ask":
         return None
-    identity = _identity_columns(raw=raw, ingest_ts=ingest_ts)
+    identity = _identity_columns(
+        raw=raw,
+        ingest_ts=ingest_ts,
+        source_timestamp_ms=source_timestamp_ms,
+        source_channel=source_channel,
+        record_provenance=record_provenance,
+    )
     if identity is None:
         return None
     bid = _as_float(raw.get("best_bid"))
@@ -110,7 +144,12 @@ def transform_top_of_book_event(
 
 
 def derive_top_of_book_from_book(
-    raw: dict[str, Any], *, ingest_ts: int
+    raw: dict[str, Any],
+    *,
+    ingest_ts: int,
+    source_timestamp_ms: int | None = None,
+    source_channel: str | None = None,
+    record_provenance: str | None = None,
 ) -> dict[str, Any] | None:
     """Derive a ``raw_top_of_book`` row from a ``book`` snapshot.
 
@@ -123,7 +162,13 @@ def derive_top_of_book_from_book(
     """
     if raw.get("event_type") != "book":
         return None
-    identity = _identity_columns(raw=raw, ingest_ts=ingest_ts)
+    identity = _identity_columns(
+        raw=raw,
+        ingest_ts=ingest_ts,
+        source_timestamp_ms=source_timestamp_ms,
+        source_channel=source_channel,
+        record_provenance=record_provenance,
+    )
     if identity is None:
         return None
     bids = _coerce_levels(raw.get("bids"))
@@ -146,7 +191,12 @@ def derive_top_of_book_from_book(
 
 
 def derive_top_of_book_from_price_change(
-    raw: dict[str, Any], *, ingest_ts: int
+    raw: dict[str, Any],
+    *,
+    ingest_ts: int,
+    source_timestamp_ms: int | None = None,
+    source_channel: str | None = None,
+    record_provenance: str | None = None,
 ) -> list[dict[str, Any]]:
     """Derive ``raw_top_of_book`` rows from a ``price_change`` event.
 
@@ -158,10 +208,15 @@ def derive_top_of_book_from_price_change(
     if raw.get("event_type") != "price_change":
         return []
     market = raw.get("market")
-    ts = _as_int_ms(raw.get("timestamp"))
+    ts = _first_int_ms(
+        source_timestamp_ms,
+        raw.get("source_timestamp_ms"),
+        raw.get("timestamp"),
+    )
     if ts is None:
         return []
-    provenance = raw.get("provenance") or PROVENANCE_WS
+    provenance = record_provenance or raw.get("provenance") or PROVENANCE_WS
+    resolved_source_channel = source_channel or _optional_str(raw.get("source_channel"))
     rows: list[dict[str, Any]] = []
     seen: dict[str, dict[str, Any]] = {}  # last best/ask per asset within event
     for entry in raw.get("price_changes") or []:
@@ -183,6 +238,7 @@ def derive_top_of_book_from_price_change(
             "source_symbol": str(asset_id),
             "source_market": str(market) if market is not None else None,
             "canonical_symbol": None,
+            "source_channel": resolved_source_channel,
             "provenance": str(provenance),
             "bid_price": bid,
             "ask_price": ask,
@@ -200,7 +256,12 @@ def derive_top_of_book_from_price_change(
 
 
 def transform_book_event(
-    raw: dict[str, Any], *, ingest_ts: int
+    raw: dict[str, Any],
+    *,
+    ingest_ts: int,
+    source_timestamp_ms: int | None = None,
+    source_channel: str | None = None,
+    record_provenance: str | None = None,
 ) -> list[dict[str, Any]]:
     """Map one ``book`` snapshot event to N + M canonical rows.
 
@@ -211,7 +272,13 @@ def transform_book_event(
     """
     if raw.get("event_type") != "book":
         return []
-    identity = _identity_columns(raw=raw, ingest_ts=ingest_ts)
+    identity = _identity_columns(
+        raw=raw,
+        ingest_ts=ingest_ts,
+        source_timestamp_ms=source_timestamp_ms,
+        source_channel=source_channel,
+        record_provenance=record_provenance,
+    )
     if identity is None:
         return []
     snapshot_hash = raw.get("hash")
@@ -269,12 +336,23 @@ def _coerce_levels(raw_levels: Any) -> list[tuple[float, float]]:
 
 
 def transform_last_trade_price_event(
-    raw: dict[str, Any], *, ingest_ts: int
+    raw: dict[str, Any],
+    *,
+    ingest_ts: int,
+    source_timestamp_ms: int | None = None,
+    source_channel: str | None = None,
+    record_provenance: str | None = None,
 ) -> dict[str, Any] | None:
     """Map one ``last_trade_price`` event to a single ``raw_trades`` row."""
     if raw.get("event_type") != "last_trade_price":
         return None
-    identity = _identity_columns(raw=raw, ingest_ts=ingest_ts)
+    identity = _identity_columns(
+        raw=raw,
+        ingest_ts=ingest_ts,
+        source_timestamp_ms=source_timestamp_ms,
+        source_channel=source_channel,
+        record_provenance=record_provenance,
+    )
     if identity is None:
         return None
     price = _as_float(raw.get("price"))
@@ -318,31 +396,64 @@ def transform_event(
     raw = record.get("raw")
     if not isinstance(raw, dict):
         return {}
-    ingest_ts = record.get("receive_time")
-    if not isinstance(ingest_ts, int):
+    ingest_ts = _first_int_ms(record.get("capture_timestamp_ms"), record.get("receive_time"))
+    if ingest_ts is None:
         return {}
+    source_timestamp_ms = _first_int_ms(record.get("source_timestamp_ms"))
+    source_channel = _optional_str(record.get("source_channel"))
+    record_provenance = _optional_str(record.get("provenance"))
     event_type = raw.get("event_type")
 
     if event_type == "best_bid_ask":
-        row = transform_top_of_book_event(raw, ingest_ts=ingest_ts)
+        row = transform_top_of_book_event(
+            raw,
+            ingest_ts=ingest_ts,
+            source_timestamp_ms=source_timestamp_ms,
+            source_channel=source_channel,
+            record_provenance=record_provenance,
+        )
         return {"raw_top_of_book": [row]} if row is not None else {}
 
     if event_type == "book":
         out: dict[str, list[dict[str, Any]]] = {}
-        snapshot_rows = transform_book_event(raw, ingest_ts=ingest_ts)
+        snapshot_rows = transform_book_event(
+            raw,
+            ingest_ts=ingest_ts,
+            source_timestamp_ms=source_timestamp_ms,
+            source_channel=source_channel,
+            record_provenance=record_provenance,
+        )
         if snapshot_rows:
             out["raw_orderbook_snapshot"] = snapshot_rows
-        bbo_row = derive_top_of_book_from_book(raw, ingest_ts=ingest_ts)
+        bbo_row = derive_top_of_book_from_book(
+            raw,
+            ingest_ts=ingest_ts,
+            source_timestamp_ms=source_timestamp_ms,
+            source_channel=source_channel,
+            record_provenance=record_provenance,
+        )
         if bbo_row is not None:
             out["raw_top_of_book"] = [bbo_row]
         return out
 
     if event_type == "price_change":
-        bbo_rows = derive_top_of_book_from_price_change(raw, ingest_ts=ingest_ts)
+        bbo_rows = derive_top_of_book_from_price_change(
+            raw,
+            ingest_ts=ingest_ts,
+            source_timestamp_ms=source_timestamp_ms,
+            source_channel=source_channel,
+            record_provenance=record_provenance,
+        )
         return {"raw_top_of_book": bbo_rows} if bbo_rows else {}
 
     if event_type == "last_trade_price":
-        row = transform_last_trade_price_event(raw, ingest_ts=ingest_ts)
+        row = transform_last_trade_price_event(
+            raw,
+            ingest_ts=ingest_ts,
+            source_timestamp_ms=source_timestamp_ms,
+            source_channel=source_channel,
+            record_provenance=record_provenance,
+        )
         return {"raw_trades": [row]} if row is not None else {}
 
     return {}

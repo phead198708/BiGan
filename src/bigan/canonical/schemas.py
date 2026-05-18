@@ -21,6 +21,9 @@ All raw tables follow the same column-naming contract:
   - ``canonical_symbol`` — cross-source canonical name. Nullable on raw rows
                            when a mapping is not available yet; non-null in
                            the ``symbol_mapping`` table itself.
+  - ``source_channel``   — transport/API channel that captured raw event rows
+                           (e.g. ``clob-ws`` or ``clob-rest``). Nullable for
+                           historical rows; aggregate tables may omit it.
 
 - **Append-only**: every ETL run writes a new ``part-*.parquet`` file under
   the appropriate Hive partition directory. Existing files are never edited
@@ -43,12 +46,15 @@ SCHEMA_VERSION = "1"
 
 # Common identity columns (timestamp + symbol contract).
 #
-# ``provenance`` (#5) tags the upstream channel that produced each row:
+# ``provenance`` (#5) tags why/how a row was produced:
 #   - NULL or "ws"                  → realtime WebSocket stream
 #   - "polymarket-rest-backfill"    → injected by the gap-recovery backfill
+#   - "polymarket-rest-seed"        → initial REST snapshot after Gamma discovery
 #   - "manual"                      → operator-triggered replay via CLI
 # Downstream consumers can filter or weight rows by provenance for
 # robustness analysis. Nullable to keep historical Parquet readable.
+# ``source_channel`` (#29) keeps transport/API channel separate from why the
+# row exists; e.g. both seed and backfill rows use ``clob-rest`` transport.
 _COMMON_IDENTITY_FIELDS: list[pa.Field] = [
     pa.field("ts", pa.int64(), nullable=False),
     pa.field("message_ts", pa.int64(), nullable=False),
@@ -57,6 +63,7 @@ _COMMON_IDENTITY_FIELDS: list[pa.Field] = [
     pa.field("source_symbol", pa.string(), nullable=False),
     pa.field("source_market", pa.string(), nullable=True),
     pa.field("canonical_symbol", pa.string(), nullable=True),
+    pa.field("source_channel", pa.string(), nullable=True),
     pa.field("provenance", pa.string(), nullable=True),
 ]
 

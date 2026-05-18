@@ -240,8 +240,16 @@ def _apply_raw_record(states: dict[str, RawAssetState], record: Mapping[str, Any
     if not isinstance(raw, dict):
         return
     event_type = raw.get("event_type")
-    receive_time_ms = _as_int(record.get("receive_time"))
-    event_time_ms = _as_int(raw.get("timestamp"))
+    receive_time_ms = _first_int(
+        record.get("capture_timestamp_ms"),
+        record.get("receive_time"),
+        raw.get("capture_timestamp_ms"),
+    )
+    event_time_ms = _first_int(
+        record.get("source_timestamp_ms"),
+        raw.get("source_timestamp_ms"),
+        raw.get("timestamp"),
+    )
     market = _as_str(raw.get("market") or raw.get("condition_id"))
 
     if event_type == "book":
@@ -421,6 +429,14 @@ def _as_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _first_int(*values: Any) -> int | None:
+    for value in values:
+        parsed = _as_int(value)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _as_str(value: Any) -> str | None:

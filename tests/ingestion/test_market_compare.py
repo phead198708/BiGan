@@ -30,6 +30,34 @@ def test_scan_raw_asset_states_tracks_books_and_price_changes(tmp_path: Path) ->
     assert scan.assets["tok-up"].latest_hash == "h1"
 
 
+def test_scan_raw_asset_states_prefers_outer_timestamp_contract(tmp_path: Path) -> None:
+    _write_raw(
+        tmp_path,
+        [
+            {
+                "receive_time": 900_000,
+                "source_timestamp_ms": 123_456,
+                "capture_timestamp_ms": 124_000,
+                "raw": {
+                    "event_type": "book",
+                    "asset_id": "tok-up",
+                    "market": "0xmkt",
+                    "timestamp": "1",
+                    "hash": "h0",
+                    "bids": [],
+                    "asks": [],
+                },
+            }
+        ],
+    )
+
+    scan = scan_raw_asset_states(tmp_path)
+
+    state = scan.assets["tok-up"]
+    assert state.latest_event_time_ms == 123_456
+    assert state.latest_receive_time_ms == 124_000
+
+
 def test_compare_market_coverage_passes_complete_assets(tmp_path: Path) -> None:
     market = _market()
     _write_raw(

@@ -363,6 +363,71 @@ def test_etl_preserves_provenance_in_parquet(tmp_path: Path) -> None:
     assert provenances == ["polymarket-rest-backfill", "ws"]
 
 
+def test_etl_prefers_outer_seed_timestamps_and_provenance(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    base = _ts(2026, 5, 10, 12, 0)
+    source_ts = base + 1_234
+    capture_ts = source_ts + 321
+    src = raw_dir / "2026-05-10.ndjson.gz"
+    _write_ndjson_gz(
+        src,
+        [
+            {
+                # Deliberately wrong legacy field: ETL should prefer
+                # capture_timestamp_ms.
+                "receive_time": base + 999_000,
+                "source_timestamp_ms": source_ts,
+                "capture_timestamp_ms": capture_ts,
+                "source_channel": "clob-rest",
+                "provenance": "polymarket-rest-seed",
+                "raw": {
+                    "event_type": "book",
+                    "asset_id": "tok-seed",
+                    "market": "0xmkt",
+                    # Deliberately wrong inner timestamp: ETL should prefer
+                    # source_timestamp_ms.
+                    "timestamp": str(base - 99_000),
+                    "hash": "seed-hash",
+                    "bids": [{"price": "0.49", "size": "100"}],
+                    "asks": [{"price": "0.51", "size": "50"}],
+                    "provenance": "ws",
+                },
+            }
+        ],
+    )
+
+    import os
+
+    os.utime(src, (1, 1))
+
+    warehouse = tmp_path / "warehouse"
+    report = run_etl_batch(
+        raw_dir=raw_dir, warehouse_dir=warehouse, lag_seconds=0.0
+    )
+
+    assert report.rows_per_table["raw_orderbook_snapshot"] == 2
+    assert report.rows_per_table["raw_top_of_book"] == 1
+
+    snapshot_files = warehouse_files(warehouse, "raw_orderbook_snapshot")
+    snapshot_rows = pq.ParquetFile(snapshot_files[0]).read().to_pylist()
+    assert len(snapshot_rows) == 2
+    for row in snapshot_rows:
+        assert row["ts"] == source_ts
+        assert row["message_ts"] == source_ts
+        assert row["ingest_ts"] == capture_ts
+        assert row["source_channel"] == "clob-rest"
+        assert row["provenance"] == "polymarket-rest-seed"
+
+    tob_files = warehouse_files(warehouse, "raw_top_of_book")
+    tob = pq.ParquetFile(tob_files[0]).read().to_pylist()[0]
+    assert tob["ts"] == source_ts
+    assert tob["message_ts"] == source_ts
+    assert tob["ingest_ts"] == capture_ts
+    assert tob["source_channel"] == "clob-rest"
+    assert tob["provenance"] == "polymarket-rest-seed"
+
+
 def test_etl_enriches_canonical_symbol_from_mapping(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
