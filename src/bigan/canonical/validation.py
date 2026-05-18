@@ -200,6 +200,7 @@ class RowValidator:
         ingest_ts = _int_or_zero(row.get("ingest_ts"))
         ts = _int_or_zero(row.get("ts")) or ingest_ts
         message_ts = _int_or_zero(row.get("message_ts")) or ts
+        capture_timestamp_ms = _int_or_zero(row.get("capture_timestamp_ms")) or None
 
         source = str(row.get("source") or "unknown")
         source_symbol = str(row.get("source_symbol") or "").strip() or UNKNOWN_SYMBOL
@@ -216,6 +217,7 @@ class RowValidator:
                     "ts": ts,
                     "message_ts": message_ts,
                     "ingest_ts": ingest_ts,
+                    "capture_timestamp_ms": capture_timestamp_ms,
                     "source": source,
                     "source_symbol": source_symbol,
                     "source_market": source_market,

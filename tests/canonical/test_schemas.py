@@ -37,6 +37,7 @@ def test_timestamp_columns_are_int64() -> None:
         "ts",
         "message_ts",
         "ingest_ts",
+        "capture_timestamp_ms",
         "bucket_ts",
         "ts_open",
         "ts_close",
@@ -107,6 +108,20 @@ def test_raw_event_tables_carry_nullable_source_channel() -> None:
         assert idx >= 0
         assert schema.field(idx).type == pa.string()
         assert schema.field(idx).nullable
+
+
+def test_polymarket_raw_tables_carry_nullable_capture_timestamp_ms() -> None:
+    """Issue #30 persists the raw sink capture timestamp for audits."""
+    for schema in (
+        SCHEMA_RAW_TOP_OF_BOOK,
+        SCHEMA_RAW_ORDERBOOK_SNAPSHOT,
+        SCHEMA_RAW_TRADES,
+    ):
+        idx = schema.get_field_index("capture_timestamp_ms")
+        assert idx >= 0
+        assert schema.field(idx).type == pa.int64()
+        assert schema.field(idx).nullable
+        assert schema.get_field_index("source_timestamp_ms") == -1
 
 
 def test_top_of_book_has_quote_columns() -> None:

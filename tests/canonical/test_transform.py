@@ -32,6 +32,7 @@ def test_top_of_book_basic() -> None:
     assert row["ts"] == 1766789469958
     assert row["message_ts"] == 1766789469958
     assert row["ingest_ts"] == 999
+    assert row["capture_timestamp_ms"] == 999
     assert row["source"] == SOURCE_POLYMARKET
     assert row["source_symbol"] == "1"
     assert row["source_market"] == "0xmkt"
@@ -220,6 +221,37 @@ def test_dispatch_dispatches_correctly() -> None:
     assert transform_event({"receive_time": 1}) == {}
     # No receive_time
     assert transform_event({"raw": {"event_type": "book", "asset_id": "a"}}) == {}
+
+
+def test_dispatch_persists_outer_capture_and_channel_metadata() -> None:
+    record = {
+        "receive_time": 999_999,
+        "source_timestamp_ms": 123_456,
+        "capture_timestamp_ms": 123_999,
+        "source_channel": "clob-rest",
+        "provenance": "polymarket-rest-seed",
+        "raw": {
+            "event_type": "book",
+            "asset_id": "a",
+            "market": "m",
+            "timestamp": "1",
+            "provenance": "ws",
+            "bids": [{"price": "0.5", "size": "1"}],
+            "asks": [{"price": "0.6", "size": "1"}],
+        },
+    }
+
+    out = transform_event(record)
+
+    rows = out["raw_orderbook_snapshot"] + out["raw_top_of_book"]
+    assert rows
+    for row in rows:
+        assert row["ts"] == 123_456
+        assert row["message_ts"] == 123_456
+        assert row["ingest_ts"] == 123_999
+        assert row["capture_timestamp_ms"] == 123_999
+        assert row["source_channel"] == "clob-rest"
+        assert row["provenance"] == "polymarket-rest-seed"
 
 
 # ---------------------------------------------------------------------------

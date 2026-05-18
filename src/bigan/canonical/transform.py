@@ -59,11 +59,12 @@ def _identity_columns(
     raw: dict[str, Any],
     ingest_ts: int,
     source_timestamp_ms: int | None = None,
+    capture_timestamp_ms: int | None = None,
     source_channel: str | None = None,
     fallback_ts: int | None = None,
     record_provenance: str | None = None,
 ) -> dict[str, Any] | None:
-    """Build the eight shared identity columns. Returns ``None`` if essential
+    """Build the shared identity columns. Returns ``None`` if essential
     fields (asset_id / timestamp) are absent — caller should skip the row.
 
     Timestamps and provenance prefer the surrounding NDJSON record metadata.
@@ -93,6 +94,9 @@ def _identity_columns(
         "ts": int(ts),
         "message_ts": int(ts),
         "ingest_ts": int(ingest_ts),
+        "capture_timestamp_ms": int(
+            capture_timestamp_ms if capture_timestamp_ms is not None else ingest_ts
+        ),
         "source": SOURCE_POLYMARKET,
         "source_symbol": str(asset_id),
         "source_market": str(raw["market"]) if raw.get("market") is not None else None,
@@ -114,6 +118,7 @@ def transform_top_of_book_event(
     *,
     ingest_ts: int,
     source_timestamp_ms: int | None = None,
+    capture_timestamp_ms: int | None = None,
     source_channel: str | None = None,
     record_provenance: str | None = None,
 ) -> dict[str, Any] | None:
@@ -124,6 +129,7 @@ def transform_top_of_book_event(
         raw=raw,
         ingest_ts=ingest_ts,
         source_timestamp_ms=source_timestamp_ms,
+        capture_timestamp_ms=capture_timestamp_ms,
         source_channel=source_channel,
         record_provenance=record_provenance,
     )
@@ -148,6 +154,7 @@ def derive_top_of_book_from_book(
     *,
     ingest_ts: int,
     source_timestamp_ms: int | None = None,
+    capture_timestamp_ms: int | None = None,
     source_channel: str | None = None,
     record_provenance: str | None = None,
 ) -> dict[str, Any] | None:
@@ -166,6 +173,7 @@ def derive_top_of_book_from_book(
         raw=raw,
         ingest_ts=ingest_ts,
         source_timestamp_ms=source_timestamp_ms,
+        capture_timestamp_ms=capture_timestamp_ms,
         source_channel=source_channel,
         record_provenance=record_provenance,
     )
@@ -195,6 +203,7 @@ def derive_top_of_book_from_price_change(
     *,
     ingest_ts: int,
     source_timestamp_ms: int | None = None,
+    capture_timestamp_ms: int | None = None,
     source_channel: str | None = None,
     record_provenance: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -234,6 +243,9 @@ def derive_top_of_book_from_price_change(
             "ts": ts,
             "message_ts": ts,
             "ingest_ts": int(ingest_ts),
+            "capture_timestamp_ms": int(
+                capture_timestamp_ms if capture_timestamp_ms is not None else ingest_ts
+            ),
             "source": SOURCE_POLYMARKET,
             "source_symbol": str(asset_id),
             "source_market": str(market) if market is not None else None,
@@ -260,6 +272,7 @@ def transform_book_event(
     *,
     ingest_ts: int,
     source_timestamp_ms: int | None = None,
+    capture_timestamp_ms: int | None = None,
     source_channel: str | None = None,
     record_provenance: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -276,6 +289,7 @@ def transform_book_event(
         raw=raw,
         ingest_ts=ingest_ts,
         source_timestamp_ms=source_timestamp_ms,
+        capture_timestamp_ms=capture_timestamp_ms,
         source_channel=source_channel,
         record_provenance=record_provenance,
     )
@@ -340,6 +354,7 @@ def transform_last_trade_price_event(
     *,
     ingest_ts: int,
     source_timestamp_ms: int | None = None,
+    capture_timestamp_ms: int | None = None,
     source_channel: str | None = None,
     record_provenance: str | None = None,
 ) -> dict[str, Any] | None:
@@ -350,6 +365,7 @@ def transform_last_trade_price_event(
         raw=raw,
         ingest_ts=ingest_ts,
         source_timestamp_ms=source_timestamp_ms,
+        capture_timestamp_ms=capture_timestamp_ms,
         source_channel=source_channel,
         record_provenance=record_provenance,
     )
@@ -383,7 +399,7 @@ def transform_last_trade_price_event(
 def transform_event(
     record: dict[str, Any],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Dispatch a single NDJSON record (``{receive_time, raw}``) to the
+    """Dispatch a single NDJSON record to the
     appropriate canonical table(s).
 
     Returns a dict ``{table_name: [rows...]}``. Tables that don't apply for
@@ -396,9 +412,13 @@ def transform_event(
     raw = record.get("raw")
     if not isinstance(raw, dict):
         return {}
-    ingest_ts = _first_int_ms(record.get("capture_timestamp_ms"), record.get("receive_time"))
-    if ingest_ts is None:
+    capture_timestamp_ms = _first_int_ms(
+        record.get("capture_timestamp_ms"),
+        record.get("receive_time"),
+    )
+    if capture_timestamp_ms is None:
         return {}
+    ingest_ts = capture_timestamp_ms
     source_timestamp_ms = _first_int_ms(record.get("source_timestamp_ms"))
     source_channel = _optional_str(record.get("source_channel"))
     record_provenance = _optional_str(record.get("provenance"))
@@ -409,6 +429,7 @@ def transform_event(
             raw,
             ingest_ts=ingest_ts,
             source_timestamp_ms=source_timestamp_ms,
+            capture_timestamp_ms=capture_timestamp_ms,
             source_channel=source_channel,
             record_provenance=record_provenance,
         )
@@ -420,6 +441,7 @@ def transform_event(
             raw,
             ingest_ts=ingest_ts,
             source_timestamp_ms=source_timestamp_ms,
+            capture_timestamp_ms=capture_timestamp_ms,
             source_channel=source_channel,
             record_provenance=record_provenance,
         )
@@ -429,6 +451,7 @@ def transform_event(
             raw,
             ingest_ts=ingest_ts,
             source_timestamp_ms=source_timestamp_ms,
+            capture_timestamp_ms=capture_timestamp_ms,
             source_channel=source_channel,
             record_provenance=record_provenance,
         )
@@ -441,6 +464,7 @@ def transform_event(
             raw,
             ingest_ts=ingest_ts,
             source_timestamp_ms=source_timestamp_ms,
+            capture_timestamp_ms=capture_timestamp_ms,
             source_channel=source_channel,
             record_provenance=record_provenance,
         )
@@ -451,6 +475,7 @@ def transform_event(
             raw,
             ingest_ts=ingest_ts,
             source_timestamp_ms=source_timestamp_ms,
+            capture_timestamp_ms=capture_timestamp_ms,
             source_channel=source_channel,
             record_provenance=record_provenance,
         )

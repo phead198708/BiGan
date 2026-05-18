@@ -416,6 +416,7 @@ def test_etl_prefers_outer_seed_timestamps_and_provenance(tmp_path: Path) -> Non
         assert row["ts"] == source_ts
         assert row["message_ts"] == source_ts
         assert row["ingest_ts"] == capture_ts
+        assert row["capture_timestamp_ms"] == capture_ts
         assert row["source_channel"] == "clob-rest"
         assert row["provenance"] == "polymarket-rest-seed"
 
@@ -424,6 +425,7 @@ def test_etl_prefers_outer_seed_timestamps_and_provenance(tmp_path: Path) -> Non
     assert tob["ts"] == source_ts
     assert tob["message_ts"] == source_ts
     assert tob["ingest_ts"] == capture_ts
+    assert tob["capture_timestamp_ms"] == capture_ts
     assert tob["source_channel"] == "clob-rest"
     assert tob["provenance"] == "polymarket-rest-seed"
 

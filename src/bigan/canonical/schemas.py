@@ -11,6 +11,10 @@ All raw tables follow the same column-naming contract:
                      event time.
   - ``ingest_ts``  — local receive time when our WS client decoded the frame
                      (UTC ms epoch).
+  - ``capture_timestamp_ms`` — nullable copy of the NDJSON outer capture
+                     timestamp. For current Polymarket rows this equals
+                     ``ingest_ts``; the explicit column preserves the raw
+                     sink contract for audits and channel comparisons.
 
 - **Symbol identity** (per #22 ``Symbol Mapping Table``):
   - ``source``           — exchange / data-source key (e.g. ``polymarket``)
@@ -55,10 +59,13 @@ SCHEMA_VERSION = "1"
 # robustness analysis. Nullable to keep historical Parquet readable.
 # ``source_channel`` (#29) keeps transport/API channel separate from why the
 # row exists; e.g. both seed and backfill rows use ``clob-rest`` transport.
+# ``capture_timestamp_ms`` (#30) persists the NDJSON outer capture timestamp
+# explicitly. ``source_timestamp_ms`` is represented by ``message_ts``.
 _COMMON_IDENTITY_FIELDS: list[pa.Field] = [
     pa.field("ts", pa.int64(), nullable=False),
     pa.field("message_ts", pa.int64(), nullable=False),
     pa.field("ingest_ts", pa.int64(), nullable=False),
+    pa.field("capture_timestamp_ms", pa.int64(), nullable=True),
     pa.field("source", pa.string(), nullable=False),
     pa.field("source_symbol", pa.string(), nullable=False),
     pa.field("source_market", pa.string(), nullable=True),

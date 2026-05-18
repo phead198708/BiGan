@@ -358,10 +358,15 @@ data/warehouse/
 
 All tables share a common identity contract:
 
-- **Timestamps**: `ts` (event time), `message_ts` (protocol timestamp), `ingest_ts` (receive time)
+- **Timestamps**: `ts` (event time), `message_ts` (persisted `source_timestamp_ms`), `ingest_ts` (receive time), nullable `capture_timestamp_ms` (raw sink capture time)
 - **Symbol identity** (#22): `source`, `source_symbol`, `source_market`, `canonical_symbol`
-- **Provenance** (#5): `provenance` — `ws` for realtime, `polymarket-rest-backfill` for recovered, `manual` for CLI replays
+- **Source channel** (#30): nullable `source_channel` keeps transport (`clob-ws`, `clob-rest`) separate from provenance
+- **Provenance** (#5): `provenance` — `ws` for realtime, `polymarket-rest-seed` for initial REST snapshots, `polymarket-rest-backfill` for recovered, `manual` for CLI replays
 - **Append-only**: ETL writes new `part-*.parquet` files; existing files are never mutated
+
+`source_timestamp_ms` is not stored as a separate Parquet column because it is
+the normalized value in `message_ts`; `capture_timestamp_ms` is persisted
+explicitly so WS and REST snapshot capture times remain queryable after ETL.
 
 `canonical_symbol` is filled by the optional issue #22 symbol mapping layer.
 Pass `--symbol-mapping-path path/to/mappings.csv` (also supports JSON, JSONL,
@@ -370,9 +375,9 @@ remain `NULL` in raw tables so ingestion can continue safely.
 
 ### Table schemas
 
-- **raw_top_of_book**: One row per `best_bid_ask` event with `bid_price`, `ask_price`, `spread`
-- **raw_orderbook_snapshot**: Long-format orderbook with `side`, `level`, `price`, `size` per level
-- **raw_trades**: One row per `last_trade_price` event with `price`, `size`, `side`, `trade_id`
+- **raw_top_of_book**: One row per `best_bid_ask` event with `bid_price`, `ask_price`, `spread`, plus `source_channel` and `capture_timestamp_ms`
+- **raw_orderbook_snapshot**: Long-format orderbook with `side`, `level`, `price`, `size` per level, plus `source_channel` and `capture_timestamp_ms`
+- **raw_trades**: One row per `last_trade_price` event with `price`, `size`, `side`, `trade_id`, plus `source_channel` and `capture_timestamp_ms`
 - **raw_candles_1m**: Derived 1-minute OHLC candles with bid/ask/trade OHLC, VWAP, volume, counts
 - **raw_spot_price**: Coinbase/Kraken BTC spot reference ticks with `price`, `bid_price`, `ask_price`
 - **raw_oracle_price**: Chainlink BTC/USD latest-round rows with `price`, `answer`, `decimals`, `round_id`
