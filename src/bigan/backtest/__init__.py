@@ -19,6 +19,12 @@ from .evaluation import (
     evaluate_predictions,
     save_evaluation_report,
 )
+from .execution import (
+    Quote,
+    SimulatedTakerTrade,
+    TakerExecutionSettings,
+    simulate_taker_long_trade,
+)
 
 __all__ = [
     "BACKTEST_CONFIG_SCHEMA_VERSION",
@@ -31,9 +37,13 @@ __all__ = [
     "BacktestStrategyConfig",
     "CalibrationBin",
     "PredictionEvaluationReport",
+    "Quote",
+    "SimulatedTakerTrade",
+    "TakerExecutionSettings",
     "ThresholdMetrics",
     "evaluate_predictions",
     "generate_run_id",
     "load_backtest_config",
     "save_evaluation_report",
+    "simulate_taker_long_trade",
 ]
