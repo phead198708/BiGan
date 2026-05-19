@@ -36,6 +36,16 @@ from .strategy import (
     run_threshold_sweep,
     save_threshold_strategy_outputs,
 )
+from .walk_forward import (
+    MetricStability,
+    WalkForwardReport,
+    WalkForwardWindow,
+    WalkForwardWindowResult,
+    generate_walk_forward_windows,
+    run_walk_forward,
+    save_walk_forward_report,
+    summarize_metric_stability,
+)
 
 __all__ = [
     "BACKTEST_CONFIG_SCHEMA_VERSION",
@@ -49,6 +59,7 @@ __all__ = [
     "CalibrationBin",
     "DEFAULT_HOLD_MS",
     "DEFAULT_THRESHOLDS",
+    "MetricStability",
     "PredictionSignal",
     "PredictionEvaluationReport",
     "Quote",
@@ -58,12 +69,19 @@ __all__ = [
     "ThresholdStrategyResult",
     "ThresholdStrategySummary",
     "ThresholdTrade",
+    "WalkForwardReport",
+    "WalkForwardWindow",
+    "WalkForwardWindowResult",
     "evaluate_predictions",
+    "generate_walk_forward_windows",
     "generate_run_id",
     "load_backtest_config",
+    "run_walk_forward",
     "run_threshold_strategy",
     "run_threshold_sweep",
     "save_evaluation_report",
     "save_threshold_strategy_outputs",
+    "save_walk_forward_report",
     "simulate_taker_long_trade",
+    "summarize_metric_stability",
 ]
