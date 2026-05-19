@@ -17,6 +17,7 @@ import typer
 from prometheus_client import start_http_server
 from typer import Exit
 
+from bigan.backtest import load_backtest_config
 from bigan.canonical.etl import run_etl_batch
 from bigan.canonical.query import open_warehouse, warehouse_summary
 from bigan.canonical.symbols import SymbolMapper
@@ -80,6 +81,10 @@ SOAK_ROLLUP_DIR_OPTION = typer.Option(
 SOAK_SUMMARY_PATH_OPTION = typer.Option(
     None,
     help="Optional path to write the JSON summary.",
+)
+BACKTEST_CONFIG_PATH_ARGUMENT = typer.Argument(
+    ...,
+    help="Backtest YAML or JSON config path.",
 )
 
 
@@ -639,6 +644,19 @@ def labels_15m_v1(
             indent=2,
         )
     )
+
+
+@app.command("backtest-config")
+def backtest_config(
+    config_path: Path = BACKTEST_CONFIG_PATH_ARGUMENT,
+    preserve_run_id: bool = typer.Option(
+        False,
+        help="Preserve output.run_id from the file instead of generating a fresh one.",
+    ),
+) -> None:
+    """Validate and print normalized backtest config JSON."""
+    config = load_backtest_config(config_path, new_run_id=not preserve_run_id)
+    typer.echo(json.dumps(config.to_script_dict(), indent=2, sort_keys=True))
 
 
 @app.command("quarantine-report")

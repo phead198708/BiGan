@@ -410,6 +410,40 @@ row count, duplicate keys, minute alignment, identity fields, score bounds,
 gap/filter consistency, and the presence of trainable rows. The SQL-only
 verification recipe lives in `docs/features/feature_sql_quality_verification.md`.
 
+## Backtest config (issue #10)
+
+Backtest jobs read a fixed `backtest_config_v1` YAML or JSON file. The v1
+contract covers the long-entry threshold, fees, slippage, latency, dataset
+version, model version, output directory, and generated run id:
+
+```yaml
+schema_version: backtest_config_v1
+strategy:
+  long_threshold: 0.6
+costs:
+  fee_bps: 2.0
+  slippage_bps: 1.0
+execution:
+  latency_ms: 500
+dataset:
+  dataset_version: features-labels-v1
+  feature_table: features_15m_v1
+  label_table: labels_15m_v1
+model:
+  model_version: baseline-v0
+output:
+  output_dir: data/backtests
+```
+
+Validate and normalize a config for scripts with:
+
+```bash
+bigan-ingest backtest-config path/to/backtest.yaml
+```
+
+The command prints JSON and generates a fresh `output.run_id` for each run by
+default. Use `--preserve-run-id` only for intentional replay/debug workflows.
+
 ### Validation rules (issue #4)
 
 Every transformed row is checked against these rules before being written. If any
