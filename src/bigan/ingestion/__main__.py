@@ -23,7 +23,12 @@ from bigan.canonical.query import open_warehouse, warehouse_summary
 from bigan.canonical.symbols import SymbolMapper
 from bigan.features import run_feature_batch, run_feature_quality_sql_checks
 from bigan.labels import run_label_batch
-from bigan.modeling import SplitConfig, assemble_training_dataset
+from bigan.modeling import (
+    LogisticBaselineConfig,
+    SplitConfig,
+    assemble_training_dataset,
+    train_logistic_baseline,
+)
 
 from .backfill import BackfillService, GapWindow
 from .clob_rest import PolymarketRestClient
@@ -90,6 +95,14 @@ BACKTEST_CONFIG_PATH_ARGUMENT = typer.Argument(
 TRAINING_DATASET_OUTPUT_DIR_OPTION = typer.Option(
     Path("data/training-datasets/bigan-training-15m-v1"),
     help="Directory for train.parquet, val.parquet, test.parquet, and manifest.json.",
+)
+LOGISTIC_DATASET_DIR_OPTION = typer.Option(
+    Path("data/training-datasets/bigan-training-15m-v1"),
+    help="Training dataset directory produced by training-dataset-v1.",
+)
+LOGISTIC_OUTPUT_DIR_OPTION = typer.Option(
+    Path("data/model-runs/logreg-baseline-v1"),
+    help="Directory for logistic baseline artifacts.",
 )
 
 
@@ -678,6 +691,29 @@ def training_dataset_v1(
             val_fraction=val_fraction,
         ),
         min_completeness_score=min_completeness_score,
+    )
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("logistic-baseline-v1")
+def logistic_baseline_v1(
+    dataset_dir: Path = LOGISTIC_DATASET_DIR_OPTION,
+    output_dir: Path = LOGISTIC_OUTPUT_DIR_OPTION,
+    epochs: int = typer.Option(500, help="Number of full-batch gradient descent epochs."),
+    learning_rate: float = typer.Option(0.10, help="Full-batch gradient descent learning rate."),
+    l2_penalty: float = typer.Option(0.0, help="L2 coefficient penalty."),
+) -> None:
+    """Train deterministic logistic regression baseline artifacts."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = train_logistic_baseline(
+        dataset_dir,
+        output_dir,
+        config=LogisticBaselineConfig(
+            epochs=epochs,
+            learning_rate=learning_rate,
+            l2_penalty=l2_penalty,
+        ),
     )
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 
