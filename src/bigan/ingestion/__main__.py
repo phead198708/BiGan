@@ -30,6 +30,7 @@ from bigan.modeling import (
     assemble_training_dataset,
     evaluate_model_promotion,
     fit_probability_calibration,
+    run_prediction_batch,
     train_logistic_baseline,
     train_xgboost_v1,
 )
@@ -147,6 +148,14 @@ PROMOTION_BACKTEST_SUMMARY_OPTION = typer.Option(
 PROMOTION_OUTPUT_DIR_OPTION = typer.Option(
     Path("data/model-runs/promotion-v1"),
     help="Directory for promotion report artifacts.",
+)
+PREDICTION_MODEL_PATH_OPTION = typer.Option(
+    Path("data/model-runs/xgboost-v1/model.json"),
+    help="Path to saved XGBoost-v1 model.json.",
+)
+PREDICTION_CALIBRATION_PATH_OPTION = typer.Option(
+    None,
+    help="Optional path to calibration.json.",
 )
 
 
@@ -815,6 +824,27 @@ def promotion_report_v1(
         calibration_dir,
         backtest_summary_path,
         output_dir,
+    )
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("predictions-v1")
+def predictions_v1(
+    model_path: Path = PREDICTION_MODEL_PATH_OPTION,
+    calibration_path: Path | None = PREDICTION_CALIBRATION_PATH_OPTION,
+    max_rows_per_partition: int = typer.Option(
+        50_000,
+        help="Flush prediction partitions after this many rows.",
+    ),
+) -> None:
+    """Generate predictions table rows from features_15m_v1."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = run_prediction_batch(
+        settings.warehouse_dir,
+        model_path,
+        calibration_path=calibration_path,
+        max_rows_per_partition=max_rows_per_partition,
     )
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 

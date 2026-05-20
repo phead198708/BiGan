@@ -23,6 +23,12 @@ from .logistic import (
     load_logistic_baseline,
     train_logistic_baseline,
 )
+from .predictions import (
+    PredictionBatchReport,
+    confidence_bucket,
+    generate_prediction_rows,
+    run_prediction_batch,
+)
 from .promotion import (
     PromotionCheck,
     PromotionReport,
@@ -49,6 +55,7 @@ __all__ = [
     "LogisticBaselineReport",
     "MODEL_VERSION",
     "ProbabilityCalibrator",
+    "PredictionBatchReport",
     "PromotionCheck",
     "PromotionReport",
     "PromotionRules",
@@ -60,12 +67,15 @@ __all__ = [
     "XGBoostV1Report",
     "XGBoostV1Stump",
     "assemble_training_dataset",
+    "confidence_bucket",
     "fit_calibration_from_predictions",
     "fit_probability_calibration",
+    "generate_prediction_rows",
     "evaluate_model_promotion",
     "load_logistic_baseline",
     "load_probability_calibrator",
     "load_xgboost_v1_model",
     "train_logistic_baseline",
+    "run_prediction_batch",
     "train_xgboost_v1",
 ]

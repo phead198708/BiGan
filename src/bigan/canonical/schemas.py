@@ -344,6 +344,38 @@ SCHEMA_LABELS_15M_V1: pa.Schema = pa.schema(
 
 
 # ---------------------------------------------------------------------------
+# predictions — online/offline prediction contract (issue #20)
+# ---------------------------------------------------------------------------
+#
+# ``prediction_ts`` mirrors the feature timestamp the model consumed. ``ts``
+# and ``message_ts`` also use that value so warehouse partitioning and generic
+# timestamp checks stay consistent with feature rows.
+
+SCHEMA_PREDICTIONS: pa.Schema = pa.schema(
+    [
+        pa.field("ts", pa.int64(), nullable=False),
+        pa.field("message_ts", pa.int64(), nullable=False),
+        pa.field("prediction_ts", pa.int64(), nullable=False),
+        pa.field("ingest_ts", pa.int64(), nullable=False),
+        pa.field("source", pa.string(), nullable=False),
+        pa.field("source_symbol", pa.string(), nullable=False),
+        pa.field("source_market", pa.string(), nullable=True),
+        pa.field("canonical_symbol", pa.string(), nullable=True),
+        pa.field("symbol", pa.string(), nullable=False),
+        pa.field("feature_version", pa.string(), nullable=False),
+        pa.field("model_version", pa.string(), nullable=False),
+        pa.field("calibration_method", pa.string(), nullable=True),
+        pa.field("prob_up_15m", pa.float64(), nullable=False),
+        pa.field("raw_prob_up_15m", pa.float64(), nullable=True),
+        pa.field("confidence_bucket", pa.string(), nullable=False),
+        pa.field("top_features_json", pa.string(), nullable=False),
+        pa.field("feature_values_json", pa.string(), nullable=True),
+    ],
+    metadata=_table_metadata("predictions"),
+)
+
+
+# ---------------------------------------------------------------------------
 # quarantine — abnormal rows isolated by the validation layer (issue #4)
 # ---------------------------------------------------------------------------
 #
@@ -384,6 +416,7 @@ TABLE_NAMES: tuple[str, ...] = (
     "symbol_mapping",
     "features_15m_v1",
     "labels_15m_v1",
+    "predictions",
     "quarantine",
 )
 
@@ -398,5 +431,6 @@ SCHEMAS: dict[str, pa.Schema] = {
     "symbol_mapping": SCHEMA_SYMBOL_MAPPING,
     "features_15m_v1": SCHEMA_FEATURES_15M_V1,
     "labels_15m_v1": SCHEMA_LABELS_15M_V1,
+    "predictions": SCHEMA_PREDICTIONS,
     "quarantine": SCHEMA_QUARANTINE,
 }
