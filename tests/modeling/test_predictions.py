@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import xgboost as xgb
 
 from bigan.canonical.writer import WarehouseWriter, warehouse_files
 
@@ -28,23 +30,44 @@ def _feature_row(ts: int, mid_price: float) -> dict:
 
 
 def _model():
-    from bigan.modeling import XGBoostV1Model, XGBoostV1Stump
+    from bigan.modeling import XGBoostV1Model
 
+    feature_columns = ("spread", "mid_price", "ret_15m")
+    matrix = np.asarray(
+        [
+            [0.02, 0.40, -0.10],
+            [0.02, 0.45, -0.05],
+            [0.02, 0.55, 0.05],
+            [0.02, 0.60, 0.10],
+        ],
+        dtype=float,
+    )
+    labels = np.asarray([0, 0, 1, 1], dtype=float)
+    booster = xgb.train(
+        {
+            "objective": "binary:logistic",
+            "eval_metric": "logloss",
+            "tree_method": "hist",
+            "seed": 0,
+            "nthread": 1,
+            "eta": 1.0,
+            "max_depth": 2,
+            "min_child_weight": 0,
+        },
+        xgb.DMatrix(matrix, label=labels, feature_names=list(feature_columns)),
+        num_boost_round=3,
+        verbose_eval=False,
+    )
+    booster.set_attr(
+        model_version="xgboost-v1",
+        feature_columns=json.dumps(list(feature_columns)),
+        params=json.dumps({"max_depth": 2, "rounds": 3}),
+    )
     return XGBoostV1Model(
         model_version="xgboost-v1",
-        feature_columns=("spread", "mid_price", "ret_15m"),
-        base_score=0.0,
-        stumps=(
-            XGBoostV1Stump(
-                feature="mid_price",
-                threshold=0.50,
-                left_value=-1.0,
-                right_value=1.0,
-                gain=2.0,
-            ),
-        ),
-        feature_means={"spread": 0.02, "mid_price": 0.50, "ret_15m": 0.0},
-        params={"rounds": 1, "learning_rate": 1.0, "l2_penalty": 0.0, "max_depth": 1},
+        feature_columns=feature_columns,
+        booster=booster,
+        params={"max_depth": 2, "rounds": 3},
     )
 
 

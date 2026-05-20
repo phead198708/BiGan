@@ -26,6 +26,10 @@ dependencies = [
     "pyarrow>=15,<19",
     "duckdb>=1.0,<2",
 
+    # Model training
+    "numpy>=1.26,<3",
+    "xgboost>=3,<4",
+
     # Observability
     "structlog>=24.1,<26",
     "prometheus-client>=0.20,<1",

@@ -8,6 +8,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import xgboost as xgb
 
 
 def _sample(feature_ts: int, mid_price: float, label: bool) -> dict:
@@ -93,12 +94,14 @@ def test_train_xgboost_v1_tunes_saves_metrics_and_feature_importance(tmp_path: P
         rounds_grid=(2, 5),
         learning_rate_grid=(0.30, 0.60),
         l2_penalty_grid=(0.0, 1.0),
+        max_depth_grid=(1, 2),
     )
     first = train_xgboost_v1(dataset_dir, first_output, config=config)
     second = train_xgboost_v1(dataset_dir, second_output, config=config)
 
     assert first.model_version == "xgboost-v1"
     assert first.best_params["rounds"] in (2, 5)
+    assert first.best_params["max_depth"] in (1, 2)
     assert first.metrics["val"]["sample_count"] == 4
     assert first.metrics["test"]["roc_auc"] == pytest.approx(1.0)
     assert first.metrics["test"]["brier_score"] < 0.25
@@ -116,6 +119,18 @@ def test_train_xgboost_v1_tunes_saves_metrics_and_feature_importance(tmp_path: P
         (first_output / "model.json").read_text(encoding="utf-8")
     )
     assert second.metrics == first.metrics
+    assert "logistic-loss-gradient-boosted-stumps" not in (
+        first_output / "model.json"
+    ).read_text(encoding="utf-8")
+
+    booster = xgb.Booster()
+    booster.load_model(str(first_output / "model.json"))
+    assert booster.attr("model_version") == "xgboost-v1"
+    assert json.loads(booster.attr("feature_columns") or "[]") == [
+        "spread",
+        "mid_price",
+        "ret_15m",
+    ]
 
 
 def test_loaded_xgboost_v1_predicts_and_explains_top_features(tmp_path: Path) -> None:
@@ -127,7 +142,11 @@ def test_loaded_xgboost_v1_predicts_and_explains_top_features(tmp_path: Path) ->
     train_xgboost_v1(
         dataset_dir,
         output_dir,
-        config=XGBoostV1Config(rounds_grid=(5,), learning_rate_grid=(0.60,)),
+        config=XGBoostV1Config(
+            rounds_grid=(5,),
+            learning_rate_grid=(0.60,),
+            max_depth_grid=(2,),
+        ),
     )
 
     model = load_xgboost_v1_model(output_dir / "model.json")

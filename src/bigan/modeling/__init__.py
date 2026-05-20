@@ -40,7 +40,6 @@ from .xgboost_v1 import (
     XGBoostV1Config,
     XGBoostV1Model,
     XGBoostV1Report,
-    XGBoostV1Stump,
     load_xgboost_v1_model,
     train_xgboost_v1,
 )
@@ -65,7 +64,6 @@ __all__ = [
     "XGBoostV1Config",
     "XGBoostV1Model",
     "XGBoostV1Report",
-    "XGBoostV1Stump",
     "assemble_training_dataset",
     "confidence_bucket",
     "fit_calibration_from_predictions",
