@@ -10,6 +10,8 @@ from typing import Any
 import numpy as np
 import xgboost as xgb
 
+from bigan.serving import write_feature_schema_artifact
+
 from .logistic import (
     _as_float,
     _labels,
@@ -227,6 +229,13 @@ def train_xgboost_v1(
         json.dumps(feature_importance, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    write_feature_schema_artifact(
+        target / "feature_schema.json",
+        feature_columns,
+        feature_version=_first_or_none(dataset["manifest"].get("feature_versions")),
+        dataset_version=_optional_str(dataset["manifest"].get("dataset_version")),
+        model_version=XGBOOST_MODEL_VERSION,
+    )
     (target / "manifest.json").write_text(
         json.dumps(report.to_dict(), indent=2, sort_keys=True),
         encoding="utf-8",
@@ -331,3 +340,9 @@ def _feature_importance(booster: xgb.Booster) -> list[dict[str, float | int | st
 
 def _optional_str(value: Any) -> str | None:
     return None if value is None else str(value)
+
+
+def _first_or_none(value: Any) -> str | None:
+    if isinstance(value, list | tuple) and value:
+        return _optional_str(value[0])
+    return _optional_str(value)

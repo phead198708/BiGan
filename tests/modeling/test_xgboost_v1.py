@@ -111,7 +111,12 @@ def test_train_xgboost_v1_tunes_saves_metrics_and_feature_importance(tmp_path: P
     assert (first_output / "xgboost_config.json").exists()
     assert (first_output / "metrics.json").exists()
     assert (first_output / "feature_importance.json").exists()
+    assert (first_output / "feature_schema.json").exists()
     assert (first_output / "manifest.json").exists()
+    feature_schema = json.loads((first_output / "feature_schema.json").read_text(encoding="utf-8"))
+    assert feature_schema["feature_columns"] == ["spread", "mid_price", "ret_15m"]
+    assert feature_schema["model_version"] == "xgboost-v1"
+    assert feature_schema["schema_hash"]
     assert json.loads((first_output / "feature_importance.json").read_text(encoding="utf-8"))[
         0
     ] == first.feature_importance[0]
