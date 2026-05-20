@@ -20,6 +20,7 @@ from .evaluation import (
     save_evaluation_report,
 )
 from .execution import (
+    NoQuoteAvailableError,
     Quote,
     SimulatedTakerTrade,
     TakerExecutionSettings,
@@ -60,6 +61,7 @@ __all__ = [
     "DEFAULT_HOLD_MS",
     "DEFAULT_THRESHOLDS",
     "MetricStability",
+    "NoQuoteAvailableError",
     "PredictionSignal",
     "PredictionEvaluationReport",
     "Quote",

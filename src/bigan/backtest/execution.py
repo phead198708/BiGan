@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from .config import BacktestConfig
 
 
+class NoQuoteAvailableError(LookupError):
+    """Raised when no quote exists for a requested execution timestamp."""
+
+
 @dataclass(frozen=True, slots=True)
 class TakerExecutionSettings:
     """Cost and latency assumptions for taker fills."""
@@ -159,7 +163,7 @@ def _first_quote_at_or_after(
     for quote in quotes:
         if quote.ts >= target_ts:
             return quote
-    raise ValueError(f"no {leg} quote available at or after {target_ts}")
+    raise NoQuoteAvailableError(f"no {leg} quote available at or after {target_ts}")
 
 
 def _validate_settings(settings: TakerExecutionSettings) -> None:

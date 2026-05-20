@@ -7,7 +7,13 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .execution import Quote, SimulatedTakerTrade, TakerExecutionSettings, simulate_taker_long_trade
+from .execution import (
+    NoQuoteAvailableError,
+    Quote,
+    SimulatedTakerTrade,
+    TakerExecutionSettings,
+    simulate_taker_long_trade,
+)
 
 DEFAULT_THRESHOLDS: tuple[float, ...] = (0.55, 0.60, 0.65)
 DEFAULT_HOLD_MS = 15 * 60 * 1000
@@ -107,9 +113,7 @@ def run_threshold_strategy(
                 exit_decision_ts=signal.ts + hold_ms,
                 settings=settings,
             )
-        except ValueError as exc:
-            if "quote" not in str(exc):
-                raise
+        except NoQuoteAvailableError:
             unfilled_signals += 1
             continue
         trades.append(

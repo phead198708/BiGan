@@ -69,6 +69,29 @@ def test_threshold_strategy_summary_uses_net_returns_after_costs() -> None:
     assert result.summary.average_net_return == pytest.approx(trade.execution.net_return)
 
 
+def test_threshold_strategy_counts_missing_quote_as_unfilled() -> None:
+    result = run_threshold_strategy(
+        signals=[PredictionSignal(ts=0, prob_up_15m=0.70, source_symbol="tok-up")],
+        quotes=[Quote(ts=0, bid_price=0.49, ask_price=0.51)],
+        settings=TakerExecutionSettings(fee_bps=0, slippage_bps=0, latency_ms=0),
+        threshold=0.65,
+    )
+
+    assert result.summary.threshold_signals == 1
+    assert result.summary.unfilled_signals == 1
+    assert result.summary.trade_count == 0
+
+
+def test_threshold_strategy_surfaces_bad_quote_validation_errors() -> None:
+    with pytest.raises(ValueError, match="bid_price"):
+        run_threshold_strategy(
+            signals=[PredictionSignal(ts=0, prob_up_15m=0.70, source_symbol="tok-up")],
+            quotes=[Quote(ts=0, bid_price=0.52, ask_price=0.51)],
+            settings=TakerExecutionSettings(fee_bps=0, slippage_bps=0, latency_ms=0),
+            threshold=0.65,
+        )
+
+
 def test_threshold_sweep_defaults_to_requested_thresholds() -> None:
     results = run_threshold_sweep(
         signals=[PredictionSignal(ts=0, prob_up_15m=0.60)],

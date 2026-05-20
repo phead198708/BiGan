@@ -6,6 +6,7 @@ import pytest
 
 from bigan.backtest import (
     BacktestConfig,
+    NoQuoteAvailableError,
     Quote,
     TakerExecutionSettings,
     simulate_taker_long_trade,
@@ -65,7 +66,7 @@ def test_taker_execution_settings_from_backtest_config() -> None:
 
 
 def test_taker_long_trade_rejects_missing_exit_quote() -> None:
-    with pytest.raises(ValueError, match="exit quote"):
+    with pytest.raises(NoQuoteAvailableError, match="exit quote"):
         simulate_taker_long_trade(
             quotes=[Quote(ts=1_000, bid_price=0.49, ask_price=0.51)],
             decision_ts=1_000,
