@@ -11,6 +11,7 @@ from typing import Any
 
 import duckdb
 
+from .drift import DRIFT_METRICS_DDL
 from .incidents import DATA_QUALITY_INCIDENTS_DDL
 
 PREDICTION_EVENTS_DDL = """
@@ -61,6 +62,7 @@ MONITORING_TABLES_DDL: tuple[str, ...] = (
     PREDICTION_OUTCOMES_DDL,
     MODEL_MONITORING_DAILY_DDL,
     DATA_QUALITY_INCIDENTS_DDL,
+    DRIFT_METRICS_DDL,
 )
 
 

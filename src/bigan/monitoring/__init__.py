@@ -14,6 +14,17 @@ from .events import (
     record_prediction_outcome,
     summarize_model_monitoring_daily,
 )
+from .drift import (
+    DRIFT_METRICS_DDL,
+    DriftMetricRow,
+    compute_feature_drift,
+    drift_metrics_json,
+    drift_report_from_rows,
+    kolmogorov_smirnov_statistic,
+    population_stability_index,
+    wasserstein_distance,
+    write_drift_metrics,
+)
 from .incidents import (
     DATA_QUALITY_INCIDENTS_DDL,
     INCIDENT_SEVERITIES,
@@ -26,6 +37,7 @@ from .incidents import (
 
 __all__ = [
     "DATA_QUALITY_INCIDENTS_DDL",
+    "DRIFT_METRICS_DDL",
     "INCIDENT_SEVERITIES",
     "INCIDENT_TYPES",
     "MODEL_MONITORING_DAILY_DDL",
@@ -33,15 +45,23 @@ __all__ = [
     "PREDICTION_EVENTS_DDL",
     "PREDICTION_OUTCOMES_DDL",
     "DataQualityIncident",
+    "DriftMetricRow",
     "MonitoringDailyRow",
     "PredictionEvent",
     "PredictionOutcome",
     "compute_brier_component",
+    "compute_feature_drift",
+    "drift_metrics_json",
+    "drift_report_from_rows",
     "initialize_monitoring_tables",
+    "kolmogorov_smirnov_statistic",
     "open_data_quality_incidents",
+    "population_stability_index",
     "record_prediction_event",
     "record_prediction_outcome",
     "record_data_quality_incident",
     "resolve_data_quality_incident",
     "summarize_model_monitoring_daily",
+    "wasserstein_distance",
+    "write_drift_metrics",
 ]
