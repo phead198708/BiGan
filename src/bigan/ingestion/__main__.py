@@ -26,8 +26,10 @@ from bigan.labels import run_label_batch
 from bigan.modeling import (
     LogisticBaselineConfig,
     SplitConfig,
+    XGBoostV1Config,
     assemble_training_dataset,
     train_logistic_baseline,
+    train_xgboost_v1,
 )
 
 from .backfill import BackfillService, GapWindow
@@ -103,6 +105,14 @@ LOGISTIC_DATASET_DIR_OPTION = typer.Option(
 LOGISTIC_OUTPUT_DIR_OPTION = typer.Option(
     Path("data/model-runs/logreg-baseline-v1"),
     help="Directory for logistic baseline artifacts.",
+)
+XGBOOST_DATASET_DIR_OPTION = typer.Option(
+    Path("data/training-datasets/bigan-training-15m-v1"),
+    help="Training dataset directory produced by training-dataset-v1.",
+)
+XGBOOST_OUTPUT_DIR_OPTION = typer.Option(
+    Path("data/model-runs/xgboost-v1"),
+    help="Directory for XGBoost-v1 artifacts.",
 )
 
 
@@ -718,6 +728,29 @@ def logistic_baseline_v1(
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 
 
+@app.command("xgboost-v1")
+def xgboost_v1(
+    dataset_dir: Path = XGBOOST_DATASET_DIR_OPTION,
+    output_dir: Path = XGBOOST_OUTPUT_DIR_OPTION,
+    rounds_grid: str = typer.Option("20,50", help="Comma-separated boosting-round grid."),
+    learning_rate_grid: str = typer.Option("0.05,0.10", help="Comma-separated learning-rate grid."),
+    l2_penalty_grid: str = typer.Option("0.0,1.0", help="Comma-separated L2 penalty grid."),
+) -> None:
+    """Train deterministic XGBoost-v1 candidate artifacts."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = train_xgboost_v1(
+        dataset_dir,
+        output_dir,
+        config=XGBoostV1Config(
+            rounds_grid=_parse_int_grid(rounds_grid),
+            learning_rate_grid=_parse_float_grid(learning_rate_grid),
+            l2_penalty_grid=_parse_float_grid(l2_penalty_grid),
+        ),
+    )
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
 @app.command("backtest-config")
 def backtest_config(
     config_path: Path = BACKTEST_CONFIG_PATH_ARGUMENT,
@@ -888,6 +921,26 @@ def backfill(
 
     result = asyncio.run(_run())
     typer.echo(json.dumps(result, indent=2))
+
+
+def _parse_int_grid(value: str) -> tuple[int, ...]:
+    try:
+        parsed = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as exc:
+        raise typer.BadParameter("expected comma-separated integers") from exc
+    if not parsed:
+        raise typer.BadParameter("expected at least one integer")
+    return parsed
+
+
+def _parse_float_grid(value: str) -> tuple[float, ...]:
+    try:
+        parsed = tuple(float(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as exc:
+        raise typer.BadParameter("expected comma-separated numbers") from exc
+    if not parsed:
+        raise typer.BadParameter("expected at least one number")
+    return parsed
 
 
 if __name__ == "__main__":
