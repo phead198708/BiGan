@@ -23,6 +23,15 @@ from .registry import (
     register_model,
     retire_model,
 )
+from .retraining import (
+    CHALLENGER_TRIGGER_STATUSES,
+    CHALLENGER_TRIGGERS_DDL,
+    ChallengerTriggerDecision,
+    RetrainingTriggerRules,
+    evaluate_challenger_trigger,
+    record_challenger_trigger,
+    register_training_result_as_challenger,
+)
 from .shadow import (
     ShadowComparisonReport,
     ShadowPredictionPair,
@@ -34,6 +43,8 @@ from .shadow import (
 
 __all__ = [
     "DEPLOYMENT_STATUSES",
+    "CHALLENGER_TRIGGER_STATUSES",
+    "CHALLENGER_TRIGGERS_DDL",
     "MODEL_DEPLOYMENTS_TABLE_DDL",
     "MODEL_DEPLOYMENTS_VIEWS_DDL",
     "MODEL_REGISTRY_STATUSES",
@@ -41,6 +52,8 @@ __all__ = [
     "MODEL_REGISTRY_VIEWS_DDL",
     "ModelDeploymentRecord",
     "ModelRegistryRecord",
+    "ChallengerTriggerDecision",
+    "RetrainingTriggerRules",
     "ShadowComparisonReport",
     "ShadowPredictionPair",
     "complete_deployment",
@@ -49,11 +62,14 @@ __all__ = [
     "current_champion",
     "distribution_kl_divergence",
     "distribution_wasserstein_distance",
+    "evaluate_challenger_trigger",
     "initialize_mlops_db",
     "model_artifact_uri",
     "promote_model",
     "record_deployment",
+    "record_challenger_trigger",
     "register_model",
+    "register_training_result_as_challenger",
     "retire_model",
     "rollback_deployment",
     "run_shadow_comparison",
