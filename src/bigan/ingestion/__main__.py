@@ -23,6 +23,7 @@ from bigan.canonical.query import open_warehouse, warehouse_summary
 from bigan.canonical.symbols import SymbolMapper
 from bigan.features import run_feature_batch, run_feature_quality_sql_checks
 from bigan.labels import run_label_batch
+from bigan.modeling import SplitConfig, assemble_training_dataset
 
 from .backfill import BackfillService, GapWindow
 from .clob_rest import PolymarketRestClient
@@ -85,6 +86,10 @@ SOAK_SUMMARY_PATH_OPTION = typer.Option(
 BACKTEST_CONFIG_PATH_ARGUMENT = typer.Argument(
     ...,
     help="Backtest YAML or JSON config path.",
+)
+TRAINING_DATASET_OUTPUT_DIR_OPTION = typer.Option(
+    Path("data/training-datasets/bigan-training-15m-v1"),
+    help="Directory for train.parquet, val.parquet, test.parquet, and manifest.json.",
 )
 
 
@@ -644,6 +649,37 @@ def labels_15m_v1(
             indent=2,
         )
     )
+
+
+@app.command("training-dataset-v1")
+def training_dataset_v1(
+    output_dir: Path = TRAINING_DATASET_OUTPUT_DIR_OPTION,
+    min_completeness_score: float = typer.Option(
+        0.80,
+        help="Minimum feature completeness_score accepted for training samples.",
+    ),
+    train_fraction: float = typer.Option(
+        0.60,
+        help="Oldest fraction of rows assigned to train.",
+    ),
+    val_fraction: float = typer.Option(
+        0.20,
+        help="Next fraction of rows assigned to validation; the remainder is test.",
+    ),
+) -> None:
+    """Assemble train/val/test samples from features_15m_v1 and labels_15m_v1."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = assemble_training_dataset(
+        settings.warehouse_dir,
+        output_dir,
+        split_config=SplitConfig(
+            train_fraction=train_fraction,
+            val_fraction=val_fraction,
+        ),
+        min_completeness_score=min_completeness_score,
+    )
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 
 
 @app.command("backtest-config")
