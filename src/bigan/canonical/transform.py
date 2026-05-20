@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from .schemas import PROVENANCE_WS
+from .symbols import symbol_mapping_row
 
 # Source identifier for Polymarket payloads. Multi-source extension (#24)
 # would add ``coinbase``, ``binance``, etc.
@@ -100,9 +101,10 @@ def _identity_columns(
         "source": SOURCE_POLYMARKET,
         "source_symbol": str(asset_id),
         "source_market": str(raw["market"]) if raw.get("market") is not None else None,
-        # canonical_symbol is populated by the #22 symbol mapping enrichment
-        # step in the ETL runner. Unknown mappings remain NULL.
-        "canonical_symbol": None,
+        # The live runner annotates Gamma-discovered outcome tokens before
+        # archiving. Unknown or historical rows can still be enriched later
+        # by the #22 symbol mapping path.
+        "canonical_symbol": _optional_str(raw.get("canonical_symbol")),
         "source_channel": source_channel or _optional_str(raw.get("source_channel")),
         "provenance": str(provenance),
     }
@@ -249,7 +251,7 @@ def derive_top_of_book_from_price_change(
             "source": SOURCE_POLYMARKET,
             "source_symbol": str(asset_id),
             "source_market": str(market) if market is not None else None,
-            "canonical_symbol": None,
+            "canonical_symbol": _optional_str(entry.get("canonical_symbol")),
             "source_channel": resolved_source_channel,
             "provenance": str(provenance),
             "bid_price": bid,
@@ -392,6 +394,53 @@ def transform_last_trade_price_event(
 
 
 # ---------------------------------------------------------------------------
+# symbol_mapping -> symbol_mapping
+# ---------------------------------------------------------------------------
+
+
+def transform_symbol_mapping_event(
+    raw: dict[str, Any],
+    *,
+    ingest_ts: int,
+    source_timestamp_ms: int | None = None,
+) -> list[dict[str, Any]]:
+    """Map Gamma-discovered token metadata to symbol_mapping rows."""
+
+    if raw.get("event_type") != "symbol_mapping":
+        return []
+    mappings = raw.get("mappings")
+    if not isinstance(mappings, list):
+        return []
+    fallback_ts = source_timestamp_ms if source_timestamp_ms is not None else ingest_ts
+    rows: list[dict[str, Any]] = []
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            continue
+        try:
+            rows.append(
+                symbol_mapping_row(
+                    source=mapping["source"],
+                    source_symbol=mapping["source_symbol"],
+                    source_market=mapping.get("source_market"),
+                    canonical_symbol=mapping["canonical_symbol"],
+                    effective_from_ts=int(
+                        mapping.get("effective_from_ts")
+                        if mapping.get("effective_from_ts") is not None
+                        else fallback_ts
+                    ),
+                    effective_to_ts=mapping.get("effective_to_ts"),
+                    ingest_ts=int(mapping.get("ingest_ts") or ingest_ts),
+                    message_ts=int(mapping.get("message_ts") or fallback_ts),
+                    symbol_kind=mapping.get("symbol_kind"),
+                    metadata_json=mapping.get("metadata_json"),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Generic dispatcher
 # ---------------------------------------------------------------------------
 
@@ -480,5 +529,13 @@ def transform_event(
             record_provenance=record_provenance,
         )
         return {"raw_trades": [row]} if row is not None else {}
+
+    if event_type == "symbol_mapping":
+        rows = transform_symbol_mapping_event(
+            raw,
+            ingest_ts=ingest_ts,
+            source_timestamp_ms=source_timestamp_ms,
+        )
+        return {"symbol_mapping": rows} if rows else {}
 
     return {}

@@ -510,6 +510,72 @@ def test_etl_enriches_canonical_symbol_from_mapping(tmp_path: Path) -> None:
     assert mapping["metadata_json"] == '{"outcome":"yes"}'
 
 
+def test_etl_persists_gamma_symbol_mapping_and_annotated_quote(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    base = _ts(2026, 5, 10, 12, 0)
+    canonical_symbol = "BTC-15M:btc-updown-15m-1778423700:UP"
+    src = raw_dir / "2026-05-10.ndjson.gz"
+    _write_ndjson_gz(
+        src,
+        [
+            {
+                "receive_time": base,
+                "source_timestamp_ms": base,
+                "raw": {
+                    "event_type": "symbol_mapping",
+                    "mappings": [
+                        {
+                            "source": "polymarket",
+                            "source_symbol": "tok-up",
+                            "source_market": "0xmkt",
+                            "canonical_symbol": canonical_symbol,
+                            "effective_from_ts": base,
+                            "symbol_kind": "btc_15m_outcome",
+                            "metadata_json": '{"outcome_side":"UP"}',
+                        }
+                    ],
+                },
+            },
+            {
+                "receive_time": base + 100,
+                "raw": {
+                    "event_type": "best_bid_ask",
+                    "asset_id": "tok-up",
+                    "market": "0xmkt",
+                    "canonical_symbol": canonical_symbol,
+                    "outcome_side": "UP",
+                    "best_bid": "0.50",
+                    "best_ask": "0.52",
+                    "spread": "0.02",
+                    "timestamp": str(base + 100),
+                },
+            },
+        ],
+    )
+
+    import os
+
+    os.utime(src, (1, 1))
+
+    warehouse = tmp_path / "warehouse"
+    report = run_etl_batch(
+        raw_dir=raw_dir,
+        warehouse_dir=warehouse,
+        lag_seconds=0.0,
+    )
+
+    assert report.rows_per_table["symbol_mapping"] == 1
+    assert report.rows_per_table["raw_top_of_book"] == 1
+    tob = pq.ParquetFile(warehouse_files(warehouse, "raw_top_of_book")[0]).read().to_pylist()[0]
+    mapping = pq.ParquetFile(warehouse_files(warehouse, "symbol_mapping")[0]).read().to_pylist()[0]
+    assert tob["canonical_symbol"] == canonical_symbol
+    assert mapping["canonical_symbol"] == canonical_symbol
+    assert mapping["metadata_json"] == '{"outcome_side":"UP"}'
+
+
 def test_etl_quarantines_stale_timestamp_with_configurable_threshold(
     tmp_path: Path,
 ) -> None:

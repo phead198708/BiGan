@@ -82,6 +82,7 @@ def test_features_schema_declares_quality_columns() -> None:
         "quote_age_ms",
         "depth_age_ms",
         "trade_age_ms",
+        "market_implied_prob",
     }.issubset(names)
 
 

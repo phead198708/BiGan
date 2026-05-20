@@ -192,8 +192,8 @@ def _validate_feature_columns(tables: dict[str, pa.Table], feature_columns: tupl
         missing = sorted(set(feature_columns) - set(table.schema.names))
         if missing:
             raise ValueError(f"{split} split missing feature columns: {', '.join(missing)}")
-        if "label_up_15m" not in table.schema.names:
-            raise ValueError(f"{split} split missing label_up_15m")
+        if "label_profit_up_15m" not in table.schema.names and "label_up_15m" not in table.schema.names:
+            raise ValueError(f"{split} split missing label_profit_up_15m or label_up_15m")
 
 
 def _fit_preprocessor(
@@ -236,7 +236,14 @@ def _matrix(
 
 
 def _labels(rows: list[dict[str, Any]]) -> list[int]:
-    return [1 if bool(row["label_up_15m"]) else 0 for row in rows]
+    return [1 if _label_value(row) else 0 for row in rows]
+
+
+def _label_value(row: dict[str, Any]) -> bool:
+    value = row.get("label_profit_up_15m")
+    if value is None:
+        value = row["label_up_15m"]
+    return bool(value)
 
 
 def _fit_logistic(

@@ -382,7 +382,8 @@ remain `NULL` in raw tables so ingestion can continue safely.
 - **raw_spot_price**: Coinbase/Kraken BTC spot reference ticks with `price`, `bid_price`, `ask_price`
 - **raw_oracle_price**: Chainlink BTC/USD latest-round rows with `price`, `answer`, `decimals`, `round_id`
 - **symbol_mapping**: Temporal source-symbol lookup with `effective_from_ts`, optional `effective_to_ts`, `symbol_kind`, and `metadata_json`
-- **features_15m_v1**: Minute-close, strictly backward-looking model feature rows with `feature_ts`, `symbol`, `feature_version`, and quality fields
+- **features_15m_v1**: Minute-close, strictly backward-looking model feature rows with `feature_ts`, `symbol`, `feature_version`, quality fields, and `market_implied_prob`
+- **labels_15m_v1**: Independent 15-minute UP-token profitability labels aligned to `feature_ts`, with Polymarket round prices, `direction_up_15m`, entry ask/cost, settlement price, realized return, and `label_profit_up_15m`
 - **quarantine**: Anomalous rows isolated by the validation layer with `target_table`, `rule`, `detail`, `payload_json`
 
 ## Feature aggregation (issue #7)
@@ -394,9 +395,16 @@ minute-grain rows to `features_15m_v1`. The aggregation timestamp
 feature_ts]`.
 
 The v1 table includes `feature_ts`, `symbol`, `feature_version`, spread,
+`market_implied_prob` from the current UP-token ask,
 mid-price, microprice, OBI L1/L5/L10, signed 1-minute volume, 1-minute trade
 imbalance, `ret_1m`/`ret_5m`/`ret_15m`, and realized volatility over
 1/5/15-minute windows.
+
+`labels_15m_v1` separates the underlying BTC direction from the executable
+UP-token trade target. `direction_up_15m` records whether the round settled UP;
+`label_profit_up_15m` is true only when `settlement_price - entry_cost > 0`.
+The legacy `label_up_15m` column is retained as a compatibility alias for the
+profitability target.
 
 Issue #8 adds data-quality fields to every feature row:
 

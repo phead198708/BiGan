@@ -45,6 +45,7 @@ def _feature_row(
         "depth_age_ms": 0,
         "trade_age_ms": 0,
         "spread": 0.02,
+        "market_implied_prob": mid_price + 0.01,
         "mid_price": mid_price,
         "microprice": mid_price + 0.001,
         "obi_l1": 0.1,
@@ -81,16 +82,25 @@ def _label_row(
         "source": "polymarket",
         "source_symbol": source_symbol,
         "source_market": "0xmkt",
-        "canonical_symbol": "BTC-UP-15M",
-        "symbol": "BTC-UP-15M",
-        "label_version": "bigan-labels-15m-v1.0.0",
+        "canonical_symbol": "BTC-15M:btc-updown-15m-test:UP",
+        "symbol": "BTC-15M:btc-updown-15m-test:UP",
+        "label_version": "bigan-labels-15m-profitability-v1.1.0",
+        "label_kind": "up_token_profitability",
         "round_slug": f"btc-updown-15m-{start_ts // 1000}",
         "round_start_ts": start_ts,
         "round_end_ts": resolved_target_ts,
         "start_price": 100.0,
         "target_price": 101.0 if label_up_15m else 99.0,
+        "direction_up_15m": label_up_15m,
+        "entry_ask_price": 0.40,
+        "settlement_price": 1.0 if label_up_15m else 0.0,
+        "entry_fee": 0.0,
+        "entry_cost": 0.40,
+        "realized_return": 0.60 if label_up_15m else -0.40,
+        "fee_bps": 0.0,
+        "label_profit_up_15m": label_up_15m,
         "label_up_15m": label_up_15m,
-        "label_source": "polymarket_gamma_event_metadata",
+        "label_source": "polymarket_gamma_event_metadata_entry_ask_profitability",
     }
 
 
@@ -150,8 +160,8 @@ def test_assemble_training_dataset_joins_filters_and_time_splits(tmp_path: Path)
     assert report.splits["train"].positive_count == 2
     assert report.splits["train"].negative_count == 1
     assert report.feature_versions == ("bigan-mvp-v1.0.0",)
-    assert report.label_versions == ("bigan-labels-15m-v1.0.0",)
-    assert {"spread", "mid_price", "ret_15m"} <= set(report.feature_columns)
+    assert report.label_versions == ("bigan-labels-15m-profitability-v1.1.0",)
+    assert {"spread", "market_implied_prob", "mid_price", "ret_15m"} <= set(report.feature_columns)
 
     train = pq.read_table(output_dir / "train.parquet")
     val = pq.read_table(output_dir / "val.parquet")
@@ -168,6 +178,10 @@ def test_assemble_training_dataset_joins_filters_and_time_splits(tmp_path: Path)
         )
     )
     assert "label_up_15m" in train.schema.names
+    assert "label_profit_up_15m" in train.schema.names
+    assert "direction_up_15m" in train.schema.names
+    assert "realized_return" in train.schema.names
+    assert "market_implied_prob" in train.schema.names
     assert "mid_price" in train.schema.names
 
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -211,3 +225,22 @@ def test_assemble_training_dataset_rejects_label_leakage(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="future information leakage"):
         assemble_training_dataset(warehouse, tmp_path / "dataset")
+
+
+def test_assemble_training_dataset_allows_pre_round_market_entry(tmp_path: Path) -> None:
+    from bigan.modeling.dataset import assemble_training_dataset
+
+    warehouse = tmp_path / "warehouse"
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    label = _label_row(t0, target_ts=t0 + 20 * 60_000)
+    label["round_start_ts"] = t0 + 5 * 60_000
+    label["round_end_ts"] = t0 + 20 * 60_000
+    _write_training_fixture(
+        warehouse,
+        feature_rows=[_feature_row(t0)],
+        label_rows=[label],
+    )
+
+    report = assemble_training_dataset(warehouse, tmp_path / "dataset")
+
+    assert report.rows_written == 1

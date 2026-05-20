@@ -6,8 +6,8 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
-from bigan.canonical.schemas import PROVENANCE_BACKFILL
-from bigan.ingestion.backfill import BackfillService, GapWindow
+from bigan.canonical.schemas import PROVENANCE_BACKFILL, PROVENANCE_REST_SEED
+from bigan.ingestion.backfill import BackfillService, GapWindow, synth_orderbook_record
 from bigan.ingestion.clob_rest import RestOrderbook, RestTrade
 
 # ---------------------------------------------------------------------------
@@ -150,13 +150,37 @@ def test_replays_trades_and_orderbook_with_backfill_provenance() -> None:
     for rec in sink.records:
         assert rec["raw"]["provenance"] == PROVENANCE_BACKFILL
         assert rec["receive_time"] == 999
+        assert rec["capture_timestamp_ms"] == 999
+        assert rec["source_channel"] == "clob-rest"
 
     event_types = [r["raw"]["event_type"] for r in sink.records]
     assert event_types.count("last_trade_price") == 2
     assert event_types.count("book") == 1
+    book_record = next(r for r in sink.records if r["raw"]["event_type"] == "book")
+    assert book_record["source_timestamp_ms"] == 1_700_000_030_000
+    assert book_record["raw"]["source_timestamp_ms"] == 1_700_000_030_000
+    assert book_record["raw"]["capture_timestamp_ms"] == 999
 
     # Trade rest call was scoped to the gap window.
     assert rest.trades_calls == [("0xmkt", 1_700_000_000_000, 1_700_000_030_000)]
+
+
+def test_synth_orderbook_record_carries_seed_provenance_and_timestamps() -> None:
+    record = synth_orderbook_record(
+        _book("tok-1", 1_700_000_030_000),
+        receive_time_ms=1_700_000_030_111,
+        provenance=PROVENANCE_REST_SEED,
+    )
+
+    assert record["receive_time"] == 1_700_000_030_111
+    assert record["source_timestamp_ms"] == 1_700_000_030_000
+    assert record["capture_timestamp_ms"] == 1_700_000_030_111
+    assert record["source_channel"] == "clob-rest"
+    assert record["provenance"] == PROVENANCE_REST_SEED
+    assert record["raw"]["event_type"] == "book"
+    assert record["raw"]["provenance"] == PROVENANCE_REST_SEED
+    assert record["raw"]["source_timestamp_ms"] == 1_700_000_030_000
+    assert record["raw"]["capture_timestamp_ms"] == 1_700_000_030_111
 
 
 def test_backfill_service_calls_rest_gate_before_each_fetch() -> None:

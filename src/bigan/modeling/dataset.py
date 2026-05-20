@@ -14,7 +14,7 @@ import pyarrow.parquet as pq
 from bigan.canonical.query import open_warehouse
 from bigan.canonical.schemas import SCHEMAS
 
-DATASET_VERSION = "bigan-training-15m-v1.0.0"
+DATASET_VERSION = "bigan-training-15m-profitability-v1.0.0"
 
 FEATURE_TABLE = "features_15m_v1"
 LABEL_TABLE = "labels_15m_v1"
@@ -123,7 +123,7 @@ def assemble_training_dataset(
 
     The join is point-in-time safe by construction: features and labels meet on
     ``(source, source_symbol, feature_ts)`` and the assembler rejects any joined
-    label whose ``target_ts`` is not strictly after ``feature_ts``.
+    label whose settlement ``target_ts`` is not strictly after ``feature_ts``.
     """
 
     if not 0.0 <= min_completeness_score <= 1.0:
@@ -242,7 +242,6 @@ def _count_leakage_rows(conn: duckdb.DuckDBPyConnection) -> int:
              and f.source_symbol = l.source_symbol
              and f.feature_ts = l.feature_ts
             where l.target_ts <= f.feature_ts
-               or l.round_start_ts > f.feature_ts
             """
         ).fetchone()[0]
     )
@@ -265,11 +264,20 @@ def _fetch_training_samples(
             f.feature_ts,
             f.feature_version,
             l.label_version,
+            l.label_kind,
             l.target_ts,
             l.round_start_ts,
             l.round_end_ts,
             l.start_price,
             l.target_price,
+            l.direction_up_15m,
+            l.entry_ask_price,
+            l.settlement_price,
+            l.entry_fee,
+            l.entry_cost,
+            l.realized_return,
+            l.fee_bps,
+            l.label_profit_up_15m,
             l.label_up_15m,
             f.completeness_score,
             f.data_gap_flag,
@@ -301,7 +309,8 @@ def _split_table(table: pa.Table, config: SplitConfig) -> dict[str, pa.Table]:
 
 
 def _split_stats(table: pa.Table) -> SplitStats:
-    labels = table.column("label_up_15m").to_pylist() if table.num_rows else []
+    label_column = _primary_label_column(table)
+    labels = table.column(label_column).to_pylist() if table.num_rows else []
     positive_count = sum(1 for value in labels if bool(value))
     row_count = table.num_rows
     negative_count = row_count - positive_count
@@ -324,3 +333,12 @@ def _unique_strings(table: pa.Table, column: str) -> tuple[str, ...]:
 
 def _quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
+
+
+def _primary_label_column(table: pa.Table) -> str:
+    names = set(table.schema.names)
+    if "label_profit_up_15m" in names:
+        values = table.column("label_profit_up_15m").to_pylist() if table.num_rows else []
+        if any(value is not None for value in values):
+            return "label_profit_up_15m"
+    return "label_up_15m"

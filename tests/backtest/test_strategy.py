@@ -37,7 +37,7 @@ def test_threshold_strategy_runs_long_flat_non_overlapping_trades() -> None:
         ],
         quotes=_quotes(),
         settings=TakerExecutionSettings(fee_bps=0, slippage_bps=0, latency_ms=0),
-        threshold=0.65,
+        threshold=0.05,
     )
 
     assert len(result.trades) == 2
@@ -59,7 +59,7 @@ def test_threshold_strategy_summary_uses_net_returns_after_costs() -> None:
         signals=[PredictionSignal(ts=0, prob_up_15m=0.70, source_symbol="tok-up")],
         quotes=_quotes(),
         settings=TakerExecutionSettings(fee_bps=100, slippage_bps=100, latency_ms=0),
-        threshold=0.65,
+        threshold=0.05,
     )
 
     trade = result.trades[0]
@@ -74,12 +74,66 @@ def test_threshold_strategy_counts_missing_quote_as_unfilled() -> None:
         signals=[PredictionSignal(ts=0, prob_up_15m=0.70, source_symbol="tok-up")],
         quotes=[Quote(ts=0, bid_price=0.49, ask_price=0.51)],
         settings=TakerExecutionSettings(fee_bps=0, slippage_bps=0, latency_ms=0),
-        threshold=0.65,
+        threshold=0.05,
     )
 
     assert result.summary.threshold_signals == 1
     assert result.summary.unfilled_signals == 1
     assert result.summary.trade_count == 0
+
+
+def test_threshold_strategy_can_exit_at_signal_target_ts() -> None:
+    result = run_threshold_strategy(
+        signals=[
+            PredictionSignal(
+                ts=0,
+                prob_up_15m=0.70,
+                source_symbol="tok-up",
+                target_ts=DEFAULT_HOLD_MS + 1_000,
+            )
+        ],
+        quotes=_quotes(),
+        settings=TakerExecutionSettings(fee_bps=0, slippage_bps=0, latency_ms=0),
+        threshold=0.05,
+        hold_ms=DEFAULT_HOLD_MS,
+    )
+
+    assert result.summary.trade_count == 1
+    assert result.trades[0].execution.exit_decision_ts == DEFAULT_HOLD_MS + 1_000
+    assert result.trades[0].execution.gross_exit_price == pytest.approx(0.55)
+
+
+def test_threshold_strategy_can_hold_to_binary_settlement_without_exit_quote() -> None:
+    result = run_threshold_strategy(
+        signals=[
+            PredictionSignal(
+                ts=0,
+                prob_up_15m=0.70,
+                source_symbol="tok-up",
+                target_ts=DEFAULT_HOLD_MS,
+                settlement_price=1.0,
+            )
+        ],
+        quotes=[Quote(ts=0, bid_price=0.49, ask_price=0.51)],
+        settings=TakerExecutionSettings(fee_bps=0, slippage_bps=0, latency_ms=0),
+        threshold=0.05,
+    )
+
+    assert result.summary.trade_count == 1
+    trade = result.trades[0]
+    assert trade.execution.exit_ts == DEFAULT_HOLD_MS
+    assert trade.execution.gross_exit_price == pytest.approx(1.0)
+    assert trade.execution.gross_pnl == pytest.approx(0.49)
+
+
+def test_threshold_strategy_rejects_non_future_target_ts() -> None:
+    with pytest.raises(ValueError, match="target_ts"):
+        run_threshold_strategy(
+            signals=[PredictionSignal(ts=1_000, prob_up_15m=0.70, target_ts=1_000)],
+            quotes=_quotes(),
+            settings=TakerExecutionSettings(fee_bps=0, slippage_bps=0, latency_ms=0),
+            threshold=0.05,
+        )
 
 
 def test_threshold_strategy_surfaces_bad_quote_validation_errors() -> None:
@@ -88,7 +142,7 @@ def test_threshold_strategy_surfaces_bad_quote_validation_errors() -> None:
             signals=[PredictionSignal(ts=0, prob_up_15m=0.70, source_symbol="tok-up")],
             quotes=[Quote(ts=0, bid_price=0.52, ask_price=0.51)],
             settings=TakerExecutionSettings(fee_bps=0, slippage_bps=0, latency_ms=0),
-            threshold=0.65,
+            threshold=0.05,
         )
 
 
@@ -99,8 +153,8 @@ def test_threshold_sweep_defaults_to_requested_thresholds() -> None:
         settings=TakerExecutionSettings(fee_bps=0, slippage_bps=0, latency_ms=0),
     )
 
-    assert [result.threshold for result in results] == [0.55, 0.60, 0.65]
-    assert [result.summary.trade_count for result in results] == [1, 1, 0]
+    assert [result.threshold for result in results] == [0.00, 0.03, 0.05]
+    assert [result.summary.trade_count for result in results] == [1, 1, 1]
 
 
 def test_threshold_strategy_outputs_trade_logs_and_summary(tmp_path: Path) -> None:
@@ -108,13 +162,35 @@ def test_threshold_strategy_outputs_trade_logs_and_summary(tmp_path: Path) -> No
         signals=[PredictionSignal(ts=0, prob_up_15m=0.70, source_symbol="tok-up")],
         quotes=_quotes(),
         settings=TakerExecutionSettings(fee_bps=0, slippage_bps=0, latency_ms=0),
-        thresholds=[0.65],
+        thresholds=[0.05],
     )
 
     save_threshold_strategy_outputs(results, tmp_path)
 
     summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
-    trade_log = (tmp_path / "trade_log_threshold_0_65.jsonl").read_text(encoding="utf-8")
-    assert summary[0]["threshold"] == 0.65
+    trade_log = (tmp_path / "trade_log_threshold_0_05.jsonl").read_text(encoding="utf-8")
+    assert summary[0]["threshold"] == 0.05
     assert summary[0]["trade_count"] == 1
-    assert json.loads(trade_log)["prob_up_15m"] == 0.70
+    trade = json.loads(trade_log)
+    assert trade["prob_up_15m"] == 0.70
+    assert trade["market_implied_prob"] == pytest.approx(0.51)
+    assert trade["edge"] == pytest.approx(0.19)
+
+
+def test_threshold_strategy_uses_explicit_market_implied_probability() -> None:
+    result = run_threshold_strategy(
+        signals=[
+            PredictionSignal(
+                ts=0,
+                prob_up_15m=0.70,
+                market_implied_prob=0.68,
+                source_symbol="tok-up",
+            )
+        ],
+        quotes=_quotes(),
+        settings=TakerExecutionSettings(fee_bps=0, slippage_bps=0, latency_ms=0),
+        threshold=0.05,
+    )
+
+    assert result.summary.trade_count == 0
+    assert result.summary.threshold_signals == 0

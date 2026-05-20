@@ -35,6 +35,8 @@ from .sink import Sink
 
 logger = logging.getLogger(__name__)
 
+SOURCE_CHANNEL_CLOB_REST = "clob-rest"
+
 
 #: Resolver signature: given an asset_id, return its market condition_id
 #: (or ``None`` if not currently known). Async-friendly so the runner can
@@ -216,8 +218,13 @@ class BackfillService:
     # ------------------------------------------------------------------
 
     def _synth_trade_record(self, trade: RestTrade) -> dict[str, Any]:
+        receive_time_ms = self._clock_ms()
         return {
-            "receive_time": self._clock_ms(),
+            "receive_time": receive_time_ms,
+            "source_timestamp_ms": trade.match_time_ms,
+            "capture_timestamp_ms": receive_time_ms,
+            "source_channel": SOURCE_CHANNEL_CLOB_REST,
+            "provenance": self._provenance,
             "raw": {
                 "event_type": "last_trade_price",
                 "asset_id": trade.asset_id,
@@ -227,6 +234,8 @@ class BackfillService:
                 "side": trade.side,
                 "fee_rate_bps": "0",
                 "timestamp": str(trade.match_time_ms),
+                "source_timestamp_ms": trade.match_time_ms,
+                "capture_timestamp_ms": receive_time_ms,
                 "provenance": self._provenance,
             },
         }
@@ -236,20 +245,48 @@ class BackfillService:
             await self._before_rest_call()
 
     def _synth_book_record(self, book: RestOrderbook) -> dict[str, Any]:
-        return {
-            "receive_time": self._clock_ms(),
-            "raw": {
-                "event_type": "book",
-                "asset_id": book.asset_id,
-                "market": book.market,
-                "timestamp": str(book.timestamp_ms),
-                "hash": book.hash,
-                "bids": [
-                    {"price": str(p), "size": str(s)} for p, s in book.bids
-                ],
-                "asks": [
-                    {"price": str(p), "size": str(s)} for p, s in book.asks
-                ],
-                "provenance": self._provenance,
-            },
-        }
+        return synth_orderbook_record(
+            book,
+            receive_time_ms=self._clock_ms(),
+            provenance=self._provenance,
+        )
+
+
+def synth_orderbook_record(
+    book: RestOrderbook,
+    *,
+    receive_time_ms: int,
+    provenance: str = PROVENANCE_BACKFILL,
+) -> dict[str, Any]:
+    """Build a raw NDJSON record from a CLOB REST orderbook snapshot.
+
+    ``source_timestamp_ms`` is the upstream snapshot timestamp from CLOB REST;
+    ``capture_timestamp_ms`` is our local clock when the snapshot was written.
+    Together with ``provenance`` they give downstream readers a deterministic
+    way to order snapshots coming from WS, gap backfill, and Gamma seeding.
+    """
+
+    return {
+        "receive_time": receive_time_ms,
+        "source_timestamp_ms": book.timestamp_ms,
+        "capture_timestamp_ms": receive_time_ms,
+        "source_channel": SOURCE_CHANNEL_CLOB_REST,
+        "provenance": provenance,
+        "raw": {
+            "event_type": "book",
+            "asset_id": book.asset_id,
+            "market": book.market,
+            "timestamp": str(book.timestamp_ms),
+            "source_timestamp_ms": book.timestamp_ms,
+            "capture_timestamp_ms": receive_time_ms,
+            "source_channel": SOURCE_CHANNEL_CLOB_REST,
+            "hash": book.hash,
+            "bids": [
+                {"price": str(p), "size": str(s)} for p, s in book.bids
+            ],
+            "asks": [
+                {"price": str(p), "size": str(s)} for p, s in book.asks
+            ],
+            "provenance": provenance,
+        },
+    }

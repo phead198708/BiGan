@@ -21,6 +21,7 @@ from .logistic import (
 )
 
 XGBOOST_MODEL_VERSION = "xgboost-v1"
+XGBOOST_V2_MODEL_VERSION = "xgboost-v2"
 SPLITS: tuple[str, ...] = ("train", "val", "test")
 
 
@@ -28,16 +29,19 @@ SPLITS: tuple[str, ...] = ("train", "val", "test")
 class XGBoostV1Config:
     """Parameter search space for native XGBoost v1 training."""
 
-    rounds_grid: tuple[int, ...] = (50,)
-    learning_rate_grid: tuple[float, ...] = (0.05, 0.10)
-    l2_penalty_grid: tuple[float, ...] = (0.0, 1.0)
-    max_depth_grid: tuple[int, ...] = (2, 3)
+    model_version: str = XGBOOST_MODEL_VERSION
+    rounds_grid: tuple[int, ...] = (100, 200, 300)
+    learning_rate_grid: tuple[float, ...] = (0.01, 0.05, 0.10)
+    l2_penalty_grid: tuple[float, ...] = (0.10, 1.0, 5.0)
+    max_depth_grid: tuple[int, ...] = (3, 4, 5)
     min_split_loss_grid: tuple[float, ...] = (0.0,)
-    subsample_grid: tuple[float, ...] = (1.0,)
-    colsample_bytree_grid: tuple[float, ...] = (1.0,)
+    subsample_grid: tuple[float, ...] = (0.70, 0.80, 1.0)
+    colsample_bytree_grid: tuple[float, ...] = (0.70, 0.80, 1.0)
     seed: int = 0
 
     def __post_init__(self) -> None:
+        if not self.model_version:
+            raise ValueError("model_version must not be empty")
         if not self.rounds_grid:
             raise ValueError("rounds_grid must not be empty")
         if not self.learning_rate_grid:
@@ -67,8 +71,9 @@ class XGBoostV1Config:
         if any(value <= 0.0 or value > 1.0 for value in self.colsample_bytree_grid):
             raise ValueError("colsample_bytree_grid values must be in (0, 1]")
 
-    def to_dict(self) -> dict[str, float | int | list[float] | list[int]]:
+    def to_dict(self) -> dict[str, float | int | str | list[float] | list[int]]:
         return {
+            "model_version": self.model_version,
             "rounds_grid": list(self.rounds_grid),
             "learning_rate_grid": list(self.learning_rate_grid),
             "l2_penalty_grid": list(self.l2_penalty_grid),
@@ -177,9 +182,9 @@ def train_xgboost_v1(
             verbose_eval=False,
         )
         params["rounds"] = rounds
-        _attach_model_attrs(booster, feature_columns, params)
+        _attach_model_attrs(booster, feature_columns, params, model_version=cfg.model_version)
         model = XGBoostV1Model(
-            model_version=XGBOOST_MODEL_VERSION,
+            model_version=cfg.model_version,
             feature_columns=feature_columns,
             booster=booster,
             params=params,
@@ -209,7 +214,7 @@ def train_xgboost_v1(
     target.mkdir(parents=True, exist_ok=True)
     feature_importance = _feature_importance(best_model.booster)
     report = XGBoostV1Report(
-        model_version=XGBOOST_MODEL_VERSION,
+        model_version=cfg.model_version,
         dataset_version=_optional_str(dataset["manifest"].get("dataset_version")),
         best_params=best_model.params,
         metrics=metrics_by_split,
@@ -234,13 +239,29 @@ def train_xgboost_v1(
         feature_columns,
         feature_version=_first_or_none(dataset["manifest"].get("feature_versions")),
         dataset_version=_optional_str(dataset["manifest"].get("dataset_version")),
-        model_version=XGBOOST_MODEL_VERSION,
+        model_version=cfg.model_version,
     )
     (target / "manifest.json").write_text(
         json.dumps(report.to_dict(), indent=2, sort_keys=True),
         encoding="utf-8",
     )
     return report
+
+
+def train_xgboost_v2(
+    dataset_dir: Path | str,
+    output_dir: Path | str,
+    *,
+    config: XGBoostV1Config | None = None,
+) -> XGBoostV1Report:
+    """Train an expanded XGBoost-v2 challenger search."""
+
+    cfg = config or XGBoostV1Config(
+        model_version=XGBOOST_V2_MODEL_VERSION,
+    )
+    if cfg.model_version != XGBOOST_V2_MODEL_VERSION:
+        raise ValueError(f"xgboost-v2 config must use model_version={XGBOOST_V2_MODEL_VERSION!r}")
+    return train_xgboost_v1(dataset_dir, output_dir, config=cfg)
 
 
 def load_xgboost_v1_model(path: Path | str) -> XGBoostV1Model:
@@ -315,9 +336,11 @@ def _attach_model_attrs(
     booster: xgb.Booster,
     feature_columns: tuple[str, ...],
     params: dict[str, float | int | str],
+    *,
+    model_version: str,
 ) -> None:
     booster.set_attr(
-        model_version=XGBOOST_MODEL_VERSION,
+        model_version=model_version,
         feature_columns=json.dumps(list(feature_columns)),
         params=json.dumps(params, sort_keys=True),
     )

@@ -155,6 +155,71 @@ def simulate_taker_long_trade(
     )
 
 
+def simulate_taker_long_settlement_trade(
+    *,
+    quotes: Sequence[Quote],
+    decision_ts: int,
+    settlement_ts: int,
+    settlement_price: float,
+    settings: TakerExecutionSettings,
+) -> SimulatedTakerTrade:
+    """Simulate a long-UP taker entry held to binary settlement.
+
+    Entry uses the first quote at or after ``decision_ts + latency_ms`` and
+    pays the ask. Exit is the resolved token payoff, so no exit quote, exit
+    slippage, or exit taker fee is applied.
+    """
+
+    _validate_settings(settings)
+    if settlement_ts <= decision_ts:
+        raise ValueError("settlement_ts must be greater than decision_ts")
+    if settlement_price < 0.0:
+        raise ValueError("settlement_price must be non-negative")
+    checked_quotes = sorted((_validate_quote(quote) for quote in quotes), key=lambda quote: quote.ts)
+    if not checked_quotes:
+        raise ValueError("at least one quote is required")
+
+    entry_target_ts = decision_ts + settings.latency_ms
+    entry_quote = _first_quote_at_or_after(checked_quotes, entry_target_ts, "entry")
+    fee_rate = settings.fee_bps / 10_000.0
+    slippage_rate = settings.slippage_bps / 10_000.0
+
+    gross_entry_price = entry_quote.ask_price
+    gross_exit_price = settlement_price
+    entry_slippage_price = gross_entry_price * (1.0 + slippage_rate)
+    exit_slippage_price = gross_exit_price
+    entry_fee = entry_slippage_price * fee_rate
+    exit_fee = 0.0
+    net_entry_price = entry_slippage_price + entry_fee
+    net_exit_price = exit_slippage_price
+
+    gross_pnl = gross_exit_price - gross_entry_price
+    net_pnl = net_exit_price - net_entry_price
+    return SimulatedTakerTrade(
+        decision_ts=decision_ts,
+        entry_target_ts=entry_target_ts,
+        entry_ts=entry_quote.ts,
+        exit_decision_ts=settlement_ts,
+        exit_target_ts=settlement_ts,
+        exit_ts=settlement_ts,
+        gross_entry_price=gross_entry_price,
+        gross_exit_price=gross_exit_price,
+        entry_slippage_price=entry_slippage_price,
+        exit_slippage_price=exit_slippage_price,
+        entry_fee=entry_fee,
+        exit_fee=exit_fee,
+        net_entry_price=net_entry_price,
+        net_exit_price=net_exit_price,
+        gross_pnl=gross_pnl,
+        net_pnl=net_pnl,
+        gross_return=gross_pnl / gross_entry_price,
+        net_return=net_pnl / net_entry_price,
+        fee_bps=settings.fee_bps,
+        slippage_bps=settings.slippage_bps,
+        latency_ms=settings.latency_ms,
+    )
+
+
 def _first_quote_at_or_after(
     quotes: Sequence[Quote],
     target_ts: int,

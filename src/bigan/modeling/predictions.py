@@ -67,6 +67,7 @@ def generate_prediction_rows(
                 "calibration_method": None if calibrator is None else calibrator.method,
                 "prob_up_15m": probability,
                 "raw_prob_up_15m": raw_probability,
+                "market_implied_prob": _optional_float(feature.get("market_implied_prob")),
                 "confidence_bucket": confidence_bucket(probability),
                 "top_features_json": json.dumps(top_features, sort_keys=True),
                 "feature_values_json": json.dumps(
@@ -162,3 +163,12 @@ def _validate_training_schema(row: dict[str, Any], feature_columns: tuple[str, .
 
 def _optional_str(value: Any) -> str | None:
     return None if value is None else str(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

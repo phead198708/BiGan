@@ -14,7 +14,14 @@ from contextlib import suppress
 
 from prometheus_client import start_http_server
 
-from .backfill import BackfillReport, BackfillService, GapWindow
+from bigan.canonical.schemas import PROVENANCE_REST_SEED, PROVENANCE_WS
+
+from .backfill import (
+    BackfillReport,
+    BackfillService,
+    GapWindow,
+    synth_orderbook_record,
+)
 from .backfill_control import (
     BackfillCircuitOpen,
     BackfillControlConfig,
@@ -24,7 +31,7 @@ from .book_state import BookRegistry
 from .clob_rest import PolymarketRestClient
 from .clob_ws import ClobWsClient, EventHandler, WsClientConfig
 from .config import IngestionSettings
-from .gamma_client import ActiveMarket, GammaClient
+from .gamma_client import ActiveMarket, GammaClient, active_market_symbol_mapping_rows
 from .gap_detector import GapDetector, GapEvent
 from .message_types import BookEvent, MarketEvent, PriceChangeEvent
 from .metrics import (
@@ -33,6 +40,8 @@ from .metrics import (
     GAP_DETECTED_TOTAL,
     GAP_RESOLVED_TOTAL,
     GAP_SILENCE_DURATION_SECONDS,
+    INITIAL_SNAPSHOT_RECORDS_TOTAL,
+    INITIAL_SNAPSHOT_REQUESTS_TOTAL,
     REGISTRY,
     WS_HASH_MISMATCH_TOTAL,
 )
@@ -76,6 +85,13 @@ class IngestionRunner:
         # --- Gap detection / backfill (issue #5) -------------------------
         self._gap_detector: GapDetector | None = None
         self._asset_market_map: dict[str, str] = {}
+        self._asset_metadata_map: dict[str, dict[str, str]] = {}
+        self._persisted_symbol_mapping_keys: set[tuple[str, str, str, str]] = set()
+        self._active_asset_ids: set[str] = set()
+        self._snapshot_seeded_assets: set[str] = set()
+        self._snapshot_seed_inflight: set[str] = set()
+        self._snapshot_seed_tasks: set[asyncio.Task[None]] = set()
+        self._backfill_tasks: set[asyncio.Task[None]] = set()
         self._backfill_coordinator = BackfillCoordinator(
             BackfillControlConfig(
                 max_concurrency=settings.backfill_max_concurrency,
@@ -124,11 +140,13 @@ class IngestionRunner:
                 tg.create_task(self._gap_watchdog(), name="gap-watchdog")
             tg.create_task(self._shutdown_watcher(), name="shutdown-watcher")
 
+        await self._drain_background_tasks()
         await self._sink.close()
 
     def stop(self) -> None:
         self._stop.set()
         self._ws.cancel()
+        self._cancel_background_tasks()
 
     # ------------------------------------------------------------------
     # Event handler factory (also used by tests)
@@ -136,9 +154,11 @@ class IngestionRunner:
 
     def make_handler(self) -> EventHandler:
         async def handler(event: MarketEvent, raw: dict) -> None:
-            # Persist verbatim payload first; this is the contract with #4 and
-            # downstream replay tooling.
-            await self._sink.write({"receive_time": event.receive_time, "raw": raw})
+            # Preserve the original payload under ``raw`` and attach ordering
+            # metadata beside it so WS and REST snapshots can be compared.
+            await self._sink.write(
+                self._annotate_raw_record(_raw_record_from_ws_event(event, raw))
+            )
 
             if isinstance(event, BookEvent):
                 self._books.upsert_snapshot(event)
@@ -166,10 +186,7 @@ class IngestionRunner:
                     if resolved is not None:
                         # Spawn backfill asynchronously so the live handler
                         # never blocks on a REST round-trip.
-                        asyncio.create_task(  # noqa: RUF006 — fire-and-forget by design
-                            self._run_backfill(resolved),
-                            name=f"backfill-{resolved.asset_id}",
-                        )
+                        self._schedule_backfill(resolved)
 
         return handler
 
@@ -186,11 +203,21 @@ class IngestionRunner:
                 try:
                     markets = await gamma.list_active_markets()
                     asset_ids = self._asset_ids_from_markets(markets)
-                    self._refresh_asset_market_map(markets)
+                    mapping_rows = self._refresh_market_metadata(markets)
+                    await self._persist_symbol_mapping_rows(mapping_rows)
+                    snapshot_assets = self._initial_snapshot_candidates(asset_ids)
                     await self._ws.set_subscription(asset_ids)
+                    if self._settings.initial_snapshot_enabled:
+                        self._schedule_initial_orderbook_snapshots(snapshot_assets)
                     logger.info(
                         "gamma.refreshed",
-                        extra={"markets": len(markets), "assets": len(asset_ids)},
+                        extra={
+                            "markets": len(markets),
+                            "assets": len(asset_ids),
+                            "initial_snapshot_assets": len(snapshot_assets)
+                            if self._settings.initial_snapshot_enabled
+                            else 0,
+                        },
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception("gamma.poll_failed")
@@ -211,10 +238,246 @@ class IngestionRunner:
             out.add(m.asset_id_down)
         return out
 
-    def _refresh_asset_market_map(self, markets: list[ActiveMarket]) -> None:
+    def _refresh_market_metadata(self, markets: list[ActiveMarket]) -> list[dict]:
+        mapping_rows = active_market_symbol_mapping_rows(markets, ingest_ts=_now_ms())
         for m in markets:
             self._asset_market_map[m.asset_id_up] = m.condition_id
             self._asset_market_map[m.asset_id_down] = m.condition_id
+        for row in mapping_rows:
+            source_symbol = str(row["source_symbol"])
+            canonical_symbol = str(row["canonical_symbol"])
+            self._asset_metadata_map[source_symbol] = {
+                "canonical_symbol": canonical_symbol,
+                "outcome_side": canonical_symbol.rsplit(":", 1)[-1],
+            }
+        return mapping_rows
+
+    async def _persist_symbol_mapping_rows(self, rows: list[dict]) -> None:
+        new_rows = []
+        for row in rows:
+            key = (
+                str(row.get("source") or ""),
+                str(row.get("source_symbol") or ""),
+                str(row.get("source_market") or ""),
+                str(row.get("canonical_symbol") or ""),
+            )
+            if key in self._persisted_symbol_mapping_keys:
+                continue
+            self._persisted_symbol_mapping_keys.add(key)
+            new_rows.append(row)
+        if not new_rows:
+            return
+        now_ms = _now_ms()
+        await self._sink.write(
+            {
+                "receive_time": now_ms,
+                "source_timestamp_ms": now_ms,
+                "capture_timestamp_ms": now_ms,
+                "source_channel": "gamma-rest",
+                "provenance": "gamma-rest",
+                "raw": {
+                    "event_type": "symbol_mapping",
+                    "timestamp": str(now_ms),
+                    "mappings": new_rows,
+                },
+            }
+        )
+
+    def _annotate_raw_record(self, record: dict) -> dict:
+        raw = record.get("raw")
+        if not isinstance(raw, dict):
+            return record
+
+        enriched_raw = dict(raw)
+        asset_id = enriched_raw.get("asset_id")
+        if asset_id is not None:
+            metadata = self._asset_metadata_map.get(str(asset_id))
+            if metadata is not None:
+                enriched_raw.setdefault("canonical_symbol", metadata["canonical_symbol"])
+                enriched_raw.setdefault("outcome_side", metadata["outcome_side"])
+
+        price_changes = enriched_raw.get("price_changes")
+        if isinstance(price_changes, list):
+            enriched_entries = []
+            changed = False
+            for entry in price_changes:
+                if not isinstance(entry, dict):
+                    enriched_entries.append(entry)
+                    continue
+                asset_id = entry.get("asset_id")
+                metadata = (
+                    self._asset_metadata_map.get(str(asset_id))
+                    if asset_id is not None
+                    else None
+                )
+                if metadata is None:
+                    enriched_entries.append(entry)
+                    continue
+                enriched_entry = dict(entry)
+                enriched_entry.setdefault("canonical_symbol", metadata["canonical_symbol"])
+                enriched_entry.setdefault("outcome_side", metadata["outcome_side"])
+                enriched_entries.append(enriched_entry)
+                changed = True
+            if changed:
+                enriched_raw["price_changes"] = enriched_entries
+
+        return {**record, "raw": enriched_raw}
+
+    def _initial_snapshot_candidates(self, asset_ids: set[str]) -> set[str]:
+        self._active_asset_ids = set(asset_ids)
+        return {
+            asset_id
+            for asset_id in asset_ids
+            if asset_id not in self._snapshot_seeded_assets
+            and asset_id not in self._snapshot_seed_inflight
+        }
+
+    def _schedule_initial_orderbook_snapshots(self, asset_ids: set[str]) -> None:
+        candidates = sorted(
+            asset_id
+            for asset_id in asset_ids
+            if asset_id not in self._snapshot_seeded_assets
+            and asset_id not in self._snapshot_seed_inflight
+        )
+        if not candidates:
+            return
+        logger.info("snapshot_seed.scheduled", extra={"assets": len(candidates)})
+        for asset_id in candidates:
+            self._snapshot_seed_inflight.add(asset_id)
+            task = asyncio.create_task(
+                self._seed_initial_orderbook_snapshot(asset_id),
+                name=f"snapshot-seed-{asset_id[:12]}",
+            )
+            self._snapshot_seed_tasks.add(task)
+            task.add_done_callback(
+                lambda done, aid=asset_id: self._on_snapshot_seed_done(aid, done)
+            )
+
+    def _on_snapshot_seed_done(
+        self,
+        asset_id: str,
+        task: asyncio.Task[None],
+    ) -> None:
+        self._snapshot_seed_inflight.discard(asset_id)
+        self._snapshot_seed_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "snapshot_seed.task_failed",
+                extra={"asset_id": asset_id},
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+
+    async def _seed_initial_orderbook_snapshot(self, asset_id: str) -> None:
+        try:
+            outcome = await self._backfill_coordinator.run(
+                asset_id=asset_id,
+                operation=lambda before_rest_call: (
+                    self._seed_initial_orderbook_snapshot_once(
+                        asset_id,
+                        before_rest_call=before_rest_call,
+                    )
+                ),
+                is_failure=lambda result: result != "ok",
+            )
+        except BackfillCircuitOpen:
+            INITIAL_SNAPSHOT_REQUESTS_TOTAL.labels(outcome="skipped_circuit").inc()
+            logger.warning("snapshot_seed.circuit_open", extra={"asset_id": asset_id})
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            INITIAL_SNAPSHOT_REQUESTS_TOTAL.labels(outcome="error").inc()
+            logger.exception("snapshot_seed.failed", extra={"asset_id": asset_id})
+            return
+
+        INITIAL_SNAPSHOT_REQUESTS_TOTAL.labels(outcome=outcome).inc()
+        if outcome == "ok":
+            self._snapshot_seeded_assets.add(asset_id)
+
+    async def _seed_initial_orderbook_snapshot_once(
+        self,
+        asset_id: str,
+        *,
+        before_rest_call,
+    ) -> str:
+        await before_rest_call()
+        async with PolymarketRestClient(
+            self._settings.clob_rest_url,
+            data_api_base_url=self._settings.polymarket_data_api_url,
+            timeout_seconds=self._settings.backfill_rest_timeout_seconds,
+        ) as rest:
+            book = await rest.fetch_orderbook(asset_id)
+        if book is None:
+            logger.warning("snapshot_seed.book_missing", extra={"asset_id": asset_id})
+            return "missing"
+
+        receive_time_ms = _now_ms()
+        await self._sink.write(
+            self._annotate_raw_record(
+                synth_orderbook_record(
+                    book,
+                    receive_time_ms=receive_time_ms,
+                    provenance=PROVENANCE_REST_SEED,
+                )
+            )
+        )
+        INITIAL_SNAPSHOT_RECORDS_TOTAL.inc()
+        logger.info(
+            "snapshot_seed.done",
+            extra={
+                "asset_id": asset_id,
+                "market": book.market,
+                "source_timestamp_ms": book.timestamp_ms,
+                "capture_timestamp_ms": receive_time_ms,
+                "hash": book.hash,
+            },
+        )
+        return "ok"
+
+    def _cancel_snapshot_seed_tasks(self) -> None:
+        for task in list(self._snapshot_seed_tasks):
+            task.cancel()
+
+    def _schedule_backfill(self, gap: GapEvent) -> None:
+        if self._stop.is_set():
+            return
+        task = asyncio.create_task(
+            self._run_backfill(gap),
+            name=f"backfill-{gap.asset_id[:12]}",
+        )
+        self._backfill_tasks.add(task)
+        task.add_done_callback(
+            lambda done, aid=gap.asset_id: self._on_backfill_done(aid, done)
+        )
+
+    def _on_backfill_done(self, asset_id: str, task: asyncio.Task[None]) -> None:
+        self._backfill_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "backfill.task_failed",
+                extra={"asset_id": asset_id},
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+
+    def _cancel_backfill_tasks(self) -> None:
+        for task in list(self._backfill_tasks):
+            task.cancel()
+
+    def _cancel_background_tasks(self) -> None:
+        self._cancel_snapshot_seed_tasks()
+        self._cancel_backfill_tasks()
+
+    async def _drain_background_tasks(self) -> None:
+        self._cancel_background_tasks()
+        tasks = [*self._snapshot_seed_tasks, *self._backfill_tasks]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _resolve_market(self, asset_id: str) -> str | None:
         return self._asset_market_map.get(asset_id)
@@ -291,7 +554,7 @@ class IngestionRunner:
         ) as rest:
             service = BackfillService(
                 rest,
-                self._sink,
+                _MetadataAnnotatingSink(self._sink, self._annotate_raw_record),
                 self._resolve_market,
                 before_rest_call=before_rest_call,
             )
@@ -322,6 +585,28 @@ class IngestionRunner:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _raw_record_from_ws_event(event: MarketEvent, raw: dict) -> dict:
+    capture_timestamp_ms = int(event.receive_time or _now_ms())
+    source_timestamp_ms = int(event.timestamp)
+    return {
+        "receive_time": capture_timestamp_ms,
+        "source_timestamp_ms": source_timestamp_ms,
+        "capture_timestamp_ms": capture_timestamp_ms,
+        "source_channel": "clob-ws",
+        "provenance": PROVENANCE_WS,
+        "raw": raw,
+    }
+
+
+class _MetadataAnnotatingSink:
+    def __init__(self, sink, annotate) -> None:
+        self._sink = sink
+        self._annotate = annotate
+
+    async def write(self, record: dict) -> None:
+        await self._sink.write(self._annotate(record))
 
 
 def _asset_ids_in_event(event: MarketEvent, raw: dict) -> set[str]:

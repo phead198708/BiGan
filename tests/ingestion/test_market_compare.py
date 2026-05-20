@@ -208,7 +208,7 @@ def test_compare_market_coverage_can_ignore_markets_opened_after_raw_end(
     assert report["gamma"]["ignored_markets_opened_after_raw_end"] == 1
 
 
-def test_compare_market_coverage_can_ignore_markets_scheduled_after_raw_end(
+def test_compare_market_coverage_does_not_ignore_active_future_scheduled_market(
     tmp_path: Path,
 ) -> None:
     current_market = ActiveMarket(
@@ -256,10 +256,10 @@ def test_compare_market_coverage_can_ignore_markets_scheduled_after_raw_end(
         )
     )
 
-    assert report["passed"] is True
-    assert report["gamma"]["ignored_markets_after_raw_end"] == 1
+    assert report["passed"] is False
+    assert report["gamma"]["ignored_markets_after_raw_end"] == 0
     assert report["gamma"]["ignored_markets_opened_after_raw_end"] == 0
-    assert report["gamma"]["ignored_markets_scheduled_after_raw_end"] == 1
+    assert report["coverage"]["missing_book_assets"] == 2
 
 
 class _FakeRest:

@@ -13,6 +13,7 @@ from bigan.ingestion.gamma_client import (
     _log_gamma_fetch_failed,
     _market_from_gamma,
     _parse_iso8601_to_ms,
+    active_market_symbol_mapping_rows,
     diff_subscription_sets,
 )
 
@@ -68,6 +69,30 @@ def test_market_from_gamma_handles_reversed_outcome_order() -> None:
     assert market is not None
     assert market.asset_id_down == "111"
     assert market.asset_id_up == "222"
+
+
+def test_active_market_symbol_mapping_rows_encode_outcome_side() -> None:
+    market = _market_from_gamma(
+        {
+            "slug": "btc-updown-15m-1778423700",
+            "conditionId": "0xabc",
+            "clobTokenIds": ["111", "222"],
+            "outcomes": ["Up", "Down"],
+            "startDate": "2026-05-10T14:30:00Z",
+            "endDate": "2026-05-10T14:45:00Z",
+            "orderPriceMinTickSize": "0.01",
+        }
+    )
+    assert market is not None
+
+    rows = active_market_symbol_mapping_rows([market], ingest_ts=1_800_000_000_000)
+
+    by_token = {row["source_symbol"]: row for row in rows}
+    assert by_token["111"]["canonical_symbol"] == "BTC-15M:btc-updown-15m-1778423700:UP"
+    assert by_token["222"]["canonical_symbol"] == "BTC-15M:btc-updown-15m-1778423700:DOWN"
+    assert by_token["111"]["source_market"] == "0xabc"
+    assert by_token["111"]["symbol_kind"] == "btc_15m_outcome"
+    assert '"outcome_side":"UP"' in by_token["111"]["metadata_json"]
 
 
 def test_market_from_gamma_drops_invalid_records() -> None:

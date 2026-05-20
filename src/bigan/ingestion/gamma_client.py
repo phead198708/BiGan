@@ -17,12 +17,16 @@ from typing import Any
 import aiohttp
 import orjson
 
+from bigan.canonical.symbols import symbol_mapping_row
+
 from .metrics import GAMMA_POLLS_TOTAL
 
 logger = logging.getLogger(__name__)
 
 
 _GAMMA_MAX_PAGE_LIMIT = 100
+POLYMARKET_SOURCE = "polymarket"
+BTC_15M_SYMBOL_KIND = "btc_15m_outcome"
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +281,67 @@ def diff_subscription_sets(
     to_subscribe = sorted(desired_set - current_set)
     to_unsubscribe = sorted(current_set - desired_set)
     return to_subscribe, to_unsubscribe
+
+
+def active_market_symbol_mapping_rows(
+    markets: Sequence[ActiveMarket],
+    *,
+    ingest_ts: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return canonical symbol mapping rows for active BTC 15-minute markets."""
+
+    resolved_ingest_ts = int(time.time() * 1000) if ingest_ts is None else int(ingest_ts)
+    rows: list[dict[str, Any]] = []
+    for market in markets:
+        effective_from_ts = market.start_ts_ms if market.start_ts_ms > 0 else resolved_ingest_ts
+        rows.append(
+            _active_market_symbol_mapping_row(
+                market,
+                outcome_side="UP",
+                source_symbol=market.asset_id_up,
+                effective_from_ts=effective_from_ts,
+                ingest_ts=resolved_ingest_ts,
+            )
+        )
+        rows.append(
+            _active_market_symbol_mapping_row(
+                market,
+                outcome_side="DOWN",
+                source_symbol=market.asset_id_down,
+                effective_from_ts=effective_from_ts,
+                ingest_ts=resolved_ingest_ts,
+            )
+        )
+    return rows
+
+
+def _active_market_symbol_mapping_row(
+    market: ActiveMarket,
+    *,
+    outcome_side: str,
+    source_symbol: str,
+    effective_from_ts: int,
+    ingest_ts: int,
+) -> dict[str, Any]:
+    canonical_symbol = f"BTC-15M:{market.slug}:{outcome_side}"
+    return symbol_mapping_row(
+        source=POLYMARKET_SOURCE,
+        source_symbol=source_symbol,
+        source_market=market.condition_id,
+        canonical_symbol=canonical_symbol,
+        effective_from_ts=effective_from_ts,
+        ingest_ts=ingest_ts,
+        message_ts=ingest_ts,
+        symbol_kind=BTC_15M_SYMBOL_KIND,
+        metadata={
+            "slug": market.slug,
+            "outcome_side": outcome_side,
+            "condition_id": market.condition_id,
+            "start_ts_ms": market.start_ts_ms,
+            "end_ts_ms": market.end_ts_ms,
+            "tick_size": market.tick_size,
+        },
+    )
 
 
 def _log_gamma_fetch_failed(

@@ -151,6 +151,19 @@ BACKFILL_THROTTLED_TOTAL = Counter(
     registry=REGISTRY,
 )
 
+INITIAL_SNAPSHOT_REQUESTS_TOTAL = Counter(
+    "bigan_initial_snapshot_requests_total",
+    "Initial CLOB REST orderbook snapshot attempts after Gamma discovery.",
+    labelnames=("outcome",),
+    registry=REGISTRY,
+)
+
+INITIAL_SNAPSHOT_RECORDS_TOTAL = Counter(
+    "bigan_initial_snapshot_records_total",
+    "Initial CLOB REST orderbook snapshots written to the raw sink.",
+    registry=REGISTRY,
+)
+
 
 # --- Reference price readers (issue #24) ---
 

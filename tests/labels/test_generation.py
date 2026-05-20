@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from bigan.canonical.writer import WarehouseWriter, warehouse_files
 
@@ -17,7 +18,14 @@ def _ts_at(year: int, month: int, day: int, hour: int, minute: int) -> int:
     return int(datetime(year, month, day, hour, minute, tzinfo=UTC).timestamp() * 1000)
 
 
-def _feature_row(ts: int, *, source_symbol: str = "tok-up", source_market: str = "0xmkt") -> dict:
+def _feature_row(
+    ts: int,
+    *,
+    source_symbol: str = "tok-up",
+    source_market: str = "0xmkt",
+    canonical_symbol: str = "BTC-15M:btc-updown-15m-test:UP",
+    market_implied_prob: float = 0.40,
+) -> dict:
     return {
         "ts": ts,
         "message_ts": ts,
@@ -26,8 +34,8 @@ def _feature_row(ts: int, *, source_symbol: str = "tok-up", source_market: str =
         "source": "polymarket",
         "source_symbol": source_symbol,
         "source_market": source_market,
-        "canonical_symbol": "BTC-UP-15M",
-        "symbol": "BTC-UP-15M",
+        "canonical_symbol": canonical_symbol,
+        "symbol": canonical_symbol,
         "feature_version": "bigan-mvp-v1.0.0",
         "completeness_score": 1.0,
         "data_gap_flag": False,
@@ -35,6 +43,7 @@ def _feature_row(ts: int, *, source_symbol: str = "tok-up", source_market: str =
         "quote_age_ms": 0,
         "depth_age_ms": 0,
         "trade_age_ms": 0,
+        "market_implied_prob": market_implied_prob,
     }
 
 
@@ -80,11 +89,20 @@ def test_labels_table_schema_is_registered_with_required_columns() -> None:
         "canonical_symbol",
         "symbol",
         "label_version",
+        "label_kind",
         "round_slug",
         "round_start_ts",
         "round_end_ts",
         "start_price",
         "target_price",
+        "direction_up_15m",
+        "entry_ask_price",
+        "settlement_price",
+        "entry_fee",
+        "entry_cost",
+        "realized_return",
+        "fee_bps",
+        "label_profit_up_15m",
         "label_up_15m",
         "label_source",
     } <= cols
@@ -94,11 +112,19 @@ def test_labels_table_schema_is_registered_with_required_columns() -> None:
     assert schema.field("round_end_ts").type == pa.int64()
     assert schema.field("start_price").type == pa.float64()
     assert schema.field("target_price").type == pa.float64()
+    assert schema.field("direction_up_15m").type == pa.bool_()
+    assert schema.field("entry_ask_price").type == pa.float64()
+    assert schema.field("settlement_price").type == pa.float64()
+    assert schema.field("entry_fee").type == pa.float64()
+    assert schema.field("entry_cost").type == pa.float64()
+    assert schema.field("realized_return").type == pa.float64()
+    assert schema.field("fee_bps").type == pa.float64()
+    assert schema.field("label_profit_up_15m").type == pa.bool_()
     assert schema.field("label_up_15m").type == pa.bool_()
 
 
 def test_generate_labels_uses_polymarket_round_prices_and_aligns_to_feature_ts() -> None:
-    from bigan.labels.generation import LABEL_VERSION, generate_labels_15m_v1
+    from bigan.labels.generation import LABEL_KIND, LABEL_VERSION, generate_labels_15m_v1
 
     t0 = _ts_at(2026, 5, 13, 12, 0)
     rows = generate_labels_15m_v1(
@@ -116,8 +142,17 @@ def test_generate_labels_uses_polymarket_round_prices_and_aligns_to_feature_ts()
     assert first["target_ts"] == t0 + HORIZON_MS
     assert first["start_price"] == 100.0
     assert first["target_price"] == 101.0
+    assert first["direction_up_15m"] is True
+    assert first["entry_ask_price"] == pytest.approx(0.40)
+    assert first["settlement_price"] == pytest.approx(1.0)
+    assert first["entry_fee"] == pytest.approx(0.0)
+    assert first["entry_cost"] == pytest.approx(0.40)
+    assert first["realized_return"] == pytest.approx(0.60)
+    assert first["fee_bps"] == pytest.approx(0.0)
+    assert first["label_profit_up_15m"] is True
     assert first["label_up_15m"] is True
     assert first["label_version"] == LABEL_VERSION
+    assert first["label_kind"] == LABEL_KIND
     assert first["round_slug"] == f"btc-updown-15m-{t0 // 1000}"
     assert first["round_start_ts"] == t0
     assert first["round_end_ts"] == t0 + HORIZON_MS
@@ -125,20 +160,138 @@ def test_generate_labels_uses_polymarket_round_prices_and_aligns_to_feature_ts()
     assert second["target_ts"] == t0 + HORIZON_MS
     assert second["start_price"] == 100.0
     assert second["target_price"] == 101.0
+    assert second["realized_return"] == pytest.approx(0.60)
     assert second["label_up_15m"] is True
 
 
-def test_generate_labels_uses_polymarket_up_tie_rule() -> None:
+def test_generate_labels_uses_profitability_not_direction_only() -> None:
     from bigan.labels.generation import generate_labels_15m_v1
 
     t0 = _ts_at(2026, 5, 13, 12, 0)
     rows = generate_labels_15m_v1(
-        feature_rows=[_feature_row(t0 + 60_000)],
+        feature_rows=[_feature_row(t0 + 60_000, market_implied_prob=1.0)],
         round_rows=[_round_row(t0, 100.0, 100.0)],
         ingest_ts=t0 + 2 * HORIZON_MS,
     )
 
-    assert rows[0]["label_up_15m"] is True
+    assert rows[0]["settlement_price"] == pytest.approx(1.0)
+    assert rows[0]["realized_return"] == pytest.approx(0.0)
+    assert rows[0]["label_profit_up_15m"] is False
+    assert rows[0]["label_up_15m"] is False
+
+
+def test_generate_labels_allows_buy_before_round_start_for_same_market() -> None:
+    from bigan.labels.generation import generate_labels_15m_v1
+
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    rows = generate_labels_15m_v1(
+        feature_rows=[_feature_row(t0 - 5 * 60_000, market_implied_prob=0.45)],
+        round_rows=[_round_row(t0, 100.0, 101.0)],
+        ingest_ts=t0 + 2 * HORIZON_MS,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["feature_ts"] == t0 - 5 * 60_000
+    assert rows[0]["target_ts"] == t0 + HORIZON_MS
+    assert rows[0]["realized_return"] == pytest.approx(0.55)
+    assert rows[0]["label_profit_up_15m"] is True
+
+
+def test_generate_labels_skips_features_after_market_settlement() -> None:
+    from bigan.labels.generation import generate_labels_15m_v1
+
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    rows = generate_labels_15m_v1(
+        feature_rows=[_feature_row(t0 + HORIZON_MS)],
+        round_rows=[_round_row(t0, 100.0, 101.0)],
+        ingest_ts=t0 + 2 * HORIZON_MS,
+    )
+
+    assert rows == []
+
+
+def test_generate_labels_requires_source_market_match_when_present() -> None:
+    from bigan.labels.generation import generate_labels_15m_v1
+
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    rows = generate_labels_15m_v1(
+        feature_rows=[_feature_row(t0 + 60_000, source_market="0xfeature")],
+        round_rows=[_round_row(t0, 100.0, 101.0, source_market="0xother")],
+        ingest_ts=t0 + 2 * HORIZON_MS,
+    )
+
+    assert rows == []
+
+
+def test_generate_labels_applies_fee_to_realized_return() -> None:
+    from bigan.labels.generation import generate_labels_15m_v1
+
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    rows = generate_labels_15m_v1(
+        feature_rows=[_feature_row(t0 + 60_000, market_implied_prob=0.9999)],
+        round_rows=[_round_row(t0, 100.0, 101.0)],
+        ingest_ts=t0 + 2 * HORIZON_MS,
+        fee_bps=2.0,
+    )
+
+    assert rows[0]["entry_fee"] == pytest.approx(0.9999 * 0.0002)
+    assert rows[0]["entry_cost"] == pytest.approx(0.9999 + rows[0]["entry_fee"])
+    assert rows[0]["realized_return"] < 0.0
+    assert rows[0]["label_profit_up_15m"] is False
+    assert rows[0]["label_up_15m"] is False
+
+
+def test_generate_labels_skips_missing_market_implied_probability() -> None:
+    from bigan.labels.generation import generate_labels_15m_v1
+
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    feature = _feature_row(t0 + 60_000)
+    feature.pop("market_implied_prob")
+
+    rows = generate_labels_15m_v1(
+        feature_rows=[feature],
+        round_rows=[_round_row(t0, 100.0, 101.0)],
+        ingest_ts=t0 + 2 * HORIZON_MS,
+    )
+
+    assert rows == []
+
+
+def test_generate_labels_skips_down_token_features() -> None:
+    from bigan.labels.generation import generate_labels_15m_v1
+
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    rows = generate_labels_15m_v1(
+        feature_rows=[
+            _feature_row(
+                t0 + 60_000,
+                source_symbol="tok-down",
+                canonical_symbol="BTC-15M:btc-updown-15m-test:DOWN",
+                market_implied_prob=0.40,
+            )
+        ],
+        round_rows=[_round_row(t0, 100.0, 101.0)],
+        ingest_ts=t0 + 2 * HORIZON_MS,
+    )
+
+    assert rows == []
+
+
+def test_generate_labels_skips_unmapped_token_features() -> None:
+    from bigan.labels.generation import generate_labels_15m_v1
+
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    feature = _feature_row(t0 + 60_000)
+    feature["canonical_symbol"] = None
+    feature["symbol"] = "tok-up"
+
+    rows = generate_labels_15m_v1(
+        feature_rows=[feature],
+        round_rows=[_round_row(t0, 100.0, 101.0)],
+        ingest_ts=t0 + 2 * HORIZON_MS,
+    )
+
+    assert rows == []
 
 
 def test_generate_labels_ignores_late_corrected_round_rows() -> None:
@@ -186,6 +339,12 @@ def test_run_label_batch_writes_independent_labels_table(tmp_path: Path) -> None
     assert row["target_ts"] == t0 + HORIZON_MS
     assert row["start_price"] == 100.0
     assert row["target_price"] == 101.0
+    assert row["direction_up_15m"] is True
+    assert row["entry_ask_price"] == pytest.approx(0.40)
+    assert row["settlement_price"] == pytest.approx(1.0)
+    assert row["entry_cost"] == pytest.approx(0.40)
+    assert row["realized_return"] == pytest.approx(0.60)
+    assert row["label_profit_up_15m"] is True
     assert row["label_up_15m"] is True
 
 
@@ -212,3 +371,35 @@ def test_polymarket_gamma_event_metadata_maps_to_round_row() -> None:
     assert row["round_end_ts"] == _ts_at(2026, 5, 16, 14, 15)
     assert row["start_price"] == 77981.58552825246
     assert row["target_price"] == 77926.177315
+
+
+def test_round_metadata_fetch_includes_canonical_market_slug(monkeypatch: pytest.MonkeyPatch) -> None:
+    from bigan.labels import generation
+
+    seen_slugs: list[str] = []
+
+    def fake_fetch(_base: str, slug: str, *, request_timeout_seconds: float):
+        seen_slugs.append(slug)
+        return {
+            "slug": slug,
+            "startTime": "2026-05-13T20:00:00Z",
+            "endDate": "2026-05-13T20:15:00Z",
+            "eventMetadata": {"priceToBeat": 100.0, "finalPrice": 101.0},
+            "markets": [{"conditionId": "0xmkt"}],
+        }
+
+    monkeypatch.setattr(generation, "_fetch_gamma_event_by_slug", fake_fetch)
+
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    rows = generation.fetch_polymarket_round_rows_for_features(
+        [
+            _feature_row(
+                t0,
+                canonical_symbol="BTC-15M:btc-updown-15m-1778712000:UP",
+            )
+        ],
+        ingest_ts=t0,
+    )
+
+    assert "btc-updown-15m-1778712000" in seen_slugs
+    assert rows

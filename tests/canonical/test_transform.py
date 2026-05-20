@@ -22,6 +22,7 @@ def test_top_of_book_basic() -> None:
         "event_type": "best_bid_ask",
         "asset_id": "1",
         "market": "0xmkt",
+        "canonical_symbol": "BTC-15M:btc-updown-15m-1:UP",
         "best_bid": "0.73",
         "best_ask": "0.77",
         "spread": "0.04",
@@ -36,7 +37,7 @@ def test_top_of_book_basic() -> None:
     assert row["source"] == SOURCE_POLYMARKET
     assert row["source_symbol"] == "1"
     assert row["source_market"] == "0xmkt"
-    assert row["canonical_symbol"] is None
+    assert row["canonical_symbol"] == "BTC-15M:btc-updown-15m-1:UP"
     assert row["bid_price"] == 0.73
     assert row["ask_price"] == 0.77
     assert row["spread"] == 0.04
@@ -223,6 +224,35 @@ def test_dispatch_dispatches_correctly() -> None:
     assert transform_event({"raw": {"event_type": "book", "asset_id": "a"}}) == {}
 
 
+def test_dispatch_symbol_mapping_event_persists_mapping_rows() -> None:
+    rec = {
+        "receive_time": 1_700_000_000_000,
+        "source_timestamp_ms": 1_700_000_000_000,
+        "raw": {
+            "event_type": "symbol_mapping",
+            "mappings": [
+                {
+                    "source": "polymarket",
+                    "source_symbol": "tok-up",
+                    "source_market": "0xmkt",
+                    "canonical_symbol": "BTC-15M:btc-updown-15m-1:UP",
+                    "effective_from_ts": 1_700_000_000_000,
+                    "symbol_kind": "btc_15m_outcome",
+                    "metadata_json": '{"outcome_side":"UP"}',
+                }
+            ],
+        },
+    }
+
+    out = transform_event(rec)
+
+    assert set(out) == {"symbol_mapping"}
+    row = out["symbol_mapping"][0]
+    assert row["source_symbol"] == "tok-up"
+    assert row["canonical_symbol"] == "BTC-15M:btc-updown-15m-1:UP"
+    assert row["metadata_json"] == '{"outcome_side":"UP"}'
+
+
 def test_dispatch_persists_outer_capture_and_channel_metadata() -> None:
     record = {
         "receive_time": 999_999,
@@ -302,6 +332,7 @@ def test_derive_top_of_book_from_price_change_emits_one_row_per_asset() -> None:
         "price_changes": [
             {
                 "asset_id": "A",
+                "canonical_symbol": "BTC-15M:btc-updown-15m-1:UP",
                 "price": "0.5",
                 "size": "200",
                 "side": "BUY",
@@ -324,6 +355,7 @@ def test_derive_top_of_book_from_price_change_emits_one_row_per_asset() -> None:
     by_asset = {r["source_symbol"]: r for r in rows}
     assert set(by_asset) == {"A", "B"}
     assert by_asset["A"]["bid_price"] == 0.49
+    assert by_asset["A"]["canonical_symbol"] == "BTC-15M:btc-updown-15m-1:UP"
     assert by_asset["B"]["ask_price"] == 0.57
 
 

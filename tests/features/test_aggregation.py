@@ -94,6 +94,7 @@ def test_aggregates_microprice_obi_trade_flow_returns_and_rv() -> None:
     assert row["feature_version"] == FEATURE_VERSION
     assert row["symbol"] == "BTC-UP-15M"
     assert row["spread"] == pytest.approx(0.02)
+    assert row["market_implied_prob"] == pytest.approx(0.53)
     assert row["mid_price"] == pytest.approx(0.52)
     assert row["microprice"] == pytest.approx((0.53 * 100 + 0.51 * 50) / 150)
     assert row["obi_l1"] == pytest.approx((100 - 50) / 150)
@@ -122,7 +123,9 @@ def test_aggregation_emits_minute_close_rows_only_from_backward_inputs() -> None
     by_ts = {row["feature_ts"]: row for row in rows}
 
     assert sorted(by_ts) == [t0 + 60_000, t0 + 120_000]
+    assert by_ts[t0 + 60_000]["market_implied_prob"] == pytest.approx(0.51)
     assert by_ts[t0 + 60_000]["mid_price"] == pytest.approx(0.50)
+    assert by_ts[t0 + 120_000]["market_implied_prob"] == pytest.approx(0.82)
     assert by_ts[t0 + 120_000]["mid_price"] == pytest.approx(0.81)
 
 
@@ -149,4 +152,5 @@ def test_run_feature_batch_writes_features_table(tmp_path: Path) -> None:
     assert row["message_ts"] == t0
     assert row["symbol"] == "BTC-UP-15M"
     assert row["feature_version"] == FEATURE_VERSION
+    assert row["market_implied_prob"] == pytest.approx(0.51)
     assert row["trade_count_1m"] == 1

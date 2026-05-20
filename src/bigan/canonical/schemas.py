@@ -78,6 +78,7 @@ _COMMON_IDENTITY_FIELDS: list[pa.Field] = [
 #: Provenance tag values used across the codebase.
 PROVENANCE_WS = "ws"
 PROVENANCE_BACKFILL = "polymarket-rest-backfill"
+PROVENANCE_REST_SEED = "polymarket-rest-seed"
 PROVENANCE_MANUAL = "manual"
 
 
@@ -290,6 +291,7 @@ SCHEMA_FEATURES_15M_V1: pa.Schema = pa.schema(
         pa.field("depth_age_ms", pa.int64(), nullable=True),
         pa.field("trade_age_ms", pa.int64(), nullable=True),
         pa.field("spread", pa.float64(), nullable=True),
+        pa.field("market_implied_prob", pa.float64(), nullable=True),
         pa.field("mid_price", pa.float64(), nullable=True),
         pa.field("microprice", pa.float64(), nullable=True),
         pa.field("obi_l1", pa.float64(), nullable=True),
@@ -311,7 +313,7 @@ SCHEMA_FEATURES_15M_V1: pa.Schema = pa.schema(
 
 
 # ---------------------------------------------------------------------------
-# labels_15m_v1 — independent 15-minute direction labels (issue #9)
+# labels_15m_v1 — independent 15-minute UP-token profitability labels (issue #9)
 # ---------------------------------------------------------------------------
 #
 # ``feature_ts`` matches the feature row timestamp, while ``target_ts`` is the
@@ -331,11 +333,20 @@ SCHEMA_LABELS_15M_V1: pa.Schema = pa.schema(
         pa.field("canonical_symbol", pa.string(), nullable=True),
         pa.field("symbol", pa.string(), nullable=False),
         pa.field("label_version", pa.string(), nullable=False),
+        pa.field("label_kind", pa.string(), nullable=True),
         pa.field("round_slug", pa.string(), nullable=True),
         pa.field("round_start_ts", pa.int64(), nullable=False),
         pa.field("round_end_ts", pa.int64(), nullable=False),
         pa.field("start_price", pa.float64(), nullable=False),
         pa.field("target_price", pa.float64(), nullable=False),
+        pa.field("direction_up_15m", pa.bool_(), nullable=True),
+        pa.field("entry_ask_price", pa.float64(), nullable=True),
+        pa.field("settlement_price", pa.float64(), nullable=True),
+        pa.field("entry_fee", pa.float64(), nullable=True),
+        pa.field("entry_cost", pa.float64(), nullable=True),
+        pa.field("realized_return", pa.float64(), nullable=True),
+        pa.field("fee_bps", pa.float64(), nullable=True),
+        pa.field("label_profit_up_15m", pa.bool_(), nullable=True),
         pa.field("label_up_15m", pa.bool_(), nullable=False),
         pa.field("label_source", pa.string(), nullable=True),
     ],
@@ -367,6 +378,7 @@ SCHEMA_PREDICTIONS: pa.Schema = pa.schema(
         pa.field("calibration_method", pa.string(), nullable=True),
         pa.field("prob_up_15m", pa.float64(), nullable=False),
         pa.field("raw_prob_up_15m", pa.float64(), nullable=True),
+        pa.field("market_implied_prob", pa.float64(), nullable=True),
         pa.field("confidence_bucket", pa.string(), nullable=False),
         pa.field("top_features_json", pa.string(), nullable=False),
         pa.field("feature_values_json", pa.string(), nullable=True),

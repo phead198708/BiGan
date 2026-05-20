@@ -226,6 +226,13 @@ class IngestionSettings(BaseSettings):
         ge=0.0,
         description="How long the open backfill circuit waits before half-open probe.",
     )
+    initial_snapshot_enabled: bool = Field(
+        default=True,
+        description=(
+            "Fetch an immediate CLOB REST book snapshot for each Gamma-discovered "
+            "asset instead of waiting for the WebSocket to emit its first book."
+        ),
+    )
 
     @property
     def raw_dir(self) -> Path:

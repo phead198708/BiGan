@@ -138,6 +138,19 @@ def test_train_xgboost_v1_tunes_saves_metrics_and_feature_importance(tmp_path: P
     ]
 
 
+def test_xgboost_v1_default_search_space_is_not_too_shallow() -> None:
+    from bigan.modeling import XGBoostV1Config
+
+    config = XGBoostV1Config()
+
+    assert config.rounds_grid == (100, 200, 300)
+    assert config.learning_rate_grid == (0.01, 0.05, 0.10)
+    assert config.l2_penalty_grid == (0.10, 1.0, 5.0)
+    assert config.max_depth_grid == (3, 4, 5)
+    assert config.subsample_grid == (0.70, 0.80, 1.0)
+    assert config.colsample_bytree_grid == (0.70, 0.80, 1.0)
+
+
 def test_loaded_xgboost_v1_predicts_and_explains_top_features(tmp_path: Path) -> None:
     from bigan.modeling import XGBoostV1Config, load_xgboost_v1_model, train_xgboost_v1
 
@@ -172,6 +185,33 @@ def test_loaded_xgboost_v1_predicts_and_explains_top_features(tmp_path: Path) ->
     assert high_prob > low_prob
     assert top_features
     assert top_features[0]["abs_contribution"] >= top_features[-1]["abs_contribution"]
+
+
+def test_train_xgboost_v2_saves_distinct_candidate_version(tmp_path: Path) -> None:
+    from bigan.modeling import (
+        XGBOOST_V2_MODEL_VERSION,
+        load_xgboost_v1_model,
+        train_xgboost_v2,
+    )
+
+    dataset_dir = tmp_path / "dataset"
+    output_dir = tmp_path / "xgb-v2"
+    _write_dataset(dataset_dir)
+
+    report = train_xgboost_v2(dataset_dir, output_dir)
+    model = load_xgboost_v1_model(output_dir / "model.json")
+    feature_schema = json.loads((output_dir / "feature_schema.json").read_text(encoding="utf-8"))
+
+    assert report.model_version == XGBOOST_V2_MODEL_VERSION
+    assert model.model_version == XGBOOST_V2_MODEL_VERSION
+    assert feature_schema["model_version"] == XGBOOST_V2_MODEL_VERSION
+    assert json.loads((output_dir / "xgboost_config.json").read_text(encoding="utf-8"))[
+        "model_version"
+    ] == XGBOOST_V2_MODEL_VERSION
+    config = json.loads((output_dir / "xgboost_config.json").read_text(encoding="utf-8"))
+    assert config["rounds_grid"] == [100, 200, 300]
+    assert config["max_depth_grid"] == [3, 4, 5]
+    assert config["subsample_grid"] == [0.7, 0.8, 1.0]
 
 
 def test_train_xgboost_v1_rejects_empty_parameter_space(tmp_path: Path) -> None:

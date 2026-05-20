@@ -17,22 +17,29 @@ import typer
 from prometheus_client import start_http_server
 from typer import Exit
 
-from bigan.backtest import load_backtest_config
+from bigan.backtest import (
+    load_backtest_config,
+    run_oracle_label_sanity_backtest,
+    run_prediction_threshold_backtest,
+)
 from bigan.canonical.etl import run_etl_batch
 from bigan.canonical.query import open_warehouse, warehouse_summary
 from bigan.canonical.symbols import SymbolMapper
 from bigan.features import run_feature_batch, run_feature_quality_sql_checks
 from bigan.labels import run_label_batch
 from bigan.modeling import (
+    BootstrapCandidateInput,
     LogisticBaselineConfig,
     SplitConfig,
     XGBoostV1Config,
     assemble_training_dataset,
+    evaluate_bootstrap_champion,
     evaluate_model_promotion,
     fit_probability_calibration,
     run_prediction_batch,
     train_logistic_baseline,
     train_xgboost_v1,
+    train_xgboost_v2,
 )
 
 from .backfill import BackfillService, GapWindow
@@ -117,6 +124,10 @@ XGBOOST_OUTPUT_DIR_OPTION = typer.Option(
     Path("data/model-runs/xgboost-v1"),
     help="Directory for XGBoost-v1 artifacts.",
 )
+XGBOOST_V2_OUTPUT_DIR_OPTION = typer.Option(
+    Path("data/model-runs/xgboost-v2"),
+    help="Directory for XGBoost-v2 artifacts.",
+)
 CALIBRATION_MODEL_PATH_OPTION = typer.Option(
     Path("data/model-runs/xgboost-v1/model.json"),
     help="Path to a saved model.json produced by xgboost-v1.",
@@ -149,6 +160,26 @@ PROMOTION_OUTPUT_DIR_OPTION = typer.Option(
     Path("data/model-runs/promotion-v1"),
     help="Directory for promotion report artifacts.",
 )
+BOOTSTRAP_BASELINE_BACKTEST_SUMMARY_OPTION = typer.Option(
+    None,
+    help="Optional baseline threshold-backtest summary JSON.",
+)
+BOOTSTRAP_SERVING_READINESS_PATH_OPTION = typer.Option(
+    None,
+    help="Optional serving readiness JSON with latency/error evidence.",
+)
+BOOTSTRAP_FEATURE_SCHEMA_PATH_OPTION = typer.Option(
+    None,
+    help="Optional candidate feature_schema.json path; defaults to candidate_dir/feature_schema.json.",
+)
+BOOTSTRAP_ROLLBACK_RUNBOOK_PATH_OPTION = typer.Option(
+    Path("docs/runbooks/model_rollback.md"),
+    help="Rollback/fallback runbook path.",
+)
+BOOTSTRAP_OUTPUT_DIR_OPTION = typer.Option(
+    Path("data/model-runs/bootstrap-champion-v1"),
+    help="Directory for first-champion bootstrap decision artifacts.",
+)
 PREDICTION_MODEL_PATH_OPTION = typer.Option(
     Path("data/model-runs/xgboost-v1/model.json"),
     help="Path to saved XGBoost-v1 model.json.",
@@ -156,6 +187,22 @@ PREDICTION_MODEL_PATH_OPTION = typer.Option(
 PREDICTION_CALIBRATION_PATH_OPTION = typer.Option(
     None,
     help="Optional path to calibration.json.",
+)
+ORACLE_BACKTEST_DATASET_DIR_OPTION = typer.Option(
+    Path("data/training-datasets/bigan-training-15m-v1"),
+    help="Training dataset directory with train.parquet, val.parquet, and test.parquet.",
+)
+ORACLE_BACKTEST_WAREHOUSE_DIR_OPTION = typer.Option(
+    None,
+    help="Warehouse root containing raw_top_of_book parquet. Defaults to BIGAN_DATA_DIR/BIGAN_WAREHOUSE_SUBDIR.",
+)
+ORACLE_BACKTEST_OUTPUT_DIR_OPTION = typer.Option(
+    Path("data/backtests/oracle-label-sanity-v1"),
+    help="Directory for oracle-label sanity backtest artifacts.",
+)
+PREDICTION_BACKTEST_OUTPUT_DIR_OPTION = typer.Option(
+    Path("data/backtests/predictions-threshold-v1"),
+    help="Directory for prediction threshold backtest artifacts.",
 )
 
 
@@ -690,17 +737,22 @@ def labels_15m_v1(
         50_000,
         help="Flush label partitions after this many rows.",
     ),
+    fee_bps: float = typer.Option(
+        0.0,
+        help="Entry fee assumption, in basis points, for profitability labels.",
+    ),
     request_timeout_seconds: float = typer.Option(
         10.0,
         help="Per-request timeout when fetching Polymarket round metadata.",
     ),
 ) -> None:
-    """Generate independent labels_15m_v1 rows from Polymarket round metadata."""
+    """Generate independent UP-token profitability labels_15m_v1 rows."""
     settings = IngestionSettings()
     _configure_logging(settings.log_level)
     report = run_label_batch(
         settings.warehouse_dir,
         max_rows_per_partition=max_rows_per_partition,
+        fee_bps=fee_bps,
         gamma_api_base=settings.gamma_api_base,
         market_slug_prefix=settings.market_slug_prefix,
         request_timeout_seconds=request_timeout_seconds,
@@ -711,6 +763,7 @@ def labels_15m_v1(
                 "label_version": report.label_version,
                 "rows_generated": report.rows_generated,
                 "rows_written": report.rows_written,
+                "fee_bps": fee_bps,
             },
             indent=2,
         )
@@ -775,9 +828,15 @@ def logistic_baseline_v1(
 def xgboost_v1(
     dataset_dir: Path = XGBOOST_DATASET_DIR_OPTION,
     output_dir: Path = XGBOOST_OUTPUT_DIR_OPTION,
-    rounds_grid: str = typer.Option("20,50", help="Comma-separated boosting-round grid."),
-    learning_rate_grid: str = typer.Option("0.05,0.10", help="Comma-separated learning-rate grid."),
-    l2_penalty_grid: str = typer.Option("0.0,1.0", help="Comma-separated L2 penalty grid."),
+    rounds_grid: str = typer.Option("100,200,300", help="Comma-separated boosting-round grid."),
+    learning_rate_grid: str = typer.Option("0.01,0.05,0.10", help="Comma-separated learning-rate grid."),
+    l2_penalty_grid: str = typer.Option("0.10,1.0,5.0", help="Comma-separated L2 penalty grid."),
+    max_depth_grid: str = typer.Option("3,4,5", help="Comma-separated max-depth grid."),
+    subsample_grid: str = typer.Option("0.70,0.80,1.0", help="Comma-separated row-subsample grid."),
+    colsample_bytree_grid: str = typer.Option(
+        "0.70,0.80,1.0",
+        help="Comma-separated column-subsample grid.",
+    ),
 ) -> None:
     """Train deterministic XGBoost-v1 candidate artifacts."""
     settings = IngestionSettings()
@@ -789,8 +848,23 @@ def xgboost_v1(
             rounds_grid=_parse_int_grid(rounds_grid),
             learning_rate_grid=_parse_float_grid(learning_rate_grid),
             l2_penalty_grid=_parse_float_grid(l2_penalty_grid),
+            max_depth_grid=_parse_int_grid(max_depth_grid),
+            subsample_grid=_parse_float_grid(subsample_grid),
+            colsample_bytree_grid=_parse_float_grid(colsample_bytree_grid),
         ),
     )
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("xgboost-v2")
+def xgboost_v2(
+    dataset_dir: Path = XGBOOST_DATASET_DIR_OPTION,
+    output_dir: Path = XGBOOST_V2_OUTPUT_DIR_OPTION,
+) -> None:
+    """Train conservative XGBoost-v2 candidate artifacts."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = train_xgboost_v2(dataset_dir, output_dir)
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 
 
@@ -828,6 +902,47 @@ def promotion_report_v1(
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 
 
+@app.command("bootstrap-champion-v1")
+def bootstrap_champion_v1(
+    baseline_dir: Path = PROMOTION_BASELINE_DIR_OPTION,
+    candidate_dir: Path = PROMOTION_CANDIDATE_DIR_OPTION,
+    calibration_dir: Path = PROMOTION_CALIBRATION_DIR_OPTION,
+    candidate_backtest_summary_path: Path = PROMOTION_BACKTEST_SUMMARY_OPTION,
+    output_dir: Path = BOOTSTRAP_OUTPUT_DIR_OPTION,
+    baseline_backtest_summary_path: Path | None = BOOTSTRAP_BASELINE_BACKTEST_SUMMARY_OPTION,
+    serving_readiness_path: Path | None = BOOTSTRAP_SERVING_READINESS_PATH_OPTION,
+    feature_schema_path: Path | None = BOOTSTRAP_FEATURE_SCHEMA_PATH_OPTION,
+    rollback_runbook_path: Path | None = BOOTSTRAP_ROLLBACK_RUNBOOK_PATH_OPTION,
+    baseline_type: str = typer.Option("logistic regression baseline", help="Human-readable baseline type."),
+    baseline_explicit: bool = typer.Option(
+        True,
+        "--baseline-explicit/--baseline-inferred",
+        help="Whether the supplied baseline is an explicit project baseline.",
+    ),
+) -> None:
+    """Evaluate whether a candidate is ready to become the first champion."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = evaluate_bootstrap_champion(
+        baseline_dir=baseline_dir,
+        candidates=(
+            BootstrapCandidateInput(
+                candidate_dir=candidate_dir,
+                calibration_dir=calibration_dir,
+                candidate_backtest_summary_path=candidate_backtest_summary_path,
+                serving_readiness_path=serving_readiness_path,
+                feature_schema_path=feature_schema_path,
+            ),
+        ),
+        baseline_backtest_summary_path=baseline_backtest_summary_path,
+        rollback_runbook_path=rollback_runbook_path,
+        baseline_type=baseline_type,
+        baseline_explicit=baseline_explicit,
+        output_dir=output_dir,
+    )
+    typer.echo(report.to_markdown())
+
+
 @app.command("predictions-v1")
 def predictions_v1(
     model_path: Path = PREDICTION_MODEL_PATH_OPTION,
@@ -845,6 +960,69 @@ def predictions_v1(
         model_path,
         calibration_path=calibration_path,
         max_rows_per_partition=max_rows_per_partition,
+    )
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("backtest-oracle-sanity-v1")
+def backtest_oracle_sanity_v1(
+    dataset_dir: Path = ORACLE_BACKTEST_DATASET_DIR_OPTION,
+    warehouse_dir: Path | None = ORACLE_BACKTEST_WAREHOUSE_DIR_OPTION,
+    output_dir: Path = ORACLE_BACKTEST_OUTPUT_DIR_OPTION,
+    thresholds: str = typer.Option(
+        "0.00,0.03,0.05",
+        help="Comma-separated edge thresholds for the oracle sweep.",
+    ),
+    use_label_target_ts: bool = typer.Option(
+        True,
+        "--label-target-ts/--fixed-hold",
+        help="Exit at each label target_ts instead of feature_ts + 15m.",
+    ),
+    required_outcome_side: str = typer.Option(
+        "UP",
+        help="Required outcome side encoded in canonical_symbol. Use an empty string to include all outcomes.",
+    ),
+) -> None:
+    """Run a perfect-label sanity backtest before trusting model promotion evidence."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = run_oracle_label_sanity_backtest(
+        dataset_dir=dataset_dir,
+        warehouse_dir=settings.warehouse_dir if warehouse_dir is None else warehouse_dir,
+        output_dir=output_dir,
+        thresholds=_parse_float_grid(thresholds),
+        use_label_target_ts=use_label_target_ts,
+        required_outcome_side=required_outcome_side or None,
+    )
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("backtest-predictions-v1")
+def backtest_predictions_v1(
+    warehouse_dir: Path | None = ORACLE_BACKTEST_WAREHOUSE_DIR_OPTION,
+    output_dir: Path = PREDICTION_BACKTEST_OUTPUT_DIR_OPTION,
+    model_version: str | None = typer.Option(
+        None,
+        help="Optional model_version filter for the predictions table.",
+    ),
+    thresholds: str = typer.Option(
+        "0.00,0.03,0.05",
+        help="Comma-separated edge thresholds for the prediction sweep.",
+    ),
+    required_outcome_side: str = typer.Option(
+        "UP",
+        help="Required outcome side encoded in canonical_symbol. Use an empty string to include all outcomes.",
+    ),
+) -> None:
+    """Run a grouped threshold backtest from warehouse predictions."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = run_prediction_threshold_backtest(
+        warehouse_dir=settings.warehouse_dir if warehouse_dir is None else warehouse_dir,
+        output_dir=output_dir,
+        model_version=model_version,
+        thresholds=_parse_float_grid(thresholds),
+        required_outcome_side=required_outcome_side or None,
     )
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 

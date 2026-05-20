@@ -185,6 +185,7 @@ def _build_feature_row(
         "feature_version": FEATURE_VERSION,
         **quality,
         "spread": spread,
+        "market_implied_prob": ask,
         "mid_price": mid,
         "microprice": _microprice(bid, ask, bid_l1, ask_l1),
         "obi_l1": _imbalance(bid_l1, ask_l1),

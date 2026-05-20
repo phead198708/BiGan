@@ -24,6 +24,7 @@ def _feature_row(ts: int, mid_price: float) -> dict:
         "feature_ts": ts,
         "feature_version": "bigan-mvp-v1.0.0",
         "spread": 0.02,
+        "market_implied_prob": mid_price + 0.01,
         "mid_price": mid_price,
         "ret_15m": mid_price - 0.50,
     }
@@ -93,11 +94,13 @@ def test_predictions_schema_is_registered_with_online_contract_fields() -> None:
         "calibration_method",
         "prob_up_15m",
         "raw_prob_up_15m",
+        "market_implied_prob",
         "confidence_bucket",
         "top_features_json",
     } <= cols
     assert schema.field("prediction_ts").type == pa.int64()
     assert schema.field("prob_up_15m").type == pa.float64()
+    assert schema.field("market_implied_prob").type == pa.float64()
     assert schema.field("model_version").type == pa.string()
     assert not schema.field("prob_up_15m").nullable
 
@@ -124,6 +127,7 @@ def test_generate_prediction_rows_outputs_frontend_ready_contract(tmp_path: Path
     assert row["calibration_method"] == "isotonic"
     assert row["prob_up_15m"] == pytest.approx(0.90)
     assert 0.0 <= row["raw_prob_up_15m"] <= 1.0
+    assert row["market_implied_prob"] == pytest.approx(0.61)
     assert row["confidence_bucket"] == "high_up"
     assert json.loads(row["top_features_json"])[0]["feature"] == "mid_price"
 
@@ -135,6 +139,7 @@ def test_generate_prediction_rows_outputs_frontend_ready_contract(tmp_path: Path
     assert files
     stored = pq.ParquetFile(files[0]).read().to_pylist()[0]
     assert stored["prob_up_15m"] == pytest.approx(0.90)
+    assert stored["market_implied_prob"] == pytest.approx(0.61)
 
 
 def test_generate_prediction_rows_rejects_training_schema_mismatch() -> None:

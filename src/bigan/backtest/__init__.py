@@ -12,6 +12,12 @@ from .config import (
     generate_run_id,
     load_backtest_config,
 )
+from .diagnostics import (
+    GroupedThresholdBacktestReport,
+    run_grouped_threshold_backtest,
+    run_oracle_label_sanity_backtest,
+    run_prediction_threshold_backtest,
+)
 from .evaluation import (
     CalibrationBin,
     PredictionEvaluationReport,
@@ -27,6 +33,7 @@ from .execution import (
     simulate_taker_long_trade,
 )
 from .strategy import (
+    DEFAULT_EDGE_THRESHOLDS,
     DEFAULT_HOLD_MS,
     DEFAULT_THRESHOLDS,
     PredictionSignal,
@@ -59,7 +66,9 @@ __all__ = [
     "BacktestStrategyConfig",
     "CalibrationBin",
     "DEFAULT_HOLD_MS",
+    "DEFAULT_EDGE_THRESHOLDS",
     "DEFAULT_THRESHOLDS",
+    "GroupedThresholdBacktestReport",
     "MetricStability",
     "NoQuoteAvailableError",
     "PredictionSignal",
@@ -78,6 +87,9 @@ __all__ = [
     "generate_walk_forward_windows",
     "generate_run_id",
     "load_backtest_config",
+    "run_grouped_threshold_backtest",
+    "run_oracle_label_sanity_backtest",
+    "run_prediction_threshold_backtest",
     "run_walk_forward",
     "run_threshold_strategy",
     "run_threshold_sweep",

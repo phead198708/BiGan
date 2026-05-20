@@ -1,5 +1,14 @@
 """Model training dataset helpers."""
 
+from .bootstrap import (
+    BootstrapCandidateInput,
+    BootstrapChampionReport,
+    BootstrapChecklist,
+    BootstrapComparisonRow,
+    BootstrapGateResult,
+    BootstrapRules,
+    evaluate_bootstrap_champion,
+)
 from .calibration import (
     CalibrationConfig,
     CalibrationReport,
@@ -37,16 +46,24 @@ from .promotion import (
 )
 from .xgboost_v1 import (
     XGBOOST_MODEL_VERSION,
+    XGBOOST_V2_MODEL_VERSION,
     XGBoostV1Config,
     XGBoostV1Model,
     XGBoostV1Report,
     load_xgboost_v1_model,
     train_xgboost_v1,
+    train_xgboost_v2,
 )
 
 __all__ = [
     "CalibrationConfig",
     "CalibrationReport",
+    "BootstrapCandidateInput",
+    "BootstrapChampionReport",
+    "BootstrapChecklist",
+    "BootstrapComparisonRow",
+    "BootstrapGateResult",
+    "BootstrapRules",
     "DATASET_VERSION",
     "DatasetAssemblyReport",
     "LogisticBaselineConfig",
@@ -61,11 +78,13 @@ __all__ = [
     "SplitConfig",
     "SplitStats",
     "XGBOOST_MODEL_VERSION",
+    "XGBOOST_V2_MODEL_VERSION",
     "XGBoostV1Config",
     "XGBoostV1Model",
     "XGBoostV1Report",
     "assemble_training_dataset",
     "confidence_bucket",
+    "evaluate_bootstrap_champion",
     "fit_calibration_from_predictions",
     "fit_probability_calibration",
     "generate_prediction_rows",
@@ -76,4 +95,5 @@ __all__ = [
     "train_logistic_baseline",
     "run_prediction_batch",
     "train_xgboost_v1",
+    "train_xgboost_v2",
 ]
