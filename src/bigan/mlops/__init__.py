@@ -23,6 +23,14 @@ from .registry import (
     register_model,
     retire_model,
 )
+from .shadow import (
+    ShadowComparisonReport,
+    ShadowPredictionPair,
+    distribution_kl_divergence,
+    distribution_wasserstein_distance,
+    run_shadow_comparison,
+    save_shadow_report,
+)
 
 __all__ = [
     "DEPLOYMENT_STATUSES",
@@ -33,10 +41,14 @@ __all__ = [
     "MODEL_REGISTRY_VIEWS_DDL",
     "ModelDeploymentRecord",
     "ModelRegistryRecord",
+    "ShadowComparisonReport",
+    "ShadowPredictionPair",
     "complete_deployment",
     "connect_mlops_db",
     "current_online_model",
     "current_champion",
+    "distribution_kl_divergence",
+    "distribution_wasserstein_distance",
     "initialize_mlops_db",
     "model_artifact_uri",
     "promote_model",
@@ -44,4 +56,6 @@ __all__ = [
     "register_model",
     "retire_model",
     "rollback_deployment",
+    "run_shadow_comparison",
+    "save_shadow_report",
 ]
