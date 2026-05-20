@@ -28,6 +28,7 @@ from bigan.modeling import (
     SplitConfig,
     XGBoostV1Config,
     assemble_training_dataset,
+    fit_probability_calibration,
     train_logistic_baseline,
     train_xgboost_v1,
 )
@@ -113,6 +114,18 @@ XGBOOST_DATASET_DIR_OPTION = typer.Option(
 XGBOOST_OUTPUT_DIR_OPTION = typer.Option(
     Path("data/model-runs/xgboost-v1"),
     help="Directory for XGBoost-v1 artifacts.",
+)
+CALIBRATION_MODEL_PATH_OPTION = typer.Option(
+    Path("data/model-runs/xgboost-v1/model.json"),
+    help="Path to a saved model.json produced by xgboost-v1.",
+)
+CALIBRATION_DATASET_DIR_OPTION = typer.Option(
+    Path("data/training-datasets/bigan-training-15m-v1"),
+    help="Training dataset directory with validation split.",
+)
+CALIBRATION_OUTPUT_DIR_OPTION = typer.Option(
+    Path("data/model-runs/xgboost-v1-calibration"),
+    help="Directory for calibration artifacts.",
 )
 
 
@@ -748,6 +761,19 @@ def xgboost_v1(
             l2_penalty_grid=_parse_float_grid(l2_penalty_grid),
         ),
     )
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("calibration-v1")
+def calibration_v1(
+    model_path: Path = CALIBRATION_MODEL_PATH_OPTION,
+    dataset_dir: Path = CALIBRATION_DATASET_DIR_OPTION,
+    output_dir: Path = CALIBRATION_OUTPUT_DIR_OPTION,
+) -> None:
+    """Fit probability calibration for a saved XGBoost-v1 model."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = fit_probability_calibration(model_path, dataset_dir, output_dir)
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 
 
