@@ -28,6 +28,7 @@ from bigan.modeling import (
     SplitConfig,
     XGBoostV1Config,
     assemble_training_dataset,
+    evaluate_model_promotion,
     fit_probability_calibration,
     train_logistic_baseline,
     train_xgboost_v1,
@@ -126,6 +127,26 @@ CALIBRATION_DATASET_DIR_OPTION = typer.Option(
 CALIBRATION_OUTPUT_DIR_OPTION = typer.Option(
     Path("data/model-runs/xgboost-v1-calibration"),
     help="Directory for calibration artifacts.",
+)
+PROMOTION_BASELINE_DIR_OPTION = typer.Option(
+    Path("data/model-runs/logreg-baseline-v1"),
+    help="Baseline model run directory.",
+)
+PROMOTION_CANDIDATE_DIR_OPTION = typer.Option(
+    Path("data/model-runs/xgboost-v1"),
+    help="Candidate model run directory.",
+)
+PROMOTION_CALIBRATION_DIR_OPTION = typer.Option(
+    Path("data/model-runs/xgboost-v1-calibration"),
+    help="Calibration artifact directory.",
+)
+PROMOTION_BACKTEST_SUMMARY_OPTION = typer.Option(
+    Path("data/backtests/summary.json"),
+    help="Threshold-backtest summary JSON.",
+)
+PROMOTION_OUTPUT_DIR_OPTION = typer.Option(
+    Path("data/model-runs/promotion-v1"),
+    help="Directory for promotion report artifacts.",
 )
 
 
@@ -774,6 +795,27 @@ def calibration_v1(
     settings = IngestionSettings()
     _configure_logging(settings.log_level)
     report = fit_probability_calibration(model_path, dataset_dir, output_dir)
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("promotion-report-v1")
+def promotion_report_v1(
+    baseline_dir: Path = PROMOTION_BASELINE_DIR_OPTION,
+    candidate_dir: Path = PROMOTION_CANDIDATE_DIR_OPTION,
+    calibration_dir: Path = PROMOTION_CALIBRATION_DIR_OPTION,
+    backtest_summary_path: Path = PROMOTION_BACKTEST_SUMMARY_OPTION,
+    output_dir: Path = PROMOTION_OUTPUT_DIR_OPTION,
+) -> None:
+    """Evaluate model promotion rules and write a checklist/report."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = evaluate_model_promotion(
+        baseline_dir,
+        candidate_dir,
+        calibration_dir,
+        backtest_summary_path,
+        output_dir,
+    )
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 
 

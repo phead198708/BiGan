@@ -23,6 +23,12 @@ from .logistic import (
     load_logistic_baseline,
     train_logistic_baseline,
 )
+from .promotion import (
+    PromotionCheck,
+    PromotionReport,
+    PromotionRules,
+    evaluate_model_promotion,
+)
 from .xgboost_v1 import (
     XGBOOST_MODEL_VERSION,
     XGBoostV1Config,
@@ -43,6 +49,9 @@ __all__ = [
     "LogisticBaselineReport",
     "MODEL_VERSION",
     "ProbabilityCalibrator",
+    "PromotionCheck",
+    "PromotionReport",
+    "PromotionRules",
     "SplitConfig",
     "SplitStats",
     "XGBOOST_MODEL_VERSION",
@@ -53,6 +62,7 @@ __all__ = [
     "assemble_training_dataset",
     "fit_calibration_from_predictions",
     "fit_probability_calibration",
+    "evaluate_model_promotion",
     "load_logistic_baseline",
     "load_probability_calibrator",
     "load_xgboost_v1_model",
