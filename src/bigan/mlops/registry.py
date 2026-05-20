@@ -10,6 +10,8 @@ from typing import Any
 
 import duckdb
 
+from .deployments import MODEL_DEPLOYMENTS_TABLE_DDL, MODEL_DEPLOYMENTS_VIEWS_DDL
+
 MODEL_REGISTRY_STATUSES: tuple[str, ...] = (
     "candidate",
     "challenger",
@@ -92,10 +94,13 @@ def connect_mlops_db(path: Path | str = ":memory:") -> duckdb.DuckDBPyConnection
 
 
 def initialize_mlops_db(conn: duckdb.DuckDBPyConnection) -> None:
-    """Create model registry tables and query views."""
+    """Create MLOps catalog tables and query views."""
 
     conn.execute(MODEL_REGISTRY_TABLE_DDL)
+    conn.execute(MODEL_DEPLOYMENTS_TABLE_DDL)
     for ddl in MODEL_REGISTRY_VIEWS_DDL:
+        conn.execute(ddl)
+    for ddl in MODEL_DEPLOYMENTS_VIEWS_DDL:
         conn.execute(ddl)
 
 
