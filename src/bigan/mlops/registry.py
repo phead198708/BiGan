@@ -10,6 +10,10 @@ from typing import Any
 
 import duckdb
 
+from bigan.monitoring.events import (
+    MONITORING_TABLES_DDL,
+)
+
 from .deployments import MODEL_DEPLOYMENTS_TABLE_DDL, MODEL_DEPLOYMENTS_VIEWS_DDL
 
 MODEL_REGISTRY_STATUSES: tuple[str, ...] = (
@@ -98,6 +102,8 @@ def initialize_mlops_db(conn: duckdb.DuckDBPyConnection) -> None:
 
     conn.execute(MODEL_REGISTRY_TABLE_DDL)
     conn.execute(MODEL_DEPLOYMENTS_TABLE_DDL)
+    for ddl in MONITORING_TABLES_DDL:
+        conn.execute(ddl)
     for ddl in MODEL_REGISTRY_VIEWS_DDL:
         conn.execute(ddl)
     for ddl in MODEL_DEPLOYMENTS_VIEWS_DDL:
