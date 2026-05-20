@@ -7,7 +7,7 @@ import json
 import math
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -62,7 +62,7 @@ def build_feature_schema_artifact(
         raise ValueError("feature_columns must not be empty")
     if len(set(columns)) != len(columns):
         raise ValueError("feature_columns must be unique")
-    types = {column: "float64" for column in columns}
+    types = dict.fromkeys(columns, "float64")
     if feature_types is not None:
         types.update({str(key): str(value) for key, value in feature_types.items()})
     unknown_types = sorted(set(types) - set(columns))
@@ -163,7 +163,7 @@ def _schema_mismatch_details(
     strict_order: bool,
 ) -> dict[str, Any]:
     expected = list(schema.feature_columns)
-    actual = [str(column) for column in features.keys()]
+    actual = [str(column) for column in features]
     missing = [column for column in expected if column not in features]
     extra = [column for column in actual if column not in schema.feature_columns]
     wrong_order = strict_order and not missing and not extra and actual != expected

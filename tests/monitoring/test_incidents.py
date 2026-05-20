@@ -9,9 +9,9 @@ import pytest
 
 from bigan.mlops import connect_mlops_db, initialize_mlops_db
 from bigan.monitoring import (
-    DataQualityIncident,
     INCIDENT_SEVERITIES,
     INCIDENT_TYPES,
+    DataQualityIncident,
     open_data_quality_incidents,
     record_data_quality_incident,
     resolve_data_quality_incident,
