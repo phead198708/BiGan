@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from bigan.ingestion.soak import (
     inspect_raw_archive,
     inspect_rollup_outputs,
     read_soak_samples,
+    record_soak_samples,
     summarize_soak,
 )
 
@@ -195,6 +197,59 @@ def test_summarize_soak_ignores_startup_samples_before_first_event(
     assert summary["metrics"]["max_last_event_lag_seconds"] == 1
 
 
+def test_summarize_soak_allows_small_duration_scheduler_grace(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    rollup_dir = tmp_path / "rollup"
+    _write_raw_file(raw_dir / "2026-05-13.ndjson.gz", [{"receive_time": 1, "raw": {}}])
+    parquet_path = rollup_dir / "date=2026-05-13" / "event_type=book" / "part.parquet"
+    parquet_path.parent.mkdir(parents=True)
+    parquet_path.write_bytes(b"placeholder")
+
+    summary = summarize_soak(
+        [
+            _sample(1_000, records=0, rollups_ok=0),
+            _sample(1_059.75, records=1, rollups_ok=1),
+        ],
+        raw_dir=raw_dir,
+        rollup_dir=rollup_dir,
+        thresholds=SoakThresholds(min_duration_seconds=60),
+    )
+
+    assert summary["passed"] is True
+    duration_check = next(
+        check for check in summary["checks"] if check["name"] == "duration_seconds"
+    )
+    assert duration_check["observed"] == 59.75
+    assert duration_check["threshold"] == {"min_seconds": 60, "grace_seconds": 0.5}
+
+
+def test_summarize_soak_fails_duration_outside_scheduler_grace(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    rollup_dir = tmp_path / "rollup"
+    _write_raw_file(raw_dir / "2026-05-13.ndjson.gz", [{"receive_time": 1, "raw": {}}])
+    parquet_path = rollup_dir / "date=2026-05-13" / "event_type=book" / "part.parquet"
+    parquet_path.parent.mkdir(parents=True)
+    parquet_path.write_bytes(b"placeholder")
+
+    summary = summarize_soak(
+        [
+            _sample(1_000, records=0, rollups_ok=0),
+            _sample(1_059.49, records=1, rollups_ok=1),
+        ],
+        raw_dir=raw_dir,
+        rollup_dir=rollup_dir,
+        thresholds=SoakThresholds(min_duration_seconds=60),
+    )
+
+    failed = {check["name"] for check in summary["checks"] if not check["passed"]}
+    assert summary["passed"] is False
+    assert "duration_seconds" in failed
+
+
 def test_raw_archive_counts_bad_lines_and_done_files(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     _write_raw_file(raw_dir / "2026-05-13.ndjson.gz", [{"ok": True}])
@@ -248,6 +303,30 @@ def test_soak_sample_ndjson_round_trip(tmp_path: Path) -> None:
         1,
         2,
     ]
+
+
+def test_record_soak_samples_appends_shutdown_sample(tmp_path: Path) -> None:
+    path = tmp_path / "soak.ndjson"
+
+    async def go() -> None:
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            record_soak_samples(
+                path,
+                started_at_seconds=1_700_000_000.0,
+                interval_seconds=60,
+                stop_event=stop,
+            )
+        )
+        await asyncio.sleep(0.01)
+        stop.set()
+        await task
+
+    asyncio.run(go())
+
+    samples = read_soak_samples(path)
+    assert len(samples) == 2
+    assert samples[-1]["sample_ts"] >= samples[0]["sample_ts"]
 
 
 def test_finalize_soak_rollup_converts_remaining_raw_files(tmp_path: Path) -> None:

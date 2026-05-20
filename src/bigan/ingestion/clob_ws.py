@@ -11,8 +11,10 @@ The class does **not** persist anything itself; the runner wires it up to a
 sink + book registry + metrics.
 
 Design notes:
-- ``websockets.connect`` already implements client-side ping/pong; we configure
-  ``ping_interval`` / ``ping_timeout`` rather than rolling our own.
+- The client owns periodic protocol pings rather than relying on
+  ``websockets`` keepalive. This lets us keep ping-timeout disconnects disabled
+  while still consuming pong-future exceptions after remote closes. Quiet
+  receive periods are checked separately by the explicit idle watchdog below.
 - The CLOB market channel does not require an initial "subscribe" message at
   connect time — the subscription payload is the only message we send before
   receiving snapshots. To change subscriptions mid-flight we send a new
@@ -54,9 +56,11 @@ class WsClientConfig:
     custom_feature_enabled: bool = True
     reconnect_min_seconds: float = 1.0
     reconnect_max_seconds: float = 30.0
-    ping_interval_seconds: float = 20.0
-    ping_timeout_seconds: float = 10.0
-    message_timeout_seconds: float = 60.0
+    reconnect_reset_after_seconds: float = 60.0
+    ping_interval_seconds: float | None = 20.0
+    ping_timeout_seconds: float | None = None
+    idle_probe_timeout_seconds: float = 10.0
+    message_timeout_seconds: float = 45.0
     ingest_lag_warn_seconds: float = 0.5
 
 
@@ -112,32 +116,49 @@ class ClobWsClient:
         """Main loop: connect, subscribe, dispatch messages, reconnect on failure."""
         backoff = self._cfg.reconnect_min_seconds
         while not self._cancelled.is_set():
+            attempt_started_at = time.monotonic()
             try:
                 await self._connect_and_run()
                 backoff = self._cfg.reconnect_min_seconds  # reset on clean exit
             except asyncio.CancelledError:
                 raise
             except (ConnectionClosed, WebSocketException, OSError) as exc:
-                WS_RECONNECTS_TOTAL.inc()
-                logger.warning(
-                    "ws.connection_failed",
-                    extra={"err": str(exc), "backoff_s": backoff},
+                backoff = self._backoff_for_failed_connection(
+                    backoff,
+                    attempt_started_at=attempt_started_at,
                 )
+                WS_RECONNECTS_TOTAL.inc()
+                _log_connection_failed(exc, backoff_s=backoff)
                 await self._sleep_with_jitter(backoff)
                 backoff = min(backoff * 2, self._cfg.reconnect_max_seconds)
             except Exception as exc:  # noqa: BLE001
+                backoff = self._backoff_for_failed_connection(
+                    backoff,
+                    attempt_started_at=attempt_started_at,
+                )
                 expected = _expected_connection_exception(exc)
                 if expected is not None:
                     WS_RECONNECTS_TOTAL.inc()
-                    logger.warning(
-                        "ws.connection_failed",
-                        extra={"err": str(expected), "backoff_s": backoff},
-                    )
+                    _log_connection_failed(expected, backoff_s=backoff)
                 else:
                     WS_RECONNECTS_TOTAL.inc()
-                    logger.exception("ws.unexpected_error", extra={"backoff_s": backoff})
+                    logger.exception(
+                        "ws.unexpected_error backoff_s=%s",
+                        backoff,
+                        extra={"backoff_s": backoff},
+                    )
                 await self._sleep_with_jitter(backoff)
                 backoff = min(backoff * 2, self._cfg.reconnect_max_seconds)
+
+    def _backoff_for_failed_connection(
+        self,
+        current_backoff: float,
+        *,
+        attempt_started_at: float,
+    ) -> float:
+        if time.monotonic() - attempt_started_at >= self._cfg.reconnect_reset_after_seconds:
+            return self._cfg.reconnect_min_seconds
+        return current_backoff
 
     async def _sleep_with_jitter(self, base: float) -> None:
         delay = base * (0.5 + random.random())
@@ -148,8 +169,8 @@ class ClobWsClient:
         logger.info("ws.connecting", extra={"url": self._cfg.url})
         async with websockets.connect(
             self._cfg.url,
-            ping_interval=self._cfg.ping_interval_seconds,
-            ping_timeout=self._cfg.ping_timeout_seconds,
+            ping_interval=None,
+            ping_timeout=None,
             close_timeout=5,
             max_size=2**24,  # 16 MB, handles large book snapshots
         ) as ws:
@@ -167,6 +188,7 @@ class ClobWsClient:
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(self._receive_loop(ws), name="ws-recv")
                     tg.create_task(self._subscription_refresher(ws), name="ws-sub-refresh")
+                    tg.create_task(self._protocol_ping_loop(ws), name="ws-protocol-ping")
             finally:
                 self._connection = None
 
@@ -199,6 +221,34 @@ class ClobWsClient:
             self._desired_updated.clear()
             await self._send_subscription()
 
+    async def _protocol_ping_loop(self, ws: websockets.WebSocketClientProtocol) -> None:
+        """Send protocol pings without closing healthy streams on late pongs."""
+        interval = self._cfg.ping_interval_seconds
+        if interval is None:
+            return
+        while not self._cancelled.is_set():
+            try:
+                await asyncio.wait_for(self._cancelled.wait(), timeout=interval)
+                return
+            except TimeoutError:
+                pass
+
+            try:
+                pong_waiter = await ws.ping()
+            except (ConnectionClosed, WebSocketException, OSError):
+                return
+            _consume_future_exception(pong_waiter)
+
+            timeout = self._cfg.ping_timeout_seconds
+            if timeout is None:
+                continue
+            try:
+                await asyncio.wait_for(asyncio.shield(pong_waiter), timeout=timeout)
+            except TimeoutError as exc:
+                raise ConnectionClosed(None, None) from exc
+            except (ConnectionClosed, WebSocketException, OSError):
+                return
+
     async def _receive_loop(self, ws: websockets.WebSocketClientProtocol) -> None:
         """Pump messages from the WS into the handler with a watchdog."""
         timeout = self._cfg.message_timeout_seconds
@@ -222,7 +272,7 @@ class ClobWsClient:
             pong_waiter = await ws.ping()
             await asyncio.wait_for(
                 pong_waiter,
-                timeout=self._cfg.ping_timeout_seconds,
+                timeout=self._cfg.idle_probe_timeout_seconds,
             )
         except (TimeoutError, ConnectionClosed, WebSocketException, OSError) as exc:
             raise ConnectionClosed(None, None) from exc
@@ -230,7 +280,10 @@ class ClobWsClient:
         LAST_EVENT_RECEIVE_TIME.set(time.time())
         logger.debug(
             "ws.idle_ping_ok",
-            extra={"idle_timeout_s": self._cfg.message_timeout_seconds},
+            extra={
+                "idle_timeout_s": self._cfg.message_timeout_seconds,
+                "probe_timeout_s": self._cfg.idle_probe_timeout_seconds,
+            },
         )
 
     # Polymarket sometimes sends plain-text application-level keepalive
@@ -322,6 +375,20 @@ def _asset_id_for_log(event: MarketEvent, payload: dict) -> str | None:
     return None
 
 
+def _consume_future_exception(future: asyncio.Future[object]) -> None:
+    """Mark future exceptions as retrieved when pings are intentionally non-fatal."""
+
+    def _done(done: asyncio.Future[object]) -> None:
+        try:
+            done.exception()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    future.add_done_callback(_done)
+
+
 def _expected_connection_exception(exc: BaseException) -> BaseException | None:
     """Return a reconnect-worthy exception, unwrapping TaskGroup noise.
 
@@ -338,3 +405,50 @@ def _expected_connection_exception(exc: BaseException) -> BaseException | None:
             if found is not None:
                 return found
     return None
+
+
+def _log_connection_failed(exc: BaseException, *, backoff_s: float) -> None:
+    context = _connection_error_context(exc, backoff_s=backoff_s)
+    logger.warning(
+        (
+            "ws.connection_failed err_type=%s err=%r close_code=%s "
+            "close_reason=%r cause_type=%s cause=%r backoff_s=%s"
+        ),
+        context["err_type"],
+        context["err"],
+        context["close_code"],
+        context["close_reason"],
+        context["cause_type"],
+        context["cause"],
+        context["backoff_s"],
+        extra=context,
+    )
+
+
+def _connection_error_context(
+    exc: BaseException,
+    *,
+    backoff_s: float,
+) -> dict[str, object]:
+    """Return reconnect diagnostics that survive plain logging formatters."""
+
+    close_code = getattr(exc, "code", None)
+    close_reason = getattr(exc, "reason", None)
+    rcvd = getattr(exc, "rcvd", None)
+    if rcvd is not None:
+        close_code = close_code if close_code is not None else getattr(rcvd, "code", None)
+        close_reason = (
+            close_reason
+            if close_reason is not None
+            else getattr(rcvd, "reason", None)
+        )
+    cause = exc.__cause__
+    return {
+        "err_type": type(exc).__name__,
+        "err": str(exc),
+        "close_code": close_code,
+        "close_reason": close_reason,
+        "cause_type": type(cause).__name__ if cause is not None else None,
+        "cause": str(cause) if cause is not None else None,
+        "backoff_s": backoff_s,
+    }

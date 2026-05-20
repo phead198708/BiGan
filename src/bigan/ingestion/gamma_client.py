@@ -202,9 +202,8 @@ class GammaClient:
                         *(fetch_offset(page_index) for page_index in range(1, max_pages))
                     )
                 )
-        except (aiohttp.ClientError, TimeoutError) as exc:
+        except (aiohttp.ClientError, TimeoutError):
             GAMMA_POLLS_TOTAL.labels(outcome="error").inc()
-            logger.warning("gamma.poll_failed", extra={"err": str(exc)})
             raise
 
         for _, records in sorted(pages, key=lambda item: item[0]):
@@ -248,9 +247,19 @@ class GammaClient:
             "order": "startDate",
             "ascending": "false",
         }
-        async with self._session.get(url, params=params) as resp:
-            resp.raise_for_status()
-            raw = await resp.read()
+        try:
+            async with self._session.get(url, params=params) as resp:
+                resp.raise_for_status()
+                raw = await resp.read()
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            _log_gamma_fetch_failed(
+                exc,
+                url=url,
+                limit=limit,
+                offset=offset,
+                timeout_s=self._timeout.total,
+            )
+            raise
         records = orjson.loads(raw)
         return records if isinstance(records, list) else []
 
@@ -268,3 +277,58 @@ def diff_subscription_sets(
     to_subscribe = sorted(desired_set - current_set)
     to_unsubscribe = sorted(current_set - desired_set)
     return to_subscribe, to_unsubscribe
+
+
+def _log_gamma_fetch_failed(
+    exc: BaseException,
+    *,
+    url: str,
+    limit: int,
+    offset: int,
+    timeout_s: float | None,
+) -> None:
+    context = _gamma_fetch_error_context(
+        exc,
+        url=url,
+        limit=limit,
+        offset=offset,
+        timeout_s=timeout_s,
+    )
+    logger.warning(
+        (
+            "gamma.poll_failed err_type=%s err=%r url=%s limit=%s offset=%s "
+            "timeout_s=%s cause_type=%s cause=%r"
+        ),
+        context["err_type"],
+        context["err"],
+        context["url"],
+        context["limit"],
+        context["offset"],
+        context["timeout_s"],
+        context["cause_type"],
+        context["cause"],
+        extra=context,
+    )
+
+
+def _gamma_fetch_error_context(
+    exc: BaseException,
+    *,
+    url: str,
+    limit: int,
+    offset: int,
+    timeout_s: float | None,
+) -> dict[str, object]:
+    """Return Gamma poll diagnostics that survive plain logging formatters."""
+
+    cause = exc.__cause__
+    return {
+        "err_type": type(exc).__name__,
+        "err": str(exc),
+        "url": url,
+        "limit": limit,
+        "offset": offset,
+        "timeout_s": timeout_s,
+        "cause_type": type(cause).__name__ if cause is not None else None,
+        "cause": str(cause) if cause is not None else None,
+    }

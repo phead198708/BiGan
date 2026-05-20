@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 
 from bigan.ingestion.gamma_client import (
     GammaClient,
+    _gamma_fetch_error_context,
+    _log_gamma_fetch_failed,
     _market_from_gamma,
     _parse_iso8601_to_ms,
     diff_subscription_sets,
@@ -196,6 +199,53 @@ def test_list_active_markets_keeps_scanning_after_empty_target_pages() -> None:
         "btc-updown-15m-4102445700",
     ]
     assert [call["offset"] for call in session.calls] == [0, 2, 4]
+
+
+def test_gamma_fetch_error_context_includes_page_diagnostics() -> None:
+    cause = TimeoutError("read timed out")
+    exc = TimeoutError()
+    exc.__cause__ = cause
+
+    context = _gamma_fetch_error_context(
+        exc,
+        url="https://gamma.test/markets",
+        limit=100,
+        offset=200,
+        timeout_s=10.0,
+    )
+
+    assert context == {
+        "err_type": "TimeoutError",
+        "err": "",
+        "url": "https://gamma.test/markets",
+        "limit": 100,
+        "offset": 200,
+        "timeout_s": 10.0,
+        "cause_type": "TimeoutError",
+        "cause": "read timed out",
+    }
+
+
+def test_gamma_poll_failed_log_message_includes_plain_diagnostics(caplog) -> None:
+    exc = TimeoutError("read timed out")
+
+    with caplog.at_level(logging.WARNING):
+        _log_gamma_fetch_failed(
+            exc,
+            url="https://gamma.test/markets",
+            limit=100,
+            offset=200,
+            timeout_s=10.0,
+        )
+
+    message = caplog.records[-1].getMessage()
+    assert "gamma.poll_failed" in message
+    assert "err_type=TimeoutError" in message
+    assert "err='read timed out'" in message
+    assert "url=https://gamma.test/markets" in message
+    assert "limit=100" in message
+    assert "offset=200" in message
+    assert "timeout_s=10.0" in message
 
 
 class _FakeGammaSession:

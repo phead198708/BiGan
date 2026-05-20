@@ -65,14 +65,48 @@ class IngestionSettings(BaseSettings):
     # --- WebSocket reconnect ---
     ws_reconnect_min_seconds: float = Field(default=1.0, ge=0.1)
     ws_reconnect_max_seconds: float = Field(default=30.0, ge=1.0)
-    ws_ping_interval_seconds: float = Field(default=20.0, ge=1.0)
-    ws_ping_timeout_seconds: float = Field(default=10.0, ge=1.0)
-    ws_message_timeout_seconds: float = Field(
+    ws_reconnect_reset_after_seconds: float = Field(
         default=60.0,
+        ge=0.0,
+        description=(
+            "Reset exponential reconnect backoff after a connection has stayed "
+            "up this long. This prevents isolated remote closes hours apart "
+            "from accumulating stale backoff."
+        ),
+    )
+    ws_ping_interval_seconds: float | None = Field(
+        default=20.0,
+        ge=1.0,
+        description=(
+            "Optional CLOB client protocol-ping interval. Defaults to enabled "
+            "to keep the upstream connection warm while ping-timeout reconnects "
+            "are disabled."
+        ),
+    )
+    ws_ping_timeout_seconds: float | None = Field(
+        default=None,
+        ge=1.0,
+        description=(
+            "Optional timeout for the CLOB client protocol-ping pong waiter. "
+            "Defaults to disabled so a delayed or missing pong does not close "
+            "a connection that is still receiving market frames."
+        ),
+    )
+    ws_idle_probe_timeout_seconds: float = Field(
+        default=10.0,
+        ge=1.0,
+        description=(
+            "Timeout for the explicit receive-loop idle ping probe that runs only "
+            "after ws_message_timeout_seconds elapses without a frame."
+        ),
+    )
+    ws_message_timeout_seconds: float = Field(
+        default=45.0,
         ge=5.0,
         description=(
             "If no WebSocket frame is received for this long, send a ping "
-            "probe before reconnecting."
+            "probe before reconnecting. Keep this below the soak liveness "
+            "threshold so a healthy idle ping refreshes the metric first."
         ),
     )
     price_reader_reconnect_min_seconds: float = Field(default=1.0, ge=0.1)

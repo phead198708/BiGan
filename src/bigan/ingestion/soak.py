@@ -23,6 +23,8 @@ import orjson
 from .metrics import REGISTRY
 from .rollup import rollup_file
 
+_DURATION_CHECK_GRACE_SECONDS = 0.5
+
 
 @dataclass(frozen=True, slots=True)
 class SoakThresholds:
@@ -85,6 +87,8 @@ async def record_soak_samples(
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
         except TimeoutError:
             continue
+        append_soak_sample(path, build_soak_sample(started_at_seconds))
+        return
 
 
 def append_soak_sample(path: Path, sample: Mapping[str, Any]) -> None:
@@ -149,9 +153,13 @@ def summarize_soak(
     _add_check(
         checks,
         "duration_seconds",
-        duration_seconds >= thresholds.min_duration_seconds,
+        duration_seconds + _DURATION_CHECK_GRACE_SECONDS
+        >= thresholds.min_duration_seconds,
         observed=round(duration_seconds, 3),
-        threshold=thresholds.min_duration_seconds,
+        threshold={
+            "min_seconds": thresholds.min_duration_seconds,
+            "grace_seconds": _DURATION_CHECK_GRACE_SECONDS,
+        },
     )
     _add_check(
         checks,

@@ -64,8 +64,10 @@ class IngestionRunner:
             custom_feature_enabled=settings.ws_custom_feature_enabled,
             reconnect_min_seconds=settings.ws_reconnect_min_seconds,
             reconnect_max_seconds=settings.ws_reconnect_max_seconds,
+            reconnect_reset_after_seconds=settings.ws_reconnect_reset_after_seconds,
             ping_interval_seconds=settings.ws_ping_interval_seconds,
             ping_timeout_seconds=settings.ws_ping_timeout_seconds,
+            idle_probe_timeout_seconds=settings.ws_idle_probe_timeout_seconds,
             message_timeout_seconds=settings.ws_message_timeout_seconds,
             ingest_lag_warn_seconds=settings.ingest_lag_warn_seconds,
         )
