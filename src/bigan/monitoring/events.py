@@ -11,6 +11,8 @@ from typing import Any
 
 import duckdb
 
+from .incidents import DATA_QUALITY_INCIDENTS_DDL
+
 PREDICTION_EVENTS_DDL = """
 CREATE TABLE IF NOT EXISTS prediction_events (
     event_id VARCHAR PRIMARY KEY,
@@ -58,6 +60,7 @@ MONITORING_TABLES_DDL: tuple[str, ...] = (
     PREDICTION_EVENTS_DDL,
     PREDICTION_OUTCOMES_DDL,
     MODEL_MONITORING_DAILY_DDL,
+    DATA_QUALITY_INCIDENTS_DDL,
 )
 
 
