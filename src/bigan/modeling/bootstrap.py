@@ -568,6 +568,25 @@ def _backtest_assessment(
 
     net_pnl = _metric(row, "net_pnl")
     trade_count = _metric(row, "trade_count")
+    baseline_net_pnl = _metric(baseline_backtest, "net_pnl")
+    net_pnl_delta = (
+        None
+        if net_pnl is None or baseline_net_pnl is None
+        else net_pnl - baseline_net_pnl
+    )
+    max_drawdown = _first_metric(row, ("max_drawdown", "max_drawdown_pct"))
+    sharpe = _first_metric(row, ("sharpe_ratio", "sharpe"))
+    sortino = _first_metric(row, ("sortino_ratio", "sortino"))
+    turnover = _first_metric(
+        row,
+        (
+            "turnover",
+            "turnover_trades_per_signal",
+            "turnover_trades_per_1000_signals",
+            "trades_per_1000_signals",
+            "trades_per_day",
+        ),
+    )
     settings = row.get("settings") if isinstance(row, dict) else None
     fee_bps = _metric(settings, "fee_bps") if isinstance(settings, dict) else None
     slippage_bps = _metric(settings, "slippage_bps") if isinstance(settings, dict) else None
@@ -575,10 +594,16 @@ def _backtest_assessment(
         missing.append("Candidate backtest net_pnl missing")
     if trade_count is None:
         missing.append("Candidate backtest trade_count missing")
-    if _metric(row, "max_drawdown") is None and _metric(row, "max_drawdown_pct") is None:
+    if baseline_backtest is not None and baseline_net_pnl is None:
+        missing.append("Baseline backtest net_pnl missing")
+    if max_drawdown is None:
         missing.append("Backtest max drawdown missing")
-    if _metric(row, "sharpe") is None and _metric(row, "sortino") is None:
+    if sharpe is None and sortino is None:
         missing.append("Backtest Sharpe/Sortino missing")
+    if turnover is None:
+        missing.append("Backtest turnover missing")
+    if not _concentration_available(row):
+        missing.append("Backtest concentration missing")
     cost_adjusted = (
         fee_bps is not None
         and slippage_bps is not None
@@ -592,15 +617,26 @@ def _backtest_assessment(
     explicit_bad = (
         (net_pnl is not None and net_pnl < rules.min_backtest_net_pnl)
         or (trade_count is not None and trade_count <= 0)
+        or (net_pnl_delta is not None and net_pnl_delta < 0.0)
     )
     if explicit_bad:
-        risks.append("Candidate backtest utility is unacceptable.")
+        if net_pnl_delta is not None and net_pnl_delta < 0.0:
+            risks.append("Candidate cost-adjusted backtest underperforms the baseline.")
+        else:
+            risks.append("Candidate backtest utility is unacceptable.")
     passed = not missing and not explicit_bad
-    summary = (
-        f"net_pnl {net_pnl:.4f}, trades {int(trade_count)}"
-        if net_pnl is not None and trade_count is not None
-        else "Backtest incomplete"
-    )
+    summary_parts = []
+    if net_pnl is not None and trade_count is not None:
+        summary_parts.append(f"net_pnl {net_pnl:.4f}, trades {int(trade_count)}")
+    if net_pnl_delta is not None:
+        summary_parts.append(f"delta_vs_baseline {net_pnl_delta:.4f}")
+    if max_drawdown is not None:
+        summary_parts.append(f"max_dd {max_drawdown:.4f}")
+    if sharpe is not None:
+        summary_parts.append(f"sharpe {sharpe:.4f}")
+    elif sortino is not None:
+        summary_parts.append(f"sortino {sortino:.4f}")
+    summary = ", ".join(summary_parts) if summary_parts else "Backtest incomplete"
     return _assessment(
         passed,
         summary,
@@ -698,7 +734,8 @@ def _simplicity_assessment(
     manifest = candidate.manifest or {}
     best_params = manifest.get("best_params") if isinstance(manifest.get("best_params"), dict) else {}
     model_version = candidate.model_version.lower()
-    notes = _read_text_optional(None if complexity_notes_path is None else Path(complexity_notes_path))
+    notes_path = _complexity_notes_path(candidate, complexity_notes_path)
+    notes = _read_text_optional(notes_path)
     if "logreg" in model_version or "baseline" in model_version:
         return _assessment(True, "Simple/interpretable", [], [], [], quality_score=1.0)
     if "xgboost" in model_version or "xgb" in model_version:
@@ -708,6 +745,20 @@ def _simplicity_assessment(
         compact = rounds is not None and rounds <= 100
         if shallow and compact:
             return _assessment(True, f"Shallow XGBoost depth {int(max_depth)}, rounds {int(rounds)}", [], [], [], quality_score=0.7)
+        if notes is not None:
+            missing_sections = _missing_complexity_note_sections(notes)
+            if not missing_sections:
+                return _assessment(
+                    True,
+                    "Model card complexity notes present",
+                    [],
+                    [],
+                    [],
+                    quality_score=0.8,
+                )
+            missing.extend(
+                f"Model complexity notes missing {section}" for section in missing_sections
+            )
     if notes is None:
         missing.append("Model complexity notes missing")
     return _assessment(
@@ -717,6 +768,44 @@ def _simplicity_assessment(
         ["Candidate maintainability is not documented."],
         ["Add model complexity notes covering dependencies, retraining, interpretability, and feature stability."],
         quality_score=0.3,
+    )
+
+
+def _complexity_notes_path(
+    candidate: _ModelRun,
+    complexity_notes_path: Path | str | None,
+) -> Path | None:
+    if complexity_notes_path is not None:
+        return Path(complexity_notes_path)
+    candidates = []
+    if candidate.model_dir is not None:
+        candidates.extend(
+            [
+                candidate.model_dir / "model_card.md",
+                candidate.model_dir / "model_complexity.md",
+            ]
+        )
+    candidates.append(Path("docs") / "models" / f"{candidate.model_version}.md")
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _missing_complexity_note_sections(notes: str) -> tuple[str, ...]:
+    lower = notes.lower()
+    requirements = {
+        "dependencies": ("dependencies", "dependency"),
+        "training cost": ("training cost", "training time", "retraining cost"),
+        "retraining": ("retraining", "retrain"),
+        "interpretability": ("interpretability", "feature importance", "contribution"),
+        "feature stability": ("feature stability", "schema stability", "stable features"),
+        "monitoring": ("monitoring", "monitor"),
+    }
+    return tuple(
+        section
+        for section, keywords in requirements.items()
+        if not any(keyword in lower for keyword in keywords)
     )
 
 
@@ -790,6 +879,25 @@ def _metric(row: dict[str, Any] | None, name: str) -> float | None:
     except (TypeError, ValueError):
         return None
     return result if math.isfinite(result) else None
+
+
+def _first_metric(row: dict[str, Any] | None, names: tuple[str, ...]) -> float | None:
+    for name in names:
+        value = _metric(row, name)
+        if value is not None:
+            return value
+    return None
+
+
+def _concentration_available(row: dict[str, Any] | None) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if _metric(row, "top1_market_abs_net_pnl_share") is not None:
+        return True
+    concentration = row.get("concentration")
+    if not isinstance(concentration, dict):
+        return False
+    return _metric(concentration, "top1_abs_net_pnl_share") is not None
 
 
 def _read_optional_json(path: Path | None) -> Any:

@@ -100,6 +100,8 @@ def test_train_logistic_baseline_saves_reproducible_artifacts(tmp_path: Path) ->
     assert first.metrics["test"]["accuracy"] >= 0.75
     assert first.metrics["test"]["roc_auc"] == pytest.approx(1.0)
     assert first.metrics["test"]["brier_score"] < 0.25
+    assert first.metrics["test"]["ece"] is not None
+    assert 0.0 <= first.metrics["test"]["ece"] <= 1.0
     assert (first_output / "model.json").exists()
     assert (first_output / "baseline_config.json").exists()
     assert (first_output / "metrics.json").exists()

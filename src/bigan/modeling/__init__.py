@@ -47,12 +47,14 @@ from .promotion import (
 from .xgboost_v1 import (
     XGBOOST_MODEL_VERSION,
     XGBOOST_V2_MODEL_VERSION,
+    XGBOOST_V3_MODEL_VERSION,
     XGBoostV1Config,
     XGBoostV1Model,
     XGBoostV1Report,
     load_xgboost_v1_model,
     train_xgboost_v1,
     train_xgboost_v2,
+    train_xgboost_v3,
 )
 
 __all__ = [
@@ -79,6 +81,7 @@ __all__ = [
     "SplitStats",
     "XGBOOST_MODEL_VERSION",
     "XGBOOST_V2_MODEL_VERSION",
+    "XGBOOST_V3_MODEL_VERSION",
     "XGBoostV1Config",
     "XGBoostV1Model",
     "XGBoostV1Report",
@@ -96,4 +99,5 @@ __all__ = [
     "run_prediction_batch",
     "train_xgboost_v1",
     "train_xgboost_v2",
+    "train_xgboost_v3",
 ]

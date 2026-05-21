@@ -1,0 +1,63 @@
+{
+  "batch_throughput": [
+    {
+      "batch_size": 10000,
+      "elapsed_ms": 95.379917,
+      "rows_per_second": 104843.8739991774
+    },
+    {
+      "batch_size": 100000,
+      "elapsed_ms": 979.348583,
+      "rows_per_second": 102108.6891183055
+    }
+  ],
+  "conclusion": "local serving path passed latency, error, schema, and fallback checks",
+  "dataset_dir": "data/model-train-backtest-rerun-20260520T134420Z/artifacts/training",
+  "environment": {
+    "cpu_count": 8,
+    "machine": "arm64",
+    "platform": "macOS-26.2-arm64-arm-64bit",
+    "processor": "arm",
+    "python_version": "3.12.4"
+  },
+  "error_count": 0,
+  "error_rate": 0.0,
+  "fallback": {
+    "fallback_model_available": true,
+    "fallback_model_path": "data/model-train-backtest-rerun-20260520T134420Z/artifacts/models/logreg-baseline-v1/model.json",
+    "rollback_runbook_available": true,
+    "rollback_runbook_path": "docs/runbooks/model_rollback.md"
+  },
+  "feature_schema_path": "data/model-train-backtest-rerun-20260520T134420Z/artifacts/models/xgboost-v3/feature_schema.json",
+  "generated_at_ms": 1779328033666,
+  "latency_p95_ms": 0.3112002999999998,
+  "latency_sla_ms": 50.0,
+  "max_error_rate": 0.0,
+  "model_path": "data/model-train-backtest-rerun-20260520T134420Z/artifacts/models/xgboost-v3/model.json",
+  "model_version": "xgboost-v3",
+  "p50_latency_ms": 0.2416455,
+  "p95_latency_ms": 0.3112002999999998,
+  "p99_latency_ms": 0.38700125,
+  "ready": true,
+  "schema_validation": {
+    "error_details": {
+      "invalid_input_error": {
+        "feature_version": "bigan-mvp-v1.0.0",
+        "missing": [
+          "spread"
+        ],
+        "model_version": "xgboost-v3",
+        "schema_hash": "fdd03b3484b6935fc3e97f5c3a5ae94f3ecd0d504b3539afd3cd493c8fd85748"
+      }
+    },
+    "invalid_input_rejected": true,
+    "silent_failure": false,
+    "valid_input_accepted": true
+  },
+  "schema_version": "serving_readiness_v1",
+  "serving_ready": true,
+  "single_inference_sample_count": 1000,
+  "split": "test",
+  "status": "ok",
+  "valid_feature_row_count": 4
+}

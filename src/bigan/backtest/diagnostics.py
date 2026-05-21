@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -176,6 +177,7 @@ def run_prediction_threshold_backtest(
     output_dir: Path | str,
     model_version: str | None = None,
     thresholds: Sequence[float] = DEFAULT_THRESHOLDS,
+    settings: TakerExecutionSettings | None = None,
     required_outcome_side: str | None = "UP",
 ) -> GroupedThresholdBacktestReport:
     """Run a grouped threshold backtest from the warehouse predictions table."""
@@ -198,6 +200,7 @@ def run_prediction_threshold_backtest(
         output_dir=output_dir,
         model_version=model_version or "predictions",
         thresholds=thresholds,
+        settings=settings,
         issues=initial_issues,
         required_outcome_side=outcome_side,
     )
@@ -222,6 +225,8 @@ def _summarize_grouped_threshold(
     gross_return_sum = sum(trade.execution.gross_return for trade in trades)
     net_return_sum = sum(trade.execution.net_return for trade in trades)
     wins = sum(1 for trade in trades if trade.execution.net_pnl > 0)
+    net_returns = [trade.execution.net_return for trade in trades]
+    risk = _risk_metrics(trades, signals_considered=signals_considered)
     return {
         "threshold": threshold,
         "edge_threshold": threshold,
@@ -236,12 +241,146 @@ def _summarize_grouped_threshold(
         "net_return_sum": net_return_sum,
         "average_gross_return": None if trade_count == 0 else gross_return_sum / trade_count,
         "average_net_return": None if trade_count == 0 else net_return_sum / trade_count,
+        "net_return_stddev": _sample_stddev(net_returns),
         "win_rate": None if trade_count == 0 else wins / trade_count,
+        **risk,
         "symbols_considered": symbols_considered,
         "symbols_with_quotes": symbols_with_quotes,
         "hold_ms": hold_ms,
         "settings": asdict(settings),
     }
+
+
+def _risk_metrics(
+    trades: Sequence[ThresholdTrade],
+    *,
+    signals_considered: int,
+) -> dict[str, Any]:
+    net_returns = [trade.execution.net_return for trade in trades]
+    max_drawdown = _max_drawdown(trades)
+    sharpe_ratio = _sharpe_ratio(net_returns)
+    sortino_ratio = _sortino_ratio(net_returns)
+    turnover = None if signals_considered == 0 else len(trades) / signals_considered
+    trades_per_1000_signals = None if turnover is None else turnover * 1_000.0
+    trades_per_day = _trades_per_day(trades)
+    concentration = _market_concentration(trades)
+    return {
+        "max_drawdown": max_drawdown,
+        "max_drawdown_pct": _max_drawdown_pct(trades, max_drawdown),
+        "sharpe": sharpe_ratio,
+        "sharpe_ratio": sharpe_ratio,
+        "sortino": sortino_ratio,
+        "sortino_ratio": sortino_ratio,
+        "turnover": turnover,
+        "turnover_trades_per_signal": turnover,
+        "trades_per_1000_signals": trades_per_1000_signals,
+        "turnover_trades_per_1000_signals": trades_per_1000_signals,
+        "trades_per_day": trades_per_day,
+        "concentration": concentration,
+        "top1_market_abs_net_pnl_share": concentration["top1_abs_net_pnl_share"],
+        "top5_market_abs_net_pnl_share": concentration["top5_abs_net_pnl_share"],
+        "top1_market_source_symbol": concentration["top1_source_symbol"],
+        "top5_market_source_symbols": concentration["top5_source_symbols"],
+    }
+
+
+def _max_drawdown(trades: Sequence[ThresholdTrade]) -> float:
+    equity = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for trade in _trades_in_equity_order(trades):
+        equity += trade.execution.net_pnl
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, peak - equity)
+    return max_drawdown
+
+
+def _max_drawdown_pct(trades: Sequence[ThresholdTrade], max_drawdown: float) -> float | None:
+    equity = 0.0
+    peak = 0.0
+    for trade in _trades_in_equity_order(trades):
+        equity += trade.execution.net_pnl
+        peak = max(peak, equity)
+    if peak <= 0.0:
+        return None
+    return max_drawdown / peak
+
+
+def _trades_in_equity_order(trades: Sequence[ThresholdTrade]) -> tuple[ThresholdTrade, ...]:
+    return tuple(
+        sorted(
+            trades,
+            key=lambda trade: (
+                trade.execution.exit_ts,
+                trade.execution.entry_ts,
+                trade.source_symbol,
+            ),
+        )
+    )
+
+
+def _sharpe_ratio(returns: Sequence[float]) -> float | None:
+    stddev = _sample_stddev(returns)
+    if stddev is None or stddev == 0.0:
+        return None
+    return (sum(returns) / len(returns)) / stddev
+
+
+def _sortino_ratio(returns: Sequence[float]) -> float | None:
+    if not returns:
+        return None
+    downside_squares = [min(0.0, value) ** 2 for value in returns]
+    downside_deviation = math.sqrt(sum(downside_squares) / len(downside_squares))
+    if downside_deviation == 0.0:
+        return None
+    return (sum(returns) / len(returns)) / downside_deviation
+
+
+def _sample_stddev(values: Sequence[float]) -> float | None:
+    if len(values) < 2:
+        return None
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    return math.sqrt(variance)
+
+
+def _trades_per_day(trades: Sequence[ThresholdTrade]) -> float | None:
+    if len(trades) < 2:
+        return None
+    ordered = _trades_in_equity_order(trades)
+    start_ts = min(trade.execution.decision_ts for trade in ordered)
+    end_ts = max(trade.execution.exit_ts for trade in ordered)
+    span_ms = end_ts - start_ts
+    if span_ms <= 0:
+        return None
+    return len(trades) / (span_ms / 86_400_000.0)
+
+
+def _market_concentration(trades: Sequence[ThresholdTrade]) -> dict[str, Any]:
+    pnl_by_symbol: dict[str, float] = defaultdict(float)
+    for trade in trades:
+        pnl_by_symbol[trade.source_symbol] += trade.execution.net_pnl
+    ordered = sorted(
+        pnl_by_symbol.items(),
+        key=lambda item: abs(item[1]),
+        reverse=True,
+    )
+    total_abs_net_pnl = sum(abs(net_pnl) for net_pnl in pnl_by_symbol.values())
+    top1 = ordered[:1]
+    top5 = ordered[:5]
+    return {
+        "total_abs_net_pnl": total_abs_net_pnl,
+        "top1_abs_net_pnl_share": _abs_pnl_share(top1, total_abs_net_pnl),
+        "top5_abs_net_pnl_share": _abs_pnl_share(top5, total_abs_net_pnl),
+        "top1_source_symbol": top1[0][0] if top1 else None,
+        "top5_source_symbols": [source_symbol for source_symbol, _ in top5],
+    }
+
+
+def _abs_pnl_share(rows: Sequence[tuple[str, float]], total_abs_net_pnl: float) -> float | None:
+    if total_abs_net_pnl == 0.0:
+        return None
+    return sum(abs(net_pnl) for _, net_pnl in rows) / total_abs_net_pnl
 
 
 def _write_trade_sample(

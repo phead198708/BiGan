@@ -294,6 +294,7 @@ def _metrics(labels: list[int], probabilities: list[float]) -> dict[str, float |
             "roc_auc": None,
             "pr_auc": None,
             "brier_score": None,
+            "ece": None,
         }
     report = evaluate_predictions(y_true=labels, y_prob=probabilities, thresholds=[0.5])
     threshold = report.thresholds[0]
@@ -308,7 +309,27 @@ def _metrics(labels: list[int], probabilities: list[float]) -> dict[str, float |
         "roc_auc": report.roc_auc,
         "pr_auc": report.pr_auc,
         "brier_score": report.brier_score,
+        "ece": _ece(labels, probabilities, bin_count=10),
     }
+
+
+def _ece(labels: list[int], probabilities: list[float], *, bin_count: int) -> float:
+    total = len(labels)
+    error = 0.0
+    for idx in range(bin_count):
+        start = idx / bin_count
+        end = (idx + 1) / bin_count
+        members = [
+            (label, probability)
+            for label, probability in zip(labels, probabilities, strict=True)
+            if (start <= probability < end) or (idx == bin_count - 1 and probability == 1.0)
+        ]
+        if not members:
+            continue
+        confidence = sum(probability for _, probability in members) / len(members)
+        accuracy = sum(label for label, _ in members) / len(members)
+        error += len(members) / total * abs(accuracy - confidence)
+    return error
 
 
 def _dot(coefficients: list[float], features: list[float]) -> float:

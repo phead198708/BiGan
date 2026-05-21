@@ -22,6 +22,7 @@ from .logistic import (
 
 XGBOOST_MODEL_VERSION = "xgboost-v1"
 XGBOOST_V2_MODEL_VERSION = "xgboost-v2"
+XGBOOST_V3_MODEL_VERSION = "xgboost-v3"
 SPLITS: tuple[str, ...] = ("train", "val", "test")
 
 
@@ -35,6 +36,7 @@ class XGBoostV1Config:
     l2_penalty_grid: tuple[float, ...] = (0.10, 1.0, 5.0)
     max_depth_grid: tuple[int, ...] = (3, 4, 5)
     min_split_loss_grid: tuple[float, ...] = (0.0,)
+    min_child_weight_grid: tuple[float, ...] = (1.0,)
     subsample_grid: tuple[float, ...] = (0.70, 0.80, 1.0)
     colsample_bytree_grid: tuple[float, ...] = (0.70, 0.80, 1.0)
     seed: int = 0
@@ -52,6 +54,8 @@ class XGBoostV1Config:
             raise ValueError("max_depth_grid must not be empty")
         if not self.min_split_loss_grid:
             raise ValueError("min_split_loss_grid must not be empty")
+        if not self.min_child_weight_grid:
+            raise ValueError("min_child_weight_grid must not be empty")
         if not self.subsample_grid:
             raise ValueError("subsample_grid must not be empty")
         if not self.colsample_bytree_grid:
@@ -66,6 +70,8 @@ class XGBoostV1Config:
             raise ValueError("max_depth_grid values must be positive")
         if any(loss < 0.0 for loss in self.min_split_loss_grid):
             raise ValueError("min_split_loss_grid values must be non-negative")
+        if any(weight <= 0.0 for weight in self.min_child_weight_grid):
+            raise ValueError("min_child_weight_grid values must be positive")
         if any(value <= 0.0 or value > 1.0 for value in self.subsample_grid):
             raise ValueError("subsample_grid values must be in (0, 1]")
         if any(value <= 0.0 or value > 1.0 for value in self.colsample_bytree_grid):
@@ -79,6 +85,7 @@ class XGBoostV1Config:
             "l2_penalty_grid": list(self.l2_penalty_grid),
             "max_depth_grid": list(self.max_depth_grid),
             "min_split_loss_grid": list(self.min_split_loss_grid),
+            "min_child_weight_grid": list(self.min_child_weight_grid),
             "subsample_grid": list(self.subsample_grid),
             "colsample_bytree_grid": list(self.colsample_bytree_grid),
             "seed": self.seed,
@@ -264,6 +271,29 @@ def train_xgboost_v2(
     return train_xgboost_v1(dataset_dir, output_dir, config=cfg)
 
 
+def train_xgboost_v3(
+    dataset_dir: Path | str,
+    output_dir: Path | str,
+    *,
+    config: XGBoostV1Config | None = None,
+) -> XGBoostV1Report:
+    """Train a conservative XGBoost-v3 challenger focused on validation Brier."""
+
+    cfg = config or XGBoostV1Config(
+        model_version=XGBOOST_V3_MODEL_VERSION,
+        rounds_grid=(100, 150, 200),
+        learning_rate_grid=(0.01, 0.03, 0.05),
+        l2_penalty_grid=(5.0, 10.0, 20.0),
+        max_depth_grid=(3, 4),
+        min_child_weight_grid=(2.0, 5.0, 10.0),
+        subsample_grid=(0.80, 1.0),
+        colsample_bytree_grid=(0.80, 1.0),
+    )
+    if cfg.model_version != XGBOOST_V3_MODEL_VERSION:
+        raise ValueError(f"xgboost-v3 config must use model_version={XGBOOST_V3_MODEL_VERSION!r}")
+    return train_xgboost_v1(dataset_dir, output_dir, config=cfg)
+
+
 def load_xgboost_v1_model(path: Path | str) -> XGBoostV1Model:
     """Load a saved native XGBoost-v1 booster artifact."""
 
@@ -294,6 +324,7 @@ def _parameter_space(config: XGBoostV1Config) -> list[dict[str, float | int | st
             "lambda": l2_penalty,
             "max_depth": max_depth,
             "gamma": min_split_loss,
+            "min_child_weight": min_child_weight,
             "subsample": subsample,
             "colsample_bytree": colsample_bytree,
             "rounds": rounds,
@@ -303,6 +334,7 @@ def _parameter_space(config: XGBoostV1Config) -> list[dict[str, float | int | st
         for l2_penalty in config.l2_penalty_grid
         for max_depth in config.max_depth_grid
         for min_split_loss in config.min_split_loss_grid
+        for min_child_weight in config.min_child_weight_grid
         for subsample in config.subsample_grid
         for colsample_bytree in config.colsample_bytree_grid
     ]

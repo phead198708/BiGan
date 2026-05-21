@@ -147,6 +147,7 @@ def test_xgboost_v1_default_search_space_is_not_too_shallow() -> None:
     assert config.learning_rate_grid == (0.01, 0.05, 0.10)
     assert config.l2_penalty_grid == (0.10, 1.0, 5.0)
     assert config.max_depth_grid == (3, 4, 5)
+    assert config.min_child_weight_grid == (1.0,)
     assert config.subsample_grid == (0.70, 0.80, 1.0)
     assert config.colsample_bytree_grid == (0.70, 0.80, 1.0)
 
@@ -214,8 +215,50 @@ def test_train_xgboost_v2_saves_distinct_candidate_version(tmp_path: Path) -> No
     assert config["subsample_grid"] == [0.7, 0.8, 1.0]
 
 
+def test_train_xgboost_v3_saves_conservative_candidate_version(tmp_path: Path) -> None:
+    from bigan.modeling import (
+        XGBOOST_V3_MODEL_VERSION,
+        XGBoostV1Config,
+        load_xgboost_v1_model,
+        train_xgboost_v3,
+    )
+
+    dataset_dir = tmp_path / "dataset"
+    output_dir = tmp_path / "xgb-v3"
+    _write_dataset(dataset_dir)
+
+    report = train_xgboost_v3(
+        dataset_dir,
+        output_dir,
+        config=XGBoostV1Config(
+            model_version=XGBOOST_V3_MODEL_VERSION,
+            rounds_grid=(5,),
+            learning_rate_grid=(0.30,),
+            l2_penalty_grid=(5.0,),
+            max_depth_grid=(3,),
+            min_child_weight_grid=(2.0,),
+            subsample_grid=(0.8,),
+            colsample_bytree_grid=(0.8,),
+        ),
+    )
+    model = load_xgboost_v1_model(output_dir / "model.json")
+    feature_schema = json.loads((output_dir / "feature_schema.json").read_text(encoding="utf-8"))
+    config = json.loads((output_dir / "xgboost_config.json").read_text(encoding="utf-8"))
+
+    assert report.model_version == XGBOOST_V3_MODEL_VERSION
+    assert model.model_version == XGBOOST_V3_MODEL_VERSION
+    assert feature_schema["model_version"] == XGBOOST_V3_MODEL_VERSION
+    assert config["model_version"] == XGBOOST_V3_MODEL_VERSION
+    assert config["l2_penalty_grid"] == [5.0]
+    assert config["max_depth_grid"] == [3]
+    assert config["min_child_weight_grid"] == [2.0]
+
+
 def test_train_xgboost_v1_rejects_empty_parameter_space(tmp_path: Path) -> None:
     from bigan.modeling import XGBoostV1Config
 
     with pytest.raises(ValueError, match="rounds_grid"):
         XGBoostV1Config(rounds_grid=())
+
+    with pytest.raises(ValueError, match="min_child_weight_grid"):
+        XGBoostV1Config(min_child_weight_grid=(0.0,))

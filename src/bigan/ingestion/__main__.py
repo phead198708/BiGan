@@ -18,6 +18,7 @@ from prometheus_client import start_http_server
 from typer import Exit
 
 from bigan.backtest import (
+    TakerExecutionSettings,
     load_backtest_config,
     run_oracle_label_sanity_backtest,
     run_prediction_threshold_backtest,
@@ -40,7 +41,9 @@ from bigan.modeling import (
     train_logistic_baseline,
     train_xgboost_v1,
     train_xgboost_v2,
+    train_xgboost_v3,
 )
+from bigan.serving.readiness import run_xgboost_serving_readiness
 
 from .backfill import BackfillService, GapWindow
 from .clob_rest import PolymarketRestClient
@@ -128,6 +131,10 @@ XGBOOST_V2_OUTPUT_DIR_OPTION = typer.Option(
     Path("data/model-runs/xgboost-v2"),
     help="Directory for XGBoost-v2 artifacts.",
 )
+XGBOOST_V3_OUTPUT_DIR_OPTION = typer.Option(
+    Path("data/model-runs/xgboost-v3"),
+    help="Directory for XGBoost-v3 artifacts.",
+)
 CALIBRATION_MODEL_PATH_OPTION = typer.Option(
     Path("data/model-runs/xgboost-v1/model.json"),
     help="Path to a saved model.json produced by xgboost-v1.",
@@ -172,6 +179,10 @@ BOOTSTRAP_FEATURE_SCHEMA_PATH_OPTION = typer.Option(
     None,
     help="Optional candidate feature_schema.json path; defaults to candidate_dir/feature_schema.json.",
 )
+BOOTSTRAP_MODEL_COMPLEXITY_NOTES_PATH_OPTION = typer.Option(
+    None,
+    help="Optional model card or complexity-notes Markdown path.",
+)
 BOOTSTRAP_ROLLBACK_RUNBOOK_PATH_OPTION = typer.Option(
     Path("docs/runbooks/model_rollback.md"),
     help="Rollback/fallback runbook path.",
@@ -183,6 +194,18 @@ BOOTSTRAP_OUTPUT_DIR_OPTION = typer.Option(
 PREDICTION_MODEL_PATH_OPTION = typer.Option(
     Path("data/model-runs/xgboost-v1/model.json"),
     help="Path to saved XGBoost-v1 model.json.",
+)
+SERVING_READINESS_FEATURE_SCHEMA_PATH_OPTION = typer.Option(
+    Path("data/model-runs/xgboost-v1/feature_schema.json"),
+    help="Feature schema artifact saved with the model.",
+)
+SERVING_READINESS_OUTPUT_PATH_OPTION = typer.Option(
+    Path("data/model-runs/xgboost-v1/serving_readiness.json"),
+    help="Path for serving readiness JSON.",
+)
+SERVING_READINESS_FALLBACK_MODEL_PATH_OPTION = typer.Option(
+    None,
+    help="Fallback baseline model artifact used for rollback readiness evidence.",
 )
 PREDICTION_CALIBRATION_PATH_OPTION = typer.Option(
     None,
@@ -868,6 +891,18 @@ def xgboost_v2(
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 
 
+@app.command("xgboost-v3")
+def xgboost_v3(
+    dataset_dir: Path = XGBOOST_DATASET_DIR_OPTION,
+    output_dir: Path = XGBOOST_V3_OUTPUT_DIR_OPTION,
+) -> None:
+    """Train conservative XGBoost-v3 artifacts focused on validation Brier."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = train_xgboost_v3(dataset_dir, output_dir)
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
 @app.command("calibration-v1")
 def calibration_v1(
     model_path: Path = CALIBRATION_MODEL_PATH_OPTION,
@@ -912,6 +947,7 @@ def bootstrap_champion_v1(
     baseline_backtest_summary_path: Path | None = BOOTSTRAP_BASELINE_BACKTEST_SUMMARY_OPTION,
     serving_readiness_path: Path | None = BOOTSTRAP_SERVING_READINESS_PATH_OPTION,
     feature_schema_path: Path | None = BOOTSTRAP_FEATURE_SCHEMA_PATH_OPTION,
+    model_complexity_notes_path: Path | None = BOOTSTRAP_MODEL_COMPLEXITY_NOTES_PATH_OPTION,
     rollback_runbook_path: Path | None = BOOTSTRAP_ROLLBACK_RUNBOOK_PATH_OPTION,
     baseline_type: str = typer.Option("logistic regression baseline", help="Human-readable baseline type."),
     baseline_explicit: bool = typer.Option(
@@ -932,6 +968,7 @@ def bootstrap_champion_v1(
                 candidate_backtest_summary_path=candidate_backtest_summary_path,
                 serving_readiness_path=serving_readiness_path,
                 feature_schema_path=feature_schema_path,
+                model_complexity_notes_path=model_complexity_notes_path,
             ),
         ),
         baseline_backtest_summary_path=baseline_backtest_summary_path,
@@ -962,6 +999,42 @@ def predictions_v1(
         max_rows_per_partition=max_rows_per_partition,
     )
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("serving-readiness-v1")
+def serving_readiness_v1(
+    model_path: Path = PREDICTION_MODEL_PATH_OPTION,
+    feature_schema_path: Path = SERVING_READINESS_FEATURE_SCHEMA_PATH_OPTION,
+    dataset_dir: Path = LOGISTIC_DATASET_DIR_OPTION,
+    output_path: Path = SERVING_READINESS_OUTPUT_PATH_OPTION,
+    split: str = typer.Option("test", help="Dataset split to benchmark."),
+    sample_size: int = typer.Option(1_000, help="Single-row latency sample count."),
+    batch_sizes: str = typer.Option(
+        "10000,100000",
+        help="Comma-separated batch sizes for throughput checks.",
+    ),
+    latency_sla_ms: float = typer.Option(50.0, help="p95 latency SLA in milliseconds."),
+    max_error_rate: float = typer.Option(0.0, help="Maximum valid-input inference error rate."),
+    fallback_model_path: Path | None = SERVING_READINESS_FALLBACK_MODEL_PATH_OPTION,
+    rollback_runbook_path: Path | None = BOOTSTRAP_ROLLBACK_RUNBOOK_PATH_OPTION,
+) -> None:
+    """Measure local model serving latency, throughput, schema, and fallback readiness."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = run_xgboost_serving_readiness(
+        model_path=model_path,
+        feature_schema_path=feature_schema_path,
+        dataset_dir=dataset_dir,
+        output_path=output_path,
+        split=split,
+        sample_size=sample_size,
+        batch_sizes=_parse_int_grid(batch_sizes),
+        latency_sla_ms=latency_sla_ms,
+        max_error_rate=max_error_rate,
+        fallback_model_path=fallback_model_path,
+        rollback_runbook_path=rollback_runbook_path,
+    )
+    typer.echo(json.dumps(report, indent=2, sort_keys=True))
 
 
 @app.command("backtest-oracle-sanity-v1")
@@ -1013,6 +1086,9 @@ def backtest_predictions_v1(
         "UP",
         help="Required outcome side encoded in canonical_symbol. Use an empty string to include all outcomes.",
     ),
+    fee_bps: float = typer.Option(0.0, help="Taker fee assumption in basis points."),
+    slippage_bps: float = typer.Option(0.0, help="Taker slippage assumption in basis points."),
+    latency_ms: int = typer.Option(0, help="Execution latency assumption in milliseconds."),
 ) -> None:
     """Run a grouped threshold backtest from warehouse predictions."""
     settings = IngestionSettings()
@@ -1022,6 +1098,11 @@ def backtest_predictions_v1(
         output_dir=output_dir,
         model_version=model_version,
         thresholds=_parse_float_grid(thresholds),
+        settings=TakerExecutionSettings(
+            fee_bps=fee_bps,
+            slippage_bps=slippage_bps,
+            latency_ms=latency_ms,
+        ),
         required_outcome_side=required_outcome_side or None,
     )
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))

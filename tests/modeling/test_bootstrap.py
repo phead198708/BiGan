@@ -13,6 +13,7 @@ def _write_model_run(
     test_auc: float,
     test_brier: float,
     test_pr_auc: float = 0.55,
+    best_params: dict | None = None,
 ) -> None:
     run_dir.mkdir(parents=True)
     metrics = {
@@ -28,7 +29,7 @@ def _write_model_run(
         "model_version": model_version,
         "dataset_version": "bigan-training-15m-v1.0.0",
         "feature_columns": ["spread", "mid_price", "ret_15m"],
-        "best_params": {"max_depth": 2, "rounds": 20},
+        "best_params": {"max_depth": 2, "rounds": 20} if best_params is None else best_params,
         "metrics": metrics,
     }
     (run_dir / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
@@ -63,7 +64,14 @@ def _write_backtest(path: Path, *, net_pnl: float, fee_bps: float = 2.0) -> None
                     "net_pnl": net_pnl,
                     "max_drawdown": 0.05,
                     "sharpe": 1.2,
+                    "sharpe_ratio": 1.2,
+                    "sortino_ratio": 1.5,
                     "turnover": 0.4,
+                    "concentration": {
+                        "top1_abs_net_pnl_share": 0.35,
+                        "top5_abs_net_pnl_share": 0.70,
+                    },
+                    "top1_market_abs_net_pnl_share": 0.35,
                     "settings": {"fee_bps": fee_bps, "slippage_bps": 1.0},
                 }
             ]
@@ -146,6 +154,7 @@ def test_bootstrap_promotes_first_champion_when_all_hard_gates_pass(tmp_path: Pa
     markdown = (tmp_path / "decision" / "bootstrap_decision.md").read_text(encoding="utf-8")
     assert markdown.startswith("# Bootstrap Champion Decision")
     assert "PROMOTE_FIRST_CHAMPION:xgboost-v1" in markdown
+    assert "delta_vs_baseline 0.7000" in markdown
 
 
 def test_bootstrap_keeps_baseline_when_candidate_backtest_is_unacceptable(
@@ -214,3 +223,64 @@ def test_bootstrap_continues_experimentation_when_promising_candidate_is_incompl
     assert report.recommended_action == "CONTINUE_BOOTSTRAP_EXPERIMENTATION"
     assert report.confidence_level == "MEDIUM"
     assert "Candidate cost-adjusted backtest summary missing" in report.missing_or_weak_evidence
+
+
+def test_bootstrap_uses_model_card_as_complexity_evidence(tmp_path: Path) -> None:
+    from bigan.modeling import BootstrapCandidateInput, evaluate_bootstrap_champion
+
+    baseline_dir = tmp_path / "baseline"
+    candidate_dir = tmp_path / "candidate"
+    calibration_dir = tmp_path / "calibration"
+    serving_path = tmp_path / "serving.json"
+    baseline_backtest = tmp_path / "baseline-backtest.json"
+    candidate_backtest = tmp_path / "candidate-backtest.json"
+    model_card = tmp_path / "xgboost-v3.md"
+    runbook = tmp_path / "rollback.md"
+    _write_model_run(baseline_dir, model_version="logreg-baseline-v1", test_auc=0.55, test_brier=0.24)
+    _write_model_run(
+        candidate_dir,
+        model_version="xgboost-v3",
+        test_auc=0.75,
+        test_brier=0.18,
+        best_params={"max_depth": 4, "rounds": 200},
+    )
+    _write_calibration(calibration_dir)
+    _write_backtest(baseline_backtest, net_pnl=0.10)
+    _write_backtest(candidate_backtest, net_pnl=0.80)
+    _write_serving(serving_path)
+    _write_schema(candidate_dir / "feature_schema.json")
+    model_card.write_text(
+        "\n".join(
+            [
+                "# XGBoost-v3 Model Card",
+                "Dependencies: xgboost and pyarrow.",
+                "Training cost: local CPU retraining time is documented.",
+                "Retraining: rerun the fixed dataset pipeline.",
+                "Interpretability: feature importance and contribution examples are reviewed.",
+                "Feature stability: feature_schema.json is the online contract.",
+                "Monitoring: watch probability drift, label shift, PnL, and latency.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runbook.write_text("# Rollback\n", encoding="utf-8")
+
+    report = evaluate_bootstrap_champion(
+        baseline_dir=baseline_dir,
+        baseline_backtest_summary_path=baseline_backtest,
+        candidates=(
+            BootstrapCandidateInput(
+                candidate_dir=candidate_dir,
+                calibration_dir=calibration_dir,
+                candidate_backtest_summary_path=candidate_backtest,
+                serving_readiness_path=serving_path,
+                model_complexity_notes_path=model_card,
+            ),
+        ),
+        rollback_runbook_path=runbook,
+        output_dir=tmp_path / "decision",
+    )
+
+    assert report.promotion_checklist.simple_enough is True
+    assert "Model complexity notes missing" not in report.missing_or_weak_evidence
+    assert "Model card complexity notes present" in report.comparison_rows[1].simplicity

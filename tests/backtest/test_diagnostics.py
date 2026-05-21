@@ -46,9 +46,44 @@ def test_grouped_threshold_backtest_runs_each_source_symbol_independently(
     assert row["symbols_considered"] == 2
     assert row["symbols_with_quotes"] == 2
     assert row["net_pnl"] == pytest.approx(0.15)
+    assert row["max_drawdown"] == pytest.approx(0.0)
+    assert row["sharpe_ratio"] is not None
+    assert row["trades_per_1000_signals"] == pytest.approx(1_000.0)
+    assert row["top1_market_abs_net_pnl_share"] == pytest.approx(2 / 3)
+    assert row["top5_market_abs_net_pnl_share"] == pytest.approx(1.0)
     assert json.loads((tmp_path / "grouped" / "summary.json").read_text(encoding="utf-8"))[
         0
     ]["trade_count"] == 2
+
+
+def test_grouped_threshold_backtest_reports_drawdown_sortino_and_concentration(
+    tmp_path: Path,
+) -> None:
+    report = run_grouped_threshold_backtest(
+        signals=[
+            PredictionSignal(ts=0, target_ts=1_000, prob_up_15m=0.80, source_symbol="tok-win"),
+            PredictionSignal(ts=2_000, target_ts=3_000, prob_up_15m=0.80, source_symbol="tok-loss"),
+        ],
+        quotes=[
+            {"ts": 0, "source_symbol": "tok-win", "bid_price": 0.19, "ask_price": 0.20},
+            {"ts": 1_000, "source_symbol": "tok-win", "bid_price": 0.40, "ask_price": 0.41},
+            {"ts": 2_000, "source_symbol": "tok-loss", "bid_price": 0.49, "ask_price": 0.50},
+            {"ts": 3_000, "source_symbol": "tok-loss", "bid_price": 0.30, "ask_price": 0.31},
+        ],
+        output_dir=tmp_path / "grouped-risk",
+        model_version="candidate-test",
+        thresholds=(0.05,),
+    )
+
+    row = report.summary[0]
+    assert row["trade_count"] == 2
+    assert row["max_drawdown"] == pytest.approx(0.20)
+    assert row["max_drawdown_pct"] == pytest.approx(1.0)
+    assert row["sortino_ratio"] is not None
+    assert row["turnover"] == pytest.approx(1.0)
+    assert row["trades_per_day"] is not None
+    assert row["concentration"]["top1_abs_net_pnl_share"] == pytest.approx(0.5)
+    assert row["top5_market_abs_net_pnl_share"] == pytest.approx(1.0)
 
 
 def test_oracle_label_sanity_flags_perfect_label_that_never_wins(

@@ -63,6 +63,9 @@ bigan-ingest backtest-predictions-v1 \
   --warehouse-dir data/warehouse \
   --model-version xgboost-v1 \
   --thresholds 0.00,0.03,0.05 \
+  --fee-bps 5 \
+  --slippage-bps 5 \
+  --latency-ms 0 \
   --output-dir data/backtests/xgboost-v1-up-only
 ```
 
@@ -70,6 +73,40 @@ The strategy buys only when `prob_up_15m - market_implied_prob >= edge_threshold
 When a prediction row does not provide `market_implied_prob`, the backtest uses
 the executable UP-token ask price at entry time as the conservative market
 implied probability.
+
+Before the final bootstrap gate, write local serving readiness evidence:
+
+```bash
+bigan-ingest serving-readiness-v1 \
+  --model-path data/model-runs/xgboost-v1/model.json \
+  --feature-schema-path data/model-runs/xgboost-v1/feature_schema.json \
+  --dataset-dir data/training-datasets/bigan-training-15m-v1 \
+  --output-path data/model-runs/xgboost-v1/serving_readiness.json \
+  --sample-size 1000 \
+  --batch-sizes 10000,100000 \
+  --fallback-model-path data/model-runs/logreg-baseline-v1/model.json \
+  --rollback-runbook-path docs/runbooks/model_rollback.md
+```
+
+## Backtest Summary Schema
+
+Each threshold row in `summary.json` should include the trading utility fields
+used by the bootstrap gates:
+
+- Core utility: `edge_threshold`, `trade_count`, `net_pnl`, `win_rate`, and
+  `settings.fee_bps`, `settings.slippage_bps`, `settings.latency_ms`.
+- Risk: `max_drawdown`, `max_drawdown_pct`, `sharpe_ratio`, and
+  `sortino_ratio`. The `sharpe` and `sortino` aliases are written for older
+  bootstrap consumers.
+- Turnover: `turnover_trades_per_signal`, `trades_per_1000_signals`, and
+  `trades_per_day`.
+- Concentration: `top1_market_abs_net_pnl_share`,
+  `top5_market_abs_net_pnl_share`, and the nested `concentration` object with
+  the corresponding top-market source symbols.
+
+Run sensitivity rows for at least zero cost, 5 bps, 10 bps, and 20 bps
+fee/slippage assumptions, plus at least one nonzero latency case such as
+500 ms. A candidate that only works at zero cost is not backtest-acceptable.
 
 ## Command
 
@@ -81,6 +118,7 @@ bigan-ingest bootstrap-champion-v1 \
   --calibration-dir data/model-runs/xgboost-v1-calibration \
   --candidate-backtest-summary-path data/backtests/xgboost-v1/summary.json \
   --serving-readiness-path data/model-runs/xgboost-v1/serving_readiness.json \
+  --model-complexity-notes-path docs/models/xgboost-v1.md \
   --output-dir data/model-runs/bootstrap-champion-v1
 ```
 
