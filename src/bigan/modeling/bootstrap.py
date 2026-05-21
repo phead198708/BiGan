@@ -19,6 +19,9 @@ class BootstrapRules:
     max_brier_delta: float = 0.0
     min_backtest_net_pnl: float = 0.0
     require_cost_adjusted_backtest: bool = True
+    # Allow lower Sharpe than baseline when probability quality is materially better
+    # and trading utility still clears positive Sharpe plus positive net-PnL delta.
+    allow_lower_sharpe_if_brier_gap: float = 0.05
 
     def to_dict(self) -> dict[str, bool | float]:
         return asdict(self)
@@ -374,6 +377,7 @@ def _assess_candidate(
         candidate_input.candidate_backtest_summary_path,
         baseline_backtest=baseline_backtest,
         rules=rules,
+        brier_improvement=_metric(offline, "brier_improvement"),
     )
     serving = _serving_assessment(candidate_input.serving_readiness_path)
     schema = _schema_assessment(candidate_input, candidate)
@@ -489,6 +493,7 @@ def _offline_assessment(
 
     auc_delta = float(candidate_auc) - float(baseline_auc)
     brier_delta = float(candidate_brier) - float(baseline_brier)
+    brier_improvement = float(baseline_brier) - float(candidate_brier)
     passed = auc_delta >= rules.min_roc_auc_delta and brier_delta <= rules.max_brier_delta
     summary = (
         f"AUC {candidate_auc:.4f} vs {baseline_auc:.4f}; "
@@ -497,7 +502,7 @@ def _offline_assessment(
     if not passed:
         risks.append("Candidate offline lift is not strong enough to justify replacing the baseline.")
         next_actions.append("Try a simpler feature or calibration variant and require clear test-set lift over baseline.")
-    return _assessment(
+    assessment = _assessment(
         passed,
         summary,
         missing,
@@ -506,6 +511,12 @@ def _offline_assessment(
         explicit_unacceptable=not passed,
         quality_score=max(0.0, min(1.0, 0.5 + auc_delta * 5.0 - max(0.0, brier_delta) * 5.0)),
     )
+    return {
+        **assessment,
+        "auc_delta": auc_delta,
+        "brier_delta": brier_delta,
+        "brier_improvement": brier_improvement,
+    }
 
 
 def _calibration_assessment(calibration_dir: Path | str | None) -> dict[str, Any]:
@@ -553,6 +564,7 @@ def _backtest_assessment(
     *,
     baseline_backtest: dict[str, Any] | None,
     rules: BootstrapRules,
+    brier_improvement: float | None = None,
 ) -> dict[str, Any]:
     missing: list[str] = []
     risks: list[str] = []
@@ -576,6 +588,7 @@ def _backtest_assessment(
     )
     max_drawdown = _first_metric(row, ("max_drawdown", "max_drawdown_pct"))
     sharpe = _first_metric(row, ("sharpe_ratio", "sharpe"))
+    baseline_sharpe = _first_metric(baseline_backtest, ("sharpe_ratio", "sharpe"))
     sortino = _first_metric(row, ("sortino_ratio", "sortino"))
     turnover = _first_metric(
         row,
@@ -619,9 +632,25 @@ def _backtest_assessment(
         or (trade_count is not None and trade_count <= 0)
         or (net_pnl_delta is not None and net_pnl_delta < 0.0)
     )
+    lower_sharpe_allowed = _lower_sharpe_allowed(
+        candidate_sharpe=sharpe,
+        baseline_sharpe=baseline_sharpe,
+        net_pnl_delta=net_pnl_delta,
+        brier_improvement=brier_improvement,
+        rules=rules,
+    )
+    lower_sharpe_unjustified = (
+        sharpe is not None
+        and baseline_sharpe is not None
+        and sharpe < baseline_sharpe
+        and not lower_sharpe_allowed
+    )
+    explicit_bad = explicit_bad or lower_sharpe_unjustified
     if explicit_bad:
         if net_pnl_delta is not None and net_pnl_delta < 0.0:
             risks.append("Candidate cost-adjusted backtest underperforms the baseline.")
+        elif lower_sharpe_unjustified:
+            risks.append("Candidate Sharpe underperforms the baseline without enough Brier/net-PnL justification.")
         else:
             risks.append("Candidate backtest utility is unacceptable.")
     passed = not missing and not explicit_bad
@@ -634,8 +663,18 @@ def _backtest_assessment(
         summary_parts.append(f"max_dd {max_drawdown:.4f}")
     if sharpe is not None:
         summary_parts.append(f"sharpe {sharpe:.4f}")
+        if baseline_sharpe is not None:
+            summary_parts.append(f"sharpe_delta_vs_baseline {sharpe - baseline_sharpe:.4f}")
     elif sortino is not None:
         summary_parts.append(f"sortino {sortino:.4f}")
+    if (
+        lower_sharpe_allowed
+        and brier_improvement is not None
+        and sharpe is not None
+        and baseline_sharpe is not None
+        and sharpe < baseline_sharpe
+    ):
+        summary_parts.append(f"lower_sharpe_allowed_brier_gap {brier_improvement:.4f}")
     summary = ", ".join(summary_parts) if summary_parts else "Backtest incomplete"
     return _assessment(
         passed,
@@ -645,6 +684,27 @@ def _backtest_assessment(
         next_actions,
         explicit_unacceptable=explicit_bad,
         quality_score=1.0 if passed else 0.0,
+    )
+
+
+def _lower_sharpe_allowed(
+    *,
+    candidate_sharpe: float | None,
+    baseline_sharpe: float | None,
+    net_pnl_delta: float | None,
+    brier_improvement: float | None,
+    rules: BootstrapRules,
+) -> bool:
+    if candidate_sharpe is None or baseline_sharpe is None:
+        return False
+    if candidate_sharpe >= baseline_sharpe:
+        return True
+    return (
+        brier_improvement is not None
+        and brier_improvement >= rules.allow_lower_sharpe_if_brier_gap
+        and candidate_sharpe > 0.0
+        and net_pnl_delta is not None
+        and net_pnl_delta > 0.0
     )
 
 

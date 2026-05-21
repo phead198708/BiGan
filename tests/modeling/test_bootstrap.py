@@ -53,7 +53,13 @@ def _write_calibration(run_dir: Path, *, improved: bool = True) -> None:
     )
 
 
-def _write_backtest(path: Path, *, net_pnl: float, fee_bps: float = 2.0) -> None:
+def _write_backtest(
+    path: Path,
+    *,
+    net_pnl: float,
+    fee_bps: float = 2.0,
+    sharpe: float = 1.2,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
@@ -63,8 +69,8 @@ def _write_backtest(path: Path, *, net_pnl: float, fee_bps: float = 2.0) -> None
                     "trade_count": 25,
                     "net_pnl": net_pnl,
                     "max_drawdown": 0.05,
-                    "sharpe": 1.2,
-                    "sharpe_ratio": 1.2,
+                    "sharpe": sharpe,
+                    "sharpe_ratio": sharpe,
                     "sortino_ratio": 1.5,
                     "turnover": 0.4,
                     "concentration": {
@@ -284,3 +290,85 @@ def test_bootstrap_uses_model_card_as_complexity_evidence(tmp_path: Path) -> Non
     assert report.promotion_checklist.simple_enough is True
     assert "Model complexity notes missing" not in report.missing_or_weak_evidence
     assert "Model card complexity notes present" in report.comparison_rows[1].simplicity
+
+
+def test_bootstrap_allows_lower_sharpe_when_brier_gap_is_material(
+    tmp_path: Path,
+) -> None:
+    from bigan.modeling import BootstrapCandidateInput, evaluate_bootstrap_champion
+
+    baseline_dir = tmp_path / "baseline"
+    candidate_dir = tmp_path / "candidate"
+    calibration_dir = tmp_path / "calibration"
+    serving_path = tmp_path / "serving.json"
+    baseline_backtest = tmp_path / "baseline-backtest.json"
+    candidate_backtest = tmp_path / "candidate-backtest.json"
+    runbook = tmp_path / "rollback.md"
+    _write_model_run(baseline_dir, model_version="logreg-baseline-v1", test_auc=0.55, test_brier=0.24)
+    _write_model_run(candidate_dir, model_version="xgboost-v3", test_auc=0.75, test_brier=0.18)
+    _write_calibration(calibration_dir)
+    _write_backtest(baseline_backtest, net_pnl=0.10, sharpe=1.20)
+    _write_backtest(candidate_backtest, net_pnl=0.80, sharpe=0.30)
+    _write_serving(serving_path)
+    _write_schema(candidate_dir / "feature_schema.json")
+    runbook.write_text("# Rollback\n", encoding="utf-8")
+
+    report = evaluate_bootstrap_champion(
+        baseline_dir=baseline_dir,
+        baseline_backtest_summary_path=baseline_backtest,
+        candidates=(
+            BootstrapCandidateInput(
+                candidate_dir=candidate_dir,
+                calibration_dir=calibration_dir,
+                candidate_backtest_summary_path=candidate_backtest,
+                serving_readiness_path=serving_path,
+            ),
+        ),
+        rollback_runbook_path=runbook,
+        output_dir=tmp_path / "decision",
+    )
+
+    assert report.promotion_checklist.backtest_acceptable is True
+    assert report.recommended_action == "PROMOTE_FIRST_CHAMPION:xgboost-v3"
+    assert "lower_sharpe_allowed_brier_gap 0.0600" in report.comparison_rows[1].backtest
+
+
+def test_bootstrap_rejects_lower_sharpe_when_brier_gap_is_small(
+    tmp_path: Path,
+) -> None:
+    from bigan.modeling import BootstrapCandidateInput, evaluate_bootstrap_champion
+
+    baseline_dir = tmp_path / "baseline"
+    candidate_dir = tmp_path / "candidate"
+    calibration_dir = tmp_path / "calibration"
+    serving_path = tmp_path / "serving.json"
+    baseline_backtest = tmp_path / "baseline-backtest.json"
+    candidate_backtest = tmp_path / "candidate-backtest.json"
+    runbook = tmp_path / "rollback.md"
+    _write_model_run(baseline_dir, model_version="logreg-baseline-v1", test_auc=0.55, test_brier=0.24)
+    _write_model_run(candidate_dir, model_version="xgboost-v3", test_auc=0.75, test_brier=0.22)
+    _write_calibration(calibration_dir)
+    _write_backtest(baseline_backtest, net_pnl=0.10, sharpe=1.20)
+    _write_backtest(candidate_backtest, net_pnl=0.80, sharpe=0.30)
+    _write_serving(serving_path)
+    _write_schema(candidate_dir / "feature_schema.json")
+    runbook.write_text("# Rollback\n", encoding="utf-8")
+
+    report = evaluate_bootstrap_champion(
+        baseline_dir=baseline_dir,
+        baseline_backtest_summary_path=baseline_backtest,
+        candidates=(
+            BootstrapCandidateInput(
+                candidate_dir=candidate_dir,
+                calibration_dir=calibration_dir,
+                candidate_backtest_summary_path=candidate_backtest,
+                serving_readiness_path=serving_path,
+            ),
+        ),
+        rollback_runbook_path=runbook,
+        output_dir=tmp_path / "decision",
+    )
+
+    assert report.promotion_checklist.backtest_acceptable is False
+    assert report.recommended_action == "KEEP_BASELINE_TEMPORARILY"
+    assert any("Sharpe underperforms" in risk for risk in report.risks)
