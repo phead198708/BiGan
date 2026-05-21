@@ -10,6 +10,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+import duckdb
+
+from bigan.canonical.query import open_warehouse
+from bigan.modeling.calibration import ProbabilityCalibrator, load_probability_calibrator
+from bigan.modeling.logistic import load_logistic_baseline
+from bigan.modeling.xgboost_v1 import load_xgboost_v1_model
+
 
 class ProbabilityModel(Protocol):
     """Minimal scoring protocol for shadow models."""
@@ -53,6 +60,9 @@ class ShadowComparisonReport:
     avg_champion_latency_ms: float | None
     avg_challenger_latency_ms: float | None
     rows: tuple[ShadowPredictionPair, ...]
+    window_start_ts: int | None = None
+    window_end_ts: int | None = None
+    generated_at_ms: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +79,8 @@ def run_shadow_comparison(
     champion_model_version: str,
     challenger_model_version: str,
     bins: int = 10,
+    window_start_ts: int | None = None,
+    window_end_ts: int | None = None,
 ) -> ShadowComparisonReport:
     """Score challenger in shadow mode without changing champion output."""
 
@@ -155,7 +167,122 @@ def run_shadow_comparison(
         avg_champion_latency_ms=_mean(champion_latencies),
         avg_challenger_latency_ms=_mean(challenger_latencies),
         rows=tuple(pairs),
+        window_start_ts=window_start_ts,
+        window_end_ts=window_end_ts,
+        generated_at_ms=int(time.time() * 1_000),
     )
+
+
+def run_shadow_warehouse_comparison(
+    *,
+    warehouse_dir: Path | str,
+    champion_model_path: Path | str,
+    challenger_model_path: Path | str,
+    output_path: Path | str,
+    champion_calibration_path: Path | str | None = None,
+    challenger_calibration_path: Path | str | None = None,
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+    limit: int | None = None,
+    bins: int = 10,
+) -> ShadowComparisonReport:
+    """Load champion/challenger artifacts, score warehouse features, and save report."""
+
+    champion_model, champion_version = load_shadow_probability_model(
+        champion_model_path,
+        calibration_path=champion_calibration_path,
+    )
+    challenger_model, challenger_version = load_shadow_probability_model(
+        challenger_model_path,
+        calibration_path=challenger_calibration_path,
+    )
+    feature_rows = read_shadow_feature_rows(
+        warehouse_dir,
+        since_ms=since_ms,
+        until_ms=until_ms,
+        limit=limit,
+    )
+    report = run_shadow_comparison(
+        champion_model=champion_model,
+        challenger_model=challenger_model,
+        feature_rows=feature_rows,
+        champion_model_version=champion_version,
+        challenger_model_version=challenger_version,
+        bins=bins,
+        window_start_ts=since_ms,
+        window_end_ts=until_ms,
+    )
+    save_shadow_report(report, output_path)
+    return report
+
+
+def read_shadow_feature_rows(
+    warehouse_dir: Path | str,
+    *,
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Read feature rows eligible for shadow comparison from the canonical warehouse."""
+
+    if limit is not None and limit <= 0:
+        raise ValueError("limit must be positive")
+    filters = ["quality_filter_pass", "not data_gap_flag"]
+    params: list[int] = []
+    if since_ms is not None:
+        filters.append("feature_ts >= ?")
+        params.append(int(since_ms))
+    if until_ms is not None:
+        filters.append("feature_ts < ?")
+        params.append(int(until_ms))
+    limit_clause = "" if limit is None else f"limit {int(limit)}"
+    query = f"""
+        select *
+        from features_15m_v1
+        where {' and '.join(filters)}
+        order by feature_ts, source, source_symbol
+        {limit_clause}
+    """
+    with open_warehouse(warehouse_dir) as conn:
+        try:
+            return conn.execute(query, params).to_arrow_table().to_pylist()
+        except (duckdb.CatalogException, duckdb.IOException):
+            return []
+
+
+def load_shadow_probability_model(
+    model_path: Path | str,
+    *,
+    calibration_path: Path | str | None = None,
+) -> tuple[ProbabilityModel, str]:
+    """Load a supported probability model plus optional calibration wrapper."""
+
+    model = _load_supported_probability_model(model_path)
+    calibrator = None if calibration_path is None else load_probability_calibrator(calibration_path)
+    wrapped = (
+        model
+        if calibrator is None
+        else CalibratedProbabilityModel(model=model, calibrator=calibrator)
+    )
+    return wrapped, str(getattr(model, "model_version", Path(model_path).stem))
+
+
+@dataclass(frozen=True, slots=True)
+class CalibratedProbabilityModel:
+    """Apply a saved probability calibrator to a model's raw output."""
+
+    model: ProbabilityModel
+    calibrator: ProbabilityCalibrator
+
+    def predict_proba(self, row: Mapping[str, Any]) -> float:
+        return self.calibrator.transform(self.model.predict_proba(dict(row)))
+
+
+def _load_supported_probability_model(model_path: Path | str) -> ProbabilityModel:
+    try:
+        return load_xgboost_v1_model(model_path)
+    except Exception:  # noqa: BLE001 - fall through to the JSON logistic format.
+        return load_logistic_baseline(model_path)
 
 
 def save_shadow_report(report: ShadowComparisonReport, output_path: Path | str) -> None:

@@ -28,6 +28,7 @@ from bigan.canonical.query import open_warehouse, warehouse_summary
 from bigan.canonical.symbols import SymbolMapper
 from bigan.features import run_feature_batch, run_feature_quality_sql_checks
 from bigan.labels import run_label_batch
+from bigan.mlops import run_shadow_warehouse_comparison
 from bigan.modeling import (
     BootstrapCandidateInput,
     LogisticBaselineConfig,
@@ -210,6 +211,26 @@ SERVING_READINESS_FALLBACK_MODEL_PATH_OPTION = typer.Option(
 PREDICTION_CALIBRATION_PATH_OPTION = typer.Option(
     None,
     help="Optional path to calibration.json.",
+)
+SHADOW_CHAMPION_MODEL_PATH_OPTION = typer.Option(
+    Path("data/model-runs/logreg-baseline-v1/model.json"),
+    help="Champion or fallback model artifact to keep serving.",
+)
+SHADOW_CHALLENGER_MODEL_PATH_OPTION = typer.Option(
+    Path("data/model-runs/xgboost-v3/model.json"),
+    help="Shadow challenger model artifact.",
+)
+SHADOW_CHAMPION_CALIBRATION_PATH_OPTION = typer.Option(
+    None,
+    help="Optional champion calibration.json.",
+)
+SHADOW_CHALLENGER_CALIBRATION_PATH_OPTION = typer.Option(
+    None,
+    help="Optional challenger calibration.json.",
+)
+SHADOW_OUTPUT_PATH_OPTION = typer.Option(
+    Path("data/shadow/xgboost-v3-shadow-report.json"),
+    help="Path for shadow comparison report JSON.",
 )
 ORACLE_BACKTEST_DATASET_DIR_OPTION = typer.Option(
     Path("data/training-datasets/bigan-training-15m-v1"),
@@ -999,6 +1020,50 @@ def predictions_v1(
         max_rows_per_partition=max_rows_per_partition,
     )
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("shadow-v1")
+def shadow_v1(
+    champion_model_path: Path = SHADOW_CHAMPION_MODEL_PATH_OPTION,
+    challenger_model_path: Path = SHADOW_CHALLENGER_MODEL_PATH_OPTION,
+    output_path: Path = SHADOW_OUTPUT_PATH_OPTION,
+    warehouse_dir: Path | None = ORACLE_BACKTEST_WAREHOUSE_DIR_OPTION,
+    champion_calibration_path: Path | None = SHADOW_CHAMPION_CALIBRATION_PATH_OPTION,
+    challenger_calibration_path: Path | None = SHADOW_CHALLENGER_CALIBRATION_PATH_OPTION,
+    since_ms: int | None = typer.Option(None, help="Inclusive feature_ts lower bound."),
+    until_ms: int | None = typer.Option(None, help="Exclusive feature_ts upper bound."),
+    lookback_hours: float | None = typer.Option(
+        None,
+        help="Use features from the last N hours relative to now.",
+    ),
+    limit: int | None = typer.Option(None, help="Optional maximum feature rows to score."),
+    bins: int = typer.Option(10, help="Histogram bins for distribution comparison."),
+) -> None:
+    """Run champion/challenger shadow scoring without changing champion output."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    if since_ms is not None and lookback_hours is not None:
+        raise typer.BadParameter("use either --since-ms or --lookback-hours, not both")
+    effective_since_ms = since_ms
+    if lookback_hours is not None:
+        if lookback_hours <= 0:
+            raise typer.BadParameter("--lookback-hours must be positive")
+        effective_since_ms = int(time.time() * 1_000 - lookback_hours * 3_600_000)
+    report = run_shadow_warehouse_comparison(
+        warehouse_dir=settings.warehouse_dir if warehouse_dir is None else warehouse_dir,
+        champion_model_path=champion_model_path,
+        challenger_model_path=challenger_model_path,
+        output_path=output_path,
+        champion_calibration_path=champion_calibration_path,
+        challenger_calibration_path=challenger_calibration_path,
+        since_ms=effective_since_ms,
+        until_ms=until_ms,
+        limit=limit,
+        bins=bins,
+    )
+    payload = report.to_dict()
+    payload["rows"] = f"{len(report.rows)} rows written to {output_path}"
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @app.command("serving-readiness-v1")

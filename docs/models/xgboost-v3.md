@@ -146,6 +146,24 @@ Monitoring after deployment should include:
 - Serving health: p50/p95/p99 latency, error rate, schema rejection rate, and stale prediction rate.
 - Feature quality: per-feature null/NaN rate, schema hash mismatches, and market data staleness.
 
+## Shadow Mode Plan
+
+Run v3 as a shadow challenger against the current baseline/champion path before routing production decisions to it. Shadow mode scores both models on the same eligible `features_15m_v1` rows and writes a comparison report; it does not change the champion output.
+
+Historical smoke run:
+
+```bash
+bigan-ingest shadow-v1 \
+  --warehouse-dir data/model-train-backtest-rerun-20260520T134420Z/warehouse \
+  --champion-model-path data/model-train-backtest-rerun-20260520T134420Z/artifacts/models/logreg-baseline-v1/model.json \
+  --champion-calibration-path data/model-train-backtest-rerun-20260520T134420Z/artifacts/models/logreg-baseline-v1-platt-calibration/calibration.json \
+  --challenger-model-path data/model-train-backtest-rerun-20260520T134420Z/artifacts/models/xgboost-v3/model.json \
+  --challenger-calibration-path data/model-train-backtest-rerun-20260520T134420Z/artifacts/models/xgboost-v3-calibration/calibration.json \
+  --output-path data/shadow/xgboost-v3-shadow-smoke.json
+```
+
+For a 1-2 day live shadow window, run the same command on a schedule after each feature batch, using `--lookback-hours 48` or explicit `--since-ms` / `--until-ms` windows. Review `challenger_error_count`, probability distribution drift, average latency, and label hit rate once outcomes settle.
+
 ## Promotion Notes
 
 `xgboost-v3` is good enough to continue bootstrap promotion review because it has stronger held-out probability quality than the baseline and still beats baseline backtest utility under 20 bps costs. It is not evidence of a globally best model. Promotion should still require a fresh bootstrap report using this model card and serving readiness JSON as inputs.

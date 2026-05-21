@@ -33,11 +33,15 @@ from .retraining import (
     register_training_result_as_challenger,
 )
 from .shadow import (
+    CalibratedProbabilityModel,
     ShadowComparisonReport,
     ShadowPredictionPair,
     distribution_kl_divergence,
     distribution_wasserstein_distance,
+    load_shadow_probability_model,
+    read_shadow_feature_rows,
     run_shadow_comparison,
+    run_shadow_warehouse_comparison,
     save_shadow_report,
 )
 
@@ -50,6 +54,7 @@ __all__ = [
     "MODEL_REGISTRY_STATUSES",
     "MODEL_REGISTRY_TABLE_DDL",
     "MODEL_REGISTRY_VIEWS_DDL",
+    "CalibratedProbabilityModel",
     "ModelDeploymentRecord",
     "ModelRegistryRecord",
     "ChallengerTriggerDecision",
@@ -72,6 +77,9 @@ __all__ = [
     "register_training_result_as_challenger",
     "retire_model",
     "rollback_deployment",
+    "load_shadow_probability_model",
+    "read_shadow_feature_rows",
     "run_shadow_comparison",
+    "run_shadow_warehouse_comparison",
     "save_shadow_report",
 ]

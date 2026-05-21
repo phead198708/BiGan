@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from bigan.mlops import (
     distribution_kl_divergence,
     distribution_wasserstein_distance,
     run_shadow_comparison,
+    run_shadow_warehouse_comparison,
     save_shadow_report,
 )
 
@@ -91,8 +94,86 @@ def test_shadow_report_can_be_saved_for_promotion_review(tmp_path: Path) -> None
     assert len(saved["rows"]) == 3
 
 
+def test_shadow_warehouse_comparison_loads_models_and_features(tmp_path: Path) -> None:
+    warehouse_dir = tmp_path / "warehouse"
+    feature_dir = warehouse_dir / "features_15m_v1"
+    feature_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "feature_ts": 1_000,
+                    "source": "polymarket",
+                    "source_symbol": "tok-1",
+                    "quality_filter_pass": True,
+                    "data_gap_flag": False,
+                    "base_prob": 0.40,
+                },
+                {
+                    "feature_ts": 2_000,
+                    "source": "polymarket",
+                    "source_symbol": "tok-2",
+                    "quality_filter_pass": True,
+                    "data_gap_flag": False,
+                    "base_prob": 0.60,
+                },
+                {
+                    "feature_ts": 3_000,
+                    "source": "polymarket",
+                    "source_symbol": "tok-gap",
+                    "quality_filter_pass": True,
+                    "data_gap_flag": True,
+                    "base_prob": 0.90,
+                },
+            ]
+        ),
+        feature_dir / "part.parquet",
+    )
+    champion_path = tmp_path / "champion.json"
+    challenger_path = tmp_path / "challenger.json"
+    _write_logistic_model(champion_path, model_version="logreg-champion", intercept=0.0)
+    _write_logistic_model(challenger_path, model_version="logreg-v3-shadow", intercept=0.2)
+    output_path = tmp_path / "shadow.json"
+
+    report = run_shadow_warehouse_comparison(
+        warehouse_dir=warehouse_dir,
+        champion_model_path=champion_path,
+        challenger_model_path=challenger_path,
+        output_path=output_path,
+        since_ms=1_000,
+        until_ms=3_000,
+    )
+
+    saved = json.loads(output_path.read_text(encoding="utf-8"))
+    assert report.champion_model_version == "logreg-champion"
+    assert report.challenger_model_version == "logreg-v3-shadow"
+    assert report.sample_count == 2
+    assert report.scored_count == 2
+    assert report.challenger_error_count == 0
+    assert report.window_start_ts == 1_000
+    assert report.window_end_ts == 3_000
+    assert saved["sample_count"] == 2
+    assert saved["rows"][0]["source_symbol"] == "tok-1"
+
+
 def test_distribution_helpers_validate_inputs() -> None:
     assert distribution_kl_divergence([0.1, 0.9], [0.2, 0.8], bins=2) >= 0
     assert distribution_wasserstein_distance([0.1, 0.9], [0.2, 0.8]) == pytest.approx(0.1)
     with pytest.raises(ValueError, match="equal length"):
         distribution_wasserstein_distance([0.1], [0.1, 0.2])
+
+
+def _write_logistic_model(path: Path, *, model_version: str, intercept: float) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "model_version": model_version,
+                "feature_columns": ["base_prob"],
+                "coefficients": [1.0],
+                "intercept": intercept,
+                "means": {"base_prob": 0.5},
+                "scales": {"base_prob": 1.0},
+            }
+        ),
+        encoding="utf-8",
+    )
