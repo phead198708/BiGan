@@ -141,6 +141,57 @@ def test_loaded_probability_calibrator_transforms_online_probabilities(tmp_path:
     assert high > 0.80
 
 
+def test_family_aware_calibration_trains_and_loads_per_family_artifact(tmp_path: Path) -> None:
+    from bigan.modeling import (
+        CalibrationConfig,
+        FamilyAwareProbabilityCalibrator,
+        family_key_from_feature,
+        fit_family_aware_calibration_from_predictions,
+        load_probability_calibrator,
+        transform_probability,
+    )
+
+    output_dir = tmp_path / "family-calibration"
+    report = fit_family_aware_calibration_from_predictions(
+        y_true=[0, 0, 1, 1, 0, 1, 0, 1],
+        y_prob=[0.05, 0.20, 0.80, 0.95, 0.40, 0.62, 0.35, 0.72],
+        family_keys=[
+            "BTC-15M",
+            "BTC-15M",
+            "BTC-15M",
+            "BTC-15M",
+            "ETH-5M",
+            "ETH-5M",
+            "ETH-5M",
+            "ETH-5M",
+        ],
+        output_dir=output_dir,
+        model_version="xgboost-v5",
+        config=CalibrationConfig(
+            methods=("platt", "isotonic", "temperature", "beta"),
+            ece_bins=2,
+            platt_epochs=100,
+            beta_epochs=100,
+            clip_bounds=(0.03, 0.97),
+        ),
+    )
+
+    calibrator = load_probability_calibrator(output_dir / "calibration.json")
+
+    assert report.selection_metric == "ece"
+    assert set(report.family_metrics or {}) == {"BTC-15M", "ETH-5M"}
+    assert isinstance(calibrator, FamilyAwareProbabilityCalibrator)
+    assert set(calibrator.family_calibrators) == {"BTC-15M", "ETH-5M"}
+    assert calibrator.transform(0.999, family_key="BTC-15M") <= 0.97
+    assert family_key_from_feature({"canonical_symbol": "ETH-UP-5M"}) == "ETH-5M"
+    assert family_key_from_feature({"underlying_id": 1.0, "horizon_minutes": 15.0}) == "BTC-15M"
+    assert 0.0 <= transform_probability(
+        calibrator,
+        0.62,
+        feature={"underlying_id": 2.0, "horizon_minutes": 5.0},
+    ) <= 1.0
+
+
 def test_calibration_rejects_single_class_labels(tmp_path: Path) -> None:
     from bigan.modeling import fit_calibration_from_predictions
 

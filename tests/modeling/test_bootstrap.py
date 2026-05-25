@@ -157,10 +157,60 @@ def test_bootstrap_promotes_first_champion_when_all_hard_gates_pass(tmp_path: Pa
     assert report.confidence_level == "HIGH"
     assert report.promotion_checklist.backtest_acceptable is True
     assert all(gate.passed for gate in report.hard_gate_results)
+    assert report.artifact_paths["baseline_eval_dir"] == str(baseline_dir)
+    assert report.artifact_paths["candidate_eval_dir"] == str(candidate_dir)
+    assert report.artifact_paths["candidate_backtest_summary_path"] == str(candidate_backtest)
+    assert report.artifact_paths["serving_readiness_path"] == str(serving_path)
+    assert report.artifact_paths["rollback_runbook_path"] == str(runbook)
+    saved = json.loads((tmp_path / "decision" / "bootstrap_decision.json").read_text(encoding="utf-8"))
+    assert saved["artifact_paths"]["candidate_dir"] == str(candidate_dir)
+    assert saved["artifact_paths"]["candidate_eval_dir"] == str(candidate_dir)
     markdown = (tmp_path / "decision" / "bootstrap_decision.md").read_text(encoding="utf-8")
     assert markdown.startswith("# Bootstrap Champion Decision")
     assert "PROMOTE_FIRST_CHAMPION:xgboost-v1" in markdown
     assert "delta_vs_baseline 0.7000" in markdown
+
+
+def test_bootstrap_can_emit_replacement_champion_action(tmp_path: Path) -> None:
+    from bigan.modeling import BootstrapCandidateInput, evaluate_bootstrap_champion
+
+    baseline_dir = tmp_path / "baseline"
+    candidate_dir = tmp_path / "candidate"
+    calibration_dir = tmp_path / "calibration"
+    serving_path = tmp_path / "serving.json"
+    baseline_backtest = tmp_path / "baseline-backtest.json"
+    candidate_backtest = tmp_path / "candidate-backtest.json"
+    runbook = tmp_path / "rollback.md"
+    _write_model_run(baseline_dir, model_version="xgboost-v3", test_auc=0.55, test_brier=0.24)
+    _write_model_run(candidate_dir, model_version="xgboost-v4", test_auc=0.59, test_brier=0.22)
+    _write_calibration(calibration_dir)
+    _write_backtest(baseline_backtest, net_pnl=0.10)
+    _write_backtest(candidate_backtest, net_pnl=0.80)
+    _write_serving(serving_path)
+    _write_schema(candidate_dir / "feature_schema.json")
+    runbook.write_text("# Rollback\n", encoding="utf-8")
+
+    report = evaluate_bootstrap_champion(
+        baseline_dir=baseline_dir,
+        baseline_backtest_summary_path=baseline_backtest,
+        candidates=(
+            BootstrapCandidateInput(
+                candidate_dir=candidate_dir,
+                calibration_dir=calibration_dir,
+                candidate_backtest_summary_path=candidate_backtest,
+                serving_readiness_path=serving_path,
+            ),
+        ),
+        rollback_runbook_path=runbook,
+        output_dir=tmp_path / "decision",
+        promotion_action="replace_champion",
+    )
+
+    assert report.recommended_action == "PROMOTE_CHAMPION"
+    assert report.hard_gate_results[0].model_version == "xgboost-v4"
+    saved = json.loads((tmp_path / "decision" / "bootstrap_decision.json").read_text(encoding="utf-8"))
+    assert saved["recommended_action"] == "PROMOTE_CHAMPION"
+    assert saved["hard_gate_results"][0]["model_version"] == "xgboost-v4"
 
 
 def test_bootstrap_keeps_baseline_when_candidate_backtest_is_unacceptable(
@@ -331,6 +381,140 @@ def test_bootstrap_allows_lower_sharpe_when_brier_gap_is_material(
     assert report.promotion_checklist.backtest_acceptable is True
     assert report.recommended_action == "PROMOTE_FIRST_CHAMPION:xgboost-v3"
     assert "lower_sharpe_allowed_brier_gap 0.0600" in report.comparison_rows[1].backtest
+
+
+def test_bootstrap_uses_shadow_evaluation_as_promotion_precondition(
+    tmp_path: Path,
+) -> None:
+    from bigan.modeling import BootstrapCandidateInput, evaluate_bootstrap_champion
+
+    baseline_dir = tmp_path / "baseline"
+    candidate_dir = tmp_path / "candidate"
+    calibration_dir = tmp_path / "calibration"
+    serving_path = tmp_path / "serving.json"
+    baseline_backtest = tmp_path / "baseline-backtest.json"
+    candidate_backtest = tmp_path / "candidate-backtest.json"
+    shadow_evaluation = tmp_path / "shadow-evaluation.json"
+    runbook = tmp_path / "rollback.md"
+    _write_model_run(baseline_dir, model_version="logreg-baseline-v1", test_auc=0.55, test_brier=0.24)
+    _write_model_run(candidate_dir, model_version="xgboost-v3", test_auc=0.75, test_brier=0.18)
+    _write_calibration(calibration_dir)
+    _write_backtest(baseline_backtest, net_pnl=0.10, sharpe=1.20)
+    _write_backtest(candidate_backtest, net_pnl=0.80, sharpe=1.30)
+    _write_serving(serving_path)
+    _write_schema(candidate_dir / "feature_schema.json")
+    shadow_evaluation.write_text(
+        json.dumps(
+            {
+                "overall_passed": False,
+                "challenger_model_version": "xgboost-v3",
+                "challenger_edge_trigger_rate": 0.0,
+                "schema_error_rate": 0.0,
+                "latency_ms": {"xgboost-v3": {"p95": 0.4}},
+                "checks": {
+                    "edge_trigger_rate": {
+                        "passed": False,
+                        "detail": "edge trigger rate is zero",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    runbook.write_text("# Rollback\n", encoding="utf-8")
+
+    report = evaluate_bootstrap_champion(
+        baseline_dir=baseline_dir,
+        baseline_backtest_summary_path=baseline_backtest,
+        candidates=(
+            BootstrapCandidateInput(
+                candidate_dir=candidate_dir,
+                calibration_dir=calibration_dir,
+                candidate_backtest_summary_path=candidate_backtest,
+                serving_readiness_path=serving_path,
+                shadow_evaluation_path=shadow_evaluation,
+            ),
+        ),
+        rollback_runbook_path=runbook,
+        output_dir=tmp_path / "decision",
+    )
+
+    assert report.recommended_action == "KEEP_BASELINE_TEMPORARILY"
+    assert report.promotion_checklist.serving_readiness_acceptable is False
+    assert "shadow FAIL" in report.comparison_rows[1].production_readiness
+    assert any("Shadow evaluation failed" in risk for risk in report.risks)
+
+
+def test_bootstrap_rejects_failed_bucket_level_calibration_gate(
+    tmp_path: Path,
+) -> None:
+    from bigan.modeling import (
+        BootstrapCandidateInput,
+        BootstrapRules,
+        evaluate_bootstrap_champion,
+    )
+
+    baseline_dir = tmp_path / "baseline"
+    candidate_dir = tmp_path / "candidate"
+    calibration_dir = tmp_path / "calibration"
+    serving_path = tmp_path / "serving.json"
+    baseline_backtest = tmp_path / "baseline-backtest.json"
+    candidate_backtest = tmp_path / "candidate-backtest.json"
+    runbook = tmp_path / "rollback.md"
+    _write_model_run(baseline_dir, model_version="xgboost-v4", test_auc=0.55, test_brier=0.24)
+    _write_model_run(candidate_dir, model_version="xgboost-v5", test_auc=0.75, test_brier=0.18)
+    calibration_dir.mkdir(parents=True)
+    (calibration_dir / "calibration_report.json").write_text(
+        json.dumps(
+            {
+                "model_version": "xgboost-v5",
+                "method": "family_aware",
+                "improved": True,
+                "raw_metrics": {"brier_score": 0.24, "ece": 0.20},
+                "calibrated_metrics": {"brier_score": 0.18, "ece": 0.40},
+                "bucket_metrics": {
+                    "high_up": {"realized_up_rate": 0.58},
+                    "high_down": {"realized_up_rate": 0.53},
+                },
+                "family_metrics": {
+                    "BTC-15M": {"avg_realized_return": 0.01},
+                    "ETH-5M": {"avg_realized_return": 0.02},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_backtest(baseline_backtest, net_pnl=0.10, sharpe=1.20)
+    _write_backtest(candidate_backtest, net_pnl=0.80, sharpe=1.30)
+    _write_serving(serving_path)
+    _write_schema(candidate_dir / "feature_schema.json")
+    runbook.write_text("# Rollback\n", encoding="utf-8")
+
+    report = evaluate_bootstrap_champion(
+        baseline_dir=baseline_dir,
+        baseline_backtest_summary_path=baseline_backtest,
+        candidates=(
+            BootstrapCandidateInput(
+                candidate_dir=candidate_dir,
+                calibration_dir=calibration_dir,
+                candidate_backtest_summary_path=candidate_backtest,
+                serving_readiness_path=serving_path,
+            ),
+        ),
+        rollback_runbook_path=runbook,
+        output_dir=tmp_path / "decision",
+        promotion_action="replace_champion",
+        rules=BootstrapRules(
+            max_global_ece=0.4784,
+            min_high_up_realized_up_rate=0.55,
+            min_high_down_realized_down_rate=0.55,
+            require_positive_avg_return_by_family=True,
+        ),
+    )
+
+    assert report.recommended_action == "KEEP_BASELINE_TEMPORARILY"
+    assert report.promotion_checklist.calibration_acceptable is False
+    assert any("high_down realized down rate" in risk for risk in report.risks)
 
 
 def test_bootstrap_rejects_lower_sharpe_when_brier_gap_is_small(

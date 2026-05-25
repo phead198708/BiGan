@@ -10,7 +10,9 @@ from .contracts import (
     PredictResponse,
     ServingStatus,
     api_contract,
+    clip_probability,
     fixed_error,
+    prediction_event_from_contract,
 )
 from .schema_validation import (
     FeatureSchemaArtifact,
@@ -34,8 +36,10 @@ __all__ = [
     "FeatureSchemaMismatch",
     "api_contract",
     "build_feature_schema_artifact",
+    "clip_probability",
     "fixed_error",
     "load_feature_schema_artifact",
+    "prediction_event_from_contract",
     "validate_features_fail_closed",
     "write_feature_schema_artifact",
 ]

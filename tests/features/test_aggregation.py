@@ -106,6 +106,54 @@ def test_aggregates_microprice_obi_trade_flow_returns_and_rv() -> None:
     assert row["trade_imbalance_1m"] == pytest.approx(6 / 14)
     assert row["ret_1m"] == pytest.approx(math.log(0.52 / 0.50))
     assert row["rv_1m"] == pytest.approx(abs(math.log(0.52 / 0.50)))
+    assert row["minute_of_day"] == pytest.approx((12 * 60 + 1) / 1439)
+    assert row["day_of_week"] == 2
+    assert row["underlying_id"] == pytest.approx(1.0)
+    assert row["horizon_minutes"] is None
+    assert row["aggressor_buy_ratio_1m"] == pytest.approx(0.5)
+    assert row["avg_trade_size_1m"] == pytest.approx(7.0)
+    assert row["tick_spread"] == pytest.approx(row["spread"])
+    assert row["tick_mid_price"] == pytest.approx(row["mid_price"])
+    assert row["tick_obi_l1"] == pytest.approx(row["obi_l1"])
+    assert row["tick_obi_l3"] == pytest.approx((120 - 60) / 180)
+    assert row["tick_trade_arrival_rate"] == pytest.approx(0.0)
+
+
+def test_sparse_trade_features_use_neutral_defaults() -> None:
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    rows = aggregate_features_15m_v1(
+        top_of_book_rows=[_tob(t0, 0.49, 0.51)],
+        orderbook_rows=[],
+        trade_rows=[],
+        ingest_ts=999,
+    )
+
+    row = rows[0]
+
+    assert row["aggressor_buy_ratio_1m"] == pytest.approx(0.5)
+    assert row["avg_trade_size_1m"] == pytest.approx(0.0)
+    assert row["trade_volume_1m"] == pytest.approx(0.0)
+    assert row["tick_obi_l1"] == pytest.approx(0.0)
+    assert row["tick_obi_l3"] == pytest.approx(0.0)
+
+
+def test_ret_30m_falls_back_for_short_round_history() -> None:
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    t15 = t0 + 15 * 60_000
+    rows = aggregate_features_15m_v1(
+        top_of_book_rows=[
+            _tob(t0, 0.49, 0.51),
+            _tob(t15, 0.54, 0.56),
+        ],
+        orderbook_rows=[],
+        trade_rows=[],
+        ingest_ts=999,
+    )
+
+    row = next(row for row in rows if row["feature_ts"] == t15)
+
+    assert row["ret_15m"] == pytest.approx(math.log(0.55 / 0.50))
+    assert row["ret_30m"] == pytest.approx(2.0 * row["ret_15m"])
 
 
 def test_aggregation_emits_minute_close_rows_only_from_backward_inputs() -> None:
@@ -127,6 +175,33 @@ def test_aggregation_emits_minute_close_rows_only_from_backward_inputs() -> None
     assert by_ts[t0 + 60_000]["mid_price"] == pytest.approx(0.50)
     assert by_ts[t0 + 120_000]["market_implied_prob"] == pytest.approx(0.82)
     assert by_ts[t0 + 120_000]["mid_price"] == pytest.approx(0.81)
+
+
+def test_orderbook_snapshot_prices_fill_missing_top_of_book_quote() -> None:
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    rows = aggregate_features_15m_v1(
+        top_of_book_rows=[],
+        orderbook_rows=[
+            _depth(t0, "BID", 0, 10),
+            _depth(t0, "BID", 1, 4),
+            _depth(t0, "ASK", 0, 5),
+            _depth(t0, "ASK", 1, 2),
+        ],
+        trade_rows=[],
+        ingest_ts=999,
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["feature_ts"] == t0
+    assert row["quote_age_ms"] == 0
+    assert row["depth_age_ms"] == 0
+    assert row["data_gap_flag"] is False
+    assert row["quality_filter_pass"] is True
+    assert row["market_implied_prob"] == pytest.approx(0.52)
+    assert row["mid_price"] == pytest.approx(0.51)
+    assert row["spread"] == pytest.approx(0.02)
+    assert row["microprice"] == pytest.approx((0.52 * 10 + 0.50 * 5) / 15)
 
 
 def test_run_feature_batch_writes_features_table(tmp_path: Path) -> None:
@@ -154,3 +229,63 @@ def test_run_feature_batch_writes_features_table(tmp_path: Path) -> None:
     assert row["feature_version"] == FEATURE_VERSION
     assert row["market_implied_prob"] == pytest.approx(0.51)
     assert row["trade_count_1m"] == 1
+
+
+def test_run_feature_batch_can_skip_existing_feature_rows(tmp_path: Path) -> None:
+    warehouse = tmp_path / "warehouse"
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    with WarehouseWriter(warehouse, max_rows_per_partition=10) as writer:
+        writer.append_rows("raw_top_of_book", [_tob(t0, 0.49, 0.51)])
+
+    first = run_feature_batch(warehouse, ingest_ts=123)
+    second = run_feature_batch(warehouse, ingest_ts=456, skip_existing=True)
+
+    assert first.rows_generated == 1
+    assert first.rows_written == 1
+    assert second.rows_generated == 1
+    assert second.rows_written == 0
+
+
+def test_run_feature_batch_can_limit_written_feature_window(tmp_path: Path) -> None:
+    warehouse = tmp_path / "warehouse"
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    with WarehouseWriter(warehouse, max_rows_per_partition=10) as writer:
+        writer.append_rows(
+            "raw_top_of_book",
+            [
+                _tob(t0, 0.49, 0.51),
+                _tob(t0 + 60_000, 0.50, 0.52),
+            ],
+        )
+
+    report = run_feature_batch(warehouse, ingest_ts=123, since_ms=t0 + 60_000)
+
+    assert report.rows_generated == 1
+    assert report.rows_written == 1
+    files = warehouse_files(warehouse, "features_15m_v1")
+    row = pq.ParquetFile(files[0]).read().to_pylist()[0]
+    assert row["feature_ts"] == t0 + 60_000
+
+
+def test_run_feature_batch_writes_features_from_orderbook_without_top_of_book(
+    tmp_path: Path,
+) -> None:
+    warehouse = tmp_path / "warehouse"
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    with WarehouseWriter(warehouse, max_rows_per_partition=10) as writer:
+        writer.append_rows(
+            "raw_orderbook_snapshot",
+            [_depth(t0, "BID", 0, 10), _depth(t0, "ASK", 0, 5)],
+        )
+
+    report = run_feature_batch(warehouse, ingest_ts=123)
+
+    assert report.rows_generated == 1
+    assert report.rows_written == 1
+    files = warehouse_files(warehouse, "features_15m_v1")
+    assert len(files) == 1
+    row = pq.ParquetFile(files[0]).read().to_pylist()[0]
+    assert row["feature_ts"] == t0
+    assert row["market_implied_prob"] == pytest.approx(0.52)
+    assert row["mid_price"] == pytest.approx(0.51)
+    assert row["quality_filter_pass"] is True

@@ -1,5 +1,10 @@
 """Model training dataset helpers."""
 
+from .ablation import (
+    FeatureAblationReport,
+    FeatureAblationRow,
+    generate_feature_ablation_report,
+)
 from .bootstrap import (
     BootstrapCandidateInput,
     BootstrapChampionReport,
@@ -12,10 +17,14 @@ from .bootstrap import (
 from .calibration import (
     CalibrationConfig,
     CalibrationReport,
+    FamilyAwareProbabilityCalibrator,
     ProbabilityCalibrator,
+    family_key_from_feature,
     fit_calibration_from_predictions,
+    fit_family_aware_calibration_from_predictions,
     fit_probability_calibration,
     load_probability_calibrator,
+    transform_probability,
 )
 from .dataset import (
     DATASET_VERSION,
@@ -23,6 +32,11 @@ from .dataset import (
     SplitConfig,
     SplitStats,
     assemble_training_dataset,
+)
+from .evaluation import (
+    ModelDatasetEvaluationReport,
+    evaluate_probability_model_on_dataset,
+    load_probability_model,
 )
 from .logistic import (
     MODEL_VERSION,
@@ -39,15 +53,34 @@ from .predictions import (
     run_prediction_batch,
 )
 from .promotion import (
+    DEFAULT_CHAMPION_PROMOTION_PROCESS_PATH,
+    DEFAULT_CHAMPION_PROMOTION_REPO_RUNBOOK_PATH,
+    ChampionPromotionAuditReport,
+    ChampionPromotionAuditRules,
+    ChampionPromotionGate,
+    ChampionPromotionGateCheck,
+    OfflineRerunReport,
     PromotionCheck,
     PromotionReport,
     PromotionRules,
+    audit_champion_promotion_process,
     evaluate_model_promotion,
+    generate_offline_rerun_report,
+)
+from .stability import (
+    DATASET_STABILITY_SCHEMA_VERSION,
+    DEFAULT_CORE_FEATURES,
+    generate_dataset_stability_report,
 )
 from .xgboost_v1 import (
     XGBOOST_MODEL_VERSION,
     XGBOOST_V2_MODEL_VERSION,
     XGBOOST_V3_MODEL_VERSION,
+    XGBOOST_V4_MODEL_VERSION,
+    XGBOOST_V4_REQUIRED_ADDED_FEATURES,
+    XGBOOST_V4_REQUIRED_FEATURES,
+    XGBOOST_V4_REQUIRED_MARKET_FEATURES,
+    XGBOOST_V4_REQUIRED_TICK_FEATURES,
     XGBoostV1Config,
     XGBoostV1Model,
     XGBoostV1Report,
@@ -55,11 +88,19 @@ from .xgboost_v1 import (
     train_xgboost_v1,
     train_xgboost_v2,
     train_xgboost_v3,
+    train_xgboost_v4,
 )
 
 __all__ = [
     "CalibrationConfig",
     "CalibrationReport",
+    "ChampionPromotionAuditReport",
+    "ChampionPromotionAuditRules",
+    "ChampionPromotionGate",
+    "ChampionPromotionGateCheck",
+    "FeatureAblationReport",
+    "FeatureAblationRow",
+    "FamilyAwareProbabilityCalibrator",
     "BootstrapCandidateInput",
     "BootstrapChampionReport",
     "BootstrapChecklist",
@@ -67,11 +108,17 @@ __all__ = [
     "BootstrapGateResult",
     "BootstrapRules",
     "DATASET_VERSION",
+    "DATASET_STABILITY_SCHEMA_VERSION",
+    "DEFAULT_CORE_FEATURES",
+    "DEFAULT_CHAMPION_PROMOTION_PROCESS_PATH",
+    "DEFAULT_CHAMPION_PROMOTION_REPO_RUNBOOK_PATH",
     "DatasetAssemblyReport",
     "LogisticBaselineConfig",
     "LogisticBaselineModel",
     "LogisticBaselineReport",
     "MODEL_VERSION",
+    "ModelDatasetEvaluationReport",
+    "OfflineRerunReport",
     "ProbabilityCalibrator",
     "PredictionBatchReport",
     "PromotionCheck",
@@ -82,22 +129,37 @@ __all__ = [
     "XGBOOST_MODEL_VERSION",
     "XGBOOST_V2_MODEL_VERSION",
     "XGBOOST_V3_MODEL_VERSION",
+    "XGBOOST_V4_MODEL_VERSION",
+    "XGBOOST_V4_REQUIRED_ADDED_FEATURES",
+    "XGBOOST_V4_REQUIRED_FEATURES",
+    "XGBOOST_V4_REQUIRED_MARKET_FEATURES",
+    "XGBOOST_V4_REQUIRED_TICK_FEATURES",
     "XGBoostV1Config",
     "XGBoostV1Model",
     "XGBoostV1Report",
     "assemble_training_dataset",
+    "audit_champion_promotion_process",
     "confidence_bucket",
     "evaluate_bootstrap_champion",
+    "evaluate_probability_model_on_dataset",
+    "generate_feature_ablation_report",
     "fit_calibration_from_predictions",
+    "fit_family_aware_calibration_from_predictions",
     "fit_probability_calibration",
+    "family_key_from_feature",
     "generate_prediction_rows",
+    "generate_offline_rerun_report",
+    "generate_dataset_stability_report",
     "evaluate_model_promotion",
     "load_logistic_baseline",
+    "load_probability_model",
     "load_probability_calibrator",
     "load_xgboost_v1_model",
     "train_logistic_baseline",
+    "transform_probability",
     "run_prediction_batch",
     "train_xgboost_v1",
     "train_xgboost_v2",
     "train_xgboost_v3",
+    "train_xgboost_v4",
 ]

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from bigan.monitoring import PredictionEvent
 
 API_ENDPOINTS: dict[str, dict[str, str]] = {
     "health": {"method": "GET", "path": "/health"},
@@ -15,6 +19,8 @@ API_ENDPOINTS: dict[str, dict[str, str]] = {
 }
 
 ServingStatus = Literal["ok", "degraded", "unhealthy"]
+DEFAULT_PROBABILITY_CLIP_LOWER = 0.05
+DEFAULT_PROBABILITY_CLIP_UPPER = 0.95
 
 
 def _now_ms() -> int:
@@ -86,6 +92,11 @@ class PredictResponse(_StrictModel):
     request_id: str | None = None
     event_id: str | None = None
 
+    @field_validator("prob_up_15m", mode="after")
+    @classmethod
+    def _clip_served_probability(cls, value: float) -> float:
+        return clip_probability(value)
+
 
 class LatestPredictionResponse(PredictResponse):
     """Response for GET /latest-prediction."""
@@ -93,6 +104,51 @@ class LatestPredictionResponse(PredictResponse):
     source: str
     source_symbol: str
     prediction_ts: int
+
+
+def prediction_event_from_contract(
+    request: PredictRequest,
+    response: PredictResponse,
+) -> PredictionEvent:
+    """Build a monitoring event from a serving predict request/response pair."""
+
+    feature_snapshot_json = json.dumps(
+        {
+            "source": request.source,
+            "source_symbol": request.source_symbol,
+            "request_id": request.request_id,
+            "market_implied_prob": request.features.get("market_implied_prob"),
+            "features": request.features,
+        },
+        sort_keys=True,
+    )
+    event_id = response.event_id or _contract_event_id(request, response)
+    return PredictionEvent(
+        event_id=event_id,
+        ts=response.inference_ts,
+        model_version=response.model_version,
+        feature_version=response.feature_version,
+        prob_up_15m=response.prob_up_15m,
+        confidence_bucket=response.confidence_bucket,
+        top_features_json=response.top_features_json,
+        feature_hash=_stable_hash(feature_snapshot_json),
+        feature_snapshot_json=feature_snapshot_json,
+        serving_latency_ms=response.serving_latency_ms,
+    )
+
+
+def clip_probability(
+    probability: float,
+    *,
+    lower: float = DEFAULT_PROBABILITY_CLIP_LOWER,
+    upper: float = DEFAULT_PROBABILITY_CLIP_UPPER,
+) -> float:
+    """Clip served probabilities to the configured hotfix interval."""
+
+    value = float(probability)
+    if lower < 0.0 or upper > 1.0 or lower >= upper:
+        raise ValueError("probability clip bounds must satisfy 0 <= lower < upper <= 1")
+    return min(upper, max(lower, value))
 
 
 def fixed_error(
@@ -131,4 +187,21 @@ def api_contract() -> dict[str, Any]:
             "details": "object",
             "request_id": "string|null",
         },
+        "probability_postprocessing": {
+            "prob_up_15m_clip_lower": DEFAULT_PROBABILITY_CLIP_LOWER,
+            "prob_up_15m_clip_upper": DEFAULT_PROBABILITY_CLIP_UPPER,
+            "scope": "serving_contract_only",
+        },
     }
+
+
+def _contract_event_id(request: PredictRequest, response: PredictResponse) -> str:
+    raw = (
+        f"{response.model_version}:{request.source}:"
+        f"{request.source_symbol}:{response.inference_ts}:{request.request_id or ''}"
+    )
+    return f"pred-{_stable_hash(raw)[:24]}"
+
+
+def _stable_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()

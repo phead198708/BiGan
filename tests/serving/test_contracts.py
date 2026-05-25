@@ -14,7 +14,9 @@ from bigan.serving import (
     PredictRequest,
     PredictResponse,
     api_contract,
+    clip_probability,
     fixed_error,
+    prediction_event_from_contract,
 )
 
 
@@ -88,6 +90,26 @@ def test_predict_request_and_response_fields_are_fixed() -> None:
         )
 
 
+def test_predict_response_clips_served_probability_hotfix() -> None:
+    response = PredictResponse(
+        prob_up_15m=0.997,
+        model_version="xgboost-v4",
+        feature_version="bigan-mvp-v1.0.0",
+        confidence_bucket="high_up",
+        top_features_json="[]",
+        inference_ts=1_000,
+        serving_latency_ms=4.2,
+    )
+
+    assert response.prob_up_15m == pytest.approx(0.95)
+    assert clip_probability(0.002, lower=0.10, upper=0.90) == pytest.approx(0.10)
+    assert api_contract()["probability_postprocessing"] == {
+        "prob_up_15m_clip_lower": 0.05,
+        "prob_up_15m_clip_upper": 0.95,
+        "scope": "serving_contract_only",
+    }
+
+
 def test_latest_prediction_extends_predict_response_with_identity() -> None:
     latest = LatestPredictionResponse(
         prob_up_15m=0.51,
@@ -102,6 +124,33 @@ def test_latest_prediction_extends_predict_response_with_identity() -> None:
         prediction_ts=1_000,
     )
     assert latest.source_symbol == "token-1"
+
+
+def test_predict_contract_can_emit_monitoring_event() -> None:
+    request = PredictRequest(
+        source_symbol="token-1",
+        feature_version="bigan-mvp-v1.0.0",
+        features={"market_implied_prob": 0.40, "ret_15m": 0.01},
+        request_id="req-1",
+    )
+    response = PredictResponse(
+        prob_up_15m=0.72,
+        model_version="xgboost-v3",
+        feature_version=request.feature_version,
+        confidence_bucket="high_up",
+        top_features_json="[]",
+        inference_ts=1_000,
+        serving_latency_ms=4.2,
+        request_id=request.request_id,
+    )
+
+    event = prediction_event_from_contract(request, response)
+
+    assert event.event_id.startswith("pred-")
+    assert event.model_version == "xgboost-v3"
+    assert event.prob_up_15m == pytest.approx(0.72)
+    assert event.serving_latency_ms == pytest.approx(4.2)
+    assert '"market_implied_prob": 0.4' in event.feature_snapshot_json
 
 
 def test_error_response_format_is_stable_and_strict() -> None:

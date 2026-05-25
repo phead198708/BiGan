@@ -12,8 +12,17 @@ import duckdb
 
 from bigan.canonical.query import open_warehouse
 from bigan.canonical.writer import WarehouseWriter
+from bigan.monitoring import (
+    prediction_event_from_prediction_row,
+    record_prediction_rows_as_events,
+)
 
-from .calibration import ProbabilityCalibrator, load_probability_calibrator
+from .calibration import (
+    FamilyAwareProbabilityCalibrator,
+    ProbabilityCalibrator,
+    load_probability_calibrator,
+    transform_probability,
+)
 from .xgboost_v1 import XGBoostV1Model, load_xgboost_v1_model
 
 
@@ -25,6 +34,7 @@ class PredictionBatchReport:
     rows_written: int
     model_version: str
     calibration_method: str | None
+    monitoring_events_written: int = 0
 
     def to_dict(self) -> dict[str, int | str | None]:
         return asdict(self)
@@ -34,7 +44,7 @@ def generate_prediction_rows(
     *,
     feature_rows: list[dict[str, Any]],
     model: XGBoostV1Model,
-    calibrator: ProbabilityCalibrator | None = None,
+    calibrator: ProbabilityCalibrator | FamilyAwareProbabilityCalibrator | None = None,
     ingest_ts: int | None = None,
 ) -> list[dict[str, Any]]:
     """Generate frontend/API-ready prediction rows from feature rows."""
@@ -45,7 +55,7 @@ def generate_prediction_rows(
         _validate_training_schema(feature, model.feature_columns)
         prediction_ts = int(feature["feature_ts"])
         raw_probability = model.predict_proba(feature)
-        probability = calibrator.transform(raw_probability) if calibrator is not None else raw_probability
+        probability = transform_probability(calibrator, raw_probability, feature=feature)
         top_features = model.top_feature_contributions(feature)
         rows.append(
             {
@@ -90,6 +100,11 @@ def run_prediction_batch(
     calibration_path: Path | str | None = None,
     max_rows_per_partition: int = 50_000,
     ingest_ts: int | None = None,
+    monitoring_db_path: Path | str | None = None,
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+    skip_existing_monitoring_events: bool = False,
+    skip_existing_predictions: bool = False,
 ) -> PredictionBatchReport:
     """Read feature rows from the warehouse and append ``predictions`` rows."""
 
@@ -97,13 +112,20 @@ def run_prediction_batch(
     calibrator = (
         None if calibration_path is None else load_probability_calibrator(calibration_path)
     )
-    feature_rows = _read_feature_rows(warehouse_dir)
+    feature_rows = _read_feature_rows(
+        warehouse_dir,
+        since_ms=since_ms,
+        until_ms=until_ms,
+    )
     rows = generate_prediction_rows(
         feature_rows=feature_rows,
         model=model,
         calibrator=calibrator,
         ingest_ts=ingest_ts,
     )
+    rows_generated = len(rows)
+    if skip_existing_predictions and rows:
+        rows = _filter_new_prediction_rows(warehouse_dir, rows)
     with WarehouseWriter(
         warehouse_dir,
         max_rows_per_partition=max_rows_per_partition,
@@ -111,11 +133,30 @@ def run_prediction_batch(
         writer.append_rows("predictions", rows)
         writer.flush("predictions")
         rows_written = writer.stats.rows_written.get("predictions", 0)
+    monitoring_events_written = 0
+    if monitoring_db_path is not None and rows:
+        from bigan.mlops.registry import connect_mlops_db, initialize_mlops_db
+
+        conn = connect_mlops_db(monitoring_db_path)
+        try:
+            initialize_mlops_db(conn)
+            monitoring_rows = (
+                _filter_new_monitoring_event_rows(conn, rows)
+                if skip_existing_monitoring_events
+                else rows
+            )
+            monitoring_events_written = record_prediction_rows_as_events(
+                conn,
+                monitoring_rows,
+            )
+        finally:
+            conn.close()
     return PredictionBatchReport(
-        rows_generated=len(rows),
+        rows_generated=rows_generated,
         rows_written=rows_written,
         model_version=model.model_version,
         calibration_method=None if calibrator is None else calibrator.method,
+        monitoring_events_written=monitoring_events_written,
     )
 
 
@@ -133,20 +174,103 @@ def confidence_bucket(probability: float) -> str:
     return "neutral"
 
 
-def _read_feature_rows(warehouse_dir: Path | str) -> list[dict[str, Any]]:
+def _read_feature_rows(
+    warehouse_dir: Path | str,
+    *,
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+) -> list[dict[str, Any]]:
+    clauses = ["quality_filter_pass", "not data_gap_flag"]
+    params: list[int] = []
+    if since_ms is not None:
+        clauses.append("feature_ts >= ?")
+        params.append(int(since_ms))
+    if until_ms is not None:
+        clauses.append("feature_ts < ?")
+        params.append(int(until_ms))
+    where_sql = " AND ".join(clauses)
     with open_warehouse(warehouse_dir) as conn:
         try:
             return conn.execute(
-                """
-                select *
-                from features_15m_v1
-                where quality_filter_pass
-                  and not data_gap_flag
-                order by feature_ts, source, source_symbol
-                """
+                f"""
+                SELECT * EXCLUDE (rn)
+                FROM (
+                    SELECT *,
+                           row_number() OVER (
+                               PARTITION BY feature_ts, source, source_symbol
+                               ORDER BY ingest_ts DESC, message_ts DESC, ts DESC
+                           ) AS rn
+                    FROM features_15m_v1
+                    WHERE {where_sql}
+                )
+                WHERE rn = 1
+                ORDER BY feature_ts, source, source_symbol
+                """,
+                params,
             ).to_arrow_table().to_pylist()
         except (duckdb.CatalogException, duckdb.IOException):
             return []
+
+
+def _filter_new_monitoring_event_rows(
+    conn: duckdb.DuckDBPyConnection,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    event_ids = [prediction_event_from_prediction_row(row).event_id for row in rows]
+    placeholders = ", ".join("?" for _ in event_ids)
+    existing = {
+        str(row[0])
+        for row in conn.execute(
+            f"""
+            SELECT event_id
+            FROM prediction_events
+            WHERE event_id IN ({placeholders})
+            """,
+            event_ids,
+        ).fetchall()
+    }
+    return [
+        row
+        for row, event_id in zip(rows, event_ids, strict=True)
+        if event_id not in existing
+    ]
+
+
+def _filter_new_prediction_rows(
+    warehouse_dir: Path | str,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    min_ts = min(int(row["prediction_ts"]) for row in rows)
+    max_ts = max(int(row["prediction_ts"]) for row in rows)
+    with open_warehouse(warehouse_dir) as conn:
+        try:
+            existing = {
+                (int(row[0]), str(row[1]), str(row[2]), str(row[3]))
+                for row in conn.execute(
+                    """
+                    SELECT prediction_ts, source, source_symbol, model_version
+                    FROM predictions
+                    WHERE prediction_ts >= ?
+                      AND prediction_ts <= ?
+                    """,
+                    [min_ts, max_ts],
+                ).fetchall()
+            }
+        except (duckdb.CatalogException, duckdb.IOException):
+            existing = set()
+    return [
+        row
+        for row in rows
+        if (
+            int(row["prediction_ts"]),
+            str(row["source"]),
+            str(row["source_symbol"]),
+            str(row["model_version"]),
+        )
+        not in existing
+    ]
 
 
 def _validate_training_schema(row: dict[str, Any], feature_columns: tuple[str, ...]) -> None:
