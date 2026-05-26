@@ -207,6 +207,28 @@ def test_executor_fill_requires_confirmed_trade(monkeypatch) -> None:
     assert fill["price"] == "0.51"
 
 
+def test_executor_fok_post_failure_does_not_create_position(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+    signal = _signal()
+
+    position = executor._try_entry(
+        client=_BuyPostFailureClient(),
+        position_manager=_PositionManager(),
+        signal=signal,
+        log_path=log_path,
+        max_position_size_usdc=1.0,
+        edge_threshold=0.45,
+        buy_slippage=0.02,
+    )
+
+    assert position is None
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["event"] == "entry_order_post_failed"
+    assert row["error_type"] == "_FokKilledError"
+    assert row["signal"]["event_id"] == signal.event_id
+    assert row["worst_price"] == 0.52
+
+
 def test_executor_opposite_signal_can_exit_without_reverse_entry(
     tmp_path: Path,
     monkeypatch,
@@ -295,6 +317,33 @@ class _TradeClient:
 
     def get_trades(self):  # noqa: ANN201
         return self.trades
+
+
+class _FokKilledError(Exception):
+    pass
+
+
+class _BuyPostFailureClient:
+    def get_order_book(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return {"bids": [{"price": "0.49"}], "asks": [{"price": "0.50"}]}
+
+    def get_tick_size(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return "0.01"
+
+    def get_neg_risk(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return False
+
+    def create_market_order(self, *, order_args, options):  # noqa: ANN001, ANN201, ARG002
+        assert order_args.token_id == "token-up"
+        assert order_args.amount == 1.0
+        assert order_args.price == 0.52
+        return {"order": "signed"}
+
+    def post_order(self, order, order_type):  # noqa: ANN001, ANN201, ARG002
+        raise _FokKilledError("order could not be fully filled")
 
 
 class _SellClient:

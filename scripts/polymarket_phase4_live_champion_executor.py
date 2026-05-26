@@ -701,7 +701,32 @@ def _try_entry(
         options=PartialCreateOrderOptions(tick_size=tick_size, neg_risk=neg_risk),
     )
     order_submit_started_at = _now_ms()
-    response = client.post_order(order, OrderType.FOK)
+    try:
+        response = client.post_order(order, OrderType.FOK)
+    except Exception as exc:  # noqa: BLE001 - Polymarket returns FOK kills as API exceptions.
+        order_failed_at = _now_ms()
+        _log(
+            log_path,
+            "entry_order_post_failed",
+            signal=asdict(signal),
+            bid=bid,
+            ask=ask,
+            worst_price=worst_price,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            order_submit_latency_ms=order_failed_at - order_submit_started_at,
+            latency_ms={
+                **_signal_latency_ms(signal, order_failed_at),
+                "signal_created_to_order_failure_ms": _delta_ms(signal.created_at, order_failed_at),
+                "bridge_to_order_failure_ms": _delta_ms(signal.bridged_at, order_failed_at),
+            },
+            timestamps={
+                **_signal_timestamps(signal),
+                "order_submitted_at": _iso(order_submit_started_at),
+                "order_failed_at": _iso(order_failed_at),
+            },
+        )
+        return None
     order_posted_at = _now_ms()
     order_id = str(response.get("orderID") or "")
     order_matched = bool(response.get("success")) and response.get("status") == "matched" and bool(order_id)
