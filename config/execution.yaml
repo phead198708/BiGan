@@ -1,0 +1,18 @@
+# Live execution configuration. Keep dry_run true until wallet, approvals,
+# fill reconciliation, and alerting have all been verified end to end.
+dry_run: true
+default_order_type: limit
+host: https://clob.polymarket.com
+chain_id: 137
+
+# Secrets are read from environment variables. Do not hard-code credentials here.
+api_key_env: POLYMARKET_API_KEY
+api_secret_env: POLYMARKET_API_SECRET
+api_passphrase_env: POLYMARKET_API_PASSPHRASE
+private_key_env: POLYMARKET_PRIVATE_KEY
+funder_env: POLYMARKET_FUNDER
+
+# Network behavior.
+max_retries: 3
+retry_base_delay_seconds: 0.25
+min_request_interval_seconds: 0.10
