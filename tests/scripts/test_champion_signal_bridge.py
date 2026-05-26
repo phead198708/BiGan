@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BRIDGE_SCRIPT = REPO_ROOT / "scripts" / "champion_signal_bridge.py"
@@ -158,30 +159,221 @@ def test_executor_shutdown_close_skips_unavailable_orderbook(tmp_path: Path) -> 
     assert row["token_id"] == "token-up"
 
 
+def test_round_lifecycle_only_confirmed_fill_locks_round() -> None:
+    state = executor.RoundLifecycleState()
+    signal = _signal()
+
+    assert state.mark_event_seen(signal.event_id) is True
+    assert state.mark_event_seen(signal.event_id) is False
+
+    state.mark_entry_attempted(signal.event_id)
+    state.mark_entry_result(signal, None)
+
+    assert signal.event_id in state.attempted_entry_event_ids
+    assert signal.round_slug not in state.filled_rounds
+    assert signal.round_slug not in state.open_positions
+
+    position = _position()
+    state.mark_entry_result(signal, position)
+
+    assert signal.round_slug in state.filled_rounds
+    assert state.open_positions[signal.round_slug] == position
+
+
+def test_executor_fill_requires_confirmed_trade(monkeypatch) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    client = _TradeClient(
+        [
+            {
+                "taker_order_id": "order-1",
+                "side": "BUY",
+                "status": "FAILED",
+                "price": "0.50",
+                "size": "2",
+            },
+            {
+                "taker_order_id": "order-1",
+                "side": "BUY",
+                "status": "CONFIRMED",
+                "price": "0.51",
+                "size": "1.96",
+            },
+        ]
+    )
+
+    fill = executor._fill_for_order(client, "order-1", wanted_side="BUY")
+
+    assert fill["status"] == "CONFIRMED"
+    assert fill["price"] == "0.51"
+
+
+def test_executor_opposite_signal_can_exit_without_reverse_entry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(executor, "_now_ms", lambda: 10_000)
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position(size=1.960783)
+    signal = _signal(
+        event_id="pred-strong-down",
+        side="DOWN",
+        token_id="token-down",
+        edge=0.52,
+        round_end_ts=300_000,
+    )
+    client = _SellClient()
+    manager = _PositionManager()
+
+    pnl = executor._maybe_exit_opposite_correction(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=signal,
+        log_path=log_path,
+        opposite_exit_edge_threshold=0.45,
+        opposite_exit_min_seconds_to_expiry=120.0,
+        sell_slippage=0.01,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    posted = next(row for row in rows if row["event"] == "exit_order_posted")
+    filled = next(row for row in rows if row["event"] == "exit_filled")
+
+    assert pnl == 0.10
+    assert client.created_orders == [{"token_id": "token-up", "side": "SELL", "amount": 1.96, "price": 0.59}]
+    assert manager.closed == [("phase4-round-1-UP", 0.60)]
+    assert posted["reason"] == "opposite_side_exit_correction"
+    assert posted["signal"]["event_id"] == "pred-strong-down"
+    assert posted["sell_size"] == 1.96
+    assert posted["dust_amount"] > 0
+    assert filled["reason"] == "opposite_side_exit_correction"
+    assert filled["account_cashflow_reconciliation_required"] is True
+
+
+def test_executor_opposite_signal_holds_near_expiry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor, "_now_ms", lambda: 10_000)
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position()
+    signal = _signal(
+        event_id="pred-strong-down",
+        side="DOWN",
+        token_id="token-down",
+        edge=0.55,
+        round_end_ts=100_000,
+    )
+
+    pnl = executor._maybe_exit_opposite_correction(
+        client=_SellClient(),
+        position_manager=_PositionManager(),
+        position=position,
+        signal=signal,
+        log_path=log_path,
+        opposite_exit_edge_threshold=0.45,
+        opposite_exit_min_seconds_to_expiry=120.0,
+        sell_slippage=0.01,
+    )
+
+    assert pnl is None
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["event"] == "opposite_exit_hold"
+    assert row["reason"] == "insufficient_time_remaining"
+    assert row["seconds_to_expiry"] == 90.0
+
+
 class _UnavailableBookClient:
     def get_order_book(self, token_id: str):  # noqa: ANN201
         raise RuntimeError(f"No orderbook exists for the requested token id: {token_id}")
 
 
-def _signal():
+class _TradeClient:
+    def __init__(self, trades):
+        self.trades = trades
+
+    def get_trades(self):  # noqa: ANN201
+        return self.trades
+
+
+class _SellClient:
+    def __init__(self) -> None:
+        self.created_orders = []
+
+    def get_order_book(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return {"bids": [{"price": "0.60"}], "asks": [{"price": "0.61"}]}
+
+    def get_tick_size(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return "0.01"
+
+    def get_neg_risk(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return False
+
+    def create_market_order(self, *, order_args, options):  # noqa: ANN001, ANN201, ARG002
+        self.created_orders.append(
+            {
+                "token_id": order_args.token_id,
+                "side": order_args.side,
+                "amount": order_args.amount,
+                "price": order_args.price,
+            }
+        )
+        return {"order": "signed"}
+
+    def post_order(self, order, order_type):  # noqa: ANN001, ANN201, ARG002
+        return {"success": True, "status": "matched", "orderID": "order-sell"}
+
+    def get_trades(self):  # noqa: ANN201
+        return [
+            {
+                "taker_order_id": "order-sell",
+                "side": "SELL",
+                "status": "MINED",
+                "price": "0.60",
+                "size": "1.96",
+            }
+        ]
+
+
+class _PositionManager:
+    def __init__(self) -> None:
+        self.closed = []
+
+    def close_position(self, event_id: str, exit_price: float):  # noqa: ANN201
+        self.closed.append((event_id, exit_price))
+        return SimpleNamespace(realized_pnl=0.10)
+
+
+def _signal(
+    *,
+    event_id: str = "pred-1",
+    side: str = "UP",
+    token_id: str = "token-up",
+    edge: float = 0.51,
+    round_end_ts: int = 1_779_775_200_000,
+):
     return executor.SignalEvent(
-        event_id="pred-1",
+        event_id=event_id,
         ts=1_000,
         created_at=2_000,
         prob_up_15m=0.98,
-        canonical_symbol="BTC-15M:round-1:UP",
-        token_id="token-up",
-        outcome_side="UP",
+        canonical_symbol=f"BTC-15M:round-1:{side}",
+        token_id=token_id,
+        outcome_side=side,
         round_slug="round-1",
-        round_end_ts=1_779_775_200_000,
+        round_end_ts=round_end_ts,
         market_implied_prob=0.47,
         token_probability=0.98,
-        edge=0.51,
+        edge=edge,
         bridged_at=3_000,
     )
 
 
-def _position():
+def _position(*, size: float = 2.0):
     return executor.LivePosition(
         event_id="phase4-round-1-UP",
         round_slug="round-1",
@@ -189,7 +381,7 @@ def _position():
         token_id="token-up",
         entry_price=0.50,
         fill_price=0.50,
-        size=2.0,
+        size=size,
         order_id="order-1",
         opened_at=4_000,
         entry_signal_event_id="pred-1",

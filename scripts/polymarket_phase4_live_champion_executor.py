@@ -17,7 +17,7 @@ import os
 import signal
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -62,6 +62,43 @@ class LivePosition:
     entry_order_posted_at: int
 
 
+@dataclass(slots=True)
+class RoundLifecycleState:
+    """In-memory execution state for one bounded Phase 4 run."""
+
+    processed_event_ids: set[str] = field(default_factory=set)
+    attempted_entry_event_ids: set[str] = field(default_factory=set)
+    filled_rounds: set[str] = field(default_factory=set)
+    closed_rounds: set[str] = field(default_factory=set)
+    open_positions: dict[str, LivePosition] = field(default_factory=dict)
+
+    def mark_event_seen(self, event_id: str) -> bool:
+        """Return false when an event was already processed."""
+
+        if not event_id:
+            return True
+        if event_id in self.processed_event_ids:
+            return False
+        self.processed_event_ids.add(event_id)
+        return True
+
+    def mark_entry_attempted(self, event_id: str) -> None:
+        if event_id:
+            self.attempted_entry_event_ids.add(event_id)
+
+    def mark_entry_result(self, event: SignalEvent, position: LivePosition | None) -> None:
+        """Only confirmed fills lock a round."""
+
+        if position is None:
+            return
+        self.filled_rounds.add(event.round_slug)
+        self.open_positions[event.round_slug] = position
+
+    def mark_position_closed(self, round_slug: str) -> None:
+        self.open_positions.pop(round_slug, None)
+        self.closed_rounds.add(round_slug)
+
+
 class OrderBookUnavailable(RuntimeError):
     """Raised when the CLOB no longer exposes an orderbook for a token."""
 
@@ -101,8 +138,7 @@ def main() -> int:
     heartbeat_thread.start()
     position_manager = PositionManager(args.monitoring_db_path)
 
-    open_positions: dict[str, LivePosition] = {}
-    traded_rounds: set[str] = set()
+    lifecycle = RoundLifecycleState()
     entries_attempted = 0
     entries_filled = 0
     closes_filled = 0
@@ -142,6 +178,8 @@ def main() -> int:
             "signal_jsonl_path": str(signal_jsonl_path) if signal_jsonl_path is not None else None,
             "edge_threshold": args.edge_threshold,
             "exit_edge_threshold": args.exit_edge_threshold,
+            "opposite_exit_edge_threshold": args.opposite_exit_edge_threshold,
+            "opposite_exit_min_seconds_to_expiry": args.opposite_exit_min_seconds_to_expiry,
             "max_rounds": args.max_rounds,
             "max_position_size_usdc": args.max_position_size_usdc,
             "daily_loss_limit_usdc": args.daily_loss_limit_usdc,
@@ -160,7 +198,7 @@ def main() -> int:
             if (now_ms - started_at) >= args.max_runtime_minutes * 60_000:
                 _log(log_path, "stop_max_runtime")
                 break
-            if entries_filled >= args.max_rounds and not open_positions:
+            if entries_filled >= args.max_rounds and not lifecycle.open_positions:
                 _log(log_path, "stop_max_rounds_closed")
                 break
             if realized_pnl <= -args.daily_loss_limit_usdc:
@@ -216,8 +254,12 @@ def main() -> int:
                 )
 
             for event in events:
-                if event.round_slug in open_positions:
-                    position = open_positions[event.round_slug]
+                if not lifecycle.mark_event_seen(event.event_id):
+                    _bump(skipped, "duplicate_event_id")
+                    continue
+
+                if event.round_slug in lifecycle.open_positions:
+                    position = lifecycle.open_positions[event.round_slug]
                     if event.outcome_side == position.side:
                         maybe_pnl = _maybe_exit(
                             client=client,
@@ -232,7 +274,25 @@ def main() -> int:
                         if maybe_pnl is not None:
                             realized_pnl += maybe_pnl
                             closes_filled += 1
-                            del open_positions[event.round_slug]
+                            lifecycle.mark_position_closed(event.round_slug)
+                            if realized_pnl <= -args.daily_loss_limit_usdc:
+                                _log(log_path, "daily_loss_limit_reached", realized_pnl=realized_pnl)
+                                break
+                    else:
+                        maybe_pnl = _maybe_exit_opposite_correction(
+                            client=client,
+                            position_manager=position_manager,
+                            position=position,
+                            signal=event,
+                            log_path=log_path,
+                            opposite_exit_edge_threshold=args.opposite_exit_edge_threshold,
+                            opposite_exit_min_seconds_to_expiry=args.opposite_exit_min_seconds_to_expiry,
+                            sell_slippage=args.sell_slippage,
+                        )
+                        if maybe_pnl is not None:
+                            realized_pnl += maybe_pnl
+                            closes_filled += 1
+                            lifecycle.mark_position_closed(event.round_slug)
                             if realized_pnl <= -args.daily_loss_limit_usdc:
                                 _log(log_path, "daily_loss_limit_reached", realized_pnl=realized_pnl)
                                 break
@@ -241,11 +301,11 @@ def main() -> int:
                 if entries_filled >= args.max_rounds:
                     _bump(skipped, "max_rounds")
                     continue
-                if len(open_positions) >= args.max_concurrent_positions:
+                if len(lifecycle.open_positions) >= args.max_concurrent_positions:
                     _bump(skipped, "max_concurrent_positions")
                     continue
-                if event.round_slug in traded_rounds:
-                    _bump(skipped, "round_already_traded")
+                if event.round_slug in lifecycle.filled_rounds:
+                    _bump(skipped, "round_already_filled")
                     continue
                 seconds_to_expiry = (event.round_end_ts - now_ms) / 1000
                 if seconds_to_expiry < args.min_seconds_to_expiry:
@@ -259,6 +319,7 @@ def main() -> int:
                     continue
 
                 entries_attempted += 1
+                lifecycle.mark_entry_attempted(event.event_id)
                 position = _try_entry(
                     client=client,
                     position_manager=position_manager,
@@ -268,9 +329,8 @@ def main() -> int:
                     edge_threshold=args.edge_threshold,
                     buy_slippage=args.buy_slippage,
                 )
-                traded_rounds.add(event.round_slug)
+                lifecycle.mark_entry_result(event, position)
                 if position is not None:
-                    open_positions[event.round_slug] = position
                     entries_filled += 1
                 if entries_filled >= args.max_rounds:
                     break
@@ -281,7 +341,7 @@ def main() -> int:
         shutdown_closed, shutdown_pnl = _close_remaining_positions(
             client=client,
             position_manager=position_manager,
-            positions=open_positions,
+            positions=lifecycle.open_positions,
             log_path=log_path,
             sell_slippage=args.sell_slippage,
         )
@@ -296,7 +356,11 @@ def main() -> int:
             "entries_filled": entries_filled,
             "closes_filled": closes_filled,
             "realized_pnl_usdc": round(realized_pnl, 8),
-            "open_positions_at_shutdown": len(open_positions),
+            "open_positions_at_shutdown": len(lifecycle.open_positions),
+            "processed_event_count": len(lifecycle.processed_event_ids),
+            "attempted_entry_event_count": len(lifecycle.attempted_entry_event_ids),
+            "filled_round_count": len(lifecycle.filled_rounds),
+            "closed_round_count": len(lifecycle.closed_rounds),
             "skipped": skipped,
             "errors": errors,
             "execution_log_path": str(log_path),
@@ -331,6 +395,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-concurrent-positions", type=int, default=2)
     parser.add_argument("--edge-threshold", type=float, default=0.45)
     parser.add_argument("--exit-edge-threshold", type=float, default=0.10)
+    parser.add_argument("--opposite-exit-edge-threshold", type=float, default=0.45)
+    parser.add_argument("--opposite-exit-min-seconds-to-expiry", type=float, default=120.0)
     parser.add_argument("--profit-target", type=float, default=0.15)
     parser.add_argument("--min-seconds-to-expiry", type=float, default=180.0)
     parser.add_argument("--max-seconds-to-expiry", type=float, default=1200.0)
@@ -672,7 +738,7 @@ def _try_entry(
     if fill_size <= 0:
         _log(
             log_path,
-            "entry_fill_missing",
+            "entry_fill_missing_or_unconfirmed",
             order_id=order_id,
             response=response,
             fill=fill,
@@ -784,6 +850,89 @@ def _maybe_exit(
     )
 
 
+def _maybe_exit_opposite_correction(
+    *,
+    client: Any,
+    position_manager: PositionManager,
+    position: LivePosition,
+    signal: SignalEvent,
+    log_path: Path,
+    opposite_exit_edge_threshold: float,
+    opposite_exit_min_seconds_to_expiry: float,
+    sell_slippage: float,
+) -> float | None:
+    """Exit an open position when the opposite side becomes strongly favored."""
+
+    seconds_to_expiry = (signal.round_end_ts - _now_ms()) / 1000
+    if seconds_to_expiry < opposite_exit_min_seconds_to_expiry:
+        _log(
+            log_path,
+            "opposite_exit_hold",
+            reason="insufficient_time_remaining",
+            position=asdict(position),
+            signal=asdict(signal),
+            old_side=position.side,
+            new_side=signal.outcome_side,
+            edge=signal.edge,
+            seconds_to_expiry=seconds_to_expiry,
+            opposite_exit_min_seconds_to_expiry=opposite_exit_min_seconds_to_expiry,
+        )
+        return None
+    if signal.edge < opposite_exit_edge_threshold:
+        _log(
+            log_path,
+            "opposite_exit_hold",
+            reason="opposite_edge_below_threshold",
+            position=asdict(position),
+            signal=asdict(signal),
+            old_side=position.side,
+            new_side=signal.outcome_side,
+            edge=signal.edge,
+            seconds_to_expiry=seconds_to_expiry,
+            opposite_exit_edge_threshold=opposite_exit_edge_threshold,
+        )
+        return None
+    try:
+        bid, _ask = _best_bid_ask(client, position.token_id)
+    except OrderBookUnavailable as exc:
+        _log(
+            log_path,
+            "opposite_exit_hold",
+            reason="orderbook_unavailable",
+            position=asdict(position),
+            signal=asdict(signal),
+            old_side=position.side,
+            new_side=signal.outcome_side,
+            edge=signal.edge,
+            seconds_to_expiry=seconds_to_expiry,
+            **exc.to_log_payload(),
+        )
+        return None
+    if bid is None:
+        _log(
+            log_path,
+            "opposite_exit_hold",
+            reason="missing_bid",
+            position=asdict(position),
+            signal=asdict(signal),
+            old_side=position.side,
+            new_side=signal.outcome_side,
+            edge=signal.edge,
+            seconds_to_expiry=seconds_to_expiry,
+        )
+        return None
+    return _sell_position(
+        client=client,
+        position_manager=position_manager,
+        position=position,
+        log_path=log_path,
+        bid=float(bid),
+        sell_slippage=sell_slippage,
+        reason="opposite_side_exit_correction",
+        signal=signal,
+    )
+
+
 def _close_remaining_positions(
     *,
     client: Any,
@@ -845,8 +994,18 @@ def _sell_position(
     neg_risk = client.get_neg_risk(position.token_id)
     worst_price = max(0.01, _round_price(bid - sell_slippage, tick_size))
     sell_size = _round_sell_size(position.size)
+    dust_amount = max(0.0, float(position.size) - sell_size)
+    dust_value_usd = dust_amount * float(bid)
     if sell_size <= 0:
-        _log(log_path, "exit_skipped", reason="sell_size_too_small", position=asdict(position))
+        _log(
+            log_path,
+            "exit_skipped",
+            reason="sell_size_too_small",
+            position=asdict(position),
+            sell_size=sell_size,
+            dust_amount=dust_amount,
+            dust_value_usd=dust_value_usd,
+        )
         return None
     order = client.create_market_order(
         order_args=MarketOrderArgs(
@@ -868,12 +1027,25 @@ def _sell_position(
         bid=bid,
         worst_price=worst_price,
         sell_size=sell_size,
+        dust_amount=dust_amount,
+        dust_value_usd=dust_value_usd,
         response=response,
     )
     if not response.get("success") or response.get("status") != "matched" or not order_id:
         return None
     fill = _fill_for_order(client, order_id, wanted_side="SELL")
     fill_price = _optional_float(fill.get("price")) or bid
+    if not fill:
+        _log(
+            log_path,
+            "exit_fill_missing_or_unconfirmed",
+            reason=reason,
+            position=asdict(position),
+            signal=None if signal is None else asdict(signal),
+            sell_order_id=order_id,
+            response=response,
+        )
+        return None
     closed = position_manager.close_position(position.event_id, fill_price)
     pnl = float(closed.realized_pnl or 0.0)
     _log(
@@ -885,6 +1057,10 @@ def _sell_position(
         fill=fill,
         exit_price=fill_price,
         realized_pnl=pnl,
+        realized_pnl_source="position_manager_fill_price",
+        account_cashflow_reconciliation_required=True,
+        dust_amount=dust_amount,
+        dust_value_usd=dust_value_usd,
     )
     return pnl
 
@@ -896,9 +1072,17 @@ def _fill_for_order(client: Any, order_id: str, *, wanted_side: str) -> dict[str
     except Exception:
         return {}
     for trade in trades:
-        if str(trade.get("taker_order_id") or "") == order_id and str(trade.get("side") or "").upper() == wanted_side:
+        if (
+            str(trade.get("taker_order_id") or "") == order_id
+            and str(trade.get("side") or "").upper() == wanted_side
+            and _trade_is_confirmed(trade)
+        ):
             return dict(trade)
     return {}
+
+
+def _trade_is_confirmed(trade: dict[str, Any]) -> bool:
+    return str(trade.get("status") or "").upper() in {"MINED", "CONFIRMED"}
 
 
 def _best_bid_ask(client: Any, token_id: str) -> tuple[float | None, float | None]:
@@ -934,7 +1118,7 @@ def _round_price(price: float, tick_size: Any) -> float:
 
 
 def _round_sell_size(size: float) -> float:
-    return math.floor(float(size) * 100) / 100
+    return math.floor(float(size) * 1000) / 1000
 
 
 def _round_end_ts(round_slug: str) -> int | None:
