@@ -138,10 +138,11 @@ class PositionManager:
             raise ValueError(f"cannot update non-open position {event_id}")
         if current_price < 0:
             raise ValueError("current_price must be non-negative")
+        cost_basis = _cost_basis(position)
         marked = _replace_position(
             position,
             current_price=float(current_price),
-            unrealized_pnl=(float(current_price) - position.entry_price) * position.size,
+            unrealized_pnl=(float(current_price) - cost_basis) * position.size,
             updated_at=_now_ms(),
         )
         self._upsert(marked)
@@ -162,7 +163,8 @@ class PositionManager:
         if exit_price < 0:
             raise ValueError("exit_price must be non-negative")
         ts = exit_time or _now_ms()
-        realized = (float(exit_price) - position.entry_price) * position.size
+        cost_basis = _cost_basis(position)
+        realized = (float(exit_price) - cost_basis) * position.size
         closed = _replace_position(
             position,
             status="closed",
@@ -189,7 +191,8 @@ class PositionManager:
         winning_side = _normalise_result(result)
         exit_price = 1.0 if winning_side == position.side else 0.0
         ts = settlement_time or _now_ms()
-        realized = (exit_price - position.entry_price) * position.size
+        cost_basis = _cost_basis(position)
+        realized = (exit_price - cost_basis) * position.size
         settled = _replace_position(
             position,
             status="expired",
@@ -343,6 +346,10 @@ def _normalise_result(value: PositionSide | str | bool) -> PositionSide:
     if isinstance(value, bool):
         return "UP" if value else "DOWN"
     return _normalise_side(value)
+
+
+def _cost_basis(position: Position) -> float:
+    return position.fill_price if position.fill_price is not None else position.entry_price
 
 
 def _require_text(field_name: str, value: str) -> None:
