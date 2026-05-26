@@ -114,9 +114,10 @@ def test_executor_starts_jsonl_cursor_at_tail(tmp_path: Path) -> None:
     assert executor._latest_signal_jsonl_cursor(queue, start="beginning") == 0
 
 
-def test_executor_exit_holds_when_orderbook_is_unavailable(tmp_path: Path) -> None:
+def test_executor_exit_holds_when_orderbook_is_unavailable(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(executor, "_now_ms", lambda: 10_000)
     log_path = tmp_path / "phase4.jsonl"
-    signal = _signal()
+    signal = _signal(round_end_ts=300_000)
     position = _position()
 
     result = executor._maybe_exit(
@@ -136,13 +137,15 @@ def test_executor_exit_holds_when_orderbook_is_unavailable(tmp_path: Path) -> No
     assert row["reason"] == "orderbook_unavailable"
     assert row["token_id"] == "token-up"
     assert row["error_type"] == "RuntimeError"
+    assert row["seconds_to_expiry"] == 290.0
 
 
 def test_executor_shutdown_close_skips_unavailable_orderbook(tmp_path: Path) -> None:
     log_path = tmp_path / "phase4.jsonl"
-    positions = {"round-1": _position()}
+    position = _position(round_slug="round-without-timestamp")
+    positions = {position.round_slug: position}
 
-    closed, pending, pnl = executor._close_remaining_positions(
+    closed, pending, settlement, pnl = executor._close_remaining_positions(
         client=_UnavailableBookClient(),
         position_manager=object(),
         positions=positions,
@@ -152,12 +155,97 @@ def test_executor_shutdown_close_skips_unavailable_orderbook(tmp_path: Path) -> 
 
     assert closed == 0
     assert pending == 0
+    assert settlement == 0
     assert pnl == 0.0
-    assert "round-1" in positions
+    assert position.round_slug in positions
     row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
     assert row["event"] == "shutdown_close_skipped"
     assert row["reason"] == "orderbook_unavailable"
     assert row["token_id"] == "token-up"
+
+
+def test_executor_expired_exit_without_orderbook_marks_pending_settlement(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor, "_now_ms", lambda: 200_000)
+    log_path = tmp_path / "phase4.jsonl"
+    signal = _signal(round_end_ts=100_000)
+    position = _position()
+
+    result = executor._maybe_exit(
+        client=_UnavailableBookClient(),
+        position_manager=object(),
+        position=position,
+        signal=signal,
+        log_path=log_path,
+        exit_edge_threshold=0.10,
+        profit_target=0.15,
+        sell_slippage=0.01,
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert result == executor.SellResult(status="pending_settlement")
+    assert row["event"] == "exit_pending_settlement"
+    assert row["reason"] == "expired_orderbook_unavailable"
+    assert row["settlement_reconciliation_required"] is True
+    assert row["position_assumed_closed_to_prevent_duplicate_sell"] is True
+    assert row["seconds_to_expiry"] == -100.0
+
+
+def test_executor_expired_exit_without_bid_marks_pending_settlement(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor, "_now_ms", lambda: 200_000)
+    log_path = tmp_path / "phase4.jsonl"
+    signal = _signal(round_end_ts=100_000)
+    position = _position()
+
+    result = executor._maybe_exit(
+        client=_MissingBidClient(),
+        position_manager=object(),
+        position=position,
+        signal=signal,
+        log_path=log_path,
+        exit_edge_threshold=0.10,
+        profit_target=0.15,
+        sell_slippage=0.01,
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert result == executor.SellResult(status="pending_settlement")
+    assert row["event"] == "exit_pending_settlement"
+    assert row["reason"] == "expired_missing_bid"
+    assert row["settlement_reconciliation_required"] is True
+
+
+def test_executor_shutdown_expired_unavailable_orderbook_marks_pending_settlement(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor, "_now_ms", lambda: 2_000_001)
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position(round_slug="btc-updown-15m-1000")
+    positions = {position.round_slug: position}
+
+    closed, pending, settlement, pnl = executor._close_remaining_positions(
+        client=_UnavailableBookClient(),
+        position_manager=object(),
+        positions=positions,
+        log_path=log_path,
+        sell_slippage=0.01,
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert closed == 0
+    assert pending == 0
+    assert settlement == 1
+    assert pnl == 0.0
+    assert positions == {}
+    assert row["event"] == "exit_pending_settlement"
+    assert row["reason"] == "shutdown_expired_orderbook_unavailable"
+    assert row["seconds_to_expiry"] == -100.001
 
 
 def test_round_lifecycle_only_confirmed_fill_locks_round() -> None:
@@ -368,6 +456,12 @@ class _UnavailableBookClient:
         raise RuntimeError(f"No orderbook exists for the requested token id: {token_id}")
 
 
+class _MissingBidClient:
+    def get_order_book(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return {"bids": [], "asks": [{"price": "0.61"}]}
+
+
 class _TradeClient:
     def __init__(self, trades):
         self.trades = trades
@@ -489,10 +583,10 @@ def _signal(
     )
 
 
-def _position(*, size: float = 2.0):
+def _position(*, size: float = 2.0, round_slug: str = "round-1"):
     return executor.LivePosition(
         event_id="phase4-round-1-UP",
-        round_slug="round-1",
+        round_slug=round_slug,
         side="UP",
         token_id="token-up",
         entry_price=0.50,

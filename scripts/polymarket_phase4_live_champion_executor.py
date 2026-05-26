@@ -149,6 +149,7 @@ def main() -> int:
     entries_filled = 0
     closes_filled = 0
     exits_pending_confirmation = 0
+    exits_pending_settlement = 0
     realized_pnl = 0.0
     skipped: dict[str, int] = {}
     errors = 0
@@ -282,6 +283,8 @@ def main() -> int:
                             realized_pnl += sell_result.realized_pnl
                             if sell_result.status == "filled":
                                 closes_filled += 1
+                            elif sell_result.status == "pending_settlement":
+                                exits_pending_settlement += 1
                             else:
                                 exits_pending_confirmation += 1
                             lifecycle.mark_position_closed(event.round_slug)
@@ -303,6 +306,8 @@ def main() -> int:
                             realized_pnl += sell_result.realized_pnl
                             if sell_result.status == "filled":
                                 closes_filled += 1
+                            elif sell_result.status == "pending_settlement":
+                                exits_pending_settlement += 1
                             else:
                                 exits_pending_confirmation += 1
                             lifecycle.mark_position_closed(event.round_slug)
@@ -351,7 +356,7 @@ def main() -> int:
             time.sleep(args.poll_seconds)
     finally:
         heartbeat_stop.set()
-        shutdown_closed, shutdown_pending, shutdown_pnl = _close_remaining_positions(
+        shutdown_closed, shutdown_pending, shutdown_settlement, shutdown_pnl = _close_remaining_positions(
             client=client,
             position_manager=position_manager,
             positions=lifecycle.open_positions,
@@ -360,6 +365,7 @@ def main() -> int:
         )
         closes_filled += shutdown_closed
         exits_pending_confirmation += shutdown_pending
+        exits_pending_settlement += shutdown_settlement
         realized_pnl += shutdown_pnl
         summary = {
             "phase": "phase4_real_champion_signal",
@@ -370,6 +376,7 @@ def main() -> int:
             "entries_filled": entries_filled,
             "closes_filled": closes_filled,
             "exits_pending_confirmation": exits_pending_confirmation,
+            "exits_pending_settlement": exits_pending_settlement,
             "realized_pnl_usdc": round(realized_pnl, 8),
             "open_positions_at_shutdown": len(lifecycle.open_positions),
             "processed_event_count": len(lifecycle.processed_event_ids),
@@ -850,23 +857,49 @@ def _maybe_exit(
     profit_target: float,
     sell_slippage: float,
 ) -> SellResult | None:
+    now_ms = _now_ms()
+    seconds_to_expiry = (signal.round_end_ts - now_ms) / 1000
     try:
         bid, _ask = _best_bid_ask(client, position.token_id)
     except OrderBookUnavailable as exc:
+        if seconds_to_expiry <= 0:
+            return _mark_pending_settlement(
+                log_path=log_path,
+                position=position,
+                signal=signal,
+                reason="expired_orderbook_unavailable",
+                seconds_to_expiry=seconds_to_expiry,
+                error_payload=exc.to_log_payload(),
+            )
         _log(
             log_path,
             "exit_hold",
             reason="orderbook_unavailable",
             position=asdict(position),
             signal=asdict(signal),
+            seconds_to_expiry=seconds_to_expiry,
             **exc.to_log_payload(),
         )
         return None
     if bid is None:
-        _log(log_path, "exit_hold", reason="missing_bid", position=asdict(position), signal=asdict(signal))
+        if seconds_to_expiry <= 0:
+            return _mark_pending_settlement(
+                log_path=log_path,
+                position=position,
+                signal=signal,
+                reason="expired_missing_bid",
+                seconds_to_expiry=seconds_to_expiry,
+            )
+        _log(
+            log_path,
+            "exit_hold",
+            reason="missing_bid",
+            position=asdict(position),
+            signal=asdict(signal),
+            seconds_to_expiry=seconds_to_expiry,
+        )
         return None
     unrealized = float(bid) - position.fill_price
-    seconds_to_expiry = (signal.round_end_ts - _now_ms()) / 1000
     should_exit = (
         signal.edge <= exit_edge_threshold
         or unrealized >= profit_target
@@ -904,6 +937,14 @@ def _maybe_exit_opposite_correction(
     """Exit an open position when the opposite side becomes strongly favored."""
 
     seconds_to_expiry = (signal.round_end_ts - _now_ms()) / 1000
+    if seconds_to_expiry <= 0:
+        return _mark_pending_settlement(
+            log_path=log_path,
+            position=position,
+            signal=signal,
+            reason="expired_before_opposite_exit",
+            seconds_to_expiry=seconds_to_expiry,
+        )
     if seconds_to_expiry < opposite_exit_min_seconds_to_expiry:
         _log(
             log_path,
@@ -980,24 +1021,61 @@ def _close_remaining_positions(
     positions: dict[str, LivePosition],
     log_path: Path,
     sell_slippage: float,
-) -> tuple[int, int, float]:
+) -> tuple[int, int, int, float]:
     closed_count = 0
     pending_count = 0
+    settlement_count = 0
     realized_pnl = 0.0
     for round_slug, position in list(positions.items()):
+        round_end_ts = _round_end_ts(position.round_slug)
+        seconds_to_expiry = None
+        is_expired = False
+        if round_end_ts is not None:
+            seconds_to_expiry = (round_end_ts - _now_ms()) / 1000
+            is_expired = seconds_to_expiry <= 0
         try:
             bid, _ask = _best_bid_ask(client, position.token_id)
         except OrderBookUnavailable as exc:
+            if is_expired:
+                _mark_pending_settlement(
+                    log_path=log_path,
+                    position=position,
+                    signal=None,
+                    reason="shutdown_expired_orderbook_unavailable",
+                    seconds_to_expiry=seconds_to_expiry,
+                    error_payload=exc.to_log_payload(),
+                )
+                settlement_count += 1
+                del positions[round_slug]
+                continue
             _log(
                 log_path,
                 "shutdown_close_skipped",
                 reason="orderbook_unavailable",
                 position=asdict(position),
+                seconds_to_expiry=seconds_to_expiry,
                 **exc.to_log_payload(),
             )
             continue
         if bid is None:
-            _log(log_path, "shutdown_close_skipped", reason="missing_bid", position=asdict(position))
+            if is_expired:
+                _mark_pending_settlement(
+                    log_path=log_path,
+                    position=position,
+                    signal=None,
+                    reason="shutdown_expired_missing_bid",
+                    seconds_to_expiry=seconds_to_expiry,
+                )
+                settlement_count += 1
+                del positions[round_slug]
+                continue
+            _log(
+                log_path,
+                "shutdown_close_skipped",
+                reason="missing_bid",
+                position=asdict(position),
+                seconds_to_expiry=seconds_to_expiry,
+            )
             continue
         sell_result = _sell_position(
             client=client,
@@ -1012,11 +1090,37 @@ def _close_remaining_positions(
         if sell_result is not None:
             if sell_result.status == "filled":
                 closed_count += 1
+            elif sell_result.status == "pending_settlement":
+                settlement_count += 1
             else:
                 pending_count += 1
             realized_pnl += sell_result.realized_pnl
             del positions[round_slug]
-    return closed_count, pending_count, realized_pnl
+    return closed_count, pending_count, settlement_count, realized_pnl
+
+
+def _mark_pending_settlement(
+    *,
+    log_path: Path,
+    position: LivePosition,
+    signal: SignalEvent | None,
+    reason: str,
+    seconds_to_expiry: float | None,
+    error_payload: dict[str, str] | None = None,
+) -> SellResult:
+    _log(
+        log_path,
+        "exit_pending_settlement",
+        reason=reason,
+        position=asdict(position),
+        signal=None if signal is None else asdict(signal),
+        seconds_to_expiry=seconds_to_expiry,
+        position_assumed_closed_to_prevent_duplicate_sell=True,
+        account_cashflow_reconciliation_required=True,
+        settlement_reconciliation_required=True,
+        **(error_payload or {}),
+    )
+    return SellResult(status="pending_settlement")
 
 
 def _sell_position(
