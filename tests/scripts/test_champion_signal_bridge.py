@@ -142,7 +142,7 @@ def test_executor_shutdown_close_skips_unavailable_orderbook(tmp_path: Path) -> 
     log_path = tmp_path / "phase4.jsonl"
     positions = {"round-1": _position()}
 
-    closed, pnl = executor._close_remaining_positions(
+    closed, pending, pnl = executor._close_remaining_positions(
         client=_UnavailableBookClient(),
         position_manager=object(),
         positions=positions,
@@ -151,6 +151,7 @@ def test_executor_shutdown_close_skips_unavailable_orderbook(tmp_path: Path) -> 
     )
 
     assert closed == 0
+    assert pending == 0
     assert pnl == 0.0
     assert "round-1" in positions
     row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
@@ -247,7 +248,7 @@ def test_executor_opposite_signal_can_exit_without_reverse_entry(
     client = _SellClient()
     manager = _PositionManager()
 
-    pnl = executor._maybe_exit_opposite_correction(
+    sell_result = executor._maybe_exit_opposite_correction(
         client=client,
         position_manager=manager,
         position=position,
@@ -262,7 +263,7 @@ def test_executor_opposite_signal_can_exit_without_reverse_entry(
     posted = next(row for row in rows if row["event"] == "exit_order_posted")
     filled = next(row for row in rows if row["event"] == "exit_filled")
 
-    assert pnl == 0.10
+    assert sell_result == executor.SellResult(status="filled", realized_pnl=0.10)
     assert client.created_orders == [{"token_id": "token-up", "side": "SELL", "amount": 1.96, "price": 0.59}]
     assert manager.closed == [("phase4-round-1-UP", 0.60)]
     assert posted["reason"] == "opposite_side_exit_correction"
@@ -271,6 +272,62 @@ def test_executor_opposite_signal_can_exit_without_reverse_entry(
     assert posted["dust_amount"] > 0
     assert filled["reason"] == "opposite_side_exit_correction"
     assert filled["account_cashflow_reconciliation_required"] is True
+
+
+def test_executor_matched_sell_without_trade_confirmation_is_pending(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position()
+    signal = _signal(edge=-0.31)
+    manager = _PositionManager()
+
+    sell_result = executor._maybe_exit(
+        client=_SellPendingClient(),
+        position_manager=manager,
+        position=position,
+        signal=signal,
+        log_path=log_path,
+        exit_edge_threshold=0.10,
+        profit_target=0.15,
+        sell_slippage=0.01,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    pending = next(row for row in rows if row["event"] == "exit_pending_confirmation")
+
+    assert sell_result == executor.SellResult(status="pending_confirmation")
+    assert manager.closed == []
+    assert pending["position_assumed_closed_to_prevent_duplicate_sell"] is True
+    assert pending["account_cashflow_reconciliation_required"] is True
+
+
+def test_executor_sell_post_failure_does_not_raise(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position()
+    signal = _signal(edge=-0.31)
+
+    sell_result = executor._maybe_exit(
+        client=_SellPostFailureClient(),
+        position_manager=_PositionManager(),
+        position=position,
+        signal=signal,
+        log_path=log_path,
+        exit_edge_threshold=0.10,
+        profit_target=0.15,
+        sell_slippage=0.01,
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert sell_result is None
+    assert row["event"] == "exit_order_post_failed"
+    assert row["error_type"] == "_FokKilledError"
 
 
 def test_executor_opposite_signal_holds_near_expiry(
@@ -386,6 +443,16 @@ class _SellClient:
                 "size": "1.96",
             }
         ]
+
+
+class _SellPendingClient(_SellClient):
+    def get_trades(self):  # noqa: ANN201
+        return []
+
+
+class _SellPostFailureClient(_SellClient):
+    def post_order(self, order, order_type):  # noqa: ANN001, ANN201, ARG002
+        raise _FokKilledError("not enough balance / allowance")
 
 
 class _PositionManager:

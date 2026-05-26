@@ -62,6 +62,12 @@ class LivePosition:
     entry_order_posted_at: int
 
 
+@dataclass(frozen=True, slots=True)
+class SellResult:
+    status: str
+    realized_pnl: float = 0.0
+
+
 @dataclass(slots=True)
 class RoundLifecycleState:
     """In-memory execution state for one bounded Phase 4 run."""
@@ -142,6 +148,7 @@ def main() -> int:
     entries_attempted = 0
     entries_filled = 0
     closes_filled = 0
+    exits_pending_confirmation = 0
     realized_pnl = 0.0
     skipped: dict[str, int] = {}
     errors = 0
@@ -261,7 +268,7 @@ def main() -> int:
                 if event.round_slug in lifecycle.open_positions:
                     position = lifecycle.open_positions[event.round_slug]
                     if event.outcome_side == position.side:
-                        maybe_pnl = _maybe_exit(
+                        sell_result = _maybe_exit(
                             client=client,
                             position_manager=position_manager,
                             position=position,
@@ -271,15 +278,18 @@ def main() -> int:
                             profit_target=args.profit_target,
                             sell_slippage=args.sell_slippage,
                         )
-                        if maybe_pnl is not None:
-                            realized_pnl += maybe_pnl
-                            closes_filled += 1
+                        if sell_result is not None:
+                            realized_pnl += sell_result.realized_pnl
+                            if sell_result.status == "filled":
+                                closes_filled += 1
+                            else:
+                                exits_pending_confirmation += 1
                             lifecycle.mark_position_closed(event.round_slug)
                             if realized_pnl <= -args.daily_loss_limit_usdc:
                                 _log(log_path, "daily_loss_limit_reached", realized_pnl=realized_pnl)
                                 break
                     else:
-                        maybe_pnl = _maybe_exit_opposite_correction(
+                        sell_result = _maybe_exit_opposite_correction(
                             client=client,
                             position_manager=position_manager,
                             position=position,
@@ -289,9 +299,12 @@ def main() -> int:
                             opposite_exit_min_seconds_to_expiry=args.opposite_exit_min_seconds_to_expiry,
                             sell_slippage=args.sell_slippage,
                         )
-                        if maybe_pnl is not None:
-                            realized_pnl += maybe_pnl
-                            closes_filled += 1
+                        if sell_result is not None:
+                            realized_pnl += sell_result.realized_pnl
+                            if sell_result.status == "filled":
+                                closes_filled += 1
+                            else:
+                                exits_pending_confirmation += 1
                             lifecycle.mark_position_closed(event.round_slug)
                             if realized_pnl <= -args.daily_loss_limit_usdc:
                                 _log(log_path, "daily_loss_limit_reached", realized_pnl=realized_pnl)
@@ -338,7 +351,7 @@ def main() -> int:
             time.sleep(args.poll_seconds)
     finally:
         heartbeat_stop.set()
-        shutdown_closed, shutdown_pnl = _close_remaining_positions(
+        shutdown_closed, shutdown_pending, shutdown_pnl = _close_remaining_positions(
             client=client,
             position_manager=position_manager,
             positions=lifecycle.open_positions,
@@ -346,6 +359,7 @@ def main() -> int:
             sell_slippage=args.sell_slippage,
         )
         closes_filled += shutdown_closed
+        exits_pending_confirmation += shutdown_pending
         realized_pnl += shutdown_pnl
         summary = {
             "phase": "phase4_real_champion_signal",
@@ -355,6 +369,7 @@ def main() -> int:
             "entries_attempted": entries_attempted,
             "entries_filled": entries_filled,
             "closes_filled": closes_filled,
+            "exits_pending_confirmation": exits_pending_confirmation,
             "realized_pnl_usdc": round(realized_pnl, 8),
             "open_positions_at_shutdown": len(lifecycle.open_positions),
             "processed_event_count": len(lifecycle.processed_event_ids),
@@ -834,7 +849,7 @@ def _maybe_exit(
     exit_edge_threshold: float,
     profit_target: float,
     sell_slippage: float,
-) -> float | None:
+) -> SellResult | None:
     try:
         bid, _ask = _best_bid_ask(client, position.token_id)
     except OrderBookUnavailable as exc:
@@ -885,7 +900,7 @@ def _maybe_exit_opposite_correction(
     opposite_exit_edge_threshold: float,
     opposite_exit_min_seconds_to_expiry: float,
     sell_slippage: float,
-) -> float | None:
+) -> SellResult | None:
     """Exit an open position when the opposite side becomes strongly favored."""
 
     seconds_to_expiry = (signal.round_end_ts - _now_ms()) / 1000
@@ -965,8 +980,9 @@ def _close_remaining_positions(
     positions: dict[str, LivePosition],
     log_path: Path,
     sell_slippage: float,
-) -> tuple[int, float]:
+) -> tuple[int, int, float]:
     closed_count = 0
+    pending_count = 0
     realized_pnl = 0.0
     for round_slug, position in list(positions.items()):
         try:
@@ -983,7 +999,7 @@ def _close_remaining_positions(
         if bid is None:
             _log(log_path, "shutdown_close_skipped", reason="missing_bid", position=asdict(position))
             continue
-        pnl = _sell_position(
+        sell_result = _sell_position(
             client=client,
             position_manager=position_manager,
             position=position,
@@ -993,11 +1009,14 @@ def _close_remaining_positions(
             reason="shutdown",
             signal=None,
         )
-        if pnl is not None:
-            closed_count += 1
-            realized_pnl += pnl
+        if sell_result is not None:
+            if sell_result.status == "filled":
+                closed_count += 1
+            else:
+                pending_count += 1
+            realized_pnl += sell_result.realized_pnl
             del positions[round_slug]
-    return closed_count, realized_pnl
+    return closed_count, pending_count, realized_pnl
 
 
 def _sell_position(
@@ -1010,7 +1029,7 @@ def _sell_position(
     sell_slippage: float,
     reason: str,
     signal: SignalEvent | None,
-) -> float | None:
+) -> SellResult | None:
     from py_clob_client_v2 import MarketOrderArgs, OrderType
     from py_clob_client_v2.clob_types import PartialCreateOrderOptions
     from py_clob_client_v2.order_builder.constants import SELL
@@ -1041,7 +1060,24 @@ def _sell_position(
         ),
         options=PartialCreateOrderOptions(tick_size=tick_size, neg_risk=neg_risk),
     )
-    response = client.post_order(order, OrderType.FOK)
+    try:
+        response = client.post_order(order, OrderType.FOK)
+    except Exception as exc:  # noqa: BLE001 - Polymarket returns failed FOK sells as API exceptions.
+        _log(
+            log_path,
+            "exit_order_post_failed",
+            reason=reason,
+            position=asdict(position),
+            signal=None if signal is None else asdict(signal),
+            bid=bid,
+            worst_price=worst_price,
+            sell_size=sell_size,
+            dust_amount=dust_amount,
+            dust_value_usd=dust_value_usd,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return None
     order_id = str(response.get("orderID") or "")
     _log(
         log_path,
@@ -1063,14 +1099,16 @@ def _sell_position(
     if not fill:
         _log(
             log_path,
-            "exit_fill_missing_or_unconfirmed",
+            "exit_pending_confirmation",
             reason=reason,
             position=asdict(position),
             signal=None if signal is None else asdict(signal),
             sell_order_id=order_id,
             response=response,
+            position_assumed_closed_to_prevent_duplicate_sell=True,
+            account_cashflow_reconciliation_required=True,
         )
-        return None
+        return SellResult(status="pending_confirmation")
     closed = position_manager.close_position(position.event_id, fill_price)
     pnl = float(closed.realized_pnl or 0.0)
     _log(
@@ -1087,7 +1125,7 @@ def _sell_position(
         dust_amount=dust_amount,
         dust_value_usd=dust_value_usd,
     )
-    return pnl
+    return SellResult(status="filled", realized_pnl=pnl)
 
 
 def _fill_for_order(client: Any, order_id: str, *, wanted_side: str) -> dict[str, Any]:
