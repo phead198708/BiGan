@@ -248,6 +248,123 @@ def test_executor_shutdown_expired_unavailable_orderbook_marks_pending_settlemen
     assert row["seconds_to_expiry"] == -100.001
 
 
+def test_executor_entry_time_window_prefers_no_new_entry_window() -> None:
+    reason = executor._entry_time_window_skip_reason(
+        240.0,
+        no_new_entry_before_expiry_seconds=300.0,
+        min_seconds_to_expiry=180.0,
+        max_seconds_to_expiry=1200.0,
+    )
+
+    assert reason == "no_new_entry_window"
+
+
+def test_executor_position_tick_hard_force_exits_without_new_signal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    now_ms = 1_810_000
+    log_path = tmp_path / "phase4.jsonl"
+    lifecycle = executor.RoundLifecycleState()
+    position = _position(round_slug="btc-updown-15m-1000", size=1.960783)
+    lifecycle.open_positions[position.round_slug] = position
+    client = _SellClient()
+    manager = _PositionManager()
+
+    closed, pending, settlement, pnl = executor._tick_open_positions(
+        client=client,
+        position_manager=manager,
+        lifecycle=lifecycle,
+        log_path=log_path,
+        now_ms=now_ms,
+        soft_force_exit_before_expiry_seconds=240.0,
+        hard_force_exit_before_expiry_seconds=120.0,
+        exit_retry_seconds=10.0,
+        max_exit_attempts_per_position=6,
+        sell_slippage=0.01,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    transition = next(row for row in rows if row["event"] == "position_lifecycle_transition")
+    posted = next(row for row in rows if row["event"] == "exit_order_posted")
+    filled = next(row for row in rows if row["event"] == "exit_filled")
+
+    assert (closed, pending, settlement, pnl) == (1, 0, 0, 0.10)
+    assert lifecycle.open_positions == {}
+    assert transition["reason"] == "hard_force_exit"
+    assert transition["lifecycle_state"] == "EXIT_PENDING"
+    assert posted["reason"] == "hard_force_exit"
+    assert posted["signal"] is None
+    assert filled["reason"] == "hard_force_exit"
+    assert client.created_orders == [{"token_id": "token-up", "side": "SELL", "amount": 1.96, "price": 0.59}]
+
+
+def test_executor_position_tick_soft_force_exit_retries_missing_bid(
+    tmp_path: Path,
+) -> None:
+    now_ms = 1_700_000
+    log_path = tmp_path / "phase4.jsonl"
+    lifecycle = executor.RoundLifecycleState()
+    position = _position(round_slug="btc-updown-15m-1000")
+    lifecycle.open_positions[position.round_slug] = position
+
+    result = executor._tick_open_positions(
+        client=_MissingBidClient(),
+        position_manager=_PositionManager(),
+        lifecycle=lifecycle,
+        log_path=log_path,
+        now_ms=now_ms,
+        soft_force_exit_before_expiry_seconds=240.0,
+        hard_force_exit_before_expiry_seconds=120.0,
+        exit_retry_seconds=10.0,
+        max_exit_attempts_per_position=6,
+        sell_slippage=0.01,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    hold = rows[-1]
+
+    assert result == (0, 0, 0, 0.0)
+    assert position.lifecycle_state == "EXIT_PENDING"
+    assert position.exit_attempt_count == 1
+    assert hold["event"] == "force_exit_hold"
+    assert hold["reason"] == "missing_bid"
+    assert hold["exit_reason"] == "soft_force_exit"
+    assert lifecycle.open_positions[position.round_slug] == position
+
+
+def test_executor_position_tick_expired_moves_to_settlement(
+    tmp_path: Path,
+) -> None:
+    now_ms = 2_000_001
+    log_path = tmp_path / "phase4.jsonl"
+    lifecycle = executor.RoundLifecycleState()
+    position = _position(round_slug="btc-updown-15m-1000")
+    lifecycle.open_positions[position.round_slug] = position
+
+    result = executor._tick_open_positions(
+        client=_MissingBidClient(),
+        position_manager=_PositionManager(),
+        lifecycle=lifecycle,
+        log_path=log_path,
+        now_ms=now_ms,
+        soft_force_exit_before_expiry_seconds=240.0,
+        hard_force_exit_before_expiry_seconds=120.0,
+        exit_retry_seconds=10.0,
+        max_exit_attempts_per_position=6,
+        sell_slippage=0.01,
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert result == (0, 0, 1, 0.0)
+    assert lifecycle.open_positions == {}
+    assert row["event"] == "exit_pending_settlement"
+    assert row["reason"] == "expired_position_monitor"
+    assert row["position"]["lifecycle_state"] == "AWAITING_SETTLEMENT"
+    assert row["settlement_reconciliation_required"] is True
+
+
 def test_round_lifecycle_only_confirmed_fill_locks_round() -> None:
     state = executor.RoundLifecycleState()
     signal = _signal()

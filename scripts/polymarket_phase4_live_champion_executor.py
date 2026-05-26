@@ -60,6 +60,10 @@ class LivePosition:
     entry_signal_created_at: int
     entry_signal_bridged_at: int
     entry_order_posted_at: int
+    lifecycle_state: str = "OPEN"
+    exit_attempt_count: int = 0
+    last_exit_attempt_at: int = 0
+    last_lifecycle_reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +192,12 @@ def main() -> int:
             "exit_edge_threshold": args.exit_edge_threshold,
             "opposite_exit_edge_threshold": args.opposite_exit_edge_threshold,
             "opposite_exit_min_seconds_to_expiry": args.opposite_exit_min_seconds_to_expiry,
+            "no_new_entry_before_expiry_seconds": args.no_new_entry_before_expiry_seconds,
+            "soft_force_exit_before_expiry_seconds": args.soft_force_exit_before_expiry_seconds,
+            "hard_force_exit_before_expiry_seconds": args.hard_force_exit_before_expiry_seconds,
+            "exit_retry_seconds": args.exit_retry_seconds,
+            "exit_order_timeout_seconds": args.exit_order_timeout_seconds,
+            "max_exit_attempts_per_position": args.max_exit_attempts_per_position,
             "max_rounds": args.max_rounds,
             "max_position_size_usdc": args.max_position_size_usdc,
             "daily_loss_limit_usdc": args.daily_loss_limit_usdc,
@@ -211,6 +221,29 @@ def main() -> int:
                 break
             if realized_pnl <= -args.daily_loss_limit_usdc:
                 _log(log_path, "stop_daily_loss_limit", realized_pnl=realized_pnl)
+                break
+
+            tick_closed, tick_pending, tick_settlement, tick_pnl = _tick_open_positions(
+                client=client,
+                position_manager=position_manager,
+                lifecycle=lifecycle,
+                log_path=log_path,
+                now_ms=now_ms,
+                soft_force_exit_before_expiry_seconds=args.soft_force_exit_before_expiry_seconds,
+                hard_force_exit_before_expiry_seconds=args.hard_force_exit_before_expiry_seconds,
+                exit_retry_seconds=args.exit_retry_seconds,
+                max_exit_attempts_per_position=args.max_exit_attempts_per_position,
+                sell_slippage=args.sell_slippage,
+            )
+            closes_filled += tick_closed
+            exits_pending_confirmation += tick_pending
+            exits_pending_settlement += tick_settlement
+            realized_pnl += tick_pnl
+            if entries_filled >= args.max_rounds and not lifecycle.open_positions:
+                _log(log_path, "stop_max_rounds_closed")
+                break
+            if realized_pnl <= -args.daily_loss_limit_usdc:
+                _log(log_path, "daily_loss_limit_reached", realized_pnl=realized_pnl)
                 break
 
             try:
@@ -326,11 +359,23 @@ def main() -> int:
                     _bump(skipped, "round_already_filled")
                     continue
                 seconds_to_expiry = (event.round_end_ts - now_ms) / 1000
-                if seconds_to_expiry < args.min_seconds_to_expiry:
-                    _bump(skipped, "near_or_past_expiry")
-                    continue
-                if seconds_to_expiry > args.max_seconds_to_expiry:
-                    _bump(skipped, "too_far_from_expiry")
+                time_skip_reason = _entry_time_window_skip_reason(
+                    seconds_to_expiry,
+                    no_new_entry_before_expiry_seconds=args.no_new_entry_before_expiry_seconds,
+                    min_seconds_to_expiry=args.min_seconds_to_expiry,
+                    max_seconds_to_expiry=args.max_seconds_to_expiry,
+                )
+                if time_skip_reason is not None:
+                    _bump(skipped, time_skip_reason)
+                    if time_skip_reason == "no_new_entry_window":
+                        _log(
+                            log_path,
+                            "entry_skipped",
+                            reason=time_skip_reason,
+                            signal=asdict(event),
+                            seconds_to_expiry=seconds_to_expiry,
+                            no_new_entry_before_expiry_seconds=args.no_new_entry_before_expiry_seconds,
+                        )
                     continue
                 if event.edge < args.edge_threshold:
                     _bump(skipped, "below_edge_threshold")
@@ -419,6 +464,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--exit-edge-threshold", type=float, default=0.10)
     parser.add_argument("--opposite-exit-edge-threshold", type=float, default=0.45)
     parser.add_argument("--opposite-exit-min-seconds-to-expiry", type=float, default=120.0)
+    parser.add_argument("--no-new-entry-before-expiry-seconds", type=float, default=300.0)
+    parser.add_argument("--soft-force-exit-before-expiry-seconds", type=float, default=240.0)
+    parser.add_argument("--hard-force-exit-before-expiry-seconds", type=float, default=120.0)
+    parser.add_argument("--exit-retry-seconds", type=float, default=10.0)
+    parser.add_argument("--exit-order-timeout-seconds", type=float, default=20.0)
+    parser.add_argument("--max-exit-attempts-per-position", type=int, default=6)
     parser.add_argument("--profit-target", type=float, default=0.15)
     parser.add_argument("--min-seconds-to-expiry", type=float, default=180.0)
     parser.add_argument("--max-seconds-to-expiry", type=float, default=1200.0)
@@ -667,6 +718,192 @@ def _best_event_per_round(events: list[SignalEvent]) -> list[SignalEvent]:
         if previous is None or event.edge > previous.edge:
             best[event.round_slug] = event
     return sorted(best.values(), key=lambda item: (item.created_at, item.event_id))
+
+
+def _entry_time_window_skip_reason(
+    seconds_to_expiry: float,
+    *,
+    no_new_entry_before_expiry_seconds: float,
+    min_seconds_to_expiry: float,
+    max_seconds_to_expiry: float,
+) -> str | None:
+    if seconds_to_expiry < no_new_entry_before_expiry_seconds:
+        return "no_new_entry_window"
+    if seconds_to_expiry < min_seconds_to_expiry:
+        return "near_or_past_expiry"
+    if seconds_to_expiry > max_seconds_to_expiry:
+        return "too_far_from_expiry"
+    return None
+
+
+def _tick_open_positions(
+    *,
+    client: Any,
+    position_manager: PositionManager,
+    lifecycle: RoundLifecycleState,
+    log_path: Path,
+    now_ms: int,
+    soft_force_exit_before_expiry_seconds: float,
+    hard_force_exit_before_expiry_seconds: float,
+    exit_retry_seconds: float,
+    max_exit_attempts_per_position: int,
+    sell_slippage: float,
+) -> tuple[int, int, int, float]:
+    closed_count = 0
+    pending_count = 0
+    settlement_count = 0
+    realized_pnl = 0.0
+
+    for round_slug, position in list(lifecycle.open_positions.items()):
+        round_end_ts = _round_end_ts(position.round_slug)
+        if round_end_ts is None:
+            _log(
+                log_path,
+                "position_lifecycle_hold",
+                reason="unknown_round_end",
+                position=asdict(position),
+            )
+            continue
+        seconds_to_expiry = (round_end_ts - now_ms) / 1000
+        if seconds_to_expiry <= 0:
+            exit_reason = "expired_position_monitor"
+        elif seconds_to_expiry <= hard_force_exit_before_expiry_seconds:
+            exit_reason = "hard_force_exit"
+        elif seconds_to_expiry <= soft_force_exit_before_expiry_seconds:
+            exit_reason = "soft_force_exit"
+        else:
+            continue
+
+        sell_result = _attempt_lifecycle_exit(
+            client=client,
+            position_manager=position_manager,
+            position=position,
+            log_path=log_path,
+            now_ms=now_ms,
+            seconds_to_expiry=seconds_to_expiry,
+            exit_reason=exit_reason,
+            exit_retry_seconds=exit_retry_seconds,
+            max_exit_attempts_per_position=max_exit_attempts_per_position,
+            sell_slippage=sell_slippage,
+        )
+        if sell_result is None:
+            continue
+        if sell_result.status == "filled":
+            closed_count += 1
+        elif sell_result.status == "pending_settlement":
+            settlement_count += 1
+        else:
+            pending_count += 1
+        realized_pnl += sell_result.realized_pnl
+        lifecycle.mark_position_closed(round_slug)
+
+    return closed_count, pending_count, settlement_count, realized_pnl
+
+
+def _attempt_lifecycle_exit(
+    *,
+    client: Any,
+    position_manager: PositionManager,
+    position: LivePosition,
+    log_path: Path,
+    now_ms: int,
+    seconds_to_expiry: float,
+    exit_reason: str,
+    exit_retry_seconds: float,
+    max_exit_attempts_per_position: int,
+    sell_slippage: float,
+) -> SellResult | None:
+    if seconds_to_expiry <= 0:
+        position.lifecycle_state = "AWAITING_SETTLEMENT"
+        position.last_lifecycle_reason = exit_reason
+        return _mark_pending_settlement(
+            log_path=log_path,
+            position=position,
+            signal=None,
+            reason=exit_reason,
+            seconds_to_expiry=seconds_to_expiry,
+        )
+
+    retry_wait_ms = int(max(0.0, exit_retry_seconds) * 1000)
+    if position.last_exit_attempt_at > 0 and now_ms - position.last_exit_attempt_at < retry_wait_ms:
+        _log(
+            log_path,
+            "position_lifecycle_hold",
+            reason="exit_retry_wait",
+            position=asdict(position),
+            exit_reason=exit_reason,
+            seconds_to_expiry=seconds_to_expiry,
+            retry_wait_ms=retry_wait_ms,
+            next_retry_at=_iso(position.last_exit_attempt_at + retry_wait_ms),
+        )
+        return None
+
+    if position.exit_attempt_count >= max_exit_attempts_per_position:
+        if position.lifecycle_state != "MANUAL_INTERVENTION_REQUIRED":
+            position.lifecycle_state = "MANUAL_INTERVENTION_REQUIRED"
+            position.last_lifecycle_reason = "max_exit_attempts_reached"
+            _log(
+                log_path,
+                "position_lifecycle_transition",
+                reason="max_exit_attempts_reached",
+                lifecycle_state=position.lifecycle_state,
+                position=asdict(position),
+                exit_reason=exit_reason,
+                seconds_to_expiry=seconds_to_expiry,
+                max_exit_attempts_per_position=max_exit_attempts_per_position,
+            )
+        return None
+
+    position.exit_attempt_count += 1
+    position.last_exit_attempt_at = now_ms
+    position.lifecycle_state = "EXIT_PENDING"
+    position.last_lifecycle_reason = exit_reason
+    _log(
+        log_path,
+        "position_lifecycle_transition",
+        reason=exit_reason,
+        lifecycle_state=position.lifecycle_state,
+        position=asdict(position),
+        seconds_to_expiry=seconds_to_expiry,
+        exit_attempt_count=position.exit_attempt_count,
+    )
+
+    try:
+        bid, _ask = _best_bid_ask(client, position.token_id)
+    except OrderBookUnavailable as exc:
+        _log(
+            log_path,
+            "force_exit_hold",
+            reason="orderbook_unavailable",
+            exit_reason=exit_reason,
+            position=asdict(position),
+            seconds_to_expiry=seconds_to_expiry,
+            exit_attempt_count=position.exit_attempt_count,
+            **exc.to_log_payload(),
+        )
+        return None
+    if bid is None:
+        _log(
+            log_path,
+            "force_exit_hold",
+            reason="missing_bid",
+            exit_reason=exit_reason,
+            position=asdict(position),
+            seconds_to_expiry=seconds_to_expiry,
+            exit_attempt_count=position.exit_attempt_count,
+        )
+        return None
+
+    return _sell_position(
+        client=client,
+        position_manager=position_manager,
+        position=position,
+        log_path=log_path,
+        bid=float(bid),
+        sell_slippage=sell_slippage,
+        reason=exit_reason,
+        signal=None,
+    )
 
 
 def _try_entry(
@@ -1108,6 +1345,8 @@ def _mark_pending_settlement(
     seconds_to_expiry: float | None,
     error_payload: dict[str, str] | None = None,
 ) -> SellResult:
+    position.lifecycle_state = "AWAITING_SETTLEMENT"
+    position.last_lifecycle_reason = reason
     _log(
         log_path,
         "exit_pending_settlement",
@@ -1138,6 +1377,8 @@ def _sell_position(
     from py_clob_client_v2.clob_types import PartialCreateOrderOptions
     from py_clob_client_v2.order_builder.constants import SELL
 
+    position.lifecycle_state = "EXIT_PENDING"
+    position.last_lifecycle_reason = reason
     tick_size = client.get_tick_size(position.token_id)
     neg_risk = client.get_neg_risk(position.token_id)
     worst_price = max(0.01, _round_price(bid - sell_slippage, tick_size))
@@ -1215,6 +1456,8 @@ def _sell_position(
         return SellResult(status="pending_confirmation")
     closed = position_manager.close_position(position.event_id, fill_price)
     pnl = float(closed.realized_pnl or 0.0)
+    position.lifecycle_state = "EXIT_FILLED"
+    position.last_lifecycle_reason = reason
     _log(
         log_path,
         "exit_filled",
