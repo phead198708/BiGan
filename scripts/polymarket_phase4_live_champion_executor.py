@@ -200,6 +200,7 @@ def main() -> int:
             "max_exit_attempts_per_position": args.max_exit_attempts_per_position,
             "max_rounds": args.max_rounds,
             "max_position_size_usdc": args.max_position_size_usdc,
+            "min_entry_price": args.min_entry_price,
             "daily_loss_limit_usdc": args.daily_loss_limit_usdc,
             "max_concurrent_positions": args.max_concurrent_positions,
             "min_seconds_to_expiry": args.min_seconds_to_expiry,
@@ -232,6 +233,7 @@ def main() -> int:
                 soft_force_exit_before_expiry_seconds=args.soft_force_exit_before_expiry_seconds,
                 hard_force_exit_before_expiry_seconds=args.hard_force_exit_before_expiry_seconds,
                 exit_retry_seconds=args.exit_retry_seconds,
+                exit_order_timeout_seconds=args.exit_order_timeout_seconds,
                 max_exit_attempts_per_position=args.max_exit_attempts_per_position,
                 sell_slippage=args.sell_slippage,
             )
@@ -311,6 +313,7 @@ def main() -> int:
                             exit_edge_threshold=args.exit_edge_threshold,
                             profit_target=args.profit_target,
                             sell_slippage=args.sell_slippage,
+                            exit_order_timeout_seconds=args.exit_order_timeout_seconds,
                         )
                         if sell_result is not None:
                             realized_pnl += sell_result.realized_pnl
@@ -334,6 +337,7 @@ def main() -> int:
                             opposite_exit_edge_threshold=args.opposite_exit_edge_threshold,
                             opposite_exit_min_seconds_to_expiry=args.opposite_exit_min_seconds_to_expiry,
                             sell_slippage=args.sell_slippage,
+                            exit_order_timeout_seconds=args.exit_order_timeout_seconds,
                         )
                         if sell_result is not None:
                             realized_pnl += sell_result.realized_pnl
@@ -389,6 +393,7 @@ def main() -> int:
                     signal=event,
                     log_path=log_path,
                     max_position_size_usdc=args.max_position_size_usdc,
+                    min_entry_price=args.min_entry_price,
                     edge_threshold=args.edge_threshold,
                     buy_slippage=args.buy_slippage,
                 )
@@ -407,6 +412,7 @@ def main() -> int:
             positions=lifecycle.open_positions,
             log_path=log_path,
             sell_slippage=args.sell_slippage,
+            exit_order_timeout_seconds=args.exit_order_timeout_seconds,
         )
         closes_filled += shutdown_closed
         exits_pending_confirmation += shutdown_pending
@@ -458,6 +464,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--model-version", default="xgboost-v4")
     parser.add_argument("--max-rounds", type=int, default=10)
     parser.add_argument("--max-position-size-usdc", type=float, default=1.0)
+    parser.add_argument(
+        "--min-entry-price",
+        type=float,
+        default=0.0,
+        help="Skip entries whose fresh CLOB ask/worst fill price is below this token price.",
+    )
     parser.add_argument("--daily-loss-limit-usdc", type=float, default=3.0)
     parser.add_argument("--max-concurrent-positions", type=int, default=2)
     parser.add_argument("--edge-threshold", type=float, default=0.45)
@@ -748,6 +760,7 @@ def _tick_open_positions(
     exit_retry_seconds: float,
     max_exit_attempts_per_position: int,
     sell_slippage: float,
+    exit_order_timeout_seconds: float = 20.0,
 ) -> tuple[int, int, int, float]:
     closed_count = 0
     pending_count = 0
@@ -783,6 +796,7 @@ def _tick_open_positions(
             seconds_to_expiry=seconds_to_expiry,
             exit_reason=exit_reason,
             exit_retry_seconds=exit_retry_seconds,
+            exit_order_timeout_seconds=exit_order_timeout_seconds,
             max_exit_attempts_per_position=max_exit_attempts_per_position,
             sell_slippage=sell_slippage,
         )
@@ -812,6 +826,7 @@ def _attempt_lifecycle_exit(
     exit_retry_seconds: float,
     max_exit_attempts_per_position: int,
     sell_slippage: float,
+    exit_order_timeout_seconds: float = 20.0,
 ) -> SellResult | None:
     if seconds_to_expiry <= 0:
         position.lifecycle_state = "AWAITING_SETTLEMENT"
@@ -901,6 +916,7 @@ def _attempt_lifecycle_exit(
         log_path=log_path,
         bid=float(bid),
         sell_slippage=sell_slippage,
+        fill_confirm_timeout_seconds=exit_order_timeout_seconds,
         reason=exit_reason,
         signal=None,
     )
@@ -913,6 +929,7 @@ def _try_entry(
     signal: SignalEvent,
     log_path: Path,
     max_position_size_usdc: float,
+    min_entry_price: float,
     edge_threshold: float,
     buy_slippage: float,
 ) -> LivePosition | None:
@@ -937,6 +954,18 @@ def _try_entry(
     tick_size = client.get_tick_size(signal.token_id)
     neg_risk = client.get_neg_risk(signal.token_id)
     worst_price = min(0.99, _round_price(float(ask) + buy_slippage, tick_size))
+    if float(ask) < min_entry_price or worst_price < min_entry_price:
+        _log(
+            log_path,
+            "entry_skipped",
+            reason="entry_price_below_min",
+            signal=asdict(signal),
+            bid=bid,
+            ask=ask,
+            worst_price=worst_price,
+            min_entry_price=min_entry_price,
+        )
+        return None
     fresh_edge_at_worst = signal.token_probability - worst_price
     if fresh_edge_at_worst < edge_threshold:
         _log(
@@ -1015,7 +1044,14 @@ def _try_entry(
     )
     if not order_matched:
         return None
-    fill = _fill_for_order(client, order_id, wanted_side="BUY")
+    fill = _fill_for_order(
+        client,
+        order_id,
+        wanted_side="BUY",
+        asset_id=signal.token_id,
+        after_ts_ms=order_submit_started_at,
+        transaction_hashes=response.get("transactionsHashes"),
+    )
     fill_checked_at = _now_ms()
     fill_price = _optional_float(fill.get("price")) or float(ask)
     fill_size = _optional_float(fill.get("size")) or _optional_float(response.get("takingAmount")) or 0.0
@@ -1093,6 +1129,7 @@ def _maybe_exit(
     exit_edge_threshold: float,
     profit_target: float,
     sell_slippage: float,
+    exit_order_timeout_seconds: float = 20.0,
 ) -> SellResult | None:
     now_ms = _now_ms()
     seconds_to_expiry = (signal.round_end_ts - now_ms) / 1000
@@ -1155,6 +1192,7 @@ def _maybe_exit(
         log_path=log_path,
         bid=float(bid),
         sell_slippage=sell_slippage,
+        fill_confirm_timeout_seconds=exit_order_timeout_seconds,
         reason="exit_signal",
         signal=signal,
     )
@@ -1170,6 +1208,7 @@ def _maybe_exit_opposite_correction(
     opposite_exit_edge_threshold: float,
     opposite_exit_min_seconds_to_expiry: float,
     sell_slippage: float,
+    exit_order_timeout_seconds: float = 20.0,
 ) -> SellResult | None:
     """Exit an open position when the opposite side becomes strongly favored."""
 
@@ -1246,6 +1285,7 @@ def _maybe_exit_opposite_correction(
         log_path=log_path,
         bid=float(bid),
         sell_slippage=sell_slippage,
+        fill_confirm_timeout_seconds=exit_order_timeout_seconds,
         reason="opposite_side_exit_correction",
         signal=signal,
     )
@@ -1258,6 +1298,7 @@ def _close_remaining_positions(
     positions: dict[str, LivePosition],
     log_path: Path,
     sell_slippage: float,
+    exit_order_timeout_seconds: float = 20.0,
 ) -> tuple[int, int, int, float]:
     closed_count = 0
     pending_count = 0
@@ -1321,6 +1362,7 @@ def _close_remaining_positions(
             log_path=log_path,
             bid=float(bid),
             sell_slippage=sell_slippage,
+            fill_confirm_timeout_seconds=exit_order_timeout_seconds,
             reason="shutdown",
             signal=None,
         )
@@ -1370,6 +1412,7 @@ def _sell_position(
     log_path: Path,
     bid: float,
     sell_slippage: float,
+    fill_confirm_timeout_seconds: float = 20.0,
     reason: str,
     signal: SignalEvent | None,
 ) -> SellResult | None:
@@ -1439,7 +1482,16 @@ def _sell_position(
     )
     if not response.get("success") or response.get("status") != "matched" or not order_id:
         return None
-    fill = _fill_for_order(client, order_id, wanted_side="SELL")
+    fill = _fill_for_order(
+        client,
+        order_id,
+        wanted_side="SELL",
+        asset_id=position.token_id,
+        after_ts_ms=position.last_exit_attempt_at or _now_ms(),
+        transaction_hashes=response.get("transactionsHashes"),
+        max_wait_seconds=fill_confirm_timeout_seconds,
+        poll_seconds=2.0,
+    )
     fill_price = _optional_float(fill.get("price")) or bid
     if not fill:
         _log(
@@ -1475,20 +1527,93 @@ def _sell_position(
     return SellResult(status="filled", realized_pnl=pnl)
 
 
-def _fill_for_order(client: Any, order_id: str, *, wanted_side: str) -> dict[str, Any]:
-    time.sleep(2)
-    try:
-        trades = client.get_trades()
-    except Exception:
-        return {}
-    for trade in trades:
-        if (
-            str(trade.get("taker_order_id") or "") == order_id
-            and str(trade.get("side") or "").upper() == wanted_side
-            and _trade_is_confirmed(trade)
-        ):
-            return dict(trade)
+def _fill_for_order(
+    client: Any,
+    order_id: str,
+    *,
+    wanted_side: str,
+    asset_id: str | None = None,
+    after_ts_ms: int | None = None,
+    transaction_hashes: Any = None,
+    max_wait_seconds: float = 2.0,
+    poll_seconds: float = 2.0,
+) -> dict[str, Any]:
+    """Find a confirmed CLOB trade for a just-posted FOK order.
+
+    Matched FOK responses can precede the authenticated trade feed by a few
+    seconds, and busy accounts can push the target trade beyond the first
+    unfiltered page. Retry briefly and prefer a token/time-filtered paginated
+    query when the client supports it.
+    """
+
+    attempts = _confirmation_attempt_count(max_wait_seconds, poll_seconds)
+    hashes = _normalise_hashes(transaction_hashes)
+    for attempt in range(attempts):
+        if attempt > 0:
+            time.sleep(max(0.0, poll_seconds))
+        for trade in _candidate_trades_for_order(client, asset_id=asset_id, after_ts_ms=after_ts_ms):
+            if _trade_matches_order(trade, order_id, wanted_side=wanted_side, transaction_hashes=hashes):
+                return dict(trade)
     return {}
+
+
+def _confirmation_attempt_count(max_wait_seconds: float, poll_seconds: float) -> int:
+    if max_wait_seconds <= 0 or poll_seconds <= 0:
+        return 1
+    return max(1, int(math.ceil(max_wait_seconds / poll_seconds)) + 1)
+
+
+def _candidate_trades_for_order(
+    client: Any,
+    *,
+    asset_id: str | None,
+    after_ts_ms: int | None,
+) -> list[dict[str, Any]]:
+    try:
+        from py_clob_client_v2.clob_types import TradeParams
+
+        params = TradeParams(
+            asset_id=asset_id,
+            after=max(0, int(after_ts_ms / 1000) - 120) if after_ts_ms is not None else None,
+        )
+        return list(client.get_trades(params=params, only_first_page=False))
+    except TypeError:
+        try:
+            return list(client.get_trades())
+        except Exception:
+            return []
+    except Exception:
+        try:
+            return list(client.get_trades())
+        except Exception:
+            return []
+
+
+def _trade_matches_order(
+    trade: dict[str, Any],
+    order_id: str,
+    *,
+    wanted_side: str,
+    transaction_hashes: set[str],
+) -> bool:
+    side = str(trade.get("side") or "").upper()
+    if side != wanted_side.upper():
+        return False
+    taker_order_id = str(trade.get("taker_order_id") or trade.get("takerOrderId") or "")
+    trade_hash = str(trade.get("transaction_hash") or trade.get("transactionHash") or "")
+    has_order_match = bool(order_id) and taker_order_id == order_id
+    has_hash_match = bool(trade_hash) and trade_hash.lower() in transaction_hashes
+    return (has_order_match or has_hash_match) and _trade_is_confirmed(trade)
+
+
+def _normalise_hashes(raw_hashes: Any) -> set[str]:
+    if raw_hashes is None:
+        return set()
+    if isinstance(raw_hashes, str):
+        return {raw_hashes.lower()}
+    if isinstance(raw_hashes, (list, tuple, set)):
+        return {str(value).lower() for value in raw_hashes if value}
+    return {str(raw_hashes).lower()}
 
 
 def _trade_is_confirmed(trade: dict[str, Any]) -> bool:

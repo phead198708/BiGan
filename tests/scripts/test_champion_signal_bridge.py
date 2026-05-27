@@ -33,7 +33,7 @@ def test_bridge_signal_from_prediction_event_row() -> None:
     }
 
     signal = bridge._bridge_signal_from_row(
-        ("pred-1", 1_779_773_900_000, 1_779_773_910_000, 0.98, json.dumps(snapshot)),
+        ("pred-1", 1_779_774_400_000, 1_779_774_410_000, 0.98, json.dumps(snapshot)),
         model_version="xgboost-v4",
     )
 
@@ -46,6 +46,42 @@ def test_bridge_signal_from_prediction_event_row() -> None:
     assert signal.token_probability == 0.98
     assert signal.edge == 0.51
     assert signal.bridged_at > 0
+
+
+def test_bridge_skips_post_expiry_degenerate_signal() -> None:
+    snapshot = {
+        "canonical_symbol": "BTC-15M:btc-updown-15m-1779755400:UP",
+        "source_symbol": "token-up",
+        "market_implied_prob": 1.0,
+        "features": {
+            "market_implied_prob": 1.0,
+            "spread": 1.0,
+            "tick_spread": 1.0,
+            "liquidity_bucket": 0.0,
+        },
+    }
+
+    signal = bridge._bridge_signal_from_row(
+        ("pred-dirty", 1_779_756_360_000, 1_779_756_361_000, 0.99, json.dumps(snapshot)),
+        model_version="xgboost-v4",
+    )
+
+    assert signal is None
+
+
+def test_bridge_skips_future_round_before_start() -> None:
+    snapshot = {
+        "canonical_symbol": "BTC-15M:btc-updown-15m-1779774300:UP",
+        "source_symbol": "token-up",
+        "market_implied_prob": 0.47,
+    }
+
+    signal = bridge._bridge_signal_from_row(
+        ("pred-future", 1_779_773_900_000, 1_779_773_910_000, 0.98, json.dumps(snapshot)),
+        model_version="xgboost-v4",
+    )
+
+    assert signal is None
 
 
 def test_executor_reads_bridged_signal_jsonl(tmp_path: Path) -> None:
@@ -423,6 +459,7 @@ def test_executor_fok_post_failure_does_not_create_position(tmp_path: Path) -> N
         signal=signal,
         log_path=log_path,
         max_position_size_usdc=1.0,
+        min_entry_price=0.0,
         edge_threshold=0.45,
         buy_slippage=0.02,
     )
@@ -433,6 +470,30 @@ def test_executor_fok_post_failure_does_not_create_position(tmp_path: Path) -> N
     assert row["error_type"] == "_FokKilledError"
     assert row["signal"]["event_id"] == signal.event_id
     assert row["worst_price"] == 0.52
+
+
+def test_executor_skips_entry_below_min_price(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+    signal = _signal()
+
+    position = executor._try_entry(
+        client=_CheapAskClient(),
+        position_manager=_PositionManager(),
+        signal=signal,
+        log_path=log_path,
+        max_position_size_usdc=1.0,
+        min_entry_price=0.30,
+        edge_threshold=0.45,
+        buy_slippage=0.02,
+    )
+
+    assert position is None
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["event"] == "entry_skipped"
+    assert row["reason"] == "entry_price_below_min"
+    assert row["ask"] == 0.25
+    assert row["worst_price"] == 0.27
+    assert row["min_entry_price"] == 0.30
 
 
 def test_executor_opposite_signal_can_exit_without_reverse_entry(
@@ -507,6 +568,39 @@ def test_executor_matched_sell_without_trade_confirmation_is_pending(
     assert manager.closed == []
     assert pending["position_assumed_closed_to_prevent_duplicate_sell"] is True
     assert pending["account_cashflow_reconciliation_required"] is True
+
+
+def test_executor_retries_matched_sell_until_trade_confirmation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position()
+    signal = _signal(edge=-0.31)
+    manager = _PositionManager()
+    client = _SellDelayedConfirmationClient()
+
+    sell_result = executor._maybe_exit(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=signal,
+        log_path=log_path,
+        exit_edge_threshold=0.10,
+        profit_target=0.15,
+        sell_slippage=0.01,
+        exit_order_timeout_seconds=20.0,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    filled = next(row for row in rows if row["event"] == "exit_filled")
+
+    assert sell_result == executor.SellResult(status="filled", realized_pnl=0.10)
+    assert manager.closed == [("phase4-round-1-UP", 0.82)]
+    assert client.trade_calls == 2
+    assert filled["sell_order_id"] == "order-sell"
+    assert filled["exit_price"] == 0.82
 
 
 def test_executor_sell_post_failure_does_not_raise(
@@ -614,6 +708,20 @@ class _BuyPostFailureClient:
         raise _FokKilledError("order could not be fully filled")
 
 
+class _CheapAskClient:
+    def get_order_book(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return {"bids": [{"price": "0.24"}], "asks": [{"price": "0.25"}]}
+
+    def get_tick_size(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return "0.01"
+
+    def get_neg_risk(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return False
+
+
 class _SellClient:
     def __init__(self) -> None:
         self.created_orders = []
@@ -659,6 +767,27 @@ class _SellClient:
 class _SellPendingClient(_SellClient):
     def get_trades(self):  # noqa: ANN201
         return []
+
+
+class _SellDelayedConfirmationClient(_SellClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.trade_calls = 0
+
+    def get_trades(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        self.trade_calls += 1
+        if self.trade_calls == 1:
+            return []
+        return [
+            {
+                "taker_order_id": "order-sell",
+                "transaction_hash": "0xsell",
+                "side": "SELL",
+                "status": "MINED",
+                "price": "0.82",
+                "size": "2.00",
+            }
+        ]
 
 
 class _SellPostFailureClient(_SellClient):
