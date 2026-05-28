@@ -44,6 +44,7 @@ class BridgeSignal:
     token_probability: float
     edge: float
     bridged_at: int
+    opposite_token_id: str = ""
 
 
 def main() -> int:
@@ -211,11 +212,21 @@ def _read_bridge_signals_after(
             """,
             [model_version, after_created_at, after_created_at, after_event_id, limit],
         ).fetchall()
-    signals: list[BridgeSignal] = []
-    for row in rows:
-        signal = _bridge_signal_from_row(row, model_version=model_version)
-        if signal is not None:
-            signals.append(signal)
+        signals: list[BridgeSignal] = []
+        for row in rows:
+            signal = _bridge_signal_from_row(row, model_version=model_version)
+            if signal is not None:
+                signals.append(
+                    replace(
+                        signal,
+                        opposite_token_id=_opposite_token_id(
+                            conn,
+                            model_version=model_version,
+                            round_slug=signal.round_slug,
+                            outcome_side=signal.outcome_side,
+                        ),
+                    )
+                )
     return signals
 
 
@@ -257,6 +268,37 @@ def _bridge_signal_from_row(row: tuple[Any, ...], *, model_version: str) -> Brid
         edge=token_probability - market,
         bridged_at=_now_ms(),
     )
+
+
+def _opposite_token_id(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    model_version: str,
+    round_slug: str,
+    outcome_side: str,
+) -> str:
+    opposite_side = "DOWN" if outcome_side == "UP" else "UP"
+    canonical_symbol = f"BTC-15M:{round_slug}:{opposite_side}"
+    row = conn.execute(
+        """
+        SELECT feature_snapshot_json
+        FROM prediction_events
+        WHERE model_version = ?
+          AND json_extract_string(feature_snapshot_json, '$.canonical_symbol') = ?
+        ORDER BY created_at DESC, event_id DESC
+        LIMIT 1
+        """,
+        [model_version, canonical_symbol],
+    ).fetchone()
+    if row is None:
+        return ""
+    try:
+        snapshot = json.loads(str(row[0]))
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(snapshot, dict):
+        return ""
+    return str(snapshot.get("source_symbol") or snapshot.get("token_id") or "")
 
 
 def _append_remote_jsonl(

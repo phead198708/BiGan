@@ -17,7 +17,7 @@ import os
 import signal
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -56,6 +56,7 @@ class SignalEvent:
     token_probability: float
     edge: float
     bridged_at: int = 0
+    opposite_token_id: str = ""
 
 
 @dataclass(slots=True)
@@ -693,11 +694,21 @@ def _read_events_after(
             """,
             [model_version, after_created_at, after_created_at, after_event_id, limit],
         ).fetchall()
-    events: list[SignalEvent] = []
-    for row in rows:
-        parsed = _event_from_row(row)
-        if parsed is not None:
-            events.append(parsed)
+        events: list[SignalEvent] = []
+        for row in rows:
+            parsed = _event_from_row(row)
+            if parsed is not None:
+                events.append(
+                    replace(
+                        parsed,
+                        opposite_token_id=_opposite_token_id(
+                            conn,
+                            model_version=model_version,
+                            round_slug=parsed.round_slug,
+                            outcome_side=parsed.outcome_side,
+                        ),
+                    )
+                )
     return _best_event_per_round(events)
 
 
@@ -780,6 +791,7 @@ def _event_from_signal_payload(payload: Any, *, model_version: str) -> SignalEve
         token_probability=float(token_probability),
         edge=float(edge),
         bridged_at=int(_optional_int(payload.get("bridged_at")) or 0),
+        opposite_token_id=str(payload.get("opposite_token_id") or ""),
     )
 
 
@@ -816,7 +828,39 @@ def _event_from_row(row: tuple[Any, ...]) -> SignalEvent | None:
         token_probability=token_probability,
         edge=token_probability - market,
         bridged_at=0,
+        opposite_token_id="",
     )
+
+
+def _opposite_token_id(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    model_version: str,
+    round_slug: str,
+    outcome_side: str,
+) -> str:
+    opposite_side = "DOWN" if outcome_side == "UP" else "UP"
+    canonical_symbol = f"BTC-15M:{round_slug}:{opposite_side}"
+    row = conn.execute(
+        """
+        SELECT feature_snapshot_json
+        FROM prediction_events
+        WHERE model_version = ?
+          AND json_extract_string(feature_snapshot_json, '$.canonical_symbol') = ?
+        ORDER BY created_at DESC, event_id DESC
+        LIMIT 1
+        """,
+        [model_version, canonical_symbol],
+    ).fetchone()
+    if row is None:
+        return ""
+    try:
+        snapshot = json.loads(str(row[0]))
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(snapshot, dict):
+        return ""
+    return str(snapshot.get("source_symbol") or snapshot.get("token_id") or "")
 
 
 def _best_event_per_round(events: list[SignalEvent]) -> list[SignalEvent]:
@@ -876,7 +920,9 @@ def _tick_open_positions(
             )
             continue
         seconds_to_expiry = (round_end_ts - now_ms) / 1000
-        if seconds_to_expiry <= 0:
+        if position.lifecycle_state == "EXIT_REQUIRED":
+            exit_reason = position.last_lifecycle_reason or "risk_exit"
+        elif seconds_to_expiry <= 0:
             exit_reason = "expired_position_monitor"
         elif seconds_to_expiry <= hard_force_exit_before_expiry_seconds:
             exit_reason = "hard_force_exit"
@@ -1103,6 +1149,74 @@ def _try_entry(
             near_min_seconds_to_expiry=entry_policy.near_min_seconds_to_expiry,
         )
         return None
+    if not signal.opposite_token_id:
+        _log(
+            log_path,
+            "entry_skipped",
+            reason="missing_opposite_token_id",
+            signal=asdict(signal),
+            bid=bid,
+            ask=ask,
+            worst_price=worst_price,
+            min_entry_price=entry_policy.min_entry_price,
+        )
+        return None
+    try:
+        complement_bid, _complement_ask = _best_bid_ask(client, signal.opposite_token_id)
+    except OrderBookUnavailable as exc:
+        _log(
+            log_path,
+            "entry_skipped",
+            reason="opposite_orderbook_unavailable",
+            signal=asdict(signal),
+            bid=bid,
+            ask=ask,
+            worst_price=worst_price,
+            opposite_token_id=signal.opposite_token_id,
+            **exc.to_log_payload(),
+        )
+        return None
+    if complement_bid is None:
+        _log(
+            log_path,
+            "entry_skipped",
+            reason="missing_opposite_bid",
+            signal=asdict(signal),
+            bid=bid,
+            ask=ask,
+            worst_price=worst_price,
+            opposite_token_id=signal.opposite_token_id,
+        )
+        return None
+    complement_entry_price = _round_price(1.0 - float(complement_bid), tick_size)
+    complement_fresh_edge = signal.token_probability - complement_entry_price
+    complement_skip_reason = entry_price_skip_reason(
+        ask=complement_entry_price,
+        worst_price=complement_entry_price,
+        fresh_edge_at_worst=complement_fresh_edge,
+        seconds_to_expiry=seconds_to_expiry,
+        policy=entry_policy,
+    )
+    if complement_skip_reason is not None:
+        _log(
+            log_path,
+            "entry_skipped",
+            reason=f"complement_{complement_skip_reason}",
+            signal=asdict(signal),
+            bid=bid,
+            ask=ask,
+            worst_price=worst_price,
+            complement_bid=complement_bid,
+            complement_entry_price=complement_entry_price,
+            complement_fresh_edge_at_price=complement_fresh_edge,
+            opposite_token_id=signal.opposite_token_id,
+            seconds_to_expiry=seconds_to_expiry,
+            min_entry_price=entry_policy.min_entry_price,
+            near_min_price_band=entry_policy.near_min_price_band,
+            near_min_fresh_edge_threshold=entry_policy.near_min_fresh_edge_threshold,
+            near_min_seconds_to_expiry=entry_policy.near_min_seconds_to_expiry,
+        )
+        return None
     order = client.create_market_order(
         order_args=MarketOrderArgs(
             token_id=signal.token_id,
@@ -1223,6 +1337,9 @@ def _try_entry(
         entry_signal_bridged_at=signal.bridged_at,
         entry_order_posted_at=order_posted_at,
     )
+    if fill_price < entry_policy.min_entry_price:
+        position.lifecycle_state = "EXIT_REQUIRED"
+        position.last_lifecycle_reason = "under_min_fill_exit"
     _persist_cash_leg(
         monitoring_db_path=monitoring_db_path,
         event_id=event_id,
@@ -1248,6 +1365,16 @@ def _try_entry(
             "fill_confirmed_at": _iso(position.opened_at),
         },
     )
+    if fill_price < entry_policy.min_entry_price:
+        _log(
+            log_path,
+            "entry_fill_below_min",
+            position=asdict(position),
+            fill=fill,
+            min_entry_price=entry_policy.min_entry_price,
+            exit_required=True,
+            reason="under_min_fill_exit",
+        )
     return position
 
 

@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import duckdb
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BRIDGE_SCRIPT = REPO_ROOT / "scripts" / "champion_signal_bridge.py"
 EXECUTOR_SCRIPT = REPO_ROOT / "scripts" / "polymarket_phase4_live_champion_executor.py"
@@ -46,6 +48,70 @@ def test_bridge_signal_from_prediction_event_row() -> None:
     assert signal.token_probability == 0.98
     assert signal.edge == 0.51
     assert signal.bridged_at > 0
+    assert signal.opposite_token_id == ""
+
+
+def test_bridge_signals_include_opposite_token_id(tmp_path: Path) -> None:
+    db_path = tmp_path / "catalog.duckdb"
+    ts = 1_779_774_400_000
+    with duckdb.connect(str(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE prediction_events (
+                event_id VARCHAR,
+                ts BIGINT,
+                created_at BIGINT,
+                model_version VARCHAR,
+                prob_up_15m DOUBLE,
+                feature_snapshot_json VARCHAR
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO prediction_events VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "pred-up",
+                    ts,
+                    ts + 1_000,
+                    "xgboost-v4",
+                    0.98,
+                    json.dumps(
+                        {
+                            "canonical_symbol": "BTC-15M:btc-updown-15m-1779774300:UP",
+                            "source_symbol": "token-up",
+                            "market_implied_prob": 0.47,
+                        }
+                    ),
+                ),
+                (
+                    "pred-down",
+                    ts,
+                    ts + 1_001,
+                    "xgboost-v4",
+                    0.98,
+                    json.dumps(
+                        {
+                            "canonical_symbol": "BTC-15M:btc-updown-15m-1779774300:DOWN",
+                            "source_symbol": "token-down",
+                            "market_implied_prob": 0.53,
+                        }
+                    ),
+                ),
+            ],
+        )
+
+    signals = bridge._read_bridge_signals_after(
+        str(db_path),
+        model_version="xgboost-v4",
+        after_created_at=0,
+        after_event_id="",
+        limit=10,
+    )
+
+    by_side = {signal.outcome_side: signal for signal in signals}
+    assert by_side["UP"].opposite_token_id == "token-down"
+    assert by_side["DOWN"].opposite_token_id == "token-up"
 
 
 def test_bridge_skips_post_expiry_degenerate_signal() -> None:
@@ -101,6 +167,7 @@ def test_executor_reads_bridged_signal_jsonl(tmp_path: Path) -> None:
         "token_probability": 0.98,
         "edge": 0.51,
         "bridged_at": 1_779_773_912_000,
+        "opposite_token_id": "token-down",
     }
     queue.write_text(json.dumps(payload) + "\nnot-json\n\n", encoding="utf-8")
 
@@ -116,6 +183,70 @@ def test_executor_reads_bridged_signal_jsonl(tmp_path: Path) -> None:
     assert events[0].event_id == "pred-1"
     assert events[0].edge == 0.51
     assert events[0].bridged_at == 1_779_773_912_000
+    assert events[0].opposite_token_id == "token-down"
+
+
+def test_executor_reads_db_signal_with_opposite_token_id(tmp_path: Path) -> None:
+    db_path = tmp_path / "catalog.duckdb"
+    ts = 1_779_774_400_000
+    with duckdb.connect(str(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE prediction_events (
+                event_id VARCHAR,
+                ts BIGINT,
+                created_at BIGINT,
+                model_version VARCHAR,
+                prob_up_15m DOUBLE,
+                feature_snapshot_json VARCHAR
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO prediction_events VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "pred-up",
+                    ts,
+                    ts + 1_000,
+                    "xgboost-v4",
+                    0.98,
+                    json.dumps(
+                        {
+                            "canonical_symbol": "BTC-15M:btc-updown-15m-1779774300:UP",
+                            "source_symbol": "token-up",
+                            "market_implied_prob": 0.47,
+                        }
+                    ),
+                ),
+                (
+                    "pred-down",
+                    ts,
+                    ts + 1_001,
+                    "xgboost-v4",
+                    0.98,
+                    json.dumps(
+                        {
+                            "canonical_symbol": "BTC-15M:btc-updown-15m-1779774300:DOWN",
+                            "source_symbol": "token-down",
+                            "market_implied_prob": 0.53,
+                        }
+                    ),
+                ),
+            ],
+        )
+
+    events = executor._read_events_after(
+        str(db_path),
+        model_version="xgboost-v4",
+        after_created_at=0,
+        after_event_id="",
+        limit=10,
+    )
+
+    assert len(events) == 1
+    assert events[0].outcome_side == "UP"
+    assert events[0].opposite_token_id == "token-down"
 
 
 def test_executor_latency_helpers() -> None:
@@ -335,6 +466,44 @@ def test_executor_position_tick_hard_force_exits_without_new_signal(
     assert posted["signal"] is None
     assert filled["reason"] == "hard_force_exit"
     assert client.created_orders == [{"token_id": "token-up", "side": "SELL", "amount": 1.96, "price": 0.59}]
+
+
+def test_executor_position_tick_exits_under_min_fill_immediately(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    now_ms = 1_200_000
+    log_path = tmp_path / "phase4.jsonl"
+    lifecycle = executor.RoundLifecycleState()
+    position = _position(round_slug="btc-updown-15m-1000", size=1.960783)
+    position.lifecycle_state = "EXIT_REQUIRED"
+    position.last_lifecycle_reason = "under_min_fill_exit"
+    lifecycle.open_positions[position.round_slug] = position
+    client = _SellClient()
+
+    closed, pending, settlement, pnl = executor._tick_open_positions(
+        client=client,
+        position_manager=_PositionManager(),
+        lifecycle=lifecycle,
+        log_path=log_path,
+        now_ms=now_ms,
+        soft_force_exit_before_expiry_seconds=240.0,
+        hard_force_exit_before_expiry_seconds=120.0,
+        soft_force_exit_min_bid=0.15,
+        exit_retry_seconds=10.0,
+        max_exit_attempts_per_position=6,
+        sell_slippage=0.01,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    transition = next(row for row in rows if row["event"] == "position_lifecycle_transition")
+    filled = next(row for row in rows if row["event"] == "exit_filled")
+
+    assert (closed, pending, settlement, pnl) == (1, 0, 0, 0.10)
+    assert lifecycle.open_positions == {}
+    assert transition["reason"] == "under_min_fill_exit"
+    assert filled["reason"] == "under_min_fill_exit"
 
 
 def test_executor_hard_force_exit_bypasses_soft_retry_cap(
@@ -616,6 +785,59 @@ def test_executor_skips_entry_below_min_price(tmp_path: Path) -> None:
     assert row["min_entry_price"] == 0.30
 
 
+def test_executor_skips_complementary_entry_below_min_price(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+    signal = _signal()
+
+    position = executor._try_entry(
+        client=_ComplementCheapClient(),
+        position_manager=_OpenPositionManager(),
+        signal=signal,
+        log_path=log_path,
+        max_position_size_usdc=1.0,
+        entry_policy=executor.Phase4EntryPolicy(min_entry_price=0.35, edge_threshold=0.45),
+        seconds_to_expiry=600.0,
+        buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
+    )
+
+    assert position is None
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["event"] == "entry_skipped"
+    assert row["reason"] == "complement_entry_price_below_min"
+    assert row["complement_bid"] == 0.68
+    assert row["complement_entry_price"] == 0.32
+    assert row["opposite_token_id"] == "token-down"
+
+
+def test_executor_under_min_actual_fill_requires_exit(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    log_path = tmp_path / "phase4.jsonl"
+    manager = _OpenPositionManager()
+
+    position = executor._try_entry(
+        client=_UnderMinFillClient(),
+        position_manager=manager,
+        signal=_signal(),
+        log_path=log_path,
+        max_position_size_usdc=1.0,
+        entry_policy=executor.Phase4EntryPolicy(min_entry_price=0.35, edge_threshold=0.45),
+        seconds_to_expiry=600.0,
+        buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
+    )
+
+    assert position is not None
+    assert position.fill_price == 0.32
+    assert position.lifecycle_state == "EXIT_REQUIRED"
+    assert position.last_lifecycle_reason == "under_min_fill_exit"
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    below_min = next(row for row in rows if row["event"] == "entry_fill_below_min")
+    assert below_min["min_entry_price"] == 0.35
+    assert below_min["exit_required"] is True
+    assert manager.opened[0]["entry_price"] == 0.32
+
+
 def test_executor_opposite_signal_can_exit_without_reverse_entry(
     tmp_path: Path,
     monkeypatch,
@@ -813,8 +1035,10 @@ class _FokKilledError(Exception):
 
 class _BuyPostFailureClient:
     def get_order_book(self, token_id: str):  # noqa: ANN201
-        assert token_id == "token-up"
-        return {"bids": [{"price": "0.49"}], "asks": [{"price": "0.50"}]}
+        if token_id == "token-up":
+            return {"bids": [{"price": "0.49"}], "asks": [{"price": "0.50"}]}
+        assert token_id == "token-down"
+        return {"bids": [{"price": "0.50"}], "asks": [{"price": "0.51"}]}
 
     def get_tick_size(self, token_id: str):  # noqa: ANN201
         assert token_id == "token-up"
@@ -852,6 +1076,56 @@ class _NearMinAskClient(_CheapAskClient):
     def get_order_book(self, token_id: str):  # noqa: ANN201
         assert token_id == "token-up"
         return {"bids": [{"price": "0.35"}], "asks": [{"price": "0.36"}]}
+
+
+class _ComplementCheapClient:
+    def get_order_book(self, token_id: str):  # noqa: ANN201
+        if token_id == "token-up":
+            return {"bids": [{"price": "0.38"}], "asks": [{"price": "0.39"}]}
+        assert token_id == "token-down"
+        return {"bids": [{"price": "0.68"}], "asks": [{"price": "0.69"}]}
+
+    def get_tick_size(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return "0.01"
+
+    def get_neg_risk(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return True
+
+
+class _UnderMinFillClient(_ComplementCheapClient):
+    def get_order_book(self, token_id: str):  # noqa: ANN201
+        if token_id == "token-up":
+            return {"bids": [{"price": "0.38"}], "asks": [{"price": "0.39"}]}
+        assert token_id == "token-down"
+        return {"bids": [{"price": "0.60"}], "asks": [{"price": "0.61"}]}
+
+    def create_market_order(self, *, order_args, options):  # noqa: ANN001, ANN201, ARG002
+        assert order_args.token_id == "token-up"
+        assert order_args.price == 0.41
+        return {"order": "signed"}
+
+    def post_order(self, order, order_type):  # noqa: ANN001, ANN201, ARG002
+        return {
+            "success": True,
+            "status": "matched",
+            "orderID": "order-buy",
+            "takingAmount": "3.125",
+            "transactionsHashes": ["0xhash"],
+        }
+
+    def get_trades(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        return [
+            {
+                "taker_order_id": "order-buy",
+                "transaction_hash": "0xhash",
+                "side": "BUY",
+                "status": "MINED",
+                "price": "0.32",
+                "size": "3.125",
+            }
+        ]
 
 
 class _SellClient:
@@ -936,11 +1210,22 @@ class _PositionManager:
         return SimpleNamespace(realized_pnl=0.10)
 
 
+class _OpenPositionManager(_PositionManager):
+    def __init__(self) -> None:
+        super().__init__()
+        self.opened = []
+
+    def open_position(self, **kwargs):  # noqa: ANN003, ANN201
+        self.opened.append(kwargs)
+        return SimpleNamespace(**kwargs)
+
+
 def _signal(
     *,
     event_id: str = "pred-1",
     side: str = "UP",
     token_id: str = "token-up",
+    opposite_token_id: str = "token-down",
     edge: float = 0.51,
     round_end_ts: int = 1_779_775_200_000,
 ):
@@ -958,6 +1243,7 @@ def _signal(
         token_probability=0.98,
         edge=edge,
         bridged_at=3_000,
+        opposite_token_id=opposite_token_id,
     )
 
 
