@@ -25,6 +25,7 @@ from typing import Any
 import duckdb
 
 from bigan.execution.cash_legs import leg_from_clob_fill, record_execution_cash_legs
+from bigan.execution.db import connect_mlops_db
 from bigan.execution.phase4_policy import (
     DEFAULT_MIN_ENTRY_PRICE,
     DEFAULT_NEAR_MIN_FRESH_EDGE_THRESHOLD,
@@ -38,7 +39,6 @@ from bigan.execution.phase4_policy import (
     soft_force_exit_deferred,
 )
 from bigan.execution.position_manager import PositionManager
-from bigan.execution.db import connect_mlops_db
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +92,8 @@ class RoundLifecycleState:
 
     processed_event_ids: set[str] = field(default_factory=set)
     attempted_entry_event_ids: set[str] = field(default_factory=set)
+    observed_rounds: list[str] = field(default_factory=list)
+    observed_round_set: set[str] = field(default_factory=set)
     filled_rounds: set[str] = field(default_factory=set)
     closed_rounds: set[str] = field(default_factory=set)
     open_positions: dict[str, LivePosition] = field(default_factory=dict)
@@ -109,6 +111,20 @@ class RoundLifecycleState:
     def mark_entry_attempted(self, event_id: str) -> None:
         if event_id:
             self.attempted_entry_event_ids.add(event_id)
+
+    def mark_round_seen(self, round_slug: str, *, max_rounds: int) -> bool:
+        """Track capped market windows; return false for new rounds beyond the cap."""
+
+        if not round_slug or round_slug in self.observed_round_set:
+            return True
+        if max_rounds <= 0 or len(self.observed_rounds) >= max_rounds:
+            return False
+        self.observed_round_set.add(round_slug)
+        self.observed_rounds.append(round_slug)
+        return True
+
+    def max_rounds_reached(self, max_rounds: int) -> bool:
+        return max_rounds <= 0 or len(self.observed_rounds) >= max_rounds
 
     def mark_entry_result(self, event: SignalEvent, position: LivePosition | None) -> None:
         """Only confirmed fills lock a round."""
@@ -235,7 +251,7 @@ def main() -> int:
             if (now_ms - started_at) >= args.max_runtime_minutes * 60_000:
                 _log(log_path, "stop_max_runtime")
                 break
-            if entries_filled >= args.max_rounds and not lifecycle.open_positions:
+            if lifecycle.max_rounds_reached(args.max_rounds) and not lifecycle.open_positions:
                 _log(log_path, "stop_max_rounds_closed")
                 break
             if realized_pnl <= -args.daily_loss_limit_usdc:
@@ -261,7 +277,7 @@ def main() -> int:
             exits_pending_confirmation += tick_pending
             exits_pending_settlement += tick_settlement
             realized_pnl += tick_pnl
-            if entries_filled >= args.max_rounds and not lifecycle.open_positions:
+            if lifecycle.max_rounds_reached(args.max_rounds) and not lifecycle.open_positions:
                 _log(log_path, "stop_max_rounds_closed")
                 break
             if realized_pnl <= -args.daily_loss_limit_usdc:
@@ -320,6 +336,17 @@ def main() -> int:
                 if not lifecycle.mark_event_seen(event.event_id):
                     _bump(skipped, "duplicate_event_id")
                     continue
+                if not lifecycle.mark_round_seen(event.round_slug, max_rounds=args.max_rounds):
+                    _bump(skipped, "max_rounds")
+                    _log(
+                        log_path,
+                        "entry_skipped",
+                        reason="max_rounds",
+                        signal=asdict(event),
+                        observed_round_count=len(lifecycle.observed_rounds),
+                        max_rounds=args.max_rounds,
+                    )
+                    continue
 
                 if event.round_slug in lifecycle.open_positions:
                     position = lifecycle.open_positions[event.round_slug]
@@ -375,9 +402,6 @@ def main() -> int:
                                 break
                     continue
 
-                if entries_filled >= args.max_rounds:
-                    _bump(skipped, "max_rounds")
-                    continue
                 if len(lifecycle.open_positions) >= args.max_concurrent_positions:
                     _bump(skipped, "max_concurrent_positions")
                     continue
@@ -429,8 +453,6 @@ def main() -> int:
                 lifecycle.mark_entry_result(event, position)
                 if position is not None:
                     entries_filled += 1
-                if entries_filled >= args.max_rounds:
-                    break
 
             time.sleep(args.poll_seconds)
     finally:
@@ -481,6 +503,7 @@ def main() -> int:
             "open_positions_at_shutdown": open_positions_at_shutdown,
             "processed_event_count": len(lifecycle.processed_event_ids),
             "attempted_entry_event_count": len(lifecycle.attempted_entry_event_ids),
+            "observed_round_count": len(lifecycle.observed_rounds),
             "filled_round_count": len(lifecycle.filled_rounds),
             "closed_round_count": len(lifecycle.closed_rounds),
             "skipped": skipped,
@@ -932,7 +955,10 @@ def _attempt_lifecycle_exit(
         )
         return None
 
-    if position.exit_attempt_count >= max_exit_attempts_per_position:
+    if (
+        position.exit_attempt_count >= max_exit_attempts_per_position
+        and exit_reason != "hard_force_exit"
+    ):
         if position.lifecycle_state != "MANUAL_INTERVENTION_REQUIRED":
             position.lifecycle_state = "MANUAL_INTERVENTION_REQUIRED"
             position.last_lifecycle_reason = "max_exit_attempts_reached"
