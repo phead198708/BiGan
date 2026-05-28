@@ -10,7 +10,7 @@ from typing import Any, Literal, Protocol
 
 import duckdb
 
-from bigan.mlops.registry import DEFAULT_MLOPS_DB_PATH, connect_mlops_db
+from .db import DEFAULT_MLOPS_DB_PATH, connect_mlops_db
 from bigan.monitoring.drift import (
     ChampionDriftThresholds,
     evaluate_label_hit_rate_drift,

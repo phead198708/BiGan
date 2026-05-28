@@ -14,7 +14,7 @@ from bigan.execution import (
     reconcile_cash_flows,
     record_cashflow_reconciliations,
 )
-from bigan.mlops.registry import connect_mlops_db
+from bigan.execution.db import connect_mlops_db
 
 
 def main() -> int:

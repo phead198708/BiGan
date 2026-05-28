@@ -38,7 +38,7 @@ from bigan.execution.phase4_policy import (
     soft_force_exit_deferred,
 )
 from bigan.execution.position_manager import PositionManager
-from bigan.mlops.registry import connect_mlops_db
+from bigan.execution.db import connect_mlops_db
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,7 +13,7 @@ from bigan.execution import (
     read_polymarket_history_csv,
     reconcile_stale_open_positions,
 )
-from bigan.mlops.registry import connect_mlops_db
+from bigan.execution.db import connect_mlops_db
 
 
 def main() -> int:

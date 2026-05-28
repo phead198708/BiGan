@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 import duckdb
 
-from bigan.mlops.registry import DEFAULT_MLOPS_DB_PATH, connect_mlops_db
+from .db import DEFAULT_MLOPS_DB_PATH, connect_mlops_db
 
 PositionSide = Literal["UP", "DOWN"]
 PositionStatus = Literal["open", "closed", "expired"]
