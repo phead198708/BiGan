@@ -59,6 +59,8 @@ python scripts/reconcile_stale_execution_positions.py \
 
 The Phase 4 executor summary JSON now includes:
 
+- `status`: lifecycle-only result — `LIFECYCLE_PASS`, `LIFECYCLE_INCOMPLETE`, `CHECK`, or `FAIL`
+- `lifecycle_complete`: `true` only when the run has fills and no open/pending exit or settlement rows at shutdown
 - `realized_pnl_usdc`: in-session fill-price ledger total
 - `theoretical_pnl_usdc`: persisted position ledger total at shutdown
 - `account_cash_pnl_usdc`: `null` until history reconciliation is run offline

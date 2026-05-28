@@ -33,6 +33,8 @@ from bigan.execution.phase4_policy import (
     DEFAULT_SOFT_FORCE_EXIT_MIN_BID,
     Phase4EntryPolicy,
     entry_price_skip_reason,
+    phase4_lifecycle_complete,
+    phase4_summary_status,
     soft_force_exit_deferred,
 )
 from bigan.execution.position_manager import PositionManager
@@ -332,6 +334,7 @@ def main() -> int:
                             profit_target=args.profit_target,
                             sell_slippage=args.sell_slippage,
                             exit_order_timeout_seconds=args.exit_order_timeout_seconds,
+                            monitoring_db_path=args.monitoring_db_path,
                         )
                         if sell_result is not None:
                             realized_pnl += sell_result.realized_pnl
@@ -356,6 +359,7 @@ def main() -> int:
                             opposite_exit_min_seconds_to_expiry=args.opposite_exit_min_seconds_to_expiry,
                             sell_slippage=args.sell_slippage,
                             exit_order_timeout_seconds=args.exit_order_timeout_seconds,
+                            monitoring_db_path=args.monitoring_db_path,
                         )
                         if sell_result is not None:
                             realized_pnl += sell_result.realized_pnl
@@ -438,17 +442,31 @@ def main() -> int:
             log_path=log_path,
             sell_slippage=args.sell_slippage,
             exit_order_timeout_seconds=args.exit_order_timeout_seconds,
+            monitoring_db_path=args.monitoring_db_path,
         )
         closes_filled += shutdown_closed
         exits_pending_confirmation += shutdown_pending
         exits_pending_settlement += shutdown_settlement
         realized_pnl += shutdown_pnl
         theoretical_pnl_usdc = _theoretical_pnl_from_positions(position_manager)
+        open_positions_at_shutdown = len(lifecycle.open_positions)
+        lifecycle_complete = phase4_lifecycle_complete(
+            errors=errors,
+            entries_filled=entries_filled,
+            open_positions_at_shutdown=open_positions_at_shutdown,
+            exits_pending_confirmation=exits_pending_confirmation,
+            exits_pending_settlement=exits_pending_settlement,
+        )
         summary = {
             "phase": "phase4_real_champion_signal",
             "started_at": _iso(started_at),
             "finished_at": _iso(_now_ms()),
-            "status": "PASS" if errors == 0 and entries_filled > 0 else "CHECK",
+            "status": phase4_summary_status(
+                errors=errors,
+                entries_filled=entries_filled,
+                lifecycle_complete=lifecycle_complete,
+            ),
+            "lifecycle_complete": lifecycle_complete,
             "entries_attempted": entries_attempted,
             "entries_filled": entries_filled,
             "closes_filled": closes_filled,
@@ -460,7 +478,7 @@ def main() -> int:
             "pnl_reconciliation_status": "theoretical_only",
             "promotion_or_capital_sizing_evidence": False,
             "account_cashflow_reconciliation_required": True,
-            "open_positions_at_shutdown": len(lifecycle.open_positions),
+            "open_positions_at_shutdown": open_positions_at_shutdown,
             "processed_event_count": len(lifecycle.processed_event_ids),
             "attempted_entry_event_count": len(lifecycle.attempted_entry_event_ids),
             "filled_round_count": len(lifecycle.filled_rounds),
@@ -1218,6 +1236,7 @@ def _maybe_exit(
     profit_target: float,
     sell_slippage: float,
     exit_order_timeout_seconds: float = 20.0,
+    monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
 ) -> SellResult | None:
     now_ms = _now_ms()
     seconds_to_expiry = (signal.round_end_ts - now_ms) / 1000
@@ -1283,6 +1302,7 @@ def _maybe_exit(
         fill_confirm_timeout_seconds=exit_order_timeout_seconds,
         reason="exit_signal",
         signal=signal,
+        monitoring_db_path=monitoring_db_path,
     )
 
 
@@ -1297,6 +1317,7 @@ def _maybe_exit_opposite_correction(
     opposite_exit_min_seconds_to_expiry: float,
     sell_slippage: float,
     exit_order_timeout_seconds: float = 20.0,
+    monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
 ) -> SellResult | None:
     """Exit an open position when the opposite side becomes strongly favored."""
 
@@ -1376,6 +1397,7 @@ def _maybe_exit_opposite_correction(
         fill_confirm_timeout_seconds=exit_order_timeout_seconds,
         reason="opposite_side_exit_correction",
         signal=signal,
+        monitoring_db_path=monitoring_db_path,
     )
 
 
@@ -1387,6 +1409,7 @@ def _close_remaining_positions(
     log_path: Path,
     sell_slippage: float,
     exit_order_timeout_seconds: float = 20.0,
+    monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
 ) -> tuple[int, int, int, float]:
     closed_count = 0
     pending_count = 0
@@ -1453,6 +1476,7 @@ def _close_remaining_positions(
             fill_confirm_timeout_seconds=exit_order_timeout_seconds,
             reason="shutdown",
             signal=None,
+            monitoring_db_path=monitoring_db_path,
         )
         if sell_result is not None:
             if sell_result.status == "filled":

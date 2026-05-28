@@ -7,6 +7,8 @@ import pytest
 from bigan.execution.phase4_policy import (
     Phase4EntryPolicy,
     entry_price_skip_reason,
+    phase4_lifecycle_complete,
+    phase4_summary_status,
     soft_force_exit_deferred,
 )
 
@@ -71,6 +73,33 @@ def test_soft_force_exit_deferred_only_for_weak_bids() -> None:
     assert soft_force_exit_deferred(exit_reason="soft_force_exit", bid=0.10) is True
     assert soft_force_exit_deferred(exit_reason="soft_force_exit", bid=0.20) is False
     assert soft_force_exit_deferred(exit_reason="hard_force_exit", bid=0.10) is False
+
+
+def test_phase4_summary_status_distinguishes_lifecycle_from_promotion() -> None:
+    assert (
+        phase4_summary_status(
+            errors=0,
+            entries_filled=3,
+            lifecycle_complete=True,
+        )
+        == "LIFECYCLE_PASS"
+    )
+    assert (
+        phase4_summary_status(
+            errors=0,
+            entries_filled=3,
+            lifecycle_complete=False,
+        )
+        == "LIFECYCLE_INCOMPLETE"
+    )
+    assert phase4_summary_status(errors=1, entries_filled=3, lifecycle_complete=True) == "FAIL"
+    assert phase4_lifecycle_complete(
+        errors=0,
+        entries_filled=1,
+        open_positions_at_shutdown=0,
+        exits_pending_confirmation=0,
+        exits_pending_settlement=1,
+    ) is False
 
 
 @pytest.mark.parametrize("ask", [0.40, 0.50])

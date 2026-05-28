@@ -56,6 +56,42 @@ def entry_price_skip_reason(
     return None
 
 
+def phase4_lifecycle_complete(
+    *,
+    errors: int,
+    entries_filled: int,
+    open_positions_at_shutdown: int,
+    exits_pending_confirmation: int,
+    exits_pending_settlement: int,
+) -> bool:
+    """Return whether a bounded Phase 4 run finished with a clean lifecycle."""
+
+    return (
+        errors == 0
+        and entries_filled > 0
+        and open_positions_at_shutdown == 0
+        and exits_pending_confirmation == 0
+        and exits_pending_settlement == 0
+    )
+
+
+def phase4_summary_status(
+    *,
+    errors: int,
+    entries_filled: int,
+    lifecycle_complete: bool,
+) -> str:
+    """Lifecycle-only status that must not be confused with promotion readiness."""
+
+    if errors > 0:
+        return "FAIL"
+    if entries_filled <= 0:
+        return "CHECK"
+    if lifecycle_complete:
+        return "LIFECYCLE_PASS"
+    return "LIFECYCLE_INCOMPLETE"
+
+
 def soft_force_exit_deferred(
     *,
     exit_reason: str,

@@ -29,6 +29,8 @@ from .phase4_policy import (
     Phase4EntryPolicy,
     entry_price_skip_reason,
     is_near_min_entry,
+    phase4_lifecycle_complete,
+    phase4_summary_status,
     soft_force_exit_deferred,
 )
 from .reconciliation import (
@@ -86,6 +88,8 @@ __all__ = [
     "account_cash_pnl",
     "account_cash_pnl_from_legs",
     "entry_price_skip_reason",
+    "phase4_lifecycle_complete",
+    "phase4_summary_status",
     "initialize_cash_leg_tables",
     "initialize_cashflow_tables",
     "initialize_settlement_tables",
