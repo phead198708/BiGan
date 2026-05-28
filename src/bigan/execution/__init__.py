@@ -1,5 +1,15 @@
 """Live execution primitives for Polymarket champion signals."""
 
+from .cash_legs import (
+    ExecutionCashLeg,
+    account_cash_pnl_from_legs,
+    initialize_cash_leg_tables,
+    leg_from_clob_fill,
+    leg_from_polymarket_history,
+    read_execution_cash_legs,
+    record_execution_cash_legs,
+    signed_cash_delta,
+)
 from .cashflow import (
     CashFlowReconciliation,
     PolymarketCashFlow,
@@ -9,6 +19,21 @@ from .cashflow import (
     read_polymarket_history_csv,
     reconcile_cash_flows,
     record_cashflow_reconciliations,
+)
+from .phase4_policy import (
+    DEFAULT_MIN_ENTRY_PRICE,
+    DEFAULT_NEAR_MIN_FRESH_EDGE_THRESHOLD,
+    DEFAULT_NEAR_MIN_PRICE_BAND,
+    DEFAULT_NEAR_MIN_SECONDS_TO_EXPIRY,
+    DEFAULT_SOFT_FORCE_EXIT_MIN_BID,
+    Phase4EntryPolicy,
+    entry_price_skip_reason,
+    is_near_min_entry,
+    soft_force_exit_deferred,
+)
+from .reconciliation import (
+    StalePositionReconciliation,
+    reconcile_stale_open_positions,
 )
 from .clob_client import (
     ClobExecutionClient,
@@ -37,9 +62,16 @@ __all__ = [
     "ClobExecutionError",
     "CashFlowReconciliation",
     "DailyRiskStats",
+    "DEFAULT_MIN_ENTRY_PRICE",
+    "DEFAULT_NEAR_MIN_FRESH_EDGE_THRESHOLD",
+    "DEFAULT_NEAR_MIN_PRICE_BAND",
+    "DEFAULT_NEAR_MIN_SECONDS_TO_EXPIRY",
+    "DEFAULT_SOFT_FORCE_EXIT_MIN_BID",
     "EntryRiskDecision",
+    "ExecutionCashLeg",
     "InsufficientBalanceError",
     "OrderStatus",
+    "Phase4EntryPolicy",
     "PolymarketCashFlow",
     "Position",
     "PositionManager",
@@ -50,14 +82,26 @@ __all__ = [
     "SettlementPoller",
     "SettlementPollerConfig",
     "SettlementReconciliationResult",
+    "StalePositionReconciliation",
     "account_cash_pnl",
+    "account_cash_pnl_from_legs",
+    "entry_price_skip_reason",
+    "initialize_cash_leg_tables",
     "initialize_cashflow_tables",
     "initialize_settlement_tables",
+    "is_near_min_entry",
+    "leg_from_clob_fill",
+    "leg_from_polymarket_history",
     "read_cashflow_reconciliations",
+    "read_execution_cash_legs",
     "read_execution_settlements",
     "read_polymarket_history_csv",
     "reconcile_cash_flows",
+    "reconcile_stale_open_positions",
     "realized_pnl_for_position",
     "record_cashflow_reconciliations",
+    "record_execution_cash_legs",
     "record_execution_settlement",
+    "signed_cash_delta",
+    "soft_force_exit_deferred",
 ]

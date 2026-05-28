@@ -316,6 +316,7 @@ def test_executor_position_tick_hard_force_exits_without_new_signal(
         now_ms=now_ms,
         soft_force_exit_before_expiry_seconds=240.0,
         hard_force_exit_before_expiry_seconds=120.0,
+        soft_force_exit_min_bid=0.15,
         exit_retry_seconds=10.0,
         max_exit_attempts_per_position=6,
         sell_slippage=0.01,
@@ -336,6 +337,36 @@ def test_executor_position_tick_hard_force_exits_without_new_signal(
     assert client.created_orders == [{"token_id": "token-up", "side": "SELL", "amount": 1.96, "price": 0.59}]
 
 
+def test_executor_position_tick_soft_force_exit_defers_weak_bid(
+    tmp_path: Path,
+) -> None:
+    now_ms = 1_700_000
+    log_path = tmp_path / "phase4.jsonl"
+    lifecycle = executor.RoundLifecycleState()
+    position = _position(round_slug="btc-updown-15m-1000")
+    lifecycle.open_positions[position.round_slug] = position
+
+    result = executor._tick_open_positions(
+        client=_WeakBidClient(),
+        position_manager=_PositionManager(),
+        lifecycle=lifecycle,
+        log_path=log_path,
+        now_ms=now_ms,
+        soft_force_exit_before_expiry_seconds=240.0,
+        hard_force_exit_before_expiry_seconds=120.0,
+        soft_force_exit_min_bid=0.15,
+        exit_retry_seconds=10.0,
+        max_exit_attempts_per_position=6,
+        sell_slippage=0.01,
+    )
+
+    hold = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert result == (0, 0, 0, 0.0)
+    assert hold["event"] == "force_exit_hold"
+    assert hold["reason"] == "soft_force_exit_bid_too_low"
+    assert lifecycle.open_positions[position.round_slug] == position
+
+
 def test_executor_position_tick_soft_force_exit_retries_missing_bid(
     tmp_path: Path,
 ) -> None:
@@ -353,6 +384,7 @@ def test_executor_position_tick_soft_force_exit_retries_missing_bid(
         now_ms=now_ms,
         soft_force_exit_before_expiry_seconds=240.0,
         hard_force_exit_before_expiry_seconds=120.0,
+        soft_force_exit_min_bid=0.15,
         exit_retry_seconds=10.0,
         max_exit_attempts_per_position=6,
         sell_slippage=0.01,
@@ -387,6 +419,7 @@ def test_executor_position_tick_expired_moves_to_settlement(
         now_ms=now_ms,
         soft_force_exit_before_expiry_seconds=240.0,
         hard_force_exit_before_expiry_seconds=120.0,
+        soft_force_exit_min_bid=0.15,
         exit_retry_seconds=10.0,
         max_exit_attempts_per_position=6,
         sell_slippage=0.01,
@@ -459,9 +492,10 @@ def test_executor_fok_post_failure_does_not_create_position(tmp_path: Path) -> N
         signal=signal,
         log_path=log_path,
         max_position_size_usdc=1.0,
-        min_entry_price=0.0,
-        edge_threshold=0.45,
+        entry_policy=executor.Phase4EntryPolicy(min_entry_price=0.0, edge_threshold=0.45),
+        seconds_to_expiry=600.0,
         buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
     )
 
     assert position is None
@@ -470,6 +504,34 @@ def test_executor_fok_post_failure_does_not_create_position(tmp_path: Path) -> N
     assert row["error_type"] == "_FokKilledError"
     assert row["signal"]["event_id"] == signal.event_id
     assert row["worst_price"] == 0.52
+
+
+def test_executor_skips_near_min_entry_without_strong_edge(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+    signal = _signal()
+
+    position = executor._try_entry(
+        client=_NearMinAskClient(),
+        position_manager=_PositionManager(),
+        signal=signal,
+        log_path=log_path,
+        max_position_size_usdc=1.0,
+        entry_policy=executor.Phase4EntryPolicy(
+            min_entry_price=0.35,
+            near_min_price_band=0.05,
+            near_min_fresh_edge_threshold=0.50,
+            near_min_seconds_to_expiry=420.0,
+            edge_threshold=0.45,
+        ),
+        seconds_to_expiry=300.0,
+        buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
+    )
+
+    assert position is None
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["event"] == "entry_skipped"
+    assert row["reason"] == "near_min_entry_too_close_to_expiry"
 
 
 def test_executor_skips_entry_below_min_price(tmp_path: Path) -> None:
@@ -482,9 +544,10 @@ def test_executor_skips_entry_below_min_price(tmp_path: Path) -> None:
         signal=signal,
         log_path=log_path,
         max_position_size_usdc=1.0,
-        min_entry_price=0.30,
-        edge_threshold=0.45,
+        entry_policy=executor.Phase4EntryPolicy(min_entry_price=0.30, edge_threshold=0.45),
+        seconds_to_expiry=600.0,
         buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
     )
 
     assert position is None
@@ -667,6 +730,12 @@ class _UnavailableBookClient:
         raise RuntimeError(f"No orderbook exists for the requested token id: {token_id}")
 
 
+class _WeakBidClient:
+    def get_order_book(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return {"bids": [{"price": "0.10"}], "asks": [{"price": "0.61"}]}
+
+
 class _MissingBidClient:
     def get_order_book(self, token_id: str):  # noqa: ANN201
         assert token_id == "token-up"
@@ -720,6 +789,12 @@ class _CheapAskClient:
     def get_neg_risk(self, token_id: str):  # noqa: ANN201
         assert token_id == "token-up"
         return False
+
+
+class _NearMinAskClient(_CheapAskClient):
+    def get_order_book(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return {"bids": [{"price": "0.35"}], "asks": [{"price": "0.36"}]}
 
 
 class _SellClient:

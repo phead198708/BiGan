@@ -24,7 +24,19 @@ from typing import Any
 
 import duckdb
 
+from bigan.execution.cash_legs import leg_from_clob_fill, record_execution_cash_legs
+from bigan.execution.phase4_policy import (
+    DEFAULT_MIN_ENTRY_PRICE,
+    DEFAULT_NEAR_MIN_FRESH_EDGE_THRESHOLD,
+    DEFAULT_NEAR_MIN_PRICE_BAND,
+    DEFAULT_NEAR_MIN_SECONDS_TO_EXPIRY,
+    DEFAULT_SOFT_FORCE_EXIT_MIN_BID,
+    Phase4EntryPolicy,
+    entry_price_skip_reason,
+    soft_force_exit_deferred,
+)
 from bigan.execution.position_manager import PositionManager
+from bigan.mlops.registry import connect_mlops_db
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +213,10 @@ def main() -> int:
             "max_rounds": args.max_rounds,
             "max_position_size_usdc": args.max_position_size_usdc,
             "min_entry_price": args.min_entry_price,
+            "near_min_price_band": args.near_min_price_band,
+            "near_min_fresh_edge_threshold": args.near_min_fresh_edge_threshold,
+            "near_min_seconds_to_expiry": args.near_min_seconds_to_expiry,
+            "soft_force_exit_min_bid": args.soft_force_exit_min_bid,
             "daily_loss_limit_usdc": args.daily_loss_limit_usdc,
             "max_concurrent_positions": args.max_concurrent_positions,
             "min_seconds_to_expiry": args.min_seconds_to_expiry,
@@ -232,10 +248,12 @@ def main() -> int:
                 now_ms=now_ms,
                 soft_force_exit_before_expiry_seconds=args.soft_force_exit_before_expiry_seconds,
                 hard_force_exit_before_expiry_seconds=args.hard_force_exit_before_expiry_seconds,
+                soft_force_exit_min_bid=args.soft_force_exit_min_bid,
                 exit_retry_seconds=args.exit_retry_seconds,
                 exit_order_timeout_seconds=args.exit_order_timeout_seconds,
                 max_exit_attempts_per_position=args.max_exit_attempts_per_position,
                 sell_slippage=args.sell_slippage,
+                monitoring_db_path=args.monitoring_db_path,
             )
             closes_filled += tick_closed
             exits_pending_confirmation += tick_pending
@@ -393,9 +411,16 @@ def main() -> int:
                     signal=event,
                     log_path=log_path,
                     max_position_size_usdc=args.max_position_size_usdc,
-                    min_entry_price=args.min_entry_price,
-                    edge_threshold=args.edge_threshold,
+                    entry_policy=Phase4EntryPolicy(
+                        min_entry_price=args.min_entry_price,
+                        near_min_price_band=args.near_min_price_band,
+                        near_min_fresh_edge_threshold=args.near_min_fresh_edge_threshold,
+                        near_min_seconds_to_expiry=args.near_min_seconds_to_expiry,
+                        edge_threshold=args.edge_threshold,
+                    ),
+                    seconds_to_expiry=seconds_to_expiry,
                     buy_slippage=args.buy_slippage,
+                    monitoring_db_path=args.monitoring_db_path,
                 )
                 lifecycle.mark_entry_result(event, position)
                 if position is not None:
@@ -418,6 +443,7 @@ def main() -> int:
         exits_pending_confirmation += shutdown_pending
         exits_pending_settlement += shutdown_settlement
         realized_pnl += shutdown_pnl
+        theoretical_pnl_usdc = _theoretical_pnl_from_positions(position_manager)
         summary = {
             "phase": "phase4_real_champion_signal",
             "started_at": _iso(started_at),
@@ -429,6 +455,11 @@ def main() -> int:
             "exits_pending_confirmation": exits_pending_confirmation,
             "exits_pending_settlement": exits_pending_settlement,
             "realized_pnl_usdc": round(realized_pnl, 8),
+            "theoretical_pnl_usdc": round(theoretical_pnl_usdc, 8),
+            "account_cash_pnl_usdc": None,
+            "pnl_reconciliation_status": "theoretical_only",
+            "promotion_or_capital_sizing_evidence": False,
+            "account_cashflow_reconciliation_required": True,
             "open_positions_at_shutdown": len(lifecycle.open_positions),
             "processed_event_count": len(lifecycle.processed_event_ids),
             "attempted_entry_event_count": len(lifecycle.attempted_entry_event_ids),
@@ -467,8 +498,32 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-entry-price",
         type=float,
-        default=0.0,
+        default=DEFAULT_MIN_ENTRY_PRICE,
         help="Skip entries whose fresh CLOB ask/worst fill price is below this token price.",
+    )
+    parser.add_argument(
+        "--near-min-price-band",
+        type=float,
+        default=DEFAULT_NEAR_MIN_PRICE_BAND,
+        help="Apply stricter near-min gating when ask/worst price is within this band above min_entry_price.",
+    )
+    parser.add_argument(
+        "--near-min-fresh-edge-threshold",
+        type=float,
+        default=DEFAULT_NEAR_MIN_FRESH_EDGE_THRESHOLD,
+        help="Required fresh edge for entries in the near-min price band.",
+    )
+    parser.add_argument(
+        "--near-min-seconds-to-expiry",
+        type=float,
+        default=DEFAULT_NEAR_MIN_SECONDS_TO_EXPIRY,
+        help="Minimum seconds-to-expiry for near-min price entries.",
+    )
+    parser.add_argument(
+        "--soft-force-exit-min-bid",
+        type=float,
+        default=DEFAULT_SOFT_FORCE_EXIT_MIN_BID,
+        help="Defer soft force exits when the bid is below this price.",
     )
     parser.add_argument("--daily-loss-limit-usdc", type=float, default=3.0)
     parser.add_argument("--max-concurrent-positions", type=int, default=2)
@@ -757,10 +812,12 @@ def _tick_open_positions(
     now_ms: int,
     soft_force_exit_before_expiry_seconds: float,
     hard_force_exit_before_expiry_seconds: float,
+    soft_force_exit_min_bid: float,
     exit_retry_seconds: float,
     max_exit_attempts_per_position: int,
     sell_slippage: float,
     exit_order_timeout_seconds: float = 20.0,
+    monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
 ) -> tuple[int, int, int, float]:
     closed_count = 0
     pending_count = 0
@@ -795,10 +852,12 @@ def _tick_open_positions(
             now_ms=now_ms,
             seconds_to_expiry=seconds_to_expiry,
             exit_reason=exit_reason,
+            soft_force_exit_min_bid=soft_force_exit_min_bid,
             exit_retry_seconds=exit_retry_seconds,
             exit_order_timeout_seconds=exit_order_timeout_seconds,
             max_exit_attempts_per_position=max_exit_attempts_per_position,
             sell_slippage=sell_slippage,
+            monitoring_db_path=monitoring_db_path,
         )
         if sell_result is None:
             continue
@@ -823,10 +882,12 @@ def _attempt_lifecycle_exit(
     now_ms: int,
     seconds_to_expiry: float,
     exit_reason: str,
+    soft_force_exit_min_bid: float,
     exit_retry_seconds: float,
     max_exit_attempts_per_position: int,
     sell_slippage: float,
     exit_order_timeout_seconds: float = 20.0,
+    monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
 ) -> SellResult | None:
     if seconds_to_expiry <= 0:
         position.lifecycle_state = "AWAITING_SETTLEMENT"
@@ -908,6 +969,23 @@ def _attempt_lifecycle_exit(
             exit_attempt_count=position.exit_attempt_count,
         )
         return None
+    if soft_force_exit_deferred(
+        exit_reason=exit_reason,
+        bid=float(bid),
+        soft_force_exit_min_bid=soft_force_exit_min_bid,
+    ):
+        _log(
+            log_path,
+            "force_exit_hold",
+            reason="soft_force_exit_bid_too_low",
+            exit_reason=exit_reason,
+            position=asdict(position),
+            bid=float(bid),
+            soft_force_exit_min_bid=soft_force_exit_min_bid,
+            seconds_to_expiry=seconds_to_expiry,
+            exit_attempt_count=position.exit_attempt_count,
+        )
+        return None
 
     return _sell_position(
         client=client,
@@ -919,6 +997,7 @@ def _attempt_lifecycle_exit(
         fill_confirm_timeout_seconds=exit_order_timeout_seconds,
         reason=exit_reason,
         signal=None,
+        monitoring_db_path=monitoring_db_path,
     )
 
 
@@ -929,9 +1008,10 @@ def _try_entry(
     signal: SignalEvent,
     log_path: Path,
     max_position_size_usdc: float,
-    min_entry_price: float,
-    edge_threshold: float,
+    entry_policy: Phase4EntryPolicy,
+    seconds_to_expiry: float,
     buy_slippage: float,
+    monitoring_db_path: str,
 ) -> LivePosition | None:
     from py_clob_client_v2 import MarketOrderArgs, OrderType
     from py_clob_client_v2.clob_types import PartialCreateOrderOptions
@@ -954,29 +1034,29 @@ def _try_entry(
     tick_size = client.get_tick_size(signal.token_id)
     neg_risk = client.get_neg_risk(signal.token_id)
     worst_price = min(0.99, _round_price(float(ask) + buy_slippage, tick_size))
-    if float(ask) < min_entry_price or worst_price < min_entry_price:
-        _log(
-            log_path,
-            "entry_skipped",
-            reason="entry_price_below_min",
-            signal=asdict(signal),
-            bid=bid,
-            ask=ask,
-            worst_price=worst_price,
-            min_entry_price=min_entry_price,
-        )
-        return None
     fresh_edge_at_worst = signal.token_probability - worst_price
-    if fresh_edge_at_worst < edge_threshold:
+    skip_reason = entry_price_skip_reason(
+        ask=float(ask),
+        worst_price=worst_price,
+        fresh_edge_at_worst=fresh_edge_at_worst,
+        seconds_to_expiry=seconds_to_expiry,
+        policy=entry_policy,
+    )
+    if skip_reason is not None:
         _log(
             log_path,
             "entry_skipped",
-            reason="fresh_edge_below_threshold",
+            reason=skip_reason,
             signal=asdict(signal),
             bid=bid,
             ask=ask,
             worst_price=worst_price,
             fresh_edge_at_worst=fresh_edge_at_worst,
+            seconds_to_expiry=seconds_to_expiry,
+            min_entry_price=entry_policy.min_entry_price,
+            near_min_price_band=entry_policy.near_min_price_band,
+            near_min_fresh_edge_threshold=entry_policy.near_min_fresh_edge_threshold,
+            near_min_seconds_to_expiry=entry_policy.near_min_seconds_to_expiry,
         )
         return None
     order = client.create_market_order(
@@ -1098,6 +1178,14 @@ def _try_entry(
         entry_signal_created_at=signal.created_at,
         entry_signal_bridged_at=signal.bridged_at,
         entry_order_posted_at=order_posted_at,
+    )
+    _persist_cash_leg(
+        monitoring_db_path=monitoring_db_path,
+        event_id=event_id,
+        round_slug=signal.round_slug,
+        action="BUY",
+        fill=fill,
+        order_id=order_id,
     )
     _log(
         log_path,
@@ -1415,6 +1503,7 @@ def _sell_position(
     fill_confirm_timeout_seconds: float = 20.0,
     reason: str,
     signal: SignalEvent | None,
+    monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
 ) -> SellResult | None:
     from py_clob_client_v2 import MarketOrderArgs, OrderType
     from py_clob_client_v2.clob_types import PartialCreateOrderOptions
@@ -1510,6 +1599,15 @@ def _sell_position(
     pnl = float(closed.realized_pnl or 0.0)
     position.lifecycle_state = "EXIT_FILLED"
     position.last_lifecycle_reason = reason
+    _persist_cash_leg(
+        monitoring_db_path=monitoring_db_path,
+        event_id=position.event_id,
+        round_slug=position.round_slug,
+        action="SELL",
+        fill=fill,
+        order_id=order_id,
+        dust_token_amount=dust_amount,
+    )
     _log(
         log_path,
         "exit_filled",
@@ -1525,6 +1623,39 @@ def _sell_position(
         dust_value_usd=dust_value_usd,
     )
     return SellResult(status="filled", realized_pnl=pnl)
+
+
+def _persist_cash_leg(
+    *,
+    monitoring_db_path: str,
+    event_id: str,
+    round_slug: str,
+    action: str,
+    fill: dict[str, Any],
+    order_id: str | None,
+    dust_token_amount: float = 0.0,
+) -> None:
+    try:
+        leg = leg_from_clob_fill(
+            event_id=event_id,
+            round_slug=round_slug,
+            action=action,  # type: ignore[arg-type]
+            fill=fill,
+            order_id=order_id,
+            dust_token_amount=dust_token_amount,
+        )
+        with connect_mlops_db(monitoring_db_path) as conn:
+            record_execution_cash_legs(conn, [leg], replace=True)
+    except Exception:  # noqa: BLE001 - cash-leg persistence must not stop trading.
+        return
+
+
+def _theoretical_pnl_from_positions(position_manager: PositionManager) -> float:
+    total = 0.0
+    for position in position_manager.list_positions():
+        if position.realized_pnl is not None and position.status in {"closed", "expired"}:
+            total += float(position.realized_pnl)
+    return total
 
 
 def _fill_for_order(

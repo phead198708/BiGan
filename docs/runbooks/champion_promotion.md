@@ -31,12 +31,15 @@ Must pass:
 | bucket calibration | high-up realized-up rate greater than 0.55 and high-down realized-down rate greater than 0.55 |
 | family realized return | each required family has positive average realized return on the validation/test evidence bundle |
 | global ECE regression | lower than the current production baseline ECE, currently `0.4784` for the observed v4 online baseline |
+| execution subset ECE | less than `0.08` on rows matching the live execution region |
 
 Rules:
 
 - If the challenger does not beat the champion on both AUC and Brier, do not proceed.
 - For v5 and later, prefer family-aware calibration over a single global calibrator. Fit separate calibrators by `(underlying_id, horizon_minutes)`, compare Platt, isotonic, temperature, and beta calibration, then select the lowest validation ECE per family.
-- Apply probability clipping only as a documented post-calibration guard; serving hotfix clipping does not replace proper calibration evidence.
+- Mark the Phase 4/live execution subset explicitly. The execution subset is the evidence closest to real trading behavior, so calibration reports must include `execution_subset_metrics` with raw and calibrated Brier/ECE. Use `sample_weights` to up-weight executed rows, and apply extra loss weighting only when the realized PnL is from an account-cash-flow reconciled ledger.
+- Search execution weighting before final v5 promotion. Start with `EXECUTION_WEIGHT` in `[1.0, 2.0, 3.0, 5.0]`, preserve a held-out validation split, and choose the candidate with the lowest execution-subset ECE rather than only the lowest global ECE.
+- Apply probability clipping only as a documented post-calibration guard; serving hotfix clipping does not replace proper calibration evidence. For v5, search family-specific clipping bounds from `[0.03, 0.05, 0.08, 0.10] x [0.90, 0.92, 0.95, 0.97]` and choose by execution-subset Brier score.
 - Document results in `rerun_report.md`.
 
 ## Stage 2: Cost-Adjusted Backtest
@@ -102,6 +105,14 @@ Full promotion checklist:
 - [ ] Simple enough for production.
 
 If the decision is `KEEP_BASELINE_TEMPORARILY`, the output lists exactly which items failed. Fix only those, then rerun from the earliest failed stage.
+
+For v5 and later, configure the bootstrap calibration rules with:
+
+- `max_global_ece=0.4784` until a newer production baseline supersedes the observed v4 ECE.
+- `max_execution_subset_ece=0.08`.
+- `min_high_up_realized_up_rate=0.55`.
+- `min_high_down_realized_down_rate=0.55`.
+- `require_positive_avg_return_by_family=True`.
 
 ## Stage 5: Champion Cutover
 
@@ -190,6 +201,14 @@ Immediately execute [model_rollback.md](model_rollback.md) if any of these occur
 | `schema_error_rate` | Greater than 0 |
 | `edge_trigger_rate` | 0 for more than 2 hours |
 | simulated PnL | Drops below fallback baseline |
+
+## Phase 4 Live Execution Gate
+
+Bounded BTC-15M champion-signal runs are diagnostic only until account-cash-flow PnL reconciliation passes. See [phase4_execution_validation.md](phase4_execution_validation.md).
+
+- Do not use Phase 4 `realized_pnl_usdc` for promotion, capital sizing, or execution-subset calibration weighting.
+- Require matched Polymarket account-history reconciliation with both theoretical and account PnL reported.
+- Keep runtime summaries in GitHub issue #84; track engineering follow-ups in issue #85.
 
 ## Active XGBoost-v4 Note
 
