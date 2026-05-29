@@ -114,6 +114,102 @@ def test_bridge_signals_include_opposite_token_id(tmp_path: Path) -> None:
     assert by_side["DOWN"].opposite_token_id == "token-up"
 
 
+def test_bridge_forwards_multiple_15m_families(tmp_path: Path) -> None:
+    db_path = tmp_path / "catalog.duckdb"
+    ts = 1_779_774_400_000
+    with duckdb.connect(str(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE prediction_events (
+                event_id VARCHAR,
+                ts BIGINT,
+                created_at BIGINT,
+                model_version VARCHAR,
+                prob_up_15m DOUBLE,
+                feature_snapshot_json VARCHAR
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO prediction_events VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "btc-up",
+                    ts,
+                    ts + 1_000,
+                    "xgboost-v5",
+                    0.90,
+                    json.dumps(
+                        {
+                            "canonical_symbol": "BTC-15M:btc-updown-15m-1779774300:UP",
+                            "source_symbol": "btc-token-up",
+                            "market_implied_prob": 0.50,
+                        }
+                    ),
+                ),
+                (
+                    "eth-up",
+                    ts,
+                    ts + 1_002,
+                    "xgboost-v5",
+                    0.90,
+                    json.dumps(
+                        {
+                            "canonical_symbol": "ETH-15M:eth-updown-15m-1779774300:UP",
+                            "source_symbol": "eth-token-up",
+                            "market_implied_prob": 0.50,
+                        }
+                    ),
+                ),
+                (
+                    "eth-down",
+                    ts,
+                    ts + 1_003,
+                    "xgboost-v5",
+                    0.90,
+                    json.dumps(
+                        {
+                            "canonical_symbol": "ETH-15M:eth-updown-15m-1779774300:DOWN",
+                            "source_symbol": "eth-token-down",
+                            "market_implied_prob": 0.50,
+                        }
+                    ),
+                ),
+                (
+                    "eth-5m-up",
+                    ts,
+                    ts + 1_004,
+                    "xgboost-v5",
+                    0.90,
+                    json.dumps(
+                        {
+                            "canonical_symbol": "ETH-5M:eth-updown-5m-1779774300:UP",
+                            "source_symbol": "eth-5m-token-up",
+                            "market_implied_prob": 0.50,
+                        }
+                    ),
+                ),
+            ],
+        )
+
+    signals = bridge._read_bridge_signals_after(
+        str(db_path),
+        model_version="xgboost-v5",
+        after_created_at=0,
+        after_event_id="",
+        limit=10,
+        allowed_families=frozenset({"BTC-15M", "ETH-15M"}),
+    )
+
+    families = {signal.canonical_symbol.split(":", 1)[0] for signal in signals}
+    assert families == {"BTC-15M", "ETH-15M"}
+    # ETH-5M is excluded by the allow-set.
+    assert all(not s.canonical_symbol.startswith("ETH-5M") for s in signals)
+    # ETH opposite-token reconstruction uses the ETH family, not a hardcoded BTC prefix.
+    eth_up = next(s for s in signals if s.canonical_symbol.startswith("ETH-15M") and s.outcome_side == "UP")
+    assert eth_up.opposite_token_id == "eth-token-down"
+
+
 def test_bridge_skips_post_expiry_degenerate_signal() -> None:
     snapshot = {
         "canonical_symbol": "BTC-15M:btc-updown-15m-1779755400:UP",
@@ -271,6 +367,35 @@ def test_executor_latency_helpers() -> None:
         "signal_created_to_at_ms": 3_500,
         "bridge_to_at_ms": 2_500,
     }
+
+
+def test_executor_event_family_filter() -> None:
+    def _event(canonical_symbol: str):
+        return executor.SignalEvent(
+            event_id="pred-1",
+            ts=1_000,
+            created_at=2_000,
+            prob_up_15m=0.98,
+            canonical_symbol=canonical_symbol,
+            token_id="token-up",
+            outcome_side="UP",
+            round_slug="round",
+            round_end_ts=1_779_775_200_000,
+            market_implied_prob=0.47,
+            token_probability=0.98,
+            edge=0.51,
+        )
+
+    btc_15m = _event("BTC-15M:btc-updown-15m-1779774300:UP")
+    eth_15m = _event("ETH-15M:eth-updown-15m-1779774300:UP")
+    eth_5m = _event("ETH-5M:eth-updown-5m-1779774300:UP")
+    allowed = frozenset({"BTC-15M", "ETH-15M"})
+
+    assert executor._event_family_allowed(btc_15m, allowed) is True
+    assert executor._event_family_allowed(eth_15m, allowed) is True
+    assert executor._event_family_allowed(eth_5m, allowed) is False
+    # Empty allow-set trades everything (legacy behavior).
+    assert executor._event_family_allowed(eth_5m, frozenset()) is True
 
 
 def test_executor_starts_jsonl_cursor_at_tail(tmp_path: Path) -> None:

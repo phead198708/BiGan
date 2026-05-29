@@ -39,6 +39,7 @@ from bigan.execution.phase4_policy import (
     soft_force_exit_deferred,
 )
 from bigan.execution.position_manager import PositionManager
+from bigan.modeling.families import market_family_from_symbol
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,9 +161,23 @@ class OrderBookUnavailable(RuntimeError):
 STOP_REQUESTED = False
 
 
+def _event_family_allowed(event: SignalEvent, allowed_families: frozenset[str]) -> bool:
+    """Return True when the signal's market family is permitted to trade.
+
+    An empty ``allowed_families`` set means all families are allowed.
+    """
+
+    if not allowed_families:
+        return True
+    return market_family_from_symbol(event.canonical_symbol) in allowed_families
+
+
 def main() -> int:
     args = _parse_args()
     _install_signal_handlers()
+    allowed_families = frozenset(
+        family.strip().upper() for family in args.market_families.split(",") if family.strip()
+    )
     log_path = Path(args.log_path)
     summary_path = Path(args.summary_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -217,6 +232,7 @@ def main() -> int:
         "phase4_started",
         config={
             "model_version": args.model_version,
+            "market_families": sorted(allowed_families) or None,
             "signal_source": "jsonl" if signal_jsonl_path is not None else "duckdb",
             "signal_jsonl_path": str(signal_jsonl_path) if signal_jsonl_path is not None else None,
             "edge_threshold": args.edge_threshold,
@@ -403,6 +419,9 @@ def main() -> int:
                                 break
                     continue
 
+                if not _event_family_allowed(event, allowed_families):
+                    _bump(skipped, "market_family_not_allowed")
+                    continue
                 if len(lifecycle.open_positions) >= args.max_concurrent_positions:
                     _bump(skipped, "max_concurrent_positions")
                     continue
@@ -484,6 +503,9 @@ def main() -> int:
             "phase": "phase4_real_champion_signal",
             "started_at": _iso(started_at),
             "finished_at": _iso(_now_ms()),
+            "model_version": args.model_version,
+            "market_families": sorted(allowed_families) or None,
+            "edge_threshold": args.edge_threshold,
             "status": phase4_summary_status(
                 errors=errors,
                 entries_filled=entries_filled,
@@ -535,6 +557,14 @@ def _parse_args() -> argparse.Namespace:
         help="Where to start reading --signal-jsonl-path on startup.",
     )
     parser.add_argument("--model-version", default="xgboost-v4")
+    parser.add_argument(
+        "--market-families",
+        default="",
+        help=(
+            "Comma-separated market families to trade (e.g. BTC-15M,ETH-15M). "
+            "Empty trades all families. Signals from other families are skipped."
+        ),
+    )
     parser.add_argument("--max-rounds", type=int, default=10)
     parser.add_argument("--max-position-size-usdc", type=float, default=1.0)
     parser.add_argument(

@@ -55,6 +55,11 @@ def main() -> int:
         raise SystemExit("--batch-limit must be positive")
     if args.start not in {"latest", "beginning"}:
         raise SystemExit("--start must be latest or beginning")
+    allowed_families = frozenset(
+        family.strip().upper() for family in args.market_families.split(",") if family.strip()
+    )
+    if not allowed_families:
+        raise SystemExit("--market-families must list at least one family")
 
     cursor_created_at, cursor_event_id = (
         (0, "")
@@ -68,6 +73,7 @@ def main() -> int:
     print("bridging champion signals")
     print(f"local_db={args.monitoring_db_path}")
     print(f"model={args.model_version} start={args.start}")
+    print(f"families={','.join(sorted(allowed_families))}")
     print(f"remote={args.remote} remote_path={args.remote_path}")
     print(f"cursor created_at={cursor_created_at} event_id={cursor_event_id}")
 
@@ -76,6 +82,7 @@ def main() -> int:
             signals = _read_bridge_signals_after(
                 args.monitoring_db_path,
                 model_version=args.model_version,
+                allowed_families=allowed_families,
                 after_created_at=cursor_created_at,
                 after_event_id=cursor_event_id,
                 limit=args.batch_limit,
@@ -138,6 +145,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--monitoring-db-path", default="data/mlops/champion_catalog.duckdb")
     parser.add_argument("--model-version", default="xgboost-v4")
     parser.add_argument(
+        "--market-families",
+        default="BTC-15M",
+        help=(
+            "Comma-separated market families to bridge (e.g. BTC-15M,ETH-15M). "
+            "Only signals whose canonical_symbol family is in this set are forwarded."
+        ),
+    )
+    parser.add_argument(
         "--remote",
         required=True,
         help="SSH target for the execution host, for example ubuntu@13.231.238.96.",
@@ -195,14 +210,20 @@ def _read_bridge_signals_after(
     after_created_at: int,
     after_event_id: str,
     limit: int,
+    allowed_families: frozenset[str] = frozenset({"BTC-15M"}),
 ) -> list[BridgeSignal]:
+    family_clause = " OR ".join(
+        "json_extract_string(feature_snapshot_json, '$.canonical_symbol') LIKE ?"
+        for _ in allowed_families
+    )
+    family_params = [f"{family}:%" for family in sorted(allowed_families)]
     with duckdb.connect(db_path, read_only=True) as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT event_id, ts, created_at, prob_up_15m, feature_snapshot_json
             FROM prediction_events
             WHERE model_version = ?
-              AND json_extract_string(feature_snapshot_json, '$.canonical_symbol') LIKE 'BTC-15M:%'
+              AND ({family_clause})
               AND (
                     created_at > ?
                  OR (created_at = ? AND event_id > ?)
@@ -210,18 +231,22 @@ def _read_bridge_signals_after(
             ORDER BY created_at ASC, event_id ASC
             LIMIT ?
             """,
-            [model_version, after_created_at, after_created_at, after_event_id, limit],
+            [model_version, *family_params, after_created_at, after_created_at, after_event_id, limit],
         ).fetchall()
         signals: list[BridgeSignal] = []
         for row in rows:
-            signal = _bridge_signal_from_row(row, model_version=model_version)
+            signal = _bridge_signal_from_row(
+                row, model_version=model_version, allowed_families=allowed_families
+            )
             if signal is not None:
+                family = signal.canonical_symbol.split(":", 1)[0]
                 signals.append(
                     replace(
                         signal,
                         opposite_token_id=_opposite_token_id(
                             conn,
                             model_version=model_version,
+                            family=family,
                             round_slug=signal.round_slug,
                             outcome_side=signal.outcome_side,
                         ),
@@ -230,7 +255,12 @@ def _read_bridge_signals_after(
     return signals
 
 
-def _bridge_signal_from_row(row: tuple[Any, ...], *, model_version: str) -> BridgeSignal | None:
+def _bridge_signal_from_row(
+    row: tuple[Any, ...],
+    *,
+    model_version: str,
+    allowed_families: frozenset[str] = frozenset({"BTC-15M"}),
+) -> BridgeSignal | None:
     event_id, ts, created_at, prob_up_15m, snapshot_json = row
     try:
         snapshot = json.loads(str(snapshot_json))
@@ -242,8 +272,8 @@ def _bridge_signal_from_row(row: tuple[Any, ...], *, model_version: str) -> Brid
     parts = canonical_symbol.split(":")
     if len(parts) < 3:
         return None
-    family, round_slug, side = parts[0], parts[-2], parts[-1].upper()
-    if family != "BTC-15M" or side not in {"UP", "DOWN"}:
+    family, round_slug, side = parts[0].upper(), parts[-2], parts[-1].upper()
+    if family not in allowed_families or side not in {"UP", "DOWN"}:
         return None
     token_id = str(snapshot.get("source_symbol") or snapshot.get("token_id") or "")
     market = _market_implied_probability(snapshot, event_ts=int(ts))
@@ -274,11 +304,12 @@ def _opposite_token_id(
     conn: duckdb.DuckDBPyConnection,
     *,
     model_version: str,
+    family: str,
     round_slug: str,
     outcome_side: str,
 ) -> str:
     opposite_side = "DOWN" if outcome_side == "UP" else "UP"
-    canonical_symbol = f"BTC-15M:{round_slug}:{opposite_side}"
+    canonical_symbol = f"{family}:{round_slug}:{opposite_side}"
     row = conn.execute(
         """
         SELECT feature_snapshot_json
