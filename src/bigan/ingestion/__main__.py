@@ -30,7 +30,11 @@ from bigan.backtest import (
 from bigan.canonical.etl import run_etl_batch
 from bigan.canonical.query import open_warehouse, warehouse_summary
 from bigan.canonical.symbols import SymbolMapper
-from bigan.features import run_feature_batch, run_feature_quality_sql_checks
+from bigan.features import (
+    run_feature_batch,
+    run_feature_quality_sql_checks,
+    run_low_latency_feature_queue_batch,
+)
 from bigan.labels import run_label_batch
 from bigan.labels.generation import DOWN_LABEL_KIND, generate_labels_15m_v1
 from bigan.mlops import (
@@ -56,11 +60,13 @@ from bigan.modeling import (
     LogisticBaselineConfig,
     SplitConfig,
     XGBoostV1Config,
+    XGBoostV6Config,
     assemble_training_dataset,
     audit_champion_promotion_process,
     evaluate_bootstrap_champion,
     evaluate_model_promotion,
     evaluate_probability_model_on_dataset,
+    fit_family_aware_calibration,
     fit_probability_calibration,
     generate_dataset_stability_report,
     generate_feature_ablation_report,
@@ -71,6 +77,8 @@ from bigan.modeling import (
     train_xgboost_v2,
     train_xgboost_v3,
     train_xgboost_v4,
+    train_xgboost_v5,
+    train_xgboost_v6,
 )
 from bigan.modeling.promotion import (
     EXPECTED_CUTOVER_GITHUB_REPO,
@@ -204,6 +212,14 @@ XGBOOST_V3_OUTPUT_DIR_OPTION = typer.Option(
 XGBOOST_V4_OUTPUT_DIR_OPTION = typer.Option(
     Path("data/model-runs/xgboost-v4"),
     help="Directory for XGBoost-v4 artifacts.",
+)
+XGBOOST_V5_OUTPUT_DIR_OPTION = typer.Option(
+    Path("data/model-runs/xgboost-v5"),
+    help="Directory for XGBoost-v5 artifacts.",
+)
+XGBOOST_V6_OUTPUT_DIR_OPTION = typer.Option(
+    Path("data/model-runs/xgboost-v6"),
+    help="Directory for XGBoost-v6 multi-head artifacts.",
 )
 CALIBRATION_MODEL_PATH_OPTION = typer.Option(
     Path("data/model-runs/xgboost-v1/model.json"),
@@ -551,6 +567,26 @@ PREDICTION_WRITE_MONITORING_EVENTS_OPTION = typer.Option(
     True,
     "--write-monitoring-events/--no-write-monitoring-events",
     help="Write generated predictions to prediction_events for live monitoring.",
+)
+LOW_LATENCY_RAW_QUEUE_PATH_OPTION = typer.Option(
+    Path("data/live/low-latency/raw-btc15m.jsonl"),
+    help="Append-only JSONL raw queue produced by the capture runner.",
+)
+LOW_LATENCY_FEATURE_CURSOR_PATH_OPTION = typer.Option(
+    None,
+    help="Optional file storing the next raw queue line cursor.",
+)
+LOW_LATENCY_FEATURE_STATE_PATH_OPTION = typer.Option(
+    None,
+    help="Optional JSON state file for incremental BTC-15M feature context.",
+)
+LOW_LATENCY_FEATURE_CANONICAL_PREFIX_OPTION = typer.Option(
+    "BTC-15M:",
+    help="Only queued raw rows whose canonical_symbol starts with this prefix are consumed.",
+)
+LOW_LATENCY_FEATURE_MAX_RECORDS_OPTION = typer.Option(
+    None,
+    help="Maximum queued raw records to consume in this batch.",
 )
 LABEL_MONITORING_MODEL_VERSION_OPTION = typer.Option(
     ACTIVE_CHAMPION_MODEL_VERSION,
@@ -1308,6 +1344,10 @@ def etl_batch(
     ),
     symbol_mapping_path: Path | None = SYMBOL_MAPPING_PATH_OPTION,
     processed_manifest_path: Path | None = PROCESSED_MANIFEST_PATH_OPTION,
+    max_files_per_batch: int | None = typer.Option(
+        None,
+        help="Process at most this many eligible NDJSON.gz files per invocation.",
+    ),
     timestamp_future_grace_seconds: float | None = TIMESTAMP_FUTURE_GRACE_SECONDS_OPTION,
     timestamp_stale_threshold_seconds: float | None = TIMESTAMP_STALE_THRESHOLD_SECONDS_OPTION,
 ) -> None:
@@ -1319,6 +1359,7 @@ def etl_batch(
         warehouse_dir=settings.warehouse_dir,
         lag_seconds=lag_seconds,
         max_rows_per_partition=max_rows_per_partition,
+        max_files_per_batch=max_files_per_batch,
         symbol_mapping_path=symbol_mapping_path,
         processed_manifest_path=processed_manifest_path,
         timestamp_future_grace_seconds=(
@@ -1455,6 +1496,10 @@ def features_15m_v1(
         None,
         help="Only write features with feature_ts < this UTC ms timestamp.",
     ),
+    canonical_symbol_like: str | None = typer.Option(
+        None,
+        help="Optional SQL LIKE pattern for canonical_symbol, for example BTC-15M:%.",
+    ),
     skip_existing: bool = typer.Option(
         False,
         "--skip-existing/--replace-existing",
@@ -1478,6 +1523,7 @@ def features_15m_v1(
         max_rows_per_partition=max_rows_per_partition,
         since_ms=lower_bound_ms,
         until_ms=until_ms,
+        canonical_symbol_like=canonical_symbol_like,
         skip_existing=skip_existing,
     )
     typer.echo(
@@ -1490,6 +1536,36 @@ def features_15m_v1(
             indent=2,
         )
     )
+
+
+@app.command("features-15m-v1-low-latency-queue")
+def features_15m_v1_low_latency_queue(
+    queue_path: Path = LOW_LATENCY_RAW_QUEUE_PATH_OPTION,
+    cursor_path: Path | None = LOW_LATENCY_FEATURE_CURSOR_PATH_OPTION,
+    state_path: Path | None = LOW_LATENCY_FEATURE_STATE_PATH_OPTION,
+    canonical_symbol_prefix: str = LOW_LATENCY_FEATURE_CANONICAL_PREFIX_OPTION,
+    max_records: int | None = LOW_LATENCY_FEATURE_MAX_RECORDS_OPTION,
+    max_rows_per_partition: int = typer.Option(
+        50_000,
+        help="Flush feature partitions after this many rows.",
+    ),
+) -> None:
+    """Append changed features_15m_v1 rows from the low-latency BTC-15M queue."""
+
+    if max_records is not None and max_records <= 0:
+        raise typer.BadParameter("--max-records must be positive")
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = run_low_latency_feature_queue_batch(
+        settings.warehouse_dir,
+        queue_path,
+        cursor_path=cursor_path,
+        state_path=state_path,
+        max_records=max_records,
+        max_rows_per_partition=max_rows_per_partition,
+        canonical_symbol_prefix=canonical_symbol_prefix,
+    )
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 
 
 @app.command("feature-quality-report")
@@ -1540,6 +1616,11 @@ def labels_15m_v1(
         "--write-monitoring-outcomes/--no-write-monitoring-outcomes",
         help="Write matched labels to prediction_outcomes for live monitoring.",
     ),
+    settlement_neutral_margin: float = typer.Option(
+        0.0,
+        "--settlement-neutral-margin",
+        help="Absolute underlying-price margin treated as NEUTRAL for v6 settlement labels.",
+    ),
     skip_existing_labels: bool = typer.Option(
         False,
         "--skip-existing-labels/--no-skip-existing-labels",
@@ -1551,6 +1632,8 @@ def labels_15m_v1(
         raise typer.BadParameter("--lookback-minutes must be positive")
     if lookback_minutes is not None and since_ms is not None:
         raise typer.BadParameter("pass either --lookback-minutes or --since-ms, not both")
+    if settlement_neutral_margin < 0.0:
+        raise typer.BadParameter("--settlement-neutral-margin must be non-negative")
     settings = IngestionSettings()
     _configure_logging(settings.log_level)
     lower_bound_ms = (
@@ -1566,6 +1649,7 @@ def labels_15m_v1(
         market_slug_prefix=settings.market_slug_prefix,
         request_timeout_seconds=request_timeout_seconds,
         request_concurrency=request_concurrency,
+        settlement_neutral_margin=settlement_neutral_margin,
         monitoring_db_path=monitoring_db_path if write_monitoring_outcomes else None,
         monitoring_model_version=monitoring_model_version if write_monitoring_outcomes else None,
         skip_existing_labels=skip_existing_labels,
@@ -1721,6 +1805,42 @@ def xgboost_v4(
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 
 
+@app.command("xgboost-v5")
+def xgboost_v5(
+    dataset_dir: Path = XGBOOST_DATASET_DIR_OPTION,
+    output_dir: Path = XGBOOST_V5_OUTPUT_DIR_OPTION,
+    ensemble_seeds: str = typer.Option(
+        "0,17,42,101,257",
+        help="Comma-separated random seeds for the v5 ensemble.",
+    ),
+) -> None:
+    """Train xgboost-v5 artifacts on the v4 feature schema (family-aware calib step is separate)."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = train_xgboost_v5(
+        dataset_dir,
+        output_dir,
+        ensemble_seeds=tuple(_parse_int_grid(ensemble_seeds)),
+    )
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("xgboost-v6")
+def xgboost_v6(
+    dataset_dir: Path = XGBOOST_DATASET_DIR_OPTION,
+    output_dir: Path = XGBOOST_V6_OUTPUT_DIR_OPTION,
+) -> None:
+    """Train xgboost-v6 three-way settlement and volatility-head artifacts."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = train_xgboost_v6(
+        dataset_dir,
+        output_dir,
+        config=XGBoostV6Config(),
+    )
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
 @app.command("calibration-v1")
 def calibration_v1(
     model_path: Path = CALIBRATION_MODEL_PATH_OPTION,
@@ -1731,6 +1851,19 @@ def calibration_v1(
     settings = IngestionSettings()
     _configure_logging(settings.log_level)
     report = fit_probability_calibration(model_path, dataset_dir, output_dir)
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("calibration-family-aware-v1")
+def calibration_family_aware_v1(
+    model_path: Path = CALIBRATION_MODEL_PATH_OPTION,
+    dataset_dir: Path = CALIBRATION_DATASET_DIR_OPTION,
+    output_dir: Path = CALIBRATION_OUTPUT_DIR_OPTION,
+) -> None:
+    """Fit per-family probability calibration for a saved model (xgboost-v5)."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = fit_family_aware_calibration(model_path, dataset_dir, output_dir)
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 
 
@@ -6092,6 +6225,10 @@ def predictions_v1(
         None,
         help="Only score features with feature_ts < this UTC ms timestamp.",
     ),
+    canonical_symbol_like: str | None = typer.Option(
+        None,
+        help="Optional SQL LIKE pattern for canonical_symbol, for example BTC-15M:%.",
+    ),
     skip_existing_monitoring_events: bool = typer.Option(
         False,
         "--skip-existing-monitoring-events/--replace-monitoring-events",
@@ -6127,6 +6264,7 @@ def predictions_v1(
         max_rows_per_partition=max_rows_per_partition,
         since_ms=lower_bound_ms,
         until_ms=until_ms,
+        canonical_symbol_like=canonical_symbol_like,
         skip_existing_monitoring_events=skip_existing_monitoring_events,
         skip_existing_predictions=skip_existing_predictions,
     )
@@ -6502,6 +6640,10 @@ def backtest_model_v1(
         "UP",
         help="Required outcome side encoded in canonical_symbol. Use an empty string to include all outcomes.",
     ),
+    market_families: str = typer.Option(
+        "",
+        help="Comma-separated market families to include (e.g. BTC-15M,ETH-15M). Empty includes all.",
+    ),
     fee_bps: float = typer.Option(10.0, help="Taker fee assumption in basis points."),
     slippage_bps: float = typer.Option(5.0, help="Taker slippage assumption in basis points."),
     latency_ms: int = typer.Option(0, help="Execution latency assumption in milliseconds."),
@@ -6509,6 +6651,9 @@ def backtest_model_v1(
     """Score a saved model on a dataset and run a grouped threshold backtest."""
     settings = IngestionSettings()
     _configure_logging(settings.log_level)
+    families = {
+        family.strip().upper() for family in market_families.split(",") if family.strip()
+    }
     report = run_model_threshold_backtest(
         model_path=model_path,
         dataset_dir=dataset_dir,
@@ -6523,6 +6668,7 @@ def backtest_model_v1(
             latency_ms=latency_ms,
         ),
         required_outcome_side=required_outcome_side or None,
+        market_families=frozenset(families) or None,
     )
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 

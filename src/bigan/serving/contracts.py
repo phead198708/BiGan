@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from bigan.monitoring import PredictionEvent
 
@@ -83,6 +83,11 @@ class PredictResponse(_StrictModel):
     """Response body for POST /predict."""
 
     prob_up_15m: float = Field(ge=0.0, le=1.0)
+    p_up: float | None = Field(default=None, ge=0.0, le=1.0)
+    p_down: float | None = Field(default=None, ge=0.0, le=1.0)
+    p_neutral: float | None = Field(default=None, ge=0.0, le=1.0)
+    p_vol_up: float | None = Field(default=None, ge=0.0, le=1.0)
+    p_vol_down: float | None = Field(default=None, ge=0.0, le=1.0)
     model_version: str
     feature_version: str
     confidence_bucket: str
@@ -96,6 +101,28 @@ class PredictResponse(_StrictModel):
     @classmethod
     def _clip_served_probability(cls, value: float) -> float:
         return clip_probability(value)
+
+    @model_validator(mode="after")
+    def _v6_payload_is_explicit(self) -> Self:
+        settlement_values = (self.p_up, self.p_down, self.p_neutral)
+        volatility_values = (self.p_vol_up, self.p_vol_down)
+        has_v6_fields = any(value is not None for value in (*settlement_values, *volatility_values))
+        is_v6 = self.model_version == "xgboost-v6" or self.model_version.startswith("xgboost-v6:")
+        if not is_v6 and not has_v6_fields:
+            return self
+        if any(value is None for value in settlement_values):
+            raise ValueError("v6 prediction payload must include p_up, p_down, and p_neutral")
+        if any(value is None for value in volatility_values):
+            raise ValueError("v6 prediction payload must include p_vol_up and p_vol_down")
+        assert self.p_up is not None
+        assert self.p_down is not None
+        assert self.p_neutral is not None
+        probability_sum = self.p_up + self.p_down + self.p_neutral
+        if abs(probability_sum - 1.0) > 1e-6:
+            raise ValueError("v6 settlement probabilities must sum to 1")
+        if abs(self.prob_up_15m - clip_probability(self.p_up)) > 1e-9:
+            raise ValueError("prob_up_15m must be the clipped legacy alias for explicit p_up")
+        return self
 
 
 class LatestPredictionResponse(PredictResponse):
@@ -191,6 +218,12 @@ def api_contract() -> dict[str, Any]:
             "prob_up_15m_clip_lower": DEFAULT_PROBABILITY_CLIP_LOWER,
             "prob_up_15m_clip_upper": DEFAULT_PROBABILITY_CLIP_UPPER,
             "scope": "serving_contract_only",
+        },
+        "v6_prediction_payload": {
+            "settlement_probabilities": ["p_up", "p_down", "p_neutral"],
+            "volatility_probabilities": ["p_vol_up", "p_vol_down"],
+            "legacy_alias": "prob_up_15m is clipped p_up only",
+            "down_probability_rule": "read explicit p_down; never derive from 1 - p_up",
         },
     }
 

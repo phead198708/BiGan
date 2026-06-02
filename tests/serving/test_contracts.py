@@ -110,6 +110,63 @@ def test_predict_response_clips_served_probability_hotfix() -> None:
     }
 
 
+def test_predict_response_requires_explicit_v6_three_way_and_volatility_payload() -> None:
+    response = PredictResponse(
+        prob_up_15m=0.55,
+        p_up=0.55,
+        p_down=0.30,
+        p_neutral=0.15,
+        p_vol_up=0.64,
+        p_vol_down=0.41,
+        model_version="xgboost-v6",
+        feature_version="bigan-mvp-v1.0.0",
+        confidence_bucket="medium_up",
+        top_features_json="[]",
+        inference_ts=1_000,
+        serving_latency_ms=4.2,
+    )
+
+    assert response.p_down == pytest.approx(0.30)
+    assert response.p_down != pytest.approx(1.0 - response.p_up)
+    assert api_contract()["v6_prediction_payload"] == {
+        "settlement_probabilities": ["p_up", "p_down", "p_neutral"],
+        "volatility_probabilities": ["p_vol_up", "p_vol_down"],
+        "legacy_alias": "prob_up_15m is clipped p_up only",
+        "down_probability_rule": "read explicit p_down; never derive from 1 - p_up",
+    }
+
+    with pytest.raises(ValidationError, match="p_up, p_down, and p_neutral"):
+        PredictResponse(
+            prob_up_15m=0.55,
+            p_up=0.55,
+            p_neutral=0.45,
+            p_vol_up=0.64,
+            p_vol_down=0.41,
+            model_version="xgboost-v6",
+            feature_version="bigan-mvp-v1.0.0",
+            confidence_bucket="bad",
+            top_features_json="[]",
+            inference_ts=1_000,
+            serving_latency_ms=4.2,
+        )
+
+    with pytest.raises(ValidationError, match="sum to 1"):
+        PredictResponse(
+            prob_up_15m=0.55,
+            p_up=0.55,
+            p_down=0.30,
+            p_neutral=0.30,
+            p_vol_up=0.64,
+            p_vol_down=0.41,
+            model_version="xgboost-v6",
+            feature_version="bigan-mvp-v1.0.0",
+            confidence_bucket="bad",
+            top_features_json="[]",
+            inference_ts=1_000,
+            serving_latency_ms=4.2,
+        )
+
+
 def test_latest_prediction_extends_predict_response_with_identity() -> None:
     latest = LatestPredictionResponse(
         prob_up_15m=0.51,
