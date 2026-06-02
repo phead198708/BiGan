@@ -1,0 +1,553 @@
+{
+  "campaign_id": "20260601T165038Z",
+  "generated_at_utc": "2026-06-02T01:48:50+00:00",
+  "notes": [
+    "Account cash PnL is authoritative for realized account impact; executor PnL is fill-price theoretical until reconciled.",
+    "Stages 1-5 were produced by the active pre-hotfix bridge process; filled trades are all BTC DOWN and the live queue still contains both UP and DOWN signal sides.",
+    "Preflight 20260601T160428Z-stage4 cashflow is excluded from this fresh 12h campaign."
+  ],
+  "referenced_policy_replay_artifacts": [
+    "docs/reports/xgboost_v5_phase4_20260601_gating_policy_replay.md",
+    "docs/reports/xgboost_v5_phase4_20260601_gating_policy_replay.json",
+    "docs/reports/xgboost_v5_phase4_20260601_profit_gating_policy_replay.md",
+    "docs/reports/xgboost_v5_phase4_20260601_profit_gating_policy_replay.json"
+  ],
+  "remote_host": "ubuntu@54.250.242.139",
+  "runbook_config": {
+    "continue_after_max_rounds_until_runtime": true,
+    "daily_loss_limit_usdc": 3.0,
+    "edge_threshold": 0.14,
+    "exit_order_timeout_seconds": 20,
+    "hard_exit_window_seconds": 120,
+    "market_families": [
+      "BTC-15M",
+      "ETH-15M"
+    ],
+    "max_concurrent_positions": 1,
+    "max_position_size_usdc": 1.0,
+    "max_rounds": 6,
+    "max_runtime_minutes": 120,
+    "max_seconds_to_expiry": 1200,
+    "min_entry_price": 0.35,
+    "min_seconds_to_expiry": 180,
+    "model_version": "xgboost-v5",
+    "no_new_entry_before_expiry_seconds": 300,
+    "poll_seconds": 10,
+    "soft_exit_window_seconds": 240
+  },
+  "source_account_history_csv": "/Users/tcscoder/Downloads/Polymarket-History-2026-06-02.csv",
+  "stage_records": [
+    {
+      "entry_skip_families": {
+        "BTC-15M": 97,
+        "ETH-15M": 24
+      },
+      "entry_skip_reasons": {
+        "entry_price_below_min": 2,
+        "max_rounds": 101,
+        "no_new_entry_window": 18
+      },
+      "entry_skip_sides": {
+        "DOWN": 68,
+        "UP": 53
+      },
+      "event_counts": {
+        "entry_filled": 1,
+        "entry_order_posted": 1,
+        "entry_skipped": 121,
+        "exit_filled": 1,
+        "exit_order_posted": 1,
+        "heartbeat_ok": 1362,
+        "opposite_exit_hold": 2,
+        "phase4_started": 1,
+        "phase4_summary": 1,
+        "signal_batch_received": 133,
+        "stop_max_runtime": 1
+      },
+      "finished_at": "2026-06-01T18:50:46.134000+00:00",
+      "latency_summary_ms": {
+        "bridge_to_at_ms": {
+          "count": 152,
+          "max_ms": 13564.0,
+          "median_ms": 8160.5
+        },
+        "event_ts_to_at_ms": {
+          "count": 152,
+          "max_ms": 695965.0,
+          "median_ms": 24642.5
+        },
+        "signal_created_to_at_ms": {
+          "count": 152,
+          "max_ms": 24055.0,
+          "median_ms": 11238.5
+        }
+      },
+      "latest_event": {
+        "event": "phase4_summary",
+        "ts": "2026-06-01T18:50:46.135000+00:00"
+      },
+      "max_signal_edge_seen": 0.96,
+      "observed_rounds_from_events": 18,
+      "remote_jsonl_path": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T165038Z-stage1/phase4-20260601T165041Z.jsonl",
+      "remote_log_dir": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T165038Z-stage1",
+      "remote_queue_lines": 483,
+      "remote_queue_path": "/home/ubuntu/BiGan/data/live/remote-signals/champion-signals-runbook-12h-20260601T165038Z-stage1.jsonl",
+      "remote_summary_path": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T165038Z-stage1/phase4-20260601T165041Z-summary.json",
+      "run_id": "20260601T165038Z-stage1",
+      "signal_count": 152,
+      "signal_families": {
+        "BTC-15M": 125,
+        "ETH-15M": 27
+      },
+      "signal_sides": {
+        "DOWN": 87,
+        "UP": 65
+      },
+      "stage": 1,
+      "started_at": "2026-06-01T16:50:42.471000+00:00",
+      "status": "LIFECYCLE_PASS",
+      "summary": {
+        "account_cash_pnl_usdc": null,
+        "account_cashflow_reconciliation_required": true,
+        "attempted_entry_event_count": 3,
+        "closed_round_count": 1,
+        "closes_filled": 1,
+        "edge_threshold": 0.14,
+        "entries_attempted": 3,
+        "entries_filled": 1,
+        "errors": 0,
+        "execution_log_path": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T165038Z-stage1/phase4-20260601T165041Z.jsonl",
+        "exits_pending_confirmation": 0,
+        "exits_pending_settlement": 0,
+        "filled_round_count": 1,
+        "finished_at": "2026-06-01T18:50:46.134000+00:00",
+        "lifecycle_complete": true,
+        "market_families": [
+          "BTC-15M",
+          "ETH-15M"
+        ],
+        "model_version": "xgboost-v5",
+        "observed_round_count": 6,
+        "open_positions_at_shutdown": 0,
+        "phase": "phase4_real_champion_signal",
+        "pnl_reconciliation_status": "theoretical_only",
+        "processed_event_count": 152,
+        "promotion_or_capital_sizing_evidence": false,
+        "realized_pnl_usdc": -0.39583308,
+        "skipped": {
+          "below_edge_threshold": 13,
+          "max_concurrent_positions": 4,
+          "max_rounds": 101,
+          "no_new_entry_window": 18,
+          "round_already_filled": 5
+        },
+        "started_at": "2026-06-01T16:50:42.471000+00:00",
+        "status": "LIFECYCLE_PASS",
+        "theoretical_pnl_usdc": -0.39583308
+      }
+    },
+    {
+      "entry_skip_families": {
+        "BTC-15M": 19,
+        "ETH-15M": 6
+      },
+      "entry_skip_reasons": {
+        "fresh_edge_below_threshold": 1,
+        "max_rounds": 11,
+        "no_new_entry_window": 13
+      },
+      "entry_skip_sides": {
+        "DOWN": 16,
+        "UP": 9
+      },
+      "event_counts": {
+        "entry_filled": 1,
+        "entry_order_posted": 1,
+        "entry_skipped": 25,
+        "exit_filled": 1,
+        "exit_order_posted": 1,
+        "heartbeat_ok": 1365,
+        "opposite_exit_hold": 1,
+        "phase4_started": 1,
+        "phase4_summary": 1,
+        "position_lifecycle_transition": 1,
+        "signal_batch_received": 44,
+        "stop_max_runtime": 1
+      },
+      "finished_at": "2026-06-01T20:58:46.554000+00:00",
+      "latency_summary_ms": {
+        "bridge_to_at_ms": {
+          "count": 49,
+          "max_ms": 12776.0,
+          "median_ms": 7042.0
+        },
+        "event_ts_to_at_ms": {
+          "count": 49,
+          "max_ms": 856304.0,
+          "median_ms": 21417.0
+        },
+        "signal_created_to_at_ms": {
+          "count": 49,
+          "max_ms": 19637.0,
+          "median_ms": 11171.0
+        }
+      },
+      "latest_event": {
+        "event": "phase4_summary",
+        "ts": "2026-06-01T20:58:46.554000+00:00"
+      },
+      "max_signal_edge_seen": 0.96,
+      "observed_rounds_from_events": 7,
+      "remote_jsonl_path": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T185841Z-stage2/phase4-20260601T185844Z.jsonl",
+      "remote_log_dir": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T185841Z-stage2",
+      "remote_queue_lines": 160,
+      "remote_queue_path": "/home/ubuntu/BiGan/data/live/remote-signals/champion-signals-runbook-12h-20260601T185841Z-stage2.jsonl",
+      "remote_summary_path": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T185841Z-stage2/phase4-20260601T185844Z-summary.json",
+      "run_id": "20260601T185841Z-stage2",
+      "signal_count": 49,
+      "signal_families": {
+        "BTC-15M": 43,
+        "ETH-15M": 6
+      },
+      "signal_sides": {
+        "DOWN": 30,
+        "UP": 19
+      },
+      "stage": 2,
+      "started_at": "2026-06-01T18:58:44.903000+00:00",
+      "status": "LIFECYCLE_PASS",
+      "summary": {
+        "account_cash_pnl_usdc": null,
+        "account_cashflow_reconciliation_required": true,
+        "attempted_entry_event_count": 2,
+        "closed_round_count": 1,
+        "closes_filled": 1,
+        "edge_threshold": 0.14,
+        "entries_attempted": 2,
+        "entries_filled": 1,
+        "errors": 0,
+        "execution_log_path": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T185841Z-stage2/phase4-20260601T185844Z.jsonl",
+        "exits_pending_confirmation": 0,
+        "exits_pending_settlement": 0,
+        "filled_round_count": 1,
+        "finished_at": "2026-06-01T20:58:46.554000+00:00",
+        "lifecycle_complete": true,
+        "market_families": [
+          "BTC-15M",
+          "ETH-15M"
+        ],
+        "model_version": "xgboost-v5",
+        "observed_round_count": 6,
+        "open_positions_at_shutdown": 0,
+        "phase": "phase4_real_champion_signal",
+        "pnl_reconciliation_status": "theoretical_only",
+        "processed_event_count": 49,
+        "promotion_or_capital_sizing_evidence": false,
+        "realized_pnl_usdc": -0.59523775,
+        "skipped": {
+          "below_edge_threshold": 13,
+          "max_rounds": 11,
+          "no_new_entry_window": 13,
+          "round_already_filled": 5
+        },
+        "started_at": "2026-06-01T18:58:44.903000+00:00",
+        "status": "LIFECYCLE_PASS",
+        "theoretical_pnl_usdc": -0.59523775
+      }
+    },
+    {
+      "entry_skip_families": {
+        "BTC-15M": 93,
+        "ETH-15M": 21
+      },
+      "entry_skip_reasons": {
+        "max_rounds": 107,
+        "no_new_entry_window": 7
+      },
+      "entry_skip_sides": {
+        "DOWN": 70,
+        "UP": 44
+      },
+      "event_counts": {
+        "entry_filled": 2,
+        "entry_order_posted": 2,
+        "entry_skipped": 114,
+        "exit_filled": 2,
+        "exit_order_posted": 2,
+        "heartbeat_ok": 1366,
+        "opposite_exit_hold": 1,
+        "phase4_started": 1,
+        "phase4_summary": 1,
+        "position_lifecycle_transition": 1,
+        "signal_batch_received": 128,
+        "stop_max_runtime": 1
+      },
+      "finished_at": "2026-06-01T22:59:30.209000+00:00",
+      "latency_summary_ms": {
+        "bridge_to_at_ms": {
+          "count": 147,
+          "max_ms": 12705.0,
+          "median_ms": 8688.0
+        },
+        "event_ts_to_at_ms": {
+          "count": 147,
+          "max_ms": 989893.0,
+          "median_ms": 20071.0
+        },
+        "signal_created_to_at_ms": {
+          "count": 147,
+          "max_ms": 31628.0,
+          "median_ms": 12059.0
+        }
+      },
+      "latest_event": {
+        "event": "phase4_summary",
+        "ts": "2026-06-01T22:59:30.209000+00:00"
+      },
+      "max_signal_edge_seen": 0.96,
+      "observed_rounds_from_events": 17,
+      "remote_jsonl_path": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T205925Z-stage3/phase4-20260601T205928Z.jsonl",
+      "remote_log_dir": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T205925Z-stage3",
+      "remote_queue_lines": 441,
+      "remote_queue_path": "/home/ubuntu/BiGan/data/live/remote-signals/champion-signals-runbook-12h-20260601T205925Z-stage3.jsonl",
+      "remote_summary_path": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T205925Z-stage3/phase4-20260601T205928Z-summary.json",
+      "run_id": "20260601T205925Z-stage3",
+      "signal_count": 147,
+      "signal_families": {
+        "BTC-15M": 126,
+        "ETH-15M": 21
+      },
+      "signal_sides": {
+        "DOWN": 87,
+        "UP": 60
+      },
+      "stage": 3,
+      "started_at": "2026-06-01T20:59:29.210000+00:00",
+      "status": "LIFECYCLE_PASS",
+      "summary": {
+        "account_cash_pnl_usdc": null,
+        "account_cashflow_reconciliation_required": true,
+        "attempted_entry_event_count": 2,
+        "closed_round_count": 2,
+        "closes_filled": 2,
+        "edge_threshold": 0.14,
+        "entries_attempted": 2,
+        "entries_filled": 2,
+        "errors": 0,
+        "execution_log_path": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T205925Z-stage3/phase4-20260601T205928Z.jsonl",
+        "exits_pending_confirmation": 0,
+        "exits_pending_settlement": 0,
+        "filled_round_count": 2,
+        "finished_at": "2026-06-01T22:59:30.209000+00:00",
+        "lifecycle_complete": true,
+        "market_families": [
+          "BTC-15M",
+          "ETH-15M"
+        ],
+        "model_version": "xgboost-v5",
+        "observed_round_count": 6,
+        "open_positions_at_shutdown": 0,
+        "phase": "phase4_real_champion_signal",
+        "pnl_reconciliation_status": "theoretical_only",
+        "processed_event_count": 147,
+        "promotion_or_capital_sizing_evidence": false,
+        "realized_pnl_usdc": 0.19381582,
+        "skipped": {
+          "below_edge_threshold": 8,
+          "max_rounds": 107,
+          "no_new_entry_window": 7,
+          "round_already_filled": 19
+        },
+        "started_at": "2026-06-01T20:59:29.210000+00:00",
+        "status": "LIFECYCLE_PASS",
+        "theoretical_pnl_usdc": 0.19381582
+      }
+    },
+    {
+      "entry_skip_families": {
+        "BTC-15M": 107,
+        "ETH-15M": 21
+      },
+      "entry_skip_reasons": {
+        "entry_price_below_min": 5,
+        "max_rounds": 111,
+        "no_new_entry_window": 12
+      },
+      "entry_skip_sides": {
+        "DOWN": 71,
+        "UP": 57
+      },
+      "event_counts": {
+        "entry_filled": 1,
+        "entry_order_posted": 1,
+        "entry_skipped": 128,
+        "exit_filled": 1,
+        "exit_order_posted": 1,
+        "heartbeat_ok": 1367,
+        "phase4_started": 1,
+        "phase4_summary": 1,
+        "signal_batch_received": 126,
+        "stop_max_runtime": 1
+      },
+      "finished_at": "2026-06-02T01:00:12.678000+00:00",
+      "latency_summary_ms": {
+        "bridge_to_at_ms": {
+          "count": 149,
+          "max_ms": 13247.0,
+          "median_ms": 7650.0
+        },
+        "event_ts_to_at_ms": {
+          "count": 149,
+          "max_ms": 1602623.0,
+          "median_ms": 22512.0
+        },
+        "signal_created_to_at_ms": {
+          "count": 149,
+          "max_ms": 36670.0,
+          "median_ms": 12051.0
+        }
+      },
+      "latest_event": {
+        "event": "phase4_summary",
+        "ts": "2026-06-02T01:00:12.679000+00:00"
+      },
+      "max_signal_edge_seen": 0.969,
+      "observed_rounds_from_events": 19,
+      "remote_jsonl_path": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T230004Z-stage4/phase4-20260601T230007Z.jsonl",
+      "remote_log_dir": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T230004Z-stage4",
+      "remote_queue_lines": 496,
+      "remote_queue_path": "/home/ubuntu/BiGan/data/live/remote-signals/champion-signals-runbook-12h-20260601T230004Z-stage4.jsonl",
+      "remote_summary_path": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T230004Z-stage4/phase4-20260601T230007Z-summary.json",
+      "run_id": "20260601T230004Z-stage4",
+      "signal_count": 149,
+      "signal_families": {
+        "BTC-15M": 128,
+        "ETH-15M": 21
+      },
+      "signal_sides": {
+        "DOWN": 77,
+        "UP": 72
+      },
+      "stage": 4,
+      "started_at": "2026-06-01T23:00:08.380000+00:00",
+      "status": "LIFECYCLE_PASS",
+      "summary": {
+        "account_cash_pnl_usdc": null,
+        "account_cashflow_reconciliation_required": true,
+        "attempted_entry_event_count": 6,
+        "closed_round_count": 1,
+        "closes_filled": 1,
+        "edge_threshold": 0.14,
+        "entries_attempted": 6,
+        "entries_filled": 1,
+        "errors": 0,
+        "execution_log_path": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260601T230004Z-stage4/phase4-20260601T230007Z.jsonl",
+        "exits_pending_confirmation": 0,
+        "exits_pending_settlement": 0,
+        "filled_round_count": 1,
+        "finished_at": "2026-06-02T01:00:12.678000+00:00",
+        "lifecycle_complete": true,
+        "market_families": [
+          "BTC-15M",
+          "ETH-15M"
+        ],
+        "model_version": "xgboost-v5",
+        "observed_round_count": 6,
+        "open_positions_at_shutdown": 0,
+        "phase": "phase4_real_champion_signal",
+        "pnl_reconciliation_status": "theoretical_only",
+        "processed_event_count": 149,
+        "promotion_or_capital_sizing_evidence": false,
+        "realized_pnl_usdc": 0.4883718,
+        "skipped": {
+          "below_edge_threshold": 11,
+          "max_rounds": 111,
+          "no_new_entry_window": 12,
+          "round_already_filled": 5
+        },
+        "started_at": "2026-06-01T23:00:08.380000+00:00",
+        "status": "LIFECYCLE_PASS",
+        "theoretical_pnl_usdc": 0.4883718
+      }
+    },
+    {
+      "entry_skip_families": {
+        "BTC-15M": 13,
+        "ETH-15M": 5
+      },
+      "entry_skip_reasons": {
+        "entry_price_below_min": 1,
+        "no_new_entry_window": 17
+      },
+      "entry_skip_sides": {
+        "DOWN": 4,
+        "UP": 14
+      },
+      "event_counts": {
+        "entry_filled": 1,
+        "entry_order_posted": 1,
+        "entry_skipped": 18,
+        "exit_filled": 1,
+        "exit_order_posted": 1,
+        "heartbeat_ok": 540,
+        "opposite_exit_hold": 1,
+        "phase4_started": 1,
+        "signal_batch_received": 48
+      },
+      "finished_at": null,
+      "latency_summary_ms": {
+        "bridge_to_at_ms": {
+          "count": 52,
+          "max_ms": 13675.0,
+          "median_ms": 10234.5
+        },
+        "event_ts_to_at_ms": {
+          "count": 52,
+          "max_ms": 1538414.0,
+          "median_ms": 28387.5
+        },
+        "signal_created_to_at_ms": {
+          "count": 52,
+          "max_ms": 46131.0,
+          "median_ms": 12474.0
+        }
+      },
+      "latest_event": {
+        "event": "heartbeat_ok",
+        "ts": "2026-06-02T01:48:43.870000+00:00"
+      },
+      "max_signal_edge_seen": 0.9366666666666666,
+      "observed_rounds_from_events": 6,
+      "remote_jsonl_path": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260602T010115Z-stage5/phase4-20260602T010117Z.jsonl",
+      "remote_log_dir": "/home/ubuntu/BiGan/logs/phase4-v5-runbook-12h-20260602T010115Z-stage5",
+      "remote_queue_lines": 144,
+      "remote_queue_path": "/home/ubuntu/BiGan/data/live/remote-signals/champion-signals-runbook-12h-20260602T010115Z-stage5.jsonl",
+      "remote_summary_path": null,
+      "run_id": "20260602T010115Z-stage5",
+      "signal_count": 52,
+      "signal_families": {
+        "BTC-15M": 47,
+        "ETH-15M": 5
+      },
+      "signal_sides": {
+        "DOWN": 17,
+        "UP": 35
+      },
+      "stage": 5,
+      "started_at": null,
+      "status": "ACTIVE_NO_SUMMARY",
+      "summary": null
+    }
+  ],
+  "summary": {
+    "active_stages_without_summary": [
+      "20260602T010115Z-stage5"
+    ],
+    "closes_filled_event_derived": 6,
+    "entries_filled_event_derived": 6,
+    "open_positions_event_derived": 0,
+    "queue_lines_total_observed": 1724,
+    "stages_observed": 5,
+    "terminal_lifecycle_pass": 4
+  }
+}
