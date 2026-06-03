@@ -30,6 +30,8 @@ Environment overrides:
   V6_VOLATILITY_THRESHOLD    Default: 0.60
   V6_ROUND_TRIP_COST         Default: 0.072
   V6_EV_MARGIN               Default: 0.01
+  V6_SETTLEMENT_MIN_EDGE_AFTER_COST
+                             Default: V6_ROUND_TRIP_COST + V6_EV_MARGIN
   ENABLE_VOLATILITY_SLEEVE   Default: true (still paper-only)
   MONITORING_DB_PATH         Default: data/mlops/champion_catalog.duckdb
   SIGNAL_JSONL_PATH          Optional bridged queue for split topology
@@ -59,6 +61,7 @@ V6_NEUTRAL_CAP="${V6_NEUTRAL_CAP:-0.25}"
 V6_VOLATILITY_THRESHOLD="${V6_VOLATILITY_THRESHOLD:-0.60}"
 V6_ROUND_TRIP_COST="${V6_ROUND_TRIP_COST:-0.072}"
 V6_EV_MARGIN="${V6_EV_MARGIN:-0.01}"
+V6_SETTLEMENT_MIN_EDGE_AFTER_COST="${V6_SETTLEMENT_MIN_EDGE_AFTER_COST:-}"
 ENABLE_VOLATILITY_SLEEVE="${ENABLE_VOLATILITY_SLEEVE:-true}"
 PAPER="true"
 MONITORING_DB_PATH="${MONITORING_DB_PATH:-data/mlops/champion_catalog.duckdb}"
@@ -119,6 +122,7 @@ echo "[v6-paper-shadow] model_version=${MODEL_VERSION}"
 echo "[v6-paper-shadow] model_json=${MODEL_JSON_PATH}"
 echo "[v6-paper-shadow] market_families=${MARKET_FAMILIES}"
 echo "[v6-paper-shadow] v6_settlement_gate=${V6_SETTLEMENT_THRESHOLD}"
+echo "[v6-paper-shadow] v6_settlement_min_edge_after_cost=${V6_SETTLEMENT_MIN_EDGE_AFTER_COST:-${V6_ROUND_TRIP_COST}+${V6_EV_MARGIN}}"
 echo "[v6-paper-shadow] volatility_reference=${V6_VOLATILITY_THRESHOLD}/${V6_ROUND_TRIP_COST}/${V6_EV_MARGIN}"
 echo "[v6-paper-shadow] paper=true volatility_sleeve=${ENABLE_VOLATILITY_SLEEVE}"
 if [[ -n "${SIGNAL_JSONL_PATH}" ]]; then
@@ -156,6 +160,9 @@ EXEC_ARGS=(
   --summary-path "${SUMMARY_PATH}"
   --paper
 )
+if [[ -n "${V6_SETTLEMENT_MIN_EDGE_AFTER_COST}" ]]; then
+  EXEC_ARGS+=(--v6-settlement-min-edge-after-cost "${V6_SETTLEMENT_MIN_EDGE_AFTER_COST}")
+fi
 if [[ -n "${SIGNAL_JSONL_PATH}" ]]; then
   EXEC_ARGS+=(--signal-jsonl-path "${SIGNAL_JSONL_PATH}" --signal-jsonl-start "${SIGNAL_JSONL_START}")
 fi

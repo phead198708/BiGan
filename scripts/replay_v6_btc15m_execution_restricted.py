@@ -69,6 +69,11 @@ def main() -> int:
     config = json.loads(Path(args.model_config_path).read_text(encoding="utf-8"))
     round_trip_cost = float(config.get("round_trip_cost", 0.072))
     ev_margin = float(config.get("ev_margin", 0.01))
+    settlement_min_edge_after_cost = (
+        float(args.settlement_min_edge_after_cost)
+        if args.settlement_min_edge_after_cost is not None
+        else round_trip_cost + ev_margin
+    )
 
     rows_by_split: dict[str, list[dict[str, Any]]] = {}
     for split in args.splits.split(","):
@@ -96,6 +101,7 @@ def main() -> int:
             "max_seconds_to_expiry": args.max_seconds_to_expiry,
             "no_new_entry_before_expiry_seconds": args.no_new_entry_before_expiry_seconds,
             "buy_slippage": args.buy_slippage,
+            "settlement_min_edge_after_cost": settlement_min_edge_after_cost,
             "round_first_per_round_slug": True,
             "require_observed_exit_path": False,
         },
@@ -124,7 +130,14 @@ def main() -> int:
             round_trip_cost=round_trip_cost,
             ev_margin=ev_margin,
             gain_priors=gain_priors,
-            policy=policy,
+            policy=Phase4EntryPolicy(
+                min_entry_price=policy.min_entry_price,
+                near_min_price_band=policy.near_min_price_band,
+                near_min_fresh_edge_threshold=policy.near_min_fresh_edge_threshold,
+                near_min_seconds_to_expiry=policy.near_min_seconds_to_expiry,
+                edge_threshold=policy.edge_threshold,
+                settlement_edge_threshold=settlement_min_edge_after_cost,
+            ),
             buy_slippage=args.buy_slippage,
             min_seconds_to_expiry=args.min_seconds_to_expiry,
             max_seconds_to_expiry=args.max_seconds_to_expiry,
@@ -181,6 +194,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-seconds-to-expiry", type=float, default=1200.0)
     parser.add_argument("--no-new-entry-before-expiry-seconds", type=float, default=300.0)
     parser.add_argument("--buy-slippage", type=float, default=0.02)
+    parser.add_argument(
+        "--settlement-min-edge-after-cost",
+        type=float,
+        default=None,
+        help=(
+            "Minimum p_side - worst_price required after observed ask + slippage. "
+            "Defaults to round_trip_cost + ev_margin from the model config."
+        ),
+    )
     parser.add_argument("--output-json-path", default="")
     parser.add_argument("--report-path", default="")
     return parser.parse_args()
@@ -521,6 +543,7 @@ def _markdown_report(report: dict[str, Any]) -> str:
         "## Execution Restrictions",
         "",
         "- Phase 4 min-entry and near-min fresh-edge checks on observed ask + buy slippage",
+        f"- Cost-aware settlement edge: p_side - worst_price >= {report['execution_policy']['settlement_min_edge_after_cost']}",
         "- Seconds-to-expiry window and no-new-entry window",
         "- Round-first: one admitted trade per round slug",
         "- Settlement gate ignores volatility heads; volatility sleeve is evaluated separately in live paper execution",

@@ -122,6 +122,24 @@ def evaluate_v6_settlement_side(
     return None
 
 
+def evaluate_v6_volatility_side(
+    payload: dict[str, float | str],
+    config: V6JointGateConfig,
+) -> str | None:
+    """Return UP/DOWN when the volatility heads alone admit a volatility bet."""
+
+    p_neutral = float(payload["p_neutral"])
+    if p_neutral > config.neutral_cap:
+        return None
+    p_vol_up = float(payload["p_vol_up"])
+    p_vol_down = float(payload["p_vol_down"])
+    if p_vol_up >= p_vol_down and p_vol_up >= config.volatility_threshold:
+        return "UP"
+    if p_vol_down > p_vol_up and p_vol_down >= config.volatility_threshold:
+        return "DOWN"
+    return None
+
+
 def v6_selection_score(payload: dict[str, float | str], side: str) -> float:
     """Rank competing round signals by admitted settlement-side confidence."""
 
@@ -161,7 +179,9 @@ def build_v6_signal_fields(
     payload = v6_payload_from_snapshot(snapshot, model_version=model_version)
     if payload is None:
         return None
-    side = evaluate_v6_settlement_side(payload, config)
+    settlement_side = evaluate_v6_settlement_side(payload, config)
+    volatility_side = evaluate_v6_volatility_side(payload, config)
+    side = settlement_side or volatility_side
     if side is None:
         return None
     canonical_symbol = str(snapshot.get("canonical_symbol") or snapshot.get("symbol") or "")
@@ -188,13 +208,19 @@ def build_v6_signal_fields(
         token_id = up_token_id
         if not token_id:
             return None
-        token_probability = float(payload["p_up"])
+        token_probability = (
+            float(payload["p_up"]) if settlement_side is not None else float(payload["p_vol_up"])
+        )
         outcome_canonical = f"{family}:{round_slug}:UP"
     else:
         token_id = down_token_id
         if not token_id:
             return None
-        token_probability = float(payload["p_down"])
+        token_probability = (
+            float(payload["p_down"])
+            if settlement_side is not None
+            else float(payload["p_vol_down"])
+        )
         outcome_canonical = f"{family}:{round_slug}:DOWN"
     selected_market_implied_prob = (
         market_implied_prob if side == token_side else 1.0 - market_implied_prob
@@ -219,7 +245,7 @@ def build_v6_signal_fields(
         "p_neutral": float(payload["p_neutral"]),
         "p_vol_up": float(payload["p_vol_up"]),
         "p_vol_down": float(payload["p_vol_down"]),
-        "v6_joint_side": side,
+        "v6_joint_side": settlement_side,
     }
 
 

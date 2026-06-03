@@ -344,6 +344,38 @@ def test_bridge_v6_settlement_gate_emits_down_side_signal_without_volatility_pas
     assert signal.p_vol_down == pytest.approx(0.10)
 
 
+def test_bridge_v6_emits_volatility_only_signal_without_settlement_side() -> None:
+    from bigan.execution.v6_gate import V6JointGateConfig
+
+    snapshot = {
+        "canonical_symbol": "BTC-15M:btc-updown-15m-1779774300:UP",
+        "source_symbol": "token-up",
+        "market_implied_prob": 0.40,
+        "p_up": 0.41,
+        "p_down": 0.47,
+        "p_neutral": 0.12,
+        "p_vol_up": 0.56,
+        "p_vol_down": 0.62,
+    }
+    config = V6JointGateConfig(
+        settlement_threshold=0.50,
+        neutral_cap=0.25,
+        volatility_threshold=0.60,
+    )
+    signal = bridge._bridge_signal_from_row(
+        ("pred-v6-vol", 1_779_774_400_000, 1_779_774_410_000, 0.41, json.dumps(snapshot)),
+        model_version="xgboost-v6",
+        v6_joint_config=config,
+        opposite_token_id="token-down",
+    )
+
+    assert signal is not None
+    assert signal.outcome_side == "DOWN"
+    assert signal.token_id == "token-down"
+    assert signal.token_probability == pytest.approx(0.62)
+    assert signal.v6_joint_side is None
+
+
 def test_executor_reads_bridged_signal_jsonl(tmp_path: Path) -> None:
     queue = tmp_path / "signals.jsonl"
     payload = {
@@ -498,8 +530,8 @@ def test_executor_duckdb_cursor_advances_past_v6_settlement_gate_misses(tmp_path
                         source_symbol="token-up",
                         p_up=0.40,
                         p_down=0.45,
-                        p_vol_up=0.70,
-                        p_vol_down=0.70,
+                        p_vol_up=0.10,
+                        p_vol_down=0.10,
                     ),
                 ),
                 (
@@ -513,8 +545,8 @@ def test_executor_duckdb_cursor_advances_past_v6_settlement_gate_misses(tmp_path
                         source_symbol="token-down",
                         p_up=0.40,
                         p_down=0.45,
-                        p_vol_up=0.70,
-                        p_vol_down=0.70,
+                        p_vol_up=0.10,
+                        p_vol_down=0.10,
                     ),
                 ),
                 (
@@ -585,6 +617,109 @@ def test_executor_duckdb_cursor_advances_past_v6_settlement_gate_misses(tmp_path
     assert second.events[0].token_id == "token-down"
     assert second.events[0].opposite_token_id == "token-up"
     assert second.events[0].p_vol_down == pytest.approx(0.10)
+
+
+def test_executor_duckdb_keeps_v6_settlement_and_volatility_lanes_per_round(
+    tmp_path: Path,
+) -> None:
+    from bigan.execution.v6_gate import V6JointGateConfig
+
+    db_path = tmp_path / "catalog.duckdb"
+    ts = 1_779_774_400_000
+
+    def snapshot(
+        *,
+        side: str,
+        source_symbol: str,
+        p_up: float,
+        p_down: float,
+        p_vol_up: float,
+        p_vol_down: float,
+    ) -> str:
+        return json.dumps(
+            {
+                "canonical_symbol": f"BTC-15M:btc-updown-15m-1779774300:{side}",
+                "source_symbol": source_symbol,
+                "market_implied_prob": 0.40 if side == "UP" else 0.60,
+                "p_up": p_up,
+                "p_down": p_down,
+                "p_neutral": 0.05,
+                "p_vol_up": p_vol_up,
+                "p_vol_down": p_vol_down,
+            }
+        )
+
+    with duckdb.connect(str(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE prediction_events (
+                event_id VARCHAR,
+                ts BIGINT,
+                created_at BIGINT,
+                model_version VARCHAR,
+                prob_up_15m DOUBLE,
+                feature_snapshot_json VARCHAR
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO prediction_events VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "pred-vol-only",
+                    ts,
+                    ts + 1_000,
+                    "xgboost-v6",
+                    0.41,
+                    snapshot(
+                        side="UP",
+                        source_symbol="token-up",
+                        p_up=0.41,
+                        p_down=0.47,
+                        p_vol_up=0.56,
+                        p_vol_down=0.62,
+                    ),
+                ),
+                (
+                    "pred-settlement",
+                    ts,
+                    ts + 1_001,
+                    "xgboost-v6",
+                    0.85,
+                    snapshot(
+                        side="DOWN",
+                        source_symbol="token-down",
+                        p_up=0.10,
+                        p_down=0.85,
+                        p_vol_up=0.10,
+                        p_vol_down=0.10,
+                    ),
+                ),
+            ],
+        )
+    config = V6JointGateConfig(
+        settlement_threshold=0.50,
+        neutral_cap=0.25,
+        volatility_threshold=0.60,
+    )
+
+    batch = executor._read_event_batch_after(
+        str(db_path),
+        model_version="xgboost-v6",
+        after_created_at=0,
+        after_event_id="",
+        limit=10,
+        v6_joint_config=config,
+    )
+
+    by_id = {event.event_id: event for event in batch.events}
+    assert set(by_id) == {"pred-vol-only", "pred-settlement"}
+    assert by_id["pred-vol-only"].outcome_side == "DOWN"
+    assert by_id["pred-vol-only"].token_id == "token-down"
+    assert by_id["pred-vol-only"].token_probability == pytest.approx(0.62)
+    assert by_id["pred-vol-only"].v6_joint_side is None
+    assert by_id["pred-settlement"].outcome_side == "DOWN"
+    assert by_id["pred-settlement"].v6_joint_side == "DOWN"
 
 
 def test_executor_latency_helpers() -> None:
@@ -1014,6 +1149,122 @@ def test_executor_position_tick_expired_moves_to_settlement(
     assert row["settlement_reconciliation_required"] is True
 
 
+def test_executor_position_tick_resolves_expired_paper_settlement(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    now_ms = 2_000_001
+    log_path = tmp_path / "phase4.jsonl"
+    lifecycle = executor.RoundLifecycleState()
+    position = _position(round_slug="btc-updown-15m-1000", sleeve="settlement")
+    position.paper = True
+    _store_open_position(lifecycle, position)
+    manager = _SettlementPositionManager(realized_pnl=-1.0)
+
+    monkeypatch.setattr(
+        executor,
+        "_fetch_paper_settlement_resolution",
+        lambda _round_slug, *, config: executor.PaperSettlementResolution(
+            result="DOWN",
+            source="gamma_market",
+            market={"slug": "btc-updown-15m-1000"},
+        ),
+    )
+
+    result = executor._tick_open_positions(
+        client=_MissingBidClient(),
+        position_manager=manager,
+        lifecycle=lifecycle,
+        log_path=log_path,
+        now_ms=now_ms,
+        soft_force_exit_before_expiry_seconds=240.0,
+        hard_force_exit_before_expiry_seconds=120.0,
+        soft_force_exit_min_bid=0.15,
+        exit_retry_seconds=10.0,
+        max_exit_attempts_per_position=6,
+        sell_slippage=0.01,
+        paper_settlement_config=executor.PaperSettlementResolverConfig(enabled=True),
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert result == (0, 0, 0, -1.0)
+    assert lifecycle.open_positions == {}
+    assert manager.settled == [
+        ("phase4-round-1-UP", "DOWN", 1_900_000),
+    ]
+    assert row["event"] == "paper_settlement_resolved"
+    assert row["reason"] == "expired_position_monitor"
+    assert row["settlement_result"] == "DOWN"
+    assert row["realized_pnl"] == -1.0
+    assert row["settlement_reconciliation_required"] is False
+
+
+def test_executor_expired_paper_settlement_falls_back_when_unresolved(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    now_ms = 2_000_001
+    log_path = tmp_path / "phase4.jsonl"
+    lifecycle = executor.RoundLifecycleState()
+    position = _position(round_slug="btc-updown-15m-1000", sleeve="settlement")
+    position.paper = True
+    _store_open_position(lifecycle, position)
+    manager = _SettlementPositionManager(realized_pnl=-1.0)
+
+    monkeypatch.setattr(
+        executor,
+        "_fetch_paper_settlement_resolution",
+        lambda _round_slug, *, config: executor.PaperSettlementResolution(
+            result=None,
+            source="gamma_market",
+            error="market_not_resolved",
+        ),
+    )
+
+    result = executor._tick_open_positions(
+        client=_MissingBidClient(),
+        position_manager=manager,
+        lifecycle=lifecycle,
+        log_path=log_path,
+        now_ms=now_ms,
+        soft_force_exit_before_expiry_seconds=240.0,
+        hard_force_exit_before_expiry_seconds=120.0,
+        soft_force_exit_min_bid=0.15,
+        exit_retry_seconds=10.0,
+        max_exit_attempts_per_position=6,
+        sell_slippage=0.01,
+        paper_settlement_config=executor.PaperSettlementResolverConfig(enabled=True),
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert result == (0, 0, 1, 0.0)
+    assert manager.settled == []
+    assert rows[-2]["event"] == "paper_settlement_resolution_pending"
+    assert rows[-2]["resolution_error"] == "market_not_resolved"
+    assert rows[-1]["event"] == "exit_pending_settlement"
+
+
+def test_executor_gamma_market_winner_parses_outcome_price_strings() -> None:
+    assert (
+        executor._winning_outcome_from_gamma_market(
+            {
+                "outcomes": '["Up", "Down"]',
+                "outcomePrices": '["0", "1"]',
+            }
+        )
+        == "DOWN"
+    )
+    assert (
+        executor._winning_outcome_from_gamma_market(
+            {
+                "outcomes": ["Up", "Down"],
+                "outcomePrices": ["1", "0"],
+            }
+        )
+        == "UP"
+    )
+
+
 def test_settlement_sleeve_holds_until_redeem_before_expiry(
     tmp_path: Path,
 ) -> None:
@@ -1329,6 +1580,31 @@ def test_executor_volatility_entry_requires_paper_mode(tmp_path: Path) -> None:
     assert row["gate_evaluation"]["expected_volatility_exit_gain"] == pytest.approx(0.18)
 
 
+def test_v6_entry_policy_defaults_settlement_edge_to_cost_plus_margin() -> None:
+    policy = executor._entry_policy_from_args(
+        SimpleNamespace(
+            entry_gate_mode="v6-joint",
+            min_entry_price=0.35,
+            near_min_price_band=0.05,
+            near_min_fresh_edge_threshold=0.50,
+            near_min_seconds_to_expiry=420.0,
+            edge_threshold=0.45,
+            settlement_edge_threshold=None,
+            volatility_score_threshold=0.50,
+            volatility_min_entry_price=0.20,
+            volatility_min_seconds_to_expiry=420.0,
+            volatility_round_trip_cost=0.04,
+            volatility_safety_margin=0.02,
+            enable_volatility_live_entries=False,
+            v6_round_trip_cost=0.072,
+            v6_ev_margin=0.01,
+            v6_settlement_min_edge_after_cost=None,
+        )
+    )
+
+    assert policy.effective_settlement_edge_threshold == pytest.approx(0.082)
+
+
 def test_executor_volatility_paper_entry_creates_tagged_position(tmp_path: Path) -> None:
     log_path = tmp_path / "phase4.jsonl"
     manager = _OpenPositionManager()
@@ -1360,6 +1636,52 @@ def test_executor_volatility_paper_entry_creates_tagged_position(tmp_path: Path)
     assert manager.opened[0]["sleeve"] == "volatility"
     assert row["event"] == "paper_entry_filled"
     assert row["sleeve"] == "volatility"
+
+
+def test_v6_joint_settlement_gate_logs_cost_edge_for_paper_fill(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+    manager = _OpenPositionManager()
+
+    position = executor._try_entry(
+        client=_VolatilityPaperClient(),
+        position_manager=manager,
+        signal=_signal(
+            edge=0.004,
+            token_probability=0.61,
+            p_up=0.61,
+            p_down=0.35,
+            p_neutral=0.04,
+            p_vol_up=0.55,
+            p_vol_down=0.45,
+            v6_joint_side="UP",
+        ),
+        log_path=log_path,
+        max_position_size_usdc=1.0,
+        entry_policy=executor.Phase4EntryPolicy(
+            settlement_edge_threshold=0.082,
+            volatility_min_entry_price=0.20,
+            volatility_round_trip_cost=0.04,
+            volatility_safety_margin=0.02,
+        ),
+        seconds_to_expiry=600.0,
+        buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
+        sleeve="settlement",
+        paper=True,
+        entry_gate_mode="v6-joint",
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    evaluated = next(row for row in rows if row["event"] == "entry_gate_evaluated")
+    filled = next(row for row in rows if row["event"] == "paper_entry_filled")
+
+    assert position is not None
+    assert evaluated["raw_settlement_edge"] == pytest.approx(0.004)
+    assert evaluated["fresh_edge_at_worst"] == pytest.approx(0.09)
+    assert evaluated["gate_evaluation"]["settlement_edge"] == pytest.approx(0.09)
+    assert evaluated["gate_evaluation"]["settlement_gate_passed"] is True
+    assert filled["gate_evaluation"]["settlement_edge"] == pytest.approx(0.09)
+    assert filled["gate_evaluation"]["settlement_gate_passed"] is True
 
 
 def test_executor_skips_complementary_entry_below_min_price(tmp_path: Path) -> None:
@@ -1859,6 +2181,21 @@ class _PositionManager:
         return SimpleNamespace(realized_pnl=0.10)
 
 
+class _SettlementPositionManager(_PositionManager):
+    def __init__(self, *, realized_pnl: float) -> None:
+        super().__init__()
+        self.realized_pnl = realized_pnl
+        self.settled = []
+
+    def settle_position(self, event_id: str, result: str, settlement_time=None):  # noqa: ANN001, ANN201
+        self.settled.append((event_id, result, settlement_time))
+        return SimpleNamespace(
+            realized_pnl=self.realized_pnl,
+            settlement_result=result,
+            exit_price=1.0 if result == "UP" else 0.0,
+        )
+
+
 class _OpenPositionManager(_PositionManager):
     def __init__(self) -> None:
         super().__init__()
@@ -1876,6 +2213,13 @@ def _signal(
     token_id: str = "token-up",
     opposite_token_id: str = "token-down",
     edge: float = 0.51,
+    token_probability: float = 0.98,
+    p_up: float | None = None,
+    p_down: float | None = None,
+    p_neutral: float | None = None,
+    p_vol_up: float | None = None,
+    p_vol_down: float | None = None,
+    v6_joint_side: str | None = None,
     round_end_ts: int = 1_779_775_200_000,
 ):
     return executor.SignalEvent(
@@ -1889,10 +2233,16 @@ def _signal(
         round_slug="round-1",
         round_end_ts=round_end_ts,
         market_implied_prob=0.47,
-        token_probability=0.98,
+        token_probability=token_probability,
         edge=edge,
         bridged_at=3_000,
         opposite_token_id=opposite_token_id,
+        p_up=p_up,
+        p_down=p_down,
+        p_neutral=p_neutral,
+        p_vol_up=p_vol_up,
+        p_vol_down=p_vol_down,
+        v6_joint_side=v6_joint_side,
     )
 
 

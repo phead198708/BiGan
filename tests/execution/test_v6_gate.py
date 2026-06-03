@@ -5,6 +5,7 @@ from bigan.execution.v6_gate import (
     build_v6_signal_fields,
     evaluate_v6_joint_side,
     evaluate_v6_settlement_side,
+    evaluate_v6_volatility_side,
     is_v6_model_version,
     v6_payload_from_snapshot,
 )
@@ -128,3 +129,42 @@ def test_build_v6_signal_fields_maps_down_snapshot_token() -> None:
     assert fields["token_id"] == "token-down"
     assert fields["opposite_token_id"] == "token-up"
     assert fields["market_implied_prob"] == 0.40
+
+
+def test_build_v6_signal_fields_emits_volatility_only_without_settlement_side() -> None:
+    snapshot = {
+        "canonical_symbol": "BTC-15M:btc-updown-15m-1000:UP",
+        "source_symbol": "token-up",
+        "market_implied_prob": 0.40,
+        "p_up": 0.41,
+        "p_down": 0.47,
+        "p_neutral": 0.12,
+        "p_vol_up": 0.56,
+        "p_vol_down": 0.62,
+    }
+    config = V6JointGateConfig(
+        settlement_threshold=0.50,
+        neutral_cap=0.25,
+        volatility_threshold=0.60,
+    )
+    payload = v6_payload_from_snapshot(snapshot, model_version="xgboost-v6")
+    assert payload is not None
+
+    fields = build_v6_signal_fields(
+        event_id="pred-vol-only",
+        ts=1_000,
+        created_at=2_000,
+        snapshot=snapshot,
+        model_version="xgboost-v6",
+        config=config,
+        round_end_ts=1_000_000,
+        opposite_token_id="token-down",
+    )
+
+    assert evaluate_v6_settlement_side(payload, config) is None
+    assert evaluate_v6_volatility_side(payload, config) == "DOWN"
+    assert fields is not None
+    assert fields["outcome_side"] == "DOWN"
+    assert fields["token_id"] == "token-down"
+    assert fields["token_probability"] == 0.62
+    assert fields["v6_joint_side"] is None

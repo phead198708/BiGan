@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib import error, parse, request
 
 import duckdb
 
@@ -61,6 +62,8 @@ from bigan.execution.v6_gate import (
     v6_selection_score,
 )
 from bigan.modeling.families import market_family_from_symbol
+
+DEFAULT_GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +129,21 @@ class SellResult:
     status: str
     realized_pnl: float = 0.0
     account_cash_pnl: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSettlementResolverConfig:
+    enabled: bool = True
+    gamma_api_base: str = DEFAULT_GAMMA_API_BASE
+    request_timeout_seconds: float = 10.0
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSettlementResolution:
+    result: str | None
+    source: str
+    market: dict[str, Any] | None = None
+    error: str | None = None
 
 
 @dataclass(slots=True)
@@ -276,6 +294,11 @@ def main() -> int:
     started_at = _now_ms()
     entry_policy = _entry_policy_from_args(args)
     v6_joint_config = _v6_joint_config_from_args(args)
+    paper_settlement_config = PaperSettlementResolverConfig(
+        enabled=args.paper and not args.disable_paper_settlement_resolution,
+        gamma_api_base=args.paper_settlement_gamma_api_base,
+        request_timeout_seconds=args.paper_settlement_timeout_seconds,
+    )
     volatility_budget = VolatilitySleeveBudget(
         round_cap_usdc=args.volatility_round_bankroll_usdc,
         per_bet_cap_usdc=args.volatility_per_bet_cap_usdc,
@@ -347,6 +370,11 @@ def main() -> int:
             "volatility_live_ordering_enabled": False,
             "volatility_ordering_mode": "paper_only",
             "paper": args.paper,
+            "paper_settlement_resolution_enabled": paper_settlement_config.enabled,
+            "paper_settlement_gamma_api_base": paper_settlement_config.gamma_api_base,
+            "paper_settlement_timeout_seconds": (
+                paper_settlement_config.request_timeout_seconds
+            ),
             "entry_gate_mode": args.entry_gate_mode,
             "v6_joint_rule": (
                 None if v6_joint_config is None else v6_joint_config.joint_rule()
@@ -414,6 +442,7 @@ def main() -> int:
                 max_exit_attempts_per_position=args.max_exit_attempts_per_position,
                 sell_slippage=args.sell_slippage,
                 monitoring_db_path=args.monitoring_db_path,
+                paper_settlement_config=paper_settlement_config,
             )
             closes_filled += tick_closed
             exits_pending_confirmation += tick_pending
@@ -522,11 +551,14 @@ def main() -> int:
                             sell_slippage=args.sell_slippage,
                             exit_order_timeout_seconds=args.exit_order_timeout_seconds,
                             monitoring_db_path=args.monitoring_db_path,
+                            paper_settlement_config=paper_settlement_config,
                         )
                         if sell_result is not None:
                             realized_pnl += sell_result.realized_pnl
                             if sell_result.status == "filled":
                                 closes_filled += 1
+                            elif sell_result.status == "settled":
+                                pass
                             elif sell_result.status == "pending_settlement":
                                 exits_pending_settlement += 1
                             else:
@@ -551,11 +583,14 @@ def main() -> int:
                             sell_slippage=args.sell_slippage,
                             exit_order_timeout_seconds=args.exit_order_timeout_seconds,
                             monitoring_db_path=args.monitoring_db_path,
+                            paper_settlement_config=paper_settlement_config,
                         )
                         if sell_result is not None:
                             realized_pnl += sell_result.realized_pnl
                             if sell_result.status == "filled":
                                 closes_filled += 1
+                            elif sell_result.status == "settled":
+                                pass
                             elif sell_result.status == "pending_settlement":
                                 exits_pending_settlement += 1
                             else:
@@ -702,6 +737,7 @@ def main() -> int:
             sell_slippage=args.sell_slippage,
             exit_order_timeout_seconds=args.exit_order_timeout_seconds,
             monitoring_db_path=args.monitoring_db_path,
+            paper_settlement_config=paper_settlement_config,
         )
         closes_filled += shutdown_closed
         exits_pending_confirmation += shutdown_pending
@@ -740,6 +776,11 @@ def main() -> int:
             "volatility_live_ordering_enabled": False,
             "volatility_ordering_mode": "paper_only",
             "paper": args.paper,
+            "paper_settlement_resolution_enabled": paper_settlement_config.enabled,
+            "paper_settlement_gamma_api_base": paper_settlement_config.gamma_api_base,
+            "paper_settlement_timeout_seconds": (
+                paper_settlement_config.request_timeout_seconds
+            ),
             "phase4_v5_role": "diagnostic_and_opportunity_analysis",
             "status": phase4_summary_status(
                 errors=errors,
@@ -955,6 +996,25 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run orderbook-only paper execution for all sleeves; no CLOB orders are posted.",
     )
+    parser.add_argument(
+        "--disable-paper-settlement-resolution",
+        action="store_true",
+        help=(
+            "Disable paper-mode post-expiry Gamma settlement resolution. When disabled, "
+            "expired paper positions remain pending settlement for offline reconciliation."
+        ),
+    )
+    parser.add_argument(
+        "--paper-settlement-gamma-api-base",
+        default=os.getenv("POLYMARKET_GAMMA_API_BASE", DEFAULT_GAMMA_API_BASE),
+        help="Gamma API base URL used to resolve expired paper positions.",
+    )
+    parser.add_argument(
+        "--paper-settlement-timeout-seconds",
+        type=float,
+        default=10.0,
+        help="Timeout for paper settlement Gamma API requests.",
+    )
     parser.add_argument("--exit-edge-threshold", type=float, default=0.10)
     parser.add_argument("--opposite-exit-edge-threshold", type=float, default=0.45)
     parser.add_argument("--opposite-exit-min-seconds-to-expiry", type=float, default=120.0)
@@ -999,10 +1059,24 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--v6-volatility-threshold", type=float, default=0.60)
     parser.add_argument("--v6-round-trip-cost", type=float, default=0.072)
     parser.add_argument("--v6-ev-margin", type=float, default=0.01)
+    parser.add_argument(
+        "--v6-settlement-min-edge-after-cost",
+        type=float,
+        default=None,
+        help=(
+            "Minimum p_side - worst_price required for v6 settlement entries. "
+            "Defaults to --v6-round-trip-cost + --v6-ev-margin."
+        ),
+    )
     return parser.parse_args()
 
 
 def _entry_policy_from_args(args: argparse.Namespace) -> Phase4EntryPolicy:
+    v6_settlement_edge_threshold = (
+        args.v6_settlement_min_edge_after_cost
+        if args.v6_settlement_min_edge_after_cost is not None
+        else args.v6_round_trip_cost + args.v6_ev_margin
+    )
     disable_settlement_edge = args.entry_gate_mode == "v6-joint"
     return Phase4EntryPolicy(
         min_entry_price=args.min_entry_price,
@@ -1010,7 +1084,9 @@ def _entry_policy_from_args(args: argparse.Namespace) -> Phase4EntryPolicy:
         near_min_fresh_edge_threshold=args.near_min_fresh_edge_threshold,
         near_min_seconds_to_expiry=args.near_min_seconds_to_expiry,
         edge_threshold=-999.0 if disable_settlement_edge else args.edge_threshold,
-        settlement_edge_threshold=0.0 if disable_settlement_edge else args.settlement_edge_threshold,
+        settlement_edge_threshold=(
+            v6_settlement_edge_threshold if disable_settlement_edge else args.settlement_edge_threshold
+        ),
         volatility_score_threshold=args.volatility_score_threshold,
         volatility_min_entry_price=args.volatility_min_entry_price,
         volatility_min_seconds_to_expiry=args.volatility_min_seconds_to_expiry,
@@ -1051,6 +1127,8 @@ def _v6_joint_config_from_args(args: argparse.Namespace) -> V6JointGateConfig | 
 def _validate_args(args: argparse.Namespace) -> None:
     if args.settlement_max_filled_per_side_per_round <= 0:
         raise ValueError("--settlement-max-filled-per-side-per-round must be positive")
+    if args.paper_settlement_timeout_seconds <= 0:
+        raise ValueError("--paper-settlement-timeout-seconds must be positive")
     if args.entry_gate_mode == "v6-joint" and not is_v6_model_version(args.model_version):
         raise ValueError("--entry-gate-mode v6-joint requires model_version xgboost-v6")
 
@@ -1543,30 +1621,39 @@ def _best_event_per_round(
 ) -> list[SignalEvent]:
     best: dict[str, SignalEvent] = {}
     for event in events:
-        previous = best.get(event.round_slug)
+        best_key = event.round_slug
+        if entry_gate_mode == "v6-joint" and event.p_up is not None and event.p_vol_up is not None:
+            best_key = (
+                f"settlement:{event.round_slug}"
+                if event.v6_joint_side is not None
+                else f"volatility:{event.round_slug}"
+            )
+        previous = best.get(best_key)
         if previous is None:
-            best[event.round_slug] = event
+            best[best_key] = event
             continue
         if entry_gate_mode == "v6-joint" and event.p_up is not None and event.p_vol_up is not None:
-            payload = {
-                "p_up": event.p_up,
-                "p_down": event.p_down or 0.0,
-                "p_vol_up": event.p_vol_up,
-                "p_vol_down": event.p_vol_down or 0.0,
-            }
-            previous_payload = {
-                "p_up": previous.p_up,
-                "p_down": previous.p_down or 0.0,
-                "p_vol_up": previous.p_vol_up,
-                "p_vol_down": previous.p_vol_down or 0.0,
-            }
-            event_score = v6_selection_score(payload, event.outcome_side)
-            previous_score = v6_selection_score(previous_payload, previous.outcome_side)
+            event_score = _v6_event_selection_score(event)
+            previous_score = _v6_event_selection_score(previous)
             if event_score > previous_score:
-                best[event.round_slug] = event
+                best[best_key] = event
         elif event.edge > previous.edge:
-            best[event.round_slug] = event
+            best[best_key] = event
     return sorted(best.values(), key=lambda item: (item.created_at, item.event_id))
+
+
+def _v6_event_selection_score(event: SignalEvent) -> float:
+    if event.v6_joint_side is None:
+        if event.outcome_side == "UP":
+            return float(event.p_vol_up or 0.0)
+        return float(event.p_vol_down or 0.0)
+    payload = {
+        "p_up": event.p_up or 0.0,
+        "p_down": event.p_down or 0.0,
+        "p_vol_up": event.p_vol_up or 0.0,
+        "p_vol_down": event.p_vol_down or 0.0,
+    }
+    return v6_selection_score(payload, event.outcome_side)
 
 
 def _entry_time_window_skip_reason(
@@ -1600,6 +1687,7 @@ def _tick_open_positions(
     sell_slippage: float,
     exit_order_timeout_seconds: float = 20.0,
     monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
+    paper_settlement_config: PaperSettlementResolverConfig | None = None,
 ) -> tuple[int, int, int, float]:
     closed_count = 0
     pending_count = 0
@@ -1651,11 +1739,14 @@ def _tick_open_positions(
             max_exit_attempts_per_position=max_exit_attempts_per_position,
             sell_slippage=sell_slippage,
             monitoring_db_path=monitoring_db_path,
+            paper_settlement_config=paper_settlement_config,
         )
         if sell_result is None:
             continue
         if sell_result.status == "filled":
             closed_count += 1
+        elif sell_result.status == "settled":
+            pass
         elif sell_result.status == "pending_settlement":
             settlement_count += 1
         else:
@@ -1681,8 +1772,20 @@ def _attempt_lifecycle_exit(
     sell_slippage: float,
     exit_order_timeout_seconds: float = 20.0,
     monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
+    paper_settlement_config: PaperSettlementResolverConfig | None = None,
 ) -> SellResult | None:
     if seconds_to_expiry <= 0:
+        resolved = _resolve_expired_paper_position(
+            position_manager=position_manager,
+            position=position,
+            log_path=log_path,
+            signal=None,
+            reason=exit_reason,
+            seconds_to_expiry=seconds_to_expiry,
+            paper_settlement_config=paper_settlement_config,
+        )
+        if resolved is not None:
+            return resolved
         position.lifecycle_state = "AWAITING_SETTLEMENT"
         position.last_lifecycle_reason = exit_reason
         return _mark_pending_settlement(
@@ -1849,8 +1952,13 @@ def _try_entry(
     neg_risk = client.get_neg_risk(signal.token_id)
     worst_price = min(0.99, _round_price(float(ask) + buy_slippage, tick_size))
     fresh_edge_at_worst = signal.token_probability - worst_price
+    settlement_edge_for_gate = (
+        fresh_edge_at_worst
+        if sleeve == "settlement" and entry_gate_mode == "v6-joint"
+        else signal.edge
+    )
     gate_evaluation = evaluate_entry_gates(
-        settlement_edge=signal.edge,
+        settlement_edge=settlement_edge_for_gate,
         ask=float(ask),
         bid=None if bid is None else float(bid),
         worst_price=worst_price,
@@ -1867,6 +1975,7 @@ def _try_entry(
         ask=ask,
         worst_price=worst_price,
         fresh_edge_at_worst=fresh_edge_at_worst,
+        raw_settlement_edge=signal.edge,
         seconds_to_expiry=seconds_to_expiry,
         gate_evaluation=gate_payload,
     )
@@ -2061,7 +2170,11 @@ def _try_entry(
             gate_evaluation=gate_payload,
             complement_gate_evaluation=asdict(
                 evaluate_entry_gates(
-                    settlement_edge=signal.edge,
+                    settlement_edge=(
+                        complement_fresh_edge
+                        if sleeve == "settlement" and entry_gate_mode == "v6-joint"
+                        else signal.edge
+                    ),
                     ask=complement_entry_price,
                     worst_price=complement_entry_price,
                     token_probability=signal.token_probability,
@@ -2315,6 +2428,7 @@ def _maybe_exit(
     sell_slippage: float,
     exit_order_timeout_seconds: float = 20.0,
     monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
+    paper_settlement_config: PaperSettlementResolverConfig | None = None,
 ) -> SellResult | None:
     now_ms = _now_ms()
     seconds_to_expiry = (signal.round_end_ts - now_ms) / 1000
@@ -2322,6 +2436,17 @@ def _maybe_exit(
         bid, _ask = _best_bid_ask(client, position.token_id)
     except OrderBookUnavailable as exc:
         if seconds_to_expiry <= 0:
+            resolved = _resolve_expired_paper_position(
+                position_manager=position_manager,
+                position=position,
+                log_path=log_path,
+                signal=signal,
+                reason="expired_orderbook_unavailable",
+                seconds_to_expiry=seconds_to_expiry,
+                paper_settlement_config=paper_settlement_config,
+            )
+            if resolved is not None:
+                return resolved
             return _mark_pending_settlement(
                 log_path=log_path,
                 position=position,
@@ -2342,6 +2467,17 @@ def _maybe_exit(
         return None
     if bid is None:
         if seconds_to_expiry <= 0:
+            resolved = _resolve_expired_paper_position(
+                position_manager=position_manager,
+                position=position,
+                log_path=log_path,
+                signal=signal,
+                reason="expired_missing_bid",
+                seconds_to_expiry=seconds_to_expiry,
+                paper_settlement_config=paper_settlement_config,
+            )
+            if resolved is not None:
+                return resolved
             return _mark_pending_settlement(
                 log_path=log_path,
                 position=position,
@@ -2399,11 +2535,23 @@ def _maybe_exit_opposite_correction(
     sell_slippage: float,
     exit_order_timeout_seconds: float = 20.0,
     monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
+    paper_settlement_config: PaperSettlementResolverConfig | None = None,
 ) -> SellResult | None:
     """Exit an open position when the opposite side becomes strongly favored."""
 
     seconds_to_expiry = (signal.round_end_ts - _now_ms()) / 1000
     if seconds_to_expiry <= 0:
+        resolved = _resolve_expired_paper_position(
+            position_manager=position_manager,
+            position=position,
+            log_path=log_path,
+            signal=signal,
+            reason="expired_before_opposite_exit",
+            seconds_to_expiry=seconds_to_expiry,
+            paper_settlement_config=paper_settlement_config,
+        )
+        if resolved is not None:
+            return resolved
         return _mark_pending_settlement(
             log_path=log_path,
             position=position,
@@ -2491,6 +2639,7 @@ def _close_remaining_positions(
     sell_slippage: float,
     exit_order_timeout_seconds: float = 20.0,
     monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
+    paper_settlement_config: PaperSettlementResolverConfig | None = None,
 ) -> tuple[int, int, int, float]:
     closed_count = 0
     pending_count = 0
@@ -2505,14 +2654,26 @@ def _close_remaining_positions(
             is_expired = seconds_to_expiry <= 0
         if position.sleeve == "settlement":
             if is_expired:
-                _mark_pending_settlement(
-                    log_path=log_path,
+                sell_result = _resolve_expired_paper_position(
+                    position_manager=position_manager,
                     position=position,
+                    log_path=log_path,
                     signal=None,
                     reason="shutdown_settlement_hold_expired",
                     seconds_to_expiry=seconds_to_expiry,
+                    paper_settlement_config=paper_settlement_config,
                 )
-                settlement_count += 1
+                if sell_result is None:
+                    sell_result = _mark_pending_settlement(
+                        log_path=log_path,
+                        position=position,
+                        signal=None,
+                        reason="shutdown_settlement_hold_expired",
+                        seconds_to_expiry=seconds_to_expiry,
+                    )
+                if sell_result.status == "pending_settlement":
+                    settlement_count += 1
+                realized_pnl += sell_result.realized_pnl
                 del positions[position_key]
                 continue
             _log(
@@ -2527,15 +2688,27 @@ def _close_remaining_positions(
             bid, _ask = _best_bid_ask(client, position.token_id)
         except OrderBookUnavailable as exc:
             if is_expired:
-                _mark_pending_settlement(
-                    log_path=log_path,
+                sell_result = _resolve_expired_paper_position(
+                    position_manager=position_manager,
                     position=position,
+                    log_path=log_path,
                     signal=None,
                     reason="shutdown_expired_orderbook_unavailable",
                     seconds_to_expiry=seconds_to_expiry,
-                    error_payload=exc.to_log_payload(),
+                    paper_settlement_config=paper_settlement_config,
                 )
-                settlement_count += 1
+                if sell_result is None:
+                    sell_result = _mark_pending_settlement(
+                        log_path=log_path,
+                        position=position,
+                        signal=None,
+                        reason="shutdown_expired_orderbook_unavailable",
+                        seconds_to_expiry=seconds_to_expiry,
+                        error_payload=exc.to_log_payload(),
+                    )
+                if sell_result.status == "pending_settlement":
+                    settlement_count += 1
+                realized_pnl += sell_result.realized_pnl
                 del positions[position_key]
                 continue
             _log(
@@ -2549,14 +2722,26 @@ def _close_remaining_positions(
             continue
         if bid is None:
             if is_expired:
-                _mark_pending_settlement(
-                    log_path=log_path,
+                sell_result = _resolve_expired_paper_position(
+                    position_manager=position_manager,
                     position=position,
+                    log_path=log_path,
                     signal=None,
                     reason="shutdown_expired_missing_bid",
                     seconds_to_expiry=seconds_to_expiry,
+                    paper_settlement_config=paper_settlement_config,
                 )
-                settlement_count += 1
+                if sell_result is None:
+                    sell_result = _mark_pending_settlement(
+                        log_path=log_path,
+                        position=position,
+                        signal=None,
+                        reason="shutdown_expired_missing_bid",
+                        seconds_to_expiry=seconds_to_expiry,
+                    )
+                if sell_result.status == "pending_settlement":
+                    settlement_count += 1
+                realized_pnl += sell_result.realized_pnl
                 del positions[position_key]
                 continue
             _log(
@@ -2582,6 +2767,8 @@ def _close_remaining_positions(
         if sell_result is not None:
             if sell_result.status == "filled":
                 closed_count += 1
+            elif sell_result.status == "settled":
+                pass
             elif sell_result.status == "pending_settlement":
                 settlement_count += 1
             else:
@@ -2589,6 +2776,192 @@ def _close_remaining_positions(
             realized_pnl += sell_result.realized_pnl
             del positions[position_key]
     return closed_count, pending_count, settlement_count, realized_pnl
+
+
+def _resolve_expired_paper_position(
+    *,
+    position_manager: PositionManager,
+    position: LivePosition,
+    log_path: Path,
+    signal: SignalEvent | None,
+    reason: str,
+    seconds_to_expiry: float | None,
+    paper_settlement_config: PaperSettlementResolverConfig | None,
+) -> SellResult | None:
+    if (
+        paper_settlement_config is None
+        or not paper_settlement_config.enabled
+        or not position.paper
+    ):
+        return None
+    resolution = _fetch_paper_settlement_resolution(
+        position.round_slug,
+        config=paper_settlement_config,
+    )
+    if resolution.result is None:
+        _log(
+            log_path,
+            "paper_settlement_resolution_pending",
+            reason=reason,
+            position=asdict(position),
+            signal=None if signal is None else asdict(signal),
+            seconds_to_expiry=seconds_to_expiry,
+            resolution_source=resolution.source,
+            resolution_error=resolution.error,
+            market=resolution.market,
+        )
+        return None
+
+    round_end_ts = _round_end_ts(position.round_slug)
+    settled = position_manager.settle_position(
+        position.event_id,
+        resolution.result,
+        settlement_time=round_end_ts,
+    )
+    pnl = float(settled.realized_pnl or 0.0)
+    position.lifecycle_state = "SETTLED"
+    position.last_lifecycle_reason = reason
+    _log(
+        log_path,
+        "paper_settlement_resolved",
+        reason=reason,
+        position=asdict(position),
+        signal=None if signal is None else asdict(signal),
+        seconds_to_expiry=seconds_to_expiry,
+        settlement_result=settled.settlement_result,
+        exit_price=settled.exit_price,
+        realized_pnl=pnl,
+        realized_account_pnl=pnl,
+        realized_pnl_source="paper_gamma_settlement",
+        resolution_source=resolution.source,
+        market=resolution.market,
+        account_cashflow_reconciliation_required=False,
+        settlement_reconciliation_required=False,
+    )
+    return SellResult(status="settled", realized_pnl=pnl, account_cash_pnl=pnl)
+
+
+def _fetch_paper_settlement_resolution(
+    round_slug: str,
+    *,
+    config: PaperSettlementResolverConfig,
+) -> PaperSettlementResolution:
+    market, error_text = _fetch_gamma_market_by_slug(
+        config.gamma_api_base,
+        round_slug,
+        timeout_seconds=config.request_timeout_seconds,
+    )
+    if market is None:
+        return PaperSettlementResolution(
+            result=None,
+            source="gamma_market",
+            market=None,
+            error=error_text,
+        )
+    slim_market = _gamma_market_log_payload(market)
+    if not _gamma_market_is_resolved(market):
+        return PaperSettlementResolution(
+            result=None,
+            source="gamma_market",
+            market=slim_market,
+            error="market_not_resolved",
+        )
+    outcome = _winning_outcome_from_gamma_market(market)
+    return PaperSettlementResolution(
+        result=outcome,
+        source="gamma_market",
+        market=slim_market,
+        error=None if outcome is not None else "winner_unavailable",
+    )
+
+
+def _fetch_gamma_market_by_slug(
+    gamma_api_base: str,
+    slug: str,
+    *,
+    timeout_seconds: float,
+) -> tuple[dict[str, Any] | None, str | None]:
+    base = str(gamma_api_base or DEFAULT_GAMMA_API_BASE).rstrip("/")
+    errors: list[str] = []
+    param_sets = (
+        {"slug": slug, "closed": "true", "limit": "1"},
+        {"slug": slug, "active": "true", "closed": "false", "limit": "1"},
+        {"slug": slug, "limit": "1"},
+    )
+    for params in param_sets:
+        url = f"{base}/markets?{parse.urlencode(params)}"
+        req = request.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "BiGan-phase4-paper-settlement/1.0",
+            },
+        )
+        try:
+            with request.urlopen(req, timeout=timeout_seconds) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except (TimeoutError, error.URLError, json.JSONDecodeError) as exc:
+            errors.append(str(exc))
+            continue
+        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+            return dict(payload[0]), None
+    return None, errors[-1] if errors else "market_not_found"
+
+
+def _gamma_market_is_resolved(market: dict[str, Any]) -> bool:
+    if bool(market.get("closed")):
+        return True
+    status = str(market.get("umaResolutionStatus") or "").strip().lower()
+    return status == "resolved"
+
+
+def _winning_outcome_from_gamma_market(market: dict[str, Any]) -> str | None:
+    outcomes = _json_list(market.get("outcomes"))
+    prices = _json_list(market.get("outcomePrices"))
+    if len(outcomes) != len(prices) or not outcomes:
+        return None
+    parsed: dict[str, float] = {}
+    for outcome, price in zip(outcomes, prices, strict=True):
+        side = str(outcome).strip().upper()
+        if side not in {"UP", "DOWN"}:
+            continue
+        parsed_price = _optional_float(price)
+        if parsed_price is None:
+            return None
+        parsed[side] = parsed_price
+    up = parsed.get("UP")
+    down = parsed.get("DOWN")
+    if up is None or down is None or up == down:
+        return None
+    return "UP" if up > down else "DOWN"
+
+
+def _json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        return payload if isinstance(payload, list) else []
+    return []
+
+
+def _gamma_market_log_payload(market: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: market.get(key)
+        for key in (
+            "slug",
+            "conditionId",
+            "closed",
+            "umaResolutionStatus",
+            "outcomes",
+            "outcomePrices",
+            "endDate",
+            "eventStartTime",
+        )
+    }
 
 
 def _mark_pending_settlement(

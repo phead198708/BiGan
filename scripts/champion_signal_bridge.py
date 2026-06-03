@@ -402,7 +402,9 @@ def _bridge_signal_from_row(
             p_neutral=float(fields["p_neutral"]),
             p_vol_up=float(fields["p_vol_up"]),
             p_vol_down=float(fields["p_vol_down"]),
-            v6_joint_side=str(fields["v6_joint_side"]),
+            v6_joint_side=(
+                str(fields["v6_joint_side"]) if fields.get("v6_joint_side") else None
+            ),
         )
     prob = float(prob_up_15m)
     token_probability = 1.0 - prob if side == "DOWN" else prob
