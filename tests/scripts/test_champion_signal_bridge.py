@@ -1067,17 +1067,17 @@ def test_round_lifecycle_only_confirmed_fill_locks_round() -> None:
     assert state.open_positions[signal.round_slug] == position
 
 
-def test_round_lifecycle_enforces_sleeve_side_cap_after_confirmed_fill() -> None:
+def test_round_lifecycle_enforces_settlement_side_cap_after_confirmed_fill() -> None:
     state = executor.RoundLifecycleState()
     signal = _signal(side="DOWN")
-    position = _position(sleeve="volatility")
+    position = _position(sleeve="settlement")
     position.side = "DOWN"
 
     assert (
         executor._sleeve_side_cap_skip_reason(
             state,
             round_slug=signal.round_slug,
-            sleeve="volatility",
+            sleeve="settlement",
             side="DOWN",
             max_filled_per_side_per_round=1,
         )
@@ -1088,29 +1088,59 @@ def test_round_lifecycle_enforces_sleeve_side_cap_after_confirmed_fill() -> None
 
     assert state.filled_count_for_side(
         round_slug=signal.round_slug,
-        sleeve="volatility",
+        sleeve="settlement",
         side="DOWN",
     ) == 1
     assert (
         executor._sleeve_side_cap_skip_reason(
             state,
             round_slug=signal.round_slug,
-            sleeve="volatility",
+            sleeve="settlement",
             side="DOWN",
             max_filled_per_side_per_round=1,
         )
-        == "volatility_side_cap"
+        == "settlement_side_cap"
     )
     assert (
         executor._sleeve_side_cap_skip_reason(
             state,
             round_slug=signal.round_slug,
-            sleeve="volatility",
+            sleeve="settlement",
             side="UP",
             max_filled_per_side_per_round=1,
         )
         is None
     )
+
+
+def test_volatility_same_side_reentry_is_budget_controlled_after_close() -> None:
+    state = executor.RoundLifecycleState()
+    budget = executor.VolatilitySleeveBudget(
+        round_cap_usdc=1.0,
+        per_bet_cap_usdc=1.0,
+        min_order_size_usdc=0.05,
+    )
+    signal = _signal(side="DOWN")
+    position = _position(sleeve="volatility")
+    position.side = "DOWN"
+
+    first = budget.next_entry_decision(signal.round_slug)
+    assert first.allowed is True
+    state.mark_entry_result(signal, position)
+    assert state.has_open_sleeve(signal.round_slug, "volatility") is True
+
+    state.mark_position_closed(signal.round_slug, "volatility")
+    budget.apply_account_pnl(signal.round_slug, -0.20)
+
+    repeat = budget.next_entry_decision(signal.round_slug)
+    assert state.has_open_sleeve(signal.round_slug, "volatility") is False
+    assert state.filled_count_for_side(
+        round_slug=signal.round_slug,
+        sleeve="volatility",
+        side="DOWN",
+    ) == 1
+    assert repeat.allowed is True
+    assert repeat.size_usdc == pytest.approx(0.80)
 
 
 def test_executor_theoretical_pnl_scopes_to_current_run_positions(tmp_path: Path) -> None:

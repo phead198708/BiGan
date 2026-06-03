@@ -63,8 +63,6 @@ Environment overrides:
                              Combined settlement + volatility open cap. Default: 2
   SETTLEMENT_MAX_FILLED_PER_SIDE_PER_ROUND
                              Settlement filled-entry cap per round+side. Default: 1
-  VOLATILITY_MAX_FILLED_PER_SIDE_PER_ROUND
-                             Volatility filled-entry cap per round+side. Default: 1
   MAX_ROUNDS                 Total rounds (entries) cap. Default: 6
   DAILY_LOSS_LIMIT_USDC      Hard realized-loss stop. Default: 3.0
   MAX_RUNTIME_MINUTES        Default: 120
@@ -123,7 +121,6 @@ MAX_POSITION_SIZE_USDC="${MAX_POSITION_SIZE_USDC:-1.0}"
 MAX_CONCURRENT_POSITIONS="${MAX_CONCURRENT_POSITIONS:-1}"
 MAX_COMBINED_CONCURRENT_POSITIONS="${MAX_COMBINED_CONCURRENT_POSITIONS:-2}"
 SETTLEMENT_MAX_FILLED_PER_SIDE_PER_ROUND="${SETTLEMENT_MAX_FILLED_PER_SIDE_PER_ROUND:-1}"
-VOLATILITY_MAX_FILLED_PER_SIDE_PER_ROUND="${VOLATILITY_MAX_FILLED_PER_SIDE_PER_ROUND:-1}"
 MAX_ROUNDS="${MAX_ROUNDS:-6}"
 DAILY_LOSS_LIMIT_USDC="${DAILY_LOSS_LIMIT_USDC:-3.0}"
 MAX_RUNTIME_MINUTES="${MAX_RUNTIME_MINUTES:-120}"
@@ -184,7 +181,7 @@ echo "[v5-live-shadow] volatility_score_threshold=${VOLATILITY_SCORE_THRESHOLD}"
 echo "[v5-live-shadow] volatility_cost_gate=round_trip_cost:${VOLATILITY_ROUND_TRIP_COST}+safety_margin:${VOLATILITY_SAFETY_MARGIN}"
 echo "[v5-live-shadow] volatility_sleeve enabled=${ENABLE_VOLATILITY_SLEEVE} paper=${PAPER} bankroll=${VOLATILITY_ROUND_BANKROLL_USDC} per_bet=${VOLATILITY_PER_BET_CAP_USDC} min_order=${VOLATILITY_MIN_ORDER_SIZE_USDC}"
 echo "[v5-live-shadow] monitoring_db=${MONITORING_DB_PATH}"
-echo "[v5-live-shadow] caps: settlement_size=${MAX_POSITION_SIZE_USDC} settlement_concurrent=${MAX_CONCURRENT_POSITIONS} combined_concurrent=${MAX_COMBINED_CONCURRENT_POSITIONS} settlement_side_cap=${SETTLEMENT_MAX_FILLED_PER_SIDE_PER_ROUND} volatility_side_cap=${VOLATILITY_MAX_FILLED_PER_SIDE_PER_ROUND} rounds=${MAX_ROUNDS} daily_loss=${DAILY_LOSS_LIMIT_USDC}"
+echo "[v5-live-shadow] caps: settlement_size=${MAX_POSITION_SIZE_USDC} settlement_concurrent=${MAX_CONCURRENT_POSITIONS} combined_concurrent=${MAX_COMBINED_CONCURRENT_POSITIONS} settlement_side_cap=${SETTLEMENT_MAX_FILLED_PER_SIDE_PER_ROUND} volatility_budget=${VOLATILITY_ROUND_BANKROLL_USDC}/${VOLATILITY_PER_BET_CAP_USDC}/${VOLATILITY_MIN_ORDER_SIZE_USDC} rounds=${MAX_ROUNDS} daily_loss=${DAILY_LOSS_LIMIT_USDC}"
 echo "[v5-live-shadow] continue_after_max_rounds_until_runtime=${CONTINUE_AFTER_MAX_ROUNDS_UNTIL_RUNTIME}"
 echo "[v5-live-shadow] entry: min_price=${MIN_ENTRY_PRICE} buy_slippage=${BUY_SLIPPAGE} sell_slippage=${SELL_SLIPPAGE}"
 if [[ -n "${SIGNAL_JSONL_PATH}" ]]; then
@@ -213,7 +210,6 @@ EXEC_ARGS=(
   --max-concurrent-positions "${MAX_CONCURRENT_POSITIONS}"
   --max-combined-concurrent-positions "${MAX_COMBINED_CONCURRENT_POSITIONS}"
   --settlement-max-filled-per-side-per-round "${SETTLEMENT_MAX_FILLED_PER_SIDE_PER_ROUND}"
-  --volatility-max-filled-per-side-per-round "${VOLATILITY_MAX_FILLED_PER_SIDE_PER_ROUND}"
   --max-rounds "${MAX_ROUNDS}"
   --daily-loss-limit-usdc "${DAILY_LOSS_LIMIT_USDC}"
   --max-runtime-minutes "${MAX_RUNTIME_MINUTES}"

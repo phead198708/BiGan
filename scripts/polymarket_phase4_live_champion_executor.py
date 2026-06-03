@@ -368,9 +368,6 @@ def main() -> int:
             "settlement_max_filled_per_side_per_round": (
                 args.settlement_max_filled_per_side_per_round
             ),
-            "volatility_max_filled_per_side_per_round": (
-                args.volatility_max_filled_per_side_per_round
-            ),
             "near_min_price_band": args.near_min_price_band,
             "near_min_fresh_edge_threshold": args.near_min_fresh_edge_threshold,
             "near_min_seconds_to_expiry": args.near_min_seconds_to_expiry,
@@ -664,33 +661,6 @@ def main() -> int:
                     and not lifecycle.has_open_sleeve(event.round_slug, "volatility")
                     and len(lifecycle.open_positions) < args.max_combined_concurrent_positions
                 ):
-                    side_skip_reason = _sleeve_side_cap_skip_reason(
-                        lifecycle,
-                        round_slug=event.round_slug,
-                        sleeve="volatility",
-                        side=event.outcome_side,
-                        max_filled_per_side_per_round=(
-                            args.volatility_max_filled_per_side_per_round
-                        ),
-                    )
-                    if side_skip_reason is not None:
-                        _bump(skipped, side_skip_reason)
-                        _log(
-                            log_path,
-                            "entry_skipped",
-                            reason=side_skip_reason,
-                            sleeve="volatility",
-                            signal=asdict(event),
-                            filled_side_count=lifecycle.filled_count_for_side(
-                                round_slug=event.round_slug,
-                                sleeve="volatility",
-                                side=event.outcome_side,
-                            ),
-                            max_filled_per_side_per_round=(
-                                args.volatility_max_filled_per_side_per_round
-                            ),
-                        )
-                        continue
                     budget_decision = volatility_budget.next_entry_decision(event.round_slug)
                     if not budget_decision.allowed:
                         _bump(skipped, budget_decision.reason)
@@ -782,9 +752,6 @@ def main() -> int:
             "max_combined_concurrent_positions": args.max_combined_concurrent_positions,
             "settlement_max_filled_per_side_per_round": (
                 args.settlement_max_filled_per_side_per_round
-            ),
-            "volatility_max_filled_per_side_per_round": (
-                args.volatility_max_filled_per_side_per_round
             ),
             "volatility_budget_balances": dict(volatility_budget.balances or {}),
             "volatility_filled_count_by_round": lifecycle.volatility_filled_count_by_round,
@@ -899,7 +866,10 @@ def _parse_args() -> argparse.Namespace:
         "--volatility-max-filled-per-side-per-round",
         type=int,
         default=1,
-        help="Cap filled volatility entries per round and side.",
+        help=(
+            "Deprecated no-op. Volatility re-entry is controlled by open-position "
+            "state plus per-round bankroll/per-bet sizing, not same-side fill count."
+        ),
     )
     parser.add_argument(
         "--edge-threshold",
@@ -1081,8 +1051,6 @@ def _v6_joint_config_from_args(args: argparse.Namespace) -> V6JointGateConfig | 
 def _validate_args(args: argparse.Namespace) -> None:
     if args.settlement_max_filled_per_side_per_round <= 0:
         raise ValueError("--settlement-max-filled-per-side-per-round must be positive")
-    if args.volatility_max_filled_per_side_per_round <= 0:
-        raise ValueError("--volatility-max-filled-per-side-per-round must be positive")
     if args.entry_gate_mode == "v6-joint" and not is_v6_model_version(args.model_version):
         raise ValueError("--entry-gate-mode v6-joint requires model_version xgboost-v6")
 
