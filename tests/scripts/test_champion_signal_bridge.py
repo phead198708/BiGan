@@ -558,8 +558,8 @@ def test_executor_duckdb_cursor_advances_past_v6_settlement_gate_misses(tmp_path
                     snapshot(
                         side="DOWN",
                         source_symbol="token-down",
-                        p_up=0.10,
-                        p_down=0.85,
+                        p_up=0.85,
+                        p_down=0.10,
                         p_vol_up=0.10,
                         p_vol_down=0.10,
                     ),
@@ -689,8 +689,8 @@ def test_executor_duckdb_keeps_v6_settlement_and_volatility_lanes_per_round(
                     snapshot(
                         side="DOWN",
                         source_symbol="token-down",
-                        p_up=0.10,
-                        p_down=0.85,
+                        p_up=0.85,
+                        p_down=0.10,
                         p_vol_up=0.10,
                         p_vol_down=0.10,
                     ),
@@ -719,6 +719,8 @@ def test_executor_duckdb_keeps_v6_settlement_and_volatility_lanes_per_round(
     assert by_id["pred-vol-only"].token_probability == pytest.approx(0.62)
     assert by_id["pred-vol-only"].v6_joint_side is None
     assert by_id["pred-settlement"].outcome_side == "DOWN"
+    assert by_id["pred-settlement"].p_up == pytest.approx(0.10)
+    assert by_id["pred-settlement"].p_down == pytest.approx(0.85)
     assert by_id["pred-settlement"].v6_joint_side == "DOWN"
 
 
@@ -1199,7 +1201,7 @@ def test_executor_position_tick_resolves_expired_paper_settlement(
     assert row["settlement_reconciliation_required"] is False
 
 
-def test_executor_expired_paper_settlement_falls_back_when_unresolved(
+def test_executor_expired_paper_settlement_waits_when_unresolved_within_grace(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1237,7 +1239,58 @@ def test_executor_expired_paper_settlement_falls_back_when_unresolved(
     )
 
     rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert result == (0, 0, 0, 0.0)
+    assert lifecycle.open_positions[executor._position_key(position.round_slug, "settlement")] == position
+    assert position.lifecycle_state == "AWAITING_SETTLEMENT"
+    assert manager.settled == []
+    assert rows[-2]["event"] == "paper_settlement_resolution_pending"
+    assert rows[-2]["resolution_error"] == "market_not_resolved"
+    assert rows[-1]["event"] == "paper_settlement_resolution_waiting"
+
+
+def test_executor_expired_paper_settlement_falls_back_after_grace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    now_ms = 2_000_001
+    log_path = tmp_path / "phase4.jsonl"
+    lifecycle = executor.RoundLifecycleState()
+    position = _position(round_slug="btc-updown-15m-1000", sleeve="settlement")
+    position.paper = True
+    _store_open_position(lifecycle, position)
+    manager = _SettlementPositionManager(realized_pnl=-1.0)
+
+    monkeypatch.setattr(
+        executor,
+        "_fetch_paper_settlement_resolution",
+        lambda _round_slug, *, config: executor.PaperSettlementResolution(
+            result=None,
+            source="gamma_market",
+            error="market_not_resolved",
+        ),
+    )
+
+    result = executor._tick_open_positions(
+        client=_MissingBidClient(),
+        position_manager=manager,
+        lifecycle=lifecycle,
+        log_path=log_path,
+        now_ms=now_ms,
+        soft_force_exit_before_expiry_seconds=240.0,
+        hard_force_exit_before_expiry_seconds=120.0,
+        soft_force_exit_min_bid=0.15,
+        exit_retry_seconds=10.0,
+        max_exit_attempts_per_position=6,
+        sell_slippage=0.01,
+        paper_settlement_config=executor.PaperSettlementResolverConfig(
+            enabled=True,
+            max_wait_after_expiry_seconds=0.0,
+        ),
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert result == (0, 0, 1, 0.0)
+    assert lifecycle.open_positions == {}
     assert manager.settled == []
     assert rows[-2]["event"] == "paper_settlement_resolution_pending"
     assert rows[-2]["resolution_error"] == "market_not_resolved"
@@ -1263,6 +1316,26 @@ def test_executor_gamma_market_winner_parses_outcome_price_strings() -> None:
         )
         == "UP"
     )
+
+
+def test_executor_gamma_event_payload_extracts_nested_market() -> None:
+    payload = {
+        "slug": "btc-updown-15m-1000",
+        "markets": [
+            {"slug": "other", "outcomes": '["Up", "Down"]'},
+            {
+                "slug": "btc-updown-15m-1000",
+                "outcomes": '["Up", "Down"]',
+                "outcomePrices": '["1", "0"]',
+            },
+        ],
+    }
+
+    market = executor._gamma_market_from_event_payload(payload, "btc-updown-15m-1000")
+
+    assert market is not None
+    assert market["slug"] == "btc-updown-15m-1000"
+    assert executor._winning_outcome_from_gamma_market(market) == "UP"
 
 
 def test_settlement_sleeve_holds_until_redeem_before_expiry(
@@ -1682,6 +1755,50 @@ def test_v6_joint_settlement_gate_logs_cost_edge_for_paper_fill(tmp_path: Path) 
     assert evaluated["gate_evaluation"]["settlement_gate_passed"] is True
     assert filled["gate_evaluation"]["settlement_edge"] == pytest.approx(0.09)
     assert filled["gate_evaluation"]["settlement_gate_passed"] is True
+
+
+def test_v6_joint_settlement_entry_ignores_legacy_min_entry_price(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+    manager = _OpenPositionManager()
+
+    position = executor._try_entry(
+        client=_CheapAskClient(),
+        position_manager=manager,
+        signal=_signal(
+            edge=0.49,
+            token_probability=0.78,
+            p_up=0.78,
+            p_down=0.18,
+            p_neutral=0.04,
+            p_vol_up=0.10,
+            p_vol_down=0.10,
+            v6_joint_side="UP",
+        ),
+        log_path=log_path,
+        max_position_size_usdc=1.0,
+        entry_policy=executor.Phase4EntryPolicy(
+            min_entry_price=0.35,
+            settlement_edge_threshold=0.082,
+            volatility_min_entry_price=0.20,
+        ),
+        seconds_to_expiry=600.0,
+        buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
+        sleeve="settlement",
+        paper=True,
+        entry_gate_mode="v6-joint",
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    evaluated = next(row for row in rows if row["event"] == "entry_gate_evaluated")
+    filled = next(row for row in rows if row["event"] == "paper_entry_filled")
+
+    assert position is not None
+    assert position.sleeve == "settlement"
+    assert position.fill_price == pytest.approx(0.27)
+    assert evaluated["worst_price"] == pytest.approx(0.27)
+    assert evaluated["fresh_edge_at_worst"] == pytest.approx(0.51)
+    assert filled["gate_evaluation"]["settlement_edge"] == pytest.approx(0.51)
 
 
 def test_executor_skips_complementary_entry_below_min_price(tmp_path: Path) -> None:

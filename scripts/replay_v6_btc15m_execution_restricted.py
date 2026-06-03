@@ -11,8 +11,12 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
-from bigan.execution.phase4_policy import Phase4EntryPolicy, entry_price_skip_reason
-from bigan.execution.v6_gate import V6JointGateConfig, evaluate_v6_settlement_side
+from bigan.execution.phase4_policy import Phase4EntryPolicy, settlement_cost_edge_skip_reason
+from bigan.execution.v6_gate import (
+    V6JointGateConfig,
+    evaluate_v6_settlement_side,
+    market_v6_payload_from_token_payload,
+)
 from bigan.modeling.families import market_family_from_symbol
 from bigan.modeling.xgboost_v6 import (
     XGBOOST_V6_MODEL_VERSION,
@@ -102,6 +106,7 @@ def main() -> int:
             "no_new_entry_before_expiry_seconds": args.no_new_entry_before_expiry_seconds,
             "buy_slippage": args.buy_slippage,
             "settlement_min_edge_after_cost": settlement_min_edge_after_cost,
+            "settlement_price_gate_mode": "cost_edge_only",
             "round_first_per_round_slug": True,
             "require_observed_exit_path": False,
         },
@@ -291,7 +296,12 @@ def _collect_offline_trades(
 ) -> list[ReplayTrade]:
     trades: list[ReplayTrade] = []
     for row, payload in zip(rows, payloads, strict=True):
-        side = _settlement_decision_from_payload(payload, joint_rule=joint_rule)
+        token_side = _outcome_side(row)
+        side = _settlement_decision_from_payload(
+            payload,
+            joint_rule=joint_rule,
+            token_side=token_side,
+        )
         if side is None:
             continue
         entry_cost = _entry_cost_for_side(row, side)
@@ -333,7 +343,13 @@ def _collect_execution_restricted_trades(
     seen_rounds: set[str] = set()
 
     for row, payload in zip(rows, payloads, strict=True):
-        side = _settlement_decision_from_payload(payload, joint_rule=joint_rule)
+        token_side = _outcome_side(row)
+        market_payload = market_v6_payload_from_token_payload(payload, token_side=token_side)
+        side = _settlement_decision_from_payload(
+            payload,
+            joint_rule=joint_rule,
+            token_side=token_side,
+        )
         if side is None:
             _bump(gate_counts, "settlement_gate_miss")
             continue
@@ -366,12 +382,11 @@ def _collect_execution_restricted_trades(
             _bump(gate_counts, "missing_entry_quote")
             continue
         worst_price = min(1.0, ask + buy_slippage)
-        token_probability = float(payload["p_up"] if side == "UP" else payload["p_down"])
-        skip_reason = entry_price_skip_reason(
-            ask=ask,
-            worst_price=worst_price,
+        token_probability = float(
+            market_payload["p_up"] if side == "UP" else market_payload["p_down"]
+        )
+        skip_reason = settlement_cost_edge_skip_reason(
             fresh_edge_at_worst=token_probability - worst_price,
-            seconds_to_expiry=seconds_to_expiry,
             policy=policy,
         )
         if skip_reason is not None:
@@ -403,9 +418,11 @@ def _settlement_decision_from_payload(
     payload: dict[str, float | str],
     *,
     joint_rule: dict[str, Any],
+    token_side: str,
 ) -> str | None:
+    market_payload = market_v6_payload_from_token_payload(payload, token_side=token_side)
     return evaluate_v6_settlement_side(
-        payload,
+        market_payload,
         V6JointGateConfig(
             settlement_threshold=float(joint_rule["settlement_threshold"]),
             neutral_cap=float(joint_rule.get("neutral_cap", 0.25)),
@@ -542,7 +559,7 @@ def _markdown_report(report: dict[str, Any]) -> str:
         "",
         "## Execution Restrictions",
         "",
-        "- Phase 4 min-entry and near-min fresh-edge checks on observed ask + buy slippage",
+        "- Settlement entries use observed ask + buy slippage for cost-aware edge only",
         f"- Cost-aware settlement edge: p_side - worst_price >= {report['execution_policy']['settlement_min_edge_after_cost']}",
         "- Seconds-to-expiry window and no-new-entry window",
         "- Round-first: one admitted trade per round slug",

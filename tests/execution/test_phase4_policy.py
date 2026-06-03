@@ -11,6 +11,7 @@ from bigan.execution.phase4_policy import (
     evaluate_entry_gates,
     phase4_lifecycle_complete,
     phase4_summary_status,
+    settlement_cost_edge_skip_reason,
     soft_force_exit_deferred,
 )
 
@@ -27,6 +28,30 @@ def test_entry_price_skip_reason_blocks_below_min() -> None:
             policy=policy,
         )
         == "entry_price_below_min"
+    )
+
+
+def test_settlement_cost_edge_skip_reason_ignores_low_price_and_near_min() -> None:
+    policy = Phase4EntryPolicy(
+        min_entry_price=0.35,
+        near_min_price_band=0.05,
+        near_min_fresh_edge_threshold=0.50,
+        settlement_edge_threshold=0.082,
+    )
+
+    assert (
+        settlement_cost_edge_skip_reason(
+            fresh_edge_at_worst=0.10,
+            policy=policy,
+        )
+        is None
+    )
+    assert (
+        settlement_cost_edge_skip_reason(
+            fresh_edge_at_worst=0.07,
+            policy=policy,
+        )
+        == "fresh_edge_below_threshold"
     )
 
 

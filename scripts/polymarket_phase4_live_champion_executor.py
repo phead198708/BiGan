@@ -51,6 +51,7 @@ from bigan.execution.phase4_policy import (
     evaluate_entry_gates,
     phase4_lifecycle_complete,
     phase4_summary_status,
+    settlement_cost_edge_skip_reason,
     soft_force_exit_deferred,
 )
 from bigan.execution.position_manager import PositionManager
@@ -136,6 +137,7 @@ class PaperSettlementResolverConfig:
     enabled: bool = True
     gamma_api_base: str = DEFAULT_GAMMA_API_BASE
     request_timeout_seconds: float = 10.0
+    max_wait_after_expiry_seconds: float = 180.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +300,7 @@ def main() -> int:
         enabled=args.paper and not args.disable_paper_settlement_resolution,
         gamma_api_base=args.paper_settlement_gamma_api_base,
         request_timeout_seconds=args.paper_settlement_timeout_seconds,
+        max_wait_after_expiry_seconds=args.paper_settlement_max_wait_after_expiry_seconds,
     )
     volatility_budget = VolatilitySleeveBudget(
         round_cap_usdc=args.volatility_round_bankroll_usdc,
@@ -357,6 +360,12 @@ def main() -> int:
             "signal_jsonl_path": str(signal_jsonl_path) if signal_jsonl_path is not None else None,
             "edge_threshold": args.edge_threshold,
             "settlement_edge_threshold": entry_policy.effective_settlement_edge_threshold,
+            "settlement_price_gate_mode": (
+                "cost_edge_only" if args.entry_gate_mode == "v6-joint" else "legacy_min_entry"
+            ),
+            "settlement_min_entry_price": (
+                None if args.entry_gate_mode == "v6-joint" else args.min_entry_price
+            ),
             "volatility_score_threshold": entry_policy.volatility_score_threshold,
             "volatility_min_entry_price": entry_policy.volatility_min_entry_price,
             "volatility_min_seconds_to_expiry": entry_policy.volatility_min_seconds_to_expiry,
@@ -374,6 +383,9 @@ def main() -> int:
             "paper_settlement_gamma_api_base": paper_settlement_config.gamma_api_base,
             "paper_settlement_timeout_seconds": (
                 paper_settlement_config.request_timeout_seconds
+            ),
+            "paper_settlement_max_wait_after_expiry_seconds": (
+                paper_settlement_config.max_wait_after_expiry_seconds
             ),
             "entry_gate_mode": args.entry_gate_mode,
             "v6_joint_rule": (
@@ -763,6 +775,12 @@ def main() -> int:
             "market_families": sorted(allowed_families) or None,
             "edge_threshold": args.edge_threshold,
             "settlement_edge_threshold": entry_policy.effective_settlement_edge_threshold,
+            "settlement_price_gate_mode": (
+                "cost_edge_only" if args.entry_gate_mode == "v6-joint" else "legacy_min_entry"
+            ),
+            "settlement_min_entry_price": (
+                None if args.entry_gate_mode == "v6-joint" else args.min_entry_price
+            ),
             "volatility_score_threshold": entry_policy.volatility_score_threshold,
             "volatility_min_entry_price": entry_policy.volatility_min_entry_price,
             "volatility_min_seconds_to_expiry": entry_policy.volatility_min_seconds_to_expiry,
@@ -780,6 +798,9 @@ def main() -> int:
             "paper_settlement_gamma_api_base": paper_settlement_config.gamma_api_base,
             "paper_settlement_timeout_seconds": (
                 paper_settlement_config.request_timeout_seconds
+            ),
+            "paper_settlement_max_wait_after_expiry_seconds": (
+                paper_settlement_config.max_wait_after_expiry_seconds
             ),
             "phase4_v5_role": "diagnostic_and_opportunity_analysis",
             "status": phase4_summary_status(
@@ -1014,6 +1035,15 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=10.0,
         help="Timeout for paper settlement Gamma API requests.",
+    )
+    parser.add_argument(
+        "--paper-settlement-max-wait-after-expiry-seconds",
+        type=float,
+        default=180.0,
+        help=(
+            "Maximum grace period to keep an expired paper settlement position open "
+            "while Gamma has not published a final result yet."
+        ),
     )
     parser.add_argument("--exit-edge-threshold", type=float, default=0.10)
     parser.add_argument("--opposite-exit-edge-threshold", type=float, default=0.45)
@@ -1786,6 +1816,26 @@ def _attempt_lifecycle_exit(
         )
         if resolved is not None:
             return resolved
+        if _paper_settlement_should_wait(
+            position=position,
+            now_ms=now_ms,
+            paper_settlement_config=paper_settlement_config,
+        ):
+            position.lifecycle_state = "AWAITING_SETTLEMENT"
+            position.last_lifecycle_reason = exit_reason
+            _log(
+                log_path,
+                "paper_settlement_resolution_waiting",
+                reason=exit_reason,
+                position=asdict(position),
+                seconds_to_expiry=seconds_to_expiry,
+                max_wait_after_expiry_seconds=(
+                    None
+                    if paper_settlement_config is None
+                    else paper_settlement_config.max_wait_after_expiry_seconds
+                ),
+            )
+            return None
         position.lifecycle_state = "AWAITING_SETTLEMENT"
         position.last_lifecycle_reason = exit_reason
         return _mark_pending_settlement(
@@ -1919,6 +1969,7 @@ def _try_entry(
     from py_clob_client_v2.clob_types import PartialCreateOrderOptions
     from py_clob_client_v2.order_builder.constants import BUY
 
+    v6_settlement_cost_edge_only = sleeve == "settlement" and entry_gate_mode == "v6-joint"
     no_quote_gate_evaluation = evaluate_entry_gates(
         settlement_edge=signal.edge,
         ask=None,
@@ -2055,12 +2106,19 @@ def _try_entry(
                 order_posted_at=_now_ms(),
                 gate_payload=gate_payload,
             )
-    skip_reason = entry_price_skip_reason(
-        ask=float(ask),
-        worst_price=worst_price,
-        fresh_edge_at_worst=fresh_edge_at_worst,
-        seconds_to_expiry=seconds_to_expiry,
-        policy=entry_policy,
+    skip_reason = (
+        settlement_cost_edge_skip_reason(
+            fresh_edge_at_worst=fresh_edge_at_worst,
+            policy=entry_policy,
+        )
+        if v6_settlement_cost_edge_only
+        else entry_price_skip_reason(
+            ask=float(ask),
+            worst_price=worst_price,
+            fresh_edge_at_worst=fresh_edge_at_worst,
+            seconds_to_expiry=seconds_to_expiry,
+            policy=entry_policy,
+        )
     )
     if skip_reason is not None:
         _log(
@@ -2079,6 +2137,9 @@ def _try_entry(
             near_min_fresh_edge_threshold=entry_policy.near_min_fresh_edge_threshold,
             near_min_seconds_to_expiry=entry_policy.near_min_seconds_to_expiry,
             settlement_edge_threshold=entry_policy.effective_settlement_edge_threshold,
+            settlement_price_gate_mode=(
+                "cost_edge_only" if v6_settlement_cost_edge_only else "legacy_min_entry"
+            ),
             gate_evaluation=gate_payload,
         )
         return None
@@ -2140,12 +2201,19 @@ def _try_entry(
         return None
     complement_entry_price = _round_price(1.0 - float(complement_bid), tick_size)
     complement_fresh_edge = signal.token_probability - complement_entry_price
-    complement_skip_reason = entry_price_skip_reason(
-        ask=complement_entry_price,
-        worst_price=complement_entry_price,
-        fresh_edge_at_worst=complement_fresh_edge,
-        seconds_to_expiry=seconds_to_expiry,
-        policy=entry_policy,
+    complement_skip_reason = (
+        settlement_cost_edge_skip_reason(
+            fresh_edge_at_worst=complement_fresh_edge,
+            policy=entry_policy,
+        )
+        if v6_settlement_cost_edge_only
+        else entry_price_skip_reason(
+            ask=complement_entry_price,
+            worst_price=complement_entry_price,
+            fresh_edge_at_worst=complement_fresh_edge,
+            seconds_to_expiry=seconds_to_expiry,
+            policy=entry_policy,
+        )
     )
     if complement_skip_reason is not None:
         _log(
@@ -2167,6 +2235,9 @@ def _try_entry(
             near_min_fresh_edge_threshold=entry_policy.near_min_fresh_edge_threshold,
             near_min_seconds_to_expiry=entry_policy.near_min_seconds_to_expiry,
             settlement_edge_threshold=entry_policy.effective_settlement_edge_threshold,
+            settlement_price_gate_mode=(
+                "cost_edge_only" if v6_settlement_cost_edge_only else "legacy_min_entry"
+            ),
             gate_evaluation=gate_payload,
             complement_gate_evaluation=asdict(
                 evaluate_entry_gates(
@@ -2312,7 +2383,7 @@ def _try_entry(
         sleeve=sleeve,
         paper=paper,
     )
-    if fill_price < entry_policy.min_entry_price:
+    if fill_price < entry_policy.min_entry_price and not v6_settlement_cost_edge_only:
         position.lifecycle_state = "EXIT_REQUIRED"
         position.last_lifecycle_reason = "under_min_fill_exit"
     _persist_cash_leg(
@@ -2343,7 +2414,7 @@ def _try_entry(
             "fill_confirmed_at": _iso(position.opened_at),
         },
     )
-    if fill_price < entry_policy.min_entry_price:
+    if fill_price < entry_policy.min_entry_price and not v6_settlement_cost_edge_only:
         _log(
             log_path,
             "entry_fill_below_min",
@@ -2447,6 +2518,28 @@ def _maybe_exit(
             )
             if resolved is not None:
                 return resolved
+            if _paper_settlement_should_wait(
+                position=position,
+                now_ms=now_ms,
+                paper_settlement_config=paper_settlement_config,
+            ):
+                position.lifecycle_state = "AWAITING_SETTLEMENT"
+                position.last_lifecycle_reason = "expired_orderbook_unavailable"
+                _log(
+                    log_path,
+                    "paper_settlement_resolution_waiting",
+                    reason="expired_orderbook_unavailable",
+                    position=asdict(position),
+                    signal=asdict(signal),
+                    seconds_to_expiry=seconds_to_expiry,
+                    max_wait_after_expiry_seconds=(
+                        None
+                        if paper_settlement_config is None
+                        else paper_settlement_config.max_wait_after_expiry_seconds
+                    ),
+                    **exc.to_log_payload(),
+                )
+                return None
             return _mark_pending_settlement(
                 log_path=log_path,
                 position=position,
@@ -2478,6 +2571,27 @@ def _maybe_exit(
             )
             if resolved is not None:
                 return resolved
+            if _paper_settlement_should_wait(
+                position=position,
+                now_ms=now_ms,
+                paper_settlement_config=paper_settlement_config,
+            ):
+                position.lifecycle_state = "AWAITING_SETTLEMENT"
+                position.last_lifecycle_reason = "expired_missing_bid"
+                _log(
+                    log_path,
+                    "paper_settlement_resolution_waiting",
+                    reason="expired_missing_bid",
+                    position=asdict(position),
+                    signal=asdict(signal),
+                    seconds_to_expiry=seconds_to_expiry,
+                    max_wait_after_expiry_seconds=(
+                        None
+                        if paper_settlement_config is None
+                        else paper_settlement_config.max_wait_after_expiry_seconds
+                    ),
+                )
+                return None
             return _mark_pending_settlement(
                 log_path=log_path,
                 position=position,
@@ -2841,6 +2955,25 @@ def _resolve_expired_paper_position(
     return SellResult(status="settled", realized_pnl=pnl, account_cash_pnl=pnl)
 
 
+def _paper_settlement_should_wait(
+    *,
+    position: LivePosition,
+    now_ms: int,
+    paper_settlement_config: PaperSettlementResolverConfig | None,
+) -> bool:
+    if (
+        paper_settlement_config is None
+        or not paper_settlement_config.enabled
+        or not position.paper
+    ):
+        return False
+    round_end_ts = _round_end_ts(position.round_slug)
+    if round_end_ts is None:
+        return False
+    seconds_after_expiry = (now_ms - round_end_ts) / 1000
+    return seconds_after_expiry < paper_settlement_config.max_wait_after_expiry_seconds
+
+
 def _fetch_paper_settlement_resolution(
     round_slug: str,
     *,
@@ -2905,7 +3038,39 @@ def _fetch_gamma_market_by_slug(
             continue
         if isinstance(payload, list) and payload and isinstance(payload[0], dict):
             return dict(payload[0]), None
+    event_url = f"{base}/events/slug/{parse.quote(slug, safe='')}"
+    event_req = request.Request(
+        event_url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "BiGan-phase4-paper-settlement/1.0",
+        },
+    )
+    try:
+        with request.urlopen(event_req, timeout=timeout_seconds) as resp:
+            event_payload = json.loads(resp.read().decode("utf-8"))
+    except (TimeoutError, error.URLError, json.JSONDecodeError) as exc:
+        errors.append(str(exc))
+    else:
+        event_market = _gamma_market_from_event_payload(event_payload, slug)
+        if event_market is not None:
+            return event_market, None
     return None, errors[-1] if errors else "market_not_found"
+
+
+def _gamma_market_from_event_payload(
+    payload: Any,
+    slug: str,
+) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    markets = payload.get("markets")
+    if not isinstance(markets, list):
+        return None
+    for market in markets:
+        if isinstance(market, dict) and str(market.get("slug") or "") == slug:
+            return dict(market)
+    return None
 
 
 def _gamma_market_is_resolved(market: dict[str, Any]) -> bool:

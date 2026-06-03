@@ -32,6 +32,8 @@ Environment overrides:
   V6_EV_MARGIN               Default: 0.01
   V6_SETTLEMENT_MIN_EDGE_AFTER_COST
                              Default: V6_ROUND_TRIP_COST + V6_EV_MARGIN
+  PAPER_SETTLEMENT_MAX_WAIT_AFTER_EXPIRY_SECONDS
+                             Default: 180
   ENABLE_VOLATILITY_SLEEVE   Default: true (still paper-only)
   MONITORING_DB_PATH         Default: data/mlops/champion_catalog.duckdb
   SIGNAL_JSONL_PATH          Optional bridged queue for split topology
@@ -62,6 +64,7 @@ V6_VOLATILITY_THRESHOLD="${V6_VOLATILITY_THRESHOLD:-0.60}"
 V6_ROUND_TRIP_COST="${V6_ROUND_TRIP_COST:-0.072}"
 V6_EV_MARGIN="${V6_EV_MARGIN:-0.01}"
 V6_SETTLEMENT_MIN_EDGE_AFTER_COST="${V6_SETTLEMENT_MIN_EDGE_AFTER_COST:-}"
+PAPER_SETTLEMENT_MAX_WAIT_AFTER_EXPIRY_SECONDS="${PAPER_SETTLEMENT_MAX_WAIT_AFTER_EXPIRY_SECONDS:-180}"
 ENABLE_VOLATILITY_SLEEVE="${ENABLE_VOLATILITY_SLEEVE:-true}"
 PAPER="true"
 MONITORING_DB_PATH="${MONITORING_DB_PATH:-data/mlops/champion_catalog.duckdb}"
@@ -158,6 +161,7 @@ EXEC_ARGS=(
   --max-seconds-to-expiry "${MAX_SECONDS_TO_EXPIRY}"
   --log-path "${LOG_PATH}"
   --summary-path "${SUMMARY_PATH}"
+  --paper-settlement-max-wait-after-expiry-seconds "${PAPER_SETTLEMENT_MAX_WAIT_AFTER_EXPIRY_SECONDS}"
   --paper
 )
 if [[ -n "${V6_SETTLEMENT_MIN_EDGE_AFTER_COST}" ]]; then

@@ -166,6 +166,18 @@ def entry_price_skip_reason(
     return None
 
 
+def settlement_cost_edge_skip_reason(
+    *,
+    fresh_edge_at_worst: float,
+    policy: Phase4EntryPolicy,
+) -> str | None:
+    """Return a v6 settlement skip reason using only executable cost edge."""
+
+    if fresh_edge_at_worst < policy.effective_settlement_edge_threshold:
+        return "fresh_edge_below_threshold"
+    return None
+
+
 def settlement_gate_passed(*, edge: float, policy: Phase4EntryPolicy) -> bool:
     """Return whether the settlement-confidence gate admits the signal."""
 

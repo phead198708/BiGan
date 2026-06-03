@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from bigan.execution.v6_gate import (
     V6JointGateConfig,
     build_v6_signal_fields,
@@ -98,11 +100,11 @@ def test_build_v6_signal_fields_maps_down_snapshot_token() -> None:
         "canonical_symbol": "BTC-15M:btc-updown-15m-1000:DOWN",
         "source_symbol": "token-down",
         "market_implied_prob": 0.40,
-        "p_up": 0.10,
-        "p_down": 0.85,
+        "p_up": 0.85,
+        "p_down": 0.10,
         "p_neutral": 0.05,
-        "p_vol_up": 0.10,
-        "p_vol_down": 0.90,
+        "p_vol_up": 0.90,
+        "p_vol_down": 0.10,
     }
     config = V6JointGateConfig(
         settlement_threshold=0.50,
@@ -128,7 +130,49 @@ def test_build_v6_signal_fields_maps_down_snapshot_token() -> None:
     assert fields["outcome_side"] == "DOWN"
     assert fields["token_id"] == "token-down"
     assert fields["opposite_token_id"] == "token-up"
+    assert fields["prob_up_15m"] == 0.10
+    assert fields["p_up"] == 0.10
+    assert fields["p_down"] == 0.85
+    assert fields["p_vol_up"] == 0.10
+    assert fields["p_vol_down"] == 0.90
+    assert fields["token_probability"] == 0.85
     assert fields["market_implied_prob"] == 0.40
+    assert fields["edge"] == pytest.approx(0.45)
+
+
+def test_build_v6_signal_fields_normalizes_contradictory_down_token_row() -> None:
+    snapshot = {
+        "canonical_symbol": "BTC-15M:btc-updown-15m-1000:DOWN",
+        "source_symbol": "token-down",
+        "market_implied_prob": 0.995,
+        "p_up": 0.9457,
+        "p_down": 0.0301,
+        "p_neutral": 0.0242,
+        "p_vol_up": 0.0819,
+        "p_vol_down": 0.0532,
+    }
+    config = V6JointGateConfig(settlement_threshold=0.50)
+
+    fields = build_v6_signal_fields(
+        event_id="pred-down-token",
+        ts=1_000,
+        created_at=2_000,
+        snapshot=snapshot,
+        model_version="xgboost-v6",
+        config=config,
+        round_end_ts=1_000_000,
+        opposite_token_id="token-up",
+    )
+
+    assert fields is not None
+    assert fields["outcome_side"] == "DOWN"
+    assert fields["token_id"] == "token-down"
+    assert fields["p_up"] == 0.0301
+    assert fields["p_down"] == 0.9457
+    assert fields["p_vol_up"] == 0.0532
+    assert fields["p_vol_down"] == 0.0819
+    assert fields["token_probability"] == 0.9457
+    assert fields["market_implied_prob"] == 0.995
 
 
 def test_build_v6_signal_fields_emits_volatility_only_without_settlement_side() -> None:

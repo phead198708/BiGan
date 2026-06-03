@@ -92,6 +92,32 @@ def v6_payload_from_snapshot(
     )
 
 
+def market_v6_payload_from_token_payload(
+    payload: dict[str, float | str],
+    *,
+    token_side: str,
+) -> dict[str, float | str]:
+    """Return v6 probabilities in market UP/DOWN coordinates.
+
+    The current v6 scorer emits probabilities from the feature row's token
+    perspective. UP-token rows already align with market UP/DOWN. DOWN-token
+    rows must be flipped before settlement or volatility gate evaluation.
+    """
+
+    side = str(token_side).strip().upper()
+    if side == "UP":
+        return dict(payload)
+    if side != "DOWN":
+        raise ValueError("token_side must be UP or DOWN")
+    return {
+        **payload,
+        "p_up": float(payload["p_down"]),
+        "p_down": float(payload["p_up"]),
+        "p_vol_up": float(payload["p_vol_down"]),
+        "p_vol_down": float(payload["p_vol_up"]),
+    }
+
+
 def evaluate_v6_joint_side(
     payload: dict[str, float | str],
     config: V6JointGateConfig,
@@ -179,17 +205,18 @@ def build_v6_signal_fields(
     payload = v6_payload_from_snapshot(snapshot, model_version=model_version)
     if payload is None:
         return None
-    settlement_side = evaluate_v6_settlement_side(payload, config)
-    volatility_side = evaluate_v6_volatility_side(payload, config)
-    side = settlement_side or volatility_side
-    if side is None:
-        return None
     canonical_symbol = str(snapshot.get("canonical_symbol") or snapshot.get("symbol") or "")
     parts = canonical_symbol.split(":")
     if len(parts) < 3:
         return None
     family, round_slug, token_side = parts[0], parts[-2], parts[-1].upper()
     if token_side not in {"UP", "DOWN"}:
+        return None
+    market_payload = market_v6_payload_from_token_payload(payload, token_side=token_side)
+    settlement_side = evaluate_v6_settlement_side(market_payload, config)
+    volatility_side = evaluate_v6_volatility_side(market_payload, config)
+    side = settlement_side or volatility_side
+    if side is None:
         return None
     market = snapshot.get("market_implied_prob")
     if market is None:
@@ -209,7 +236,9 @@ def build_v6_signal_fields(
         if not token_id:
             return None
         token_probability = (
-            float(payload["p_up"]) if settlement_side is not None else float(payload["p_vol_up"])
+            float(market_payload["p_up"])
+            if settlement_side is not None
+            else float(market_payload["p_vol_up"])
         )
         outcome_canonical = f"{family}:{round_slug}:UP"
     else:
@@ -217,9 +246,9 @@ def build_v6_signal_fields(
         if not token_id:
             return None
         token_probability = (
-            float(payload["p_down"])
+            float(market_payload["p_down"])
             if settlement_side is not None
-            else float(payload["p_vol_down"])
+            else float(market_payload["p_vol_down"])
         )
         outcome_canonical = f"{family}:{round_slug}:DOWN"
     selected_market_implied_prob = (
@@ -229,7 +258,7 @@ def build_v6_signal_fields(
         "event_id": event_id,
         "ts": int(ts),
         "created_at": int(created_at),
-        "prob_up_15m": float(payload["p_up"]),
+        "prob_up_15m": float(market_payload["p_up"]),
         "canonical_symbol": outcome_canonical,
         "token_id": token_id,
         "outcome_side": side,
@@ -240,11 +269,11 @@ def build_v6_signal_fields(
         "edge": token_probability - selected_market_implied_prob,
         "bridged_at": bridged_at,
         "opposite_token_id": down_token_id if side == "UP" else up_token_id,
-        "p_up": float(payload["p_up"]),
-        "p_down": float(payload["p_down"]),
-        "p_neutral": float(payload["p_neutral"]),
-        "p_vol_up": float(payload["p_vol_up"]),
-        "p_vol_down": float(payload["p_vol_down"]),
+        "p_up": float(market_payload["p_up"]),
+        "p_down": float(market_payload["p_down"]),
+        "p_neutral": float(market_payload["p_neutral"]),
+        "p_vol_up": float(market_payload["p_vol_up"]),
+        "p_vol_down": float(market_payload["p_vol_down"]),
         "v6_joint_side": settlement_side,
     }
 
