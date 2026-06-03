@@ -500,17 +500,6 @@ def main() -> int:
                 if not lifecycle.mark_event_seen(event.event_id):
                     _bump(skipped, "duplicate_event_id")
                     continue
-                if not lifecycle.mark_round_seen(event.round_slug, max_rounds=args.max_rounds):
-                    _bump(skipped, "max_rounds")
-                    _log(
-                        log_path,
-                        "entry_skipped",
-                        reason="max_rounds",
-                        signal=asdict(event),
-                        observed_round_count=len(lifecycle.observed_rounds),
-                        max_rounds=args.max_rounds,
-                    )
-                    continue
 
                 settlement_position = lifecycle.open_position(event.round_slug, "settlement")
                 if settlement_position is not None:
@@ -605,6 +594,17 @@ def main() -> int:
                             seconds_to_expiry=seconds_to_expiry,
                             no_new_entry_before_expiry_seconds=args.no_new_entry_before_expiry_seconds,
                         )
+                    continue
+                if not lifecycle.mark_round_seen(event.round_slug, max_rounds=args.max_rounds):
+                    _bump(skipped, "max_rounds")
+                    _log(
+                        log_path,
+                        "entry_skipped",
+                        reason="max_rounds",
+                        signal=asdict(event),
+                        observed_round_count=len(lifecycle.observed_rounds),
+                        max_rounds=args.max_rounds,
+                    )
                     continue
                 if len(lifecycle.open_positions) >= args.max_combined_concurrent_positions:
                     _bump(skipped, "max_combined_concurrent_positions")
