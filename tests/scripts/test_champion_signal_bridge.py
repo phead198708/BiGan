@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import duckdb
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BRIDGE_SCRIPT = REPO_ROOT / "scripts" / "champion_signal_bridge.py"
@@ -112,6 +113,69 @@ def test_bridge_signals_include_opposite_token_id(tmp_path: Path) -> None:
     by_side = {signal.outcome_side: signal for signal in signals}
     assert by_side["UP"].opposite_token_id == "token-down"
     assert by_side["DOWN"].opposite_token_id == "token-up"
+
+
+def test_bridge_outcome_side_filter_keeps_up_only_predictions(tmp_path: Path) -> None:
+    db_path = tmp_path / "catalog.duckdb"
+    ts = 1_779_774_400_000
+    with duckdb.connect(str(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE prediction_events (
+                event_id VARCHAR,
+                ts BIGINT,
+                created_at BIGINT,
+                model_version VARCHAR,
+                prob_up_15m DOUBLE,
+                feature_snapshot_json VARCHAR
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO prediction_events VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "pred-up",
+                    ts,
+                    ts + 1_000,
+                    "xgboost-v5",
+                    0.90,
+                    json.dumps(
+                        {
+                            "canonical_symbol": "BTC-15M:btc-updown-15m-1779774300:UP",
+                            "source_symbol": "token-up",
+                            "market_implied_prob": 0.47,
+                        }
+                    ),
+                ),
+                (
+                    "pred-down",
+                    ts,
+                    ts + 1_001,
+                    "xgboost-v5",
+                    0.10,
+                    json.dumps(
+                        {
+                            "canonical_symbol": "BTC-15M:btc-updown-15m-1779774300:DOWN",
+                            "source_symbol": "token-down",
+                            "market_implied_prob": 0.53,
+                        }
+                    ),
+                ),
+            ],
+        )
+
+    signals = bridge._read_bridge_signals_after(
+        str(db_path),
+        model_version="xgboost-v5",
+        after_created_at=0,
+        after_event_id="",
+        limit=10,
+        allowed_outcome_sides=frozenset({"UP"}),
+    )
+
+    assert [signal.outcome_side for signal in signals] == ["UP"]
+    assert signals[0].opposite_token_id == "token-down"
 
 
 def test_bridge_forwards_multiple_15m_families(tmp_path: Path) -> None:
@@ -244,6 +308,40 @@ def test_bridge_skips_future_round_before_start() -> None:
     )
 
     assert signal is None
+
+
+def test_bridge_v6_joint_gate_emits_down_side_signal() -> None:
+    from bigan.execution.v6_gate import V6JointGateConfig
+
+    snapshot = {
+        "canonical_symbol": "BTC-15M:btc-updown-15m-1779774300:UP",
+        "source_symbol": "token-up",
+        "market_implied_prob": 0.40,
+        "p_up": 0.10,
+        "p_down": 0.85,
+        "p_neutral": 0.05,
+        "p_vol_up": 0.10,
+        "p_vol_down": 0.90,
+    }
+    config = V6JointGateConfig(
+        settlement_threshold=0.50,
+        neutral_cap=0.25,
+        volatility_threshold=0.50,
+        round_trip_cost=0.04,
+        ev_margin=0.01,
+        gain_priors=(("up", 0.30), ("down", 0.30)),
+    )
+    signal = bridge._bridge_signal_from_row(
+        ("pred-v6", 1_779_774_400_000, 1_779_774_410_000, 0.10, json.dumps(snapshot)),
+        model_version="xgboost-v6",
+        v6_joint_config=config,
+        opposite_token_id="token-down",
+    )
+    assert signal is not None
+    assert signal.outcome_side == "DOWN"
+    assert signal.token_id == "token-down"
+    assert signal.v6_joint_side == "DOWN"
+    assert signal.p_vol_down == pytest.approx(0.90)
 
 
 def test_executor_reads_bridged_signal_jsonl(tmp_path: Path) -> None:
@@ -560,7 +658,7 @@ def test_executor_position_tick_hard_force_exits_without_new_signal(
     log_path = tmp_path / "phase4.jsonl"
     lifecycle = executor.RoundLifecycleState()
     position = _position(round_slug="btc-updown-15m-1000", size=1.960783)
-    lifecycle.open_positions[position.round_slug] = position
+    _store_open_position(lifecycle, position)
     client = _SellClient()
     manager = _PositionManager()
 
@@ -604,7 +702,7 @@ def test_executor_position_tick_exits_under_min_fill_immediately(
     position = _position(round_slug="btc-updown-15m-1000", size=1.960783)
     position.lifecycle_state = "EXIT_REQUIRED"
     position.last_lifecycle_reason = "under_min_fill_exit"
-    lifecycle.open_positions[position.round_slug] = position
+    _store_open_position(lifecycle, position)
     client = _SellClient()
 
     closed, pending, settlement, pnl = executor._tick_open_positions(
@@ -644,7 +742,7 @@ def test_executor_hard_force_exit_bypasses_soft_retry_cap(
     position.last_exit_attempt_at = 1_700_000
     position.lifecycle_state = "EXIT_PENDING"
     position.last_lifecycle_reason = "soft_force_exit"
-    lifecycle.open_positions[position.round_slug] = position
+    _store_open_position(lifecycle, position)
     client = _SellClient()
     manager = _PositionManager()
 
@@ -682,7 +780,7 @@ def test_executor_position_tick_soft_force_exit_defers_weak_bid(
     log_path = tmp_path / "phase4.jsonl"
     lifecycle = executor.RoundLifecycleState()
     position = _position(round_slug="btc-updown-15m-1000")
-    lifecycle.open_positions[position.round_slug] = position
+    _store_open_position(lifecycle, position)
 
     result = executor._tick_open_positions(
         client=_WeakBidClient(),
@@ -702,7 +800,7 @@ def test_executor_position_tick_soft_force_exit_defers_weak_bid(
     assert result == (0, 0, 0, 0.0)
     assert hold["event"] == "force_exit_hold"
     assert hold["reason"] == "soft_force_exit_bid_too_low"
-    assert lifecycle.open_positions[position.round_slug] == position
+    assert lifecycle.open_positions[executor._position_key(position.round_slug, position.sleeve)] == position
 
 
 def test_executor_position_tick_soft_force_exit_retries_missing_bid(
@@ -712,7 +810,7 @@ def test_executor_position_tick_soft_force_exit_retries_missing_bid(
     log_path = tmp_path / "phase4.jsonl"
     lifecycle = executor.RoundLifecycleState()
     position = _position(round_slug="btc-updown-15m-1000")
-    lifecycle.open_positions[position.round_slug] = position
+    _store_open_position(lifecycle, position)
 
     result = executor._tick_open_positions(
         client=_MissingBidClient(),
@@ -737,7 +835,7 @@ def test_executor_position_tick_soft_force_exit_retries_missing_bid(
     assert hold["event"] == "force_exit_hold"
     assert hold["reason"] == "missing_bid"
     assert hold["exit_reason"] == "soft_force_exit"
-    assert lifecycle.open_positions[position.round_slug] == position
+    assert lifecycle.open_positions[executor._position_key(position.round_slug, position.sleeve)] == position
 
 
 def test_executor_position_tick_expired_moves_to_settlement(
@@ -747,7 +845,7 @@ def test_executor_position_tick_expired_moves_to_settlement(
     log_path = tmp_path / "phase4.jsonl"
     lifecycle = executor.RoundLifecycleState()
     position = _position(round_slug="btc-updown-15m-1000")
-    lifecycle.open_positions[position.round_slug] = position
+    _store_open_position(lifecycle, position)
 
     result = executor._tick_open_positions(
         client=_MissingBidClient(),
@@ -772,6 +870,37 @@ def test_executor_position_tick_expired_moves_to_settlement(
     assert row["settlement_reconciliation_required"] is True
 
 
+def test_settlement_sleeve_holds_until_redeem_before_expiry(
+    tmp_path: Path,
+) -> None:
+    now_ms = 1_700_000
+    log_path = tmp_path / "phase4.jsonl"
+    lifecycle = executor.RoundLifecycleState()
+    position = _position(round_slug="btc-updown-15m-2000", sleeve="settlement")
+    _store_open_position(lifecycle, position)
+
+    result = executor._tick_open_positions(
+        client=_SellClient(),
+        position_manager=_PositionManager(),
+        lifecycle=lifecycle,
+        log_path=log_path,
+        now_ms=now_ms,
+        soft_force_exit_before_expiry_seconds=240.0,
+        hard_force_exit_before_expiry_seconds=120.0,
+        soft_force_exit_min_bid=0.15,
+        exit_retry_seconds=10.0,
+        max_exit_attempts_per_position=6,
+        sell_slippage=0.01,
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert result == (0, 0, 0, 0.0)
+    assert lifecycle.open_positions[executor._position_key(position.round_slug, position.sleeve)] == position
+    assert row["event"] == "settlement_sleeve_hold"
+    assert row["reason"] == "hold_to_settlement"
+    assert row["position"]["sleeve"] == "settlement"
+
+
 def test_round_lifecycle_only_confirmed_fill_locks_round() -> None:
     state = executor.RoundLifecycleState()
     signal = _signal()
@@ -786,11 +915,98 @@ def test_round_lifecycle_only_confirmed_fill_locks_round() -> None:
     assert signal.round_slug not in state.filled_rounds
     assert signal.round_slug not in state.open_positions
 
-    position = _position()
+    position = _position(sleeve="settlement")
     state.mark_entry_result(signal, position)
 
     assert signal.round_slug in state.filled_rounds
+    assert state.position_event_ids == {position.event_id}
     assert state.open_positions[signal.round_slug] == position
+
+
+def test_round_lifecycle_enforces_sleeve_side_cap_after_confirmed_fill() -> None:
+    state = executor.RoundLifecycleState()
+    signal = _signal(side="DOWN")
+    position = _position(sleeve="volatility")
+    position.side = "DOWN"
+
+    assert (
+        executor._sleeve_side_cap_skip_reason(
+            state,
+            round_slug=signal.round_slug,
+            sleeve="volatility",
+            side="DOWN",
+            max_filled_per_side_per_round=1,
+        )
+        is None
+    )
+
+    state.mark_entry_result(signal, position)
+
+    assert state.filled_count_for_side(
+        round_slug=signal.round_slug,
+        sleeve="volatility",
+        side="DOWN",
+    ) == 1
+    assert (
+        executor._sleeve_side_cap_skip_reason(
+            state,
+            round_slug=signal.round_slug,
+            sleeve="volatility",
+            side="DOWN",
+            max_filled_per_side_per_round=1,
+        )
+        == "volatility_side_cap"
+    )
+    assert (
+        executor._sleeve_side_cap_skip_reason(
+            state,
+            round_slug=signal.round_slug,
+            sleeve="volatility",
+            side="UP",
+            max_filled_per_side_per_round=1,
+        )
+        is None
+    )
+
+
+def test_executor_theoretical_pnl_scopes_to_current_run_positions(tmp_path: Path) -> None:
+    manager = executor.PositionManager(tmp_path / "positions.duckdb")
+    manager.open_position(
+        "historical-winner",
+        "BTC-15M:btc-updown-15m-1779805800:UP",
+        "UP",
+        0.04,
+        25.0,
+        "old-order",
+    )
+    manager.settle_position("historical-winner", "UP")
+    manager.open_position(
+        "current-loss",
+        "BTC-15M:btc-updown-15m-1780239600:DOWN",
+        "DOWN",
+        0.50,
+        2.0,
+        "run-order-1",
+    )
+    manager.close_position("current-loss", 0.20)
+    manager.open_position(
+        "current-win",
+        "BTC-15M:btc-updown-15m-1780240500:DOWN",
+        "DOWN",
+        0.40,
+        2.5,
+        "run-order-2",
+    )
+    manager.close_position("current-win", 0.65)
+
+    all_history_pnl = executor._theoretical_pnl_from_positions(manager)
+    current_run_pnl = executor._theoretical_pnl_from_positions(
+        manager,
+        event_ids={"current-loss", "current-win"},
+    )
+
+    assert round(all_history_pnl, 8) == 24.025
+    assert round(current_run_pnl, 8) == 0.025
 
 
 def test_round_lifecycle_caps_unique_observed_rounds() -> None:
@@ -908,6 +1124,68 @@ def test_executor_skips_entry_below_min_price(tmp_path: Path) -> None:
     assert row["ask"] == 0.25
     assert row["worst_price"] == 0.27
     assert row["min_entry_price"] == 0.30
+
+
+def test_executor_volatility_entry_requires_paper_mode(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+
+    position = executor._try_entry(
+        client=_VolatilityPaperClient(),
+        position_manager=_OpenPositionManager(),
+        signal=_signal(edge=0.10),
+        log_path=log_path,
+        max_position_size_usdc=1.0,
+        entry_policy=executor.Phase4EntryPolicy(
+            settlement_edge_threshold=0.45,
+            volatility_min_entry_price=0.20,
+            volatility_round_trip_cost=0.04,
+            volatility_safety_margin=0.02,
+        ),
+        seconds_to_expiry=600.0,
+        buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
+        sleeve="volatility",
+        paper=False,
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert position is None
+    assert row["event"] == "entry_skipped"
+    assert row["reason"] == "volatility_live_disabled"
+    assert row["gate_evaluation"]["expected_volatility_exit_gain"] == pytest.approx(0.18)
+
+
+def test_executor_volatility_paper_entry_creates_tagged_position(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+    manager = _OpenPositionManager()
+
+    position = executor._try_entry(
+        client=_VolatilityPaperClient(),
+        position_manager=manager,
+        signal=_signal(edge=0.10),
+        log_path=log_path,
+        max_position_size_usdc=0.80,
+        entry_policy=executor.Phase4EntryPolicy(
+            settlement_edge_threshold=0.45,
+            volatility_min_entry_price=0.20,
+            volatility_round_trip_cost=0.04,
+            volatility_safety_margin=0.02,
+        ),
+        seconds_to_expiry=600.0,
+        buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
+        sleeve="volatility",
+        paper=True,
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert position is not None
+    assert position.paper is True
+    assert position.sleeve == "volatility"
+    assert position.fill_price == pytest.approx(0.52)
+    assert manager.opened[0]["sleeve"] == "volatility"
+    assert row["event"] == "paper_entry_filled"
+    assert row["sleeve"] == "volatility"
 
 
 def test_executor_skips_complementary_entry_below_min_price(tmp_path: Path) -> None:
@@ -1070,6 +1348,64 @@ def test_executor_retries_matched_sell_until_trade_confirmation(
     assert filled["exit_price"] == 0.82
 
 
+def test_executor_sell_result_prefers_cash_leg_account_pnl_for_budget(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    db_path = tmp_path / "catalog.duckdb"
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position()
+    manager = executor.PositionManager(db_path)
+    manager.open_position(
+        position.event_id,
+        "BTC-15M:round-1:UP",
+        "UP",
+        0.50,
+        2.0,
+        "order-buy",
+        fill_price=0.50,
+        sleeve=position.sleeve,
+    )
+    executor._persist_cash_leg(
+        monitoring_db_path=str(db_path),
+        event_id=position.event_id,
+        round_slug=position.round_slug,
+        action="BUY",
+        fill={
+            "price": "0.50",
+            "size": "2.0",
+            "usdcAmount": "1.05",
+            "timestamp": 1,
+        },
+        order_id="order-buy",
+        sleeve=position.sleeve,
+    )
+
+    sell_result = executor._sell_position(
+        client=_SellDelayedConfirmationClient(),
+        position_manager=manager,
+        position=position,
+        log_path=log_path,
+        bid=0.82,
+        sell_slippage=0.01,
+        reason="test_budget_account_pnl",
+        signal=None,
+        monitoring_db_path=str(db_path),
+    )
+
+    filled = next(
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["event"] == "exit_filled"
+    )
+
+    assert sell_result.realized_pnl == pytest.approx(0.64)
+    assert sell_result.account_cash_pnl == pytest.approx(0.59)
+    assert executor._cash_pnl_for_budget(sell_result) == pytest.approx(0.59)
+    assert filled["account_cash_pnl"] == pytest.approx(0.59)
+
+
 def test_executor_sell_post_failure_does_not_raise(
     tmp_path: Path,
     monkeypatch,
@@ -1201,6 +1537,20 @@ class _NearMinAskClient(_CheapAskClient):
     def get_order_book(self, token_id: str):  # noqa: ANN201
         assert token_id == "token-up"
         return {"bids": [{"price": "0.35"}], "asks": [{"price": "0.36"}]}
+
+
+class _VolatilityPaperClient:
+    def get_order_book(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return {"bids": [{"price": "0.70"}], "asks": [{"price": "0.50"}]}
+
+    def get_tick_size(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return "0.01"
+
+    def get_neg_risk(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return False
 
 
 class _ComplementCheapClient:
@@ -1372,7 +1722,7 @@ def _signal(
     )
 
 
-def _position(*, size: float = 2.0, round_slug: str = "round-1"):
+def _position(*, size: float = 2.0, round_slug: str = "round-1", sleeve: str = "volatility"):
     return executor.LivePosition(
         event_id="phase4-round-1-UP",
         round_slug=round_slug,
@@ -1388,4 +1738,12 @@ def _position(*, size: float = 2.0, round_slug: str = "round-1"):
         entry_signal_created_at=2_000,
         entry_signal_bridged_at=3_000,
         entry_order_posted_at=3_500,
+        sleeve=sleeve,
     )
+
+
+def _store_open_position(
+    lifecycle: executor.RoundLifecycleState,
+    position: executor.LivePosition,
+) -> None:
+    lifecycle.open_positions[executor._position_key(position.round_slug, position.sleeve)] = position

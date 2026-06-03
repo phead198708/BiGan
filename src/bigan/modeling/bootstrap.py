@@ -25,6 +25,7 @@ class BootstrapRules:
     # and trading utility still clears positive Sharpe plus positive net-PnL delta.
     allow_lower_sharpe_if_brier_gap: float = 0.05
     max_global_ece: float | None = None
+    max_execution_subset_ece: float | None = None
     min_high_up_realized_up_rate: float | None = None
     min_high_down_realized_down_rate: float | None = None
     require_positive_avg_return_by_family: bool = False
@@ -643,6 +644,9 @@ def _calibration_assessment(
     summary_parts = []
     if ece is not None and brier is not None:
         summary_parts.append(f"{report.get('method', 'unknown')} ECE {ece:.4f}, Brier {brier:.4f}")
+    execution_ece = _execution_subset_ece(report)
+    if execution_ece is not None:
+        summary_parts.append(f"execution ECE {execution_ece:.4f}")
     if report.get("family_metrics"):
         summary_parts.append(f"families {len(report.get('family_metrics') or {})}")
     if gate_failures:
@@ -674,6 +678,8 @@ def _calibration_gate_missing(report: dict[str, Any], rules: BootstrapRules) -> 
         missing.append("high_up bucket realized up rate missing")
     if rules.min_high_down_realized_down_rate is not None and _high_down_realized_rate(bucket_metrics) is None:
         missing.append("high_down bucket realized down rate missing")
+    if rules.max_execution_subset_ece is not None and _execution_subset_ece(report) is None:
+        missing.append("execution subset ECE missing")
     if rules.require_positive_avg_return_by_family and not isinstance(family_metrics, dict):
         missing.append("family calibration metrics missing")
     elif rules.require_positive_avg_return_by_family and not family_metrics:
@@ -690,6 +696,16 @@ def _bucket_level_calibration_gate_failures(
     ece = _metric(calibrated, "ece") if isinstance(calibrated, dict) else None
     if rules.max_global_ece is not None and ece is not None and ece >= rules.max_global_ece:
         failures.append(f"Global ECE {ece:.4f} does not beat gate {rules.max_global_ece:.4f}.")
+    execution_ece = _execution_subset_ece(report)
+    if (
+        rules.max_execution_subset_ece is not None
+        and execution_ece is not None
+        and execution_ece >= rules.max_execution_subset_ece
+    ):
+        failures.append(
+            f"Execution subset ECE {execution_ece:.4f} does not beat gate "
+            f"{rules.max_execution_subset_ece:.4f}."
+        )
     bucket_metrics = report.get("bucket_metrics")
     high_up = _bucket_metric(bucket_metrics, "high_up", ("realized_up_rate", "positive_rate", "up_rate"))
     if (
@@ -737,6 +753,22 @@ def _bucket_level_calibration_gate_failures(
                 + "."
             )
     return failures
+
+
+def _execution_subset_ece(report: dict[str, Any]) -> float | None:
+    metrics = report.get("execution_subset_metrics")
+    if isinstance(metrics, dict):
+        calibrated = metrics.get("calibrated_metrics")
+        if isinstance(calibrated, dict):
+            return _metric(calibrated, "ece")
+    family_metrics = report.get("family_metrics")
+    if isinstance(family_metrics, dict):
+        subset = family_metrics.get("_execution_subset")
+        if isinstance(subset, dict):
+            calibrated = subset.get("calibrated_metrics")
+            if isinstance(calibrated, dict):
+                return _metric(calibrated, "ece")
+    return None
 
 
 def _high_down_realized_rate(bucket_metrics: Any) -> float | None:

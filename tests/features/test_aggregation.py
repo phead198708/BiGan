@@ -267,6 +267,36 @@ def test_run_feature_batch_can_limit_written_feature_window(tmp_path: Path) -> N
     assert row["feature_ts"] == t0 + 60_000
 
 
+def test_run_feature_batch_can_filter_by_canonical_symbol(tmp_path: Path) -> None:
+    warehouse = tmp_path / "warehouse"
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    btc_row = {
+        **_tob(t0, 0.49, 0.51),
+        "source_symbol": "btc-up-token",
+        "canonical_symbol": "BTC-15M:btc-round:UP",
+    }
+    eth_row = {
+        **_tob(t0, 0.52, 0.54),
+        "source_symbol": "eth-up-token",
+        "canonical_symbol": "ETH-15M:eth-round:UP",
+    }
+    with WarehouseWriter(warehouse, max_rows_per_partition=10) as writer:
+        writer.append_rows("raw_top_of_book", [btc_row, eth_row])
+
+    report = run_feature_batch(
+        warehouse,
+        ingest_ts=123,
+        canonical_symbol_like="BTC-15M:%",
+    )
+
+    assert report.rows_generated == 1
+    assert report.rows_written == 1
+    files = warehouse_files(warehouse, "features_15m_v1")
+    row = pq.ParquetFile(files[0]).read().to_pylist()[0]
+    assert row["source_symbol"] == "btc-up-token"
+    assert row["canonical_symbol"] == "BTC-15M:btc-round:UP"
+
+
 def test_run_feature_batch_writes_features_from_orderbook_without_top_of_book(
     tmp_path: Path,
 ) -> None:

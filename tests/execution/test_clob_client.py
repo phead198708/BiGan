@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 
 from bigan.execution import (
@@ -97,3 +100,114 @@ def test_status_and_best_bid_ask_are_normalized_from_client_payloads() -> None:
     assert status.remaining_size == pytest.approx(0.25)
     assert status.avg_fill_price == pytest.approx(0.49)
     assert client.get_best_bid_ask("token-4") == (0.48, 0.51)
+
+
+def test_builds_v2_client_with_proxy_signature_and_derived_creds(monkeypatch: pytest.MonkeyPatch) -> None:
+    class SignatureTypeV2(int):
+        EOA = 0
+        POLY_PROXY = 1
+        POLY_GNOSIS_SAFE = 2
+        POLY_1271 = 3
+
+    class ApiCreds:
+        def __init__(self, api_key: str, api_secret: str, api_passphrase: str) -> None:
+            self.api_key = api_key
+            self.api_secret = api_secret
+            self.api_passphrase = api_passphrase
+
+    class FakeClobClient:
+        instances: list[FakeClobClient] = []
+
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.derived = False
+            self.creds: ApiCreds | None = None
+            FakeClobClient.instances.append(self)
+
+        def create_or_derive_api_key(self) -> ApiCreds:
+            self.derived = True
+            return ApiCreds("derived-key", "derived-secret", "derived-passphrase")
+
+        def set_api_creds(self, creds: ApiCreds) -> None:
+            self.creds = creds
+
+    monkeypatch.setitem(
+        sys.modules,
+        "py_clob_client_v2",
+        types.SimpleNamespace(ClobClient=FakeClobClient, SignatureTypeV2=SignatureTypeV2),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "py_clob_client_v2.clob_types",
+        types.SimpleNamespace(ApiCreds=ApiCreds),
+    )
+    monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", "0xprivate")
+    monkeypatch.setenv("POLYMARKET_FUNDER", "0xfunder")
+    monkeypatch.setenv("POLYMARKET_API_KEY", "builder-key-that-should-not-be-used")
+    monkeypatch.setenv("POLYMARKET_API_SECRET", "builder-secret-that-should-not-be-used")
+    monkeypatch.setenv("POLYMARKET_API_PASSPHRASE", "builder-pass-that-should-not-be-used")
+
+    ClobExecutionClient(config=_config())
+
+    fake = FakeClobClient.instances[-1]
+    assert fake.kwargs["signature_type"] == SignatureTypeV2.POLY_PROXY
+    assert fake.kwargs["funder"] == "0xfunder"
+    assert fake.derived is True
+    assert fake.creds is not None
+    assert fake.creds.api_key == "derived-key"
+
+
+def test_v2_static_env_auth_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    class SignatureTypeV2(int):
+        POLY_PROXY = 1
+
+    class ApiCreds:
+        def __init__(self, api_key: str, api_secret: str, api_passphrase: str) -> None:
+            self.api_key = api_key
+            self.api_secret = api_secret
+            self.api_passphrase = api_passphrase
+
+    class FakeClobClient:
+        instances: list[FakeClobClient] = []
+
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.derived = False
+            self.creds: ApiCreds | None = None
+            FakeClobClient.instances.append(self)
+
+        def create_or_derive_api_key(self) -> ApiCreds:
+            self.derived = True
+            return ApiCreds("derived-key", "derived-secret", "derived-passphrase")
+
+        def set_api_creds(self, creds: ApiCreds) -> None:
+            self.creds = creds
+
+    monkeypatch.setitem(
+        sys.modules,
+        "py_clob_client_v2",
+        types.SimpleNamespace(ClobClient=FakeClobClient, SignatureTypeV2=SignatureTypeV2),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "py_clob_client_v2.clob_types",
+        types.SimpleNamespace(ApiCreds=ApiCreds),
+    )
+    monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", "0xprivate")
+    monkeypatch.setenv("POLYMARKET_CLOB_AUTH_MODE", "env")
+    monkeypatch.setenv("POLYMARKET_CLOB_API_KEY", "clob-key")
+    monkeypatch.setenv("POLYMARKET_CLOB_API_SECRET", "clob-secret")
+    monkeypatch.setenv("POLYMARKET_CLOB_API_PASSPHRASE", "clob-pass")
+
+    ClobExecutionClient(
+        config=_config(
+            api_key_env="POLYMARKET_CLOB_API_KEY",
+            api_secret_env="POLYMARKET_CLOB_API_SECRET",
+            api_passphrase_env="POLYMARKET_CLOB_API_PASSPHRASE",
+        )
+    )
+
+    fake = FakeClobClient.instances[-1]
+    assert fake.derived is False
+    assert fake.creds is not None
+    assert fake.creds.api_key == "clob-key"

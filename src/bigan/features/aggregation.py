@@ -109,13 +109,18 @@ def run_feature_batch(
     quality_config: FeatureQualityConfig = DEFAULT_QUALITY_CONFIG,
     since_ms: int | None = None,
     until_ms: int | None = None,
+    canonical_symbol_like: str | None = None,
     skip_existing: bool = False,
 ) -> FeatureBatchReport:
     """Read canonical warehouse tables and append ``features_15m_v1`` rows."""
 
     warehouse_dir = Path(warehouse_dir)
     raw_since_ms = None if since_ms is None else max(0, int(since_ms) - 30 * BUCKET_MS)
-    raw_where_sql, raw_params = _raw_window_sql(since_ms=raw_since_ms, until_ms=until_ms)
+    raw_where_sql, raw_params = _raw_window_sql(
+        since_ms=raw_since_ms,
+        until_ms=until_ms,
+        canonical_symbol_like=canonical_symbol_like,
+    )
     with open_warehouse(warehouse_dir) as conn:
         top_of_book = _fetch_dicts(
             conn,
@@ -628,15 +633,19 @@ def _raw_window_sql(
     *,
     since_ms: int | None,
     until_ms: int | None,
-) -> tuple[str, list[int]]:
+    canonical_symbol_like: str | None = None,
+) -> tuple[str, list[Any]]:
     clauses: list[str] = []
-    params: list[int] = []
+    params: list[Any] = []
     if since_ms is not None:
         clauses.append("ts >= ?")
         params.append(int(since_ms))
     if until_ms is not None:
         clauses.append("ts < ?")
         params.append(int(until_ms))
+    if canonical_symbol_like:
+        clauses.append("canonical_symbol LIKE ?")
+        params.append(str(canonical_symbol_like))
     if not clauses:
         return "", []
     return " WHERE " + " AND ".join(clauses), params

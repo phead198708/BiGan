@@ -12,6 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bigan.backtest import evaluate_predictions
+from bigan.modeling.families import market_family_from_symbol
 
 MODEL_VERSION = "logreg-baseline-v1"
 SPLITS: tuple[str, ...] = ("train", "val", "test")
@@ -79,6 +80,7 @@ class LogisticBaselineReport:
     dataset_version: str | None
     feature_columns: tuple[str, ...]
     metrics: dict[str, dict[str, float | int | None]]
+    family_metrics: dict[str, dict[str, dict[str, float | int | None]]]
     output_dir: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -87,6 +89,7 @@ class LogisticBaselineReport:
             "dataset_version": self.dataset_version,
             "feature_columns": list(self.feature_columns),
             "metrics": self.metrics,
+            "family_metrics": self.family_metrics,
             "output_dir": self.output_dir,
         }
 
@@ -122,10 +125,12 @@ def train_logistic_baseline(
     )
 
     metrics: dict[str, dict[str, float | int | None]] = {}
+    family_metrics: dict[str, dict[str, dict[str, float | int | None]]] = {}
     for split in SPLITS:
         rows = dataset["tables"][split].to_pylist()
         probabilities = model.predict_proba_many(rows)
         metrics[split] = _metrics(_labels(rows), probabilities)
+        family_metrics[split] = _metrics_by_market_family(rows, probabilities)
 
     target = Path(output_dir)
     target.mkdir(parents=True, exist_ok=True)
@@ -134,6 +139,7 @@ def train_logistic_baseline(
         dataset_version=_optional_str(dataset["manifest"].get("dataset_version")),
         feature_columns=feature_columns,
         metrics=metrics,
+        family_metrics=family_metrics,
         output_dir=str(target),
     )
     (target / "model.json").write_text(
@@ -146,6 +152,10 @@ def train_logistic_baseline(
     )
     (target / "metrics.json").write_text(
         json.dumps(metrics, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    (target / "family_metrics.json").write_text(
+        json.dumps(family_metrics, indent=2, sort_keys=True),
         encoding="utf-8",
     )
     (target / "manifest.json").write_text(
@@ -310,6 +320,22 @@ def _metrics(labels: list[int], probabilities: list[float]) -> dict[str, float |
         "pr_auc": report.pr_auc,
         "brier_score": report.brier_score,
         "ece": _ece(labels, probabilities, bin_count=10),
+    }
+
+
+def _metrics_by_market_family(
+    rows: list[dict[str, Any]],
+    probabilities: list[float],
+) -> dict[str, dict[str, float | int | None]]:
+    grouped: dict[str, tuple[list[int], list[float]]] = {}
+    for row, probability in zip(rows, probabilities, strict=True):
+        family = market_family_from_symbol(row.get("canonical_symbol") or row.get("symbol"))
+        labels, family_probabilities = grouped.setdefault(family, ([], []))
+        labels.append(1 if _label_value(row) else 0)
+        family_probabilities.append(float(probability))
+    return {
+        family: _metrics(labels, family_probabilities)
+        for family, (labels, family_probabilities) in sorted(grouped.items())
     }
 
 

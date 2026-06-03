@@ -20,7 +20,11 @@ def main() -> int:
     args = _parse_args()
     manager = PositionManager(args.db_path)
     flows = read_polymarket_history_csv(args.history_csv)
-    results = reconcile_stale_open_positions(manager, flows)
+    results = reconcile_stale_open_positions(
+        manager,
+        flows,
+        settlement_results=_parse_settlement_results(args.settlement_result),
+    )
     summary = _summary(results)
 
     if args.report_path:
@@ -53,10 +57,34 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--history-csv", required=True)
     parser.add_argument("--db-path", default="data/mlops/champion_catalog.duckdb")
     parser.add_argument("--event-prefix", default="phase4-")
+    parser.add_argument(
+        "--settlement-result",
+        action="append",
+        default=[],
+        metavar="EVENT_ID=UP|DOWN",
+        help=(
+            "Authoritative resolved side for a stale event without SELL/REDEEM cash flow; "
+            "may be repeated."
+        ),
+    )
     parser.add_argument("--write-cashflow-db", action="store_true")
     parser.add_argument("--report-path", default="")
     parser.add_argument("--summary-json-path", default="")
     return parser.parse_args()
+
+
+def _parse_settlement_results(values: list[str]) -> dict[str, str]:
+    results: dict[str, str] = {}
+    for value in values:
+        event_id, separator, side = value.partition("=")
+        event_id = event_id.strip()
+        side = side.strip().upper()
+        if not separator or not event_id or side not in {"UP", "DOWN"}:
+            raise SystemExit(
+                "--settlement-result must be formatted as EVENT_ID=UP or EVENT_ID=DOWN"
+            )
+        results[event_id] = side
+    return results
 
 
 def _summary(results: list[Any]) -> dict[str, Any]:

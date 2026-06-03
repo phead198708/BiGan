@@ -15,12 +15,14 @@ from .db import DEFAULT_MLOPS_DB_PATH, connect_mlops_db
 
 PositionSide = Literal["UP", "DOWN"]
 PositionStatus = Literal["open", "closed", "expired"]
+PositionSleeve = Literal["settlement", "volatility"]
 
 POSITIONS_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS execution_positions (
     event_id VARCHAR PRIMARY KEY,
     symbol VARCHAR NOT NULL,
     side VARCHAR NOT NULL CHECK (side IN ('UP', 'DOWN')),
+    sleeve VARCHAR NOT NULL DEFAULT 'settlement' CHECK (sleeve IN ('settlement', 'volatility')),
     status VARCHAR NOT NULL CHECK (status IN ('open', 'closed', 'expired')),
     entry_time BIGINT NOT NULL,
     entry_price DOUBLE NOT NULL,
@@ -46,6 +48,7 @@ class Position:
     event_id: str
     symbol: str
     side: PositionSide
+    sleeve: PositionSleeve
     status: PositionStatus
     entry_time: int
     entry_price: float
@@ -92,12 +95,14 @@ class PositionManager:
         size: float,
         order_id: str,
         *,
+        sleeve: PositionSleeve | str = "settlement",
         entry_time: int | None = None,
         fill_price: float | None = None,
     ) -> Position:
         """Persist a newly opened position, rejecting duplicate open rounds."""
 
         normal_side = _normalise_side(side)
+        normal_sleeve = _normalise_sleeve(sleeve)
         _require_text("event_id", event_id)
         _require_text("symbol", symbol)
         _require_text("order_id", order_id)
@@ -112,6 +117,7 @@ class PositionManager:
             event_id=event_id,
             symbol=symbol,
             side=normal_side,
+            sleeve=normal_sleeve,
             status="open",
             entry_time=ts,
             entry_price=float(entry_price),
@@ -302,6 +308,7 @@ def initialize_position_tables(conn: duckdb.DuckDBPyConnection) -> None:
     """Create execution position tables."""
 
     conn.execute(POSITIONS_TABLE_DDL)
+    _ensure_position_schema(conn)
 
 
 def _position_from_row(columns: list[str], row: tuple[Any, ...]) -> Position:
@@ -310,6 +317,7 @@ def _position_from_row(columns: list[str], row: tuple[Any, ...]) -> Position:
         event_id=str(payload["event_id"]),
         symbol=str(payload["symbol"]),
         side=_normalise_side(payload["side"]),
+        sleeve=_normalise_sleeve(payload.get("sleeve") or "settlement"),
         status=str(payload["status"]),  # type: ignore[arg-type]
         entry_time=int(payload["entry_time"]),
         entry_price=float(payload["entry_price"]),
@@ -346,6 +354,23 @@ def _normalise_result(value: PositionSide | str | bool) -> PositionSide:
     if isinstance(value, bool):
         return "UP" if value else "DOWN"
     return _normalise_side(value)
+
+
+def _normalise_sleeve(value: Any) -> PositionSleeve:
+    text = str(value or "settlement").strip().lower()
+    if text not in {"settlement", "volatility"}:
+        raise ValueError("sleeve must be settlement or volatility")
+    return text  # type: ignore[return-value]
+
+
+def _ensure_position_schema(conn: duckdb.DuckDBPyConnection) -> None:
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info('execution_positions')").fetchall()
+    }
+    if "sleeve" not in columns:
+        conn.execute("ALTER TABLE execution_positions ADD COLUMN sleeve VARCHAR")
+        conn.execute("UPDATE execution_positions SET sleeve = 'settlement' WHERE sleeve IS NULL")
 
 
 def _cost_basis(position: Position) -> float:

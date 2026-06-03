@@ -1018,6 +1018,25 @@ def _joint_decision(
     return None
 
 
+def joint_decision_from_payload(
+    payload: dict[str, float | str],
+    *,
+    joint_rule: dict[str, Any],
+    round_trip_cost: float,
+    ev_margin: float,
+    gain_priors: dict[str, float],
+) -> str | None:
+    """Return UP/DOWN when the v6 joint gate admits a trade, else None."""
+
+    return _joint_decision(
+        payload,
+        joint_rule=joint_rule,
+        round_trip_cost=round_trip_cost,
+        ev_margin=ev_margin,
+        gain_priors=gain_priors,
+    )
+
+
 def _v5_comparison_report(
     rows_by_split: dict[str, list[dict[str, Any]]],
     payloads_by_split: dict[str, list[dict[str, float | str]]],

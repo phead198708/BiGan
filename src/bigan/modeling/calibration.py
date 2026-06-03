@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from bigan.backtest import evaluate_predictions
 
+from .families import market_family_from_symbol
 from .logistic import _labels, _load_dataset, _sigmoid
 from .xgboost_v1 import load_xgboost_v1_model
 
@@ -32,6 +33,7 @@ class CalibrationConfig:
     beta_epochs: int = 1_000
     beta_learning_rate: float = 0.05
     clip_bounds: tuple[float, float] | None = None
+    clip_bounds_grid: tuple[tuple[float, float], ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.methods:
@@ -55,6 +57,11 @@ class CalibrationConfig:
             raise ValueError("beta_learning_rate must be positive")
         if self.clip_bounds is not None:
             _check_clip_bounds(self.clip_bounds)
+        if self.clip_bounds_grid is not None:
+            if not self.clip_bounds_grid:
+                raise ValueError("clip_bounds_grid must not be empty")
+            for bounds in self.clip_bounds_grid:
+                _check_clip_bounds(bounds)
 
     def to_dict(self) -> dict[str, float | int | list[float] | list[str] | None]:
         return {
@@ -66,6 +73,9 @@ class CalibrationConfig:
             "beta_epochs": self.beta_epochs,
             "beta_learning_rate": self.beta_learning_rate,
             "clip_bounds": None if self.clip_bounds is None else list(self.clip_bounds),
+            "clip_bounds_grid": None
+            if self.clip_bounds_grid is None
+            else [list(bounds) for bounds in self.clip_bounds_grid],
         }
 
 
@@ -182,6 +192,7 @@ class CalibrationReport:
     improved: bool
     output_dir: str
     family_metrics: dict[str, dict[str, Any]] | None = None
+    execution_subset_metrics: dict[str, dict[str, float | int | None]] | None = None
     selection_metric: str = "brier_score"
 
     def to_dict(self) -> dict[str, Any]:
@@ -211,6 +222,39 @@ def fit_probability_calibration(
     )
 
 
+def fit_family_aware_calibration(
+    model_path: Path | str,
+    dataset_dir: Path | str,
+    output_dir: Path | str,
+    *,
+    config: CalibrationConfig | None = None,
+) -> CalibrationReport:
+    """Fit per-family calibration from a saved model's validation probabilities.
+
+    Used for xgboost-v5: each market family/horizon gets an independent
+    calibrator with a global fallback, which is the v5 promotion differentiator
+    over v4's single global calibrator.
+    """
+
+    model = load_xgboost_v1_model(model_path)
+    dataset = _load_dataset(dataset_dir)
+    rows = dataset["tables"]["val"].to_pylist()
+    if not rows:
+        raise ValueError("val split must contain at least one row for calibration")
+    family_keys = [
+        market_family_from_symbol(row.get("canonical_symbol") or row.get("symbol"))
+        for row in rows
+    ]
+    return fit_family_aware_calibration_from_predictions(
+        y_true=_labels(rows),
+        y_prob=model.predict_proba_many(rows),
+        family_keys=family_keys,
+        output_dir=output_dir,
+        model_version=model.model_version,
+        config=config,
+    )
+
+
 def fit_calibration_from_predictions(
     *,
     y_true: list[bool | int],
@@ -218,6 +262,8 @@ def fit_calibration_from_predictions(
     output_dir: Path | str,
     model_version: str,
     config: CalibrationConfig | None = None,
+    sample_weights: list[float] | None = None,
+    selection_mask: list[bool] | None = None,
 ) -> CalibrationReport:
     """Fit candidate calibration methods from raw probabilities and labels."""
 
@@ -226,16 +272,20 @@ def fit_calibration_from_predictions(
     probabilities = [_check_probability(probability) for probability in y_prob]
     if len(labels) != len(probabilities):
         raise ValueError("y_true and y_prob must have the same length")
+    weights = _check_sample_weights(sample_weights, expected=len(labels))
+    selection_indices = _indices_from_mask(selection_mask, expected=len(labels))
     if len(set(labels)) < 2:
         raise ValueError("calibration requires both positive and negative labels")
 
-    raw_metrics = _metrics(labels, probabilities, cfg.ece_bins)
+    raw_metrics = _metrics(labels, probabilities, cfg.ece_bins, sample_weights=weights)
     calibrator, calibrated_metrics, candidate_rows = _fit_best_calibrator(
         labels=labels,
         probabilities=probabilities,
+        sample_weights=weights,
         model_version=model_version,
         config=cfg,
         selection_metric="brier_score",
+        selection_indices=selection_indices,
     )
     method = calibrator.method
     improved = (
@@ -273,8 +323,15 @@ def fit_family_aware_calibration_from_predictions(
     output_dir: Path | str,
     model_version: str,
     config: CalibrationConfig | None = None,
+    sample_weights: list[float] | None = None,
+    execution_mask: list[bool] | None = None,
 ) -> CalibrationReport:
-    """Fit independent calibrators by market family/horizon."""
+    """Fit independent calibrators by market family/horizon.
+
+    ``sample_weights`` lets Phase 4 executed rows carry more influence during
+    fitting. ``execution_mask`` marks the rows that should drive candidate
+    selection and be reported separately as the execution subset.
+    """
 
     cfg = config or CalibrationConfig(
         methods=("platt", "isotonic", "temperature", "beta"),
@@ -284,16 +341,20 @@ def fit_family_aware_calibration_from_predictions(
     probabilities = [_check_probability(probability) for probability in y_prob]
     if len(labels) != len(probabilities) or len(labels) != len(family_keys):
         raise ValueError("y_true, y_prob, and family_keys must have the same length")
+    weights = _check_sample_weights(sample_weights, expected=len(labels))
+    execution_indices = _indices_from_mask(execution_mask, expected=len(labels))
     if len(set(labels)) < 2:
         raise ValueError("calibration requires both positive and negative labels")
 
-    raw_metrics = _metrics(labels, probabilities, cfg.ece_bins)
+    raw_metrics = _metrics(labels, probabilities, cfg.ece_bins, sample_weights=weights)
     global_calibrator, global_metrics, global_candidates = _fit_best_calibrator(
         labels=labels,
         probabilities=probabilities,
+        sample_weights=weights,
         model_version=model_version,
         config=cfg,
         selection_metric="ece",
+        selection_indices=execution_indices,
     )
     family_calibrators: dict[str, ProbabilityCalibrator] = {}
     family_metrics: dict[str, dict[str, Any]] = {}
@@ -301,13 +362,38 @@ def fit_family_aware_calibration_from_predictions(
         indices = [idx for idx, key in enumerate(family_keys) if key == family_key]
         family_labels = [labels[idx] for idx in indices]
         family_probabilities = [probabilities[idx] for idx in indices]
-        family_raw = _metrics(family_labels, family_probabilities, cfg.ece_bins)
+        family_weights = [weights[idx] for idx in indices]
+        family_execution_indices = [
+            local_idx
+            for local_idx, original_idx in enumerate(indices)
+            if execution_indices is not None and original_idx in set(execution_indices)
+        ]
+        family_selection_indices = family_execution_indices or None
+        family_raw = _metrics(
+            family_labels,
+            family_probabilities,
+            cfg.ece_bins,
+            sample_weights=family_weights,
+        )
         if len(set(family_labels)) < 2:
             calibrated = global_calibrator.transform_many(family_probabilities)
             family_metrics[family_key] = {
                 "method": "global_fallback",
                 "raw_metrics": family_raw,
-                "calibrated_metrics": _metrics(family_labels, calibrated, cfg.ece_bins),
+                "calibrated_metrics": _metrics(
+                    family_labels,
+                    calibrated,
+                    cfg.ece_bins,
+                    sample_weights=family_weights,
+                ),
+                "execution_subset_metrics": _subset_metric_pair(
+                    labels=family_labels,
+                    raw_probabilities=family_probabilities,
+                    calibrated_probabilities=calibrated,
+                    indices=family_selection_indices,
+                    ece_bins=cfg.ece_bins,
+                    sample_weights=family_weights,
+                ),
                 "sample_count": len(family_labels),
                 "fallback_reason": "single_class_family",
             }
@@ -315,15 +401,26 @@ def fit_family_aware_calibration_from_predictions(
         calibrator, calibrated_metrics, candidates = _fit_best_calibrator(
             labels=family_labels,
             probabilities=family_probabilities,
+            sample_weights=family_weights,
             model_version=model_version,
             config=cfg,
             selection_metric="ece",
+            selection_indices=family_selection_indices,
         )
         family_calibrators[family_key] = calibrator
+        calibrated_family = calibrator.transform_many(family_probabilities)
         family_metrics[family_key] = {
             "method": calibrator.method,
             "raw_metrics": family_raw,
             "calibrated_metrics": calibrated_metrics,
+            "execution_subset_metrics": _subset_metric_pair(
+                labels=family_labels,
+                raw_probabilities=family_probabilities,
+                calibrated_probabilities=calibrated_family,
+                indices=family_selection_indices,
+                ece_bins=cfg.ece_bins,
+                sample_weights=family_weights,
+            ),
             "candidates": {name: metrics for name, (_, metrics) in candidates.items()},
             "sample_count": len(family_labels),
         }
@@ -332,7 +429,7 @@ def fit_family_aware_calibration_from_predictions(
         family_calibrators.get(family_key, global_calibrator).transform(probability)
         for probability, family_key in zip(probabilities, family_keys, strict=True)
     ]
-    calibrated_metrics = _metrics(labels, calibrated_all, cfg.ece_bins)
+    calibrated_metrics = _metrics(labels, calibrated_all, cfg.ece_bins, sample_weights=weights)
     improved = (
         _metric_or_inf(calibrated_metrics["brier_score"]) <= _metric_or_inf(raw_metrics["brier_score"])
         or _metric_or_inf(calibrated_metrics["ece"]) <= _metric_or_inf(raw_metrics["ece"])
@@ -353,6 +450,14 @@ def fit_family_aware_calibration_from_predictions(
         improved=improved,
         output_dir=str(target),
         family_metrics=family_metrics,
+        execution_subset_metrics=_subset_metric_pair(
+            labels=labels,
+            raw_probabilities=probabilities,
+            calibrated_probabilities=calibrated_all,
+            indices=execution_indices,
+            ece_bins=cfg.ece_bins,
+            sample_weights=weights,
+        ),
         selection_metric="ece",
     )
     (target / "calibration.json").write_text(
@@ -431,9 +536,11 @@ def _fit_best_calibrator(
     *,
     labels: list[int],
     probabilities: list[float],
+    sample_weights: list[float],
     model_version: str,
     config: CalibrationConfig,
     selection_metric: CalibrationSelectionMetric,
+    selection_indices: list[int] | None = None,
 ) -> tuple[
     ProbabilityCalibrator,
     dict[str, float | int | None],
@@ -441,15 +548,42 @@ def _fit_best_calibrator(
 ]:
     candidate_rows: dict[str, tuple[ProbabilityCalibrator, dict[str, float | int | None]]] = {}
     for method in config.methods:
-        calibrator = _fit_method(method, labels, probabilities, model_version, config)
-        calibrated = calibrator.transform_many(probabilities)
-        candidate_rows[method] = (calibrator, _metrics(labels, calibrated, config.ece_bins))
+        base_calibrator = _fit_method(
+            method,
+            labels,
+            probabilities,
+            sample_weights,
+            model_version,
+            config,
+        )
+        for clip_bounds in _clip_bound_candidates(config):
+            calibrator = _with_clip_bounds(base_calibrator, clip_bounds)
+            calibrated = calibrator.transform_many(probabilities)
+            key = method if clip_bounds is None else f"{method}@clip={clip_bounds[0]:g}-{clip_bounds[1]:g}"
+            candidate_rows[key] = (
+                calibrator,
+                _metrics(labels, calibrated, config.ece_bins, sample_weights=sample_weights),
+            )
 
     method, (calibrator, calibrated_metrics) = min(
         candidate_rows.items(),
         key=lambda item: (
-            _metric_or_inf(item[1][1][selection_metric]),
-            _metric_or_inf(item[1][1]["brier_score" if selection_metric == "ece" else "ece"]),
+            _candidate_metric(
+                labels=labels,
+                probabilities=item[1][0].transform_many(probabilities),
+                sample_weights=sample_weights,
+                ece_bins=config.ece_bins,
+                metric=selection_metric,
+                selection_indices=selection_indices,
+            ),
+            _candidate_metric(
+                labels=labels,
+                probabilities=item[1][0].transform_many(probabilities),
+                sample_weights=sample_weights,
+                ece_bins=config.ece_bins,
+                metric="brier_score" if selection_metric == "ece" else "ece",
+                selection_indices=selection_indices,
+            ),
             item[0],
         ),
     )
@@ -460,45 +594,39 @@ def _fit_method(
     method: CalibrationMethod,
     labels: list[int],
     probabilities: list[float],
+    sample_weights: list[float],
     model_version: str,
     config: CalibrationConfig,
 ) -> ProbabilityCalibrator:
     if method == "platt":
-        calibrator = _fit_platt(labels, probabilities, model_version, config)
+        return _fit_platt(labels, probabilities, sample_weights, model_version, config)
     elif method == "isotonic":
-        calibrator = _fit_isotonic(labels, probabilities, model_version)
+        return _fit_isotonic(labels, probabilities, sample_weights, model_version)
     elif method == "temperature":
-        calibrator = _fit_temperature(labels, probabilities, model_version, config)
-    else:
-        calibrator = _fit_beta(labels, probabilities, model_version, config)
-    if config.clip_bounds is None:
-        return calibrator
-    return ProbabilityCalibrator(
-        method=calibrator.method,
-        model_version=calibrator.model_version,
-        params={**calibrator.params, "clip_bounds": list(config.clip_bounds)},
-    )
+        return _fit_temperature(labels, probabilities, sample_weights, model_version, config)
+    return _fit_beta(labels, probabilities, sample_weights, model_version, config)
 
 
 def _fit_platt(
     labels: list[int],
     probabilities: list[float],
+    sample_weights: list[float],
     model_version: str,
     config: CalibrationConfig,
 ) -> ProbabilityCalibrator:
     x_values = [_logit(probability) for probability in probabilities]
     a = 1.0
     b = 0.0
-    sample_count = len(labels)
+    weight_total = sum(sample_weights)
     for _ in range(config.platt_epochs):
         grad_a = grad_b = 0.0
-        for x_value, label in zip(x_values, labels, strict=True):
+        for x_value, label, weight in zip(x_values, labels, sample_weights, strict=True):
             pred = _sigmoid(a * x_value + b)
-            error = pred - label
+            error = (pred - label) * weight
             grad_a += error * x_value
             grad_b += error
-        a -= config.platt_learning_rate * grad_a / sample_count
-        b -= config.platt_learning_rate * grad_b / sample_count
+        a -= config.platt_learning_rate * grad_a / weight_total
+        b -= config.platt_learning_rate * grad_b / weight_total
     return ProbabilityCalibrator(
         method="platt",
         model_version=model_version,
@@ -509,6 +637,7 @@ def _fit_platt(
 def _fit_temperature(
     labels: list[int],
     probabilities: list[float],
+    sample_weights: list[float],
     model_version: str,
     config: CalibrationConfig,
 ) -> ProbabilityCalibrator:
@@ -519,6 +648,7 @@ def _fit_temperature(
                 labels,
                 [_sigmoid(_logit(probability) / temperature) for probability in probabilities],
                 config.ece_bins,
+                sample_weights=sample_weights,
             )["brier_score"]
         ),
     )
@@ -532,6 +662,7 @@ def _fit_temperature(
 def _fit_beta(
     labels: list[int],
     probabilities: list[float],
+    sample_weights: list[float],
     model_version: str,
     config: CalibrationConfig,
 ) -> ProbabilityCalibrator:
@@ -543,18 +674,18 @@ def _fit_beta(
         for probability in probabilities
     ]
     a = b = c = 0.0
-    sample_count = len(labels)
+    weight_total = sum(sample_weights)
     for _ in range(config.beta_epochs):
         grad_a = grad_b = grad_c = 0.0
-        for (x1, x2), label in zip(features, labels, strict=True):
+        for (x1, x2), label, weight in zip(features, labels, sample_weights, strict=True):
             pred = _sigmoid(a * x1 + b * x2 + c)
-            error = pred - label
+            error = (pred - label) * weight
             grad_a += error * x1
             grad_b += error * x2
             grad_c += error
-        a -= config.beta_learning_rate * grad_a / sample_count
-        b -= config.beta_learning_rate * grad_b / sample_count
-        c -= config.beta_learning_rate * grad_c / sample_count
+        a -= config.beta_learning_rate * grad_a / weight_total
+        b -= config.beta_learning_rate * grad_b / weight_total
+        c -= config.beta_learning_rate * grad_c / weight_total
     return ProbabilityCalibrator(
         method="beta",
         model_version=model_version,
@@ -567,25 +698,28 @@ class _IsotonicBlock:
     min_probability: float
     max_probability: float
     positive_sum: float
+    weight_sum: float
     count: int
 
     @property
     def value(self) -> float:
-        return self.positive_sum / self.count
+        return self.positive_sum / self.weight_sum
 
 
 def _fit_isotonic(
     labels: list[int],
     probabilities: list[float],
+    sample_weights: list[float],
     model_version: str,
 ) -> ProbabilityCalibrator:
     blocks: list[_IsotonicBlock] = []
-    for probability, label in sorted(zip(probabilities, labels, strict=True)):
+    for probability, label, weight in sorted(zip(probabilities, labels, sample_weights, strict=True)):
         blocks.append(
             _IsotonicBlock(
                 min_probability=probability,
                 max_probability=probability,
-                positive_sum=float(label),
+                positive_sum=float(label) * weight,
+                weight_sum=weight,
                 count=1,
             )
         )
@@ -597,6 +731,7 @@ def _fit_isotonic(
                     min_probability=left.min_probability,
                     max_probability=right.max_probability,
                     positive_sum=left.positive_sum + right.positive_sum,
+                    weight_sum=left.weight_sum + right.weight_sum,
                     count=left.count + right.count,
                 )
             )
@@ -609,6 +744,7 @@ def _fit_isotonic(
                     "min_probability": block.min_probability,
                     "max_probability": block.max_probability,
                     "value": block.value,
+                    "weight_sum": block.weight_sum,
                     "count": block.count,
                 }
                 for block in blocks
@@ -617,13 +753,99 @@ def _fit_isotonic(
     )
 
 
+def _clip_bound_candidates(config: CalibrationConfig) -> tuple[tuple[float, float] | None, ...]:
+    if config.clip_bounds_grid is not None:
+        return tuple(config.clip_bounds_grid)
+    if config.clip_bounds is not None:
+        return (config.clip_bounds,)
+    return (None,)
+
+
+def _with_clip_bounds(
+    calibrator: ProbabilityCalibrator,
+    bounds: tuple[float, float] | None,
+) -> ProbabilityCalibrator:
+    params = dict(calibrator.params)
+    if bounds is None:
+        params.pop("clip_bounds", None)
+    else:
+        params["clip_bounds"] = [float(bounds[0]), float(bounds[1])]
+    return ProbabilityCalibrator(
+        method=calibrator.method,
+        model_version=calibrator.model_version,
+        params=params,
+    )
+
+
+def _candidate_metric(
+    *,
+    labels: list[int],
+    probabilities: list[float],
+    sample_weights: list[float],
+    ece_bins: int,
+    metric: CalibrationSelectionMetric,
+    selection_indices: list[int] | None,
+) -> float:
+    if selection_indices is None:
+        return _metric_or_inf(
+            _metrics(labels, probabilities, ece_bins, sample_weights=sample_weights)[metric]
+        )
+    subset_labels = [labels[idx] for idx in selection_indices]
+    subset_probabilities = [probabilities[idx] for idx in selection_indices]
+    subset_weights = [sample_weights[idx] for idx in selection_indices]
+    if len(subset_labels) < 2:
+        return _metric_or_inf(
+            _metrics(labels, probabilities, ece_bins, sample_weights=sample_weights)[metric]
+        )
+    return _metric_or_inf(
+        _metrics(
+            subset_labels,
+            subset_probabilities,
+            ece_bins,
+            sample_weights=subset_weights,
+        )[metric]
+    )
+
+
+def _subset_metric_pair(
+    *,
+    labels: list[int],
+    raw_probabilities: list[float],
+    calibrated_probabilities: list[float],
+    indices: list[int] | None,
+    ece_bins: int,
+    sample_weights: list[float],
+) -> dict[str, dict[str, float | int | None]] | None:
+    if not indices:
+        return None
+    subset_labels = [labels[idx] for idx in indices]
+    subset_weights = [sample_weights[idx] for idx in indices]
+    return {
+        "raw_metrics": _metrics(
+            subset_labels,
+            [raw_probabilities[idx] for idx in indices],
+            ece_bins,
+            sample_weights=subset_weights,
+        ),
+        "calibrated_metrics": _metrics(
+            subset_labels,
+            [calibrated_probabilities[idx] for idx in indices],
+            ece_bins,
+            sample_weights=subset_weights,
+        ),
+    }
+
+
 def _metrics(
     labels: list[int],
     probabilities: list[float],
     ece_bins: int,
+    *,
+    sample_weights: list[float] | None = None,
 ) -> dict[str, float | int | None]:
     report = evaluate_predictions(y_true=labels, y_prob=probabilities, thresholds=[0.5])
     threshold = report.thresholds[0]
+    weights = _check_sample_weights(sample_weights, expected=len(labels))
     return {
         "sample_count": report.sample_count,
         "positive_count": report.positive_count,
@@ -634,28 +856,71 @@ def _metrics(
         "f1": threshold.f1,
         "roc_auc": report.roc_auc,
         "pr_auc": report.pr_auc,
-        "brier_score": report.brier_score,
-        "ece": _ece(labels, probabilities, ece_bins),
+        "brier_score": _weighted_brier_score(labels, probabilities, weights),
+        "ece": _ece(labels, probabilities, ece_bins, sample_weights=weights),
     }
 
 
-def _ece(labels: list[int], probabilities: list[float], bin_count: int) -> float:
-    total = len(labels)
+def _ece(
+    labels: list[int],
+    probabilities: list[float],
+    bin_count: int,
+    *,
+    sample_weights: list[float] | None = None,
+) -> float:
+    weights = _check_sample_weights(sample_weights, expected=len(labels))
+    total = sum(weights)
     error = 0.0
     for idx in range(bin_count):
         start = idx / bin_count
         end = (idx + 1) / bin_count
         members = [
-            (label, probability)
-            for label, probability in zip(labels, probabilities, strict=True)
+            (label, probability, weight)
+            for label, probability, weight in zip(labels, probabilities, weights, strict=True)
             if (start <= probability < end) or (idx == bin_count - 1 and probability == 1.0)
         ]
         if not members:
             continue
-        confidence = sum(probability for _, probability in members) / len(members)
-        accuracy = sum(label for label, _ in members) / len(members)
-        error += len(members) / total * abs(accuracy - confidence)
+        bucket_weight = sum(weight for _, _, weight in members)
+        confidence = sum(probability * weight for _, probability, weight in members) / bucket_weight
+        accuracy = sum(label * weight for label, _, weight in members) / bucket_weight
+        error += bucket_weight / total * abs(accuracy - confidence)
     return error
+
+
+def _weighted_brier_score(
+    labels: list[int],
+    probabilities: list[float],
+    sample_weights: list[float],
+) -> float:
+    weight_total = sum(sample_weights)
+    return (
+        sum(
+            weight * (probability - float(label)) ** 2
+            for label, probability, weight in zip(labels, probabilities, sample_weights, strict=True)
+        )
+        / weight_total
+    )
+
+
+def _check_sample_weights(values: list[float] | None, *, expected: int) -> list[float]:
+    if values is None:
+        return [1.0] * expected
+    if len(values) != expected:
+        raise ValueError("sample_weights must have the same length as y_true")
+    weights = [float(value) for value in values]
+    if any(not math.isfinite(weight) or weight <= 0.0 for weight in weights):
+        raise ValueError("sample_weights must be finite positive values")
+    return weights
+
+
+def _indices_from_mask(values: list[bool] | None, *, expected: int) -> list[int] | None:
+    if values is None:
+        return None
+    if len(values) != expected:
+        raise ValueError("selection/execution mask must have the same length as y_true")
+    indices = [idx for idx, value in enumerate(values) if value]
+    return indices or None
 
 
 def _check_labels(values: list[bool | int]) -> list[int]:

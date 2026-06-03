@@ -11,12 +11,14 @@ import duckdb
 
 CashLegAction = Literal["BUY", "SELL", "REDEEM"]
 CashLegSource = Literal["clob_fill", "history_csv", "manual"]
+CashLegSleeve = Literal["settlement", "volatility"]
 
 EXECUTION_CASH_LEGS_DDL = """
 CREATE TABLE IF NOT EXISTS execution_cash_legs (
     leg_id VARCHAR PRIMARY KEY,
     event_id VARCHAR NOT NULL,
     round_slug VARCHAR NOT NULL,
+    sleeve VARCHAR NOT NULL DEFAULT 'settlement' CHECK (sleeve IN ('settlement', 'volatility')),
     action VARCHAR NOT NULL CHECK (action IN ('BUY', 'SELL', 'REDEEM')),
     usdc_amount DOUBLE NOT NULL,
     cash_delta DOUBLE NOT NULL,
@@ -42,6 +44,7 @@ class ExecutionCashLeg:
     leg_id: str
     event_id: str
     round_slug: str
+    sleeve: CashLegSleeve
     action: CashLegAction
     usdc_amount: float
     cash_delta: float
@@ -67,6 +70,7 @@ def initialize_cash_leg_tables(conn: duckdb.DuckDBPyConnection) -> None:
     """Create execution cash-leg tables."""
 
     conn.execute(EXECUTION_CASH_LEGS_DDL)
+    _ensure_cash_leg_schema(conn)
 
 
 def signed_cash_delta(action: CashLegAction, usdc_amount: float) -> float:
@@ -93,6 +97,7 @@ def leg_from_clob_fill(
     action: CashLegAction,
     fill: dict[str, Any],
     order_id: str | None = None,
+    sleeve: CashLegSleeve | str = "settlement",
     dust_token_amount: float = 0.0,
     leg_id_suffix: str | None = None,
 ) -> ExecutionCashLeg:
@@ -113,6 +118,7 @@ def leg_from_clob_fill(
         leg_id=f"{event_id}:{action}:{suffix}",
         event_id=event_id,
         round_slug=round_slug,
+        sleeve=_normalise_sleeve(sleeve),
         action=action,
         usdc_amount=abs(usdc_amount),
         cash_delta=cash_delta,
@@ -139,6 +145,7 @@ def leg_from_polymarket_history(
     fill_price: float | None,
     leg_ts: int,
     tx_hash: str | None = None,
+    sleeve: CashLegSleeve | str = "settlement",
 ) -> ExecutionCashLeg:
     """Build a cash leg from a Polymarket account-history row."""
 
@@ -149,6 +156,7 @@ def leg_from_polymarket_history(
         leg_id=f"{event_id}:{action}:{suffix}",
         event_id=event_id,
         round_slug=round_slug,
+        sleeve=_normalise_sleeve(sleeve),
         action=action,
         usdc_amount=abs(usdc_amount),
         cash_delta=cash_delta,
@@ -228,6 +236,8 @@ def account_cash_pnl_from_legs(legs: list[ExecutionCashLeg]) -> float:
 def _validate_leg(leg: ExecutionCashLeg) -> None:
     if not leg.leg_id or not leg.event_id or not leg.round_slug:
         raise ValueError("leg_id, event_id, and round_slug are required")
+    if leg.sleeve not in {"settlement", "volatility"}:
+        raise ValueError("invalid sleeve")
     if leg.action not in {"BUY", "SELL", "REDEEM"}:
         raise ValueError("invalid action")
     if leg.usdc_amount < 0:
@@ -250,6 +260,23 @@ def _optional_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _normalise_sleeve(value: Any) -> CashLegSleeve:
+    text = str(value or "settlement").strip().lower()
+    if text not in {"settlement", "volatility"}:
+        raise ValueError("sleeve must be settlement or volatility")
+    return text  # type: ignore[return-value]
+
+
+def _ensure_cash_leg_schema(conn: duckdb.DuckDBPyConnection) -> None:
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info('execution_cash_legs')").fetchall()
+    }
+    if "sleeve" not in columns:
+        conn.execute("ALTER TABLE execution_cash_legs ADD COLUMN sleeve VARCHAR")
+        conn.execute("UPDATE execution_cash_legs SET sleeve = 'settlement' WHERE sleeve IS NULL")
 
 
 def _now_ms() -> int:

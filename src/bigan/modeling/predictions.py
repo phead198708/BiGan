@@ -24,6 +24,11 @@ from .calibration import (
     transform_probability,
 )
 from .xgboost_v1 import XGBoostV1Model, load_xgboost_v1_model
+from .xgboost_v6 import (
+    XGBOOST_V6_ARTIFACT_SCHEMA_VERSION,
+    XGBoostV6Model,
+    load_xgboost_v6_model,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +98,64 @@ def generate_prediction_rows(
     return rows
 
 
+def generate_v6_prediction_rows(
+    *,
+    feature_rows: list[dict[str, Any]],
+    model: XGBoostV6Model,
+    ingest_ts: int | None = None,
+) -> list[dict[str, Any]]:
+    """Generate prediction rows with explicit v6 settlement/volatility payload fields."""
+
+    run_ingest_ts = int(time.time() * 1000) if ingest_ts is None else int(ingest_ts)
+    payloads = model.predict_payload_many(feature_rows)
+    rows: list[dict[str, Any]] = []
+    for feature, payload in zip(feature_rows, payloads, strict=True):
+        _validate_training_schema(feature, model.feature_columns)
+        prediction_ts = int(feature["feature_ts"])
+        p_up = float(payload["p_up"])
+        rows.append(
+            {
+                "ts": prediction_ts,
+                "message_ts": prediction_ts,
+                "prediction_ts": prediction_ts,
+                "ingest_ts": run_ingest_ts,
+                "source": str(feature["source"]),
+                "source_symbol": str(feature["source_symbol"]),
+                "source_market": _optional_str(feature.get("source_market")),
+                "canonical_symbol": _optional_str(feature.get("canonical_symbol")),
+                "symbol": str(
+                    feature.get("symbol")
+                    or feature.get("canonical_symbol")
+                    or feature["source_symbol"]
+                ),
+                "feature_version": str(feature["feature_version"]),
+                "model_version": model.model_version,
+                "calibration_method": "family-aware temperature scaling",
+                "prob_up_15m": p_up,
+                "raw_prob_up_15m": p_up,
+                "p_up": p_up,
+                "p_down": float(payload["p_down"]),
+                "p_neutral": float(payload["p_neutral"]),
+                "p_vol_up": float(payload["p_vol_up"]),
+                "p_vol_down": float(payload["p_vol_down"]),
+                "market_implied_prob": _optional_float(feature.get("market_implied_prob")),
+                "confidence_bucket": confidence_bucket(p_up),
+                "top_features_json": json.dumps([], sort_keys=True),
+                "feature_values_json": json.dumps(
+                    {column: feature.get(column) for column in model.feature_columns},
+                    sort_keys=True,
+                ),
+            }
+        )
+    rows.sort(key=lambda row: (row["prediction_ts"], row["source"], row["source_symbol"]))
+    return rows
+
+
+def _is_v6_model_artifact(model_path: Path | str) -> bool:
+    artifact = json.loads(Path(model_path).read_text(encoding="utf-8"))
+    return artifact.get("schema_version") == XGBOOST_V6_ARTIFACT_SCHEMA_VERSION
+
+
 def run_prediction_batch(
     warehouse_dir: Path | str,
     model_path: Path | str,
@@ -103,26 +166,40 @@ def run_prediction_batch(
     monitoring_db_path: Path | str | None = None,
     since_ms: int | None = None,
     until_ms: int | None = None,
+    canonical_symbol_like: str | None = None,
     skip_existing_monitoring_events: bool = False,
     skip_existing_predictions: bool = False,
 ) -> PredictionBatchReport:
     """Read feature rows from the warehouse and append ``predictions`` rows."""
 
-    model = load_xgboost_v1_model(model_path)
-    calibrator = (
-        None if calibration_path is None else load_probability_calibrator(calibration_path)
-    )
     feature_rows = _read_feature_rows(
         warehouse_dir,
         since_ms=since_ms,
         until_ms=until_ms,
+        canonical_symbol_like=canonical_symbol_like,
     )
-    rows = generate_prediction_rows(
-        feature_rows=feature_rows,
-        model=model,
-        calibrator=calibrator,
-        ingest_ts=ingest_ts,
-    )
+    if _is_v6_model_artifact(model_path):
+        if calibration_path is not None:
+            raise ValueError("xgboost-v6 artifacts do not use a separate calibration_path")
+        model = load_xgboost_v6_model(model_path)
+        rows = generate_v6_prediction_rows(
+            feature_rows=feature_rows,
+            model=model,
+            ingest_ts=ingest_ts,
+        )
+        calibration_method: str | None = "family-aware temperature scaling"
+    else:
+        model = load_xgboost_v1_model(model_path)
+        calibrator = (
+            None if calibration_path is None else load_probability_calibrator(calibration_path)
+        )
+        rows = generate_prediction_rows(
+            feature_rows=feature_rows,
+            model=model,
+            calibrator=calibrator,
+            ingest_ts=ingest_ts,
+        )
+        calibration_method = None if calibrator is None else calibrator.method
     rows_generated = len(rows)
     if skip_existing_predictions and rows:
         rows = _filter_new_prediction_rows(warehouse_dir, rows)
@@ -155,7 +232,7 @@ def run_prediction_batch(
         rows_generated=rows_generated,
         rows_written=rows_written,
         model_version=model.model_version,
-        calibration_method=None if calibrator is None else calibrator.method,
+        calibration_method=calibration_method,
         monitoring_events_written=monitoring_events_written,
     )
 
@@ -179,15 +256,19 @@ def _read_feature_rows(
     *,
     since_ms: int | None = None,
     until_ms: int | None = None,
+    canonical_symbol_like: str | None = None,
 ) -> list[dict[str, Any]]:
     clauses = ["quality_filter_pass", "not data_gap_flag"]
-    params: list[int] = []
+    params: list[Any] = []
     if since_ms is not None:
         clauses.append("feature_ts >= ?")
         params.append(int(since_ms))
     if until_ms is not None:
         clauses.append("feature_ts < ?")
         params.append(int(until_ms))
+    if canonical_symbol_like:
+        clauses.append("canonical_symbol LIKE ?")
+        params.append(str(canonical_symbol_like))
     where_sql = " AND ".join(clauses)
     with open_warehouse(warehouse_dir) as conn:
         try:

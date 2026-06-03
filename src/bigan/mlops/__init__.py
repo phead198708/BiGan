@@ -1,6 +1,9 @@
 """MLOps catalog helpers for model lifecycle state."""
 
 from .deployments import (
+    ACTIVE_CHAMPION_DEPLOYMENT_ID,
+    ACTIVE_CHAMPION_ENVIRONMENT,
+    ACTIVE_CHAMPION_MODEL_VERSION,
     DEPLOYMENT_STATUSES,
     MODEL_DEPLOYMENTS_TABLE_DDL,
     MODEL_DEPLOYMENTS_VIEWS_DDL,
@@ -11,6 +14,8 @@ from .deployments import (
     rollback_deployment,
 )
 from .registry import (
+    ACTIVE_MODEL_FAMILY,
+    DEFAULT_MLOPS_DB_PATH,
     MODEL_REGISTRY_STATUSES,
     MODEL_REGISTRY_TABLE_DDL,
     MODEL_REGISTRY_VIEWS_DDL,
@@ -19,6 +24,7 @@ from .registry import (
     current_champion,
     initialize_mlops_db,
     model_artifact_uri,
+    model_by_version,
     promote_model,
     register_model,
     retire_model,
@@ -35,18 +41,28 @@ from .retraining import (
 from .shadow import (
     CalibratedProbabilityModel,
     ShadowComparisonReport,
+    ShadowEvaluationResult,
     ShadowPredictionPair,
     distribution_kl_divergence,
     distribution_wasserstein_distance,
+    evaluate_shadow_report,
     load_shadow_probability_model,
     read_shadow_feature_rows,
+    run_per_family_shadow_analysis,
     run_shadow_comparison,
     run_shadow_warehouse_comparison,
     save_shadow_report,
+    shadow_evaluation_output_paths,
+    shadow_evaluation_report,
 )
 
 __all__ = [
     "DEPLOYMENT_STATUSES",
+    "ACTIVE_CHAMPION_DEPLOYMENT_ID",
+    "ACTIVE_CHAMPION_ENVIRONMENT",
+    "ACTIVE_CHAMPION_MODEL_VERSION",
+    "ACTIVE_MODEL_FAMILY",
+    "DEFAULT_MLOPS_DB_PATH",
     "CHALLENGER_TRIGGER_STATUSES",
     "CHALLENGER_TRIGGERS_DDL",
     "MODEL_DEPLOYMENTS_TABLE_DDL",
@@ -60,6 +76,7 @@ __all__ = [
     "ChallengerTriggerDecision",
     "RetrainingTriggerRules",
     "ShadowComparisonReport",
+    "ShadowEvaluationResult",
     "ShadowPredictionPair",
     "complete_deployment",
     "connect_mlops_db",
@@ -67,9 +84,11 @@ __all__ = [
     "current_champion",
     "distribution_kl_divergence",
     "distribution_wasserstein_distance",
+    "evaluate_shadow_report",
     "evaluate_challenger_trigger",
     "initialize_mlops_db",
     "model_artifact_uri",
+    "model_by_version",
     "promote_model",
     "record_deployment",
     "record_challenger_trigger",
@@ -79,7 +98,10 @@ __all__ = [
     "rollback_deployment",
     "load_shadow_probability_model",
     "read_shadow_feature_rows",
+    "run_per_family_shadow_analysis",
     "run_shadow_comparison",
     "run_shadow_warehouse_comparison",
     "save_shadow_report",
+    "shadow_evaluation_output_paths",
+    "shadow_evaluation_report",
 ]

@@ -13,6 +13,7 @@ from typing import Any
 import duckdb
 
 from .incidents import DataQualityIncident, record_data_quality_incident
+from .market_quality import tradable_market_implied_probability
 
 CHAMPION_BASELINE_DISTRIBUTIONS: dict[str, dict[str, Any]] = {
     "xgboost-v3": {
@@ -653,7 +654,8 @@ def _event_edges(rows: Sequence[Mapping[str, Any]]) -> list[float]:
     for row in rows:
         probability = _as_safe_float(row.get("prob_up_15m"))
         snapshot = _snapshot_payload(row.get("feature_snapshot_json"))
-        market = _market_implied_prob_from_snapshot_payload(snapshot)
+        event_ts = _as_safe_int(row.get("ts"))
+        market = tradable_market_implied_probability(snapshot, event_ts=event_ts)
         outcome_side = _outcome_side_from_snapshot(snapshot)
         if probability is not None and market is not None:
             edges.append(_token_probability(probability, outcome_side) - market)
@@ -675,14 +677,7 @@ def _snapshot_payload(snapshot: Any) -> Mapping[str, Any]:
 
 
 def _market_implied_prob_from_snapshot_payload(payload: Mapping[str, Any]) -> float | None:
-    features = payload.get("features")
-    feature_payload = features if isinstance(features, Mapping) else {}
-    for source in (payload, feature_payload):
-        for key in ("market_implied_prob", "best_ask", "entry_ask_price"):
-            value = _as_safe_float(source.get(key))
-            if value is not None:
-                return value
-    return None
+    return tradable_market_implied_probability(payload)
 
 
 def _outcome_side_from_snapshot(payload: Mapping[str, Any]) -> str:
@@ -726,6 +721,15 @@ def _as_safe_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
+
+
+def _as_safe_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _relative_change(current: float, reference: float) -> float:

@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS execution_cashflow_reconciliations (
     event_id VARCHAR PRIMARY KEY,
     round_slug VARCHAR NOT NULL,
     side VARCHAR NOT NULL CHECK (side IN ('UP', 'DOWN')),
+    sleeve VARCHAR NOT NULL DEFAULT 'settlement' CHECK (sleeve IN ('settlement', 'volatility')),
     position_status VARCHAR NOT NULL,
     theoretical_pnl DOUBLE,
     account_cash_pnl DOUBLE,
@@ -83,6 +84,7 @@ class CashFlowReconciliation:
     event_id: str
     round_slug: str
     side: PositionSide
+    sleeve: str
     position_status: str
     theoretical_pnl: float | None
     account_cash_pnl: float | None
@@ -111,6 +113,7 @@ def initialize_cashflow_tables(conn: duckdb.DuckDBPyConnection) -> None:
     """Create account cash-flow reconciliation tables."""
 
     conn.execute(EXECUTION_CASHFLOW_RECONCILIATIONS_DDL)
+    _ensure_cashflow_schema(conn)
 
 
 def read_polymarket_history_csv(path: Path | str) -> list[PolymarketCashFlow]:
@@ -255,6 +258,7 @@ def _reconcile_position(
         event_id=position.event_id,
         round_slug=round_slug,
         side=position.side,
+        sleeve=position.sleeve,
         position_status=position.status,
         theoretical_pnl=theoretical_pnl,
         account_cash_pnl=account_pnl,
@@ -337,11 +341,26 @@ def _validate_record(record: CashFlowReconciliation) -> None:
         raise ValueError("event_id is required")
     if record.side not in {"UP", "DOWN"}:
         raise ValueError("side must be UP or DOWN")
+    if record.sleeve not in {"settlement", "volatility"}:
+        raise ValueError("sleeve must be settlement or volatility")
     if record.cash_flow_count < 0:
         raise ValueError("cash_flow_count must be non-negative")
     if record.match_status not in {"matched", "missing_cash_flow", "ambiguous_redeem"}:
         raise ValueError("invalid match_status")
     json.loads(record.cash_flows_json)
+
+
+def _ensure_cashflow_schema(conn: duckdb.DuckDBPyConnection) -> None:
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info('execution_cashflow_reconciliations')").fetchall()
+    }
+    if "sleeve" not in columns:
+        conn.execute("ALTER TABLE execution_cashflow_reconciliations ADD COLUMN sleeve VARCHAR")
+        conn.execute(
+            "UPDATE execution_cashflow_reconciliations "
+            "SET sleeve = 'settlement' WHERE sleeve IS NULL"
+        )
 
 
 def _now_et() -> datetime:

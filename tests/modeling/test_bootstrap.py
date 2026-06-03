@@ -517,6 +517,69 @@ def test_bootstrap_rejects_failed_bucket_level_calibration_gate(
     assert any("high_down realized down rate" in risk for risk in report.risks)
 
 
+def test_bootstrap_rejects_failed_execution_subset_calibration_gate(
+    tmp_path: Path,
+) -> None:
+    from bigan.modeling import (
+        BootstrapCandidateInput,
+        BootstrapRules,
+        evaluate_bootstrap_champion,
+    )
+
+    baseline_dir = tmp_path / "baseline"
+    candidate_dir = tmp_path / "candidate"
+    calibration_dir = tmp_path / "calibration"
+    serving_path = tmp_path / "serving.json"
+    baseline_backtest = tmp_path / "baseline-backtest.json"
+    candidate_backtest = tmp_path / "candidate-backtest.json"
+    runbook = tmp_path / "rollback.md"
+    _write_model_run(baseline_dir, model_version="xgboost-v4", test_auc=0.55, test_brier=0.24)
+    _write_model_run(candidate_dir, model_version="xgboost-v5", test_auc=0.75, test_brier=0.18)
+    calibration_dir.mkdir(parents=True)
+    (calibration_dir / "calibration_report.json").write_text(
+        json.dumps(
+            {
+                "model_version": "xgboost-v5",
+                "method": "family_aware",
+                "improved": True,
+                "raw_metrics": {"brier_score": 0.24, "ece": 0.20},
+                "calibrated_metrics": {"brier_score": 0.18, "ece": 0.04},
+                "execution_subset_metrics": {
+                    "raw_metrics": {"brier_score": 0.30, "ece": 0.35},
+                    "calibrated_metrics": {"brier_score": 0.22, "ece": 0.12},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_backtest(baseline_backtest, net_pnl=0.10, sharpe=1.20)
+    _write_backtest(candidate_backtest, net_pnl=0.80, sharpe=1.30)
+    _write_serving(serving_path)
+    _write_schema(candidate_dir / "feature_schema.json")
+    runbook.write_text("# Rollback\n", encoding="utf-8")
+
+    report = evaluate_bootstrap_champion(
+        baseline_dir=baseline_dir,
+        baseline_backtest_summary_path=baseline_backtest,
+        candidates=(
+            BootstrapCandidateInput(
+                candidate_dir=candidate_dir,
+                calibration_dir=calibration_dir,
+                candidate_backtest_summary_path=candidate_backtest,
+                serving_readiness_path=serving_path,
+            ),
+        ),
+        rollback_runbook_path=runbook,
+        output_dir=tmp_path / "decision",
+        promotion_action="replace_champion",
+        rules=BootstrapRules(max_execution_subset_ece=0.08),
+    )
+
+    assert report.recommended_action == "KEEP_BASELINE_TEMPORARILY"
+    assert report.promotion_checklist.calibration_acceptable is False
+    assert any("Execution subset ECE" in risk for risk in report.risks)
+
+
 def test_bootstrap_rejects_lower_sharpe_when_brier_gap_is_small(
     tmp_path: Path,
 ) -> None:

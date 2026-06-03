@@ -1,6 +1,7 @@
 """Live execution primitives for Polymarket champion signals."""
 
 from .cash_legs import (
+    CashLegSleeve,
     ExecutionCashLeg,
     account_cash_pnl_from_legs,
     initialize_cash_leg_tables,
@@ -20,23 +21,6 @@ from .cashflow import (
     reconcile_cash_flows,
     record_cashflow_reconciliations,
 )
-from .phase4_policy import (
-    DEFAULT_MIN_ENTRY_PRICE,
-    DEFAULT_NEAR_MIN_FRESH_EDGE_THRESHOLD,
-    DEFAULT_NEAR_MIN_PRICE_BAND,
-    DEFAULT_NEAR_MIN_SECONDS_TO_EXPIRY,
-    DEFAULT_SOFT_FORCE_EXIT_MIN_BID,
-    Phase4EntryPolicy,
-    entry_price_skip_reason,
-    is_near_min_entry,
-    phase4_lifecycle_complete,
-    phase4_summary_status,
-    soft_force_exit_deferred,
-)
-from .reconciliation import (
-    StalePositionReconciliation,
-    reconcile_stale_open_positions,
-)
 from .clob_client import (
     ClobExecutionClient,
     ClobExecutionConfig,
@@ -45,7 +29,38 @@ from .clob_client import (
     OrderStatus,
     RateLimitError,
 )
-from .position_manager import Position, PositionManager
+from .phase4_policy import (
+    DEFAULT_MIN_ENTRY_PRICE,
+    DEFAULT_NEAR_MIN_FRESH_EDGE_THRESHOLD,
+    DEFAULT_NEAR_MIN_PRICE_BAND,
+    DEFAULT_NEAR_MIN_SECONDS_TO_EXPIRY,
+    DEFAULT_SETTLEMENT_EDGE_THRESHOLD,
+    DEFAULT_SOFT_FORCE_EXIT_MIN_BID,
+    DEFAULT_VOLATILITY_MIN_ENTRY_PRICE,
+    DEFAULT_VOLATILITY_MIN_ORDER_SIZE_USDC,
+    DEFAULT_VOLATILITY_MIN_SECONDS_TO_EXPIRY,
+    DEFAULT_VOLATILITY_ROUND_BANKROLL_USDC,
+    DEFAULT_VOLATILITY_ROUND_TRIP_COST,
+    DEFAULT_VOLATILITY_SAFETY_MARGIN,
+    DEFAULT_VOLATILITY_SCORE_THRESHOLD,
+    Phase4EntryPolicy,
+    Phase4GateEvaluation,
+    VolatilityBudgetDecision,
+    VolatilitySleeveBudget,
+    entry_price_skip_reason,
+    evaluate_entry_gates,
+    expected_volatility_exit_gain_from_orderbook,
+    is_near_min_entry,
+    phase4_lifecycle_complete,
+    phase4_summary_status,
+    soft_force_exit_deferred,
+    volatility_gate_passed,
+)
+from .position_manager import Position, PositionManager, PositionSleeve
+from .reconciliation import (
+    StalePositionReconciliation,
+    reconcile_stale_open_positions,
+)
 from .risk import DailyRiskStats, EntryRiskDecision, RiskConfig, RiskManager
 from .settlement import (
     ExecutionSettlementRecord,
@@ -63,23 +78,36 @@ __all__ = [
     "ClobExecutionConfig",
     "ClobExecutionError",
     "CashFlowReconciliation",
+    "CashLegSleeve",
     "DailyRiskStats",
     "DEFAULT_MIN_ENTRY_PRICE",
     "DEFAULT_NEAR_MIN_FRESH_EDGE_THRESHOLD",
     "DEFAULT_NEAR_MIN_PRICE_BAND",
     "DEFAULT_NEAR_MIN_SECONDS_TO_EXPIRY",
+    "DEFAULT_SETTLEMENT_EDGE_THRESHOLD",
     "DEFAULT_SOFT_FORCE_EXIT_MIN_BID",
+    "DEFAULT_VOLATILITY_MIN_ENTRY_PRICE",
+    "DEFAULT_VOLATILITY_MIN_ORDER_SIZE_USDC",
+    "DEFAULT_VOLATILITY_MIN_SECONDS_TO_EXPIRY",
+    "DEFAULT_VOLATILITY_ROUND_BANKROLL_USDC",
+    "DEFAULT_VOLATILITY_ROUND_TRIP_COST",
+    "DEFAULT_VOLATILITY_SAFETY_MARGIN",
+    "DEFAULT_VOLATILITY_SCORE_THRESHOLD",
     "EntryRiskDecision",
     "ExecutionCashLeg",
     "InsufficientBalanceError",
     "OrderStatus",
     "Phase4EntryPolicy",
+    "Phase4GateEvaluation",
     "PolymarketCashFlow",
     "Position",
     "PositionManager",
+    "PositionSleeve",
     "RateLimitError",
     "RiskConfig",
     "RiskManager",
+    "VolatilityBudgetDecision",
+    "VolatilitySleeveBudget",
     "ExecutionSettlementRecord",
     "SettlementPoller",
     "SettlementPollerConfig",
@@ -88,6 +116,8 @@ __all__ = [
     "account_cash_pnl",
     "account_cash_pnl_from_legs",
     "entry_price_skip_reason",
+    "evaluate_entry_gates",
+    "expected_volatility_exit_gain_from_orderbook",
     "phase4_lifecycle_complete",
     "phase4_summary_status",
     "initialize_cash_leg_tables",
@@ -108,4 +138,5 @@ __all__ = [
     "record_execution_settlement",
     "signed_cash_delta",
     "soft_force_exit_deferred",
+    "volatility_gate_passed",
 ]

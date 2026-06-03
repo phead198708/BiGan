@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from bigan.canonical.schemas import PROVENANCE_REST_SEED, PROVENANCE_WS
+from bigan.features.low_latency import JsonlRawQueue
 from bigan.ingestion.clob_rest import RestOrderbook
 from bigan.ingestion.config import IngestionSettings
-from bigan.ingestion.gamma_client import ActiveMarket
+from bigan.ingestion.gamma_client import ActiveMarket, MarketDiscoverySpec
 from bigan.ingestion.message_types import BookEvent
-from bigan.ingestion.runner import IngestionRunner, _raw_record_from_ws_event
+from bigan.ingestion.runner import (
+    IngestionRunner,
+    _gamma_poll_timeout_seconds,
+    _log_gamma_poll_failure,
+    _raw_record_from_ws_event,
+)
 
 
 class _RecordingSink:
@@ -65,6 +72,37 @@ def test_initial_snapshot_candidates_skip_seeded_and_inflight(tmp_path) -> None:
     assert runner._active_asset_ids == {"seeded", "inflight", "fresh"}
 
 
+def test_gamma_poll_retryable_failure_logs_warning_without_traceback(caplog) -> None:
+    with caplog.at_level(logging.WARNING):
+        _log_gamma_poll_failure(TimeoutError("gamma timed out"))
+
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert record.levelno == logging.WARNING
+    assert record.message == "gamma.poll_retryable_failed"
+    assert record.err_type == "TimeoutError"
+    assert record.exc_info is None
+
+
+def test_gamma_poll_timeout_wakes_on_market_boundary() -> None:
+    specs = [
+        MarketDiscoverySpec(
+            slug_prefix="btc-updown-15m-",
+            underlying="BTC",
+            horizon_ms=15 * 60_000,
+            symbol_kind="btc_15m_outcome",
+        )
+    ]
+
+    timeout = _gamma_poll_timeout_seconds(
+        specs,
+        interval_seconds=60.0,
+        now_ms=1_779_461_990_000,
+    )
+
+    assert timeout == 10.25
+
+
 def test_runner_persists_and_applies_gamma_outcome_metadata(tmp_path) -> None:
     runner = IngestionRunner(
         IngestionSettings(data_dir=tmp_path, metrics_enabled=False, rollup_enabled=False)
@@ -115,6 +153,205 @@ def test_runner_persists_and_applies_gamma_outcome_metadata(tmp_path) -> None:
     assert len(sink.records[0]["raw"]["mappings"]) == 2
     assert record["raw"]["canonical_symbol"] == "BTC-15M:btc-updown-15m-1778423700:UP"
     assert record["raw"]["outcome_side"] == "UP"
+
+
+def test_runner_publishes_btc15_canonical_rows_to_low_latency_raw_queue(tmp_path) -> None:
+    queue_path = tmp_path / "live" / "btc15-raw-queue.jsonl"
+    runner = IngestionRunner(
+        IngestionSettings(
+            data_dir=tmp_path,
+            metrics_enabled=False,
+            rollup_enabled=False,
+            low_latency_raw_queue_path=queue_path,
+        )
+    )
+    sink = _RecordingSink()
+    runner._sink = sink  # type: ignore[assignment]
+    runner._refresh_market_metadata(
+        [
+            ActiveMarket(
+                slug="btc-updown-15m-1778423700",
+                condition_id="0xabc",
+                asset_id_up="tok-up",
+                asset_id_down="tok-down",
+                start_ts_ms=1_778_423_700_000,
+                end_ts_ms=1_778_424_600_000,
+                tick_size="0.01",
+            )
+        ]
+    )
+    event = BookEvent(
+        event_type="book",
+        asset_id="tok-up",
+        market="0xabc",
+        timestamp=1_778_423_710_000,
+        receive_time=1_778_423_710_111,
+        bids=[],
+        asks=[],
+        hash="h0",
+    )
+
+    asyncio.run(
+        runner.make_handler()(
+            event,
+                {
+                    "event_type": "book",
+                    "asset_id": "tok-up",
+                    "market": "0xabc",
+                    "timestamp": "1778423710000",
+                "bids": [{"price": "0.49", "size": "100"}],
+                "asks": [{"price": "0.51", "size": "50"}],
+                "hash": "h0",
+            },
+        )
+    )
+
+    queued, cursor = JsonlRawQueue(queue_path).read_from(0)
+
+    assert len(sink.records) == 1
+    assert cursor == 3
+    assert [item.table for item in queued] == [
+        "raw_orderbook_snapshot",
+        "raw_orderbook_snapshot",
+        "raw_top_of_book",
+    ]
+    assert {item.row["canonical_symbol"] for item in queued} == {
+        "BTC-15M:btc-updown-15m-1778423700:UP"
+    }
+    assert queued[-1].row["bid_price"] == 0.49
+    assert queued[-1].row["ask_price"] == 0.51
+
+
+def test_runner_limits_low_latency_orderbook_queue_to_feature_depth_levels(
+    tmp_path,
+) -> None:
+    queue_path = tmp_path / "live" / "btc15-raw-queue.jsonl"
+    runner = IngestionRunner(
+        IngestionSettings(
+            data_dir=tmp_path,
+            metrics_enabled=False,
+            rollup_enabled=False,
+            low_latency_raw_queue_path=queue_path,
+        )
+    )
+    sink = _RecordingSink()
+    runner._sink = sink  # type: ignore[assignment]
+    runner._refresh_market_metadata(
+        [
+            ActiveMarket(
+                slug="btc-updown-15m-1778423700",
+                condition_id="0xabc",
+                asset_id_up="tok-up",
+                asset_id_down="tok-down",
+                start_ts_ms=1_778_423_700_000,
+                end_ts_ms=1_778_424_600_000,
+                tick_size="0.01",
+            )
+        ]
+    )
+    bids = [
+        {"price": f"{0.49 - level * 0.001:.3f}", "size": "1"}
+        for level in range(12)
+    ]
+    asks = [
+        {"price": f"{0.51 + level * 0.001:.3f}", "size": "1"}
+        for level in range(12)
+    ]
+
+    asyncio.run(
+        runner.make_handler()(
+            BookEvent(
+                event_type="book",
+                asset_id="tok-up",
+                market="0xabc",
+                timestamp=1_778_423_710_000,
+                receive_time=1_778_423_710_111,
+                bids=[],
+                asks=[],
+                hash="h0",
+            ),
+            {
+                "event_type": "book",
+                "asset_id": "tok-up",
+                "market": "0xabc",
+                "timestamp": "1778423710000",
+                "bids": bids,
+                "asks": asks,
+                "hash": "h0",
+            },
+        )
+    )
+
+    queued, cursor = JsonlRawQueue(queue_path).read_from(0)
+    depth_rows = [item for item in queued if item.table == "raw_orderbook_snapshot"]
+
+    assert cursor == 21
+    assert len(depth_rows) == 20
+    assert max(int(item.row["level"]) for item in depth_rows) == 9
+    assert [item.table for item in queued][-1] == "raw_top_of_book"
+
+
+def test_runner_excludes_future_and_expired_round_rows_from_low_latency_raw_queue(
+    tmp_path,
+) -> None:
+    queue_path = tmp_path / "live" / "btc15-raw-queue.jsonl"
+    runner = IngestionRunner(
+        IngestionSettings(
+            data_dir=tmp_path,
+            metrics_enabled=False,
+            rollup_enabled=False,
+            low_latency_raw_queue_path=queue_path,
+        )
+    )
+    sink = _RecordingSink()
+    runner._sink = sink  # type: ignore[assignment]
+    start_ts = 1_778_423_400_000
+    end_ts = 1_778_424_300_000
+    runner._refresh_market_metadata(
+        [
+            ActiveMarket(
+                slug="btc-updown-15m-1778423400",
+                condition_id="0xabc",
+                asset_id_up="tok-up",
+                asset_id_down="tok-down",
+                start_ts_ms=start_ts,
+                end_ts_ms=end_ts,
+                tick_size="0.01",
+            )
+        ]
+    )
+
+    for timestamp in (start_ts - 1_000, end_ts):
+        event = BookEvent(
+            event_type="book",
+            asset_id="tok-up",
+            market="0xabc",
+            timestamp=timestamp,
+            receive_time=timestamp + 111,
+            bids=[],
+            asks=[],
+            hash=f"h-{timestamp}",
+        )
+        asyncio.run(
+            runner.make_handler()(
+                event,
+                {
+                    "event_type": "book",
+                    "asset_id": "tok-up",
+                    "market": "0xabc",
+                    "timestamp": str(timestamp),
+                    "bids": [{"price": "0.49", "size": "100"}],
+                    "asks": [{"price": "0.51", "size": "50"}],
+                    "hash": f"h-{timestamp}",
+                },
+            )
+        )
+
+    queued, cursor = JsonlRawQueue(queue_path).read_from(0)
+
+    assert len(sink.records) == 2
+    assert queued == []
+    assert cursor == 0
 
 
 def test_initial_snapshot_seed_writes_rest_book(monkeypatch, tmp_path) -> None:

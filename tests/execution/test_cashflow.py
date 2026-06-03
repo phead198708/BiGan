@@ -43,6 +43,7 @@ def test_cashflow_reconciliation_uses_account_cash_and_tracks_dust(tmp_path) -> 
         3.225805,
         "order-entry",
         fill_price=0.31,
+        sleeve="volatility",
     )
     positions.close_position(
         "phase4-btc-updown-15m-1779786000-UP-10f86d62",
@@ -57,6 +58,7 @@ def test_cashflow_reconciliation_uses_account_cash_and_tracks_dust(tmp_path) -> 
     assert account_cash_pnl(flows) == pytest.approx(-0.716149)
     assert len(records) == 1
     record = records[0]
+    assert record.sleeve == "volatility"
     assert record.match_status == "matched"
     assert record.account_cash_pnl == pytest.approx(-0.716149)
     assert record.theoretical_pnl == pytest.approx(-0.645161)
@@ -142,4 +144,46 @@ def test_cashflow_reconciliations_are_persisted(tmp_path) -> None:
 
     assert len(rows) == 1
     assert rows[0]["event_id"] == "phase4-btc-updown-15m-1779786000-UP-x"
+    assert rows[0]["sleeve"] == "settlement"
     assert rows[0]["match_status"] == "missing_cash_flow"
+
+
+def test_existing_cashflow_table_without_sleeve_is_migrated() -> None:
+    conn = duckdb.connect()
+    conn.execute(
+        """
+        CREATE TABLE execution_cashflow_reconciliations (
+            event_id VARCHAR PRIMARY KEY,
+            round_slug VARCHAR NOT NULL,
+            side VARCHAR NOT NULL,
+            position_status VARCHAR NOT NULL,
+            theoretical_pnl DOUBLE,
+            account_cash_pnl DOUBLE,
+            cash_pnl_delta DOUBLE,
+            bought_token_amount DOUBLE NOT NULL,
+            sold_token_amount DOUBLE NOT NULL,
+            redeemed_token_amount DOUBLE NOT NULL,
+            dust_token_amount DOUBLE NOT NULL,
+            cash_flow_count INTEGER NOT NULL,
+            first_cash_flow_ts BIGINT,
+            last_cash_flow_ts BIGINT,
+            match_status VARCHAR NOT NULL,
+            cash_flows_json VARCHAR NOT NULL,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_cashflow_reconciliations VALUES (
+            'event-1', 'btc-updown-15m-1', 'UP', 'open', NULL, NULL, NULL,
+            0.0, 0.0, 0.0, 0.0, 0, NULL, NULL, 'missing_cash_flow',
+            '[]', 1000, 1000
+        )
+        """
+    )
+
+    rows = read_cashflow_reconciliations(conn)
+
+    assert rows[0]["sleeve"] == "settlement"

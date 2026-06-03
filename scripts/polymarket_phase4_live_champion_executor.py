@@ -24,21 +24,42 @@ from typing import Any
 
 import duckdb
 
-from bigan.execution.cash_legs import leg_from_clob_fill, record_execution_cash_legs
+from bigan.execution.cash_legs import (
+    leg_from_clob_fill,
+    read_execution_cash_legs,
+    record_execution_cash_legs,
+)
 from bigan.execution.db import connect_mlops_db
 from bigan.execution.phase4_policy import (
     DEFAULT_MIN_ENTRY_PRICE,
     DEFAULT_NEAR_MIN_FRESH_EDGE_THRESHOLD,
     DEFAULT_NEAR_MIN_PRICE_BAND,
     DEFAULT_NEAR_MIN_SECONDS_TO_EXPIRY,
+    DEFAULT_SETTLEMENT_EDGE_THRESHOLD,
     DEFAULT_SOFT_FORCE_EXIT_MIN_BID,
+    DEFAULT_VOLATILITY_MIN_ENTRY_PRICE,
+    DEFAULT_VOLATILITY_MIN_ORDER_SIZE_USDC,
+    DEFAULT_VOLATILITY_MIN_SECONDS_TO_EXPIRY,
+    DEFAULT_VOLATILITY_ROUND_BANKROLL_USDC,
+    DEFAULT_VOLATILITY_ROUND_TRIP_COST,
+    DEFAULT_VOLATILITY_SAFETY_MARGIN,
+    DEFAULT_VOLATILITY_SCORE_THRESHOLD,
     Phase4EntryPolicy,
+    VolatilitySleeveBudget,
     entry_price_skip_reason,
+    evaluate_entry_gates,
     phase4_lifecycle_complete,
     phase4_summary_status,
     soft_force_exit_deferred,
 )
 from bigan.execution.position_manager import PositionManager
+from bigan.execution.v6_gate import (
+    V6JointGateConfig,
+    build_v6_signal_fields,
+    is_v6_model_version,
+    v6_joint_gate_config_from_model,
+    v6_selection_score,
+)
 from bigan.modeling.families import market_family_from_symbol
 
 
@@ -58,6 +79,12 @@ class SignalEvent:
     edge: float
     bridged_at: int = 0
     opposite_token_id: str = ""
+    p_up: float | None = None
+    p_down: float | None = None
+    p_neutral: float | None = None
+    p_vol_up: float | None = None
+    p_vol_down: float | None = None
+    v6_joint_side: str | None = None
 
 
 @dataclass(slots=True)
@@ -80,12 +107,15 @@ class LivePosition:
     exit_attempt_count: int = 0
     last_exit_attempt_at: int = 0
     last_lifecycle_reason: str = ""
+    sleeve: str = "settlement"
+    paper: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class SellResult:
     status: str
     realized_pnl: float = 0.0
+    account_cash_pnl: float | None = None
 
 
 @dataclass(slots=True)
@@ -98,7 +128,10 @@ class RoundLifecycleState:
     observed_round_set: set[str] = field(default_factory=set)
     filled_rounds: set[str] = field(default_factory=set)
     closed_rounds: set[str] = field(default_factory=set)
+    position_event_ids: set[str] = field(default_factory=set)
     open_positions: dict[str, LivePosition] = field(default_factory=dict)
+    volatility_filled_count_by_round: dict[str, int] = field(default_factory=dict)
+    filled_count_by_sleeve_round_side: dict[str, int] = field(default_factory=dict)
 
     def mark_event_seen(self, event_id: str) -> bool:
         """Return false when an event was already processed."""
@@ -133,12 +166,58 @@ class RoundLifecycleState:
 
         if position is None:
             return
-        self.filled_rounds.add(event.round_slug)
-        self.open_positions[event.round_slug] = position
+        if position.sleeve == "settlement":
+            self.filled_rounds.add(event.round_slug)
+        elif position.sleeve == "volatility":
+            self.volatility_filled_count_by_round[event.round_slug] = (
+                self.volatility_filled_count_by_round.get(event.round_slug, 0) + 1
+            )
+        side_key = _sleeve_side_key(position.round_slug, position.sleeve, position.side)
+        self.filled_count_by_sleeve_round_side[side_key] = (
+            self.filled_count_by_sleeve_round_side.get(side_key, 0) + 1
+        )
+        self.position_event_ids.add(position.event_id)
+        self.open_positions[_position_key(position.round_slug, position.sleeve)] = position
 
-    def mark_position_closed(self, round_slug: str) -> None:
-        self.open_positions.pop(round_slug, None)
+    def mark_position_closed(self, round_slug: str, sleeve: str = "settlement") -> None:
+        self.open_positions.pop(_position_key(round_slug, sleeve), None)
         self.closed_rounds.add(round_slug)
+
+    def open_position(self, round_slug: str, sleeve: str) -> LivePosition | None:
+        return self.open_positions.get(_position_key(round_slug, sleeve))
+
+    def has_open_sleeve(self, round_slug: str, sleeve: str) -> bool:
+        return self.open_position(round_slug, sleeve) is not None
+
+    def filled_count_for_side(self, *, round_slug: str, sleeve: str, side: str) -> int:
+        return self.filled_count_by_sleeve_round_side.get(
+            _sleeve_side_key(round_slug, sleeve, side),
+            0,
+        )
+
+
+def _position_key(round_slug: str, sleeve: str) -> str:
+    return round_slug if sleeve == "settlement" else f"{sleeve}:{round_slug}"
+
+
+def _sleeve_side_key(round_slug: str, sleeve: str, side: str) -> str:
+    return f"{sleeve}:{round_slug}:{side.upper()}"
+
+
+def _sleeve_side_cap_skip_reason(
+    lifecycle: RoundLifecycleState,
+    *,
+    round_slug: str,
+    sleeve: str,
+    side: str,
+    max_filled_per_side_per_round: int,
+) -> str | None:
+    if max_filled_per_side_per_round <= 0:
+        raise ValueError("max_filled_per_side_per_round must be positive")
+    filled = lifecycle.filled_count_for_side(round_slug=round_slug, sleeve=sleeve, side=side)
+    if filled >= max_filled_per_side_per_round:
+        return f"{sleeve}_side_cap"
+    return None
 
 
 class OrderBookUnavailable(RuntimeError):
@@ -174,6 +253,7 @@ def _event_family_allowed(event: SignalEvent, allowed_families: frozenset[str]) 
 
 def main() -> int:
     args = _parse_args()
+    _validate_args(args)
     _install_signal_handlers()
     allowed_families = frozenset(
         family.strip().upper() for family in args.market_families.split(",") if family.strip()
@@ -184,6 +264,13 @@ def main() -> int:
     summary_path.parent.mkdir(parents=True, exist_ok=True)
 
     started_at = _now_ms()
+    entry_policy = _entry_policy_from_args(args)
+    v6_joint_config = _v6_joint_config_from_args(args)
+    volatility_budget = VolatilitySleeveBudget(
+        round_cap_usdc=args.volatility_round_bankroll_usdc,
+        per_bet_cap_usdc=args.volatility_per_bet_cap_usdc,
+        min_order_size_usdc=args.volatility_min_order_size_usdc,
+    )
     client = _build_clob_client()
     heartbeat_stop = threading.Event()
     heartbeat_thread = threading.Thread(
@@ -236,6 +323,25 @@ def main() -> int:
             "signal_source": "jsonl" if signal_jsonl_path is not None else "duckdb",
             "signal_jsonl_path": str(signal_jsonl_path) if signal_jsonl_path is not None else None,
             "edge_threshold": args.edge_threshold,
+            "settlement_edge_threshold": entry_policy.effective_settlement_edge_threshold,
+            "volatility_score_threshold": entry_policy.volatility_score_threshold,
+            "volatility_min_entry_price": entry_policy.volatility_min_entry_price,
+            "volatility_min_seconds_to_expiry": entry_policy.volatility_min_seconds_to_expiry,
+            "volatility_round_trip_cost": entry_policy.volatility_round_trip_cost,
+            "volatility_safety_margin": entry_policy.volatility_safety_margin,
+            "volatility_round_bankroll_usdc": volatility_budget.round_cap_usdc,
+            "volatility_per_bet_cap_usdc": volatility_budget.per_bet_cap_usdc,
+            "volatility_min_order_size_usdc": volatility_budget.min_order_size_usdc,
+            "enable_volatility_live_entries": entry_policy.enable_volatility_live_entries,
+            "enable_volatility_sleeve": args.enable_volatility_sleeve,
+            "volatility_live_ordering_enabled": False,
+            "volatility_ordering_mode": "paper_only",
+            "paper": args.paper,
+            "entry_gate_mode": args.entry_gate_mode,
+            "v6_joint_rule": (
+                None if v6_joint_config is None else v6_joint_config.joint_rule()
+            ),
+            "phase4_v5_role": "diagnostic_and_opportunity_analysis",
             "exit_edge_threshold": args.exit_edge_threshold,
             "opposite_exit_edge_threshold": args.opposite_exit_edge_threshold,
             "opposite_exit_min_seconds_to_expiry": args.opposite_exit_min_seconds_to_expiry,
@@ -248,6 +354,13 @@ def main() -> int:
             "max_rounds": args.max_rounds,
             "max_position_size_usdc": args.max_position_size_usdc,
             "min_entry_price": args.min_entry_price,
+            "max_combined_concurrent_positions": args.max_combined_concurrent_positions,
+            "settlement_max_filled_per_side_per_round": (
+                args.settlement_max_filled_per_side_per_round
+            ),
+            "volatility_max_filled_per_side_per_round": (
+                args.volatility_max_filled_per_side_per_round
+            ),
             "near_min_price_band": args.near_min_price_band,
             "near_min_fresh_edge_threshold": args.near_min_fresh_edge_threshold,
             "near_min_seconds_to_expiry": args.near_min_seconds_to_expiry,
@@ -258,6 +371,7 @@ def main() -> int:
             "max_seconds_to_expiry": args.max_seconds_to_expiry,
             "poll_seconds": args.poll_seconds,
             "max_runtime_minutes": args.max_runtime_minutes,
+            "continue_after_max_rounds_until_runtime": args.continue_after_max_rounds_until_runtime,
         },
         cursor=cursor_payload,
     )
@@ -268,7 +382,11 @@ def main() -> int:
             if (now_ms - started_at) >= args.max_runtime_minutes * 60_000:
                 _log(log_path, "stop_max_runtime")
                 break
-            if lifecycle.max_rounds_reached(args.max_rounds) and not lifecycle.open_positions:
+            if (
+                lifecycle.max_rounds_reached(args.max_rounds)
+                and not lifecycle.open_positions
+                and not args.continue_after_max_rounds_until_runtime
+            ):
                 _log(log_path, "stop_max_rounds_closed")
                 break
             if realized_pnl <= -args.daily_loss_limit_usdc:
@@ -294,7 +412,11 @@ def main() -> int:
             exits_pending_confirmation += tick_pending
             exits_pending_settlement += tick_settlement
             realized_pnl += tick_pnl
-            if lifecycle.max_rounds_reached(args.max_rounds) and not lifecycle.open_positions:
+            if (
+                lifecycle.max_rounds_reached(args.max_rounds)
+                and not lifecycle.open_positions
+                and not args.continue_after_max_rounds_until_runtime
+            ):
                 _log(log_path, "stop_max_rounds_closed")
                 break
             if realized_pnl <= -args.daily_loss_limit_usdc:
@@ -309,6 +431,7 @@ def main() -> int:
                         after_created_at=cursor_created_at,
                         after_event_id=cursor_event_id,
                         limit=args.event_limit,
+                        v6_joint_config=v6_joint_config,
                     )
                     if events:
                         cursor_created_at = events[-1].created_at
@@ -319,6 +442,8 @@ def main() -> int:
                         after_line_number=cursor_line_number,
                         model_version=args.model_version,
                         limit=args.event_limit,
+                        v6_joint_config=v6_joint_config,
+                        entry_gate_mode=args.entry_gate_mode,
                     )
             except Exception as exc:  # noqa: BLE001
                 errors += 1
@@ -365,13 +490,23 @@ def main() -> int:
                     )
                     continue
 
-                if event.round_slug in lifecycle.open_positions:
-                    position = lifecycle.open_positions[event.round_slug]
-                    if event.outcome_side == position.side:
+                settlement_position = lifecycle.open_position(event.round_slug, "settlement")
+                if settlement_position is not None:
+                    _log(
+                        log_path,
+                        "settlement_sleeve_hold",
+                        reason="hold_to_settlement",
+                        position=asdict(settlement_position),
+                        signal=asdict(event),
+                    )
+
+                volatility_position = lifecycle.open_position(event.round_slug, "volatility")
+                if volatility_position is not None:
+                    if event.outcome_side == volatility_position.side:
                         sell_result = _maybe_exit(
                             client=client,
                             position_manager=position_manager,
-                            position=position,
+                            position=volatility_position,
                             signal=event,
                             log_path=log_path,
                             exit_edge_threshold=args.exit_edge_threshold,
@@ -388,7 +523,11 @@ def main() -> int:
                                 exits_pending_settlement += 1
                             else:
                                 exits_pending_confirmation += 1
-                            lifecycle.mark_position_closed(event.round_slug)
+                            lifecycle.mark_position_closed(event.round_slug, "volatility")
+                            volatility_budget.apply_account_pnl(
+                                event.round_slug,
+                                _cash_pnl_for_budget(sell_result),
+                            )
                             if realized_pnl <= -args.daily_loss_limit_usdc:
                                 _log(log_path, "daily_loss_limit_reached", realized_pnl=realized_pnl)
                                 break
@@ -396,7 +535,7 @@ def main() -> int:
                         sell_result = _maybe_exit_opposite_correction(
                             client=client,
                             position_manager=position_manager,
-                            position=position,
+                            position=volatility_position,
                             signal=event,
                             log_path=log_path,
                             opposite_exit_edge_threshold=args.opposite_exit_edge_threshold,
@@ -413,7 +552,11 @@ def main() -> int:
                                 exits_pending_settlement += 1
                             else:
                                 exits_pending_confirmation += 1
-                            lifecycle.mark_position_closed(event.round_slug)
+                            lifecycle.mark_position_closed(event.round_slug, "volatility")
+                            volatility_budget.apply_account_pnl(
+                                event.round_slug,
+                                _cash_pnl_for_budget(sell_result),
+                            )
                             if realized_pnl <= -args.daily_loss_limit_usdc:
                                 _log(log_path, "daily_loss_limit_reached", realized_pnl=realized_pnl)
                                 break
@@ -421,12 +564,6 @@ def main() -> int:
 
                 if not _event_family_allowed(event, allowed_families):
                     _bump(skipped, "market_family_not_allowed")
-                    continue
-                if len(lifecycle.open_positions) >= args.max_concurrent_positions:
-                    _bump(skipped, "max_concurrent_positions")
-                    continue
-                if event.round_slug in lifecycle.filled_rounds:
-                    _bump(skipped, "round_already_filled")
                     continue
                 seconds_to_expiry = (event.round_end_ts - now_ms) / 1000
                 time_skip_reason = _entry_time_window_skip_reason(
@@ -447,32 +584,120 @@ def main() -> int:
                             no_new_entry_before_expiry_seconds=args.no_new_entry_before_expiry_seconds,
                         )
                     continue
-                if event.edge < args.edge_threshold:
-                    _bump(skipped, "below_edge_threshold")
+                if len(lifecycle.open_positions) >= args.max_combined_concurrent_positions:
+                    _bump(skipped, "max_combined_concurrent_positions")
                     continue
 
-                entries_attempted += 1
-                lifecycle.mark_entry_attempted(event.event_id)
-                position = _try_entry(
-                    client=client,
-                    position_manager=position_manager,
-                    signal=event,
-                    log_path=log_path,
-                    max_position_size_usdc=args.max_position_size_usdc,
-                    entry_policy=Phase4EntryPolicy(
-                        min_entry_price=args.min_entry_price,
-                        near_min_price_band=args.near_min_price_band,
-                        near_min_fresh_edge_threshold=args.near_min_fresh_edge_threshold,
-                        near_min_seconds_to_expiry=args.near_min_seconds_to_expiry,
-                        edge_threshold=args.edge_threshold,
-                    ),
-                    seconds_to_expiry=seconds_to_expiry,
-                    buy_slippage=args.buy_slippage,
-                    monitoring_db_path=args.monitoring_db_path,
-                )
-                lifecycle.mark_entry_result(event, position)
-                if position is not None:
-                    entries_filled += 1
+                if event.round_slug not in lifecycle.filled_rounds and settlement_position is None:
+                    side_skip_reason = _sleeve_side_cap_skip_reason(
+                        lifecycle,
+                        round_slug=event.round_slug,
+                        sleeve="settlement",
+                        side=event.outcome_side,
+                        max_filled_per_side_per_round=(
+                            args.settlement_max_filled_per_side_per_round
+                        ),
+                    )
+                    if side_skip_reason is not None:
+                        _bump(skipped, side_skip_reason)
+                        _log(
+                            log_path,
+                            "entry_skipped",
+                            reason=side_skip_reason,
+                            sleeve="settlement",
+                            signal=asdict(event),
+                            filled_side_count=lifecycle.filled_count_for_side(
+                                round_slug=event.round_slug,
+                                sleeve="settlement",
+                                side=event.outcome_side,
+                            ),
+                            max_filled_per_side_per_round=(
+                                args.settlement_max_filled_per_side_per_round
+                            ),
+                        )
+                        continue
+                    entries_attempted += 1
+                    lifecycle.mark_entry_attempted(event.event_id)
+                    position = _try_entry(
+                        client=client,
+                        position_manager=position_manager,
+                        signal=event,
+                        log_path=log_path,
+                        max_position_size_usdc=args.max_position_size_usdc,
+                        entry_policy=entry_policy,
+                        seconds_to_expiry=seconds_to_expiry,
+                        buy_slippage=args.buy_slippage,
+                        monitoring_db_path=args.monitoring_db_path,
+                        sleeve="settlement",
+                        paper=args.paper,
+                        entry_gate_mode=args.entry_gate_mode,
+                    )
+                    lifecycle.mark_entry_result(event, position)
+                    if position is not None:
+                        entries_filled += 1
+                        continue
+
+                if (
+                    args.enable_volatility_sleeve
+                    and not lifecycle.has_open_sleeve(event.round_slug, "volatility")
+                    and len(lifecycle.open_positions) < args.max_combined_concurrent_positions
+                ):
+                    side_skip_reason = _sleeve_side_cap_skip_reason(
+                        lifecycle,
+                        round_slug=event.round_slug,
+                        sleeve="volatility",
+                        side=event.outcome_side,
+                        max_filled_per_side_per_round=(
+                            args.volatility_max_filled_per_side_per_round
+                        ),
+                    )
+                    if side_skip_reason is not None:
+                        _bump(skipped, side_skip_reason)
+                        _log(
+                            log_path,
+                            "entry_skipped",
+                            reason=side_skip_reason,
+                            sleeve="volatility",
+                            signal=asdict(event),
+                            filled_side_count=lifecycle.filled_count_for_side(
+                                round_slug=event.round_slug,
+                                sleeve="volatility",
+                                side=event.outcome_side,
+                            ),
+                            max_filled_per_side_per_round=(
+                                args.volatility_max_filled_per_side_per_round
+                            ),
+                        )
+                        continue
+                    budget_decision = volatility_budget.next_entry_decision(event.round_slug)
+                    if not budget_decision.allowed:
+                        _bump(skipped, budget_decision.reason)
+                        _log(
+                            log_path,
+                            "entry_skipped",
+                            reason=budget_decision.reason,
+                            sleeve="volatility",
+                            signal=asdict(event),
+                            volatility_budget=asdict(budget_decision),
+                        )
+                        continue
+                    volatility_position = _try_entry(
+                        client=client,
+                        position_manager=position_manager,
+                        signal=event,
+                        log_path=log_path,
+                        max_position_size_usdc=budget_decision.size_usdc,
+                        entry_policy=entry_policy,
+                        seconds_to_expiry=seconds_to_expiry,
+                        buy_slippage=args.buy_slippage,
+                        monitoring_db_path=args.monitoring_db_path,
+                        sleeve="volatility",
+                        paper=args.paper,
+                        entry_gate_mode=args.entry_gate_mode,
+                    )
+                    lifecycle.mark_entry_result(event, volatility_position)
+                    if volatility_position is not None:
+                        entries_filled += 1
 
             time.sleep(args.poll_seconds)
     finally:
@@ -490,7 +715,10 @@ def main() -> int:
         exits_pending_confirmation += shutdown_pending
         exits_pending_settlement += shutdown_settlement
         realized_pnl += shutdown_pnl
-        theoretical_pnl_usdc = _theoretical_pnl_from_positions(position_manager)
+        theoretical_pnl_usdc = _theoretical_pnl_from_positions(
+            position_manager,
+            event_ids=lifecycle.position_event_ids,
+        )
         open_positions_at_shutdown = len(lifecycle.open_positions)
         lifecycle_complete = phase4_lifecycle_complete(
             errors=errors,
@@ -506,6 +734,21 @@ def main() -> int:
             "model_version": args.model_version,
             "market_families": sorted(allowed_families) or None,
             "edge_threshold": args.edge_threshold,
+            "settlement_edge_threshold": entry_policy.effective_settlement_edge_threshold,
+            "volatility_score_threshold": entry_policy.volatility_score_threshold,
+            "volatility_min_entry_price": entry_policy.volatility_min_entry_price,
+            "volatility_min_seconds_to_expiry": entry_policy.volatility_min_seconds_to_expiry,
+            "volatility_round_trip_cost": entry_policy.volatility_round_trip_cost,
+            "volatility_safety_margin": entry_policy.volatility_safety_margin,
+            "volatility_round_bankroll_usdc": volatility_budget.round_cap_usdc,
+            "volatility_per_bet_cap_usdc": volatility_budget.per_bet_cap_usdc,
+            "volatility_min_order_size_usdc": volatility_budget.min_order_size_usdc,
+            "enable_volatility_live_entries": entry_policy.enable_volatility_live_entries,
+            "enable_volatility_sleeve": args.enable_volatility_sleeve,
+            "volatility_live_ordering_enabled": False,
+            "volatility_ordering_mode": "paper_only",
+            "paper": args.paper,
+            "phase4_v5_role": "diagnostic_and_opportunity_analysis",
             "status": phase4_summary_status(
                 errors=errors,
                 entries_filled=entries_filled,
@@ -514,6 +757,18 @@ def main() -> int:
             "lifecycle_complete": lifecycle_complete,
             "entries_attempted": entries_attempted,
             "entries_filled": entries_filled,
+            "max_combined_concurrent_positions": args.max_combined_concurrent_positions,
+            "settlement_max_filled_per_side_per_round": (
+                args.settlement_max_filled_per_side_per_round
+            ),
+            "volatility_max_filled_per_side_per_round": (
+                args.volatility_max_filled_per_side_per_round
+            ),
+            "volatility_budget_balances": dict(volatility_budget.balances or {}),
+            "volatility_filled_count_by_round": lifecycle.volatility_filled_count_by_round,
+            "filled_count_by_sleeve_round_side": (
+                lifecycle.filled_count_by_sleeve_round_side
+            ),
             "closes_filled": closes_filled,
             "exits_pending_confirmation": exits_pending_confirmation,
             "exits_pending_settlement": exits_pending_settlement,
@@ -523,6 +778,13 @@ def main() -> int:
             "pnl_reconciliation_status": "theoretical_only",
             "promotion_or_capital_sizing_evidence": False,
             "account_cashflow_reconciliation_required": True,
+            "decision_evidence_allowed": False,
+            "decision_evidence_blockers": _decision_evidence_blockers(
+                lifecycle_complete=lifecycle_complete,
+                open_positions_at_shutdown=open_positions_at_shutdown,
+                exits_pending_confirmation=exits_pending_confirmation,
+                exits_pending_settlement=exits_pending_settlement,
+            ),
             "open_positions_at_shutdown": open_positions_at_shutdown,
             "processed_event_count": len(lifecycle.processed_event_ids),
             "attempted_entry_event_count": len(lifecycle.attempted_entry_event_ids),
@@ -599,7 +861,108 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--daily-loss-limit-usdc", type=float, default=3.0)
     parser.add_argument("--max-concurrent-positions", type=int, default=2)
-    parser.add_argument("--edge-threshold", type=float, default=0.45)
+    parser.add_argument(
+        "--max-combined-concurrent-positions",
+        type=int,
+        default=2,
+        help="Top-level cap across settlement and volatility sleeves.",
+    )
+    parser.add_argument(
+        "--settlement-max-filled-per-side-per-round",
+        type=int,
+        default=1,
+        help="Cap filled settlement entries per round and side.",
+    )
+    parser.add_argument(
+        "--volatility-max-filled-per-side-per-round",
+        type=int,
+        default=1,
+        help="Cap filled volatility entries per round and side.",
+    )
+    parser.add_argument(
+        "--edge-threshold",
+        type=float,
+        default=DEFAULT_SETTLEMENT_EDGE_THRESHOLD,
+        help=(
+            "Legacy alias for --settlement-edge-threshold. Kept for runbook compatibility; "
+            "new Phase 4 v5 configs should set the settlement threshold explicitly."
+        ),
+    )
+    parser.add_argument(
+        "--settlement-edge-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Minimum settlement confidence edge for live entries. Defaults to "
+            "--edge-threshold when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--volatility-score-threshold",
+        type=float,
+        default=DEFAULT_VOLATILITY_SCORE_THRESHOLD,
+        help="Diagnostic volatility score threshold; does not enable live volatility entries.",
+    )
+    parser.add_argument(
+        "--volatility-min-entry-price",
+        type=float,
+        default=DEFAULT_VOLATILITY_MIN_ENTRY_PRICE,
+        help="Diagnostic volatility gate ask/worst price floor.",
+    )
+    parser.add_argument(
+        "--volatility-min-seconds-to-expiry",
+        type=float,
+        default=DEFAULT_VOLATILITY_MIN_SECONDS_TO_EXPIRY,
+        help="Diagnostic volatility gate minimum seconds to expiry.",
+    )
+    parser.add_argument(
+        "--volatility-round-trip-cost",
+        type=float,
+        default=DEFAULT_VOLATILITY_ROUND_TRIP_COST,
+        help="Minimum expected volatility exit gain consumed by buy+sell cost drag.",
+    )
+    parser.add_argument(
+        "--volatility-safety-margin",
+        type=float,
+        default=DEFAULT_VOLATILITY_SAFETY_MARGIN,
+        help="Safety margin added on top of volatility round-trip cost.",
+    )
+    parser.add_argument(
+        "--volatility-round-bankroll-usdc",
+        type=float,
+        default=DEFAULT_VOLATILITY_ROUND_BANKROLL_USDC,
+        help="Per-round volatility sleeve bankroll reset.",
+    )
+    parser.add_argument(
+        "--volatility-per-bet-cap-usdc",
+        type=float,
+        default=DEFAULT_VOLATILITY_ROUND_BANKROLL_USDC,
+        help="Per-entry cap for the volatility sleeve.",
+    )
+    parser.add_argument(
+        "--volatility-min-order-size-usdc",
+        type=float,
+        default=DEFAULT_VOLATILITY_MIN_ORDER_SIZE_USDC,
+        help="Stop volatility entries for a round below this remaining bankroll.",
+    )
+    parser.add_argument(
+        "--enable-volatility-sleeve",
+        action="store_true",
+        help="Enable volatility sleeve mechanics. Phase 4 v5 volatility entries are paper-only.",
+    )
+    parser.add_argument(
+        "--enable-volatility-live-entries",
+        action="store_true",
+        help=(
+            "Intent flag for a future promoted volatility path. In Phase 4 v5 this still does not "
+            "place live volatility orders; the path remains paper/orderbook-only."
+        ),
+    )
+    parser.add_argument(
+        "--paper",
+        action="store_true",
+        help="Run orderbook-only paper execution for all sleeves; no CLOB orders are posted.",
+    )
     parser.add_argument("--exit-edge-threshold", type=float, default=0.10)
     parser.add_argument("--opposite-exit-edge-threshold", type=float, default=0.45)
     parser.add_argument("--opposite-exit-min-seconds-to-expiry", type=float, default=120.0)
@@ -617,9 +980,112 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--event-limit", type=int, default=200)
     parser.add_argument("--max-runtime-minutes", type=float, default=240.0)
+    parser.add_argument(
+        "--continue-after-max-rounds-until-runtime",
+        action="store_true",
+        help=(
+            "Keep the executor alive until max runtime after the round cap is reached. "
+            "New rounds are still skipped by max_rounds; this only preserves the "
+            "monitoring/execution window."
+        ),
+    )
     parser.add_argument("--log-path", default="logs/remote_dry_run_phase4_real_champion.jsonl")
     parser.add_argument("--summary-path", default="logs/remote_dry_run_phase4_real_champion_summary.json")
+    parser.add_argument(
+        "--entry-gate-mode",
+        choices=("v5-edge", "v6-joint"),
+        default="v5-edge",
+        help="v5-edge uses settlement edge threshold; v6-joint uses explicit p_up/p_down/p_vol gate.",
+    )
+    parser.add_argument(
+        "--v6-model-json-path",
+        default="",
+        help="Optional xgboost-v6 model.json used to load volatility gain priors for v6-joint mode.",
+    )
+    parser.add_argument("--v6-settlement-threshold", type=float, default=0.50)
+    parser.add_argument("--v6-neutral-cap", type=float, default=0.25)
+    parser.add_argument("--v6-volatility-threshold", type=float, default=0.60)
+    parser.add_argument("--v6-round-trip-cost", type=float, default=0.072)
+    parser.add_argument("--v6-ev-margin", type=float, default=0.01)
     return parser.parse_args()
+
+
+def _entry_policy_from_args(args: argparse.Namespace) -> Phase4EntryPolicy:
+    disable_settlement_edge = args.entry_gate_mode == "v6-joint"
+    return Phase4EntryPolicy(
+        min_entry_price=args.min_entry_price,
+        near_min_price_band=args.near_min_price_band,
+        near_min_fresh_edge_threshold=args.near_min_fresh_edge_threshold,
+        near_min_seconds_to_expiry=args.near_min_seconds_to_expiry,
+        edge_threshold=-999.0 if disable_settlement_edge else args.edge_threshold,
+        settlement_edge_threshold=0.0 if disable_settlement_edge else args.settlement_edge_threshold,
+        volatility_score_threshold=args.volatility_score_threshold,
+        volatility_min_entry_price=args.volatility_min_entry_price,
+        volatility_min_seconds_to_expiry=args.volatility_min_seconds_to_expiry,
+        volatility_round_trip_cost=args.volatility_round_trip_cost,
+        volatility_safety_margin=args.volatility_safety_margin,
+        enable_volatility_live_entries=args.enable_volatility_live_entries,
+    )
+
+
+def _v6_joint_config_from_args(args: argparse.Namespace) -> V6JointGateConfig | None:
+    if args.entry_gate_mode != "v6-joint":
+        return None
+    if not is_v6_model_version(args.model_version):
+        raise ValueError("--entry-gate-mode v6-joint requires model_version xgboost-v6")
+    model_json_path = (
+        Path(args.v6_model_json_path)
+        if args.v6_model_json_path
+        else None
+    )
+    if model_json_path is not None and model_json_path.is_file():
+        return v6_joint_gate_config_from_model(
+            model_json_path,
+            settlement_threshold=args.v6_settlement_threshold,
+            neutral_cap=args.v6_neutral_cap,
+            volatility_threshold=args.v6_volatility_threshold,
+            round_trip_cost=args.v6_round_trip_cost,
+            ev_margin=args.v6_ev_margin,
+        )
+    return V6JointGateConfig(
+        settlement_threshold=args.v6_settlement_threshold,
+        neutral_cap=args.v6_neutral_cap,
+        volatility_threshold=args.v6_volatility_threshold,
+        round_trip_cost=args.v6_round_trip_cost,
+        ev_margin=args.v6_ev_margin,
+    )
+
+
+def _validate_args(args: argparse.Namespace) -> None:
+    if args.settlement_max_filled_per_side_per_round <= 0:
+        raise ValueError("--settlement-max-filled-per-side-per-round must be positive")
+    if args.volatility_max_filled_per_side_per_round <= 0:
+        raise ValueError("--volatility-max-filled-per-side-per-round must be positive")
+    if args.entry_gate_mode == "v6-joint" and not is_v6_model_version(args.model_version):
+        raise ValueError("--entry-gate-mode v6-joint requires model_version xgboost-v6")
+
+
+def _decision_evidence_blockers(
+    *,
+    lifecycle_complete: bool,
+    open_positions_at_shutdown: int,
+    exits_pending_confirmation: int,
+    exits_pending_settlement: int,
+) -> list[str]:
+    blockers = ["account_cashflow_reconciliation_required"]
+    if not lifecycle_complete:
+        blockers.append("lifecycle_not_complete")
+    if open_positions_at_shutdown:
+        blockers.append("open_positions_at_shutdown")
+    if exits_pending_confirmation:
+        blockers.append("exits_pending_confirmation")
+    if exits_pending_settlement:
+        blockers.append("exits_pending_settlement")
+    return blockers
+
+
+def _cash_pnl_for_budget(result: SellResult) -> float:
+    return result.account_cash_pnl if result.account_cash_pnl is not None else result.realized_pnl
 
 
 def _install_signal_handlers() -> None:
@@ -708,6 +1174,7 @@ def _read_events_after(
     after_created_at: int,
     after_event_id: str,
     limit: int,
+    v6_joint_config: V6JointGateConfig | None = None,
 ) -> list[SignalEvent]:
     with duckdb.connect(db_path, read_only=True) as conn:
         rows = conn.execute(
@@ -726,20 +1193,38 @@ def _read_events_after(
         ).fetchall()
         events: list[SignalEvent] = []
         for row in rows:
-            parsed = _event_from_row(row)
+            snapshot_json = str(row[4])
+            try:
+                snapshot = json.loads(snapshot_json)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(snapshot, dict):
+                continue
+            canonical_symbol = str(snapshot.get("canonical_symbol") or snapshot.get("symbol") or "")
+            parts = canonical_symbol.split(":")
+            if len(parts) < 3:
+                continue
+            round_slug = parts[-2]
+            opposite_token_id = _opposite_token_id(
+                conn,
+                model_version=model_version,
+                round_slug=round_slug,
+                outcome_side="UP",
+            )
+            parsed = _event_from_row(
+                row,
+                model_version=model_version,
+                v6_joint_config=v6_joint_config,
+                opposite_token_id=opposite_token_id,
+            )
             if parsed is not None:
                 events.append(
                     replace(
                         parsed,
-                        opposite_token_id=_opposite_token_id(
-                            conn,
-                            model_version=model_version,
-                            round_slug=parsed.round_slug,
-                            outcome_side=parsed.outcome_side,
-                        ),
+                        opposite_token_id=opposite_token_id or parsed.opposite_token_id,
                     )
                 )
-    return _best_event_per_round(events)
+    return _best_event_per_round(events, entry_gate_mode="v6-joint" if v6_joint_config else "v5-edge")
 
 
 def _latest_signal_jsonl_cursor(path: Path, *, start: str) -> int:
@@ -755,6 +1240,8 @@ def _read_signal_jsonl_after(
     after_line_number: int,
     model_version: str,
     limit: int,
+    v6_joint_config: V6JointGateConfig | None = None,
+    entry_gate_mode: str = "v5-edge",
 ) -> tuple[list[SignalEvent], int]:
     if not path.exists():
         return [], after_line_number
@@ -772,36 +1259,93 @@ def _read_signal_jsonl_after(
                 payload = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            event = _event_from_signal_payload(payload, model_version=model_version)
+            event = _event_from_signal_payload(
+                payload,
+                model_version=model_version,
+                v6_joint_config=v6_joint_config,
+            )
             if event is not None:
                 events.append(event)
             if len(events) >= limit:
                 break
-    return _best_event_per_round(events), last_line_number
+    return _best_event_per_round(events, entry_gate_mode=entry_gate_mode), last_line_number
 
 
-def _event_from_signal_payload(payload: Any, *, model_version: str) -> SignalEvent | None:
+def _event_from_signal_payload(
+    payload: Any,
+    *,
+    model_version: str,
+    v6_joint_config: V6JointGateConfig | None = None,
+) -> SignalEvent | None:
     if not isinstance(payload, dict):
         return None
     payload_model_version = str(payload.get("model_version") or model_version)
     if payload_model_version != model_version:
         return None
     round_slug = str(payload.get("round_slug") or "")
-    side = str(payload.get("outcome_side") or "").upper()
-    token_id = str(payload.get("token_id") or payload.get("source_symbol") or "")
     round_end_ts = _optional_int(payload.get("round_end_ts")) or _round_end_ts(round_slug)
     market = _optional_float(payload.get("market_implied_prob"))
-    token_probability = _optional_float(payload.get("token_probability"))
     prob_up_15m = _optional_float(payload.get("prob_up_15m"))
-    if (
-        not round_slug
-        or side not in {"UP", "DOWN"}
-        or not token_id
-        or round_end_ts is None
-        or market is None
-        or token_probability is None
-        or prob_up_15m is None
-    ):
+    if not round_slug or round_end_ts is None or market is None or prob_up_15m is None:
+        return None
+    if v6_joint_config is not None and is_v6_model_version(model_version):
+        if payload.get("v6_joint_side"):
+            side = str(payload.get("v6_joint_side")).upper()
+            token_id = str(payload.get("token_id") or "")
+            token_probability = _optional_float(payload.get("token_probability"))
+            if side not in {"UP", "DOWN"} or not token_id or token_probability is None:
+                return None
+            edge = _optional_float(payload.get("edge")) or token_probability - market
+            return SignalEvent(
+                event_id=str(payload.get("event_id") or ""),
+                ts=int(_optional_int(payload.get("ts")) or 0),
+                created_at=int(_optional_int(payload.get("created_at")) or 0),
+                prob_up_15m=float(prob_up_15m),
+                canonical_symbol=str(
+                    payload.get("canonical_symbol") or f"BTC-15M:{round_slug}:{side}"
+                ),
+                token_id=token_id,
+                outcome_side=side,
+                round_slug=round_slug,
+                round_end_ts=int(round_end_ts),
+                market_implied_prob=float(market),
+                token_probability=float(token_probability),
+                edge=float(edge),
+                bridged_at=int(_optional_int(payload.get("bridged_at")) or 0),
+                opposite_token_id=str(payload.get("opposite_token_id") or ""),
+                p_up=_optional_float(payload.get("p_up")),
+                p_down=_optional_float(payload.get("p_down")),
+                p_neutral=_optional_float(payload.get("p_neutral")),
+                p_vol_up=_optional_float(payload.get("p_vol_up")),
+                p_vol_down=_optional_float(payload.get("p_vol_down")),
+                v6_joint_side=side,
+            )
+        snapshot = {
+            "canonical_symbol": payload.get("canonical_symbol"),
+            "source_symbol": payload.get("token_id") or payload.get("source_symbol"),
+            "market_implied_prob": market,
+            "p_up": payload.get("p_up"),
+            "p_down": payload.get("p_down"),
+            "p_neutral": payload.get("p_neutral"),
+            "p_vol_up": payload.get("p_vol_up"),
+            "p_vol_down": payload.get("p_vol_down"),
+        }
+        fields = build_v6_signal_fields(
+            event_id=str(payload.get("event_id") or ""),
+            ts=int(_optional_int(payload.get("ts")) or 0),
+            created_at=int(_optional_int(payload.get("created_at")) or 0),
+            snapshot=snapshot,
+            model_version=model_version,
+            config=v6_joint_config,
+            round_end_ts=int(round_end_ts),
+            bridged_at=int(_optional_int(payload.get("bridged_at")) or 0),
+            opposite_token_id=str(payload.get("opposite_token_id") or ""),
+        )
+        return SignalEvent(**fields) if fields is not None else None
+    side = str(payload.get("outcome_side") or "").upper()
+    token_id = str(payload.get("token_id") or payload.get("source_symbol") or "")
+    token_probability = _optional_float(payload.get("token_probability"))
+    if side not in {"UP", "DOWN"} or not token_id or token_probability is None:
         return None
     edge = _optional_float(payload.get("edge"))
     if edge is None:
@@ -825,15 +1369,42 @@ def _event_from_signal_payload(payload: Any, *, model_version: str) -> SignalEve
     )
 
 
-def _event_from_row(row: tuple[Any, ...]) -> SignalEvent | None:
+def _event_from_row(
+    row: tuple[Any, ...],
+    *,
+    model_version: str,
+    v6_joint_config: V6JointGateConfig | None = None,
+    opposite_token_id: str = "",
+) -> SignalEvent | None:
     event_id, ts, created_at, prob_up_15m, snapshot_json = row
-    snapshot = json.loads(snapshot_json)
+    try:
+        snapshot = json.loads(snapshot_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(snapshot, dict):
+        return None
     canonical_symbol = str(snapshot.get("canonical_symbol") or snapshot.get("symbol") or "")
     parts = canonical_symbol.split(":")
     if len(parts) < 3:
         return None
-    family, round_slug, side = parts[0], parts[-2], parts[-1].upper()
-    if family != "BTC-15M" or side not in {"UP", "DOWN"}:
+    round_slug = parts[-2]
+    round_end_ts = _round_end_ts(round_slug)
+    if round_end_ts is None:
+        return None
+    if v6_joint_config is not None and is_v6_model_version(model_version):
+        fields = build_v6_signal_fields(
+            event_id=str(event_id),
+            ts=int(ts),
+            created_at=int(created_at),
+            snapshot=snapshot,
+            model_version=model_version,
+            config=v6_joint_config,
+            round_end_ts=int(round_end_ts),
+            opposite_token_id=opposite_token_id,
+        )
+        return SignalEvent(**fields) if fields is not None else None
+    _family, _round_slug, side = parts[0], parts[-2], parts[-1].upper()
+    if side not in {"UP", "DOWN"}:
         return None
     token_id = str(snapshot.get("source_symbol") or snapshot.get("token_id") or "")
     market = _optional_float(snapshot.get("market_implied_prob"))
@@ -841,9 +1412,6 @@ def _event_from_row(row: tuple[Any, ...]) -> SignalEvent | None:
         return None
     prob = float(prob_up_15m)
     token_probability = 1.0 - prob if side == "DOWN" else prob
-    round_end_ts = _round_end_ts(round_slug)
-    if round_end_ts is None:
-        return None
     return SignalEvent(
         event_id=str(event_id),
         ts=int(ts),
@@ -893,11 +1461,35 @@ def _opposite_token_id(
     return str(snapshot.get("source_symbol") or snapshot.get("token_id") or "")
 
 
-def _best_event_per_round(events: list[SignalEvent]) -> list[SignalEvent]:
+def _best_event_per_round(
+    events: list[SignalEvent],
+    *,
+    entry_gate_mode: str = "v5-edge",
+) -> list[SignalEvent]:
     best: dict[str, SignalEvent] = {}
     for event in events:
         previous = best.get(event.round_slug)
-        if previous is None or event.edge > previous.edge:
+        if previous is None:
+            best[event.round_slug] = event
+            continue
+        if entry_gate_mode == "v6-joint" and event.p_up is not None and event.p_vol_up is not None:
+            payload = {
+                "p_up": event.p_up,
+                "p_down": event.p_down or 0.0,
+                "p_vol_up": event.p_vol_up,
+                "p_vol_down": event.p_vol_down or 0.0,
+            }
+            previous_payload = {
+                "p_up": previous.p_up,
+                "p_down": previous.p_down or 0.0,
+                "p_vol_up": previous.p_vol_up,
+                "p_vol_down": previous.p_vol_down or 0.0,
+            }
+            event_score = v6_selection_score(payload, event.outcome_side)
+            previous_score = v6_selection_score(previous_payload, previous.outcome_side)
+            if event_score > previous_score:
+                best[event.round_slug] = event
+        elif event.edge > previous.edge:
             best[event.round_slug] = event
     return sorted(best.values(), key=lambda item: (item.created_at, item.event_id))
 
@@ -939,7 +1531,7 @@ def _tick_open_positions(
     settlement_count = 0
     realized_pnl = 0.0
 
-    for round_slug, position in list(lifecycle.open_positions.items()):
+    for _round_slug, position in list(lifecycle.open_positions.items()):
         round_end_ts = _round_end_ts(position.round_slug)
         if round_end_ts is None:
             _log(
@@ -950,6 +1542,15 @@ def _tick_open_positions(
             )
             continue
         seconds_to_expiry = (round_end_ts - now_ms) / 1000
+        if position.sleeve == "settlement" and seconds_to_expiry > 0:
+            _log(
+                log_path,
+                "settlement_sleeve_hold",
+                reason="hold_to_settlement",
+                position=asdict(position),
+                seconds_to_expiry=seconds_to_expiry,
+            )
+            continue
         if position.lifecycle_state == "EXIT_REQUIRED":
             exit_reason = position.last_lifecycle_reason or "risk_exit"
         elif seconds_to_expiry <= 0:
@@ -985,7 +1586,7 @@ def _tick_open_positions(
         else:
             pending_count += 1
         realized_pnl += sell_result.realized_pnl
-        lifecycle.mark_position_closed(round_slug)
+        lifecycle.mark_position_closed(position.round_slug, position.sleeve)
 
     return closed_count, pending_count, settlement_count, realized_pnl
 
@@ -1132,11 +1733,22 @@ def _try_entry(
     seconds_to_expiry: float,
     buy_slippage: float,
     monitoring_db_path: str,
+    sleeve: str = "settlement",
+    paper: bool = False,
+    entry_gate_mode: str = "v5-edge",
 ) -> LivePosition | None:
     from py_clob_client_v2 import MarketOrderArgs, OrderType
     from py_clob_client_v2.clob_types import PartialCreateOrderOptions
     from py_clob_client_v2.order_builder.constants import BUY
 
+    no_quote_gate_evaluation = evaluate_entry_gates(
+        settlement_edge=signal.edge,
+        ask=None,
+        worst_price=None,
+        token_probability=signal.token_probability,
+        seconds_to_expiry=seconds_to_expiry,
+        policy=entry_policy,
+    )
     try:
         bid, ask = _best_bid_ask(client, signal.token_id)
     except OrderBookUnavailable as exc:
@@ -1145,16 +1757,120 @@ def _try_entry(
             "entry_skipped",
             reason="orderbook_unavailable",
             signal=asdict(signal),
+            gate_evaluation=asdict(no_quote_gate_evaluation),
             **exc.to_log_payload(),
         )
         return None
     if ask is None:
-        _log(log_path, "entry_skipped", reason="missing_ask", signal=asdict(signal))
+        _log(
+            log_path,
+            "entry_skipped",
+            reason="missing_ask",
+            signal=asdict(signal),
+            gate_evaluation=asdict(no_quote_gate_evaluation),
+        )
         return None
     tick_size = client.get_tick_size(signal.token_id)
     neg_risk = client.get_neg_risk(signal.token_id)
     worst_price = min(0.99, _round_price(float(ask) + buy_slippage, tick_size))
     fresh_edge_at_worst = signal.token_probability - worst_price
+    gate_evaluation = evaluate_entry_gates(
+        settlement_edge=signal.edge,
+        ask=float(ask),
+        bid=None if bid is None else float(bid),
+        worst_price=worst_price,
+        token_probability=signal.token_probability,
+        seconds_to_expiry=seconds_to_expiry,
+        policy=entry_policy,
+    )
+    gate_payload = asdict(gate_evaluation)
+    _log(
+        log_path,
+        "entry_gate_evaluated",
+        signal=asdict(signal),
+        bid=bid,
+        ask=ask,
+        worst_price=worst_price,
+        fresh_edge_at_worst=fresh_edge_at_worst,
+        seconds_to_expiry=seconds_to_expiry,
+        gate_evaluation=gate_payload,
+    )
+    if sleeve == "settlement" and entry_gate_mode != "v6-joint":
+        if not gate_evaluation.settlement_gate_passed:
+            _log(
+                log_path,
+                "entry_skipped",
+                reason="below_edge_threshold",
+                legacy_reason="below_edge_threshold",
+                sleeve=sleeve,
+                signal=asdict(signal),
+                bid=bid,
+                ask=ask,
+                worst_price=worst_price,
+                fresh_edge_at_worst=fresh_edge_at_worst,
+                seconds_to_expiry=seconds_to_expiry,
+                gate_evaluation=gate_payload,
+            )
+            return None
+    elif sleeve == "settlement" and signal.v6_joint_side is None:
+        _log(
+            log_path,
+            "entry_skipped",
+            reason="v6_joint_gate_miss",
+            sleeve=sleeve,
+            signal=asdict(signal),
+            bid=bid,
+            ask=ask,
+            worst_price=worst_price,
+            seconds_to_expiry=seconds_to_expiry,
+            gate_evaluation=gate_payload,
+        )
+        return None
+    if sleeve == "volatility":
+        if not gate_evaluation.volatility_gate_passed:
+            _log(
+                log_path,
+                "entry_skipped",
+                reason="volatility_gate_below_cost",
+                sleeve=sleeve,
+                signal=asdict(signal),
+                bid=bid,
+                ask=ask,
+                worst_price=worst_price,
+                fresh_edge_at_worst=fresh_edge_at_worst,
+                seconds_to_expiry=seconds_to_expiry,
+                gate_evaluation=gate_payload,
+            )
+            return None
+        if not paper:
+            _log(
+                log_path,
+                "entry_skipped",
+                reason=(
+                    "volatility_live_requires_paper_evidence"
+                    if entry_policy.enable_volatility_live_entries
+                    else "volatility_live_disabled"
+                ),
+                sleeve=sleeve,
+                signal=asdict(signal),
+                bid=bid,
+                ask=ask,
+                worst_price=worst_price,
+                seconds_to_expiry=seconds_to_expiry,
+                gate_evaluation=gate_payload,
+            )
+            return None
+        if paper:
+            return _open_paper_position(
+                position_manager=position_manager,
+                signal=signal,
+                log_path=log_path,
+                sleeve=sleeve,
+                fill_price=worst_price,
+                size_usdc=max_position_size_usdc,
+                order_posted_at=_now_ms(),
+                gate_payload=gate_payload,
+            )
     skip_reason = entry_price_skip_reason(
         ask=float(ask),
         worst_price=worst_price,
@@ -1167,6 +1883,7 @@ def _try_entry(
             log_path,
             "entry_skipped",
             reason=skip_reason,
+            sleeve=sleeve,
             signal=asdict(signal),
             bid=bid,
             ask=ask,
@@ -1177,18 +1894,33 @@ def _try_entry(
             near_min_price_band=entry_policy.near_min_price_band,
             near_min_fresh_edge_threshold=entry_policy.near_min_fresh_edge_threshold,
             near_min_seconds_to_expiry=entry_policy.near_min_seconds_to_expiry,
+            settlement_edge_threshold=entry_policy.effective_settlement_edge_threshold,
+            gate_evaluation=gate_payload,
         )
         return None
+    if paper:
+        return _open_paper_position(
+            position_manager=position_manager,
+            signal=signal,
+            log_path=log_path,
+            sleeve=sleeve,
+            fill_price=worst_price,
+            size_usdc=max_position_size_usdc,
+            order_posted_at=_now_ms(),
+            gate_payload=gate_payload,
+        )
     if not signal.opposite_token_id:
         _log(
             log_path,
             "entry_skipped",
             reason="missing_opposite_token_id",
+            sleeve=sleeve,
             signal=asdict(signal),
             bid=bid,
             ask=ask,
             worst_price=worst_price,
             min_entry_price=entry_policy.min_entry_price,
+            gate_evaluation=gate_payload,
         )
         return None
     try:
@@ -1198,11 +1930,13 @@ def _try_entry(
             log_path,
             "entry_skipped",
             reason="opposite_orderbook_unavailable",
+            sleeve=sleeve,
             signal=asdict(signal),
             bid=bid,
             ask=ask,
             worst_price=worst_price,
             opposite_token_id=signal.opposite_token_id,
+            gate_evaluation=gate_payload,
             **exc.to_log_payload(),
         )
         return None
@@ -1211,11 +1945,13 @@ def _try_entry(
             log_path,
             "entry_skipped",
             reason="missing_opposite_bid",
+            sleeve=sleeve,
             signal=asdict(signal),
             bid=bid,
             ask=ask,
             worst_price=worst_price,
             opposite_token_id=signal.opposite_token_id,
+            gate_evaluation=gate_payload,
         )
         return None
     complement_entry_price = _round_price(1.0 - float(complement_bid), tick_size)
@@ -1232,6 +1968,7 @@ def _try_entry(
             log_path,
             "entry_skipped",
             reason=f"complement_{complement_skip_reason}",
+            sleeve=sleeve,
             signal=asdict(signal),
             bid=bid,
             ask=ask,
@@ -1245,6 +1982,18 @@ def _try_entry(
             near_min_price_band=entry_policy.near_min_price_band,
             near_min_fresh_edge_threshold=entry_policy.near_min_fresh_edge_threshold,
             near_min_seconds_to_expiry=entry_policy.near_min_seconds_to_expiry,
+            settlement_edge_threshold=entry_policy.effective_settlement_edge_threshold,
+            gate_evaluation=gate_payload,
+            complement_gate_evaluation=asdict(
+                evaluate_entry_gates(
+                    settlement_edge=signal.edge,
+                    ask=complement_entry_price,
+                    worst_price=complement_entry_price,
+                    token_probability=signal.token_probability,
+                    seconds_to_expiry=seconds_to_expiry,
+                    policy=entry_policy,
+                )
+            ),
         )
         return None
     order = client.create_market_order(
@@ -1264,12 +2013,14 @@ def _try_entry(
         _log(
             log_path,
             "entry_order_post_failed",
+            sleeve=sleeve,
             signal=asdict(signal),
             bid=bid,
             ask=ask,
             worst_price=worst_price,
             error=str(exc),
             error_type=type(exc).__name__,
+            gate_evaluation=gate_payload,
             order_submit_latency_ms=order_failed_at - order_submit_started_at,
             latency_ms={
                 **_signal_latency_ms(signal, order_failed_at),
@@ -1289,10 +2040,12 @@ def _try_entry(
     _log(
         log_path,
         "entry_order_posted",
+        sleeve=sleeve,
         signal=asdict(signal),
         bid=bid,
         ask=ask,
         worst_price=worst_price,
+        gate_evaluation=gate_payload,
         response=response,
         order_submit_latency_ms=order_posted_at - order_submit_started_at,
         latency_ms={
@@ -1330,6 +2083,7 @@ def _try_entry(
             order_id=order_id,
             response=response,
             fill=fill,
+            gate_evaluation=gate_payload,
             latency_ms={
                 **_signal_latency_ms(signal, fill_checked_at),
                 "order_success_to_fill_check_ms": fill_checked_at - order_posted_at,
@@ -1346,6 +2100,7 @@ def _try_entry(
         event_id=event_id,
         symbol=signal.canonical_symbol,
         side=signal.outcome_side,
+        sleeve=sleeve,
         entry_price=fill_price,
         fill_price=fill_price,
         size=fill_size,
@@ -1366,6 +2121,8 @@ def _try_entry(
         entry_signal_created_at=signal.created_at,
         entry_signal_bridged_at=signal.bridged_at,
         entry_order_posted_at=order_posted_at,
+        sleeve=sleeve,
+        paper=paper,
     )
     if fill_price < entry_policy.min_entry_price:
         position.lifecycle_state = "EXIT_REQUIRED"
@@ -1377,12 +2134,15 @@ def _try_entry(
         action="BUY",
         fill=fill,
         order_id=order_id,
+        sleeve=sleeve,
     )
     _log(
         log_path,
         "entry_filled",
+        sleeve=sleeve,
         position=asdict(position),
         fill=fill,
+        gate_evaluation=gate_payload,
         latency_ms={
             **_signal_latency_ms(signal, position.opened_at),
             "signal_created_to_fill_confirmed_ms": _delta_ms(signal.created_at, position.opened_at),
@@ -1405,6 +2165,66 @@ def _try_entry(
             exit_required=True,
             reason="under_min_fill_exit",
         )
+    return position
+
+
+def _open_paper_position(
+    *,
+    position_manager: PositionManager,
+    signal: SignalEvent,
+    log_path: Path,
+    sleeve: str,
+    fill_price: float,
+    size_usdc: float,
+    order_posted_at: int,
+    gate_payload: dict[str, Any],
+) -> LivePosition:
+    fill_size = size_usdc / fill_price if fill_price > 0 else 0.0
+    event_suffix = (signal.event_id or str(order_posted_at))[-8:]
+    event_id = f"phase4-paper-{sleeve}-{signal.round_slug}-{signal.outcome_side}-{event_suffix}"
+    order_id = f"paper-{sleeve}-{event_suffix}"
+    position_manager.open_position(
+        event_id=event_id,
+        symbol=signal.canonical_symbol,
+        side=signal.outcome_side,
+        sleeve=sleeve,
+        entry_price=fill_price,
+        fill_price=fill_price,
+        size=fill_size,
+        order_id=order_id,
+        entry_time=order_posted_at,
+    )
+    position = LivePosition(
+        event_id=event_id,
+        round_slug=signal.round_slug,
+        side=signal.outcome_side,
+        token_id=signal.token_id,
+        entry_price=fill_price,
+        fill_price=fill_price,
+        size=fill_size,
+        order_id=order_id,
+        opened_at=order_posted_at,
+        entry_signal_event_id=signal.event_id,
+        entry_signal_ts=signal.ts,
+        entry_signal_created_at=signal.created_at,
+        entry_signal_bridged_at=signal.bridged_at,
+        entry_order_posted_at=order_posted_at,
+        sleeve=sleeve,
+        paper=True,
+    )
+    _log(
+        log_path,
+        "paper_entry_filled",
+        sleeve=sleeve,
+        position=asdict(position),
+        signal=asdict(signal),
+        size_usdc=size_usdc,
+        gate_evaluation=gate_payload,
+        timestamps={
+            **_signal_timestamps(signal),
+            "paper_entry_at": _iso(order_posted_at),
+        },
+    )
     return position
 
 
@@ -1464,11 +2284,14 @@ def _maybe_exit(
         )
         return None
     unrealized = float(bid) - position.fill_price
-    should_exit = (
-        signal.edge <= exit_edge_threshold
-        or unrealized >= profit_target
-        or seconds_to_expiry <= 60
-    )
+    if position.sleeve == "volatility":
+        should_exit = unrealized >= profit_target or seconds_to_expiry <= 60
+    else:
+        should_exit = (
+            signal.edge <= exit_edge_threshold
+            or unrealized >= profit_target
+            or seconds_to_expiry <= 60
+        )
     if not should_exit:
         try:
             position_manager.update_price(position.event_id, float(bid))
@@ -1598,13 +2421,33 @@ def _close_remaining_positions(
     pending_count = 0
     settlement_count = 0
     realized_pnl = 0.0
-    for round_slug, position in list(positions.items()):
+    for position_key, position in list(positions.items()):
         round_end_ts = _round_end_ts(position.round_slug)
         seconds_to_expiry = None
         is_expired = False
         if round_end_ts is not None:
             seconds_to_expiry = (round_end_ts - _now_ms()) / 1000
             is_expired = seconds_to_expiry <= 0
+        if position.sleeve == "settlement":
+            if is_expired:
+                _mark_pending_settlement(
+                    log_path=log_path,
+                    position=position,
+                    signal=None,
+                    reason="shutdown_settlement_hold_expired",
+                    seconds_to_expiry=seconds_to_expiry,
+                )
+                settlement_count += 1
+                del positions[position_key]
+                continue
+            _log(
+                log_path,
+                "shutdown_close_skipped",
+                reason="settlement_sleeve_hold_to_redeem",
+                position=asdict(position),
+                seconds_to_expiry=seconds_to_expiry,
+            )
+            continue
         try:
             bid, _ask = _best_bid_ask(client, position.token_id)
         except OrderBookUnavailable as exc:
@@ -1618,7 +2461,7 @@ def _close_remaining_positions(
                     error_payload=exc.to_log_payload(),
                 )
                 settlement_count += 1
-                del positions[round_slug]
+                del positions[position_key]
                 continue
             _log(
                 log_path,
@@ -1639,7 +2482,7 @@ def _close_remaining_positions(
                     seconds_to_expiry=seconds_to_expiry,
                 )
                 settlement_count += 1
-                del positions[round_slug]
+                del positions[position_key]
                 continue
             _log(
                 log_path,
@@ -1669,7 +2512,7 @@ def _close_remaining_positions(
             else:
                 pending_count += 1
             realized_pnl += sell_result.realized_pnl
-            del positions[round_slug]
+            del positions[position_key]
     return closed_count, pending_count, settlement_count, realized_pnl
 
 
@@ -1712,6 +2555,27 @@ def _sell_position(
     signal: SignalEvent | None,
     monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
 ) -> SellResult | None:
+    if position.paper:
+        fill_price = max(0.01, bid - sell_slippage)
+        closed = position_manager.close_position(position.event_id, fill_price)
+        pnl = float(closed.realized_pnl or 0.0)
+        position.lifecycle_state = "EXIT_FILLED"
+        position.last_lifecycle_reason = reason
+        _log(
+            log_path,
+            "paper_exit_filled",
+            reason=reason,
+            sleeve=position.sleeve,
+            position=asdict(position),
+            signal=None if signal is None else asdict(signal),
+            bid=bid,
+            exit_price=fill_price,
+            realized_account_pnl=pnl,
+            realized_pnl=pnl,
+            realized_pnl_source="paper_orderbook_bid_minus_slippage",
+        )
+        return SellResult(status="filled", realized_pnl=pnl, account_cash_pnl=pnl)
+
     from py_clob_client_v2 import MarketOrderArgs, OrderType
     from py_clob_client_v2.clob_types import PartialCreateOrderOptions
     from py_clob_client_v2.order_builder.constants import SELL
@@ -1813,7 +2677,12 @@ def _sell_position(
         action="SELL",
         fill=fill,
         order_id=order_id,
+        sleeve=position.sleeve,
         dust_token_amount=dust_amount,
+    )
+    account_cash_pnl = _account_cash_pnl_for_position(
+        monitoring_db_path=monitoring_db_path,
+        event_id=position.event_id,
     )
     _log(
         log_path,
@@ -1823,13 +2692,14 @@ def _sell_position(
         sell_order_id=order_id,
         fill=fill,
         exit_price=fill_price,
+        account_cash_pnl=account_cash_pnl,
         realized_pnl=pnl,
         realized_pnl_source="position_manager_fill_price",
         account_cashflow_reconciliation_required=True,
         dust_amount=dust_amount,
         dust_value_usd=dust_value_usd,
     )
-    return SellResult(status="filled", realized_pnl=pnl)
+    return SellResult(status="filled", realized_pnl=pnl, account_cash_pnl=account_cash_pnl)
 
 
 def _persist_cash_leg(
@@ -1840,12 +2710,14 @@ def _persist_cash_leg(
     action: str,
     fill: dict[str, Any],
     order_id: str | None,
+    sleeve: str = "settlement",
     dust_token_amount: float = 0.0,
 ) -> None:
     try:
         leg = leg_from_clob_fill(
             event_id=event_id,
             round_slug=round_slug,
+            sleeve=sleeve,
             action=action,  # type: ignore[arg-type]
             fill=fill,
             order_id=order_id,
@@ -1857,9 +2729,32 @@ def _persist_cash_leg(
         return
 
 
-def _theoretical_pnl_from_positions(position_manager: PositionManager) -> float:
+def _account_cash_pnl_for_position(
+    *,
+    monitoring_db_path: str,
+    event_id: str,
+) -> float | None:
+    try:
+        with connect_mlops_db(monitoring_db_path) as conn:
+            rows = read_execution_cash_legs(conn, event_id=event_id)
+    except Exception:  # noqa: BLE001 - unavailable cash-leg accounting should not stop trading.
+        return None
+    actions = {str(row.get("action") or "").upper() for row in rows}
+    if "BUY" not in actions or not ({"SELL", "REDEEM"} & actions):
+        return None
+    return float(sum(float(row.get("cash_delta") or 0.0) for row in rows))
+
+
+def _theoretical_pnl_from_positions(
+    position_manager: PositionManager,
+    *,
+    event_ids: set[str] | frozenset[str] | None = None,
+) -> float:
     total = 0.0
+    scoped_event_ids = set(event_ids) if event_ids is not None else None
     for position in position_manager.list_positions():
+        if scoped_event_ids is not None and position.event_id not in scoped_event_ids:
+            continue
         if position.realized_pnl is not None and position.status in {"closed", "expired"}:
             total += float(position.realized_pnl)
     return total

@@ -46,7 +46,8 @@ def open_warehouse(root: Path | str, *, read_only: bool = True) -> Iterator[duck
             glob = str(base / "**/*.parquet")
             conn.execute(
                 f"CREATE OR REPLACE VIEW {table} AS "
-                f"SELECT * FROM read_parquet({_sql_string(glob)}, hive_partitioning=true)"
+                f"SELECT * FROM read_parquet("
+                f"{_sql_string(glob)}, hive_partitioning=true, union_by_name=true)"
             )
         yield conn
     finally:

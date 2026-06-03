@@ -30,6 +30,34 @@ def _feature_row(ts: int, mid_price: float) -> dict:
     }
 
 
+def _warehouse_feature_row(ts: int, mid_price: float, *, ingest_ts: int | None = None) -> dict:
+    return {
+        **_feature_row(ts, mid_price),
+        "ts": ts,
+        "message_ts": ts,
+        "ingest_ts": ts if ingest_ts is None else ingest_ts,
+        "completeness_score": 1.0,
+        "data_gap_flag": False,
+        "quality_filter_pass": True,
+        "quote_age_ms": 0,
+        "depth_age_ms": 0,
+        "trade_age_ms": None,
+        "microprice": mid_price,
+        "obi_l1": 0.0,
+        "obi_l5": 0.0,
+        "obi_l10": 0.0,
+        "signed_volume_1m": 0.0,
+        "trade_imbalance_1m": None,
+        "trade_count_1m": 0,
+        "trade_volume_1m": None,
+        "ret_1m": None,
+        "ret_5m": None,
+        "rv_1m": None,
+        "rv_5m": None,
+        "rv_15m": None,
+    }
+
+
 def _model():
     from bigan.modeling import XGBoostV1Model
 
@@ -150,3 +178,121 @@ def test_generate_prediction_rows_rejects_training_schema_mismatch() -> None:
             feature_rows=[{"source": "polymarket", "source_symbol": "tok-up", "feature_ts": 1}],
             model=_model(),
         )
+
+
+def test_run_prediction_batch_can_score_recent_features_and_skip_existing_events(
+    tmp_path: Path,
+) -> None:
+    from bigan.mlops.registry import connect_mlops_db, initialize_mlops_db
+    from bigan.modeling import run_prediction_batch
+
+    warehouse = tmp_path / "warehouse"
+    model_path = tmp_path / "model.json"
+    mlops_db = tmp_path / "mlops.duckdb"
+    model = _model()
+    model.booster.save_model(model_path)
+    with WarehouseWriter(warehouse, max_rows_per_partition=10) as writer:
+        writer.append_rows("features_15m_v1", [_warehouse_feature_row(1_000, 0.40)])
+        writer.append_rows(
+            "features_15m_v1",
+            [
+                _warehouse_feature_row(2_000, 0.50, ingest_ts=10),
+                _warehouse_feature_row(2_000, 0.60, ingest_ts=20),
+            ],
+        )
+
+    first = run_prediction_batch(
+        warehouse,
+        model_path,
+        since_ms=2_000,
+        monitoring_db_path=mlops_db,
+        skip_existing_monitoring_events=True,
+    )
+    second = run_prediction_batch(
+        warehouse,
+        model_path,
+        since_ms=2_000,
+        monitoring_db_path=mlops_db,
+        skip_existing_monitoring_events=True,
+    )
+
+    assert first.rows_generated == 1
+    assert first.monitoring_events_written == 1
+    assert second.rows_generated == 1
+    assert second.monitoring_events_written == 0
+    conn = connect_mlops_db(mlops_db)
+    try:
+        initialize_mlops_db(conn)
+        event = conn.execute(
+            "select ts, feature_snapshot_json from prediction_events"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert event[0] == 2_000
+    snapshot = json.loads(event[1])
+    assert snapshot["features"]["mid_price"] == pytest.approx(0.60)
+
+
+def test_run_prediction_batch_can_skip_existing_prediction_rows(tmp_path: Path) -> None:
+    from bigan.modeling import run_prediction_batch
+
+    warehouse = tmp_path / "warehouse"
+    model_path = tmp_path / "model.json"
+    model = _model()
+    model.booster.save_model(model_path)
+    with WarehouseWriter(warehouse, max_rows_per_partition=10) as writer:
+        writer.append_rows("features_15m_v1", [_warehouse_feature_row(2_000, 0.50)])
+
+    first = run_prediction_batch(
+        warehouse,
+        model_path,
+        since_ms=2_000,
+        skip_existing_predictions=True,
+    )
+    second = run_prediction_batch(
+        warehouse,
+        model_path,
+        since_ms=2_000,
+        skip_existing_predictions=True,
+    )
+
+    assert first.rows_generated == 1
+    assert first.rows_written == 1
+    assert second.rows_generated == 1
+    assert second.rows_written == 0
+
+
+def test_run_prediction_batch_can_filter_by_canonical_symbol(tmp_path: Path) -> None:
+    from bigan.modeling import run_prediction_batch
+
+    warehouse = tmp_path / "warehouse"
+    model_path = tmp_path / "model.json"
+    model = _model()
+    model.booster.save_model(model_path)
+    btc = {
+        **_warehouse_feature_row(2_000, 0.50),
+        "source_symbol": "btc-up-token",
+        "canonical_symbol": "BTC-15M:btc-round:UP",
+        "symbol": "BTC-15M:btc-round:UP",
+    }
+    eth = {
+        **_warehouse_feature_row(2_000, 0.60),
+        "source_symbol": "eth-up-token",
+        "canonical_symbol": "ETH-15M:eth-round:UP",
+        "symbol": "ETH-15M:eth-round:UP",
+    }
+    with WarehouseWriter(warehouse, max_rows_per_partition=10) as writer:
+        writer.append_rows("features_15m_v1", [btc, eth])
+
+    report = run_prediction_batch(
+        warehouse,
+        model_path,
+        since_ms=2_000,
+        canonical_symbol_like="BTC-15M:%",
+    )
+
+    assert report.rows_generated == 1
+    files = warehouse_files(warehouse, "predictions")
+    row = pq.ParquetFile(files[0]).read().to_pylist()[0]
+    assert row["source_symbol"] == "btc-up-token"
+    assert row["canonical_symbol"] == "BTC-15M:btc-round:UP"

@@ -22,6 +22,11 @@ from typing import Any
 
 import duckdb
 
+from bigan.execution.v6_gate import (
+    V6JointGateConfig,
+    build_v6_signal_fields,
+    is_v6_model_version,
+)
 from bigan.monitoring.market_quality import (
     round_end_ts_from_canonical_symbol,
     tradable_market_implied_probability,
@@ -45,6 +50,12 @@ class BridgeSignal:
     edge: float
     bridged_at: int
     opposite_token_id: str = ""
+    p_up: float | None = None
+    p_down: float | None = None
+    p_neutral: float | None = None
+    p_vol_up: float | None = None
+    p_vol_down: float | None = None
+    v6_joint_side: str | None = None
 
 
 def main() -> int:
@@ -60,6 +71,18 @@ def main() -> int:
     )
     if not allowed_families:
         raise SystemExit("--market-families must list at least one family")
+    allowed_outcome_sides = _normalise_outcome_side_filter(args.outcome_side)
+    v6_joint_config = (
+        V6JointGateConfig(
+            settlement_threshold=args.v6_settlement_threshold,
+            neutral_cap=args.v6_neutral_cap,
+            volatility_threshold=args.v6_volatility_threshold,
+            round_trip_cost=args.v6_round_trip_cost,
+            ev_margin=args.v6_ev_margin,
+        )
+        if is_v6_model_version(args.model_version)
+        else None
+    )
 
     cursor_created_at, cursor_event_id = (
         (0, "")
@@ -74,6 +97,14 @@ def main() -> int:
     print(f"local_db={args.monitoring_db_path}")
     print(f"model={args.model_version} start={args.start}")
     print(f"families={','.join(sorted(allowed_families))}")
+    print(
+        "outcome_side="
+        + (
+            "ANY"
+            if allowed_outcome_sides is None
+            else ",".join(sorted(allowed_outcome_sides))
+        )
+    )
     print(f"remote={args.remote} remote_path={args.remote_path}")
     print(f"cursor created_at={cursor_created_at} event_id={cursor_event_id}")
 
@@ -83,6 +114,8 @@ def main() -> int:
                 args.monitoring_db_path,
                 model_version=args.model_version,
                 allowed_families=allowed_families,
+                allowed_outcome_sides=allowed_outcome_sides,
+                v6_joint_config=v6_joint_config,
                 after_created_at=cursor_created_at,
                 after_event_id=cursor_event_id,
                 limit=args.batch_limit,
@@ -153,6 +186,14 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--outcome-side",
+        default="ANY",
+        help=(
+            "Outcome side to bridge: UP, DOWN, or ANY. Use UP for models trained "
+            "only on UP-token rows."
+        ),
+    )
+    parser.add_argument(
         "--remote",
         required=True,
         help="SSH target for the execution host, for example ubuntu@13.231.238.96.",
@@ -183,6 +224,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--audit-log-path", default="")
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--v6-settlement-threshold", type=float, default=0.50)
+    parser.add_argument("--v6-neutral-cap", type=float, default=0.25)
+    parser.add_argument("--v6-volatility-threshold", type=float, default=0.60)
+    parser.add_argument("--v6-round-trip-cost", type=float, default=0.072)
+    parser.add_argument("--v6-ev-margin", type=float, default=0.01)
     return parser.parse_args()
 
 
@@ -211,12 +257,15 @@ def _read_bridge_signals_after(
     after_event_id: str,
     limit: int,
     allowed_families: frozenset[str] = frozenset({"BTC-15M"}),
+    allowed_outcome_sides: frozenset[str] | None = None,
+    v6_joint_config: V6JointGateConfig | None = None,
 ) -> list[BridgeSignal]:
     family_clause = " OR ".join(
         "json_extract_string(feature_snapshot_json, '$.canonical_symbol') LIKE ?"
         for _ in allowed_families
     )
     family_params = [f"{family}:%" for family in sorted(allowed_families)]
+    side_clause, side_params = _outcome_side_sql_filter(allowed_outcome_sides)
     with duckdb.connect(db_path, read_only=True) as conn:
         rows = conn.execute(
             f"""
@@ -224,6 +273,7 @@ def _read_bridge_signals_after(
             FROM prediction_events
             WHERE model_version = ?
               AND ({family_clause})
+              {side_clause}
               AND (
                     created_at > ?
                  OR (created_at = ? AND event_id > ?)
@@ -231,25 +281,52 @@ def _read_bridge_signals_after(
             ORDER BY created_at ASC, event_id ASC
             LIMIT ?
             """,
-            [model_version, *family_params, after_created_at, after_created_at, after_event_id, limit],
+            [
+                model_version,
+                *family_params,
+                *side_params,
+                after_created_at,
+                after_created_at,
+                after_event_id,
+                limit,
+            ],
         ).fetchall()
         signals: list[BridgeSignal] = []
         for row in rows:
+            event_id, ts, created_at, prob_up_15m, snapshot_json = row
+            try:
+                snapshot = json.loads(str(snapshot_json))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(snapshot, dict):
+                continue
+            canonical_symbol = str(snapshot.get("canonical_symbol") or snapshot.get("symbol") or "")
+            parts = canonical_symbol.split(":")
+            if len(parts) < 3:
+                continue
+            family, round_slug, side = parts[0].upper(), parts[-2], parts[-1].upper()
+            opposite_token_id = _opposite_token_id(
+                conn,
+                model_version=model_version,
+                family=family,
+                round_slug=round_slug,
+                outcome_side=side,
+            )
             signal = _bridge_signal_from_row(
-                row, model_version=model_version, allowed_families=allowed_families
+                row,
+                model_version=model_version,
+                allowed_families=allowed_families,
+                allowed_outcome_sides=allowed_outcome_sides,
+                v6_joint_config=v6_joint_config,
+                opposite_token_id=opposite_token_id,
             )
             if signal is not None:
-                family = signal.canonical_symbol.split(":", 1)[0]
+                if signal.outcome_side == "DOWN" and not signal.token_id:
+                    signal = replace(signal, token_id=opposite_token_id)
                 signals.append(
                     replace(
                         signal,
-                        opposite_token_id=_opposite_token_id(
-                            conn,
-                            model_version=model_version,
-                            family=family,
-                            round_slug=signal.round_slug,
-                            outcome_side=signal.outcome_side,
-                        ),
+                        opposite_token_id=opposite_token_id or signal.opposite_token_id,
                     )
                 )
     return signals
@@ -260,6 +337,9 @@ def _bridge_signal_from_row(
     *,
     model_version: str,
     allowed_families: frozenset[str] = frozenset({"BTC-15M"}),
+    allowed_outcome_sides: frozenset[str] | None = None,
+    v6_joint_config: V6JointGateConfig | None = None,
+    opposite_token_id: str = "",
 ) -> BridgeSignal | None:
     event_id, ts, created_at, prob_up_15m, snapshot_json = row
     try:
@@ -275,11 +355,55 @@ def _bridge_signal_from_row(
     family, round_slug, side = parts[0].upper(), parts[-2], parts[-1].upper()
     if family not in allowed_families or side not in {"UP", "DOWN"}:
         return None
+    if (
+        allowed_outcome_sides is not None
+        and v6_joint_config is None
+        and side not in allowed_outcome_sides
+    ):
+        return None
     token_id = str(snapshot.get("source_symbol") or snapshot.get("token_id") or "")
     market = _market_implied_probability(snapshot, event_ts=int(ts))
     round_end_ts = round_end_ts_from_canonical_symbol(canonical_symbol)
     if not token_id or market is None or round_end_ts is None:
         return None
+    if v6_joint_config is not None and is_v6_model_version(model_version):
+        fields = build_v6_signal_fields(
+            event_id=str(event_id),
+            ts=int(ts),
+            created_at=int(created_at),
+            snapshot=snapshot,
+            model_version=model_version,
+            config=v6_joint_config,
+            round_end_ts=int(round_end_ts),
+            opposite_token_id=opposite_token_id,
+        )
+        if fields is None:
+            return None
+        if allowed_outcome_sides is not None and fields["outcome_side"] not in allowed_outcome_sides:
+            return None
+        return BridgeSignal(
+            event_id=str(fields["event_id"]),
+            ts=int(fields["ts"]),
+            created_at=int(fields["created_at"]),
+            model_version=model_version,
+            prob_up_15m=float(fields["prob_up_15m"]),
+            canonical_symbol=str(fields["canonical_symbol"]),
+            token_id=str(fields["token_id"]),
+            outcome_side=str(fields["outcome_side"]),
+            round_slug=str(fields["round_slug"]),
+            round_end_ts=int(fields["round_end_ts"]),
+            market_implied_prob=float(fields["market_implied_prob"]),
+            token_probability=float(fields["token_probability"]),
+            edge=float(fields["edge"]),
+            bridged_at=_now_ms(),
+            opposite_token_id=str(fields.get("opposite_token_id") or ""),
+            p_up=float(fields["p_up"]),
+            p_down=float(fields["p_down"]),
+            p_neutral=float(fields["p_neutral"]),
+            p_vol_up=float(fields["p_vol_up"]),
+            p_vol_down=float(fields["p_vol_down"]),
+            v6_joint_side=str(fields["v6_joint_side"]),
+        )
     prob = float(prob_up_15m)
     token_probability = 1.0 - prob if side == "DOWN" else prob
     return BridgeSignal(
@@ -298,6 +422,27 @@ def _bridge_signal_from_row(
         edge=token_probability - market,
         bridged_at=_now_ms(),
     )
+
+
+def _normalise_outcome_side_filter(value: str | None) -> frozenset[str] | None:
+    side = str(value or "ANY").strip().upper()
+    if not side or side == "ANY":
+        return None
+    values = frozenset(part.strip().upper() for part in side.split(",") if part.strip())
+    if not values or not values <= {"UP", "DOWN"}:
+        raise SystemExit("--outcome-side must be UP, DOWN, ANY, or a comma-separated subset")
+    return values
+
+
+def _outcome_side_sql_filter(allowed_outcome_sides: frozenset[str] | None) -> tuple[str, list[str]]:
+    if allowed_outcome_sides is None:
+        return "", []
+    clauses = [
+        "json_extract_string(feature_snapshot_json, '$.canonical_symbol') LIKE ?"
+        for _ in allowed_outcome_sides
+    ]
+    params = [f"%:{side}" for side in sorted(allowed_outcome_sides)]
+    return f"AND ({' OR '.join(clauses)})", params
 
 
 def _opposite_token_id(

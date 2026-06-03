@@ -9,12 +9,15 @@ from typing import Any
 
 from bigan.ingestion.gamma_client import (
     GammaClient,
+    MarketDiscoverySpec,
+    _candidate_slugs_for_now,
     _gamma_fetch_error_context,
     _log_gamma_fetch_failed,
     _market_from_gamma,
     _parse_iso8601_to_ms,
     active_market_symbol_mapping_rows,
     diff_subscription_sets,
+    parse_market_specs_json,
 )
 
 
@@ -95,6 +98,35 @@ def test_active_market_symbol_mapping_rows_encode_outcome_side() -> None:
     assert '"outcome_side":"UP"' in by_token["111"]["metadata_json"]
 
 
+def test_active_market_symbol_mapping_rows_encode_eth_horizon() -> None:
+    spec = MarketDiscoverySpec(
+        slug_prefix="eth-updown-5m-",
+        underlying="ETH",
+        horizon_ms=5 * 60_000,
+        symbol_kind="eth_5m_outcome",
+    )
+    market = _market_from_gamma(
+        {
+            "slug": "eth-updown-5m-1778423700",
+            "conditionId": "0xeth",
+            "clobTokenIds": ["333", "444"],
+            "outcomes": ["Up", "Down"],
+            "startDate": "2026-05-10T14:30:00Z",
+            "endDate": "2026-05-10T14:35:00Z",
+            "orderPriceMinTickSize": "0.01",
+        },
+        spec,
+    )
+    assert market is not None
+
+    rows = active_market_symbol_mapping_rows([market], ingest_ts=1_800_000_000_000)
+
+    by_token = {row["source_symbol"]: row for row in rows}
+    assert by_token["333"]["canonical_symbol"] == "ETH-5M:eth-updown-5m-1778423700:UP"
+    assert by_token["333"]["symbol_kind"] == "eth_5m_outcome"
+    assert '"horizon_ms":300000' in by_token["333"]["metadata_json"]
+
+
 def test_market_from_gamma_drops_invalid_records() -> None:
     assert _market_from_gamma({}) is None
     assert _market_from_gamma({"slug": "x"}) is None
@@ -171,8 +203,11 @@ def test_list_active_markets_handles_gamma_limit_cap() -> None:
         "btc-updown-15m-4102444800",
         "btc-updown-15m-4102445700",
     ]
-    assert [call["limit"] for call in session.calls] == [100, 100, 100]
-    assert [call["offset"] for call in session.calls] == [0, 100, 200]
+    page_calls = [call for call in session.calls if "offset" in call]
+    assert [call["limit"] for call in page_calls] == [100, 100, 100]
+    assert [call["offset"] for call in page_calls] == [0, 100, 200]
+    assert {call["order"] for call in page_calls} == {"endDate"}
+    assert {call["ascending"] for call in page_calls} == {"true"}
 
 
 def test_list_active_markets_keeps_scanning_after_empty_target_pages() -> None:
@@ -223,7 +258,168 @@ def test_list_active_markets_keeps_scanning_after_empty_target_pages() -> None:
         "btc-updown-15m-4102444800",
         "btc-updown-15m-4102445700",
     ]
-    assert [call["offset"] for call in session.calls] == [0, 2, 4]
+    page_calls = [call for call in session.calls if "offset" in call]
+    assert [call["offset"] for call in page_calls] == [0, 2, 4]
+
+
+def test_candidate_slugs_for_now_include_current_and_upcoming_rounds() -> None:
+    now_ms = 1_779_461_234_000
+
+    slugs = _candidate_slugs_for_now(
+        "btc-updown-15m-",
+        now_ms=now_ms,
+        horizon_ms=15 * 60_000,
+        lookback_intervals=1,
+        lookahead_intervals=2,
+    )
+
+    assert slugs == (
+        "btc-updown-15m-1779460200",
+        "btc-updown-15m-1779461100",
+        "btc-updown-15m-1779462000",
+        "btc-updown-15m-1779462900",
+    )
+
+
+def test_list_active_markets_directly_fetches_near_expiry_slug() -> None:
+    now_ms = 1_779_461_234_000
+    session = _FakeGammaSession(
+        pages={0: []},
+        slug_records={
+            "btc-updown-15m-1779461100": [
+                _gamma_record(
+                    slug="btc-updown-15m-1779461100",
+                    condition_id="0xcurrent",
+                    up="111",
+                    down="222",
+                    end_date="2026-05-22T15:00:00Z",
+                )
+            ]
+        },
+    )
+
+    async def go() -> list[str]:
+        client = GammaClient("https://gamma.test", "btc-updown-15m-")
+        client._session = session  # type: ignore[attr-defined]  # test fake
+        markets = await client.list_active_markets(
+            page_limit=2,
+            max_pages=1,
+            direct_slug_lookback_intervals=1,
+            direct_slug_lookahead_intervals=2,
+            now_ms=now_ms,
+        )
+        return [market.slug for market in markets]
+
+    assert asyncio.run(go()) == ["btc-updown-15m-1779461100"]
+
+
+def test_list_active_markets_drops_round_at_expiry_and_keeps_next_round() -> None:
+    now_ms = 1_779_462_000_000
+    session = _FakeGammaSession(
+        pages={0: []},
+        slug_records={
+            "btc-updown-15m-1779461100": [
+                _gamma_record(
+                    slug="btc-updown-15m-1779461100",
+                    condition_id="0xexpired",
+                    up="111",
+                    down="222",
+                    end_date="2026-05-22T15:00:00Z",
+                )
+            ],
+            "btc-updown-15m-1779462000": [
+                _gamma_record(
+                    slug="btc-updown-15m-1779462000",
+                    condition_id="0xnext",
+                    up="333",
+                    down="444",
+                    end_date="2026-05-22T15:15:00Z",
+                )
+            ],
+        },
+    )
+
+    async def go() -> list[str]:
+        client = GammaClient("https://gamma.test", "btc-updown-15m-")
+        client._session = session  # type: ignore[attr-defined]  # test fake
+        markets = await client.list_active_markets(
+            page_limit=2,
+            max_pages=1,
+            direct_slug_lookback_intervals=1,
+            direct_slug_lookahead_intervals=1,
+            now_ms=now_ms,
+        )
+        return [market.slug for market in markets]
+
+    assert asyncio.run(go()) == ["btc-updown-15m-1779462000"]
+
+
+def test_list_active_markets_supports_multiple_market_specs() -> None:
+    now_ms = 1_779_461_234_000
+    specs = parse_market_specs_json(
+        """
+        [
+          {"slug_prefix": "btc-updown-15m-", "underlying": "BTC", "horizon_minutes": 15},
+          {"slug_prefix": "eth-updown-5m-", "underlying": "ETH", "horizon_minutes": 5}
+        ]
+        """
+    )
+    session = _FakeGammaSession(
+        pages={
+            0: [
+                _gamma_record(
+                    slug="btc-updown-15m-1779461100",
+                    condition_id="0xbtc",
+                    up="111",
+                    down="222",
+                ),
+                _gamma_record(
+                    slug="eth-updown-5m-1779461100",
+                    condition_id="0xeth",
+                    up="333",
+                    down="444",
+                ),
+                _gamma_record(
+                    slug="sol-updown-5m-1779461100",
+                    condition_id="0xsol",
+                    up="555",
+                    down="666",
+                ),
+            ]
+        },
+    )
+
+    async def go() -> list[tuple[str, str, int]]:
+        client = GammaClient("https://gamma.test", "btc-updown-15m-", market_specs=specs)
+        client._session = session  # type: ignore[attr-defined]  # test fake
+        markets = await client.list_active_markets(
+            page_limit=3,
+            max_pages=1,
+            direct_slug_lookback_intervals=0,
+            direct_slug_lookahead_intervals=0,
+            now_ms=now_ms,
+        )
+        return [(market.slug, market.underlying, market.horizon_ms) for market in markets]
+
+    assert asyncio.run(go()) == [
+        ("btc-updown-15m-1779461100", "BTC", 15 * 60_000),
+        ("eth-updown-5m-1779461100", "ETH", 5 * 60_000),
+    ]
+
+
+def test_parse_market_specs_json_infers_defaults() -> None:
+    specs = parse_market_specs_json(
+        '[{"slug_prefix":"eth-updown-5m-"},{"slug_prefix":"btc-updown-15m-"}]'
+    )
+
+    assert specs[0] == MarketDiscoverySpec(
+        slug_prefix="eth-updown-5m-",
+        underlying="ETH",
+        horizon_ms=5 * 60_000,
+        symbol_kind="eth_5m_outcome",
+    )
+    assert specs[1].underlying == "BTC"
+    assert specs[1].horizon_ms == 15 * 60_000
 
 
 def test_gamma_fetch_error_context_includes_page_diagnostics() -> None:
@@ -274,12 +470,19 @@ def test_gamma_poll_failed_log_message_includes_plain_diagnostics(caplog) -> Non
 
 
 class _FakeGammaSession:
-    def __init__(self, pages: dict[int, list[dict[str, Any]]]) -> None:
+    def __init__(
+        self,
+        pages: dict[int, list[dict[str, Any]]],
+        slug_records: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> None:
         self._pages = pages
+        self._slug_records = slug_records or {}
         self.calls: list[dict[str, Any]] = []
 
     def get(self, _url: str, *, params: dict[str, Any]) -> _FakeGammaResponse:
         self.calls.append(dict(params))
+        if "slug" in params:
+            return _FakeGammaResponse(self._slug_records.get(str(params["slug"]), []))
         return _FakeGammaResponse(self._pages.get(int(params["offset"]), []))
 
 
@@ -306,6 +509,7 @@ def _gamma_record(
     condition_id: str,
     up: str,
     down: str,
+    end_date: str = "2099-01-01T00:15:00Z",
 ) -> dict[str, Any]:
     return {
         "slug": slug,
@@ -313,6 +517,6 @@ def _gamma_record(
         "clobTokenIds": [up, down],
         "outcomes": ["Up", "Down"],
         "startDate": "2099-01-01T00:00:00Z",
-        "endDate": "2099-01-01T00:15:00Z",
+        "endDate": end_date,
         "orderPriceMinTickSize": "0.01",
     }

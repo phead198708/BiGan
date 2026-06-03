@@ -14,8 +14,12 @@ from bigan.monitoring import (
     PredictionOutcome,
     compute_brier_component,
     initialize_monitoring_tables,
+    prediction_event_from_prediction_row,
+    prediction_outcome_from_label_row,
+    record_label_rows_as_outcomes,
     record_prediction_event,
     record_prediction_outcome,
+    record_prediction_rows_as_events,
     summarize_model_monitoring_daily,
 )
 
@@ -81,6 +85,134 @@ def test_prediction_events_and_outcomes_are_traceable_by_event_id() -> None:
         """
     ).fetchone()
     assert row == ("xgboost-v1", 0.80, True, pytest.approx(0.04))
+
+
+def test_prediction_rows_are_recorded_as_monitoring_events() -> None:
+    conn = connect_mlops_db()
+    row = {
+        "prediction_ts": _ts("2026-05-20", hour=1),
+        "source": "polymarket",
+        "source_symbol": "tok-up",
+        "source_market": "mkt-1",
+        "canonical_symbol": "BTC-UP-15M",
+        "symbol": "BTC-UP-15M",
+        "feature_version": "bigan-mvp-v1.0.0",
+        "model_version": "xgboost-v3",
+        "prob_up_15m": 0.72,
+        "market_implied_prob": 0.41,
+        "confidence_bucket": "high_up",
+        "top_features_json": "[]",
+        "feature_values_json": json.dumps({"spread": 0.02}, sort_keys=True),
+    }
+
+    event = prediction_event_from_prediction_row(row, serving_latency_ms=1.5)
+    assert event.event_id.startswith("pred-")
+    assert event.prob_up_15m == pytest.approx(0.72)
+    assert json.loads(event.feature_snapshot_json)["market_implied_prob"] == pytest.approx(0.41)
+
+    assert record_prediction_rows_as_events(conn, [row]) == 1
+    stored = conn.execute(
+        """
+        SELECT model_version, prob_up_15m, serving_latency_ms, feature_snapshot_json
+        FROM prediction_events
+        """
+    ).fetchone()
+    assert stored[0] == "xgboost-v3"
+    assert stored[1] == pytest.approx(0.72)
+    assert stored[2] == pytest.approx(0.0)
+    assert json.loads(stored[3])["features"] == {"spread": 0.02}
+
+
+def test_label_rows_are_recorded_as_prediction_outcomes() -> None:
+    conn = connect_mlops_db()
+    prediction_row = {
+        "prediction_ts": _ts("2026-05-20", hour=1),
+        "source": "polymarket",
+        "source_symbol": "tok-up",
+        "source_market": "mkt-1",
+        "canonical_symbol": "BTC-UP-15M",
+        "symbol": "BTC-UP-15M",
+        "feature_version": "bigan-mvp-v1.0.0",
+        "model_version": "xgboost-v3",
+        "prob_up_15m": 0.72,
+        "market_implied_prob": 0.41,
+        "confidence_bucket": "high_up",
+        "top_features_json": "[]",
+        "feature_values_json": "{}",
+    }
+    record_prediction_rows_as_events(conn, [prediction_row])
+    label_row = {
+        "feature_ts": prediction_row["prediction_ts"],
+        "target_ts": prediction_row["prediction_ts"] + 900_000,
+        "ingest_ts": prediction_row["prediction_ts"] + 901_000,
+        "source": "polymarket",
+        "source_symbol": "tok-up",
+        "label_profit_up_15m": True,
+        "realized_return": 0.58,
+    }
+
+    outcome = prediction_outcome_from_label_row(
+        conn,
+        label_row,
+        model_version="xgboost-v3",
+    )
+    assert outcome is not None
+    assert outcome.brier_component == pytest.approx((0.72 - 1.0) ** 2)
+
+    assert record_label_rows_as_outcomes(
+        conn,
+        [label_row],
+        model_version="xgboost-v3",
+    ) == 1
+    stored = conn.execute(
+        """
+        SELECT realized_label, realized_return, brier_component
+        FROM prediction_outcomes
+        """
+    ).fetchone()
+    assert stored == (True, pytest.approx(0.58), pytest.approx((0.72 - 1.0) ** 2))
+
+
+def test_down_label_rows_use_down_token_probability_for_brier() -> None:
+    conn = connect_mlops_db()
+    prediction_row = {
+        "prediction_ts": _ts("2026-05-20", hour=1),
+        "source": "polymarket",
+        "source_symbol": "tok-down",
+        "source_market": "mkt-1",
+        "canonical_symbol": "BTC-15M:btc-updown-15m-test:DOWN",
+        "symbol": "BTC-15M:btc-updown-15m-test:DOWN",
+        "feature_version": "bigan-mvp-v1.0.0",
+        "model_version": "xgboost-v3",
+        "prob_up_15m": 0.20,
+        "market_implied_prob": 0.40,
+        "confidence_bucket": "medium_up",
+        "top_features_json": "[]",
+        "feature_values_json": "{}",
+    }
+    record_prediction_rows_as_events(conn, [prediction_row])
+    label_row = {
+        "feature_ts": prediction_row["prediction_ts"],
+        "target_ts": prediction_row["prediction_ts"] + 900_000,
+        "ingest_ts": prediction_row["prediction_ts"] + 901_000,
+        "source": "polymarket",
+        "source_symbol": "tok-down",
+        "canonical_symbol": "BTC-15M:btc-updown-15m-test:DOWN",
+        "label_kind": "down_token_profitability",
+        "label_profit_down_15m": True,
+        "label_down_15m": True,
+        "realized_return": 0.60,
+    }
+
+    outcome = prediction_outcome_from_label_row(
+        conn,
+        label_row,
+        model_version="xgboost-v3",
+    )
+
+    assert outcome is not None
+    assert outcome.realized_label is True
+    assert outcome.brier_component == pytest.approx((0.80 - 1.0) ** 2)
 
 
 def test_daily_monitoring_summary_computes_hit_rate_brier_and_ece() -> None:

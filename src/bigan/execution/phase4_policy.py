@@ -11,17 +11,127 @@ DEFAULT_NEAR_MIN_PRICE_BAND = 0.05
 DEFAULT_NEAR_MIN_FRESH_EDGE_THRESHOLD = 0.50
 DEFAULT_NEAR_MIN_SECONDS_TO_EXPIRY = 420.0
 DEFAULT_SOFT_FORCE_EXIT_MIN_BID = 0.15
+DEFAULT_SETTLEMENT_EDGE_THRESHOLD = 0.45
+DEFAULT_VOLATILITY_SCORE_THRESHOLD = 0.50
+DEFAULT_VOLATILITY_MIN_ENTRY_PRICE = 0.20
+DEFAULT_VOLATILITY_MIN_SECONDS_TO_EXPIRY = 420.0
+DEFAULT_VOLATILITY_ROUND_TRIP_COST = 0.04
+DEFAULT_VOLATILITY_SAFETY_MARGIN = 0.02
+DEFAULT_VOLATILITY_ROUND_BANKROLL_USDC = 1.0
+DEFAULT_VOLATILITY_MIN_ORDER_SIZE_USDC = 0.05
 
 
 @dataclass(frozen=True, slots=True)
 class Phase4EntryPolicy:
-    """Cheap-entry and near-threshold gating for Phase 4 live execution."""
+    """Cheap-entry and near-threshold gating for Phase 4 live execution.
+
+    ``edge_threshold`` is kept as a legacy alias for the settlement gate. New
+    Phase 4 v5 code should prefer ``settlement_edge_threshold`` so settlement
+    confidence and volatility diagnostics do not share one overloaded field.
+    """
 
     min_entry_price: float = DEFAULT_MIN_ENTRY_PRICE
     near_min_price_band: float = DEFAULT_NEAR_MIN_PRICE_BAND
     near_min_fresh_edge_threshold: float = DEFAULT_NEAR_MIN_FRESH_EDGE_THRESHOLD
     near_min_seconds_to_expiry: float = DEFAULT_NEAR_MIN_SECONDS_TO_EXPIRY
-    edge_threshold: float = 0.45
+    edge_threshold: float = DEFAULT_SETTLEMENT_EDGE_THRESHOLD
+    settlement_edge_threshold: float | None = None
+    volatility_score_threshold: float = DEFAULT_VOLATILITY_SCORE_THRESHOLD
+    volatility_min_entry_price: float = DEFAULT_VOLATILITY_MIN_ENTRY_PRICE
+    volatility_min_seconds_to_expiry: float = DEFAULT_VOLATILITY_MIN_SECONDS_TO_EXPIRY
+    volatility_round_trip_cost: float = DEFAULT_VOLATILITY_ROUND_TRIP_COST
+    volatility_safety_margin: float = DEFAULT_VOLATILITY_SAFETY_MARGIN
+    enable_volatility_live_entries: bool = False
+
+    @property
+    def effective_settlement_edge_threshold(self) -> float:
+        """Return the active settlement edge threshold."""
+
+        if self.settlement_edge_threshold is None:
+            return self.edge_threshold
+        return self.settlement_edge_threshold
+
+
+@dataclass(frozen=True, slots=True)
+class Phase4GateEvaluation:
+    """Decision record for the split settlement/volatility Phase 4 gates."""
+
+    settlement_gate_passed: bool
+    settlement_edge: float
+    settlement_edge_threshold: float
+    volatility_gate_passed: bool
+    volatility_score: float | None
+    volatility_score_threshold: float
+    volatility_min_entry_price: float
+    volatility_min_seconds_to_expiry: float
+    volatility_round_trip_cost: float
+    volatility_safety_margin: float
+    expected_volatility_exit_gain: float | None
+    volatility_live_entry_enabled: bool
+    gate_mode: str
+
+
+@dataclass(frozen=True, slots=True)
+class VolatilityBudgetDecision:
+    """Sizing decision for one volatility-sleeve paper/live entry."""
+
+    round_slug: str
+    balance_usdc: float
+    size_usdc: float
+    min_order_size_usdc: float
+    allowed: bool
+    reason: str
+
+
+@dataclass(slots=True)
+class VolatilitySleeveBudget:
+    """Per-round running bankroll for the volatility sleeve.
+
+    The balance resets at the first signal for each round, is reduced by account
+    cash-flow losses, and can refill with account cash-flow profit up to the
+    configured round cap. Use account-cash PnL here; theoretical executor PnL
+    hides slippage, fees, and dust.
+    """
+
+    round_cap_usdc: float = DEFAULT_VOLATILITY_ROUND_BANKROLL_USDC
+    per_bet_cap_usdc: float = DEFAULT_VOLATILITY_ROUND_BANKROLL_USDC
+    min_order_size_usdc: float = DEFAULT_VOLATILITY_MIN_ORDER_SIZE_USDC
+    balances: dict[str, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.round_cap_usdc <= 0:
+            raise ValueError("round_cap_usdc must be positive")
+        if self.per_bet_cap_usdc <= 0:
+            raise ValueError("per_bet_cap_usdc must be positive")
+        if self.min_order_size_usdc < 0:
+            raise ValueError("min_order_size_usdc must be non-negative")
+        if self.balances is None:
+            self.balances = {}
+
+    def balance_for_round(self, round_slug: str) -> float:
+        _require_round_slug(round_slug)
+        assert self.balances is not None
+        return self.balances.setdefault(round_slug, self.round_cap_usdc)
+
+    def next_entry_decision(self, round_slug: str) -> VolatilityBudgetDecision:
+        balance = self.balance_for_round(round_slug)
+        size = min(self.per_bet_cap_usdc, max(0.0, balance))
+        allowed = size >= self.min_order_size_usdc and size > 0
+        return VolatilityBudgetDecision(
+            round_slug=round_slug,
+            balance_usdc=balance,
+            size_usdc=size if allowed else 0.0,
+            min_order_size_usdc=self.min_order_size_usdc,
+            allowed=allowed,
+            reason="ok" if allowed else "volatility_round_balance_below_min_size",
+        )
+
+    def apply_account_pnl(self, round_slug: str, realized_account_pnl: float) -> float:
+        balance = self.balance_for_round(round_slug)
+        updated = min(self.round_cap_usdc, max(0.0, balance + realized_account_pnl))
+        assert self.balances is not None
+        self.balances[round_slug] = updated
+        return updated
 
 
 def is_near_min_entry(*, ask: float, worst_price: float, policy: Phase4EntryPolicy) -> bool:
@@ -51,9 +161,120 @@ def entry_price_skip_reason(
             and seconds_to_expiry < policy.near_min_seconds_to_expiry
         ):
             return "near_min_entry_too_close_to_expiry"
-    if fresh_edge_at_worst < policy.edge_threshold:
+    if fresh_edge_at_worst < policy.effective_settlement_edge_threshold:
         return "fresh_edge_below_threshold"
     return None
+
+
+def settlement_gate_passed(*, edge: float, policy: Phase4EntryPolicy) -> bool:
+    """Return whether the settlement-confidence gate admits the signal."""
+
+    return edge >= policy.effective_settlement_edge_threshold
+
+
+def expected_volatility_exit_gain_from_orderbook(
+    *,
+    bid: float | None,
+    worst_price: float,
+) -> float:
+    """Return an orderbook-only expected exit gain for the volatility sleeve.
+
+    This intentionally avoids model edge. With only top-of-book data available,
+    the conservative paper gate requires current executable exit value to clear
+    the entry worst price plus cost/margin. Richer microstructure features can
+    replace this input later without changing the budget mechanics.
+    """
+
+    if bid is None:
+        return 0.0
+    return float(bid) - worst_price
+
+
+def volatility_score_from_quote(*, token_probability: float, worst_price: float) -> float:
+    """Legacy issue #89 diagnostic alias; do not use for #90 live volatility sizing."""
+
+    return token_probability - worst_price
+
+
+def volatility_gate_passed(
+    *,
+    ask: float,
+    worst_price: float,
+    expected_volatility_exit_gain: float,
+    seconds_to_expiry: float | None,
+    policy: Phase4EntryPolicy,
+) -> bool:
+    """Return whether the diagnostic volatility gate admits the quote."""
+
+    if ask < policy.volatility_min_entry_price or worst_price < policy.volatility_min_entry_price:
+        return False
+    if (
+        seconds_to_expiry is not None
+        and seconds_to_expiry < policy.volatility_min_seconds_to_expiry
+    ):
+        return False
+    return expected_volatility_exit_gain >= (
+        policy.volatility_round_trip_cost + policy.volatility_safety_margin
+    )
+
+
+def evaluate_entry_gates(
+    *,
+    settlement_edge: float,
+    ask: float | None,
+    worst_price: float | None,
+    token_probability: float,
+    seconds_to_expiry: float | None,
+    policy: Phase4EntryPolicy,
+    bid: float | None = None,
+) -> Phase4GateEvaluation:
+    """Evaluate settlement and volatility gates without placing an order."""
+
+    settlement_passed = settlement_gate_passed(edge=settlement_edge, policy=policy)
+    expected_volatility_exit_gain = (
+        expected_volatility_exit_gain_from_orderbook(bid=bid, worst_price=worst_price)
+        if ask is not None and worst_price is not None
+        else None
+    )
+    volatility_passed = (
+        volatility_gate_passed(
+            ask=ask,
+            worst_price=worst_price,
+            expected_volatility_exit_gain=expected_volatility_exit_gain,
+            seconds_to_expiry=seconds_to_expiry,
+            policy=policy,
+        )
+        if ask is not None and worst_price is not None and expected_volatility_exit_gain is not None
+        else False
+    )
+    if settlement_passed:
+        gate_mode = "settlement_live_entry"
+    elif volatility_passed and policy.enable_volatility_live_entries:
+        gate_mode = "volatility_live_entry"
+    elif volatility_passed:
+        gate_mode = "volatility_diagnostic_only"
+    else:
+        gate_mode = "blocked"
+    return Phase4GateEvaluation(
+        settlement_gate_passed=settlement_passed,
+        settlement_edge=settlement_edge,
+        settlement_edge_threshold=policy.effective_settlement_edge_threshold,
+        volatility_gate_passed=volatility_passed,
+        volatility_score=expected_volatility_exit_gain,
+        volatility_score_threshold=policy.volatility_score_threshold,
+        volatility_min_entry_price=policy.volatility_min_entry_price,
+        volatility_min_seconds_to_expiry=policy.volatility_min_seconds_to_expiry,
+        volatility_round_trip_cost=policy.volatility_round_trip_cost,
+        volatility_safety_margin=policy.volatility_safety_margin,
+        expected_volatility_exit_gain=expected_volatility_exit_gain,
+        volatility_live_entry_enabled=policy.enable_volatility_live_entries,
+        gate_mode=gate_mode,
+    )
+
+
+def _require_round_slug(round_slug: str) -> None:
+    if not str(round_slug).strip():
+        raise ValueError("round_slug is required")
 
 
 def phase4_lifecycle_complete(

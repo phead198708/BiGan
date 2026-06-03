@@ -27,6 +27,10 @@ class ClobExecutionConfig:
     dry_run: bool = True
     host: str = "https://clob.polymarket.com"
     chain_id: int = 137
+    signature_type: str = "POLY_PROXY"
+    signature_type_env: str = "POLYMARKET_SIGNATURE_TYPE"
+    api_auth_mode: str = "derive"
+    api_auth_mode_env: str = "POLYMARKET_CLOB_AUTH_MODE"
     api_key_env: str = "POLYMARKET_API_KEY"
     api_secret_env: str = "POLYMARKET_API_SECRET"
     api_passphrase_env: str = "POLYMARKET_API_PASSPHRASE"
@@ -228,13 +232,85 @@ class ClobExecutionClient:
                 f"{self.config.private_key_env} is required when dry_run is false"
             )
         try:
+            return self._build_py_clob_client_v2(private_key)
+        except ImportError:
+            return self._build_py_clob_client_v1(private_key)
+
+    def _build_py_clob_client_v2(self, private_key: str) -> Any:
+        try:
+            from py_clob_client_v2 import (  # type: ignore[import-not-found]
+                ClobClient,
+                SignatureTypeV2,
+            )
+            from py_clob_client_v2.clob_types import ApiCreds  # type: ignore[import-not-found]
+        except ImportError as exc:
+            raise exc
+
+        signature_type = _resolve_signature_type(
+            SignatureTypeV2,
+            os.getenv(self.config.signature_type_env, self.config.signature_type),
+        )
+        kwargs: dict[str, Any] = {
+            "host": os.getenv("POLYMARKET_HOST", self.config.host),
+            "key": private_key,
+            "chain_id": self.config.chain_id,
+            "signature_type": signature_type,
+        }
+        funder = os.getenv(self.config.funder_env)
+        if funder:
+            kwargs["funder"] = funder
+        client = ClobClient(**kwargs)
+        self._configure_v2_api_creds(client, ApiCreds)
+        return client
+
+    def _configure_v2_api_creds(self, client: Any, api_creds_type: Any) -> None:
+        mode = os.getenv(self.config.api_auth_mode_env, self.config.api_auth_mode)
+        mode = str(mode).strip().lower()
+        if mode in {"", "none", "disabled"}:
+            return
+        if mode in {"derive", "derived"}:
+            if not hasattr(client, "create_or_derive_api_key") or not hasattr(client, "set_api_creds"):
+                raise ClobExecutionError("py-clob-client-v2 does not support derived API creds")
+            client.set_api_creds(client.create_or_derive_api_key())
+            return
+        if mode in {"env", "static"}:
+            values = {
+                "api_key": os.getenv(self.config.api_key_env),
+                "api_secret": os.getenv(self.config.api_secret_env),
+                "api_passphrase": os.getenv(self.config.api_passphrase_env),
+            }
+            missing = [
+                env_name
+                for env_name, value in (
+                    (self.config.api_key_env, values["api_key"]),
+                    (self.config.api_secret_env, values["api_secret"]),
+                    (self.config.api_passphrase_env, values["api_passphrase"]),
+                )
+                if not value
+            ]
+            if missing:
+                raise ClobExecutionError(
+                    "static CLOB API auth requested but missing env vars: "
+                    + ", ".join(missing)
+                )
+            if not hasattr(client, "set_api_creds"):
+                raise ClobExecutionError("py-clob-client-v2 does not support set_api_creds")
+            client.set_api_creds(api_creds_type(**values))
+            return
+        raise ClobExecutionError(
+            f"unsupported {self.config.api_auth_mode_env}/{self.config.api_auth_mode}: {mode}"
+        )
+
+    def _build_py_clob_client_v1(self, private_key: str) -> Any:
+        try:
             from py_clob_client.client import ClobClient  # type: ignore[import-not-found]
         except ImportError as exc:
             raise ClobExecutionError(
-                "py-clob-client is required for live CLOB execution"
+                "py-clob-client-v2 or py-clob-client is required for live CLOB execution"
             ) from exc
+
         kwargs: dict[str, Any] = {
-            "host": self.config.host,
+            "host": os.getenv("POLYMARKET_HOST", self.config.host),
             "key": private_key,
             "chain_id": self.config.chain_id,
         }
@@ -276,6 +352,19 @@ def _normalise_side(side: OrderSide | str) -> str:
     if text not in {"BUY", "SELL"}:
         raise ValueError("side must be BUY or SELL")
     return text
+
+
+def _resolve_signature_type(signature_type_enum: Any, value: Any) -> Any:
+    if value is None:
+        return signature_type_enum.POLY_PROXY
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return signature_type_enum.POLY_PROXY
+        if text.isdigit():
+            return signature_type_enum(int(text))
+        return getattr(signature_type_enum, text.upper())
+    return signature_type_enum(value)
 
 
 def _validate_order(*, token_id: str, price: float, size: float) -> None:

@@ -12,6 +12,7 @@ import pytest
 from bigan.backtest import (
     PredictionSignal,
     run_grouped_threshold_backtest,
+    run_model_threshold_backtest,
     run_oracle_label_sanity_backtest,
     run_prediction_threshold_backtest,
 )
@@ -295,6 +296,351 @@ def test_prediction_threshold_backtest_filters_to_required_up_side(
     assert trade["edge"] == pytest.approx(0.10)
 
 
+def test_model_threshold_backtest_scores_saved_model_without_warehouse_predictions(
+    tmp_path: Path,
+) -> None:
+    dataset_dir = tmp_path / "dataset"
+    rows = [
+        {
+            "feature_ts": 0,
+            "target_ts": 1_000,
+            "source": "polymarket",
+            "source_symbol": "tok-up",
+            "canonical_symbol": "BTC-15M:btc-updown-15m-test:UP",
+            "label_up_15m": True,
+            "mid_price": 0.70,
+            "market_implied_prob": 0.50,
+            "settlement_price": 0.85,
+        },
+        {
+            "feature_ts": 2_000,
+            "target_ts": 3_000,
+            "source": "polymarket",
+            "source_symbol": "tok-up",
+            "canonical_symbol": "BTC-15M:btc-updown-15m-test:UP",
+            "label_up_15m": False,
+            "mid_price": 0.30,
+            "market_implied_prob": 0.50,
+            "settlement_price": 0.10,
+        },
+    ]
+    for split in ("train", "val", "test"):
+        _write_parquet(dataset_dir / f"{split}.parquet", rows)
+    (dataset_dir / "manifest.json").write_text(
+        json.dumps({"dataset_version": "dataset-v1"}, indent=2),
+        encoding="utf-8",
+    )
+    model_path = tmp_path / "model.json"
+    model_path.write_text(
+        json.dumps(
+            {
+                "model_version": "logreg-test",
+                "feature_columns": ["mid_price"],
+                "coefficients": [10.0],
+                "intercept": -5.0,
+                "means": {"mid_price": 0.0},
+                "scales": {"mid_price": 1.0},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    warehouse_dir = tmp_path / "warehouse"
+    _write_parquet(
+        warehouse_dir / "raw_top_of_book" / "part-1.parquet",
+        [
+            {
+                "ts": 0,
+                "source_symbol": "tok-up",
+                "canonical_symbol": "BTC-15M:btc-updown-15m-test:UP",
+                "bid_price": 0.49,
+                "ask_price": 0.50,
+            },
+            {
+                "ts": 2_000,
+                "source_symbol": "tok-up",
+                "canonical_symbol": "BTC-15M:btc-updown-15m-test:UP",
+                "bid_price": 0.49,
+                "ask_price": 0.50,
+            },
+        ],
+    )
+
+    report = run_model_threshold_backtest(
+        model_path=model_path,
+        dataset_dir=dataset_dir,
+        warehouse_dir=warehouse_dir,
+        output_dir=tmp_path / "backtest",
+        thresholds=(0.30,),
+        required_outcome_side="UP",
+    )
+
+    row = report.summary[0]
+    assert report.model_version == "logreg-test"
+    assert row["signals_considered"] == 6
+    assert row["threshold_signals"] == 3
+    assert row["trade_count"] == 1
+    assert row["overlap_skipped"] == 2
+    assert row["net_pnl"] == pytest.approx(0.35)
+    diagnostics = json.loads((tmp_path / "backtest" / "diagnostics.json").read_text(encoding="utf-8"))
+    assert diagnostics["model_version"] == "logreg-test"
+    assert diagnostics["metadata"]["backtest_kind"] == "direct_model"
+    assert diagnostics["metadata"]["dataset_dir"] == str(dataset_dir)
+    assert diagnostics["metadata"]["dataset_version"] == "dataset-v1"
+    assert diagnostics["metadata"]["quote_filter"] == {
+        "source_symbol_count": 1,
+        "source_symbols_sample": ["tok-up"],
+        "since_ts": 0,
+        "until_ts": 3_000,
+        "quote_request_count": 2,
+    }
+
+
+def test_model_threshold_backtest_restricts_to_market_families(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "dataset"
+    rows = [
+        {
+            "feature_ts": 0,
+            "target_ts": 1_000,
+            "source": "polymarket",
+            "source_symbol": "tok-15m",
+            "canonical_symbol": "BTC-15M:btc-updown-15m-test:UP",
+            "label_up_15m": True,
+            "mid_price": 0.70,
+            "market_implied_prob": 0.50,
+            "settlement_price": 0.85,
+        },
+        {
+            "feature_ts": 0,
+            "target_ts": 1_000,
+            "source": "polymarket",
+            "source_symbol": "tok-5m",
+            "canonical_symbol": "BTC-5M:btc-updown-5m-test:UP",
+            "label_up_15m": True,
+            "mid_price": 0.70,
+            "market_implied_prob": 0.50,
+            "settlement_price": 0.85,
+        },
+    ]
+    for split in ("train", "val", "test"):
+        _write_parquet(dataset_dir / f"{split}.parquet", rows)
+    (dataset_dir / "manifest.json").write_text(
+        json.dumps({"dataset_version": "dataset-v1"}, indent=2),
+        encoding="utf-8",
+    )
+    model_path = tmp_path / "model.json"
+    model_path.write_text(
+        json.dumps(
+            {
+                "model_version": "logreg-test",
+                "feature_columns": ["mid_price"],
+                "coefficients": [10.0],
+                "intercept": -5.0,
+                "means": {"mid_price": 0.0},
+                "scales": {"mid_price": 1.0},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    warehouse_dir = tmp_path / "warehouse"
+    _write_parquet(
+        warehouse_dir / "raw_top_of_book" / "part-1.parquet",
+        [
+            {
+                "ts": 0,
+                "source_symbol": "tok-15m",
+                "canonical_symbol": "BTC-15M:btc-updown-15m-test:UP",
+                "bid_price": 0.49,
+                "ask_price": 0.50,
+            },
+            {
+                "ts": 0,
+                "source_symbol": "tok-5m",
+                "canonical_symbol": "BTC-5M:btc-updown-5m-test:UP",
+                "bid_price": 0.49,
+                "ask_price": 0.50,
+            },
+        ],
+    )
+
+    run_model_threshold_backtest(
+        model_path=model_path,
+        dataset_dir=dataset_dir,
+        warehouse_dir=warehouse_dir,
+        output_dir=tmp_path / "backtest",
+        thresholds=(0.10,),
+        required_outcome_side="UP",
+        market_families=frozenset({"BTC-15M"}),
+    )
+
+    diagnostics = json.loads(
+        (tmp_path / "backtest" / "diagnostics.json").read_text(encoding="utf-8")
+    )
+    assert diagnostics["metadata"]["market_families"] == ["BTC-15M"]
+    # Only the 15M symbol survives the family filter; its quote request count is 1.
+    assert diagnostics["metadata"]["quote_filter"]["source_symbol_count"] == 1
+    assert diagnostics["metadata"]["quote_filter"]["source_symbols_sample"] == ["tok-15m"]
+
+
+def test_model_threshold_backtest_uses_down_token_probability_and_settlement(
+    tmp_path: Path,
+) -> None:
+    dataset_dir = tmp_path / "dataset"
+    row = {
+        "feature_ts": 0,
+        "target_ts": 1_000,
+        "source": "polymarket",
+        "source_symbol": "tok-down",
+        "canonical_symbol": "BTC-15M:btc-updown-15m-test:DOWN",
+        "label_profit_down_15m": True,
+        "mid_price": 0.0,
+        "market_implied_prob": 0.30,
+        "settlement_price": 1.0,
+    }
+    for split in ("train", "val", "test"):
+        _write_parquet(dataset_dir / f"{split}.parquet", [row])
+    (dataset_dir / "manifest.json").write_text(
+        json.dumps({"dataset_version": "dataset-v1"}, indent=2),
+        encoding="utf-8",
+    )
+    model_path = tmp_path / "model.json"
+    model_path.write_text(
+        json.dumps(
+            {
+                "model_version": "logreg-test",
+                "feature_columns": ["mid_price"],
+                "coefficients": [0.0],
+                "intercept": -1.3862943611198906,
+                "means": {"mid_price": 0.0},
+                "scales": {"mid_price": 1.0},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    warehouse_dir = tmp_path / "warehouse"
+    _write_parquet(
+        warehouse_dir / "raw_top_of_book" / "part-1.parquet",
+        [
+            {
+                "ts": 0,
+                "source_symbol": "tok-down",
+                "canonical_symbol": "BTC-15M:btc-updown-15m-test:DOWN",
+                "bid_price": 0.29,
+                "ask_price": 0.30,
+            }
+        ],
+    )
+
+    report = run_model_threshold_backtest(
+        model_path=model_path,
+        dataset_dir=dataset_dir,
+        warehouse_dir=warehouse_dir,
+        output_dir=tmp_path / "backtest",
+        thresholds=(0.30,),
+        required_outcome_side="DOWN",
+    )
+
+    row_summary = report.summary[0]
+    assert report.required_outcome_side == "DOWN"
+    assert report.issues == ()
+    assert row_summary["signals_considered"] == 3
+    assert row_summary["threshold_signals"] == 3
+    assert row_summary["trade_count"] == 1
+    assert row_summary["net_pnl"] == pytest.approx(0.70)
+    trade = json.loads(
+        (tmp_path / "backtest" / "trade_log_sample_threshold_0_3.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    assert trade["outcome_side"] == "DOWN"
+    assert trade["prob_up_15m"] == pytest.approx(0.80)
+    assert trade["market_implied_prob"] == pytest.approx(0.30)
+    assert trade["edge"] == pytest.approx(0.50)
+    diagnostics = json.loads((tmp_path / "backtest" / "diagnostics.json").read_text(encoding="utf-8"))
+    assert diagnostics["metadata"]["backtest_kind"] == "direct_model"
+    assert diagnostics["metadata"]["dataset_version"] == "dataset-v1"
+
+
+def test_model_threshold_backtest_does_not_enter_after_settlement_window(
+    tmp_path: Path,
+) -> None:
+    dataset_dir = tmp_path / "dataset"
+    row = {
+        "feature_ts": 0,
+        "target_ts": 1_000,
+        "source": "polymarket",
+        "source_symbol": "tok-up",
+        "canonical_symbol": "BTC-15M:btc-updown-15m-test:UP",
+        "label_up_15m": True,
+        "mid_price": 0.70,
+        "market_implied_prob": 0.50,
+        "settlement_price": 0.85,
+    }
+    for split in ("train", "val", "test"):
+        _write_parquet(dataset_dir / f"{split}.parquet", [row])
+    model_path = tmp_path / "model.json"
+    model_path.write_text(
+        json.dumps(
+            {
+                "model_version": "logreg-test",
+                "feature_columns": ["mid_price"],
+                "coefficients": [10.0],
+                "intercept": -5.0,
+                "means": {"mid_price": 0.0},
+                "scales": {"mid_price": 1.0},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    warehouse_dir = tmp_path / "warehouse"
+    _write_parquet(
+        warehouse_dir / "raw_top_of_book" / "part-1.parquet",
+        [
+            {
+                "ts": 2_000,
+                "source_symbol": "tok-up",
+                "canonical_symbol": "BTC-15M:btc-updown-15m-test:UP",
+                "bid_price": 0.49,
+                "ask_price": 0.50,
+            },
+            {
+                "ts": 0,
+                "source_symbol": "tok-down",
+                "canonical_symbol": "BTC-15M:btc-updown-15m-test:DOWN",
+                "bid_price": 0.49,
+                "ask_price": 0.50,
+            },
+        ],
+    )
+
+    report = run_model_threshold_backtest(
+        model_path=model_path,
+        dataset_dir=dataset_dir,
+        warehouse_dir=warehouse_dir,
+        output_dir=tmp_path / "backtest",
+        thresholds=(0.30,),
+        required_outcome_side="UP",
+    )
+
+    row_summary = report.summary[0]
+    assert report.issues == ("model_quote_required_outcome_missing",)
+    assert row_summary["signals_considered"] == 3
+    assert row_summary["threshold_signals"] == 3
+    assert row_summary["trade_count"] == 0
+    assert row_summary["unfilled_signals"] == 3
+    diagnostics = json.loads((tmp_path / "backtest" / "diagnostics.json").read_text(encoding="utf-8"))
+    assert diagnostics["metadata"]["quote_filter"] == {
+        "source_symbol_count": 1,
+        "source_symbols_sample": ["tok-up"],
+        "since_ts": 0,
+        "until_ts": 1_000,
+        "quote_request_count": 1,
+    }
+
+
 def test_prediction_threshold_backtest_uses_label_settlement_when_available(
     tmp_path: Path,
 ) -> None:
@@ -347,3 +693,71 @@ def test_prediction_threshold_backtest_uses_label_settlement_when_available(
 
     assert report.summary[0]["trade_count"] == 1
     assert report.summary[0]["net_pnl"] == pytest.approx(0.50)
+
+
+def test_prediction_threshold_backtest_uses_down_token_probability_and_settlement(
+    tmp_path: Path,
+) -> None:
+    warehouse_dir = tmp_path / "warehouse"
+    _write_parquet(
+        warehouse_dir / "predictions" / "part-1.parquet",
+        [
+            {
+                "prediction_ts": 0,
+                "source": "polymarket",
+                "source_symbol": "tok-down",
+                "canonical_symbol": "BTC-15M:btc-updown-15m-test:DOWN",
+                "model_version": "xgboost-test",
+                "prob_up_15m": 0.20,
+                "market_implied_prob": 0.30,
+            }
+        ],
+    )
+    _write_parquet(
+        warehouse_dir / "labels_15m_v1" / "part-1.parquet",
+        [
+            {
+                "feature_ts": 0,
+                "target_ts": 1_000,
+                "source": "polymarket",
+                "source_symbol": "tok-down",
+                "settlement_price": 1.0,
+                "label_profit_down_15m": True,
+                "label_down_15m": True,
+            }
+        ],
+    )
+    _write_parquet(
+        warehouse_dir / "raw_top_of_book" / "part-1.parquet",
+        [
+            {
+                "ts": 0,
+                "source_symbol": "tok-down",
+                "canonical_symbol": "BTC-15M:btc-updown-15m-test:DOWN",
+                "bid_price": 0.29,
+                "ask_price": 0.30,
+            }
+        ],
+    )
+
+    report = run_prediction_threshold_backtest(
+        warehouse_dir=warehouse_dir,
+        output_dir=tmp_path / "prediction-down-backtest",
+        model_version="xgboost-test",
+        thresholds=(0.30,),
+        required_outcome_side="DOWN",
+    )
+
+    assert report.required_outcome_side == "DOWN"
+    assert report.issues == ()
+    assert report.summary[0]["signals_considered"] == 1
+    assert report.summary[0]["trade_count"] == 1
+    assert report.summary[0]["net_pnl"] == pytest.approx(0.70)
+    trade = json.loads(
+        (tmp_path / "prediction-down-backtest" / "trade_log_sample_threshold_0_3.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    assert trade["prob_up_15m"] == pytest.approx(0.80)
+    assert trade["market_implied_prob"] == pytest.approx(0.30)
+    assert trade["edge"] == pytest.approx(0.50)
