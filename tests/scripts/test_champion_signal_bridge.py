@@ -310,7 +310,7 @@ def test_bridge_skips_future_round_before_start() -> None:
     assert signal is None
 
 
-def test_bridge_v6_joint_gate_emits_down_side_signal() -> None:
+def test_bridge_v6_settlement_gate_emits_down_side_signal_without_volatility_pass() -> None:
     from bigan.execution.v6_gate import V6JointGateConfig
 
     snapshot = {
@@ -321,7 +321,7 @@ def test_bridge_v6_joint_gate_emits_down_side_signal() -> None:
         "p_down": 0.85,
         "p_neutral": 0.05,
         "p_vol_up": 0.10,
-        "p_vol_down": 0.90,
+        "p_vol_down": 0.10,
     }
     config = V6JointGateConfig(
         settlement_threshold=0.50,
@@ -341,7 +341,7 @@ def test_bridge_v6_joint_gate_emits_down_side_signal() -> None:
     assert signal.outcome_side == "DOWN"
     assert signal.token_id == "token-down"
     assert signal.v6_joint_side == "DOWN"
-    assert signal.p_vol_down == pytest.approx(0.90)
+    assert signal.p_vol_down == pytest.approx(0.10)
 
 
 def test_executor_reads_bridged_signal_jsonl(tmp_path: Path) -> None:
@@ -443,7 +443,7 @@ def test_executor_reads_db_signal_with_opposite_token_id(tmp_path: Path) -> None
     assert events[0].opposite_token_id == "token-down"
 
 
-def test_executor_duckdb_cursor_advances_past_v6_gate_misses(tmp_path: Path) -> None:
+def test_executor_duckdb_cursor_advances_past_v6_settlement_gate_misses(tmp_path: Path) -> None:
     from bigan.execution.v6_gate import V6JointGateConfig
 
     db_path = tmp_path / "catalog.duckdb"
@@ -529,7 +529,7 @@ def test_executor_duckdb_cursor_advances_past_v6_gate_misses(tmp_path: Path) -> 
                         p_up=0.10,
                         p_down=0.85,
                         p_vol_up=0.10,
-                        p_vol_down=0.90,
+                        p_vol_down=0.10,
                     ),
                 ),
                 (
@@ -579,11 +579,12 @@ def test_executor_duckdb_cursor_advances_past_v6_gate_misses(tmp_path: Path) -> 
     assert first.rows_scanned == 2
     assert first.rows_filtered == 2
     assert first.cursor_event_id == "pred-miss-down"
-    assert first.filter_reasons == {"v6_joint_gate_miss": 2}
+    assert first.filter_reasons == {"v6_settlement_gate_miss": 2}
     assert len(second.events) == 1
     assert second.events[0].outcome_side == "DOWN"
     assert second.events[0].token_id == "token-down"
     assert second.events[0].opposite_token_id == "token-up"
+    assert second.events[0].p_vol_down == pytest.approx(0.10)
 
 
 def test_executor_latency_helpers() -> None:

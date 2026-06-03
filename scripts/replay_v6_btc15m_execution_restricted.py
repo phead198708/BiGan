@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay v6 BTC-15M joint gate with Phase-4-style execution restrictions."""
+"""Replay v6 BTC-15M settlement gate with Phase-4-style execution restrictions."""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from typing import Any
 import pyarrow.parquet as pq
 
 from bigan.execution.phase4_policy import Phase4EntryPolicy, entry_price_skip_reason
+from bigan.execution.v6_gate import V6JointGateConfig, evaluate_v6_settlement_side
 from bigan.modeling.families import market_family_from_symbol
 from bigan.modeling.xgboost_v6 import (
     XGBOOST_V6_MODEL_VERSION,
-    joint_decision_from_payload,
     load_xgboost_v6_model,
 )
 
@@ -97,7 +97,7 @@ def main() -> int:
             "no_new_entry_before_expiry_seconds": args.no_new_entry_before_expiry_seconds,
             "buy_slippage": args.buy_slippage,
             "round_first_per_round_slug": True,
-            "require_observed_exit_path": True,
+            "require_observed_exit_path": False,
         },
         "splits": {},
         "paper_shadow_gate": {
@@ -134,7 +134,7 @@ def main() -> int:
         all_pass = all_pass and split_pass
         report["splits"][split] = {
             "row_count": len(rows),
-            "offline_joint_gate": offline,
+            "offline_settlement_gate": offline,
             "execution_restricted": restricted,
             "passes_paper_shadow_prerequisite": split_pass,
         }
@@ -269,13 +269,7 @@ def _collect_offline_trades(
 ) -> list[ReplayTrade]:
     trades: list[ReplayTrade] = []
     for row, payload in zip(rows, payloads, strict=True):
-        side = joint_decision_from_payload(
-            payload,
-            joint_rule=joint_rule,
-            round_trip_cost=round_trip_cost,
-            ev_margin=ev_margin,
-            gain_priors=gain_priors,
-        )
+        side = _settlement_decision_from_payload(payload, joint_rule=joint_rule)
         if side is None:
             continue
         entry_cost = _entry_cost_for_side(row, side)
@@ -291,7 +285,7 @@ def _collect_offline_trades(
                 entry_worst_price=entry_cost,
                 pnl=pnl,
                 true_label=true_label,
-                joint_gate="pass",
+                joint_gate="settlement_pass",
                 execution_gate="offline_proxy",
             )
         )
@@ -315,18 +309,11 @@ def _collect_execution_restricted_trades(
 ) -> list[ReplayTrade]:
     trades: list[ReplayTrade] = []
     seen_rounds: set[str] = set()
-    minimum_path_gain = round_trip_cost + ev_margin
 
     for row, payload in zip(rows, payloads, strict=True):
-        side = joint_decision_from_payload(
-            payload,
-            joint_rule=joint_rule,
-            round_trip_cost=round_trip_cost,
-            ev_margin=ev_margin,
-            gain_priors=gain_priors,
-        )
+        side = _settlement_decision_from_payload(payload, joint_rule=joint_rule)
         if side is None:
-            _bump(gate_counts, "joint_gate_miss")
+            _bump(gate_counts, "settlement_gate_miss")
             continue
 
         round_slug = _round_slug(row)
@@ -369,14 +356,6 @@ def _collect_execution_restricted_trades(
             _bump(gate_counts, skip_reason)
             continue
 
-        observed_gain = _observed_max_exit_gain(row, side)
-        if observed_gain is None:
-            _bump(gate_counts, "missing_exit_path")
-            continue
-        if observed_gain < minimum_path_gain:
-            _bump(gate_counts, "observed_exit_gain_below_cost_margin")
-            continue
-
         entry_cost = worst_price
         true_label = _settlement_label(row)
         pnl = _trade_pnl(true_label, side, entry_cost, round_trip_cost)
@@ -391,11 +370,26 @@ def _collect_execution_restricted_trades(
                 entry_worst_price=worst_price,
                 pnl=pnl,
                 true_label=true_label,
-                joint_gate="pass",
+                joint_gate="settlement_pass",
                 execution_gate="executor_candidate",
             )
         )
     return trades
+
+
+def _settlement_decision_from_payload(
+    payload: dict[str, float | str],
+    *,
+    joint_rule: dict[str, Any],
+) -> str | None:
+    return evaluate_v6_settlement_side(
+        payload,
+        V6JointGateConfig(
+            settlement_threshold=float(joint_rule["settlement_threshold"]),
+            neutral_cap=float(joint_rule.get("neutral_cap", 0.25)),
+            volatility_threshold=float(joint_rule.get("volatility_threshold", 0.60)),
+        ),
+    )
 
 
 def _summarize_trades(trades: list[ReplayTrade]) -> dict[str, Any]:
@@ -518,7 +512,7 @@ def _markdown_report(report: dict[str, Any]) -> str:
         "",
         f"Model run: `{report['model_run']}`",
         "",
-        "## Joint Rule (15M mixed model)",
+        "## Settlement Rule (15M mixed model)",
         "",
         f"- settlement_threshold={report['joint_rule']['settlement_threshold']}",
         f"- neutral_cap={report['joint_rule']['neutral_cap']}",
@@ -529,7 +523,7 @@ def _markdown_report(report: dict[str, Any]) -> str:
         "- Phase 4 min-entry and near-min fresh-edge checks on observed ask + buy slippage",
         "- Seconds-to-expiry window and no-new-entry window",
         "- Round-first: one admitted trade per round slug",
-        "- Observed rollup max-exit gain must clear round-trip cost + EV margin",
+        "- Settlement gate ignores volatility heads; volatility sleeve is evaluated separately in live paper execution",
         "",
         "This replay is closer to live execution than the offline proxy, but it still "
         "does not model complement-token checks, fill failures, or realized account cashflow.",
@@ -540,7 +534,7 @@ def _markdown_report(report: dict[str, Any]) -> str:
         "|---|---:|---:|---:|---:|---:|---|",
     ]
     for split, payload in report["splits"].items():
-        offline = payload["offline_joint_gate"]
+        offline = payload["offline_settlement_gate"]
         restricted = payload["execution_restricted"]
         lines.append(
             f"| {split} | {offline['trade_count']} | {offline['pnl']:.4f} | "

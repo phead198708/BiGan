@@ -4,6 +4,7 @@ from bigan.execution.v6_gate import (
     V6JointGateConfig,
     build_v6_signal_fields,
     evaluate_v6_joint_side,
+    evaluate_v6_settlement_side,
     is_v6_model_version,
     v6_payload_from_snapshot,
 )
@@ -35,6 +36,21 @@ def test_v6_joint_gate_admits_up_side() -> None:
     assert evaluate_v6_joint_side(payload, config) == "UP"
 
 
+def test_v6_settlement_gate_ignores_neutral_and_volatility_heads() -> None:
+    payload = {
+        "model_version": "xgboost-v6",
+        "p_up": 0.64,
+        "p_down": 0.30,
+        "p_neutral": 0.99,
+        "p_vol_up": 0.01,
+        "p_vol_down": 0.99,
+    }
+    config = V6JointGateConfig(settlement_threshold=0.50)
+
+    assert evaluate_v6_settlement_side(payload, config) == "UP"
+    assert evaluate_v6_joint_side(payload, config) is None
+
+
 def test_build_v6_signal_fields_maps_down_token() -> None:
     snapshot = {
         "canonical_symbol": "BTC-15M:btc-updown-15m-1000:UP",
@@ -44,7 +60,7 @@ def test_build_v6_signal_fields_maps_down_token() -> None:
         "p_down": 0.85,
         "p_neutral": 0.05,
         "p_vol_up": 0.10,
-        "p_vol_down": 0.90,
+        "p_vol_down": 0.10,
     }
     config = V6JointGateConfig(
         settlement_threshold=0.50,
@@ -68,8 +84,12 @@ def test_build_v6_signal_fields_maps_down_token() -> None:
     assert fields["outcome_side"] == "DOWN"
     assert fields["token_id"] == "token-down"
     assert fields["v6_joint_side"] == "DOWN"
+    assert fields["p_vol_down"] == 0.10
+    assert fields["market_implied_prob"] == 0.60
+    assert abs(fields["edge"] - 0.25) < 1e-12
     payload = v6_payload_from_snapshot(snapshot, model_version="xgboost-v6")
     assert payload is not None
+    assert evaluate_v6_joint_side(payload, config) is None
 
 
 def test_build_v6_signal_fields_maps_down_snapshot_token() -> None:
@@ -107,3 +127,4 @@ def test_build_v6_signal_fields_maps_down_snapshot_token() -> None:
     assert fields["outcome_side"] == "DOWN"
     assert fields["token_id"] == "token-down"
     assert fields["opposite_token_id"] == "token-up"
+    assert fields["market_implied_prob"] == 0.40

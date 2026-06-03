@@ -7,7 +7,7 @@ Run xgboost-v6 Phase 4 paper/orderbook-only shadow (no live promotion).
 
 This path is evidence-only:
   - orderbook-only execution (PAPER=true, no CLOB orders)
-  - v6 joint gate (settlement + volatility heads) via --entry-gate-mode v6-joint
+  - v6 settlement gate plus separate orderbook-only volatility sleeve
   - account-cashflow reconciliation required before any promotion decision
 
 Prerequisites (local scorer in another terminal):
@@ -119,7 +119,8 @@ echo "[v6-paper-shadow] repo=${REPO_ROOT}"
 echo "[v6-paper-shadow] model_version=${MODEL_VERSION}"
 echo "[v6-paper-shadow] model_json=${MODEL_JSON_PATH}"
 echo "[v6-paper-shadow] market_families=${MARKET_FAMILIES}"
-echo "[v6-paper-shadow] v6_joint_gate=${V6_SETTLEMENT_THRESHOLD}/${V6_NEUTRAL_CAP}/${V6_VOLATILITY_THRESHOLD}"
+echo "[v6-paper-shadow] v6_settlement_gate=${V6_SETTLEMENT_THRESHOLD}"
+echo "[v6-paper-shadow] volatility_reference=${V6_VOLATILITY_THRESHOLD}/${V6_ROUND_TRIP_COST}/${V6_EV_MARGIN}"
 echo "[v6-paper-shadow] paper=true volatility_sleeve=${ENABLE_VOLATILITY_SLEEVE}"
 if [[ -n "${SIGNAL_JSONL_PATH}" ]]; then
   echo "[v6-paper-shadow] signal_source=jsonl path=${SIGNAL_JSONL_PATH}"

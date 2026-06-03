@@ -1,4 +1,4 @@
-"""Live/paper v6 joint-gate helpers for Phase 4 execution."""
+"""Live/paper v6 gate helpers for Phase 4 execution."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from bigan.modeling.xgboost_v6 import joint_decision_from_payload
 
 @dataclass(frozen=True, slots=True)
 class V6JointGateConfig:
-    """Issue #93/#94 settlement + volatility joint gate for live execution."""
+    """Issue #93/#94 v6 gate settings for live execution."""
 
     settlement_threshold: float = 0.50
     neutral_cap: float = 0.25
@@ -107,8 +107,31 @@ def evaluate_v6_joint_side(
     )
 
 
+def evaluate_v6_settlement_side(
+    payload: dict[str, float | str],
+    config: V6JointGateConfig,
+) -> str | None:
+    """Return UP/DOWN when the settlement head alone admits a settlement bet."""
+
+    p_up = float(payload["p_up"])
+    p_down = float(payload["p_down"])
+    if p_up >= p_down and p_up >= config.settlement_threshold:
+        return "UP"
+    if p_down > p_up and p_down >= config.settlement_threshold:
+        return "DOWN"
+    return None
+
+
 def v6_selection_score(payload: dict[str, float | str], side: str) -> float:
-    """Rank competing round signals by admitted-side confidence."""
+    """Rank competing round signals by admitted settlement-side confidence."""
+
+    if side == "UP":
+        return float(payload["p_up"])
+    return float(payload["p_down"])
+
+
+def v6_joint_selection_score(payload: dict[str, float | str], side: str) -> float:
+    """Rank competing opportunities when explicitly evaluating the old joint gate."""
 
     if side == "UP":
         return float(payload["p_up"]) * float(payload["p_vol_up"])
@@ -138,7 +161,7 @@ def build_v6_signal_fields(
     payload = v6_payload_from_snapshot(snapshot, model_version=model_version)
     if payload is None:
         return None
-    side = evaluate_v6_joint_side(payload, config)
+    side = evaluate_v6_settlement_side(payload, config)
     if side is None:
         return None
     canonical_symbol = str(snapshot.get("canonical_symbol") or snapshot.get("symbol") or "")
@@ -173,6 +196,9 @@ def build_v6_signal_fields(
             return None
         token_probability = float(payload["p_down"])
         outcome_canonical = f"{family}:{round_slug}:DOWN"
+    selected_market_implied_prob = (
+        market_implied_prob if side == token_side else 1.0 - market_implied_prob
+    )
     return {
         "event_id": event_id,
         "ts": int(ts),
@@ -183,9 +209,9 @@ def build_v6_signal_fields(
         "outcome_side": side,
         "round_slug": round_slug,
         "round_end_ts": int(round_end_ts),
-        "market_implied_prob": market_implied_prob,
+        "market_implied_prob": selected_market_implied_prob,
         "token_probability": token_probability,
-        "edge": token_probability - market_implied_prob,
+        "edge": token_probability - selected_market_implied_prob,
         "bridged_at": bridged_at,
         "opposite_token_id": down_token_id if side == "UP" else up_token_id,
         "p_up": float(payload["p_up"]),

@@ -1330,7 +1330,7 @@ def _event_filter_reason(
             opposite_token_id=opposite_token_id,
         )
         if fields is None:
-            return "v6_joint_gate_miss"
+            return "v6_settlement_gate_miss"
     return "unparseable_signal"
 
 
@@ -1923,7 +1923,7 @@ def _try_entry(
         _log(
             log_path,
             "entry_skipped",
-            reason="v6_joint_gate_miss",
+            reason="v6_settlement_gate_miss",
             sleeve=sleeve,
             signal=asdict(signal),
             bid=bid,
