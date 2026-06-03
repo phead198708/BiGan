@@ -145,20 +145,30 @@ def build_v6_signal_fields(
     parts = canonical_symbol.split(":")
     if len(parts) < 3:
         return None
-    family, round_slug, _token_side = parts[0], parts[-2], parts[-1].upper()
+    family, round_slug, token_side = parts[0], parts[-2], parts[-1].upper()
+    if token_side not in {"UP", "DOWN"}:
+        return None
     market = snapshot.get("market_implied_prob")
     if market is None:
         return None
     market_implied_prob = float(market)
-    up_token_id = str(snapshot.get("source_symbol") or snapshot.get("token_id") or "")
-    if not up_token_id:
+    source_token_id = str(snapshot.get("source_symbol") or snapshot.get("token_id") or "")
+    if not source_token_id:
         return None
+    if token_side == "UP":
+        up_token_id = source_token_id
+        down_token_id = opposite_token_id
+    else:
+        up_token_id = opposite_token_id
+        down_token_id = source_token_id
     if side == "UP":
         token_id = up_token_id
+        if not token_id:
+            return None
         token_probability = float(payload["p_up"])
         outcome_canonical = f"{family}:{round_slug}:UP"
     else:
-        token_id = opposite_token_id
+        token_id = down_token_id
         if not token_id:
             return None
         token_probability = float(payload["p_down"])
@@ -177,7 +187,7 @@ def build_v6_signal_fields(
         "token_probability": token_probability,
         "edge": token_probability - market_implied_prob,
         "bridged_at": bridged_at,
-        "opposite_token_id": opposite_token_id if side == "UP" else up_token_id,
+        "opposite_token_id": down_token_id if side == "UP" else up_token_id,
         "p_up": float(payload["p_up"]),
         "p_down": float(payload["p_down"]),
         "p_neutral": float(payload["p_neutral"]),

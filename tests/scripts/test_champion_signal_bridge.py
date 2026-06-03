@@ -443,6 +443,149 @@ def test_executor_reads_db_signal_with_opposite_token_id(tmp_path: Path) -> None
     assert events[0].opposite_token_id == "token-down"
 
 
+def test_executor_duckdb_cursor_advances_past_v6_gate_misses(tmp_path: Path) -> None:
+    from bigan.execution.v6_gate import V6JointGateConfig
+
+    db_path = tmp_path / "catalog.duckdb"
+    ts = 1_779_774_400_000
+
+    def snapshot(
+        *,
+        side: str,
+        source_symbol: str,
+        p_up: float,
+        p_down: float,
+        p_vol_up: float,
+        p_vol_down: float,
+    ) -> str:
+        return json.dumps(
+            {
+                "canonical_symbol": f"BTC-15M:btc-updown-15m-1779774300:{side}",
+                "source_symbol": source_symbol,
+                "market_implied_prob": 0.50,
+                "p_up": p_up,
+                "p_down": p_down,
+                "p_neutral": 0.05,
+                "p_vol_up": p_vol_up,
+                "p_vol_down": p_vol_down,
+            }
+        )
+
+    with duckdb.connect(str(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE prediction_events (
+                event_id VARCHAR,
+                ts BIGINT,
+                created_at BIGINT,
+                model_version VARCHAR,
+                prob_up_15m DOUBLE,
+                feature_snapshot_json VARCHAR
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO prediction_events VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "pred-miss-up",
+                    ts,
+                    ts + 1_000,
+                    "xgboost-v6",
+                    0.40,
+                    snapshot(
+                        side="UP",
+                        source_symbol="token-up",
+                        p_up=0.40,
+                        p_down=0.45,
+                        p_vol_up=0.70,
+                        p_vol_down=0.70,
+                    ),
+                ),
+                (
+                    "pred-miss-down",
+                    ts,
+                    ts + 1_001,
+                    "xgboost-v6",
+                    0.40,
+                    snapshot(
+                        side="DOWN",
+                        source_symbol="token-down",
+                        p_up=0.40,
+                        p_down=0.45,
+                        p_vol_up=0.70,
+                        p_vol_down=0.70,
+                    ),
+                ),
+                (
+                    "pred-pass-down",
+                    ts,
+                    ts + 1_002,
+                    "xgboost-v6",
+                    0.10,
+                    snapshot(
+                        side="DOWN",
+                        source_symbol="token-down",
+                        p_up=0.10,
+                        p_down=0.85,
+                        p_vol_up=0.10,
+                        p_vol_down=0.90,
+                    ),
+                ),
+                (
+                    "pred-pass-up-row",
+                    ts,
+                    ts + 1_003,
+                    "xgboost-v6",
+                    0.10,
+                    snapshot(
+                        side="UP",
+                        source_symbol="token-up",
+                        p_up=0.10,
+                        p_down=0.85,
+                        p_vol_up=0.10,
+                        p_vol_down=0.90,
+                    ),
+                ),
+            ],
+        )
+    config = V6JointGateConfig(
+        settlement_threshold=0.50,
+        neutral_cap=0.25,
+        volatility_threshold=0.50,
+        round_trip_cost=0.04,
+        ev_margin=0.01,
+        gain_priors=(("up", 0.30), ("down", 0.30)),
+    )
+
+    first = executor._read_event_batch_after(
+        str(db_path),
+        model_version="xgboost-v6",
+        after_created_at=0,
+        after_event_id="",
+        limit=2,
+        v6_joint_config=config,
+    )
+    second = executor._read_event_batch_after(
+        str(db_path),
+        model_version="xgboost-v6",
+        after_created_at=first.cursor_created_at,
+        after_event_id=first.cursor_event_id,
+        limit=10,
+        v6_joint_config=config,
+    )
+
+    assert first.events == []
+    assert first.rows_scanned == 2
+    assert first.rows_filtered == 2
+    assert first.cursor_event_id == "pred-miss-down"
+    assert first.filter_reasons == {"v6_joint_gate_miss": 2}
+    assert len(second.events) == 1
+    assert second.events[0].outcome_side == "DOWN"
+    assert second.events[0].token_id == "token-down"
+    assert second.events[0].opposite_token_id == "token-up"
+
+
 def test_executor_latency_helpers() -> None:
     event = executor.SignalEvent(
         event_id="pred-1",

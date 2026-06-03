@@ -70,3 +70,40 @@ def test_build_v6_signal_fields_maps_down_token() -> None:
     assert fields["v6_joint_side"] == "DOWN"
     payload = v6_payload_from_snapshot(snapshot, model_version="xgboost-v6")
     assert payload is not None
+
+
+def test_build_v6_signal_fields_maps_down_snapshot_token() -> None:
+    snapshot = {
+        "canonical_symbol": "BTC-15M:btc-updown-15m-1000:DOWN",
+        "source_symbol": "token-down",
+        "market_implied_prob": 0.40,
+        "p_up": 0.10,
+        "p_down": 0.85,
+        "p_neutral": 0.05,
+        "p_vol_up": 0.10,
+        "p_vol_down": 0.90,
+    }
+    config = V6JointGateConfig(
+        settlement_threshold=0.50,
+        neutral_cap=0.25,
+        volatility_threshold=0.50,
+        round_trip_cost=0.04,
+        ev_margin=0.01,
+        gain_priors=(("up", 0.30), ("down", 0.30)),
+    )
+
+    fields = build_v6_signal_fields(
+        event_id="pred-1",
+        ts=1_000,
+        created_at=2_000,
+        snapshot=snapshot,
+        model_version="xgboost-v6",
+        config=config,
+        round_end_ts=1_000_000,
+        opposite_token_id="token-up",
+    )
+
+    assert fields is not None
+    assert fields["outcome_side"] == "DOWN"
+    assert fields["token_id"] == "token-down"
+    assert fields["opposite_token_id"] == "token-up"

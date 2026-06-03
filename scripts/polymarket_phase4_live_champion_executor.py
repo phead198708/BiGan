@@ -87,6 +87,16 @@ class SignalEvent:
     v6_joint_side: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SignalReadBatch:
+    events: list[SignalEvent]
+    cursor_created_at: int
+    cursor_event_id: str
+    rows_scanned: int
+    rows_filtered: int
+    filter_reasons: dict[str, int] = field(default_factory=dict)
+
+
 @dataclass(slots=True)
 class LivePosition:
     event_id: str
@@ -425,7 +435,7 @@ def main() -> int:
 
             try:
                 if signal_jsonl_path is None:
-                    events = _read_events_after(
+                    batch = _read_event_batch_after(
                         args.monitoring_db_path,
                         model_version=args.model_version,
                         after_created_at=cursor_created_at,
@@ -433,9 +443,21 @@ def main() -> int:
                         limit=args.event_limit,
                         v6_joint_config=v6_joint_config,
                     )
-                    if events:
-                        cursor_created_at = events[-1].created_at
-                        cursor_event_id = events[-1].event_id
+                    events = batch.events
+                    if batch.rows_scanned:
+                        cursor_created_at = batch.cursor_created_at
+                        cursor_event_id = batch.cursor_event_id
+                        if batch.rows_filtered:
+                            _log(
+                                log_path,
+                                "signal_rows_filtered",
+                                source="duckdb",
+                                rows_scanned=batch.rows_scanned,
+                                rows_filtered=batch.rows_filtered,
+                                filter_reasons=batch.filter_reasons,
+                                cursor_created_at=cursor_created_at,
+                                cursor_event_id=cursor_event_id,
+                            )
                 else:
                     events, cursor_line_number = _read_signal_jsonl_after(
                         signal_jsonl_path,
@@ -1176,6 +1198,25 @@ def _read_events_after(
     limit: int,
     v6_joint_config: V6JointGateConfig | None = None,
 ) -> list[SignalEvent]:
+    return _read_event_batch_after(
+        db_path,
+        model_version=model_version,
+        after_created_at=after_created_at,
+        after_event_id=after_event_id,
+        limit=limit,
+        v6_joint_config=v6_joint_config,
+    ).events
+
+
+def _read_event_batch_after(
+    db_path: str,
+    *,
+    model_version: str,
+    after_created_at: int,
+    after_event_id: str,
+    limit: int,
+    v6_joint_config: V6JointGateConfig | None = None,
+) -> SignalReadBatch:
     with duckdb.connect(db_path, read_only=True) as conn:
         rows = conn.execute(
             """
@@ -1192,24 +1233,33 @@ def _read_events_after(
             [model_version, after_created_at, after_created_at, after_event_id, limit],
         ).fetchall()
         events: list[SignalEvent] = []
+        filter_reasons: dict[str, int] = {}
+        cursor_created_at = after_created_at
+        cursor_event_id = after_event_id
         for row in rows:
+            cursor_event_id = str(row[0])
+            cursor_created_at = int(row[2])
             snapshot_json = str(row[4])
             try:
                 snapshot = json.loads(snapshot_json)
             except json.JSONDecodeError:
+                _bump(filter_reasons, "invalid_feature_snapshot_json")
                 continue
             if not isinstance(snapshot, dict):
+                _bump(filter_reasons, "invalid_feature_snapshot")
                 continue
             canonical_symbol = str(snapshot.get("canonical_symbol") or snapshot.get("symbol") or "")
             parts = canonical_symbol.split(":")
             if len(parts) < 3:
+                _bump(filter_reasons, "invalid_canonical_symbol")
                 continue
             round_slug = parts[-2]
+            outcome_side = parts[-1].upper()
             opposite_token_id = _opposite_token_id(
                 conn,
                 model_version=model_version,
                 round_slug=round_slug,
-                outcome_side="UP",
+                outcome_side=outcome_side if outcome_side in {"UP", "DOWN"} else "UP",
             )
             parsed = _event_from_row(
                 row,
@@ -1221,10 +1271,67 @@ def _read_events_after(
                 events.append(
                     replace(
                         parsed,
-                        opposite_token_id=opposite_token_id or parsed.opposite_token_id,
+                        opposite_token_id=parsed.opposite_token_id or opposite_token_id,
                     )
                 )
-    return _best_event_per_round(events, entry_gate_mode="v6-joint" if v6_joint_config else "v5-edge")
+            else:
+                _bump(
+                    filter_reasons,
+                    _event_filter_reason(
+                        row,
+                        model_version=model_version,
+                        v6_joint_config=v6_joint_config,
+                        opposite_token_id=opposite_token_id,
+                    ),
+                )
+    best_events = _best_event_per_round(
+        events,
+        entry_gate_mode="v6-joint" if v6_joint_config else "v5-edge",
+    )
+    return SignalReadBatch(
+        events=best_events,
+        cursor_created_at=cursor_created_at,
+        cursor_event_id=cursor_event_id,
+        rows_scanned=len(rows),
+        rows_filtered=max(0, len(rows) - len(events)),
+        filter_reasons=filter_reasons,
+    )
+
+
+def _event_filter_reason(
+    row: tuple[Any, ...],
+    *,
+    model_version: str,
+    v6_joint_config: V6JointGateConfig | None,
+    opposite_token_id: str,
+) -> str:
+    _event_id, _ts, _created_at, _prob_up_15m, snapshot_json = row
+    try:
+        snapshot = json.loads(str(snapshot_json))
+    except json.JSONDecodeError:
+        return "invalid_feature_snapshot_json"
+    if not isinstance(snapshot, dict):
+        return "invalid_feature_snapshot"
+    canonical_symbol = str(snapshot.get("canonical_symbol") or snapshot.get("symbol") or "")
+    parts = canonical_symbol.split(":")
+    if len(parts) < 3:
+        return "invalid_canonical_symbol"
+    if _round_end_ts(parts[-2]) is None:
+        return "invalid_round_slug"
+    if v6_joint_config is not None and is_v6_model_version(model_version):
+        fields = build_v6_signal_fields(
+            event_id="probe",
+            ts=0,
+            created_at=0,
+            snapshot=snapshot,
+            model_version=model_version,
+            config=v6_joint_config,
+            round_end_ts=1,
+            opposite_token_id=opposite_token_id,
+        )
+        if fields is None:
+            return "v6_joint_gate_miss"
+    return "unparseable_signal"
 
 
 def _latest_signal_jsonl_cursor(path: Path, *, start: str) -> int:
