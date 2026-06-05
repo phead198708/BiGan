@@ -8,6 +8,7 @@ import os
 import platform
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -49,9 +50,7 @@ def run_xgboost_serving_readiness(
     if any(size <= 0 for size in batch_sizes):
         raise ValueError("batch_sizes values must be positive")
 
-    from bigan.modeling import load_xgboost_v1_model
-
-    model = load_xgboost_v1_model(model_path)
+    model = _load_serving_model(model_path)
     schema = load_feature_schema_artifact(feature_schema_path)
     rows = _load_feature_rows(Path(dataset_dir), split=split, schema=schema)
     single_rows = _repeat_rows(rows, sample_size)
@@ -189,9 +188,7 @@ def _benchmark_single_latency(
         start = time.perf_counter_ns()
         try:
             validated = validate_features_fail_closed(row, schema)
-            probability = model.predict_proba(validated)
-            if probability < 0.0 or probability > 1.0:
-                raise ValueError("model returned probability outside [0, 1]")
+            _validate_prediction_output(model.predict_one(validated))
         except Exception:
             error_count += 1
         finally:
@@ -215,10 +212,12 @@ def _benchmark_batch(
     batch = _repeat_rows(rows, batch_size)
     start = time.perf_counter_ns()
     validated = [validate_features_fail_closed(row, schema) for row in batch]
-    probabilities = model.predict_proba_many(validated)
+    probabilities = model.predict_many(validated)
     elapsed_ms = (time.perf_counter_ns() - start) / 1_000_000.0
     if len(probabilities) != batch_size:
         raise ValueError("batch inference returned unexpected row count")
+    for probability in probabilities:
+        _validate_prediction_output(probability)
     return {
         "batch_size": batch_size,
         "elapsed_ms": elapsed_ms,
@@ -228,6 +227,75 @@ def _benchmark_batch(
 
 def _repeat_rows(rows: Sequence[dict[str, Any]], size: int) -> list[dict[str, Any]]:
     return [dict(rows[idx % len(rows)]) for idx in range(size)]
+
+
+@dataclass(frozen=True, slots=True)
+class _ServingModel:
+    raw_model: Any
+    model_version: str
+    payload_mode: str
+
+    def predict_one(self, row: dict[str, Any]) -> Any:
+        if self.payload_mode == "v6_payload":
+            return self.raw_model.predict_payload(row)
+        return self.raw_model.predict_proba(row)
+
+    def predict_many(self, rows: list[dict[str, Any]]) -> list[Any]:
+        if self.payload_mode == "v6_payload":
+            return list(self.raw_model.predict_payload_many(rows))
+        return list(self.raw_model.predict_proba_many(rows))
+
+
+def _load_serving_model(model_path: Path | str) -> _ServingModel:
+    path = Path(model_path)
+    artifact: dict[str, Any] = {}
+    try:
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        artifact = {}
+    if artifact.get("schema_version") == "xgboost_v6_multihead_v1":
+        from bigan.modeling import load_xgboost_v6_model
+
+        model = load_xgboost_v6_model(path)
+        return _ServingModel(
+            raw_model=model,
+            model_version=model.model_version,
+            payload_mode="v6_payload",
+        )
+
+    from bigan.modeling import load_xgboost_v1_model
+
+    model = load_xgboost_v1_model(path)
+    return _ServingModel(
+        raw_model=model,
+        model_version=model.model_version,
+        payload_mode="probability",
+    )
+
+
+def _validate_prediction_output(output: Any) -> None:
+    if isinstance(output, int | float) and not isinstance(output, bool):
+        _validate_probability(float(output), name="probability")
+        return
+    if not isinstance(output, dict):
+        raise ValueError("model returned unsupported prediction payload")
+
+    required = ("p_up", "p_down", "p_neutral", "p_vol_up", "p_vol_down")
+    missing = [name for name in required if name not in output]
+    if missing:
+        raise ValueError(f"model payload missing probability fields: {missing}")
+    for name in required:
+        _validate_probability(float(output[name]), name=name)
+    settlement_sum = (
+        float(output["p_up"]) + float(output["p_down"]) + float(output["p_neutral"])
+    )
+    if not math.isclose(settlement_sum, 1.0, rel_tol=1e-6, abs_tol=1e-6):
+        raise ValueError("settlement probabilities do not sum to 1")
+
+
+def _validate_probability(value: float, *, name: str) -> None:
+    if not math.isfinite(value) or value < 0.0 or value > 1.0:
+        raise ValueError(f"model returned {name} outside [0, 1]")
 
 
 def _fallback_readiness(
