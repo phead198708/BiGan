@@ -35,6 +35,7 @@ from bigan.features import (
     run_feature_quality_sql_checks,
     run_low_latency_feature_queue_batch,
 )
+from bigan.execution.v6_gate import V6JointGateConfig
 from bigan.labels import run_label_batch
 from bigan.labels.generation import DOWN_LABEL_KIND, generate_labels_15m_v1
 from bigan.mlops import (
@@ -6213,6 +6214,33 @@ def predictions_v1(
     calibration_path: Path | None = PREDICTION_CALIBRATION_PATH_OPTION,
     monitoring_db_path: Path | None = PREDICTION_MONITORING_DB_PATH_OPTION,
     write_monitoring_events: bool = PREDICTION_WRITE_MONITORING_EVENTS_OPTION,
+    signal_jsonl_output_path: Path | None = typer.Option(
+        None,
+        help=(
+            "Optional executor-ready JSONL signal queue path. When set, prediction "
+            "rows are appended directly without rereading prediction_events."
+        ),
+    ),
+    signal_jsonl_market_families: str = typer.Option(
+        "BTC-15M",
+        help="Comma-separated market families to emit to --signal-jsonl-output-path.",
+    ),
+    signal_jsonl_outcome_side: str = typer.Option(
+        "ANY",
+        help="Outcome side to emit to --signal-jsonl-output-path: UP, DOWN, ANY, or a subset.",
+    ),
+    signal_jsonl_max_event_age_seconds: float | None = typer.Option(
+        None,
+        help=(
+            "Only emit queue signals whose event timestamp is newer than this many seconds. "
+            "Useful for queue-first live shadow runs."
+        ),
+    ),
+    v6_settlement_threshold: float = typer.Option(0.50, help="v6 signal queue settlement threshold."),
+    v6_neutral_cap: float = typer.Option(0.25, help="v6 signal queue neutral cap."),
+    v6_volatility_threshold: float = typer.Option(0.60, help="v6 signal queue volatility threshold."),
+    v6_round_trip_cost: float = typer.Option(0.072, help="v6 signal queue round-trip cost."),
+    v6_ev_margin: float = typer.Option(0.01, help="v6 signal queue EV margin."),
     lookback_minutes: float | None = typer.Option(
         None,
         help="Only score features newer than now minus this many minutes.",
@@ -6247,6 +6275,8 @@ def predictions_v1(
     """Generate predictions table rows from features_15m_v1."""
     if lookback_minutes is not None and lookback_minutes <= 0:
         raise typer.BadParameter("--lookback-minutes must be positive")
+    if signal_jsonl_max_event_age_seconds is not None and signal_jsonl_max_event_age_seconds <= 0:
+        raise typer.BadParameter("--signal-jsonl-max-event-age-seconds must be positive")
     if lookback_minutes is not None and since_ms is not None:
         raise typer.BadParameter("pass either --lookback-minutes or --since-ms, not both")
     settings = IngestionSettings()
@@ -6256,6 +6286,14 @@ def predictions_v1(
         if lookback_minutes is not None
         else since_ms
     )
+    signal_families = frozenset(
+        family.strip().upper()
+        for family in signal_jsonl_market_families.split(",")
+        if family.strip()
+    )
+    if signal_jsonl_output_path is not None and not signal_families:
+        raise typer.BadParameter("--signal-jsonl-market-families must not be empty")
+    signal_sides = _normalise_signal_jsonl_outcome_side(signal_jsonl_outcome_side)
     report = run_prediction_batch(
         settings.warehouse_dir,
         model_path,
@@ -6267,8 +6305,31 @@ def predictions_v1(
         canonical_symbol_like=canonical_symbol_like,
         skip_existing_monitoring_events=skip_existing_monitoring_events,
         skip_existing_predictions=skip_existing_predictions,
+        signal_jsonl_output_path=signal_jsonl_output_path,
+        signal_jsonl_market_families=signal_families,
+        signal_jsonl_outcome_sides=signal_sides,
+        signal_jsonl_max_event_age_seconds=signal_jsonl_max_event_age_seconds,
+        signal_jsonl_v6_joint_config=V6JointGateConfig(
+            settlement_threshold=v6_settlement_threshold,
+            neutral_cap=v6_neutral_cap,
+            volatility_threshold=v6_volatility_threshold,
+            round_trip_cost=v6_round_trip_cost,
+            ev_margin=v6_ev_margin,
+        ),
     )
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
+def _normalise_signal_jsonl_outcome_side(value: str | None) -> frozenset[str] | None:
+    side = str(value or "ANY").strip().upper()
+    if not side or side == "ANY":
+        return None
+    values = frozenset(part.strip().upper() for part in side.split(",") if part.strip())
+    if not values or not values <= {"UP", "DOWN"}:
+        raise typer.BadParameter(
+            "--signal-jsonl-outcome-side must be UP, DOWN, ANY, or a comma-separated subset"
+        )
+    return values
 
 
 @app.command("signals-tail")

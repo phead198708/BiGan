@@ -69,6 +69,8 @@ def main() -> int:
         near_min_seconds_to_expiry=args.near_min_seconds_to_expiry,
         edge_threshold=-999.0,
         settlement_edge_threshold=0.0,
+        settlement_min_confidence=args.settlement_min_confidence,
+        max_signal_age_seconds=None,
     )
     config = json.loads(Path(args.model_config_path).read_text(encoding="utf-8"))
     round_trip_cost = float(config.get("round_trip_cost", 0.072))
@@ -106,6 +108,7 @@ def main() -> int:
             "no_new_entry_before_expiry_seconds": args.no_new_entry_before_expiry_seconds,
             "buy_slippage": args.buy_slippage,
             "settlement_min_edge_after_cost": settlement_min_edge_after_cost,
+            "settlement_min_confidence": policy.settlement_min_confidence,
             "settlement_price_gate_mode": "cost_edge_only",
             "round_first_per_round_slug": True,
             "require_observed_exit_path": False,
@@ -142,6 +145,8 @@ def main() -> int:
                 near_min_seconds_to_expiry=policy.near_min_seconds_to_expiry,
                 edge_threshold=policy.edge_threshold,
                 settlement_edge_threshold=settlement_min_edge_after_cost,
+                settlement_min_confidence=policy.settlement_min_confidence,
+                max_signal_age_seconds=None,
             ),
             buy_slippage=args.buy_slippage,
             min_seconds_to_expiry=args.min_seconds_to_expiry,
@@ -207,6 +212,12 @@ def _parse_args() -> argparse.Namespace:
             "Minimum p_side - worst_price required after observed ask + slippage. "
             "Defaults to round_trip_cost + ev_margin from the model config."
         ),
+    )
+    parser.add_argument(
+        "--settlement-min-confidence",
+        type=float,
+        default=0.80,
+        help="Minimum selected p_up/p_down required for execution-restricted settlement replay.",
     )
     parser.add_argument("--output-json-path", default="")
     parser.add_argument("--report-path", default="")
@@ -388,6 +399,7 @@ def _collect_execution_restricted_trades(
         skip_reason = settlement_cost_edge_skip_reason(
             fresh_edge_at_worst=token_probability - worst_price,
             policy=policy,
+            settlement_confidence=token_probability,
         )
         if skip_reason is not None:
             _bump(gate_counts, skip_reason)
@@ -561,6 +573,7 @@ def _markdown_report(report: dict[str, Any]) -> str:
         "",
         "- Settlement entries use observed ask + buy slippage for cost-aware edge only",
         f"- Cost-aware settlement edge: p_side - worst_price >= {report['execution_policy']['settlement_min_edge_after_cost']}",
+        f"- Settlement min confidence: p_side >= {report['execution_policy']['settlement_min_confidence']}",
         "- Seconds-to-expiry window and no-new-entry window",
         "- Round-first: one admitted trade per round slug",
         "- Settlement gate ignores volatility heads; volatility sleeve is evaluated separately in live paper execution",

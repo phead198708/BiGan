@@ -412,6 +412,52 @@ def test_executor_reads_bridged_signal_jsonl(tmp_path: Path) -> None:
     assert events[0].opposite_token_id == "token-down"
 
 
+def test_executor_trusts_executor_ready_v6_volatility_jsonl_payload(tmp_path: Path) -> None:
+    from bigan.execution.v6_gate import V6JointGateConfig
+
+    queue = tmp_path / "signals.jsonl"
+    payload = {
+        "event_id": "pred-v6-vol",
+        "ts": 1_779_774_400_000,
+        "created_at": 1_779_774_410_000,
+        "model_version": "xgboost-v6",
+        "prob_up_15m": 0.41,
+        "canonical_symbol": "BTC-15M:btc-updown-15m-1779774300:DOWN",
+        "token_id": "token-down",
+        "outcome_side": "DOWN",
+        "round_slug": "btc-updown-15m-1779774300",
+        "round_end_ts": 1_779_775_200_000,
+        "market_implied_prob": 0.60,
+        "token_probability": 0.62,
+        "edge": 0.02,
+        "bridged_at": 1_779_774_411_000,
+        "opposite_token_id": "token-up",
+        "p_up": 0.41,
+        "p_down": 0.47,
+        "p_neutral": 0.12,
+        "p_vol_up": 0.56,
+        "p_vol_down": 0.62,
+        "v6_joint_side": None,
+    }
+    queue.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    events, _cursor = executor._read_signal_jsonl_after(
+        queue,
+        after_line_number=0,
+        model_version="xgboost-v6",
+        limit=10,
+        v6_joint_config=V6JointGateConfig(volatility_threshold=0.60),
+        entry_gate_mode="v6-joint",
+    )
+
+    assert len(events) == 1
+    assert events[0].outcome_side == "DOWN"
+    assert events[0].token_id == "token-down"
+    assert events[0].token_probability == pytest.approx(0.62)
+    assert events[0].p_vol_down == pytest.approx(0.62)
+    assert events[0].v6_joint_side is None
+
+
 def test_executor_reads_db_signal_with_opposite_token_id(tmp_path: Path) -> None:
     db_path = tmp_path / "catalog.duckdb"
     ts = 1_779_774_400_000
@@ -783,6 +829,40 @@ def test_executor_starts_jsonl_cursor_at_tail(tmp_path: Path) -> None:
 
     assert executor._latest_signal_jsonl_cursor(queue, start="tail") == 2
     assert executor._latest_signal_jsonl_cursor(queue, start="beginning") == 0
+
+
+def test_executor_resets_jsonl_cursor_after_queue_rotation(tmp_path: Path) -> None:
+    queue = tmp_path / "signals.jsonl"
+    queue.write_text(
+        json.dumps(
+            {
+                "event_id": "pred-new-round",
+                "ts": 1_000,
+                "created_at": 2_000,
+                "prob_up_15m": 0.91,
+                "canonical_symbol": "BTC-15M:btc-updown-15m-1779775200:UP",
+                "token_id": "token-up",
+                "outcome_side": "UP",
+                "round_slug": "btc-updown-15m-1779775200",
+                "round_end_ts": 1_779_775_200_000,
+                "market_implied_prob": 0.50,
+                "token_probability": 0.91,
+                "edge": 0.41,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    events, cursor = executor._read_signal_jsonl_after(
+        queue,
+        after_line_number=5,
+        model_version="xgboost-v5",
+        limit=10,
+    )
+
+    assert cursor == 1
+    assert [event.event_id for event in events] == ["pred-new-round"]
 
 
 def test_executor_exit_holds_when_orderbook_is_unavailable(tmp_path: Path, monkeypatch) -> None:
@@ -1720,9 +1800,9 @@ def test_v6_joint_settlement_gate_logs_cost_edge_for_paper_fill(tmp_path: Path) 
         position_manager=manager,
         signal=_signal(
             edge=0.004,
-            token_probability=0.61,
-            p_up=0.61,
-            p_down=0.35,
+            token_probability=0.81,
+            p_up=0.81,
+            p_down=0.15,
             p_neutral=0.04,
             p_vol_up=0.55,
             p_vol_down=0.45,
@@ -1750,10 +1830,13 @@ def test_v6_joint_settlement_gate_logs_cost_edge_for_paper_fill(tmp_path: Path) 
 
     assert position is not None
     assert evaluated["raw_settlement_edge"] == pytest.approx(0.004)
-    assert evaluated["fresh_edge_at_worst"] == pytest.approx(0.09)
-    assert evaluated["gate_evaluation"]["settlement_edge"] == pytest.approx(0.09)
+    assert evaluated["fresh_edge_at_worst"] == pytest.approx(0.31)
+    assert evaluated["gate_evaluation"]["settlement_edge"] == pytest.approx(0.31)
+    assert evaluated["max_acceptable_price"] == pytest.approx(0.72)
+    assert evaluated["order_limit_price"] == pytest.approx(0.52)
     assert evaluated["gate_evaluation"]["settlement_gate_passed"] is True
-    assert filled["gate_evaluation"]["settlement_edge"] == pytest.approx(0.09)
+    assert position.fill_price == pytest.approx(0.50)
+    assert filled["gate_evaluation"]["settlement_edge"] == pytest.approx(0.31)
     assert filled["gate_evaluation"]["settlement_gate_passed"] is True
 
 
@@ -1766,9 +1849,9 @@ def test_v6_joint_settlement_entry_ignores_legacy_min_entry_price(tmp_path: Path
         position_manager=manager,
         signal=_signal(
             edge=0.49,
-            token_probability=0.78,
-            p_up=0.78,
-            p_down=0.18,
+            token_probability=0.82,
+            p_up=0.82,
+            p_down=0.14,
             p_neutral=0.04,
             p_vol_up=0.10,
             p_vol_down=0.10,
@@ -1795,10 +1878,54 @@ def test_v6_joint_settlement_entry_ignores_legacy_min_entry_price(tmp_path: Path
 
     assert position is not None
     assert position.sleeve == "settlement"
-    assert position.fill_price == pytest.approx(0.27)
-    assert evaluated["worst_price"] == pytest.approx(0.27)
-    assert evaluated["fresh_edge_at_worst"] == pytest.approx(0.51)
-    assert filled["gate_evaluation"]["settlement_edge"] == pytest.approx(0.51)
+    assert position.fill_price == pytest.approx(0.25)
+    assert evaluated["worst_price"] == pytest.approx(0.25)
+    assert evaluated["fresh_edge_at_worst"] == pytest.approx(0.57)
+    assert evaluated["max_acceptable_price"] == pytest.approx(0.73)
+    assert evaluated["order_limit_price"] == pytest.approx(0.27)
+    assert filled["gate_evaluation"]["settlement_edge"] == pytest.approx(0.57)
+
+
+def test_v6_joint_settlement_entry_skips_after_confidence_peak_drop(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+
+    position = executor._try_entry(
+        client=_VolatilityPaperClient(),
+        position_manager=_OpenPositionManager(),
+        signal=_signal(
+            edge=0.16,
+            token_probability=0.83,
+            p_up=0.83,
+            p_down=0.14,
+            p_neutral=0.03,
+            p_vol_up=0.10,
+            p_vol_down=0.10,
+            v6_joint_side="UP",
+        ),
+        log_path=log_path,
+        max_position_size_usdc=1.0,
+        entry_policy=executor.Phase4EntryPolicy(
+            settlement_edge_threshold=0.082,
+            settlement_min_confidence=0.80,
+            settlement_peak_confidence_drop_tolerance=0.05,
+        ),
+        seconds_to_expiry=600.0,
+        buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
+        sleeve="settlement",
+        paper=True,
+        entry_gate_mode="v6-joint",
+        settlement_peak_confidence=0.94,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    skipped = rows[-1]
+
+    assert position is None
+    assert skipped["event"] == "entry_skipped"
+    assert skipped["reason"] == "settlement_confidence_peak_drop"
+    assert skipped["settlement_peak_confidence"] == pytest.approx(0.94)
+    assert skipped["settlement_peak_confidence_drop_tolerance"] == pytest.approx(0.05)
 
 
 def test_executor_skips_complementary_entry_below_min_price(tmp_path: Path) -> None:
@@ -1896,6 +2023,346 @@ def test_executor_opposite_signal_can_exit_without_reverse_entry(
     assert posted["dust_amount"] > 0
     assert filled["reason"] == "opposite_side_exit_correction"
     assert filled["account_cashflow_reconciliation_required"] is True
+
+
+def test_settlement_reversal_exit_requires_hysteresis_then_sells(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(executor, "_now_ms", lambda: 10_000)
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position(sleeve="settlement")
+    position.paper = True
+    position.entry_p_up = 0.91
+    position.entry_p_down = 0.04
+    signal = _signal(
+        event_id="pred-strong-down",
+        side="DOWN",
+        token_id="token-down",
+        token_probability=0.92,
+        p_up=0.05,
+        p_down=0.92,
+        p_neutral=0.03,
+        p_vol_up=0.10,
+        p_vol_down=0.10,
+        round_end_ts=300_000,
+    )
+    config = executor.SettlementExitConfig(
+        allow_mid_round_exit=True,
+        reversal_min_confidence=0.80,
+        reversal_hysteresis_bars=2,
+    )
+    manager = _PositionManager()
+
+    first = executor._maybe_settlement_signal_exit(
+        client=_SellClient(),
+        position_manager=manager,
+        position=position,
+        signal=signal,
+        log_path=log_path,
+        config=config,
+        v6_joint_config=executor.V6JointGateConfig(settlement_threshold=0.50),
+        signal_age_seconds=9.0,
+        max_signal_age_seconds=180.0,
+        seconds_to_expiry=290.0,
+        opposite_exit_min_seconds_to_expiry=120.0,
+        sell_slippage=0.01,
+    )
+    second = executor._maybe_settlement_signal_exit(
+        client=_SellClient(),
+        position_manager=manager,
+        position=position,
+        signal=signal,
+        log_path=log_path,
+        config=config,
+        v6_joint_config=executor.V6JointGateConfig(settlement_threshold=0.50),
+        signal_age_seconds=9.0,
+        max_signal_age_seconds=180.0,
+        seconds_to_expiry=290.0,
+        opposite_exit_min_seconds_to_expiry=120.0,
+        sell_slippage=0.01,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert first is None
+    assert second == (
+        "settlement_reversal_exit",
+        executor.SellResult(status="filled", realized_pnl=0.10, account_cash_pnl=0.10),
+    )
+    assert manager.closed == [("phase4-round-1-UP", 0.59)]
+    assert any(
+        row["event"] == "settlement_reversal_exit_skipped"
+        and row["reason"] == "hysteresis_wait"
+        for row in rows
+    )
+    assert rows[-1]["event"] == "settlement_reversal_exit_filled"
+
+
+def test_settlement_confidence_decay_exit_sells_on_fresh_regime_shift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(executor, "_now_ms", lambda: 10_000)
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position(sleeve="settlement")
+    position.paper = True
+    position.entry_p_up = 0.90
+    position.entry_p_down = 0.05
+    signal = _signal(
+        event_id="pred-decay-down",
+        side="DOWN",
+        token_id="token-down",
+        token_probability=0.82,
+        p_up=0.16,
+        p_down=0.82,
+        p_neutral=0.02,
+        p_vol_up=0.10,
+        p_vol_down=0.10,
+        round_end_ts=300_000,
+    )
+
+    result = executor._maybe_settlement_signal_exit(
+        client=_SellClient(),
+        position_manager=_PositionManager(),
+        position=position,
+        signal=signal,
+        log_path=log_path,
+        config=executor.SettlementExitConfig(confidence_decay_enabled=True),
+        v6_joint_config=executor.V6JointGateConfig(settlement_threshold=0.50),
+        signal_age_seconds=9.0,
+        max_signal_age_seconds=180.0,
+        seconds_to_expiry=290.0,
+        opposite_exit_min_seconds_to_expiry=120.0,
+        sell_slippage=0.01,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert result == (
+        "settlement_confidence_decay_exit",
+        executor.SellResult(status="filled", realized_pnl=0.10, account_cash_pnl=0.10),
+    )
+    evaluated = next(
+        row for row in rows if row["event"] == "settlement_confidence_decay_exit_evaluated"
+    )
+    assert evaluated["below_floor"] is True
+    assert evaluated["below_delta"] is True
+    assert evaluated["regime_shift"] is True
+    assert evaluated["opposite_confidence_passed"] is True
+    assert rows[-1]["event"] == "settlement_confidence_decay_exit_filled"
+
+
+def test_settlement_confidence_decay_exit_ignores_weak_regime_shift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(executor, "_now_ms", lambda: 10_000)
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position(sleeve="settlement")
+    position.paper = True
+    position.entry_p_up = 0.90
+    position.entry_p_down = 0.05
+    signal = _signal(
+        event_id="pred-weak-down",
+        side="DOWN",
+        token_id="token-down",
+        token_probability=0.58,
+        p_up=0.40,
+        p_down=0.58,
+        p_neutral=0.02,
+        p_vol_up=0.10,
+        p_vol_down=0.10,
+        round_end_ts=300_000,
+    )
+
+    result = executor._maybe_settlement_signal_exit(
+        client=_SellClient(),
+        position_manager=_PositionManager(),
+        position=position,
+        signal=signal,
+        log_path=log_path,
+        config=executor.SettlementExitConfig(confidence_decay_enabled=True),
+        v6_joint_config=executor.V6JointGateConfig(settlement_threshold=0.50),
+        signal_age_seconds=9.0,
+        max_signal_age_seconds=180.0,
+        seconds_to_expiry=290.0,
+        opposite_exit_min_seconds_to_expiry=120.0,
+        sell_slippage=0.01,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    evaluated = next(
+        row for row in rows if row["event"] == "settlement_confidence_decay_exit_evaluated"
+    )
+
+    assert result is None
+    assert evaluated["below_floor"] is True
+    assert evaluated["below_delta"] is True
+    assert evaluated["regime_shift"] is True
+    assert evaluated["opposite_confidence_passed"] is False
+    assert evaluated["should_exit"] is False
+
+
+def test_settlement_price_stop_exit_sells_on_bid_breach(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position(sleeve="settlement")
+    position.paper = True
+    position.entry_price = 0.75
+    position.fill_price = 0.75
+
+    result = executor._maybe_settlement_price_stop_exit(
+        client=_SellClient(),
+        position_manager=_PositionManager(),
+        position=position,
+        log_path=log_path,
+        seconds_to_expiry=300.0,
+        config=executor.SettlementExitConfig(
+            price_stop_enabled=True,
+            stop_price_delta=0.10,
+            stop_loss_usdc=0.50,
+            stop_min_seconds_to_expiry=120.0,
+        ),
+        sell_slippage=0.01,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert result == executor.SellResult(status="filled", realized_pnl=0.10, account_cash_pnl=0.10)
+    evaluated = next(row for row in rows if row["event"] == "settlement_stop_exit_evaluated")
+    assert evaluated["price_breach"] is True
+    assert rows[-1]["event"] == "settlement_stop_exit_filled"
+
+
+def test_settlement_price_stop_same_side_confirmation_veto_holds(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(executor, "_now_ms", lambda: 5_000)
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position(sleeve="settlement")
+    position.paper = True
+    position.entry_price = 0.75
+    position.fill_price = 0.75
+    signal = _signal(
+        event_id="pred-confirm-up",
+        side="UP",
+        token_id="token-up",
+        token_probability=0.86,
+        p_up=0.86,
+        p_down=0.10,
+        p_neutral=0.04,
+        p_vol_up=0.10,
+        p_vol_down=0.10,
+        created_at=3_000,
+    )
+    config = executor.SettlementExitConfig(
+        price_stop_enabled=True,
+        stop_price_delta=0.10,
+        stop_loss_usdc=0.50,
+        stop_min_seconds_to_expiry=120.0,
+        price_stop_same_side_confirmation_veto_enabled=True,
+        price_stop_same_side_confirmation_min_confidence=0.80,
+        price_stop_same_side_confirmation_max_age_seconds=180.0,
+    )
+    client = _SellClient()
+    manager = _PositionManager()
+
+    recorded = executor._record_settlement_same_side_confirmation(
+        position=position,
+        signal=signal,
+        log_path=log_path,
+        config=config,
+        signal_age_seconds=2.0,
+        max_signal_age_seconds=180.0,
+    )
+    result = executor._maybe_settlement_price_stop_exit(
+        client=client,
+        position_manager=manager,
+        position=position,
+        log_path=log_path,
+        seconds_to_expiry=300.0,
+        config=config,
+        sell_slippage=0.01,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    skipped = next(
+        row
+        for row in rows
+        if row["event"] == "settlement_stop_exit_skipped"
+        and row["reason"] == "same_side_confirmation_veto"
+    )
+    assert recorded is True
+    assert result is None
+    assert manager.closed == []
+    assert client.created_orders == []
+    assert position.settlement_same_side_confirmation_event_id == "pred-confirm-up"
+    assert skipped["same_side_confirmation"]["confidence"] == 0.86
+
+
+def test_settlement_price_stop_same_side_confirmation_veto_expires(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(executor, "_now_ms", lambda: 10_000)
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position(sleeve="settlement")
+    position.paper = True
+    position.entry_price = 0.75
+    position.fill_price = 0.75
+    signal = _signal(
+        event_id="pred-confirm-up",
+        side="UP",
+        token_id="token-up",
+        token_probability=0.86,
+        p_up=0.86,
+        p_down=0.10,
+        p_neutral=0.04,
+        p_vol_up=0.10,
+        p_vol_down=0.10,
+        created_at=3_000,
+    )
+    config = executor.SettlementExitConfig(
+        price_stop_enabled=True,
+        stop_price_delta=0.10,
+        stop_loss_usdc=0.50,
+        stop_min_seconds_to_expiry=120.0,
+        price_stop_same_side_confirmation_veto_enabled=True,
+        price_stop_same_side_confirmation_min_confidence=0.80,
+        price_stop_same_side_confirmation_max_age_seconds=1.0,
+    )
+    manager = _PositionManager()
+
+    recorded = executor._record_settlement_same_side_confirmation(
+        position=position,
+        signal=signal,
+        log_path=log_path,
+        config=config,
+        signal_age_seconds=2.0,
+        max_signal_age_seconds=180.0,
+    )
+    result = executor._maybe_settlement_price_stop_exit(
+        client=_SellClient(),
+        position_manager=manager,
+        position=position,
+        log_path=log_path,
+        seconds_to_expiry=300.0,
+        config=config,
+        sell_slippage=0.01,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert recorded is True
+    assert result == executor.SellResult(status="filled", realized_pnl=0.10, account_cash_pnl=0.10)
+    assert manager.closed == [("phase4-round-1-UP", 0.59)]
+    assert rows[-1]["event"] == "settlement_stop_exit_filled"
 
 
 def test_executor_matched_sell_without_trade_confirmation_is_pending(
@@ -2081,6 +2548,42 @@ def test_executor_opposite_signal_holds_near_expiry(
 class _UnavailableBookClient:
     def get_order_book(self, token_id: str):  # noqa: ANN201
         raise RuntimeError(f"No orderbook exists for the requested token id: {token_id}")
+
+
+class _RestBookResponse:
+    def __enter__(self):  # noqa: ANN204
+        return self
+
+    def __exit__(self, exc_type, exc, tb):  # noqa: ANN001, ANN201
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps(
+            {
+                "bids": [{"price": "0.44"}, {"price": "0.48"}],
+                "asks": [{"price": "0.53"}, {"price": "0.51"}],
+            }
+        ).encode("utf-8")
+
+
+def test_best_bid_ask_falls_back_to_rest_book(monkeypatch) -> None:
+    requests = []
+
+    def fake_urlopen(req, *, timeout):  # noqa: ANN001, ANN202
+        requests.append((req.full_url, timeout, dict(req.header_items())))
+        return _RestBookResponse()
+
+    monkeypatch.setenv("POLYMARKET_ORDERBOOK_REST_FALLBACK", "true")
+    monkeypatch.setenv("POLYMARKET_ORDERBOOK_REST_TIMEOUT_SECONDS", "1.5")
+    monkeypatch.setenv("POLYMARKET_HOST", "https://clob.polymarket.test")
+    monkeypatch.setattr(executor.request, "urlopen", fake_urlopen)
+
+    assert executor._best_bid_ask(_UnavailableBookClient(), "token-up") == (0.48, 0.51)
+    assert len(requests) == 1
+    url, timeout, headers = requests[0]
+    assert url == "https://clob.polymarket.test/book?token_id=token-up"
+    assert timeout == 1.5
+    assert headers["Accept"] == "application/json"
 
 
 class _WeakBidClient:
@@ -2338,11 +2841,12 @@ def _signal(
     p_vol_down: float | None = None,
     v6_joint_side: str | None = None,
     round_end_ts: int = 1_779_775_200_000,
+    created_at: int = 2_000,
 ):
     return executor.SignalEvent(
         event_id=event_id,
         ts=1_000,
-        created_at=2_000,
+        created_at=created_at,
         prob_up_15m=0.98,
         canonical_symbol=f"BTC-15M:round-1:{side}",
         token_id=token_id,

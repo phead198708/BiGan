@@ -25,6 +25,17 @@ Environment overrides:
   SCORING_CANONICAL_SYMBOL_LIKE
                              Optional canonical_symbol SQL LIKE filter for
                              low-latency scoped scoring, e.g. BTC-15M:%.
+  SIGNAL_JSONL_OUTPUT_PATH   Optional executor-ready signal JSONL queue written
+                             directly by predictions-v1.
+  SIGNAL_JSONL_MARKET_FAMILIES
+                             Families to emit to SIGNAL_JSONL_OUTPUT_PATH.
+                             Default: BTC-15M
+  SIGNAL_JSONL_OUTCOME_SIDE  Outcome side emitted to SIGNAL_JSONL_OUTPUT_PATH:
+                             UP, DOWN, ANY, or a comma-separated subset.
+                             Default: ANY
+  SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS
+                             Optional max event age, in seconds, for queue
+                             emission. Stale signals are not appended.
   LOW_LATENCY_FEATURE_QUEUE_ENABLED
                              Consume BTC-15M features directly from a raw JSONL
                              queue instead of raw ETL + batch recompute.
@@ -169,6 +180,15 @@ LOOKBACK_MINUTES="${LOOKBACK_MINUTES:-30}"
 FEATURE_LOOKBACK_MINUTES="${FEATURE_LOOKBACK_MINUTES:-${LOOKBACK_MINUTES}}"
 PREDICTION_LOOKBACK_MINUTES="${PREDICTION_LOOKBACK_MINUTES:-${LOOKBACK_MINUTES}}"
 SCORING_CANONICAL_SYMBOL_LIKE="${SCORING_CANONICAL_SYMBOL_LIKE:-}"
+SIGNAL_JSONL_OUTPUT_PATH="${SIGNAL_JSONL_OUTPUT_PATH:-}"
+SIGNAL_JSONL_MARKET_FAMILIES="${SIGNAL_JSONL_MARKET_FAMILIES:-BTC-15M}"
+SIGNAL_JSONL_OUTCOME_SIDE="${SIGNAL_JSONL_OUTCOME_SIDE:-ANY}"
+SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS="${SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS:-}"
+V6_SETTLEMENT_THRESHOLD="${V6_SETTLEMENT_THRESHOLD:-0.50}"
+V6_NEUTRAL_CAP="${V6_NEUTRAL_CAP:-0.25}"
+V6_VOLATILITY_THRESHOLD="${V6_VOLATILITY_THRESHOLD:-0.60}"
+V6_ROUND_TRIP_COST="${V6_ROUND_TRIP_COST:-0.072}"
+V6_EV_MARGIN="${V6_EV_MARGIN:-0.01}"
 LOW_LATENCY_FEATURE_QUEUE_ENABLED="${LOW_LATENCY_FEATURE_QUEUE_ENABLED:-false}"
 LOW_LATENCY_RAW_QUEUE_PATH="${LOW_LATENCY_RAW_QUEUE_PATH:-${LIVE_ROOT}/low-latency/raw-btc15m.jsonl}"
 LOW_LATENCY_RAW_QUEUE_CANONICAL_SYMBOL_PREFIX="${LOW_LATENCY_RAW_QUEUE_CANONICAL_SYMBOL_PREFIX:-BTC-15M:}"
@@ -226,6 +246,9 @@ if [[ "${LOW_LATENCY_FEATURE_QUEUE_ENABLED}" == "true" ]]; then
   mkdir -p "$(dirname "${LOW_LATENCY_RAW_QUEUE_PATH}")" \
     "$(dirname "${LOW_LATENCY_FEATURE_CURSOR_PATH}")" \
     "$(dirname "${LOW_LATENCY_FEATURE_STATE_PATH}")"
+fi
+if [[ -n "${SIGNAL_JSONL_OUTPUT_PATH}" ]]; then
+  mkdir -p "$(dirname "${SIGNAL_JSONL_OUTPUT_PATH}")"
 fi
 CAPTURE_LOG="${LOG_DIR}/capture-${SESSION_ID}.log"
 SCORER_LOG="${LOG_DIR}/scorer-${SESSION_ID}.log"
@@ -489,6 +512,23 @@ run_cycle() {
     feature_args+=(--canonical-symbol-like "${SCORING_CANONICAL_SYMBOL_LIKE}")
     prediction_args+=(--canonical-symbol-like "${SCORING_CANONICAL_SYMBOL_LIKE}")
   fi
+  if [[ -n "${SIGNAL_JSONL_OUTPUT_PATH}" ]]; then
+    prediction_args+=(
+      --signal-jsonl-output-path "${SIGNAL_JSONL_OUTPUT_PATH}"
+      --signal-jsonl-market-families "${SIGNAL_JSONL_MARKET_FAMILIES}"
+      --signal-jsonl-outcome-side "${SIGNAL_JSONL_OUTCOME_SIDE}"
+      --v6-settlement-threshold "${V6_SETTLEMENT_THRESHOLD}"
+      --v6-neutral-cap "${V6_NEUTRAL_CAP}"
+      --v6-volatility-threshold "${V6_VOLATILITY_THRESHOLD}"
+      --v6-round-trip-cost "${V6_ROUND_TRIP_COST}"
+      --v6-ev-margin "${V6_EV_MARGIN}"
+    )
+    if [[ -n "${SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS}" ]]; then
+      prediction_args+=(
+        --signal-jsonl-max-event-age-seconds "${SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS}"
+      )
+    fi
+  fi
 
   echo
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] scan ${cycle_id} started"
@@ -595,6 +635,11 @@ echo "[champion-live] score only when ETL processed=${SCORE_ONLY_WHEN_ETL_PROCES
 echo "[champion-live] low-latency feature queue enabled=${LOW_LATENCY_FEATURE_QUEUE_ENABLED}"
 if [[ -n "${SCORING_CANONICAL_SYMBOL_LIKE}" ]]; then
   echo "[champion-live] scoring canonical symbol like=${SCORING_CANONICAL_SYMBOL_LIKE}"
+fi
+echo "[champion-live] signal jsonl output=${SIGNAL_JSONL_OUTPUT_PATH:-<none>}"
+if [[ -n "${SIGNAL_JSONL_OUTPUT_PATH}" ]]; then
+  echo "[champion-live] signal jsonl families=${SIGNAL_JSONL_MARKET_FAMILIES} outcome_side=${SIGNAL_JSONL_OUTCOME_SIDE}"
+  echo "[champion-live] signal jsonl max event age seconds=${SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS:-<none>}"
 fi
 if [[ "${LOW_LATENCY_FEATURE_QUEUE_ENABLED}" == "true" ]]; then
   echo "[champion-live] low-latency raw queue=${LOW_LATENCY_RAW_QUEUE_PATH}"

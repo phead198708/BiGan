@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import duckdb
 import pytest
 
 from bigan.execution import PositionManager
@@ -9,7 +10,6 @@ from bigan.execution import PositionManager
 
 def test_existing_position_table_without_sleeve_is_migrated(tmp_path) -> None:
     db_path = tmp_path / "positions.duckdb"
-    import duckdb
 
     with duckdb.connect(str(db_path)) as conn:
         conn.execute(
@@ -50,6 +50,33 @@ def test_existing_position_table_without_sleeve_is_migrated(tmp_path) -> None:
     migrated = manager.get_position("old-round")
     assert migrated is not None
     assert migrated.sleeve == "settlement"
+
+
+def test_position_manager_retries_transient_duckdb_lock(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "positions.duckdb"
+    real_connect = duckdb.connect
+    calls = 0
+    monkeypatch.setenv("BIGAN_EXECUTION_DB_CONNECT_RETRY_DELAY_SECONDS", "0")
+
+    def flaky_connect(path: str, *args: object, **kwargs: object):
+        nonlocal calls
+        if path == str(db_path):
+            calls += 1
+            if calls == 1:
+                raise duckdb.IOException(
+                    "IO Error: Could not set lock on file positions.duckdb"
+                )
+        return real_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(duckdb, "connect", flaky_connect)
+
+    manager = PositionManager(db_path)
+
+    assert calls >= 2
+    assert manager.get_all_open() == []
 
 
 def test_position_lifecycle_is_persisted_to_duckdb(tmp_path) -> None:

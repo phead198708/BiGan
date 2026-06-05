@@ -6,7 +6,7 @@ import json
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import duckdb
 
@@ -30,6 +30,9 @@ from .xgboost_v6 import (
     load_xgboost_v6_model,
 )
 
+if TYPE_CHECKING:
+    from bigan.execution.v6_gate import V6JointGateConfig
+
 
 @dataclass(frozen=True, slots=True)
 class PredictionBatchReport:
@@ -40,6 +43,7 @@ class PredictionBatchReport:
     model_version: str
     calibration_method: str | None
     monitoring_events_written: int = 0
+    signal_queue_events_written: int = 0
 
     def to_dict(self) -> dict[str, int | str | None]:
         return asdict(self)
@@ -169,6 +173,11 @@ def run_prediction_batch(
     canonical_symbol_like: str | None = None,
     skip_existing_monitoring_events: bool = False,
     skip_existing_predictions: bool = False,
+    signal_jsonl_output_path: Path | str | None = None,
+    signal_jsonl_market_families: frozenset[str] = frozenset({"BTC-15M"}),
+    signal_jsonl_outcome_sides: frozenset[str] | None = None,
+    signal_jsonl_v6_joint_config: "V6JointGateConfig | None" = None,
+    signal_jsonl_max_event_age_seconds: float | None = None,
 ) -> PredictionBatchReport:
     """Read feature rows from the warehouse and append ``predictions`` rows."""
 
@@ -211,6 +220,7 @@ def run_prediction_batch(
         writer.flush("predictions")
         rows_written = writer.stats.rows_written.get("predictions", 0)
     monitoring_events_written = 0
+    signal_queue_events_written = 0
     if monitoring_db_path is not None and rows:
         from bigan.mlops.registry import connect_mlops_db, initialize_mlops_db
 
@@ -228,12 +238,31 @@ def run_prediction_batch(
             )
         finally:
             conn.close()
+    if signal_jsonl_output_path is not None and rows:
+        from bigan.execution.signal_queue import append_prediction_rows_as_signal_jsonl
+
+        token_ids_by_market_side = (
+            _token_ids_by_market_side_from_features(warehouse_dir, rows)
+            if signal_jsonl_v6_joint_config is not None
+            else None
+        )
+        signal_queue_events_written = append_prediction_rows_as_signal_jsonl(
+            signal_jsonl_output_path,
+            rows,
+            model_version=model.model_version,
+            allowed_families=signal_jsonl_market_families,
+            allowed_outcome_sides=signal_jsonl_outcome_sides,
+            v6_joint_config=signal_jsonl_v6_joint_config,
+            max_event_age_seconds=signal_jsonl_max_event_age_seconds,
+            token_ids_by_market_side=token_ids_by_market_side,
+        )
     return PredictionBatchReport(
         rows_generated=rows_generated,
         rows_written=rows_written,
         model_version=model.model_version,
         calibration_method=calibration_method,
         monitoring_events_written=monitoring_events_written,
+        signal_queue_events_written=signal_queue_events_written,
     )
 
 
@@ -352,6 +381,66 @@ def _filter_new_prediction_rows(
         )
         not in existing
     ]
+
+
+def _token_ids_by_market_side_from_features(
+    warehouse_dir: Path | str,
+    rows: list[dict[str, Any]],
+) -> dict[tuple[str, str, str], str]:
+    targets = {
+        _parse_canonical_symbol_for_token_map(
+            str(row.get("canonical_symbol") or row.get("symbol") or "")
+        )
+        for row in rows
+    }
+    targets.discard(None)
+    if not targets:
+        return {}
+    families = sorted({target[0] for target in targets if target is not None})
+    rounds = sorted({target[1] for target in targets if target is not None})
+    family_placeholders = ", ".join("?" for _ in families)
+    round_placeholders = ", ".join("?" for _ in rounds)
+    with open_warehouse(warehouse_dir) as conn:
+        try:
+            result = conn.execute(
+                f"""
+                SELECT canonical_symbol, source_symbol
+                FROM (
+                    SELECT canonical_symbol,
+                           source_symbol,
+                           row_number() OVER (
+                               PARTITION BY canonical_symbol
+                               ORDER BY feature_ts DESC, ingest_ts DESC, message_ts DESC, ts DESC
+                           ) AS rn
+                    FROM features_15m_v1
+                    WHERE split_part(canonical_symbol, ':', 1) IN ({family_placeholders})
+                      AND split_part(canonical_symbol, ':', 2) IN ({round_placeholders})
+                )
+                WHERE rn = 1
+                """,
+                [*families, *rounds],
+            ).fetchall()
+        except (duckdb.CatalogException, duckdb.IOException):
+            return {}
+    out: dict[tuple[str, str, str], str] = {}
+    for canonical_symbol, token_id in result:
+        parsed = _parse_canonical_symbol_for_token_map(str(canonical_symbol or ""))
+        if parsed is None or not token_id:
+            continue
+        out[parsed] = str(token_id)
+    return out
+
+
+def _parse_canonical_symbol_for_token_map(
+    canonical_symbol: str,
+) -> tuple[str, str, str] | None:
+    parts = canonical_symbol.split(":")
+    if len(parts) < 3:
+        return None
+    side = parts[-1].upper()
+    if side not in {"UP", "DOWN"}:
+        return None
+    return parts[0].upper(), parts[-2], side
 
 
 def _validate_training_schema(row: dict[str, Any], feature_columns: tuple[str, ...]) -> None:

@@ -32,11 +32,14 @@ from bigan.execution.cash_legs import (
 )
 from bigan.execution.db import connect_mlops_db
 from bigan.execution.phase4_policy import (
+    DEFAULT_MAX_SIGNAL_AGE_SECONDS,
     DEFAULT_MIN_ENTRY_PRICE,
     DEFAULT_NEAR_MIN_FRESH_EDGE_THRESHOLD,
     DEFAULT_NEAR_MIN_PRICE_BAND,
     DEFAULT_NEAR_MIN_SECONDS_TO_EXPIRY,
+    DEFAULT_SETTLEMENT_PEAK_CONFIDENCE_DROP_TOLERANCE,
     DEFAULT_SETTLEMENT_EDGE_THRESHOLD,
+    DEFAULT_SETTLEMENT_MIN_CONFIDENCE,
     DEFAULT_SOFT_FORCE_EXIT_MIN_BID,
     DEFAULT_VOLATILITY_MIN_ENTRY_PRICE,
     DEFAULT_VOLATILITY_MIN_ORDER_SIZE_USDC,
@@ -58,7 +61,9 @@ from bigan.execution.position_manager import PositionManager
 from bigan.execution.v6_gate import (
     V6JointGateConfig,
     build_v6_signal_fields,
+    evaluate_v6_settlement_side,
     is_v6_model_version,
+    v6_payload_from_values,
     v6_joint_gate_config_from_model,
     v6_selection_score,
 )
@@ -117,12 +122,20 @@ class LivePosition:
     entry_signal_created_at: int
     entry_signal_bridged_at: int
     entry_order_posted_at: int
+    entry_p_up: float | None = None
+    entry_p_down: float | None = None
+    entry_p_neutral: float | None = None
     lifecycle_state: str = "OPEN"
     exit_attempt_count: int = 0
     last_exit_attempt_at: int = 0
     last_lifecycle_reason: str = ""
     sleeve: str = "settlement"
     paper: bool = False
+    settlement_reversal_candidate_side: str = ""
+    settlement_reversal_candidate_count: int = 0
+    settlement_same_side_confirmation_event_id: str = ""
+    settlement_same_side_confirmation_created_at: int = 0
+    settlement_same_side_confirmation_confidence: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +161,26 @@ class PaperSettlementResolution:
     error: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SettlementExitConfig:
+    allow_mid_round_exit: bool = False
+    reversal_min_confidence: float = DEFAULT_SETTLEMENT_MIN_CONFIDENCE
+    reversal_hysteresis_bars: int = 1
+    confidence_decay_enabled: bool = False
+    decay_floor: float = 0.55
+    decay_delta: float = 0.25
+    decay_opposite_min_confidence: float | None = DEFAULT_SETTLEMENT_MIN_CONFIDENCE
+    price_stop_enabled: bool = False
+    stop_price_delta: float = 0.15
+    stop_loss_usdc: float = 0.50
+    stop_min_seconds_to_expiry: float = 120.0
+    price_stop_same_side_confirmation_veto_enabled: bool = False
+    price_stop_same_side_confirmation_min_confidence: float = DEFAULT_SETTLEMENT_MIN_CONFIDENCE
+    price_stop_same_side_confirmation_max_age_seconds: float | None = (
+        DEFAULT_MAX_SIGNAL_AGE_SECONDS
+    )
+
+
 @dataclass(slots=True)
 class RoundLifecycleState:
     """In-memory execution state for one bounded Phase 4 run."""
@@ -162,6 +195,7 @@ class RoundLifecycleState:
     open_positions: dict[str, LivePosition] = field(default_factory=dict)
     volatility_filled_count_by_round: dict[str, int] = field(default_factory=dict)
     filled_count_by_sleeve_round_side: dict[str, int] = field(default_factory=dict)
+    settlement_peak_confidence_by_round_side: dict[str, float] = field(default_factory=dict)
 
     def mark_event_seen(self, event_id: str) -> bool:
         """Return false when an event was already processed."""
@@ -224,6 +258,18 @@ class RoundLifecycleState:
             _sleeve_side_key(round_slug, sleeve, side),
             0,
         )
+
+    def mark_settlement_signal_confidence(self, event: SignalEvent) -> float | None:
+        """Track the strongest observed settlement confidence for this round/side."""
+
+        if event.token_probability is None:
+            return None
+        key = _sleeve_side_key(event.round_slug, "settlement", event.outcome_side)
+        previous = self.settlement_peak_confidence_by_round_side.get(key)
+        current = float(event.token_probability)
+        peak = current if previous is None else max(previous, current)
+        self.settlement_peak_confidence_by_round_side[key] = peak
+        return peak
 
 
 def _position_key(round_slug: str, sleeve: str) -> str:
@@ -296,6 +342,7 @@ def main() -> int:
     started_at = _now_ms()
     entry_policy = _entry_policy_from_args(args)
     v6_joint_config = _v6_joint_config_from_args(args)
+    settlement_exit_config = _settlement_exit_config_from_args(args)
     paper_settlement_config = PaperSettlementResolverConfig(
         enabled=args.paper and not args.disable_paper_settlement_resolution,
         gamma_api_base=args.paper_settlement_gamma_api_base,
@@ -325,6 +372,7 @@ def main() -> int:
     exits_pending_settlement = 0
     realized_pnl = 0.0
     skipped: dict[str, int] = {}
+    settlement_exit_counts: dict[str, int] = {}
     errors = 0
 
     signal_jsonl_path = Path(args.signal_jsonl_path) if args.signal_jsonl_path else None
@@ -360,6 +408,12 @@ def main() -> int:
             "signal_jsonl_path": str(signal_jsonl_path) if signal_jsonl_path is not None else None,
             "edge_threshold": args.edge_threshold,
             "settlement_edge_threshold": entry_policy.effective_settlement_edge_threshold,
+            "settlement_min_confidence": entry_policy.settlement_min_confidence,
+            "settlement_peak_confidence_drop_tolerance": (
+                entry_policy.settlement_peak_confidence_drop_tolerance
+            ),
+            "max_signal_age_seconds": entry_policy.max_signal_age_seconds,
+            "settlement_exit_policy": asdict(settlement_exit_config),
             "settlement_price_gate_mode": (
                 "cost_edge_only" if args.entry_gate_mode == "v6-joint" else "legacy_min_entry"
             ),
@@ -455,6 +509,8 @@ def main() -> int:
                 sell_slippage=args.sell_slippage,
                 monitoring_db_path=args.monitoring_db_path,
                 paper_settlement_config=paper_settlement_config,
+                settlement_exit_config=settlement_exit_config,
+                settlement_exit_counts=settlement_exit_counts,
             )
             closes_filled += tick_closed
             exits_pending_confirmation += tick_pending
@@ -539,8 +595,59 @@ def main() -> int:
                     _bump(skipped, "duplicate_event_id")
                     continue
 
+                event_now_ms = _now_ms()
+                signal_age_seconds = (
+                    max(0.0, (event_now_ms - event.ts) / 1000)
+                    if event.ts > 0
+                    else None
+                )
+                seconds_to_expiry = (event.round_end_ts - event_now_ms) / 1000
                 settlement_position = lifecycle.open_position(event.round_slug, "settlement")
                 if settlement_position is not None:
+                    if _event_family_allowed(event, allowed_families):
+                        _record_settlement_same_side_confirmation(
+                            position=settlement_position,
+                            signal=event,
+                            log_path=log_path,
+                            config=settlement_exit_config,
+                            signal_age_seconds=signal_age_seconds,
+                            max_signal_age_seconds=entry_policy.max_signal_age_seconds,
+                        )
+                        settlement_exit = _maybe_settlement_signal_exit(
+                            client=client,
+                            position_manager=position_manager,
+                            position=settlement_position,
+                            signal=event,
+                            log_path=log_path,
+                            config=settlement_exit_config,
+                            v6_joint_config=v6_joint_config,
+                            signal_age_seconds=signal_age_seconds,
+                            max_signal_age_seconds=entry_policy.max_signal_age_seconds,
+                            seconds_to_expiry=seconds_to_expiry,
+                            opposite_exit_min_seconds_to_expiry=(
+                                args.opposite_exit_min_seconds_to_expiry
+                            ),
+                            sell_slippage=args.sell_slippage,
+                            exit_order_timeout_seconds=args.exit_order_timeout_seconds,
+                            monitoring_db_path=args.monitoring_db_path,
+                        )
+                        if settlement_exit is not None:
+                            settlement_exit_reason, sell_result = settlement_exit
+                            _bump(settlement_exit_counts, settlement_exit_reason)
+                            realized_pnl += sell_result.realized_pnl
+                            if sell_result.status == "filled":
+                                closes_filled += 1
+                            elif sell_result.status == "settled":
+                                pass
+                            elif sell_result.status == "pending_settlement":
+                                exits_pending_settlement += 1
+                            else:
+                                exits_pending_confirmation += 1
+                            lifecycle.mark_position_closed(event.round_slug, "settlement")
+                            if realized_pnl <= -args.daily_loss_limit_usdc:
+                                _log(log_path, "daily_loss_limit_reached", realized_pnl=realized_pnl)
+                                break
+                            continue
                     _log(
                         log_path,
                         "settlement_sleeve_hold",
@@ -620,7 +727,22 @@ def main() -> int:
                 if not _event_family_allowed(event, allowed_families):
                     _bump(skipped, "market_family_not_allowed")
                     continue
-                seconds_to_expiry = (event.round_end_ts - now_ms) / 1000
+                if (
+                    entry_policy.max_signal_age_seconds is not None
+                    and signal_age_seconds is not None
+                    and signal_age_seconds > entry_policy.max_signal_age_seconds
+                ):
+                    _bump(skipped, "signal_age_above_threshold")
+                    _log(
+                        log_path,
+                        "entry_skipped",
+                        reason="signal_age_above_threshold",
+                        signal=asdict(event),
+                        signal_age_seconds=signal_age_seconds,
+                        max_signal_age_seconds=entry_policy.max_signal_age_seconds,
+                        signal_latency_ms=_signal_latency_ms(event, now_ms),
+                    )
+                    continue
                 time_skip_reason = _entry_time_window_skip_reason(
                     seconds_to_expiry,
                     no_new_entry_before_expiry_seconds=args.no_new_entry_before_expiry_seconds,
@@ -655,6 +777,7 @@ def main() -> int:
                     continue
 
                 if event.round_slug not in lifecycle.filled_rounds and settlement_position is None:
+                    settlement_peak_confidence = lifecycle.mark_settlement_signal_confidence(event)
                     side_skip_reason = _sleeve_side_cap_skip_reason(
                         lifecycle,
                         round_slug=event.round_slug,
@@ -697,6 +820,8 @@ def main() -> int:
                         sleeve="settlement",
                         paper=args.paper,
                         entry_gate_mode=args.entry_gate_mode,
+                        signal_age_seconds=signal_age_seconds,
+                        settlement_peak_confidence=settlement_peak_confidence,
                     )
                     lifecycle.mark_entry_result(event, position)
                     if position is not None:
@@ -733,6 +858,7 @@ def main() -> int:
                         sleeve="volatility",
                         paper=args.paper,
                         entry_gate_mode=args.entry_gate_mode,
+                        signal_age_seconds=signal_age_seconds,
                     )
                     lifecycle.mark_entry_result(event, volatility_position)
                     if volatility_position is not None:
@@ -775,6 +901,12 @@ def main() -> int:
             "market_families": sorted(allowed_families) or None,
             "edge_threshold": args.edge_threshold,
             "settlement_edge_threshold": entry_policy.effective_settlement_edge_threshold,
+            "settlement_min_confidence": entry_policy.settlement_min_confidence,
+            "settlement_peak_confidence_drop_tolerance": (
+                entry_policy.settlement_peak_confidence_drop_tolerance
+            ),
+            "max_signal_age_seconds": entry_policy.max_signal_age_seconds,
+            "settlement_exit_policy": asdict(settlement_exit_config),
             "settlement_price_gate_mode": (
                 "cost_edge_only" if args.entry_gate_mode == "v6-joint" else "legacy_min_entry"
             ),
@@ -843,6 +975,7 @@ def main() -> int:
             "filled_round_count": len(lifecycle.filled_rounds),
             "closed_round_count": len(lifecycle.closed_rounds),
             "skipped": skipped,
+            "settlement_exit_counts": settlement_exit_counts,
             "errors": errors,
             "execution_log_path": str(log_path),
         }
@@ -1098,6 +1231,91 @@ def _parse_args() -> argparse.Namespace:
             "Defaults to --v6-round-trip-cost + --v6-ev-margin."
         ),
     )
+    parser.add_argument(
+        "--settlement-min-confidence",
+        type=float,
+        default=DEFAULT_SETTLEMENT_MIN_CONFIDENCE,
+        help="Minimum selected p_up/p_down required for settlement entries.",
+    )
+    parser.add_argument(
+        "--settlement-peak-confidence-drop-tolerance",
+        type=float,
+        default=None,
+        help=(
+            "Optional v6 settlement momentum guard. Skip same-round/side entries "
+            "when current p_side is more than this amount below the observed peak."
+        ),
+    )
+    parser.add_argument(
+        "--settlement-allow-mid-round-exit",
+        action="store_true",
+        help="Allow settlement sleeve to sell before expiry on high-confidence opposite flips.",
+    )
+    parser.add_argument(
+        "--settlement-reversal-min-confidence",
+        type=float,
+        default=None,
+        help="Minimum opposite p_up/p_down for settlement reversal exits; defaults to entry confidence.",
+    )
+    parser.add_argument(
+        "--settlement-reversal-hysteresis-bars",
+        type=int,
+        default=1,
+        help="Consecutive fresh opposite settlement admissions required before reversal exit.",
+    )
+    parser.add_argument(
+        "--settlement-confidence-decay-enabled",
+        action="store_true",
+        help="Allow settlement sleeve to exit when same-side confidence decays on fresh signals.",
+    )
+    parser.add_argument("--settlement-decay-floor", type=float, default=0.55)
+    parser.add_argument("--settlement-decay-delta", type=float, default=0.25)
+    parser.add_argument(
+        "--settlement-decay-opposite-min-confidence",
+        type=float,
+        default=None,
+        help=(
+            "Minimum opposite p_up/p_down required for confidence-decay exits; "
+            "defaults to the reversal/entry confidence threshold."
+        ),
+    )
+    parser.add_argument(
+        "--settlement-price-stop-enabled",
+        action="store_true",
+        help="Allow settlement sleeve to exit when current bid breaches the stop-loss policy.",
+    )
+    parser.add_argument("--settlement-stop-price-delta", type=float, default=0.15)
+    parser.add_argument("--settlement-stop-loss-usdc", type=float, default=0.50)
+    parser.add_argument("--settlement-stop-min-seconds-to-expiry", type=float, default=120.0)
+    parser.add_argument(
+        "--settlement-price-stop-same-side-confirmation-veto-enabled",
+        action="store_true",
+        help=(
+            "Skip a settlement price-stop exit when a fresh, post-entry same-side "
+            "settlement confidence confirmation is still active."
+        ),
+    )
+    parser.add_argument(
+        "--settlement-price-stop-same-side-confirmation-min-confidence",
+        type=float,
+        default=None,
+        help=(
+            "Minimum same-side p_up/p_down needed to veto a settlement price stop; "
+            "defaults to --settlement-min-confidence."
+        ),
+    )
+    parser.add_argument(
+        "--settlement-price-stop-same-side-confirmation-max-age-seconds",
+        type=float,
+        default=DEFAULT_MAX_SIGNAL_AGE_SECONDS,
+        help="Maximum age for same-side confirmation veto; <=0 disables the age cap.",
+    )
+    parser.add_argument(
+        "--max-signal-age-seconds",
+        type=float,
+        default=DEFAULT_MAX_SIGNAL_AGE_SECONDS,
+        help="Maximum executor receive time minus signal ts for new entries; <=0 disables.",
+    )
     return parser.parse_args()
 
 
@@ -1106,6 +1324,11 @@ def _entry_policy_from_args(args: argparse.Namespace) -> Phase4EntryPolicy:
         args.v6_settlement_min_edge_after_cost
         if args.v6_settlement_min_edge_after_cost is not None
         else args.v6_round_trip_cost + args.v6_ev_margin
+    )
+    max_signal_age_seconds = getattr(
+        args,
+        "max_signal_age_seconds",
+        DEFAULT_MAX_SIGNAL_AGE_SECONDS,
     )
     disable_settlement_edge = args.entry_gate_mode == "v6-joint"
     return Phase4EntryPolicy(
@@ -1123,6 +1346,19 @@ def _entry_policy_from_args(args: argparse.Namespace) -> Phase4EntryPolicy:
         volatility_round_trip_cost=args.volatility_round_trip_cost,
         volatility_safety_margin=args.volatility_safety_margin,
         enable_volatility_live_entries=args.enable_volatility_live_entries,
+        settlement_min_confidence=getattr(
+            args,
+            "settlement_min_confidence",
+            DEFAULT_SETTLEMENT_MIN_CONFIDENCE,
+        ),
+        max_signal_age_seconds=(
+            None if max_signal_age_seconds <= 0 else max_signal_age_seconds
+        ),
+        settlement_peak_confidence_drop_tolerance=getattr(
+            args,
+            "settlement_peak_confidence_drop_tolerance",
+            None,
+        ),
     )
 
 
@@ -1154,11 +1390,98 @@ def _v6_joint_config_from_args(args: argparse.Namespace) -> V6JointGateConfig | 
     )
 
 
+def _settlement_exit_config_from_args(args: argparse.Namespace) -> SettlementExitConfig:
+    reversal_min_confidence = (
+        args.settlement_min_confidence
+        if args.settlement_reversal_min_confidence is None
+        else args.settlement_reversal_min_confidence
+    )
+    decay_opposite_min_confidence = (
+        reversal_min_confidence
+        if args.settlement_decay_opposite_min_confidence is None
+        else args.settlement_decay_opposite_min_confidence
+    )
+    same_side_confirmation_min_confidence = (
+        args.settlement_min_confidence
+        if args.settlement_price_stop_same_side_confirmation_min_confidence is None
+        else args.settlement_price_stop_same_side_confirmation_min_confidence
+    )
+    same_side_confirmation_max_age_seconds = (
+        None
+        if args.settlement_price_stop_same_side_confirmation_max_age_seconds <= 0
+        else args.settlement_price_stop_same_side_confirmation_max_age_seconds
+    )
+    return SettlementExitConfig(
+        allow_mid_round_exit=args.settlement_allow_mid_round_exit,
+        reversal_min_confidence=reversal_min_confidence,
+        reversal_hysteresis_bars=args.settlement_reversal_hysteresis_bars,
+        confidence_decay_enabled=args.settlement_confidence_decay_enabled,
+        decay_floor=args.settlement_decay_floor,
+        decay_delta=args.settlement_decay_delta,
+        decay_opposite_min_confidence=decay_opposite_min_confidence,
+        price_stop_enabled=args.settlement_price_stop_enabled,
+        stop_price_delta=args.settlement_stop_price_delta,
+        stop_loss_usdc=args.settlement_stop_loss_usdc,
+        stop_min_seconds_to_expiry=args.settlement_stop_min_seconds_to_expiry,
+        price_stop_same_side_confirmation_veto_enabled=(
+            args.settlement_price_stop_same_side_confirmation_veto_enabled
+        ),
+        price_stop_same_side_confirmation_min_confidence=(
+            same_side_confirmation_min_confidence
+        ),
+        price_stop_same_side_confirmation_max_age_seconds=(
+            same_side_confirmation_max_age_seconds
+        ),
+    )
+
+
 def _validate_args(args: argparse.Namespace) -> None:
     if args.settlement_max_filled_per_side_per_round <= 0:
         raise ValueError("--settlement-max-filled-per-side-per-round must be positive")
     if args.paper_settlement_timeout_seconds <= 0:
         raise ValueError("--paper-settlement-timeout-seconds must be positive")
+    if not 0.0 <= args.settlement_min_confidence <= 1.0:
+        raise ValueError("--settlement-min-confidence must be between 0 and 1")
+    if (
+        args.settlement_peak_confidence_drop_tolerance is not None
+        and args.settlement_peak_confidence_drop_tolerance < 0
+    ):
+        raise ValueError("--settlement-peak-confidence-drop-tolerance must be non-negative")
+    if (
+        args.settlement_reversal_min_confidence is not None
+        and not 0.0 <= args.settlement_reversal_min_confidence <= 1.0
+    ):
+        raise ValueError("--settlement-reversal-min-confidence must be between 0 and 1")
+    if args.settlement_reversal_hysteresis_bars <= 0:
+        raise ValueError("--settlement-reversal-hysteresis-bars must be positive")
+    if not 0.0 <= args.settlement_decay_floor <= 1.0:
+        raise ValueError("--settlement-decay-floor must be between 0 and 1")
+    if args.settlement_decay_delta < 0:
+        raise ValueError("--settlement-decay-delta must be non-negative")
+    if (
+        args.settlement_decay_opposite_min_confidence is not None
+        and not 0.0 <= args.settlement_decay_opposite_min_confidence <= 1.0
+    ):
+        raise ValueError("--settlement-decay-opposite-min-confidence must be between 0 and 1")
+    if args.settlement_stop_price_delta < 0:
+        raise ValueError("--settlement-stop-price-delta must be non-negative")
+    if args.settlement_stop_loss_usdc < 0:
+        raise ValueError("--settlement-stop-loss-usdc must be non-negative")
+    if args.settlement_stop_min_seconds_to_expiry < 0:
+        raise ValueError("--settlement-stop-min-seconds-to-expiry must be non-negative")
+    if (
+        args.settlement_price_stop_same_side_confirmation_min_confidence is not None
+        and not 0.0
+        <= args.settlement_price_stop_same_side_confirmation_min_confidence
+        <= 1.0
+    ):
+        raise ValueError(
+            "--settlement-price-stop-same-side-confirmation-min-confidence must be between 0 and 1"
+        )
+    if args.settlement_price_stop_same_side_confirmation_max_age_seconds < 0:
+        raise ValueError(
+            "--settlement-price-stop-same-side-confirmation-max-age-seconds must be non-negative"
+        )
     if args.entry_gate_mode == "v6-joint" and not is_v6_model_version(args.model_version):
         raise ValueError("--entry-gate-mode v6-joint requires model_version xgboost-v6")
 
@@ -1429,28 +1752,31 @@ def _read_signal_jsonl_after(
     if not path.exists():
         return [], after_line_number
     events: list[SignalEvent] = []
-    last_line_number = after_line_number
     with path.open(encoding="utf-8") as handle:
-        for line_number, raw in enumerate(handle, start=1):
-            if line_number <= after_line_number:
-                continue
-            last_line_number = line_number
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            event = _event_from_signal_payload(
-                payload,
-                model_version=model_version,
-                v6_joint_config=v6_joint_config,
-            )
-            if event is not None:
-                events.append(event)
-            if len(events) >= limit:
-                break
+        lines = handle.readlines()
+    if after_line_number > len(lines):
+        after_line_number = 0
+    last_line_number = after_line_number
+    for line_number, raw in enumerate(lines, start=1):
+        if line_number <= after_line_number:
+            continue
+        last_line_number = line_number
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        event = _event_from_signal_payload(
+            payload,
+            model_version=model_version,
+            v6_joint_config=v6_joint_config,
+        )
+        if event is not None:
+            events.append(event)
+        if len(events) >= limit:
+            break
     return _best_event_per_round(events, entry_gate_mode=entry_gate_mode), last_line_number
 
 
@@ -1472,8 +1798,9 @@ def _event_from_signal_payload(
     if not round_slug or round_end_ts is None or market is None or prob_up_15m is None:
         return None
     if v6_joint_config is not None and is_v6_model_version(model_version):
-        if payload.get("v6_joint_side"):
-            side = str(payload.get("v6_joint_side")).upper()
+        payload_side = payload.get("outcome_side") or payload.get("v6_joint_side")
+        if payload_side:
+            side = str(payload_side).upper()
             token_id = str(payload.get("token_id") or "")
             token_probability = _optional_float(payload.get("token_probability"))
             if side not in {"UP", "DOWN"} or not token_id or token_probability is None:
@@ -1501,7 +1828,11 @@ def _event_from_signal_payload(
                 p_neutral=_optional_float(payload.get("p_neutral")),
                 p_vol_up=_optional_float(payload.get("p_vol_up")),
                 p_vol_down=_optional_float(payload.get("p_vol_down")),
-                v6_joint_side=side,
+                v6_joint_side=(
+                    str(payload["v6_joint_side"]).upper()
+                    if payload.get("v6_joint_side")
+                    else None
+                ),
             )
         snapshot = {
             "canonical_symbol": payload.get("canonical_symbol"),
@@ -1718,6 +2049,8 @@ def _tick_open_positions(
     exit_order_timeout_seconds: float = 20.0,
     monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
     paper_settlement_config: PaperSettlementResolverConfig | None = None,
+    settlement_exit_config: SettlementExitConfig | None = None,
+    settlement_exit_counts: dict[str, int] | None = None,
 ) -> tuple[int, int, int, float]:
     closed_count = 0
     pending_count = 0
@@ -1736,6 +2069,31 @@ def _tick_open_positions(
             continue
         seconds_to_expiry = (round_end_ts - now_ms) / 1000
         if position.sleeve == "settlement" and seconds_to_expiry > 0:
+            sell_result = _maybe_settlement_price_stop_exit(
+                client=client,
+                position_manager=position_manager,
+                position=position,
+                log_path=log_path,
+                seconds_to_expiry=seconds_to_expiry,
+                config=settlement_exit_config,
+                sell_slippage=sell_slippage,
+                exit_order_timeout_seconds=exit_order_timeout_seconds,
+                monitoring_db_path=monitoring_db_path,
+            )
+            if sell_result is not None:
+                if sell_result.status == "filled":
+                    closed_count += 1
+                elif sell_result.status == "settled":
+                    pass
+                elif sell_result.status == "pending_settlement":
+                    settlement_count += 1
+                else:
+                    pending_count += 1
+                realized_pnl += sell_result.realized_pnl
+                if settlement_exit_counts is not None:
+                    _bump(settlement_exit_counts, "settlement_price_stop_exit")
+                lifecycle.mark_position_closed(position.round_slug, position.sleeve)
+                continue
             _log(
                 log_path,
                 "settlement_sleeve_hold",
@@ -1964,6 +2322,8 @@ def _try_entry(
     sleeve: str = "settlement",
     paper: bool = False,
     entry_gate_mode: str = "v5-edge",
+    signal_age_seconds: float | None = None,
+    settlement_peak_confidence: float | None = None,
 ) -> LivePosition | None:
     from py_clob_client_v2 import MarketOrderArgs, OrderType
     from py_clob_client_v2.clob_types import PartialCreateOrderOptions
@@ -1977,6 +2337,12 @@ def _try_entry(
         token_probability=signal.token_probability,
         seconds_to_expiry=seconds_to_expiry,
         policy=entry_policy,
+        settlement_confidence=signal.token_probability if sleeve == "settlement" else None,
+        settlement_peak_confidence=(
+            settlement_peak_confidence if sleeve == "settlement" else None
+        ),
+        signal_age_seconds=signal_age_seconds,
+        enable_settlement_gate=sleeve == "settlement",
     )
     try:
         bid, ask = _best_bid_ask(client, signal.token_id)
@@ -2001,7 +2367,22 @@ def _try_entry(
         return None
     tick_size = client.get_tick_size(signal.token_id)
     neg_risk = client.get_neg_risk(signal.token_id)
-    worst_price = min(0.99, _round_price(float(ask) + buy_slippage, tick_size))
+    ask_price = float(ask)
+    slippage_worst_price = min(0.99, _round_price(ask_price + buy_slippage, tick_size))
+    max_acceptable_price = (
+        _floor_price(
+            signal.token_probability - entry_policy.effective_settlement_edge_threshold,
+            tick_size,
+        )
+        if v6_settlement_cost_edge_only
+        else None
+    )
+    worst_price = _round_price(ask_price, tick_size) if v6_settlement_cost_edge_only else slippage_worst_price
+    order_limit_price = (
+        max(worst_price, min(slippage_worst_price, max_acceptable_price))
+        if max_acceptable_price is not None
+        else worst_price
+    )
     fresh_edge_at_worst = signal.token_probability - worst_price
     settlement_edge_for_gate = (
         fresh_edge_at_worst
@@ -2016,6 +2397,12 @@ def _try_entry(
         token_probability=signal.token_probability,
         seconds_to_expiry=seconds_to_expiry,
         policy=entry_policy,
+        settlement_confidence=signal.token_probability if sleeve == "settlement" else None,
+        settlement_peak_confidence=(
+            settlement_peak_confidence if sleeve == "settlement" else None
+        ),
+        signal_age_seconds=signal_age_seconds,
+        enable_settlement_gate=sleeve == "settlement",
     )
     gate_payload = asdict(gate_evaluation)
     _log(
@@ -2025,6 +2412,9 @@ def _try_entry(
         bid=bid,
         ask=ask,
         worst_price=worst_price,
+        slippage_worst_price=slippage_worst_price,
+        max_acceptable_price=max_acceptable_price,
+        order_limit_price=order_limit_price,
         fresh_edge_at_worst=fresh_edge_at_worst,
         raw_settlement_edge=signal.edge,
         seconds_to_expiry=seconds_to_expiry,
@@ -2042,6 +2432,9 @@ def _try_entry(
                 bid=bid,
                 ask=ask,
                 worst_price=worst_price,
+                slippage_worst_price=slippage_worst_price,
+                max_acceptable_price=max_acceptable_price,
+                order_limit_price=order_limit_price,
                 fresh_edge_at_worst=fresh_edge_at_worst,
                 seconds_to_expiry=seconds_to_expiry,
                 gate_evaluation=gate_payload,
@@ -2057,6 +2450,9 @@ def _try_entry(
             bid=bid,
             ask=ask,
             worst_price=worst_price,
+            slippage_worst_price=slippage_worst_price,
+            max_acceptable_price=max_acceptable_price,
+            order_limit_price=order_limit_price,
             seconds_to_expiry=seconds_to_expiry,
             gate_evaluation=gate_payload,
         )
@@ -2072,6 +2468,9 @@ def _try_entry(
                 bid=bid,
                 ask=ask,
                 worst_price=worst_price,
+                slippage_worst_price=slippage_worst_price,
+                max_acceptable_price=max_acceptable_price,
+                order_limit_price=order_limit_price,
                 fresh_edge_at_worst=fresh_edge_at_worst,
                 seconds_to_expiry=seconds_to_expiry,
                 gate_evaluation=gate_payload,
@@ -2091,6 +2490,9 @@ def _try_entry(
                 bid=bid,
                 ask=ask,
                 worst_price=worst_price,
+                slippage_worst_price=slippage_worst_price,
+                max_acceptable_price=max_acceptable_price,
+                order_limit_price=order_limit_price,
                 seconds_to_expiry=seconds_to_expiry,
                 gate_evaluation=gate_payload,
             )
@@ -2110,6 +2512,9 @@ def _try_entry(
         settlement_cost_edge_skip_reason(
             fresh_edge_at_worst=fresh_edge_at_worst,
             policy=entry_policy,
+            settlement_confidence=signal.token_probability,
+            settlement_peak_confidence=settlement_peak_confidence,
+            signal_age_seconds=signal_age_seconds,
         )
         if v6_settlement_cost_edge_only
         else entry_price_skip_reason(
@@ -2130,6 +2535,9 @@ def _try_entry(
             bid=bid,
             ask=ask,
             worst_price=worst_price,
+            slippage_worst_price=slippage_worst_price,
+            max_acceptable_price=max_acceptable_price,
+            order_limit_price=order_limit_price,
             fresh_edge_at_worst=fresh_edge_at_worst,
             seconds_to_expiry=seconds_to_expiry,
             min_entry_price=entry_policy.min_entry_price,
@@ -2137,6 +2545,13 @@ def _try_entry(
             near_min_fresh_edge_threshold=entry_policy.near_min_fresh_edge_threshold,
             near_min_seconds_to_expiry=entry_policy.near_min_seconds_to_expiry,
             settlement_edge_threshold=entry_policy.effective_settlement_edge_threshold,
+            settlement_min_confidence=entry_policy.settlement_min_confidence,
+            settlement_peak_confidence=settlement_peak_confidence,
+            settlement_peak_confidence_drop_tolerance=(
+                entry_policy.settlement_peak_confidence_drop_tolerance
+            ),
+            max_signal_age_seconds=entry_policy.max_signal_age_seconds,
+            signal_age_seconds=signal_age_seconds,
             settlement_price_gate_mode=(
                 "cost_edge_only" if v6_settlement_cost_edge_only else "legacy_min_entry"
             ),
@@ -2164,6 +2579,9 @@ def _try_entry(
             bid=bid,
             ask=ask,
             worst_price=worst_price,
+            slippage_worst_price=slippage_worst_price,
+            max_acceptable_price=max_acceptable_price,
+            order_limit_price=order_limit_price,
             min_entry_price=entry_policy.min_entry_price,
             gate_evaluation=gate_payload,
         )
@@ -2180,6 +2598,9 @@ def _try_entry(
             bid=bid,
             ask=ask,
             worst_price=worst_price,
+            slippage_worst_price=slippage_worst_price,
+            max_acceptable_price=max_acceptable_price,
+            order_limit_price=order_limit_price,
             opposite_token_id=signal.opposite_token_id,
             gate_evaluation=gate_payload,
             **exc.to_log_payload(),
@@ -2195,6 +2616,9 @@ def _try_entry(
             bid=bid,
             ask=ask,
             worst_price=worst_price,
+            slippage_worst_price=slippage_worst_price,
+            max_acceptable_price=max_acceptable_price,
+            order_limit_price=order_limit_price,
             opposite_token_id=signal.opposite_token_id,
             gate_evaluation=gate_payload,
         )
@@ -2202,10 +2626,13 @@ def _try_entry(
     complement_entry_price = _round_price(1.0 - float(complement_bid), tick_size)
     complement_fresh_edge = signal.token_probability - complement_entry_price
     complement_skip_reason = (
-        settlement_cost_edge_skip_reason(
-            fresh_edge_at_worst=complement_fresh_edge,
-            policy=entry_policy,
-        )
+            settlement_cost_edge_skip_reason(
+                fresh_edge_at_worst=complement_fresh_edge,
+                policy=entry_policy,
+                settlement_confidence=signal.token_probability,
+                settlement_peak_confidence=settlement_peak_confidence,
+                signal_age_seconds=signal_age_seconds,
+            )
         if v6_settlement_cost_edge_only
         else entry_price_skip_reason(
             ask=complement_entry_price,
@@ -2235,6 +2662,13 @@ def _try_entry(
             near_min_fresh_edge_threshold=entry_policy.near_min_fresh_edge_threshold,
             near_min_seconds_to_expiry=entry_policy.near_min_seconds_to_expiry,
             settlement_edge_threshold=entry_policy.effective_settlement_edge_threshold,
+                settlement_min_confidence=entry_policy.settlement_min_confidence,
+                settlement_peak_confidence=settlement_peak_confidence,
+                settlement_peak_confidence_drop_tolerance=(
+                    entry_policy.settlement_peak_confidence_drop_tolerance
+                ),
+                max_signal_age_seconds=entry_policy.max_signal_age_seconds,
+            signal_age_seconds=signal_age_seconds,
             settlement_price_gate_mode=(
                 "cost_edge_only" if v6_settlement_cost_edge_only else "legacy_min_entry"
             ),
@@ -2251,6 +2685,10 @@ def _try_entry(
                     token_probability=signal.token_probability,
                     seconds_to_expiry=seconds_to_expiry,
                     policy=entry_policy,
+                    settlement_confidence=signal.token_probability,
+                    settlement_peak_confidence=settlement_peak_confidence,
+                    signal_age_seconds=signal_age_seconds,
+                    enable_settlement_gate=sleeve == "settlement",
                 )
             ),
         )
@@ -2260,7 +2698,7 @@ def _try_entry(
             token_id=signal.token_id,
             side=BUY,
             amount=max_position_size_usdc,
-            price=worst_price,
+            price=order_limit_price,
         ),
         options=PartialCreateOrderOptions(tick_size=tick_size, neg_risk=neg_risk),
     )
@@ -2277,6 +2715,9 @@ def _try_entry(
             bid=bid,
             ask=ask,
             worst_price=worst_price,
+            slippage_worst_price=slippage_worst_price,
+            max_acceptable_price=max_acceptable_price,
+            order_limit_price=order_limit_price,
             error=str(exc),
             error_type=type(exc).__name__,
             gate_evaluation=gate_payload,
@@ -2304,6 +2745,9 @@ def _try_entry(
         bid=bid,
         ask=ask,
         worst_price=worst_price,
+        slippage_worst_price=slippage_worst_price,
+        max_acceptable_price=max_acceptable_price,
+        order_limit_price=order_limit_price,
         gate_evaluation=gate_payload,
         response=response,
         order_submit_latency_ms=order_posted_at - order_submit_started_at,
@@ -2380,6 +2824,9 @@ def _try_entry(
         entry_signal_created_at=signal.created_at,
         entry_signal_bridged_at=signal.bridged_at,
         entry_order_posted_at=order_posted_at,
+        entry_p_up=signal.p_up,
+        entry_p_down=signal.p_down,
+        entry_p_neutral=signal.p_neutral,
         sleeve=sleeve,
         paper=paper,
     )
@@ -2468,6 +2915,9 @@ def _open_paper_position(
         entry_signal_created_at=signal.created_at,
         entry_signal_bridged_at=signal.bridged_at,
         entry_order_posted_at=order_posted_at,
+        entry_p_up=signal.p_up,
+        entry_p_down=signal.p_down,
+        entry_p_neutral=signal.p_neutral,
         sleeve=sleeve,
         paper=True,
     )
@@ -2485,6 +2935,513 @@ def _open_paper_position(
         },
     )
     return position
+
+
+def _maybe_settlement_signal_exit(
+    *,
+    client: Any,
+    position_manager: PositionManager,
+    position: LivePosition,
+    signal: SignalEvent,
+    log_path: Path,
+    config: SettlementExitConfig,
+    v6_joint_config: V6JointGateConfig | None,
+    signal_age_seconds: float | None,
+    max_signal_age_seconds: float | None,
+    seconds_to_expiry: float,
+    opposite_exit_min_seconds_to_expiry: float,
+    sell_slippage: float,
+    exit_order_timeout_seconds: float = 20.0,
+    monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
+) -> tuple[str, SellResult] | None:
+    """Evaluate fresh v6 settlement signals for mid-round settlement exits."""
+
+    if position.sleeve != "settlement":
+        return None
+    if not config.allow_mid_round_exit and not config.confidence_decay_enabled:
+        return None
+    if (
+        max_signal_age_seconds is not None
+        and signal_age_seconds is not None
+        and signal_age_seconds > max_signal_age_seconds
+    ):
+        _log(
+            log_path,
+            "settlement_signal_exit_skipped",
+            reason="signal_age_above_threshold",
+            position=asdict(position),
+            signal=asdict(signal),
+            signal_age_seconds=signal_age_seconds,
+            max_signal_age_seconds=max_signal_age_seconds,
+        )
+        return None
+    if seconds_to_expiry <= 0:
+        return None
+    payload = _settlement_payload_from_signal(signal)
+    if payload is None:
+        _log(
+            log_path,
+            "settlement_signal_exit_skipped",
+            reason="missing_v6_probabilities",
+            position=asdict(position),
+            signal=asdict(signal),
+        )
+        return None
+
+    if config.allow_mid_round_exit and v6_joint_config is not None:
+        admitted_side = evaluate_v6_settlement_side(payload, v6_joint_config)
+        admitted_confidence = _settlement_side_probability(payload, admitted_side)
+        _log(
+            log_path,
+            "settlement_reversal_exit_evaluated",
+            position=asdict(position),
+            signal=asdict(signal),
+            admitted_side=admitted_side,
+            admitted_confidence=admitted_confidence,
+            position_side=position.side,
+            reversal_min_confidence=config.reversal_min_confidence,
+            hysteresis_bars=config.reversal_hysteresis_bars,
+            seconds_to_expiry=seconds_to_expiry,
+        )
+        if admitted_side == position.side:
+            position.settlement_reversal_candidate_side = ""
+            position.settlement_reversal_candidate_count = 0
+        elif admitted_side is None:
+            position.settlement_reversal_candidate_side = ""
+            position.settlement_reversal_candidate_count = 0
+        elif seconds_to_expiry < opposite_exit_min_seconds_to_expiry:
+            _log(
+                log_path,
+                "settlement_reversal_exit_skipped",
+                reason="insufficient_time_remaining",
+                position=asdict(position),
+                signal=asdict(signal),
+                admitted_side=admitted_side,
+                seconds_to_expiry=seconds_to_expiry,
+                opposite_exit_min_seconds_to_expiry=opposite_exit_min_seconds_to_expiry,
+            )
+        elif (
+            admitted_confidence is None
+            or admitted_confidence < config.reversal_min_confidence
+        ):
+            _log(
+                log_path,
+                "settlement_reversal_exit_skipped",
+                reason="below_confidence",
+                position=asdict(position),
+                signal=asdict(signal),
+                admitted_side=admitted_side,
+                admitted_confidence=admitted_confidence,
+                reversal_min_confidence=config.reversal_min_confidence,
+            )
+        else:
+            if position.settlement_reversal_candidate_side == admitted_side:
+                position.settlement_reversal_candidate_count += 1
+            else:
+                position.settlement_reversal_candidate_side = admitted_side
+                position.settlement_reversal_candidate_count = 1
+            if position.settlement_reversal_candidate_count < config.reversal_hysteresis_bars:
+                _log(
+                    log_path,
+                    "settlement_reversal_exit_skipped",
+                    reason="hysteresis_wait",
+                    position=asdict(position),
+                    signal=asdict(signal),
+                    admitted_side=admitted_side,
+                    admitted_confidence=admitted_confidence,
+                    candidate_count=position.settlement_reversal_candidate_count,
+                    hysteresis_bars=config.reversal_hysteresis_bars,
+                )
+            else:
+                sell_result = _sell_settlement_policy_exit(
+                    client=client,
+                    position_manager=position_manager,
+                    position=position,
+                    signal=signal,
+                    log_path=log_path,
+                    event_prefix="settlement_reversal_exit",
+                    reason="settlement_reversal_exit",
+                    sell_slippage=sell_slippage,
+                    exit_order_timeout_seconds=exit_order_timeout_seconds,
+                    monitoring_db_path=monitoring_db_path,
+                )
+                if sell_result is not None:
+                    return "settlement_reversal_exit", sell_result
+
+    if config.confidence_decay_enabled:
+        position_confidence = _settlement_side_probability(payload, position.side)
+        opposite_confidence = _settlement_side_probability(payload, _opposite_side(position.side))
+        baseline = _position_entry_side_probability(position)
+        below_floor = (
+            position_confidence is not None
+            and position_confidence < config.decay_floor
+        )
+        below_delta = (
+            position_confidence is not None
+            and baseline is not None
+            and baseline - position_confidence >= config.decay_delta
+        )
+        regime_shift = (
+            position_confidence is not None
+            and opposite_confidence is not None
+            and opposite_confidence > position_confidence
+        )
+        opposite_confidence_passed = (
+            opposite_confidence is not None
+            and config.decay_opposite_min_confidence is not None
+            and opposite_confidence >= config.decay_opposite_min_confidence
+        )
+        should_exit = (below_floor or below_delta) and regime_shift and opposite_confidence_passed
+        _log(
+            log_path,
+            "settlement_confidence_decay_exit_evaluated",
+            position=asdict(position),
+            signal=asdict(signal),
+            position_confidence=position_confidence,
+            opposite_confidence=opposite_confidence,
+            entry_baseline_confidence=baseline,
+            below_floor=below_floor,
+            below_delta=below_delta,
+            regime_shift=regime_shift,
+            opposite_confidence_passed=opposite_confidence_passed,
+            decay_opposite_min_confidence=config.decay_opposite_min_confidence,
+            should_exit=should_exit,
+            seconds_to_expiry=seconds_to_expiry,
+        )
+        if seconds_to_expiry < config.stop_min_seconds_to_expiry:
+            _log(
+                log_path,
+                "settlement_confidence_decay_exit_skipped",
+                reason="insufficient_time_remaining",
+                position=asdict(position),
+                signal=asdict(signal),
+                seconds_to_expiry=seconds_to_expiry,
+                min_seconds_to_expiry=config.stop_min_seconds_to_expiry,
+            )
+        elif should_exit:
+            sell_result = _sell_settlement_policy_exit(
+                client=client,
+                position_manager=position_manager,
+                position=position,
+                signal=signal,
+                log_path=log_path,
+                event_prefix="settlement_confidence_decay_exit",
+                reason="settlement_confidence_decay_exit",
+                sell_slippage=sell_slippage,
+                exit_order_timeout_seconds=exit_order_timeout_seconds,
+                monitoring_db_path=monitoring_db_path,
+            )
+            if sell_result is not None:
+                return "settlement_confidence_decay_exit", sell_result
+    return None
+
+
+def _record_settlement_same_side_confirmation(
+    *,
+    position: LivePosition,
+    signal: SignalEvent,
+    log_path: Path,
+    config: SettlementExitConfig,
+    signal_age_seconds: float | None,
+    max_signal_age_seconds: float | None,
+) -> bool:
+    """Remember fresh post-entry same-side settlement confidence for stop vetoes."""
+
+    if (
+        position.sleeve != "settlement"
+        or signal.round_slug != position.round_slug
+        or not config.price_stop_same_side_confirmation_veto_enabled
+    ):
+        return False
+    if (
+        max_signal_age_seconds is not None
+        and signal_age_seconds is not None
+        and signal_age_seconds > max_signal_age_seconds
+    ):
+        return False
+    if signal.created_at <= position.entry_signal_created_at:
+        return False
+    payload = _settlement_payload_from_signal(signal)
+    if payload is None:
+        return False
+    confidence = _settlement_side_probability(payload, position.side)
+    opposite_confidence = _settlement_side_probability(payload, _opposite_side(position.side))
+    min_confidence = config.price_stop_same_side_confirmation_min_confidence
+    if confidence is None or opposite_confidence is None or confidence < min_confidence:
+        return False
+    if position.side == "UP" and confidence < opposite_confidence:
+        return False
+    if position.side == "DOWN" and confidence <= opposite_confidence:
+        return False
+    if signal.created_at < position.settlement_same_side_confirmation_created_at:
+        return False
+    if (
+        signal.created_at == position.settlement_same_side_confirmation_created_at
+        and signal.event_id <= position.settlement_same_side_confirmation_event_id
+    ):
+        return False
+
+    position.settlement_same_side_confirmation_event_id = signal.event_id
+    position.settlement_same_side_confirmation_created_at = signal.created_at
+    position.settlement_same_side_confirmation_confidence = confidence
+    _log(
+        log_path,
+        "settlement_same_side_confirmation_updated",
+        position=asdict(position),
+        signal=asdict(signal),
+        same_side_confidence=confidence,
+        opposite_confidence=opposite_confidence,
+        min_confidence=min_confidence,
+        signal_age_seconds=signal_age_seconds,
+        max_signal_age_seconds=max_signal_age_seconds,
+    )
+    return True
+
+
+def _settlement_same_side_confirmation_veto_payload(
+    *,
+    position: LivePosition,
+    config: SettlementExitConfig,
+    now_ms: int,
+) -> dict[str, Any] | None:
+    if not config.price_stop_same_side_confirmation_veto_enabled:
+        return None
+    if position.settlement_same_side_confirmation_created_at <= position.entry_signal_created_at:
+        return None
+    confidence = position.settlement_same_side_confirmation_confidence
+    min_confidence = config.price_stop_same_side_confirmation_min_confidence
+    if confidence < min_confidence:
+        return None
+    confirmation_age_seconds = max(
+        0.0,
+        (now_ms - position.settlement_same_side_confirmation_created_at) / 1000,
+    )
+    max_age_seconds = config.price_stop_same_side_confirmation_max_age_seconds
+    if max_age_seconds is not None and confirmation_age_seconds > max_age_seconds:
+        return None
+    return {
+        "event_id": position.settlement_same_side_confirmation_event_id,
+        "created_at": position.settlement_same_side_confirmation_created_at,
+        "confidence": confidence,
+        "min_confidence": min_confidence,
+        "age_seconds": confirmation_age_seconds,
+        "max_age_seconds": max_age_seconds,
+    }
+
+
+def _maybe_settlement_price_stop_exit(
+    *,
+    client: Any,
+    position_manager: PositionManager,
+    position: LivePosition,
+    log_path: Path,
+    seconds_to_expiry: float,
+    config: SettlementExitConfig | None,
+    sell_slippage: float,
+    exit_order_timeout_seconds: float = 20.0,
+    monitoring_db_path: str = "data/mlops/champion_catalog.duckdb",
+) -> SellResult | None:
+    if config is None or not config.price_stop_enabled or position.sleeve != "settlement":
+        return None
+    if seconds_to_expiry < config.stop_min_seconds_to_expiry:
+        _log(
+            log_path,
+            "settlement_stop_exit_skipped",
+            reason="insufficient_time_remaining",
+            position=asdict(position),
+            seconds_to_expiry=seconds_to_expiry,
+            min_seconds_to_expiry=config.stop_min_seconds_to_expiry,
+        )
+        return None
+    try:
+        bid, _ask = _best_bid_ask(client, position.token_id)
+    except OrderBookUnavailable as exc:
+        _log(
+            log_path,
+            "settlement_stop_exit_skipped",
+            reason="orderbook_unavailable",
+            position=asdict(position),
+            seconds_to_expiry=seconds_to_expiry,
+            **exc.to_log_payload(),
+        )
+        return None
+    if bid is None:
+        _log(
+            log_path,
+            "settlement_stop_exit_skipped",
+            reason="missing_bid",
+            position=asdict(position),
+            seconds_to_expiry=seconds_to_expiry,
+        )
+        return None
+    unrealized_pnl = (float(bid) - position.fill_price) * position.size
+    price_breach = float(bid) <= position.fill_price - config.stop_price_delta
+    loss_breach = unrealized_pnl <= -config.stop_loss_usdc
+    _log(
+        log_path,
+        "settlement_stop_exit_evaluated",
+        position=asdict(position),
+        bid=float(bid),
+        fill_price=position.fill_price,
+        unrealized_pnl=unrealized_pnl,
+        price_breach=price_breach,
+        loss_breach=loss_breach,
+        stop_price_delta=config.stop_price_delta,
+        stop_loss_usdc=config.stop_loss_usdc,
+        seconds_to_expiry=seconds_to_expiry,
+    )
+    if not price_breach and not loss_breach:
+        return None
+    same_side_veto = _settlement_same_side_confirmation_veto_payload(
+        position=position,
+        config=config,
+        now_ms=_now_ms(),
+    )
+    if same_side_veto is not None:
+        _log(
+            log_path,
+            "settlement_stop_exit_skipped",
+            reason="same_side_confirmation_veto",
+            position=asdict(position),
+            bid=float(bid),
+            fill_price=position.fill_price,
+            unrealized_pnl=unrealized_pnl,
+            price_breach=price_breach,
+            loss_breach=loss_breach,
+            stop_price_delta=config.stop_price_delta,
+            stop_loss_usdc=config.stop_loss_usdc,
+            seconds_to_expiry=seconds_to_expiry,
+            same_side_confirmation=same_side_veto,
+        )
+        return None
+    return _sell_settlement_policy_exit(
+        client=client,
+        position_manager=position_manager,
+        position=position,
+        signal=None,
+        log_path=log_path,
+        event_prefix="settlement_stop_exit",
+        reason="settlement_price_stop_exit",
+        bid=float(bid),
+        sell_slippage=sell_slippage,
+        exit_order_timeout_seconds=exit_order_timeout_seconds,
+        monitoring_db_path=monitoring_db_path,
+    )
+
+
+def _sell_settlement_policy_exit(
+    *,
+    client: Any,
+    position_manager: PositionManager,
+    position: LivePosition,
+    signal: SignalEvent | None,
+    log_path: Path,
+    event_prefix: str,
+    reason: str,
+    sell_slippage: float,
+    exit_order_timeout_seconds: float,
+    monitoring_db_path: str,
+    bid: float | None = None,
+) -> SellResult | None:
+    if bid is None:
+        try:
+            bid, _ask = _best_bid_ask(client, position.token_id)
+        except OrderBookUnavailable as exc:
+            _log(
+                log_path,
+                f"{event_prefix}_skipped",
+                reason="orderbook_unavailable",
+                position=asdict(position),
+                signal=None if signal is None else asdict(signal),
+                **exc.to_log_payload(),
+            )
+            return None
+        if bid is None:
+            _log(
+                log_path,
+                f"{event_prefix}_skipped",
+                reason="missing_bid",
+                position=asdict(position),
+                signal=None if signal is None else asdict(signal),
+            )
+            return None
+    sell_result = _sell_position(
+        client=client,
+        position_manager=position_manager,
+        position=position,
+        log_path=log_path,
+        bid=float(bid),
+        sell_slippage=sell_slippage,
+        fill_confirm_timeout_seconds=exit_order_timeout_seconds,
+        reason=reason,
+        signal=signal,
+        monitoring_db_path=monitoring_db_path,
+    )
+    if sell_result is None:
+        _log(
+            log_path,
+            f"{event_prefix}_skipped",
+            reason="sell_not_filled",
+            position=asdict(position),
+            signal=None if signal is None else asdict(signal),
+            bid=float(bid),
+        )
+    elif sell_result.status == "filled":
+        _log(
+            log_path,
+            f"{event_prefix}_filled",
+            position=asdict(position),
+            signal=None if signal is None else asdict(signal),
+            bid=float(bid),
+            realized_pnl=sell_result.realized_pnl,
+            account_cash_pnl=sell_result.account_cash_pnl,
+        )
+    else:
+        _log(
+            log_path,
+            f"{event_prefix}_pending",
+            status=sell_result.status,
+            position=asdict(position),
+            signal=None if signal is None else asdict(signal),
+            bid=float(bid),
+        )
+    return sell_result
+
+
+def _settlement_payload_from_signal(signal: SignalEvent) -> dict[str, float | str] | None:
+    if signal.p_up is None or signal.p_down is None:
+        return None
+    return v6_payload_from_values(
+        model_version="xgboost-v6",
+        p_up=signal.p_up,
+        p_down=signal.p_down,
+        p_neutral=0.0 if signal.p_neutral is None else signal.p_neutral,
+        p_vol_up=0.0 if signal.p_vol_up is None else signal.p_vol_up,
+        p_vol_down=0.0 if signal.p_vol_down is None else signal.p_vol_down,
+    )
+
+
+def _settlement_side_probability(
+    payload: dict[str, float | str],
+    side: str | None,
+) -> float | None:
+    if side == "UP":
+        return float(payload["p_up"])
+    if side == "DOWN":
+        return float(payload["p_down"])
+    return None
+
+
+def _position_entry_side_probability(position: LivePosition) -> float | None:
+    if position.side == "UP":
+        return position.entry_p_up
+    if position.side == "DOWN":
+        return position.entry_p_down
+    return None
+
+
+def _opposite_side(side: str) -> str:
+    return "DOWN" if side == "UP" else "UP"
 
 
 def _maybe_exit(
@@ -3466,17 +4423,45 @@ def _trade_is_confirmed(trade: dict[str, Any]) -> bool:
     return str(trade.get("status") or "").upper() in {"MINED", "CONFIRMED"}
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _best_bid_ask(client: Any, token_id: str) -> tuple[float | None, float | None]:
     try:
         book = client.get_order_book(token_id)
     except Exception as exc:  # noqa: BLE001
-        raise OrderBookUnavailable(token_id, exc) from exc
+        if not _env_bool("POLYMARKET_ORDERBOOK_REST_FALLBACK", default=False):
+            raise OrderBookUnavailable(token_id, exc) from exc
+        try:
+            book = _load_order_book_rest(token_id)
+        except Exception as fallback_exc:  # noqa: BLE001
+            combined = RuntimeError(
+                f"{type(exc).__name__}: {exc}; REST fallback failed: "
+                f"{type(fallback_exc).__name__}: {fallback_exc}"
+            )
+            raise OrderBookUnavailable(token_id, combined) from fallback_exc
     raw = book if isinstance(book, dict) else getattr(book, "__dict__", {})
     bids = raw.get("bids") or []
     asks = raw.get("asks") or []
     bid = _best_price(bids, want_max=True)
     ask = _best_price(asks, want_max=False)
     return bid, ask
+
+
+def _load_order_book_rest(token_id: str) -> dict[str, Any]:
+    host = os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com").rstrip("/")
+    query = parse.urlencode({"token_id": token_id})
+    timeout = float(os.getenv("POLYMARKET_ORDERBOOK_REST_TIMEOUT_SECONDS", "5"))
+    req = request.Request(
+        f"{host}/book?{query}",
+        headers={"accept": "application/json", "user-agent": "BiGan phase4 executor"},
+    )
+    with request.urlopen(req, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
 def _best_price(levels: Any, *, want_max: bool) -> float | None:
@@ -3496,6 +4481,13 @@ def _round_price(price: float, tick_size: Any) -> float:
     if tick <= 0:
         return round(price, 4)
     return round(round(price / tick) * tick, 4)
+
+
+def _floor_price(price: float, tick_size: Any) -> float:
+    tick = float(tick_size)
+    if tick <= 0:
+        return round(price, 4)
+    return round(math.floor(price / tick) * tick, 4)
 
 
 def _round_sell_size(size: float) -> float:

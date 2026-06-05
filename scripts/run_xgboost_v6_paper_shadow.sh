@@ -32,15 +32,58 @@ Environment overrides:
   V6_EV_MARGIN               Default: 0.01
   V6_SETTLEMENT_MIN_EDGE_AFTER_COST
                              Default: V6_ROUND_TRIP_COST + V6_EV_MARGIN
+  V6_SETTLEMENT_MIN_CONFIDENCE
+                             Default: 0.80
+  SETTLEMENT_PEAK_CONFIDENCE_DROP_TOLERANCE
+                             Default: 0.05. Skip settlement entries when the
+                             same-round/side confidence has already faded from
+                             its observed peak by more than this amount.
+  SETTLEMENT_ALLOW_MID_ROUND_EXIT
+                             Default: false
+  SETTLEMENT_REVERSAL_MIN_CONFIDENCE
+                             Default: V6_SETTLEMENT_MIN_CONFIDENCE
+  SETTLEMENT_REVERSAL_HYSTERESIS_BARS
+                             Default: 1
+  SETTLEMENT_CONFIDENCE_DECAY_ENABLED
+                             Default: false
+  SETTLEMENT_DECAY_FLOOR   Default: 0.55
+  SETTLEMENT_DECAY_DELTA   Default: 0.25
+  SETTLEMENT_DECAY_OPPOSITE_MIN_CONFIDENCE
+                             Default: V6_SETTLEMENT_MIN_CONFIDENCE
+  SETTLEMENT_PRICE_STOP_ENABLED
+                             Default: false
+  SETTLEMENT_STOP_PRICE_DELTA
+                             Default: 0.15
+  SETTLEMENT_STOP_LOSS_USDC
+                             Default: 0.50
+  SETTLEMENT_STOP_MIN_SECONDS_TO_EXPIRY
+                             Default: 120
+  SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_VETO_ENABLED
+                             Default: false. When enabled, a fresh post-entry
+                             same-side settlement confidence confirmation can
+                             veto a price-stop exit.
+  SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MIN_CONFIDENCE
+                             Default: V6_SETTLEMENT_MIN_CONFIDENCE
+  SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MAX_AGE_SECONDS
+                             Default: MAX_SIGNAL_AGE_SECONDS
+  MAX_SIGNAL_AGE_SECONDS     Default: 180
   PAPER_SETTLEMENT_MAX_WAIT_AFTER_EXPIRY_SECONDS
                              Default: 180
+  POLYMARKET_ORDERBOOK_REST_FALLBACK
+                             Default: true for paper shadow. Uses REST /book if
+                             the authenticated CLOB client orderbook call fails.
+  POLYMARKET_ORDERBOOK_REST_TIMEOUT_SECONDS
+                             Default: 5
   ENABLE_VOLATILITY_SLEEVE   Default: true (still paper-only)
   MONITORING_DB_PATH         Default: data/mlops/champion_catalog.duckdb
-  SIGNAL_JSONL_PATH          Optional bridged queue for split topology
+  SIGNAL_JSONL_PATH          Executor-ready signal JSONL queue. Required by
+                             default; set REQUIRE_SIGNAL_JSONL=false only for
+                             diagnostic DuckDB scans.
+  REQUIRE_SIGNAL_JSONL       Default: true
   LOG_DIR                    Default: logs/xgboost-v6-paper-shadow
 
 Example:
-  ./scripts/run_xgboost_v6_paper_shadow.sh
+  bash scripts/run_xgboost_v6_paper_shadow.sh
 EOF
 }
 
@@ -64,6 +107,23 @@ V6_VOLATILITY_THRESHOLD="${V6_VOLATILITY_THRESHOLD:-0.60}"
 V6_ROUND_TRIP_COST="${V6_ROUND_TRIP_COST:-0.072}"
 V6_EV_MARGIN="${V6_EV_MARGIN:-0.01}"
 V6_SETTLEMENT_MIN_EDGE_AFTER_COST="${V6_SETTLEMENT_MIN_EDGE_AFTER_COST:-}"
+V6_SETTLEMENT_MIN_CONFIDENCE="${V6_SETTLEMENT_MIN_CONFIDENCE:-0.80}"
+SETTLEMENT_PEAK_CONFIDENCE_DROP_TOLERANCE="${SETTLEMENT_PEAK_CONFIDENCE_DROP_TOLERANCE:-0.05}"
+SETTLEMENT_ALLOW_MID_ROUND_EXIT="${SETTLEMENT_ALLOW_MID_ROUND_EXIT:-false}"
+SETTLEMENT_REVERSAL_MIN_CONFIDENCE="${SETTLEMENT_REVERSAL_MIN_CONFIDENCE:-}"
+SETTLEMENT_REVERSAL_HYSTERESIS_BARS="${SETTLEMENT_REVERSAL_HYSTERESIS_BARS:-1}"
+SETTLEMENT_CONFIDENCE_DECAY_ENABLED="${SETTLEMENT_CONFIDENCE_DECAY_ENABLED:-false}"
+SETTLEMENT_DECAY_FLOOR="${SETTLEMENT_DECAY_FLOOR:-0.55}"
+SETTLEMENT_DECAY_DELTA="${SETTLEMENT_DECAY_DELTA:-0.25}"
+SETTLEMENT_DECAY_OPPOSITE_MIN_CONFIDENCE="${SETTLEMENT_DECAY_OPPOSITE_MIN_CONFIDENCE:-${V6_SETTLEMENT_MIN_CONFIDENCE}}"
+SETTLEMENT_PRICE_STOP_ENABLED="${SETTLEMENT_PRICE_STOP_ENABLED:-false}"
+SETTLEMENT_STOP_PRICE_DELTA="${SETTLEMENT_STOP_PRICE_DELTA:-0.15}"
+SETTLEMENT_STOP_LOSS_USDC="${SETTLEMENT_STOP_LOSS_USDC:-0.50}"
+SETTLEMENT_STOP_MIN_SECONDS_TO_EXPIRY="${SETTLEMENT_STOP_MIN_SECONDS_TO_EXPIRY:-120}"
+MAX_SIGNAL_AGE_SECONDS="${MAX_SIGNAL_AGE_SECONDS:-180}"
+SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_VETO_ENABLED="${SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_VETO_ENABLED:-false}"
+SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MIN_CONFIDENCE="${SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MIN_CONFIDENCE:-${V6_SETTLEMENT_MIN_CONFIDENCE}}"
+SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MAX_AGE_SECONDS="${SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MAX_AGE_SECONDS:-${MAX_SIGNAL_AGE_SECONDS}}"
 PAPER_SETTLEMENT_MAX_WAIT_AFTER_EXPIRY_SECONDS="${PAPER_SETTLEMENT_MAX_WAIT_AFTER_EXPIRY_SECONDS:-180}"
 ENABLE_VOLATILITY_SLEEVE="${ENABLE_VOLATILITY_SLEEVE:-true}"
 PAPER="true"
@@ -83,8 +143,10 @@ MIN_SECONDS_TO_EXPIRY="${MIN_SECONDS_TO_EXPIRY:-180}"
 MAX_SECONDS_TO_EXPIRY="${MAX_SECONDS_TO_EXPIRY:-900}"
 SIGNAL_JSONL_PATH="${SIGNAL_JSONL_PATH:-}"
 SIGNAL_JSONL_START="${SIGNAL_JSONL_START:-tail}"
+REQUIRE_SIGNAL_JSONL="${REQUIRE_SIGNAL_JSONL:-true}"
 LOG_DIR="${LOG_DIR:-logs/xgboost-v6-paper-shadow}"
 CONTINUE_AFTER_MAX_ROUNDS_UNTIL_RUNTIME="${CONTINUE_AFTER_MAX_ROUNDS_UNTIL_RUNTIME:-false}"
+POLYMARKET_ORDERBOOK_REST_FALLBACK="${POLYMARKET_ORDERBOOK_REST_FALLBACK:-true}"
 
 if [[ "${CONFIRM:-}" == "yes" ]]; then
   echo "[v6-paper-shadow] refusing live settlement: v6 promotion path is paper-only." >&2
@@ -108,6 +170,10 @@ if [[ -n "${SIGNAL_JSONL_PATH}" ]]; then
     echo "[v6-paper-shadow] signal jsonl queue not found: ${SIGNAL_JSONL_PATH}" >&2
     exit 1
   fi
+elif [[ "${REQUIRE_SIGNAL_JSONL}" == "true" ]]; then
+  echo "[v6-paper-shadow] SIGNAL_JSONL_PATH is required for low-latency v6 paper shadow." >&2
+  echo "[v6-paper-shadow] start scorer with SIGNAL_JSONL_OUTPUT_PATH, or set REQUIRE_SIGNAL_JSONL=false for diagnostic DuckDB scans." >&2
+  exit 1
 elif [[ ! -f "${MONITORING_DB_PATH}" ]]; then
   echo "[v6-paper-shadow] monitoring db not found: ${MONITORING_DB_PATH}" >&2
   echo "[v6-paper-shadow] start the v6 scorer first, or set SIGNAL_JSONL_PATH." >&2
@@ -119,6 +185,7 @@ LOG_PATH="${LOG_DIR}/phase4-${SESSION_ID}.jsonl"
 SUMMARY_PATH="${LOG_DIR}/phase4-${SESSION_ID}-summary.json"
 
 export PYTHONPATH="${PYTHONPATH:-src}"
+export POLYMARKET_ORDERBOOK_REST_FALLBACK
 
 echo "[v6-paper-shadow] repo=${REPO_ROOT}"
 echo "[v6-paper-shadow] model_version=${MODEL_VERSION}"
@@ -126,8 +193,15 @@ echo "[v6-paper-shadow] model_json=${MODEL_JSON_PATH}"
 echo "[v6-paper-shadow] market_families=${MARKET_FAMILIES}"
 echo "[v6-paper-shadow] v6_settlement_gate=${V6_SETTLEMENT_THRESHOLD}"
 echo "[v6-paper-shadow] v6_settlement_min_edge_after_cost=${V6_SETTLEMENT_MIN_EDGE_AFTER_COST:-${V6_ROUND_TRIP_COST}+${V6_EV_MARGIN}}"
+echo "[v6-paper-shadow] v6_settlement_min_confidence=${V6_SETTLEMENT_MIN_CONFIDENCE}"
+echo "[v6-paper-shadow] settlement_peak_confidence_drop_tolerance=${SETTLEMENT_PEAK_CONFIDENCE_DROP_TOLERANCE}"
+echo "[v6-paper-shadow] settlement_mid_round_exit=${SETTLEMENT_ALLOW_MID_ROUND_EXIT} confidence_decay=${SETTLEMENT_CONFIDENCE_DECAY_ENABLED} price_stop=${SETTLEMENT_PRICE_STOP_ENABLED}"
+echo "[v6-paper-shadow] settlement_price_stop_same_side_confirmation_veto=${SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_VETO_ENABLED} min_confidence=${SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MIN_CONFIDENCE} max_age=${SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MAX_AGE_SECONDS}"
+echo "[v6-paper-shadow] settlement_decay_opposite_min_confidence=${SETTLEMENT_DECAY_OPPOSITE_MIN_CONFIDENCE}"
+echo "[v6-paper-shadow] max_signal_age_seconds=${MAX_SIGNAL_AGE_SECONDS}"
 echo "[v6-paper-shadow] volatility_reference=${V6_VOLATILITY_THRESHOLD}/${V6_ROUND_TRIP_COST}/${V6_EV_MARGIN}"
 echo "[v6-paper-shadow] paper=true volatility_sleeve=${ENABLE_VOLATILITY_SLEEVE}"
+echo "[v6-paper-shadow] orderbook_rest_fallback=${POLYMARKET_ORDERBOOK_REST_FALLBACK}"
 if [[ -n "${SIGNAL_JSONL_PATH}" ]]; then
   echo "[v6-paper-shadow] signal_source=jsonl path=${SIGNAL_JSONL_PATH}"
 else
@@ -145,6 +219,18 @@ EXEC_ARGS=(
   --v6-volatility-threshold "${V6_VOLATILITY_THRESHOLD}"
   --v6-round-trip-cost "${V6_ROUND_TRIP_COST}"
   --v6-ev-margin "${V6_EV_MARGIN}"
+  --settlement-min-confidence "${V6_SETTLEMENT_MIN_CONFIDENCE}"
+  --settlement-peak-confidence-drop-tolerance "${SETTLEMENT_PEAK_CONFIDENCE_DROP_TOLERANCE}"
+  --settlement-reversal-hysteresis-bars "${SETTLEMENT_REVERSAL_HYSTERESIS_BARS}"
+  --settlement-decay-floor "${SETTLEMENT_DECAY_FLOOR}"
+  --settlement-decay-delta "${SETTLEMENT_DECAY_DELTA}"
+  --settlement-decay-opposite-min-confidence "${SETTLEMENT_DECAY_OPPOSITE_MIN_CONFIDENCE}"
+  --settlement-stop-price-delta "${SETTLEMENT_STOP_PRICE_DELTA}"
+  --settlement-stop-loss-usdc "${SETTLEMENT_STOP_LOSS_USDC}"
+  --settlement-stop-min-seconds-to-expiry "${SETTLEMENT_STOP_MIN_SECONDS_TO_EXPIRY}"
+  --settlement-price-stop-same-side-confirmation-min-confidence "${SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MIN_CONFIDENCE}"
+  --settlement-price-stop-same-side-confirmation-max-age-seconds "${SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MAX_AGE_SECONDS}"
+  --max-signal-age-seconds "${MAX_SIGNAL_AGE_SECONDS}"
   --monitoring-db-path "${MONITORING_DB_PATH}"
   --max-position-size-usdc "${MAX_POSITION_SIZE_USDC}"
   --max-concurrent-positions "${MAX_CONCURRENT_POSITIONS}"
@@ -167,6 +253,9 @@ EXEC_ARGS=(
 if [[ -n "${V6_SETTLEMENT_MIN_EDGE_AFTER_COST}" ]]; then
   EXEC_ARGS+=(--v6-settlement-min-edge-after-cost "${V6_SETTLEMENT_MIN_EDGE_AFTER_COST}")
 fi
+if [[ -n "${SETTLEMENT_REVERSAL_MIN_CONFIDENCE}" ]]; then
+  EXEC_ARGS+=(--settlement-reversal-min-confidence "${SETTLEMENT_REVERSAL_MIN_CONFIDENCE}")
+fi
 if [[ -n "${SIGNAL_JSONL_PATH}" ]]; then
   EXEC_ARGS+=(--signal-jsonl-path "${SIGNAL_JSONL_PATH}" --signal-jsonl-start "${SIGNAL_JSONL_START}")
 fi
@@ -175,6 +264,18 @@ if [[ "${CONTINUE_AFTER_MAX_ROUNDS_UNTIL_RUNTIME}" == "true" ]]; then
 fi
 if [[ "${ENABLE_VOLATILITY_SLEEVE}" == "true" ]]; then
   EXEC_ARGS+=(--enable-volatility-sleeve)
+fi
+if [[ "${SETTLEMENT_ALLOW_MID_ROUND_EXIT}" == "true" ]]; then
+  EXEC_ARGS+=(--settlement-allow-mid-round-exit)
+fi
+if [[ "${SETTLEMENT_CONFIDENCE_DECAY_ENABLED}" == "true" ]]; then
+  EXEC_ARGS+=(--settlement-confidence-decay-enabled)
+fi
+if [[ "${SETTLEMENT_PRICE_STOP_ENABLED}" == "true" ]]; then
+  EXEC_ARGS+=(--settlement-price-stop-enabled)
+fi
+if [[ "${SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_VETO_ENABLED}" == "true" ]]; then
+  EXEC_ARGS+=(--settlement-price-stop-same-side-confirmation-veto-enabled)
 fi
 
 exec "${PYTHON_BIN}" scripts/polymarket_phase4_live_champion_executor.py "${EXEC_ARGS[@]}"

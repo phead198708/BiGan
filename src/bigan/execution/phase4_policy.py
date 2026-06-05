@@ -19,6 +19,9 @@ DEFAULT_VOLATILITY_ROUND_TRIP_COST = 0.04
 DEFAULT_VOLATILITY_SAFETY_MARGIN = 0.02
 DEFAULT_VOLATILITY_ROUND_BANKROLL_USDC = 1.0
 DEFAULT_VOLATILITY_MIN_ORDER_SIZE_USDC = 0.05
+DEFAULT_SETTLEMENT_MIN_CONFIDENCE = 0.80
+DEFAULT_MAX_SIGNAL_AGE_SECONDS = 180.0
+DEFAULT_SETTLEMENT_PEAK_CONFIDENCE_DROP_TOLERANCE = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +45,9 @@ class Phase4EntryPolicy:
     volatility_round_trip_cost: float = DEFAULT_VOLATILITY_ROUND_TRIP_COST
     volatility_safety_margin: float = DEFAULT_VOLATILITY_SAFETY_MARGIN
     enable_volatility_live_entries: bool = False
+    settlement_min_confidence: float = DEFAULT_SETTLEMENT_MIN_CONFIDENCE
+    max_signal_age_seconds: float | None = DEFAULT_MAX_SIGNAL_AGE_SECONDS
+    settlement_peak_confidence_drop_tolerance: float | None = None
 
     @property
     def effective_settlement_edge_threshold(self) -> float:
@@ -59,6 +65,12 @@ class Phase4GateEvaluation:
     settlement_gate_passed: bool
     settlement_edge: float
     settlement_edge_threshold: float
+    settlement_confidence: float | None
+    settlement_min_confidence: float
+    settlement_confidence_passed: bool
+    signal_age_seconds: float | None
+    max_signal_age_seconds: float | None
+    signal_freshness_passed: bool
     volatility_gate_passed: bool
     volatility_score: float | None
     volatility_score_threshold: float
@@ -170,18 +182,56 @@ def settlement_cost_edge_skip_reason(
     *,
     fresh_edge_at_worst: float,
     policy: Phase4EntryPolicy,
+    settlement_confidence: float | None = None,
+    settlement_peak_confidence: float | None = None,
+    signal_age_seconds: float | None = None,
 ) -> str | None:
-    """Return a v6 settlement skip reason using only executable cost edge."""
+    """Return a v6 settlement skip reason using executable, fresh, confident edge."""
 
+    if (
+        policy.max_signal_age_seconds is not None
+        and signal_age_seconds is not None
+        and signal_age_seconds > policy.max_signal_age_seconds
+    ):
+        return "signal_age_above_threshold"
+    if (
+        settlement_confidence is not None
+        and settlement_confidence < policy.settlement_min_confidence
+    ):
+        return "settlement_confidence_below_threshold"
+    if (
+        settlement_confidence is not None
+        and settlement_peak_confidence is not None
+        and policy.settlement_peak_confidence_drop_tolerance is not None
+        and settlement_peak_confidence - settlement_confidence
+        > policy.settlement_peak_confidence_drop_tolerance
+    ):
+        return "settlement_confidence_peak_drop"
     if fresh_edge_at_worst < policy.effective_settlement_edge_threshold:
         return "fresh_edge_below_threshold"
     return None
 
 
-def settlement_gate_passed(*, edge: float, policy: Phase4EntryPolicy) -> bool:
+def settlement_gate_passed(
+    *,
+    edge: float,
+    policy: Phase4EntryPolicy,
+    settlement_confidence: float | None = None,
+    settlement_peak_confidence: float | None = None,
+    signal_age_seconds: float | None = None,
+) -> bool:
     """Return whether the settlement-confidence gate admits the signal."""
 
-    return edge >= policy.effective_settlement_edge_threshold
+    return (
+        settlement_cost_edge_skip_reason(
+            fresh_edge_at_worst=edge,
+            policy=policy,
+            settlement_confidence=settlement_confidence,
+            settlement_peak_confidence=settlement_peak_confidence,
+            signal_age_seconds=signal_age_seconds,
+        )
+        is None
+    )
 
 
 def expected_volatility_exit_gain_from_orderbook(
@@ -239,10 +289,34 @@ def evaluate_entry_gates(
     seconds_to_expiry: float | None,
     policy: Phase4EntryPolicy,
     bid: float | None = None,
+    settlement_confidence: float | None = None,
+    settlement_peak_confidence: float | None = None,
+    signal_age_seconds: float | None = None,
+    enable_settlement_gate: bool = True,
 ) -> Phase4GateEvaluation:
     """Evaluate settlement and volatility gates without placing an order."""
 
-    settlement_passed = settlement_gate_passed(edge=settlement_edge, policy=policy)
+    settlement_confidence_passed = (
+        (not enable_settlement_gate)
+        or settlement_confidence is None
+        or settlement_confidence >= policy.settlement_min_confidence
+    )
+    signal_freshness_passed = (
+        policy.max_signal_age_seconds is None
+        or signal_age_seconds is None
+        or signal_age_seconds <= policy.max_signal_age_seconds
+    )
+    settlement_passed = (
+        settlement_gate_passed(
+            edge=settlement_edge,
+            policy=policy,
+            settlement_confidence=settlement_confidence,
+            settlement_peak_confidence=settlement_peak_confidence,
+            signal_age_seconds=signal_age_seconds,
+        )
+        if enable_settlement_gate
+        else False
+    )
     expected_volatility_exit_gain = (
         expected_volatility_exit_gain_from_orderbook(bid=bid, worst_price=worst_price)
         if ask is not None and worst_price is not None
@@ -271,6 +345,12 @@ def evaluate_entry_gates(
         settlement_gate_passed=settlement_passed,
         settlement_edge=settlement_edge,
         settlement_edge_threshold=policy.effective_settlement_edge_threshold,
+        settlement_confidence=settlement_confidence,
+        settlement_min_confidence=policy.settlement_min_confidence,
+        settlement_confidence_passed=settlement_confidence_passed,
+        signal_age_seconds=signal_age_seconds,
+        max_signal_age_seconds=policy.max_signal_age_seconds,
+        signal_freshness_passed=signal_freshness_passed,
         volatility_gate_passed=volatility_passed,
         volatility_score=expected_volatility_exit_gain,
         volatility_score_threshold=policy.volatility_score_threshold,
