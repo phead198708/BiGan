@@ -6708,6 +6708,14 @@ def backtest_model_v1(
     fee_bps: float = typer.Option(10.0, help="Taker fee assumption in basis points."),
     slippage_bps: float = typer.Option(5.0, help="Taker slippage assumption in basis points."),
     latency_ms: int = typer.Option(0, help="Execution latency assumption in milliseconds."),
+    allow_dataset_quote_proxy: bool = typer.Option(
+        False,
+        "--allow-dataset-quote-proxy/--no-allow-dataset-quote-proxy",
+        help=(
+            "Use dataset market_implied_prob as an entry quote proxy when "
+            "warehouse raw_top_of_book has no matching quotes."
+        ),
+    ),
 ) -> None:
     """Score a saved model on a dataset and run a grouped threshold backtest."""
     settings = IngestionSettings()
@@ -6730,6 +6738,7 @@ def backtest_model_v1(
         ),
         required_outcome_side=required_outcome_side or None,
         market_families=frozenset(families) or None,
+        allow_dataset_quote_proxy=allow_dataset_quote_proxy,
     )
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 

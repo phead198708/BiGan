@@ -19,6 +19,7 @@ from .logistic import (
     load_logistic_baseline,
 )
 from .xgboost_v1 import SPLITS, load_xgboost_v1_model
+from .xgboost_v6 import XGBOOST_V6_ARTIFACT_SCHEMA_VERSION, load_xgboost_v6_model
 
 
 class ProbabilityModel(Protocol):
@@ -58,6 +59,11 @@ def evaluate_probability_model_on_dataset(
 
     model = load_probability_model(model_path)
     calibrator = None if calibration_path is None else load_probability_calibrator(calibration_path)
+    if calibrator is not None and isinstance(model, XGBoostV6ProbabilityAdapter):
+        raise ValueError("xgboost-v6 models use embedded temperature calibration")
+    embedded_calibration_method = (
+        model.calibration_method if isinstance(model, XGBoostV6ProbabilityAdapter) else None
+    )
     dataset = _load_dataset(dataset_dir)
     _validate_feature_columns(dataset["tables"], tuple(model.feature_columns))
 
@@ -81,7 +87,11 @@ def evaluate_probability_model_on_dataset(
             dataset_version=dataset_version,
             split=split,
             calibration_path=None if calibration_path is None else str(calibration_path),
-            calibration_method=None if calibrator is None else str(calibrator.method),
+            calibration_method=(
+                str(calibrator.method)
+                if calibrator is not None
+                else embedded_calibration_method
+            ),
         )
 
     target = Path(output_dir)
@@ -96,7 +106,11 @@ def evaluate_probability_model_on_dataset(
         probability_distributions=probability_distributions,
         output_dir=str(target),
         calibration_path=None if calibration_path is None else str(calibration_path),
-        calibration_method=None if calibrator is None else str(calibrator.method),
+        calibration_method=(
+            str(calibrator.method)
+            if calibrator is not None
+            else embedded_calibration_method
+        ),
     )
     (target / "metrics.json").write_text(
         json.dumps(metrics, indent=2, sort_keys=True),
@@ -131,7 +145,56 @@ def load_probability_model(model_path: Path | str) -> ProbabilityModel:
         payload = None
     if isinstance(payload, dict) and {"coefficients", "intercept", "means", "scales"}.issubset(payload):
         return load_logistic_baseline(path)
+    if isinstance(payload, dict) and payload.get("schema_version") == XGBOOST_V6_ARTIFACT_SCHEMA_VERSION:
+        return XGBoostV6ProbabilityAdapter(load_xgboost_v6_model(path))
     return load_xgboost_v1_model(path)
+
+
+@dataclass(frozen=True, slots=True)
+class XGBoostV6ProbabilityAdapter:
+    """Compatibility adapter for legacy binary eval/backtest commands.
+
+    ``model-eval-v1`` keeps its historical UP-vs-rest metric contract for
+    promotion audit compatibility. Direct execution backtests can still ask the
+    adapter for token-side probabilities so DOWN uses explicit ``p_down``.
+    """
+
+    raw_model: Any
+    calibration_method: str = "family-aware temperature scaling with global fallback"
+
+    @property
+    def model_version(self) -> str:
+        return str(self.raw_model.model_version)
+
+    @property
+    def feature_columns(self) -> tuple[str, ...]:
+        return tuple(self.raw_model.feature_columns)
+
+    def predict_proba_many(self, rows: list[dict[str, Any]]) -> list[float]:
+        return [
+            float(payload["p_up"])
+            for payload in self.raw_model.predict_payload_many(rows)
+        ]
+
+    def predict_token_proba_many(self, rows: list[dict[str, Any]]) -> list[float]:
+        payloads = self.raw_model.predict_payload_many(rows)
+        out: list[float] = []
+        for row, payload in zip(rows, payloads, strict=True):
+            side = _outcome_side_from_row(row)
+            if side == "DOWN":
+                out.append(float(payload["p_down"]))
+            else:
+                out.append(float(payload["p_up"]))
+        return out
+
+
+def _outcome_side_from_row(row: dict[str, Any]) -> str | None:
+    text = str(row.get("canonical_symbol") or row.get("symbol") or "").strip().upper()
+    if text.endswith(":DOWN") or text.endswith("-DOWN-15M"):
+        return "DOWN"
+    if text.endswith(":UP") or text.endswith("-UP-15M"):
+        return "UP"
+    return None
 
 
 def _optional_str(value: Any) -> str | None:

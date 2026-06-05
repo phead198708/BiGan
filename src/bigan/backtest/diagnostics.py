@@ -276,6 +276,7 @@ def run_model_threshold_backtest(
     settings: TakerExecutionSettings | None = None,
     required_outcome_side: str | None = "UP",
     market_families: frozenset[str] | None = None,
+    allow_dataset_quote_proxy: bool = False,
 ) -> GroupedThresholdBacktestReport:
     """Run a grouped threshold backtest by scoring a saved model on a dataset."""
 
@@ -306,6 +307,12 @@ def run_model_threshold_backtest(
         until_ts=quote_filter.until_ts,
         quote_requests=quote_filter.quote_requests,
     )
+    quote_source = "warehouse_raw_top_of_book"
+    if not quotes and (
+        allow_dataset_quote_proxy or _model_supports_dataset_quote_proxy(model)
+    ):
+        quotes = _dataset_proxy_quotes(signals)
+        quote_source = "dataset_market_implied_prob_proxy" if quotes else quote_source
     initial_issues = []
     if outcome_side is not None and not signals:
         initial_issues.append("model_required_outcome_missing")
@@ -329,6 +336,8 @@ def run_model_threshold_backtest(
             "calibration_path": None if calibration_path is None else str(calibration_path),
             "market_families": None if market_families is None else sorted(market_families),
             "quote_filter": quote_filter.to_metadata(),
+            "quote_source": quote_source,
+            "quote_count": len(quotes),
         },
     )
 
@@ -991,8 +1000,10 @@ def _model_dataset_signals(
             in market_families
         )
     ]
-    probabilities = model.predict_proba_many(rows)
+    probabilities, probabilities_are_token_side = _model_token_probabilities(model, rows)
     if calibrator is not None:
+        if probabilities_are_token_side:
+            raise ValueError("token-side v6 probabilities use embedded calibration")
         if isinstance(calibrator, FamilyAwareProbabilityCalibrator):
             family_keys: list[str | None] = [
                 market_family_from_symbol(row.get("canonical_symbol") or row.get("symbol"))
@@ -1005,9 +1016,13 @@ def _model_dataset_signals(
         PredictionSignal(
             ts=int(row["feature_ts"]),
             target_ts=int(row["target_ts"]) if row.get("target_ts") is not None else None,
-            prob_up_15m=_token_probability(
-                float(probability),
-                _outcome_side_from_symbol(row.get("canonical_symbol")),
+            prob_up_15m=(
+                float(probability)
+                if probabilities_are_token_side
+                else _token_probability(
+                    float(probability),
+                    _outcome_side_from_symbol(row.get("canonical_symbol")),
+                )
             ),
             source=str(row.get("source", "polymarket")),
             source_symbol=str(row["source_symbol"]),
@@ -1017,6 +1032,46 @@ def _model_dataset_signals(
         )
         for row, probability in zip(rows, probabilities, strict=True)
     )
+
+
+def _model_token_probabilities(model: Any, rows: list[dict[str, Any]]) -> tuple[list[float], bool]:
+    token_predictor = getattr(model, "predict_token_proba_many", None)
+    if callable(token_predictor):
+        return (list(token_predictor(rows)), True)
+    return (list(model.predict_proba_many(rows)), False)
+
+
+def _model_supports_dataset_quote_proxy(model: Any) -> bool:
+    return callable(getattr(model, "predict_token_proba_many", None))
+
+
+def _dataset_proxy_quotes(signals: Sequence[PredictionSignal]) -> tuple[dict[str, Any], ...]:
+    quotes: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for signal in signals:
+        if signal.market_implied_prob is None:
+            continue
+        key = (signal.source_symbol, int(signal.ts))
+        if key in seen:
+            continue
+        seen.add(key)
+        price = _clip_proxy_price(float(signal.market_implied_prob))
+        quotes.append(
+            {
+                "ts": int(signal.ts),
+                "source": signal.source,
+                "source_symbol": signal.source_symbol,
+                "bid_price": price,
+                "ask_price": price,
+            }
+        )
+    return tuple(quotes)
+
+
+def _clip_proxy_price(value: float) -> float:
+    if not math.isfinite(value):
+        return 0.5
+    return min(1.0, max(0.0, value))
 
 
 def _table_parquet_paths(root: Path, table_name: str) -> list[str]:
