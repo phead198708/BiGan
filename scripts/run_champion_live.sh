@@ -160,13 +160,13 @@ if [[ -z "${MODEL_PATH:-}" ]]; then
   echo "[champion-live] MODEL_PATH is required for MODEL_VERSION=${MODEL_VERSION}" >&2
   exit 1
 fi
-IS_V6_MODEL="false"
-if [[ "${MODEL_VERSION}" == "xgboost-v6" || "${MODEL_VERSION}" == xgboost-v6:* ]]; then
-  IS_V6_MODEL="true"
+IS_EMBEDDED_CALIBRATION_MODEL="false"
+if [[ "${MODEL_VERSION}" == "xgboost-v6" || "${MODEL_VERSION}" == xgboost-v6:* || "${MODEL_VERSION}" == "xgboost-v7" || "${MODEL_VERSION}" == xgboost-v7:* ]]; then
+  IS_EMBEDDED_CALIBRATION_MODEL="true"
 fi
-if [[ "${IS_V6_MODEL}" == "true" ]]; then
+if [[ "${IS_EMBEDDED_CALIBRATION_MODEL}" == "true" ]]; then
   if [[ -n "${CALIBRATION_PATH:-}" ]]; then
-    echo "[champion-live] ignoring CALIBRATION_PATH for MODEL_VERSION=${MODEL_VERSION}; v6 calibration is embedded" >&2
+    echo "[champion-live] ignoring CALIBRATION_PATH for MODEL_VERSION=${MODEL_VERSION}; calibration is embedded" >&2
   fi
   CALIBRATION_PATH=""
 elif [[ -z "${CALIBRATION_PATH:-}" ]]; then
@@ -270,7 +270,7 @@ if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   exit 1
 fi
 require_file "${MODEL_PATH}" "model artifact"
-if [[ "${IS_V6_MODEL}" != "true" ]]; then
+if [[ "${IS_EMBEDDED_CALIBRATION_MODEL}" != "true" ]]; then
   require_file "${CALIBRATION_PATH}" "calibration artifact"
 fi
 if ! [[ "${LABELS_EVERY_CYCLES}" =~ ^[1-9][0-9]*$ ]]; then
@@ -496,7 +496,7 @@ run_cycle() {
   prediction_args=(
     --model-path "${MODEL_PATH}"
   )
-  if [[ "${IS_V6_MODEL}" != "true" ]]; then
+  if [[ "${IS_EMBEDDED_CALIBRATION_MODEL}" != "true" ]]; then
     prediction_args+=(--calibration-path "${CALIBRATION_PATH}")
   fi
   prediction_args+=(
@@ -618,8 +618,8 @@ score_loop() {
 echo "[champion-live] repo=${REPO_ROOT}"
 echo "[champion-live] model version=${MODEL_VERSION}"
 echo "[champion-live] model path=${MODEL_PATH}"
-if [[ "${IS_V6_MODEL}" == "true" ]]; then
-  echo "[champion-live] calibration path=(embedded in v6 model artifact)"
+if [[ "${IS_EMBEDDED_CALIBRATION_MODEL}" == "true" ]]; then
+  echo "[champion-live] calibration path=(embedded in model artifact)"
 else
   echo "[champion-live] calibration path=${CALIBRATION_PATH}"
 fi

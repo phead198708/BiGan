@@ -97,6 +97,15 @@ class SignalEvent:
     p_vol_up: float | None = None
     p_vol_down: float | None = None
     v6_joint_side: str | None = None
+    settlement_residual: float | None = None
+    expected_edge_up: float | None = None
+    expected_edge_down: float | None = None
+    residual_expected_edge_up: float | None = None
+    residual_expected_edge_down: float | None = None
+    selected_side: str | None = None
+    selected_expected_edge: float | None = None
+    entry_worst_price: float | None = None
+    should_enter_settlement: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,11 +430,11 @@ def main() -> int:
             ),
             "max_signal_age_seconds": entry_policy.max_signal_age_seconds,
             "settlement_exit_policy": asdict(settlement_exit_config),
-            "settlement_price_gate_mode": (
-                "cost_edge_only" if args.entry_gate_mode == "v6-joint" else "legacy_min_entry"
+            "settlement_price_gate_mode": _settlement_price_gate_mode_name(
+                args.entry_gate_mode
             ),
             "settlement_min_entry_price": (
-                None if args.entry_gate_mode == "v6-joint" else args.min_entry_price
+                None if _settlement_cost_edge_mode(args.entry_gate_mode) else args.min_entry_price
             ),
             "volatility_score_threshold": entry_policy.volatility_score_threshold,
             "volatility_min_entry_price": entry_policy.volatility_min_entry_price,
@@ -543,6 +552,7 @@ def main() -> int:
                         after_event_id=cursor_event_id,
                         limit=args.event_limit,
                         v6_joint_config=v6_joint_config,
+                        entry_gate_mode=args.entry_gate_mode,
                     )
                     events = batch.events
                     if batch.rows_scanned:
@@ -907,6 +917,7 @@ def main() -> int:
             "finished_at": _iso(_now_ms()),
             "model_version": args.model_version,
             "market_families": sorted(allowed_families) or None,
+            "entry_gate_mode": args.entry_gate_mode,
             "edge_threshold": args.edge_threshold,
             "settlement_edge_threshold": entry_policy.effective_settlement_edge_threshold,
             "settlement_min_confidence": entry_policy.settlement_min_confidence,
@@ -915,11 +926,11 @@ def main() -> int:
             ),
             "max_signal_age_seconds": entry_policy.max_signal_age_seconds,
             "settlement_exit_policy": asdict(settlement_exit_config),
-            "settlement_price_gate_mode": (
-                "cost_edge_only" if args.entry_gate_mode == "v6-joint" else "legacy_min_entry"
+            "settlement_price_gate_mode": _settlement_price_gate_mode_name(
+                args.entry_gate_mode
             ),
             "settlement_min_entry_price": (
-                None if args.entry_gate_mode == "v6-joint" else args.min_entry_price
+                None if _settlement_cost_edge_mode(args.entry_gate_mode) else args.min_entry_price
             ),
             "volatility_score_threshold": entry_policy.volatility_score_threshold,
             "volatility_min_entry_price": entry_policy.volatility_min_entry_price,
@@ -1216,9 +1227,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--summary-path", default="logs/remote_dry_run_phase4_real_champion_summary.json")
     parser.add_argument(
         "--entry-gate-mode",
-        choices=("v5-edge", "v6-joint"),
+        choices=("v5-edge", "v6-joint", "v7-pnl"),
         default="v5-edge",
-        help="v5-edge uses settlement edge threshold; v6-joint uses explicit p_up/p_down/p_vol gate.",
+        help=(
+            "v5-edge uses settlement edge threshold; v6-joint uses explicit "
+            "p_up/p_down/p_vol gate; v7-pnl uses selected_side plus executable "
+            "fresh p_side - price edge."
+        ),
     )
     parser.add_argument(
         "--v6-model-json-path",
@@ -1237,6 +1252,16 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Minimum p_side - worst_price required for v6 settlement entries. "
             "Defaults to --v6-round-trip-cost + --v6-ev-margin."
+        ),
+    )
+    parser.add_argument(
+        "--v7-settlement-min-edge-after-cost",
+        type=float,
+        default=None,
+        help=(
+            "Minimum fresh p_side - executable price required for xgboost-v7 "
+            "settlement entries. Defaults to --settlement-edge-threshold when set, "
+            "otherwise 0.04 from the current v7 PnL-stability gate."
         ),
     )
     parser.add_argument(
@@ -1354,20 +1379,35 @@ def _entry_policy_from_args(args: argparse.Namespace) -> Phase4EntryPolicy:
         if args.v6_settlement_min_edge_after_cost is not None
         else args.v6_round_trip_cost + args.v6_ev_margin
     )
+    v7_settlement_edge_threshold = (
+        getattr(args, "v7_settlement_min_edge_after_cost", None)
+        if getattr(args, "v7_settlement_min_edge_after_cost", None) is not None
+        else (
+            args.settlement_edge_threshold
+            if args.settlement_edge_threshold is not None
+            else 0.04
+        )
+    )
     max_signal_age_seconds = getattr(
         args,
         "max_signal_age_seconds",
         DEFAULT_MAX_SIGNAL_AGE_SECONDS,
     )
-    disable_settlement_edge = args.entry_gate_mode == "v6-joint"
+    cost_edge_only = args.entry_gate_mode in {"v6-joint", "v7-pnl"}
     return Phase4EntryPolicy(
         min_entry_price=args.min_entry_price,
         near_min_price_band=args.near_min_price_band,
         near_min_fresh_edge_threshold=args.near_min_fresh_edge_threshold,
         near_min_seconds_to_expiry=args.near_min_seconds_to_expiry,
-        edge_threshold=-999.0 if disable_settlement_edge else args.edge_threshold,
+        edge_threshold=-999.0 if cost_edge_only else args.edge_threshold,
         settlement_edge_threshold=(
-            v6_settlement_edge_threshold if disable_settlement_edge else args.settlement_edge_threshold
+            v6_settlement_edge_threshold
+            if args.entry_gate_mode == "v6-joint"
+            else (
+                v7_settlement_edge_threshold
+                if args.entry_gate_mode == "v7-pnl"
+                else args.settlement_edge_threshold
+            )
         ),
         volatility_score_threshold=args.volatility_score_threshold,
         volatility_min_entry_price=args.volatility_min_entry_price,
@@ -1417,6 +1457,22 @@ def _v6_joint_config_from_args(args: argparse.Namespace) -> V6JointGateConfig | 
         round_trip_cost=args.v6_round_trip_cost,
         ev_margin=args.v6_ev_margin,
     )
+
+
+def _is_v7_model_version(model_version: str) -> bool:
+    return model_version == "xgboost-v7" or model_version.startswith("xgboost-v7:")
+
+
+def _settlement_cost_edge_mode(entry_gate_mode: str) -> bool:
+    return entry_gate_mode in {"v6-joint", "v7-pnl"}
+
+
+def _settlement_price_gate_mode_name(entry_gate_mode: str) -> str:
+    if entry_gate_mode == "v7-pnl":
+        return "v7_pnl_edge_only"
+    if entry_gate_mode == "v6-joint":
+        return "cost_edge_only"
+    return "legacy_min_entry"
 
 
 def _settlement_exit_config_from_args(args: argparse.Namespace) -> SettlementExitConfig:
@@ -1516,6 +1572,13 @@ def _validate_args(args: argparse.Namespace) -> None:
         )
     if args.entry_gate_mode == "v6-joint" and not is_v6_model_version(args.model_version):
         raise ValueError("--entry-gate-mode v6-joint requires model_version xgboost-v6")
+    if args.entry_gate_mode == "v7-pnl" and not _is_v7_model_version(args.model_version):
+        raise ValueError("--entry-gate-mode v7-pnl requires model_version xgboost-v7")
+    if (
+        args.v7_settlement_min_edge_after_cost is not None
+        and args.v7_settlement_min_edge_after_cost < 0
+    ):
+        raise ValueError("--v7-settlement-min-edge-after-cost must be non-negative")
     live_mid_round_exit_requested = (
         args.settlement_allow_mid_round_exit
         or args.settlement_confidence_decay_enabled
@@ -1642,6 +1705,7 @@ def _read_events_after(
     after_event_id: str,
     limit: int,
     v6_joint_config: V6JointGateConfig | None = None,
+    entry_gate_mode: str = "v5-edge",
 ) -> list[SignalEvent]:
     return _read_event_batch_after(
         db_path,
@@ -1650,6 +1714,7 @@ def _read_events_after(
         after_event_id=after_event_id,
         limit=limit,
         v6_joint_config=v6_joint_config,
+        entry_gate_mode=entry_gate_mode,
     ).events
 
 
@@ -1661,6 +1726,7 @@ def _read_event_batch_after(
     after_event_id: str,
     limit: int,
     v6_joint_config: V6JointGateConfig | None = None,
+    entry_gate_mode: str = "v5-edge",
 ) -> SignalReadBatch:
     with duckdb.connect(db_path, read_only=True) as conn:
         rows = conn.execute(
@@ -1729,9 +1795,14 @@ def _read_event_batch_after(
                         opposite_token_id=opposite_token_id,
                     ),
                 )
+    effective_entry_gate_mode = (
+        "v6-joint"
+        if v6_joint_config is not None and entry_gate_mode == "v5-edge"
+        else entry_gate_mode
+    )
     best_events = _best_event_per_round(
         events,
-        entry_gate_mode="v6-joint" if v6_joint_config else "v5-edge",
+        entry_gate_mode=effective_entry_gate_mode,
     )
     return SignalReadBatch(
         events=best_events,
@@ -1776,6 +1847,15 @@ def _event_filter_reason(
         )
         if fields is None:
             return "v6_settlement_gate_miss"
+    if _is_v7_model_version(model_version):
+        if _selected_v7_signal_side(snapshot) is None:
+            return "v7_selected_side_missing"
+        p_up = _optional_float(snapshot.get("p_up"))
+        p_down = _optional_float(snapshot.get("p_down"))
+        if p_up is None or p_down is None:
+            return "v7_probability_missing"
+        if _optional_float(snapshot.get("market_implied_prob")) is None:
+            return "v7_market_implied_prob_missing"
     return "unparseable_signal"
 
 
@@ -1948,6 +2028,22 @@ def _event_from_signal_payload(
         edge=float(edge),
         bridged_at=int(_optional_int(payload.get("bridged_at")) or 0),
         opposite_token_id=str(payload.get("opposite_token_id") or ""),
+        p_up=_optional_float(payload.get("p_up")),
+        p_down=_optional_float(payload.get("p_down")),
+        p_neutral=_optional_float(payload.get("p_neutral")),
+        settlement_residual=_optional_float(payload.get("settlement_residual")),
+        expected_edge_up=_optional_float(payload.get("expected_edge_up")),
+        expected_edge_down=_optional_float(payload.get("expected_edge_down")),
+        residual_expected_edge_up=_optional_float(payload.get("residual_expected_edge_up")),
+        residual_expected_edge_down=_optional_float(payload.get("residual_expected_edge_down")),
+        selected_side=(
+            str(payload["selected_side"]).upper()
+            if payload.get("selected_side")
+            else None
+        ),
+        selected_expected_edge=_optional_float(payload.get("selected_expected_edge")),
+        entry_worst_price=_optional_float(payload.get("entry_worst_price")),
+        should_enter_settlement=_optional_bool(payload.get("should_enter_settlement")),
     )
 
 
@@ -1988,6 +2084,69 @@ def _event_from_row(
     _family, _round_slug, side = parts[0], parts[-2], parts[-1].upper()
     if side not in {"UP", "DOWN"}:
         return None
+    if _is_v7_model_version(model_version):
+        selected_side = _selected_v7_signal_side(snapshot)
+        if selected_side is None:
+            return None
+        p_up = _optional_float(snapshot.get("p_up")) or float(prob_up_15m)
+        p_down = _optional_float(snapshot.get("p_down"))
+        if p_down is None:
+            p_down = max(0.0, min(1.0, 1.0 - p_up))
+        market = _optional_float(snapshot.get("market_implied_prob"))
+        if market is None:
+            return None
+        selected_market = market if selected_side == side else max(0.0, min(1.0, 1.0 - market))
+        token_id = (
+            str(snapshot.get("source_symbol") or snapshot.get("token_id") or "")
+            if selected_side == side
+            else opposite_token_id
+        )
+        if not token_id:
+            return None
+        token_probability = p_up if selected_side == "UP" else p_down
+        edge = _optional_float(
+            snapshot.get("expected_edge_up")
+            if selected_side == "UP"
+            else snapshot.get("expected_edge_down")
+        )
+        if edge is None:
+            edge = token_probability - selected_market
+        return SignalEvent(
+            event_id=str(event_id),
+            ts=int(ts),
+            created_at=int(created_at),
+            prob_up_15m=p_up,
+            canonical_symbol=f"{parts[0]}:{round_slug}:{selected_side}",
+            token_id=token_id,
+            outcome_side=selected_side,
+            round_slug=round_slug,
+            round_end_ts=round_end_ts,
+            market_implied_prob=selected_market,
+            token_probability=token_probability,
+            edge=edge,
+            bridged_at=0,
+            opposite_token_id=(
+                str(snapshot.get("source_symbol") or snapshot.get("token_id") or "")
+                if selected_side != side
+                else opposite_token_id
+            ),
+            p_up=p_up,
+            p_down=p_down,
+            p_neutral=_optional_float(snapshot.get("p_neutral")),
+            settlement_residual=_optional_float(snapshot.get("settlement_residual")),
+            expected_edge_up=_optional_float(snapshot.get("expected_edge_up")),
+            expected_edge_down=_optional_float(snapshot.get("expected_edge_down")),
+            residual_expected_edge_up=_optional_float(snapshot.get("residual_expected_edge_up")),
+            residual_expected_edge_down=_optional_float(snapshot.get("residual_expected_edge_down")),
+            selected_side=selected_side,
+            selected_expected_edge=edge,
+            entry_worst_price=_optional_float(
+                snapshot.get("entry_worst_price_up")
+                if selected_side == "UP"
+                else snapshot.get("entry_worst_price_down")
+            ),
+            should_enter_settlement=_optional_bool(snapshot.get("should_enter_settlement")),
+        )
     token_id = str(snapshot.get("source_symbol") or snapshot.get("token_id") or "")
     market = _optional_float(snapshot.get("market_implied_prob"))
     if not token_id or market is None:
@@ -2010,6 +2169,19 @@ def _event_from_row(
         bridged_at=0,
         opposite_token_id="",
     )
+
+
+def _selected_v7_signal_side(snapshot: dict[str, Any]) -> str | None:
+    selected = str(snapshot.get("selected_side") or "").upper()
+    if selected in {"UP", "DOWN"}:
+        return selected
+    up_edge = _optional_float(snapshot.get("expected_edge_up"))
+    down_edge = _optional_float(snapshot.get("expected_edge_down"))
+    if up_edge is None and down_edge is None:
+        return None
+    if down_edge is None or (up_edge is not None and up_edge >= down_edge):
+        return "UP"
+    return "DOWN"
 
 
 def _opposite_token_id(
@@ -2066,6 +2238,11 @@ def _best_event_per_round(
             previous_score = _v6_event_selection_score(previous)
             if event_score > previous_score:
                 best[best_key] = event
+        elif entry_gate_mode == "v7-pnl":
+            event_score = _v7_event_selection_score(event)
+            previous_score = _v7_event_selection_score(previous)
+            if event_score > previous_score:
+                best[best_key] = event
         elif event.edge > previous.edge:
             best[best_key] = event
     return sorted(best.values(), key=lambda item: (item.created_at, item.event_id))
@@ -2083,6 +2260,12 @@ def _v6_event_selection_score(event: SignalEvent) -> float:
         "p_vol_down": event.p_vol_down or 0.0,
     }
     return v6_selection_score(payload, event.outcome_side)
+
+
+def _v7_event_selection_score(event: SignalEvent) -> float:
+    if event.selected_expected_edge is not None:
+        return event.selected_expected_edge
+    return event.edge
 
 
 def _entry_time_window_skip_reason(
@@ -2397,7 +2580,9 @@ def _try_entry(
     from py_clob_client_v2.clob_types import PartialCreateOrderOptions
     from py_clob_client_v2.order_builder.constants import BUY
 
-    v6_settlement_cost_edge_only = sleeve == "settlement" and entry_gate_mode == "v6-joint"
+    settlement_cost_edge_only = sleeve == "settlement" and _settlement_cost_edge_mode(
+        entry_gate_mode
+    )
     no_quote_gate_evaluation = evaluate_entry_gates(
         settlement_edge=signal.edge,
         ask=None,
@@ -2442,10 +2627,10 @@ def _try_entry(
             signal.token_probability - entry_policy.effective_settlement_edge_threshold,
             tick_size,
         )
-        if v6_settlement_cost_edge_only
+        if settlement_cost_edge_only
         else None
     )
-    worst_price = _round_price(ask_price, tick_size) if v6_settlement_cost_edge_only else slippage_worst_price
+    worst_price = _round_price(ask_price, tick_size) if settlement_cost_edge_only else slippage_worst_price
     order_limit_price = (
         max(worst_price, min(slippage_worst_price, max_acceptable_price))
         if max_acceptable_price is not None
@@ -2454,7 +2639,7 @@ def _try_entry(
     fresh_edge_at_worst = signal.token_probability - worst_price
     settlement_edge_for_gate = (
         fresh_edge_at_worst
-        if sleeve == "settlement" and entry_gate_mode == "v6-joint"
+        if settlement_cost_edge_only
         else signal.edge
     )
     gate_evaluation = evaluate_entry_gates(
@@ -2485,10 +2670,13 @@ def _try_entry(
         order_limit_price=order_limit_price,
         fresh_edge_at_worst=fresh_edge_at_worst,
         raw_settlement_edge=signal.edge,
+        model_selected_expected_edge=signal.selected_expected_edge,
+        model_entry_worst_price=signal.entry_worst_price,
+        entry_gate_mode=entry_gate_mode,
         seconds_to_expiry=seconds_to_expiry,
         gate_evaluation=gate_payload,
     )
-    if sleeve == "settlement" and entry_gate_mode != "v6-joint":
+    if sleeve == "settlement" and not _settlement_cost_edge_mode(entry_gate_mode):
         if not gate_evaluation.settlement_gate_passed:
             _log(
                 log_path,
@@ -2508,11 +2696,33 @@ def _try_entry(
                 gate_evaluation=gate_payload,
             )
             return None
-    elif sleeve == "settlement" and signal.v6_joint_side is None:
+    elif sleeve == "settlement" and entry_gate_mode == "v6-joint" and signal.v6_joint_side is None:
         _log(
             log_path,
             "entry_skipped",
             reason="v6_settlement_gate_miss",
+            sleeve=sleeve,
+            signal=asdict(signal),
+            bid=bid,
+            ask=ask,
+            worst_price=worst_price,
+            slippage_worst_price=slippage_worst_price,
+            max_acceptable_price=max_acceptable_price,
+            order_limit_price=order_limit_price,
+            seconds_to_expiry=seconds_to_expiry,
+            gate_evaluation=gate_payload,
+        )
+        return None
+    elif (
+        sleeve == "settlement"
+        and entry_gate_mode == "v7-pnl"
+        and signal.selected_side is not None
+        and signal.selected_side != signal.outcome_side
+    ):
+        _log(
+            log_path,
+            "entry_skipped",
+            reason="v7_selected_side_mismatch",
             sleeve=sleeve,
             signal=asdict(signal),
             bid=bid,
@@ -2584,7 +2794,7 @@ def _try_entry(
             settlement_peak_confidence=settlement_peak_confidence,
             signal_age_seconds=signal_age_seconds,
         )
-        if v6_settlement_cost_edge_only
+        if settlement_cost_edge_only
         else entry_price_skip_reason(
             ask=float(ask),
             worst_price=worst_price,
@@ -2620,9 +2830,7 @@ def _try_entry(
             ),
             max_signal_age_seconds=entry_policy.max_signal_age_seconds,
             signal_age_seconds=signal_age_seconds,
-            settlement_price_gate_mode=(
-                "cost_edge_only" if v6_settlement_cost_edge_only else "legacy_min_entry"
-            ),
+            settlement_price_gate_mode=_settlement_price_gate_mode_name(entry_gate_mode),
             gate_evaluation=gate_payload,
         )
         return None
@@ -2701,7 +2909,7 @@ def _try_entry(
                 settlement_peak_confidence=settlement_peak_confidence,
                 signal_age_seconds=signal_age_seconds,
             )
-        if v6_settlement_cost_edge_only
+        if settlement_cost_edge_only
         else entry_price_skip_reason(
             ask=complement_entry_price,
             worst_price=complement_entry_price,
@@ -2737,15 +2945,13 @@ def _try_entry(
                 ),
                 max_signal_age_seconds=entry_policy.max_signal_age_seconds,
             signal_age_seconds=signal_age_seconds,
-            settlement_price_gate_mode=(
-                "cost_edge_only" if v6_settlement_cost_edge_only else "legacy_min_entry"
-            ),
+            settlement_price_gate_mode=_settlement_price_gate_mode_name(entry_gate_mode),
             gate_evaluation=gate_payload,
             complement_gate_evaluation=asdict(
                 evaluate_entry_gates(
                     settlement_edge=(
                         complement_fresh_edge
-                        if sleeve == "settlement" and entry_gate_mode == "v6-joint"
+                        if settlement_cost_edge_only
                         else signal.edge
                     ),
                     ask=complement_entry_price,
@@ -2898,7 +3104,7 @@ def _try_entry(
         sleeve=sleeve,
         paper=paper,
     )
-    if fill_price < entry_policy.min_entry_price and not v6_settlement_cost_edge_only:
+    if fill_price < entry_policy.min_entry_price and not settlement_cost_edge_only:
         position.lifecycle_state = "EXIT_REQUIRED"
         position.last_lifecycle_reason = "under_min_fill_exit"
     _persist_cash_leg(
@@ -2929,7 +3135,7 @@ def _try_entry(
             "fill_confirmed_at": _iso(position.opened_at),
         },
     )
-    if fill_price < entry_policy.min_entry_price and not v6_settlement_cost_edge_only:
+    if fill_price < entry_policy.min_entry_price and not settlement_cost_edge_only:
         _log(
             log_path,
             "entry_fill_below_min",
@@ -4665,6 +4871,21 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y"}:
+        return True
+    if normalized in {"0", "false", "no", "n"}:
+        return False
+    return None
 
 
 def _optional_int(value: Any) -> int | None:

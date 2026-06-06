@@ -459,6 +459,74 @@ def test_executor_trusts_executor_ready_v6_volatility_jsonl_payload(tmp_path: Pa
     assert events[0].v6_joint_side is None
 
 
+def test_executor_reads_executor_ready_v7_pnl_jsonl_payload(tmp_path: Path) -> None:
+    queue = tmp_path / "signals.jsonl"
+    base_payload = {
+        "event_id": "pred-v7-low",
+        "ts": 1_779_774_400_000,
+        "created_at": 1_779_774_410_000,
+        "model_version": "xgboost-v7",
+        "prob_up_15m": 0.76,
+        "canonical_symbol": "BTC-15M:btc-updown-15m-1779774300:UP",
+        "token_id": "token-up",
+        "outcome_side": "UP",
+        "round_slug": "btc-updown-15m-1779774300",
+        "round_end_ts": 1_779_775_200_000,
+        "market_implied_prob": 0.70,
+        "token_probability": 0.76,
+        "edge": 0.03,
+        "bridged_at": 1_779_774_411_000,
+        "opposite_token_id": "token-down",
+        "p_up": 0.76,
+        "p_down": 0.18,
+        "p_neutral": 0.06,
+        "settlement_residual": 0.12,
+        "expected_edge_up": 0.03,
+        "expected_edge_down": -0.12,
+        "residual_expected_edge_up": 0.02,
+        "residual_expected_edge_down": -0.09,
+        "selected_side": "UP",
+        "selected_expected_edge": 0.03,
+        "entry_worst_price": 0.73,
+        "should_enter_settlement": False,
+    }
+    stronger_payload = {
+        **base_payload,
+        "event_id": "pred-v7-high",
+        "created_at": 1_779_774_412_000,
+        "prob_up_15m": 0.84,
+        "token_probability": 0.84,
+        "edge": 0.12,
+        "p_up": 0.84,
+        "p_down": 0.10,
+        "expected_edge_up": 0.12,
+        "selected_expected_edge": 0.12,
+        "entry_worst_price": 0.72,
+        "should_enter_settlement": True,
+    }
+    queue.write_text(
+        json.dumps(base_payload) + "\n" + json.dumps(stronger_payload) + "\n",
+        encoding="utf-8",
+    )
+
+    events, cursor, _signature = executor._read_signal_jsonl_after(
+        queue,
+        after_line_number=0,
+        model_version="xgboost-v7",
+        limit=10,
+        entry_gate_mode="v7-pnl",
+    )
+
+    assert cursor == 2
+    assert len(events) == 1
+    assert events[0].event_id == "pred-v7-high"
+    assert events[0].selected_side == "UP"
+    assert events[0].selected_expected_edge == pytest.approx(0.12)
+    assert events[0].entry_worst_price == pytest.approx(0.72)
+    assert events[0].should_enter_settlement is True
+    assert events[0].settlement_residual == pytest.approx(0.12)
+
+
 def test_executor_reads_db_signal_with_opposite_token_id(tmp_path: Path) -> None:
     db_path = tmp_path / "catalog.duckdb"
     ts = 1_779_774_400_000
@@ -1932,6 +2000,95 @@ def test_v6_joint_settlement_entry_skips_after_confidence_peak_drop(tmp_path: Pa
     assert skipped["settlement_peak_confidence_drop_tolerance"] == pytest.approx(0.05)
 
 
+def test_v7_pnl_entry_gate_uses_fresh_orderbook_edge(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+
+    position = executor._try_entry(
+        client=_V7ExpensiveAskClient(),
+        position_manager=_OpenPositionManager(),
+        signal=_signal(
+            edge=0.20,
+            token_probability=0.80,
+            p_up=0.80,
+            p_down=0.15,
+            p_neutral=0.05,
+            selected_side="UP",
+            selected_expected_edge=0.20,
+            entry_worst_price=0.60,
+            should_enter_settlement=True,
+        ),
+        log_path=log_path,
+        max_position_size_usdc=1.0,
+        entry_policy=executor.Phase4EntryPolicy(
+            settlement_edge_threshold=0.04,
+            settlement_min_confidence=0.75,
+        ),
+        seconds_to_expiry=600.0,
+        buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
+        sleeve="settlement",
+        paper=True,
+        entry_gate_mode="v7-pnl",
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    evaluated = next(row for row in rows if row["event"] == "entry_gate_evaluated")
+    skipped = rows[-1]
+
+    assert position is None
+    assert evaluated["raw_settlement_edge"] == pytest.approx(0.20)
+    assert evaluated["fresh_edge_at_worst"] == pytest.approx(0.02)
+    assert evaluated["model_selected_expected_edge"] == pytest.approx(0.20)
+    assert evaluated["model_entry_worst_price"] == pytest.approx(0.60)
+    assert evaluated["entry_gate_mode"] == "v7-pnl"
+    assert evaluated["gate_evaluation"]["settlement_edge"] == pytest.approx(0.02)
+    assert skipped["event"] == "entry_skipped"
+    assert skipped["reason"] == "fresh_edge_below_threshold"
+    assert skipped["settlement_price_gate_mode"] == "v7_pnl_edge_only"
+
+
+def test_v7_pnl_entry_gate_allows_fresh_positive_edge_paper_fill(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+
+    position = executor._try_entry(
+        client=_VolatilityPaperClient(),
+        position_manager=_OpenPositionManager(),
+        signal=_signal(
+            edge=0.05,
+            token_probability=0.80,
+            p_up=0.80,
+            p_down=0.15,
+            p_neutral=0.05,
+            selected_side="UP",
+            selected_expected_edge=0.05,
+            entry_worst_price=0.75,
+            should_enter_settlement=True,
+        ),
+        log_path=log_path,
+        max_position_size_usdc=1.0,
+        entry_policy=executor.Phase4EntryPolicy(
+            settlement_edge_threshold=0.04,
+            settlement_min_confidence=0.75,
+        ),
+        seconds_to_expiry=600.0,
+        buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
+        sleeve="settlement",
+        paper=True,
+        entry_gate_mode="v7-pnl",
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    evaluated = next(row for row in rows if row["event"] == "entry_gate_evaluated")
+    filled = rows[-1]
+
+    assert position is not None
+    assert position.fill_price == pytest.approx(0.50)
+    assert evaluated["fresh_edge_at_worst"] == pytest.approx(0.30)
+    assert evaluated["gate_evaluation"]["settlement_gate_passed"] is True
+    assert filled["event"] == "paper_entry_filled"
+
+
 def test_executor_skips_complementary_entry_below_min_price(tmp_path: Path) -> None:
     log_path = tmp_path / "phase4.jsonl"
     signal = _signal()
@@ -2769,6 +2926,20 @@ class _VolatilityPaperClient:
         return False
 
 
+class _V7ExpensiveAskClient:
+    def get_order_book(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return {"bids": [{"price": "0.76"}], "asks": [{"price": "0.78"}]}
+
+    def get_tick_size(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return "0.01"
+
+    def get_neg_risk(self, token_id: str):  # noqa: ANN201
+        assert token_id == "token-up"
+        return False
+
+
 class _ComplementCheapClient:
     def get_order_book(self, token_id: str):  # noqa: ANN201
         if token_id == "token-up":
@@ -2940,6 +3111,10 @@ def _signal(
     p_vol_up: float | None = None,
     p_vol_down: float | None = None,
     v6_joint_side: str | None = None,
+    selected_side: str | None = None,
+    selected_expected_edge: float | None = None,
+    entry_worst_price: float | None = None,
+    should_enter_settlement: bool | None = None,
     round_end_ts: int = 1_779_775_200_000,
     created_at: int = 2_000,
 ):
@@ -2964,6 +3139,10 @@ def _signal(
         p_vol_up=p_vol_up,
         p_vol_down=p_vol_down,
         v6_joint_side=v6_joint_side,
+        selected_side=selected_side,
+        selected_expected_edge=selected_expected_edge,
+        entry_worst_price=entry_worst_price,
+        should_enter_settlement=should_enter_settlement,
     )
 
 
