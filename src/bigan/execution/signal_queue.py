@@ -445,11 +445,16 @@ def _parse_canonical_symbol(canonical_symbol: str) -> tuple[str, str, str] | Non
 
 
 def _current_round_slug(signals: list[ExecutionSignal]) -> str:
-    """Return the round represented by the freshest executor signal batch."""
+    """Return the nearest active round represented by the executor signal batch."""
 
     if not signals:
         raise ValueError("signals is empty")
-    newest = max(signals, key=lambda signal: (signal.ts, signal.round_end_ts))
+    now_ms = _now_ms()
+    active = [signal for signal in signals if signal.round_end_ts >= now_ms]
+    if active:
+        nearest = min(active, key=lambda signal: (signal.round_end_ts, -signal.ts))
+        return nearest.round_slug
+    newest = max(signals, key=lambda signal: (signal.round_end_ts, signal.ts))
     return newest.round_slug
 
 

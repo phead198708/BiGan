@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import bigan.execution.signal_queue as signal_queue
 from bigan.execution.signal_queue import append_prediction_rows_as_signal_jsonl
 from bigan.execution.v6_gate import V6JointGateConfig
 
@@ -125,6 +126,54 @@ def test_append_prediction_rows_as_signal_jsonl_rotates_to_current_round(
     ]
     assert [payload["round_slug"] for payload in payloads] == [new_round]
     assert payloads[0]["outcome_side"] == "UP"
+
+
+def test_append_prediction_rows_as_signal_jsonl_prefers_nearest_active_round(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    queue_path = tmp_path / "signals.jsonl"
+    near_round = "btc-updown-15m-1779774300"
+    far_round = "btc-updown-15m-1779782400"
+    monkeypatch.setattr(signal_queue, "_now_ms", lambda: 1_779_774_410_000)
+
+    written = append_prediction_rows_as_signal_jsonl(
+        queue_path,
+        [
+            _prediction_row(
+                side="UP",
+                token_id="near-up",
+                market_implied_prob=0.30,
+                p_up=0.90,
+                p_down=0.05,
+                p_neutral=0.05,
+                p_vol_up=0.20,
+                p_vol_down=0.10,
+                round_slug=near_round,
+                ts=1_779_774_400_000,
+            ),
+            _prediction_row(
+                side="UP",
+                token_id="far-up",
+                market_implied_prob=0.30,
+                p_up=0.91,
+                p_down=0.04,
+                p_neutral=0.05,
+                p_vol_up=0.20,
+                p_vol_down=0.10,
+                round_slug=far_round,
+                ts=1_779_774_400_000,
+            ),
+        ],
+        model_version="xgboost-v6",
+        v6_joint_config=V6JointGateConfig(settlement_threshold=0.80),
+        bridged_at=1_779_774_410_000,
+    )
+
+    assert written == 1
+    payload = json.loads(queue_path.read_text(encoding="utf-8"))
+    assert payload["round_slug"] == near_round
+    assert payload["token_id"] == "near-up"
 
 
 def test_append_prediction_rows_as_signal_jsonl_deduplicates_current_round(
