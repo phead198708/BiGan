@@ -60,6 +60,10 @@ Environment overrides:
   SCORE_ONLY_WHEN_ETL_PROCESSED
                              Skip feature/prediction scans when ETL processed
                              zero new files. Default: true
+  SKIP_EXISTING_PREDICTIONS  Skip prediction rows already present in the local
+                             warehouse. Default: true. Set false when a
+                             queue-first scorer must re-emit fresh executor
+                             signals from already-materialized features.
   BIGAN_SINK_SEGMENT_DURATION_SECONDS
                              Optional raw gzip segment grain for long runs. Default: 0
   LABELS_ENABLED             Refresh settled labels during the scan loop. Default: true
@@ -201,6 +205,7 @@ ETL_SEGMENT_SAFETY_SECONDS="${ETL_SEGMENT_SAFETY_SECONDS:-15}"
 ETL_PROCESSED_MANIFEST_PATH="${ETL_PROCESSED_MANIFEST_PATH:-}"
 ETL_MAX_FILES_PER_BATCH="${ETL_MAX_FILES_PER_BATCH:-}"
 SCORE_ONLY_WHEN_ETL_PROCESSED="${SCORE_ONLY_WHEN_ETL_PROCESSED:-true}"
+SKIP_EXISTING_PREDICTIONS="${SKIP_EXISTING_PREDICTIONS:-true}"
 LABELS_ENABLED="${LABELS_ENABLED:-true}"
 LABELS_EVERY_CYCLES="${LABELS_EVERY_CYCLES:-12}"
 LABEL_LOOKBACK_MINUTES="${LABEL_LOOKBACK_MINUTES:-120}"
@@ -283,6 +288,10 @@ if ! [[ "${LABEL_REQUEST_CONCURRENCY}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 if [[ "${SCORE_ONLY_WHEN_ETL_PROCESSED}" != "true" && "${SCORE_ONLY_WHEN_ETL_PROCESSED}" != "false" ]]; then
   echo "[champion-live] SCORE_ONLY_WHEN_ETL_PROCESSED must be true or false" >&2
+  exit 1
+fi
+if [[ "${SKIP_EXISTING_PREDICTIONS}" != "true" && "${SKIP_EXISTING_PREDICTIONS}" != "false" ]]; then
+  echo "[champion-live] SKIP_EXISTING_PREDICTIONS must be true or false" >&2
   exit 1
 fi
 if [[ "${LOW_LATENCY_FEATURE_QUEUE_ENABLED}" != "true" && "${LOW_LATENCY_FEATURE_QUEUE_ENABLED}" != "false" ]]; then
@@ -503,8 +512,12 @@ run_cycle() {
     --monitoring-db-path "${MONITORING_DB_PATH}"
     --lookback-minutes "${PREDICTION_LOOKBACK_MINUTES}"
     --skip-existing-monitoring-events
-    --skip-existing-predictions
   )
+  if [[ "${SKIP_EXISTING_PREDICTIONS}" == "true" ]]; then
+    prediction_args+=(--skip-existing-predictions)
+  else
+    prediction_args+=(--replace-predictions)
+  fi
   if [[ -n "${ETL_PROCESSED_MANIFEST_PATH}" ]]; then
     etl_args+=("${ETL_MANIFEST_ARGS[@]}")
   fi
@@ -632,6 +645,7 @@ echo "[champion-live] feature lookback minutes=${FEATURE_LOOKBACK_MINUTES}"
 echo "[champion-live] prediction lookback minutes=${PREDICTION_LOOKBACK_MINUTES}"
 echo "[champion-live] ETL lag seconds=${ETL_EFFECTIVE_LAG_SECONDS}"
 echo "[champion-live] score only when ETL processed=${SCORE_ONLY_WHEN_ETL_PROCESSED}"
+echo "[champion-live] skip existing predictions=${SKIP_EXISTING_PREDICTIONS}"
 echo "[champion-live] low-latency feature queue enabled=${LOW_LATENCY_FEATURE_QUEUE_ENABLED}"
 if [[ -n "${SCORING_CANONICAL_SYMBOL_LIKE}" ]]; then
   echo "[champion-live] scoring canonical symbol like=${SCORING_CANONICAL_SYMBOL_LIKE}"

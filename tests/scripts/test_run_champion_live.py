@@ -289,9 +289,55 @@ def test_runner_allows_xgboost_v6_without_external_calibration(tmp_path: Path) -
     command_log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
 
     assert "model version=xgboost-v6" in result.stdout
-    assert "calibration path=(embedded in v6 model artifact)" in result.stdout
+    assert "calibration path=(embedded in model artifact)" in result.stdout
     assert "predictions-v1 --model-path" in command_log
     assert "--calibration-path" not in command_log
+
+
+def test_runner_allows_xgboost_v7_without_external_calibration(tmp_path: Path) -> None:
+    env = _base_runner_env(tmp_path)
+    env["MODEL_VERSION"] = "xgboost-v7"
+    env.pop("CALIBRATION_PATH")
+    env["FAKE_ETL_FILES_PROCESSED"] = "1"
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    command_log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
+
+    assert "model version=xgboost-v7" in result.stdout
+    assert "calibration path=(embedded in model artifact)" in result.stdout
+    assert "predictions-v1 --model-path" in command_log
+    assert "--calibration-path" not in command_log
+
+
+def test_runner_can_replace_predictions_for_queue_reemit(tmp_path: Path) -> None:
+    env = _base_runner_env(tmp_path)
+    env["FAKE_ETL_FILES_PROCESSED"] = "1"
+    env["SKIP_EXISTING_PREDICTIONS"] = "false"
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    command_log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
+
+    assert "--skip-existing-monitoring-events --replace-predictions" in command_log
+    assert "--skip-existing-predictions" not in command_log
+    assert "skip existing predictions=false" in result.stdout
 
 
 def test_runner_can_use_low_latency_raw_queue_feature_path(tmp_path: Path) -> None:
