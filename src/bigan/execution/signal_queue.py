@@ -306,8 +306,11 @@ def _v7_execution_signal(
     edge = _optional_float(
         snapshot.get("expected_edge_up") if side == "UP" else snapshot.get("expected_edge_down")
     )
-    if market is None or edge is None:
+    if market is None:
         return None
+    token_probability = p_up if side == "UP" else p_down
+    if edge is None:
+        edge = token_probability - market
     entry_worst = _optional_float(
         snapshot.get("entry_worst_price_up")
         if side == "UP"
@@ -325,7 +328,7 @@ def _v7_execution_signal(
         round_slug=round_slug,
         round_end_ts=round_end_ts,
         market_implied_prob=market,
-        token_probability=p_up if side == "UP" else p_down,
+        token_probability=token_probability,
         edge=edge,
         bridged_at=bridged_at,
         opposite_token_id=str(opposite_token_id or ""),

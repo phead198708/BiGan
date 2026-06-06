@@ -252,6 +252,39 @@ def test_train_xgboost_v7_saves_settlement_ev_artifacts_and_payload(tmp_path: Pa
     )
     assert queue_payload["entry_worst_price"] is not None
 
+    live_like_prediction = {
+        **prediction,
+        "p_up": 0.82,
+        "p_down": 0.12,
+        "prob_up_15m": 0.82,
+        "selected_side": "UP",
+        "selected_expected_edge": None,
+        "entry_worst_price_up": None,
+        "entry_worst_price_down": None,
+        "expected_edge_up": None,
+        "expected_edge_down": None,
+        "residual_expected_edge_up": None,
+        "residual_expected_edge_down": None,
+        "market_implied_prob": 0.52,
+    }
+    live_like_queue_path = tmp_path / "signals-live-like.jsonl"
+    written = append_prediction_rows_as_signal_jsonl(
+        live_like_queue_path,
+        [live_like_prediction],
+        model_version=XGBOOST_V7_MODEL_VERSION,
+        bridged_at=1_779_774_410_000,
+        token_ids_by_market_side={
+            ("BTC-15M", round_slug, "UP"): "token-up",
+            ("BTC-15M", round_slug, "DOWN"): "token-down",
+        },
+    )
+    live_like_queue_payload = json.loads(live_like_queue_path.read_text(encoding="utf-8"))
+    assert written == 1
+    assert live_like_queue_payload["outcome_side"] == "UP"
+    assert live_like_queue_payload["selected_expected_edge"] == pytest.approx(0.30)
+    assert live_like_queue_payload["edge"] == pytest.approx(0.30)
+    assert live_like_queue_payload["entry_worst_price"] is None
+
 
 def test_xgboost_v7_settlement_ev_formulas() -> None:
     from bigan.modeling.xgboost_v7 import (
