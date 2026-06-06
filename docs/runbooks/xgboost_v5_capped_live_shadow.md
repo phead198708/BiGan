@@ -1,9 +1,9 @@
 # xgboost-v5 Capped Live Shadow
 
 Runbook for the capped Phase 4 **live shadow** of `xgboost-v5` using the operating
-policy validated by the cost-adjusted backtest
-(`docs/reports/backtest_v5_vs_v4/README.md`). This is the next gate before
-registering v5 and running the champion cutover.
+policy validated by the drawdown-gated cost-adjusted backtest
+(`data/model-runs/xgboost-v5-run-20260529T053000Z/backtest-drawdown-gated/`).
+This is the next gate before registering v5 and running the champion cutover.
 
 Runtime evidence belongs in GitHub issue [#84](https://github.com/phead198708/BiGan/issues/84);
 engineering follow-ups in [#85](https://github.com/phead198708/BiGan/issues/85).
@@ -14,11 +14,36 @@ engineering follow-ups in [#85](https://github.com/phead198708/BiGan/issues/85).
 |---|---|---|
 | `model_version` | `xgboost-v5` | First model with a cost-adjusted positive edge |
 | `market_families` | `BTC-15M,ETH-15M` | Only 15M families showed real out-of-sample edge (AUC ~0.68-0.69); 5M was noise |
-| `edge_threshold` | `0.08` | Net-positive, monotonic operating point from the backtest (+34.15 PnL @ 533 trades) |
+| `edge_threshold` | legacy alias | Kept for runner compatibility; do not use it as the single v5 decision threshold |
+| `settlement_edge_threshold` | `0.45` | Settlement-confidence live-entry gate. This remains separate from volatility diagnostics |
+| `volatility_score_threshold` | `0.50` | Legacy diagnostic field; issue #90 volatility entries are gated by orderbook-only expected exit gain |
+| `volatility_min_entry_price` | `0.20` | Diagnostic orderbook floor for volatility opportunity analysis |
+| `volatility_round_trip_cost` | `0.04` | Estimated buy+sell cost drag for volatility sleeve paper evidence |
+| `volatility_safety_margin` | `0.02` | Required margin above cost drag before a paper volatility entry |
+| `volatility_round_bankroll_usdc` | `1.0` | Per-round volatility sleeve bankroll reset |
+| `volatility_min_order_size_usdc` | `0.05` | Stop volatility re-entry when the round bankroll falls below the floor |
 | `max_position_size_usdc` | `1.0` | Capped blast radius for a live shadow |
 | `max_concurrent_positions` | `1` | One position at a time during validation |
+| `max_combined_concurrent_positions` | `2` | Allows one settlement hold plus one volatility paper position when explicitly enabled |
+| `settlement_max_filled_per_side_per_round` | `1` | Prevents settlement concentration into repeated same-side fills in one round |
+| `volatility_max_filled_per_side_per_round` | `1` | Allows volatility re-entry after sell, but caps same-side concentration per round |
 | `max_rounds` | `6` | Small total entry budget |
 | `daily_loss_limit_usdc` | `3.0` | Hard realized-loss stop |
+
+The old backtest/replay threshold of `0.14` is diagnostic evidence only. For v5
+live-shadow execution, settlement and volatility are separate sleeves:
+
+- `settlement` can place capped FOK BUY orders, at most one filled position per
+  round, and is held to `REDEEM` rather than sold before expiry.
+- `volatility` may re-enter the same round only after the prior volatility
+  position is sold. It uses a per-round $1 bankroll that resets each round, is
+  refilled by realized account cash-flow PnL up to the $1 cap, and stops below
+  the configured min-order floor.
+- Both sleeves enforce per-round, per-side filled-entry caps to keep the v5
+  down-side concentration from silently becoming repeated same-side exposure.
+- `volatility` is orderbook-only paper until explicitly promoted. The gate is
+  `expected_volatility_exit_gain >= round_trip_cost + safety_margin`; model edge
+  is logged for diagnostics but is not the volatility decision surface.
 
 v5 uses **family-aware calibration**: `BTC-15M` and `ETH-15M` each get an
 independent calibrator with a global fallback. The live scorer
@@ -34,6 +59,11 @@ register v5 and proceed to the cutover gate after a capped run completes with
 `open_positions_at_shutdown = 0`, `exits_pending_confirmation = 0`,
 `exits_pending_settlement = 0`, and a matched reconciliation with no
 `missing_cash_flow` rows.
+
+The executor summary keeps `promotion_or_capital_sizing_evidence = false` and
+`decision_evidence_allowed = false` until the account-history reconciliation
+also shows acceptable account PnL. Volatility paper records are opportunity
+diagnostics only; they must not influence capital sizing or calibration weights.
 
 ## Topology
 
@@ -100,8 +130,9 @@ python scripts/champion_signal_bridge.py \
 ## 3. Execution host: start the capped live-shadow executor
 
 On `54.250.242.139`, with Polymarket credentials already present, read the bridged
-queue and trade the v5 policy. It places REAL FOK orders, so keep the caps small.
-The runner refuses to start unless `CONFIRM=yes`.
+queue and trade the v5 settlement policy. This default mode places REAL
+settlement-sleeve FOK BUY orders and holds them to settlement, so keep the caps
+small. The runner refuses to start unless `CONFIRM=yes`.
 
 ```bash
 # on 54.250.242.139, inside the BiGan checkout
@@ -110,6 +141,24 @@ SIGNAL_JSONL_PATH=/home/ubuntu/BiGan/data/live/remote-signals/xgboost-v5-signals
 ./scripts/run_xgboost_v5_capped_live_shadow.sh
 ```
 
+## 3a. Execution host: collect volatility sleeve paper evidence
+
+Before any real volatility trading, run the orderbook-only paper path. This still
+uses the CLOB client for quotes, but it does not post BUY or SELL orders.
+
+```bash
+# on 54.250.242.139, inside the BiGan checkout
+PAPER=true \
+ENABLE_VOLATILITY_SLEEVE=true \
+SIGNAL_JSONL_PATH=/home/ubuntu/BiGan/data/live/remote-signals/xgboost-v5-signals.jsonl \
+./scripts/run_xgboost_v5_capped_live_shadow.sh
+```
+
+Do not set `--enable-volatility-live-entries` for Phase 4 v5. Promotion to real
+volatility orders requires a separate paper evidence review that shows positive
+account cash-flow reconciliation after costs and no min-size/concurrency
+breaches.
+
 If the runner is not yet deployed to the host, call the executor directly with the
 same locked policy:
 
@@ -117,11 +166,18 @@ same locked policy:
 python scripts/polymarket_phase4_live_champion_executor.py \
   --model-version xgboost-v5 \
   --market-families BTC-15M,ETH-15M \
-  --edge-threshold 0.08 \
+  --settlement-edge-threshold 0.45 \
+  --volatility-score-threshold 0.50 \
+  --volatility-min-entry-price 0.20 \
+  --volatility-round-trip-cost 0.04 \
+  --volatility-safety-margin 0.02 \
   --signal-jsonl-path /home/ubuntu/BiGan/data/live/remote-signals/xgboost-v5-signals.jsonl \
   --signal-jsonl-start tail \
   --max-position-size-usdc 1.0 \
   --max-concurrent-positions 1 \
+  --max-combined-concurrent-positions 2 \
+  --settlement-max-filled-per-side-per-round 1 \
+  --volatility-max-filled-per-side-per-round 1 \
   --max-rounds 6 \
   --daily-loss-limit-usdc 3.0 \
   --max-runtime-minutes 120 \
@@ -155,7 +211,7 @@ python scripts/reconcile_stale_execution_positions.py \
   --report-path docs/reports/xgboost_v5_live_shadow_stale_positions.md
 ```
 
-## 4. Promotion decision
+## 5. Promotion decision
 
 Only if the reconciled `account_cash_pnl_usdc` is non-negative and the lifecycle
 is clean: register v5 and proceed to the champion cutover gate. Otherwise, treat
@@ -164,7 +220,8 @@ capital sizing.
 
 ## Related
 
-- `docs/reports/backtest_v5_vs_v4/README.md` — cost-adjusted edge evidence
+- `data/model-runs/xgboost-v5-run-20260529T053000Z/backtest-drawdown-gated/` — drawdown-gated cost-adjusted edge evidence
+- `docs/reports/backtest_v5_vs_v4/README.md` — initial cost-adjusted edge evidence
 - `docs/reports/shadow_v5_vs_v4/README.md` — per-family shadow comparison
 - `docs/runbooks/phase4_execution_validation.md` — base Phase 4 controls
 - `docs/runbooks/champion_promotion.md` — cutover gate

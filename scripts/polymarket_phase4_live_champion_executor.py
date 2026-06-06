@@ -11,6 +11,7 @@ This script intentionally keeps the blast radius small:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -70,6 +71,8 @@ from bigan.execution.v6_gate import (
 from bigan.modeling.families import market_family_from_symbol
 
 DEFAULT_GAMMA_API_BASE = "https://gamma-api.polymarket.com"
+DEFAULT_SETTLEMENT_REVERSAL_MIN_CONFIDENCE = 0.75
+DEFAULT_SETTLEMENT_REVERSAL_HYSTERESIS_BARS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +136,7 @@ class LivePosition:
     paper: bool = False
     settlement_reversal_candidate_side: str = ""
     settlement_reversal_candidate_count: int = 0
+    settlement_decay_candidate_count: int = 0
     settlement_same_side_confirmation_event_id: str = ""
     settlement_same_side_confirmation_created_at: int = 0
     settlement_same_side_confirmation_confidence: float = 0.0
@@ -164,12 +168,13 @@ class PaperSettlementResolution:
 @dataclass(frozen=True, slots=True)
 class SettlementExitConfig:
     allow_mid_round_exit: bool = False
-    reversal_min_confidence: float = DEFAULT_SETTLEMENT_MIN_CONFIDENCE
-    reversal_hysteresis_bars: int = 1
+    reversal_min_confidence: float = DEFAULT_SETTLEMENT_REVERSAL_MIN_CONFIDENCE
+    reversal_hysteresis_bars: int = DEFAULT_SETTLEMENT_REVERSAL_HYSTERESIS_BARS
     confidence_decay_enabled: bool = False
     decay_floor: float = 0.55
     decay_delta: float = 0.25
-    decay_opposite_min_confidence: float | None = DEFAULT_SETTLEMENT_MIN_CONFIDENCE
+    decay_hysteresis_bars: int = DEFAULT_SETTLEMENT_REVERSAL_HYSTERESIS_BARS
+    decay_opposite_min_confidence: float | None = DEFAULT_SETTLEMENT_REVERSAL_MIN_CONFIDENCE
     price_stop_enabled: bool = False
     stop_price_delta: float = 0.15
     stop_loss_usdc: float = 0.50
@@ -379,6 +384,7 @@ def main() -> int:
     cursor_created_at = 0
     cursor_event_id = ""
     cursor_line_number = 0
+    cursor_line_signature = ""
     if signal_jsonl_path is None:
         cursor_created_at, cursor_event_id = _latest_cursor(
             args.monitoring_db_path,
@@ -389,12 +395,13 @@ def main() -> int:
             "event_id": cursor_event_id,
         }
     else:
-        cursor_line_number = _latest_signal_jsonl_cursor(
+        cursor_line_number, cursor_line_signature = _latest_signal_jsonl_cursor(
             signal_jsonl_path,
             start=args.signal_jsonl_start,
         )
         cursor_payload = {
             "line_number": cursor_line_number,
+            "line_signature": cursor_line_signature,
             "signal_jsonl_path": str(signal_jsonl_path),
             "signal_jsonl_start": args.signal_jsonl_start,
         }
@@ -553,9 +560,10 @@ def main() -> int:
                                 cursor_event_id=cursor_event_id,
                             )
                 else:
-                    events, cursor_line_number = _read_signal_jsonl_after(
+                    events, cursor_line_number, cursor_line_signature = _read_signal_jsonl_after(
                         signal_jsonl_path,
                         after_line_number=cursor_line_number,
+                        after_line_signature=cursor_line_signature,
                         model_version=args.model_version,
                         limit=args.event_limit,
                         v6_joint_config=v6_joint_config,
@@ -1252,15 +1260,27 @@ def _parse_args() -> argparse.Namespace:
         help="Allow settlement sleeve to sell before expiry on high-confidence opposite flips.",
     )
     parser.add_argument(
+        "--allow-live-settlement-mid-round-exit",
+        action="store_true",
+        help=(
+            "Explicitly allow live settlement sleeve mid-round exits. Without this "
+            "second guard, live settlement positions hold to expiry/settlement even "
+            "if reversal, confidence-decay, or price-stop flags are passed."
+        ),
+    )
+    parser.add_argument(
         "--settlement-reversal-min-confidence",
         type=float,
         default=None,
-        help="Minimum opposite p_up/p_down for settlement reversal exits; defaults to entry confidence.",
+        help=(
+            "Minimum opposite p_up/p_down for settlement reversal exits; defaults "
+            "to data-tuned reversal confidence."
+        ),
     )
     parser.add_argument(
         "--settlement-reversal-hysteresis-bars",
         type=int,
-        default=1,
+        default=DEFAULT_SETTLEMENT_REVERSAL_HYSTERESIS_BARS,
         help="Consecutive fresh opposite settlement admissions required before reversal exit.",
     )
     parser.add_argument(
@@ -1270,6 +1290,15 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--settlement-decay-floor", type=float, default=0.55)
     parser.add_argument("--settlement-decay-delta", type=float, default=0.25)
+    parser.add_argument(
+        "--settlement-decay-hysteresis-bars",
+        type=int,
+        default=DEFAULT_SETTLEMENT_REVERSAL_HYSTERESIS_BARS,
+        help=(
+            "Consecutive fresh signals that must satisfy the confidence-decay exit "
+            "condition before selling. Raise above 1 to ignore single-bar noise."
+        ),
+    )
     parser.add_argument(
         "--settlement-decay-opposite-min-confidence",
         type=float,
@@ -1392,7 +1421,7 @@ def _v6_joint_config_from_args(args: argparse.Namespace) -> V6JointGateConfig | 
 
 def _settlement_exit_config_from_args(args: argparse.Namespace) -> SettlementExitConfig:
     reversal_min_confidence = (
-        args.settlement_min_confidence
+        DEFAULT_SETTLEMENT_REVERSAL_MIN_CONFIDENCE
         if args.settlement_reversal_min_confidence is None
         else args.settlement_reversal_min_confidence
     )
@@ -1418,6 +1447,7 @@ def _settlement_exit_config_from_args(args: argparse.Namespace) -> SettlementExi
         confidence_decay_enabled=args.settlement_confidence_decay_enabled,
         decay_floor=args.settlement_decay_floor,
         decay_delta=args.settlement_decay_delta,
+        decay_hysteresis_bars=args.settlement_decay_hysteresis_bars,
         decay_opposite_min_confidence=decay_opposite_min_confidence,
         price_stop_enabled=args.settlement_price_stop_enabled,
         stop_price_delta=args.settlement_stop_price_delta,
@@ -1458,6 +1488,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--settlement-decay-floor must be between 0 and 1")
     if args.settlement_decay_delta < 0:
         raise ValueError("--settlement-decay-delta must be non-negative")
+    if args.settlement_decay_hysteresis_bars <= 0:
+        raise ValueError("--settlement-decay-hysteresis-bars must be positive")
     if (
         args.settlement_decay_opposite_min_confidence is not None
         and not 0.0 <= args.settlement_decay_opposite_min_confidence <= 1.0
@@ -1484,6 +1516,20 @@ def _validate_args(args: argparse.Namespace) -> None:
         )
     if args.entry_gate_mode == "v6-joint" and not is_v6_model_version(args.model_version):
         raise ValueError("--entry-gate-mode v6-joint requires model_version xgboost-v6")
+    live_mid_round_exit_requested = (
+        args.settlement_allow_mid_round_exit
+        or args.settlement_confidence_decay_enabled
+        or args.settlement_price_stop_enabled
+    )
+    if (
+        not args.paper
+        and live_mid_round_exit_requested
+        and not args.allow_live_settlement_mid_round_exit
+    ):
+        raise ValueError(
+            "Live settlement mid-round exits are disabled by default; pass "
+            "--allow-live-settlement-mid-round-exit only after explicit risk approval."
+        )
 
 
 def _decision_evidence_blockers(
@@ -1532,7 +1578,7 @@ def _build_clob_client() -> Any:
         "chain_id": int(os.getenv("POLYMARKET_CHAIN_ID", "137")),
         "signature_type": signature_type,
     }
-    funder = os.getenv("POLYMARKET_FUNDER")
+    funder = os.getenv("POLYMARKET_FUNDER") or os.getenv("POLYMARKET_FUNDER_ADDRESS")
     if funder:
         kwargs["funder"] = funder
     client = ClobClient(**kwargs)
@@ -1733,29 +1779,37 @@ def _event_filter_reason(
     return "unparseable_signal"
 
 
-def _latest_signal_jsonl_cursor(path: Path, *, start: str) -> int:
+def _latest_signal_jsonl_cursor(path: Path, *, start: str) -> tuple[int, str]:
     if start == "beginning" or not path.exists():
-        return 0
+        return 0, ""
     with path.open(encoding="utf-8") as handle:
-        return sum(1 for _ in handle)
+        lines = handle.readlines()
+    return len(lines), _signal_jsonl_prefix_signature(lines, len(lines))
 
 
 def _read_signal_jsonl_after(
     path: Path,
     *,
     after_line_number: int,
+    after_line_signature: str = "",
     model_version: str,
     limit: int,
     v6_joint_config: V6JointGateConfig | None = None,
     entry_gate_mode: str = "v5-edge",
-) -> tuple[list[SignalEvent], int]:
+) -> tuple[list[SignalEvent], int, str]:
     if not path.exists():
-        return [], after_line_number
+        return [], after_line_number, after_line_signature
     events: list[SignalEvent] = []
     with path.open(encoding="utf-8") as handle:
         lines = handle.readlines()
     if after_line_number > len(lines):
         after_line_number = 0
+        after_line_signature = ""
+    elif after_line_number > 0 and after_line_signature:
+        current_prefix_signature = _signal_jsonl_prefix_signature(lines, after_line_number)
+        if current_prefix_signature != after_line_signature:
+            after_line_number = 0
+            after_line_signature = ""
     last_line_number = after_line_number
     for line_number, raw in enumerate(lines, start=1):
         if line_number <= after_line_number:
@@ -1777,7 +1831,21 @@ def _read_signal_jsonl_after(
             events.append(event)
         if len(events) >= limit:
             break
-    return _best_event_per_round(events, entry_gate_mode=entry_gate_mode), last_line_number
+    line_signature = _signal_jsonl_prefix_signature(lines, last_line_number)
+    return (
+        _best_event_per_round(events, entry_gate_mode=entry_gate_mode),
+        last_line_number,
+        line_signature,
+    )
+
+
+def _signal_jsonl_prefix_signature(lines: list[str], line_number: int) -> str:
+    if line_number <= 0:
+        return ""
+    digest = hashlib.sha256()
+    for raw in lines[:line_number]:
+        digest.update(raw.encode("utf-8", errors="surrogatepass"))
+    return digest.hexdigest()
 
 
 def _event_from_signal_payload(
@@ -2958,7 +3026,8 @@ def _maybe_settlement_signal_exit(
 
     if position.sleeve != "settlement":
         return None
-    if not config.allow_mid_round_exit and not config.confidence_decay_enabled:
+    track_reversal = config.allow_mid_round_exit or config.price_stop_enabled
+    if not track_reversal and not config.confidence_decay_enabled:
         return None
     if (
         max_signal_age_seconds is not None
@@ -2988,7 +3057,7 @@ def _maybe_settlement_signal_exit(
         )
         return None
 
-    if config.allow_mid_round_exit and v6_joint_config is not None:
+    if track_reversal and v6_joint_config is not None:
         admitted_side = evaluate_v6_settlement_side(payload, v6_joint_config)
         admitted_confidence = _settlement_side_probability(payload, admitted_side)
         _log(
@@ -3001,6 +3070,8 @@ def _maybe_settlement_signal_exit(
             position_side=position.side,
             reversal_min_confidence=config.reversal_min_confidence,
             hysteresis_bars=config.reversal_hysteresis_bars,
+            exit_enabled=config.allow_mid_round_exit,
+            price_stop_reversal_tracking=config.price_stop_enabled,
             seconds_to_expiry=seconds_to_expiry,
         )
         if admitted_side == position.side:
@@ -3024,6 +3095,8 @@ def _maybe_settlement_signal_exit(
             admitted_confidence is None
             or admitted_confidence < config.reversal_min_confidence
         ):
+            position.settlement_reversal_candidate_side = ""
+            position.settlement_reversal_candidate_count = 0
             _log(
                 log_path,
                 "settlement_reversal_exit_skipped",
@@ -3051,6 +3124,19 @@ def _maybe_settlement_signal_exit(
                     admitted_confidence=admitted_confidence,
                     candidate_count=position.settlement_reversal_candidate_count,
                     hysteresis_bars=config.reversal_hysteresis_bars,
+                )
+            elif not config.allow_mid_round_exit:
+                _log(
+                    log_path,
+                    "settlement_reversal_exit_skipped",
+                    reason="mid_round_exit_disabled",
+                    position=asdict(position),
+                    signal=asdict(signal),
+                    admitted_side=admitted_side,
+                    admitted_confidence=admitted_confidence,
+                    candidate_count=position.settlement_reversal_candidate_count,
+                    hysteresis_bars=config.reversal_hysteresis_bars,
+                    price_stop_reversal_tracking=config.price_stop_enabled,
                 )
             else:
                 sell_result = _sell_settlement_policy_exit(
@@ -3091,7 +3177,17 @@ def _maybe_settlement_signal_exit(
             and config.decay_opposite_min_confidence is not None
             and opposite_confidence >= config.decay_opposite_min_confidence
         )
-        should_exit = (below_floor or below_delta) and regime_shift and opposite_confidence_passed
+        decay_condition = (
+            below_floor and below_delta and regime_shift and opposite_confidence_passed
+        )
+        if decay_condition:
+            position.settlement_decay_candidate_count += 1
+        else:
+            position.settlement_decay_candidate_count = 0
+        hysteresis_met = (
+            position.settlement_decay_candidate_count >= config.decay_hysteresis_bars
+        )
+        should_exit = decay_condition and hysteresis_met
         _log(
             log_path,
             "settlement_confidence_decay_exit_evaluated",
@@ -3105,6 +3201,9 @@ def _maybe_settlement_signal_exit(
             regime_shift=regime_shift,
             opposite_confidence_passed=opposite_confidence_passed,
             decay_opposite_min_confidence=config.decay_opposite_min_confidence,
+            decay_condition=decay_condition,
+            decay_candidate_count=position.settlement_decay_candidate_count,
+            decay_hysteresis_bars=config.decay_hysteresis_bars,
             should_exit=should_exit,
             seconds_to_expiry=seconds_to_expiry,
         )
@@ -3117,6 +3216,16 @@ def _maybe_settlement_signal_exit(
                 signal=asdict(signal),
                 seconds_to_expiry=seconds_to_expiry,
                 min_seconds_to_expiry=config.stop_min_seconds_to_expiry,
+            )
+        elif decay_condition and not hysteresis_met:
+            _log(
+                log_path,
+                "settlement_confidence_decay_exit_skipped",
+                reason="decay_hysteresis_wait",
+                position=asdict(position),
+                signal=asdict(signal),
+                decay_candidate_count=position.settlement_decay_candidate_count,
+                decay_hysteresis_bars=config.decay_hysteresis_bars,
             )
         elif should_exit:
             sell_result = _sell_settlement_policy_exit(
@@ -3229,6 +3338,29 @@ def _settlement_same_side_confirmation_veto_payload(
     }
 
 
+def _settlement_reversal_confirmation_payload(
+    *,
+    position: LivePosition,
+    config: SettlementExitConfig,
+) -> dict[str, Any]:
+    opposite_side = _opposite_side(position.side)
+    candidate_count = (
+        position.settlement_reversal_candidate_count
+        if position.settlement_reversal_candidate_side == opposite_side
+        else 0
+    )
+    return {
+        "required_side": opposite_side,
+        "candidate_side": position.settlement_reversal_candidate_side,
+        "candidate_count": candidate_count,
+        "hysteresis_bars": config.reversal_hysteresis_bars,
+        "confirmed": bool(
+            opposite_side
+            and candidate_count >= config.reversal_hysteresis_bars
+        ),
+    }
+
+
 def _maybe_settlement_price_stop_exit(
     *,
     client: Any,
@@ -3277,6 +3409,10 @@ def _maybe_settlement_price_stop_exit(
     unrealized_pnl = (float(bid) - position.fill_price) * position.size
     price_breach = float(bid) <= position.fill_price - config.stop_price_delta
     loss_breach = unrealized_pnl <= -config.stop_loss_usdc
+    reversal_confirmation = _settlement_reversal_confirmation_payload(
+        position=position,
+        config=config,
+    )
     _log(
         log_path,
         "settlement_stop_exit_evaluated",
@@ -3288,9 +3424,27 @@ def _maybe_settlement_price_stop_exit(
         loss_breach=loss_breach,
         stop_price_delta=config.stop_price_delta,
         stop_loss_usdc=config.stop_loss_usdc,
+        reversal_confirmation=reversal_confirmation,
         seconds_to_expiry=seconds_to_expiry,
     )
     if not price_breach and not loss_breach:
+        return None
+    if not reversal_confirmation["confirmed"]:
+        _log(
+            log_path,
+            "settlement_stop_exit_skipped",
+            reason="reversal_confirmation_required",
+            position=asdict(position),
+            bid=float(bid),
+            fill_price=position.fill_price,
+            unrealized_pnl=unrealized_pnl,
+            price_breach=price_breach,
+            loss_breach=loss_breach,
+            stop_price_delta=config.stop_price_delta,
+            stop_loss_usdc=config.stop_loss_usdc,
+            reversal_confirmation=reversal_confirmation,
+            seconds_to_expiry=seconds_to_expiry,
+        )
         return None
     same_side_veto = _settlement_same_side_confirmation_veto_payload(
         position=position,

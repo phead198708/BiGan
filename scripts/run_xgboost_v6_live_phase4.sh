@@ -15,8 +15,9 @@ The wrapper intentionally keeps the blast radius small:
   - paper mode disabled; live settlement FOK orders are possible
   - BTC-15M only by default
   - 1 USDC max entry size, 1 concurrent settlement position
-  - 10 observed rounds, 1.0 USDC daily realized-loss stop by default
-  - cost-aware v6 settlement gate with confidence, signal-age, and exit guards
+  - 10 observed rounds, 5.0 USDC daily realized-loss stop by default
+  - cost-aware v6 settlement gate with confidence and signal-age guards
+  - settlement positions hold to expiry/settlement by default
 
 Prerequisite scorer:
   MODEL_VERSION=xgboost-v6 \
@@ -44,19 +45,21 @@ Environment overrides:
   MAX_RUNTIME_MINUTES        Default: 180
   MAX_POSITION_SIZE_USDC     Default: 1.0
   MAX_CONCURRENT_POSITIONS   Default: 1
-  DAILY_LOSS_LIMIT_USDC      Default: 1.0
+  DAILY_LOSS_LIMIT_USDC      Default: 5.0
   V6_SETTLEMENT_MIN_CONFIDENCE
                              Default: 0.80
   V6_SETTLEMENT_MIN_EDGE_AFTER_COST
                              Default: 0.082
   SETTLEMENT_ALLOW_MID_ROUND_EXIT
-                             Default: true
+                             Default: false
   SETTLEMENT_CONFIDENCE_DECAY_ENABLED
-                             Default: true
+                             Default: false
   SETTLEMENT_PRICE_STOP_ENABLED
-                             Default: true
+                             Default: false
   SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_VETO_ENABLED
-                             Default: true
+                             Default: false
+  ALLOW_SETTLEMENT_LIVE_MID_ROUND_EXIT
+                             Must be yes to enable any live settlement mid-round exit
   CONFIRM                    Must be yes
   ALLOW_V6_LIVE_CONFIRM      Must be yes
 
@@ -99,7 +102,7 @@ MAX_POSITION_SIZE_USDC="${MAX_POSITION_SIZE_USDC:-1.0}"
 MAX_CONCURRENT_POSITIONS="${MAX_CONCURRENT_POSITIONS:-1}"
 MAX_COMBINED_CONCURRENT_POSITIONS="${MAX_COMBINED_CONCURRENT_POSITIONS:-1}"
 SETTLEMENT_MAX_FILLED_PER_SIDE_PER_ROUND="${SETTLEMENT_MAX_FILLED_PER_SIDE_PER_ROUND:-1}"
-DAILY_LOSS_LIMIT_USDC="${DAILY_LOSS_LIMIT_USDC:-1.0}"
+DAILY_LOSS_LIMIT_USDC="${DAILY_LOSS_LIMIT_USDC:-5.0}"
 BUY_SLIPPAGE="${BUY_SLIPPAGE:-0.02}"
 SELL_SLIPPAGE="${SELL_SLIPPAGE:-0.02}"
 POLL_SECONDS="${POLL_SECONDS:-10}"
@@ -109,18 +112,19 @@ NO_NEW_ENTRY_BEFORE_EXPIRY_SECONDS="${NO_NEW_ENTRY_BEFORE_EXPIRY_SECONDS:-300}"
 MAX_SIGNAL_AGE_SECONDS="${MAX_SIGNAL_AGE_SECONDS:-180}"
 CONTINUE_AFTER_MAX_ROUNDS_UNTIL_RUNTIME="${CONTINUE_AFTER_MAX_ROUNDS_UNTIL_RUNTIME:-false}"
 
-SETTLEMENT_ALLOW_MID_ROUND_EXIT="${SETTLEMENT_ALLOW_MID_ROUND_EXIT:-true}"
-SETTLEMENT_REVERSAL_MIN_CONFIDENCE="${SETTLEMENT_REVERSAL_MIN_CONFIDENCE:-${V6_SETTLEMENT_MIN_CONFIDENCE}}"
+SETTLEMENT_ALLOW_MID_ROUND_EXIT="${SETTLEMENT_ALLOW_MID_ROUND_EXIT:-false}"
+SETTLEMENT_REVERSAL_MIN_CONFIDENCE="${SETTLEMENT_REVERSAL_MIN_CONFIDENCE:-0.75}"
 SETTLEMENT_REVERSAL_HYSTERESIS_BARS="${SETTLEMENT_REVERSAL_HYSTERESIS_BARS:-2}"
-SETTLEMENT_CONFIDENCE_DECAY_ENABLED="${SETTLEMENT_CONFIDENCE_DECAY_ENABLED:-true}"
+SETTLEMENT_CONFIDENCE_DECAY_ENABLED="${SETTLEMENT_CONFIDENCE_DECAY_ENABLED:-false}"
 SETTLEMENT_DECAY_FLOOR="${SETTLEMENT_DECAY_FLOOR:-0.55}"
 SETTLEMENT_DECAY_DELTA="${SETTLEMENT_DECAY_DELTA:-0.25}"
-SETTLEMENT_DECAY_OPPOSITE_MIN_CONFIDENCE="${SETTLEMENT_DECAY_OPPOSITE_MIN_CONFIDENCE:-${V6_SETTLEMENT_MIN_CONFIDENCE}}"
-SETTLEMENT_PRICE_STOP_ENABLED="${SETTLEMENT_PRICE_STOP_ENABLED:-true}"
+SETTLEMENT_DECAY_HYSTERESIS_BARS="${SETTLEMENT_DECAY_HYSTERESIS_BARS:-2}"
+SETTLEMENT_DECAY_OPPOSITE_MIN_CONFIDENCE="${SETTLEMENT_DECAY_OPPOSITE_MIN_CONFIDENCE:-0.75}"
+SETTLEMENT_PRICE_STOP_ENABLED="${SETTLEMENT_PRICE_STOP_ENABLED:-false}"
 SETTLEMENT_STOP_PRICE_DELTA="${SETTLEMENT_STOP_PRICE_DELTA:-0.15}"
 SETTLEMENT_STOP_LOSS_USDC="${SETTLEMENT_STOP_LOSS_USDC:-0.50}"
 SETTLEMENT_STOP_MIN_SECONDS_TO_EXPIRY="${SETTLEMENT_STOP_MIN_SECONDS_TO_EXPIRY:-120}"
-SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_VETO_ENABLED="${SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_VETO_ENABLED:-true}"
+SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_VETO_ENABLED="${SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_VETO_ENABLED:-false}"
 SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MIN_CONFIDENCE="${SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MIN_CONFIDENCE:-${V6_SETTLEMENT_MIN_CONFIDENCE}}"
 SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MAX_AGE_SECONDS="${SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MAX_AGE_SECONDS:-${MAX_SIGNAL_AGE_SECONDS}}"
 
@@ -128,6 +132,7 @@ ENABLE_VOLATILITY_SLEEVE="${ENABLE_VOLATILITY_SLEEVE:-false}"
 ENABLE_VOLATILITY_LIVE_ENTRIES="${ENABLE_VOLATILITY_LIVE_ENTRIES:-false}"
 CONFIRM="${CONFIRM:-}"
 ALLOW_V6_LIVE_CONFIRM="${ALLOW_V6_LIVE_CONFIRM:-}"
+ALLOW_SETTLEMENT_LIVE_MID_ROUND_EXIT="${ALLOW_SETTLEMENT_LIVE_MID_ROUND_EXIT:-}"
 
 if [[ "${CONFIRM}" != "yes" || "${ALLOW_V6_LIVE_CONFIRM}" != "yes" ]]; then
   echo "[v6-live-phase4] refusing to start: this places REAL capped settlement orders." >&2
@@ -136,6 +141,15 @@ if [[ "${CONFIRM}" != "yes" || "${ALLOW_V6_LIVE_CONFIRM}" != "yes" ]]; then
 fi
 if [[ "${ENABLE_VOLATILITY_SLEEVE}" == "true" || "${ENABLE_VOLATILITY_LIVE_ENTRIES}" == "true" ]]; then
   echo "[v6-live-phase4] refusing to start: volatility must remain disabled for this live run." >&2
+  exit 1
+fi
+if [[ (
+    "${SETTLEMENT_ALLOW_MID_ROUND_EXIT}" == "true" ||
+    "${SETTLEMENT_CONFIDENCE_DECAY_ENABLED}" == "true" ||
+    "${SETTLEMENT_PRICE_STOP_ENABLED}" == "true"
+  ) && "${ALLOW_SETTLEMENT_LIVE_MID_ROUND_EXIT}" != "yes" ]]; then
+  echo "[v6-live-phase4] refusing to start: live settlement mid-round exits are disabled by default." >&2
+  echo "[v6-live-phase4] set ALLOW_SETTLEMENT_LIVE_MID_ROUND_EXIT=yes only after explicit risk approval." >&2
   exit 1
 fi
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
@@ -154,6 +168,8 @@ if [[ -z "${POLYMARKET_PRIVATE_KEY:-}" ]]; then
   echo "[v6-live-phase4] POLYMARKET_PRIVATE_KEY is required for live execution" >&2
   exit 1
 fi
+POLYMARKET_FUNDER="${POLYMARKET_FUNDER:-${POLYMARKET_FUNDER_ADDRESS:-}}"
+export POLYMARKET_FUNDER
 if [[ -z "${SIGNAL_JSONL_PATH}" || ! -f "${SIGNAL_JSONL_PATH}" ]]; then
   echo "[v6-live-phase4] SIGNAL_JSONL_PATH must point at an existing low-latency queue" >&2
   exit 1
@@ -175,7 +191,7 @@ mkdir -p "${LOG_DIR}"
 LOG_PATH="${LOG_DIR}/phase4-${SESSION_ID}.jsonl"
 SUMMARY_PATH="${LOG_DIR}/phase4-${SESSION_ID}-summary.json"
 
-export PYTHONPATH="${PYTHONPATH:-src}"
+export PYTHONPATH="src${PYTHONPATH:+:${PYTHONPATH}}"
 
 echo "[v6-live-phase4] repo=${REPO_ROOT}"
 echo "[v6-live-phase4] model_version=${MODEL_VERSION}"
@@ -208,6 +224,7 @@ EXEC_ARGS=(
   --settlement-reversal-hysteresis-bars "${SETTLEMENT_REVERSAL_HYSTERESIS_BARS}"
   --settlement-decay-floor "${SETTLEMENT_DECAY_FLOOR}"
   --settlement-decay-delta "${SETTLEMENT_DECAY_DELTA}"
+  --settlement-decay-hysteresis-bars "${SETTLEMENT_DECAY_HYSTERESIS_BARS}"
   --settlement-decay-opposite-min-confidence "${SETTLEMENT_DECAY_OPPOSITE_MIN_CONFIDENCE}"
   --settlement-stop-price-delta "${SETTLEMENT_STOP_PRICE_DELTA}"
   --settlement-stop-loss-usdc "${SETTLEMENT_STOP_LOSS_USDC}"
@@ -246,6 +263,9 @@ if [[ "${SETTLEMENT_PRICE_STOP_ENABLED}" == "true" ]]; then
 fi
 if [[ "${SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_VETO_ENABLED}" == "true" ]]; then
   EXEC_ARGS+=(--settlement-price-stop-same-side-confirmation-veto-enabled)
+fi
+if [[ "${ALLOW_SETTLEMENT_LIVE_MID_ROUND_EXIT}" == "yes" ]]; then
+  EXEC_ARGS+=(--allow-live-settlement-mid-round-exit)
 fi
 
 exec "${PYTHON_BIN}" scripts/polymarket_phase4_live_champion_executor.py "${EXEC_ARGS[@]}"

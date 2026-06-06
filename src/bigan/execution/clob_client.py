@@ -256,7 +256,7 @@ class ClobExecutionClient:
             "chain_id": self.config.chain_id,
             "signature_type": signature_type,
         }
-        funder = os.getenv(self.config.funder_env)
+        funder = os.getenv(self.config.funder_env) or os.getenv("POLYMARKET_FUNDER_ADDRESS")
         if funder:
             kwargs["funder"] = funder
         client = ClobClient(**kwargs)
@@ -314,7 +314,7 @@ class ClobExecutionClient:
             "key": private_key,
             "chain_id": self.config.chain_id,
         }
-        funder = os.getenv(self.config.funder_env)
+        funder = os.getenv(self.config.funder_env) or os.getenv("POLYMARKET_FUNDER_ADDRESS")
         if funder:
             kwargs["funder"] = funder
         return ClobClient(**kwargs)

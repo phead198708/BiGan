@@ -54,11 +54,13 @@ The settlement sleeve still defaults to hold-to-settlement. Issue #97/#98 exit p
 
 ```bash
 SETTLEMENT_ALLOW_MID_ROUND_EXIT=true \
-SETTLEMENT_REVERSAL_MIN_CONFIDENCE=0.80 \
+SETTLEMENT_REVERSAL_MIN_CONFIDENCE=0.75 \
 SETTLEMENT_REVERSAL_HYSTERESIS_BARS=2 \
 SETTLEMENT_CONFIDENCE_DECAY_ENABLED=true \
 SETTLEMENT_DECAY_FLOOR=0.55 \
 SETTLEMENT_DECAY_DELTA=0.25 \
+SETTLEMENT_DECAY_OPPOSITE_MIN_CONFIDENCE=0.75 \
+SETTLEMENT_DECAY_HYSTERESIS_BARS=2 \
 SETTLEMENT_PRICE_STOP_ENABLED=true \
 SETTLEMENT_STOP_PRICE_DELTA=0.15 \
 SETTLEMENT_STOP_LOSS_USDC=0.50 \
@@ -68,9 +70,9 @@ SETTLEMENT_PRICE_STOP_SAME_SIDE_CONFIRMATION_MAX_AGE_SECONDS=180 \
 bash scripts/run_xgboost_v6_paper_shadow.sh
 ```
 
-- Reversal exit uses only settlement probabilities: a fresh opposite `p_up`/`p_down` admission above the reversal confidence, after hysteresis, can sell the existing settlement position.
-- Confidence decay exit uses the fill-time settlement confidence baseline and exits when same-side confidence weakens below floor or delta while the opposite side becomes larger.
-- Price stop exit uses the current bid versus fill price / unrealized PnL; it does not depend on volatility probabilities. When same-side confirmation veto is enabled, a fresh post-entry same-side settlement confidence confirmation can skip the price stop for that poll.
+- Reversal exit uses only settlement probabilities: the opposite side must be admitted above the reversal confidence for consecutive fresh signals before selling the existing settlement position. The current data-tuned default is `p_opposite >= 0.75` for `2` consecutive signals; in the 2026-06-04 queue-first 30-round shadow log, this caught the two filled rounds that later resolved opposite and did not trigger on winning filled rounds, while `0.80/2` missed one of those two reversals.
+- Confidence decay exit uses the fill-time settlement confidence baseline and exits when same-side confidence weakens below floor or delta while the opposite side becomes larger and passes the same consecutive strong-opposite confirmation.
+- Price stop exit uses the current bid versus fill price / unrealized PnL, but the stop can execute only after the same confirmed opposite-reversal condition is present (`p_opposite >= 0.75` for `2` consecutive fresh signals by default). A price or loss breach without confirmed reversal is held and logged as `reversal_confirmation_required`; when same-side confirmation veto is enabled, a fresh post-entry same-side settlement confidence confirmation can still skip the confirmed-reversal price stop for that poll.
 
 ## Artifacts
 

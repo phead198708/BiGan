@@ -397,7 +397,7 @@ def test_executor_reads_bridged_signal_jsonl(tmp_path: Path) -> None:
     }
     queue.write_text(json.dumps(payload) + "\nnot-json\n\n", encoding="utf-8")
 
-    events, cursor = executor._read_signal_jsonl_after(
+    events, cursor, signature = executor._read_signal_jsonl_after(
         queue,
         after_line_number=0,
         model_version="xgboost-v4",
@@ -405,6 +405,7 @@ def test_executor_reads_bridged_signal_jsonl(tmp_path: Path) -> None:
     )
 
     assert cursor == 3
+    assert signature
     assert len(events) == 1
     assert events[0].event_id == "pred-1"
     assert events[0].edge == 0.51
@@ -441,7 +442,7 @@ def test_executor_trusts_executor_ready_v6_volatility_jsonl_payload(tmp_path: Pa
     }
     queue.write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
-    events, _cursor = executor._read_signal_jsonl_after(
+    events, _cursor, _signature = executor._read_signal_jsonl_after(
         queue,
         after_line_number=0,
         model_version="xgboost-v6",
@@ -827,8 +828,10 @@ def test_executor_starts_jsonl_cursor_at_tail(tmp_path: Path) -> None:
     queue = tmp_path / "signals.jsonl"
     queue.write_text("{}\n{}\n", encoding="utf-8")
 
-    assert executor._latest_signal_jsonl_cursor(queue, start="tail") == 2
-    assert executor._latest_signal_jsonl_cursor(queue, start="beginning") == 0
+    tail_cursor, tail_signature = executor._latest_signal_jsonl_cursor(queue, start="tail")
+    assert tail_cursor == 2
+    assert tail_signature
+    assert executor._latest_signal_jsonl_cursor(queue, start="beginning") == (0, "")
 
 
 def test_executor_resets_jsonl_cursor_after_queue_rotation(tmp_path: Path) -> None:
@@ -854,7 +857,7 @@ def test_executor_resets_jsonl_cursor_after_queue_rotation(tmp_path: Path) -> No
         encoding="utf-8",
     )
 
-    events, cursor = executor._read_signal_jsonl_after(
+    events, cursor, signature = executor._read_signal_jsonl_after(
         queue,
         after_line_number=5,
         model_version="xgboost-v5",
@@ -862,6 +865,7 @@ def test_executor_resets_jsonl_cursor_after_queue_rotation(tmp_path: Path) -> No
     )
 
     assert cursor == 1
+    assert signature
     assert [event.event_id for event in events] == ["pred-new-round"]
 
 
@@ -2099,6 +2103,56 @@ def test_settlement_reversal_exit_requires_hysteresis_then_sells(
     assert rows[-1]["event"] == "settlement_reversal_exit_filled"
 
 
+def test_settlement_price_stop_tracks_reversal_when_mid_round_exit_disabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(executor, "_now_ms", lambda: 10_000)
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position(sleeve="settlement")
+    position.paper = True
+    signal = _signal(
+        event_id="pred-strong-down",
+        side="DOWN",
+        token_id="token-down",
+        token_probability=0.91,
+        p_up=0.06,
+        p_down=0.91,
+        p_neutral=0.03,
+        p_vol_up=0.10,
+        p_vol_down=0.10,
+        round_end_ts=300_000,
+    )
+
+    result = executor._maybe_settlement_signal_exit(
+        client=_SellClient(),
+        position_manager=_PositionManager(),
+        position=position,
+        signal=signal,
+        log_path=log_path,
+        config=executor.SettlementExitConfig(
+            allow_mid_round_exit=False,
+            price_stop_enabled=True,
+            reversal_min_confidence=0.75,
+            reversal_hysteresis_bars=2,
+        ),
+        v6_joint_config=executor.V6JointGateConfig(settlement_threshold=0.50),
+        signal_age_seconds=9.0,
+        max_signal_age_seconds=180.0,
+        seconds_to_expiry=290.0,
+        opposite_exit_min_seconds_to_expiry=120.0,
+        sell_slippage=0.01,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert result is None
+    assert position.settlement_reversal_candidate_side == "DOWN"
+    assert position.settlement_reversal_candidate_count == 1
+    assert rows[-1]["event"] == "settlement_reversal_exit_skipped"
+    assert rows[-1]["reason"] == "hysteresis_wait"
+
+
 def test_settlement_confidence_decay_exit_sells_on_fresh_regime_shift(
     tmp_path: Path,
     monkeypatch,
@@ -2129,7 +2183,10 @@ def test_settlement_confidence_decay_exit_sells_on_fresh_regime_shift(
         position=position,
         signal=signal,
         log_path=log_path,
-        config=executor.SettlementExitConfig(confidence_decay_enabled=True),
+        config=executor.SettlementExitConfig(
+            confidence_decay_enabled=True,
+            decay_hysteresis_bars=1,
+        ),
         v6_joint_config=executor.V6JointGateConfig(settlement_threshold=0.50),
         signal_age_seconds=9.0,
         max_signal_age_seconds=180.0,
@@ -2205,7 +2262,7 @@ def test_settlement_confidence_decay_exit_ignores_weak_regime_shift(
     assert evaluated["should_exit"] is False
 
 
-def test_settlement_price_stop_exit_sells_on_bid_breach(
+def test_settlement_price_stop_waits_for_reversal_confirmation(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2232,9 +2289,48 @@ def test_settlement_price_stop_exit_sells_on_bid_breach(
     )
 
     rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert result is None
+    evaluated = next(row for row in rows if row["event"] == "settlement_stop_exit_evaluated")
+    assert evaluated["price_breach"] is True
+    assert evaluated["reversal_confirmation"]["confirmed"] is False
+    assert rows[-1]["event"] == "settlement_stop_exit_skipped"
+    assert rows[-1]["reason"] == "reversal_confirmation_required"
+
+
+def test_settlement_price_stop_exit_sells_after_reversal_confirmation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    log_path = tmp_path / "phase4.jsonl"
+    position = _position(sleeve="settlement")
+    position.paper = True
+    position.entry_price = 0.75
+    position.fill_price = 0.75
+    position.settlement_reversal_candidate_side = "DOWN"
+    position.settlement_reversal_candidate_count = 2
+
+    result = executor._maybe_settlement_price_stop_exit(
+        client=_SellClient(),
+        position_manager=_PositionManager(),
+        position=position,
+        log_path=log_path,
+        seconds_to_expiry=300.0,
+        config=executor.SettlementExitConfig(
+            price_stop_enabled=True,
+            stop_price_delta=0.10,
+            stop_loss_usdc=0.50,
+            stop_min_seconds_to_expiry=120.0,
+            reversal_hysteresis_bars=2,
+        ),
+        sell_slippage=0.01,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert result == executor.SellResult(status="filled", realized_pnl=0.10, account_cash_pnl=0.10)
     evaluated = next(row for row in rows if row["event"] == "settlement_stop_exit_evaluated")
     assert evaluated["price_breach"] is True
+    assert evaluated["reversal_confirmation"]["confirmed"] is True
     assert rows[-1]["event"] == "settlement_stop_exit_filled"
 
 
@@ -2249,6 +2345,8 @@ def test_settlement_price_stop_same_side_confirmation_veto_holds(
     position.paper = True
     position.entry_price = 0.75
     position.fill_price = 0.75
+    position.settlement_reversal_candidate_side = "DOWN"
+    position.settlement_reversal_candidate_count = 2
     signal = _signal(
         event_id="pred-confirm-up",
         side="UP",
@@ -2317,6 +2415,8 @@ def test_settlement_price_stop_same_side_confirmation_veto_expires(
     position.paper = True
     position.entry_price = 0.75
     position.fill_price = 0.75
+    position.settlement_reversal_candidate_side = "DOWN"
+    position.settlement_reversal_candidate_count = 2
     signal = _signal(
         event_id="pred-confirm-up",
         side="UP",
