@@ -30,7 +30,10 @@ Environment overrides:
   MARKET_FAMILIES                       Default: BTC-15M
   V7_SETTLEMENT_MIN_CONFIDENCE          Default: 0.75
   V7_SETTLEMENT_MIN_EDGE_AFTER_COST     Default: 0.04
-  MAX_SIGNAL_AGE_SECONDS                Default: 30
+  MAX_SIGNAL_AGE_SECONDS                Default: 60. The scorer queue can stay
+                                        stricter; executor read latency can
+                                        otherwise reject minute-aligned signals
+                                        just over 30s old.
   PAPER_SETTLEMENT_MAX_WAIT_AFTER_EXPIRY_SECONDS
                                         Default: 180
   ENABLE_VOLATILITY_SLEEVE              Default: false
@@ -61,7 +64,7 @@ MODEL_JSON_PATH="${MODEL_JSON_PATH:-data/model-runs/xgboost-v7/20260606T132859Z-
 MARKET_FAMILIES="${MARKET_FAMILIES:-BTC-15M}"
 V7_SETTLEMENT_MIN_CONFIDENCE="${V7_SETTLEMENT_MIN_CONFIDENCE:-0.75}"
 V7_SETTLEMENT_MIN_EDGE_AFTER_COST="${V7_SETTLEMENT_MIN_EDGE_AFTER_COST:-0.04}"
-MAX_SIGNAL_AGE_SECONDS="${MAX_SIGNAL_AGE_SECONDS:-30}"
+MAX_SIGNAL_AGE_SECONDS="${MAX_SIGNAL_AGE_SECONDS:-60}"
 PAPER_SETTLEMENT_MAX_WAIT_AFTER_EXPIRY_SECONDS="${PAPER_SETTLEMENT_MAX_WAIT_AFTER_EXPIRY_SECONDS:-180}"
 ENABLE_VOLATILITY_SLEEVE="${ENABLE_VOLATILITY_SLEEVE:-false}"
 PAPER="true"
