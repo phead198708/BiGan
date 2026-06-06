@@ -556,6 +556,8 @@ def main() -> int:
                         limit=args.event_limit,
                         v6_joint_config=v6_joint_config,
                         entry_gate_mode=args.entry_gate_mode,
+                        selection_now_ms=_now_ms(),
+                        max_signal_age_seconds=entry_policy.max_signal_age_seconds,
                     )
                     events = batch.events
                     if batch.rows_scanned:
@@ -581,6 +583,8 @@ def main() -> int:
                         limit=args.event_limit,
                         v6_joint_config=v6_joint_config,
                         entry_gate_mode=args.entry_gate_mode,
+                        selection_now_ms=_now_ms(),
+                        max_signal_age_seconds=entry_policy.max_signal_age_seconds,
                     )
             except Exception as exc:  # noqa: BLE001
                 errors += 1
@@ -1735,6 +1739,8 @@ def _read_event_batch_after(
     limit: int,
     v6_joint_config: V6JointGateConfig | None = None,
     entry_gate_mode: str = "v5-edge",
+    selection_now_ms: int | None = None,
+    max_signal_age_seconds: float | None = None,
 ) -> SignalReadBatch:
     with duckdb.connect(db_path, read_only=True) as conn:
         rows = conn.execute(
@@ -1811,6 +1817,8 @@ def _read_event_batch_after(
     best_events = _best_event_per_round(
         events,
         entry_gate_mode=effective_entry_gate_mode,
+        selection_now_ms=selection_now_ms,
+        max_signal_age_seconds=max_signal_age_seconds,
     )
     return SignalReadBatch(
         events=best_events,
@@ -1884,6 +1892,8 @@ def _read_signal_jsonl_after(
     limit: int,
     v6_joint_config: V6JointGateConfig | None = None,
     entry_gate_mode: str = "v5-edge",
+    selection_now_ms: int | None = None,
+    max_signal_age_seconds: float | None = None,
 ) -> tuple[list[SignalEvent], int, str]:
     if not path.exists():
         return [], after_line_number, after_line_signature
@@ -1921,7 +1931,12 @@ def _read_signal_jsonl_after(
             break
     line_signature = _signal_jsonl_prefix_signature(lines, last_line_number)
     return (
-        _best_event_per_round(events, entry_gate_mode=entry_gate_mode),
+        _best_event_per_round(
+            events,
+            entry_gate_mode=entry_gate_mode,
+            selection_now_ms=selection_now_ms,
+            max_signal_age_seconds=max_signal_age_seconds,
+        ),
         last_line_number,
         line_signature,
     )
@@ -2227,8 +2242,10 @@ def _best_event_per_round(
     events: list[SignalEvent],
     *,
     entry_gate_mode: str = "v5-edge",
+    selection_now_ms: int | None = None,
+    max_signal_age_seconds: float | None = None,
 ) -> list[SignalEvent]:
-    best: dict[str, SignalEvent] = {}
+    grouped: dict[str, list[SignalEvent]] = {}
     for event in events:
         best_key = event.round_slug
         if entry_gate_mode == "v6-joint" and event.p_up is not None and event.p_vol_up is not None:
@@ -2237,23 +2254,67 @@ def _best_event_per_round(
                 if event.v6_joint_side is not None
                 else f"volatility:{event.round_slug}"
             )
-        previous = best.get(best_key)
-        if previous is None:
-            best[best_key] = event
-            continue
-        if entry_gate_mode == "v6-joint" and event.p_up is not None and event.p_vol_up is not None:
-            event_score = _v6_event_selection_score(event)
-            previous_score = _v6_event_selection_score(previous)
-            if event_score > previous_score:
-                best[best_key] = event
-        elif entry_gate_mode == "v7-pnl":
-            event_score = _v7_event_selection_score(event)
-            previous_score = _v7_event_selection_score(previous)
-            if event_score > previous_score:
-                best[best_key] = event
-        elif event.edge > previous.edge:
-            best[best_key] = event
+        grouped.setdefault(best_key, []).append(event)
+    best: dict[str, SignalEvent] = {}
+    for best_key, group in grouped.items():
+        candidates = _fresh_selection_candidates(
+            group,
+            selection_now_ms=selection_now_ms,
+            max_signal_age_seconds=max_signal_age_seconds,
+        )
+        best[best_key] = _select_best_event(candidates, entry_gate_mode=entry_gate_mode)
     return sorted(best.values(), key=lambda item: (item.created_at, item.event_id))
+
+
+def _fresh_selection_candidates(
+    events: list[SignalEvent],
+    *,
+    selection_now_ms: int | None,
+    max_signal_age_seconds: float | None,
+) -> list[SignalEvent]:
+    if selection_now_ms is None or max_signal_age_seconds is None:
+        return events
+    fresh = [
+        event
+        for event in events
+        if event.ts <= 0
+        or max(0.0, (selection_now_ms - event.ts) / 1000) <= max_signal_age_seconds
+    ]
+    if fresh:
+        return fresh
+    return [
+        max(
+            events,
+            key=lambda item: (item.ts, item.created_at, item.event_id),
+        )
+    ]
+
+
+def _select_best_event(
+    events: list[SignalEvent],
+    *,
+    entry_gate_mode: str,
+) -> SignalEvent:
+    best = events[0]
+    best_score = _event_selection_score(best, entry_gate_mode=entry_gate_mode)
+    for event in events[1:]:
+        event_score = _event_selection_score(event, entry_gate_mode=entry_gate_mode)
+        if event_score > best_score:
+            best = event
+            best_score = event_score
+    return best
+
+
+def _event_selection_score(
+    event: SignalEvent,
+    *,
+    entry_gate_mode: str,
+) -> float:
+    if entry_gate_mode == "v6-joint" and event.p_up is not None and event.p_vol_up is not None:
+        return _v6_event_selection_score(event)
+    if entry_gate_mode == "v7-pnl":
+        return _v7_event_selection_score(event)
+    return event.edge
 
 
 def _v6_event_selection_score(event: SignalEvent) -> float:

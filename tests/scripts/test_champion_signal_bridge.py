@@ -527,6 +527,64 @@ def test_executor_reads_executor_ready_v7_pnl_jsonl_payload(tmp_path: Path) -> N
     assert events[0].settlement_residual == pytest.approx(0.12)
 
 
+def test_v7_pnl_jsonl_selection_ignores_stale_high_edge_signal(tmp_path: Path) -> None:
+    queue = tmp_path / "signals.jsonl"
+    stale_high_edge = {
+        "event_id": "pred-v7-stale-high",
+        "ts": 1_779_774_000_000,
+        "created_at": 1_779_774_010_000,
+        "model_version": "xgboost-v7",
+        "prob_up_15m": 0.85,
+        "canonical_symbol": "BTC-15M:btc-updown-15m-1779774300:UP",
+        "token_id": "token-up",
+        "outcome_side": "UP",
+        "round_slug": "btc-updown-15m-1779774300",
+        "round_end_ts": 1_779_775_200_000,
+        "market_implied_prob": 0.55,
+        "token_probability": 0.85,
+        "edge": 0.30,
+        "bridged_at": 1_779_774_011_000,
+        "opposite_token_id": "token-down",
+        "p_up": 0.85,
+        "p_down": 0.10,
+        "p_neutral": 0.05,
+        "selected_side": "UP",
+        "selected_expected_edge": 0.30,
+    }
+    fresh_lower_edge = {
+        **stale_high_edge,
+        "event_id": "pred-v7-fresh-lower",
+        "ts": 1_779_774_500_000,
+        "created_at": 1_779_774_501_000,
+        "prob_up_15m": 0.77,
+        "token_probability": 0.77,
+        "edge": 0.08,
+        "bridged_at": 1_779_774_502_000,
+        "p_up": 0.77,
+        "p_down": 0.18,
+        "selected_expected_edge": 0.08,
+    }
+    queue.write_text(
+        json.dumps(stale_high_edge) + "\n" + json.dumps(fresh_lower_edge) + "\n",
+        encoding="utf-8",
+    )
+
+    events, cursor, _signature = executor._read_signal_jsonl_after(
+        queue,
+        after_line_number=0,
+        model_version="xgboost-v7",
+        limit=10,
+        entry_gate_mode="v7-pnl",
+        selection_now_ms=1_779_774_530_000,
+        max_signal_age_seconds=120,
+    )
+
+    assert cursor == 2
+    assert len(events) == 1
+    assert events[0].event_id == "pred-v7-fresh-lower"
+    assert events[0].selected_expected_edge == pytest.approx(0.08)
+
+
 def test_executor_reads_db_signal_with_opposite_token_id(tmp_path: Path) -> None:
     db_path = tmp_path / "catalog.duckdb"
     ts = 1_779_774_400_000

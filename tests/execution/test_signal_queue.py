@@ -176,6 +176,42 @@ def test_append_prediction_rows_as_signal_jsonl_prefers_nearest_active_round(
     assert payload["token_id"] == "near-up"
 
 
+def test_append_prediction_rows_as_signal_jsonl_clears_when_no_active_round(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    queue_path = tmp_path / "signals.jsonl"
+    queue_path.write_text(
+        json.dumps({"round_slug": "btc-updown-15m-1779774300"}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(signal_queue, "_now_ms", lambda: 1_779_776_500_000)
+
+    written = append_prediction_rows_as_signal_jsonl(
+        queue_path,
+        [
+            _prediction_row(
+                side="UP",
+                token_id="expired-up",
+                market_implied_prob=0.30,
+                p_up=0.90,
+                p_down=0.05,
+                p_neutral=0.05,
+                p_vol_up=0.20,
+                p_vol_down=0.10,
+                round_slug="btc-updown-15m-1779774300",
+                ts=1_779_774_400_000,
+            )
+        ],
+        model_version="xgboost-v6",
+        v6_joint_config=V6JointGateConfig(settlement_threshold=0.80),
+        bridged_at=1_779_776_500_000,
+    )
+
+    assert written == 0
+    assert queue_path.read_text(encoding="utf-8") == ""
+
+
 def test_append_prediction_rows_as_signal_jsonl_deduplicates_current_round(
     tmp_path: Path,
 ) -> None:
@@ -272,6 +308,7 @@ def test_v6_signal_queue_uses_external_token_map_for_opposite_side(
         ],
         model_version="xgboost-v6",
         v6_joint_config=V6JointGateConfig(settlement_threshold=0.50),
+        bridged_at=1_779_774_410_000,
         token_ids_by_market_side={
             ("BTC-15M", round_slug, "UP"): "token-up",
             ("BTC-15M", round_slug, "DOWN"): "token-down",

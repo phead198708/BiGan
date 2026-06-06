@@ -84,9 +84,14 @@ def append_prediction_rows_as_signal_jsonl(
     )
     if not signals:
         return 0
-    current_round_slug = _current_round_slug(signals)
-    signals = [signal for signal in signals if signal.round_slug == current_round_slug]
+    reference_ms = _now_ms() if bridged_at is None else int(bridged_at)
+    current_round_slug = _current_round_slug(signals, now_ms=reference_ms)
     output_path = Path(path)
+    if current_round_slug is None:
+        if output_path.exists():
+            output_path.write_text("", encoding="utf-8")
+        return 0
+    signals = [signal for signal in signals if signal.round_slug == current_round_slug]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     existing_round_slug = _existing_queue_round_slug(output_path)
     mode = "w" if existing_round_slug and existing_round_slug != current_round_slug else "a"
@@ -444,18 +449,17 @@ def _parse_canonical_symbol(canonical_symbol: str) -> tuple[str, str, str] | Non
     return parts[0].upper(), parts[-2], parts[-1].upper()
 
 
-def _current_round_slug(signals: list[ExecutionSignal]) -> str:
+def _current_round_slug(signals: list[ExecutionSignal], *, now_ms: int | None = None) -> str | None:
     """Return the nearest active round represented by the executor signal batch."""
 
     if not signals:
         raise ValueError("signals is empty")
-    now_ms = _now_ms()
+    now_ms = _now_ms() if now_ms is None else int(now_ms)
     active = [signal for signal in signals if signal.round_end_ts >= now_ms]
     if active:
         nearest = min(active, key=lambda signal: (signal.round_end_ts, -signal.ts))
         return nearest.round_slug
-    newest = max(signals, key=lambda signal: (signal.round_end_ts, signal.ts))
-    return newest.round_slug
+    return None
 
 
 def _existing_queue_round_slug(path: Path) -> str | None:
