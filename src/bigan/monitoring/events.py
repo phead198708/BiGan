@@ -473,6 +473,20 @@ def _prediction_feature_snapshot_json(row: dict[str, Any]) -> str:
         "p_neutral": row.get("p_neutral"),
         "p_vol_up": row.get("p_vol_up"),
         "p_vol_down": row.get("p_vol_down"),
+        "settlement_residual": row.get("settlement_residual"),
+        "token_side": row.get("token_side"),
+        "token_expected_win_probability": row.get("token_expected_win_probability"),
+        "p_up_residual_adjusted": row.get("p_up_residual_adjusted"),
+        "p_down_residual_adjusted": row.get("p_down_residual_adjusted"),
+        "entry_worst_price_up": row.get("entry_worst_price_up"),
+        "entry_worst_price_down": row.get("entry_worst_price_down"),
+        "expected_edge_up": row.get("expected_edge_up"),
+        "expected_edge_down": row.get("expected_edge_down"),
+        "residual_expected_edge_up": row.get("residual_expected_edge_up"),
+        "residual_expected_edge_down": row.get("residual_expected_edge_down"),
+        "selected_side": row.get("selected_side"),
+        "selected_expected_edge": row.get("selected_expected_edge"),
+        "should_enter_settlement": row.get("should_enter_settlement"),
     }
     feature_values_json = row.get("feature_values_json")
     if feature_values_json is not None:

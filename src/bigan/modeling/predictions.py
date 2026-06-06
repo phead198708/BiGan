@@ -29,6 +29,11 @@ from .xgboost_v6 import (
     XGBoostV6Model,
     load_xgboost_v6_model,
 )
+from .xgboost_v7 import (
+    XGBOOST_V7_ARTIFACT_SCHEMA_VERSION,
+    XGBoostV7Model,
+    load_xgboost_v7_model,
+)
 
 if TYPE_CHECKING:
     from bigan.execution.v6_gate import V6JointGateConfig
@@ -155,9 +160,87 @@ def generate_v6_prediction_rows(
     return rows
 
 
+def generate_v7_prediction_rows(
+    *,
+    feature_rows: list[dict[str, Any]],
+    model: XGBoostV7Model,
+    ingest_ts: int | None = None,
+) -> list[dict[str, Any]]:
+    """Generate prediction rows with explicit v7 settlement-EV payload fields."""
+
+    run_ingest_ts = int(time.time() * 1000) if ingest_ts is None else int(ingest_ts)
+    payloads = model.predict_payload_many(feature_rows)
+    rows: list[dict[str, Any]] = []
+    for feature, payload in zip(feature_rows, payloads, strict=True):
+        _validate_training_schema(feature, model.feature_columns)
+        prediction_ts = int(feature["feature_ts"])
+        p_up = float(payload["p_up"])
+        rows.append(
+            {
+                "ts": prediction_ts,
+                "message_ts": prediction_ts,
+                "prediction_ts": prediction_ts,
+                "ingest_ts": run_ingest_ts,
+                "source": str(feature["source"]),
+                "source_symbol": str(feature["source_symbol"]),
+                "source_market": _optional_str(feature.get("source_market")),
+                "canonical_symbol": _optional_str(feature.get("canonical_symbol")),
+                "symbol": str(
+                    feature.get("symbol")
+                    or feature.get("canonical_symbol")
+                    or feature["source_symbol"]
+                ),
+                "feature_version": str(feature["feature_version"]),
+                "model_version": model.model_version,
+                "calibration_method": "family-aware temperature scaling + settlement residual",
+                "prob_up_15m": p_up,
+                "raw_prob_up_15m": p_up,
+                "p_up": p_up,
+                "p_down": float(payload["p_down"]),
+                "p_neutral": float(payload["p_neutral"]),
+                "p_vol_up": None,
+                "p_vol_down": None,
+                "settlement_residual": float(payload["settlement_residual"]),
+                "token_side": _optional_str(payload.get("token_side")),
+                "token_expected_win_probability": _optional_float(
+                    payload.get("token_expected_win_probability")
+                ),
+                "p_up_residual_adjusted": _optional_float(payload.get("p_up_residual_adjusted")),
+                "p_down_residual_adjusted": _optional_float(payload.get("p_down_residual_adjusted")),
+                "entry_worst_price_up": _optional_float(payload.get("entry_worst_price_up")),
+                "entry_worst_price_down": _optional_float(payload.get("entry_worst_price_down")),
+                "expected_edge_up": _optional_float(payload.get("expected_edge_up")),
+                "expected_edge_down": _optional_float(payload.get("expected_edge_down")),
+                "residual_expected_edge_up": _optional_float(
+                    payload.get("residual_expected_edge_up")
+                ),
+                "residual_expected_edge_down": _optional_float(
+                    payload.get("residual_expected_edge_down")
+                ),
+                "selected_side": _optional_str(payload.get("selected_side")),
+                "selected_expected_edge": _optional_float(payload.get("selected_expected_edge")),
+                "should_enter_settlement": payload.get("should_enter_settlement"),
+                "market_implied_prob": _optional_float(payload.get("market_implied_prob")),
+                "confidence_bucket": confidence_bucket(p_up),
+                "top_features_json": json.dumps([], sort_keys=True),
+                "feature_values_json": json.dumps(
+                    {column: feature.get(column) for column in model.feature_columns},
+                    sort_keys=True,
+                ),
+            }
+        )
+    rows.sort(key=lambda row: (row["prediction_ts"], row["source"], row["source_symbol"]))
+    return rows
+
+
 def _is_v6_model_artifact(model_path: Path | str) -> bool:
     artifact = json.loads(Path(model_path).read_text(encoding="utf-8"))
     return artifact.get("schema_version") == XGBOOST_V6_ARTIFACT_SCHEMA_VERSION
+
+
+def _is_v7_model_artifact(model_path: Path | str) -> bool:
+    artifact = json.loads(Path(model_path).read_text(encoding="utf-8"))
+    return artifact.get("schema_version") == XGBOOST_V7_ARTIFACT_SCHEMA_VERSION
 
 
 def run_prediction_batch(
@@ -187,7 +270,17 @@ def run_prediction_batch(
         until_ms=until_ms,
         canonical_symbol_like=canonical_symbol_like,
     )
-    if _is_v6_model_artifact(model_path):
+    if _is_v7_model_artifact(model_path):
+        if calibration_path is not None:
+            raise ValueError("xgboost-v7 artifacts do not use a separate calibration_path")
+        model = load_xgboost_v7_model(model_path)
+        rows = generate_v7_prediction_rows(
+            feature_rows=feature_rows,
+            model=model,
+            ingest_ts=ingest_ts,
+        )
+        calibration_method: str | None = "family-aware temperature scaling + settlement residual"
+    elif _is_v6_model_artifact(model_path):
         if calibration_path is not None:
             raise ValueError("xgboost-v6 artifacts do not use a separate calibration_path")
         model = load_xgboost_v6_model(model_path)

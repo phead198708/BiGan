@@ -62,6 +62,7 @@ from bigan.modeling import (
     SplitConfig,
     XGBoostV1Config,
     XGBoostV6Config,
+    XGBoostV7Config,
     assemble_training_dataset,
     audit_champion_promotion_process,
     evaluate_bootstrap_champion,
@@ -80,6 +81,7 @@ from bigan.modeling import (
     train_xgboost_v4,
     train_xgboost_v5,
     train_xgboost_v6,
+    train_xgboost_v7,
 )
 from bigan.modeling.promotion import (
     EXPECTED_CUTOVER_GITHUB_REPO,
@@ -221,6 +223,10 @@ XGBOOST_V5_OUTPUT_DIR_OPTION = typer.Option(
 XGBOOST_V6_OUTPUT_DIR_OPTION = typer.Option(
     Path("data/model-runs/xgboost-v6"),
     help="Directory for XGBoost-v6 multi-head artifacts.",
+)
+XGBOOST_V7_OUTPUT_DIR_OPTION = typer.Option(
+    Path("data/model-runs/xgboost-v7"),
+    help="Directory for XGBoost-v7 settlement-EV artifacts.",
 )
 CALIBRATION_MODEL_PATH_OPTION = typer.Option(
     Path("data/model-runs/xgboost-v1/model.json"),
@@ -1838,6 +1844,22 @@ def xgboost_v6(
         dataset_dir,
         output_dir,
         config=XGBoostV6Config(),
+    )
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("xgboost-v7")
+def xgboost_v7(
+    dataset_dir: Path = XGBOOST_DATASET_DIR_OPTION,
+    output_dir: Path = XGBOOST_V7_OUTPUT_DIR_OPTION,
+) -> None:
+    """Train xgboost-v7 settlement-EV artifacts."""
+    settings = IngestionSettings()
+    _configure_logging(settings.log_level)
+    report = train_xgboost_v7(
+        dataset_dir,
+        output_dir,
+        config=XGBoostV7Config(),
     )
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 

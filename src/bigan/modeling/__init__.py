@@ -51,6 +51,7 @@ from .predictions import (
     PredictionBatchReport,
     confidence_bucket,
     generate_prediction_rows,
+    generate_v7_prediction_rows,
     run_prediction_batch,
 )
 from .promotion import (
@@ -102,6 +103,14 @@ from .xgboost_v6 import (
     load_xgboost_v6_model,
     train_xgboost_v6,
 )
+from .xgboost_v7 import (
+    XGBOOST_V7_MODEL_VERSION,
+    XGBoostV7Config,
+    XGBoostV7Model,
+    XGBoostV7Report,
+    load_xgboost_v7_model,
+    train_xgboost_v7,
+)
 
 __all__ = [
     "CalibrationConfig",
@@ -144,6 +153,7 @@ __all__ = [
     "XGBOOST_V4_MODEL_VERSION",
     "XGBOOST_V5_MODEL_VERSION",
     "XGBOOST_V6_MODEL_VERSION",
+    "XGBOOST_V7_MODEL_VERSION",
     "XGBOOST_V4_REQUIRED_ADDED_FEATURES",
     "XGBOOST_V4_REQUIRED_FEATURES",
     "XGBOOST_V4_REQUIRED_MARKET_FEATURES",
@@ -155,6 +165,9 @@ __all__ = [
     "XGBoostV6Model",
     "XGBoostV6Report",
     "XGBoostV6VolatilityHead",
+    "XGBoostV7Config",
+    "XGBoostV7Model",
+    "XGBoostV7Report",
     "assemble_training_dataset",
     "audit_champion_promotion_process",
     "confidence_bucket",
@@ -167,6 +180,7 @@ __all__ = [
     "fit_probability_calibration",
     "family_key_from_feature",
     "generate_prediction_rows",
+    "generate_v7_prediction_rows",
     "generate_offline_rerun_report",
     "generate_dataset_stability_report",
     "evaluate_model_promotion",
@@ -175,6 +189,7 @@ __all__ = [
     "load_probability_calibrator",
     "load_xgboost_v1_model",
     "load_xgboost_v6_model",
+    "load_xgboost_v7_model",
     "train_logistic_baseline",
     "transform_probability",
     "run_prediction_batch",
@@ -184,4 +199,5 @@ __all__ = [
     "train_xgboost_v4",
     "train_xgboost_v5",
     "train_xgboost_v6",
+    "train_xgboost_v7",
 ]

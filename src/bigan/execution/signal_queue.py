@@ -46,6 +46,15 @@ class ExecutionSignal:
     p_vol_up: float | None = None
     p_vol_down: float | None = None
     v6_joint_side: str | None = None
+    settlement_residual: float | None = None
+    expected_edge_up: float | None = None
+    expected_edge_down: float | None = None
+    residual_expected_edge_up: float | None = None
+    residual_expected_edge_down: float | None = None
+    selected_side: str | None = None
+    selected_expected_edge: float | None = None
+    entry_worst_price: float | None = None
+    should_enter_settlement: bool | None = None
 
 
 def append_prediction_rows_as_signal_jsonl(
@@ -213,6 +222,23 @@ def _execution_signal_from_prediction_row(
             ),
         )
 
+    if _is_v7_model_version(model_version):
+        return _v7_execution_signal(
+            row=row,
+            event_id=event.event_id,
+            event_ts=int(event.ts),
+            created_at=created_at,
+            model_version=model_version,
+            snapshot=snapshot,
+            family=family,
+            round_slug=round_slug,
+            token_side=token_side,
+            token_by_side=token_by_side,
+            round_end_ts=int(round_end_ts),
+            bridged_at=bridged_at,
+            allowed_outcome_sides=allowed_outcome_sides,
+        )
+
     token_id = str(snapshot.get("source_symbol") or snapshot.get("token_id") or "")
     market = tradable_market_implied_probability(snapshot, event_ts=int(event.ts))
     if not token_id or market is None:
@@ -238,6 +264,119 @@ def _execution_signal_from_prediction_row(
     )
 
 
+def _v7_execution_signal(
+    *,
+    row: dict[str, Any],
+    event_id: str,
+    event_ts: int,
+    created_at: int,
+    model_version: str,
+    snapshot: dict[str, Any],
+    family: str,
+    round_slug: str,
+    token_side: str,
+    token_by_side: dict[tuple[str, str, str], str],
+    round_end_ts: int,
+    bridged_at: int,
+    allowed_outcome_sides: frozenset[str] | None,
+) -> ExecutionSignal | None:
+    side = _selected_v7_side(snapshot)
+    if side is None:
+        return None
+    if allowed_outcome_sides is not None and side not in allowed_outcome_sides:
+        return None
+    token_id = (
+        str(snapshot.get("source_symbol") or snapshot.get("token_id") or "")
+        if side == token_side
+        else token_by_side.get((family, round_slug, side), "")
+    )
+    if not token_id:
+        return None
+    opposite_side = "DOWN" if side == "UP" else "UP"
+    opposite_token_id = (
+        str(snapshot.get("source_symbol") or snapshot.get("token_id") or "")
+        if opposite_side == token_side
+        else token_by_side.get((family, round_slug, opposite_side), "")
+    )
+    p_up = _optional_float(snapshot.get("p_up"))
+    p_down = _optional_float(snapshot.get("p_down"))
+    if p_up is None or p_down is None:
+        return None
+    market = _v7_selected_market(snapshot, selected_side=side, token_side=token_side)
+    edge = _optional_float(
+        snapshot.get("expected_edge_up") if side == "UP" else snapshot.get("expected_edge_down")
+    )
+    if market is None or edge is None:
+        return None
+    entry_worst = _optional_float(
+        snapshot.get("entry_worst_price_up")
+        if side == "UP"
+        else snapshot.get("entry_worst_price_down")
+    )
+    return ExecutionSignal(
+        event_id=event_id,
+        ts=event_ts,
+        created_at=created_at,
+        model_version=model_version,
+        prob_up_15m=p_up,
+        canonical_symbol=str(snapshot.get("canonical_symbol") or snapshot.get("symbol") or ""),
+        token_id=str(token_id),
+        outcome_side=side,
+        round_slug=round_slug,
+        round_end_ts=round_end_ts,
+        market_implied_prob=market,
+        token_probability=p_up if side == "UP" else p_down,
+        edge=edge,
+        bridged_at=bridged_at,
+        opposite_token_id=str(opposite_token_id or ""),
+        p_up=p_up,
+        p_down=p_down,
+        p_neutral=_optional_float(snapshot.get("p_neutral")),
+        p_vol_up=None,
+        p_vol_down=None,
+        settlement_residual=_optional_float(snapshot.get("settlement_residual")),
+        expected_edge_up=_optional_float(snapshot.get("expected_edge_up")),
+        expected_edge_down=_optional_float(snapshot.get("expected_edge_down")),
+        residual_expected_edge_up=_optional_float(snapshot.get("residual_expected_edge_up")),
+        residual_expected_edge_down=_optional_float(snapshot.get("residual_expected_edge_down")),
+        selected_side=side,
+        selected_expected_edge=edge,
+        entry_worst_price=entry_worst,
+        should_enter_settlement=_optional_bool(snapshot.get("should_enter_settlement")),
+    )
+
+
+def _is_v7_model_version(model_version: str) -> bool:
+    return model_version == "xgboost-v7" or model_version.startswith("xgboost-v7:")
+
+
+def _selected_v7_side(snapshot: dict[str, Any]) -> str | None:
+    selected = str(snapshot.get("selected_side") or "").upper()
+    if selected in {"UP", "DOWN"}:
+        return selected
+    up_edge = _optional_float(snapshot.get("expected_edge_up"))
+    down_edge = _optional_float(snapshot.get("expected_edge_down"))
+    if up_edge is None and down_edge is None:
+        return None
+    if down_edge is None or (up_edge is not None and up_edge >= down_edge):
+        return "UP"
+    return "DOWN"
+
+
+def _v7_selected_market(
+    snapshot: dict[str, Any],
+    *,
+    selected_side: str,
+    token_side: str,
+) -> float | None:
+    value = _optional_float(snapshot.get("market_implied_prob"))
+    if value is None:
+        return None
+    if selected_side == token_side:
+        return value
+    return max(0.0, min(1.0, 1.0 - value))
+
+
 def _snapshot_from_prediction_row(row: dict[str, Any]) -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "source": row.get("source"),
@@ -251,6 +390,20 @@ def _snapshot_from_prediction_row(row: dict[str, Any]) -> dict[str, Any]:
         "p_neutral": row.get("p_neutral"),
         "p_vol_up": row.get("p_vol_up"),
         "p_vol_down": row.get("p_vol_down"),
+        "settlement_residual": row.get("settlement_residual"),
+        "token_side": row.get("token_side"),
+        "token_expected_win_probability": row.get("token_expected_win_probability"),
+        "p_up_residual_adjusted": row.get("p_up_residual_adjusted"),
+        "p_down_residual_adjusted": row.get("p_down_residual_adjusted"),
+        "entry_worst_price_up": row.get("entry_worst_price_up"),
+        "entry_worst_price_down": row.get("entry_worst_price_down"),
+        "expected_edge_up": row.get("expected_edge_up"),
+        "expected_edge_down": row.get("expected_edge_down"),
+        "residual_expected_edge_up": row.get("residual_expected_edge_up"),
+        "residual_expected_edge_down": row.get("residual_expected_edge_down"),
+        "selected_side": row.get("selected_side"),
+        "selected_expected_edge": row.get("selected_expected_edge"),
+        "should_enter_settlement": row.get("should_enter_settlement"),
     }
     feature_values_json = row.get("feature_values_json")
     if feature_values_json is not None:
@@ -346,6 +499,9 @@ def _signal_identity(signal: ExecutionSignal) -> tuple[object, ...]:
         _rounded_probability(signal.p_neutral),
         _rounded_probability(signal.p_vol_up),
         _rounded_probability(signal.p_vol_down),
+        _rounded_probability(signal.expected_edge_up),
+        _rounded_probability(signal.expected_edge_down),
+        _rounded_probability(signal.selected_expected_edge),
     )
 
 
@@ -362,6 +518,9 @@ def _payload_signal_identity(payload: dict[str, Any]) -> tuple[object, ...]:
         _rounded_probability(payload.get("p_neutral")),
         _rounded_probability(payload.get("p_vol_up")),
         _rounded_probability(payload.get("p_vol_down")),
+        _rounded_probability(payload.get("expected_edge_up")),
+        _rounded_probability(payload.get("expected_edge_down")),
+        _rounded_probability(payload.get("selected_expected_edge")),
     )
 
 
@@ -373,6 +532,25 @@ def _rounded_probability(value: object) -> float | None:
     if value is None:
         return None
     return round(float(value), 12)
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _optional_bool(value: object) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n"}:
+            return False
+        return None
+    return bool(value)
 
 
 def _now_ms() -> int:
