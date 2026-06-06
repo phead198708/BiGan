@@ -370,12 +370,15 @@ def main() -> int:
     )
     client = _build_clob_client()
     heartbeat_stop = threading.Event()
-    heartbeat_thread = threading.Thread(
-        target=_heartbeat_loop,
-        args=(client, heartbeat_stop, log_path),
-        daemon=True,
-    )
-    heartbeat_thread.start()
+    if args.disable_heartbeat:
+        _log(log_path, "heartbeat_disabled", paper=args.paper)
+    else:
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_loop,
+            args=(client, heartbeat_stop, log_path),
+            daemon=True,
+        )
+        heartbeat_thread.start()
     position_manager = PositionManager(args.monitoring_db_path)
 
     lifecycle = RoundLifecycleState()
@@ -1020,6 +1023,11 @@ def _parse_args() -> argparse.Namespace:
         choices=("tail", "beginning"),
         default="tail",
         help="Where to start reading --signal-jsonl-path on startup.",
+    )
+    parser.add_argument(
+        "--disable-heartbeat",
+        action="store_true",
+        help="Disable CLOB heartbeat keepalive, mainly for orderbook-only paper shadow runs.",
     )
     parser.add_argument("--model-version", default="xgboost-v4")
     parser.add_argument(

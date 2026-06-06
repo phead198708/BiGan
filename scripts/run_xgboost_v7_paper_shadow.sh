@@ -37,6 +37,7 @@ Environment overrides:
   PAPER_SETTLEMENT_MAX_WAIT_AFTER_EXPIRY_SECONDS
                                         Default: 180
   ENABLE_VOLATILITY_SLEEVE              Default: false
+  DISABLE_HEARTBEAT                     Default: true for paper shadow
   SIGNAL_JSONL_PATH                     Executor-ready signal JSONL queue.
                                         Required by default.
   REQUIRE_SIGNAL_JSONL                  Default: true
@@ -67,6 +68,7 @@ V7_SETTLEMENT_MIN_EDGE_AFTER_COST="${V7_SETTLEMENT_MIN_EDGE_AFTER_COST:-0.04}"
 MAX_SIGNAL_AGE_SECONDS="${MAX_SIGNAL_AGE_SECONDS:-60}"
 PAPER_SETTLEMENT_MAX_WAIT_AFTER_EXPIRY_SECONDS="${PAPER_SETTLEMENT_MAX_WAIT_AFTER_EXPIRY_SECONDS:-180}"
 ENABLE_VOLATILITY_SLEEVE="${ENABLE_VOLATILITY_SLEEVE:-false}"
+DISABLE_HEARTBEAT="${DISABLE_HEARTBEAT:-true}"
 PAPER="true"
 MONITORING_DB_PATH="${MONITORING_DB_PATH:-data/mlops/champion_catalog.duckdb}"
 MAX_POSITION_SIZE_USDC="${MAX_POSITION_SIZE_USDC:-1.0}"
@@ -143,6 +145,7 @@ echo "[v7-paper-shadow] v7_settlement_min_confidence=${V7_SETTLEMENT_MIN_CONFIDE
 echo "[v7-paper-shadow] v7_settlement_min_edge_after_cost=${V7_SETTLEMENT_MIN_EDGE_AFTER_COST}"
 echo "[v7-paper-shadow] max_signal_age_seconds=${MAX_SIGNAL_AGE_SECONDS}"
 echo "[v7-paper-shadow] paper=true volatility_sleeve=${ENABLE_VOLATILITY_SLEEVE}"
+echo "[v7-paper-shadow] disable_heartbeat=${DISABLE_HEARTBEAT}"
 echo "[v7-paper-shadow] orderbook_rest_fallback=${POLYMARKET_ORDERBOOK_REST_FALLBACK}"
 if [[ -n "${SIGNAL_JSONL_PATH}" ]]; then
   echo "[v7-paper-shadow] signal_source=jsonl path=${SIGNAL_JSONL_PATH} start=${SIGNAL_JSONL_START}"
@@ -186,6 +189,9 @@ if [[ "${CONTINUE_AFTER_MAX_ROUNDS_UNTIL_RUNTIME}" == "true" ]]; then
 fi
 if [[ "${ENABLE_VOLATILITY_SLEEVE}" == "true" ]]; then
   EXEC_ARGS+=(--enable-volatility-sleeve)
+fi
+if [[ "${DISABLE_HEARTBEAT}" == "true" ]]; then
+  EXEC_ARGS+=(--disable-heartbeat)
 fi
 
 exec "${PYTHON_BIN}" scripts/polymarket_phase4_live_champion_executor.py "${EXEC_ARGS[@]}"
