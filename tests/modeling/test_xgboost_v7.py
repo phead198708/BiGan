@@ -247,6 +247,7 @@ def test_train_xgboost_v7_saves_settlement_ev_artifacts_and_payload(tmp_path: Pa
     assert written == 1
     assert queue_payload["model_version"] == XGBOOST_V7_MODEL_VERSION
     assert queue_payload["outcome_side"] == prediction["selected_side"]
+    assert queue_payload["canonical_symbol"].endswith(f":{queue_payload['outcome_side']}")
     assert queue_payload["selected_expected_edge"] == pytest.approx(
         prediction["selected_expected_edge"]
     )
@@ -281,6 +282,7 @@ def test_train_xgboost_v7_saves_settlement_ev_artifacts_and_payload(tmp_path: Pa
     live_like_queue_payload = json.loads(live_like_queue_path.read_text(encoding="utf-8"))
     assert written == 1
     assert live_like_queue_payload["outcome_side"] == "UP"
+    assert live_like_queue_payload["canonical_symbol"] == f"BTC-15M:{round_slug}:UP"
     assert live_like_queue_payload["selected_expected_edge"] == pytest.approx(0.30)
     assert live_like_queue_payload["edge"] == pytest.approx(0.30)
     assert live_like_queue_payload["entry_worst_price"] is None

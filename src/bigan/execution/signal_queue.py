@@ -322,7 +322,7 @@ def _v7_execution_signal(
         created_at=created_at,
         model_version=model_version,
         prob_up_15m=p_up,
-        canonical_symbol=str(snapshot.get("canonical_symbol") or snapshot.get("symbol") or ""),
+        canonical_symbol=f"{family}:{round_slug}:{side}",
         token_id=str(token_id),
         outcome_side=side,
         round_slug=round_slug,
