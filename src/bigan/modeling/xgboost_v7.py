@@ -356,12 +356,25 @@ def train_xgboost_v7(
     selected_rule = _select_tradable_ev_rule(rows_by_split["val"] or train_rows, payloads_by_split["val"] or payloads_by_split["train"], cfg)
     tradable_ev_metrics = {
         split: {
-            "v7_probability_ev_gate": _tradable_ev_backtest(rows_by_split[split], payloads_by_split[split], selected_rule, probability_prefix=""),
-            "v7_residual_ev_gate": _tradable_ev_backtest(rows_by_split[split], payloads_by_split[split], selected_rule, probability_prefix="residual_"),
+            "v7_probability_ev_gate": _tradable_ev_backtest(
+                rows_by_split[split],
+                payloads_by_split[split],
+                selected_rule,
+                cfg=cfg,
+                probability_prefix="",
+            ),
+            "v7_residual_ev_gate": _tradable_ev_backtest(
+                rows_by_split[split],
+                payloads_by_split[split],
+                selected_rule,
+                cfg=cfg,
+                probability_prefix="residual_",
+            ),
             "v6_current_gate_reference": _tradable_ev_backtest(
                 rows_by_split[split],
                 payloads_by_split[split],
                 {"settlement_threshold": 0.80, "edge_threshold": 0.082},
+                cfg=cfg,
                 probability_prefix="",
             ),
             "zero_skill_market_baseline": _zero_skill_baseline(rows_by_split[split], cfg),
@@ -685,7 +698,7 @@ def _select_tradable_ev_rule(
     for confidence in cfg.settlement_threshold_grid:
         for edge in cfg.edge_threshold_grid:
             rule = {"settlement_threshold": confidence, "edge_threshold": edge}
-            summary = _tradable_ev_backtest(rows, payloads, rule, probability_prefix="")
+            summary = _tradable_ev_backtest(rows, payloads, rule, cfg=cfg, probability_prefix="")
             candidate = {**rule, "validation": summary}
             if best is None or (
                 float(summary["pnl"]) > float(best["validation"]["pnl"])
@@ -704,12 +717,15 @@ def _tradable_ev_backtest(
     payloads: list[dict[str, float | str | bool | None]],
     rule: dict[str, Any],
     *,
+    cfg: XGBoostV7Config,
     probability_prefix: str,
 ) -> dict[str, Any]:
     selected: list[dict[str, Any]] = []
     seen_rounds: set[str] = set()
     candidate_rounds: set[str] = set()
     for row, payload in zip(rows, payloads, strict=True):
+        if not _execution_eligible(row, cfg):
+            continue
         side = _select_side(
             p_up=_probability(payload, "UP", probability_prefix),
             p_down=_probability(payload, "DOWN", probability_prefix),

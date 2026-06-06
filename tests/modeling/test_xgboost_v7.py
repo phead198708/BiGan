@@ -258,6 +258,7 @@ def test_xgboost_v7_settlement_ev_formulas() -> None:
         _entry_worst_price,
         _settlement_realized_pnl,
         _settlement_residual_label,
+        _tradable_ev_backtest,
         XGBoostV7Config,
     )
 
@@ -287,3 +288,27 @@ def test_xgboost_v7_settlement_ev_formulas() -> None:
     assert _settlement_residual_label(winning_row) == pytest.approx(0.40)
     assert _settlement_residual_label(losing_row) == pytest.approx(-0.60)
     assert _settlement_realized_pnl(winning_row, cfg) == pytest.approx(0.374)
+
+    ineligible_late_row = winning_row | {
+        "feature_ts": 850_000,
+        "round_start_ts": 0,
+        "round_end_ts": 900_000,
+    }
+    summary = _tradable_ev_backtest(
+        [ineligible_late_row],
+        [
+            {
+                "p_up": 0.95,
+                "p_down": 0.02,
+                "entry_worst_price_up": 0.50,
+                "entry_worst_price_down": 0.50,
+                "expected_edge_up": 0.45,
+                "expected_edge_down": -0.48,
+            }
+        ],
+        {"settlement_threshold": 0.8, "edge_threshold": 0.0},
+        cfg=cfg,
+        probability_prefix="",
+    )
+    assert summary["trade_count"] == 0
+    assert summary["candidate_round_count"] == 0
