@@ -74,8 +74,10 @@ class XGBoostV7Config:
     subsample_grid: tuple[float, ...] = (0.80, 1.0)
     colsample_bytree_grid: tuple[float, ...] = (0.80, 1.0)
     temperature_grid: tuple[float, ...] = (0.75, 1.0, 1.25, 1.5)
-    settlement_threshold_grid: tuple[float, ...] = (0.50, 0.60, 0.70, 0.80)
-    edge_threshold_grid: tuple[float, ...] = (0.0, 0.04, 0.06, 0.082, 0.10, 0.12)
+    settlement_threshold_grid: tuple[float, ...] = (0.50, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90)
+    edge_threshold_grid: tuple[float, ...] = (0.0, 0.02, 0.04, 0.06, 0.082, 0.10, 0.12)
+    gate_selection_min_trades_per_split: int = 5
+    gate_selection_min_avg_pnl: float = 0.08
     buy_slippage: float = 0.02
     fee_bps: float = 0.0
     ev_margin: float = 0.01
@@ -106,6 +108,10 @@ class XGBoostV7Config:
             raise ValueError("buy_slippage must be non-negative")
         if self.fee_bps < 0.0:
             raise ValueError("fee_bps must be non-negative")
+        if self.gate_selection_min_trades_per_split < 1:
+            raise ValueError("gate_selection_min_trades_per_split must be positive")
+        if self.gate_selection_min_avg_pnl < 0.0:
+            raise ValueError("gate_selection_min_avg_pnl must be non-negative")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -120,6 +126,8 @@ class XGBoostV7Config:
             "temperature_grid": list(self.temperature_grid),
             "settlement_threshold_grid": list(self.settlement_threshold_grid),
             "edge_threshold_grid": list(self.edge_threshold_grid),
+            "gate_selection_min_trades_per_split": self.gate_selection_min_trades_per_split,
+            "gate_selection_min_avg_pnl": self.gate_selection_min_avg_pnl,
             "buy_slippage": self.buy_slippage,
             "fee_bps": self.fee_bps,
             "ev_margin": self.ev_margin,
@@ -353,7 +361,7 @@ def train_xgboost_v7(
         split: _residual_metrics(rows_by_split[split], payloads_by_split[split], cfg)
         for split in SPLITS
     }
-    selected_rule = _select_tradable_ev_rule(rows_by_split["val"] or train_rows, payloads_by_split["val"] or payloads_by_split["train"], cfg)
+    selected_rule = _select_tradable_ev_rule(rows_by_split, payloads_by_split, cfg)
     tradable_ev_metrics = {
         split: {
             "v7_probability_ev_gate": _tradable_ev_backtest(
@@ -690,26 +698,147 @@ def _residual_metrics(
 
 
 def _select_tradable_ev_rule(
-    rows: list[dict[str, Any]],
-    payloads: list[dict[str, float | str | bool | None]],
+    rows_by_split: dict[str, list[dict[str, Any]]],
+    payloads_by_split: dict[str, list[dict[str, float | str | bool | None]]],
     cfg: XGBoostV7Config,
 ) -> dict[str, Any]:
-    best: dict[str, Any] | None = None
+    selection_splits = [
+        split
+        for split in ("train", "val")
+        if rows_by_split.get(split) and payloads_by_split.get(split)
+    ]
+    if not selection_splits:
+        raise ValueError("at least one train/val split is required for v7 gate selection")
+    validation_split = "val" if "val" in selection_splits else selection_splits[-1]
+    candidates: list[dict[str, Any]] = []
     for confidence in cfg.settlement_threshold_grid:
         for edge in cfg.edge_threshold_grid:
             rule = {"settlement_threshold": confidence, "edge_threshold": edge}
-            summary = _tradable_ev_backtest(rows, payloads, rule, cfg=cfg, probability_prefix="")
-            candidate = {**rule, "validation": summary}
-            if best is None or (
-                float(summary["pnl"]) > float(best["validation"]["pnl"])
-                or (
-                    float(summary["pnl"]) == float(best["validation"]["pnl"])
-                    and int(summary["trade_count"]) > int(best["validation"]["trade_count"])
+            summaries = {
+                split: _tradable_ev_backtest(
+                    rows_by_split[split],
+                    payloads_by_split[split],
+                    rule,
+                    cfg=cfg,
+                    probability_prefix="",
                 )
-            ):
-                best = candidate
+                for split in selection_splits
+            }
+            diagnostics = _gate_selection_diagnostics(
+                summaries,
+                min_trades_per_split=cfg.gate_selection_min_trades_per_split,
+                min_avg_pnl=cfg.gate_selection_min_avg_pnl,
+            )
+            candidates.append(
+                {
+                    **rule,
+                    "selection_method": "train_val_stability_min_avg_pnl",
+                    "selection_splits": selection_splits,
+                    "selection_min_trades_per_split": cfg.gate_selection_min_trades_per_split,
+                    "selection_min_avg_pnl": cfg.gate_selection_min_avg_pnl,
+                    "selection_score": _gate_selection_score(diagnostics, summaries, validation_split),
+                    "selection_diagnostics": diagnostics,
+                    "selection_metrics": summaries,
+                    "validation": summaries[validation_split],
+                }
+            )
+    best = max(
+        candidates,
+        key=lambda candidate: tuple(candidate["selection_score"]),
+    )
     assert best is not None
-    return best
+    return {
+        **best,
+        "candidate_count": len(candidates),
+        "top_candidates": _compact_gate_candidates(candidates),
+    }
+
+
+def _gate_selection_diagnostics(
+    summaries: dict[str, dict[str, Any]],
+    *,
+    min_trades_per_split: int,
+    min_avg_pnl: float,
+) -> dict[str, Any]:
+    split_names = list(summaries)
+    trade_counts = {split: int(summary["trade_count"]) for split, summary in summaries.items()}
+    pnls = {split: float(summary["pnl"]) for split, summary in summaries.items()}
+    avg_pnls = {
+        split: summary.get("avg_pnl")
+        for split, summary in summaries.items()
+    }
+    positive_all_splits = all(pnls[split] > 0.0 for split in split_names)
+    enough_trades_all_splits = all(
+        trade_counts[split] >= min_trades_per_split
+        for split in split_names
+    )
+    min_split_avg_pnl = (
+        min(float(value) for value in avg_pnls.values() if value is not None)
+        if avg_pnls and all(value is not None for value in avg_pnls.values())
+        else None
+    )
+    strong_average_all_splits = (
+        min_split_avg_pnl is not None
+        and min_split_avg_pnl >= min_avg_pnl
+    )
+    return {
+        "positive_all_splits": positive_all_splits,
+        "enough_trades_all_splits": enough_trades_all_splits,
+        "strong_average_all_splits": strong_average_all_splits,
+        "preferred": positive_all_splits and enough_trades_all_splits and strong_average_all_splits,
+        "min_trade_count": min(trade_counts.values()) if trade_counts else 0,
+        "min_pnl": min(pnls.values()) if pnls else 0.0,
+        "min_avg_pnl": min_split_avg_pnl,
+        "trade_counts": trade_counts,
+        "pnls": pnls,
+        "avg_pnls": avg_pnls,
+    }
+
+
+def _gate_selection_score(
+    diagnostics: dict[str, Any],
+    summaries: dict[str, dict[str, Any]],
+    validation_split: str,
+) -> tuple[float, ...]:
+    validation = summaries[validation_split]
+    return (
+        float(bool(diagnostics["preferred"])),
+        _score_float(diagnostics.get("min_pnl")),
+        _score_float(diagnostics.get("min_avg_pnl")),
+        _score_float(validation.get("avg_pnl")),
+        float(validation["pnl"]),
+        float(diagnostics["min_trade_count"]),
+        float(validation["trade_count"]),
+    )
+
+
+def _compact_gate_candidates(candidates: list[dict[str, Any]], *, limit: int = 8) -> list[dict[str, Any]]:
+    top = sorted(candidates, key=lambda candidate: tuple(candidate["selection_score"]), reverse=True)[:limit]
+    compact: list[dict[str, Any]] = []
+    for candidate in top:
+        diagnostics = candidate["selection_diagnostics"]
+        compact.append(
+            {
+                "settlement_threshold": candidate["settlement_threshold"],
+                "edge_threshold": candidate["edge_threshold"],
+                "selection_score": candidate["selection_score"],
+                "preferred": diagnostics["preferred"],
+                "strong_average_all_splits": diagnostics["strong_average_all_splits"],
+                "min_avg_pnl": diagnostics["min_avg_pnl"],
+                "min_pnl": diagnostics["min_pnl"],
+                "min_trade_count": diagnostics["min_trade_count"],
+                "trade_counts": diagnostics["trade_counts"],
+                "pnls": diagnostics["pnls"],
+                "avg_pnls": diagnostics["avg_pnls"],
+            }
+        )
+    return compact
+
+
+def _score_float(value: Any) -> float:
+    if value is None:
+        return -1_000_000_000.0
+    return float(value)
 
 
 def _tradable_ev_backtest(

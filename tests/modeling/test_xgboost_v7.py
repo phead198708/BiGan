@@ -312,3 +312,69 @@ def test_xgboost_v7_settlement_ev_formulas() -> None:
     )
     assert summary["trade_count"] == 0
     assert summary["candidate_round_count"] == 0
+
+
+def test_xgboost_v7_gate_selection_prefers_stable_average_pnl() -> None:
+    from bigan.modeling.xgboost_v7 import (
+        _select_tradable_ev_rule,
+        XGBoostV7Config,
+    )
+
+    def eligible_row(idx: int, *, label: str) -> dict:
+        return {
+            "canonical_symbol": f"BTC-15M:btc-updown-15m-{idx}:UP",
+            "label_settlement_3way": label,
+            "market_implied_prob": 0.50,
+            "entry_ask_price": 0.50,
+            "feature_ts": 60_000,
+            "round_start_ts": 0,
+            "round_end_ts": 900_000,
+        }
+
+    def payload(p_up: float, worst: float) -> dict:
+        return {
+            "p_up": p_up,
+            "p_down": 1.0 - p_up,
+            "entry_worst_price_up": worst,
+            "entry_worst_price_down": 1.0 - worst,
+            "expected_edge_up": p_up - worst,
+            "expected_edge_down": (1.0 - p_up) - (1.0 - worst),
+        }
+
+    train_rows = [eligible_row(idx, label="UP") for idx in range(6)]
+    train_payloads = [payload(0.80, 0.60) for _ in train_rows]
+    val_rows = [eligible_row(idx, label="UP") for idx in range(10, 15)]
+    val_payloads = [
+        payload(0.80, 0.60),
+        payload(0.80, 0.60),
+        payload(0.73, 0.69),
+        payload(0.73, 0.69),
+        payload(0.73, 0.69),
+    ]
+    cfg = XGBoostV7Config(
+        rounds_grid=(1,),
+        learning_rate_grid=(0.1,),
+        l2_penalty_grid=(1.0,),
+        max_depth_grid=(1,),
+        min_child_weight_grid=(1.0,),
+        subsample_grid=(1.0,),
+        colsample_bytree_grid=(1.0,),
+        temperature_grid=(1.0,),
+        settlement_threshold_grid=(0.70, 0.75),
+        edge_threshold_grid=(0.04,),
+        gate_selection_min_trades_per_split=2,
+        gate_selection_min_avg_pnl=0.35,
+    )
+
+    selected = _select_tradable_ev_rule(
+        {"train": train_rows, "val": val_rows},
+        {"train": train_payloads, "val": val_payloads},
+        cfg,
+    )
+
+    assert selected["settlement_threshold"] == pytest.approx(0.75)
+    assert selected["edge_threshold"] == pytest.approx(0.04)
+    assert selected["selection_method"] == "train_val_stability_min_avg_pnl"
+    assert selected["selection_diagnostics"]["preferred"] is True
+    assert selected["selection_diagnostics"]["strong_average_all_splits"] is True
+    assert selected["validation"]["pnl"] < 1.76
