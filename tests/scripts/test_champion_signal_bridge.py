@@ -2172,7 +2172,7 @@ def test_v7_pnl_entry_sizes_initial_paper_fill_from_position_edge(
         max_position_size_usdc=1.0,
         entry_policy=executor.Phase4EntryPolicy(
             settlement_edge_threshold=0.04,
-            settlement_min_confidence=0.60,
+            settlement_min_confidence=0.75,
         ),
         seconds_to_expiry=600.0,
         buy_slippage=0.02,
@@ -2196,6 +2196,8 @@ def test_v7_pnl_entry_sizes_initial_paper_fill_from_position_edge(
 
     assert position is not None
     assert evaluated["fresh_edge_at_worst"] == pytest.approx(0.14)
+    assert evaluated["gate_evaluation"]["settlement_confidence"] is None
+    assert evaluated["gate_evaluation"]["settlement_confidence_passed"] is True
     assert evaluated["v7_position_entry_sizing"]["entry_size_usdc"] == pytest.approx(0.5)
     assert filled["event"] == "paper_entry_filled"
     assert filled["size_usdc"] == pytest.approx(0.5)

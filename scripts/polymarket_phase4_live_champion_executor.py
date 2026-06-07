@@ -2922,6 +2922,16 @@ def _try_entry(
     settlement_cost_edge_only = sleeve == "settlement" and _settlement_cost_edge_mode(
         entry_gate_mode
     )
+    settlement_confidence_for_gate = (
+        None
+        if entry_gate_mode == "v7-pnl"
+        else signal.token_probability if sleeve == "settlement" else None
+    )
+    settlement_peak_confidence_for_gate = (
+        None
+        if entry_gate_mode == "v7-pnl"
+        else settlement_peak_confidence if sleeve == "settlement" else None
+    )
     no_quote_gate_evaluation = evaluate_entry_gates(
         settlement_edge=signal.edge,
         ask=None,
@@ -2929,10 +2939,8 @@ def _try_entry(
         token_probability=signal.token_probability,
         seconds_to_expiry=seconds_to_expiry,
         policy=entry_policy,
-        settlement_confidence=signal.token_probability if sleeve == "settlement" else None,
-        settlement_peak_confidence=(
-            settlement_peak_confidence if sleeve == "settlement" else None
-        ),
+        settlement_confidence=settlement_confidence_for_gate,
+        settlement_peak_confidence=settlement_peak_confidence_for_gate,
         signal_age_seconds=signal_age_seconds,
         enable_settlement_gate=sleeve == "settlement",
     )
@@ -3036,10 +3044,8 @@ def _try_entry(
         token_probability=signal.token_probability,
         seconds_to_expiry=seconds_to_expiry,
         policy=entry_policy,
-        settlement_confidence=signal.token_probability if sleeve == "settlement" else None,
-        settlement_peak_confidence=(
-            settlement_peak_confidence if sleeve == "settlement" else None
-        ),
+        settlement_confidence=settlement_confidence_for_gate,
+        settlement_peak_confidence=settlement_peak_confidence_for_gate,
         signal_age_seconds=signal_age_seconds,
         enable_settlement_gate=sleeve == "settlement",
     )
@@ -3200,8 +3206,8 @@ def _try_entry(
         settlement_cost_edge_skip_reason(
             fresh_edge_at_worst=fresh_edge_at_worst,
             policy=entry_policy,
-            settlement_confidence=signal.token_probability,
-            settlement_peak_confidence=settlement_peak_confidence,
+            settlement_confidence=settlement_confidence_for_gate,
+            settlement_peak_confidence=settlement_peak_confidence_for_gate,
             signal_age_seconds=signal_age_seconds,
         )
         if settlement_cost_edge_only
@@ -3234,7 +3240,7 @@ def _try_entry(
             near_min_seconds_to_expiry=entry_policy.near_min_seconds_to_expiry,
             settlement_edge_threshold=entry_policy.effective_settlement_edge_threshold,
             settlement_min_confidence=entry_policy.settlement_min_confidence,
-            settlement_peak_confidence=settlement_peak_confidence,
+            settlement_peak_confidence=settlement_peak_confidence_for_gate,
             settlement_peak_confidence_drop_tolerance=(
                 entry_policy.settlement_peak_confidence_drop_tolerance
             ),
@@ -3293,7 +3299,7 @@ def _try_entry(
                 seconds_to_expiry=seconds_to_expiry,
                 settlement_edge_threshold=entry_policy.effective_settlement_edge_threshold,
                 settlement_min_confidence=entry_policy.settlement_min_confidence,
-                settlement_peak_confidence=settlement_peak_confidence,
+                settlement_peak_confidence=settlement_peak_confidence_for_gate,
                 signal_age_seconds=signal_age_seconds,
                 settlement_price_gate_mode=_settlement_price_gate_mode_name(entry_gate_mode),
                 gate_evaluation=gate_payload,
@@ -3374,13 +3380,13 @@ def _try_entry(
     complement_entry_price = _round_price(1.0 - float(complement_bid), tick_size)
     complement_fresh_edge = signal.token_probability - complement_entry_price
     complement_skip_reason = (
-            settlement_cost_edge_skip_reason(
-                fresh_edge_at_worst=complement_fresh_edge,
-                policy=entry_policy,
-                settlement_confidence=signal.token_probability,
-                settlement_peak_confidence=settlement_peak_confidence,
-                signal_age_seconds=signal_age_seconds,
-            )
+        settlement_cost_edge_skip_reason(
+            fresh_edge_at_worst=complement_fresh_edge,
+            policy=entry_policy,
+            settlement_confidence=settlement_confidence_for_gate,
+            settlement_peak_confidence=settlement_peak_confidence_for_gate,
+            signal_age_seconds=signal_age_seconds,
+        )
         if settlement_cost_edge_only
         else entry_price_skip_reason(
             ask=complement_entry_price,
@@ -3410,12 +3416,12 @@ def _try_entry(
             near_min_fresh_edge_threshold=entry_policy.near_min_fresh_edge_threshold,
             near_min_seconds_to_expiry=entry_policy.near_min_seconds_to_expiry,
             settlement_edge_threshold=entry_policy.effective_settlement_edge_threshold,
-                settlement_min_confidence=entry_policy.settlement_min_confidence,
-                settlement_peak_confidence=settlement_peak_confidence,
-                settlement_peak_confidence_drop_tolerance=(
-                    entry_policy.settlement_peak_confidence_drop_tolerance
-                ),
-                max_signal_age_seconds=entry_policy.max_signal_age_seconds,
+            settlement_min_confidence=entry_policy.settlement_min_confidence,
+            settlement_peak_confidence=settlement_peak_confidence_for_gate,
+            settlement_peak_confidence_drop_tolerance=(
+                entry_policy.settlement_peak_confidence_drop_tolerance
+            ),
+            max_signal_age_seconds=entry_policy.max_signal_age_seconds,
             signal_age_seconds=signal_age_seconds,
             settlement_price_gate_mode=_settlement_price_gate_mode_name(entry_gate_mode),
             gate_evaluation=gate_payload,
@@ -3431,8 +3437,8 @@ def _try_entry(
                     token_probability=signal.token_probability,
                     seconds_to_expiry=seconds_to_expiry,
                     policy=entry_policy,
-                    settlement_confidence=signal.token_probability,
-                    settlement_peak_confidence=settlement_peak_confidence,
+                    settlement_confidence=settlement_confidence_for_gate,
+                    settlement_peak_confidence=settlement_peak_confidence_for_gate,
                     signal_age_seconds=signal_age_seconds,
                     enable_settlement_gate=sleeve == "settlement",
                 )
