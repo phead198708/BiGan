@@ -32,13 +32,16 @@ from bigan.execution.cash_legs import (
     record_execution_cash_legs,
 )
 from bigan.execution.db import connect_mlops_db
+from bigan.execution.low_latency_overlay import (
+    LowLatencyEntryOverlay,
+    LowLatencyOverlayConfig,
+)
 from bigan.execution.phase4_policy import (
     DEFAULT_MAX_SIGNAL_AGE_SECONDS,
     DEFAULT_MIN_ENTRY_PRICE,
     DEFAULT_NEAR_MIN_FRESH_EDGE_THRESHOLD,
     DEFAULT_NEAR_MIN_PRICE_BAND,
     DEFAULT_NEAR_MIN_SECONDS_TO_EXPIRY,
-    DEFAULT_SETTLEMENT_PEAK_CONFIDENCE_DROP_TOLERANCE,
     DEFAULT_SETTLEMENT_EDGE_THRESHOLD,
     DEFAULT_SETTLEMENT_MIN_CONFIDENCE,
     DEFAULT_SOFT_FORCE_EXIT_MIN_BID,
@@ -64,8 +67,8 @@ from bigan.execution.v6_gate import (
     build_v6_signal_fields,
     evaluate_v6_settlement_side,
     is_v6_model_version,
-    v6_payload_from_values,
     v6_joint_gate_config_from_model,
+    v6_payload_from_values,
     v6_selection_score,
 )
 from bigan.modeling.families import market_family_from_symbol
@@ -149,6 +152,9 @@ class LivePosition:
     settlement_same_side_confirmation_event_id: str = ""
     settlement_same_side_confirmation_created_at: int = 0
     settlement_same_side_confirmation_confidence: float = 0.0
+    v7_position_reversal_candidate_count: int = 0
+    v7_position_weak_hold_candidate_count: int = 0
+    v7_position_realized_pnl_usdc: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +199,31 @@ class SettlementExitConfig:
     price_stop_same_side_confirmation_max_age_seconds: float | None = (
         DEFAULT_MAX_SIGNAL_AGE_SECONDS
     )
+
+
+@dataclass(frozen=True, slots=True)
+class V7SettlementPositionConfig:
+    enabled: bool = False
+    paper_execute: bool = False
+    round_cap_usdc: float = 1.0
+    add_edge_min: float = 0.08
+    full_add_edge: float = 0.20
+    weak_hold_edge: float = 0.02
+    reduce_fraction: float = 0.50
+    exit_hold_edge: float = -0.02
+    exit_hysteresis_bars: int = 2
+    reversal_min_confidence: float = 0.75
+    reversal_min_edge: float = 0.04
+    reversal_hysteresis_bars: int = 2
+    min_rebalance_usdc: float = 0.05
+
+
+@dataclass(frozen=True, slots=True)
+class PositionAdjustmentResult:
+    action: str
+    status: str
+    realized_pnl: float = 0.0
+    closed: bool = False
 
 
 @dataclass(slots=True)
@@ -356,7 +387,10 @@ def main() -> int:
     started_at = _now_ms()
     entry_policy = _entry_policy_from_args(args)
     v6_joint_config = _v6_joint_config_from_args(args)
+    low_latency_overlay_config = _low_latency_overlay_config_from_args(args)
+    low_latency_overlay = _low_latency_overlay_from_args(args)
     settlement_exit_config = _settlement_exit_config_from_args(args)
+    v7_position_config = _v7_settlement_position_config_from_args(args)
     paper_settlement_config = PaperSettlementResolverConfig(
         enabled=args.paper and not args.disable_paper_settlement_resolution,
         gamma_api_base=args.paper_settlement_gamma_api_base,
@@ -368,7 +402,7 @@ def main() -> int:
         per_bet_cap_usdc=args.volatility_per_bet_cap_usdc,
         min_order_size_usdc=args.volatility_min_order_size_usdc,
     )
-    client = _build_clob_client()
+    client = _build_clob_client(require_api_creds=not args.paper)
     heartbeat_stop = threading.Event()
     if args.disable_heartbeat:
         _log(log_path, "heartbeat_disabled", paper=args.paper)
@@ -433,9 +467,19 @@ def main() -> int:
             ),
             "max_signal_age_seconds": entry_policy.max_signal_age_seconds,
             "settlement_exit_policy": asdict(settlement_exit_config),
+            "v7_settlement_position_policy": asdict(v7_position_config),
             "settlement_price_gate_mode": _settlement_price_gate_mode_name(
                 args.entry_gate_mode
             ),
+            "low_latency_overlay": {
+                **asdict(low_latency_overlay_config),
+                "raw_jsonl_path": (
+                    args.low_latency_overlay_raw_jsonl_path
+                    if args.low_latency_overlay_raw_jsonl_path
+                    else None
+                ),
+                "start": args.low_latency_overlay_start,
+            },
             "settlement_min_entry_price": (
                 None if _settlement_cost_edge_mode(args.entry_gate_mode) else args.min_entry_price
             ),
@@ -546,6 +590,28 @@ def main() -> int:
                 _log(log_path, "daily_loss_limit_reached", realized_pnl=realized_pnl)
                 break
 
+            if low_latency_overlay is not None:
+                try:
+                    overlay_report = low_latency_overlay.refresh()
+                except Exception as exc:  # noqa: BLE001
+                    errors += 1
+                    _log(
+                        log_path,
+                        "low_latency_overlay_refresh_error",
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                        raw_jsonl_path=args.low_latency_overlay_raw_jsonl_path,
+                    )
+                    time.sleep(args.poll_seconds)
+                    continue
+                if overlay_report.rows_read:
+                    _log(
+                        log_path,
+                        "low_latency_overlay_refreshed",
+                        report=overlay_report.to_dict(),
+                        raw_jsonl_path=args.low_latency_overlay_raw_jsonl_path,
+                    )
+
             try:
                 if signal_jsonl_path is None:
                     batch = _read_event_batch_after(
@@ -628,51 +694,76 @@ def main() -> int:
                 )
                 seconds_to_expiry = (event.round_end_ts - event_now_ms) / 1000
                 settlement_position = lifecycle.open_position(event.round_slug, "settlement")
-                if settlement_position is not None:
-                    if _event_family_allowed(event, allowed_families):
-                        _record_settlement_same_side_confirmation(
-                            position=settlement_position,
-                            signal=event,
-                            log_path=log_path,
-                            config=settlement_exit_config,
-                            signal_age_seconds=signal_age_seconds,
-                            max_signal_age_seconds=entry_policy.max_signal_age_seconds,
-                        )
-                        settlement_exit = _maybe_settlement_signal_exit(
-                            client=client,
-                            position_manager=position_manager,
-                            position=settlement_position,
-                            signal=event,
-                            log_path=log_path,
-                            config=settlement_exit_config,
-                            v6_joint_config=v6_joint_config,
-                            signal_age_seconds=signal_age_seconds,
-                            max_signal_age_seconds=entry_policy.max_signal_age_seconds,
-                            seconds_to_expiry=seconds_to_expiry,
-                            opposite_exit_min_seconds_to_expiry=(
-                                args.opposite_exit_min_seconds_to_expiry
-                            ),
-                            sell_slippage=args.sell_slippage,
-                            exit_order_timeout_seconds=args.exit_order_timeout_seconds,
-                            monitoring_db_path=args.monitoring_db_path,
-                        )
-                        if settlement_exit is not None:
-                            settlement_exit_reason, sell_result = settlement_exit
-                            _bump(settlement_exit_counts, settlement_exit_reason)
-                            realized_pnl += sell_result.realized_pnl
-                            if sell_result.status == "filled":
+                if settlement_position is not None and _event_family_allowed(
+                    event,
+                    allowed_families,
+                ):
+                    _record_settlement_same_side_confirmation(
+                        position=settlement_position,
+                        signal=event,
+                        log_path=log_path,
+                        config=settlement_exit_config,
+                        signal_age_seconds=signal_age_seconds,
+                        max_signal_age_seconds=entry_policy.max_signal_age_seconds,
+                    )
+                    v7_adjustment = _maybe_v7_settlement_position_adjustment(
+                        client=client,
+                        position_manager=position_manager,
+                        position=settlement_position,
+                        signal=event,
+                        log_path=log_path,
+                        config=v7_position_config,
+                        paper=args.paper,
+                        sell_slippage=args.sell_slippage,
+                        exit_order_timeout_seconds=args.exit_order_timeout_seconds,
+                        monitoring_db_path=args.monitoring_db_path,
+                    )
+                    if v7_adjustment is not None:
+                        realized_pnl += v7_adjustment.realized_pnl
+                        if v7_adjustment.closed:
+                            if v7_adjustment.status == "filled":
                                 closes_filled += 1
-                            elif sell_result.status == "settled":
-                                pass
-                            elif sell_result.status == "pending_settlement":
+                            elif v7_adjustment.status == "pending_settlement":
                                 exits_pending_settlement += 1
-                            else:
+                            elif v7_adjustment.status not in {"recommended", "hold"}:
                                 exits_pending_confirmation += 1
                             lifecycle.mark_position_closed(event.round_slug, "settlement")
-                            if realized_pnl <= -args.daily_loss_limit_usdc:
-                                _log(log_path, "daily_loss_limit_reached", realized_pnl=realized_pnl)
-                                break
                             continue
+                    settlement_exit = _maybe_settlement_signal_exit(
+                        client=client,
+                        position_manager=position_manager,
+                        position=settlement_position,
+                        signal=event,
+                        log_path=log_path,
+                        config=settlement_exit_config,
+                        v6_joint_config=v6_joint_config,
+                        signal_age_seconds=signal_age_seconds,
+                        max_signal_age_seconds=entry_policy.max_signal_age_seconds,
+                        seconds_to_expiry=seconds_to_expiry,
+                        opposite_exit_min_seconds_to_expiry=(
+                            args.opposite_exit_min_seconds_to_expiry
+                        ),
+                        sell_slippage=args.sell_slippage,
+                        exit_order_timeout_seconds=args.exit_order_timeout_seconds,
+                        monitoring_db_path=args.monitoring_db_path,
+                    )
+                    if settlement_exit is not None:
+                        settlement_exit_reason, sell_result = settlement_exit
+                        _bump(settlement_exit_counts, settlement_exit_reason)
+                        realized_pnl += sell_result.realized_pnl
+                        if sell_result.status == "filled":
+                            closes_filled += 1
+                        elif sell_result.status == "settled":
+                            pass
+                        elif sell_result.status == "pending_settlement":
+                            exits_pending_settlement += 1
+                        else:
+                            exits_pending_confirmation += 1
+                        lifecycle.mark_position_closed(event.round_slug, "settlement")
+                        if realized_pnl <= -args.daily_loss_limit_usdc:
+                            _log(log_path, "daily_loss_limit_reached", realized_pnl=realized_pnl)
+                            break
+                        continue
                     _log(
                         log_path,
                         "settlement_sleeve_hold",
@@ -847,6 +938,8 @@ def main() -> int:
                         entry_gate_mode=args.entry_gate_mode,
                         signal_age_seconds=signal_age_seconds,
                         settlement_peak_confidence=settlement_peak_confidence,
+                        low_latency_overlay=low_latency_overlay,
+                        v7_position_config=v7_position_config,
                     )
                     lifecycle.mark_entry_result(event, position)
                     if position is not None:
@@ -884,6 +977,7 @@ def main() -> int:
                         paper=args.paper,
                         entry_gate_mode=args.entry_gate_mode,
                         signal_age_seconds=signal_age_seconds,
+                        low_latency_overlay=low_latency_overlay,
                     )
                     lifecycle.mark_entry_result(event, volatility_position)
                     if volatility_position is not None:
@@ -933,6 +1027,7 @@ def main() -> int:
             ),
             "max_signal_age_seconds": entry_policy.max_signal_age_seconds,
             "settlement_exit_policy": asdict(settlement_exit_config),
+            "v7_settlement_position_policy": asdict(v7_position_config),
             "settlement_price_gate_mode": _settlement_price_gate_mode_name(
                 args.entry_gate_mode
             ),
@@ -1027,6 +1122,67 @@ def _parse_args() -> argparse.Namespace:
         choices=("tail", "beginning"),
         default="tail",
         help="Where to start reading --signal-jsonl-path on startup.",
+    )
+    parser.add_argument(
+        "--low-latency-overlay-enabled",
+        action="store_true",
+        help=(
+            "Enable executor-side 5s/10s overlay vetoes from the raw low-latency "
+            "JSONL queue. This only blocks entries; it never relaxes the base gate."
+        ),
+    )
+    parser.add_argument(
+        "--low-latency-overlay-raw-jsonl-path",
+        default="",
+        help="Raw queue path written by the scorer low-latency feature path.",
+    )
+    parser.add_argument(
+        "--low-latency-overlay-start",
+        choices=("tail", "beginning"),
+        default="beginning",
+        help="Where to start reading the raw overlay queue on executor startup.",
+    )
+    parser.add_argument(
+        "--low-latency-overlay-max-quote-age-seconds",
+        type=float,
+        default=10.0,
+        help="Skip otherwise-valid entries when the latest side-token quote is older than this.",
+    )
+    parser.add_argument(
+        "--low-latency-overlay-window-seconds",
+        type=float,
+        default=10.0,
+        help="Rolling side-token quote window used for the adverse velocity veto.",
+    )
+    parser.add_argument(
+        "--low-latency-overlay-max-spread",
+        type=float,
+        default=0.05,
+        help="Skip otherwise-valid entries when the latest side-token spread is wider than this.",
+    )
+    parser.add_argument(
+        "--low-latency-overlay-adverse-velocity-threshold",
+        type=float,
+        default=0.04,
+        help="Skip when side-token mid falls by at least this amount over the overlay window.",
+    )
+    parser.add_argument(
+        "--low-latency-overlay-max-price-drift-from-signal",
+        type=float,
+        default=0.08,
+        help="Skip when latest side-token ask is this much above the signal-time implied price.",
+    )
+    parser.add_argument(
+        "--low-latency-overlay-missing-quote-action",
+        choices=("pass", "skip"),
+        default="pass",
+        help="Whether a missing raw queue quote should pass or skip an otherwise-valid entry.",
+    )
+    parser.add_argument(
+        "--low-latency-overlay-max-records-per-refresh",
+        type=int,
+        default=20_000,
+        help="Maximum raw queue records consumed by each overlay refresh.",
     )
     parser.add_argument(
         "--disable-heartbeat",
@@ -1377,6 +1533,35 @@ def _parse_args() -> argparse.Namespace:
         help="Maximum age for same-side confirmation veto; <=0 disables the age cap.",
     )
     parser.add_argument(
+        "--v7-settlement-position-management-enabled",
+        action="store_true",
+        help="Enable v7 settlement EV position management for open settlement positions.",
+    )
+    parser.add_argument(
+        "--v7-settlement-position-paper-execute",
+        action="store_true",
+        help="Allow v7 EV position ADD/REDUCE/EXIT simulation in paper mode.",
+    )
+    parser.add_argument("--v7-settlement-position-round-cap-usdc", type=float, default=1.0)
+    parser.add_argument("--v7-settlement-position-add-edge-min", type=float, default=0.08)
+    parser.add_argument("--v7-settlement-position-full-add-edge", type=float, default=0.20)
+    parser.add_argument("--v7-settlement-position-weak-hold-edge", type=float, default=0.02)
+    parser.add_argument("--v7-settlement-position-reduce-fraction", type=float, default=0.50)
+    parser.add_argument("--v7-settlement-position-exit-hold-edge", type=float, default=-0.02)
+    parser.add_argument("--v7-settlement-position-exit-hysteresis-bars", type=int, default=2)
+    parser.add_argument(
+        "--v7-settlement-position-reversal-min-confidence",
+        type=float,
+        default=0.75,
+    )
+    parser.add_argument("--v7-settlement-position-reversal-min-edge", type=float, default=0.04)
+    parser.add_argument(
+        "--v7-settlement-position-reversal-hysteresis-bars",
+        type=int,
+        default=2,
+    )
+    parser.add_argument("--v7-settlement-position-min-rebalance-usdc", type=float, default=0.05)
+    parser.add_argument(
         "--max-signal-age-seconds",
         type=float,
         default=DEFAULT_MAX_SIGNAL_AGE_SECONDS,
@@ -1471,8 +1656,58 @@ def _v6_joint_config_from_args(args: argparse.Namespace) -> V6JointGateConfig | 
     )
 
 
+def _v7_settlement_position_config_from_args(args: argparse.Namespace) -> V7SettlementPositionConfig:
+    return V7SettlementPositionConfig(
+        enabled=bool(args.v7_settlement_position_management_enabled),
+        paper_execute=bool(args.v7_settlement_position_paper_execute),
+        round_cap_usdc=args.v7_settlement_position_round_cap_usdc,
+        add_edge_min=args.v7_settlement_position_add_edge_min,
+        full_add_edge=args.v7_settlement_position_full_add_edge,
+        weak_hold_edge=args.v7_settlement_position_weak_hold_edge,
+        reduce_fraction=args.v7_settlement_position_reduce_fraction,
+        exit_hold_edge=args.v7_settlement_position_exit_hold_edge,
+        exit_hysteresis_bars=args.v7_settlement_position_exit_hysteresis_bars,
+        reversal_min_confidence=args.v7_settlement_position_reversal_min_confidence,
+        reversal_min_edge=args.v7_settlement_position_reversal_min_edge,
+        reversal_hysteresis_bars=args.v7_settlement_position_reversal_hysteresis_bars,
+        min_rebalance_usdc=args.v7_settlement_position_min_rebalance_usdc,
+    )
+
+
 def _is_v7_model_version(model_version: str) -> bool:
     return model_version == "xgboost-v7" or model_version.startswith("xgboost-v7:")
+
+
+def _low_latency_overlay_config_from_args(
+    args: argparse.Namespace,
+) -> LowLatencyOverlayConfig:
+    return LowLatencyOverlayConfig(
+        enabled=bool(args.low_latency_overlay_enabled),
+        max_quote_age_seconds=args.low_latency_overlay_max_quote_age_seconds,
+        window_seconds=args.low_latency_overlay_window_seconds,
+        max_spread=args.low_latency_overlay_max_spread,
+        adverse_velocity_threshold=args.low_latency_overlay_adverse_velocity_threshold,
+        max_price_drift_from_signal=args.low_latency_overlay_max_price_drift_from_signal,
+        missing_quote_action=args.low_latency_overlay_missing_quote_action,
+        max_records_per_refresh=args.low_latency_overlay_max_records_per_refresh,
+    )
+
+
+def _low_latency_overlay_from_args(
+    args: argparse.Namespace,
+) -> LowLatencyEntryOverlay | None:
+    config = _low_latency_overlay_config_from_args(args)
+    if not config.enabled:
+        return None
+    if not args.low_latency_overlay_raw_jsonl_path:
+        raise ValueError(
+            "--low-latency-overlay-raw-jsonl-path is required when overlay is enabled"
+        )
+    return LowLatencyEntryOverlay(
+        args.low_latency_overlay_raw_jsonl_path,
+        config=config,
+        start=args.low_latency_overlay_start,
+    )
 
 
 def _settlement_cost_edge_mode(entry_gate_mode: str) -> bool:
@@ -1591,6 +1826,36 @@ def _validate_args(args: argparse.Namespace) -> None:
         and args.v7_settlement_min_edge_after_cost < 0
     ):
         raise ValueError("--v7-settlement-min-edge-after-cost must be non-negative")
+    _low_latency_overlay_config_from_args(args)
+    if args.low_latency_overlay_enabled and not args.low_latency_overlay_raw_jsonl_path:
+        raise ValueError(
+            "--low-latency-overlay-raw-jsonl-path is required when overlay is enabled"
+        )
+    v7_position_config = _v7_settlement_position_config_from_args(args)
+    if v7_position_config.round_cap_usdc <= 0:
+        raise ValueError("--v7-settlement-position-round-cap-usdc must be positive")
+    if v7_position_config.add_edge_min < 0:
+        raise ValueError("--v7-settlement-position-add-edge-min must be non-negative")
+    if v7_position_config.full_add_edge <= v7_position_config.add_edge_min:
+        raise ValueError(
+            "--v7-settlement-position-full-add-edge must be greater than add-edge-min"
+        )
+    if not 0 < v7_position_config.reduce_fraction <= 1:
+        raise ValueError("--v7-settlement-position-reduce-fraction must be in (0, 1]")
+    if v7_position_config.exit_hysteresis_bars <= 0:
+        raise ValueError("--v7-settlement-position-exit-hysteresis-bars must be positive")
+    if not 0 <= v7_position_config.reversal_min_confidence <= 1:
+        raise ValueError(
+            "--v7-settlement-position-reversal-min-confidence must be between 0 and 1"
+        )
+    if v7_position_config.reversal_min_edge < 0:
+        raise ValueError("--v7-settlement-position-reversal-min-edge must be non-negative")
+    if v7_position_config.reversal_hysteresis_bars <= 0:
+        raise ValueError(
+            "--v7-settlement-position-reversal-hysteresis-bars must be positive"
+        )
+    if v7_position_config.min_rebalance_usdc < 0:
+        raise ValueError("--v7-settlement-position-min-rebalance-usdc must be non-negative")
     live_mid_round_exit_requested = (
         args.settlement_allow_mid_round_exit
         or args.settlement_confidence_decay_enabled
@@ -1639,24 +1904,27 @@ def _install_signal_handlers() -> None:
     signal.signal(signal.SIGTERM, _handler)
 
 
-def _build_clob_client() -> Any:
+def _build_clob_client(*, require_api_creds: bool = True) -> Any:
     from py_clob_client_v2 import ClobClient, SignatureTypeV2
 
     private_key = os.getenv("POLYMARKET_PRIVATE_KEY")
-    if not private_key:
+    if require_api_creds and not private_key:
         raise RuntimeError("POLYMARKET_PRIVATE_KEY is required")
     signature_type_name = os.getenv("POLYMARKET_SIGNATURE_TYPE", "POLY_PROXY")
     signature_type = getattr(SignatureTypeV2, signature_type_name)
     kwargs: dict[str, Any] = {
         "host": os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com"),
-        "key": private_key,
         "chain_id": int(os.getenv("POLYMARKET_CHAIN_ID", "137")),
         "signature_type": signature_type,
     }
+    if private_key:
+        kwargs["key"] = private_key
     funder = os.getenv("POLYMARKET_FUNDER") or os.getenv("POLYMARKET_FUNDER_ADDRESS")
     if funder:
         kwargs["funder"] = funder
     client = ClobClient(**kwargs)
+    if not require_api_creds:
+        return client
     auth_mode = os.getenv("POLYMARKET_CLOB_AUTH_MODE", "derive").strip().lower()
     if auth_mode in {"", "derive", "derived"}:
         client.set_api_creds(client.create_or_derive_api_key())
@@ -2644,6 +2912,8 @@ def _try_entry(
     entry_gate_mode: str = "v5-edge",
     signal_age_seconds: float | None = None,
     settlement_peak_confidence: float | None = None,
+    low_latency_overlay: LowLatencyEntryOverlay | None = None,
+    v7_position_config: V7SettlementPositionConfig | None = None,
 ) -> LivePosition | None:
     from py_clob_client_v2 import MarketOrderArgs, OrderType
     from py_clob_client_v2.clob_types import PartialCreateOrderOptions
@@ -2666,18 +2936,59 @@ def _try_entry(
         signal_age_seconds=signal_age_seconds,
         enable_settlement_gate=sleeve == "settlement",
     )
+    orderbook_source = "clob"
+    low_latency_overlay_payload: dict[str, Any] | None = None
+    low_latency_overlay_passed: bool | None = None
     try:
         bid, ask = _best_bid_ask(client, signal.token_id)
     except OrderBookUnavailable as exc:
-        _log(
-            log_path,
-            "entry_skipped",
-            reason="orderbook_unavailable",
-            signal=asdict(signal),
-            gate_evaluation=asdict(no_quote_gate_evaluation),
-            **exc.to_log_payload(),
-        )
-        return None
+        if paper and low_latency_overlay is not None:
+            overlay_decision = low_latency_overlay.evaluate_entry(
+                asdict(signal),
+                now_ms=_now_ms(),
+            )
+            low_latency_overlay_payload = overlay_decision.to_dict()
+            low_latency_overlay_passed = overlay_decision.passed
+            if not overlay_decision.passed:
+                _log(
+                    log_path,
+                    "entry_skipped",
+                    reason=overlay_decision.reason,
+                    signal=asdict(signal),
+                    gate_evaluation=asdict(no_quote_gate_evaluation),
+                    low_latency_overlay=low_latency_overlay_payload,
+                    orderbook_source="low_latency_overlay",
+                    clob_orderbook_error=exc.to_log_payload(),
+                )
+                return None
+            if overlay_decision.latest_ask is not None:
+                bid = overlay_decision.latest_bid
+                ask = overlay_decision.latest_ask
+                orderbook_source = "low_latency_overlay"
+            else:
+                _log(
+                    log_path,
+                    "entry_skipped",
+                    reason="orderbook_unavailable",
+                    signal=asdict(signal),
+                    gate_evaluation=asdict(no_quote_gate_evaluation),
+                    low_latency_overlay=low_latency_overlay_payload,
+                    **exc.to_log_payload(),
+                )
+                return None
+        else:
+            _log(
+                log_path,
+                "entry_skipped",
+                reason="orderbook_unavailable",
+                signal=asdict(signal),
+                gate_evaluation=asdict(no_quote_gate_evaluation),
+                **exc.to_log_payload(),
+            )
+            return None
+    if orderbook_source == "clob":
+        low_latency_overlay_payload = None
+        low_latency_overlay_passed = None
     if ask is None:
         _log(
             log_path,
@@ -2685,10 +2996,16 @@ def _try_entry(
             reason="missing_ask",
             signal=asdict(signal),
             gate_evaluation=asdict(no_quote_gate_evaluation),
+            orderbook_source=orderbook_source,
+            low_latency_overlay=low_latency_overlay_payload,
         )
         return None
-    tick_size = client.get_tick_size(signal.token_id)
-    neg_risk = client.get_neg_risk(signal.token_id)
+    if orderbook_source == "low_latency_overlay":
+        tick_size = 0.01
+        neg_risk = False
+    else:
+        tick_size = client.get_tick_size(signal.token_id)
+        neg_risk = client.get_neg_risk(signal.token_id)
     ask_price = float(ask)
     slippage_worst_price = min(0.99, _round_price(ask_price + buy_slippage, tick_size))
     max_acceptable_price = (
@@ -2727,6 +3044,17 @@ def _try_entry(
         enable_settlement_gate=sleeve == "settlement",
     )
     gate_payload = asdict(gate_evaluation)
+    entry_size_usdc = max_position_size_usdc
+    v7_position_entry_sizing = _v7_initial_entry_sizing(
+        sleeve=sleeve,
+        entry_gate_mode=entry_gate_mode,
+        fresh_edge_at_worst=fresh_edge_at_worst,
+        max_position_size_usdc=max_position_size_usdc,
+        config=v7_position_config,
+    )
+    if v7_position_entry_sizing is not None:
+        gate_payload["v7_position_entry_sizing"] = v7_position_entry_sizing
+        entry_size_usdc = float(v7_position_entry_sizing["entry_size_usdc"])
     _log(
         log_path,
         "entry_gate_evaluated",
@@ -2743,6 +3071,9 @@ def _try_entry(
         model_entry_worst_price=signal.entry_worst_price,
         entry_gate_mode=entry_gate_mode,
         seconds_to_expiry=seconds_to_expiry,
+        orderbook_source=orderbook_source,
+        low_latency_overlay=low_latency_overlay_payload,
+        v7_position_entry_sizing=v7_position_entry_sizing,
         gate_evaluation=gate_payload,
     )
     if sleeve == "settlement" and not _settlement_cost_edge_mode(entry_gate_mode):
@@ -2762,6 +3093,8 @@ def _try_entry(
                 order_limit_price=order_limit_price,
                 fresh_edge_at_worst=fresh_edge_at_worst,
                 seconds_to_expiry=seconds_to_expiry,
+                orderbook_source=orderbook_source,
+                low_latency_overlay=low_latency_overlay_payload,
                 gate_evaluation=gate_payload,
             )
             return None
@@ -2779,6 +3112,8 @@ def _try_entry(
             max_acceptable_price=max_acceptable_price,
             order_limit_price=order_limit_price,
             seconds_to_expiry=seconds_to_expiry,
+            orderbook_source=orderbook_source,
+            low_latency_overlay=low_latency_overlay_payload,
             gate_evaluation=gate_payload,
         )
         return None
@@ -2801,6 +3136,8 @@ def _try_entry(
             max_acceptable_price=max_acceptable_price,
             order_limit_price=order_limit_price,
             seconds_to_expiry=seconds_to_expiry,
+            orderbook_source=orderbook_source,
+            low_latency_overlay=low_latency_overlay_payload,
             gate_evaluation=gate_payload,
         )
         return None
@@ -2820,6 +3157,8 @@ def _try_entry(
                 order_limit_price=order_limit_price,
                 fresh_edge_at_worst=fresh_edge_at_worst,
                 seconds_to_expiry=seconds_to_expiry,
+                orderbook_source=orderbook_source,
+                low_latency_overlay=low_latency_overlay_payload,
                 gate_evaluation=gate_payload,
             )
             return None
@@ -2841,6 +3180,8 @@ def _try_entry(
                 max_acceptable_price=max_acceptable_price,
                 order_limit_price=order_limit_price,
                 seconds_to_expiry=seconds_to_expiry,
+                orderbook_source=orderbook_source,
+                low_latency_overlay=low_latency_overlay_payload,
                 gate_evaluation=gate_payload,
             )
             return None
@@ -2903,6 +3244,68 @@ def _try_entry(
             gate_evaluation=gate_payload,
         )
         return None
+    if (
+        v7_position_entry_sizing is not None
+        and entry_size_usdc < float(v7_position_entry_sizing["min_rebalance_usdc"])
+    ):
+        _log(
+            log_path,
+            "entry_skipped",
+            reason="v7_position_target_below_min_rebalance",
+            sleeve=sleeve,
+            signal=asdict(signal),
+            bid=bid,
+            ask=ask,
+            worst_price=worst_price,
+            slippage_worst_price=slippage_worst_price,
+            max_acceptable_price=max_acceptable_price,
+            order_limit_price=order_limit_price,
+            fresh_edge_at_worst=fresh_edge_at_worst,
+            seconds_to_expiry=seconds_to_expiry,
+            signal_age_seconds=signal_age_seconds,
+            gate_evaluation=gate_payload,
+            v7_position_entry_sizing=v7_position_entry_sizing,
+        )
+        return None
+    if low_latency_overlay is not None:
+        if low_latency_overlay_payload is None:
+            overlay_decision = low_latency_overlay.evaluate_entry(
+                asdict(signal),
+                now_ms=_now_ms(),
+            )
+            low_latency_overlay_payload = overlay_decision.to_dict()
+            low_latency_overlay_passed = overlay_decision.passed
+        assert low_latency_overlay_passed is not None
+        if not low_latency_overlay_passed:
+            _log(
+                log_path,
+                "entry_skipped",
+                reason=str(low_latency_overlay_payload["reason"]),
+                sleeve=sleeve,
+                signal=asdict(signal),
+                bid=bid,
+                ask=ask,
+                worst_price=worst_price,
+                slippage_worst_price=slippage_worst_price,
+                max_acceptable_price=max_acceptable_price,
+                order_limit_price=order_limit_price,
+                fresh_edge_at_worst=fresh_edge_at_worst,
+                seconds_to_expiry=seconds_to_expiry,
+                settlement_edge_threshold=entry_policy.effective_settlement_edge_threshold,
+                settlement_min_confidence=entry_policy.settlement_min_confidence,
+                settlement_peak_confidence=settlement_peak_confidence,
+                signal_age_seconds=signal_age_seconds,
+                settlement_price_gate_mode=_settlement_price_gate_mode_name(entry_gate_mode),
+                gate_evaluation=gate_payload,
+                orderbook_source=orderbook_source,
+                low_latency_overlay=low_latency_overlay_payload,
+            )
+            return None
+        gate_payload = {
+            **gate_payload,
+            "orderbook_source": orderbook_source,
+            "low_latency_overlay": low_latency_overlay_payload,
+        }
     if paper:
         return _open_paper_position(
             position_manager=position_manager,
@@ -2910,7 +3313,7 @@ def _try_entry(
             log_path=log_path,
             sleeve=sleeve,
             fill_price=worst_price,
-            size_usdc=max_position_size_usdc,
+            size_usdc=entry_size_usdc,
             order_posted_at=_now_ms(),
             gate_payload=gate_payload,
         )
@@ -3040,7 +3443,7 @@ def _try_entry(
         order_args=MarketOrderArgs(
             token_id=signal.token_id,
             side=BUY,
-            amount=max_position_size_usdc,
+            amount=entry_size_usdc,
             price=order_limit_price,
         ),
         options=PartialCreateOrderOptions(tick_size=tick_size, neg_risk=neg_risk),
@@ -3227,22 +3630,58 @@ def _open_paper_position(
     size_usdc: float,
     order_posted_at: int,
     gate_payload: dict[str, Any],
-) -> LivePosition:
+) -> LivePosition | None:
     fill_size = size_usdc / fill_price if fill_price > 0 else 0.0
     event_suffix = (signal.event_id or str(order_posted_at))[-8:]
     event_id = f"phase4-paper-{sleeve}-{signal.round_slug}-{signal.outcome_side}-{event_suffix}"
     order_id = f"paper-{sleeve}-{event_suffix}"
-    position_manager.open_position(
-        event_id=event_id,
-        symbol=signal.canonical_symbol,
-        side=signal.outcome_side,
+    existing_open = _find_open_position_for_round_sleeve(
+        position_manager,
+        round_slug=signal.round_slug,
         sleeve=sleeve,
-        entry_price=fill_price,
-        fill_price=fill_price,
-        size=fill_size,
-        order_id=order_id,
-        entry_time=order_posted_at,
     )
+    if existing_open is not None:
+        _log(
+            log_path,
+            "paper_entry_duplicate_open",
+            reason="open_position_already_exists_for_round_sleeve",
+            sleeve=sleeve,
+            event_id=event_id,
+            existing_position=_position_log_payload(existing_open),
+            signal=asdict(signal),
+            fill_price=fill_price,
+            size_usdc=size_usdc,
+            gate_evaluation=gate_payload,
+        )
+        return None
+    try:
+        position_manager.open_position(
+            event_id=event_id,
+            symbol=signal.canonical_symbol,
+            side=signal.outcome_side,
+            sleeve=sleeve,
+            entry_price=fill_price,
+            fill_price=fill_price,
+            size=fill_size,
+            order_id=order_id,
+            entry_time=order_posted_at,
+        )
+    except ValueError as exc:
+        if "open position already exists for event_id=" not in str(exc):
+            raise
+        _log(
+            log_path,
+            "paper_entry_duplicate_open",
+            reason="open_position_already_exists_for_event_id",
+            sleeve=sleeve,
+            event_id=event_id,
+            signal=asdict(signal),
+            fill_price=fill_price,
+            size_usdc=size_usdc,
+            gate_evaluation=gate_payload,
+            error=str(exc),
+        )
+        return None
     position = LivePosition(
         event_id=event_id,
         round_slug=signal.round_slug,
@@ -3278,6 +3717,440 @@ def _open_paper_position(
         },
     )
     return position
+
+
+def _find_open_position_for_round_sleeve(
+    position_manager: PositionManager,
+    *,
+    round_slug: str,
+    sleeve: str,
+) -> Any | None:
+    open_positions_fn = getattr(position_manager, "get_all_open", None)
+    list_positions_fn = getattr(position_manager, "list_positions", None)
+    try:
+        if callable(open_positions_fn):
+            open_positions = open_positions_fn()
+        elif callable(list_positions_fn):
+            open_positions = list_positions_fn(status="open")
+        else:
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    for position in open_positions:
+        position_sleeve = str(getattr(position, "sleeve", "settlement"))
+        if position_sleeve != sleeve:
+            continue
+        symbol = str(getattr(position, "symbol", ""))
+        event_id = str(getattr(position, "event_id", ""))
+        if round_slug in symbol or round_slug in event_id:
+            return position
+    return None
+
+
+def _position_log_payload(position: Any) -> dict[str, Any]:
+    if hasattr(position, "__dataclass_fields__"):
+        return asdict(position)
+    payload = getattr(position, "__dict__", None)
+    return dict(payload) if isinstance(payload, dict) else {"value": str(position)}
+
+
+def _maybe_v7_settlement_position_adjustment(
+    *,
+    client: Any,
+    position_manager: PositionManager,
+    position: LivePosition,
+    signal: SignalEvent,
+    log_path: Path,
+    config: V7SettlementPositionConfig,
+    paper: bool,
+    sell_slippage: float,
+    exit_order_timeout_seconds: float,
+    monitoring_db_path: str,
+) -> PositionAdjustmentResult | None:
+    if not config.enabled or position.sleeve != "settlement":
+        return None
+    if position.round_slug != signal.round_slug:
+        return None
+    if signal.created_at <= position.entry_signal_created_at:
+        return None
+
+    p_side = _signal_probability_for_side(signal, position.side)
+    opposite_side = _opposite_side(position.side)
+    p_opposite = _signal_probability_for_side(signal, opposite_side)
+    if p_side is None and p_opposite is None:
+        _log(
+            log_path,
+            "v7_settlement_position_management_skipped",
+            reason="missing_probabilities",
+            position=asdict(position),
+            signal=asdict(signal),
+            config=asdict(config),
+        )
+        return None
+
+    try:
+        hold_bid, hold_ask = _best_bid_ask(client, position.token_id)
+    except OrderBookUnavailable as exc:
+        _log(
+            log_path,
+            "v7_settlement_position_management_skipped",
+            reason="position_orderbook_unavailable",
+            position=asdict(position),
+            signal=asdict(signal),
+            config=asdict(config),
+            **exc.to_log_payload(),
+        )
+        return None
+    opposite_token_id = _opposite_token_id_for_signal(position, signal)
+    opposite_ask: float | None = None
+    if opposite_token_id:
+        try:
+            _opposite_bid, opposite_ask = _best_bid_ask(client, opposite_token_id)
+        except OrderBookUnavailable as exc:
+            _log(
+                log_path,
+                "v7_settlement_position_opposite_quote_missing",
+                reason="opposite_orderbook_unavailable",
+                position=asdict(position),
+                signal=asdict(signal),
+                opposite_token_id=opposite_token_id,
+                **exc.to_log_payload(),
+            )
+
+    hold_edge = None if p_side is None or hold_bid is None else p_side - float(hold_bid)
+    add_edge = None if p_side is None or hold_ask is None else p_side - float(hold_ask)
+    reversal_edge = (
+        None if p_opposite is None or opposite_ask is None else p_opposite - float(opposite_ask)
+    )
+    reversal_confirmed = (
+        p_opposite is not None
+        and p_opposite >= config.reversal_min_confidence
+        and reversal_edge is not None
+        and reversal_edge >= config.reversal_min_edge
+    )
+    if reversal_confirmed:
+        position.v7_position_reversal_candidate_count += 1
+    else:
+        position.v7_position_reversal_candidate_count = 0
+    weak_hold = hold_edge is not None and hold_edge < config.weak_hold_edge
+    if weak_hold:
+        position.v7_position_weak_hold_candidate_count += 1
+    else:
+        position.v7_position_weak_hold_candidate_count = 0
+
+    prior_cost = _position_cost_basis_usdc(position)
+    avg_price = _position_average_price(position)
+    target_cost = prior_cost
+    action = "HOLD"
+    reason = "ev_hold"
+    if position.v7_position_reversal_candidate_count >= config.reversal_hysteresis_bars:
+        action = "EXIT"
+        reason = "confirmed_opposite_ev_reversal"
+        target_cost = 0.0
+    elif (
+        hold_edge is not None
+        and hold_edge <= config.exit_hold_edge
+        and position.v7_position_weak_hold_candidate_count >= config.exit_hysteresis_bars
+    ):
+        action = "EXIT"
+        reason = "confirmed_negative_hold_edge"
+        target_cost = 0.0
+    elif (
+        hold_edge is not None
+        and hold_edge < config.weak_hold_edge
+        and position.v7_position_weak_hold_candidate_count >= config.exit_hysteresis_bars
+    ):
+        action = "REDUCE"
+        reason = "weak_hold_edge_reduce"
+        target_cost = max(0.0, prior_cost * (1.0 - config.reduce_fraction))
+    elif add_edge is not None and add_edge >= config.add_edge_min:
+        target_cost = _v7_target_cost_from_edge(
+            add_edge=add_edge,
+            config=config,
+        )
+        if target_cost >= prior_cost + config.min_rebalance_usdc:
+            action = "ADD"
+            reason = "positive_add_edge"
+        else:
+            target_cost = prior_cost
+
+    evaluation = {
+        "action": action,
+        "reason": reason,
+        "p_side": p_side,
+        "p_opposite": p_opposite,
+        "hold_bid": hold_bid,
+        "hold_ask": hold_ask,
+        "opposite_token_id": opposite_token_id,
+        "opposite_ask": opposite_ask,
+        "hold_edge": hold_edge,
+        "add_edge": add_edge,
+        "reversal_edge": reversal_edge,
+        "prior_cost_basis_usdc": prior_cost,
+        "target_cost_basis_usdc": target_cost,
+        "avg_price": avg_price,
+        "config": asdict(config),
+        "reversal_count": position.v7_position_reversal_candidate_count,
+        "weak_hold_count": position.v7_position_weak_hold_candidate_count,
+    }
+    _log(
+        log_path,
+        "v7_settlement_position_management_evaluated",
+        position=asdict(position),
+        signal=asdict(signal),
+        evaluation=evaluation,
+    )
+    if action == "HOLD":
+        return PositionAdjustmentResult(action=action, status="hold")
+    if not paper or not config.paper_execute:
+        _log(
+            log_path,
+            "v7_settlement_position_management_recommended",
+            reason="live_recommendation_only" if not paper else "paper_execute_disabled",
+            position=asdict(position),
+            signal=asdict(signal),
+            evaluation=evaluation,
+        )
+        return PositionAdjustmentResult(action=action, status="recommended")
+    if action == "ADD":
+        return _paper_v7_settlement_add(
+            position_manager=position_manager,
+            position=position,
+            signal=signal,
+            log_path=log_path,
+            hold_ask=hold_ask,
+            prior_cost=prior_cost,
+            target_cost=target_cost,
+            evaluation=evaluation,
+        )
+    if action == "REDUCE":
+        return _paper_v7_settlement_reduce(
+            position_manager=position_manager,
+            position=position,
+            signal=signal,
+            log_path=log_path,
+            hold_bid=hold_bid,
+            prior_cost=prior_cost,
+            target_cost=target_cost,
+            evaluation=evaluation,
+        )
+    if action == "EXIT":
+        sell_result = _sell_settlement_policy_exit(
+            client=client,
+            position_manager=position_manager,
+            position=position,
+            signal=signal,
+            log_path=log_path,
+            event_prefix="v7_settlement_position_exit",
+            reason=reason,
+            sell_slippage=sell_slippage,
+            exit_order_timeout_seconds=exit_order_timeout_seconds,
+            monitoring_db_path=monitoring_db_path,
+            bid=float(hold_bid) if hold_bid is not None else None,
+        )
+        if sell_result is None:
+            return None
+        return PositionAdjustmentResult(
+            action=action,
+            status=sell_result.status,
+            realized_pnl=sell_result.realized_pnl,
+            closed=sell_result.status in {"filled", "pending_settlement", "pending_confirmation"},
+        )
+    return None
+
+
+def _paper_v7_settlement_add(
+    *,
+    position_manager: PositionManager,
+    position: LivePosition,
+    signal: SignalEvent,
+    log_path: Path,
+    hold_ask: float | None,
+    prior_cost: float,
+    target_cost: float,
+    evaluation: dict[str, Any],
+) -> PositionAdjustmentResult | None:
+    if hold_ask is None or hold_ask <= 0:
+        _log(
+            log_path,
+            "v7_settlement_position_management_skipped",
+            reason="missing_hold_ask_for_add",
+            position=asdict(position),
+            signal=asdict(signal),
+            evaluation=evaluation,
+        )
+        return None
+    add_usdc = max(0.0, target_cost - prior_cost)
+    if add_usdc <= 0:
+        return PositionAdjustmentResult(action="HOLD", status="hold")
+    shares_delta = add_usdc / float(hold_ask)
+    new_size = position.size + shares_delta
+    new_cost = prior_cost + add_usdc
+    new_avg = new_cost / new_size
+    position.size = new_size
+    position.fill_price = new_avg
+    position_manager.adjust_open_position(
+        position.event_id,
+        fill_price=new_avg,
+        size=new_size,
+        current_price=float(hold_ask),
+    )
+    _log(
+        log_path,
+        "paper_v7_settlement_position_added",
+        position=asdict(position),
+        signal=asdict(signal),
+        add_usdc=add_usdc,
+        shares_delta=shares_delta,
+        new_size=new_size,
+        new_average_price=new_avg,
+        evaluation=evaluation,
+    )
+    return PositionAdjustmentResult(action="ADD", status="filled")
+
+
+def _paper_v7_settlement_reduce(
+    *,
+    position_manager: PositionManager,
+    position: LivePosition,
+    signal: SignalEvent,
+    log_path: Path,
+    hold_bid: float | None,
+    prior_cost: float,
+    target_cost: float,
+    evaluation: dict[str, Any],
+) -> PositionAdjustmentResult | None:
+    if hold_bid is None:
+        _log(
+            log_path,
+            "v7_settlement_position_management_skipped",
+            reason="missing_hold_bid_for_reduce",
+            position=asdict(position),
+            signal=asdict(signal),
+            evaluation=evaluation,
+        )
+        return None
+    avg_price = _position_average_price(position)
+    cost_to_sell = max(0.0, prior_cost - target_cost)
+    shares_to_sell = min(position.size, cost_to_sell / max(avg_price, 1e-12))
+    if shares_to_sell <= 0:
+        return PositionAdjustmentResult(action="HOLD", status="hold")
+    realized_delta = shares_to_sell * (float(hold_bid) - avg_price)
+    new_size = max(0.0, position.size - shares_to_sell)
+    if new_size <= 1e-12:
+        closed = position_manager.close_position(position.event_id, float(hold_bid))
+        pnl = float(closed.realized_pnl or 0.0)
+        position.size = 0.0
+        position.lifecycle_state = "EXIT_FILLED"
+        position.last_lifecycle_reason = "v7_position_reduce_to_zero"
+        position.v7_position_realized_pnl_usdc += pnl
+        _log(
+            log_path,
+            "paper_v7_settlement_position_reduced_to_exit",
+            position=asdict(position),
+            signal=asdict(signal),
+            hold_bid=float(hold_bid),
+            realized_pnl=pnl,
+            evaluation=evaluation,
+        )
+        return PositionAdjustmentResult(
+            action="EXIT",
+            status="filled",
+            realized_pnl=pnl,
+            closed=True,
+        )
+    position.size = new_size
+    position.v7_position_realized_pnl_usdc += realized_delta
+    position_manager.adjust_open_position(
+        position.event_id,
+        fill_price=avg_price,
+        size=new_size,
+        current_price=float(hold_bid),
+    )
+    _log(
+        log_path,
+        "paper_v7_settlement_position_reduced",
+        position=asdict(position),
+        signal=asdict(signal),
+        hold_bid=float(hold_bid),
+        shares_sold=shares_to_sell,
+        remaining_size=new_size,
+        realized_pnl_delta=realized_delta,
+        cumulative_position_realized_pnl=position.v7_position_realized_pnl_usdc,
+        evaluation=evaluation,
+    )
+    return PositionAdjustmentResult(
+        action="REDUCE",
+        status="filled",
+        realized_pnl=realized_delta,
+    )
+
+
+def _signal_probability_for_side(signal: SignalEvent, side: str) -> float | None:
+    if side == "UP":
+        return signal.p_up
+    if side == "DOWN":
+        return signal.p_down
+    return None
+
+
+def _opposite_token_id_for_signal(position: LivePosition, signal: SignalEvent) -> str:
+    if signal.outcome_side == _opposite_side(position.side):
+        return signal.token_id
+    return signal.opposite_token_id
+
+
+def _position_cost_basis_usdc(position: LivePosition) -> float:
+    return max(0.0, float(position.fill_price) * float(position.size))
+
+
+def _position_average_price(position: LivePosition) -> float:
+    if position.size <= 0:
+        return 0.0
+    return float(position.fill_price)
+
+
+def _v7_target_cost_from_edge(
+    *,
+    add_edge: float,
+    config: V7SettlementPositionConfig,
+) -> float:
+    if add_edge < config.add_edge_min:
+        return 0.0
+    fraction = (add_edge - config.add_edge_min) / (config.full_add_edge - config.add_edge_min)
+    return min(config.round_cap_usdc, max(0.0, fraction) * config.round_cap_usdc)
+
+
+def _v7_initial_entry_sizing(
+    *,
+    sleeve: str,
+    entry_gate_mode: str,
+    fresh_edge_at_worst: float,
+    max_position_size_usdc: float,
+    config: V7SettlementPositionConfig | None,
+) -> dict[str, float] | None:
+    if (
+        config is None
+        or not config.enabled
+        or sleeve != "settlement"
+        or entry_gate_mode != "v7-pnl"
+    ):
+        return None
+    target_cost_usdc = _v7_target_cost_from_edge(
+        add_edge=fresh_edge_at_worst,
+        config=config,
+    )
+    entry_size_usdc = min(max_position_size_usdc, target_cost_usdc)
+    return {
+        "fresh_edge_at_worst": fresh_edge_at_worst,
+        "round_cap_usdc": config.round_cap_usdc,
+        "max_position_size_usdc": max_position_size_usdc,
+        "target_cost_usdc": target_cost_usdc,
+        "entry_size_usdc": entry_size_usdc,
+        "add_edge_min": config.add_edge_min,
+        "full_add_edge": config.full_add_edge,
+        "min_rebalance_usdc": config.min_rebalance_usdc,
+    }
 
 
 def _maybe_settlement_signal_exit(
@@ -3349,10 +4222,7 @@ def _maybe_settlement_signal_exit(
             price_stop_reversal_tracking=config.price_stop_enabled,
             seconds_to_expiry=seconds_to_expiry,
         )
-        if admitted_side == position.side:
-            position.settlement_reversal_candidate_side = ""
-            position.settlement_reversal_candidate_count = 0
-        elif admitted_side is None:
+        if admitted_side is None or admitted_side == position.side:
             position.settlement_reversal_candidate_side = ""
             position.settlement_reversal_candidate_count = 0
         elif seconds_to_expiry < opposite_exit_min_seconds_to_expiry:

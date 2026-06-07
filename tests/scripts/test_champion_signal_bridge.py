@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import duckdb
 import pytest
 
+from bigan.features.low_latency import JsonlRawQueue
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BRIDGE_SCRIPT = REPO_ROOT / "scripts" / "champion_signal_bridge.py"
 EXECUTOR_SCRIPT = REPO_ROOT / "scripts" / "polymarket_phase4_live_champion_executor.py"
@@ -2147,6 +2149,173 @@ def test_v7_pnl_entry_gate_allows_fresh_positive_edge_paper_fill(tmp_path: Path)
     assert filled["event"] == "paper_entry_filled"
 
 
+def test_v7_pnl_entry_sizes_initial_paper_fill_from_position_edge(
+    tmp_path: Path,
+) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+
+    position = executor._try_entry(
+        client=_VolatilityPaperClient(),
+        position_manager=_OpenPositionManager(),
+        signal=_signal(
+            edge=0.14,
+            token_probability=0.64,
+            p_up=0.64,
+            p_down=0.31,
+            p_neutral=0.05,
+            selected_side="UP",
+            selected_expected_edge=0.14,
+            entry_worst_price=0.50,
+            should_enter_settlement=True,
+        ),
+        log_path=log_path,
+        max_position_size_usdc=1.0,
+        entry_policy=executor.Phase4EntryPolicy(
+            settlement_edge_threshold=0.04,
+            settlement_min_confidence=0.60,
+        ),
+        seconds_to_expiry=600.0,
+        buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
+        sleeve="settlement",
+        paper=True,
+        entry_gate_mode="v7-pnl",
+        v7_position_config=executor.V7SettlementPositionConfig(
+            enabled=True,
+            paper_execute=True,
+            round_cap_usdc=1.0,
+            add_edge_min=0.08,
+            full_add_edge=0.20,
+            min_rebalance_usdc=0.05,
+        ),
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    evaluated = next(row for row in rows if row["event"] == "entry_gate_evaluated")
+    filled = rows[-1]
+
+    assert position is not None
+    assert evaluated["fresh_edge_at_worst"] == pytest.approx(0.14)
+    assert evaluated["v7_position_entry_sizing"]["entry_size_usdc"] == pytest.approx(0.5)
+    assert filled["event"] == "paper_entry_filled"
+    assert filled["size_usdc"] == pytest.approx(0.5)
+    assert position.size * position.fill_price == pytest.approx(0.5)
+
+
+def test_v7_paper_entry_can_use_low_latency_overlay_quote_when_clob_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("POLYMARKET_ORDERBOOK_REST_FALLBACK", "false")
+    monkeypatch.setattr(executor, "_now_ms", lambda: 10_000)
+    log_path = tmp_path / "phase4.jsonl"
+    raw_queue_path = tmp_path / "raw.jsonl"
+    JsonlRawQueue(raw_queue_path).append(
+        "raw_top_of_book",
+        {
+            "canonical_symbol": "BTC-15M:round-1:UP",
+            "source": "polymarket",
+            "source_symbol": "token-up",
+            "source_market": "0xmkt",
+            "ts": 9_000,
+            "message_ts": 9_000,
+            "capture_timestamp_ms": 9_000,
+            "bid_price": 0.49,
+            "ask_price": 0.50,
+            "spread": 0.01,
+        },
+        published_at_ms=9_001,
+    )
+    overlay = executor.LowLatencyEntryOverlay(
+        raw_queue_path,
+        config=executor.LowLatencyOverlayConfig(enabled=True),
+        start="beginning",
+    )
+    overlay.refresh()
+
+    position = executor._try_entry(
+        client=_UnavailableBookClient(),
+        position_manager=_OpenPositionManager(),
+        signal=_signal(
+            edge=0.36,
+            token_probability=0.83,
+            p_up=0.83,
+            p_down=0.12,
+            p_neutral=0.05,
+            selected_side="UP",
+            selected_expected_edge=0.36,
+            should_enter_settlement=True,
+        ),
+        log_path=log_path,
+        max_position_size_usdc=1.0,
+        entry_policy=executor.Phase4EntryPolicy(
+            settlement_edge_threshold=0.04,
+            settlement_min_confidence=0.75,
+        ),
+        seconds_to_expiry=600.0,
+        buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
+        sleeve="settlement",
+        paper=True,
+        entry_gate_mode="v7-pnl",
+        signal_age_seconds=9.0,
+        low_latency_overlay=overlay,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    evaluated = next(row for row in rows if row["event"] == "entry_gate_evaluated")
+    filled = rows[-1]
+
+    assert position is not None
+    assert position.fill_price == pytest.approx(0.50)
+    assert evaluated["orderbook_source"] == "low_latency_overlay"
+    assert evaluated["fresh_edge_at_worst"] == pytest.approx(0.33)
+    assert filled["event"] == "paper_entry_filled"
+    assert filled["gate_evaluation"]["orderbook_source"] == "low_latency_overlay"
+    assert filled["gate_evaluation"]["low_latency_overlay"]["reason"] == "overlay_pass"
+    assert filled["gate_evaluation"]["low_latency_overlay"]["latest_ask"] == pytest.approx(0.50)
+
+
+def test_paper_entry_skips_existing_open_round_sleeve_after_restart(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+    manager = executor.PositionManager(tmp_path / "positions.duckdb")
+    first_signal = _signal(event_id="pred-round-1-first")
+    second_signal = _signal(event_id="pred-round-1-second")
+
+    first = executor._open_paper_position(
+        position_manager=manager,
+        signal=first_signal,
+        log_path=log_path,
+        sleeve="settlement",
+        fill_price=0.50,
+        size_usdc=1.0,
+        order_posted_at=4_000,
+        gate_payload={"settlement_gate_passed": True},
+    )
+    second = executor._open_paper_position(
+        position_manager=manager,
+        signal=second_signal,
+        log_path=log_path,
+        sleeve="settlement",
+        fill_price=0.45,
+        size_usdc=1.0,
+        order_posted_at=5_000,
+        gate_payload={"settlement_gate_passed": True},
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    open_positions = manager.list_positions(status="open")
+
+    assert first is not None
+    assert second is None
+    assert len(open_positions) == 1
+    assert open_positions[0].event_id == first.event_id
+    assert rows[0]["event"] == "paper_entry_filled"
+    assert rows[1]["event"] == "paper_entry_duplicate_open"
+    assert rows[1]["reason"] == "open_position_already_exists_for_round_sleeve"
+    assert rows[1]["event_id"] != rows[1]["existing_position"]["event_id"]
+
+
 def test_executor_skips_complementary_entry_below_min_price(tmp_path: Path) -> None:
     log_path = tmp_path / "phase4.jsonl"
     signal = _signal()
@@ -3155,6 +3324,18 @@ class _OpenPositionManager(_PositionManager):
         return SimpleNamespace(**kwargs)
 
 
+class _OrderBookClient:
+    def __init__(self, books: dict[str, tuple[float | None, float | None]]) -> None:
+        self.books = books
+
+    def get_order_book(self, token_id: str):  # noqa: ANN201
+        bid, ask = self.books[token_id]
+        return {
+            "bids": [] if bid is None else [{"price": bid}],
+            "asks": [] if ask is None else [{"price": ask}],
+        }
+
+
 def _signal(
     *,
     event_id: str = "pred-1",
@@ -3229,3 +3410,160 @@ def _store_open_position(
     position: executor.LivePosition,
 ) -> None:
     lifecycle.open_positions[executor._position_key(position.round_slug, position.sleeve)] = position
+
+
+def test_v7_settlement_position_manager_adds_in_paper(tmp_path: Path) -> None:
+    manager = executor.PositionManager(tmp_path / "positions.duckdb")
+    manager.open_position(
+        "phase4-round-1-UP",
+        "BTC-15M:round-1:UP",
+        "UP",
+        0.50,
+        1.0,
+        "order-1",
+        sleeve="settlement",
+        fill_price=0.50,
+    )
+    position = _position(size=1.0, sleeve="settlement")
+    signal = _signal(
+        side="UP",
+        token_id="token-up",
+        opposite_token_id="token-down",
+        token_probability=0.90,
+        p_up=0.90,
+        p_down=0.05,
+        created_at=5_000,
+    )
+    client = _OrderBookClient({"token-up": (0.60, 0.70), "token-down": (0.20, 0.30)})
+
+    result = executor._maybe_v7_settlement_position_adjustment(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=signal,
+        log_path=tmp_path / "exec.jsonl",
+        config=executor.V7SettlementPositionConfig(enabled=True, paper_execute=True),
+        paper=True,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+
+    assert result is not None
+    assert result.action == "ADD"
+    assert result.status == "filled"
+    persisted = manager.get_position(position.event_id)
+    assert persisted is not None
+    assert persisted.size > 1.0
+    assert position.size == pytest.approx(persisted.size)
+
+
+def test_v7_settlement_position_manager_reduces_after_weak_hold_hysteresis(
+    tmp_path: Path,
+) -> None:
+    manager = executor.PositionManager(tmp_path / "positions.duckdb")
+    manager.open_position(
+        "phase4-round-1-UP",
+        "BTC-15M:round-1:UP",
+        "UP",
+        0.50,
+        2.0,
+        "order-1",
+        sleeve="settlement",
+        fill_price=0.50,
+    )
+    position = _position(size=2.0, sleeve="settlement")
+    client = _OrderBookClient({"token-up": (0.51, 0.54), "token-down": (0.40, 0.45)})
+    config = executor.V7SettlementPositionConfig(enabled=True, paper_execute=True)
+
+    first = executor._maybe_v7_settlement_position_adjustment(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=_signal(
+            event_id="weak-1",
+            side="UP",
+            token_probability=0.52,
+            p_up=0.52,
+            p_down=0.20,
+            created_at=5_000,
+        ),
+        log_path=tmp_path / "exec.jsonl",
+        config=config,
+        paper=True,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+    second = executor._maybe_v7_settlement_position_adjustment(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=_signal(
+            event_id="weak-2",
+            side="UP",
+            token_probability=0.52,
+            p_up=0.52,
+            p_down=0.20,
+            created_at=6_000,
+        ),
+        log_path=tmp_path / "exec.jsonl",
+        config=config,
+        paper=True,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+
+    assert first is not None
+    assert first.action == "HOLD"
+    assert second is not None
+    assert second.action == "REDUCE"
+    assert second.realized_pnl == pytest.approx(0.01)
+    persisted = manager.get_position(position.event_id)
+    assert persisted is not None
+    assert persisted.size == pytest.approx(1.0)
+
+
+def test_v7_settlement_position_manager_live_only_recommends(tmp_path: Path) -> None:
+    manager = executor.PositionManager(tmp_path / "positions.duckdb")
+    manager.open_position(
+        "phase4-round-1-UP",
+        "BTC-15M:round-1:UP",
+        "UP",
+        0.50,
+        1.0,
+        "order-1",
+        sleeve="settlement",
+        fill_price=0.50,
+    )
+    position = _position(size=1.0, sleeve="settlement")
+    client = _OrderBookClient({"token-up": (0.60, 0.70), "token-down": (0.20, 0.30)})
+
+    result = executor._maybe_v7_settlement_position_adjustment(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=_signal(
+            side="UP",
+            token_id="token-up",
+            opposite_token_id="token-down",
+            token_probability=0.90,
+            p_up=0.90,
+            p_down=0.05,
+            created_at=5_000,
+        ),
+        log_path=tmp_path / "exec.jsonl",
+        config=executor.V7SettlementPositionConfig(enabled=True, paper_execute=True),
+        paper=False,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+
+    assert result is not None
+    assert result.action == "ADD"
+    assert result.status == "recommended"
+    persisted = manager.get_position(position.event_id)
+    assert persisted is not None
+    assert persisted.size == pytest.approx(1.0)

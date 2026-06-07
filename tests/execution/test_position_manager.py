@@ -104,9 +104,20 @@ def test_position_lifecycle_is_persisted_to_duckdb(tmp_path) -> None:
     updated = restarted.update_price("round-1", 0.62)
     assert updated.unrealized_pnl == pytest.approx(0.22)
 
+    adjusted = restarted.adjust_open_position(
+        "round-1",
+        fill_price=0.55,
+        size=3.0,
+        current_price=0.60,
+    )
+    assert adjusted.fill_price == pytest.approx(0.55)
+    assert adjusted.size == pytest.approx(3.0)
+    assert adjusted.current_price == pytest.approx(0.60)
+    assert adjusted.unrealized_pnl == pytest.approx(0.15)
+
     closed = restarted.close_position("round-1", 0.64, exit_time=2000)
     assert closed.status == "closed"
-    assert closed.realized_pnl == pytest.approx(0.26)
+    assert closed.realized_pnl == pytest.approx(0.27)
     assert restarted.has_open_position("round-1") is False
 
 

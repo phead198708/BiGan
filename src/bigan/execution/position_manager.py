@@ -154,6 +154,37 @@ class PositionManager:
         self._upsert(marked)
         return marked
 
+    def adjust_open_position(
+        self,
+        event_id: str,
+        *,
+        fill_price: float,
+        size: float,
+        current_price: float | None = None,
+    ) -> Position:
+        """Update an open position's average fill price and remaining size."""
+
+        position = self._require_position(event_id)
+        if position.status != "open":
+            raise ValueError(f"cannot adjust non-open position {event_id}")
+        if fill_price <= 0:
+            raise ValueError("fill_price must be positive")
+        if size <= 0:
+            raise ValueError("size must be positive")
+        mark_price = fill_price if current_price is None else current_price
+        if mark_price < 0:
+            raise ValueError("current_price must be non-negative")
+        adjusted = _replace_position(
+            position,
+            fill_price=float(fill_price),
+            size=float(size),
+            current_price=float(mark_price),
+            unrealized_pnl=(float(mark_price) - float(fill_price)) * float(size),
+            updated_at=_now_ms(),
+        )
+        self._upsert(adjusted)
+        return adjusted
+
     def close_position(
         self,
         event_id: str,
