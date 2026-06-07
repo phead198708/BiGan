@@ -483,12 +483,15 @@ def test_executor_reads_executor_ready_v7_pnl_jsonl_payload(tmp_path: Path) -> N
         "p_down": 0.18,
         "p_neutral": 0.06,
         "settlement_residual": 0.12,
+        "token_expected_win_probability": 0.72,
+        "p_up_residual_adjusted": 0.72,
+        "p_down_residual_adjusted": 0.28,
         "expected_edge_up": 0.03,
         "expected_edge_down": -0.12,
         "residual_expected_edge_up": 0.02,
         "residual_expected_edge_down": -0.09,
         "selected_side": "UP",
-        "selected_expected_edge": 0.03,
+        "selected_expected_edge": 0.02,
         "entry_worst_price": 0.73,
         "should_enter_settlement": False,
     }
@@ -502,7 +505,11 @@ def test_executor_reads_executor_ready_v7_pnl_jsonl_payload(tmp_path: Path) -> N
         "p_up": 0.84,
         "p_down": 0.10,
         "expected_edge_up": 0.12,
-        "selected_expected_edge": 0.12,
+        "token_expected_win_probability": 0.83,
+        "p_up_residual_adjusted": 0.83,
+        "p_down_residual_adjusted": 0.17,
+        "residual_expected_edge_up": 0.11,
+        "selected_expected_edge": 0.11,
         "entry_worst_price": 0.72,
         "should_enter_settlement": True,
     }
@@ -523,10 +530,66 @@ def test_executor_reads_executor_ready_v7_pnl_jsonl_payload(tmp_path: Path) -> N
     assert len(events) == 1
     assert events[0].event_id == "pred-v7-high"
     assert events[0].selected_side == "UP"
-    assert events[0].selected_expected_edge == pytest.approx(0.12)
+    assert events[0].token_probability == pytest.approx(0.83)
+    assert events[0].p_up == pytest.approx(0.84)
+    assert events[0].p_up_residual_adjusted == pytest.approx(0.83)
+    assert events[0].selected_expected_edge == pytest.approx(0.11)
     assert events[0].entry_worst_price == pytest.approx(0.72)
     assert events[0].should_enter_settlement is True
     assert events[0].settlement_residual == pytest.approx(0.12)
+
+
+def test_v7_pnl_jsonl_selection_uses_residual_edge_over_settlement_side(
+    tmp_path: Path,
+) -> None:
+    queue = tmp_path / "signals.jsonl"
+    queue.write_text(
+        json.dumps(
+            {
+                "event_id": "pred-v7-residual-down",
+                "ts": 1_779_774_400_000,
+                "created_at": 1_779_774_410_000,
+                "model_version": "xgboost-v7",
+                "prob_up_15m": 0.86,
+                "canonical_symbol": "BTC-15M:btc-updown-15m-1779774300:DOWN",
+                "token_id": "token-down",
+                "outcome_side": "DOWN",
+                "round_slug": "btc-updown-15m-1779774300",
+                "round_end_ts": 1_779_775_200_000,
+                "market_implied_prob": 0.43,
+                "token_probability": 0.14,
+                "edge": -0.29,
+                "bridged_at": 1_779_774_411_000,
+                "opposite_token_id": "token-up",
+                "p_up": 0.86,
+                "p_down": 0.14,
+                "p_neutral": 0.0,
+                "settlement_residual": 0.20,
+                "p_up_residual_adjusted": 0.35,
+                "p_down_residual_adjusted": 0.65,
+                "residual_expected_edge_up": -0.22,
+                "residual_expected_edge_down": 0.22,
+                "selected_side": "UP",
+                "selected_expected_edge": -0.22,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    events, cursor, _signature = executor._read_signal_jsonl_after(
+        queue,
+        after_line_number=0,
+        model_version="xgboost-v7",
+        limit=10,
+        entry_gate_mode="v7-pnl",
+    )
+
+    assert cursor == 1
+    assert len(events) == 1
+    assert events[0].outcome_side == "DOWN"
+    assert events[0].token_probability == pytest.approx(0.65)
+    assert events[0].selected_expected_edge == pytest.approx(0.22)
 
 
 def test_v7_pnl_jsonl_selection_ignores_stale_high_edge_signal(tmp_path: Path) -> None:

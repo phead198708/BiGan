@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from collections.abc import Mapping
 from typing import Any
 
 from bigan.execution.v6_gate import (
@@ -47,6 +47,9 @@ class ExecutionSignal:
     p_vol_down: float | None = None
     v6_joint_side: str | None = None
     settlement_residual: float | None = None
+    token_expected_win_probability: float | None = None
+    p_up_residual_adjusted: float | None = None
+    p_down_residual_adjusted: float | None = None
     expected_edge_up: float | None = None
     expected_edge_down: float | None = None
     residual_expected_edge_up: float | None = None
@@ -285,7 +288,7 @@ def _v7_execution_signal(
     bridged_at: int,
     allowed_outcome_sides: frozenset[str] | None,
 ) -> ExecutionSignal | None:
-    side = _selected_v7_side(snapshot)
+    side = _selected_v7_side(snapshot, token_side=token_side)
     if side is None:
         return None
     if allowed_outcome_sides is not None and side not in allowed_outcome_sides:
@@ -308,12 +311,17 @@ def _v7_execution_signal(
     if p_up is None or p_down is None:
         return None
     market = _v7_selected_market(snapshot, selected_side=side, token_side=token_side)
-    edge = _optional_float(
-        snapshot.get("expected_edge_up") if side == "UP" else snapshot.get("expected_edge_down")
-    )
     if market is None:
         return None
-    token_probability = p_up if side == "UP" else p_down
+    p_up_residual = _optional_float(snapshot.get("p_up_residual_adjusted"))
+    p_down_residual = _optional_float(snapshot.get("p_down_residual_adjusted"))
+    residual_probability = p_up_residual if side == "UP" else p_down_residual
+    token_probability = (
+        residual_probability
+        if residual_probability is not None
+        else (p_up if side == "UP" else p_down)
+    )
+    edge = _v7_side_edge(snapshot, side=side, market=market, token_probability=token_probability)
     if edge is None:
         edge = token_probability - market
     entry_worst = _optional_float(
@@ -343,6 +351,9 @@ def _v7_execution_signal(
         p_vol_up=None,
         p_vol_down=None,
         settlement_residual=_optional_float(snapshot.get("settlement_residual")),
+        token_expected_win_probability=token_probability,
+        p_up_residual_adjusted=p_up_residual,
+        p_down_residual_adjusted=p_down_residual,
         expected_edge_up=_optional_float(snapshot.get("expected_edge_up")),
         expected_edge_down=_optional_float(snapshot.get("expected_edge_down")),
         residual_expected_edge_up=_optional_float(snapshot.get("residual_expected_edge_up")),
@@ -358,7 +369,13 @@ def _is_v7_model_version(model_version: str) -> bool:
     return model_version == "xgboost-v7" or model_version.startswith("xgboost-v7:")
 
 
-def _selected_v7_side(snapshot: dict[str, Any]) -> str | None:
+def _selected_v7_side(snapshot: dict[str, Any], *, token_side: str | None = None) -> str | None:
+    up_edge = _v7_side_edge_from_snapshot(snapshot, side="UP", token_side=token_side)
+    down_edge = _v7_side_edge_from_snapshot(snapshot, side="DOWN", token_side=token_side)
+    if up_edge is not None or down_edge is not None:
+        if down_edge is None or (up_edge is not None and up_edge >= down_edge):
+            return "UP"
+        return "DOWN"
     selected = str(snapshot.get("selected_side") or "").upper()
     if selected in {"UP", "DOWN"}:
         return selected
@@ -369,6 +386,57 @@ def _selected_v7_side(snapshot: dict[str, Any]) -> str | None:
     if down_edge is None or (up_edge is not None and up_edge >= down_edge):
         return "UP"
     return "DOWN"
+
+
+def _v7_side_edge(
+    snapshot: dict[str, Any],
+    *,
+    side: str,
+    market: float,
+    token_probability: float,
+) -> float | None:
+    residual = _optional_float(
+        snapshot.get("residual_expected_edge_up")
+        if side == "UP"
+        else snapshot.get("residual_expected_edge_down")
+    )
+    if residual is not None:
+        return residual
+    edge = _optional_float(
+        snapshot.get("expected_edge_up") if side == "UP" else snapshot.get("expected_edge_down")
+    )
+    if edge is not None and _optional_float(
+        snapshot.get("p_up_residual_adjusted")
+        if side == "UP"
+        else snapshot.get("p_down_residual_adjusted")
+    ) is None:
+        return edge
+    return token_probability - market
+
+
+def _v7_side_edge_from_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    side: str,
+    token_side: str | None,
+) -> float | None:
+    residual = _optional_float(
+        snapshot.get("residual_expected_edge_up")
+        if side == "UP"
+        else snapshot.get("residual_expected_edge_down")
+    )
+    if residual is not None:
+        return residual
+    residual_probability = _optional_float(
+        snapshot.get("p_up_residual_adjusted")
+        if side == "UP"
+        else snapshot.get("p_down_residual_adjusted")
+    )
+    if residual_probability is not None and token_side is not None:
+        market = _v7_selected_market(snapshot, selected_side=side, token_side=token_side)
+        if market is not None:
+            return residual_probability - market
+    return None
 
 
 def _v7_selected_market(
@@ -511,8 +579,13 @@ def _signal_identity(signal: ExecutionSignal) -> tuple[object, ...]:
         _rounded_probability(signal.p_neutral),
         _rounded_probability(signal.p_vol_up),
         _rounded_probability(signal.p_vol_down),
+        _rounded_probability(signal.token_expected_win_probability),
+        _rounded_probability(signal.p_up_residual_adjusted),
+        _rounded_probability(signal.p_down_residual_adjusted),
         _rounded_probability(signal.expected_edge_up),
         _rounded_probability(signal.expected_edge_down),
+        _rounded_probability(signal.residual_expected_edge_up),
+        _rounded_probability(signal.residual_expected_edge_down),
         _rounded_probability(signal.selected_expected_edge),
     )
 
@@ -530,8 +603,13 @@ def _payload_signal_identity(payload: dict[str, Any]) -> tuple[object, ...]:
         _rounded_probability(payload.get("p_neutral")),
         _rounded_probability(payload.get("p_vol_up")),
         _rounded_probability(payload.get("p_vol_down")),
+        _rounded_probability(payload.get("token_expected_win_probability")),
+        _rounded_probability(payload.get("p_up_residual_adjusted")),
+        _rounded_probability(payload.get("p_down_residual_adjusted")),
         _rounded_probability(payload.get("expected_edge_up")),
         _rounded_probability(payload.get("expected_edge_down")),
+        _rounded_probability(payload.get("residual_expected_edge_up")),
+        _rounded_probability(payload.get("residual_expected_edge_down")),
         _rounded_probability(payload.get("selected_expected_edge")),
     )
 

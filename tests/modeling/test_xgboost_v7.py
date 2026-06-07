@@ -266,6 +266,9 @@ def test_train_xgboost_v7_saves_settlement_ev_artifacts_and_payload(tmp_path: Pa
         "expected_edge_down": None,
         "residual_expected_edge_up": None,
         "residual_expected_edge_down": None,
+        "token_expected_win_probability": 0.61,
+        "p_up_residual_adjusted": 0.61,
+        "p_down_residual_adjusted": 0.65,
         "market_implied_prob": 0.52,
     }
     live_like_queue_path = tmp_path / "signals-live-like.jsonl"
@@ -281,20 +284,21 @@ def test_train_xgboost_v7_saves_settlement_ev_artifacts_and_payload(tmp_path: Pa
     )
     live_like_queue_payload = json.loads(live_like_queue_path.read_text(encoding="utf-8"))
     assert written == 1
-    assert live_like_queue_payload["outcome_side"] == "UP"
-    assert live_like_queue_payload["canonical_symbol"] == f"BTC-15M:{round_slug}:UP"
-    assert live_like_queue_payload["selected_expected_edge"] == pytest.approx(0.30)
-    assert live_like_queue_payload["edge"] == pytest.approx(0.30)
+    assert live_like_queue_payload["outcome_side"] == "DOWN"
+    assert live_like_queue_payload["canonical_symbol"] == f"BTC-15M:{round_slug}:DOWN"
+    assert live_like_queue_payload["token_probability"] == pytest.approx(0.65)
+    assert live_like_queue_payload["selected_expected_edge"] == pytest.approx(0.17)
+    assert live_like_queue_payload["edge"] == pytest.approx(0.17)
     assert live_like_queue_payload["entry_worst_price"] is None
 
 
 def test_xgboost_v7_settlement_ev_formulas() -> None:
     from bigan.modeling.xgboost_v7 import (
+        XGBoostV7Config,
         _entry_worst_price,
         _settlement_realized_pnl,
         _settlement_residual_label,
         _tradable_ev_backtest,
-        XGBoostV7Config,
     )
 
     winning_row = {
@@ -351,8 +355,8 @@ def test_xgboost_v7_settlement_ev_formulas() -> None:
 
 def test_xgboost_v7_gate_selection_prefers_stable_average_pnl() -> None:
     from bigan.modeling.xgboost_v7 import (
-        _select_tradable_ev_rule,
         XGBoostV7Config,
+        _select_tradable_ev_rule,
     )
 
     def eligible_row(idx: int, *, label: str) -> dict:

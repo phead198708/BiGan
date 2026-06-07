@@ -29,14 +29,12 @@ from .xgboost_v1 import (
     _first_or_none,
 )
 from .xgboost_v6 import (
-    SETTLEMENT_CLASSES,
     SETTLEMENT_CLASS_TO_ID,
+    SETTLEMENT_CLASSES,
     _family_settlement_metrics,
     _fit_family_temperatures,
     _fit_temperature,
     _metric_sort_value,
-    _multiclass_brier,
-    _multiclass_log_loss,
     _raw_settlement_probabilities,
     _settlement_label,
     _settlement_label_id,
@@ -177,12 +175,18 @@ class XGBoostV7Model:
                 p_up_residual = _clip01(1.0 - token_probability)
             up_worst = _entry_worst_price(_entry_ask(row, "UP"), self.buy_slippage, self.fee_bps)
             down_worst = _entry_worst_price(_entry_ask(row, "DOWN"), self.buy_slippage, self.fee_bps)
-            up_edge = None if up_worst is None else p_up - up_worst
-            down_edge = None if down_worst is None else p_down - down_worst
-            residual_up_edge = None if up_worst is None else p_up_residual - up_worst
-            residual_down_edge = None if down_worst is None else p_down_residual - down_worst
-            selected_side = _select_side(p_up=p_up, p_down=p_down, threshold=0.0)
-            selected_edge = up_edge if selected_side == "UP" else down_edge
+            up_price = up_worst if up_worst is not None else _side_market_price(market, token_side, "UP")
+            down_price = (
+                down_worst
+                if down_worst is not None
+                else _side_market_price(market, token_side, "DOWN")
+            )
+            up_edge = None if up_price is None else p_up - up_price
+            down_edge = None if down_price is None else p_down - down_price
+            residual_up_edge = None if up_price is None else p_up_residual - up_price
+            residual_down_edge = None if down_price is None else p_down_residual - down_price
+            selected_side = _select_edge_side(up_edge=residual_up_edge, down_edge=residual_down_edge)
+            selected_edge = residual_up_edge if selected_side == "UP" else residual_down_edge
             class_idx = int(np.argmax(np.asarray(probs, dtype=float)))
             payloads.append(
                 {
@@ -915,6 +919,22 @@ def _select_side(*, p_up: float, p_down: float, threshold: float) -> str | None:
     return None
 
 
+def _select_edge_side(*, up_edge: float | None, down_edge: float | None) -> str | None:
+    if up_edge is None and down_edge is None:
+        return None
+    if down_edge is None or (up_edge is not None and up_edge >= down_edge):
+        return "UP"
+    return "DOWN"
+
+
+def _side_market_price(market: float | None, token_side: str, side: str) -> float | None:
+    if market is None:
+        return None
+    if side == token_side:
+        return market
+    return _clip01(1.0 - market)
+
+
 def _summarize_trades(
     trades: list[dict[str, Any]],
     *,
@@ -1076,6 +1096,9 @@ def _write_v7_model_artifact(path: Path, *, model: XGBoostV7Model) -> None:
             "p_neutral",
             "settlement_residual",
             "market_implied_prob",
+            "token_expected_win_probability",
+            "p_up_residual_adjusted",
+            "p_down_residual_adjusted",
             "entry_worst_price_up",
             "entry_worst_price_down",
             "expected_edge_up",
