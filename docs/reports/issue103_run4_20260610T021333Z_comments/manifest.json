@@ -1,0 +1,65 @@
+{
+  "issue": 103,
+  "rounds": [
+    {
+      "round_slug": "btc-updown-15m-1781057700",
+      "path": "docs/reports/issue103_run4_20260610T021333Z_comments/comments/01-btc-updown-15m-1781057700.md",
+      "filename": "01-btc-updown-15m-1781057700.md"
+    },
+    {
+      "round_slug": "btc-updown-15m-1781058600",
+      "path": "docs/reports/issue103_run4_20260610T021333Z_comments/comments/02-btc-updown-15m-1781058600.md",
+      "filename": "02-btc-updown-15m-1781058600.md"
+    },
+    {
+      "round_slug": "btc-updown-15m-1781059500",
+      "path": "docs/reports/issue103_run4_20260610T021333Z_comments/comments/03-btc-updown-15m-1781059500.md",
+      "filename": "03-btc-updown-15m-1781059500.md"
+    },
+    {
+      "round_slug": "btc-updown-15m-1781060400",
+      "path": "docs/reports/issue103_run4_20260610T021333Z_comments/comments/04-btc-updown-15m-1781060400.md",
+      "filename": "04-btc-updown-15m-1781060400.md"
+    },
+    {
+      "round_slug": "btc-updown-15m-1781061300",
+      "path": "docs/reports/issue103_run4_20260610T021333Z_comments/comments/05-btc-updown-15m-1781061300.md",
+      "filename": "05-btc-updown-15m-1781061300.md"
+    },
+    {
+      "round_slug": "btc-updown-15m-1781062200",
+      "path": "docs/reports/issue103_run4_20260610T021333Z_comments/comments/06-btc-updown-15m-1781062200.md",
+      "filename": "06-btc-updown-15m-1781062200.md"
+    },
+    {
+      "round_slug": "btc-updown-15m-1781063100",
+      "path": "docs/reports/issue103_run4_20260610T021333Z_comments/comments/07-btc-updown-15m-1781063100.md",
+      "filename": "07-btc-updown-15m-1781063100.md"
+    },
+    {
+      "round_slug": "btc-updown-15m-1781064000",
+      "path": "docs/reports/issue103_run4_20260610T021333Z_comments/comments/08-btc-updown-15m-1781064000.md",
+      "filename": "08-btc-updown-15m-1781064000.md"
+    },
+    {
+      "round_slug": "btc-updown-15m-1781065800",
+      "path": "docs/reports/issue103_run4_20260610T021333Z_comments/comments/09-btc-updown-15m-1781065800.md",
+      "filename": "09-btc-updown-15m-1781065800.md"
+    },
+    {
+      "round_slug": "btc-updown-15m-1781066700",
+      "path": "docs/reports/issue103_run4_20260610T021333Z_comments/comments/10-btc-updown-15m-1781066700.md",
+      "filename": "10-btc-updown-15m-1781066700.md"
+    },
+    {
+      "round_slug": "btc-updown-15m-1781067600",
+      "path": "docs/reports/issue103_run4_20260610T021333Z_comments/comments/11-btc-updown-15m-1781067600.md",
+      "filename": "11-btc-updown-15m-1781067600.md"
+    },
+    {
+      "round_slug": "btc-updown-15m-1781068500",
+      "path": "docs/reports/issue103_run4_20260610T021333Z_comments/comments/12-btc-updown-15m-1781068500.md",
+      "filename": "12-btc-updown-15m-1781068500.md"
+    }
+  ]
+}
