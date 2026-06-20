@@ -36,6 +36,23 @@ Environment overrides:
   SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS
                              Optional max event age, in seconds, for queue
                              emission. Stale signals are not appended.
+  SIGNAL_KAFKA_BOOTSTRAP_SERVERS
+                             Optional Kafka bootstrap servers for executor-ready
+                             signal emission.
+  SIGNAL_KAFKA_TOPIC         Optional Kafka topic for executor-ready signal
+                             emission. Set together with
+                             SIGNAL_KAFKA_BOOTSTRAP_SERVERS.
+  SIGNAL_KAFKA_FLUSH_TIMEOUT_SECONDS
+                             Kafka producer flush timeout. Default: 5.
+  EVENT_DRIVEN_V7_SIGNAL_QUEUE_ENABLED
+                             When true, append a separate v7 event-driven
+                             repriced signal queue from SIGNAL_JSONL_OUTPUT_PATH
+                             plus LOW_LATENCY_RAW_QUEUE_PATH. Default: false
+  EVENT_DRIVEN_V7_SIGNAL_JSONL_OUTPUT_PATH
+                             Event-driven executor queue output path. Default:
+                             LIVE_ROOT/signals-v7-event-driven.jsonl
+  EVENT_DRIVEN_V7_SIGNAL_BUCKET_SECONDS
+                             Event-driven signal cadence. Default: 10
   LOW_LATENCY_FEATURE_QUEUE_ENABLED
                              Consume BTC-15M features directly from a raw JSONL
                              queue instead of raw ETL + batch recompute.
@@ -46,6 +63,10 @@ Environment overrides:
                              Cursor file for the low-latency queue consumer.
   LOW_LATENCY_FEATURE_STATE_PATH
                              State file for incremental BTC-15M feature context.
+  LOW_LATENCY_FEATURE_BUCKET_SECONDS
+                             Optional feature bucket width. When event-driven v7
+                             is enabled and this is unset, it follows
+                             EVENT_DRIVEN_V7_SIGNAL_BUCKET_SECONDS.
   LOW_LATENCY_FEATURE_MAX_RECORDS
                              Max raw queue records consumed per cycle. Default: 50000
   CYCLE_SLEEP_SECONDS        Sleep after each scoring cycle. Default: 5
@@ -188,6 +209,9 @@ SIGNAL_JSONL_OUTPUT_PATH="${SIGNAL_JSONL_OUTPUT_PATH:-}"
 SIGNAL_JSONL_MARKET_FAMILIES="${SIGNAL_JSONL_MARKET_FAMILIES:-BTC-15M}"
 SIGNAL_JSONL_OUTCOME_SIDE="${SIGNAL_JSONL_OUTCOME_SIDE:-ANY}"
 SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS="${SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS:-}"
+SIGNAL_KAFKA_BOOTSTRAP_SERVERS="${SIGNAL_KAFKA_BOOTSTRAP_SERVERS:-}"
+SIGNAL_KAFKA_TOPIC="${SIGNAL_KAFKA_TOPIC:-}"
+SIGNAL_KAFKA_FLUSH_TIMEOUT_SECONDS="${SIGNAL_KAFKA_FLUSH_TIMEOUT_SECONDS:-5}"
 V6_SETTLEMENT_THRESHOLD="${V6_SETTLEMENT_THRESHOLD:-0.50}"
 V6_NEUTRAL_CAP="${V6_NEUTRAL_CAP:-0.25}"
 V6_VOLATILITY_THRESHOLD="${V6_VOLATILITY_THRESHOLD:-0.60}"
@@ -198,7 +222,19 @@ LOW_LATENCY_RAW_QUEUE_PATH="${LOW_LATENCY_RAW_QUEUE_PATH:-${LIVE_ROOT}/low-laten
 LOW_LATENCY_RAW_QUEUE_CANONICAL_SYMBOL_PREFIX="${LOW_LATENCY_RAW_QUEUE_CANONICAL_SYMBOL_PREFIX:-BTC-15M:}"
 LOW_LATENCY_FEATURE_CURSOR_PATH="${LOW_LATENCY_FEATURE_CURSOR_PATH:-${LIVE_ROOT}/low-latency/features.cursor}"
 LOW_LATENCY_FEATURE_STATE_PATH="${LOW_LATENCY_FEATURE_STATE_PATH:-${LIVE_ROOT}/low-latency/features-state.json}"
+LOW_LATENCY_FEATURE_BUCKET_SECONDS="${LOW_LATENCY_FEATURE_BUCKET_SECONDS:-}"
 LOW_LATENCY_FEATURE_MAX_RECORDS="${LOW_LATENCY_FEATURE_MAX_RECORDS:-50000}"
+EVENT_DRIVEN_V7_SIGNAL_QUEUE_ENABLED="${EVENT_DRIVEN_V7_SIGNAL_QUEUE_ENABLED:-false}"
+EVENT_DRIVEN_V7_SIGNAL_JSONL_OUTPUT_PATH="${EVENT_DRIVEN_V7_SIGNAL_JSONL_OUTPUT_PATH:-${LIVE_ROOT}/signals-v7-event-driven.jsonl}"
+EVENT_DRIVEN_V7_SIGNAL_CURSOR_PATH="${EVENT_DRIVEN_V7_SIGNAL_CURSOR_PATH:-${LIVE_ROOT}/low-latency/v7-event-driven-signal.cursor}"
+EVENT_DRIVEN_V7_SIGNAL_BUCKET_SECONDS="${EVENT_DRIVEN_V7_SIGNAL_BUCKET_SECONDS:-10}"
+EVENT_DRIVEN_V7_SIGNAL_START="${EVENT_DRIVEN_V7_SIGNAL_START:-beginning}"
+EVENT_DRIVEN_V7_SIGNAL_MAX_RECORDS="${EVENT_DRIVEN_V7_SIGNAL_MAX_RECORDS:-20000}"
+EVENT_DRIVEN_V7_BASE_SIGNAL_MAX_AGE_SECONDS="${EVENT_DRIVEN_V7_BASE_SIGNAL_MAX_AGE_SECONDS:-180}"
+EVENT_DRIVEN_V7_SIGNAL_MAX_EVENT_AGE_SECONDS="${EVENT_DRIVEN_V7_SIGNAL_MAX_EVENT_AGE_SECONDS:-30}"
+if [[ "${EVENT_DRIVEN_V7_SIGNAL_QUEUE_ENABLED}" == "true" && -z "${LOW_LATENCY_FEATURE_BUCKET_SECONDS}" ]]; then
+  LOW_LATENCY_FEATURE_BUCKET_SECONDS="${EVENT_DRIVEN_V7_SIGNAL_BUCKET_SECONDS}"
+fi
 CYCLE_SLEEP_SECONDS="${CYCLE_SLEEP_SECONDS:-5}"
 ETL_LAG_SECONDS="${ETL_LAG_SECONDS:-0}"
 ETL_SEGMENT_SAFETY_SECONDS="${ETL_SEGMENT_SAFETY_SECONDS:-15}"
@@ -235,6 +271,14 @@ fi
 if [[ "${LOW_LATENCY_FEATURE_QUEUE_ENABLED}" == "true" && -z "${SCORING_CANONICAL_SYMBOL_LIKE}" ]]; then
   SCORING_CANONICAL_SYMBOL_LIKE="${LOW_LATENCY_RAW_QUEUE_CANONICAL_SYMBOL_PREFIX}%"
 fi
+if [[ -n "${SIGNAL_KAFKA_BOOTSTRAP_SERVERS}" && -z "${SIGNAL_KAFKA_TOPIC}" ]]; then
+  echo "[champion-live] SIGNAL_KAFKA_TOPIC is required when SIGNAL_KAFKA_BOOTSTRAP_SERVERS is set" >&2
+  exit 1
+fi
+if [[ -z "${SIGNAL_KAFKA_BOOTSTRAP_SERVERS}" && -n "${SIGNAL_KAFKA_TOPIC}" ]]; then
+  echo "[champion-live] SIGNAL_KAFKA_BOOTSTRAP_SERVERS is required when SIGNAL_KAFKA_TOPIC is set" >&2
+  exit 1
+fi
 
 export BIGAN_METRICS_ENABLED="${BIGAN_METRICS_ENABLED:-false}"
 export BIGAN_DATA_DIR="${LIVE_ROOT}"
@@ -254,6 +298,10 @@ if [[ "${LOW_LATENCY_FEATURE_QUEUE_ENABLED}" == "true" ]]; then
 fi
 if [[ -n "${SIGNAL_JSONL_OUTPUT_PATH}" ]]; then
   mkdir -p "$(dirname "${SIGNAL_JSONL_OUTPUT_PATH}")"
+fi
+if [[ "${EVENT_DRIVEN_V7_SIGNAL_QUEUE_ENABLED}" == "true" ]]; then
+  mkdir -p "$(dirname "${EVENT_DRIVEN_V7_SIGNAL_JSONL_OUTPUT_PATH}")" \
+    "$(dirname "${EVENT_DRIVEN_V7_SIGNAL_CURSOR_PATH}")"
 fi
 CAPTURE_LOG="${LOG_DIR}/capture-${SESSION_ID}.log"
 SCORER_LOG="${LOG_DIR}/scorer-${SESSION_ID}.log"
@@ -298,8 +346,38 @@ if [[ "${LOW_LATENCY_FEATURE_QUEUE_ENABLED}" != "true" && "${LOW_LATENCY_FEATURE
   echo "[champion-live] LOW_LATENCY_FEATURE_QUEUE_ENABLED must be true or false" >&2
   exit 1
 fi
+if [[ "${EVENT_DRIVEN_V7_SIGNAL_QUEUE_ENABLED}" != "true" && "${EVENT_DRIVEN_V7_SIGNAL_QUEUE_ENABLED}" != "false" ]]; then
+  echo "[champion-live] EVENT_DRIVEN_V7_SIGNAL_QUEUE_ENABLED must be true or false" >&2
+  exit 1
+fi
+if [[ "${EVENT_DRIVEN_V7_SIGNAL_START}" != "tail" && "${EVENT_DRIVEN_V7_SIGNAL_START}" != "beginning" ]]; then
+  echo "[champion-live] EVENT_DRIVEN_V7_SIGNAL_START must be tail or beginning" >&2
+  exit 1
+fi
+if [[ "${EVENT_DRIVEN_V7_SIGNAL_QUEUE_ENABLED}" == "true" ]]; then
+  if [[ "${MODEL_VERSION}" != "xgboost-v7" && "${MODEL_VERSION}" != xgboost-v7:* ]]; then
+    echo "[champion-live] event-driven v7 signal queue requires MODEL_VERSION=xgboost-v7" >&2
+    exit 1
+  fi
+  if [[ "${LOW_LATENCY_FEATURE_QUEUE_ENABLED}" != "true" ]]; then
+    echo "[champion-live] event-driven v7 signal queue requires LOW_LATENCY_FEATURE_QUEUE_ENABLED=true" >&2
+    exit 1
+  fi
+  if [[ -z "${SIGNAL_JSONL_OUTPUT_PATH}" ]]; then
+    echo "[champion-live] event-driven v7 signal queue requires SIGNAL_JSONL_OUTPUT_PATH as the base queue" >&2
+    exit 1
+  fi
+fi
 if ! [[ "${LOW_LATENCY_FEATURE_MAX_RECORDS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "[champion-live] LOW_LATENCY_FEATURE_MAX_RECORDS must be a positive integer" >&2
+  exit 1
+fi
+if [[ -n "${LOW_LATENCY_FEATURE_BUCKET_SECONDS}" && ! "${LOW_LATENCY_FEATURE_BUCKET_SECONDS}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "[champion-live] LOW_LATENCY_FEATURE_BUCKET_SECONDS must be a positive number" >&2
+  exit 1
+fi
+if ! [[ "${EVENT_DRIVEN_V7_SIGNAL_MAX_RECORDS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[champion-live] EVENT_DRIVEN_V7_SIGNAL_MAX_RECORDS must be a positive integer" >&2
   exit 1
 fi
 if ! [[ "${LIVE_MIN_FREE_BYTES}" =~ ^[0-9]+$ ]]; then
@@ -525,9 +603,8 @@ run_cycle() {
     feature_args+=(--canonical-symbol-like "${SCORING_CANONICAL_SYMBOL_LIKE}")
     prediction_args+=(--canonical-symbol-like "${SCORING_CANONICAL_SYMBOL_LIKE}")
   fi
-  if [[ -n "${SIGNAL_JSONL_OUTPUT_PATH}" ]]; then
+  if [[ -n "${SIGNAL_JSONL_OUTPUT_PATH}" || -n "${SIGNAL_KAFKA_TOPIC}" ]]; then
     prediction_args+=(
-      --signal-jsonl-output-path "${SIGNAL_JSONL_OUTPUT_PATH}"
       --signal-jsonl-market-families "${SIGNAL_JSONL_MARKET_FAMILIES}"
       --signal-jsonl-outcome-side "${SIGNAL_JSONL_OUTCOME_SIDE}"
       --v6-settlement-threshold "${V6_SETTLEMENT_THRESHOLD}"
@@ -536,6 +613,16 @@ run_cycle() {
       --v6-round-trip-cost "${V6_ROUND_TRIP_COST}"
       --v6-ev-margin "${V6_EV_MARGIN}"
     )
+    if [[ -n "${SIGNAL_JSONL_OUTPUT_PATH}" ]]; then
+      prediction_args+=(--signal-jsonl-output-path "${SIGNAL_JSONL_OUTPUT_PATH}")
+    fi
+    if [[ -n "${SIGNAL_KAFKA_TOPIC}" ]]; then
+      prediction_args+=(
+        --signal-kafka-bootstrap-servers "${SIGNAL_KAFKA_BOOTSTRAP_SERVERS}"
+        --signal-kafka-topic "${SIGNAL_KAFKA_TOPIC}"
+        --signal-kafka-flush-timeout-seconds "${SIGNAL_KAFKA_FLUSH_TIMEOUT_SECONDS}"
+      )
+    fi
     if [[ -n "${SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS}" ]]; then
       prediction_args+=(
         --signal-jsonl-max-event-age-seconds "${SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS}"
@@ -548,17 +635,43 @@ run_cycle() {
   echo "live_data_root=${LIVE_ROOT}"
 
   if [[ "${LOW_LATENCY_FEATURE_QUEUE_ENABLED}" == "true" ]]; then
-    run_step "features-15m-v1-low-latency-queue" \
-      "${PYTHON_BIN}" -m bigan.ingestion.__main__ features-15m-v1-low-latency-queue \
-      --queue-path "${LOW_LATENCY_RAW_QUEUE_PATH}" \
-      --cursor-path "${LOW_LATENCY_FEATURE_CURSOR_PATH}" \
-      --state-path "${LOW_LATENCY_FEATURE_STATE_PATH}" \
-      --canonical-symbol-prefix "${LOW_LATENCY_RAW_QUEUE_CANONICAL_SYMBOL_PREFIX}" \
-      --max-records "${LOW_LATENCY_FEATURE_MAX_RECORDS}" || return "$?"
+    if [[ -n "${LOW_LATENCY_FEATURE_BUCKET_SECONDS}" ]]; then
+      run_step "features-15m-v1-low-latency-queue" \
+        "${PYTHON_BIN}" -m bigan.ingestion.__main__ features-15m-v1-low-latency-queue \
+        --queue-path "${LOW_LATENCY_RAW_QUEUE_PATH}" \
+        --cursor-path "${LOW_LATENCY_FEATURE_CURSOR_PATH}" \
+        --state-path "${LOW_LATENCY_FEATURE_STATE_PATH}" \
+        --canonical-symbol-prefix "${LOW_LATENCY_RAW_QUEUE_CANONICAL_SYMBOL_PREFIX}" \
+        --max-records "${LOW_LATENCY_FEATURE_MAX_RECORDS}" \
+        --bucket-seconds "${LOW_LATENCY_FEATURE_BUCKET_SECONDS}" || return "$?"
+    else
+      run_step "features-15m-v1-low-latency-queue" \
+        "${PYTHON_BIN}" -m bigan.ingestion.__main__ features-15m-v1-low-latency-queue \
+        --queue-path "${LOW_LATENCY_RAW_QUEUE_PATH}" \
+        --cursor-path "${LOW_LATENCY_FEATURE_CURSOR_PATH}" \
+        --state-path "${LOW_LATENCY_FEATURE_STATE_PATH}" \
+        --canonical-symbol-prefix "${LOW_LATENCY_RAW_QUEUE_CANONICAL_SYMBOL_PREFIX}" \
+        --max-records "${LOW_LATENCY_FEATURE_MAX_RECORDS}" || return "$?"
+    fi
 
     run_step "predictions-v1" \
       "${PYTHON_BIN}" -m bigan.ingestion.__main__ predictions-v1 \
       "${prediction_args[@]}" || return "$?"
+
+    if [[ "${EVENT_DRIVEN_V7_SIGNAL_QUEUE_ENABLED}" == "true" ]]; then
+      run_step "signals-v7-event-driven-reprice" \
+        "${PYTHON_BIN}" -m bigan.ingestion.__main__ signals-v7-event-driven-reprice \
+        --output-path "${EVENT_DRIVEN_V7_SIGNAL_JSONL_OUTPUT_PATH}" \
+        --base-signal-jsonl-path "${SIGNAL_JSONL_OUTPUT_PATH}" \
+        --raw-queue-path "${LOW_LATENCY_RAW_QUEUE_PATH}" \
+        --cursor-path "${EVENT_DRIVEN_V7_SIGNAL_CURSOR_PATH}" \
+        --bucket-seconds "${EVENT_DRIVEN_V7_SIGNAL_BUCKET_SECONDS}" \
+        --market-families "${SIGNAL_JSONL_MARKET_FAMILIES}" \
+        --max-records "${EVENT_DRIVEN_V7_SIGNAL_MAX_RECORDS}" \
+        --max-base-signal-age-seconds "${EVENT_DRIVEN_V7_BASE_SIGNAL_MAX_AGE_SECONDS}" \
+        --max-event-age-seconds "${EVENT_DRIVEN_V7_SIGNAL_MAX_EVENT_AGE_SECONDS}" \
+        --start "${EVENT_DRIVEN_V7_SIGNAL_START}" || return "$?"
+    fi
   else
     run_step_capture "etl-batch" "${etl_output}" \
       "${PYTHON_BIN}" -m bigan.ingestion.__main__ etl-batch \
@@ -651,14 +764,28 @@ if [[ -n "${SCORING_CANONICAL_SYMBOL_LIKE}" ]]; then
   echo "[champion-live] scoring canonical symbol like=${SCORING_CANONICAL_SYMBOL_LIKE}"
 fi
 echo "[champion-live] signal jsonl output=${SIGNAL_JSONL_OUTPUT_PATH:-<none>}"
-if [[ -n "${SIGNAL_JSONL_OUTPUT_PATH}" ]]; then
-  echo "[champion-live] signal jsonl families=${SIGNAL_JSONL_MARKET_FAMILIES} outcome_side=${SIGNAL_JSONL_OUTCOME_SIDE}"
-  echo "[champion-live] signal jsonl max event age seconds=${SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS:-<none>}"
+if [[ -n "${SIGNAL_JSONL_OUTPUT_PATH}" || -n "${SIGNAL_KAFKA_TOPIC}" ]]; then
+  echo "[champion-live] signal families=${SIGNAL_JSONL_MARKET_FAMILIES} outcome_side=${SIGNAL_JSONL_OUTCOME_SIDE}"
+  echo "[champion-live] signal max event age seconds=${SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS:-<none>}"
+fi
+if [[ -n "${SIGNAL_KAFKA_TOPIC}" ]]; then
+  echo "[champion-live] signal kafka topic=${SIGNAL_KAFKA_TOPIC} bootstrap=${SIGNAL_KAFKA_BOOTSTRAP_SERVERS}"
+  echo "[champion-live] signal kafka flush timeout seconds=${SIGNAL_KAFKA_FLUSH_TIMEOUT_SECONDS}"
+fi
+echo "[champion-live] event-driven v7 signal queue enabled=${EVENT_DRIVEN_V7_SIGNAL_QUEUE_ENABLED}"
+if [[ "${EVENT_DRIVEN_V7_SIGNAL_QUEUE_ENABLED}" == "true" ]]; then
+  echo "[champion-live] event-driven v7 signal output=${EVENT_DRIVEN_V7_SIGNAL_JSONL_OUTPUT_PATH}"
+  echo "[champion-live] event-driven v7 signal cursor=${EVENT_DRIVEN_V7_SIGNAL_CURSOR_PATH}"
+  echo "[champion-live] event-driven v7 signal bucket seconds=${EVENT_DRIVEN_V7_SIGNAL_BUCKET_SECONDS}"
+  echo "[champion-live] event-driven v7 signal start=${EVENT_DRIVEN_V7_SIGNAL_START}"
+  echo "[champion-live] event-driven v7 base max age seconds=${EVENT_DRIVEN_V7_BASE_SIGNAL_MAX_AGE_SECONDS}"
+  echo "[champion-live] event-driven v7 max event age seconds=${EVENT_DRIVEN_V7_SIGNAL_MAX_EVENT_AGE_SECONDS}"
 fi
 if [[ "${LOW_LATENCY_FEATURE_QUEUE_ENABLED}" == "true" ]]; then
   echo "[champion-live] low-latency raw queue=${LOW_LATENCY_RAW_QUEUE_PATH}"
   echo "[champion-live] low-latency feature cursor=${LOW_LATENCY_FEATURE_CURSOR_PATH}"
   echo "[champion-live] low-latency feature state=${LOW_LATENCY_FEATURE_STATE_PATH}"
+  echo "[champion-live] low-latency feature bucket seconds=${LOW_LATENCY_FEATURE_BUCKET_SECONDS:-60}"
 fi
 echo "[champion-live] live min free bytes=${LIVE_MIN_FREE_BYTES}"
 check_live_root_free_space

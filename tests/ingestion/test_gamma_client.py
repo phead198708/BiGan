@@ -313,6 +313,49 @@ def test_list_active_markets_directly_fetches_near_expiry_slug() -> None:
     assert asyncio.run(go()) == ["btc-updown-15m-1779461100"]
 
 
+def test_list_active_markets_keeps_direct_slug_when_pagination_fails() -> None:
+    now_ms = 1_779_461_234_000
+    session = _FakeGammaSession(
+        pages={
+            0: [
+                _gamma_record(
+                    slug=f"other-market-{idx}",
+                    condition_id=f"0xother{idx}",
+                    up=f"up-{idx}",
+                    down=f"down-{idx}",
+                )
+                for idx in range(2)
+            ],
+            2: TimeoutError("gamma page failed"),
+        },
+        slug_records={
+            "btc-updown-15m-1779461100": [
+                _gamma_record(
+                    slug="btc-updown-15m-1779461100",
+                    condition_id="0xcurrent",
+                    up="111",
+                    down="222",
+                    end_date="2026-05-22T15:00:00Z",
+                )
+            ]
+        },
+    )
+
+    async def go() -> list[str]:
+        client = GammaClient("https://gamma.test", "btc-updown-15m-")
+        client._session = session  # type: ignore[attr-defined]  # test fake
+        markets = await client.list_active_markets(
+            page_limit=2,
+            max_pages=2,
+            direct_slug_lookback_intervals=1,
+            direct_slug_lookahead_intervals=2,
+            now_ms=now_ms,
+        )
+        return [market.slug for market in markets]
+
+    assert asyncio.run(go()) == ["btc-updown-15m-1779461100"]
+
+
 def test_list_active_markets_drops_round_at_expiry_and_keeps_next_round() -> None:
     now_ms = 1_779_462_000_000
     session = _FakeGammaSession(
@@ -472,7 +515,7 @@ def test_gamma_poll_failed_log_message_includes_plain_diagnostics(caplog) -> Non
 class _FakeGammaSession:
     def __init__(
         self,
-        pages: dict[int, list[dict[str, Any]]],
+        pages: dict[int, list[dict[str, Any]] | Exception],
         slug_records: dict[str, list[dict[str, Any]]] | None = None,
     ) -> None:
         self._pages = pages
@@ -487,7 +530,7 @@ class _FakeGammaSession:
 
 
 class _FakeGammaResponse:
-    def __init__(self, records: list[dict[str, Any]]) -> None:
+    def __init__(self, records: list[dict[str, Any]] | Exception) -> None:
         self._records = records
 
     async def __aenter__(self) -> _FakeGammaResponse:
@@ -497,9 +540,13 @@ class _FakeGammaResponse:
         return None
 
     def raise_for_status(self) -> None:
+        if isinstance(self._records, Exception):
+            raise self._records
         return None
 
     async def read(self) -> bytes:
+        if isinstance(self._records, Exception):
+            raise self._records
         return json.dumps(self._records).encode("utf-8")
 
 

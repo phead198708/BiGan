@@ -13,6 +13,8 @@ from bigan.execution.phase4_policy import (
     phase4_summary_status,
     settlement_cost_edge_skip_reason,
     soft_force_exit_deferred,
+    v7_raw_side_agreement_skip_reason,
+    v7_raw_side_required_min_probability,
 )
 
 
@@ -120,6 +122,103 @@ def test_settlement_cost_edge_blocks_confidence_peak_drop() -> None:
             policy=policy,
         )
         is None
+    )
+
+
+def test_v7_raw_side_agreement_blocks_opposed_selected_side() -> None:
+    policy = Phase4EntryPolicy(
+        v7_raw_side_agreement_enabled=True,
+        v7_raw_side_min_probability=0.50,
+        v7_raw_side_max_opposite_lead=0.03,
+    )
+
+    assert (
+        v7_raw_side_agreement_skip_reason(
+            selected_side="DOWN",
+            p_up=0.58,
+            p_down=0.42,
+            policy=policy,
+        )
+        == "v7_raw_side_probability_below_threshold"
+    )
+    assert (
+        v7_raw_side_agreement_skip_reason(
+            selected_side="DOWN",
+            p_up=0.52,
+            p_down=0.50,
+            policy=policy,
+        )
+        is None
+    )
+
+
+def test_v7_raw_side_agreement_can_block_large_opposite_lead() -> None:
+    policy = Phase4EntryPolicy(
+        v7_raw_side_agreement_enabled=True,
+        v7_raw_side_min_probability=0.45,
+        v7_raw_side_max_opposite_lead=0.03,
+    )
+
+    assert (
+        v7_raw_side_agreement_skip_reason(
+            selected_side="DOWN",
+            p_up=0.55,
+            p_down=0.45,
+            policy=policy,
+        )
+        == "v7_raw_side_opposite_lead_above_threshold"
+    )
+
+
+def test_v7_raw_side_agreement_can_require_positive_margin() -> None:
+    policy = Phase4EntryPolicy(
+        v7_raw_side_agreement_enabled=True,
+        v7_raw_side_min_margin=0.03,
+    )
+
+    assert (
+        v7_raw_side_agreement_skip_reason(
+            selected_side="UP",
+            p_up=0.511,
+            p_down=0.489,
+            policy=policy,
+        )
+        == "v7_raw_side_margin_below_threshold"
+    )
+    assert (
+        v7_raw_side_agreement_skip_reason(
+            selected_side="UP",
+            p_up=0.516,
+            p_down=0.484,
+            policy=policy,
+        )
+        is None
+    )
+
+
+def test_v7_raw_side_price_conviction_tightens_mid_price_entries() -> None:
+    policy = Phase4EntryPolicy(
+        v7_raw_side_agreement_enabled=True,
+        v7_raw_side_min_probability=0.50,
+        v7_raw_side_price_conviction_enabled=True,
+        v7_raw_side_price_conviction_min_price=0.40,
+        v7_raw_side_price_conviction_center_price=0.50,
+        v7_raw_side_price_conviction_max_price=0.70,
+        v7_raw_side_price_conviction_center_min_probability=0.57,
+    )
+
+    assert v7_raw_side_required_min_probability(entry_price=0.50, policy=policy) == pytest.approx(0.57)
+    assert v7_raw_side_required_min_probability(entry_price=0.40, policy=policy) == pytest.approx(0.50)
+    assert v7_raw_side_required_min_probability(entry_price=0.70, policy=policy) == pytest.approx(0.50)
+    assert (
+        v7_raw_side_agreement_skip_reason(
+            selected_side="DOWN",
+            p_up=0.49,
+            p_down=0.51,
+            entry_price=0.50,
+            policy=policy,
+        )
+        == "v7_raw_side_probability_below_threshold"
     )
 
 

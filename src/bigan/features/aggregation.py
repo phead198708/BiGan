@@ -69,9 +69,12 @@ def aggregate_features_15m_v1(
     quality_config: FeatureQualityConfig = DEFAULT_QUALITY_CONFIG,
     since_ms: int | None = None,
     until_ms: int | None = None,
+    bucket_ms: int = BUCKET_MS,
 ) -> list[dict[str, Any]]:
     """Aggregate canonical raw rows into minute-grain v1 feature rows."""
 
+    if bucket_ms <= 0:
+        raise ValueError("bucket_ms must be positive")
     ingest_ts = int(time.time() * 1000) if ingest_ts is None else ingest_ts
     quote_groups = _group_rows(_normalise_quote_rows(top_of_book_rows))
     depth_groups = _group_depth_snapshots(orderbook_rows)
@@ -83,7 +86,7 @@ def aggregate_features_15m_v1(
         quotes = _Series(quote_groups.get(key, []))
         depth = _Series(depth_groups.get(key, []))
         trades = _Series(trade_groups.get(key, []))
-        feature_times = _feature_times(quotes.rows, depth.rows, trades.rows)
+        feature_times = _feature_times(quotes.rows, depth.rows, trades.rows, bucket_ms=bucket_ms)
         for feature_ts in feature_times:
             if not _feature_ts_in_window(feature_ts, since_ms=since_ms, until_ms=until_ms):
                 continue
@@ -364,16 +367,20 @@ def _group_depth_snapshots(
     return _group_rows(snapshots.values())
 
 
-def _feature_times(*groups: Iterable[dict[str, Any]]) -> list[int]:
+def _feature_times(*groups: Iterable[dict[str, Any]], bucket_ms: int = BUCKET_MS) -> list[int]:
     times = set()
     for rows in groups:
         for row in rows:
-            times.add(_ceil_minute(int(row["ts"])))
+            times.add(_ceil_bucket(int(row["ts"]), bucket_ms))
     return sorted(times)
 
 
 def _ceil_minute(ts: int) -> int:
-    return ((ts + BUCKET_MS - 1) // BUCKET_MS) * BUCKET_MS
+    return _ceil_bucket(ts, BUCKET_MS)
+
+
+def _ceil_bucket(ts: int, bucket_ms: int) -> int:
+    return ((ts + bucket_ms - 1) // bucket_ms) * bucket_ms
 
 
 def _latest_context(

@@ -217,10 +217,12 @@ class IncrementalBtc15mFeaturePath:
         ingest_ts: int | None = None,
         canonical_symbol_prefix: str = "BTC-15M:",
         quality_config: FeatureQualityConfig = DEFAULT_QUALITY_CONFIG,
+        bucket_ms: int | None = None,
     ) -> None:
         self._fixed_ingest_ts = None if ingest_ts is None else int(ingest_ts)
         self._canonical_symbol_prefix = canonical_symbol_prefix.upper()
         self._quality_config = quality_config
+        self._bucket_ms = bucket_ms
         self._top_of_book: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         self._orderbook: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         self._trades: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -317,6 +319,7 @@ class IncrementalBtc15mFeaturePath:
         ingest_ts: int | None = None,
         canonical_symbol_prefix: str = "BTC-15M:",
         quality_config: FeatureQualityConfig = DEFAULT_QUALITY_CONFIG,
+        bucket_ms: int | None = None,
     ) -> IncrementalBtc15mFeaturePath:
         """Restore an incremental path from ``to_state`` output."""
 
@@ -324,6 +327,7 @@ class IncrementalBtc15mFeaturePath:
             ingest_ts=ingest_ts,
             canonical_symbol_prefix=canonical_symbol_prefix,
             quality_config=quality_config,
+            bucket_ms=bucket_ms,
         )
         path._top_of_book = _group_state_rows(state.get("top_of_book_rows"))
         path._orderbook = _group_state_rows(state.get("orderbook_rows"))
@@ -350,12 +354,16 @@ class IncrementalBtc15mFeaturePath:
         }
 
     def _recompute_key(self, key: tuple[str, str]) -> list[dict[str, Any]]:
+        aggregate_kwargs: dict[str, Any] = {}
+        if self._bucket_ms is not None:
+            aggregate_kwargs["bucket_ms"] = self._bucket_ms
         rows = aggregate_features_15m_v1(
             top_of_book_rows=self._top_of_book.get(key, []),
             orderbook_rows=self._orderbook.get(key, []),
             trade_rows=self._trades.get(key, []),
             ingest_ts=self._ingest_ts(),
             quality_config=self._quality_config,
+            **aggregate_kwargs,
         )
         changed: list[dict[str, Any]] = []
         for row in rows:
@@ -388,9 +396,17 @@ def run_low_latency_feature_queue_batch(
     max_rows_per_partition: int = 50_000,
     ingest_ts: int | None = None,
     canonical_symbol_prefix: str = "BTC-15M:",
+    bucket_seconds: float | None = None,
 ) -> LowLatencyFeatureQueueReport:
     """Consume queued BTC-15M raw rows and append changed feature rows."""
 
+    bucket_ms = None
+    if bucket_seconds is not None:
+        if bucket_seconds <= 0:
+            raise ValueError("bucket_seconds must be positive")
+        bucket_ms = int(round(bucket_seconds * 1000))
+        if bucket_ms <= 0:
+            raise ValueError("bucket_seconds must be positive")
     cursor_file = None if cursor_path is None else Path(cursor_path)
     state_file = None if state_path is None else Path(state_path)
     emit_until_ms = int(time.time() * 1000) if ingest_ts is None else int(ingest_ts)
@@ -414,6 +430,7 @@ def run_low_latency_feature_queue_batch(
         state,
         ingest_ts=emit_until_ms,
         canonical_symbol_prefix=canonical_symbol_prefix,
+        bucket_ms=bucket_ms,
     )
     path.apply_queue_items(items)
     rows_to_write, emitted_signatures = _mature_feature_rows_to_write(

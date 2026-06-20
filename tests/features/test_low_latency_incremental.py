@@ -191,6 +191,20 @@ def test_incremental_btc15_features_update_when_late_raw_row_changes_prior_minut
     assert _sorted_feature_rows(path.latest_feature_rows()) == _sorted_feature_rows(batch_rows)
 
 
+def test_incremental_btc15_features_support_subminute_bucket() -> None:
+    t0 = _ts_at(2026, 5, 28, 1, 0)
+    path = IncrementalBtc15mFeaturePath(ingest_ts=t0 + 60_000, bucket_ms=5_000)
+
+    path.apply_table_row("raw_top_of_book", _tob(t0 + 5_000, 0.49, 0.51))
+    path.apply_table_row("raw_top_of_book", _tob(t0 + 10_000, 0.50, 0.52))
+
+    feature_ts_values = {row["feature_ts"] for row in path.latest_feature_rows()}
+
+    assert t0 + 5_000 in feature_ts_values
+    assert t0 + 10_000 in feature_ts_values
+    assert t0 + 60_000 not in feature_ts_values
+
+
 def test_low_latency_queue_batch_persists_cursor_state_and_writes_changed_rows(
     tmp_path: Path,
 ) -> None:
@@ -251,6 +265,29 @@ def test_low_latency_queue_batch_persists_cursor_state_and_writes_changed_rows(
     latest = max(feature_rows, key=lambda row: int(row["ingest_ts"]))
     assert latest["trade_count_1m"] == 1
     assert latest["trade_volume_1m"] == pytest.approx(3.0)
+
+
+def test_low_latency_queue_batch_writes_subminute_bucket_rows(tmp_path: Path) -> None:
+    t0 = _ts_at(2026, 5, 28, 1, 0)
+    warehouse = tmp_path / "warehouse"
+    queue = JsonlRawQueue(tmp_path / "raw-queue.jsonl")
+
+    queue.append("raw_top_of_book", _tob(t0 + 5_000, 0.49, 0.51))
+    report = run_low_latency_feature_queue_batch(
+        warehouse,
+        queue.path,
+        ingest_ts=t0 + 10_000,
+        bucket_seconds=5,
+    )
+
+    feature_rows = [
+        row
+        for file in warehouse_files(warehouse, "features_15m_v1")
+        for row in pq.ParquetFile(file).read().to_pylist()
+    ]
+
+    assert report.rows_generated == 1
+    assert {row["feature_ts"] for row in feature_rows} == {t0 + 5_000}
 
 
 def test_low_latency_queue_batch_resumes_from_persisted_file_offset(

@@ -3,11 +3,11 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'EOF'
-Train xgboost-v7 settlement-EV artifacts.
+Train xgboost-v7 convergence artifacts.
 
-v7 is settlement-only for now. It keeps a calibrated settlement probability
-head and adds executable EV/residual reporting for issue #99. Volatility signals
-are intentionally out of scope for the v7 promotion decision.
+v7 keeps settlement probabilities as diagnostics and trains side-specific
+convergence heads for issue #99. Volatility signals are intentionally out of
+scope for the v7 promotion decision.
 
 Environment overrides:
   PYTHON_BIN    Default: .venv/bin/python
@@ -50,7 +50,7 @@ echo "[xgboost-v7-training] repo=${REPO_ROOT}"
 echo "[xgboost-v7-training] dataset=${DATASET_DIR}"
 echo "[xgboost-v7-training] output=${OUTPUT_DIR}"
 echo "[xgboost-v7-training] model_version=xgboost-v7"
-echo "[xgboost-v7-training] metric_of_record=executable_one_way_settlement_pnl"
+echo "[xgboost-v7-training] metric_of_record=best_exit_path_pnl"
 echo "[xgboost-v7-training] volatility=disabled"
 
 if [[ "${PLAN_ONLY}" == "true" ]]; then

@@ -57,6 +57,51 @@ def test_dashboard_snapshot_tracks_current_round_and_settled_pnl(tmp_path: Path)
     assert "PnL=+0.100" in rendered
 
 
+def test_dashboard_renders_v7_pm_monitoring_from_phase4_summary(tmp_path: Path) -> None:
+    db_path = tmp_path / "mlops.duckdb"
+    summary_path = tmp_path / "phase4-summary.json"
+    conn = connect_mlops_db(db_path)
+    initialize_mlops_db(conn)
+    _record_event(conn, event_id="evt-buy", ts=1_000_000, prob=0.80, market=0.40, round_id="round-a")
+    conn.close()
+    summary_path.write_text(
+        json.dumps(
+            {
+                "v7_pm_monitoring": {
+                    "divergence_reduce_hold_edge": {
+                        "count": 3,
+                        "p50": 0.12,
+                        "p90": 0.24,
+                    },
+                    "take_profit_candidates": {
+                        "evaluations": 4,
+                        "exits": 1,
+                        "unexecuted": 3,
+                        "reason_counts": {
+                            "convergence_force_exit_before_expiry": 4,
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = read_dashboard_snapshot(
+        db_path,
+        model_version="xgboost-v3",
+        edge_threshold=0.30,
+        now_ms=1_100_000,
+        phase4_summary_path=summary_path,
+    )
+    rendered = render_dashboard(snapshot)
+
+    assert snapshot.v7_pm_monitoring is not None
+    assert "V7 PM MONITORING" in rendered
+    assert "count=3 p50=0.120 p90=0.240" in rendered
+    assert "unexecuted=3" in rendered
+
+
 def test_dashboard_snapshot_retries_transient_read_only_db_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

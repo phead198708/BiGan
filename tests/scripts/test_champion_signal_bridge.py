@@ -483,13 +483,16 @@ def test_executor_reads_executor_ready_v7_pnl_jsonl_payload(tmp_path: Path) -> N
         "p_down": 0.18,
         "p_neutral": 0.06,
         "settlement_residual": 0.12,
+        "model_probability": 0.72,
+        "polymarket_price": 0.70,
+        "mispricing_edge": 0.02,
         "token_expected_win_probability": 0.72,
-        "p_up_residual_adjusted": 0.72,
-        "p_down_residual_adjusted": 0.28,
+        "p_up_residual_adjusted": None,
+        "p_down_residual_adjusted": None,
         "expected_edge_up": 0.03,
         "expected_edge_down": -0.12,
-        "residual_expected_edge_up": 0.02,
-        "residual_expected_edge_down": -0.09,
+        "residual_expected_edge_up": None,
+        "residual_expected_edge_down": None,
         "selected_side": "UP",
         "selected_expected_edge": 0.02,
         "entry_worst_price": 0.73,
@@ -505,10 +508,13 @@ def test_executor_reads_executor_ready_v7_pnl_jsonl_payload(tmp_path: Path) -> N
         "p_up": 0.84,
         "p_down": 0.10,
         "expected_edge_up": 0.12,
+        "model_probability": 0.83,
+        "polymarket_price": 0.72,
+        "mispricing_edge": 0.11,
         "token_expected_win_probability": 0.83,
-        "p_up_residual_adjusted": 0.83,
-        "p_down_residual_adjusted": 0.17,
-        "residual_expected_edge_up": 0.11,
+        "p_up_residual_adjusted": None,
+        "p_down_residual_adjusted": None,
+        "residual_expected_edge_up": None,
         "selected_expected_edge": 0.11,
         "entry_worst_price": 0.72,
         "should_enter_settlement": True,
@@ -531,15 +537,17 @@ def test_executor_reads_executor_ready_v7_pnl_jsonl_payload(tmp_path: Path) -> N
     assert events[0].event_id == "pred-v7-high"
     assert events[0].selected_side == "UP"
     assert events[0].token_probability == pytest.approx(0.83)
+    assert events[0].model_probability == pytest.approx(0.83)
+    assert events[0].polymarket_price == pytest.approx(0.72)
+    assert events[0].mispricing_edge == pytest.approx(0.11)
     assert events[0].p_up == pytest.approx(0.84)
-    assert events[0].p_up_residual_adjusted == pytest.approx(0.83)
     assert events[0].selected_expected_edge == pytest.approx(0.11)
     assert events[0].entry_worst_price == pytest.approx(0.72)
     assert events[0].should_enter_settlement is True
     assert events[0].settlement_residual == pytest.approx(0.12)
 
 
-def test_v7_pnl_jsonl_selection_uses_residual_edge_over_settlement_side(
+def test_v7_pnl_jsonl_selection_uses_model_price_mispricing(
     tmp_path: Path,
 ) -> None:
     queue = tmp_path / "signals.jsonl"
@@ -565,12 +573,15 @@ def test_v7_pnl_jsonl_selection_uses_residual_edge_over_settlement_side(
                 "p_down": 0.14,
                 "p_neutral": 0.0,
                 "settlement_residual": 0.20,
-                "p_up_residual_adjusted": 0.35,
-                "p_down_residual_adjusted": 0.65,
-                "residual_expected_edge_up": -0.22,
-                "residual_expected_edge_down": 0.22,
+                "model_probability": 0.65,
+                "polymarket_price": 0.43,
+                "mispricing_edge": 0.22,
+                "p_up_residual_adjusted": None,
+                "p_down_residual_adjusted": None,
+                "residual_expected_edge_up": None,
+                "residual_expected_edge_down": None,
                 "selected_side": "UP",
-                "selected_expected_edge": -0.22,
+                "selected_expected_edge": 0.22,
             }
         )
         + "\n",
@@ -589,6 +600,9 @@ def test_v7_pnl_jsonl_selection_uses_residual_edge_over_settlement_side(
     assert len(events) == 1
     assert events[0].outcome_side == "DOWN"
     assert events[0].token_probability == pytest.approx(0.65)
+    assert events[0].model_probability == pytest.approx(0.65)
+    assert events[0].polymarket_price == pytest.approx(0.43)
+    assert events[0].mispricing_edge == pytest.approx(0.22)
     assert events[0].selected_expected_edge == pytest.approx(0.22)
 
 
@@ -1131,7 +1145,10 @@ def test_executor_expired_exit_without_orderbook_marks_pending_settlement(
     )
 
     row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
-    assert result == executor.SellResult(status="pending_settlement")
+    assert result == executor.SellResult(
+        status="pending_settlement",
+        reason="expired_orderbook_unavailable",
+    )
     assert row["event"] == "exit_pending_settlement"
     assert row["reason"] == "expired_orderbook_unavailable"
     assert row["settlement_reconciliation_required"] is True
@@ -1160,7 +1177,10 @@ def test_executor_expired_exit_without_bid_marks_pending_settlement(
     )
 
     row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
-    assert result == executor.SellResult(status="pending_settlement")
+    assert result == executor.SellResult(
+        status="pending_settlement",
+        reason="expired_missing_bid",
+    )
     assert row["event"] == "exit_pending_settlement"
     assert row["reason"] == "expired_missing_bid"
     assert row["settlement_reconciliation_required"] is True
@@ -1644,6 +1664,296 @@ def test_settlement_sleeve_holds_until_redeem_before_expiry(
     assert row["position"]["sleeve"] == "settlement"
 
 
+def test_v7_settlement_tick_force_exit_without_new_signal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    now_ms = 1_750_000
+    log_path = tmp_path / "phase4.jsonl"
+    lifecycle = executor.RoundLifecycleState()
+    position = _position(round_slug="btc-updown-15m-1000", sleeve="settlement")
+    position.paper = True
+    _store_open_position(lifecycle, position)
+    manager = _PositionManager()
+    config = executor.V7SettlementPositionConfig(
+        enabled=True,
+        paper_execute=True,
+        convergence_take_profit_enabled=True,
+        take_profit_force_exit_seconds=180.0,
+        take_profit_hysteresis_bars=2,
+    )
+
+    first = executor._tick_open_positions(
+        client=_SellClient(),
+        position_manager=manager,
+        lifecycle=lifecycle,
+        log_path=log_path,
+        now_ms=now_ms,
+        soft_force_exit_before_expiry_seconds=240.0,
+        hard_force_exit_before_expiry_seconds=120.0,
+        soft_force_exit_min_bid=0.15,
+        exit_retry_seconds=10.0,
+        max_exit_attempts_per_position=6,
+        sell_slippage=0.01,
+        v7_position_config=config,
+    )
+    second = executor._tick_open_positions(
+        client=_SellClient(),
+        position_manager=manager,
+        lifecycle=lifecycle,
+        log_path=log_path,
+        now_ms=now_ms + 5_000,
+        soft_force_exit_before_expiry_seconds=240.0,
+        hard_force_exit_before_expiry_seconds=120.0,
+        soft_force_exit_min_bid=0.15,
+        exit_retry_seconds=10.0,
+        max_exit_attempts_per_position=6,
+        sell_slippage=0.01,
+        v7_position_config=config,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    evaluations = [
+        row for row in rows if row["event"] == "v7_settlement_position_management_evaluated"
+    ]
+    assert first == (0, 0, 0, 0.0)
+    assert second == (1, 0, 0, 0.10)
+    assert lifecycle.open_positions == {}
+    assert evaluations[0]["evaluation"]["reason"] == (
+        "convergence_force_exit_before_expiry_hysteresis_wait"
+    )
+    assert evaluations[-1]["evaluation"]["reason"] == "convergence_force_exit_before_expiry"
+    assert evaluations[-1]["evaluation"]["poll_loop"] is True
+    assert manager.closed == [("phase4-round-1-UP", 0.59)]
+
+
+def test_v7_take_profit_price_convergence_candidate() -> None:
+    candidate, reason = executor._v7_take_profit_exit_candidate(
+        config=executor.V7SettlementPositionConfig(
+            convergence_take_profit_enabled=True,
+            take_profit_residual_ratio=0.40,
+            take_profit_price_convergence_move=0.10,
+            take_profit_price_convergence_hold_edge_ratio=0.50,
+        ),
+        side="DOWN",
+        hold_edge=0.14,
+        hold_bid=0.60,
+        avg_price=0.50,
+        convergence={
+            "available": True,
+            "entry_residual": 0.30,
+            "price_converged": True,
+            "price_move_toward_model": 0.12,
+            "residual_abs_ratio": 0.60,
+            "model_degraded": False,
+        },
+        seconds_to_expiry=600.0,
+    )
+
+    assert candidate is True
+    assert reason == "convergence_price_move_take_profit"
+
+
+def test_v7_pm_monitoring_summary_tracks_hold_edge_and_take_profit(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+    rows = [
+        {
+            "event": "v7_settlement_position_management_evaluated",
+            "evaluation": {
+                "action": "REDUCE",
+                "reason": "residual_divergence_reduce",
+                "hold_edge": 0.12,
+                "take_profit_count": 0,
+            },
+        },
+        {
+            "event": "v7_settlement_position_management_evaluated",
+            "evaluation": {
+                "action": "HOLD",
+                "reason": "convergence_force_exit_before_expiry_hysteresis_wait",
+                "hold_edge": 0.04,
+                "take_profit_count": 1,
+                "take_profit_reason": "convergence_force_exit_before_expiry",
+            },
+        },
+        {
+            "event": "v7_settlement_position_management_evaluated",
+            "evaluation": {
+                "action": "EXIT",
+                "reason": "convergence_force_exit_before_expiry",
+                "hold_edge": 0.03,
+                "take_profit_count": 2,
+                "take_profit_reason": "convergence_force_exit_before_expiry",
+            },
+        },
+    ]
+    log_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    summary = executor._phase4_v7_pm_monitoring_summary(log_path)
+
+    assert summary["divergence_reduce_hold_edge"]["count"] == 1
+    assert summary["divergence_reduce_hold_edge"]["mean"] == pytest.approx(0.12)
+    assert summary["take_profit_candidates"]["evaluations"] == 2
+    assert summary["take_profit_candidates"]["exits"] == 1
+    assert summary["take_profit_candidates"]["unexecuted"] == 1
+    assert summary["take_profit_candidates"]["reason_counts"] == {
+        "convergence_force_exit_before_expiry": 2
+    }
+
+
+def test_phase4_pnl_reconciliation_separates_partial_reduces_from_exit_only(
+    tmp_path: Path,
+) -> None:
+    manager = executor.PositionManager(tmp_path / "positions.duckdb")
+    manager.open_position(
+        "paper-1",
+        "BTC-15M:btc-updown-15m-1781422200:UP",
+        "UP",
+        0.50,
+        2.0,
+        "order-1",
+    )
+    manager.close_position("paper-1", 0.60)
+    manager.open_position(
+        "paper-2",
+        "BTC-15M:btc-updown-15m-1781423100:UP",
+        "UP",
+        0.40,
+        1.0,
+        "order-2",
+    )
+    manager.settle_position("paper-2", "UP")
+    log_path = tmp_path / "phase4.jsonl"
+    rows = [
+        {
+            "event": "paper_v7_settlement_position_reduced",
+            "reason": "adverse_confidence_decay_reduce",
+            "realized_pnl_delta": -0.20,
+        },
+        {
+            "event": "paper_exit_filled",
+            "reason": "profit_protect_take_profit",
+            "realized_pnl": 0.20,
+        },
+        {
+            "event": "paper_settlement_resolved",
+            "reason": "expired_position_monitor",
+            "realized_pnl": 0.60,
+        },
+    ]
+    log_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    summary = executor._phase4_pnl_reconciliation_summary(
+        log_path,
+        position_manager=manager,
+        event_ids={"paper-1", "paper-2"},
+        runtime_realized_pnl=0.60,
+        paper=True,
+    )
+
+    assert summary["status"] == "paper_event_incremental_reconciled_exit_only_differs"
+    assert summary["metric_of_record"] == "event_incremental_pnl_usdc"
+    assert summary["event_incremental_pnl_usdc"] == pytest.approx(0.60)
+    assert summary["exit_only_pnl_usdc"] == pytest.approx(0.80)
+    assert summary["partial_reduce_pnl_usdc"] == pytest.approx(-0.20)
+    assert summary["event_vs_exit_only_delta_usdc"] == pytest.approx(-0.20)
+    assert summary["exit_only_excludes_partial_reduces"] is True
+    assert summary["account_cashflow_reconciliation_required"] is False
+    assert summary["event_bucket_counts"]["paper_v7_settlement_position_reduced"] == 1
+    assert summary["event_bucket_pnl_usdc"]["paper_exit_filled"] == pytest.approx(0.20)
+
+
+def test_signal_jsonl_watchdog_logs_stale_once_then_recovery(tmp_path: Path) -> None:
+    queue = tmp_path / "signals.jsonl"
+    queue.write_text("{}\n", encoding="utf-8")
+    log_path = tmp_path / "phase4.jsonl"
+    mtime_ms = int(queue.stat().st_mtime_ns / 1_000_000)
+    state = executor.SignalJsonlWatchdogState(path=queue, stale_warn_seconds=10.0)
+
+    executor._check_signal_jsonl_watchdog(
+        state,
+        log_path=log_path,
+        now_ms=mtime_ms + 11_000,
+        cursor_line_number=2,
+        open_positions=1,
+    )
+    executor._check_signal_jsonl_watchdog(
+        state,
+        log_path=log_path,
+        now_ms=mtime_ms + 12_000,
+        cursor_line_number=2,
+        open_positions=1,
+    )
+    queue.write_text("{}\n{}\n", encoding="utf-8")
+    fresh_mtime_ms = int(queue.stat().st_mtime_ns / 1_000_000)
+    executor._check_signal_jsonl_watchdog(
+        state,
+        log_path=log_path,
+        now_ms=fresh_mtime_ms + 1_000,
+        cursor_line_number=3,
+        open_positions=0,
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert [row["event"] for row in rows] == ["signal_jsonl_stale", "signal_jsonl_recovered"]
+    assert rows[0]["reason"] == "signal_jsonl_mtime_stale"
+    assert rows[0]["cursor_line_number"] == 2
+    assert rows[1]["fresh"] is True
+    assert state.stale_events == 1
+    assert state.recovered_events == 1
+    assert state.summary()["stale_active"] is False
+
+
+def test_no_new_observed_round_watchdog_logs_stale_once_then_recovery(
+    tmp_path: Path,
+) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+    state = executor.NoNewObservedRoundWatchdogState(
+        warn_seconds=10.0,
+        last_observed_round_at=1_000,
+    )
+
+    executor._check_no_new_observed_round_watchdog(
+        state,
+        log_path=log_path,
+        now_ms=12_000,
+        observed_round_count=0,
+        open_positions=0,
+        signal_source_name="kafka",
+    )
+    executor._check_no_new_observed_round_watchdog(
+        state,
+        log_path=log_path,
+        now_ms=13_000,
+        observed_round_count=0,
+        open_positions=0,
+        signal_source_name="kafka",
+    )
+    executor._record_no_new_observed_round_watchdog_round_seen(
+        state,
+        log_path=log_path,
+        now_ms=14_000,
+        round_slug="btc-updown-15m-1779774300",
+        observed_round_count=1,
+        open_positions=0,
+        signal_source_name="kafka",
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert [row["event"] for row in rows] == [
+        "no_new_observed_round_stale",
+        "no_new_observed_round_recovered",
+    ]
+    assert rows[0]["reason"] == "no_new_observed_round"
+    assert rows[0]["signal_source"] == "kafka"
+    assert rows[0]["observed_round_count"] == 0
+    assert rows[1]["last_observed_round_slug"] == "btc-updown-15m-1779774300"
+    assert state.stale_events == 1
+    assert state.recovered_events == 1
+    assert state.summary()["stale_active"] is False
+
+
 def test_round_lifecycle_only_confirmed_fill_locks_round() -> None:
     state = executor.RoundLifecycleState()
     signal = _signal()
@@ -1709,6 +2019,92 @@ def test_round_lifecycle_enforces_settlement_side_cap_after_confirmed_fill() -> 
             max_filled_per_side_per_round=1,
         )
         is None
+    )
+
+
+def test_v7_settlement_reentry_after_exit_allows_same_round_entry() -> None:
+    state = executor.RoundLifecycleState()
+    signal = _signal(side="DOWN")
+    position = _position(sleeve="settlement")
+    position.side = "DOWN"
+
+    state.mark_entry_result(signal, position)
+
+    assert (
+        executor._can_attempt_settlement_entry(
+            state,
+            round_slug=signal.round_slug,
+            settlement_position=position,
+            entry_gate_mode="v7-pnl",
+            allow_reentry_after_exit=True,
+        )
+        is False
+    )
+
+    state.mark_position_closed(signal.round_slug, "settlement")
+
+    assert (
+        executor._can_attempt_settlement_entry(
+            state,
+            round_slug=signal.round_slug,
+            settlement_position=None,
+            entry_gate_mode="v7-pnl",
+            allow_reentry_after_exit=True,
+        )
+        is True
+    )
+    assert (
+        executor._settlement_side_cap_skip_reason_for_entry(
+            state,
+            round_slug=signal.round_slug,
+            side="DOWN",
+            max_filled_per_side_per_round=1,
+            entry_gate_mode="v7-pnl",
+            allow_reentry_after_exit=True,
+        )
+        is None
+    )
+
+
+def test_settlement_reentry_after_exit_is_v7_opt_in_only() -> None:
+    state = executor.RoundLifecycleState()
+    signal = _signal(side="DOWN")
+    position = _position(sleeve="settlement")
+    position.side = "DOWN"
+
+    state.mark_entry_result(signal, position)
+    state.mark_position_closed(signal.round_slug, "settlement")
+
+    assert (
+        executor._can_attempt_settlement_entry(
+            state,
+            round_slug=signal.round_slug,
+            settlement_position=None,
+            entry_gate_mode="v7-pnl",
+            allow_reentry_after_exit=False,
+        )
+        is False
+    )
+    assert (
+        executor._can_attempt_settlement_entry(
+            state,
+            round_slug=signal.round_slug,
+            settlement_position=None,
+            entry_gate_mode="v6-joint",
+            allow_reentry_after_exit=True,
+        )
+        is False
+    )
+    assert (
+        executor._settlement_side_cap_skip_reason_for_entry(
+            state,
+            round_slug=signal.round_slug,
+            side="DOWN",
+            max_filled_per_side_per_round=1,
+            entry_gate_mode="v6-joint",
+            allow_reentry_after_exit=True,
+        )
+        == "settlement_side_cap"
     )
 
 
@@ -2170,6 +2566,50 @@ def test_v7_pnl_entry_gate_uses_fresh_orderbook_edge(tmp_path: Path) -> None:
     assert skipped["settlement_price_gate_mode"] == "v7_pnl_edge_only"
 
 
+def test_v7_pnl_entry_gate_blocks_below_min_entry_price(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase4.jsonl"
+
+    position = executor._try_entry(
+        client=_CheapAskClient(),
+        position_manager=_OpenPositionManager(),
+        signal=_signal(
+            edge=0.60,
+            token_probability=0.90,
+            p_up=0.90,
+            p_down=0.08,
+            p_neutral=0.02,
+            selected_side="UP",
+            selected_expected_edge=0.60,
+            entry_worst_price=0.25,
+            should_enter_settlement=True,
+        ),
+        log_path=log_path,
+        max_position_size_usdc=1.0,
+        entry_policy=executor.Phase4EntryPolicy(
+            min_entry_price=0.30,
+            settlement_edge_threshold=0.04,
+            settlement_min_confidence=0.75,
+        ),
+        seconds_to_expiry=600.0,
+        buy_slippage=0.02,
+        monitoring_db_path=str(tmp_path / "catalog.duckdb"),
+        sleeve="settlement",
+        paper=True,
+        entry_gate_mode="v7-pnl",
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    skipped = rows[-1]
+
+    assert position is None
+    assert skipped["event"] == "entry_skipped"
+    assert skipped["reason"] == "entry_price_below_min"
+    assert skipped["ask"] == pytest.approx(0.25)
+    assert skipped["worst_price"] == pytest.approx(0.25)
+    assert skipped["min_entry_price"] == pytest.approx(0.30)
+    assert skipped["settlement_price_gate_mode"] == "v7_pnl_edge_only"
+
+
 def test_v7_pnl_entry_gate_allows_fresh_positive_edge_paper_fill(tmp_path: Path) -> None:
     log_path = tmp_path / "phase4.jsonl"
 
@@ -2467,7 +2907,11 @@ def test_executor_opposite_signal_can_exit_without_reverse_entry(
     posted = next(row for row in rows if row["event"] == "exit_order_posted")
     filled = next(row for row in rows if row["event"] == "exit_filled")
 
-    assert sell_result == executor.SellResult(status="filled", realized_pnl=0.10)
+    assert sell_result == executor.SellResult(
+        status="filled",
+        realized_pnl=0.10,
+        reason="opposite_side_exit_correction",
+    )
     assert client.created_orders == [{"token_id": "token-up", "side": "SELL", "amount": 1.96, "price": 0.59}]
     assert manager.closed == [("phase4-round-1-UP", 0.60)]
     assert posted["reason"] == "opposite_side_exit_correction"
@@ -2541,7 +2985,12 @@ def test_settlement_reversal_exit_requires_hysteresis_then_sells(
     assert first is None
     assert second == (
         "settlement_reversal_exit",
-        executor.SellResult(status="filled", realized_pnl=0.10, account_cash_pnl=0.10),
+        executor.SellResult(
+            status="filled",
+            realized_pnl=0.10,
+            account_cash_pnl=0.10,
+            reason="settlement_reversal_exit",
+        ),
     )
     assert manager.closed == [("phase4-round-1-UP", 0.59)]
     assert any(
@@ -2647,7 +3096,12 @@ def test_settlement_confidence_decay_exit_sells_on_fresh_regime_shift(
     rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert result == (
         "settlement_confidence_decay_exit",
-        executor.SellResult(status="filled", realized_pnl=0.10, account_cash_pnl=0.10),
+        executor.SellResult(
+            status="filled",
+            realized_pnl=0.10,
+            account_cash_pnl=0.10,
+            reason="settlement_confidence_decay_exit",
+        ),
     )
     evaluated = next(
         row for row in rows if row["event"] == "settlement_confidence_decay_exit_evaluated"
@@ -2776,7 +3230,12 @@ def test_settlement_price_stop_exit_sells_after_reversal_confirmation(
     )
 
     rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
-    assert result == executor.SellResult(status="filled", realized_pnl=0.10, account_cash_pnl=0.10)
+    assert result == executor.SellResult(
+        status="filled",
+        realized_pnl=0.10,
+        account_cash_pnl=0.10,
+        reason="settlement_price_stop_exit",
+    )
     evaluated = next(row for row in rows if row["event"] == "settlement_stop_exit_evaluated")
     assert evaluated["price_breach"] is True
     assert evaluated["reversal_confirmation"]["confirmed"] is True
@@ -2909,7 +3368,12 @@ def test_settlement_price_stop_same_side_confirmation_veto_expires(
 
     rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert recorded is True
-    assert result == executor.SellResult(status="filled", realized_pnl=0.10, account_cash_pnl=0.10)
+    assert result == executor.SellResult(
+        status="filled",
+        realized_pnl=0.10,
+        account_cash_pnl=0.10,
+        reason="settlement_price_stop_exit",
+    )
     assert manager.closed == [("phase4-round-1-UP", 0.59)]
     assert rows[-1]["event"] == "settlement_stop_exit_filled"
 
@@ -2938,7 +3402,10 @@ def test_executor_matched_sell_without_trade_confirmation_is_pending(
     rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     pending = next(row for row in rows if row["event"] == "exit_pending_confirmation")
 
-    assert sell_result == executor.SellResult(status="pending_confirmation")
+    assert sell_result == executor.SellResult(
+        status="pending_confirmation",
+        reason="exit_signal",
+    )
     assert manager.closed == []
     assert pending["position_assumed_closed_to_prevent_duplicate_sell"] is True
     assert pending["account_cashflow_reconciliation_required"] is True
@@ -2970,7 +3437,11 @@ def test_executor_retries_matched_sell_until_trade_confirmation(
     rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     filled = next(row for row in rows if row["event"] == "exit_filled")
 
-    assert sell_result == executor.SellResult(status="filled", realized_pnl=0.10)
+    assert sell_result == executor.SellResult(
+        status="filled",
+        realized_pnl=0.10,
+        reason="exit_signal",
+    )
     assert manager.closed == [("phase4-round-1-UP", 0.82)]
     assert client.trade_calls == 2
     assert filled["sell_order_id"] == "order-sell"
@@ -3414,6 +3885,11 @@ def _signal(
     p_neutral: float | None = None,
     p_vol_up: float | None = None,
     p_vol_down: float | None = None,
+    model_probability: float | None = None,
+    polymarket_price: float | None = None,
+    mispricing_edge: float | None = None,
+    p_up_residual_adjusted: float | None = None,
+    p_down_residual_adjusted: float | None = None,
     v6_joint_side: str | None = None,
     selected_side: str | None = None,
     selected_expected_edge: float | None = None,
@@ -3437,11 +3913,16 @@ def _signal(
         edge=edge,
         bridged_at=3_000,
         opposite_token_id=opposite_token_id,
+        model_probability=model_probability,
+        polymarket_price=polymarket_price,
+        mispricing_edge=mispricing_edge,
         p_up=p_up,
         p_down=p_down,
         p_neutral=p_neutral,
         p_vol_up=p_vol_up,
         p_vol_down=p_vol_down,
+        p_up_residual_adjusted=p_up_residual_adjusted,
+        p_down_residual_adjusted=p_down_residual_adjusted,
         v6_joint_side=v6_joint_side,
         selected_side=selected_side,
         selected_expected_edge=selected_expected_edge,
@@ -3523,6 +4004,357 @@ def test_v7_settlement_position_manager_adds_in_paper(tmp_path: Path) -> None:
     assert position.size == pytest.approx(persisted.size)
 
 
+def test_v7_settlement_position_manager_blocks_divergence_reduce_when_hold_edge_healthy(
+    tmp_path: Path,
+) -> None:
+    manager = executor.PositionManager(tmp_path / "positions.duckdb")
+    manager.open_position(
+        "phase4-round-1-UP",
+        "BTC-15M:round-1:UP",
+        "UP",
+        0.28,
+        4.0,
+        "order-1",
+        sleeve="settlement",
+        fill_price=0.28,
+    )
+    position = _position(size=4.0, sleeve="settlement")
+    position.entry_price = 0.28
+    position.fill_price = 0.28
+    position.entry_model_probability = 0.403
+    position.entry_polymarket_price = 0.25
+    position.entry_mispricing_edge = 0.123
+    client = _OrderBookClient({"token-up": (0.15, 0.16), "token-down": (0.84, 0.85)})
+    config = executor.V7SettlementPositionConfig(enabled=True, paper_execute=True)
+    log_path = tmp_path / "exec.jsonl"
+
+    first = executor._maybe_v7_settlement_position_adjustment(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=_signal(
+            event_id="divergence-1",
+            side="UP",
+            token_probability=0.37,
+            model_probability=0.37,
+            polymarket_price=0.16,
+            mispricing_edge=0.21,
+            p_up=0.30,
+            p_down=0.68,
+            created_at=5_000,
+        ),
+        log_path=log_path,
+        config=config,
+        paper=True,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+    second = executor._maybe_v7_settlement_position_adjustment(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=_signal(
+            event_id="divergence-2",
+            side="UP",
+            token_probability=0.37,
+            model_probability=0.37,
+            polymarket_price=0.16,
+            mispricing_edge=0.21,
+            p_up=0.30,
+            p_down=0.68,
+            created_at=6_000,
+        ),
+        log_path=log_path,
+        config=config,
+        paper=True,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+
+    assert first is not None
+    assert first.action == "HOLD"
+    assert second is not None
+    assert second.action == "HOLD"
+    persisted = manager.get_position(position.event_id)
+    assert persisted is not None
+    assert persisted.size == pytest.approx(4.0)
+    evaluations = [
+        json.loads(line)
+        for line in log_path.read_text().splitlines()
+        if json.loads(line).get("event") == "v7_settlement_position_management_evaluated"
+    ]
+    assert evaluations[0]["evaluation"]["reason"] == (
+        "positive_add_edge_blocked_by_residual_divergence"
+    )
+    assert evaluations[0]["evaluation"]["convergence"]["price_diverged"] is True
+    assert evaluations[-1]["evaluation"]["reason"] == (
+        "residual_divergence_reduce_blocked_by_hold_edge"
+    )
+
+
+def test_v7_settlement_position_manager_reduces_divergence_when_hold_edge_is_weak(
+    tmp_path: Path,
+) -> None:
+    manager = executor.PositionManager(tmp_path / "positions.duckdb")
+    manager.open_position(
+        "phase4-round-1-UP",
+        "BTC-15M:round-1:UP",
+        "UP",
+        0.28,
+        4.0,
+        "order-1",
+        sleeve="settlement",
+        fill_price=0.28,
+    )
+    position = _position(size=4.0, sleeve="settlement")
+    position.entry_price = 0.28
+    position.fill_price = 0.28
+    position.entry_model_probability = 0.403
+    position.entry_polymarket_price = 0.25
+    position.entry_mispricing_edge = 0.123
+    client = _OrderBookClient({"token-up": (0.15, 0.16), "token-down": (0.84, 0.85)})
+    config = executor.V7SettlementPositionConfig(enabled=True, paper_execute=True)
+    log_path = tmp_path / "exec.jsonl"
+
+    first = executor._maybe_v7_settlement_position_adjustment(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=_signal(
+            event_id="divergence-1",
+            side="UP",
+            token_probability=0.20,
+            model_probability=0.20,
+            polymarket_price=0.16,
+            mispricing_edge=0.04,
+            p_up=0.20,
+            p_down=0.78,
+            created_at=5_000,
+        ),
+        log_path=log_path,
+        config=config,
+        paper=True,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+    second = executor._maybe_v7_settlement_position_adjustment(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=_signal(
+            event_id="divergence-2",
+            side="UP",
+            token_probability=0.20,
+            model_probability=0.20,
+            polymarket_price=0.16,
+            mispricing_edge=0.04,
+            p_up=0.20,
+            p_down=0.78,
+            created_at=6_000,
+        ),
+        log_path=log_path,
+        config=config,
+        paper=True,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+
+    assert first is not None
+    assert first.action == "HOLD"
+    assert second is not None
+    assert second.action == "REDUCE"
+    persisted = manager.get_position(position.event_id)
+    assert persisted is not None
+    assert persisted.size == pytest.approx(2.0)
+    evaluations = [
+        json.loads(line)
+        for line in log_path.read_text().splitlines()
+        if json.loads(line).get("event") == "v7_settlement_position_management_evaluated"
+    ]
+    assert evaluations[-1]["evaluation"]["reason"] == "residual_divergence_reduce"
+    assert evaluations[-1]["evaluation"]["divergence_reduce_allowed"] is True
+
+
+def test_v7_settlement_position_manager_blocks_add_after_divergence_reduce_cooldown(
+    tmp_path: Path,
+) -> None:
+    manager = executor.PositionManager(tmp_path / "positions.duckdb")
+    manager.open_position(
+        "phase4-round-1-UP",
+        "BTC-15M:round-1:UP",
+        "UP",
+        0.28,
+        4.0,
+        "order-1",
+        sleeve="settlement",
+        fill_price=0.28,
+    )
+    position = _position(size=4.0, sleeve="settlement")
+    position.entry_price = 0.28
+    position.fill_price = 0.28
+    position.entry_model_probability = 0.403
+    position.entry_polymarket_price = 0.25
+    position.entry_mispricing_edge = 0.123
+    client = _OrderBookClient({"token-up": (0.15, 0.16), "token-down": (0.84, 0.85)})
+    config = executor.V7SettlementPositionConfig(enabled=True, paper_execute=True)
+    log_path = tmp_path / "exec.jsonl"
+
+    for idx, created_at in enumerate((5_000, 6_000), start=1):
+        executor._maybe_v7_settlement_position_adjustment(
+            client=client,
+            position_manager=manager,
+            position=position,
+            signal=_signal(
+                event_id=f"divergence-{idx}",
+                side="UP",
+                token_probability=0.20,
+                model_probability=0.20,
+                polymarket_price=0.16,
+                mispricing_edge=0.04,
+                p_up=0.20,
+                p_down=0.78,
+                created_at=created_at,
+            ),
+            log_path=log_path,
+            config=config,
+            paper=True,
+            sell_slippage=0.02,
+            exit_order_timeout_seconds=1.0,
+            monitoring_db_path=str(tmp_path / "positions.duckdb"),
+        )
+    client.books["token-up"] = (0.60, 0.70)
+    result = executor._maybe_v7_settlement_position_adjustment(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=_signal(
+            event_id="post-reduce-add",
+            side="UP",
+            token_probability=0.90,
+            model_probability=0.90,
+            polymarket_price=0.70,
+            mispricing_edge=0.20,
+            p_up=0.90,
+            p_down=0.08,
+            created_at=66_000,
+        ),
+        log_path=log_path,
+        config=config,
+        paper=True,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+
+    assert result is not None
+    assert result.action == "HOLD"
+    evaluations = [
+        json.loads(line)
+        for line in log_path.read_text().splitlines()
+        if json.loads(line).get("event") == "v7_settlement_position_management_evaluated"
+    ]
+    assert evaluations[-1]["evaluation"]["reason"] == (
+        "positive_add_edge_blocked_by_divergence_reduce_cooldown"
+    )
+    assert evaluations[-1]["evaluation"]["add_cooldown_remaining_seconds"] == pytest.approx(60.0)
+
+
+def test_v7_settlement_position_manager_exits_adverse_confidence_decay(
+    tmp_path: Path,
+) -> None:
+    manager = executor.PositionManager(tmp_path / "positions.duckdb")
+    manager.open_position(
+        "phase4-round-1-UP",
+        "BTC-15M:round-1:UP",
+        "UP",
+        0.50,
+        2.0,
+        "order-1",
+        sleeve="settlement",
+        fill_price=0.50,
+    )
+    position = _position(size=2.0, sleeve="settlement")
+    position.entry_model_probability = 0.80
+    position.entry_polymarket_price = 0.50
+    position.entry_mispricing_edge = 0.30
+    position.paper = True
+    client = _OrderBookClient({"token-up": (0.20, 0.21), "token-down": (0.78, 0.80)})
+    config = executor.V7SettlementPositionConfig(
+        enabled=True,
+        paper_execute=True,
+        adverse_confidence_decay_enabled=True,
+        adverse_confidence_full_exit_max_hold_edge=-1.0,
+    )
+    log_path = tmp_path / "exec.jsonl"
+
+    first = executor._maybe_v7_settlement_position_adjustment(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=_signal(
+            event_id="adverse-1",
+            side="UP",
+            token_probability=0.70,
+            model_probability=0.70,
+            polymarket_price=0.20,
+            mispricing_edge=0.50,
+            p_up=0.70,
+            p_down=0.28,
+            created_at=5_000,
+        ),
+        log_path=log_path,
+        config=config,
+        paper=True,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+    second = executor._maybe_v7_settlement_position_adjustment(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=_signal(
+            event_id="adverse-2",
+            side="UP",
+            token_probability=0.70,
+            model_probability=0.70,
+            polymarket_price=0.20,
+            mispricing_edge=0.50,
+            p_up=0.70,
+            p_down=0.28,
+            created_at=6_000,
+        ),
+        log_path=log_path,
+        config=config,
+        paper=True,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+
+    assert first is not None
+    assert first.action == "HOLD"
+    assert second is not None
+    assert second.action == "EXIT"
+    evaluations = [
+        json.loads(line)
+        for line in log_path.read_text().splitlines()
+        if json.loads(line).get("event") == "v7_settlement_position_management_evaluated"
+    ]
+    assert evaluations[0]["evaluation"]["reason"] == (
+        "adverse_confidence_decay_hysteresis_wait"
+    )
+    assert evaluations[-1]["evaluation"]["reason"] == "adverse_confidence_decay_exit"
+    assert evaluations[-1]["evaluation"]["hold_edge"] == pytest.approx(0.50)
+    assert evaluations[-1]["evaluation"]["adverse_confidence"]["required_p_side"] == (
+        pytest.approx(0.785)
+    )
+
+
 def test_v7_settlement_position_manager_reduces_after_weak_hold_hysteresis(
     tmp_path: Path,
 ) -> None:
@@ -3588,6 +4420,211 @@ def test_v7_settlement_position_manager_reduces_after_weak_hold_hysteresis(
     persisted = manager.get_position(position.event_id)
     assert persisted is not None
     assert persisted.size == pytest.approx(1.0)
+
+
+def test_v7_settlement_position_manager_take_profit_uses_bound_avg_price(
+    tmp_path: Path,
+) -> None:
+    manager = executor.PositionManager(tmp_path / "positions.duckdb")
+    manager.open_position(
+        "phase4-round-1-UP",
+        "BTC-15M:round-1:UP",
+        "UP",
+        0.50,
+        2.0,
+        "order-1",
+        sleeve="settlement",
+        fill_price=0.50,
+    )
+    position = _position(size=2.0, sleeve="settlement")
+    position.paper = True
+    log_path = tmp_path / "exec.jsonl"
+    config = executor.V7SettlementPositionConfig(
+        enabled=True,
+        paper_execute=True,
+        convergence_take_profit_enabled=True,
+        take_profit_force_exit_seconds=180.0,
+        take_profit_hysteresis_bars=2,
+    )
+
+    result = executor._maybe_v7_settlement_position_adjustment(
+        client=_OrderBookClient({"token-up": (0.55, 0.60), "token-down": (0.40, 0.45)}),
+        position_manager=manager,
+        position=position,
+        signal=_signal(
+            event_id="take-profit-force-1",
+            side="UP",
+            token_probability=0.58,
+            p_up=0.58,
+            p_down=0.40,
+            round_end_ts=executor._now_ms() + 120_000,
+            created_at=5_000,
+        ),
+        log_path=log_path,
+        config=config,
+        paper=True,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+
+    assert result is not None
+    assert result.action == "HOLD"
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["event"] == "v7_settlement_position_management_evaluated"
+    assert row["evaluation"]["take_profit_count"] == 1
+    assert row["evaluation"]["take_profit_reason"] == (
+        "convergence_profit_lock_before_expiry"
+    )
+    assert row["evaluation"]["avg_price"] == pytest.approx(0.50)
+
+
+def test_v7_settlement_position_manager_uses_model_probability_for_reversal(
+    tmp_path: Path,
+) -> None:
+    manager = executor.PositionManager(tmp_path / "positions.duckdb")
+    manager.open_position(
+        "phase4-round-1-UP",
+        "BTC-15M:round-1:UP",
+        "UP",
+        0.50,
+        1.0,
+        "order-1",
+        sleeve="settlement",
+        fill_price=0.50,
+    )
+    position = _position(size=1.0, sleeve="settlement")
+    position.paper = True
+    client = _OrderBookClient({"token-up": (0.05, 0.06), "token-down": (0.92, 0.94)})
+    config = executor.V7SettlementPositionConfig(enabled=True, paper_execute=True)
+    log_path = tmp_path / "exec.jsonl"
+
+    first = executor._maybe_v7_settlement_position_adjustment(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=_signal(
+            event_id="residual-down-1",
+            side="DOWN",
+            token_id="token-down",
+            opposite_token_id="token-up",
+            token_probability=1.0,
+            model_probability=1.0,
+            polymarket_price=0.94,
+            mispricing_edge=0.06,
+            p_up=0.017,
+            p_down=0.38,
+            selected_side="DOWN",
+            selected_expected_edge=0.06,
+            created_at=5_000,
+        ),
+        log_path=log_path,
+        config=config,
+        paper=True,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+    second = executor._maybe_v7_settlement_position_adjustment(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=_signal(
+            event_id="residual-down-2",
+            side="DOWN",
+            token_id="token-down",
+            opposite_token_id="token-up",
+            token_probability=1.0,
+            model_probability=1.0,
+            polymarket_price=0.94,
+            mispricing_edge=0.06,
+            p_up=0.016,
+            p_down=0.36,
+            selected_side="DOWN",
+            selected_expected_edge=0.06,
+            created_at=6_000,
+        ),
+        log_path=log_path,
+        config=config,
+        paper=True,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+
+    assert first is not None
+    assert first.action == "HOLD"
+    assert second is not None
+    assert second.action == "EXIT"
+    assert second.status == "filled"
+    persisted = manager.get_position(position.event_id)
+    assert persisted is not None
+    assert persisted.status == "closed"
+    evaluations = [
+        json.loads(line)
+        for line in log_path.read_text().splitlines()
+        if json.loads(line).get("event") == "v7_settlement_position_management_evaluated"
+    ]
+    assert evaluations[-1]["evaluation"]["p_opposite"] == pytest.approx(1.0)
+    assert evaluations[-1]["evaluation"]["p_opposite_source"] == "model_probability"
+    assert evaluations[-1]["evaluation"]["reason"] == "confirmed_opposite_ev_reversal"
+
+
+def test_v7_settlement_position_manager_logs_residual_reversal_liquidity_block(
+    tmp_path: Path,
+) -> None:
+    manager = executor.PositionManager(tmp_path / "positions.duckdb")
+    manager.open_position(
+        "phase4-round-1-UP",
+        "BTC-15M:round-1:UP",
+        "UP",
+        0.50,
+        1.0,
+        "order-1",
+        sleeve="settlement",
+        fill_price=0.50,
+    )
+    position = _position(size=1.0, sleeve="settlement")
+    client = _OrderBookClient({"token-up": (0.05, 0.06), "token-down": (0.80, None)})
+    log_path = tmp_path / "exec.jsonl"
+
+    result = executor._maybe_v7_settlement_position_adjustment(
+        client=client,
+        position_manager=manager,
+        position=position,
+        signal=_signal(
+            event_id="residual-down-liquidity-blocked",
+            side="DOWN",
+            token_id="token-down",
+            opposite_token_id="token-up",
+            token_probability=1.0,
+            model_probability=1.0,
+            polymarket_price=0.80,
+            mispricing_edge=0.20,
+            p_up=0.02,
+            p_down=0.38,
+            selected_side="DOWN",
+            selected_expected_edge=0.10,
+            created_at=5_000,
+        ),
+        log_path=log_path,
+        config=executor.V7SettlementPositionConfig(enabled=True, paper_execute=True),
+        paper=True,
+        sell_slippage=0.02,
+        exit_order_timeout_seconds=1.0,
+        monitoring_db_path=str(tmp_path / "positions.duckdb"),
+    )
+
+    assert result is not None
+    assert result.action == "HOLD"
+    evaluations = [
+        json.loads(line)
+        for line in log_path.read_text().splitlines()
+        if json.loads(line).get("event") == "v7_settlement_position_management_evaluated"
+    ]
+    assert evaluations[-1]["evaluation"]["reason"] == "exit_desired_but_liquidity_blocked"
+    assert evaluations[-1]["evaluation"]["reversal_confidence_passed"] is True
+    assert evaluations[-1]["evaluation"]["reversal_liquidity_blocked"] is True
 
 
 def test_v7_settlement_position_manager_live_only_recommends(tmp_path: Path) -> None:

@@ -47,6 +47,9 @@ dev = [
     "mypy>=1.10,<2",
     "aioresponses>=0.7,<1",
 ]
+kafka = [
+    "confluent-kafka>=2.4,<3",
+]
 
 [project.scripts]
 bigan-ingest = "bigan.ingestion.__main__:app"

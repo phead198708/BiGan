@@ -58,6 +58,9 @@ if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "bigan.ingestion.__main__" ]]; then
     predictions-v1)
       printf '{{"rows_generated": 5, "rows_written": 5, "monitoring_events_written": 5}}\\n'
       ;;
+    signals-v7-event-driven-reprice)
+      printf '{{"rows_read": 3, "signals_written": 2}}\\n'
+      ;;
     *)
       printf 'unexpected command: %s\\n' "${{command}}" >&2
       exit 12
@@ -366,6 +369,66 @@ def test_runner_can_use_low_latency_raw_queue_feature_path(tmp_path: Path) -> No
     assert "--canonical-symbol-like BTC-15M:%" in command_log
     assert "low-latency feature queue enabled=true" in result.stdout
     assert "low-latency raw queue=" in result.stdout
+
+
+def test_runner_can_append_event_driven_v7_signal_queue(tmp_path: Path) -> None:
+    env = _base_runner_env(tmp_path)
+    env["MODEL_VERSION"] = "xgboost-v7"
+    env.pop("CALIBRATION_PATH")
+    env["LOW_LATENCY_FEATURE_QUEUE_ENABLED"] = "true"
+    env["EVENT_DRIVEN_V7_SIGNAL_QUEUE_ENABLED"] = "true"
+    env["SIGNAL_JSONL_OUTPUT_PATH"] = str(tmp_path / "live" / "base-signals.jsonl")
+    env["EVENT_DRIVEN_V7_SIGNAL_JSONL_OUTPUT_PATH"] = str(
+        tmp_path / "live" / "event-signals.jsonl"
+    )
+    env["EVENT_DRIVEN_V7_SIGNAL_BUCKET_SECONDS"] = "5"
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    command_log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
+
+    assert "signals-v7-event-driven-reprice --output-path" in command_log
+    assert f"--base-signal-jsonl-path {env['SIGNAL_JSONL_OUTPUT_PATH']}" in command_log
+    assert "--bucket-seconds 5" in command_log
+    assert "features-15m-v1-low-latency-queue --queue-path" in command_log
+    assert "--max-records 50000 --bucket-seconds 5" in command_log
+    assert "event-driven v7 signal queue enabled=true" in result.stdout
+    assert f"event-driven v7 signal output={env['EVENT_DRIVEN_V7_SIGNAL_JSONL_OUTPUT_PATH']}" in result.stdout
+    assert "low-latency feature bucket seconds=5" in result.stdout
+
+
+def test_runner_can_emit_executor_signals_to_kafka(tmp_path: Path) -> None:
+    env = _base_runner_env(tmp_path)
+    env["SIGNAL_KAFKA_BOOTSTRAP_SERVERS"] = "localhost:9092"
+    env["SIGNAL_KAFKA_TOPIC"] = "bigan.signals"
+    env["SIGNAL_KAFKA_FLUSH_TIMEOUT_SECONDS"] = "1.5"
+    env["SCORE_ONLY_WHEN_ETL_PROCESSED"] = "false"
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    command_log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
+
+    assert "--signal-kafka-bootstrap-servers localhost:9092" in command_log
+    assert "--signal-kafka-topic bigan.signals" in command_log
+    assert "--signal-kafka-flush-timeout-seconds 1.5" in command_log
+    assert "--signal-jsonl-market-families BTC-15M" in command_log
+    assert "signal kafka topic=bigan.signals bootstrap=localhost:9092" in result.stdout
 
 
 def test_runner_rejects_live_root_lock_held_by_running_process(

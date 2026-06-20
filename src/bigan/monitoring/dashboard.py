@@ -90,6 +90,7 @@ class DashboardSnapshot:
     settled_round_count: int
     edge_trigger_rate_1h: float | None
     alerts: tuple[str, ...]
+    v7_pm_monitoring: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -136,6 +137,7 @@ def read_dashboard_snapshot(
     lookback_hours: float = 6.0,
     limit: int = 1_000,
     now_ms: int | None = None,
+    phase4_summary_path: Path | str | None = None,
 ) -> DashboardSnapshot:
     """Read recent monitoring events and build a paper-trading dashboard snapshot."""
 
@@ -196,6 +198,7 @@ def read_dashboard_snapshot(
         settled_round_count=len(history),
         edge_trigger_rate_1h=edge_trigger_rate,
         alerts=tuple(alerts),
+        v7_pm_monitoring=_read_v7_pm_monitoring(phase4_summary_path),
     )
 
 
@@ -213,11 +216,28 @@ def render_dashboard(snapshot: DashboardSnapshot, *, max_signals: int = 10) -> s
     lines.extend(_render_history(snapshot.history))
     lines.append("")
     lines.extend(_render_session(snapshot))
+    if snapshot.v7_pm_monitoring:
+        lines.append("")
+        lines.extend(_render_v7_pm_monitoring(snapshot.v7_pm_monitoring))
     if snapshot.alerts:
         lines.append("")
         lines.append("ALERTS")
         lines.extend(f"! {alert}" for alert in snapshot.alerts)
     return "\n".join(lines)
+
+
+def _read_v7_pm_monitoring(path: Path | str | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    summary_path = Path(path)
+    if not summary_path.exists():
+        return None
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    monitoring = payload.get("v7_pm_monitoring")
+    return monitoring if isinstance(monitoring, dict) else None
 
 
 def _read_event_records(
@@ -543,6 +563,42 @@ def _render_session(snapshot: DashboardSnapshot) -> list[str]:
             f"EdgeTrigger1h={trigger}"
         ),
     ]
+
+
+def _render_v7_pm_monitoring(monitoring: dict[str, Any]) -> list[str]:
+    hold_edge = monitoring.get("divergence_reduce_hold_edge") or {}
+    take_profit = monitoring.get("take_profit_candidates") or {}
+    reason_counts = take_profit.get("reason_counts") or {}
+    reason_text = (
+        "-"
+        if not reason_counts
+        else ", ".join(f"{key}={value}" for key, value in sorted(reason_counts.items()))
+    )
+    return [
+        "V7 PM MONITORING",
+        (
+            "DivergenceReduceHoldEdge "
+            f"count={hold_edge.get('count', 0)} "
+            f"p50={_fmt_optional_num(hold_edge.get('p50'))} "
+            f"p90={_fmt_optional_num(hold_edge.get('p90'))}"
+        ),
+        (
+            "TakeProfitCandidates "
+            f"evaluations={take_profit.get('evaluations', 0)} "
+            f"exits={take_profit.get('exits', 0)} "
+            f"unexecuted={take_profit.get('unexecuted', 0)} "
+            f"reasons={reason_text}"
+        ),
+    ]
+
+
+def _fmt_optional_num(value: Any) -> str:
+    if value is None:
+        return "NA"
+    try:
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return "NA"
 
 
 def _table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:

@@ -30,12 +30,13 @@ from bigan.backtest import (
 from bigan.canonical.etl import run_etl_batch
 from bigan.canonical.query import open_warehouse, warehouse_summary
 from bigan.canonical.symbols import SymbolMapper
+from bigan.execution.signal_queue import append_event_driven_v7_signals_from_raw_queue
+from bigan.execution.v6_gate import V6JointGateConfig
 from bigan.features import (
     run_feature_batch,
     run_feature_quality_sql_checks,
     run_low_latency_feature_queue_batch,
 )
-from bigan.execution.v6_gate import V6JointGateConfig
 from bigan.labels import run_label_batch
 from bigan.labels.generation import DOWN_LABEL_KIND, generate_labels_15m_v1
 from bigan.mlops import (
@@ -575,6 +576,60 @@ PREDICTION_WRITE_MONITORING_EVENTS_OPTION = typer.Option(
     "--write-monitoring-events/--no-write-monitoring-events",
     help="Write generated predictions to prediction_events for live monitoring.",
 )
+PREDICTION_SIGNAL_JSONL_OUTPUT_PATH_OPTION = typer.Option(
+    None,
+    help=(
+        "Optional executor-ready JSONL signal queue path. When set, prediction "
+        "rows are appended directly without rereading prediction_events."
+    ),
+)
+PREDICTION_SIGNAL_JSONL_MARKET_FAMILIES_OPTION = typer.Option(
+    "BTC-15M",
+    help="Comma-separated market families to emit to --signal-jsonl-output-path.",
+)
+PREDICTION_SIGNAL_JSONL_OUTCOME_SIDE_OPTION = typer.Option(
+    "ANY",
+    help="Outcome side to emit to --signal-jsonl-output-path: UP, DOWN, ANY, or a subset.",
+)
+PREDICTION_SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS_OPTION = typer.Option(
+    None,
+    help=(
+        "Only emit queue signals whose event timestamp is newer than this many seconds. "
+        "Useful for queue-first live shadow runs."
+    ),
+)
+PREDICTION_SIGNAL_KAFKA_BOOTSTRAP_SERVERS_OPTION = typer.Option(
+    None,
+    help="Optional Kafka bootstrap servers for executor-ready signal emission.",
+)
+PREDICTION_SIGNAL_KAFKA_TOPIC_OPTION = typer.Option(
+    None,
+    help="Optional Kafka topic for executor-ready signal emission.",
+)
+PREDICTION_SIGNAL_KAFKA_FLUSH_TIMEOUT_SECONDS_OPTION = typer.Option(
+    5.0,
+    help="Kafka producer flush timeout for executor-ready signal emission.",
+)
+PREDICTION_V6_SETTLEMENT_THRESHOLD_OPTION = typer.Option(
+    0.50,
+    help="v6 signal queue settlement threshold.",
+)
+PREDICTION_V6_NEUTRAL_CAP_OPTION = typer.Option(
+    0.25,
+    help="v6 signal queue neutral cap.",
+)
+PREDICTION_V6_VOLATILITY_THRESHOLD_OPTION = typer.Option(
+    0.60,
+    help="v6 signal queue volatility threshold.",
+)
+PREDICTION_V6_ROUND_TRIP_COST_OPTION = typer.Option(
+    0.072,
+    help="v6 signal queue round-trip cost.",
+)
+PREDICTION_V6_EV_MARGIN_OPTION = typer.Option(
+    0.01,
+    help="v6 signal queue EV margin.",
+)
 LOW_LATENCY_RAW_QUEUE_PATH_OPTION = typer.Option(
     Path("data/live/low-latency/raw-btc15m.jsonl"),
     help="Append-only JSONL raw queue produced by the capture runner.",
@@ -594,6 +649,49 @@ LOW_LATENCY_FEATURE_CANONICAL_PREFIX_OPTION = typer.Option(
 LOW_LATENCY_FEATURE_MAX_RECORDS_OPTION = typer.Option(
     None,
     help="Maximum queued raw records to consume in this batch.",
+)
+LOW_LATENCY_FEATURE_BUCKET_SECONDS_OPTION = typer.Option(
+    None,
+    help=(
+        "Optional feature bucket width in seconds. Defaults to the historical "
+        "minute bucket when omitted."
+    ),
+)
+EVENT_DRIVEN_V7_SIGNAL_OUTPUT_PATH_OPTION = typer.Option(
+    ...,
+    help="Executor-ready event-driven v7 signal JSONL output path.",
+)
+EVENT_DRIVEN_V7_BASE_SIGNAL_JSONL_PATH_OPTION = typer.Option(
+    ...,
+    help="Base v7 model signal JSONL queue produced by predictions-v1.",
+)
+EVENT_DRIVEN_V7_SIGNAL_CURSOR_PATH_OPTION = typer.Option(
+    None,
+    help="Persisted byte-offset cursor for the raw low-latency queue.",
+)
+EVENT_DRIVEN_V7_SIGNAL_BUCKET_SECONDS_OPTION = typer.Option(
+    10.0,
+    help="Sub-minute signal bucket size, for example 5 or 10 seconds.",
+)
+EVENT_DRIVEN_V7_SIGNAL_MARKET_FAMILIES_OPTION = typer.Option(
+    "BTC-15M",
+    help="Comma-separated market families allowed in event-driven output.",
+)
+EVENT_DRIVEN_V7_SIGNAL_MAX_RECORDS_OPTION = typer.Option(
+    20_000,
+    help="Maximum raw queue rows to consume in this batch.",
+)
+EVENT_DRIVEN_V7_BASE_SIGNAL_MAX_AGE_SECONDS_OPTION = typer.Option(
+    180.0,
+    help="Skip repricing when the base v7 model signal is older than this.",
+)
+EVENT_DRIVEN_V7_SIGNAL_MAX_EVENT_AGE_SECONDS_OPTION = typer.Option(
+    30.0,
+    help="Skip event-driven bucket signals older than this at append time.",
+)
+EVENT_DRIVEN_V7_SIGNAL_START_OPTION = typer.Option(
+    "beginning",
+    help="Where to start when the cursor is missing: beginning or tail.",
 )
 LABEL_MONITORING_MODEL_VERSION_OPTION = typer.Option(
     ACTIVE_CHAMPION_MODEL_VERSION,
@@ -1552,6 +1650,7 @@ def features_15m_v1_low_latency_queue(
     state_path: Path | None = LOW_LATENCY_FEATURE_STATE_PATH_OPTION,
     canonical_symbol_prefix: str = LOW_LATENCY_FEATURE_CANONICAL_PREFIX_OPTION,
     max_records: int | None = LOW_LATENCY_FEATURE_MAX_RECORDS_OPTION,
+    bucket_seconds: float | None = LOW_LATENCY_FEATURE_BUCKET_SECONDS_OPTION,
     max_rows_per_partition: int = typer.Option(
         50_000,
         help="Flush feature partitions after this many rows.",
@@ -1561,6 +1660,8 @@ def features_15m_v1_low_latency_queue(
 
     if max_records is not None and max_records <= 0:
         raise typer.BadParameter("--max-records must be positive")
+    if bucket_seconds is not None and bucket_seconds <= 0:
+        raise typer.BadParameter("--bucket-seconds must be positive")
     settings = IngestionSettings()
     _configure_logging(settings.log_level)
     report = run_low_latency_feature_queue_batch(
@@ -1571,6 +1672,56 @@ def features_15m_v1_low_latency_queue(
         max_records=max_records,
         max_rows_per_partition=max_rows_per_partition,
         canonical_symbol_prefix=canonical_symbol_prefix,
+        bucket_seconds=bucket_seconds,
+    )
+    typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("signals-v7-event-driven-reprice")
+def signals_v7_event_driven_reprice(
+    output_path: Path = EVENT_DRIVEN_V7_SIGNAL_OUTPUT_PATH_OPTION,
+    base_signal_jsonl_path: Path = EVENT_DRIVEN_V7_BASE_SIGNAL_JSONL_PATH_OPTION,
+    raw_queue_path: Path = LOW_LATENCY_RAW_QUEUE_PATH_OPTION,
+    cursor_path: Path | None = EVENT_DRIVEN_V7_SIGNAL_CURSOR_PATH_OPTION,
+    bucket_seconds: float = EVENT_DRIVEN_V7_SIGNAL_BUCKET_SECONDS_OPTION,
+    market_families: str = EVENT_DRIVEN_V7_SIGNAL_MARKET_FAMILIES_OPTION,
+    max_records: int | None = EVENT_DRIVEN_V7_SIGNAL_MAX_RECORDS_OPTION,
+    max_base_signal_age_seconds: float | None = (
+        EVENT_DRIVEN_V7_BASE_SIGNAL_MAX_AGE_SECONDS_OPTION
+    ),
+    max_event_age_seconds: float | None = EVENT_DRIVEN_V7_SIGNAL_MAX_EVENT_AGE_SECONDS_OPTION,
+    start: str = EVENT_DRIVEN_V7_SIGNAL_START_OPTION,
+) -> None:
+    """Reprice v7 base signals from raw top-of-book into 5s/10s signals."""
+
+    if bucket_seconds <= 0:
+        raise typer.BadParameter("--bucket-seconds must be positive")
+    if max_records is not None and max_records <= 0:
+        raise typer.BadParameter("--max-records must be positive")
+    if max_base_signal_age_seconds is not None and max_base_signal_age_seconds <= 0:
+        raise typer.BadParameter("--max-base-signal-age-seconds must be positive")
+    if max_event_age_seconds is not None and max_event_age_seconds <= 0:
+        raise typer.BadParameter("--max-event-age-seconds must be positive")
+    if start not in {"beginning", "tail"}:
+        raise typer.BadParameter("--start must be beginning or tail")
+    families = frozenset(
+        family.strip().upper()
+        for family in market_families.split(",")
+        if family.strip()
+    )
+    if not families:
+        raise typer.BadParameter("--market-families must not be empty")
+    report = append_event_driven_v7_signals_from_raw_queue(
+        output_path,
+        base_signal_jsonl_path=base_signal_jsonl_path,
+        raw_queue_path=raw_queue_path,
+        cursor_path=cursor_path,
+        bucket_seconds=bucket_seconds,
+        allowed_families=families,
+        max_records=max_records,
+        max_base_signal_age_seconds=max_base_signal_age_seconds,
+        max_event_age_seconds=max_event_age_seconds,
+        start=start,
     )
     typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 
@@ -6236,33 +6387,24 @@ def predictions_v1(
     calibration_path: Path | None = PREDICTION_CALIBRATION_PATH_OPTION,
     monitoring_db_path: Path | None = PREDICTION_MONITORING_DB_PATH_OPTION,
     write_monitoring_events: bool = PREDICTION_WRITE_MONITORING_EVENTS_OPTION,
-    signal_jsonl_output_path: Path | None = typer.Option(
-        None,
-        help=(
-            "Optional executor-ready JSONL signal queue path. When set, prediction "
-            "rows are appended directly without rereading prediction_events."
-        ),
+    signal_jsonl_output_path: Path | None = PREDICTION_SIGNAL_JSONL_OUTPUT_PATH_OPTION,
+    signal_jsonl_market_families: str = PREDICTION_SIGNAL_JSONL_MARKET_FAMILIES_OPTION,
+    signal_jsonl_outcome_side: str = PREDICTION_SIGNAL_JSONL_OUTCOME_SIDE_OPTION,
+    signal_jsonl_max_event_age_seconds: float | None = (
+        PREDICTION_SIGNAL_JSONL_MAX_EVENT_AGE_SECONDS_OPTION
     ),
-    signal_jsonl_market_families: str = typer.Option(
-        "BTC-15M",
-        help="Comma-separated market families to emit to --signal-jsonl-output-path.",
+    signal_kafka_bootstrap_servers: str | None = (
+        PREDICTION_SIGNAL_KAFKA_BOOTSTRAP_SERVERS_OPTION
     ),
-    signal_jsonl_outcome_side: str = typer.Option(
-        "ANY",
-        help="Outcome side to emit to --signal-jsonl-output-path: UP, DOWN, ANY, or a subset.",
+    signal_kafka_topic: str | None = PREDICTION_SIGNAL_KAFKA_TOPIC_OPTION,
+    signal_kafka_flush_timeout_seconds: float = (
+        PREDICTION_SIGNAL_KAFKA_FLUSH_TIMEOUT_SECONDS_OPTION
     ),
-    signal_jsonl_max_event_age_seconds: float | None = typer.Option(
-        None,
-        help=(
-            "Only emit queue signals whose event timestamp is newer than this many seconds. "
-            "Useful for queue-first live shadow runs."
-        ),
-    ),
-    v6_settlement_threshold: float = typer.Option(0.50, help="v6 signal queue settlement threshold."),
-    v6_neutral_cap: float = typer.Option(0.25, help="v6 signal queue neutral cap."),
-    v6_volatility_threshold: float = typer.Option(0.60, help="v6 signal queue volatility threshold."),
-    v6_round_trip_cost: float = typer.Option(0.072, help="v6 signal queue round-trip cost."),
-    v6_ev_margin: float = typer.Option(0.01, help="v6 signal queue EV margin."),
+    v6_settlement_threshold: float = PREDICTION_V6_SETTLEMENT_THRESHOLD_OPTION,
+    v6_neutral_cap: float = PREDICTION_V6_NEUTRAL_CAP_OPTION,
+    v6_volatility_threshold: float = PREDICTION_V6_VOLATILITY_THRESHOLD_OPTION,
+    v6_round_trip_cost: float = PREDICTION_V6_ROUND_TRIP_COST_OPTION,
+    v6_ev_margin: float = PREDICTION_V6_EV_MARGIN_OPTION,
     lookback_minutes: float | None = typer.Option(
         None,
         help="Only score features newer than now minus this many minutes.",
@@ -6299,6 +6441,12 @@ def predictions_v1(
         raise typer.BadParameter("--lookback-minutes must be positive")
     if signal_jsonl_max_event_age_seconds is not None and signal_jsonl_max_event_age_seconds <= 0:
         raise typer.BadParameter("--signal-jsonl-max-event-age-seconds must be positive")
+    if signal_kafka_flush_timeout_seconds < 0:
+        raise typer.BadParameter("--signal-kafka-flush-timeout-seconds must be non-negative")
+    if bool(signal_kafka_bootstrap_servers) != bool(signal_kafka_topic):
+        raise typer.BadParameter(
+            "pass both --signal-kafka-bootstrap-servers and --signal-kafka-topic, or neither"
+        )
     if lookback_minutes is not None and since_ms is not None:
         raise typer.BadParameter("pass either --lookback-minutes or --since-ms, not both")
     settings = IngestionSettings()
@@ -6313,7 +6461,7 @@ def predictions_v1(
         for family in signal_jsonl_market_families.split(",")
         if family.strip()
     )
-    if signal_jsonl_output_path is not None and not signal_families:
+    if (signal_jsonl_output_path is not None or signal_kafka_topic is not None) and not signal_families:
         raise typer.BadParameter("--signal-jsonl-market-families must not be empty")
     signal_sides = _normalise_signal_jsonl_outcome_side(signal_jsonl_outcome_side)
     report = run_prediction_batch(
@@ -6331,6 +6479,9 @@ def predictions_v1(
         signal_jsonl_market_families=signal_families,
         signal_jsonl_outcome_sides=signal_sides,
         signal_jsonl_max_event_age_seconds=signal_jsonl_max_event_age_seconds,
+        signal_kafka_bootstrap_servers=signal_kafka_bootstrap_servers,
+        signal_kafka_topic=signal_kafka_topic,
+        signal_kafka_flush_timeout_seconds=signal_kafka_flush_timeout_seconds,
         signal_jsonl_v6_joint_config=V6JointGateConfig(
             settlement_threshold=v6_settlement_threshold,
             neutral_cap=v6_neutral_cap,
@@ -6503,6 +6654,10 @@ def signals_dashboard(
         "--once/--follow",
         help="Render one dashboard snapshot and exit.",
     ),
+    phase4_summary_path: Path | None = typer.Option(
+        None,
+        help="Optional Phase 4 summary JSON with v7 PM monitoring metrics.",
+    ),
 ) -> None:
     """Render a live terminal dashboard with current round and paper PnL."""
 
@@ -6526,6 +6681,7 @@ def signals_dashboard(
                 outcome_side=outcome_side,
                 lookback_hours=lookback_hours,
                 limit=limit,
+                phase4_summary_path=phase4_summary_path,
             )
             output = render_dashboard(snapshot)
         except Exception as exc:  # noqa: BLE001 - dashboard should survive transient DB locks.

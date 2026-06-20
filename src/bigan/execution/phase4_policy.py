@@ -48,6 +48,16 @@ class Phase4EntryPolicy:
     settlement_min_confidence: float = DEFAULT_SETTLEMENT_MIN_CONFIDENCE
     max_signal_age_seconds: float | None = DEFAULT_MAX_SIGNAL_AGE_SECONDS
     settlement_peak_confidence_drop_tolerance: float | None = None
+    entry_max_price_drift_from_signal: float | None = None
+    v7_raw_side_agreement_enabled: bool = False
+    v7_raw_side_min_probability: float | None = None
+    v7_raw_side_min_margin: float | None = None
+    v7_raw_side_max_opposite_lead: float | None = None
+    v7_raw_side_price_conviction_enabled: bool = False
+    v7_raw_side_price_conviction_min_price: float = 0.40
+    v7_raw_side_price_conviction_center_price: float = 0.50
+    v7_raw_side_price_conviction_max_price: float = 0.70
+    v7_raw_side_price_conviction_center_min_probability: float | None = None
 
     @property
     def effective_settlement_edge_threshold(self) -> float:
@@ -178,6 +188,22 @@ def entry_price_skip_reason(
     return None
 
 
+def entry_price_drift_skip_reason(
+    *,
+    entry_price: float,
+    signal_price: float | None,
+    policy: Phase4EntryPolicy,
+) -> str | None:
+    """Skip when executable entry price drifts above signal polymarket price."""
+
+    max_drift = policy.entry_max_price_drift_from_signal
+    if max_drift is None or signal_price is None:
+        return None
+    if entry_price - signal_price > max_drift:
+        return "entry_price_drift_above_threshold"
+    return None
+
+
 def settlement_cost_edge_skip_reason(
     *,
     fresh_edge_at_worst: float,
@@ -210,6 +236,75 @@ def settlement_cost_edge_skip_reason(
     if fresh_edge_at_worst < policy.effective_settlement_edge_threshold:
         return "fresh_edge_below_threshold"
     return None
+
+
+def v7_raw_side_agreement_skip_reason(
+    *,
+    selected_side: str,
+    p_up: float | None,
+    p_down: float | None,
+    entry_price: float | None = None,
+    policy: Phase4EntryPolicy,
+) -> str | None:
+    """Skip v7-pnl entries when raw direction evidence contradicts the selected side."""
+
+    if not policy.v7_raw_side_agreement_enabled:
+        return None
+    side = selected_side.upper()
+    if side == "UP":
+        p_side = p_up
+        p_opposite = p_down
+    elif side == "DOWN":
+        p_side = p_down
+        p_opposite = p_up
+    else:
+        return "v7_raw_side_missing"
+    if p_side is None or p_opposite is None:
+        return "v7_raw_side_missing"
+    min_probability = v7_raw_side_required_min_probability(
+        entry_price=entry_price,
+        policy=policy,
+    )
+    if min_probability is not None and p_side < min_probability:
+        return "v7_raw_side_probability_below_threshold"
+    min_margin = policy.v7_raw_side_min_margin
+    if min_margin is not None and p_side - p_opposite < min_margin:
+        return "v7_raw_side_margin_below_threshold"
+    max_opposite_lead = policy.v7_raw_side_max_opposite_lead
+    if max_opposite_lead is not None and p_opposite - p_side > max_opposite_lead:
+        return "v7_raw_side_opposite_lead_above_threshold"
+    return None
+
+
+def v7_raw_side_required_min_probability(
+    *,
+    entry_price: float | None,
+    policy: Phase4EntryPolicy,
+) -> float | None:
+    """Return the raw p_side threshold after the optional mid-price tightening."""
+
+    base = policy.v7_raw_side_min_probability
+    center_min = policy.v7_raw_side_price_conviction_center_min_probability
+    if (
+        not policy.v7_raw_side_price_conviction_enabled
+        or entry_price is None
+        or center_min is None
+    ):
+        return base
+    price = float(entry_price)
+    low = policy.v7_raw_side_price_conviction_min_price
+    center = policy.v7_raw_side_price_conviction_center_price
+    high = policy.v7_raw_side_price_conviction_max_price
+    if price < low or price > high or low >= center or center >= high:
+        return base
+    if price <= center:
+        distance_ratio = (center - price) / max(center - low, 1e-12)
+    else:
+        distance_ratio = (price - center) / max(high - center, 1e-12)
+    center_weight = max(0.0, min(1.0, 1.0 - distance_ratio))
+    floor = 0.0 if base is None else float(base)
+    dynamic = floor + (float(center_min) - floor) * center_weight
+    return max(floor, dynamic)
 
 
 def settlement_gate_passed(

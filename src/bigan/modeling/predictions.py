@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -49,8 +49,11 @@ class PredictionBatchReport:
     calibration_method: str | None
     monitoring_events_written: int = 0
     signal_queue_events_written: int = 0
+    signal_jsonl_events_written: int = 0
+    signal_kafka_events_written: int = 0
+    signal_bridge_diagnostics: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> dict[str, int | str | None]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -166,7 +169,7 @@ def generate_v7_prediction_rows(
     model: XGBoostV7Model,
     ingest_ts: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Generate prediction rows with explicit v7 settlement-EV payload fields."""
+    """Generate prediction rows with explicit v7 convergence payload fields."""
 
     run_ingest_ts = int(time.time() * 1000) if ingest_ts is None else int(ingest_ts)
     payloads = model.predict_payload_many(feature_rows)
@@ -192,7 +195,7 @@ def generate_v7_prediction_rows(
                 ),
                 "feature_version": str(feature["feature_version"]),
                 "model_version": model.model_version,
-                "calibration_method": "family-aware temperature scaling + settlement residual",
+                "calibration_method": "family-aware temperature scaling + convergence exit value",
                 "prob_up_15m": p_up,
                 "raw_prob_up_15m": p_up,
                 "p_up": p_up,
@@ -202,6 +205,9 @@ def generate_v7_prediction_rows(
                 "p_vol_down": None,
                 "settlement_residual": float(payload["settlement_residual"]),
                 "token_side": _optional_str(payload.get("token_side")),
+                "model_probability": _optional_float(payload.get("model_probability")),
+                "polymarket_price": _optional_float(payload.get("polymarket_price")),
+                "mispricing_edge": _optional_float(payload.get("mispricing_edge")),
                 "token_expected_win_probability": _optional_float(
                     payload.get("token_expected_win_probability")
                 ),
@@ -216,6 +222,36 @@ def generate_v7_prediction_rows(
                 ),
                 "residual_expected_edge_down": _optional_float(
                     payload.get("residual_expected_edge_down")
+                ),
+                "p_up_hit_5c_before_loss_10c": _optional_float(
+                    payload.get("p_up_hit_5c_before_loss_10c")
+                ),
+                "p_up_hit_10c_before_loss_10c": _optional_float(
+                    payload.get("p_up_hit_10c_before_loss_10c")
+                ),
+                "p_up_loss_10c_before_hit_5c": _optional_float(
+                    payload.get("p_up_loss_10c_before_hit_5c")
+                ),
+                "p_down_hit_5c_before_loss_10c": _optional_float(
+                    payload.get("p_down_hit_5c_before_loss_10c")
+                ),
+                "p_down_hit_10c_before_loss_10c": _optional_float(
+                    payload.get("p_down_hit_10c_before_loss_10c")
+                ),
+                "p_down_loss_10c_before_hit_5c": _optional_float(
+                    payload.get("p_down_loss_10c_before_hit_5c")
+                ),
+                "selected_hit_5c_before_loss_10c": _optional_float(
+                    payload.get("selected_hit_5c_before_loss_10c")
+                ),
+                "selected_hit_10c_before_loss_10c": _optional_float(
+                    payload.get("selected_hit_10c_before_loss_10c")
+                ),
+                "selected_loss_10c_before_hit_5c": _optional_float(
+                    payload.get("selected_loss_10c_before_hit_5c")
+                ),
+                "selected_confidence_score": _optional_float(
+                    payload.get("selected_confidence_score")
                 ),
                 "selected_side": _optional_str(payload.get("selected_side")),
                 "selected_expected_edge": _optional_float(payload.get("selected_expected_edge")),
@@ -259,8 +295,11 @@ def run_prediction_batch(
     signal_jsonl_output_path: Path | str | None = None,
     signal_jsonl_market_families: frozenset[str] = frozenset({"BTC-15M"}),
     signal_jsonl_outcome_sides: frozenset[str] | None = None,
-    signal_jsonl_v6_joint_config: "V6JointGateConfig | None" = None,
+    signal_jsonl_v6_joint_config: V6JointGateConfig | None = None,
     signal_jsonl_max_event_age_seconds: float | None = None,
+    signal_kafka_bootstrap_servers: str | None = None,
+    signal_kafka_topic: str | None = None,
+    signal_kafka_flush_timeout_seconds: float = 5.0,
 ) -> PredictionBatchReport:
     """Read feature rows from the warehouse and append ``predictions`` rows."""
 
@@ -279,7 +318,7 @@ def run_prediction_batch(
             model=model,
             ingest_ts=ingest_ts,
         )
-        calibration_method: str | None = "family-aware temperature scaling + settlement residual"
+        calibration_method: str | None = "family-aware temperature scaling + convergence exit value"
     elif _is_v6_model_artifact(model_path):
         if calibration_path is not None:
             raise ValueError("xgboost-v6 artifacts do not use a separate calibration_path")
@@ -314,6 +353,9 @@ def run_prediction_batch(
         rows_written = writer.stats.rows_written.get("predictions", 0)
     monitoring_events_written = 0
     signal_queue_events_written = 0
+    signal_jsonl_events_written = 0
+    signal_kafka_events_written = 0
+    signal_bridge_diagnostics: dict[str, Any] = {}
     if monitoring_db_path is not None and rows:
         from bigan.mlops.registry import connect_mlops_db, initialize_mlops_db
 
@@ -331,16 +373,19 @@ def run_prediction_batch(
             )
         finally:
             conn.close()
-    if signal_jsonl_output_path is not None and rows:
-        from bigan.execution.signal_queue import append_prediction_rows_as_signal_jsonl
+    if (signal_jsonl_output_path is not None or signal_kafka_topic is not None) and rows:
+        from bigan.execution.signal_queue import (
+            append_prediction_rows_as_signal_jsonl,
+            append_prediction_rows_as_signal_kafka,
+            diagnose_prediction_rows_for_signal_bridge,
+        )
 
         token_ids_by_market_side = (
             _token_ids_by_market_side_from_features(warehouse_dir, rows)
             if signal_jsonl_v6_joint_config is not None
             else None
         )
-        signal_queue_events_written = append_prediction_rows_as_signal_jsonl(
-            signal_jsonl_output_path,
+        signal_bridge_diagnostics = diagnose_prediction_rows_for_signal_bridge(
             rows,
             model_version=model.model_version,
             allowed_families=signal_jsonl_market_families,
@@ -348,6 +393,36 @@ def run_prediction_batch(
             v6_joint_config=signal_jsonl_v6_joint_config,
             max_event_age_seconds=signal_jsonl_max_event_age_seconds,
             token_ids_by_market_side=token_ids_by_market_side,
+        ).to_dict()
+        if signal_jsonl_output_path is not None:
+            signal_jsonl_events_written = append_prediction_rows_as_signal_jsonl(
+                signal_jsonl_output_path,
+                rows,
+                model_version=model.model_version,
+                allowed_families=signal_jsonl_market_families,
+                allowed_outcome_sides=signal_jsonl_outcome_sides,
+                v6_joint_config=signal_jsonl_v6_joint_config,
+                max_event_age_seconds=signal_jsonl_max_event_age_seconds,
+                token_ids_by_market_side=token_ids_by_market_side,
+            )
+        if signal_kafka_topic is not None:
+            if not signal_kafka_bootstrap_servers:
+                raise ValueError("signal_kafka_bootstrap_servers is required when topic is set")
+            signal_kafka_events_written = append_prediction_rows_as_signal_kafka(
+                bootstrap_servers=signal_kafka_bootstrap_servers,
+                topic=signal_kafka_topic,
+                rows=rows,
+                model_version=model.model_version,
+                allowed_families=signal_jsonl_market_families,
+                allowed_outcome_sides=signal_jsonl_outcome_sides,
+                v6_joint_config=signal_jsonl_v6_joint_config,
+                max_event_age_seconds=signal_jsonl_max_event_age_seconds,
+                token_ids_by_market_side=token_ids_by_market_side,
+                flush_timeout_seconds=signal_kafka_flush_timeout_seconds,
+            )
+        signal_queue_events_written = max(
+            signal_jsonl_events_written,
+            signal_kafka_events_written,
         )
     return PredictionBatchReport(
         rows_generated=rows_generated,
@@ -356,6 +431,9 @@ def run_prediction_batch(
         calibration_method=calibration_method,
         monitoring_events_written=monitoring_events_written,
         signal_queue_events_written=signal_queue_events_written,
+        signal_jsonl_events_written=signal_jsonl_events_written,
+        signal_kafka_events_written=signal_kafka_events_written,
+        signal_bridge_diagnostics=signal_bridge_diagnostics,
     )
 
 

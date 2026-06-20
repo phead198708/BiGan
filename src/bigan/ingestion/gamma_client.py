@@ -235,8 +235,18 @@ class GammaClient:
                     seen_conditions.add(market.condition_id)
                     out.append(market)
 
-            first_page = await self._fetch_markets_page(url, limit=request_limit, offset=0)
-            pages: list[tuple[int, Sequence[Mapping[str, Any]]]] = [(0, first_page)]
+            pages: list[tuple[int, Sequence[Mapping[str, Any]]]] = []
+            try:
+                first_page = await self._fetch_markets_page(
+                    url,
+                    limit=request_limit,
+                    offset=0,
+                )
+            except (aiohttp.ClientError, TimeoutError):
+                if not out:
+                    raise
+                first_page = []
+            pages.append((0, first_page))
             if len(first_page) >= request_limit and max_pages > 1:
                 semaphore = asyncio.Semaphore(max(1, page_concurrency))
 
@@ -252,11 +262,16 @@ class GammaClient:
                         )
                     return offset, records
 
-                pages.extend(
-                    await asyncio.gather(
-                        *(fetch_offset(page_index) for page_index in range(1, max_pages))
-                    )
+                page_results = await asyncio.gather(
+                    *(fetch_offset(page_index) for page_index in range(1, max_pages)),
+                    return_exceptions=True,
                 )
+                for result in page_results:
+                    if isinstance(result, (aiohttp.ClientError, TimeoutError)):
+                        continue
+                    if isinstance(result, Exception):
+                        raise result
+                    pages.append(result)
         except (aiohttp.ClientError, TimeoutError):
             GAMMA_POLLS_TOTAL.labels(outcome="error").inc()
             raise

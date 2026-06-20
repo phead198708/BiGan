@@ -359,7 +359,9 @@ def load_run(
                 round_slug = str(position.get("round_slug") or "")
                 evaluation = payload.get("evaluation") or {}
                 action = str(evaluation.get("action") or event.removeprefix("paper_v7_settlement_position_")).upper()
-                pnl = _optional_float(payload.get("cumulative_position_realized_pnl"))
+                pnl = _optional_float(payload.get("realized_pnl_delta"))
+                if pnl is None:
+                    pnl = _optional_float(payload.get("cumulative_position_realized_pnl"))
                 if event.endswith("_added"):
                     pnl = None
                 exit_row = ExitRow(
@@ -591,8 +593,12 @@ def render_run_overview(runs: list[RunData]) -> str:
         stop = summary.get("stop_reason") or summary.get("status")
         if run.run_id in {"20260608T055415Z", "20260610T021333Z"}:
             stop = "stop_max_runtime (180min)"
-        elif run.run_id in {"20260608T133724Z", "20260609T103055Z"}:
+        elif run.run_id in {"20260608T133724Z", "20260609T103055Z", "20260611T030545Z"}:
             stop = "stop_daily_loss_limit (-3 USDC)"
+        elif run.run_id == "20260611T111648Z":
+            stop = "stop_max_runtime (180min)"
+        elif run.run_id == "20260611T154406Z":
+            stop = "CLOB API timeout crash (20/30 rounds)"
         if summary.get("stop_reason"):
             stop = str(summary["stop_reason"])
         lines.append(
@@ -610,6 +616,11 @@ def render_run_overview(runs: list[RunData]) -> str:
             "",
             "**Run 4 delta:** `convergence_take_profit_enabled=true`, `take_profit_hold_edge=0.03`, "
             "`take_profit_force_exit_seconds=180`, `take_profit_hysteresis_bars=2`.",
+            "",
+            "**Run 5–6 delta (Issue #104 P0/P1):** `min_entry_price=0.30`, "
+            "`divergence_reduce_max_hold_edge=0.08`, `add_cooldown_after_divergence_reduce_seconds=120`, "
+            "poll-loop take-profit / force-exit, price-convergence take-profit, Gamma retry 24h. "
+            "Run 6 repeats Run 5 config on a different UTC window.",
             "",
             "**Artifacts:**",
         ]
@@ -666,6 +677,39 @@ def _all_runs(root: Path) -> list[RunData]:
             / "data/logs/xgboost-v7-paper-shadow-20260610T021333Z-event5s-30round-takeprofit/phase4-20260610T022208Z.jsonl",
             summary_path=root / "logs/xgboost-v7-paper-shadow/phase4-20260610T021333Z-summary.json",
             gamma_path=root / "logs/xgboost-v7-paper-shadow/phase4-20260610T021333Z-gamma-reconcile.json",
+        ),
+        load_run(
+            run_id="20260611T030545Z",
+            description=(
+                "v7 event5s paper30 run 5 (issue104 P0/P1); conf=0.75, edge=0.04, max_age=30s, "
+                "min_entry_price=0.30, PM+take-profit+anti-churn; stopped on daily_loss_limit; "
+                "lifecycle complete, 0 pending settlement"
+            ),
+            log_path=root / "logs/xgboost-v7-paper-shadow/phase4-20260611T030545Z.jsonl",
+            summary_path=root / "logs/xgboost-v7-paper-shadow/phase4-20260611T030545Z-summary.json",
+            gamma_path=None,
+        ),
+        load_run(
+            run_id="20260611T111648Z",
+            description=(
+                "v7 event5s paper30 run 6 (issue104 P0/P1, same config as run 5); conf=0.75, "
+                "edge=0.04, max_age=30s, min_entry_price=0.30, PM+take-profit+anti-churn; "
+                "stopped on max_runtime 180min; lifecycle complete, 0 pending settlement"
+            ),
+            log_path=root / "logs/xgboost-v7-paper-shadow/phase4-20260611T111648Z.jsonl",
+            summary_path=root / "logs/xgboost-v7-paper-shadow/phase4-20260611T111648Z-summary.json",
+            gamma_path=None,
+        ),
+        load_run(
+            run_id="20260611T154406Z",
+            description=(
+                "v7 event5s paper30 run 7 (issue104 P0/P1); conf=0.75, edge=0.04, max_age=30s, "
+                "min_entry_price=0.30, PM+take-profit+anti-churn, max_runtime=1440min; "
+                "stopped on CLOB API timeout crash at 20/30 rounds; lifecycle complete"
+            ),
+            log_path=root / "logs/xgboost-v7-paper-shadow/phase4-20260611T154406Z.jsonl",
+            summary_path=root / "logs/xgboost-v7-paper-shadow/phase4-20260611T154406Z-summary.json",
+            gamma_path=None,
         ),
     ]
 
