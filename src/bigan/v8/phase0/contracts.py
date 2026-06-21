@@ -330,16 +330,40 @@ class DatasetContract(BaseModel):
     feature_schema: tuple[str, ...]
     label_schema: tuple[str, ...]
     cost_columns: tuple[str, ...] = COST_COLUMNS
+    market_schema_hash: str | None = None
+    feature_schema_hash: str | None = None
+    label_schema_hash: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_schema_hashes(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping):
+            return data
+        row = dict(data)
+        for field_name in ("market_schema", "feature_schema", "label_schema"):
+            hash_field = f"{field_name}_hash"
+            if row.get(hash_field) is None and row.get(field_name) is not None:
+                row[hash_field] = schema_names_hash(tuple(row[field_name]))
+        return row
 
     @model_validator(mode="after")
     def validate_contract(self) -> DatasetContract:
-        if self.market_schema != tuple(MARKET_DATA_SCHEMA.names):
-            raise ValueError("market_schema does not match Phase 0 MarketData schema")
-        if self.feature_schema != tuple(FEATURE_VECTOR_SCHEMA.names):
-            raise ValueError("feature_schema does not match Phase 0 FeatureVector schema")
-        if self.label_schema != tuple(LABEL_SCHEMA.names):
-            raise ValueError("label_schema does not match Phase 0 Label schema")
+        _require_schema_columns(
+            "market_schema",
+            self.market_schema,
+            tuple(MARKET_DATA_SCHEMA.names),
+        )
+        _require_schema_columns(
+            "feature_schema",
+            self.feature_schema,
+            tuple(FEATURE_VECTOR_SCHEMA.names),
+        )
+        _require_schema_columns(
+            "label_schema",
+            self.label_schema,
+            tuple(LABEL_SCHEMA.names),
+        )
         missing_cost_columns = set(self.cost_columns) - set(self.label_schema)
         if missing_cost_columns:
             raise ValueError(
@@ -350,6 +374,39 @@ class DatasetContract(BaseModel):
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
+
+    @property
+    def market_schema_order_matches(self) -> bool:
+        return self.market_schema == tuple(MARKET_DATA_SCHEMA.names)
+
+    @property
+    def feature_schema_order_matches(self) -> bool:
+        return self.feature_schema == tuple(FEATURE_VECTOR_SCHEMA.names)
+
+    @property
+    def label_schema_order_matches(self) -> bool:
+        return self.label_schema == tuple(LABEL_SCHEMA.names)
+
+
+def schema_names_hash(names: tuple[str, ...]) -> str:
+    import hashlib
+    import json
+
+    payload = json.dumps(list(names), separators=(",", ":"), sort_keys=False).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _require_schema_columns(
+    field_name: str,
+    observed: tuple[str, ...],
+    required: tuple[str, ...],
+) -> None:
+    missing = set(required) - set(observed)
+    if missing:
+        raise ValueError(
+            f"{field_name} is missing required columns: "
+            + ", ".join(sorted(missing))
+        )
 
 
 def _optional_float(value: Any) -> float | None:

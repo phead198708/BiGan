@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import random
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,8 +14,10 @@ import pytest
 from bigan.v8.phase0 import (
     FEATURE_VECTOR_SCHEMA,
     LABEL_SCHEMA,
+    MARKET_DATA_SCHEMA,
     CausalFeatureBuilder,
     CostAwareLabelBuilder,
+    CostCalibrationBucketConfig,
     CostCalibrationConfig,
     CostModelConfig,
     DatasetContract,
@@ -24,11 +27,14 @@ from bigan.v8.phase0 import (
     IntegrityValidator,
     Label,
     MarketDataLoader,
+    Phase0ArtifactError,
+    Phase0ArtifactGate,
     Phase0Pipeline,
     Phase0PipelineConfig,
     TimeAlignmentEngine,
     TradingCostModel,
     ValidationConfig,
+    assert_phase0_artifact_ready,
 )
 
 MINUTE_MS = 60_000
@@ -79,6 +85,44 @@ def _pipeline(*, fail_on_validation_error: bool = True) -> Phase0Pipeline:
             fail_on_validation_error=fail_on_validation_error,
         )
     )
+
+
+def _calibration_samples(
+    *,
+    market_count: int = 20,
+    observed_multiplier: float = 1.02,
+    cost_model: TradingCostModel | None = None,
+) -> tuple[TradingCostModel, list[ExecutionCostSample]]:
+    loader = MarketDataLoader()
+    market_data = loader.load_rows(_market_rows(market_count))
+    resolved_model = cost_model or TradingCostModel(
+        CostModelConfig(
+            fee_bps=5.0,
+            base_slippage_bps=1.0,
+            volatility_slippage_factor=0.10,
+            liquidity_impact_factor=0.002,
+        )
+    )
+    samples: list[ExecutionCostSample] = []
+    for idx, (entry, exit_row) in enumerate(zip(market_data, market_data[1:], strict=False)):
+        volatility = 0.001 if idx < market_count // 2 else 0.02
+        order_size = 1.0 if idx < market_count // 2 else 25.0
+        estimate = resolved_model.estimate(
+            entry=entry,
+            exit=exit_row,
+            order_size=order_size,
+            volatility=volatility,
+        )
+        samples.append(
+            ExecutionCostSample(
+                entry=entry,
+                exit=exit_row,
+                order_size=order_size,
+                volatility=volatility,
+                observed_total_cost=estimate.total_cost * observed_multiplier,
+            )
+        )
+    return resolved_model, samples
 
 
 def test_phase0_pipeline_is_cost_aware_causal_and_reproducible(tmp_path: Path) -> None:
@@ -397,39 +441,28 @@ def test_statistical_integrity_detects_distribution_drift() -> None:
 
 
 def test_cost_model_calibration_validates_against_observed_execution_costs() -> None:
-    loader = MarketDataLoader()
-    market_data = loader.load_rows(_market_rows(10))
-    cost_model = TradingCostModel(
-        CostModelConfig(
-            fee_bps=5.0,
-            base_slippage_bps=1.0,
-            volatility_slippage_factor=0.10,
-            liquidity_impact_factor=0.002,
-        )
-    )
-    samples: list[ExecutionCostSample] = []
-    for entry, exit_row in zip(market_data, market_data[1:], strict=False):
-        estimate = cost_model.estimate(entry=entry, exit=exit_row, volatility=0.001)
-        samples.append(
-            ExecutionCostSample(
-                entry=entry,
-                exit=exit_row,
-                volatility=0.001,
-                observed_total_cost=estimate.total_cost * 1.02,
-            )
-        )
+    cost_model, samples = _calibration_samples(market_count=10)
 
     calibration_config = CostCalibrationConfig(
         min_samples=5,
         max_mean_absolute_error=0.001,
         max_mean_absolute_percentage_error=0.05,
         max_abs_bias=0.001,
+        max_weighted_mean_absolute_percentage_error=0.05,
+        max_median_absolute_percentage_error=0.05,
     )
     report = cost_model.validate_calibration(samples, config=calibration_config)
 
     assert report.passed
     assert report.sample_count == len(samples)
     assert report.mean_absolute_percentage_error == pytest.approx(0.02 / 1.02, rel=1e-2)
+    assert report.weighted_mean_absolute_percentage_error == pytest.approx(
+        0.02 / 1.02,
+        rel=1e-2,
+    )
+    assert report.median_absolute_error is not None
+    assert report.median_absolute_percentage_error is not None
+    assert report.symmetric_mean_absolute_percentage_error is not None
 
     bad_samples = [
         ExecutionCostSample(
@@ -445,3 +478,215 @@ def test_cost_model_calibration_validates_against_observed_execution_costs() -> 
     assert not bad_report.passed
     assert bad_report.mean_absolute_percentage_error is not None
     assert bad_report.mean_absolute_percentage_error > 0.05
+
+
+def test_artifact_gate_accepts_valid_manifest_and_rejects_invalid_contracts() -> None:
+    dataset = _pipeline().build(_market_rows())
+    contract = assert_phase0_artifact_ready(dataset.manifest)
+    assert contract.dataset_hash == dataset.manifest["dataset_hash"]
+
+    invalid_cases = [
+        ("missing_dataset_contract", lambda manifest: manifest.pop("dataset_contract")),
+        ("dataset_hash_mismatch", lambda manifest: manifest.update({"dataset_hash": "stale"})),
+        (
+            "stale_dataset_version",
+            lambda manifest: manifest["dataset_contract"].update(
+                {"dataset_version": "bigan-v8-phase0-v0"}
+            ),
+        ),
+        (
+            "missing_cost_columns",
+            lambda manifest: manifest["dataset_contract"].update(
+                {
+                    "cost_columns": [
+                        column
+                        for column in manifest["dataset_contract"]["cost_columns"]
+                        if column != "net_return"
+                    ]
+                }
+            ),
+        ),
+        (
+            "validation_failed",
+            lambda manifest: manifest["validation"].update({"passed": False}),
+        ),
+        (
+            "missing_acceptance_criteria",
+            lambda manifest: manifest["validation"].pop("acceptance_criteria"),
+        ),
+        (
+            "acceptance_criterion_failed",
+            lambda manifest: manifest["validation"]["acceptance_criteria"].update(
+                {"zero_detectable_leakage": False}
+            ),
+        ),
+    ]
+    for expected_code, mutate in invalid_cases:
+        manifest = deepcopy(dataset.manifest)
+        mutate(manifest)
+        report = Phase0ArtifactGate().validate_manifest(manifest)
+        assert not report.passed
+        assert expected_code in {failure.code for failure in report.failures}
+        with pytest.raises(Phase0ArtifactError):
+            report.raise_if_failed()
+
+
+def test_artifact_gate_separates_required_schema_and_canonical_order() -> None:
+    dataset = _pipeline().build(_market_rows())
+    reordered_manifest = deepcopy(dataset.manifest)
+    reordered_manifest["dataset_contract"]["feature_schema"] = list(
+        reversed(FEATURE_VECTOR_SCHEMA.names)
+    )
+
+    strict_report = Phase0ArtifactGate().validate_manifest(reordered_manifest)
+    assert not strict_report.passed
+    assert "feature_schema_order_mismatch" in {
+        failure.code for failure in strict_report.failures
+    }
+
+    relaxed_report = Phase0ArtifactGate(require_canonical_order=False).validate_manifest(
+        reordered_manifest
+    )
+    assert relaxed_report.passed
+
+    missing_manifest = deepcopy(dataset.manifest)
+    missing_manifest["dataset_contract"]["market_schema"] = [
+        column
+        for column in MARKET_DATA_SCHEMA.names
+        if column != "available_at_ts"
+    ]
+    missing_report = Phase0ArtifactGate(require_canonical_order=False).validate_manifest(
+        missing_manifest
+    )
+    assert not missing_report.passed
+    assert "market_schema_missing_columns" in {
+        failure.code for failure in missing_report.failures
+    }
+
+
+def test_bucketed_cost_calibration_fails_when_sampled_regime_fails() -> None:
+    cost_model, samples = _calibration_samples(market_count=24)
+    calibration_config = CostCalibrationConfig(
+        min_samples=5,
+        max_mean_absolute_error=0.001,
+        max_mean_absolute_percentage_error=0.05,
+        max_abs_bias=0.001,
+    )
+    bucket_config = CostCalibrationBucketConfig(
+        min_bucket_samples=5,
+        bucket_by_source=False,
+        bucket_by_instrument=False,
+        volatility_edges=(0.005,),
+        spread_edges=(),
+        liquidity_edges=(),
+        order_size_edges=(5.0,),
+    )
+
+    good_report = cost_model.validate_calibration_by_bucket(
+        samples,
+        bucket_config=bucket_config,
+        config=calibration_config,
+    )
+    assert good_report.passed
+    assert good_report.buckets
+    assert not good_report.failed_buckets
+
+    bad_samples = [
+        sample
+        if (sample.volatility or 0.0) < 0.005
+        else ExecutionCostSample(
+            entry=sample.entry,
+            exit=sample.exit,
+            order_size=sample.order_size,
+            volatility=sample.volatility,
+            observed_total_cost=sample.observed_total_cost * 3.0,
+        )
+        for sample in samples
+    ]
+    bad_report = cost_model.validate_calibration_by_bucket(
+        bad_samples,
+        bucket_config=bucket_config,
+        config=calibration_config,
+    )
+    assert not bad_report.passed
+    assert bad_report.aggregate.passed is False
+    assert bad_report.failed_buckets
+
+
+def test_robust_low_cost_metrics_remain_finite_for_tiny_observed_costs() -> None:
+    loader = MarketDataLoader()
+    market_data = loader.load_rows(_market_rows(8))
+    cost_model = TradingCostModel(CostModelConfig(liquidity_impact_factor=0.0))
+    samples = [
+        ExecutionCostSample(
+            entry=entry,
+            exit=exit_row,
+            observed_total_cost=1e-9,
+            volatility=0.0,
+        )
+        for entry, exit_row in zip(market_data, market_data[1:], strict=False)
+    ]
+
+    report = cost_model.validate_calibration(
+        samples,
+        config=CostCalibrationConfig(
+            min_samples=5,
+            percentage_error_floor=1e-4,
+            max_mean_absolute_error=1.0,
+            max_mean_absolute_percentage_error=1e6,
+            max_abs_bias=1.0,
+        ),
+    )
+
+    assert report.mean_absolute_percentage_error is not None
+    assert math.isfinite(report.mean_absolute_percentage_error)
+    assert report.weighted_mean_absolute_percentage_error is not None
+    assert math.isfinite(report.weighted_mean_absolute_percentage_error)
+    assert report.median_absolute_percentage_error is not None
+    assert math.isfinite(report.median_absolute_percentage_error)
+
+
+def test_drift_policy_supports_warning_and_insufficient_row_hard_fail() -> None:
+    t0 = _ts_at(2026, 6, 1, 12, 0)
+    features = [
+        FeatureVector(
+            decision_ts=t0 + idx * MINUTE_MS,
+            feature_cutoff_ts=t0 + idx * MINUTE_MS,
+            lookback_start_ts=t0 + idx * MINUTE_MS,
+            max_input_ts=t0 + idx * MINUTE_MS,
+            source="polymarket",
+            instrument_id="btc-updown-15m:UP",
+            features={"probe": float(idx)},
+            provenance={
+                "probe": FeatureProvenance(
+                    feature_name="probe",
+                    input_start_ts=t0 + idx * MINUTE_MS,
+                    input_end_ts=t0 + idx * MINUTE_MS,
+                    available_at_ts=t0 + idx * MINUTE_MS,
+                    lookback_ms=0,
+                )
+            },
+        )
+        for idx in range(10)
+    ]
+
+    hard_report = IntegrityValidator(
+        ValidationConfig(
+            min_drift_rows=20,
+            fail_on_insufficient_drift_rows=True,
+        )
+    ).validate_statistical_integrity(features)
+    assert not hard_report.passed
+    assert "feature_distribution_insufficient_rows" in {
+        failure.code for failure in hard_report.failures
+    }
+
+    warn_report = IntegrityValidator(
+        ValidationConfig(
+            min_drift_rows=20,
+            fail_on_insufficient_drift_rows=True,
+            statistical_integrity_mode="warn",
+        )
+    ).validate_statistical_integrity(features)
+    assert warn_report.passed
+    assert warn_report.failures[0].severity == "warning"

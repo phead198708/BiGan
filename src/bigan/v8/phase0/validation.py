@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -27,6 +27,8 @@ class ValidationConfig:
     max_psi: float = 10.0
     max_kl_divergence: float = 10.0
     drift_excluded_columns: tuple[str, ...] = ("minute_of_day", "day_of_week")
+    statistical_integrity_mode: Literal["warn", "fail"] = "fail"
+    fail_on_insufficient_drift_rows: bool = False
 
     def __post_init__(self) -> None:
         if not 0.0 < self.max_abs_feature_future_corr <= 1.0:
@@ -45,6 +47,8 @@ class ValidationConfig:
             raise ValueError("max_psi must be non-negative")
         if self.max_kl_divergence < 0:
             raise ValueError("max_kl_divergence must be non-negative")
+        if self.statistical_integrity_mode not in {"warn", "fail"}:
+            raise ValueError("statistical_integrity_mode must be warn or fail")
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +101,13 @@ class ValidationReport:
                     failure.code.startswith("label_") for failure in self.failures
                 ),
                 "statistical_validity_verified": not any(
-                    failure.code in {"feature_distribution_drift"} for failure in self.failures
+                    failure.code
+                    in {
+                        "feature_distribution_drift",
+                        "feature_distribution_insufficient_rows",
+                    }
+                    and failure.severity == "error"
+                    for failure in self.failures
                 ),
                 "cost_model_realistic": not any(
                     failure.code in {"label_cost_math", "negative_cost"} for failure in self.failures
@@ -319,10 +329,25 @@ class IntegrityValidator:
 
         ordered = sorted(features, key=lambda feature: feature.decision_ts)
         if len(ordered) < self.config.min_drift_rows:
+            failures = []
+            if self.config.fail_on_insufficient_drift_rows:
+                failures.append(
+                    ValidationFailure(
+                        code="feature_distribution_insufficient_rows",
+                        message="not enough rows to run configured drift checks",
+                        severity=_drift_severity(self.config),
+                        row_count=len(ordered),
+                    )
+                )
             return ValidationReport(
+                failures=failures,
                 metrics={
                     "statistical_integrity": {
                         "checked": False,
+                        "mode": self.config.statistical_integrity_mode,
+                        "fail_on_insufficient_rows": (
+                            self.config.fail_on_insufficient_drift_rows
+                        ),
                         "reason": "insufficient_rows",
                         "row_count": len(ordered),
                     }
@@ -361,6 +386,7 @@ class IntegrityValidator:
                         message=(
                             "feature distribution drift exceeds KS/PSI/KL thresholds"
                         ),
+                        severity=_drift_severity(self.config),
                         row_count=len(ref_values) + len(cand_values),
                         column=column,
                     )
@@ -370,6 +396,8 @@ class IntegrityValidator:
             metrics={
                 "statistical_integrity": {
                     "checked": bool(drift_metrics),
+                    "mode": self.config.statistical_integrity_mode,
+                    "fail_on_insufficient_rows": self.config.fail_on_insufficient_drift_rows,
                     "metrics": drift_metrics,
                 }
             },
@@ -526,6 +554,10 @@ def _feature_columns_present(features: list[FeatureVector]) -> tuple[str, ...]:
     for feature in features:
         columns.update(feature.features)
     return tuple(sorted(columns))
+
+
+def _drift_severity(config: ValidationConfig) -> str:
+    return "error" if config.statistical_integrity_mode == "fail" else "warning"
 
 
 def _pearson(x_values: list[float], y_values: list[float]) -> float | None:
