@@ -10,6 +10,7 @@ import pytest
 from bigan.v8.phase0.costs import CostModelConfig
 from bigan.v8.phase1 import PolicyPrediction, PolicyTrainShadowSplit
 from bigan.v8.phase1.model import XGBoostPolicyModel
+from bigan.v8.phase2 import Phase2EvaluationConfig, run_phase2_evaluation
 from bigan.v8.phase3 import (
     PHASE3_DIFFERENTIABLE_PNL_PHASE,
     DifferentiableExecutionConfig,
@@ -65,6 +66,25 @@ def _phase3_config(output_dir: Path | None = None) -> DifferentiablePnlOptimizat
     )
 
 
+def _write_frozen_phase2_report(tmp_path: Path, phase15) -> Path:
+    phase3_config = _phase3_config()
+    result = run_phase2_evaluation(
+        phase15.artifact_dir,
+        phase15.split,
+        Phase2EvaluationConfig(
+            execution_config=phase3_config.execution_config.to_phase2_execution_config(),
+            min_sharpe_improvement_ratio=-10.0,
+            min_turnover_reduction_ratio=-10.0,
+            max_cost_to_abs_gross_return_ratio=100.0,
+            output_dir=tmp_path / "phase2",
+            created_at="2026-06-21T00:19:00Z",
+        ),
+    )
+    assert result.report.passed
+    assert result.report_path is not None
+    return result.report_path
+
+
 def test_phase3_optimizes_differentiable_pnl_and_writes_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -72,11 +92,13 @@ def test_phase3_optimizes_differentiable_pnl_and_writes_report(
     phase15 = _accepted_phase15_candidate(tmp_path)
     assert phase15.artifact_dir is not None
     monkeypatch.setattr(XGBoostPolicyModel, "predict_examples", _fake_cost_aware_predictions)
+    phase2_report_path = _write_frozen_phase2_report(tmp_path, phase15)
 
     result = run_phase3_optimization(
         phase15.artifact_dir,
         phase15.split,
         _phase3_config(output_dir=tmp_path / "phase3"),
+        phase2_report_path=phase2_report_path,
     )
 
     assert result.passed
@@ -88,6 +110,10 @@ def test_phase3_optimizes_differentiable_pnl_and_writes_report(
     assert result.report.phase1_5_hashes["dataset_profile_sha256"] == (
         phase15.run_manifest["artifacts"]["dataset_profile_sha256"]
     )
+    assert result.report.phase2_baseline_source == "frozen_phase2_report"
+    assert result.report.phase2_report_path == str(phase2_report_path)
+    assert result.report.phase2_report_sha256 is not None
+    assert result.report.acceptance_criteria["frozen_phase2_report_verified"] is True
     assert result.report.acceptance_criteria["direct_pnl_optimization"] is True
     assert result.report.acceptance_criteria["gradient_flow_verified"] is True
     assert result.report.acceptance_criteria["optimization_loss_decreased"] is True
@@ -112,6 +138,54 @@ def test_phase3_optimizes_differentiable_pnl_and_writes_report(
     saved = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert saved["phase"] == PHASE3_DIFFERENTIABLE_PNL_PHASE
     assert saved["passed"] is True
+    assert saved["phase2_report_sha256"] == result.report.phase2_report_sha256
+
+
+def test_phase3_marks_recomputed_phase2_baseline_as_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    phase15 = _accepted_phase15_candidate(tmp_path)
+    assert phase15.artifact_dir is not None
+    monkeypatch.setattr(XGBoostPolicyModel, "predict_examples", _fake_cost_aware_predictions)
+
+    result = run_phase3_optimization(
+        phase15.artifact_dir,
+        phase15.split,
+        _phase3_config(),
+    )
+
+    assert result.report.phase2_baseline_source == "diagnostic_recomputed_phase2_baseline"
+    assert result.report.phase2_report_path is None
+    assert result.report.phase2_report_sha256 is None
+    assert result.report.acceptance_criteria["frozen_phase2_report_verified"] is False
+    assert not result.passed
+
+
+def test_phase3_rejects_phase2_report_candidate_mismatch_before_prediction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    phase15 = _accepted_phase15_candidate(tmp_path)
+    assert phase15.artifact_dir is not None
+    monkeypatch.setattr(XGBoostPolicyModel, "predict_examples", _fake_cost_aware_predictions)
+    phase2_report_path = _write_frozen_phase2_report(tmp_path, phase15)
+    report = json.loads(phase2_report_path.read_text(encoding="utf-8"))
+    report["candidate_run_id"] = "wrong-candidate"
+    phase2_report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+
+    def fail_predict(*args, **kwargs):
+        raise AssertionError("prediction should not run after Phase 2 report mismatch")
+
+    monkeypatch.setattr(XGBoostPolicyModel, "predict_examples", fail_predict)
+
+    with pytest.raises(Phase3OptimizationError, match="candidate_run_id"):
+        run_phase3_optimization(
+            phase15.artifact_dir,
+            phase15.split,
+            _phase3_config(),
+            phase2_report_path=phase2_report_path,
+        )
 
 
 def test_phase3_split_mismatch_fails_before_prediction(
@@ -149,6 +223,7 @@ def test_phase3_oos_stability_gate_is_explicit(
     phase15 = _accepted_phase15_candidate(tmp_path)
     assert phase15.artifact_dir is not None
     monkeypatch.setattr(XGBoostPolicyModel, "predict_examples", _fake_cost_aware_predictions)
+    phase2_report_path = _write_frozen_phase2_report(tmp_path, phase15)
     config = DifferentiablePnlOptimizationConfig(
         execution_config=_phase3_config().execution_config,
         initial_parameters=(0.0, 1.0, 0.0, 0.0),
@@ -160,7 +235,12 @@ def test_phase3_oos_stability_gate_is_explicit(
         created_at="2026-06-21T00:21:00Z",
     )
 
-    result = run_phase3_optimization(phase15.artifact_dir, phase15.split, config)
+    result = run_phase3_optimization(
+        phase15.artifact_dir,
+        phase15.split,
+        config,
+        phase2_report_path=phase2_report_path,
+    )
 
     assert result.report.acceptance_criteria["stable_oos_performance"] is False
     assert not result.passed

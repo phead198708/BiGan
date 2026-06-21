@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from bigan.v8.phase1.contracts import (
     PolicyTrainShadowSplit,
 )
 from bigan.v8.phase2 import (
+    PHASE2_EVALUATION_PHASE,
     Phase2EvaluationConfig,
     Phase15CandidateArtifact,
     build_phase2_report,
@@ -53,12 +55,22 @@ def run_phase3_optimization(
     candidate_artifact_dir: Path | str,
     split: PolicyTrainShadowSplit,
     config: DifferentiablePnlOptimizationConfig | None = None,
+    *,
+    phase2_report_path: Path | str | None = None,
 ) -> Phase3OptimizationResult:
     """Optimize a differentiable cost-aware action head over a Phase 1.5 policy."""
 
     resolved_config = config or DifferentiablePnlOptimizationConfig()
     candidate = load_phase15_candidate(candidate_artifact_dir)
     _assert_split_matches_candidate(candidate, split)
+    frozen_phase2_baseline = (
+        _load_frozen_phase2_baseline(
+            phase2_report_path=phase2_report_path,
+            candidate=candidate,
+        )
+        if phase2_report_path is not None
+        else None
+    )
     train_predictions = candidate.model.predict_examples(split.train_examples)
     oos_predictions = candidate.model.predict_examples(split.shadow_examples)
     if len(train_predictions) != len(split.train_examples):
@@ -66,21 +78,11 @@ def run_phase3_optimization(
     if len(oos_predictions) != len(split.shadow_examples):
         raise Phase3OptimizationError("OOS prediction count mismatch")
 
-    baseline_execution_config = _phase2_baseline_execution_config(resolved_config)
-    phase2_fills = simulate_execution(
+    phase2_baseline = frozen_phase2_baseline or _diagnostic_phase2_baseline(
+        candidate=candidate,
         examples=split.shadow_examples,
         predictions=oos_predictions,
-        config=baseline_execution_config,
-    )
-    phase2_report = build_phase2_report(
-        candidate=candidate,
-        fills=phase2_fills,
-        config=Phase2EvaluationConfig(
-            execution_config=baseline_execution_config,
-            min_sharpe_improvement_ratio=-1_000_000_000.0,
-            min_turnover_reduction_ratio=-1_000_000_000.0,
-            created_at=resolved_config.created_at,
-        ),
+        config=resolved_config,
     )
 
     optimized_parameters, optimization_trace = _optimize_parameters(
@@ -109,7 +111,7 @@ def run_phase3_optimization(
         config=resolved_config,
     )
     comparison_metrics = _comparison_metrics(
-        phase2_metrics=phase2_report.execution_metrics,
+        phase2_metrics=phase2_baseline.metrics,
         phase3_metrics=oos_eval.metrics,
         stress_metrics=stress_metrics,
     )
@@ -118,7 +120,10 @@ def run_phase3_optimization(
         candidate_run_id=candidate.run_id,
         candidate_artifact_dir=str(candidate.artifact_dir),
         phase1_5_hashes=candidate.phase1_5_hashes(),
-        phase2_baseline_metrics=phase2_report.execution_metrics,
+        phase2_report_path=phase2_baseline.report_path,
+        phase2_report_sha256=phase2_baseline.report_sha256,
+        phase2_baseline_source=phase2_baseline.source,
+        phase2_baseline_metrics=phase2_baseline.metrics,
         train_metrics=train_eval.metrics,
         oos_metrics=oos_eval.metrics,
         comparison_metrics=comparison_metrics,
@@ -127,7 +132,8 @@ def run_phase3_optimization(
         optimized_parameters=_parameters_to_dict(optimized_parameters),
         acceptance_criteria=_acceptance_criteria(
             optimization_trace=optimization_trace,
-            phase2_metrics=phase2_report.execution_metrics,
+            phase2_baseline_source=phase2_baseline.source,
+            phase2_metrics=phase2_baseline.metrics,
             phase3_train_metrics=train_eval.metrics,
             phase3_oos_metrics=oos_eval.metrics,
             comparison_metrics=comparison_metrics,
@@ -160,6 +166,80 @@ def run_phase3_optimization(
 class _DifferentiableEvaluation:
     metrics: dict[str, Any]
     loss: float
+
+
+@dataclass(frozen=True, slots=True)
+class _Phase2Baseline:
+    metrics: dict[str, Any]
+    source: str
+    report_path: str | None
+    report_sha256: str | None
+
+
+def _load_frozen_phase2_baseline(
+    *,
+    phase2_report_path: Path | str,
+    candidate: Phase15CandidateArtifact,
+) -> _Phase2Baseline:
+    path = Path(phase2_report_path)
+    payload = _read_json(path)
+    if payload.get("phase") != PHASE2_EVALUATION_PHASE:
+        raise Phase3OptimizationError("Phase 2 report phase mismatch")
+    if payload.get("passed") is not True:
+        raise Phase3OptimizationError("Phase 3 requires a passed frozen Phase 2 report")
+    if payload.get("candidate_run_id") != candidate.run_id:
+        raise Phase3OptimizationError("Phase 2 report candidate_run_id mismatch")
+    report_hashes = payload.get("phase1_5_hashes")
+    if not isinstance(report_hashes, dict):
+        raise Phase3OptimizationError("Phase 2 report phase1_5_hashes are required")
+    candidate_hashes = candidate.phase1_5_hashes()
+    for field_name in (
+        "policy_dataset_hash",
+        "split_hash",
+        "model_sha256",
+    ):
+        if report_hashes.get(field_name) != candidate_hashes.get(field_name):
+            raise Phase3OptimizationError(f"Phase 2 report {field_name} mismatch")
+    metrics = payload.get("execution_metrics")
+    if not isinstance(metrics, dict) or int(metrics.get("row_count", 0)) <= 0:
+        raise Phase3OptimizationError("Phase 2 report execution_metrics are required")
+    return _Phase2Baseline(
+        metrics=metrics,
+        source="frozen_phase2_report",
+        report_path=str(path),
+        report_sha256=_sha256_file(path),
+    )
+
+
+def _diagnostic_phase2_baseline(
+    *,
+    candidate: Phase15CandidateArtifact,
+    examples: tuple[PolicyTrainingExample, ...],
+    predictions: tuple[PolicyPrediction, ...],
+    config: DifferentiablePnlOptimizationConfig,
+) -> _Phase2Baseline:
+    baseline_execution_config = _phase2_baseline_execution_config(config)
+    phase2_fills = simulate_execution(
+        examples=examples,
+        predictions=predictions,
+        config=baseline_execution_config,
+    )
+    phase2_report = build_phase2_report(
+        candidate=candidate,
+        fills=phase2_fills,
+        config=Phase2EvaluationConfig(
+            execution_config=baseline_execution_config,
+            min_sharpe_improvement_ratio=-1_000_000_000.0,
+            min_turnover_reduction_ratio=-1_000_000_000.0,
+            created_at=config.created_at,
+        ),
+    )
+    return _Phase2Baseline(
+        metrics=phase2_report.execution_metrics,
+        source="diagnostic_recomputed_phase2_baseline",
+        report_path=None,
+        report_sha256=None,
+    )
 
 
 def _optimize_parameters(
@@ -437,6 +517,7 @@ def _comparison_metrics(
 def _acceptance_criteria(
     *,
     optimization_trace: list[dict[str, float | int]],
+    phase2_baseline_source: str,
     phase2_metrics: dict[str, Any],
     phase3_train_metrics: dict[str, Any],
     phase3_oos_metrics: dict[str, Any],
@@ -450,6 +531,7 @@ def _acceptance_criteria(
     return {
         "phase1_5_candidate_verified": True,
         "phase2_baseline_reported": int(phase2_metrics.get("row_count", 0)) > 0,
+        "frozen_phase2_report_verified": phase2_baseline_source == "frozen_phase2_report",
         "direct_pnl_optimization": True,
         "gradient_flow_verified": max(gradient_norms) >= config.min_gradient_norm,
         "gradient_norms_finite": all(math.isfinite(value) for value in gradient_norms),
@@ -512,6 +594,24 @@ def _assert_prediction_matches_example(
         or example.instrument_id != prediction.instrument_id
     ):
         raise Phase3OptimizationError("prediction keys must match policy examples")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise Phase3OptimizationError(f"invalid JSON artifact: {path}") from exc
+    if not isinstance(payload, dict):
+        raise Phase3OptimizationError(f"JSON artifact must contain an object: {path}")
+    return payload
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _risk_penalty(

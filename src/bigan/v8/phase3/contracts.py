@@ -167,6 +167,9 @@ class Phase3OptimizationReport:
     candidate_run_id: str
     candidate_artifact_dir: str
     phase1_5_hashes: dict[str, str]
+    phase2_report_path: str | None
+    phase2_report_sha256: str | None
+    phase2_baseline_source: str
     phase2_baseline_metrics: dict[str, Any]
     train_metrics: dict[str, Any]
     oos_metrics: dict[str, Any]
@@ -189,6 +192,9 @@ class Phase3OptimizationReport:
             "candidate_run_id": self.candidate_run_id,
             "candidate_artifact_dir": self.candidate_artifact_dir,
             "phase1_5_hashes": self.phase1_5_hashes,
+            "phase2_report_path": self.phase2_report_path,
+            "phase2_report_sha256": self.phase2_report_sha256,
+            "phase2_baseline_source": self.phase2_baseline_source,
             "phase2_baseline_metrics": self.phase2_baseline_metrics,
             "train_metrics": self.train_metrics,
             "oos_metrics": self.oos_metrics,
