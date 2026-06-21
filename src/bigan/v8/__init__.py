@@ -6,4 +6,6 @@ frozen accepted Phase 1.5 candidate and evaluates execution-consistent PnL.
 Phase 3 optimizes a differentiable, cost-aware PnL action overlay after the
 Phase 2 baseline has been established. Phase 4 replays the frozen policy stream
 through causal regime, lambda, and execution-aggressiveness adaptation gates.
+Phase 5 monitors shadow-vs-live degradation and emits fail-closed kill-switch
+and rollback actions.
 """
