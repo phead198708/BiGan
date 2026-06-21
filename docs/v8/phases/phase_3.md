@@ -61,11 +61,14 @@ candidate_run_id matches the Phase 1.5 candidate
 policy_dataset_hash matches
 split_hash matches
 model_sha256 matches
+config.execution_config matches the expected Phase 3 baseline execution config
 execution_metrics.row_count > 0
 ```
 
 The Phase 3 report records `phase2_report_path`, `phase2_report_sha256`, and
-`phase2_baseline_source`.
+`phase2_baseline_source`. It also records
+`phase2_execution_config_sha256` and `phase2_execution_config_verified`, so the
+execution assumptions behind the Phase 2 comparison are reproducible.
 
 ## Loss
 
@@ -116,6 +119,7 @@ Acceptance criteria include:
 phase1_5_candidate_verified
 phase2_baseline_reported
 frozen_phase2_report_verified
+phase2_execution_config_verified
 direct_pnl_optimization
 gradient_flow_verified
 gradient_norms_finite

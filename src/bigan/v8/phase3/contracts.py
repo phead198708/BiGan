@@ -170,6 +170,8 @@ class Phase3OptimizationReport:
     phase2_report_path: str | None
     phase2_report_sha256: str | None
     phase2_baseline_source: str
+    phase2_execution_config_sha256: str
+    phase2_execution_config_verified: bool
     phase2_baseline_metrics: dict[str, Any]
     train_metrics: dict[str, Any]
     oos_metrics: dict[str, Any]
@@ -195,6 +197,8 @@ class Phase3OptimizationReport:
             "phase2_report_path": self.phase2_report_path,
             "phase2_report_sha256": self.phase2_report_sha256,
             "phase2_baseline_source": self.phase2_baseline_source,
+            "phase2_execution_config_sha256": self.phase2_execution_config_sha256,
+            "phase2_execution_config_verified": self.phase2_execution_config_verified,
             "phase2_baseline_metrics": self.phase2_baseline_metrics,
             "train_metrics": self.train_metrics,
             "oos_metrics": self.oos_metrics,

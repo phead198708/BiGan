@@ -63,10 +63,12 @@ def run_phase3_optimization(
     resolved_config = config or DifferentiablePnlOptimizationConfig()
     candidate = load_phase15_candidate(candidate_artifact_dir)
     _assert_split_matches_candidate(candidate, split)
+    expected_phase2_execution_config = _phase2_baseline_execution_config(resolved_config)
     frozen_phase2_baseline = (
         _load_frozen_phase2_baseline(
             phase2_report_path=phase2_report_path,
             candidate=candidate,
+            expected_execution_config=expected_phase2_execution_config,
         )
         if phase2_report_path is not None
         else None
@@ -123,6 +125,8 @@ def run_phase3_optimization(
         phase2_report_path=phase2_baseline.report_path,
         phase2_report_sha256=phase2_baseline.report_sha256,
         phase2_baseline_source=phase2_baseline.source,
+        phase2_execution_config_sha256=phase2_baseline.execution_config_sha256,
+        phase2_execution_config_verified=phase2_baseline.execution_config_verified,
         phase2_baseline_metrics=phase2_baseline.metrics,
         train_metrics=train_eval.metrics,
         oos_metrics=oos_eval.metrics,
@@ -133,6 +137,7 @@ def run_phase3_optimization(
         acceptance_criteria=_acceptance_criteria(
             optimization_trace=optimization_trace,
             phase2_baseline_source=phase2_baseline.source,
+            phase2_execution_config_verified=phase2_baseline.execution_config_verified,
             phase2_metrics=phase2_baseline.metrics,
             phase3_train_metrics=train_eval.metrics,
             phase3_oos_metrics=oos_eval.metrics,
@@ -174,12 +179,15 @@ class _Phase2Baseline:
     source: str
     report_path: str | None
     report_sha256: str | None
+    execution_config_sha256: str
+    execution_config_verified: bool
 
 
 def _load_frozen_phase2_baseline(
     *,
     phase2_report_path: Path | str,
     candidate: Phase15CandidateArtifact,
+    expected_execution_config: ExecutionSimulationConfig,
 ) -> _Phase2Baseline:
     path = Path(phase2_report_path)
     payload = _read_json(path)
@@ -203,11 +211,25 @@ def _load_frozen_phase2_baseline(
     metrics = payload.get("execution_metrics")
     if not isinstance(metrics, dict) or int(metrics.get("row_count", 0)) <= 0:
         raise Phase3OptimizationError("Phase 2 report execution_metrics are required")
+    report_config = payload.get("config")
+    if not isinstance(report_config, dict):
+        raise Phase3OptimizationError("Phase 2 report config is required")
+    actual_execution_config = report_config.get("execution_config")
+    if not isinstance(actual_execution_config, dict):
+        raise Phase3OptimizationError("Phase 2 report config.execution_config is required")
+    expected_execution_config_hash = _canonical_payload_sha256(
+        expected_execution_config.to_dict()
+    )
+    actual_execution_config_hash = _canonical_payload_sha256(actual_execution_config)
+    if actual_execution_config_hash != expected_execution_config_hash:
+        raise Phase3OptimizationError("Phase 2 report execution_config mismatch")
     return _Phase2Baseline(
         metrics=metrics,
         source="frozen_phase2_report",
         report_path=str(path),
         report_sha256=_sha256_file(path),
+        execution_config_sha256=actual_execution_config_hash,
+        execution_config_verified=True,
     )
 
 
@@ -239,6 +261,10 @@ def _diagnostic_phase2_baseline(
         source="diagnostic_recomputed_phase2_baseline",
         report_path=None,
         report_sha256=None,
+        execution_config_sha256=_canonical_payload_sha256(
+            baseline_execution_config.to_dict()
+        ),
+        execution_config_verified=False,
     )
 
 
@@ -518,6 +544,7 @@ def _acceptance_criteria(
     *,
     optimization_trace: list[dict[str, float | int]],
     phase2_baseline_source: str,
+    phase2_execution_config_verified: bool,
     phase2_metrics: dict[str, Any],
     phase3_train_metrics: dict[str, Any],
     phase3_oos_metrics: dict[str, Any],
@@ -532,6 +559,7 @@ def _acceptance_criteria(
         "phase1_5_candidate_verified": True,
         "phase2_baseline_reported": int(phase2_metrics.get("row_count", 0)) > 0,
         "frozen_phase2_report_verified": phase2_baseline_source == "frozen_phase2_report",
+        "phase2_execution_config_verified": phase2_execution_config_verified,
         "direct_pnl_optimization": True,
         "gradient_flow_verified": max(gradient_norms) >= config.min_gradient_norm,
         "gradient_norms_finite": all(math.isfinite(value) for value in gradient_norms),
@@ -612,6 +640,16 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _canonical_payload_sha256(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        _json_ready(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _risk_penalty(

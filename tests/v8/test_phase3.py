@@ -113,7 +113,10 @@ def test_phase3_optimizes_differentiable_pnl_and_writes_report(
     assert result.report.phase2_baseline_source == "frozen_phase2_report"
     assert result.report.phase2_report_path == str(phase2_report_path)
     assert result.report.phase2_report_sha256 is not None
+    assert result.report.phase2_execution_config_sha256 is not None
+    assert result.report.phase2_execution_config_verified is True
     assert result.report.acceptance_criteria["frozen_phase2_report_verified"] is True
+    assert result.report.acceptance_criteria["phase2_execution_config_verified"] is True
     assert result.report.acceptance_criteria["direct_pnl_optimization"] is True
     assert result.report.acceptance_criteria["gradient_flow_verified"] is True
     assert result.report.acceptance_criteria["optimization_loss_decreased"] is True
@@ -139,6 +142,9 @@ def test_phase3_optimizes_differentiable_pnl_and_writes_report(
     assert saved["phase"] == PHASE3_DIFFERENTIABLE_PNL_PHASE
     assert saved["passed"] is True
     assert saved["phase2_report_sha256"] == result.report.phase2_report_sha256
+    assert saved["phase2_execution_config_sha256"] == (
+        result.report.phase2_execution_config_sha256
+    )
 
 
 def test_phase3_marks_recomputed_phase2_baseline_as_diagnostic(
@@ -158,7 +164,10 @@ def test_phase3_marks_recomputed_phase2_baseline_as_diagnostic(
     assert result.report.phase2_baseline_source == "diagnostic_recomputed_phase2_baseline"
     assert result.report.phase2_report_path is None
     assert result.report.phase2_report_sha256 is None
+    assert result.report.phase2_execution_config_sha256 is not None
+    assert result.report.phase2_execution_config_verified is False
     assert result.report.acceptance_criteria["frozen_phase2_report_verified"] is False
+    assert result.report.acceptance_criteria["phase2_execution_config_verified"] is False
     assert not result.passed
 
 
@@ -180,6 +189,32 @@ def test_phase3_rejects_phase2_report_candidate_mismatch_before_prediction(
     monkeypatch.setattr(XGBoostPolicyModel, "predict_examples", fail_predict)
 
     with pytest.raises(Phase3OptimizationError, match="candidate_run_id"):
+        run_phase3_optimization(
+            phase15.artifact_dir,
+            phase15.split,
+            _phase3_config(),
+            phase2_report_path=phase2_report_path,
+        )
+
+
+def test_phase3_rejects_phase2_execution_config_mismatch_before_prediction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    phase15 = _accepted_phase15_candidate(tmp_path)
+    assert phase15.artifact_dir is not None
+    monkeypatch.setattr(XGBoostPolicyModel, "predict_examples", _fake_cost_aware_predictions)
+    phase2_report_path = _write_frozen_phase2_report(tmp_path, phase15)
+    report = json.loads(phase2_report_path.read_text(encoding="utf-8"))
+    report["config"]["execution_config"]["slippage_multiplier"] = 2.0
+    phase2_report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+
+    def fail_predict(*args, **kwargs):
+        raise AssertionError("prediction should not run after Phase 2 config mismatch")
+
+    monkeypatch.setattr(XGBoostPolicyModel, "predict_examples", fail_predict)
+
+    with pytest.raises(Phase3OptimizationError, match="execution_config"):
         run_phase3_optimization(
             phase15.artifact_dir,
             phase15.split,
