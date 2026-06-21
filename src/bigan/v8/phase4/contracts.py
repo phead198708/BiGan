@@ -44,6 +44,8 @@ class Phase4InputProvenance:
             if not str(getattr(self, field_name)).strip():
                 raise ValueError(f"{field_name} is required")
         for field_name in (
+            "policy_dataset_hash",
+            "split_hash",
             "model_sha256",
             "example_stream_sha256",
             "prediction_stream_sha256",

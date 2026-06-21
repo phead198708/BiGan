@@ -15,6 +15,7 @@ from bigan.v8.phase4 import (
     LambdaControllerConfig,
     Phase4AdaptiveError,
     Phase4AdaptiveSystemConfig,
+    Phase4InputProvenance,
     RegimeDetectorConfig,
     build_phase4_input_provenance,
     run_phase4_adaptive_system,
@@ -127,8 +128,8 @@ def _provenance(
         examples=examples,
         predictions=predictions,
         candidate_run_id="phase15-candidate-001",
-        policy_dataset_hash="policy-dataset-hash",
-        split_hash="split-hash",
+        policy_dataset_hash="d" * 64,
+        split_hash="e" * 64,
         model_sha256="a" * 64,
         phase2_report_sha256="b" * 64,
         phase3_report_sha256="c" * 64,
@@ -214,6 +215,8 @@ def test_phase4_adapts_lambda_execution_and_writes_report(tmp_path: Path) -> Non
     assert regime_actions["trend"] > regime_actions["high_volatility"]
     assert result.report.comparison_metrics["tail_loss_reduction_ratio"] > 0.10
     assert result.report.candidate_run_id == "phase15-candidate-001"
+    assert result.report.policy_dataset_hash == "d" * 64
+    assert result.report.split_hash == "e" * 64
     assert result.report.model_sha256 == "a" * 64
     assert result.report.phase2_report_sha256 == "b" * 64
     assert result.report.phase3_report_sha256 == "c" * 64
@@ -229,6 +232,8 @@ def test_phase4_adapts_lambda_execution_and_writes_report(tmp_path: Path) -> Non
     assert saved["phase"] == PHASE4_ADAPTIVE_SYSTEM_PHASE
     assert saved["passed"] is True
     assert saved["candidate_run_id"] == "phase15-candidate-001"
+    assert saved["policy_dataset_hash"] == "d" * 64
+    assert saved["split_hash"] == "e" * 64
     assert saved["input_provenance_verified"] is True
     assert saved["baseline_type"] == "non_adaptive_frozen_policy_execution"
     assert saved["acceptance_criteria"] == result.report.acceptance_criteria
@@ -465,3 +470,33 @@ def test_phase4_stream_hashes_change_and_stale_provenance_fails() -> None:
     assert result.report.input_provenance_verified is False
     assert result.report.acceptance_criteria["input_provenance_verified"] is False
     assert result.report.prediction_stream_sha256 != provenance.prediction_stream_sha256
+
+
+def test_phase4_rejects_malformed_policy_dataset_and_split_hashes() -> None:
+    examples = _adaptive_examples()
+    predictions = _adaptive_predictions(examples)
+    base = _provenance(examples, predictions)
+
+    with pytest.raises(ValueError, match="policy_dataset_hash"):
+        Phase4InputProvenance(
+            candidate_run_id=base.candidate_run_id,
+            policy_dataset_hash="not-a-sha",
+            split_hash=base.split_hash,
+            model_sha256=base.model_sha256,
+            phase2_report_sha256=base.phase2_report_sha256,
+            phase3_report_sha256=base.phase3_report_sha256,
+            example_stream_sha256=base.example_stream_sha256,
+            prediction_stream_sha256=base.prediction_stream_sha256,
+        )
+
+    with pytest.raises(ValueError, match="split_hash"):
+        Phase4InputProvenance(
+            candidate_run_id=base.candidate_run_id,
+            policy_dataset_hash=base.policy_dataset_hash,
+            split_hash="not-a-sha",
+            model_sha256=base.model_sha256,
+            phase2_report_sha256=base.phase2_report_sha256,
+            phase3_report_sha256=base.phase3_report_sha256,
+            example_stream_sha256=base.example_stream_sha256,
+            prediction_stream_sha256=base.prediction_stream_sha256,
+        )

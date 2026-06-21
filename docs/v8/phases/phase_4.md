@@ -53,7 +53,8 @@ The replay fails closed before adaptation when:
 
 Missing or stale provenance is not promotion quality. The runner may still
 produce a diagnostic report, but `input_provenance_verified=false` makes
-`passed=false`.
+`passed=false`. Policy dataset, split, model, report, example-stream, and
+prediction-stream hashes must be canonical SHA-256 hex digests.
 
 The helper below computes deterministic stream hashes from replay-order
 payloads:
