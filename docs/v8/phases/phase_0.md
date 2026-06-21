@@ -42,9 +42,10 @@ Arrow schemas are exported as `MARKET_DATA_SCHEMA`, `FEATURE_VECTOR_SCHEMA`, and
 `dataset_contract` does not match these schemas.
 
 `DatasetContract` validates required column sets separately from canonical
-ordering. Runtime consumers can require canonical ordering for production
-artifacts while still receiving precise failure reasons for missing columns,
-ordering drift, or hash/version mismatches.
+ordering and persists schema-name hashes. Runtime consumers can require
+canonical ordering for production artifacts while still receiving precise
+failure reasons for missing columns, ordering drift, hash drift, or
+version/hash mismatches.
 
 ## Cost Model
 
@@ -61,6 +62,8 @@ ordering drift, or hash/version mismatches.
   for source, instrument, volatility, spread, liquidity, and order size
 - robust low-cost diagnostics: weighted MAPE, median AE, median APE, and
   symmetric MAPE
+- coverage controls: minimum checked bucket count, minimum checked sample
+  ratio, and fail-on-all-buckets-skipped
 
 Labels persist `net_return = gross_return - total_cost`.
 
@@ -72,6 +75,7 @@ Labels persist `net_return = gross_return - total_cost`.
 - feature availability after `decision_ts`
 - paired feature/label rows where `max(feature_timestamp) > label_start_time`
 - unsafe runtime artifacts via `assert_phase0_artifact_ready(manifest)`
+- stale schema hashes or top-level/contract dataset-version mismatches
 - rolling-window provenance that crosses the feature cutoff
 - cross-timeframe/future feature provenance
 - feature names that indicate target/future/label leakage
@@ -91,7 +95,25 @@ Drift checks have explicit policy:
 
 The artifact gate rejects manifests with missing contracts, stale dataset
 versions, hash mismatches, schema/cost-column mismatches, failed validation,
-missing acceptance criteria, or failed mandatory criteria.
+missing acceptance criteria, failed mandatory criteria, missing required cost
+calibration, failed aggregate calibration, or failed bucket calibration.
+
+When `cost_calibration_samples` are supplied to `Phase0Pipeline.build(...)`, the
+manifest includes:
+
+```json
+"cost_calibration": {
+  "passed": true,
+  "aggregate": {},
+  "buckets": {},
+  "failed_buckets": [],
+  "skipped_buckets": [],
+  "checked_sample_ratio": 1.0
+}
+```
+
+When `Phase0PipelineConfig.require_cost_calibration` is true,
+`validation.acceptance_criteria.cost_model_realistic` is calibration-aware.
 
 ## Tests
 
@@ -107,6 +129,7 @@ The mandatory Phase 0 tests are in `tests/v8/test_phase0.py`:
 - runtime artifact gate acceptance/rejection
 - cost calibration against observed execution-cost samples
 - bucketed cost calibration pass/fail
+- bucket coverage controls that prevent sparse-bucket silent pass
 - robust low-cost calibration metrics
 - KS/PSI/KL distribution drift detection
 - drift warning/fail/insufficient-row policy
@@ -130,6 +153,7 @@ Phase 0 pytest suite for v8 changes.
 - net returns include spread, fee, slippage, and liquidity impact
 - cost model calibrated against observed execution samples before production use
 - sufficiently sampled cost regimes pass bucketed calibration
+- sparse bucket coverage cannot silently pass as aggregate-only calibration
 - KS/PSI/KL statistical integrity checks pass
 - deterministic dataset hash is stable across input row order
 - no model training inside Phase 0

@@ -24,7 +24,13 @@ from bigan.v8.phase0.contracts import (
     Label,
     MarketData,
 )
-from bigan.v8.phase0.costs import CostModelConfig, TradingCostModel
+from bigan.v8.phase0.costs import (
+    CostCalibrationBucketConfig,
+    CostCalibrationConfig,
+    CostModelConfig,
+    ExecutionCostSample,
+    TradingCostModel,
+)
 from bigan.v8.phase0.features import CausalFeatureBuilder, CausalFeatureBuilderConfig
 from bigan.v8.phase0.labels import CostAwareLabelBuilder, CostAwareLabelBuilderConfig
 from bigan.v8.phase0.loader import MarketDataLoader
@@ -40,6 +46,9 @@ class Phase0PipelineConfig:
     cost_config: CostModelConfig = CostModelConfig()
     validation_config: ValidationConfig = ValidationConfig()
     fail_on_validation_error: bool = True
+    require_cost_calibration: bool = False
+    cost_calibration_config: CostCalibrationConfig = CostCalibrationConfig()
+    cost_calibration_bucket_config: CostCalibrationBucketConfig = CostCalibrationBucketConfig()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -48,6 +57,9 @@ class Phase0PipelineConfig:
             "cost_config": self.cost_config.to_dict(),
             "validation_config": asdict(self.validation_config),
             "fail_on_validation_error": self.fail_on_validation_error,
+            "require_cost_calibration": self.require_cost_calibration,
+            "cost_calibration_config": asdict(self.cost_calibration_config),
+            "cost_calibration_bucket_config": asdict(self.cost_calibration_bucket_config),
         }
 
 
@@ -112,6 +124,7 @@ class Phase0Pipeline:
         self,
         rows: Iterable[Mapping[str, Any]] | list[MarketData],
         *,
+        cost_calibration_samples: list[ExecutionCostSample] | None = None,
         output_dir: Path | str | None = None,
     ) -> Phase0Dataset:
         market_data = (
@@ -141,6 +154,26 @@ class Phase0Pipeline:
             market_data=market_data,
             dataset_hash=dataset_hash,
         )
+        cost_calibration = (
+            None
+            if cost_calibration_samples is None
+            else self.cost_model.validate_calibration_by_bucket(
+                cost_calibration_samples,
+                bucket_config=self.config.cost_calibration_bucket_config,
+                config=self.config.cost_calibration_config,
+            )
+        )
+        validation_payload = validation_report.to_dict()
+        calibration_ready = cost_calibration is not None and cost_calibration.passed
+        if self.config.require_cost_calibration:
+            validation_payload["acceptance_criteria"]["cost_model_realistic"] = (
+                validation_payload["acceptance_criteria"]["cost_model_realistic"]
+                and calibration_ready
+            )
+            validation_payload["passed"] = (
+                validation_payload["passed"]
+                and validation_payload["acceptance_criteria"]["cost_model_realistic"]
+            )
         manifest = {
             "dataset_version": PHASE0_DATASET_VERSION,
             "dataset_hash": dataset_hash,
@@ -150,8 +183,10 @@ class Phase0Pipeline:
             "feature_columns": list(FEATURE_COLUMNS),
             "dataset_contract": contract.to_dict(),
             "config": self.config.to_dict(),
-            "validation": validation_report.to_dict(),
+            "validation": validation_payload,
         }
+        if cost_calibration is not None:
+            manifest["cost_calibration"] = cost_calibration.to_dict()
         dataset = Phase0Dataset(
             market_data=list(market_data),
             features=features,
@@ -159,8 +194,10 @@ class Phase0Pipeline:
             validation_report=validation_report,
             manifest=manifest,
         )
-        if self.config.fail_on_validation_error and not validation_report.passed:
+        if self.config.fail_on_validation_error and not validation_payload["passed"]:
             failures = "; ".join(f"{failure.code}: {failure.message}" for failure in validation_report.failures)
+            if self.config.require_cost_calibration and not calibration_ready:
+                failures = (failures + "; " if failures else "") + "cost_calibration: failed or missing"
             raise ValueError(f"Phase 0 validation failed: {failures}")
         if output_dir is not None:
             dataset.write(output_dir)

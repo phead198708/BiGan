@@ -161,6 +161,9 @@ class CostCalibrationBucketConfig:
     """Bucket definitions for regime-aware cost calibration."""
 
     min_bucket_samples: int = 5
+    min_checked_bucket_count: int = 1
+    min_checked_sample_ratio: float = 0.80
+    fail_on_all_buckets_skipped: bool = True
     bucket_by_source: bool = True
     bucket_by_instrument: bool = True
     volatility_edges: tuple[float, ...] = (0.001, 0.005, 0.01, 0.02)
@@ -171,6 +174,10 @@ class CostCalibrationBucketConfig:
     def __post_init__(self) -> None:
         if self.min_bucket_samples <= 0:
             raise ValueError("min_bucket_samples must be positive")
+        if self.min_checked_bucket_count < 0:
+            raise ValueError("min_checked_bucket_count must be non-negative")
+        if not 0.0 <= self.min_checked_sample_ratio <= 1.0:
+            raise ValueError("min_checked_sample_ratio must be in [0, 1]")
         for name, edges in (
             ("volatility_edges", self.volatility_edges),
             ("spread_edges", self.spread_edges),
@@ -191,6 +198,11 @@ class CostCalibrationBucketReport:
     buckets: dict[str, CostCalibrationReport]
     skipped_buckets: tuple[str, ...]
     failed_buckets: tuple[str, ...]
+    checked_sample_count: int
+    skipped_sample_count: int
+    checked_sample_ratio: float
+    checked_bucket_count: int
+    skipped_bucket_count: int
     passed: bool
 
     def to_dict(self) -> dict[str, object]:
@@ -203,6 +215,11 @@ class CostCalibrationBucketReport:
             },
             "skipped_buckets": list(self.skipped_buckets),
             "failed_buckets": list(self.failed_buckets),
+            "checked_sample_count": self.checked_sample_count,
+            "skipped_sample_count": self.skipped_sample_count,
+            "checked_sample_ratio": self.checked_sample_ratio,
+            "checked_bucket_count": self.checked_bucket_count,
+            "skipped_bucket_count": self.skipped_bucket_count,
         }
 
 
@@ -381,21 +398,47 @@ class TradingCostModel:
         bucket_reports: dict[str, CostCalibrationReport] = {}
         skipped_buckets: list[str] = []
         failed_buckets: list[str] = []
+        checked_sample_count = 0
+        skipped_sample_count = 0
         for bucket, bucket_samples in sorted(grouped.items()):
             if len(bucket_samples) < buckets_config.min_bucket_samples:
                 skipped_buckets.append(bucket)
+                skipped_sample_count += len(bucket_samples)
                 continue
             report = self.validate_calibration(bucket_samples, config=calibration_config)
             bucket_reports[bucket] = report
+            checked_sample_count += len(bucket_samples)
             if not report.passed:
                 failed_buckets.append(bucket)
 
+        total_bucketed_samples = checked_sample_count + skipped_sample_count
+        checked_sample_ratio = (
+            0.0
+            if total_bucketed_samples == 0
+            else checked_sample_count / total_bucketed_samples
+        )
+        checked_bucket_count = len(bucket_reports)
+        skipped_bucket_count = len(skipped_buckets)
+        coverage_passed = (
+            checked_bucket_count >= buckets_config.min_checked_bucket_count
+            and checked_sample_ratio >= buckets_config.min_checked_sample_ratio
+            and not (
+                buckets_config.fail_on_all_buckets_skipped
+                and total_bucketed_samples > 0
+                and checked_bucket_count == 0
+            )
+        )
         return CostCalibrationBucketReport(
             aggregate=aggregate,
             buckets=bucket_reports,
             skipped_buckets=tuple(skipped_buckets),
             failed_buckets=tuple(failed_buckets),
-            passed=aggregate.passed and not failed_buckets,
+            checked_sample_count=checked_sample_count,
+            skipped_sample_count=skipped_sample_count,
+            checked_sample_ratio=checked_sample_ratio,
+            checked_bucket_count=checked_bucket_count,
+            skipped_bucket_count=skipped_bucket_count,
+            passed=aggregate.passed and not failed_buckets and coverage_passed,
         )
 
     def _spread_cost(self, entry: MarketData, exit: MarketData | None) -> float:

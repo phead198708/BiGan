@@ -36,6 +36,7 @@ from bigan.v8.phase0 import (
     ValidationConfig,
     assert_phase0_artifact_ready,
 )
+from bigan.v8.phase0.contracts import schema_names_hash
 
 MINUTE_MS = 60_000
 
@@ -468,6 +469,7 @@ def test_cost_model_calibration_validates_against_observed_execution_costs() -> 
         ExecutionCostSample(
             entry=sample.entry,
             exit=sample.exit,
+            order_size=sample.order_size,
             volatility=sample.volatility,
             observed_total_cost=sample.observed_total_cost * 4.0,
         )
@@ -537,6 +539,9 @@ def test_artifact_gate_separates_required_schema_and_canonical_order() -> None:
     reordered_manifest["dataset_contract"]["feature_schema"] = list(
         reversed(FEATURE_VECTOR_SCHEMA.names)
     )
+    reordered_manifest["dataset_contract"]["feature_schema_hash"] = schema_names_hash(
+        tuple(reordered_manifest["dataset_contract"]["feature_schema"])
+    )
 
     strict_report = Phase0ArtifactGate().validate_manifest(reordered_manifest)
     assert not strict_report.passed
@@ -562,6 +567,121 @@ def test_artifact_gate_separates_required_schema_and_canonical_order() -> None:
     assert "market_schema_missing_columns" in {
         failure.code for failure in missing_report.failures
     }
+
+
+def test_artifact_gate_rejects_schema_hash_and_manifest_version_mismatches() -> None:
+    dataset = _pipeline().build(_market_rows())
+    hash_cases = [
+        ("market_schema_hash", "market_schema_hash_mismatch"),
+        ("feature_schema_hash", "feature_schema_hash_mismatch"),
+        ("label_schema_hash", "label_schema_hash_mismatch"),
+    ]
+    for hash_field, expected_code in hash_cases:
+        manifest = deepcopy(dataset.manifest)
+        manifest["dataset_contract"][hash_field] = "stale"
+        report = Phase0ArtifactGate(require_canonical_order=False).validate_manifest(manifest)
+        assert not report.passed
+        assert expected_code in {failure.code for failure in report.failures}
+
+    missing_version = deepcopy(dataset.manifest)
+    missing_version.pop("dataset_version")
+    missing_report = Phase0ArtifactGate().validate_manifest(missing_version)
+    assert "missing_manifest_dataset_version" in {
+        failure.code for failure in missing_report.failures
+    }
+
+    mismatch_version = deepcopy(dataset.manifest)
+    mismatch_version["dataset_version"] = "bigan-v8-phase0-v0"
+    mismatch_report = Phase0ArtifactGate().validate_manifest(mismatch_version)
+    assert "manifest_dataset_version_mismatch" in {
+        failure.code for failure in mismatch_report.failures
+    }
+
+
+def test_pipeline_manifest_cost_calibration_is_gate_enforced() -> None:
+    cost_model, samples = _calibration_samples(market_count=24)
+    pipeline = Phase0Pipeline(
+        Phase0PipelineConfig(
+            cost_config=cost_model.config,
+            require_cost_calibration=True,
+            cost_calibration_config=CostCalibrationConfig(
+                min_samples=5,
+                max_mean_absolute_error=0.001,
+                max_mean_absolute_percentage_error=0.05,
+                max_abs_bias=0.001,
+            ),
+            cost_calibration_bucket_config=CostCalibrationBucketConfig(
+                min_bucket_samples=5,
+                bucket_by_source=False,
+                bucket_by_instrument=False,
+                volatility_edges=(0.005,),
+                spread_edges=(),
+                liquidity_edges=(),
+                order_size_edges=(5.0,),
+            ),
+        )
+    )
+
+    dataset = pipeline.build(_market_rows(), cost_calibration_samples=samples)
+
+    assert dataset.manifest["cost_calibration"]["passed"] is True
+    assert (
+        dataset.manifest["validation"]["acceptance_criteria"]["cost_model_realistic"]
+        is True
+    )
+    assert Phase0ArtifactGate(require_cost_calibration=True).validate_manifest(
+        dataset.manifest
+    ).passed
+
+    missing_calibration = deepcopy(dataset.manifest)
+    missing_calibration.pop("cost_calibration")
+    missing_report = Phase0ArtifactGate(require_cost_calibration=True).validate_manifest(
+        missing_calibration
+    )
+    assert "missing_cost_calibration" in {
+        failure.code for failure in missing_report.failures
+    }
+
+    failed_calibration = deepcopy(dataset.manifest)
+    failed_calibration["cost_calibration"]["passed"] = False
+    failed_report = Phase0ArtifactGate(require_cost_calibration=True).validate_manifest(
+        failed_calibration
+    )
+    assert "cost_calibration_failed" in {
+        failure.code for failure in failed_report.failures
+    }
+
+    failed_bucket = deepcopy(dataset.manifest)
+    failed_bucket["cost_calibration"]["failed_buckets"] = ["volatility=>=0.005"]
+    bucket_report = Phase0ArtifactGate(require_cost_calibration=True).validate_manifest(
+        failed_bucket
+    )
+    assert "cost_calibration_bucket_failed" in {
+        failure.code for failure in bucket_report.failures
+    }
+
+    bad_samples = [
+        ExecutionCostSample(
+            entry=sample.entry,
+            exit=sample.exit,
+            order_size=sample.order_size,
+            volatility=sample.volatility,
+            observed_total_cost=sample.observed_total_cost * 4.0,
+        )
+        for sample in samples
+    ]
+    bad_pipeline = Phase0Pipeline(
+        Phase0PipelineConfig(
+            cost_config=cost_model.config,
+            require_cost_calibration=True,
+            fail_on_validation_error=False,
+        )
+    )
+    bad_dataset = bad_pipeline.build(_market_rows(), cost_calibration_samples=bad_samples)
+    assert (
+        bad_dataset.manifest["validation"]["acceptance_criteria"]["cost_model_realistic"]
+        is False
+    )
 
 
 def test_bucketed_cost_calibration_fails_when_sampled_regime_fails() -> None:
@@ -611,6 +731,67 @@ def test_bucketed_cost_calibration_fails_when_sampled_regime_fails() -> None:
     assert not bad_report.passed
     assert bad_report.aggregate.passed is False
     assert bad_report.failed_buckets
+
+
+def test_sparse_bucket_calibration_cannot_silently_pass() -> None:
+    cost_model, samples = _calibration_samples(market_count=24)
+    calibration_config = CostCalibrationConfig(
+        min_samples=5,
+        max_mean_absolute_error=0.001,
+        max_mean_absolute_percentage_error=0.05,
+        max_abs_bias=0.001,
+    )
+
+    all_skipped = cost_model.validate_calibration_by_bucket(
+        samples,
+        config=calibration_config,
+        bucket_config=CostCalibrationBucketConfig(
+            min_bucket_samples=100,
+            bucket_by_source=False,
+            bucket_by_instrument=False,
+            volatility_edges=(0.005,),
+            spread_edges=(),
+            liquidity_edges=(),
+            order_size_edges=(),
+        ),
+    )
+    assert not all_skipped.passed
+    assert all_skipped.checked_bucket_count == 0
+    assert all_skipped.skipped_sample_count == len(samples)
+
+    ratio_failed = cost_model.validate_calibration_by_bucket(
+        samples,
+        config=calibration_config,
+        bucket_config=CostCalibrationBucketConfig(
+            min_bucket_samples=12,
+            min_checked_sample_ratio=0.80,
+            bucket_by_source=False,
+            bucket_by_instrument=False,
+            volatility_edges=(0.005,),
+            spread_edges=(),
+            liquidity_edges=(),
+            order_size_edges=(5.0,),
+        ),
+    )
+    assert not ratio_failed.passed
+    assert ratio_failed.checked_sample_ratio < 0.80
+
+    bucket_count_failed = cost_model.validate_calibration_by_bucket(
+        samples,
+        config=calibration_config,
+        bucket_config=CostCalibrationBucketConfig(
+            min_bucket_samples=5,
+            min_checked_bucket_count=3,
+            bucket_by_source=False,
+            bucket_by_instrument=False,
+            volatility_edges=(0.005,),
+            spread_edges=(),
+            liquidity_edges=(),
+            order_size_edges=(5.0,),
+        ),
+    )
+    assert not bucket_count_failed.passed
+    assert bucket_count_failed.checked_bucket_count < 3
 
 
 def test_robust_low_cost_metrics_remain_finite_for_tiny_observed_costs() -> None:

@@ -15,6 +15,7 @@ from bigan.v8.phase0.contracts import (
     MARKET_DATA_SCHEMA,
     PHASE0_DATASET_VERSION,
     DatasetContract,
+    schema_names_hash,
 )
 
 MANDATORY_ACCEPTANCE_CRITERIA: tuple[str, ...] = (
@@ -81,6 +82,7 @@ class Phase0ArtifactGate:
 
     expected_dataset_version: str = PHASE0_DATASET_VERSION
     require_canonical_order: bool = True
+    require_cost_calibration: bool = False
     mandatory_acceptance_criteria: tuple[str, ...] = MANDATORY_ACCEPTANCE_CRITERIA
 
     def validate_manifest(
@@ -116,6 +118,7 @@ class Phase0ArtifactGate:
             failures.extend(self._validate_contract(manifest, contract))
 
         failures.extend(self._validate_validation_block(manifest))
+        failures.extend(self._validate_cost_calibration(manifest))
         return Phase0ArtifactValidationReport(
             failures=tuple(failures),
             contract=contract,
@@ -127,6 +130,34 @@ class Phase0ArtifactGate:
         contract: DatasetContract,
     ) -> list[Phase0ArtifactValidationFailure]:
         failures: list[Phase0ArtifactValidationFailure] = []
+        manifest_version = manifest.get("dataset_version")
+        if manifest_version is None:
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="missing_manifest_dataset_version",
+                    message="manifest must include dataset_version",
+                    field="dataset_version",
+                )
+            )
+        elif manifest_version != contract.dataset_version:
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="manifest_dataset_version_mismatch",
+                    message="manifest dataset_version does not match dataset_contract",
+                    field="dataset_version",
+                )
+            )
+        elif manifest_version != self.expected_dataset_version:
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="manifest_dataset_version_mismatch",
+                    message=(
+                        f"expected manifest dataset_version {self.expected_dataset_version}, "
+                        f"got {manifest_version}"
+                    ),
+                    field="dataset_version",
+                )
+            )
         if contract.dataset_version != self.expected_dataset_version:
             failures.append(
                 Phase0ArtifactValidationFailure(
@@ -157,6 +188,7 @@ class Phase0ArtifactGate:
             )
         if self.require_canonical_order:
             failures.extend(_order_failures(contract))
+        failures.extend(_schema_hash_failures(contract))
         return failures
 
     def _validate_validation_block(
@@ -208,6 +240,42 @@ class Phase0ArtifactGate:
                         field=f"validation.acceptance_criteria.{criterion}",
                     )
                 )
+        return failures
+
+    def _validate_cost_calibration(
+        self,
+        manifest: Mapping[str, Any],
+    ) -> list[Phase0ArtifactValidationFailure]:
+        calibration = manifest.get("cost_calibration")
+        if not isinstance(calibration, Mapping):
+            if not self.require_cost_calibration:
+                return []
+            return [
+                Phase0ArtifactValidationFailure(
+                    code="missing_cost_calibration",
+                    message="manifest must include cost_calibration",
+                    field="cost_calibration",
+                )
+            ]
+
+        failures: list[Phase0ArtifactValidationFailure] = []
+        if calibration.get("passed") is not True:
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_failed",
+                    message="cost_calibration.passed must be true",
+                    field="cost_calibration.passed",
+                )
+            )
+        failed_buckets = calibration.get("failed_buckets")
+        if isinstance(failed_buckets, list) and failed_buckets:
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_bucket_failed",
+                    message="cost calibration contains failed buckets",
+                    field="cost_calibration.failed_buckets",
+                )
+            )
         return failures
 
 
@@ -279,6 +347,25 @@ def _order_failures(contract: DatasetContract) -> list[Phase0ArtifactValidationF
                     code=f"{field_name}_order_mismatch",
                     message=f"{field_name} does not match canonical ordering",
                     field=f"dataset_contract.{field_name}",
+                )
+            )
+    return failures
+
+
+def _schema_hash_failures(contract: DatasetContract) -> list[Phase0ArtifactValidationFailure]:
+    failures: list[Phase0ArtifactValidationFailure] = []
+    for field_name, schema_names, observed_hash in (
+        ("market_schema", contract.market_schema, contract.market_schema_hash),
+        ("feature_schema", contract.feature_schema, contract.feature_schema_hash),
+        ("label_schema", contract.label_schema, contract.label_schema_hash),
+    ):
+        expected_hash = schema_names_hash(schema_names)
+        if observed_hash != expected_hash:
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code=f"{field_name}_hash_mismatch",
+                    message=f"{field_name}_hash does not match schema names",
+                    field=f"dataset_contract.{field_name}_hash",
                 )
             )
     return failures
