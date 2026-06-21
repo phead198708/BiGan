@@ -68,6 +68,13 @@ Missing, rejected, hash-mismatched, or provenance-mismatched artifacts raise
 `PolicyTrainShadowSplit` hashes match the candidate before calling
 `predict_examples(...)`.
 
+`dataset_profile.json` is optional for backward compatibility with earlier
+Phase 1.5 candidates. When `dataset_profile_path` and
+`dataset_profile_sha256` are present in `run_manifest.json`, Phase 2 verifies
+the file hash, checks that the file payload matches the embedded
+`dataset_profile` block when that block exists, and includes
+`dataset_profile_sha256` in the Phase 2 report hashes.
+
 Phase 2 also requires Phase 1.5 shadow baseline metrics for comparison:
 
 ```text
@@ -112,7 +119,7 @@ from execution-adjusted PnL metrics.
 It records:
 
 - exact Phase 1.5 `run_id`
-- Phase 1.5 dataset/split/model hashes
+- Phase 1.5 dataset/split/model hashes, plus dataset profile hash when present
 - Phase 1.5 shadow Sharpe and turnover
 - Phase 2 execution Sharpe and turnover
 - execution costs, risk penalties, net returns, and filter rate

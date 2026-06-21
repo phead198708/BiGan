@@ -245,6 +245,10 @@ def _refresh_artifact_hashes(artifact_dir: Path) -> None:
         ("policy_dataset_manifest_path", "policy_dataset_manifest_sha256"),
     ):
         artifacts[hash_key] = _sha256_file(artifact_dir / artifacts[path_key])
+    if artifacts.get("dataset_profile_path") and artifacts.get("dataset_profile_sha256"):
+        artifacts["dataset_profile_sha256"] = _sha256_file(
+            artifact_dir / artifacts["dataset_profile_path"]
+        )
     artifacts["run_manifest_canonical_sha256"] = ""
     artifacts["run_manifest_canonical_sha256"] = _canonical_run_manifest_hash(manifest)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -277,9 +281,39 @@ def test_phase2_loader_verifies_accepted_candidate_artifacts(tmp_path: Path) -> 
     assert candidate.shadow_baseline_metrics["shadow_sharpe"] == (
         phase15.acceptance_report.metrics["shadow_sharpe"]
     )
+    assert candidate.dataset_profile is not None
+    assert candidate.dataset_profile["policy_dataset_row_count"] == len(
+        phase15.policy_dataset.examples
+    )
+    assert candidate.phase1_5_hashes()["dataset_profile_sha256"] == (
+        phase15.run_manifest["artifacts"]["dataset_profile_sha256"]
+    )
     assert candidate.shadow_acceptance_report["acceptance_criteria"][
         "split_provenance_verified"
     ] is True
+
+
+def test_phase2_dataset_profile_hash_is_optional_for_older_candidates(
+    tmp_path: Path,
+) -> None:
+    phase15 = _accepted_phase15_candidate(tmp_path)
+    assert phase15.artifact_dir is not None
+    manifest_path = phase15.artifact_dir / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    profile_path = phase15.artifact_dir / manifest["artifacts"].pop("dataset_profile_path")
+    manifest["artifacts"].pop("dataset_profile_sha256")
+    manifest.pop("dataset_profile")
+    profile_path.unlink()
+    manifest["artifacts"]["run_manifest_canonical_sha256"] = ""
+    manifest["artifacts"]["run_manifest_canonical_sha256"] = _canonical_run_manifest_hash(
+        manifest
+    )
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+    candidate = load_phase15_candidate(phase15.artifact_dir)
+
+    assert candidate.dataset_profile is None
+    assert "dataset_profile_sha256" not in candidate.phase1_5_hashes()
 
 
 def test_phase2_rejects_rejected_phase15_candidate(tmp_path: Path) -> None:
@@ -551,6 +585,9 @@ def test_phase2_evaluation_does_not_train_and_writes_report(
     assert result.report.candidate_run_id == phase15.run_manifest["run_id"]
     assert result.report.phase1_5_hashes["model_sha256"] == (
         phase15.run_manifest["artifacts"]["model_sha256"]
+    )
+    assert result.report.phase1_5_hashes["dataset_profile_sha256"] == (
+        phase15.run_manifest["artifacts"]["dataset_profile_sha256"]
     )
     assert result.report.phase1_5_hashes["split_hash"] == phase15.split.split_hash
     assert result.report.phase1_5_shadow_acceptance_metrics["shadow_sharpe"] == (

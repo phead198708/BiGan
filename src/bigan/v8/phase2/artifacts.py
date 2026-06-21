@@ -59,6 +59,7 @@ class Phase15CandidateArtifact:
     split_manifest: dict[str, Any]
     shadow_acceptance_report: dict[str, Any]
     shadow_baseline_metrics: dict[str, float | int]
+    dataset_profile: dict[str, Any] | None
     model_path: Path
     model_sha256: str
     model: XGBoostPolicyModel
@@ -85,7 +86,7 @@ class Phase15CandidateArtifact:
 
     def phase1_5_hashes(self) -> dict[str, str]:
         artifacts = self.run_manifest.get("artifacts", {})
-        return {
+        hashes = {
             "run_id": self.run_id,
             "policy_dataset_hash": self.policy_dataset_hash,
             "split_hash": self.split_hash,
@@ -104,6 +105,10 @@ class Phase15CandidateArtifact:
                 artifacts.get("run_manifest_canonical_sha256", "")
             ),
         }
+        dataset_profile_sha256 = str(artifacts.get("dataset_profile_sha256", "")).strip()
+        if dataset_profile_sha256:
+            hashes["dataset_profile_sha256"] = dataset_profile_sha256
+        return hashes
 
 
 def load_phase15_candidate(artifact_dir: Path | str) -> Phase15CandidateArtifact:
@@ -126,6 +131,10 @@ def load_phase15_candidate(artifact_dir: Path | str) -> Phase15CandidateArtifact
         artifact_dir=resolved_dir,
         run_manifest=run_manifest,
     )
+    dataset_profile = _read_optional_dataset_profile(
+        artifact_dir=resolved_dir,
+        run_manifest=run_manifest,
+    )
 
     model_sha256 = str(run_manifest["artifacts"]["model_sha256"])
     model = _load_policy_model(
@@ -139,6 +148,7 @@ def load_phase15_candidate(artifact_dir: Path | str) -> Phase15CandidateArtifact
         split_manifest=split_manifest,
         shadow_acceptance_report=shadow_acceptance_report,
         shadow_baseline_metrics=shadow_baseline_metrics,
+        dataset_profile=dataset_profile,
         model_path=model_path,
         model_sha256=model_sha256,
         model=model,
@@ -211,6 +221,13 @@ def _validate_run_manifest(run_manifest: dict[str, Any]) -> None:
         raise Phase2ArtifactError(
             "Phase 1.5 run_manifest is missing required artifact paths: "
             + ", ".join(missing_artifact_paths)
+        )
+    dataset_profile_path = str(artifacts.get("dataset_profile_path", "")).strip()
+    dataset_profile_sha256 = str(artifacts.get("dataset_profile_sha256", "")).strip()
+    if bool(dataset_profile_path) != bool(dataset_profile_sha256):
+        raise Phase2ArtifactError(
+            "Phase 1.5 dataset_profile_path and dataset_profile_sha256 "
+            "must both be present or both be absent"
         )
 
 
@@ -327,18 +344,58 @@ def _validate_recorded_artifact_hashes(
         ("split_manifest_path", "split_manifest_sha256"),
         ("policy_dataset_manifest_path", "policy_dataset_manifest_sha256"),
     ):
-        path_value = artifacts.get(path_key)
-        hash_value = artifacts.get(hash_key)
-        path = artifact_dir / str(path_value)
-        if not path.is_file():
-            raise Phase2ArtifactError(f"recorded artifact path does not exist: {path_value}")
-        actual = _sha256_file(path)
-        if actual != hash_value:
-            raise Phase2ArtifactError(f"artifact hash mismatch for {path_value}")
+        _validate_artifact_hash_pair(
+            artifact_dir=artifact_dir,
+            artifacts=artifacts,
+            path_key=path_key,
+            hash_key=hash_key,
+        )
+    if artifacts.get("dataset_profile_path") or artifacts.get("dataset_profile_sha256"):
+        _validate_artifact_hash_pair(
+            artifact_dir=artifact_dir,
+            artifacts=artifacts,
+            path_key="dataset_profile_path",
+            hash_key="dataset_profile_sha256",
+        )
     expected_run_manifest_hash = artifacts.get("run_manifest_canonical_sha256")
     actual_run_manifest_hash = _canonical_run_manifest_sha256(run_manifest)
     if actual_run_manifest_hash != expected_run_manifest_hash:
         raise Phase2ArtifactError("run_manifest_canonical_sha256 mismatch")
+
+
+def _validate_artifact_hash_pair(
+    *,
+    artifact_dir: Path,
+    artifacts: Mapping[str, Any],
+    path_key: str,
+    hash_key: str,
+) -> None:
+    path_value = artifacts.get(path_key)
+    hash_value = artifacts.get(hash_key)
+    path = artifact_dir / str(path_value)
+    if not path.is_file():
+        raise Phase2ArtifactError(f"recorded artifact path does not exist: {path_value}")
+    actual = _sha256_file(path)
+    if actual != hash_value:
+        raise Phase2ArtifactError(f"artifact hash mismatch for {path_value}")
+
+
+def _read_optional_dataset_profile(
+    *,
+    artifact_dir: Path,
+    run_manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+    artifacts = run_manifest.get("artifacts")
+    if not isinstance(artifacts, Mapping):
+        raise Phase2ArtifactError("Phase 1.5 artifacts block is required")
+    path_value = str(artifacts.get("dataset_profile_path", "")).strip()
+    if not path_value:
+        return None
+    profile = _read_json(artifact_dir / path_value)
+    run_profile = run_manifest.get("dataset_profile")
+    if isinstance(run_profile, Mapping) and dict(run_profile) != profile:
+        raise Phase2ArtifactError("dataset_profile mismatch between file and run_manifest")
+    return profile
 
 
 def _load_policy_model(

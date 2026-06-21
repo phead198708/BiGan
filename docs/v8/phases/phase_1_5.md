@@ -28,6 +28,7 @@ When `output_dir` is provided, the runner writes a local registry record:
 ```text
 <output_dir>/<run_id>/
   policy_dataset_manifest.json
+  dataset_profile.json
   split_manifest.json
   training_manifest.json
   shadow_acceptance_report.json
@@ -62,6 +63,13 @@ records:
 }
 ```
 
+`dataset_profile.json` is immutable candidate metadata for training-corpus
+observability. It records row counts, train/shadow UP-DOWN target balance,
+source/instrument/regime distributions, model objective, boost rounds, target
+encoding, positive-return threshold, and feature columns. The same payload is
+embedded in `run_manifest.json` under `dataset_profile`, while the `artifacts`
+block records `dataset_profile_path` and `dataset_profile_sha256`.
+
 ## Hard Gates
 
 The runner fails closed for:
@@ -75,7 +83,8 @@ The runner fails closed for:
 
 The run manifest records the hashes needed to distinguish train rows, shadow
 rows, direct training labels, and shadow acceptance returns. It also records
-artifact paths and SHA-256 hashes for the local registry files. The
+artifact paths and SHA-256 hashes for the local registry files, including the
+dataset profile. The
 `run_manifest_canonical_sha256` field is computed over the canonical JSON
 payload with that self-hash field blanked, avoiding a circular file-hash
 dependency.

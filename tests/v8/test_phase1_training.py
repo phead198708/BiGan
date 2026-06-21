@@ -191,6 +191,7 @@ def test_policy_training_runner_writes_accepted_candidate_artifacts(tmp_path: Pa
 
     expected_files = {
         "policy_dataset_manifest.json",
+        "dataset_profile.json",
         "split_manifest.json",
         "training_manifest.json",
         "shadow_acceptance_report.json",
@@ -204,6 +205,9 @@ def test_policy_training_runner_writes_accepted_candidate_artifacts(tmp_path: Pa
     assert artifacts["hash_algorithm"] == "sha256"
     assert artifacts["policy_dataset_manifest_sha256"] == _sha256_file(
         result.artifact_dir / artifacts["policy_dataset_manifest_path"]
+    )
+    assert artifacts["dataset_profile_sha256"] == _sha256_file(
+        result.artifact_dir / artifacts["dataset_profile_path"]
     )
     assert artifacts["split_manifest_sha256"] == _sha256_file(
         result.artifact_dir / artifacts["split_manifest_path"]
@@ -229,6 +233,53 @@ def test_policy_training_runner_writes_accepted_candidate_artifacts(tmp_path: Pa
         ).encode("utf-8")
     ).hexdigest()
     assert artifacts["run_manifest_canonical_sha256"] == canonical_digest
+    saved_profile = json.loads(
+        (result.artifact_dir / artifacts["dataset_profile_path"]).read_text()
+    )
+    assert saved_profile == saved_manifest["dataset_profile"]
+    assert saved_profile["policy_dataset_row_count"] == len(result.policy_dataset.examples)
+    assert saved_profile["train_row_count"] == len(result.split.train_examples)
+    assert saved_profile["shadow_row_count"] == len(result.split.shadow_examples)
+    assert saved_profile["train_up_count"] == sum(
+        1 for example in result.split.train_examples if example.target_label > 0.0
+    )
+    assert saved_profile["train_down_count"] == (
+        len(result.split.train_examples) - saved_profile["train_up_count"]
+    )
+    assert saved_profile["shadow_up_count"] == sum(
+        1 for example in result.split.shadow_examples if example.target_label > 0.0
+    )
+    assert saved_profile["shadow_down_count"] == (
+        len(result.split.shadow_examples) - saved_profile["shadow_up_count"]
+    )
+    assert saved_profile["train_up_ratio"] == pytest.approx(
+        saved_profile["train_up_count"] / saved_profile["train_row_count"]
+    )
+    assert saved_profile["shadow_up_ratio"] == pytest.approx(
+        saved_profile["shadow_up_count"] / saved_profile["shadow_row_count"]
+    )
+    assert saved_profile["source_distribution"]["policy_dataset"] == {
+        "polymarket": len(result.policy_dataset.examples)
+    }
+    assert saved_profile["source_distribution"]["train"] == {
+        "polymarket": len(result.split.train_examples)
+    }
+    assert saved_profile["source_distribution"]["shadow"] == {
+        "polymarket": len(result.split.shadow_examples)
+    }
+    assert sum(saved_profile["instrument_distribution"]["train"].values()) == len(
+        result.split.train_examples
+    )
+    assert sum(saved_profile["regime_distribution"]["shadow"].values()) == len(
+        result.split.shadow_examples
+    )
+    assert saved_profile["num_boost_round"] == result.model.config.num_boost_round
+    assert saved_profile["objective"] == result.model.config.objective
+    assert saved_profile["target_encoding"] == result.policy_dataset.config.target_encoding
+    assert saved_profile["positive_return_threshold"] == (
+        result.policy_dataset.config.positive_return_threshold
+    )
+    assert saved_profile["feature_columns"] == list(result.policy_dataset.feature_columns)
 
     booster = xgb.Booster()
     booster.load_model(result.artifact_dir / "model.xgb")
@@ -313,6 +364,10 @@ def test_policy_training_runner_outputs_are_deterministic(tmp_path: Path) -> Non
     assert first.run_manifest["created_at"] == second.run_manifest["created_at"]
     assert first.run_manifest["direct_pnl_optimization"] is False
     assert second.run_manifest["direct_pnl_optimization"] is False
+    assert first.run_manifest["dataset_profile"] == second.run_manifest["dataset_profile"]
+    assert first.run_manifest["artifacts"]["dataset_profile_sha256"] == (
+        second.run_manifest["artifacts"]["dataset_profile_sha256"]
+    )
 
 
 def test_split_provenance_failure_cannot_register_accepted_candidate(monkeypatch: pytest.MonkeyPatch) -> None:

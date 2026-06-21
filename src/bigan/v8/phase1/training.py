@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections import Counter
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -15,6 +16,7 @@ from bigan.v8.phase1.contracts import (
     PHASE1_POLICY_VERSION,
     PolicyDataset,
     PolicyDatasetConfig,
+    PolicyTrainingExample,
     PolicyTrainShadowSplit,
     XGBoostPolicyConfig,
 )
@@ -167,6 +169,11 @@ def _run_manifest(
         "model_version": model.config.model_version,
         "objective": model.config.objective,
         "target_encoding": policy_dataset.config.target_encoding,
+        "dataset_profile": _dataset_profile(
+            policy_dataset=policy_dataset,
+            split=split,
+            model=model,
+        ),
         "direct_pnl_optimization": bool(model.training_manifest["direct_pnl_optimization"]),
         "shadow_return_used_for_training": bool(
             model.training_manifest["shadow_return_used_for_training"]
@@ -224,6 +231,7 @@ def _write_run_artifacts(
     artifact_dir.mkdir(parents=True, exist_ok=overwrite_existing)
 
     policy_dataset_path = artifact_dir / "policy_dataset_manifest.json"
+    dataset_profile_path = artifact_dir / "dataset_profile.json"
     split_path = artifact_dir / "split_manifest.json"
     training_path = artifact_dir / "training_manifest.json"
     shadow_acceptance_path = artifact_dir / "shadow_acceptance_report.json"
@@ -231,6 +239,7 @@ def _write_run_artifacts(
     model_path = artifact_dir / "model.xgb"
 
     _write_json(policy_dataset_path, policy_dataset.to_dict())
+    _write_json(dataset_profile_path, run_manifest["dataset_profile"])
     _write_json(split_path, split.to_dict())
     _write_json(training_path, model.training_manifest)
     _write_json(shadow_acceptance_path, acceptance_report.to_dict())
@@ -253,6 +262,8 @@ def _write_run_artifacts(
         "hash_algorithm": "sha256",
         "policy_dataset_manifest_path": policy_dataset_path.name,
         "policy_dataset_manifest_sha256": _sha256_file(policy_dataset_path),
+        "dataset_profile_path": dataset_profile_path.name,
+        "dataset_profile_sha256": _sha256_file(dataset_profile_path),
         "split_manifest_path": split_path.name,
         "split_manifest_sha256": _sha256_file(split_path),
         "training_manifest_path": training_path.name,
@@ -271,6 +282,86 @@ def _write_run_artifacts(
     run_manifest.clear()
     run_manifest.update(final_run_manifest)
     return artifact_dir
+
+
+def _dataset_profile(
+    *,
+    policy_dataset: PolicyDataset,
+    split: PolicyTrainShadowSplit,
+    model: XGBoostPolicyModel,
+) -> dict[str, Any]:
+    policy_examples = policy_dataset.examples
+    train_examples = split.train_examples
+    shadow_examples = split.shadow_examples
+    train_targets = _target_distribution(train_examples)
+    shadow_targets = _target_distribution(shadow_examples)
+    return {
+        "policy_dataset_hash": policy_dataset.policy_dataset_hash,
+        "phase0_dataset_hash": policy_dataset.phase0_dataset_hash,
+        "split_hash": split.split_hash,
+        "train_dataset_hash": split.train_dataset_hash,
+        "shadow_dataset_hash": split.shadow_dataset_hash,
+        "policy_dataset_row_count": len(policy_examples),
+        "train_row_count": len(train_examples),
+        "shadow_row_count": len(shadow_examples),
+        "train_up_count": train_targets["up_count"],
+        "train_down_count": train_targets["down_count"],
+        "train_up_ratio": train_targets["up_ratio"],
+        "shadow_up_count": shadow_targets["up_count"],
+        "shadow_down_count": shadow_targets["down_count"],
+        "shadow_up_ratio": shadow_targets["up_ratio"],
+        "target_distribution": {
+            "policy_dataset": _target_distribution(policy_examples),
+            "train": train_targets,
+            "shadow": shadow_targets,
+        },
+        "source_distribution": {
+            "policy_dataset": _distribution(policy_examples, "source"),
+            "train": _distribution(train_examples, "source"),
+            "shadow": _distribution(shadow_examples, "source"),
+        },
+        "instrument_distribution": {
+            "policy_dataset": _distribution(policy_examples, "instrument_id"),
+            "train": _distribution(train_examples, "instrument_id"),
+            "shadow": _distribution(shadow_examples, "instrument_id"),
+        },
+        "regime_distribution": {
+            "policy_dataset": _distribution(policy_examples, "regime_key"),
+            "train": _distribution(train_examples, "regime_key"),
+            "shadow": _distribution(shadow_examples, "regime_key"),
+        },
+        "num_boost_round": model.config.num_boost_round,
+        "objective": model.config.objective,
+        "target_encoding": policy_dataset.config.target_encoding,
+        "positive_return_threshold": policy_dataset.config.positive_return_threshold,
+        "feature_columns": list(policy_dataset.feature_columns),
+    }
+
+
+def _target_distribution(
+    examples: tuple[PolicyTrainingExample, ...],
+) -> dict[str, float | int]:
+    up_count = sum(1 for example in examples if example.target_label > 0.0)
+    down_count = len(examples) - up_count
+    return {
+        "up_count": up_count,
+        "down_count": down_count,
+        "up_ratio": _ratio(up_count, len(examples)),
+    }
+
+
+def _distribution(
+    examples: tuple[PolicyTrainingExample, ...],
+    attribute_name: str,
+) -> dict[str, int]:
+    counts = Counter(str(getattr(example, attribute_name)) for example in examples)
+    return {key: counts[key] for key in sorted(counts)}
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return numerator / denominator
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
