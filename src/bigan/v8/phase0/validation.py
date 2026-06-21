@@ -23,6 +23,34 @@ COST_MODEL_FAILURE_CODES: frozenset[str] = frozenset(
     }
 )
 
+LEAKAGE_FAILURE_CODES: frozenset[str] = frozenset(
+    {
+        "feature_causality",
+        "feature_label_causality",
+        "rolling_window",
+        "cross_timeframe_leakage",
+        "forbidden_feature_name",
+        "feature_future_correlation",
+    }
+)
+
+FEATURE_CAUSALITY_FAILURE_CODES: frozenset[str] = frozenset(
+    {
+        "feature_causality",
+        "feature_label_causality",
+        "rolling_window",
+        "cross_timeframe_leakage",
+        "forbidden_feature_name",
+    }
+)
+
+STATISTICAL_VALIDITY_FAILURE_CODES: frozenset[str] = frozenset(
+    {
+        "feature_distribution_drift",
+        "feature_distribution_insufficient_rows",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ValidationConfig:
@@ -97,31 +125,29 @@ class ValidationReport:
             "failures": [failure.to_dict() for failure in self.failures],
             "metrics": self.metrics,
             "acceptance_criteria": {
-                "zero_detectable_leakage": self.passed,
+                "zero_detectable_leakage": not any(
+                    failure.code in LEAKAGE_FAILURE_CODES
+                    and failure.severity == "error"
+                    for failure in self.failures
+                ),
                 "feature_causality_strictly_enforced": not any(
-                    failure.code
-                    in {
-                        "feature_causality",
-                        "rolling_window",
-                        "cross_timeframe_leakage",
-                        "forbidden_feature_name",
-                    }
+                    failure.code in FEATURE_CAUSALITY_FAILURE_CODES
+                    and failure.severity == "error"
                     for failure in self.failures
                 ),
                 "label_correctness_verified": not any(
-                    failure.code.startswith("label_") for failure in self.failures
+                    failure.code.startswith("label_")
+                    and failure.severity == "error"
+                    for failure in self.failures
                 ),
                 "statistical_validity_verified": not any(
-                    failure.code
-                    in {
-                        "feature_distribution_drift",
-                        "feature_distribution_insufficient_rows",
-                    }
+                    failure.code in STATISTICAL_VALIDITY_FAILURE_CODES
                     and failure.severity == "error"
                     for failure in self.failures
                 ),
                 "cost_model_realistic": not any(
                     failure.code in COST_MODEL_FAILURE_CODES
+                    and failure.severity == "error"
                     for failure in self.failures
                 ),
                 "dataset_reproducible": bool(self.metrics.get("dataset_hash")),

@@ -98,6 +98,11 @@ Drift checks have explicit policy:
 - `fail_on_insufficient_drift_rows=True` when too-little data should block
   artifact consumption
 
+Acceptance criteria are failure-domain specific. For example,
+`zero_detectable_leakage` is driven only by leakage and causality failure codes;
+cost, label, reproducibility, and statistical failures must not masquerade as
+detected leakage.
+
 The artifact gate rejects manifests with missing contracts, stale dataset
 versions, hash mismatches, schema/cost-column mismatches, failed validation,
 missing acceptance criteria, failed mandatory criteria, missing required cost

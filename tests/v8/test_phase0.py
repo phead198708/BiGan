@@ -37,6 +37,7 @@ from bigan.v8.phase0 import (
     assert_phase0_artifact_ready,
 )
 from bigan.v8.phase0.contracts import schema_names_hash
+from bigan.v8.phase0.validation import ValidationFailure, ValidationReport
 
 MINUTE_MS = 60_000
 
@@ -509,6 +510,38 @@ def test_cost_model_calibration_validates_against_observed_execution_costs() -> 
     assert not bad_report.passed
     assert bad_report.mean_absolute_percentage_error is not None
     assert bad_report.mean_absolute_percentage_error > 0.05
+
+
+def test_zero_detectable_leakage_is_not_overall_validation_passed() -> None:
+    cost_failure = ValidationReport(
+        failures=[
+            ValidationFailure(
+                code="cost_calibration_failed",
+                message="aggregate cost calibration failed",
+            )
+        ],
+        metrics={"dataset_hash": "stable"},
+    )
+    cost_payload = cost_failure.to_dict()
+
+    assert cost_payload["passed"] is False
+    assert cost_payload["acceptance_criteria"]["zero_detectable_leakage"] is True
+    assert cost_payload["acceptance_criteria"]["cost_model_realistic"] is False
+
+    leakage_failure = ValidationReport(
+        failures=[
+            ValidationFailure(
+                code="feature_future_correlation",
+                message="feature is correlated with a future return",
+            )
+        ],
+        metrics={"dataset_hash": "stable"},
+    )
+    leakage_payload = leakage_failure.to_dict()
+
+    assert leakage_payload["passed"] is False
+    assert leakage_payload["acceptance_criteria"]["zero_detectable_leakage"] is False
+    assert leakage_payload["acceptance_criteria"]["cost_model_realistic"] is True
 
 
 def test_artifact_gate_accepts_valid_manifest_and_rejects_invalid_contracts() -> None:
