@@ -38,6 +38,20 @@ When `output_dir` is provided, the runner writes a local registry record:
 The model artifact is written after model training succeeds. The candidate is
 marked accepted only when `acceptance_report.passed` is true.
 
+Registry records are overwrite-protected by default. `run_id` is deterministic
+and identifies a reproducible candidate spec:
+
+```text
+same Phase 0 input + same policy config + same split config + same model config
+  -> same run_id
+```
+
+`created_at` is intentionally excluded from `run_id`. This keeps candidate
+identity reproducible while the default `overwrite_existing=False` setting
+prevents a later invocation with a different timestamp from silently mutating an
+existing registry record. Callers must set `overwrite_existing=True` explicitly
+to replace `<output_dir>/<run_id>/`.
+
 Rejected runs may still be written for debugging, but `run_manifest.json`
 records:
 
@@ -60,10 +74,14 @@ The runner fails closed for:
 - shadow acceptance failure
 
 The run manifest records the hashes needed to distinguish train rows, shadow
-rows, direct training labels, and shadow acceptance returns.
+rows, direct training labels, and shadow acceptance returns. It also records
+artifact paths and SHA-256 hashes for the local registry files. The
+`run_manifest_canonical_sha256` field is computed over the canonical JSON
+payload with that self-hash field blanked, avoiding a circular file-hash
+dependency.
 
 ## Reproducibility
 
 `run_id`, `policy_dataset_hash`, and `split_hash` are deterministic for the same
-Phase 0 input and config. `created_at` is part of the config so callers can make
-full artifact output deterministic in tests and audits.
+Phase 0 input and config. `created_at` is part of the manifest/config for audit
+metadata, but it is not part of the deterministic `run_id`.

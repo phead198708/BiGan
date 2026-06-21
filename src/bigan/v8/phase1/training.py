@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -40,13 +41,16 @@ class PolicyTrainingRunConfig:
     xgboost_config: XGBoostPolicyConfig = XGBoostPolicyConfig()
     acceptance_config: PolicyAcceptanceConfig = PolicyAcceptanceConfig()
     train_fraction: float = 0.70
-    output_dir: Path | None = None
+    output_dir: Path | str | None = None
     run_id: str | None = None
     created_at: str = DEFAULT_CREATED_AT
+    overwrite_existing: bool = False
 
     def __post_init__(self) -> None:
         if not 0.0 < self.train_fraction < 1.0:
             raise ValueError("train_fraction must be in (0, 1)")
+        if self.output_dir is not None and not isinstance(self.output_dir, Path):
+            object.__setattr__(self, "output_dir", Path(self.output_dir))
         if self.run_id is not None and not self.run_id.strip():
             raise ValueError("run_id must be non-empty when provided")
         if not self.created_at:
@@ -119,6 +123,7 @@ def run_policy_training(
             model=model,
             acceptance_report=acceptance_report,
             run_manifest=run_manifest,
+            overwrite_existing=resolved_config.overwrite_existing,
         )
     return PolicyTrainingRunResult(
         policy_dataset=policy_dataset,
@@ -207,14 +212,28 @@ def _write_run_artifacts(
     model: XGBoostPolicyModel,
     acceptance_report: PolicyAcceptanceReport,
     run_manifest: dict[str, Any],
+    overwrite_existing: bool,
 ) -> Path:
+    output_dir = Path(output_dir)
     artifact_dir = output_dir / run_id
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    _write_json(artifact_dir / "policy_dataset_manifest.json", policy_dataset.to_dict())
-    _write_json(artifact_dir / "split_manifest.json", split.to_dict())
-    _write_json(artifact_dir / "training_manifest.json", model.training_manifest)
-    _write_json(artifact_dir / "shadow_acceptance_report.json", acceptance_report.to_dict())
-    _write_json(artifact_dir / "run_manifest.json", run_manifest)
+    if artifact_dir.exists() and not overwrite_existing:
+        raise FileExistsError(
+            "candidate registry artifact directory already exists: "
+            f"{artifact_dir}; set overwrite_existing=True to replace it"
+        )
+    artifact_dir.mkdir(parents=True, exist_ok=overwrite_existing)
+
+    policy_dataset_path = artifact_dir / "policy_dataset_manifest.json"
+    split_path = artifact_dir / "split_manifest.json"
+    training_path = artifact_dir / "training_manifest.json"
+    shadow_acceptance_path = artifact_dir / "shadow_acceptance_report.json"
+    run_manifest_path = artifact_dir / "run_manifest.json"
+    model_path = artifact_dir / "model.xgb"
+
+    _write_json(policy_dataset_path, policy_dataset.to_dict())
+    _write_json(split_path, split.to_dict())
+    _write_json(training_path, model.training_manifest)
+    _write_json(shadow_acceptance_path, acceptance_report.to_dict())
     model.booster.set_attr(
         training_manifest=json.dumps(
             _json_ready(model.training_manifest),
@@ -227,7 +246,30 @@ def _write_run_artifacts(
             separators=(",", ":"),
         ),
     )
-    model.booster.save_model(artifact_dir / "model.xgb")
+    model.booster.save_model(model_path)
+
+    final_run_manifest = deepcopy(run_manifest)
+    final_run_manifest["artifacts"] = {
+        "hash_algorithm": "sha256",
+        "policy_dataset_manifest_path": policy_dataset_path.name,
+        "policy_dataset_manifest_sha256": _sha256_file(policy_dataset_path),
+        "split_manifest_path": split_path.name,
+        "split_manifest_sha256": _sha256_file(split_path),
+        "training_manifest_path": training_path.name,
+        "training_manifest_sha256": _sha256_file(training_path),
+        "shadow_acceptance_report_path": shadow_acceptance_path.name,
+        "shadow_acceptance_report_sha256": _sha256_file(shadow_acceptance_path),
+        "model_path": model_path.name,
+        "model_sha256": _sha256_file(model_path),
+        "run_manifest_path": run_manifest_path.name,
+        "run_manifest_canonical_sha256": "",
+    }
+    final_run_manifest["artifacts"][
+        "run_manifest_canonical_sha256"
+    ] = _canonical_payload_sha256(final_run_manifest)
+    _write_json(run_manifest_path, final_run_manifest)
+    run_manifest.clear()
+    run_manifest.update(final_run_manifest)
     return artifact_dir
 
 
@@ -236,6 +278,24 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         json.dumps(_json_ready(payload), indent=2, sort_keys=True, allow_nan=False),
         encoding="utf-8",
     )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _canonical_payload_sha256(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        _json_ready(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _json_ready(value: Any) -> Any:

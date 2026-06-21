@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -130,7 +132,7 @@ def _phase0_training_dataset(row_count: int = 96) -> Phase0Dataset:
     )
 
 
-def _run_config(output_dir: Path | None = None) -> PolicyTrainingRunConfig:
+def _run_config(output_dir: Path | str | None = None) -> PolicyTrainingRunConfig:
     return PolicyTrainingRunConfig(
         policy_dataset_config=PolicyDatasetConfig(
             horizon_ms=MINUTE_MS,
@@ -161,10 +163,14 @@ def _run_config(output_dir: Path | None = None) -> PolicyTrainingRunConfig:
     )
 
 
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def test_policy_training_runner_writes_accepted_candidate_artifacts(tmp_path: Path) -> None:
     result = run_policy_training(
         _phase0_training_dataset(),
-        _run_config(output_dir=tmp_path),
+        _run_config(output_dir=str(tmp_path)),
     )
 
     assert result.accepted
@@ -181,6 +187,7 @@ def test_policy_training_runner_writes_accepted_candidate_artifacts(tmp_path: Pa
     assert result.run_manifest["shadow_return_used_for_training"] is False
     assert result.model.training_manifest["split"]["split_hash"] == result.split.split_hash
     assert result.artifact_dir is not None
+    assert result.run_manifest["config"]["output_dir"] == str(tmp_path)
 
     expected_files = {
         "policy_dataset_manifest.json",
@@ -193,12 +200,69 @@ def test_policy_training_runner_writes_accepted_candidate_artifacts(tmp_path: Pa
     assert expected_files == {path.name for path in result.artifact_dir.iterdir()}
     saved_manifest = json.loads((result.artifact_dir / "run_manifest.json").read_text())
     assert saved_manifest["accepted"] is True
+    artifacts = saved_manifest["artifacts"]
+    assert artifacts["hash_algorithm"] == "sha256"
+    assert artifacts["policy_dataset_manifest_sha256"] == _sha256_file(
+        result.artifact_dir / artifacts["policy_dataset_manifest_path"]
+    )
+    assert artifacts["split_manifest_sha256"] == _sha256_file(
+        result.artifact_dir / artifacts["split_manifest_path"]
+    )
+    assert artifacts["training_manifest_sha256"] == _sha256_file(
+        result.artifact_dir / artifacts["training_manifest_path"]
+    )
+    assert artifacts["shadow_acceptance_report_sha256"] == _sha256_file(
+        result.artifact_dir / artifacts["shadow_acceptance_report_path"]
+    )
+    assert artifacts["model_sha256"] == _sha256_file(
+        result.artifact_dir / artifacts["model_path"]
+    )
+    canonical_manifest = saved_manifest.copy()
+    canonical_manifest["artifacts"] = artifacts.copy()
+    canonical_manifest["artifacts"]["run_manifest_canonical_sha256"] = ""
+    canonical_digest = hashlib.sha256(
+        json.dumps(
+            canonical_manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert artifacts["run_manifest_canonical_sha256"] == canonical_digest
 
     booster = xgb.Booster()
     booster.load_model(result.artifact_dir / "model.xgb")
     training_manifest_attr = booster.attr("training_manifest")
     assert training_manifest_attr is not None
     assert json.loads(training_manifest_attr)["split"]["split_hash"] == result.split.split_hash
+
+
+def test_policy_training_registry_refuses_silent_overwrite_by_default(tmp_path: Path) -> None:
+    phase0_dataset = _phase0_training_dataset()
+    config = _run_config(output_dir=tmp_path)
+    first = run_policy_training(phase0_dataset, config)
+    assert first.artifact_dir is not None
+    manifest_path = first.artifact_dir / "run_manifest.json"
+    original_manifest_text = manifest_path.read_text(encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="overwrite_existing=True"):
+        run_policy_training(phase0_dataset, config)
+
+    assert manifest_path.read_text(encoding="utf-8") == original_manifest_text
+
+    overwrite_config = replace(
+        config,
+        created_at="2026-06-21T00:01:00Z",
+        overwrite_existing=True,
+    )
+    overwritten = run_policy_training(phase0_dataset, overwrite_config)
+
+    assert overwritten.artifact_dir == first.artifact_dir
+    assert overwritten.run_manifest["run_id"] == first.run_manifest["run_id"]
+    assert overwritten.run_manifest["created_at"] == "2026-06-21T00:01:00Z"
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["created_at"] == (
+        "2026-06-21T00:01:00Z"
+    )
 
 
 def test_failed_shadow_acceptance_writes_rejected_candidate(tmp_path: Path) -> None:
