@@ -769,6 +769,44 @@ def test_pipeline_manifest_cost_calibration_is_gate_enforced() -> None:
     )
 
 
+def test_optional_failed_cost_calibration_is_a_hard_artifact_failure() -> None:
+    cost_model, samples = _calibration_samples(market_count=24)
+    bad_samples = [
+        ExecutionCostSample(
+            entry=sample.entry,
+            exit=sample.exit,
+            order_size=sample.order_size,
+            volatility=sample.volatility,
+            observed_total_cost=sample.observed_total_cost * 4.0,
+        )
+        for sample in samples
+    ]
+    pipeline = Phase0Pipeline(
+        Phase0PipelineConfig(
+            cost_config=cost_model.config,
+            require_cost_calibration=False,
+            fail_on_validation_error=False,
+        )
+    )
+
+    dataset = pipeline.build(_market_rows(), cost_calibration_samples=bad_samples)
+
+    assert dataset.manifest["config"]["require_cost_calibration"] is False
+    assert dataset.manifest["cost_calibration"]["passed"] is False
+    assert dataset.validation_report.passed is False
+    assert dataset.validation_report.passed is dataset.manifest["validation"]["passed"]
+    assert (
+        dataset.manifest["validation"]["acceptance_criteria"]["cost_model_realistic"]
+        is False
+    )
+    assert any(
+        failure.code == "cost_calibration_failed"
+        for failure in dataset.validation_report.failures
+    )
+    with pytest.raises(Phase0ArtifactError, match="cost_calibration_failed"):
+        assert_phase0_artifact_ready(dataset.manifest)
+
+
 def test_artifact_gate_strictly_validates_cost_calibration_payload() -> None:
     cost_model, samples = _calibration_samples(market_count=24)
     dataset = _calibration_required_pipeline(cost_model).build(
@@ -784,6 +822,28 @@ def test_artifact_gate_strictly_validates_cost_calibration_payload() -> None:
         (
             "cost_calibration_missing_field",
             lambda manifest: manifest["cost_calibration"].pop("checked_sample_ratio"),
+        ),
+        (
+            "cost_calibration_missing_field",
+            lambda manifest: manifest["cost_calibration"].pop("coverage_passed"),
+        ),
+        (
+            "cost_calibration_missing_field",
+            lambda manifest: manifest["cost_calibration"].pop(
+                "coverage_failure_reasons"
+            ),
+        ),
+        (
+            "cost_calibration_missing_field",
+            lambda manifest: manifest["cost_calibration"]["aggregate"].pop(
+                "sample_count"
+            ),
+        ),
+        (
+            "cost_calibration_missing_field",
+            lambda manifest: next(
+                iter(manifest["cost_calibration"]["buckets"].values())
+            ).pop("bias"),
         ),
         (
             "cost_calibration_coverage_invalid",

@@ -38,6 +38,8 @@ COST_CALIBRATION_REQUIRED_FIELDS: tuple[str, ...] = (
     "checked_sample_ratio",
     "checked_bucket_count",
     "skipped_bucket_count",
+    "coverage_passed",
+    "coverage_failure_reasons",
 )
 
 COST_CALIBRATION_COUNT_FIELDS: tuple[str, ...] = (
@@ -53,6 +55,34 @@ COST_CALIBRATION_COVERAGE_REASONS: frozenset[str] = frozenset(
         "checked_sample_ratio_below_min",
         "checked_bucket_count_below_min",
     }
+)
+
+COST_CALIBRATION_REPORT_REQUIRED_FIELDS: tuple[str, ...] = (
+    "sample_count",
+    "passed",
+    "estimated_mean_cost",
+    "observed_mean_cost",
+    "mean_absolute_error",
+    "mean_absolute_percentage_error",
+    "bias",
+    "max_absolute_error",
+    "weighted_mean_absolute_percentage_error",
+    "median_absolute_error",
+    "median_absolute_percentage_error",
+    "symmetric_mean_absolute_percentage_error",
+)
+
+COST_CALIBRATION_REPORT_METRIC_FIELDS: tuple[str, ...] = (
+    "estimated_mean_cost",
+    "observed_mean_cost",
+    "mean_absolute_error",
+    "mean_absolute_percentage_error",
+    "bias",
+    "max_absolute_error",
+    "weighted_mean_absolute_percentage_error",
+    "median_absolute_error",
+    "median_absolute_percentage_error",
+    "symmetric_mean_absolute_percentage_error",
 )
 
 
@@ -390,6 +420,13 @@ def _cost_calibration_structure_failures(
                 field="cost_calibration.aggregate.passed",
             )
         )
+    if isinstance(aggregate, Mapping):
+        failures.extend(
+            _cost_calibration_report_failures(
+                aggregate,
+                field_prefix="cost_calibration.aggregate",
+            )
+        )
 
     buckets = calibration.get("buckets")
     if "buckets" in calibration and not isinstance(buckets, Mapping):
@@ -400,6 +437,41 @@ def _cost_calibration_structure_failures(
                 field="cost_calibration.buckets",
             )
         )
+    elif isinstance(buckets, Mapping):
+        for bucket_name, bucket_report in buckets.items():
+            bucket_field_prefix = f"cost_calibration.buckets.{bucket_name}"
+            if not isinstance(bucket_name, str):
+                failures.append(
+                    Phase0ArtifactValidationFailure(
+                        code="cost_calibration_invalid_field",
+                        message="cost_calibration.buckets keys must be strings",
+                        field="cost_calibration.buckets",
+                    )
+                )
+                continue
+            if not isinstance(bucket_report, Mapping):
+                failures.append(
+                    Phase0ArtifactValidationFailure(
+                        code="cost_calibration_invalid_field",
+                        message=f"{bucket_field_prefix} must be an object",
+                        field=bucket_field_prefix,
+                    )
+                )
+                continue
+            failures.extend(
+                _cost_calibration_report_failures(
+                    bucket_report,
+                    field_prefix=bucket_field_prefix,
+                )
+            )
+            if bucket_report.get("passed") is False:
+                failures.append(
+                    Phase0ArtifactValidationFailure(
+                        code="cost_calibration_bucket_failed",
+                        message=f"{bucket_field_prefix}.passed must be true",
+                        field=f"{bucket_field_prefix}.passed",
+                    )
+                )
 
     for field_name in ("skipped_buckets", "failed_buckets"):
         value = calibration.get(field_name)
@@ -497,6 +569,70 @@ def _cost_calibration_structure_failures(
                         field="cost_calibration.coverage_failure_reasons",
                     )
                 )
+    return failures
+
+
+def _cost_calibration_report_failures(
+    report: Mapping[str, Any],
+    *,
+    field_prefix: str,
+) -> list[Phase0ArtifactValidationFailure]:
+    failures: list[Phase0ArtifactValidationFailure] = []
+    for field_name in COST_CALIBRATION_REPORT_REQUIRED_FIELDS:
+        if field_name not in report:
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_missing_field",
+                    message=f"{field_prefix}.{field_name} is required",
+                    field=f"{field_prefix}.{field_name}",
+                )
+            )
+
+    sample_count = report.get("sample_count")
+    if "sample_count" in report:
+        if type(sample_count) is not int:
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_invalid_field",
+                    message=f"{field_prefix}.sample_count must be an integer",
+                    field=f"{field_prefix}.sample_count",
+                )
+            )
+        elif sample_count < 0:
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_invalid_field",
+                    message=f"{field_prefix}.sample_count must be non-negative",
+                    field=f"{field_prefix}.sample_count",
+                )
+            )
+
+    passed = report.get("passed")
+    if "passed" in report and not isinstance(passed, bool):
+        failures.append(
+            Phase0ArtifactValidationFailure(
+                code="cost_calibration_invalid_field",
+                message=f"{field_prefix}.passed must be boolean",
+                field=f"{field_prefix}.passed",
+            )
+        )
+
+    for field_name in COST_CALIBRATION_REPORT_METRIC_FIELDS:
+        value = report.get(field_name)
+        if field_name not in report or value is None:
+            continue
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_invalid_field",
+                    message=f"{field_prefix}.{field_name} must be numeric or null",
+                    field=f"{field_prefix}.{field_name}",
+                )
+            )
     return failures
 
 

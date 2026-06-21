@@ -245,21 +245,22 @@ def _merge_cost_calibration_validation(
             cost_calibration.checked_bucket_count
         )
 
-    if not require_cost_calibration:
-        return
     if cost_calibration is None:
-        validation_report.failures.append(
-            ValidationFailure(
-                code="cost_calibration_missing",
-                message="required cost calibration samples were not provided",
+        if require_cost_calibration:
+            validation_report.failures.append(
+                ValidationFailure(
+                    code="cost_calibration_missing",
+                    message="required cost calibration samples were not provided",
+                )
             )
-        )
         return
+
+    message_prefix = "required " if require_cost_calibration else ""
     if not cost_calibration.aggregate.passed:
         validation_report.failures.append(
             ValidationFailure(
                 code="cost_calibration_failed",
-                message="required aggregate cost calibration failed",
+                message=f"{message_prefix}aggregate cost calibration failed",
                 row_count=cost_calibration.aggregate.sample_count,
             )
         )
@@ -267,7 +268,7 @@ def _merge_cost_calibration_validation(
         validation_report.failures.append(
             ValidationFailure(
                 code="cost_calibration_bucket_failed",
-                message="required bucketed cost calibration failed",
+                message=f"{message_prefix}bucketed cost calibration failed",
                 row_count=len(cost_calibration.failed_buckets),
                 column="cost_calibration.failed_buckets",
             )
@@ -277,7 +278,7 @@ def _merge_cost_calibration_validation(
         validation_report.failures.append(
             ValidationFailure(
                 code="cost_calibration_coverage_failed",
-                message=f"required bucket coverage failed: {reason_text}",
+                message=f"{message_prefix}bucket coverage failed: {reason_text}",
                 row_count=cost_calibration.skipped_sample_count,
                 column="cost_calibration.coverage_failure_reasons",
             )

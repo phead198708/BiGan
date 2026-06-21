@@ -130,6 +130,11 @@ When `Phase0PipelineConfig.require_cost_calibration` is true,
 `validation.passed`, and `Phase0Dataset.validation_report.passed` are
 calibration-aware and remain aligned.
 
+When calibration is optional, samples are not required. If optional calibration
+samples are provided, the resulting `cost_calibration` block must still pass;
+failed calibration is treated as a hard cost-realism failure because the
+artifact is carrying evidence that the cost model is unsafe.
+
 Bucket coverage failures expose explicit reasons:
 
 - `all_buckets_skipped`
@@ -149,6 +154,7 @@ The mandatory Phase 0 tests are in `tests/v8/test_phase0.py`:
 - runtime feature/label causality checks
 - runtime artifact gate acceptance/rejection
 - artifact readiness helper calibration inference from manifest config
+- optional calibration failure alignment with artifact readiness
 - cost calibration against observed execution-cost samples
 - bucketed cost calibration pass/fail
 - bucket coverage controls that prevent sparse-bucket silent pass
