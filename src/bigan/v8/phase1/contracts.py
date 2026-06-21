@@ -239,6 +239,8 @@ class XGBoostPolicyConfig:
     max_position_size: float = 1.0
     action_activation_threshold: float = 0.55
     ranking_group_strategy: RankingGroupStrategy = "source_instrument_regime"
+    min_ranking_group_size: int = 2
+    min_effective_ranking_groups: int = 1
     regime_feature_names: tuple[str, ...] = (
         "volatility_5m",
         "volatility_15m",
@@ -276,6 +278,10 @@ class XGBoostPolicyConfig:
                 "ranking_group_strategy must be one of "
                 + ", ".join(SUPPORTED_RANKING_GROUP_STRATEGIES)
             )
+        if self.min_ranking_group_size < 2:
+            raise ValueError("min_ranking_group_size must be at least 2")
+        if self.min_effective_ranking_groups < 1:
+            raise ValueError("min_effective_ranking_groups must be at least 1")
         assert_no_direct_pnl_optimization(
             objective=self.objective,
             eval_metric=self.eval_metric,

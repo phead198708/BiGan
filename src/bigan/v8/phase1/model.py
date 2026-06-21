@@ -101,6 +101,12 @@ def train_xgboost_policy(
     )
     labels = _training_labels(training_examples, resolved_config)
     _validate_training_labels(labels, resolved_config)
+    ranking_quality = _ranking_group_quality(
+        training_examples=training_examples,
+        group_sizes=group_sizes,
+        group_keys=group_keys,
+        config=resolved_config,
+    )
 
     dtrain = _dmatrix(training_examples, dataset.feature_columns, labels=labels)
     if group_sizes:
@@ -131,6 +137,7 @@ def train_xgboost_policy(
         "ranking_group_count": len(group_sizes),
         "ranking_group_sizes": list(group_sizes),
         "ranking_group_keys": list(group_keys),
+        **ranking_quality,
         "policy_dataset_hash": dataset.policy_dataset_hash,
         "phase0_dataset_hash": dataset.phase0_dataset_hash,
         "phase0_dataset_version": dataset.phase0_dataset_version,
@@ -229,6 +236,53 @@ def _validate_training_labels(
         raise ValueError("binary policy labels must be 0/1 target labels")
     if config.objective == "rank:pairwise" and np.unique(labels).size < 2:
         raise ValueError("ranking policy training requires at least two target labels")
+
+
+def _ranking_group_quality(
+    *,
+    training_examples: tuple[PolicyTrainingExample, ...],
+    group_sizes: tuple[int, ...],
+    group_keys: tuple[str, ...],
+    config: XGBoostPolicyConfig,
+) -> dict[str, Any]:
+    if config.objective != "rank:pairwise":
+        return {
+            "ranking_effective_group_count": 0,
+            "ranking_ineffective_group_count": 0,
+            "ranking_ineffective_group_keys": [],
+            "min_ranking_group_size": config.min_ranking_group_size,
+            "min_effective_ranking_groups": config.min_effective_ranking_groups,
+        }
+
+    ineffective_keys: list[str] = []
+    effective_count = 0
+    offset = 0
+    for group_key, group_size in zip(group_keys, group_sizes, strict=True):
+        group_examples = training_examples[offset : offset + group_size]
+        offset += group_size
+        unique_labels = {example.target_label for example in group_examples}
+        if (
+            group_size >= config.min_ranking_group_size
+            and len(unique_labels) >= 2
+        ):
+            effective_count += 1
+            continue
+        ineffective_keys.append(group_key)
+
+    if effective_count < config.min_effective_ranking_groups:
+        raise ValueError(
+            "rank:pairwise requires at least "
+            f"{config.min_effective_ranking_groups} effective ranking groups; "
+            f"got {effective_count}"
+        )
+
+    return {
+        "ranking_effective_group_count": effective_count,
+        "ranking_ineffective_group_count": len(ineffective_keys),
+        "ranking_ineffective_group_keys": ineffective_keys,
+        "min_ranking_group_size": config.min_ranking_group_size,
+        "min_effective_ranking_groups": config.min_effective_ranking_groups,
+    }
 
 
 def _ranking_group_key(

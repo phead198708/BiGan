@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -263,8 +264,12 @@ def validate_policy_shadow_split(
 ) -> PolicyAcceptanceReport:
     """Run acceptance on the shadow side of a temporal split."""
 
+    provenance_failures, provenance_metrics = _validate_split_provenance(
+        policy_model,
+        split,
+    )
     predictions = policy_model.predict_examples(split.shadow_examples)
-    return validate_policy_acceptance(
+    report = validate_policy_acceptance(
         split.shadow_examples,
         predictions,
         config,
@@ -273,6 +278,86 @@ def validate_policy_shadow_split(
         split_hash=split.split_hash,
         training_row_count=len(split.train_examples),
     )
+    criteria = {
+        **report.acceptance_criteria,
+        "split_provenance_verified": provenance_metrics["passed"],
+    }
+    metrics = {
+        **report.metrics,
+        "split_provenance": provenance_metrics,
+    }
+    return PolicyAcceptanceReport(
+        failures=(*report.failures, *provenance_failures),
+        metrics=metrics,
+        acceptance_criteria=criteria,
+    )
+
+
+def _validate_split_provenance(
+    policy_model: Any,
+    split: PolicyTrainShadowSplit,
+) -> tuple[list[PolicyAcceptanceFailure], dict[str, Any]]:
+    failures: list[PolicyAcceptanceFailure] = []
+    manifest = getattr(policy_model, "training_manifest", None)
+    manifest_present = isinstance(manifest, Mapping)
+    split_hash_matches = False
+    train_hash_matches = False
+    shadow_hash_matches = False
+
+    if not manifest_present:
+        failures.append(
+            PolicyAcceptanceFailure(
+                code="missing_training_manifest",
+                message="policy model must expose a training_manifest for shadow split validation",
+            )
+        )
+    else:
+        split_block = manifest.get("split")
+        split_hash_matches = (
+            isinstance(split_block, Mapping)
+            and split_block.get("split_hash") == split.split_hash
+        )
+        train_hash_matches = manifest.get("train_dataset_hash") == split.train_dataset_hash
+        shadow_hash_matches = manifest.get("shadow_dataset_hash") == split.shadow_dataset_hash
+
+        if not split_hash_matches:
+            failures.append(
+                PolicyAcceptanceFailure(
+                    code="split_hash_mismatch",
+                    message="model training split_hash does not match the supplied split",
+                )
+            )
+        if not train_hash_matches:
+            failures.append(
+                PolicyAcceptanceFailure(
+                    code="train_split_mismatch",
+                    message="model train_dataset_hash does not match the supplied split",
+                )
+            )
+        if not shadow_hash_matches:
+            failures.append(
+                PolicyAcceptanceFailure(
+                    code="shadow_split_mismatch",
+                    message="model shadow_dataset_hash does not match the supplied split",
+                )
+            )
+
+    passed = (
+        manifest_present
+        and split_hash_matches
+        and train_hash_matches
+        and shadow_hash_matches
+    )
+    return failures, {
+        "passed": passed,
+        "training_manifest_present": manifest_present,
+        "split_hash_matches": split_hash_matches,
+        "train_dataset_hash_matches": train_hash_matches,
+        "shadow_dataset_hash_matches": shadow_hash_matches,
+        "expected_split_hash": split.split_hash,
+        "expected_train_dataset_hash": split.train_dataset_hash,
+        "expected_shadow_dataset_hash": split.shadow_dataset_hash,
+    }
 
 
 def _prediction_contract_valid(

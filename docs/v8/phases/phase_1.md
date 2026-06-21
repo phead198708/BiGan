@@ -31,6 +31,9 @@ Phase 1 dataset
 
 The split contract requires `max(train.decision_ts) < min(shadow.decision_ts)`
 and records deterministic train, shadow, and split hashes.
+Shadow acceptance verifies the policy model was trained with the same split by
+matching `split_hash`, `train_dataset_hash`, and `shadow_dataset_hash` in the
+training manifest.
 
 ## Modules
 
@@ -72,6 +75,7 @@ The training manifest always records:
 - feature columns
 - policy objective and model config
 - ranking group strategy and deterministic group sizes for ranking objectives
+- effective and ineffective ranking group counts for ranking objectives
 
 Target fields are deliberately separated:
 
@@ -90,6 +94,15 @@ magnitude. Supported ranking group strategies:
 - `source_instrument`
 - `source_instrument_day`
 
+Ranking groups must contain useful pairwise signal. An effective ranking group
+must satisfy:
+
+- group size is at least `min_ranking_group_size`
+- unique `target_label` count is at least 2
+
+Training fails when the effective group count is below
+`min_effective_ranking_groups`.
+
 ## Outputs
 
 Each prediction emits:
@@ -106,9 +119,11 @@ Phase 1 is acceptable only when:
 - The consumed Phase 0 manifest passes the artifact gate.
 - The policy dataset hash is deterministic.
 - The train/shadow split is temporal and out-of-sample.
+- Shadow acceptance verifies the model training split provenance.
 - Label and cost fields are not present in policy features.
 - Training consumes `target_label`, not `shadow_net_return`.
 - The XGBoost objective is supervised or ranking only.
+- Ranking objectives have enough effective ranking groups.
 - Direct PnL optimization knobs are rejected.
 - Shadow Sharpe is positive on shadow rows.
 - The action distribution is stable and not collapsed.

@@ -194,6 +194,23 @@ def _copy_example(
     )
 
 
+def _dataset_with_examples(dataset, examples: tuple[PolicyTrainingExample, ...]):
+    return dataset.__class__(
+        examples=examples,
+        feature_columns=dataset.feature_columns,
+        policy_dataset_hash=policy_dataset_hash(
+            examples=examples,
+            feature_columns=dataset.feature_columns,
+            phase0_dataset_hash=dataset.phase0_dataset_hash,
+            phase0_dataset_version=dataset.phase0_dataset_version,
+            config=dataset.config,
+        ),
+        phase0_dataset_hash=dataset.phase0_dataset_hash,
+        phase0_dataset_version=dataset.phase0_dataset_version,
+        config=dataset.config,
+    )
+
+
 def test_phase1_dataset_adapter_requires_ready_phase0_and_is_deterministic() -> None:
     phase0_dataset = _pipeline().build(_market_rows())
 
@@ -340,6 +357,7 @@ def test_xgboost_policy_trains_on_train_split_and_shadow_acceptance_uses_shadow_
             )
 
     fake_model = FakePolicyModel()
+    fake_model.training_manifest = model.training_manifest
     report = validate_policy_shadow_split(
         fake_model,
         split,
@@ -351,6 +369,71 @@ def test_xgboost_policy_trains_on_train_split_and_shadow_acceptance_uses_shadow_
     assert report.metrics["split_hash"] == split.split_hash
     assert report.metrics["training_row_count"] == len(split.train_examples)
     assert report.metrics["row_count"] == len(split.shadow_examples)
+    assert report.metrics["split_provenance"]["passed"] is True
+    assert report.acceptance_criteria["split_provenance_verified"] is True
+
+
+def test_shadow_split_validation_rejects_missing_or_mismatched_training_provenance() -> None:
+    dataset = _causal_policy_dataset(row_count=40)
+    split = build_temporal_policy_split(dataset, train_fraction=0.60)
+    other_split = build_temporal_policy_split(dataset, train_fraction=0.75)
+    config = XGBoostPolicyConfig(num_boost_round=4, max_depth=2)
+
+    class NoManifestPolicyModel:
+        def predict_examples(
+            self,
+            examples: tuple[PolicyTrainingExample, ...],
+        ) -> tuple[PolicyPrediction, ...]:
+            return tuple(
+                PolicyPrediction(
+                    decision_ts=example.decision_ts,
+                    source=example.source,
+                    instrument_id=example.instrument_id,
+                    action=0.5 if example.target_label > 0.0 else 0.0,
+                    confidence=0.75,
+                    regime_embedding=(0.0,),
+                    score=example.target_label,
+                )
+                for example in examples
+            )
+
+    missing_report = validate_policy_shadow_split(
+        NoManifestPolicyModel(),
+        split,
+        PolicyAcceptanceConfig(min_active_regime_count=1),
+    )
+
+    assert missing_report.acceptance_criteria["split_provenance_verified"] is False
+    assert missing_report.metrics["split_provenance"]["training_manifest_present"] is False
+    assert "missing_training_manifest" in {
+        failure.code for failure in missing_report.failures
+    }
+
+    full_dataset_model = train_xgboost_policy(dataset, config)
+    no_split_report = validate_policy_shadow_split(
+        full_dataset_model,
+        split,
+        PolicyAcceptanceConfig(min_active_regime_count=1),
+    )
+
+    assert no_split_report.acceptance_criteria["split_provenance_verified"] is False
+    assert no_split_report.metrics["split_provenance"]["split_hash_matches"] is False
+    assert "split_hash_mismatch" in {
+        failure.code for failure in no_split_report.failures
+    }
+
+    split_model = train_xgboost_policy(dataset, config, split=split)
+    mismatch_report = validate_policy_shadow_split(
+        split_model,
+        other_split,
+        PolicyAcceptanceConfig(min_active_regime_count=1),
+    )
+
+    assert mismatch_report.acceptance_criteria["split_provenance_verified"] is False
+    failure_codes = {failure.code for failure in mismatch_report.failures}
+    assert "split_hash_mismatch" in failure_codes
+    assert "train_split_mismatch" in failure_codes
+    assert "shadow_split_mismatch" in failure_codes
 
 
 def test_xgboost_ranking_uses_discrete_target_labels_and_auditable_groups() -> None:
@@ -363,7 +446,7 @@ def test_xgboost_ranking_uses_discrete_target_labels_and_auditable_groups() -> N
         selection_metric="ndcg",
         num_boost_round=4,
         max_depth=2,
-        ranking_group_strategy="source_instrument_regime",
+        ranking_group_strategy="source_instrument",
     )
 
     model = train_xgboost_policy(dataset, config)
@@ -374,8 +457,10 @@ def test_xgboost_ranking_uses_discrete_target_labels_and_auditable_groups() -> N
     )
     assert model.training_manifest["training_label_field"] == "target_label"
     assert model.training_manifest["shadow_return_used_for_training"] is False
-    assert model.training_manifest["ranking_group_strategy"] == "source_instrument_regime"
+    assert model.training_manifest["ranking_group_strategy"] == "source_instrument"
     assert model.training_manifest["ranking_group_count"] >= 1
+    assert model.training_manifest["ranking_effective_group_count"] >= 1
+    assert model.training_manifest["ranking_ineffective_group_count"] >= 0
     assert all(size > 0 for size in model.training_manifest["ranking_group_sizes"])
     assert len(model.training_manifest["ranking_group_sizes"]) == len(
         model.training_manifest["ranking_group_keys"]
@@ -385,6 +470,46 @@ def test_xgboost_ranking_uses_discrete_target_labels_and_auditable_groups() -> N
     assert "target_label" in labels_source
     assert "shadow_net_return" not in labels_source
     assert "net_return" not in labels_source
+
+
+def test_xgboost_ranking_rejects_ineffective_ranking_groups() -> None:
+    dataset = _causal_policy_dataset(
+        row_count=12,
+        target_encoding="rank_discrete_net_return_quality_bucket",
+    )
+    config = XGBoostPolicyConfig(
+        objective="rank:pairwise",
+        eval_metric="ndcg",
+        selection_metric="ndcg",
+        num_boost_round=2,
+        max_depth=2,
+        ranking_group_strategy="source_instrument_regime",
+    )
+
+    size_one_group_dataset = _dataset_with_examples(
+        dataset,
+        tuple(
+            _copy_example(example, regime_key=f"unique-regime-{idx}")
+            for idx, example in enumerate(dataset.examples)
+        ),
+    )
+    with pytest.raises(ValueError, match="effective ranking groups"):
+        train_xgboost_policy(size_one_group_dataset, config)
+
+    half = len(dataset.examples) // 2
+    constant_label_group_dataset = _dataset_with_examples(
+        dataset,
+        tuple(
+            _copy_example(
+                example,
+                target_label=0.0 if idx < half else 1.0,
+                regime_key="constant-zero" if idx < half else "constant-one",
+            )
+            for idx, example in enumerate(dataset.examples)
+        ),
+    )
+    with pytest.raises(ValueError, match="effective ranking groups"):
+        train_xgboost_policy(constant_label_group_dataset, config)
 
 
 def test_objective_and_target_encoding_must_match() -> None:
