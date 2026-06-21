@@ -264,15 +264,25 @@ def validate_policy_shadow_split(
 ) -> PolicyAcceptanceReport:
     """Run acceptance on the shadow side of a temporal split."""
 
+    resolved_config = config or PolicyAcceptanceConfig()
     provenance_failures, provenance_metrics = _validate_split_provenance(
         policy_model,
         split,
     )
+    if provenance_failures:
+        return _split_provenance_failed_report(
+            failures=provenance_failures,
+            metrics=provenance_metrics,
+            config=resolved_config,
+            split=split,
+            direct_pnl_optimization=direct_pnl_optimization,
+        )
+
     predictions = policy_model.predict_examples(split.shadow_examples)
     report = validate_policy_acceptance(
         split.shadow_examples,
         predictions,
-        config,
+        resolved_config,
         direct_pnl_optimization=direct_pnl_optimization,
         evaluation_scope="shadow",
         split_hash=split.split_hash,
@@ -290,6 +300,36 @@ def validate_policy_shadow_split(
         failures=(*report.failures, *provenance_failures),
         metrics=metrics,
         acceptance_criteria=criteria,
+    )
+
+
+def _split_provenance_failed_report(
+    *,
+    failures: list[PolicyAcceptanceFailure],
+    metrics: dict[str, Any],
+    config: PolicyAcceptanceConfig,
+    split: PolicyTrainShadowSplit,
+    direct_pnl_optimization: bool,
+) -> PolicyAcceptanceReport:
+    return PolicyAcceptanceReport(
+        failures=tuple(failures),
+        metrics={
+            "config": config.to_dict(),
+            "evaluation_scope": "shadow",
+            "split_hash": split.split_hash,
+            "training_row_count": len(split.train_examples),
+            "row_count": len(split.shadow_examples),
+            "prediction_skipped_due_to_split_provenance": True,
+            "split_provenance": metrics,
+        },
+        acceptance_criteria={
+            "shadow_sharpe_positive": False,
+            "stable_action_distribution": False,
+            "monotonic_pnl_bucket_behavior": False,
+            "regime_action_stability": False,
+            "no_direct_pnl_optimization": not direct_pnl_optimization,
+            "split_provenance_verified": False,
+        },
     )
 
 

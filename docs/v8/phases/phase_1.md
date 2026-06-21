@@ -33,7 +33,8 @@ The split contract requires `max(train.decision_ts) < min(shadow.decision_ts)`
 and records deterministic train, shadow, and split hashes.
 Shadow acceptance verifies the policy model was trained with the same split by
 matching `split_hash`, `train_dataset_hash`, and `shadow_dataset_hash` in the
-training manifest.
+training manifest. If split provenance fails, acceptance fails closed before
+calling policy prediction.
 
 ## Modules
 

@@ -384,18 +384,7 @@ def test_shadow_split_validation_rejects_missing_or_mismatched_training_provenan
             self,
             examples: tuple[PolicyTrainingExample, ...],
         ) -> tuple[PolicyPrediction, ...]:
-            return tuple(
-                PolicyPrediction(
-                    decision_ts=example.decision_ts,
-                    source=example.source,
-                    instrument_id=example.instrument_id,
-                    action=0.5 if example.target_label > 0.0 else 0.0,
-                    confidence=0.75,
-                    regime_embedding=(0.0,),
-                    score=example.target_label,
-                )
-                for example in examples
-            )
+            raise AssertionError("predict_examples must not run when provenance fails")
 
     missing_report = validate_policy_shadow_split(
         NoManifestPolicyModel(),
@@ -404,6 +393,7 @@ def test_shadow_split_validation_rejects_missing_or_mismatched_training_provenan
     )
 
     assert missing_report.acceptance_criteria["split_provenance_verified"] is False
+    assert missing_report.metrics["prediction_skipped_due_to_split_provenance"] is True
     assert missing_report.metrics["split_provenance"]["training_manifest_present"] is False
     assert "missing_training_manifest" in {
         failure.code for failure in missing_report.failures
@@ -417,6 +407,7 @@ def test_shadow_split_validation_rejects_missing_or_mismatched_training_provenan
     )
 
     assert no_split_report.acceptance_criteria["split_provenance_verified"] is False
+    assert no_split_report.metrics["prediction_skipped_due_to_split_provenance"] is True
     assert no_split_report.metrics["split_provenance"]["split_hash_matches"] is False
     assert "split_hash_mismatch" in {
         failure.code for failure in no_split_report.failures
@@ -430,6 +421,7 @@ def test_shadow_split_validation_rejects_missing_or_mismatched_training_provenan
     )
 
     assert mismatch_report.acceptance_criteria["split_provenance_verified"] is False
+    assert mismatch_report.metrics["prediction_skipped_due_to_split_provenance"] is True
     failure_codes = {failure.code for failure in mismatch_report.failures}
     assert "split_hash_mismatch" in failure_codes
     assert "train_split_mismatch" in failure_codes
