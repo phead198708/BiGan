@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from bigan.v8.phase4.contracts import (
     Phase4AdaptiveError,
     Phase4AdaptiveSystemConfig,
     Phase4AdaptiveSystemReport,
+    Phase4InputProvenance,
     RegimeClassification,
     RegimeDetectorConfig,
     RegimeName,
@@ -42,6 +44,7 @@ def run_phase4_adaptive_system(
     *,
     examples: tuple[PolicyTrainingExample, ...],
     predictions: tuple[PolicyPrediction, ...],
+    provenance: Phase4InputProvenance | None = None,
     config: Phase4AdaptiveSystemConfig | None = None,
 ) -> Phase4AdaptiveSystemResult:
     """Replay an online adaptive overlay over frozen policy predictions.
@@ -53,6 +56,13 @@ def run_phase4_adaptive_system(
 
     resolved_config = config or Phase4AdaptiveSystemConfig()
     _assert_safe_stream(examples, predictions)
+    example_stream_sha256 = compute_phase4_example_stream_sha256(examples)
+    prediction_stream_sha256 = compute_phase4_prediction_stream_sha256(predictions)
+    input_provenance_verified = _input_provenance_verified(
+        provenance=provenance,
+        example_stream_sha256=example_stream_sha256,
+        prediction_stream_sha256=prediction_stream_sha256,
+    )
     decisions = _simulate_decisions(
         examples=examples,
         predictions=predictions,
@@ -80,6 +90,29 @@ def run_phase4_adaptive_system(
     report = Phase4AdaptiveSystemReport(
         phase=PHASE4_ADAPTIVE_SYSTEM_PHASE,
         row_count=len(decisions),
+        candidate_run_id=None if provenance is None else provenance.candidate_run_id,
+        policy_dataset_hash=(
+            None if provenance is None else provenance.policy_dataset_hash
+        ),
+        split_hash=None if provenance is None else provenance.split_hash,
+        model_sha256=None if provenance is None else provenance.model_sha256,
+        phase2_report_sha256=(
+            None if provenance is None else provenance.phase2_report_sha256
+        ),
+        phase3_report_sha256=(
+            None if provenance is None else provenance.phase3_report_sha256
+        ),
+        example_stream_sha256=example_stream_sha256,
+        prediction_stream_sha256=prediction_stream_sha256,
+        input_provenance_verified=input_provenance_verified,
+        baseline_type="non_adaptive_frozen_policy_execution",
+        baseline_execution_config_sha256=_canonical_payload_sha256(
+            resolved_config.execution_config.to_dict()
+        ),
+        decision_trace_sha256=compute_phase4_decision_trace_sha256(decisions),
+        decision_count=len(decisions),
+        first_decision_ts=decisions[0].decision_ts if decisions else None,
+        last_decision_ts=decisions[-1].decision_ts if decisions else None,
         adaptive_metrics=adaptive_metrics,
         baseline_metrics=baseline_metrics,
         comparison_metrics=comparison_metrics,
@@ -89,6 +122,7 @@ def run_phase4_adaptive_system(
             adaptive_metrics=adaptive_metrics,
             comparison_metrics=comparison_metrics,
             stress_metrics=stress_metrics,
+            input_provenance_verified=input_provenance_verified,
             config=resolved_config,
         ),
         config=resolved_config.to_dict(),
@@ -113,6 +147,55 @@ def run_phase4_adaptive_system(
         report=report,
         report_path=report_path,
     )
+
+
+def build_phase4_input_provenance(
+    *,
+    examples: tuple[PolicyTrainingExample, ...],
+    predictions: tuple[PolicyPrediction, ...],
+    candidate_run_id: str,
+    policy_dataset_hash: str,
+    split_hash: str,
+    model_sha256: str,
+    phase2_report_sha256: str | None = None,
+    phase3_report_sha256: str | None = None,
+) -> Phase4InputProvenance:
+    """Build deterministic input provenance for a Phase 4 replay."""
+
+    return Phase4InputProvenance(
+        candidate_run_id=candidate_run_id,
+        policy_dataset_hash=policy_dataset_hash,
+        split_hash=split_hash,
+        model_sha256=model_sha256,
+        phase2_report_sha256=phase2_report_sha256,
+        phase3_report_sha256=phase3_report_sha256,
+        example_stream_sha256=compute_phase4_example_stream_sha256(examples),
+        prediction_stream_sha256=compute_phase4_prediction_stream_sha256(predictions),
+    )
+
+
+def compute_phase4_example_stream_sha256(
+    examples: tuple[PolicyTrainingExample, ...],
+) -> str:
+    """Hash the exact Phase 4 example stream in replay order."""
+
+    return _canonical_payload_sha256([example.to_dict() for example in examples])
+
+
+def compute_phase4_prediction_stream_sha256(
+    predictions: tuple[PolicyPrediction, ...],
+) -> str:
+    """Hash the exact Phase 4 prediction stream in replay order."""
+
+    return _canonical_payload_sha256([prediction.to_dict() for prediction in predictions])
+
+
+def compute_phase4_decision_trace_sha256(
+    decisions: tuple[AdaptiveDecision, ...],
+) -> str:
+    """Hash the in-memory Phase 4 adaptive decision trace."""
+
+    return _canonical_payload_sha256([decision.to_dict() for decision in decisions])
 
 
 @dataclass(slots=True)
@@ -220,6 +303,7 @@ def _simulate_decisions(
                 score=prediction.score,
                 regime=classification.regime,
                 raw_regime=classification.raw_regime,
+                pending_regime_active=classification.pending_regime_active,
                 transitioned=classification.transitioned,
                 lambda_value=lambda_value,
                 execution_aggressiveness=execution_aggressiveness,
@@ -329,6 +413,7 @@ def _classify_regime(
         liquidity_depth=liquidity_depth,
         spread_bps=spread_bps,
         confirmation_count=confirmation_count,
+        pending_regime_active=state.pending_regime is not None,
         transitioned=transitioned,
     )
 
@@ -585,7 +670,22 @@ def _adaptive_metrics(
     net_returns = [decision.net_return for decision in decisions]
     lambdas = [decision.lambda_value for decision in decisions]
     aggressiveness = [decision.execution_aggressiveness for decision in decisions]
-    transition_count = sum(1 for decision in decisions if decision.transitioned)
+    confirmed_transition_count = sum(1 for decision in decisions if decision.transitioned)
+    raw_transition_count = sum(
+        1
+        for previous, current in zip(decisions, decisions[1:], strict=False)
+        if previous.raw_regime != current.raw_regime
+    )
+    pending_regime_count = sum(1 for decision in decisions if decision.pending_regime_active)
+    transition_denominator = max(len(decisions) - 1, 1)
+    raw_transition_rate = raw_transition_count / transition_denominator
+    confirmed_transition_rate = confirmed_transition_count / transition_denominator
+    pending_regime_rate = pending_regime_count / len(decisions) if decisions else 0.0
+    suppression_ratio = (
+        (raw_transition_count - confirmed_transition_count) / raw_transition_count
+        if raw_transition_count > 0
+        else 0.0
+    )
     lambda_by_regime: dict[str, list[float]] = {}
     action_by_regime: dict[str, list[float]] = {}
     for decision in decisions:
@@ -615,9 +715,16 @@ def _adaptive_metrics(
         ),
         "mean_risk_penalty": _mean([decision.risk_penalty for decision in decisions]),
         "mean_abs_turnover": _mean([decision.turnover for decision in decisions]),
-        "transition_count": transition_count,
-        "transition_rate": transition_count / max(len(decisions) - 1, 1),
-        "regime_stability_ratio": 1.0 - transition_count / max(len(decisions) - 1, 1),
+        "raw_regime_transition_count": raw_transition_count,
+        "raw_regime_transition_rate": raw_transition_rate,
+        "confirmed_regime_transition_count": confirmed_transition_count,
+        "confirmed_regime_transition_rate": confirmed_transition_rate,
+        "pending_regime_count": pending_regime_count,
+        "pending_regime_rate": pending_regime_rate,
+        "raw_to_confirmed_transition_suppression_ratio": suppression_ratio,
+        "transition_count": confirmed_transition_count,
+        "transition_rate": confirmed_transition_rate,
+        "regime_stability_ratio": 1.0 - confirmed_transition_rate,
         "mean_lambda_by_regime": {
             regime: _mean(values) for regime, values in sorted(lambda_by_regime.items())
         },
@@ -680,6 +787,7 @@ def _acceptance_criteria(
     adaptive_metrics: dict[str, Any],
     comparison_metrics: dict[str, Any],
     stress_metrics: dict[str, dict[str, Any]],
+    input_provenance_verified: bool,
     config: Phase4AdaptiveSystemConfig,
 ) -> dict[str, bool]:
     stress_lambda_stable = bool(stress_metrics) and all(
@@ -693,7 +801,18 @@ def _acceptance_criteria(
     return {
         "causal_stream_ordered": True,
         "prediction_keys_match_examples": True,
+        "input_provenance_verified": input_provenance_verified,
         "regime_detector_active": adaptive_metrics["row_count"] > 0,
+        "raw_regime_flicker_bounded": (
+            adaptive_metrics["raw_regime_transition_rate"]
+            <= config.max_raw_regime_transition_rate + 1e-12
+            and adaptive_metrics["pending_regime_rate"]
+            <= config.max_pending_regime_rate + 1e-12
+        ),
+        "confirmed_regime_transitions_stable": (
+            adaptive_metrics["regime_stability_ratio"]
+            >= config.min_regime_stability_ratio
+        ),
         "regime_transitions_stable": (
             adaptive_metrics["regime_stability_ratio"]
             >= config.min_regime_stability_ratio
@@ -887,6 +1006,29 @@ def _metrics_are_finite(value: Any) -> bool:
     if isinstance(value, list | tuple):
         return all(_metrics_are_finite(item) for item in value)
     return True
+
+
+def _input_provenance_verified(
+    *,
+    provenance: Phase4InputProvenance | None,
+    example_stream_sha256: str,
+    prediction_stream_sha256: str,
+) -> bool:
+    return (
+        provenance is not None
+        and provenance.example_stream_sha256 == example_stream_sha256
+        and provenance.prediction_stream_sha256 == prediction_stream_sha256
+    )
+
+
+def _canonical_payload_sha256(payload: Any) -> str:
+    encoded = json.dumps(
+        _json_ready(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _json_ready(value: Any) -> Any:

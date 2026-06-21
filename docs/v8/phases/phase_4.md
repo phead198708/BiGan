@@ -8,9 +8,11 @@ must be safe under stress before downstream live execution may consume them.
 ## Flow
 
 ```text
-policy examples + frozen policy predictions
+policy examples + frozen policy predictions + input provenance
   -> verify non-decreasing decision timestamps
   -> verify prediction keys match examples before replay
+  -> hash exact example and prediction streams
+  -> verify upstream candidate/model/split provenance
   -> classify current market regime from causal features only
   -> update lambda from regime, prior drawdown, and current volatility
   -> update execution aggressiveness from cost and liquidity state
@@ -25,6 +27,7 @@ The public entrypoint is:
 run_phase4_adaptive_system(
     examples=shadow_examples,
     predictions=frozen_policy_predictions,
+    provenance=Phase4InputProvenance(...),
     config=Phase4AdaptiveSystemConfig(...),
 )
 ```
@@ -48,6 +51,26 @@ The replay fails closed before adaptation when:
 - timestamps are not globally non-decreasing
 - prediction keys do not match example keys
 
+Missing or stale provenance is not promotion quality. The runner may still
+produce a diagnostic report, but `input_provenance_verified=false` makes
+`passed=false`.
+
+The helper below computes deterministic stream hashes from replay-order
+payloads:
+
+```python
+build_phase4_input_provenance(
+    examples=shadow_examples,
+    predictions=frozen_policy_predictions,
+    candidate_run_id=...,
+    policy_dataset_hash=...,
+    split_hash=...,
+    model_sha256=...,
+    phase2_report_sha256=...,
+    phase3_report_sha256=...,
+)
+```
+
 ## Components
 
 ### Regime Detector
@@ -56,6 +79,21 @@ The detector emits `trend`, `range`, `high_volatility`, or `liquidity_stress`
 from trend score, volatility, liquidity depth, and spread. Regime changes must
 persist for `transition_confirmation_count` rows before the confirmed regime
 changes, reducing noisy regime flicker.
+
+The report records both raw detector transitions and confirmed regime
+transitions:
+
+```text
+raw_regime_transition_count
+raw_regime_transition_rate
+confirmed_regime_transition_count
+confirmed_regime_transition_rate
+pending_regime_count
+pending_regime_rate
+raw_to_confirmed_transition_suppression_ratio
+```
+
+This prevents confirmation smoothing from hiding a noisy raw detector.
 
 ### Lambda Controller
 
@@ -83,6 +121,12 @@ volatility reduce filled size.
 
 `Phase4AdaptiveSystemReport` records:
 
+- candidate run id
+- policy dataset, split, model, Phase 2, and Phase 3 hashes
+- exact example and prediction stream hashes
+- provenance verification result
+- baseline identity and baseline execution-config hash
+- decision trace hash, count, and timestamp span
 - adaptive metrics
 - baseline non-adaptive metrics
 - tail-risk comparison
@@ -96,7 +140,10 @@ Acceptance criteria include:
 ```text
 causal_stream_ordered
 prediction_keys_match_examples
+input_provenance_verified
 regime_detector_active
+raw_regime_flicker_bounded
+confirmed_regime_transitions_stable
 regime_transitions_stable
 lambda_values_bounded
 lambda_stability

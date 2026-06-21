@@ -16,6 +16,7 @@ from bigan.v8.phase4 import (
     Phase4AdaptiveError,
     Phase4AdaptiveSystemConfig,
     RegimeDetectorConfig,
+    build_phase4_input_provenance,
     run_phase4_adaptive_system,
 )
 
@@ -118,6 +119,22 @@ def _adaptive_predictions(
     return tuple(_prediction(example) for example in examples)
 
 
+def _provenance(
+    examples: tuple[PolicyTrainingExample, ...],
+    predictions: tuple[PolicyPrediction, ...],
+):
+    return build_phase4_input_provenance(
+        examples=examples,
+        predictions=predictions,
+        candidate_run_id="phase15-candidate-001",
+        policy_dataset_hash="policy-dataset-hash",
+        split_hash="split-hash",
+        model_sha256="a" * 64,
+        phase2_report_sha256="b" * 64,
+        phase3_report_sha256="c" * 64,
+    )
+
+
 def _cost_config() -> CostModelConfig:
     return CostModelConfig(
         fee_bps=0.1,
@@ -177,6 +194,7 @@ def test_phase4_adapts_lambda_execution_and_writes_report(tmp_path: Path) -> Non
     result = run_phase4_adaptive_system(
         examples=examples,
         predictions=predictions,
+        provenance=_provenance(examples, predictions),
         config=_phase4_config(output_dir=tmp_path),
     )
 
@@ -184,6 +202,9 @@ def test_phase4_adapts_lambda_execution_and_writes_report(tmp_path: Path) -> Non
     assert result.report.phase == PHASE4_ADAPTIVE_SYSTEM_PHASE
     assert result.report.row_count == len(examples)
     assert result.report.acceptance_criteria["regime_transitions_stable"] is True
+    assert result.report.acceptance_criteria["input_provenance_verified"] is True
+    assert result.report.acceptance_criteria["raw_regime_flicker_bounded"] is True
+    assert result.report.acceptance_criteria["confirmed_regime_transitions_stable"] is True
     assert result.report.acceptance_criteria["lambda_stability_under_stress"] is True
     assert result.report.acceptance_criteria["tail_risk_performance_improved"] is True
     assert set(result.report.stress_metrics) == {"1.2", "1.5", "2"}
@@ -192,10 +213,24 @@ def test_phase4_adapts_lambda_execution_and_writes_report(tmp_path: Path) -> Non
     regime_actions = result.report.adaptive_metrics["mean_filled_action_by_regime"]
     assert regime_actions["trend"] > regime_actions["high_volatility"]
     assert result.report.comparison_metrics["tail_loss_reduction_ratio"] > 0.10
+    assert result.report.candidate_run_id == "phase15-candidate-001"
+    assert result.report.model_sha256 == "a" * 64
+    assert result.report.phase2_report_sha256 == "b" * 64
+    assert result.report.phase3_report_sha256 == "c" * 64
+    assert result.report.input_provenance_verified is True
+    assert result.report.baseline_type == "non_adaptive_frozen_policy_execution"
+    assert len(result.report.baseline_execution_config_sha256) == 64
+    assert len(result.report.decision_trace_sha256) == 64
+    assert result.report.decision_count == len(examples)
+    assert result.report.first_decision_ts == examples[0].decision_ts
+    assert result.report.last_decision_ts == examples[-1].decision_ts
     assert result.report_path is not None
     saved = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert saved["phase"] == PHASE4_ADAPTIVE_SYSTEM_PHASE
     assert saved["passed"] is True
+    assert saved["candidate_run_id"] == "phase15-candidate-001"
+    assert saved["input_provenance_verified"] is True
+    assert saved["baseline_type"] == "non_adaptive_frozen_policy_execution"
     assert saved["acceptance_criteria"] == result.report.acceptance_criteria
 
 
@@ -276,6 +311,7 @@ def test_phase4_tail_risk_gate_fails_when_overlay_cannot_reduce_exposure() -> No
     result = run_phase4_adaptive_system(
         examples=examples,
         predictions=predictions,
+        provenance=_provenance(examples, predictions),
         config=neutral_config,
     )
 
@@ -311,6 +347,7 @@ def test_phase4_lambda_stress_gate_fails_for_oscillating_controller() -> None:
     result = run_phase4_adaptive_system(
         examples=examples,
         predictions=predictions,
+        provenance=_provenance(examples, predictions),
         config=config,
     )
 
@@ -352,9 +389,79 @@ def test_phase4_regime_confirmation_smooths_noisy_raw_regimes() -> None:
     result = run_phase4_adaptive_system(
         examples=examples,
         predictions=predictions,
+        provenance=_provenance(examples, predictions),
         config=config,
     )
 
-    assert result.passed
+    assert not result.passed
+    assert result.report.acceptance_criteria["confirmed_regime_transitions_stable"] is True
+    assert result.report.acceptance_criteria["raw_regime_flicker_bounded"] is False
+    assert result.report.adaptive_metrics["raw_regime_transition_count"] > 0
+    assert result.report.adaptive_metrics["confirmed_regime_transition_count"] == 0
+    assert result.report.adaptive_metrics["pending_regime_count"] > 0
+    assert (
+        result.report.adaptive_metrics["raw_to_confirmed_transition_suppression_ratio"]
+        == 1.0
+    )
     assert result.report.adaptive_metrics["transition_count"] == 0
     assert result.report.adaptive_metrics["regime_stability_ratio"] == 1.0
+
+
+def test_phase4_missing_provenance_is_not_promotion_quality() -> None:
+    examples = _adaptive_examples()
+    predictions = _adaptive_predictions(examples)
+
+    result = run_phase4_adaptive_system(
+        examples=examples,
+        predictions=predictions,
+        config=_phase4_config(),
+    )
+
+    assert not result.passed
+    assert result.report.candidate_run_id is None
+    assert result.report.input_provenance_verified is False
+    assert result.report.acceptance_criteria["input_provenance_verified"] is False
+    assert len(result.report.example_stream_sha256) == 64
+    assert len(result.report.prediction_stream_sha256) == 64
+
+
+def test_phase4_stream_hashes_change_and_stale_provenance_fails() -> None:
+    examples = _adaptive_examples()
+    predictions = _adaptive_predictions(examples)
+    provenance = _provenance(examples, predictions)
+    changed_predictions = (
+        _prediction(examples[0], action=0.10),
+        *predictions[1:],
+    )
+    changed_prediction_provenance = _provenance(examples, changed_predictions)
+    changed_examples = (
+        _example(
+            0,
+            signal=0.88,
+            volatility=0.012,
+            liquidity_depth=500.0,
+            spread_bps=5.0,
+            shadow_net_return=0.020,
+        ),
+        *examples[1:],
+    )
+    changed_example_provenance = _provenance(changed_examples, predictions)
+
+    assert changed_prediction_provenance.prediction_stream_sha256 != (
+        provenance.prediction_stream_sha256
+    )
+    assert changed_example_provenance.example_stream_sha256 != (
+        provenance.example_stream_sha256
+    )
+
+    result = run_phase4_adaptive_system(
+        examples=examples,
+        predictions=changed_predictions,
+        provenance=provenance,
+        config=_phase4_config(),
+    )
+
+    assert not result.passed
+    assert result.report.input_provenance_verified is False
+    assert result.report.acceptance_criteria["input_provenance_verified"] is False
+    assert result.report.prediction_stream_sha256 != provenance.prediction_stream_sha256

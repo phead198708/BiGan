@@ -20,6 +20,45 @@ class Phase4AdaptiveError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class Phase4InputProvenance:
+    """Upstream artifact and stream hashes replayed by Phase 4."""
+
+    candidate_run_id: str
+    policy_dataset_hash: str
+    split_hash: str
+    model_sha256: str
+    example_stream_sha256: str
+    prediction_stream_sha256: str
+    phase2_report_sha256: str | None = None
+    phase3_report_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "candidate_run_id",
+            "policy_dataset_hash",
+            "split_hash",
+            "model_sha256",
+            "example_stream_sha256",
+            "prediction_stream_sha256",
+        ):
+            if not str(getattr(self, field_name)).strip():
+                raise ValueError(f"{field_name} is required")
+        for field_name in (
+            "model_sha256",
+            "example_stream_sha256",
+            "prediction_stream_sha256",
+            "phase2_report_sha256",
+            "phase3_report_sha256",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and not _looks_like_sha256(value):
+                raise ValueError(f"{field_name} must be a SHA-256 hex digest")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class RegimeDetectorConfig:
     """Causal market-state thresholds for online regime classification."""
 
@@ -183,6 +222,8 @@ class Phase4AdaptiveSystemConfig:
     max_accepted_lambda_oscillation_rate: float = 0.15
     max_accepted_aggressiveness_step: float = 0.15
     min_tail_loss_reduction_ratio: float = 0.0
+    max_raw_regime_transition_rate: float = 0.35
+    max_pending_regime_rate: float = 0.50
     stress_volatility_multipliers: tuple[float, ...] = (1.2, 1.5, 2.0)
     stress_drawdown_shock: float = 0.0
     output_dir: Path | str | None = None
@@ -203,6 +244,10 @@ class Phase4AdaptiveSystemConfig:
             raise ValueError("max_accepted_aggressiveness_step must be positive")
         if not math.isfinite(self.min_tail_loss_reduction_ratio):
             raise ValueError("min_tail_loss_reduction_ratio must be finite")
+        if not 0.0 <= self.max_raw_regime_transition_rate <= 1.0:
+            raise ValueError("max_raw_regime_transition_rate must be in [0, 1]")
+        if not 0.0 <= self.max_pending_regime_rate <= 1.0:
+            raise ValueError("max_pending_regime_rate must be in [0, 1]")
         if not self.stress_volatility_multipliers:
             raise ValueError("stress_volatility_multipliers must not be empty")
         for multiplier in self.stress_volatility_multipliers:
@@ -230,6 +275,8 @@ class Phase4AdaptiveSystemConfig:
                 self.max_accepted_aggressiveness_step
             ),
             "min_tail_loss_reduction_ratio": self.min_tail_loss_reduction_ratio,
+            "max_raw_regime_transition_rate": self.max_raw_regime_transition_rate,
+            "max_pending_regime_rate": self.max_pending_regime_rate,
             "stress_volatility_multipliers": list(self.stress_volatility_multipliers),
             "stress_drawdown_shock": self.stress_drawdown_shock,
             "output_dir": None if self.output_dir is None else str(self.output_dir),
@@ -248,6 +295,7 @@ class RegimeClassification:
     liquidity_depth: float
     spread_bps: float
     confirmation_count: int
+    pending_regime_active: bool
     transitioned: bool
 
     def to_dict(self) -> dict[str, Any]:
@@ -268,6 +316,7 @@ class AdaptiveDecision:
     score: float
     regime: RegimeName
     raw_regime: RegimeName
+    pending_regime_active: bool
     transitioned: bool
     lambda_value: float
     execution_aggressiveness: float
@@ -328,6 +377,21 @@ class Phase4AdaptiveSystemReport:
 
     phase: str
     row_count: int
+    candidate_run_id: str | None
+    policy_dataset_hash: str | None
+    split_hash: str | None
+    model_sha256: str | None
+    phase2_report_sha256: str | None
+    phase3_report_sha256: str | None
+    example_stream_sha256: str
+    prediction_stream_sha256: str
+    input_provenance_verified: bool
+    baseline_type: str
+    baseline_execution_config_sha256: str
+    decision_trace_sha256: str
+    decision_count: int
+    first_decision_ts: int | None
+    last_decision_ts: int | None
     adaptive_metrics: dict[str, Any]
     baseline_metrics: dict[str, Any]
     comparison_metrics: dict[str, Any]
@@ -346,6 +410,23 @@ class Phase4AdaptiveSystemReport:
             "phase": self.phase,
             "passed": self.passed,
             "row_count": self.row_count,
+            "candidate_run_id": self.candidate_run_id,
+            "policy_dataset_hash": self.policy_dataset_hash,
+            "split_hash": self.split_hash,
+            "model_sha256": self.model_sha256,
+            "phase2_report_sha256": self.phase2_report_sha256,
+            "phase3_report_sha256": self.phase3_report_sha256,
+            "example_stream_sha256": self.example_stream_sha256,
+            "prediction_stream_sha256": self.prediction_stream_sha256,
+            "input_provenance_verified": self.input_provenance_verified,
+            "baseline_type": self.baseline_type,
+            "baseline_execution_config_sha256": (
+                self.baseline_execution_config_sha256
+            ),
+            "decision_trace_sha256": self.decision_trace_sha256,
+            "decision_count": self.decision_count,
+            "first_decision_ts": self.first_decision_ts,
+            "last_decision_ts": self.last_decision_ts,
             "adaptive_metrics": self.adaptive_metrics,
             "baseline_metrics": self.baseline_metrics,
             "comparison_metrics": self.comparison_metrics,
@@ -355,3 +436,7 @@ class Phase4AdaptiveSystemReport:
             "config": self.config,
             "created_at": self.created_at,
         }
+
+
+def _looks_like_sha256(value: str) -> bool:
+    return len(value) == 64 and all(char in "0123456789abcdef" for char in value.lower())
