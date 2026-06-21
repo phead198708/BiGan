@@ -268,8 +268,8 @@ def _market_row_from_example(example: PolicyTrainingExample) -> MarketData:
     mid_price = _feature_float(example, "mid_price") or 100.0
     spread = _feature_float(example, "spread")
     if spread is None:
-        spread_fraction = _feature_float(example, "spread_bps") or 0.0
-        spread = max(0.0, spread_fraction * mid_price)
+        spread_bps = _feature_float(example, "spread_bps") or 0.0
+        spread = max(0.0, spread_bps / 10_000.0 * mid_price)
     spread = max(0.0, spread)
     liquidity_depth = _feature_float(example, "liquidity_depth")
     return MarketData(
@@ -376,13 +376,37 @@ def _execution_metrics(
 
 def _phase1_5_shadow_metrics(candidate: Phase15CandidateArtifact) -> dict[str, Any]:
     metrics = candidate.shadow_acceptance_report.get("metrics", {})
+    if not isinstance(metrics, dict):
+        raise Phase2ArtifactError("Phase 1.5 shadow acceptance metrics are required")
     action_distribution = metrics.get("action_distribution", {})
+    if not isinstance(action_distribution, dict):
+        raise Phase2ArtifactError("Phase 1.5 action_distribution metrics are required")
     return {
-        "shadow_sharpe": float(metrics.get("shadow_sharpe", 0.0)),
-        "mean_shadow_return": float(metrics.get("mean_shadow_return", 0.0)),
-        "mean_abs_turnover": float(action_distribution.get("mean_abs_turnover", 0.0)),
-        "active_rate": float(action_distribution.get("active_rate", 0.0)),
-        "row_count": int(metrics.get("row_count", 0)),
+        "shadow_sharpe": _required_finite_float(
+            metrics,
+            "shadow_sharpe",
+            "Phase 1.5 shadow acceptance metrics",
+        ),
+        "mean_shadow_return": _required_finite_float(
+            metrics,
+            "mean_shadow_return",
+            "Phase 1.5 shadow acceptance metrics",
+        ),
+        "mean_abs_turnover": _required_finite_float(
+            action_distribution,
+            "mean_abs_turnover",
+            "Phase 1.5 action_distribution metrics",
+        ),
+        "active_rate": _required_finite_float(
+            action_distribution,
+            "active_rate",
+            "Phase 1.5 action_distribution metrics",
+        ),
+        "row_count": _required_positive_int(
+            metrics,
+            "row_count",
+            "Phase 1.5 shadow acceptance metrics",
+        ),
     }
 
 
@@ -432,6 +456,30 @@ def _metrics_are_finite(metrics: dict[str, Any]) -> bool:
 
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def _required_finite_float(metrics: dict[str, Any], key: str, context: str) -> float:
+    if key not in metrics:
+        raise Phase2ArtifactError(f"{context} missing required field: {key}")
+    try:
+        value = float(metrics[key])
+    except (TypeError, ValueError) as exc:
+        raise Phase2ArtifactError(f"{context} field must be numeric: {key}") from exc
+    if not math.isfinite(value):
+        raise Phase2ArtifactError(f"{context} field must be finite: {key}")
+    return value
+
+
+def _required_positive_int(metrics: dict[str, Any], key: str, context: str) -> int:
+    if key not in metrics:
+        raise Phase2ArtifactError(f"{context} missing required field: {key}")
+    try:
+        value = int(metrics[key])
+    except (TypeError, ValueError) as exc:
+        raise Phase2ArtifactError(f"{context} field must be an integer: {key}") from exc
+    if value <= 0:
+        raise Phase2ArtifactError(f"{context} field must be positive: {key}")
+    return value
 
 
 def _sharpe(values: list[float]) -> float:

@@ -30,6 +30,23 @@ REQUIRED_RUN_HASH_FIELDS: tuple[str, ...] = (
     "shadow_dataset_hash",
 )
 
+REQUIRED_ARTIFACT_HASH_FIELDS: tuple[str, ...] = (
+    "model_sha256",
+    "training_manifest_sha256",
+    "shadow_acceptance_report_sha256",
+    "split_manifest_sha256",
+    "policy_dataset_manifest_sha256",
+    "run_manifest_canonical_sha256",
+)
+
+REQUIRED_ARTIFACT_PATH_FIELDS: tuple[str, ...] = (
+    "model_path",
+    "training_manifest_path",
+    "shadow_acceptance_report_path",
+    "split_manifest_path",
+    "policy_dataset_manifest_path",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class Phase15CandidateArtifact:
@@ -73,6 +90,9 @@ class Phase15CandidateArtifact:
             "train_dataset_hash": self.train_dataset_hash,
             "shadow_dataset_hash": self.shadow_dataset_hash,
             "model_sha256": self.model_sha256,
+            "policy_dataset_manifest_sha256": str(
+                artifacts.get("policy_dataset_manifest_sha256", "")
+            ),
             "training_manifest_sha256": str(artifacts.get("training_manifest_sha256", "")),
             "shadow_acceptance_report_sha256": str(
                 artifacts.get("shadow_acceptance_report_sha256", "")
@@ -102,7 +122,6 @@ def load_phase15_candidate(artifact_dir: Path | str) -> Phase15CandidateArtifact
     _validate_recorded_artifact_hashes(
         artifact_dir=resolved_dir,
         run_manifest=run_manifest,
-        required_hash_names=("model_sha256",),
     )
 
     model_sha256 = str(run_manifest["artifacts"]["model_sha256"])
@@ -169,8 +188,26 @@ def _validate_run_manifest(run_manifest: dict[str, Any]) -> None:
     artifacts = run_manifest.get("artifacts")
     if not isinstance(artifacts, Mapping):
         raise Phase2ArtifactError("Phase 1.5 run_manifest artifacts block is required")
-    if not str(artifacts.get("model_sha256", "")).strip():
-        raise Phase2ArtifactError("Phase 1.5 model_sha256 must be recorded")
+    missing_artifact_hashes = [
+        field_name
+        for field_name in REQUIRED_ARTIFACT_HASH_FIELDS
+        if not str(artifacts.get(field_name, "")).strip()
+    ]
+    if missing_artifact_hashes:
+        raise Phase2ArtifactError(
+            "Phase 1.5 run_manifest is missing required artifact hashes: "
+            + ", ".join(missing_artifact_hashes)
+        )
+    missing_artifact_paths = [
+        field_name
+        for field_name in REQUIRED_ARTIFACT_PATH_FIELDS
+        if not str(artifacts.get(field_name, "")).strip()
+    ]
+    if missing_artifact_paths:
+        raise Phase2ArtifactError(
+            "Phase 1.5 run_manifest is missing required artifact paths: "
+            + ", ".join(missing_artifact_paths)
+        )
 
 
 def _validate_training_manifest(
@@ -237,14 +274,10 @@ def _validate_recorded_artifact_hashes(
     *,
     artifact_dir: Path,
     run_manifest: dict[str, Any],
-    required_hash_names: tuple[str, ...],
 ) -> None:
     artifacts = run_manifest.get("artifacts")
     if not isinstance(artifacts, Mapping):
         raise Phase2ArtifactError("Phase 1.5 artifacts block is required")
-    for hash_name in required_hash_names:
-        if not str(artifacts.get(hash_name, "")).strip():
-            raise Phase2ArtifactError(f"required artifact hash missing: {hash_name}")
     for path_key, hash_key in (
         ("model_path", "model_sha256"),
         ("training_manifest_path", "training_manifest_sha256"),
@@ -254,14 +287,16 @@ def _validate_recorded_artifact_hashes(
     ):
         path_value = artifacts.get(path_key)
         hash_value = artifacts.get(hash_key)
-        if path_value is None or hash_value is None:
-            continue
         path = artifact_dir / str(path_value)
         if not path.is_file():
             raise Phase2ArtifactError(f"recorded artifact path does not exist: {path_value}")
         actual = _sha256_file(path)
         if actual != hash_value:
             raise Phase2ArtifactError(f"artifact hash mismatch for {path_value}")
+    expected_run_manifest_hash = artifacts.get("run_manifest_canonical_sha256")
+    actual_run_manifest_hash = _canonical_run_manifest_sha256(run_manifest)
+    if actual_run_manifest_hash != expected_run_manifest_hash:
+        raise Phase2ArtifactError("run_manifest_canonical_sha256 mismatch")
 
 
 def _load_policy_model(
@@ -298,3 +333,18 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _canonical_run_manifest_sha256(run_manifest: dict[str, Any]) -> str:
+    payload = json.loads(json.dumps(run_manifest, sort_keys=True, allow_nan=False))
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise Phase2ArtifactError("Phase 1.5 artifacts block is required")
+    artifacts["run_manifest_canonical_sha256"] = ""
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -11,6 +12,7 @@ import pytest
 
 import bigan.v8.phase1.model as phase1_model
 import bigan.v8.phase1.training as phase1_training
+import bigan.v8.phase2.evaluation as phase2_evaluation
 from bigan.v8.phase0 import (
     FEATURE_VECTOR_SCHEMA,
     LABEL_SCHEMA,
@@ -27,6 +29,8 @@ from bigan.v8.phase0.costs import CostModelConfig
 from bigan.v8.phase1 import (
     PolicyAcceptanceConfig,
     PolicyDatasetConfig,
+    PolicyPrediction,
+    PolicyTrainingExample,
     PolicyTrainingRunConfig,
     PolicyTrainShadowSplit,
     XGBoostPolicyConfig,
@@ -206,6 +210,57 @@ def _phase2_config(output_dir: Path | None = None) -> Phase2EvaluationConfig:
     )
 
 
+def _shadow_example_without_spread() -> PolicyTrainingExample:
+    return PolicyTrainingExample(
+        decision_ts=_ts_at(2026, 6, 1, 12, 0),
+        source="polymarket",
+        instrument_id="btc-updown-15m:UP",
+        features={
+            "mid_price": 100.0,
+            "spread_bps": 5.0,
+            "volatility_5m": 0.0,
+            "liquidity_depth": 1_000_000.0,
+        },
+        target_label=1.0,
+        shadow_net_return=0.01,
+        horizon_ms=MINUTE_MS,
+        regime_key="polymarket|btc-updown-15m:UP|vol=0|spread=0|liq=2",
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _refresh_artifact_hashes(artifact_dir: Path) -> None:
+    manifest_path = artifact_dir / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifacts = manifest["artifacts"]
+    for path_key, hash_key in (
+        ("model_path", "model_sha256"),
+        ("training_manifest_path", "training_manifest_sha256"),
+        ("shadow_acceptance_report_path", "shadow_acceptance_report_sha256"),
+        ("split_manifest_path", "split_manifest_sha256"),
+        ("policy_dataset_manifest_path", "policy_dataset_manifest_sha256"),
+    ):
+        artifacts[hash_key] = _sha256_file(artifact_dir / artifacts[path_key])
+    artifacts["run_manifest_canonical_sha256"] = ""
+    artifacts["run_manifest_canonical_sha256"] = _canonical_run_manifest_hash(manifest)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _canonical_run_manifest_hash(manifest: dict) -> str:
+    payload = json.loads(json.dumps(manifest, sort_keys=True, allow_nan=False))
+    payload["artifacts"]["run_manifest_canonical_sha256"] = ""
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def test_phase2_loader_verifies_accepted_candidate_artifacts(tmp_path: Path) -> None:
     phase15 = _accepted_phase15_candidate(tmp_path)
     assert phase15.artifact_dir is not None
@@ -254,6 +309,30 @@ def test_phase2_rejects_missing_model_sha256(tmp_path: Path) -> None:
         load_phase15_candidate(phase15.artifact_dir)
 
 
+def test_phase2_requires_all_recorded_hashes(tmp_path: Path) -> None:
+    phase15 = _accepted_phase15_candidate(tmp_path)
+    assert phase15.artifact_dir is not None
+    manifest_path = phase15.artifact_dir / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["artifacts"]["training_manifest_sha256"]
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(Phase2ArtifactError, match="training_manifest_sha256"):
+        load_phase15_candidate(phase15.artifact_dir)
+
+
+def test_phase2_detects_run_manifest_canonical_hash_mismatch(tmp_path: Path) -> None:
+    phase15 = _accepted_phase15_candidate(tmp_path)
+    assert phase15.artifact_dir is not None
+    manifest_path = phase15.artifact_dir / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["created_at"] = "2026-06-21T00:09:00Z"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(Phase2ArtifactError, match="run_manifest_canonical_sha256"):
+        load_phase15_candidate(phase15.artifact_dir)
+
+
 def test_phase2_rejects_direct_pnl_training_flag(tmp_path: Path) -> None:
     phase15 = _accepted_phase15_candidate(tmp_path)
     assert phase15.artifact_dir is not None
@@ -264,6 +343,78 @@ def test_phase2_rejects_direct_pnl_training_flag(tmp_path: Path) -> None:
 
     with pytest.raises(Phase2ArtifactError, match="direct_pnl_optimization"):
         load_phase15_candidate(phase15.artifact_dir)
+
+
+def test_phase2_spread_bps_fallback_uses_basis_points_units() -> None:
+    market_row = phase2_evaluation._market_row_from_example(_shadow_example_without_spread())
+
+    assert market_row.ask_price is not None
+    assert market_row.bid_price is not None
+    assert market_row.ask_price - market_row.bid_price == pytest.approx(0.05)
+
+
+def test_phase2_spread_bps_fallback_keeps_execution_costs_bounded() -> None:
+    example = _shadow_example_without_spread()
+    prediction = PolicyPrediction(
+        decision_ts=example.decision_ts,
+        source=example.source,
+        instrument_id=example.instrument_id,
+        action=1.0,
+        confidence=1.0,
+        regime_embedding=(0.0, 0.0, 5.0, 1_000_000.0),
+        score=1.0,
+    )
+
+    fills = phase2_evaluation.simulate_execution(
+        examples=(example,),
+        predictions=(prediction,),
+        config=ExecutionSimulationConfig(
+            cost_model_config=CostModelConfig(
+                fee_bps=0.0,
+                base_slippage_bps=0.0,
+                volatility_slippage_factor=0.0,
+                liquidity_impact_factor=0.0,
+            ),
+            risk_penalty_factor=0.0,
+            policy_edge_scale=0.10,
+        ),
+    )
+
+    assert len(fills) == 1
+    assert fills[0].spread_cost == pytest.approx(0.0005, rel=1e-5)
+    assert fills[0].total_execution_cost < 0.001
+
+
+@pytest.mark.parametrize(
+    ("mutate_report", "expected_message"),
+    (
+        (lambda report: report["metrics"].pop("shadow_sharpe"), "shadow_sharpe"),
+        (
+            lambda report: report["metrics"]["action_distribution"].pop("mean_abs_turnover"),
+            "mean_abs_turnover",
+        ),
+        (lambda report: report["metrics"].update({"row_count": 0}), "row_count"),
+    ),
+)
+def test_phase2_requires_phase15_shadow_baseline_metrics(
+    tmp_path: Path,
+    mutate_report,
+    expected_message: str,
+) -> None:
+    phase15 = _accepted_phase15_candidate(tmp_path)
+    assert phase15.artifact_dir is not None
+    report_path = phase15.artifact_dir / "shadow_acceptance_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    mutate_report(report)
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    _refresh_artifact_hashes(phase15.artifact_dir)
+
+    with pytest.raises(Phase2ArtifactError, match=expected_message):
+        run_phase2_evaluation(
+            phase15.artifact_dir,
+            phase15.split,
+            _phase2_config(),
+        )
 
 
 def test_phase2_evaluation_does_not_train_and_writes_report(

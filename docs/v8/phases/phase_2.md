@@ -49,6 +49,13 @@ split_provenance_verified = true
 direct_pnl_optimization = false
 shadow_return_used_for_training = false
 model_sha256 recorded and matching
+artifact paths recorded for model, policy dataset manifest, split manifest,
+training manifest, and shadow acceptance report
+training_manifest_sha256 recorded and matching
+shadow_acceptance_report_sha256 recorded and matching
+split_manifest_sha256 recorded and matching
+policy_dataset_manifest_sha256 recorded and matching
+run_manifest_canonical_sha256 recorded and matching
 policy_dataset_hash recorded
 split_hash recorded
 train_dataset_hash recorded
@@ -60,6 +67,19 @@ Missing, rejected, hash-mismatched, or provenance-mismatched artifacts raise
 `PolicyTrainShadowSplit` hashes match the candidate before calling
 `predict_examples(...)`.
 
+Phase 2 also requires Phase 1.5 shadow baseline metrics for comparison:
+
+```text
+metrics.shadow_sharpe
+metrics.mean_shadow_return
+metrics.row_count > 0
+metrics.action_distribution.mean_abs_turnover
+metrics.action_distribution.active_rate
+```
+
+Missing or non-finite baseline values are hard failures. Phase 2 comparison
+metrics must never be computed from implicit default-zero Phase 1.5 metrics.
+
 ## Execution Overlay
 
 Phase 2 applies a deterministic execution simulation:
@@ -70,6 +90,14 @@ Phase 2 applies a deterministic execution simulation:
 - turnover penalty
 - static lambda-weighted hybrid score for diagnostics
 - optional cost-aware low-EV trade filter
+
+When reconstructing execution rows from policy examples, `spread` is treated as
+a price spread and used directly. If `spread` is absent and `spread_bps` is
+present, Phase 2 converts basis points as:
+
+```text
+spread = spread_bps / 10_000 * mid_price
+```
 
 The filter uses only policy confidence and pre-trade cost/risk estimates. It
 does not use realized future PnL to decide the action.

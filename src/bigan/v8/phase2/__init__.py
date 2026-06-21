@@ -1,6 +1,8 @@
 """Phase 2 hybrid PnL-aware execution evaluation for v8."""
 
 from bigan.v8.phase2.artifacts import (
+    REQUIRED_ARTIFACT_HASH_FIELDS,
+    REQUIRED_ARTIFACT_PATH_FIELDS,
     REQUIRED_PHASE15_FILES,
     REQUIRED_RUN_HASH_FIELDS,
     Phase15CandidateArtifact,
@@ -25,6 +27,8 @@ from bigan.v8.phase2.evaluation import (
 __all__ = [
     "DEFAULT_PHASE2_CREATED_AT",
     "PHASE2_EVALUATION_PHASE",
+    "REQUIRED_ARTIFACT_HASH_FIELDS",
+    "REQUIRED_ARTIFACT_PATH_FIELDS",
     "REQUIRED_PHASE15_FILES",
     "REQUIRED_RUN_HASH_FIELDS",
     "ExecutionFill",
