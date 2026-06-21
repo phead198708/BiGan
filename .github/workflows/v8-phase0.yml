@@ -34,4 +34,4 @@ jobs:
         run: python -m ruff check src/bigan/v8 tests/v8 examples/v8
 
       - name: Run v8 hard-gate tests
-        run: python -m pytest tests/v8/test_phase0.py tests/v8/test_phase1.py tests/v8/test_phase1_training.py tests/v8/test_phase2.py tests/v8/test_phase3.py tests/v8/test_phase4.py tests/v8/test_phase5.py tests/v8/test_phase6.py tests/v8/test_paper_harness.py -q
+        run: python -m pytest tests/v8/test_phase0.py tests/v8/test_phase1.py tests/v8/test_phase1_training.py tests/v8/test_phase2.py tests/v8/test_phase3.py tests/v8/test_phase4.py tests/v8/test_phase5.py tests/v8/test_phase6.py tests/v8/test_e2e_golden_path.py tests/v8/test_paper_harness.py -q
