@@ -188,6 +188,7 @@ def build_phase2_report(
     criteria = {
         "phase1_5_candidate_verified": True,
         "execution_adjusted_pnl_reported": "mean_net_execution_return" in execution_metrics,
+        "execution_costs_reported": _execution_costs_reported(execution_metrics),
         "execution_metrics_finite": _metrics_are_finite(execution_metrics),
         "sharpe_improvement_ge_min": (
             comparison_metrics["sharpe_improvement_ratio"]
@@ -197,9 +198,10 @@ def build_phase2_report(
             comparison_metrics["turnover_reduction_ratio"]
             >= config.min_turnover_reduction_ratio
         ),
-        "cost_aware_behavior_emerged": (
-            execution_metrics["filtered_low_ev_trade_count"] > 0
-            or execution_metrics["mean_execution_cost"] > 0.0
+        "cost_aware_behavior_emerged": _cost_aware_behavior_emerged(
+            execution_metrics=execution_metrics,
+            comparison_metrics=comparison_metrics,
+            config=config,
         ),
     }
     return Phase2EvaluationReport(
@@ -375,39 +377,7 @@ def _execution_metrics(
 
 
 def _phase1_5_shadow_metrics(candidate: Phase15CandidateArtifact) -> dict[str, Any]:
-    metrics = candidate.shadow_acceptance_report.get("metrics", {})
-    if not isinstance(metrics, dict):
-        raise Phase2ArtifactError("Phase 1.5 shadow acceptance metrics are required")
-    action_distribution = metrics.get("action_distribution", {})
-    if not isinstance(action_distribution, dict):
-        raise Phase2ArtifactError("Phase 1.5 action_distribution metrics are required")
-    return {
-        "shadow_sharpe": _required_finite_float(
-            metrics,
-            "shadow_sharpe",
-            "Phase 1.5 shadow acceptance metrics",
-        ),
-        "mean_shadow_return": _required_finite_float(
-            metrics,
-            "mean_shadow_return",
-            "Phase 1.5 shadow acceptance metrics",
-        ),
-        "mean_abs_turnover": _required_finite_float(
-            action_distribution,
-            "mean_abs_turnover",
-            "Phase 1.5 action_distribution metrics",
-        ),
-        "active_rate": _required_finite_float(
-            action_distribution,
-            "active_rate",
-            "Phase 1.5 action_distribution metrics",
-        ),
-        "row_count": _required_positive_int(
-            metrics,
-            "row_count",
-            "Phase 1.5 shadow acceptance metrics",
-        ),
-    }
+    return dict(candidate.shadow_baseline_metrics)
 
 
 def _comparison_metrics(
@@ -454,32 +424,37 @@ def _metrics_are_finite(metrics: dict[str, Any]) -> bool:
     return True
 
 
+def _execution_costs_reported(metrics: dict[str, Any]) -> bool:
+    for key in ("mean_execution_cost", "cost_to_abs_gross_return_ratio"):
+        value = metrics.get(key)
+        if not isinstance(value, int | float) or not math.isfinite(float(value)):
+            return False
+    return metrics["mean_execution_cost"] >= 0.0 and metrics["cost_to_abs_gross_return_ratio"] >= 0.0
+
+
+def _cost_aware_behavior_emerged(
+    *,
+    execution_metrics: dict[str, Any],
+    comparison_metrics: dict[str, Any],
+    config: Phase2EvaluationConfig,
+) -> bool:
+    filtered_low_ev = execution_metrics["filtered_low_ev_trade_count"] > 0
+    turnover_reduced = comparison_metrics["turnover_reduction_ratio"] > max(
+        0.0,
+        config.min_turnover_reduction_ratio,
+    )
+    cost_ratio_within_configured_bound = (
+        config.max_cost_to_abs_gross_return_ratio is not None
+        and execution_metrics["cost_to_abs_gross_return_ratio"]
+        <= config.max_cost_to_abs_gross_return_ratio
+    )
+    if config.require_cost_aware_filter_or_turnover_reduction:
+        return filtered_low_ev or turnover_reduced
+    return filtered_low_ev or turnover_reduced or cost_ratio_within_configured_bound
+
+
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
-
-
-def _required_finite_float(metrics: dict[str, Any], key: str, context: str) -> float:
-    if key not in metrics:
-        raise Phase2ArtifactError(f"{context} missing required field: {key}")
-    try:
-        value = float(metrics[key])
-    except (TypeError, ValueError) as exc:
-        raise Phase2ArtifactError(f"{context} field must be numeric: {key}") from exc
-    if not math.isfinite(value):
-        raise Phase2ArtifactError(f"{context} field must be finite: {key}")
-    return value
-
-
-def _required_positive_int(metrics: dict[str, Any], key: str, context: str) -> int:
-    if key not in metrics:
-        raise Phase2ArtifactError(f"{context} missing required field: {key}")
-    try:
-        value = int(metrics[key])
-    except (TypeError, ValueError) as exc:
-        raise Phase2ArtifactError(f"{context} field must be an integer: {key}") from exc
-    if value <= 0:
-        raise Phase2ArtifactError(f"{context} field must be positive: {key}")
-    return value
 
 
 def _sharpe(values: list[float]) -> float:

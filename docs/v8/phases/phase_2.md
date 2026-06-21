@@ -10,6 +10,7 @@ direct differentiable PnL optimization.
 accepted Phase 1.5 candidate artifact
   -> verify run_manifest.json and registry hashes
   -> verify training/shadow/split provenance
+  -> verify Phase 1.5 shadow baseline metrics
   -> load model.xgb as immutable policy input
   -> run shadow inference on the supplied temporal split
   -> apply execution fill/cost/risk/turnover overlay
@@ -77,8 +78,9 @@ metrics.action_distribution.mean_abs_turnover
 metrics.action_distribution.active_rate
 ```
 
-Missing or non-finite baseline values are hard failures. Phase 2 comparison
-metrics must never be computed from implicit default-zero Phase 1.5 metrics.
+Missing or non-finite baseline values are hard failures before prediction or
+execution simulation. Phase 2 comparison metrics must never be computed from
+implicit default-zero Phase 1.5 metrics.
 
 ## Execution Overlay
 
@@ -122,11 +124,28 @@ Acceptance criteria are reported as booleans:
 ```text
 phase1_5_candidate_verified
 execution_adjusted_pnl_reported
+execution_costs_reported
 execution_metrics_finite
 sharpe_improvement_ge_min
 reduced_turnover
 cost_aware_behavior_emerged
 ```
+
+`execution_costs_reported` means cost diagnostics are present and finite.
+`cost_aware_behavior_emerged` is stricter and does not pass merely because
+execution costs were computed. It passes when at least one of the following is
+true:
+
+```text
+filtered_low_ev_trade_count > 0
+turnover_reduction_ratio > max(0, min_turnover_reduction_ratio)
+cost_to_abs_gross_return_ratio <= max_cost_to_abs_gross_return_ratio
+  when max_cost_to_abs_gross_return_ratio is configured
+```
+
+If `require_cost_aware_filter_or_turnover_reduction` is true, the configured
+cost ratio bound is treated as a diagnostic only; behavior must come from
+filtering or actual turnover reduction.
 
 Default acceptance requires at least 10% Sharpe improvement over the Phase 1.5
 shadow acceptance baseline and non-negative turnover reduction. Callers may

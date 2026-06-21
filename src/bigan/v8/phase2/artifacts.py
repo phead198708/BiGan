@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +58,7 @@ class Phase15CandidateArtifact:
     training_manifest: dict[str, Any]
     split_manifest: dict[str, Any]
     shadow_acceptance_report: dict[str, Any]
+    shadow_baseline_metrics: dict[str, float | int]
     model_path: Path
     model_sha256: str
     model: XGBoostPolicyModel
@@ -119,6 +121,7 @@ def load_phase15_candidate(artifact_dir: Path | str) -> Phase15CandidateArtifact
     _validate_training_manifest(run_manifest, training_manifest)
     _validate_split_manifest(run_manifest, training_manifest, split_manifest)
     _validate_shadow_acceptance(run_manifest, shadow_acceptance_report)
+    shadow_baseline_metrics = _shadow_baseline_metrics(shadow_acceptance_report)
     _validate_recorded_artifact_hashes(
         artifact_dir=resolved_dir,
         run_manifest=run_manifest,
@@ -135,6 +138,7 @@ def load_phase15_candidate(artifact_dir: Path | str) -> Phase15CandidateArtifact
         training_manifest=training_manifest,
         split_manifest=split_manifest,
         shadow_acceptance_report=shadow_acceptance_report,
+        shadow_baseline_metrics=shadow_baseline_metrics,
         model_path=model_path,
         model_sha256=model_sha256,
         model=model,
@@ -270,6 +274,44 @@ def _validate_shadow_acceptance(
         raise Phase2ArtifactError("shadow_acceptance_report split_hash mismatch")
 
 
+def _shadow_baseline_metrics(
+    shadow_acceptance_report: dict[str, Any],
+) -> dict[str, float | int]:
+    metrics = shadow_acceptance_report.get("metrics")
+    if not isinstance(metrics, Mapping):
+        raise Phase2ArtifactError("Phase 1.5 shadow acceptance metrics are required")
+    action_distribution = metrics.get("action_distribution")
+    if not isinstance(action_distribution, Mapping):
+        raise Phase2ArtifactError("Phase 1.5 action_distribution metrics are required")
+    return {
+        "shadow_sharpe": _required_finite_float(
+            metrics,
+            "shadow_sharpe",
+            "Phase 1.5 shadow acceptance metrics",
+        ),
+        "mean_shadow_return": _required_finite_float(
+            metrics,
+            "mean_shadow_return",
+            "Phase 1.5 shadow acceptance metrics",
+        ),
+        "mean_abs_turnover": _required_finite_float(
+            action_distribution,
+            "mean_abs_turnover",
+            "Phase 1.5 action_distribution metrics",
+        ),
+        "active_rate": _required_finite_float(
+            action_distribution,
+            "active_rate",
+            "Phase 1.5 action_distribution metrics",
+        ),
+        "row_count": _required_positive_int(
+            metrics,
+            "row_count",
+            "Phase 1.5 shadow acceptance metrics",
+        ),
+    }
+
+
 def _validate_recorded_artifact_hashes(
     *,
     artifact_dir: Path,
@@ -348,3 +390,27 @@ def _canonical_run_manifest_sha256(run_manifest: dict[str, Any]) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _required_finite_float(metrics: Mapping[str, Any], key: str, context: str) -> float:
+    if key not in metrics:
+        raise Phase2ArtifactError(f"{context} missing required field: {key}")
+    try:
+        value = float(metrics[key])
+    except (TypeError, ValueError) as exc:
+        raise Phase2ArtifactError(f"{context} field must be numeric: {key}") from exc
+    if not math.isfinite(value):
+        raise Phase2ArtifactError(f"{context} field must be finite: {key}")
+    return value
+
+
+def _required_positive_int(metrics: Mapping[str, Any], key: str, context: str) -> int:
+    if key not in metrics:
+        raise Phase2ArtifactError(f"{context} missing required field: {key}")
+    try:
+        value = int(metrics[key])
+    except (TypeError, ValueError) as exc:
+        raise Phase2ArtifactError(f"{context} field must be an integer: {key}") from exc
+    if value <= 0:
+        raise Phase2ArtifactError(f"{context} field must be positive: {key}")
+    return value

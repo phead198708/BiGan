@@ -67,6 +67,8 @@ class Phase2EvaluationConfig:
     execution_config: ExecutionSimulationConfig = ExecutionSimulationConfig()
     min_sharpe_improvement_ratio: float = 0.10
     min_turnover_reduction_ratio: float = 0.0
+    max_cost_to_abs_gross_return_ratio: float | None = None
+    require_cost_aware_filter_or_turnover_reduction: bool = False
     output_dir: Path | str | None = None
     created_at: str = DEFAULT_PHASE2_CREATED_AT
 
@@ -77,6 +79,11 @@ class Phase2EvaluationConfig:
             raise ValueError("min_sharpe_improvement_ratio must be finite")
         if not math.isfinite(self.min_turnover_reduction_ratio):
             raise ValueError("min_turnover_reduction_ratio must be finite")
+        if self.max_cost_to_abs_gross_return_ratio is not None and (
+            not math.isfinite(self.max_cost_to_abs_gross_return_ratio)
+            or self.max_cost_to_abs_gross_return_ratio < 0.0
+        ):
+            raise ValueError("max_cost_to_abs_gross_return_ratio must be finite and non-negative")
         if not self.created_at:
             raise ValueError("created_at is required")
 

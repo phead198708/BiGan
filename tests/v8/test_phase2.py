@@ -39,6 +39,7 @@ from bigan.v8.phase1 import (
 from bigan.v8.phase1.model import XGBoostPolicyModel
 from bigan.v8.phase2 import (
     PHASE2_EVALUATION_PHASE,
+    ExecutionFill,
     ExecutionSimulationConfig,
     Phase2ArtifactError,
     Phase2EvaluationConfig,
@@ -273,6 +274,9 @@ def test_phase2_loader_verifies_accepted_candidate_artifacts(tmp_path: Path) -> 
     assert candidate.policy_dataset_hash == phase15.run_manifest["policy_dataset_hash"]
     assert candidate.split_hash == phase15.split.split_hash
     assert candidate.model.training_manifest["direct_pnl_optimization"] is False
+    assert candidate.shadow_baseline_metrics["shadow_sharpe"] == (
+        phase15.acceptance_report.metrics["shadow_sharpe"]
+    )
     assert candidate.shadow_acceptance_report["acceptance_criteria"][
         "split_provenance_verified"
     ] is True
@@ -398,6 +402,7 @@ def test_phase2_spread_bps_fallback_keeps_execution_costs_bounded() -> None:
 )
 def test_phase2_requires_phase15_shadow_baseline_metrics(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     mutate_report,
     expected_message: str,
 ) -> None:
@@ -409,12 +414,118 @@ def test_phase2_requires_phase15_shadow_baseline_metrics(
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     _refresh_artifact_hashes(phase15.artifact_dir)
 
+    def fail_predict(*args, **kwargs):
+        raise AssertionError("prediction should not run after baseline metric failure")
+
+    monkeypatch.setattr(XGBoostPolicyModel, "predict_examples", fail_predict)
+
     with pytest.raises(Phase2ArtifactError, match=expected_message):
         run_phase2_evaluation(
             phase15.artifact_dir,
             phase15.split,
             _phase2_config(),
         )
+
+
+def test_phase2_costs_reported_do_not_imply_cost_aware_behavior(tmp_path: Path) -> None:
+    phase15 = _accepted_phase15_candidate(tmp_path)
+    assert phase15.artifact_dir is not None
+    candidate = load_phase15_candidate(phase15.artifact_dir)
+    baseline_turnover = float(candidate.shadow_baseline_metrics["mean_abs_turnover"])
+    fills = (
+        ExecutionFill(
+            decision_ts=phase15.split.shadow_examples[0].decision_ts,
+            source="polymarket",
+            instrument_id="btc-updown-15m:UP",
+            raw_action=0.5,
+            adjusted_action=0.5,
+            fill_probability=1.0,
+            filled_action=0.5,
+            confidence=0.8,
+            score=0.8,
+            shadow_net_return=0.02,
+            gross_policy_return=0.01,
+            spread_cost=0.001,
+            fee_cost=0.0,
+            slippage_cost=0.0,
+            liquidity_impact_cost=0.0,
+            total_execution_cost=0.001,
+            risk_penalty=0.0,
+            turnover_penalty=0.0,
+            net_execution_return=0.009,
+            turnover=baseline_turnover,
+            estimated_policy_edge=0.01,
+            estimated_friction=0.001,
+            expected_net_edge=0.009,
+            low_ev_filtered=False,
+        ),
+        ExecutionFill(
+            decision_ts=phase15.split.shadow_examples[1].decision_ts,
+            source="polymarket",
+            instrument_id="btc-updown-15m:UP",
+            raw_action=0.5,
+            adjusted_action=0.5,
+            fill_probability=1.0,
+            filled_action=0.5,
+            confidence=0.8,
+            score=0.8,
+            shadow_net_return=0.018,
+            gross_policy_return=0.009,
+            spread_cost=0.001,
+            fee_cost=0.0,
+            slippage_cost=0.0,
+            liquidity_impact_cost=0.0,
+            total_execution_cost=0.001,
+            risk_penalty=0.0,
+            turnover_penalty=0.0,
+            net_execution_return=0.008,
+            turnover=baseline_turnover,
+            estimated_policy_edge=0.01,
+            estimated_friction=0.001,
+            expected_net_edge=0.009,
+            low_ev_filtered=False,
+        ),
+    )
+
+    report = phase2_evaluation.build_phase2_report(
+        candidate=candidate,
+        fills=fills,
+        config=Phase2EvaluationConfig(
+            min_sharpe_improvement_ratio=-10.0,
+            min_turnover_reduction_ratio=-10.0,
+            created_at="2026-06-21T00:10:00Z",
+        ),
+    )
+
+    assert report.execution_metrics["mean_execution_cost"] > 0.0
+    assert report.acceptance_criteria["execution_costs_reported"] is True
+    assert report.comparison_metrics["turnover_reduction_ratio"] == pytest.approx(0.0)
+    assert report.acceptance_criteria["cost_aware_behavior_emerged"] is False
+
+    bounded_cost_report = phase2_evaluation.build_phase2_report(
+        candidate=candidate,
+        fills=fills,
+        config=Phase2EvaluationConfig(
+            min_sharpe_improvement_ratio=-10.0,
+            min_turnover_reduction_ratio=-10.0,
+            max_cost_to_abs_gross_return_ratio=0.20,
+            created_at="2026-06-21T00:10:00Z",
+        ),
+    )
+    assert bounded_cost_report.acceptance_criteria["cost_aware_behavior_emerged"] is True
+
+    strict_behavior_report = phase2_evaluation.build_phase2_report(
+        candidate=candidate,
+        fills=fills,
+        config=Phase2EvaluationConfig(
+            min_sharpe_improvement_ratio=-10.0,
+            min_turnover_reduction_ratio=-10.0,
+            max_cost_to_abs_gross_return_ratio=0.20,
+            require_cost_aware_filter_or_turnover_reduction=True,
+            created_at="2026-06-21T00:10:00Z",
+        ),
+    )
+    assert strict_behavior_report.acceptance_criteria["cost_aware_behavior_emerged"] is False
 
 
 def test_phase2_evaluation_does_not_train_and_writes_report(
