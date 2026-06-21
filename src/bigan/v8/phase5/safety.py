@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -46,6 +47,13 @@ def run_phase5_safety_layer(
     resolved_config = config or SafetyLayerConfig()
     _assert_streams_safe(shadow_decisions, live_observations)
     records = _build_shadow_live_records(shadow_decisions, live_observations)
+    shadow_decision_stream_sha256 = compute_phase5_shadow_decision_stream_sha256(
+        shadow_decisions
+    )
+    live_observation_stream_sha256 = compute_phase5_live_observation_stream_sha256(
+        live_observations
+    )
+    shadow_live_record_sha256 = compute_phase5_shadow_live_record_sha256(records)
     rolling_diagnostics = _rolling_diagnostics(records, resolved_config)
     drift_metrics = _drift_metrics(
         records=records,
@@ -72,6 +80,9 @@ def run_phase5_safety_layer(
     report = Phase5SafetyLayerReport(
         phase=PHASE5_SAFETY_LAYER_PHASE,
         row_count=len(records),
+        shadow_decision_stream_sha256=shadow_decision_stream_sha256,
+        live_observation_stream_sha256=live_observation_stream_sha256,
+        shadow_live_record_sha256=shadow_live_record_sha256,
         shadow_mode_metrics=shadow_mode_metrics,
         drift_metrics=drift_metrics,
         live_risk_metrics=live_risk_metrics,
@@ -101,6 +112,32 @@ def run_phase5_safety_layer(
         report=report,
         report_path=report_path,
     )
+
+
+def compute_phase5_shadow_decision_stream_sha256(
+    shadow_decisions: tuple[AdaptiveDecision, ...],
+) -> str:
+    """Hash the exact Phase 5 shadow-decision stream in replay order."""
+
+    return _canonical_payload_sha256([decision.to_dict() for decision in shadow_decisions])
+
+
+def compute_phase5_live_observation_stream_sha256(
+    live_observations: tuple[LiveExecutionObservation, ...],
+) -> str:
+    """Hash the exact Phase 5 live-observation stream in replay order."""
+
+    return _canonical_payload_sha256(
+        [observation.to_dict() for observation in live_observations]
+    )
+
+
+def compute_phase5_shadow_live_record_sha256(
+    records: tuple[ShadowLiveRecord, ...],
+) -> str:
+    """Hash the exact paired Phase 5 shadow/live record stream."""
+
+    return _canonical_payload_sha256([record.to_dict() for record in records])
 
 
 def _assert_streams_safe(
@@ -161,13 +198,15 @@ def _rolling_diagnostics(
     for end_index in range(window_size, len(records) + 1):
         window = records[end_index - window_size : end_index]
         metrics = _window_metrics(window, config)
+        window_reason_codes = _reason_codes(metrics, config)
         diagnostics.append(
             {
                 "start_ts": window[0].decision_ts,
                 "end_ts": window[-1].decision_ts,
                 "row_count": len(window),
                 **metrics,
-                "degradation_detected": _window_degraded(metrics, config),
+                "window_reason_codes": list(window_reason_codes),
+                "degradation_detected": bool(window_reason_codes),
             }
         )
     return diagnostics
@@ -228,7 +267,15 @@ def _drift_metrics(
         ),
         None,
     )
-    reason_codes = _reason_codes(aggregate, config)
+    aggregate_reason_codes = _reason_codes(aggregate, config)
+    first_degradation_reason_codes = (
+        tuple(first_degradation["window_reason_codes"])
+        if first_degradation is not None
+        else ()
+    )
+    reason_codes = tuple(
+        sorted(set(aggregate_reason_codes) | set(first_degradation_reason_codes))
+    )
     return {
         **aggregate,
         "pnl_drift_detected": (
@@ -247,6 +294,8 @@ def _drift_metrics(
         "first_degradation_ts": (
             None if first_degradation is None else int(first_degradation["end_ts"])
         ),
+        "first_degradation_reason_codes": list(first_degradation_reason_codes),
+        "aggregate_reason_codes": list(aggregate_reason_codes),
         "reason_codes": reason_codes,
     }
 
@@ -470,6 +519,16 @@ def _metrics_are_finite(value: Any) -> bool:
     if isinstance(value, list | tuple):
         return all(_metrics_are_finite(item) for item in value)
     return True
+
+
+def _canonical_payload_sha256(payload: Any) -> str:
+    encoded = json.dumps(
+        _json_ready(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _json_ready(value: Any) -> Any:

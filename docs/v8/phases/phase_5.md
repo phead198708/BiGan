@@ -66,6 +66,20 @@ The first rolling window that breaches any threshold emits a degradation
 timestamp and reason codes. That timestamp is compared with the first live
 drawdown breach to prove degradation was detected before drawdown.
 
+Rolling diagnostics preserve both the first degraded window reason codes and
+aggregate reason codes:
+
+```text
+window_reason_codes
+first_degradation_reason_codes
+aggregate_reason_codes
+reason_codes
+```
+
+If an early window degrades and later rows recover enough for aggregate metrics
+to look healthy, Phase 5 still triggers the kill-switch using the first degraded
+window evidence.
+
 ## Kill-switch
 
 If degradation or live drawdown breach is detected, Phase 5 emits a
@@ -99,7 +113,21 @@ safe_parameters
 
 All snapshot hashes must be canonical SHA-256 hex digests. On kill-switch,
 the safety action must restore the exact safe parameter payload from the stable
-snapshot.
+snapshot. `safe_parameter_sha256` is bound to the canonical hash of
+`safe_parameters`; a mismatch fails before monitoring starts.
+
+## Audit Hashes
+
+The report records exact input and paired-record hashes:
+
+```text
+shadow_decision_stream_sha256
+live_observation_stream_sha256
+shadow_live_record_sha256
+```
+
+These hashes make a safety report reproducible against the exact shadow stream,
+live stream, and paired audit records that produced the kill/no-kill decision.
 
 ## Acceptance Criteria
 

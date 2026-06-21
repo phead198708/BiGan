@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
@@ -157,6 +159,10 @@ class StableModelSnapshot:
                 raise ValueError(f"{field_name} must be a SHA-256 hex digest")
         if not self.safe_parameters:
             raise ValueError("safe_parameters must not be empty")
+        if self.safe_parameter_sha256 != compute_safe_parameters_sha256(
+            self.safe_parameters
+        ):
+            raise ValueError("safe_parameter_sha256 mismatch")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -220,6 +226,9 @@ class Phase5SafetyLayerReport:
 
     phase: str
     row_count: int
+    shadow_decision_stream_sha256: str
+    live_observation_stream_sha256: str
+    shadow_live_record_sha256: str
     shadow_mode_metrics: dict[str, Any]
     drift_metrics: dict[str, Any]
     live_risk_metrics: dict[str, Any]
@@ -239,6 +248,9 @@ class Phase5SafetyLayerReport:
             "phase": self.phase,
             "passed": self.passed,
             "row_count": self.row_count,
+            "shadow_decision_stream_sha256": self.shadow_decision_stream_sha256,
+            "live_observation_stream_sha256": self.live_observation_stream_sha256,
+            "shadow_live_record_sha256": self.shadow_live_record_sha256,
             "shadow_mode_metrics": self.shadow_mode_metrics,
             "drift_metrics": self.drift_metrics,
             "live_risk_metrics": self.live_risk_metrics,
@@ -249,6 +261,34 @@ class Phase5SafetyLayerReport:
             "config": self.config,
             "created_at": self.created_at,
         }
+
+
+def compute_safe_parameters_sha256(safe_parameters: Mapping[str, Any]) -> str:
+    """Hash the exact safe rollback parameter payload."""
+
+    return _canonical_payload_sha256(dict(safe_parameters))
+
+
+def _canonical_payload_sha256(payload: Any) -> str:
+    encoded = json.dumps(
+        _json_ready(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, Path):
+        return str(value)
+    return value
 
 
 def _looks_like_sha256(value: str) -> bool:

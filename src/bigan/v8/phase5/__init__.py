@@ -10,9 +10,13 @@ from bigan.v8.phase5.contracts import (
     SafetyLayerConfig,
     ShadowLiveRecord,
     StableModelSnapshot,
+    compute_safe_parameters_sha256,
 )
 from bigan.v8.phase5.safety import (
     Phase5SafetyLayerResult,
+    compute_phase5_live_observation_stream_sha256,
+    compute_phase5_shadow_decision_stream_sha256,
+    compute_phase5_shadow_live_record_sha256,
     run_phase5_safety_layer,
 )
 
@@ -27,5 +31,9 @@ __all__ = [
     "SafetyLayerConfig",
     "ShadowLiveRecord",
     "StableModelSnapshot",
+    "compute_phase5_live_observation_stream_sha256",
+    "compute_phase5_shadow_decision_stream_sha256",
+    "compute_phase5_shadow_live_record_sha256",
+    "compute_safe_parameters_sha256",
     "run_phase5_safety_layer",
 ]
