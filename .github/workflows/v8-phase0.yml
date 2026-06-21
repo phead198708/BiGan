@@ -32,5 +32,5 @@ jobs:
       - name: Lint v8
         run: python -m ruff check src/bigan/v8 tests/v8
 
-      - name: Run v8 Phase 0 and Phase 1 hard-gate tests
-        run: python -m pytest tests/v8/test_phase0.py tests/v8/test_phase1.py -q
+      - name: Run v8 hard-gate tests
+        run: python -m pytest tests/v8/test_phase0.py tests/v8/test_phase1.py tests/v8/test_phase1_training.py -q

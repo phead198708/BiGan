@@ -24,6 +24,12 @@ from bigan.v8.phase1.dataset import (
     policy_dataset_hash,
 )
 from bigan.v8.phase1.model import XGBoostPolicyModel, train_xgboost_policy
+from bigan.v8.phase1.training import (
+    PHASE15_TRAINING_PHASE,
+    PolicyTrainingRunConfig,
+    PolicyTrainingRunResult,
+    run_policy_training,
+)
 from bigan.v8.phase1.validation import (
     PolicyAcceptanceConfig,
     PolicyAcceptanceFailure,
@@ -34,6 +40,7 @@ from bigan.v8.phase1.validation import (
 
 __all__ = [
     "PHASE1_POLICY_VERSION",
+    "PHASE15_TRAINING_PHASE",
     "SUPPORTED_RANKING_GROUP_STRATEGIES",
     "SUPPORTED_POLICY_OBJECTIVES",
     "SUPPORTED_TARGET_ENCODINGS",
@@ -48,6 +55,8 @@ __all__ = [
     "PolicyTargetEncoding",
     "PolicyTrainShadowSplit",
     "PolicyTrainingExample",
+    "PolicyTrainingRunConfig",
+    "PolicyTrainingRunResult",
     "RankingGroupStrategy",
     "XGBoostPolicyConfig",
     "XGBoostPolicyModel",
@@ -56,6 +65,7 @@ __all__ = [
     "build_policy_dataset",
     "build_policy_dataset_from_phase0",
     "policy_dataset_hash",
+    "run_policy_training",
     "train_xgboost_policy",
     "validate_policy_acceptance",
     "validate_policy_shadow_split",
