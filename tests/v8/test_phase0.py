@@ -126,6 +126,35 @@ def _calibration_samples(
     return resolved_model, samples
 
 
+def _calibration_required_pipeline(
+    cost_model: TradingCostModel,
+    *,
+    fail_on_validation_error: bool = True,
+) -> Phase0Pipeline:
+    return Phase0Pipeline(
+        Phase0PipelineConfig(
+            cost_config=cost_model.config,
+            require_cost_calibration=True,
+            fail_on_validation_error=fail_on_validation_error,
+            cost_calibration_config=CostCalibrationConfig(
+                min_samples=5,
+                max_mean_absolute_error=0.001,
+                max_mean_absolute_percentage_error=0.05,
+                max_abs_bias=0.001,
+            ),
+            cost_calibration_bucket_config=CostCalibrationBucketConfig(
+                min_bucket_samples=5,
+                bucket_by_source=False,
+                bucket_by_instrument=False,
+                volatility_edges=(0.005,),
+                spread_edges=(),
+                liquidity_edges=(),
+                order_size_edges=(5.0,),
+            ),
+        )
+    )
+
+
 def test_phase0_pipeline_is_cost_aware_causal_and_reproducible(tmp_path: Path) -> None:
     rows = _market_rows()
     first_dir = tmp_path / "first"
@@ -598,6 +627,42 @@ def test_artifact_gate_rejects_schema_hash_and_manifest_version_mismatches() -> 
     }
 
 
+def test_assert_phase0_artifact_ready_uses_manifest_calibration_requirement() -> None:
+    cost_model, samples = _calibration_samples(market_count=24)
+    dataset = _calibration_required_pipeline(cost_model).build(
+        _market_rows(),
+        cost_calibration_samples=samples,
+    )
+
+    assert_phase0_artifact_ready(dataset.manifest)
+
+    missing_calibration = deepcopy(dataset.manifest)
+    missing_calibration.pop("cost_calibration")
+    with pytest.raises(Phase0ArtifactError, match="missing_cost_calibration"):
+        assert_phase0_artifact_ready(missing_calibration)
+
+    explicit_override_contract = assert_phase0_artifact_ready(
+        missing_calibration,
+        require_cost_calibration=False,
+    )
+    assert explicit_override_contract.dataset_hash == dataset.manifest["dataset_hash"]
+
+    optional_calibration = deepcopy(missing_calibration)
+    optional_calibration["config"]["require_cost_calibration"] = False
+    assert_phase0_artifact_ready(optional_calibration)
+
+    with pytest.raises(Phase0ArtifactError, match="missing_cost_calibration"):
+        assert_phase0_artifact_ready(
+            optional_calibration,
+            require_cost_calibration=True,
+        )
+
+    failed_calibration = deepcopy(dataset.manifest)
+    failed_calibration["cost_calibration"]["passed"] = False
+    with pytest.raises(Phase0ArtifactError, match="cost_calibration_failed"):
+        assert_phase0_artifact_ready(failed_calibration)
+
+
 def test_pipeline_manifest_cost_calibration_is_gate_enforced() -> None:
     cost_model, samples = _calibration_samples(market_count=24)
     pipeline = Phase0Pipeline(
@@ -625,10 +690,13 @@ def test_pipeline_manifest_cost_calibration_is_gate_enforced() -> None:
     dataset = pipeline.build(_market_rows(), cost_calibration_samples=samples)
 
     assert dataset.manifest["cost_calibration"]["passed"] is True
+    assert dataset.manifest["cost_calibration"]["coverage_passed"] is True
+    assert dataset.manifest["cost_calibration"]["coverage_failure_reasons"] == []
     assert (
         dataset.manifest["validation"]["acceptance_criteria"]["cost_model_realistic"]
         is True
     )
+    assert dataset.validation_report.passed is dataset.manifest["validation"]["passed"]
     assert Phase0ArtifactGate(require_cost_calibration=True).validate_manifest(
         dataset.manifest
     ).passed
@@ -682,6 +750,69 @@ def test_pipeline_manifest_cost_calibration_is_gate_enforced() -> None:
         bad_dataset.manifest["validation"]["acceptance_criteria"]["cost_model_realistic"]
         is False
     )
+    assert bad_dataset.validation_report.passed is False
+    assert bad_dataset.validation_report.passed is bad_dataset.manifest["validation"]["passed"]
+    assert any(
+        failure.code == "cost_calibration_failed"
+        for failure in bad_dataset.validation_report.failures
+    )
+
+    missing_dataset = bad_pipeline.build(_market_rows(), cost_calibration_samples=None)
+    assert missing_dataset.validation_report.passed is False
+    assert (
+        missing_dataset.validation_report.passed
+        is missing_dataset.manifest["validation"]["passed"]
+    )
+    assert any(
+        failure.code == "cost_calibration_missing"
+        for failure in missing_dataset.validation_report.failures
+    )
+
+
+def test_artifact_gate_strictly_validates_cost_calibration_payload() -> None:
+    cost_model, samples = _calibration_samples(market_count=24)
+    dataset = _calibration_required_pipeline(cost_model).build(
+        _market_rows(),
+        cost_calibration_samples=samples,
+    )
+
+    cases = [
+        (
+            "cost_calibration_missing_field",
+            lambda manifest: manifest["cost_calibration"].pop("aggregate"),
+        ),
+        (
+            "cost_calibration_missing_field",
+            lambda manifest: manifest["cost_calibration"].pop("checked_sample_ratio"),
+        ),
+        (
+            "cost_calibration_coverage_invalid",
+            lambda manifest: manifest["cost_calibration"].update(
+                {"checked_sample_ratio": 1.5}
+            ),
+        ),
+        (
+            "cost_calibration_coverage_invalid",
+            lambda manifest: manifest["cost_calibration"].update(
+                {"checked_sample_count": -1}
+            ),
+        ),
+        (
+            "cost_calibration_invalid_field",
+            lambda manifest: manifest["cost_calibration"].update(
+                {"failed_buckets": "not-a-list"}
+            ),
+        ),
+    ]
+
+    for expected_code, mutate in cases:
+        manifest = deepcopy(dataset.manifest)
+        mutate(manifest)
+        report = Phase0ArtifactGate(require_cost_calibration=True).validate_manifest(
+            manifest
+        )
+        assert not report.passed
+        assert expected_code in {failure.code for failure in report.failures}
 
 
 def test_bucketed_cost_calibration_fails_when_sampled_regime_fails() -> None:
@@ -758,6 +889,9 @@ def test_sparse_bucket_calibration_cannot_silently_pass() -> None:
     assert not all_skipped.passed
     assert all_skipped.checked_bucket_count == 0
     assert all_skipped.skipped_sample_count == len(samples)
+    assert all_skipped.coverage_passed is False
+    assert "all_buckets_skipped" in all_skipped.coverage_failure_reasons
+    assert "all_buckets_skipped" in all_skipped.to_dict()["coverage_failure_reasons"]
 
     ratio_failed = cost_model.validate_calibration_by_bucket(
         samples,
@@ -775,6 +909,11 @@ def test_sparse_bucket_calibration_cannot_silently_pass() -> None:
     )
     assert not ratio_failed.passed
     assert ratio_failed.checked_sample_ratio < 0.80
+    assert ratio_failed.coverage_passed is False
+    assert (
+        "checked_sample_ratio_below_min"
+        in ratio_failed.coverage_failure_reasons
+    )
 
     bucket_count_failed = cost_model.validate_calibration_by_bucket(
         samples,
@@ -792,6 +931,11 @@ def test_sparse_bucket_calibration_cannot_silently_pass() -> None:
     )
     assert not bucket_count_failed.passed
     assert bucket_count_failed.checked_bucket_count < 3
+    assert bucket_count_failed.coverage_passed is False
+    assert (
+        "checked_bucket_count_below_min"
+        in bucket_count_failed.coverage_failure_reasons
+    )
 
 
 def test_robust_low_cost_metrics_remain_finite_for_tiny_observed_costs() -> None:

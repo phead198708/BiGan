@@ -12,6 +12,17 @@ import numpy as np
 from bigan.v8.phase0.alignment import TimeAlignmentEngine
 from bigan.v8.phase0.contracts import FEATURE_COLUMNS, FeatureVector, Label, MarketData
 
+COST_MODEL_FAILURE_CODES: frozenset[str] = frozenset(
+    {
+        "label_cost_math",
+        "negative_cost",
+        "cost_calibration_missing",
+        "cost_calibration_failed",
+        "cost_calibration_bucket_failed",
+        "cost_calibration_coverage_failed",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ValidationConfig:
@@ -110,7 +121,8 @@ class ValidationReport:
                     for failure in self.failures
                 ),
                 "cost_model_realistic": not any(
-                    failure.code in {"label_cost_math", "negative_cost"} for failure in self.failures
+                    failure.code in COST_MODEL_FAILURE_CODES
+                    for failure in self.failures
                 ),
                 "dataset_reproducible": bool(self.metrics.get("dataset_hash")),
             },

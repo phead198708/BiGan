@@ -203,6 +203,8 @@ class CostCalibrationBucketReport:
     checked_sample_ratio: float
     checked_bucket_count: int
     skipped_bucket_count: int
+    coverage_passed: bool
+    coverage_failure_reasons: tuple[str, ...]
     passed: bool
 
     def to_dict(self) -> dict[str, object]:
@@ -220,6 +222,8 @@ class CostCalibrationBucketReport:
             "checked_sample_ratio": self.checked_sample_ratio,
             "checked_bucket_count": self.checked_bucket_count,
             "skipped_bucket_count": self.skipped_bucket_count,
+            "coverage_passed": self.coverage_passed,
+            "coverage_failure_reasons": list(self.coverage_failure_reasons),
         }
 
 
@@ -419,15 +423,18 @@ class TradingCostModel:
         )
         checked_bucket_count = len(bucket_reports)
         skipped_bucket_count = len(skipped_buckets)
-        coverage_passed = (
-            checked_bucket_count >= buckets_config.min_checked_bucket_count
-            and checked_sample_ratio >= buckets_config.min_checked_sample_ratio
-            and not (
-                buckets_config.fail_on_all_buckets_skipped
-                and total_bucketed_samples > 0
-                and checked_bucket_count == 0
-            )
-        )
+        coverage_failure_reasons: list[str] = []
+        if (
+            buckets_config.fail_on_all_buckets_skipped
+            and total_bucketed_samples > 0
+            and checked_bucket_count == 0
+        ):
+            coverage_failure_reasons.append("all_buckets_skipped")
+        if checked_sample_ratio < buckets_config.min_checked_sample_ratio:
+            coverage_failure_reasons.append("checked_sample_ratio_below_min")
+        if checked_bucket_count < buckets_config.min_checked_bucket_count:
+            coverage_failure_reasons.append("checked_bucket_count_below_min")
+        coverage_passed = not coverage_failure_reasons
         return CostCalibrationBucketReport(
             aggregate=aggregate,
             buckets=bucket_reports,
@@ -438,6 +445,8 @@ class TradingCostModel:
             checked_sample_ratio=checked_sample_ratio,
             checked_bucket_count=checked_bucket_count,
             skipped_bucket_count=skipped_bucket_count,
+            coverage_passed=coverage_passed,
+            coverage_failure_reasons=tuple(coverage_failure_reasons),
             passed=aggregate.passed and not failed_buckets and coverage_passed,
         )
 

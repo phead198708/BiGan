@@ -47,6 +47,11 @@ canonical ordering for production artifacts while still receiving precise
 failure reasons for missing columns, ordering drift, hash drift, or
 version/hash mismatches.
 
+`assert_phase0_artifact_ready(manifest)` reads
+`manifest["config"]["require_cost_calibration"]` by default. Downstream callers
+may override this with `require_cost_calibration=True` or `False`, but the
+default helper follows the artifact's own production-readiness requirement.
+
 ## Cost Model
 
 `TradingCostModel` includes:
@@ -96,7 +101,9 @@ Drift checks have explicit policy:
 The artifact gate rejects manifests with missing contracts, stale dataset
 versions, hash mismatches, schema/cost-column mismatches, failed validation,
 missing acceptance criteria, failed mandatory criteria, missing required cost
-calibration, failed aggregate calibration, or failed bucket calibration.
+calibration, malformed calibration payloads, invalid calibration coverage
+fields, failed aggregate calibration, failed bucket coverage, or failed bucket
+calibration.
 
 When `cost_calibration_samples` are supplied to `Phase0Pipeline.build(...)`, the
 manifest includes:
@@ -108,12 +115,26 @@ manifest includes:
   "buckets": {},
   "failed_buckets": [],
   "skipped_buckets": [],
-  "checked_sample_ratio": 1.0
+  "checked_sample_count": 100,
+  "skipped_sample_count": 0,
+  "checked_sample_ratio": 1.0,
+  "checked_bucket_count": 4,
+  "skipped_bucket_count": 0,
+  "coverage_passed": true,
+  "coverage_failure_reasons": []
 }
 ```
 
 When `Phase0PipelineConfig.require_cost_calibration` is true,
-`validation.acceptance_criteria.cost_model_realistic` is calibration-aware.
+`validation.acceptance_criteria.cost_model_realistic`,
+`validation.passed`, and `Phase0Dataset.validation_report.passed` are
+calibration-aware and remain aligned.
+
+Bucket coverage failures expose explicit reasons:
+
+- `all_buckets_skipped`
+- `checked_sample_ratio_below_min`
+- `checked_bucket_count_below_min`
 
 ## Tests
 
@@ -127,9 +148,11 @@ The mandatory Phase 0 tests are in `tests/v8/test_phase0.py`:
 - deterministic dataset generation and schema checks
 - runtime feature/label causality checks
 - runtime artifact gate acceptance/rejection
+- artifact readiness helper calibration inference from manifest config
 - cost calibration against observed execution-cost samples
 - bucketed cost calibration pass/fail
 - bucket coverage controls that prevent sparse-bucket silent pass
+- strict calibration payload validation
 - robust low-cost calibration metrics
 - KS/PSI/KL distribution drift detection
 - drift warning/fail/insufficient-row policy

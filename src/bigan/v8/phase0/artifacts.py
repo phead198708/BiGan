@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -25,6 +26,33 @@ MANDATORY_ACCEPTANCE_CRITERIA: tuple[str, ...] = (
     "statistical_validity_verified",
     "cost_model_realistic",
     "dataset_reproducible",
+)
+
+COST_CALIBRATION_REQUIRED_FIELDS: tuple[str, ...] = (
+    "aggregate",
+    "buckets",
+    "skipped_buckets",
+    "failed_buckets",
+    "checked_sample_count",
+    "skipped_sample_count",
+    "checked_sample_ratio",
+    "checked_bucket_count",
+    "skipped_bucket_count",
+)
+
+COST_CALIBRATION_COUNT_FIELDS: tuple[str, ...] = (
+    "checked_sample_count",
+    "skipped_sample_count",
+    "checked_bucket_count",
+    "skipped_bucket_count",
+)
+
+COST_CALIBRATION_COVERAGE_REASONS: frozenset[str] = frozenset(
+    {
+        "all_buckets_skipped",
+        "checked_sample_ratio_below_min",
+        "checked_bucket_count_below_min",
+    }
 )
 
 
@@ -259,6 +287,7 @@ class Phase0ArtifactGate:
             ]
 
         failures: list[Phase0ArtifactValidationFailure] = []
+        failures.extend(_cost_calibration_structure_failures(calibration))
         if calibration.get("passed") is not True:
             failures.append(
                 Phase0ArtifactValidationFailure(
@@ -268,7 +297,11 @@ class Phase0ArtifactGate:
                 )
             )
         failed_buckets = calibration.get("failed_buckets")
-        if isinstance(failed_buckets, list) and failed_buckets:
+        if (
+            isinstance(failed_buckets, list)
+            and all(isinstance(bucket, str) for bucket in failed_buckets)
+            and failed_buckets
+        ):
             failures.append(
                 Phase0ArtifactValidationFailure(
                     code="cost_calibration_bucket_failed",
@@ -276,17 +309,195 @@ class Phase0ArtifactGate:
                     field="cost_calibration.failed_buckets",
                 )
             )
+        coverage_passed = calibration.get("coverage_passed")
+        coverage_reasons = calibration.get("coverage_failure_reasons")
+        if coverage_passed is False and calibration.get("passed") is True:
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_coverage_invalid",
+                    message="coverage_passed cannot be false when cost_calibration.passed is true",
+                    field="cost_calibration.coverage_passed",
+                )
+            )
+        if (
+            isinstance(coverage_reasons, list)
+            and coverage_reasons
+            and calibration.get("passed") is True
+        ):
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_coverage_invalid",
+                    message=(
+                        "coverage_failure_reasons cannot be non-empty when "
+                        "cost_calibration.passed is true"
+                    ),
+                    field="cost_calibration.coverage_failure_reasons",
+                )
+            )
         return failures
 
 
-def assert_phase0_artifact_ready(manifest: Mapping[str, Any]) -> DatasetContract:
+def assert_phase0_artifact_ready(
+    manifest: Mapping[str, Any],
+    *,
+    require_cost_calibration: bool | None = None,
+) -> DatasetContract:
     """Raise unless a Phase 0 artifact manifest is safe to consume."""
 
-    report = Phase0ArtifactGate().validate_manifest(manifest)
+    if require_cost_calibration is None:
+        config = manifest.get("config", {})
+        require_cost_calibration = bool(
+            isinstance(config, Mapping)
+            and config.get("require_cost_calibration", False)
+        )
+    report = Phase0ArtifactGate(
+        require_cost_calibration=require_cost_calibration,
+    ).validate_manifest(manifest)
     report.raise_if_failed()
     if report.contract is None:
         raise Phase0ArtifactError("Phase 0 artifact contract was not parsed")
     return report.contract
+
+
+def _cost_calibration_structure_failures(
+    calibration: Mapping[str, Any],
+) -> list[Phase0ArtifactValidationFailure]:
+    failures: list[Phase0ArtifactValidationFailure] = []
+    for field_name in COST_CALIBRATION_REQUIRED_FIELDS:
+        if field_name not in calibration:
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_missing_field",
+                    message=f"cost_calibration.{field_name} is required",
+                    field=f"cost_calibration.{field_name}",
+                )
+            )
+
+    aggregate = calibration.get("aggregate")
+    if "aggregate" in calibration and not isinstance(aggregate, Mapping):
+        failures.append(
+            Phase0ArtifactValidationFailure(
+                code="cost_calibration_invalid_field",
+                message="cost_calibration.aggregate must be an object",
+                field="cost_calibration.aggregate",
+            )
+        )
+    if isinstance(aggregate, Mapping) and aggregate.get("passed") is not True:
+        failures.append(
+            Phase0ArtifactValidationFailure(
+                code="cost_calibration_failed",
+                message="cost_calibration.aggregate.passed must be true",
+                field="cost_calibration.aggregate.passed",
+            )
+        )
+
+    buckets = calibration.get("buckets")
+    if "buckets" in calibration and not isinstance(buckets, Mapping):
+        failures.append(
+            Phase0ArtifactValidationFailure(
+                code="cost_calibration_invalid_field",
+                message="cost_calibration.buckets must be an object",
+                field="cost_calibration.buckets",
+            )
+        )
+
+    for field_name in ("skipped_buckets", "failed_buckets"):
+        value = calibration.get(field_name)
+        if field_name not in calibration:
+            continue
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_invalid_field",
+                    message=f"cost_calibration.{field_name} must be a list of strings",
+                    field=f"cost_calibration.{field_name}",
+                )
+            )
+
+    for field_name in COST_CALIBRATION_COUNT_FIELDS:
+        value = calibration.get(field_name)
+        if field_name not in calibration:
+            continue
+        if type(value) is not int:
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_invalid_field",
+                    message=f"cost_calibration.{field_name} must be an integer",
+                    field=f"cost_calibration.{field_name}",
+                )
+            )
+        elif value < 0:
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_coverage_invalid",
+                    message=f"cost_calibration.{field_name} must be non-negative",
+                    field=f"cost_calibration.{field_name}",
+                )
+            )
+
+    checked_sample_ratio = calibration.get("checked_sample_ratio")
+    if "checked_sample_ratio" in calibration:
+        if (
+            isinstance(checked_sample_ratio, bool)
+            or not isinstance(checked_sample_ratio, (int, float))
+            or not math.isfinite(float(checked_sample_ratio))
+        ):
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_invalid_field",
+                    message="cost_calibration.checked_sample_ratio must be numeric",
+                    field="cost_calibration.checked_sample_ratio",
+                )
+            )
+        elif not 0.0 <= float(checked_sample_ratio) <= 1.0:
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_coverage_invalid",
+                    message="cost_calibration.checked_sample_ratio must be in [0, 1]",
+                    field="cost_calibration.checked_sample_ratio",
+                )
+            )
+
+    coverage_passed = calibration.get("coverage_passed")
+    if "coverage_passed" in calibration and not isinstance(coverage_passed, bool):
+        failures.append(
+            Phase0ArtifactValidationFailure(
+                code="cost_calibration_invalid_field",
+                message="cost_calibration.coverage_passed must be boolean",
+                field="cost_calibration.coverage_passed",
+            )
+        )
+
+    coverage_reasons = calibration.get("coverage_failure_reasons")
+    if "coverage_failure_reasons" in calibration:
+        if not isinstance(coverage_reasons, list) or not all(
+            isinstance(reason, str) for reason in coverage_reasons
+        ):
+            failures.append(
+                Phase0ArtifactValidationFailure(
+                    code="cost_calibration_invalid_field",
+                    message="cost_calibration.coverage_failure_reasons must be a list of strings",
+                    field="cost_calibration.coverage_failure_reasons",
+                )
+            )
+        else:
+            unknown_reasons = [
+                reason
+                for reason in coverage_reasons
+                if reason not in COST_CALIBRATION_COVERAGE_REASONS
+            ]
+            if unknown_reasons:
+                failures.append(
+                    Phase0ArtifactValidationFailure(
+                        code="cost_calibration_invalid_field",
+                        message=(
+                            "unknown cost calibration coverage reasons: "
+                            + ", ".join(sorted(unknown_reasons))
+                        ),
+                        field="cost_calibration.coverage_failure_reasons",
+                    )
+                )
+    return failures
 
 
 def _schema_failures(contract_data: Mapping[str, Any]) -> list[Phase0ArtifactValidationFailure]:

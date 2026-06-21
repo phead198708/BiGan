@@ -26,6 +26,7 @@ from bigan.v8.phase0.contracts import (
 )
 from bigan.v8.phase0.costs import (
     CostCalibrationBucketConfig,
+    CostCalibrationBucketReport,
     CostCalibrationConfig,
     CostModelConfig,
     ExecutionCostSample,
@@ -34,7 +35,12 @@ from bigan.v8.phase0.costs import (
 from bigan.v8.phase0.features import CausalFeatureBuilder, CausalFeatureBuilderConfig
 from bigan.v8.phase0.labels import CostAwareLabelBuilder, CostAwareLabelBuilderConfig
 from bigan.v8.phase0.loader import MarketDataLoader
-from bigan.v8.phase0.validation import IntegrityValidator, ValidationConfig, ValidationReport
+from bigan.v8.phase0.validation import (
+    IntegrityValidator,
+    ValidationConfig,
+    ValidationFailure,
+    ValidationReport,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,17 +169,12 @@ class Phase0Pipeline:
                 config=self.config.cost_calibration_config,
             )
         )
+        _merge_cost_calibration_validation(
+            validation_report,
+            require_cost_calibration=self.config.require_cost_calibration,
+            cost_calibration=cost_calibration,
+        )
         validation_payload = validation_report.to_dict()
-        calibration_ready = cost_calibration is not None and cost_calibration.passed
-        if self.config.require_cost_calibration:
-            validation_payload["acceptance_criteria"]["cost_model_realistic"] = (
-                validation_payload["acceptance_criteria"]["cost_model_realistic"]
-                and calibration_ready
-            )
-            validation_payload["passed"] = (
-                validation_payload["passed"]
-                and validation_payload["acceptance_criteria"]["cost_model_realistic"]
-            )
         manifest = {
             "dataset_version": PHASE0_DATASET_VERSION,
             "dataset_hash": dataset_hash,
@@ -195,9 +196,10 @@ class Phase0Pipeline:
             manifest=manifest,
         )
         if self.config.fail_on_validation_error and not validation_payload["passed"]:
-            failures = "; ".join(f"{failure.code}: {failure.message}" for failure in validation_report.failures)
-            if self.config.require_cost_calibration and not calibration_ready:
-                failures = (failures + "; " if failures else "") + "cost_calibration: failed or missing"
+            failures = "; ".join(
+                f"{failure.code}: {failure.message}"
+                for failure in validation_report.failures
+            )
             raise ValueError(f"Phase 0 validation failed: {failures}")
         if output_dir is not None:
             dataset.write(output_dir)
@@ -225,3 +227,58 @@ def _dataset_hash(features: list[FeatureVector], labels: list[Label]) -> str:
         "utf-8"
     )
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _merge_cost_calibration_validation(
+    validation_report: ValidationReport,
+    *,
+    require_cost_calibration: bool,
+    cost_calibration: CostCalibrationBucketReport | None,
+) -> None:
+    validation_report.metrics["cost_calibration_required"] = require_cost_calibration
+    if cost_calibration is not None:
+        validation_report.metrics["cost_calibration_passed"] = cost_calibration.passed
+        validation_report.metrics["cost_calibration_checked_sample_ratio"] = (
+            cost_calibration.checked_sample_ratio
+        )
+        validation_report.metrics["cost_calibration_checked_bucket_count"] = (
+            cost_calibration.checked_bucket_count
+        )
+
+    if not require_cost_calibration:
+        return
+    if cost_calibration is None:
+        validation_report.failures.append(
+            ValidationFailure(
+                code="cost_calibration_missing",
+                message="required cost calibration samples were not provided",
+            )
+        )
+        return
+    if not cost_calibration.aggregate.passed:
+        validation_report.failures.append(
+            ValidationFailure(
+                code="cost_calibration_failed",
+                message="required aggregate cost calibration failed",
+                row_count=cost_calibration.aggregate.sample_count,
+            )
+        )
+    if cost_calibration.failed_buckets:
+        validation_report.failures.append(
+            ValidationFailure(
+                code="cost_calibration_bucket_failed",
+                message="required bucketed cost calibration failed",
+                row_count=len(cost_calibration.failed_buckets),
+                column="cost_calibration.failed_buckets",
+            )
+        )
+    if not cost_calibration.coverage_passed:
+        reason_text = ", ".join(cost_calibration.coverage_failure_reasons)
+        validation_report.failures.append(
+            ValidationFailure(
+                code="cost_calibration_coverage_failed",
+                message=f"required bucket coverage failed: {reason_text}",
+                row_count=cost_calibration.skipped_sample_count,
+                column="cost_calibration.coverage_failure_reasons",
+            )
+        )
