@@ -43,17 +43,17 @@ _IDENTITY_REASON_CODES = {
     ),
     "model_sha256": (
         "model_sha256_missing",
-        "model_sha256_invalid",
+        "model_sha256_malformed",
         "model_identity_mismatch",
     ),
     "policy_dataset_hash": (
         "policy_dataset_hash_missing",
-        "policy_dataset_hash_invalid",
+        "policy_dataset_hash_malformed",
         "policy_dataset_identity_mismatch",
     ),
     "split_hash": (
         "split_hash_missing",
-        "split_hash_invalid",
+        "split_hash_malformed",
         "split_identity_mismatch",
     ),
 }

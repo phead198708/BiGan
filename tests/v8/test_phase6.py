@@ -332,9 +332,9 @@ def test_phase6_blocks_cross_stage_model_identity_mismatch() -> None:
 @pytest.mark.parametrize(
     ("field_name", "reason_code"),
     (
-        ("model_sha256", "model_sha256_invalid"),
-        ("policy_dataset_hash", "policy_dataset_hash_invalid"),
-        ("split_hash", "split_hash_invalid"),
+        ("model_sha256", "model_sha256_malformed"),
+        ("policy_dataset_hash", "policy_dataset_hash_malformed"),
+        ("split_hash", "split_hash_malformed"),
     ),
 )
 def test_phase6_blocks_invalid_stage_identity_hash(
