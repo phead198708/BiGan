@@ -38,8 +38,20 @@ def _stage(
     )
 
 
-def _stage_evidence() -> tuple[CICDStageEvidence, ...]:
+def _identity_metadata(candidate_run_id: str) -> dict[str, str]:
+    return {
+        "candidate_run_id": candidate_run_id,
+        "model_sha256": "1" * 64,
+        "policy_dataset_hash": "e" * 64,
+        "split_hash": "f" * 64,
+    }
+
+
+def _stage_evidence(
+    candidate_run_id: str = "phase6-candidate-001",
+) -> tuple[CICDStageEvidence, ...]:
     model_sha256 = "1" * 64
+    identity = _identity_metadata(candidate_run_id)
     return (
         _stage(
             "training",
@@ -47,6 +59,7 @@ def _stage_evidence() -> tuple[CICDStageEvidence, ...]:
             report_sha256="2" * 64,
             run_id="phase1_5_candidate_001",
             metadata={
+                **identity,
                 "accepted_candidate_model": True,
                 "deterministic_training": True,
                 "model_sha256": model_sha256,
@@ -58,6 +71,7 @@ def _stage_evidence() -> tuple[CICDStageEvidence, ...]:
             report_sha256="4" * 64,
             run_id="phase2_validation_001",
             metadata={
+                **identity,
                 "oos_backtest_passed": True,
                 "cost_stress_passed": True,
                 "cost_stress_multipliers": [1.2, 1.5, 2.0],
@@ -69,6 +83,7 @@ def _stage_evidence() -> tuple[CICDStageEvidence, ...]:
             report_sha256="6" * 64,
             run_id="phase5_shadow_001",
             metadata={
+                **identity,
                 "shadow_mode": True,
                 "simulate_live_execution": True,
                 "capital_at_risk": False,
@@ -80,9 +95,12 @@ def _stage_evidence() -> tuple[CICDStageEvidence, ...]:
             report_sha256="8" * 64,
             run_id="phase6_live_rollout_001",
             metadata={
+                **identity,
                 "staged_capital_rollout": True,
                 "manual_approval_recorded": True,
-                "requested_capital_fraction": 0.05,
+                "rollout_capital_fractions": [0.0, 0.01, 0.05, 0.10],
+                "rollout_step_index": 1,
+                "requested_capital_fraction": 0.01,
             },
         ),
         _stage(
@@ -91,6 +109,7 @@ def _stage_evidence() -> tuple[CICDStageEvidence, ...]:
             report_sha256="0" * 64,
             run_id="phase6_monitoring_001",
             metadata={
+                **identity,
                 "performance_tracking_enabled": True,
                 "risk_tracking_enabled": True,
                 "kill_switch_wired": True,
@@ -151,13 +170,23 @@ def test_phase6_approves_deterministic_pipeline_and_writes_report(
     assert result.report.rollback_gate["available"] is True
     assert result.report.rollback_gate["max_observed_latency_ms"] == 92
     assert result.report.acceptance_criteria["full_pipeline_deterministic"] is True
+    assert result.report.acceptance_criteria["candidate_identity_consistent"] is True
     assert result.report.acceptance_criteria["no_unvalidated_strategy_goes_live"] is True
+    assert result.report.candidate_identity_verified is True
+    assert result.report.candidate_identity["candidate_run_id"] == (
+        "phase6-candidate-001"
+    )
+    assert len(result.report.candidate_identity_sha256) == 64
     assert result.report.pipeline_input_sha256 == repeated.report.pipeline_input_sha256
     assert result.report.release_manifest_sha256 == (
         repeated.report.release_manifest_sha256
     )
     assert len(result.report.release_manifest_sha256) == 64
     assert result.report_path is not None
+    assert result.report_path.name == (
+        "phase6_cicd_pipeline_report_"
+        f"{result.report.release_manifest['release_id']}.json"
+    )
     saved = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert saved["phase"] == PHASE6_CICD_PHASE
     assert saved["passed"] is True
@@ -165,7 +194,8 @@ def test_phase6_approves_deterministic_pipeline_and_writes_report(
 
 
 def test_phase6_blocks_live_deployment_when_validation_failed() -> None:
-    evidence = list(_stage_evidence())
+    candidate_run_id = "phase6-candidate-002"
+    evidence = list(_stage_evidence(candidate_run_id))
     validation = evidence[1]
     evidence[1] = CICDStageEvidence(
         stage=validation.stage,
@@ -174,6 +204,7 @@ def test_phase6_blocks_live_deployment_when_validation_failed() -> None:
         report_sha256=validation.report_sha256,
         run_id=validation.run_id,
         metadata={
+            **_identity_metadata(candidate_run_id),
             "oos_backtest_passed": False,
             "cost_stress_passed": False,
             "cost_stress_multipliers": [1.2, 1.5, 2.0],
@@ -181,7 +212,7 @@ def test_phase6_blocks_live_deployment_when_validation_failed() -> None:
     )
 
     result = run_phase6_cicd_pipeline(
-        candidate_run_id="phase6-candidate-002",
+        candidate_run_id=candidate_run_id,
         stage_evidence=tuple(evidence),
         rollback_plan=_rollback_plan(),
         config=_config(),
@@ -199,9 +230,10 @@ def test_phase6_blocks_live_deployment_when_validation_failed() -> None:
 
 
 def test_phase6_blocks_live_deployment_when_rollback_latency_exceeds_threshold() -> None:
+    candidate_run_id = "phase6-candidate-003"
     result = run_phase6_cicd_pipeline(
-        candidate_run_id="phase6-candidate-003",
-        stage_evidence=_stage_evidence(),
+        candidate_run_id=candidate_run_id,
+        stage_evidence=_stage_evidence(candidate_run_id),
         rollback_plan=_rollback_plan(latency_measurements_ms=(80, 260, 90)),
         config=_config(),
     )
@@ -218,17 +250,19 @@ def test_phase6_blocks_live_deployment_when_rollback_latency_exceeds_threshold()
 
 
 def test_phase6_rejects_missing_required_stage_sequence() -> None:
+    candidate_run_id = "phase6-candidate-004"
     with pytest.raises(Phase6CICDError, match="required CI/CD stages"):
         run_phase6_cicd_pipeline(
-            candidate_run_id="phase6-candidate-004",
-            stage_evidence=_stage_evidence()[1:],
+            candidate_run_id=candidate_run_id,
+            stage_evidence=_stage_evidence(candidate_run_id)[1:],
             rollback_plan=_rollback_plan(),
             config=_config(),
         )
 
 
 def test_phase6_malformed_stage_metadata_fails_closed_without_exception() -> None:
-    evidence = list(_stage_evidence())
+    candidate_run_id = "phase6-candidate-005"
+    evidence = list(_stage_evidence(candidate_run_id))
     validation = evidence[1]
     evidence[1] = CICDStageEvidence(
         stage=validation.stage,
@@ -237,6 +271,7 @@ def test_phase6_malformed_stage_metadata_fails_closed_without_exception() -> Non
         report_sha256=validation.report_sha256,
         run_id=validation.run_id,
         metadata={
+            **_identity_metadata(candidate_run_id),
             "oos_backtest_passed": True,
             "cost_stress_passed": True,
             "cost_stress_multipliers": ["not-a-number"],
@@ -244,7 +279,7 @@ def test_phase6_malformed_stage_metadata_fails_closed_without_exception() -> Non
     )
 
     result = run_phase6_cicd_pipeline(
-        candidate_run_id="phase6-candidate-005",
+        candidate_run_id=candidate_run_id,
         stage_evidence=tuple(evidence),
         rollback_plan=_rollback_plan(),
         config=_config(),
@@ -256,6 +291,166 @@ def test_phase6_malformed_stage_metadata_fails_closed_without_exception() -> Non
     assert result.report.deployment_status == "blocked_fail_closed"
     assert validation_gate["allowed"] is False
     assert "cost_stress_multipliers_incomplete" in validation_gate["reason_codes"]
+
+
+def test_phase6_blocks_cross_stage_model_identity_mismatch() -> None:
+    candidate_run_id = "phase6-candidate-006"
+    evidence = list(_stage_evidence(candidate_run_id))
+    validation = evidence[1]
+    mismatched_identity = _identity_metadata(candidate_run_id)
+    mismatched_identity["model_sha256"] = "a" * 64
+    evidence[1] = CICDStageEvidence(
+        stage=validation.stage,
+        passed=True,
+        artifact_sha256=validation.artifact_sha256,
+        report_sha256=validation.report_sha256,
+        run_id=validation.run_id,
+        metadata={
+            **mismatched_identity,
+            "oos_backtest_passed": True,
+            "cost_stress_passed": True,
+            "cost_stress_multipliers": [1.2, 1.5, 2.0],
+        },
+    )
+
+    result = run_phase6_cicd_pipeline(
+        candidate_run_id=candidate_run_id,
+        stage_evidence=tuple(evidence),
+        rollback_plan=_rollback_plan(),
+        config=_config(),
+    )
+
+    gate_by_stage = {gate["stage"]: gate for gate in result.report.stage_gates}
+    assert not result.passed
+    assert result.report.candidate_identity_verified is False
+    assert result.report.acceptance_criteria["candidate_identity_consistent"] is False
+    assert gate_by_stage["validation"]["allowed"] is False
+    assert "model_identity_mismatch" in gate_by_stage["validation"]["reason_codes"]
+    assert gate_by_stage["live_deployment"]["allowed"] is False
+
+
+def test_phase6_blocks_live_candidate_run_id_mismatch() -> None:
+    candidate_run_id = "phase6-candidate-007"
+    evidence = list(_stage_evidence(candidate_run_id))
+    live = evidence[3]
+    evidence[3] = CICDStageEvidence(
+        stage=live.stage,
+        passed=True,
+        artifact_sha256=live.artifact_sha256,
+        report_sha256=live.report_sha256,
+        run_id=live.run_id,
+        metadata={
+            **dict(live.metadata),
+            "candidate_run_id": "wrong-candidate",
+        },
+    )
+
+    result = run_phase6_cicd_pipeline(
+        candidate_run_id=candidate_run_id,
+        stage_evidence=tuple(evidence),
+        rollback_plan=_rollback_plan(),
+        config=_config(),
+    )
+
+    live_gate = {gate["stage"]: gate for gate in result.report.stage_gates}[
+        "live_deployment"
+    ]
+    assert not result.passed
+    assert live_gate["allowed"] is False
+    assert "candidate_run_id_mismatch" in live_gate["reason_codes"]
+
+
+def test_phase6_blocks_initial_live_capital_fraction_above_limit() -> None:
+    candidate_run_id = "phase6-candidate-008"
+    evidence = list(_stage_evidence(candidate_run_id))
+    live = evidence[3]
+    evidence[3] = CICDStageEvidence(
+        stage=live.stage,
+        passed=True,
+        artifact_sha256=live.artifact_sha256,
+        report_sha256=live.report_sha256,
+        run_id=live.run_id,
+        metadata={
+            **dict(live.metadata),
+            "rollout_step_index": 0,
+            "requested_capital_fraction": 0.05,
+        },
+    )
+
+    result = run_phase6_cicd_pipeline(
+        candidate_run_id=candidate_run_id,
+        stage_evidence=tuple(evidence),
+        rollback_plan=_rollback_plan(),
+        config=_config(),
+    )
+
+    live_gate = {gate["stage"]: gate for gate in result.report.stage_gates}[
+        "live_deployment"
+    ]
+    assert not result.passed
+    assert live_gate["allowed"] is False
+    assert "initial_capital_fraction_exceeds_limit" in live_gate["reason_codes"]
+
+
+def test_phase6_blocks_missing_live_rollout_plan() -> None:
+    candidate_run_id = "phase6-candidate-009"
+    evidence = list(_stage_evidence(candidate_run_id))
+    live = evidence[3]
+    live_metadata = dict(live.metadata)
+    live_metadata.pop("rollout_capital_fractions")
+    evidence[3] = CICDStageEvidence(
+        stage=live.stage,
+        passed=True,
+        artifact_sha256=live.artifact_sha256,
+        report_sha256=live.report_sha256,
+        run_id=live.run_id,
+        metadata=live_metadata,
+    )
+
+    result = run_phase6_cicd_pipeline(
+        candidate_run_id=candidate_run_id,
+        stage_evidence=tuple(evidence),
+        rollback_plan=_rollback_plan(),
+        config=_config(),
+    )
+
+    live_gate = {gate["stage"]: gate for gate in result.report.stage_gates}[
+        "live_deployment"
+    ]
+    assert not result.passed
+    assert live_gate["allowed"] is False
+    assert "rollout_plan_missing" in live_gate["reason_codes"]
+
+
+def test_phase6_blocks_live_rollout_plan_mismatch() -> None:
+    candidate_run_id = "phase6-candidate-010"
+    evidence = list(_stage_evidence(candidate_run_id))
+    live = evidence[3]
+    evidence[3] = CICDStageEvidence(
+        stage=live.stage,
+        passed=True,
+        artifact_sha256=live.artifact_sha256,
+        report_sha256=live.report_sha256,
+        run_id=live.run_id,
+        metadata={
+            **dict(live.metadata),
+            "rollout_capital_fractions": [0.0, 0.02, 0.05, 0.10],
+        },
+    )
+
+    result = run_phase6_cicd_pipeline(
+        candidate_run_id=candidate_run_id,
+        stage_evidence=tuple(evidence),
+        rollback_plan=_rollback_plan(),
+        config=_config(),
+    )
+
+    live_gate = {gate["stage"]: gate for gate in result.report.stage_gates}[
+        "live_deployment"
+    ]
+    assert not result.passed
+    assert live_gate["allowed"] is False
+    assert "rollout_plan_mismatch" in live_gate["reason_codes"]
 
 
 def test_phase6_rejects_mismatched_safe_parameter_hash() -> None:
@@ -277,17 +472,15 @@ def test_phase6_stage_hash_changes_when_evidence_changes() -> None:
     evidence = _stage_evidence()
     changed = list(evidence)
     training = changed[0]
+    changed_metadata = dict(training.metadata)
+    changed_metadata["model_sha256"] = "a" * 64
     changed[0] = CICDStageEvidence(
         stage=training.stage,
         passed=training.passed,
-        artifact_sha256="f" * 64,
+        artifact_sha256="a" * 64,
         report_sha256=training.report_sha256,
         run_id=training.run_id,
-        metadata={
-            "accepted_candidate_model": True,
-            "deterministic_training": True,
-            "model_sha256": "f" * 64,
-        },
+        metadata=changed_metadata,
     )
 
     assert compute_phase6_stage_evidence_sha256(tuple(changed)) != (

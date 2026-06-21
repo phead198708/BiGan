@@ -190,6 +190,9 @@ class CICDPipelineReport:
     phase: str
     candidate_run_id: str
     pipeline_input_sha256: str
+    candidate_identity: dict[str, Any]
+    candidate_identity_verified: bool
+    candidate_identity_sha256: str
     release_manifest_sha256: str
     deployment_status: str
     stage_gates: list[dict[str, Any]]
@@ -209,6 +212,9 @@ class CICDPipelineReport:
             "passed": self.passed,
             "candidate_run_id": self.candidate_run_id,
             "pipeline_input_sha256": self.pipeline_input_sha256,
+            "candidate_identity": self.candidate_identity,
+            "candidate_identity_verified": self.candidate_identity_verified,
+            "candidate_identity_sha256": self.candidate_identity_sha256,
             "release_manifest_sha256": self.release_manifest_sha256,
             "deployment_status": self.deployment_status,
             "stage_gates": self.stage_gates,

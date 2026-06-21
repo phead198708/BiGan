@@ -22,6 +22,32 @@ from bigan.v8.phase6.contracts import (
     compute_phase6_stage_evidence_sha256,
 )
 
+_IDENTITY_FIELDS = (
+    "candidate_run_id",
+    "model_sha256",
+    "policy_dataset_hash",
+    "split_hash",
+)
+
+_IDENTITY_REASON_CODES = {
+    "candidate_run_id": (
+        "candidate_run_id_missing",
+        "candidate_run_id_mismatch",
+    ),
+    "model_sha256": (
+        "model_sha256_missing",
+        "model_identity_mismatch",
+    ),
+    "policy_dataset_hash": (
+        "policy_dataset_hash_missing",
+        "policy_dataset_identity_mismatch",
+    ),
+    "split_hash": (
+        "split_hash_missing",
+        "split_identity_mismatch",
+    ),
+}
+
 
 @dataclass(frozen=True, slots=True)
 class CICDPipelineResult:
@@ -55,9 +81,14 @@ def run_phase6_cicd_pipeline(
         rollback_plan=rollback_plan,
         config=resolved_config,
     )
+    identity_audit = _candidate_identity_audit(
+        candidate_run_id=candidate_run_id,
+        stage_evidence=stage_evidence,
+    )
     rollback_gate = _rollback_gate(rollback_plan, resolved_config)
     stage_gates = _stage_gates(
         stage_evidence=stage_evidence,
+        identity_audit=identity_audit,
         rollback_gate=rollback_gate,
         config=resolved_config,
     )
@@ -70,6 +101,7 @@ def run_phase6_cicd_pipeline(
         candidate_run_id=candidate_run_id,
         pipeline_input_sha256=pipeline_input_sha256,
         deployment_status=deployment_status,
+        identity_audit=identity_audit,
         stage_evidence=stage_evidence,
         stage_gates=stage_gates,
         rollback_gate=rollback_gate,
@@ -89,6 +121,9 @@ def run_phase6_cicd_pipeline(
         phase=PHASE6_CICD_PHASE,
         candidate_run_id=candidate_run_id,
         pipeline_input_sha256=pipeline_input_sha256,
+        candidate_identity=identity_audit["candidate_identity"],
+        candidate_identity_verified=identity_audit["candidate_identity_verified"],
+        candidate_identity_sha256=identity_audit["candidate_identity_sha256"],
         release_manifest_sha256=release_manifest_sha256,
         deployment_status=deployment_status,
         stage_gates=stage_gates,
@@ -102,7 +137,8 @@ def run_phase6_cicd_pipeline(
     if resolved_config.output_dir is not None:
         output_dir = Path(resolved_config.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        report_path = output_dir / "phase6_cicd_pipeline_report.json"
+        release_id = str(release_manifest["release_id"])
+        report_path = output_dir / f"phase6_cicd_pipeline_report_{release_id}.json"
         report_path.write_text(
             json.dumps(
                 _json_ready(report.to_dict()),
@@ -172,9 +208,53 @@ def _rollback_gate(
     }
 
 
+def _candidate_identity_audit(
+    *,
+    candidate_run_id: str,
+    stage_evidence: tuple[CICDStageEvidence, ...],
+) -> dict[str, Any]:
+    training_metadata = dict(stage_evidence[0].metadata)
+    candidate_identity = {
+        "candidate_run_id": candidate_run_id,
+        "model_sha256": training_metadata.get("model_sha256"),
+        "policy_dataset_hash": training_metadata.get("policy_dataset_hash"),
+        "split_hash": training_metadata.get("split_hash"),
+    }
+    stage_reason_codes: dict[str, list[str]] = {}
+    for evidence in stage_evidence:
+        metadata = dict(evidence.metadata)
+        reason_codes: list[str] = []
+        for field_name in _IDENTITY_FIELDS:
+            missing_code, mismatch_code = _IDENTITY_REASON_CODES[field_name]
+            observed = metadata.get(field_name)
+            expected = candidate_identity[field_name]
+            if observed is None:
+                reason_codes.append(missing_code)
+                continue
+            if observed != expected:
+                reason_codes.append(mismatch_code)
+        stage_reason_codes[evidence.stage] = _dedupe(reason_codes)
+
+    reason_codes = _dedupe(
+        [
+            code
+            for stage_codes in stage_reason_codes.values()
+            for code in stage_codes
+        ]
+    )
+    return {
+        "candidate_identity": candidate_identity,
+        "candidate_identity_verified": not reason_codes,
+        "candidate_identity_sha256": _canonical_payload_sha256(candidate_identity),
+        "stage_reason_codes": stage_reason_codes,
+        "reason_codes": reason_codes,
+    }
+
+
 def _stage_gates(
     *,
     stage_evidence: tuple[CICDStageEvidence, ...],
+    identity_audit: dict[str, Any],
     rollback_gate: dict[str, Any],
     config: CICDPipelineConfig,
 ) -> list[dict[str, Any]]:
@@ -186,6 +266,7 @@ def _stage_gates(
             reason_codes.append("upstream_gate_failed")
         if not evidence.passed:
             reason_codes.append(f"{evidence.stage}_failed")
+        reason_codes.extend(identity_audit["stage_reason_codes"][evidence.stage])
         reason_codes.extend(_stage_specific_reason_codes(evidence, config))
         if evidence.stage == "live_deployment":
             reason_codes.extend(_live_deployment_reason_codes(rollback_gate))
@@ -279,15 +360,60 @@ def _live_reason_codes(
         and metadata.get("manual_approval_recorded") is not True
     ):
         reason_codes.append("manual_approval_missing")
+
+    rollout_payload = metadata.get("rollout_capital_fractions")
+    rollout_plan = _coerce_rollout_plan(rollout_payload)
+    if rollout_payload is None:
+        reason_codes.append("rollout_plan_missing")
+    elif rollout_plan is None or not _rollout_plans_match(
+        rollout_plan,
+        config.rollout_capital_fractions,
+    ):
+        reason_codes.append("rollout_plan_mismatch")
+
+    rollout_step_index = metadata.get("rollout_step_index")
+    step_index_valid = (
+        not isinstance(rollout_step_index, bool)
+        and isinstance(rollout_step_index, int)
+        and rollout_step_index >= 0
+        and rollout_step_index < len(config.rollout_capital_fractions)
+    )
+    if not step_index_valid:
+        reason_codes.append("rollout_step_missing")
+
     requested_fraction = metadata.get("requested_capital_fraction")
+    requested_fraction_valid = (
+        not isinstance(requested_fraction, bool)
+        and isinstance(requested_fraction, int | float)
+        and math.isfinite(float(requested_fraction))
+    )
+    requested_value = float(requested_fraction) if requested_fraction_valid else None
     if (
-        isinstance(requested_fraction, bool)
-        or not isinstance(requested_fraction, int | float)
-        or not math.isfinite(float(requested_fraction))
+        not requested_fraction_valid
     ):
         reason_codes.append("requested_capital_fraction_missing")
-    elif float(requested_fraction) > config.max_live_capital_fraction:
+    elif requested_value > config.max_live_capital_fraction:
         reason_codes.append("requested_capital_fraction_exceeds_limit")
+
+    if requested_value is not None and rollout_plan is not None:
+        requested_fraction_not_in_rollout_plan = not any(
+            _float_equal(requested_value, fraction) for fraction in rollout_plan
+        ) or (
+            step_index_valid
+            and not _float_equal(
+                requested_value,
+                rollout_plan[int(rollout_step_index)],
+            )
+        )
+        if requested_fraction_not_in_rollout_plan:
+            reason_codes.append("requested_capital_fraction_not_in_rollout_plan")
+        first_live_step_index = _first_non_zero_rollout_index(rollout_plan)
+        if (
+            step_index_valid
+            and int(rollout_step_index) in {0, first_live_step_index}
+            and requested_value > config.max_initial_live_capital_fraction
+        ):
+            reason_codes.append("initial_capital_fraction_exceeds_limit")
     return reason_codes
 
 
@@ -313,6 +439,7 @@ def _release_manifest(
     candidate_run_id: str,
     pipeline_input_sha256: str,
     deployment_status: str,
+    identity_audit: dict[str, Any],
     stage_evidence: tuple[CICDStageEvidence, ...],
     stage_gates: list[dict[str, Any]],
     rollback_gate: dict[str, Any],
@@ -326,6 +453,9 @@ def _release_manifest(
         "phase": PHASE6_CICD_PHASE,
         "deployment_status": deployment_status,
         "pipeline_input_sha256": pipeline_input_sha256,
+        "candidate_identity": identity_audit["candidate_identity"],
+        "candidate_identity_verified": identity_audit["candidate_identity_verified"],
+        "candidate_identity_sha256": identity_audit["candidate_identity_sha256"],
         "stage_order": list(REQUIRED_STAGE_ORDER),
         "stage_evidence": [evidence.to_dict() for evidence in stage_evidence],
         "stage_gates": stage_gates,
@@ -359,6 +489,9 @@ def _acceptance_criteria(
         "full_pipeline_deterministic": (
             release_manifest_sha256
             == compute_phase6_release_manifest_sha256(release_manifest)
+        ),
+        "candidate_identity_consistent": bool(
+            release_manifest["candidate_identity_verified"]
         ),
         "reproducible_training_pipeline": gates["training"],
         "validation_passed": gates["validation"],
@@ -395,6 +528,44 @@ def _covers_required_multipliers(
         )
         for required_value in required
     )
+
+
+def _coerce_rollout_plan(value: Any) -> tuple[float, ...] | None:
+    if not isinstance(value, (list, tuple)):
+        return None
+    fractions: list[float] = []
+    for fraction in value:
+        if isinstance(fraction, bool):
+            return None
+        try:
+            fraction_value = float(fraction)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(fraction_value):
+            return None
+        fractions.append(fraction_value)
+    return tuple(fractions)
+
+
+def _rollout_plans_match(
+    observed: tuple[float, ...],
+    expected: tuple[float, ...],
+) -> bool:
+    return len(observed) == len(expected) and all(
+        _float_equal(observed_fraction, expected_fraction)
+        for observed_fraction, expected_fraction in zip(observed, expected, strict=True)
+    )
+
+
+def _first_non_zero_rollout_index(rollout_plan: tuple[float, ...]) -> int:
+    for index, fraction in enumerate(rollout_plan):
+        if fraction > 0.0:
+            return index
+    return 0
+
+
+def _float_equal(left: float, right: float) -> bool:
+    return abs(left - right) <= 1e-12
 
 
 def _dedupe(reason_codes: list[str]) -> list[str]:

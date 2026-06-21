@@ -30,6 +30,19 @@ metadata
 The stage evidence stream is ordered and hashed. Missing, duplicated, or
 out-of-order stages fail closed before deployment.
 
+Every stage must also carry the same candidate identity:
+
+```text
+candidate_run_id
+model_sha256
+policy_dataset_hash
+split_hash
+```
+
+Phase 6 verifies this identity across training, validation, shadow deployment,
+live deployment, and monitoring. A model, dataset, split, or candidate mismatch
+blocks the pipeline before live deployment.
+
 ## Hard Gates
 
 Phase 6 enforces these deployment rules:
@@ -75,6 +88,18 @@ The rollout policy is deterministic:
 The first live step must not exceed the configured initial capital limit, and
 the final live fraction must not exceed the configured max live capital limit.
 
+Live deployment evidence must include:
+
+```text
+rollout_capital_fractions
+rollout_step_index
+requested_capital_fraction
+```
+
+`rollout_capital_fractions` must exactly match the configured rollout plan.
+`requested_capital_fraction` must match the requested rollout step. The first
+non-zero live step must remain below `max_initial_live_capital_fraction`.
+
 Manual approval is required by default before the live deployment gate can pass.
 
 ## Rollback
@@ -100,9 +125,12 @@ threshold.
 Phase 6 emits:
 
 ```text
-phase6_cicd_pipeline_report.json
+phase6_cicd_pipeline_report_<release_id>.json
 release_manifest
 pipeline_input_sha256
+candidate_identity
+candidate_identity_verified
+candidate_identity_sha256
 release_manifest_sha256
 stage_gates
 rollback_gate
@@ -123,6 +151,7 @@ Phase 6 passes only if:
 
 ```text
 full_pipeline_deterministic=true
+candidate_identity_consistent=true
 reproducible_training_pipeline=true
 validation_passed=true
 shadow_deployment_passed=true
