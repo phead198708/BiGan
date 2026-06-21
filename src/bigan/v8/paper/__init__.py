@@ -22,14 +22,35 @@ from bigan.v8.paper.engine import (
     paper_fills_to_live_observations,
     run_paper_trading_harness,
 )
+from bigan.v8.paper.feed import (
+    DeterministicReplayFeed,
+    FeedHealthSnapshot,
+    ReadOnlyFeedError,
+    ReadOnlyFeedEvent,
+    ReadOnlyMarketFeed,
+    assert_readonly_feed_safe,
+    compute_feed_health,
+    synthetic_readonly_feed_events,
+)
 from bigan.v8.paper.ledger import PaperLedger
 from bigan.v8.paper.replay import synthetic_phase4_decisions
+from bigan.v8.paper.soak import (
+    DEFAULT_READONLY_SHADOW_CREATED_AT,
+    READONLY_SHADOW_SCHEMA_VERSION,
+    ReadOnlyShadowSoakConfig,
+    ReadOnlyShadowSoakResult,
+    run_readonly_shadow_soak,
+)
 
 __all__ = [
     "DEFAULT_PAPER_CREATED_AT",
+    "DEFAULT_READONLY_SHADOW_CREATED_AT",
     "PAPER_ARTIFACT_FILENAMES",
     "PAPER_TRADING_HARNESS_PHASE",
     "PRIMARY_PAPER_ARTIFACT_FILENAMES",
+    "READONLY_SHADOW_SCHEMA_VERSION",
+    "DeterministicReplayFeed",
+    "FeedHealthSnapshot",
     "PaperDegradationConfig",
     "PaperFill",
     "PaperHarnessConfig",
@@ -41,9 +62,18 @@ __all__ = [
     "PaperRunReport",
     "PaperSide",
     "PaperTradingError",
+    "ReadOnlyFeedError",
+    "ReadOnlyFeedEvent",
+    "ReadOnlyMarketFeed",
+    "ReadOnlyShadowSoakConfig",
+    "ReadOnlyShadowSoakResult",
+    "assert_readonly_feed_safe",
     "canonical_payload_sha256",
+    "compute_feed_health",
     "paper_fills_to_live_observations",
+    "run_readonly_shadow_soak",
     "run_paper_trading_harness",
     "stream_sha256",
     "synthetic_phase4_decisions",
+    "synthetic_readonly_feed_events",
 ]
