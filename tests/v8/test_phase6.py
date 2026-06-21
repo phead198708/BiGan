@@ -329,6 +329,48 @@ def test_phase6_blocks_cross_stage_model_identity_mismatch() -> None:
     assert gate_by_stage["live_deployment"]["allowed"] is False
 
 
+@pytest.mark.parametrize(
+    ("field_name", "reason_code"),
+    (
+        ("model_sha256", "model_sha256_invalid"),
+        ("policy_dataset_hash", "policy_dataset_hash_invalid"),
+        ("split_hash", "split_hash_invalid"),
+    ),
+)
+def test_phase6_blocks_invalid_stage_identity_hash(
+    field_name: str,
+    reason_code: str,
+) -> None:
+    candidate_run_id = f"phase6-invalid-{field_name}"
+    evidence = list(_stage_evidence(candidate_run_id))
+    validation = evidence[1]
+    invalid_identity = dict(validation.metadata)
+    invalid_identity[field_name] = "not-a-sha256"
+    evidence[1] = CICDStageEvidence(
+        stage=validation.stage,
+        passed=True,
+        artifact_sha256=validation.artifact_sha256,
+        report_sha256=validation.report_sha256,
+        run_id=validation.run_id,
+        metadata=invalid_identity,
+    )
+
+    result = run_phase6_cicd_pipeline(
+        candidate_run_id=candidate_run_id,
+        stage_evidence=tuple(evidence),
+        rollback_plan=_rollback_plan(),
+        config=_config(),
+    )
+
+    validation_gate = {
+        gate["stage"]: gate for gate in result.report.stage_gates
+    }["validation"]
+    assert not result.passed
+    assert result.report.candidate_identity_verified is False
+    assert validation_gate["allowed"] is False
+    assert reason_code in validation_gate["reason_codes"]
+
+
 def test_phase6_blocks_live_candidate_run_id_mismatch() -> None:
     candidate_run_id = "phase6-candidate-007"
     evidence = list(_stage_evidence(candidate_run_id))

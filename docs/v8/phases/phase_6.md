@@ -41,7 +41,9 @@ split_hash
 
 Phase 6 verifies this identity across training, validation, shadow deployment,
 live deployment, and monitoring. A model, dataset, split, or candidate mismatch
-blocks the pipeline before live deployment.
+blocks the pipeline before live deployment. `model_sha256`,
+`policy_dataset_hash`, and `split_hash` must also be valid SHA-256 hex digests
+in every stage metadata payload.
 
 ## Hard Gates
 

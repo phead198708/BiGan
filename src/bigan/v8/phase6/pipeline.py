@@ -29,21 +29,31 @@ _IDENTITY_FIELDS = (
     "split_hash",
 )
 
+_IDENTITY_SHA256_FIELDS = (
+    "model_sha256",
+    "policy_dataset_hash",
+    "split_hash",
+)
+
 _IDENTITY_REASON_CODES = {
     "candidate_run_id": (
         "candidate_run_id_missing",
+        None,
         "candidate_run_id_mismatch",
     ),
     "model_sha256": (
         "model_sha256_missing",
+        "model_sha256_invalid",
         "model_identity_mismatch",
     ),
     "policy_dataset_hash": (
         "policy_dataset_hash_missing",
+        "policy_dataset_hash_invalid",
         "policy_dataset_identity_mismatch",
     ),
     "split_hash": (
         "split_hash_missing",
+        "split_hash_invalid",
         "split_identity_mismatch",
     ),
 }
@@ -225,12 +235,20 @@ def _candidate_identity_audit(
         metadata = dict(evidence.metadata)
         reason_codes: list[str] = []
         for field_name in _IDENTITY_FIELDS:
-            missing_code, mismatch_code = _IDENTITY_REASON_CODES[field_name]
+            missing_code, invalid_code, mismatch_code = _IDENTITY_REASON_CODES[
+                field_name
+            ]
             observed = metadata.get(field_name)
             expected = candidate_identity[field_name]
             if observed is None:
                 reason_codes.append(missing_code)
                 continue
+            if (
+                field_name in _IDENTITY_SHA256_FIELDS
+                and not _looks_like_sha256(observed)
+                and invalid_code is not None
+            ):
+                reason_codes.append(invalid_code)
             if observed != expected:
                 reason_codes.append(mismatch_code)
         stage_reason_codes[evidence.stage] = _dedupe(reason_codes)
@@ -566,6 +584,12 @@ def _first_non_zero_rollout_index(rollout_plan: tuple[float, ...]) -> int:
 
 def _float_equal(left: float, right: float) -> bool:
     return abs(left - right) <= 1e-12
+
+
+def _looks_like_sha256(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        char in "0123456789abcdef" for char in value.lower()
+    )
 
 
 def _dedupe(reason_codes: list[str]) -> list[str]:
