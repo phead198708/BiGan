@@ -29,10 +29,12 @@ from bigan.v8.phase0 import (  # noqa: E402
     CausalFeatureBuilderConfig,
     CostAwareLabelBuilderConfig,
     CostModelConfig,
+    DatasetContract,
     Phase0Dataset,
     Phase0Pipeline,
     Phase0PipelineConfig,
     ValidationConfig,
+    assert_phase0_artifact_ready,
 )
 from bigan.v8.phase1 import (  # noqa: E402
     PolicyAcceptanceConfig,
@@ -103,6 +105,7 @@ class GoldenPathResult:
     run_id: str
     bundle_dir: Path
     phase0_dataset: Phase0Dataset
+    phase0_contract: DatasetContract
     phase1_5_result: PolicyTrainingRunResult
     phase2_result: Phase2EvaluationResult
     phase3_result: Phase3OptimizationResult
@@ -142,6 +145,15 @@ def run_golden_path(
             output_dir=phase0_dir,
         )
         _write_json(phase0_dir / "validation_report.json", phase0_dataset.validation_report.to_dict())
+        phase0_contract = assert_phase0_artifact_ready(phase0_dataset.manifest)
+        _write_json(
+            phase0_dir / "artifact_gate_report.json",
+            {
+                "passed": True,
+                "failures": [],
+                "contract": phase0_contract.to_dict(),
+            },
+        )
 
         phase1_5_result = run_policy_training(
             phase0_dataset,
@@ -244,6 +256,7 @@ def run_golden_path(
         _assert_hard_gates(
             identity=identity,
             phase0_dataset=phase0_dataset,
+            phase0_contract=phase0_contract,
             phase1_5_result=phase1_5_result,
             phase2_result=phase2_result,
             phase3_result=phase3_result,
@@ -256,6 +269,7 @@ def run_golden_path(
             run_id=run_id,
             identity=identity,
             phase0_dataset=phase0_dataset,
+            phase0_contract=phase0_contract,
             phase1_5_result=phase1_5_result,
             phase2_result=phase2_result,
             phase3_result=phase3_result,
@@ -270,6 +284,7 @@ def run_golden_path(
         run_id=run_id,
         bundle_dir=bundle_dir,
         phase0_dataset=phase0_dataset,
+        phase0_contract=phase0_contract,
         phase1_5_result=phase1_5_result,
         phase2_result=phase2_result,
         phase3_result=phase3_result,
@@ -609,6 +624,7 @@ def _assert_hard_gates(
     *,
     identity: Mapping[str, str],
     phase0_dataset: Phase0Dataset,
+    phase0_contract: DatasetContract,
     phase1_5_result: PolicyTrainingRunResult,
     phase2_result: Phase2EvaluationResult,
     phase3_result: Phase3OptimizationResult,
@@ -619,6 +635,8 @@ def _assert_hard_gates(
 ) -> None:
     phase_statuses = {
         "phase0": phase0_dataset.validation_report.passed,
+        "phase0_artifact": phase0_contract.dataset_hash
+        == phase0_dataset.manifest["dataset_hash"],
         "phase1_5": phase1_5_result.accepted,
         "phase2": phase2_result.passed,
         "phase3": phase3_result.passed,
@@ -695,6 +713,7 @@ def _bundle_manifest(
     run_id: str,
     identity: Mapping[str, str],
     phase0_dataset: Phase0Dataset,
+    phase0_contract: DatasetContract,
     phase1_5_result: PolicyTrainingRunResult,
     phase2_result: Phase2EvaluationResult,
     phase3_result: Phase3OptimizationResult,
@@ -720,12 +739,16 @@ def _bundle_manifest(
         "synthetic_market_data": _artifact_record(Path("phase0/synthetic_market_data.jsonl")),
         "phase0_manifest": _artifact_record(Path("phase0/manifest.json")),
         "phase0_validation_report": _artifact_record(Path("phase0/validation_report.json")),
+        "phase0_artifact_gate_report": _artifact_record(
+            Path("phase0/artifact_gate_report.json")
+        ),
         "phase0_features": _artifact_record(Path("phase0/features.parquet")),
         "phase0_labels": _artifact_record(Path("phase0/labels.parquet")),
         "phase1_5_run_manifest": _artifact_record(artifact_dir / "run_manifest.json"),
         "phase1_5_policy_dataset_manifest": _artifact_record(
             artifact_dir / "policy_dataset_manifest.json"
         ),
+        "phase1_5_dataset_profile": _artifact_record(artifact_dir / "dataset_profile.json"),
         "phase1_5_split_manifest": _artifact_record(artifact_dir / "split_manifest.json"),
         "phase1_5_training_manifest": _artifact_record(artifact_dir / "training_manifest.json"),
         "phase1_5_shadow_acceptance_report": _artifact_record(
@@ -750,8 +773,12 @@ def _bundle_manifest(
         "real_trading": False,
         "profitability_claim": False,
         "identity": dict(identity),
+        "phase0_artifact_ready": True,
+        "phase0_dataset_hash": phase0_contract.dataset_hash,
+        "phase0_dataset_contract": phase0_contract.to_dict(),
         "phase_statuses": {
             "phase0_validation_passed": phase0_dataset.validation_report.passed,
+            "phase0_artifact_ready": True,
             "phase1_5_candidate_accepted": phase1_5_result.accepted,
             "phase2_passed": phase2_result.passed,
             "phase3_passed": phase3_result.passed,

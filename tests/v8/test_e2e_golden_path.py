@@ -28,6 +28,10 @@ def test_v8_golden_path_dry_run_approves_staged_live_release(tmp_path: Path) -> 
     assert manifest["live_exchange_calls"] is False
     assert manifest["real_trading"] is False
     assert manifest["profitability_claim"] is False
+    assert manifest["phase0_artifact_ready"] is True
+    assert manifest["phase_statuses"]["phase0_artifact_ready"] is True
+    assert manifest["phase0_dataset_hash"] == first.phase0_dataset.manifest["dataset_hash"]
+    assert manifest["phase0_dataset_contract"] == first.phase0_contract.to_dict()
 
     assert _downstream_identity(first.phase2_result.report) == identity
     assert _downstream_identity(first.phase3_result.report) == identity
@@ -41,6 +45,7 @@ def test_v8_golden_path_dry_run_approves_staged_live_release(tmp_path: Path) -> 
     assert first.phase3_result.report.acceptance_criteria["cost_perturbation_robust"] is True
     assert set(first.phase3_result.report.cost_stress_metrics) == {"1.2", "1.5", "2"}
     assert first.phase5_result.report.safety_action["kill_switch_triggered"] is False
+    assert "phase1_5_dataset_profile" in manifest["artifacts"]
 
     for artifact_name, artifact in manifest["artifacts"].items():
         artifact_path = first.bundle_dir / artifact["path"]
