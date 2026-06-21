@@ -8,4 +8,6 @@ Phase 2 baseline has been established. Phase 4 replays the frozen policy stream
 through causal regime, lambda, and execution-aggressiveness adaptation gates.
 Phase 5 monitors shadow-vs-live degradation and emits fail-closed kill-switch
 and rollback actions.
+Phase 6 gates the full training, validation, shadow, staged-live, monitoring,
+and rollback lifecycle through a deterministic CI/CD release manifest.
 """
