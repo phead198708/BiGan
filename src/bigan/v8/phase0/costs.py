@@ -62,6 +62,71 @@ class CostBreakdown:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionCostSample:
+    """Observed execution-cost sample used to validate the cost model."""
+
+    entry: MarketData
+    exit: MarketData | None
+    observed_total_cost: float
+    order_size: float = 1.0
+    volatility: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.observed_total_cost < 0:
+            raise ValueError("observed_total_cost must be non-negative")
+        if self.order_size <= 0:
+            raise ValueError("order_size must be positive")
+        if self.volatility is not None and self.volatility < 0:
+            raise ValueError("volatility must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
+class CostCalibrationConfig:
+    """Bounded-error thresholds for real-execution cost validation."""
+
+    min_samples: int = 5
+    max_mean_absolute_error: float = 0.0025
+    max_mean_absolute_percentage_error: float = 0.35
+    max_abs_bias: float = 0.0015
+
+    def __post_init__(self) -> None:
+        if self.min_samples <= 0:
+            raise ValueError("min_samples must be positive")
+        if self.max_mean_absolute_error < 0:
+            raise ValueError("max_mean_absolute_error must be non-negative")
+        if self.max_mean_absolute_percentage_error < 0:
+            raise ValueError("max_mean_absolute_percentage_error must be non-negative")
+        if self.max_abs_bias < 0:
+            raise ValueError("max_abs_bias must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
+class CostCalibrationReport:
+    """Cost-model error report against observed executions."""
+
+    sample_count: int
+    passed: bool
+    estimated_mean_cost: float | None
+    observed_mean_cost: float | None
+    mean_absolute_error: float | None
+    mean_absolute_percentage_error: float | None
+    bias: float | None
+    max_absolute_error: float | None
+
+    def to_dict(self) -> dict[str, float | int | bool | None]:
+        return {
+            "sample_count": self.sample_count,
+            "passed": self.passed,
+            "estimated_mean_cost": self.estimated_mean_cost,
+            "observed_mean_cost": self.observed_mean_cost,
+            "mean_absolute_error": self.mean_absolute_error,
+            "mean_absolute_percentage_error": self.mean_absolute_percentage_error,
+            "bias": self.bias,
+            "max_absolute_error": self.max_absolute_error,
+        }
+
+
 class TradingCostModel:
     """Spread, fee, volatility-slippage, and liquidity-impact costs."""
 
@@ -125,6 +190,66 @@ class TradingCostModel:
             for multiplier in multipliers
         }
 
+    def validate_calibration(
+        self,
+        samples: list[ExecutionCostSample],
+        *,
+        config: CostCalibrationConfig | None = None,
+    ) -> CostCalibrationReport:
+        """Validate cost estimates against observed execution costs."""
+
+        calibration_config = config or CostCalibrationConfig()
+        if len(samples) < calibration_config.min_samples:
+            return CostCalibrationReport(
+                sample_count=len(samples),
+                passed=False,
+                estimated_mean_cost=None,
+                observed_mean_cost=None,
+                mean_absolute_error=None,
+                mean_absolute_percentage_error=None,
+                bias=None,
+                max_absolute_error=None,
+            )
+
+        estimates = [
+            self.estimate(
+                entry=sample.entry,
+                exit=sample.exit,
+                order_size=sample.order_size,
+                volatility=sample.volatility,
+            ).total_cost
+            for sample in samples
+        ]
+        observed = [sample.observed_total_cost for sample in samples]
+        errors = [
+            estimate - actual
+            for estimate, actual in zip(estimates, observed, strict=True)
+        ]
+        abs_errors = [abs(error) for error in errors]
+        pct_errors = [
+            abs(error) / max(actual, 1e-12)
+            for error, actual in zip(errors, observed, strict=True)
+        ]
+        mean_absolute_error = sum(abs_errors) / len(abs_errors)
+        mean_absolute_percentage_error = sum(pct_errors) / len(pct_errors)
+        bias = sum(errors) / len(errors)
+        passed = (
+            mean_absolute_error <= calibration_config.max_mean_absolute_error
+            and mean_absolute_percentage_error
+            <= calibration_config.max_mean_absolute_percentage_error
+            and abs(bias) <= calibration_config.max_abs_bias
+        )
+        return CostCalibrationReport(
+            sample_count=len(samples),
+            passed=passed,
+            estimated_mean_cost=sum(estimates) / len(estimates),
+            observed_mean_cost=sum(observed) / len(observed),
+            mean_absolute_error=mean_absolute_error,
+            mean_absolute_percentage_error=mean_absolute_percentage_error,
+            bias=bias,
+            max_absolute_error=max(abs_errors),
+        )
+
     def _spread_cost(self, entry: MarketData, exit: MarketData | None) -> float:
         entry_cost = _spread_fraction(entry)
         exit_cost = _spread_fraction(exit) if exit is not None else entry_cost
@@ -139,4 +264,3 @@ def _spread_fraction(row: MarketData | None) -> float:
     if mid <= 0.0:
         return 0.0
     return max(0.0, row.ask_price - row.bid_price) / mid
-

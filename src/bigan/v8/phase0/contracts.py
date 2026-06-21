@@ -42,6 +42,15 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     "day_of_week",
 )
 
+COST_COLUMNS: tuple[str, ...] = (
+    "spread_cost",
+    "fee_cost",
+    "slippage_cost",
+    "liquidity_impact_cost",
+    "total_cost",
+    "net_return",
+)
+
 
 class MarketData(BaseModel):
     """One normalized market observation.
@@ -303,6 +312,44 @@ LABEL_SCHEMA: pa.Schema = pa.schema(
     ],
     metadata={b"bigan.contract": b"v8.phase0.Label"},
 )
+
+
+class DatasetContract(BaseModel):
+    """Reproducible dataset-level contract.
+
+    This is the strict contract downstream phases should inspect before using a
+    Phase 0 artifact. It binds the feature schema, label/cost schema, metadata,
+    and deterministic dataset hash into one auditable object.
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    dataset_version: str = Field(min_length=1)
+    dataset_hash: str = Field(min_length=1)
+    market_schema: tuple[str, ...]
+    feature_schema: tuple[str, ...]
+    label_schema: tuple[str, ...]
+    cost_columns: tuple[str, ...] = COST_COLUMNS
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_contract(self) -> DatasetContract:
+        if self.market_schema != tuple(MARKET_DATA_SCHEMA.names):
+            raise ValueError("market_schema does not match Phase 0 MarketData schema")
+        if self.feature_schema != tuple(FEATURE_VECTOR_SCHEMA.names):
+            raise ValueError("feature_schema does not match Phase 0 FeatureVector schema")
+        if self.label_schema != tuple(LABEL_SCHEMA.names):
+            raise ValueError("label_schema does not match Phase 0 Label schema")
+        missing_cost_columns = set(self.cost_columns) - set(self.label_schema)
+        if missing_cost_columns:
+            raise ValueError(
+                "label_schema is missing cost columns: "
+                + ", ".join(sorted(missing_cost_columns))
+            )
+        return self
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
 
 
 def _optional_float(value: Any) -> float | None:

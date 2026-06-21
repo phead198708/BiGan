@@ -33,9 +33,12 @@ The strict contracts live in `src/bigan/v8/phase0/contracts.py`:
 - `Label`: future target timestamp, horizon, entry/exit price, gross return,
   spread cost, fee cost, volatility slippage, liquidity impact, total cost, and
   net return.
+- `DatasetContract`: deterministic dataset hash, market schema, feature schema,
+  label/cost schema, and artifact metadata.
 
 Arrow schemas are exported as `MARKET_DATA_SCHEMA`, `FEATURE_VECTOR_SCHEMA`, and
-`LABEL_SCHEMA`.
+`LABEL_SCHEMA`. Downstream phases must reject artifacts whose
+`dataset_contract` does not match these schemas.
 
 ## Cost Model
 
@@ -46,6 +49,8 @@ Arrow schemas are exported as `MARKET_DATA_SCHEMA`, `FEATURE_VECTOR_SCHEMA`, and
 - volatility-scaled slippage
 - square-root liquidity impact approximation
 - slippage stress multipliers, including `1.2`, `1.5`, and `2.0`
+- real-execution calibration via `ExecutionCostSample` and
+  `TradingCostModel.validate_calibration`
 
 Labels persist `net_return = gross_return - total_cost`.
 
@@ -55,10 +60,12 @@ Labels persist `net_return = gross_return - total_cost`.
 
 - feature inputs after `decision_ts`
 - feature availability after `decision_ts`
+- paired feature/label rows where `max(feature_timestamp) > label_start_time`
 - rolling-window provenance that crosses the feature cutoff
 - cross-timeframe/future feature provenance
 - feature names that indicate target/future/label leakage
 - suspicious feature-to-future-return correlations
+- temporal feature-distribution drift via KS, PSI, and KL divergence
 - label horizon violations
 - label cost/math mismatches
 - label/market-data entry and exit inconsistencies
@@ -74,6 +81,9 @@ The mandatory Phase 0 tests are in `tests/v8/test_phase0.py`:
 - label consistency across horizons
 - strict timestamp and cross-timeframe leakage rejection
 - deterministic dataset generation and schema checks
+- runtime feature/label causality checks
+- cost calibration against observed execution-cost samples
+- KS/PSI/KL distribution drift detection
 
 Run:
 
@@ -81,12 +91,18 @@ Run:
 pytest tests/v8/test_phase0.py -q
 ```
 
+CI hard gates live in `.github/workflows/v8-phase0.yml` and run ruff plus the
+Phase 0 pytest suite for v8 changes.
+
 ## Acceptance Checklist
 
 - zero detectable leakage
 - strict feature causality enforced
 - label correctness verified against market rows
+- feature/label causality verified with `max(feature_timestamp) <= label_start_time`
 - net returns include spread, fee, slippage, and liquidity impact
+- cost model calibrated against observed execution samples before production use
+- KS/PSI/KL statistical integrity checks pass
 - deterministic dataset hash is stable across input row order
 - no model training inside Phase 0
 

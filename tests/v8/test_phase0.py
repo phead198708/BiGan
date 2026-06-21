@@ -15,7 +15,10 @@ from bigan.v8.phase0 import (
     LABEL_SCHEMA,
     CausalFeatureBuilder,
     CostAwareLabelBuilder,
+    CostCalibrationConfig,
     CostModelConfig,
+    DatasetContract,
+    ExecutionCostSample,
     FeatureProvenance,
     FeatureVector,
     IntegrityValidator,
@@ -92,6 +95,12 @@ def test_phase0_pipeline_is_cost_aware_causal_and_reproducible(tmp_path: Path) -
     assert first.manifest["feature_rows"] == len(rows)
     assert first.manifest["label_rows"] > 0
     assert first.manifest["validation"]["acceptance_criteria"]["zero_detectable_leakage"]
+    assert first.manifest["validation"]["acceptance_criteria"]["statistical_validity_verified"]
+
+    contract = DatasetContract(**first.manifest["dataset_contract"])
+    assert contract.dataset_hash == first.manifest["dataset_hash"]
+    assert "total_cost" in contract.cost_columns
+    assert "net_return" in contract.cost_columns
 
     assert all(feature.max_input_ts <= feature.decision_ts for feature in first.features)
     assert all(
@@ -319,15 +328,120 @@ def test_timestamp_and_cross_timeframe_leakage_are_rejected() -> None:
         }
     )
 
+    matching_label = next(
+        label
+        for label in dataset.labels
+        if label.source == bad_feature.source
+        and label.instrument_id == bad_feature.instrument_id
+        and label.decision_ts == bad_feature.decision_ts
+    )
     report = IntegrityValidator().validate_all(
         features=[bad_feature],
-        labels=[],
+        labels=[matching_label],
         market_data=None,
     )
 
     assert not report.passed
     codes = {failure.code for failure in report.failures}
     assert "feature_causality" in codes
+    assert "feature_label_causality" in codes
     assert "cross_timeframe_leakage" in codes
     assert "forbidden_feature_name" in codes
 
+
+def test_statistical_integrity_detects_distribution_drift() -> None:
+    t0 = _ts_at(2026, 6, 1, 12, 0)
+    features: list[FeatureVector] = []
+    for idx in range(100):
+        decision_ts = t0 + idx * MINUTE_MS
+        value = 0.0 if idx < 70 else 10.0
+        provenance = FeatureProvenance(
+            feature_name="distribution_probe",
+            input_start_ts=decision_ts,
+            input_end_ts=decision_ts,
+            available_at_ts=decision_ts,
+            lookback_ms=0,
+        )
+        features.append(
+            FeatureVector(
+                decision_ts=decision_ts,
+                feature_cutoff_ts=decision_ts,
+                lookback_start_ts=decision_ts,
+                max_input_ts=decision_ts,
+                source="polymarket",
+                instrument_id="btc-updown-15m:UP",
+                features={"distribution_probe": value},
+                provenance={"distribution_probe": provenance},
+            )
+        )
+
+    report = IntegrityValidator(
+        ValidationConfig(
+            min_drift_rows=20,
+            max_ks_statistic=0.2,
+            max_psi=0.2,
+            max_kl_divergence=0.2,
+        )
+    ).validate_statistical_integrity(features)
+
+    assert not report.passed
+    assert any(
+        failure.code == "feature_distribution_drift"
+        and failure.column == "distribution_probe"
+        for failure in report.failures
+    )
+    metrics = report.metrics["statistical_integrity"]["metrics"]["distribution_probe"]
+    assert metrics["ks_statistic"] == pytest.approx(1.0)
+    assert metrics["psi"] > 0.2
+    assert metrics["kl_divergence"] > 0.2
+
+
+def test_cost_model_calibration_validates_against_observed_execution_costs() -> None:
+    loader = MarketDataLoader()
+    market_data = loader.load_rows(_market_rows(10))
+    cost_model = TradingCostModel(
+        CostModelConfig(
+            fee_bps=5.0,
+            base_slippage_bps=1.0,
+            volatility_slippage_factor=0.10,
+            liquidity_impact_factor=0.002,
+        )
+    )
+    samples: list[ExecutionCostSample] = []
+    for entry, exit_row in zip(market_data, market_data[1:], strict=False):
+        estimate = cost_model.estimate(entry=entry, exit=exit_row, volatility=0.001)
+        samples.append(
+            ExecutionCostSample(
+                entry=entry,
+                exit=exit_row,
+                volatility=0.001,
+                observed_total_cost=estimate.total_cost * 1.02,
+            )
+        )
+
+    calibration_config = CostCalibrationConfig(
+        min_samples=5,
+        max_mean_absolute_error=0.001,
+        max_mean_absolute_percentage_error=0.05,
+        max_abs_bias=0.001,
+    )
+    report = cost_model.validate_calibration(samples, config=calibration_config)
+
+    assert report.passed
+    assert report.sample_count == len(samples)
+    assert report.mean_absolute_percentage_error == pytest.approx(0.02 / 1.02, rel=1e-2)
+
+    bad_samples = [
+        ExecutionCostSample(
+            entry=sample.entry,
+            exit=sample.exit,
+            volatility=sample.volatility,
+            observed_total_cost=sample.observed_total_cost * 4.0,
+        )
+        for sample in samples
+    ]
+    bad_report = cost_model.validate_calibration(bad_samples, config=calibration_config)
+
+    assert not bad_report.passed
+    assert bad_report.mean_absolute_percentage_error is not None
+    assert bad_report.mean_absolute_percentage_error > 0.05

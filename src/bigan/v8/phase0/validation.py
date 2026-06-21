@@ -21,6 +21,12 @@ class ValidationConfig:
     min_correlation_rows: int = 30
     numeric_tolerance: float = 1e-9
     forbidden_feature_tokens: tuple[str, ...] = ("future", "target", "label", "lead", "forward")
+    min_drift_rows: int = 60
+    drift_bins: int = 10
+    max_ks_statistic: float = 0.95
+    max_psi: float = 10.0
+    max_kl_divergence: float = 10.0
+    drift_excluded_columns: tuple[str, ...] = ("minute_of_day", "day_of_week")
 
     def __post_init__(self) -> None:
         if not 0.0 < self.max_abs_feature_future_corr <= 1.0:
@@ -29,6 +35,16 @@ class ValidationConfig:
             raise ValueError("min_correlation_rows must be at least 3")
         if self.numeric_tolerance <= 0:
             raise ValueError("numeric_tolerance must be positive")
+        if self.min_drift_rows < 4:
+            raise ValueError("min_drift_rows must be at least 4")
+        if self.drift_bins < 2:
+            raise ValueError("drift_bins must be at least 2")
+        if not 0.0 < self.max_ks_statistic <= 1.0:
+            raise ValueError("max_ks_statistic must be in (0, 1]")
+        if self.max_psi < 0:
+            raise ValueError("max_psi must be non-negative")
+        if self.max_kl_divergence < 0:
+            raise ValueError("max_kl_divergence must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +96,9 @@ class ValidationReport:
                 "label_correctness_verified": not any(
                     failure.code.startswith("label_") for failure in self.failures
                 ),
+                "statistical_validity_verified": not any(
+                    failure.code in {"feature_distribution_drift"} for failure in self.failures
+                ),
                 "cost_model_realistic": not any(
                     failure.code in {"label_cost_math", "negative_cost"} for failure in self.failures
                 ),
@@ -108,10 +127,12 @@ class IntegrityValidator:
             report.metrics["dataset_hash"] = dataset_hash
         for check in (
             self.validate_feature_causality(features),
+            self.validate_feature_label_causality(features, labels),
             self.validate_rolling_windows(features),
             self.detect_cross_timeframe_leakage(features),
             self.validate_label_consistency(labels, market_data=market_data),
             self.check_feature_future_correlations(features, labels),
+            self.validate_statistical_integrity(features),
         ):
             report.extend(check)
         return report
@@ -138,6 +159,51 @@ class IntegrityValidator:
                     code="feature_causality",
                     message="features use inputs unavailable at the decision timestamp",
                     row_count=len(offenders),
+                )
+            )
+        return ValidationReport(failures=failures)
+
+    def validate_feature_label_causality(
+        self,
+        features: list[FeatureVector],
+        labels: list[Label],
+    ) -> ValidationReport:
+        """Enforce ``max(feature_timestamp) <= label_start_time`` at runtime."""
+
+        feature_by_key = {
+            (feature.source, feature.instrument_id, feature.decision_ts): feature
+            for feature in features
+        }
+        missing_feature_count = 0
+        causality_offenders = 0
+        for label in labels:
+            feature = feature_by_key.get((label.source, label.instrument_id, label.decision_ts))
+            if feature is None:
+                missing_feature_count += 1
+                continue
+            max_feature_timestamp = max(
+                [feature.max_input_ts]
+                + [provenance.input_end_ts for provenance in feature.provenance.values()]
+                + [provenance.available_at_ts for provenance in feature.provenance.values()]
+            )
+            if max_feature_timestamp > label.decision_ts:
+                causality_offenders += 1
+
+        failures: list[ValidationFailure] = []
+        if missing_feature_count:
+            failures.append(
+                ValidationFailure(
+                    code="feature_label_missing_feature",
+                    message="labels exist without a matching feature row",
+                    row_count=missing_feature_count,
+                )
+            )
+        if causality_offenders:
+            failures.append(
+                ValidationFailure(
+                    code="feature_label_causality",
+                    message="max(feature_timestamp) exceeds label_start_time",
+                    row_count=causality_offenders,
                 )
             )
         return ValidationReport(failures=failures)
@@ -243,6 +309,70 @@ class IntegrityValidator:
         return ValidationReport(
             failures=failures,
             metrics={"feature_future_correlations": correlations},
+        )
+
+    def validate_statistical_integrity(
+        self,
+        features: list[FeatureVector],
+    ) -> ValidationReport:
+        """Check temporal feature-distribution stability with KS, PSI, and KL."""
+
+        ordered = sorted(features, key=lambda feature: feature.decision_ts)
+        if len(ordered) < self.config.min_drift_rows:
+            return ValidationReport(
+                metrics={
+                    "statistical_integrity": {
+                        "checked": False,
+                        "reason": "insufficient_rows",
+                        "row_count": len(ordered),
+                    }
+                }
+            )
+
+        split_index = max(1, int(len(ordered) * 0.7))
+        reference = ordered[:split_index]
+        candidate = ordered[split_index:]
+        drift_metrics: dict[str, dict[str, float]] = {}
+        failures: list[ValidationFailure] = []
+        excluded = set(self.config.drift_excluded_columns)
+        for column in _feature_columns_present(ordered):
+            if column in excluded:
+                continue
+            ref_values = _finite_feature_values(reference, column)
+            cand_values = _finite_feature_values(candidate, column)
+            if len(ref_values) < 2 or len(cand_values) < 2:
+                continue
+            stats = _distribution_metrics(
+                ref_values,
+                cand_values,
+                bins=self.config.drift_bins,
+            )
+            if stats is None:
+                continue
+            drift_metrics[column] = stats
+            if (
+                stats["ks_statistic"] > self.config.max_ks_statistic
+                or stats["psi"] > self.config.max_psi
+                or stats["kl_divergence"] > self.config.max_kl_divergence
+            ):
+                failures.append(
+                    ValidationFailure(
+                        code="feature_distribution_drift",
+                        message=(
+                            "feature distribution drift exceeds KS/PSI/KL thresholds"
+                        ),
+                        row_count=len(ref_values) + len(cand_values),
+                        column=column,
+                    )
+                )
+        return ValidationReport(
+            failures=failures,
+            metrics={
+                "statistical_integrity": {
+                    "checked": bool(drift_metrics),
+                    "metrics": drift_metrics,
+                }
+            },
         )
 
     def validate_label_consistency(
@@ -409,6 +539,66 @@ def _pearson(x_values: list[float], y_values: list[float]) -> float | None:
     if np.std(x) == 0.0 or np.std(y) == 0.0:
         return None
     return float(np.corrcoef(x, y)[0, 1])
+
+
+def _finite_feature_values(features: list[FeatureVector], column: str) -> list[float]:
+    values = [
+        float(feature.features[column])
+        for feature in features
+        if column in feature.features and feature.features[column] is not None
+    ]
+    array = np.asarray(values, dtype=float)
+    return [float(value) for value in array[np.isfinite(array)]]
+
+
+def _distribution_metrics(
+    reference_values: list[float],
+    candidate_values: list[float],
+    *,
+    bins: int,
+) -> dict[str, float] | None:
+    reference = np.asarray(reference_values, dtype=float)
+    candidate = np.asarray(candidate_values, dtype=float)
+    combined = np.concatenate([reference, candidate])
+    if np.min(combined) == np.max(combined):
+        return None
+    edges = np.quantile(reference, np.linspace(0.0, 1.0, bins + 1))
+    edges = np.unique(edges)
+    if len(edges) < 3:
+        edges = np.linspace(float(np.min(combined)), float(np.max(combined)), bins + 1)
+    edges[0] = min(edges[0], float(np.min(combined)))
+    edges[-1] = max(edges[-1], float(np.max(combined)))
+    ref_pct = _histogram_percentages(reference, edges)
+    cand_pct = _histogram_percentages(candidate, edges)
+    epsilon = 1e-6
+    ref_safe = np.clip(ref_pct, epsilon, None)
+    cand_safe = np.clip(cand_pct, epsilon, None)
+    ref_safe = ref_safe / np.sum(ref_safe)
+    cand_safe = cand_safe / np.sum(cand_safe)
+    psi = float(np.sum((cand_safe - ref_safe) * np.log(cand_safe / ref_safe)))
+    kl_divergence = float(np.sum(cand_safe * np.log(cand_safe / ref_safe)))
+    return {
+        "ks_statistic": _ks_statistic(reference, candidate),
+        "psi": psi,
+        "kl_divergence": kl_divergence,
+    }
+
+
+def _histogram_percentages(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    counts, _ = np.histogram(values, bins=edges)
+    total = np.sum(counts)
+    if total == 0:
+        return np.zeros_like(counts, dtype=float)
+    return counts.astype(float) / float(total)
+
+
+def _ks_statistic(reference: np.ndarray, candidate: np.ndarray) -> float:
+    points = np.sort(np.unique(np.concatenate([reference, candidate])))
+    ref_sorted = np.sort(reference)
+    cand_sorted = np.sort(candidate)
+    ref_cdf = np.searchsorted(ref_sorted, points, side="right") / len(ref_sorted)
+    cand_cdf = np.searchsorted(cand_sorted, points, side="right") / len(cand_sorted)
+    return float(np.max(np.abs(ref_cdf - cand_cdf)))
 
 
 def _duplicate_label_count(labels: list[Label]) -> int:

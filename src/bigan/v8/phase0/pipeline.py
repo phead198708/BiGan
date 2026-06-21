@@ -17,7 +17,9 @@ from bigan.v8.phase0.contracts import (
     FEATURE_COLUMNS,
     FEATURE_VECTOR_SCHEMA,
     LABEL_SCHEMA,
+    MARKET_DATA_SCHEMA,
     PHASE0_DATASET_VERSION,
+    DatasetContract,
     FeatureVector,
     Label,
     MarketData,
@@ -121,6 +123,18 @@ class Phase0Pipeline:
         features = self.feature_builder.build(aligned)
         labels = self.label_builder.build(aligned, features)
         dataset_hash = _dataset_hash(features, labels)
+        contract = DatasetContract(
+            dataset_version=PHASE0_DATASET_VERSION,
+            dataset_hash=dataset_hash,
+            market_schema=tuple(MARKET_DATA_SCHEMA.names),
+            feature_schema=tuple(FEATURE_VECTOR_SCHEMA.names),
+            label_schema=tuple(LABEL_SCHEMA.names),
+            metadata={
+                "market_rows": len(market_data),
+                "feature_rows": len(features),
+                "label_rows": len(labels),
+            },
+        )
         validation_report = self.validator.validate_all(
             features=features,
             labels=labels,
@@ -134,6 +148,7 @@ class Phase0Pipeline:
             "feature_rows": len(features),
             "label_rows": len(labels),
             "feature_columns": list(FEATURE_COLUMNS),
+            "dataset_contract": contract.to_dict(),
             "config": self.config.to_dict(),
             "validation": validation_report.to_dict(),
         }
@@ -173,4 +188,3 @@ def _dataset_hash(features: list[FeatureVector], labels: list[Label]) -> str:
         "utf-8"
     )
     return hashlib.sha256(encoded).hexdigest()
-
