@@ -12,13 +12,18 @@ from typing import Any, Literal
 
 PAPER_TRADING_HARNESS_PHASE = "paper_trading_harness"
 DEFAULT_PAPER_CREATED_AT = "1970-01-01T00:00:00Z"
-PAPER_ARTIFACT_FILENAMES: tuple[str, ...] = (
+PRIMARY_PAPER_ARTIFACT_FILENAMES: tuple[str, ...] = (
     "paper_orders.jsonl",
     "paper_fills.jsonl",
     "paper_ledger.jsonl",
     "paper_positions.json",
     "paper_pnl_report.json",
     "paper_bundle_manifest.json",
+)
+PAPER_ARTIFACT_FILENAMES: tuple[str, ...] = (
+    *PRIMARY_PAPER_ARTIFACT_FILENAMES,
+    "phase5_safety_layer_report.json",
+    "phase6_cicd_pipeline_report_<release_id>.json",
 )
 
 PaperSide = Literal["buy", "sell", "hold"]
@@ -68,6 +73,7 @@ class PaperHarnessConfig:
     degradation: PaperDegradationConfig | None = None
     upstream_training_report_sha256: str = "2" * 64
     upstream_validation_report_sha256: str = "3" * 64
+    overwrite_existing: bool = False
     broker_write_enabled: bool = False
     paper_only: bool = True
     capital_at_risk: bool = False
@@ -257,7 +263,13 @@ class PaperFill:
 
 @dataclass(frozen=True, slots=True)
 class PaperLedgerEntry:
-    """Paper-only ledger entry produced by applying a fill."""
+    """Paper-only ledger entry produced by applying a fill.
+
+    Accounting units are synthetic and deterministic: position fields are
+    normalized action fractions, cash fields are fixture notional balances, and
+    ``net_return`` / ``realized_pnl`` are normalized return values rather than
+    real-currency PnL.
+    """
 
     entry_id: str
     order_id: str
@@ -336,7 +348,11 @@ class PaperPositionSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class PaperRunReport:
-    """Auditable paper harness report."""
+    """Auditable immutable paper harness report used as Phase 6 input evidence.
+
+    The Phase 6 report hash is intentionally recorded in the bundle manifest
+    only, keeping ``paper_pnl_report.json`` stable after Phase 6 consumes it.
+    """
 
     phase: str
     run_id: str
@@ -358,7 +374,6 @@ class PaperRunReport:
     max_drawdown: float
     total_execution_cost: float
     phase5_report_sha256: str | None
-    phase6_report_sha256: str | None
     acceptance_criteria: Mapping[str, bool]
     config: Mapping[str, Any]
     created_at: str
@@ -385,10 +400,10 @@ class PaperRunReport:
         ):
             if not looks_like_sha256(str(getattr(self, field_name))):
                 raise ValueError(f"{field_name} must be a SHA-256 hex digest")
-        for field_name in ("phase5_report_sha256", "phase6_report_sha256"):
-            value = getattr(self, field_name)
-            if value is not None and not looks_like_sha256(value):
-                raise ValueError(f"{field_name} must be a SHA-256 hex digest")
+        if self.phase5_report_sha256 is not None and not looks_like_sha256(
+            self.phase5_report_sha256
+        ):
+            raise ValueError("phase5_report_sha256 must be a SHA-256 hex digest")
         if not self.acceptance_criteria:
             raise ValueError("acceptance_criteria must not be empty")
 

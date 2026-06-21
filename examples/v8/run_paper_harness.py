@@ -34,6 +34,7 @@ def run_paper_harness(
     *,
     run_id: str = DEFAULT_RUN_ID,
     inject_degradation: bool = False,
+    overwrite_existing: bool = False,
 ) -> dict[str, object]:
     """Run a deterministic paper-only harness and return a concise summary."""
 
@@ -57,6 +58,7 @@ def run_paper_harness(
             if inject_degradation
             else None
         ),
+        overwrite_existing=overwrite_existing,
     )
     result = run_paper_trading_harness(
         decisions=synthetic_phase4_decisions(),
@@ -96,11 +98,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Inject deterministic paper degradation to exercise the Phase 5 kill-switch.",
     )
+    parser.add_argument(
+        "--overwrite-existing",
+        action="store_true",
+        help="Replace an existing run-scoped paper artifact bundle.",
+    )
     args = parser.parse_args(argv)
     summary = run_paper_harness(
         args.output_dir,
         run_id=args.run_id,
         inject_degradation=args.inject_degradation,
+        overwrite_existing=args.overwrite_existing,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0

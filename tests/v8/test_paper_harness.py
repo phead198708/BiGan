@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 
 from bigan.v8.paper import (
+    PAPER_ARTIFACT_FILENAMES,
+    PRIMARY_PAPER_ARTIFACT_FILENAMES,
     PaperDegradationConfig,
     PaperHarnessConfig,
     PaperTradingError,
@@ -39,6 +41,7 @@ def test_paper_harness_writes_ledger_phase5_and_phase6_evidence(tmp_path: Path) 
     _assert_required_artifacts(first.artifact_paths)
     _assert_paper_artifact_safety_flags(first.output_dir)
     _assert_bundle_hashes(first.bundle_manifest, first.output_dir)
+    _assert_phase6_paper_evidence_hashes(first)
 
     assert first.paper_report.paper_order_stream_sha256 == stream_sha256(first.orders)
     assert first.paper_report.paper_fill_stream_sha256 == stream_sha256(first.fills)
@@ -105,6 +108,30 @@ def test_paper_harness_refuses_broker_write_configuration(tmp_path: Path) -> Non
         run_paper_trading_harness(decisions=(), config=_config(tmp_path / "empty"))
 
 
+def test_paper_harness_output_dir_fails_closed_by_default(tmp_path: Path) -> None:
+    output_dir = tmp_path / "existing"
+    output_dir.mkdir()
+
+    with pytest.raises(FileExistsError, match="overwrite_existing=True"):
+        _run(output_dir, run_id="existing-default")
+
+    result = run_paper_trading_harness(
+        decisions=synthetic_phase4_decisions(),
+        config=_config(
+            output_dir,
+            run_id="existing-overwrite",
+            overwrite_existing=True,
+        ),
+    )
+    assert result.artifact_paths["paper_bundle_manifest"].exists()
+
+
+def test_paper_artifact_filename_contract_includes_phase_reports() -> None:
+    assert set(PRIMARY_PAPER_ARTIFACT_FILENAMES).issubset(PAPER_ARTIFACT_FILENAMES)
+    assert "phase5_safety_layer_report.json" in PAPER_ARTIFACT_FILENAMES
+    assert "phase6_cicd_pipeline_report_<release_id>.json" in PAPER_ARTIFACT_FILENAMES
+
+
 def _run(
     output_dir: Path,
     *,
@@ -123,6 +150,7 @@ def _config(
     run_id: str = "paper-smoke",
     degradation: PaperDegradationConfig | None = None,
     broker_write_enabled: bool = False,
+    overwrite_existing: bool = False,
 ) -> PaperHarnessConfig:
     return PaperHarnessConfig(
         run_id=run_id,
@@ -136,6 +164,7 @@ def _config(
         created_at="2026-06-22T01:00:00Z",
         degradation=degradation,
         broker_write_enabled=broker_write_enabled,
+        overwrite_existing=overwrite_existing,
     )
 
 
@@ -172,6 +201,7 @@ def _assert_paper_artifact_safety_flags(output_dir: Path) -> None:
     report = _read_json(output_dir / "paper_pnl_report.json")
     assert report["paper_only"] is True
     assert report["capital_at_risk"] is False
+    assert "phase6_report_sha256" not in report
     bundle = _read_json(output_dir / "paper_bundle_manifest.json")
     assert bundle["paper_only"] is True
     assert bundle["capital_at_risk"] is False
@@ -187,10 +217,24 @@ def _assert_bundle_hashes(bundle: dict[str, Any], output_dir: Path) -> None:
         "paper_fill_stream_sha256",
         "paper_ledger_sha256",
         "paper_positions_sha256",
+        "paper_report_sha256",
         "phase5_report_sha256",
         "phase6_report_sha256",
     ):
         assert len(bundle[field_name]) == 64
+
+
+def _assert_phase6_paper_evidence_hashes(result: Any) -> None:
+    paper_report_path = result.artifact_paths["paper_pnl_report"]
+    paper_report_sha256 = _sha256_file(paper_report_path)
+    stage_by_name = {
+        stage["stage"]: stage
+        for stage in result.phase6_result.report.release_manifest["stage_evidence"]
+    }
+
+    assert stage_by_name["shadow_deployment"]["report_sha256"] == paper_report_sha256
+    assert stage_by_name["live_deployment"]["report_sha256"] == paper_report_sha256
+    assert result.bundle_manifest["paper_report_sha256"] == paper_report_sha256
 
 
 def _read_json(path: Path) -> dict[str, Any]:

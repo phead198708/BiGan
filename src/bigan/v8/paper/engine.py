@@ -72,6 +72,11 @@ def run_paper_trading_harness(
         raise PaperTradingError("paper harness requires at least one Phase 4 decision")
     output_dir = Path(config.output_dir or ".").resolve()
     if output_dir.exists():
+        if not config.overwrite_existing:
+            raise FileExistsError(
+                f"paper harness output_dir already exists: {output_dir}; "
+                "set overwrite_existing=True to replace it"
+            )
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
 
@@ -114,7 +119,6 @@ def run_paper_trading_harness(
         ledger_entries=ledger_entries,
         positions=positions,
         phase5_report_sha256=phase5_report_sha256,
-        phase6_report_sha256=None,
     )
     _write_json(output_dir / "paper_pnl_report.json", paper_report.to_dict())
     artifact_paths["paper_pnl_report"] = output_dir / "paper_pnl_report.json"
@@ -137,17 +141,6 @@ def run_paper_trading_harness(
         raise PaperTradingError("Phase 6 did not write a report")
 
     phase6_report_sha256 = _file_sha256(phase6_result.report_path)
-    paper_report = _build_paper_report(
-        config=config,
-        orders=orders,
-        fills=fills,
-        ledger_entries=ledger_entries,
-        positions=positions,
-        phase5_report_sha256=phase5_report_sha256,
-        phase6_report_sha256=phase6_report_sha256,
-    )
-    _write_json(output_dir / "paper_pnl_report.json", paper_report.to_dict())
-    paper_report_sha256 = _file_sha256(output_dir / "paper_pnl_report.json")
     artifact_paths.update(
         {
             "paper_pnl_report": output_dir / "paper_pnl_report.json",
@@ -424,7 +417,6 @@ def _build_paper_report(
     ledger_entries: tuple[PaperLedgerEntry, ...],
     positions: tuple[PaperPositionSnapshot, ...],
     phase5_report_sha256: str | None,
-    phase6_report_sha256: str | None,
 ) -> PaperRunReport:
     net_returns = [fill.net_return for fill in fills]
     total_execution_cost = sum(fill.total_execution_cost for fill in fills)
@@ -454,8 +446,6 @@ def _build_paper_report(
         "phase5_evidence_recorded": phase5_report_sha256 is not None,
         "broker_exchange_write_disabled": not config.broker_write_enabled,
     }
-    if phase6_report_sha256 is not None:
-        criteria["phase6_paper_evidence_recorded"] = True
     return PaperRunReport(
         phase=PAPER_TRADING_HARNESS_PHASE,
         run_id=config.run_id,
@@ -477,7 +467,6 @@ def _build_paper_report(
         max_drawdown=_max_drawdown(net_returns),
         total_execution_cost=total_execution_cost,
         phase5_report_sha256=phase5_report_sha256,
-        phase6_report_sha256=phase6_report_sha256,
         acceptance_criteria=criteria,
         config=config.to_dict(),
         created_at=config.created_at,
