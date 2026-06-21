@@ -15,6 +15,17 @@ SUPPORTED_POLICY_OBJECTIVES: tuple[str, ...] = (
     "rank:pairwise",
 )
 
+SUPPORTED_TARGET_ENCODINGS: tuple[str, ...] = (
+    "binary_positive_net_return_threshold",
+    "rank_discrete_net_return_quality_bucket",
+)
+
+SUPPORTED_RANKING_GROUP_STRATEGIES: tuple[str, ...] = (
+    "source_instrument_regime",
+    "source_instrument",
+    "source_instrument_day",
+)
+
 FORBIDDEN_DIRECT_PNL_TOKENS: tuple[str, ...] = (
     "pnl",
     "profit",
@@ -27,6 +38,15 @@ FORBIDDEN_DIRECT_PNL_TOKENS: tuple[str, ...] = (
 )
 
 PolicyObjective = Literal["binary:logistic", "rank:pairwise"]
+PolicyTargetEncoding = Literal[
+    "binary_positive_net_return_threshold",
+    "rank_discrete_net_return_quality_bucket",
+]
+RankingGroupStrategy = Literal[
+    "source_instrument_regime",
+    "source_instrument",
+    "source_instrument_day",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,21 +54,36 @@ class PolicyDatasetConfig:
     """Configuration for converting Phase 0 labels into pure policy targets."""
 
     horizon_ms: int | None = None
+    target_encoding: PolicyTargetEncoding = "binary_positive_net_return_threshold"
     positive_return_threshold: float = 0.0
+    rank_quality_bucket_edges: tuple[float, ...] = (-0.005, 0.0, 0.005)
     max_position_size: float = 1.0
     feature_columns: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.horizon_ms is not None and self.horizon_ms <= 0:
             raise ValueError("horizon_ms must be positive when provided")
+        if self.target_encoding not in SUPPORTED_TARGET_ENCODINGS:
+            raise ValueError(
+                "target_encoding must be one of "
+                + ", ".join(SUPPORTED_TARGET_ENCODINGS)
+            )
         if not 0.0 < self.max_position_size <= 1.0:
             raise ValueError("max_position_size must be in (0, 1]")
         if self.positive_return_threshold < 0.0:
             raise ValueError("positive_return_threshold must be non-negative")
+        previous: float | None = None
+        for edge in self.rank_quality_bucket_edges:
+            if not math.isfinite(edge):
+                raise ValueError("rank_quality_bucket_edges must be finite")
+            if previous is not None and edge <= previous:
+                raise ValueError("rank_quality_bucket_edges must be strictly increasing")
+            previous = edge
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["feature_columns"] = list(self.feature_columns)
+        payload["rank_quality_bucket_edges"] = list(self.rank_quality_bucket_edges)
         return payload
 
 
@@ -60,9 +95,8 @@ class PolicyTrainingExample:
     source: str
     instrument_id: str
     features: Mapping[str, float | int | None]
-    target_action: float
-    target_score: float
-    net_return: float
+    target_label: float
+    shadow_net_return: float
     horizon_ms: int
     regime_key: str
 
@@ -75,14 +109,16 @@ class PolicyTrainingExample:
             raise ValueError("instrument_id is required")
         if not self.features:
             raise ValueError("features must not be empty")
-        if not 0.0 <= self.target_action <= 1.0:
-            raise ValueError("target_action must be in [0, 1]")
-        if not math.isfinite(self.target_score):
-            raise ValueError("target_score must be finite")
-        if not math.isfinite(self.net_return):
-            raise ValueError("net_return must be finite")
+        if not math.isfinite(self.target_label):
+            raise ValueError("target_label must be finite")
+        if self.target_label < 0.0:
+            raise ValueError("target_label must be non-negative")
+        if not math.isfinite(self.shadow_net_return):
+            raise ValueError("shadow_net_return must be finite")
         if self.horizon_ms <= 0:
             raise ValueError("horizon_ms must be positive")
+        if not self.regime_key:
+            raise ValueError("regime_key is required")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -90,9 +126,8 @@ class PolicyTrainingExample:
             "source": self.source,
             "instrument_id": self.instrument_id,
             "features": dict(self.features),
-            "target_action": self.target_action,
-            "target_score": self.target_score,
-            "net_return": self.net_return,
+            "target_label": self.target_label,
+            "shadow_net_return": self.shadow_net_return,
             "horizon_ms": self.horizon_ms,
             "regime_key": self.regime_key,
         }
@@ -134,6 +169,54 @@ class PolicyDataset:
 
 
 @dataclass(frozen=True, slots=True)
+class PolicyTrainShadowSplit:
+    """Temporal out-of-sample split for policy training and shadow acceptance."""
+
+    train_examples: tuple[PolicyTrainingExample, ...]
+    shadow_examples: tuple[PolicyTrainingExample, ...]
+    split_ts: int
+    split_hash: str
+    train_dataset_hash: str
+    shadow_dataset_hash: str
+
+    def __post_init__(self) -> None:
+        if not self.train_examples:
+            raise ValueError("train_examples must not be empty")
+        if not self.shadow_examples:
+            raise ValueError("shadow_examples must not be empty")
+        if self.split_ts <= 0:
+            raise ValueError("split_ts must be positive")
+        max_train_ts = max(example.decision_ts for example in self.train_examples)
+        min_shadow_ts = min(example.decision_ts for example in self.shadow_examples)
+        if max_train_ts >= min_shadow_ts:
+            raise ValueError("temporal split must satisfy max(train_ts) < min(shadow_ts)")
+        if max_train_ts >= self.split_ts or min_shadow_ts < self.split_ts:
+            raise ValueError("split_ts must separate train and shadow examples")
+        if not self.split_hash:
+            raise ValueError("split_hash is required")
+        if not self.train_dataset_hash:
+            raise ValueError("train_dataset_hash is required")
+        if not self.shadow_dataset_hash:
+            raise ValueError("shadow_dataset_hash is required")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "split_ts": self.split_ts,
+            "split_hash": self.split_hash,
+            "train_dataset_hash": self.train_dataset_hash,
+            "shadow_dataset_hash": self.shadow_dataset_hash,
+            "train_row_count": len(self.train_examples),
+            "shadow_row_count": len(self.shadow_examples),
+            "max_train_decision_ts": max(
+                example.decision_ts for example in self.train_examples
+            ),
+            "min_shadow_decision_ts": min(
+                example.decision_ts for example in self.shadow_examples
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class XGBoostPolicyConfig:
     """Pure policy-learning config.
 
@@ -155,6 +238,7 @@ class XGBoostPolicyConfig:
     seed: int = 0
     max_position_size: float = 1.0
     action_activation_threshold: float = 0.55
+    ranking_group_strategy: RankingGroupStrategy = "source_instrument_regime"
     regime_feature_names: tuple[str, ...] = (
         "volatility_5m",
         "volatility_15m",
@@ -187,6 +271,11 @@ class XGBoostPolicyConfig:
             raise ValueError("max_position_size must be in (0, 1]")
         if not 0.0 <= self.action_activation_threshold <= 1.0:
             raise ValueError("action_activation_threshold must be in [0, 1]")
+        if self.ranking_group_strategy not in SUPPORTED_RANKING_GROUP_STRATEGIES:
+            raise ValueError(
+                "ranking_group_strategy must be one of "
+                + ", ".join(SUPPORTED_RANKING_GROUP_STRATEGIES)
+            )
         assert_no_direct_pnl_optimization(
             objective=self.objective,
             eval_metric=self.eval_metric,
@@ -229,8 +318,8 @@ class PolicyPrediction:
     def __post_init__(self) -> None:
         if self.decision_ts < 0:
             raise ValueError("decision_ts must be non-negative")
-        if self.action < 0.0:
-            raise ValueError("action must be non-negative")
+        if not 0.0 <= self.action <= 1.0:
+            raise ValueError("action must be in [0, 1]")
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("confidence must be in [0, 1]")
         if not math.isfinite(self.score):

@@ -8,7 +8,11 @@ from typing import Any
 
 import numpy as np
 
-from bigan.v8.phase1.contracts import PolicyPrediction, PolicyTrainingExample
+from bigan.v8.phase1.contracts import (
+    PolicyPrediction,
+    PolicyTrainingExample,
+    PolicyTrainShadowSplit,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +26,8 @@ class PolicyAcceptanceConfig:
     min_action_std: float = 1e-6
     max_dominant_bucket_ratio: float = 0.98
     max_mean_abs_turnover: float = 1.0
+    min_active_regime_count: int = 2
+    max_active_regime_ratio: float = 0.80
     action_bucket_count: int = 5
     min_non_empty_buckets: int = 2
     monotonic_tolerance: float = 1e-12
@@ -38,6 +44,10 @@ class PolicyAcceptanceConfig:
             raise ValueError("max_dominant_bucket_ratio must be in (0, 1]")
         if self.max_mean_abs_turnover < 0.0:
             raise ValueError("max_mean_abs_turnover must be non-negative")
+        if self.min_active_regime_count < 1:
+            raise ValueError("min_active_regime_count must be at least 1")
+        if not 0.0 < self.max_active_regime_ratio <= 1.0:
+            raise ValueError("max_active_regime_ratio must be in (0, 1]")
         if self.action_bucket_count < 2:
             raise ValueError("action_bucket_count must be at least 2")
         if self.min_non_empty_buckets < 2:
@@ -89,6 +99,9 @@ def validate_policy_acceptance(
     config: PolicyAcceptanceConfig | None = None,
     *,
     direct_pnl_optimization: bool = False,
+    evaluation_scope: str = "shadow",
+    split_hash: str | None = None,
+    training_row_count: int | None = None,
 ) -> PolicyAcceptanceReport:
     """Validate Phase 1 acceptance criteria on shadow policy outputs."""
 
@@ -122,7 +135,10 @@ def validate_policy_acceptance(
         [prediction.confidence for prediction in predictions],
         dtype=np.float64,
     )
-    net_returns = np.asarray([example.net_return for example in examples], dtype=np.float64)
+    shadow_net_returns = np.asarray(
+        [example.shadow_net_return for example in examples],
+        dtype=np.float64,
+    )
     contract_valid = _prediction_contract_valid(actions, confidences, predictions, resolved_config)
     if not contract_valid:
         failures.append(
@@ -132,9 +148,10 @@ def validate_policy_acceptance(
             )
         )
 
-    shadow_returns = actions * net_returns
+    shadow_returns = actions * shadow_net_returns
     shadow_sharpe = _sharpe(shadow_returns)
     distribution = _action_distribution(actions, resolved_config)
+    regime_exposure = _regime_exposure(examples, actions, resolved_config)
     bucket_summary = _bucket_summary(actions, shadow_returns, resolved_config)
     monotonic = _bucket_means_are_monotonic(bucket_summary, resolved_config)
 
@@ -150,6 +167,12 @@ def validate_policy_acceptance(
             and distribution["mean_abs_turnover"] <= resolved_config.max_mean_abs_turnover
         ),
         "monotonic_pnl_bucket_behavior": monotonic,
+        "regime_action_stability": (
+            regime_exposure["active_regime_count"]
+            >= resolved_config.min_active_regime_count
+            and regime_exposure["max_active_regime_ratio"]
+            <= resolved_config.max_active_regime_ratio
+        ),
         "no_direct_pnl_optimization": not direct_pnl_optimization,
     }
 
@@ -174,6 +197,13 @@ def validate_policy_acceptance(
                 message="mean shadow PnL must be non-decreasing by action bucket",
             )
         )
+    if not criteria["regime_action_stability"]:
+        failures.append(
+            PolicyAcceptanceFailure(
+                code="regime_exposure_concentration",
+                message="active policy exposure is too concentrated in one regime",
+            )
+        )
     if direct_pnl_optimization:
         failures.append(
             PolicyAcceptanceFailure(
@@ -186,14 +216,20 @@ def validate_policy_acceptance(
         failures=tuple(failures),
         metrics={
             "config": resolved_config.to_dict(),
+            "evaluation_scope": evaluation_scope,
+            "split_hash": split_hash,
+            "training_row_count": training_row_count,
             "row_count": len(examples),
             "mean_shadow_return": float(np.mean(shadow_returns)) if shadow_returns.size else 0.0,
             "std_shadow_return": float(np.std(shadow_returns, ddof=1))
             if shadow_returns.size > 1
             else 0.0,
             "shadow_sharpe": shadow_sharpe,
-            "mean_net_return": float(np.mean(net_returns)) if net_returns.size else 0.0,
+            "mean_shadow_net_return": float(np.mean(shadow_net_returns))
+            if shadow_net_returns.size
+            else 0.0,
             "action_distribution": distribution,
+            "regime_exposure": regime_exposure,
             "pnl_bucket_summary": bucket_summary,
         },
         acceptance_criteria=criteria,
@@ -212,8 +248,30 @@ def _failed_report(
             "shadow_sharpe_positive": False,
             "stable_action_distribution": False,
             "monotonic_pnl_bucket_behavior": False,
+            "regime_action_stability": False,
             "no_direct_pnl_optimization": not direct_pnl_optimization,
         },
+    )
+
+
+def validate_policy_shadow_split(
+    policy_model: Any,
+    split: PolicyTrainShadowSplit,
+    config: PolicyAcceptanceConfig | None = None,
+    *,
+    direct_pnl_optimization: bool = False,
+) -> PolicyAcceptanceReport:
+    """Run acceptance on the shadow side of a temporal split."""
+
+    predictions = policy_model.predict_examples(split.shadow_examples)
+    return validate_policy_acceptance(
+        split.shadow_examples,
+        predictions,
+        config,
+        direct_pnl_optimization=direct_pnl_optimization,
+        evaluation_scope="shadow",
+        split_hash=split.split_hash,
+        training_row_count=len(split.train_examples),
     )
 
 
@@ -274,6 +332,33 @@ def _action_distribution(
         "action_std": float(np.std(actions, ddof=0)),
         "dominant_bucket_ratio": float(np.max(counts) / actions.size),
         "mean_abs_turnover": float(np.mean(turnover)) if turnover.size else 0.0,
+    }
+
+
+def _regime_exposure(
+    examples: tuple[PolicyTrainingExample, ...],
+    actions: np.ndarray,
+    config: PolicyAcceptanceConfig,
+) -> dict[str, Any]:
+    active_count_by_regime: dict[str, int] = {}
+    for example, action in zip(examples, actions, strict=True):
+        if action <= config.active_action_epsilon:
+            continue
+        active_count_by_regime[example.regime_key] = (
+            active_count_by_regime.get(example.regime_key, 0) + 1
+        )
+
+    active_total_count = sum(active_count_by_regime.values())
+    max_active_count = max(active_count_by_regime.values(), default=0)
+    return {
+        "active_regime_count": len(active_count_by_regime),
+        "active_total_count": active_total_count,
+        "max_active_regime_ratio": (
+            float(max_active_count / active_total_count)
+            if active_total_count
+            else 1.0
+        ),
+        "active_count_by_regime": dict(sorted(active_count_by_regime.items())),
     }
 
 

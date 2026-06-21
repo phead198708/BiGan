@@ -16,6 +16,7 @@ from bigan.v8.phase1.contracts import (
     PolicyDataset,
     PolicyDatasetConfig,
     PolicyTrainingExample,
+    PolicyTrainShadowSplit,
 )
 
 FORBIDDEN_POLICY_FEATURE_COLUMNS: frozenset[str] = frozenset(
@@ -92,15 +93,10 @@ def build_policy_dataset(
                 source=feature.source,
                 instrument_id=feature.instrument_id,
                 features=example_features,
-                target_action=(
-                    resolved_config.max_position_size
-                    if label.net_return > resolved_config.positive_return_threshold
-                    else 0.0
-                ),
-                target_score=label.net_return,
-                net_return=label.net_return,
+                target_label=_policy_target_label(label.net_return, resolved_config),
+                shadow_net_return=label.net_return,
                 horizon_ms=label.horizon_ms,
-                regime_key=f"{feature.source}:{feature.instrument_id}",
+                regime_key=_regime_key(feature),
             )
         )
 
@@ -127,6 +123,49 @@ def build_policy_dataset(
     )
 
 
+def build_temporal_policy_split(
+    dataset: PolicyDataset,
+    *,
+    split_ts: int | None = None,
+    train_fraction: float = 0.70,
+) -> PolicyTrainShadowSplit:
+    """Build a strict temporal train/shadow split for out-of-sample acceptance."""
+
+    ordered = tuple(sorted(dataset.examples, key=lambda row: row.decision_ts))
+    if split_ts is None:
+        if not 0.0 < train_fraction < 1.0:
+            raise ValueError("train_fraction must be in (0, 1)")
+        split_index = max(1, min(len(ordered) - 1, int(len(ordered) * train_fraction)))
+        split_ts = ordered[split_index].decision_ts
+
+    train_examples = tuple(example for example in ordered if example.decision_ts < split_ts)
+    shadow_examples = tuple(example for example in ordered if example.decision_ts >= split_ts)
+    train_hash = _examples_hash(
+        examples=train_examples,
+        feature_columns=dataset.feature_columns,
+        namespace="train",
+    )
+    shadow_hash = _examples_hash(
+        examples=shadow_examples,
+        feature_columns=dataset.feature_columns,
+        namespace="shadow",
+    )
+    split_hash = _split_hash(
+        train_dataset_hash=train_hash,
+        shadow_dataset_hash=shadow_hash,
+        split_ts=split_ts,
+        policy_dataset_hash=dataset.policy_dataset_hash,
+    )
+    return PolicyTrainShadowSplit(
+        train_examples=train_examples,
+        shadow_examples=shadow_examples,
+        split_ts=split_ts,
+        split_hash=split_hash,
+        train_dataset_hash=train_hash,
+        shadow_dataset_hash=shadow_hash,
+    )
+
+
 def policy_dataset_hash(
     *,
     examples: tuple[PolicyTrainingExample, ...],
@@ -144,6 +183,59 @@ def policy_dataset_hash(
         "feature_columns": list(feature_columns),
         "config": config.to_dict(),
         "examples": [example.to_dict() for example in examples],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _policy_target_label(net_return: float, config: PolicyDatasetConfig) -> float:
+    if config.target_encoding == "binary_positive_net_return_threshold":
+        return 1.0 if net_return > config.positive_return_threshold else 0.0
+    return float(_rank_quality_bucket(net_return, config.rank_quality_bucket_edges))
+
+
+def _rank_quality_bucket(net_return: float, edges: tuple[float, ...]) -> int:
+    bucket = 0
+    for edge in edges:
+        if net_return <= edge:
+            return bucket
+        bucket += 1
+    return bucket
+
+
+def _examples_hash(
+    *,
+    examples: tuple[PolicyTrainingExample, ...],
+    feature_columns: tuple[str, ...],
+    namespace: str,
+) -> str:
+    payload = {
+        "phase1_policy_version": PHASE1_POLICY_VERSION,
+        "namespace": namespace,
+        "feature_columns": list(feature_columns),
+        "examples": [example.to_dict() for example in examples],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _split_hash(
+    *,
+    train_dataset_hash: str,
+    shadow_dataset_hash: str,
+    split_ts: int,
+    policy_dataset_hash: str,
+) -> str:
+    payload = {
+        "phase1_policy_version": PHASE1_POLICY_VERSION,
+        "policy_dataset_hash": policy_dataset_hash,
+        "split_ts": split_ts,
+        "train_dataset_hash": train_dataset_hash,
+        "shadow_dataset_hash": shadow_dataset_hash,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
         "utf-8"
@@ -253,3 +345,32 @@ def _coerce_feature_value(value: Any) -> float | int | None:
     if not math.isfinite(numeric):
         return None
     return value
+
+
+def _regime_key(feature: FeatureVector) -> str:
+    volatility = _feature_float(feature.features.get("volatility_5m"))
+    spread_bps = _feature_float(feature.features.get("spread_bps"))
+    liquidity_depth = _feature_float(feature.features.get("liquidity_depth"))
+    return "|".join(
+        (
+            feature.source,
+            feature.instrument_id,
+            f"vol={_bucket(volatility, (0.005, 0.015))}",
+            f"spread={_bucket(spread_bps, (2.0, 5.0))}",
+            f"liq={_bucket(liquidity_depth, (50.0, 150.0))}",
+        )
+    )
+
+
+def _feature_float(value: float | int | None) -> float:
+    coerced = _coerce_feature_value(value)
+    return 0.0 if coerced is None else float(coerced)
+
+
+def _bucket(value: float, edges: tuple[float, ...]) -> str:
+    bucket = 0
+    for edge in edges:
+        if value <= edge:
+            return str(bucket)
+        bucket += 1
+    return str(bucket)

@@ -15,9 +15,12 @@ from bigan.v8.phase1.contracts import (
     PolicyDataset,
     PolicyPrediction,
     PolicyTrainingExample,
+    PolicyTrainShadowSplit,
     XGBoostPolicyConfig,
     assert_no_direct_pnl_optimization,
 )
+
+DAY_MS = 86_400_000
 
 
 @dataclass(slots=True)
@@ -79,17 +82,21 @@ class XGBoostPolicyModel:
 def train_xgboost_policy(
     dataset: PolicyDataset,
     config: XGBoostPolicyConfig | None = None,
+    *,
+    split: PolicyTrainShadowSplit | None = None,
 ) -> XGBoostPolicyModel:
     """Train an XGBoost policy model without direct PnL optimization."""
 
     resolved_config = config or XGBoostPolicyConfig()
+    _validate_objective_target_encoding(dataset, resolved_config)
     assert_no_direct_pnl_optimization(
         objective=resolved_config.objective,
         eval_metric=resolved_config.eval_metric,
         selection_metric=resolved_config.selection_metric,
     )
-    training_examples, group_sizes = _training_examples_for_objective(
-        dataset.examples,
+    source_examples = split.train_examples if split is not None else dataset.examples
+    training_examples, group_sizes, group_keys = _training_examples_for_objective(
+        source_examples,
         resolved_config,
     )
     labels = _training_labels(training_examples, resolved_config)
@@ -114,21 +121,27 @@ def train_xgboost_policy(
             if resolved_config.objective == "binary:logistic"
             else "pairwise_ranking_policy"
         ),
-        "target_encoding": (
-            "cost_aware_net_return_threshold"
-            if resolved_config.objective == "binary:logistic"
-            else "dense_relevance_rank_from_cost_aware_net_return"
-        ),
+        "target_encoding": dataset.config.target_encoding,
+        "training_label_field": "target_label",
+        "shadow_return_used_for_training": False,
         "direct_pnl_optimization": False,
         "pnl_usage": "shadow_acceptance_after_inference_only",
         "selection_metric": resolved_config.selection_metric,
+        "ranking_group_strategy": resolved_config.ranking_group_strategy,
+        "ranking_group_count": len(group_sizes),
+        "ranking_group_sizes": list(group_sizes),
+        "ranking_group_keys": list(group_keys),
         "policy_dataset_hash": dataset.policy_dataset_hash,
         "phase0_dataset_hash": dataset.phase0_dataset_hash,
         "phase0_dataset_version": dataset.phase0_dataset_version,
         "feature_columns": list(dataset.feature_columns),
-        "row_count": len(dataset.examples),
+        "row_count": len(training_examples),
         "training_config": resolved_config.to_dict(),
     }
+    if split is not None:
+        manifest["split"] = split.to_dict()
+        manifest["train_dataset_hash"] = split.train_dataset_hash
+        manifest["shadow_dataset_hash"] = split.shadow_dataset_hash
     return XGBoostPolicyModel(
         booster=booster,
         feature_columns=dataset.feature_columns,
@@ -137,24 +150,41 @@ def train_xgboost_policy(
     )
 
 
+def _validate_objective_target_encoding(
+    dataset: PolicyDataset,
+    config: XGBoostPolicyConfig,
+) -> None:
+    expected = (
+        "binary_positive_net_return_threshold"
+        if config.objective == "binary:logistic"
+        else "rank_discrete_net_return_quality_bucket"
+    )
+    if dataset.config.target_encoding != expected:
+        raise ValueError(
+            f"{config.objective} requires target_encoding={expected!r}, "
+            f"got {dataset.config.target_encoding!r}"
+        )
+
+
 def _training_examples_for_objective(
     examples: tuple[PolicyTrainingExample, ...],
     config: XGBoostPolicyConfig,
-) -> tuple[tuple[PolicyTrainingExample, ...], tuple[int, ...]]:
+) -> tuple[tuple[PolicyTrainingExample, ...], tuple[int, ...], tuple[str, ...]]:
     if config.objective != "rank:pairwise":
-        return examples, ()
+        return examples, (), ()
 
     ordered = tuple(
         sorted(
             examples,
-            key=lambda row: (row.source, row.instrument_id, row.decision_ts),
+            key=lambda row: (_ranking_group_key(row, config), row.decision_ts),
         )
     )
     group_sizes: list[int] = []
-    current_key: tuple[str, str] | None = None
+    group_keys: list[str] = []
+    current_key: str | None = None
     current_size = 0
     for example in ordered:
-        key = (example.source, example.instrument_id)
+        key = _ranking_group_key(example, config)
         if current_key is None:
             current_key = key
             current_size = 1
@@ -163,11 +193,14 @@ def _training_examples_for_objective(
             current_size += 1
             continue
         group_sizes.append(current_size)
+        group_keys.append(current_key)
         current_key = key
         current_size = 1
     if current_size:
         group_sizes.append(current_size)
-    return ordered, tuple(group_sizes)
+        if current_key is not None:
+            group_keys.append(current_key)
+    return ordered, tuple(group_sizes), tuple(group_keys)
 
 
 def _training_labels(
@@ -176,10 +209,10 @@ def _training_labels(
 ) -> np.ndarray:
     if config.objective == "binary:logistic":
         return np.asarray(
-            [1.0 if example.target_action > 0.0 else 0.0 for example in examples],
+            [example.target_label for example in examples],
             dtype=np.float32,
         )
-    return _dense_relevance_labels(examples)
+    return np.asarray([example.target_label for example in examples], dtype=np.float32)
 
 
 def _validate_training_labels(
@@ -192,21 +225,27 @@ def _validate_training_labels(
         raise ValueError("policy training labels must be finite")
     if config.objective == "binary:logistic" and np.unique(labels).size < 2:
         raise ValueError("binary policy training requires both flat and active targets")
+    if config.objective == "binary:logistic" and not set(labels.tolist()) <= {0.0, 1.0}:
+        raise ValueError("binary policy labels must be 0/1 target labels")
     if config.objective == "rank:pairwise" and np.unique(labels).size < 2:
-        raise ValueError("ranking policy training requires at least two target scores")
+        raise ValueError("ranking policy training requires at least two target labels")
 
 
-def _dense_relevance_labels(
-    examples: tuple[PolicyTrainingExample, ...],
-) -> np.ndarray:
-    """Encode cost-aware label ordering as non-negative ranking relevance."""
-
-    unique_scores = sorted({example.target_score for example in examples})
-    score_to_rank = {score: rank for rank, score in enumerate(unique_scores)}
-    return np.asarray(
-        [float(score_to_rank[example.target_score]) for example in examples],
-        dtype=np.float32,
-    )
+def _ranking_group_key(
+    example: PolicyTrainingExample,
+    config: XGBoostPolicyConfig,
+) -> str:
+    if config.ranking_group_strategy == "source_instrument":
+        parts = (example.source, example.instrument_id)
+    elif config.ranking_group_strategy == "source_instrument_day":
+        parts = (
+            example.source,
+            example.instrument_id,
+            str(example.decision_ts // DAY_MS),
+        )
+    else:
+        parts = (example.source, example.instrument_id, example.regime_key)
+    return "|".join(parts)
 
 
 def _dmatrix(
