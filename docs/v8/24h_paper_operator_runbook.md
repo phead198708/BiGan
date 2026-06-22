@@ -29,6 +29,10 @@ broker_exchange_write_allowed=false
 Degraded, blocked, feed-anomaly, and operator-stop runs remain paper-only and
 fail closed.
 
+The production operator API does not expose a post-run artifact mutation hook.
+Paper artifacts written by the soak are consumed directly by observability and
+comment generation.
+
 ## Manual 24h Run
 
 ```bash

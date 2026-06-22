@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             inject_degradation=args.inject_degradation,
             overwrite_existing=args.overwrite_existing,
         )
-    except (PaperOperatorCLIError, ValueError) as exc:
+    except (PaperOperatorCLIError, ValueError, FileExistsError) as exc:
         print(json.dumps({"status": "failed_fail_closed", "error": str(exc)}))
         return 1
     print(json.dumps(summary, indent=2, sort_keys=True))

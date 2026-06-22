@@ -153,9 +153,42 @@ def run_24h_paper_operator(
     *,
     config: PaperOperatorRunConfig,
     feed: ReadOnlyMarketFeed | None = None,
-    after_paper_run_hook: Callable[[Path], None] | None = None,
 ) -> PaperOperatorRunResult:
     """Run paper soak, observability, comment delivery, and manifest writing."""
+
+    return _run_24h_paper_operator_impl(
+        config=config,
+        feed=feed,
+        _after_paper_run_fault_injection_hook_for_tests=None,
+    )
+
+
+def _run_24h_paper_operator_with_fault_injection_for_tests(
+    *,
+    config: PaperOperatorRunConfig,
+    feed: ReadOnlyMarketFeed | None = None,
+    _after_paper_run_fault_injection_hook_for_tests: Callable[[Path], None],
+) -> PaperOperatorRunResult:
+    """Test-only fault injection path; not part of the operator API."""
+
+    return _run_24h_paper_operator_impl(
+        config=config,
+        feed=feed,
+        _after_paper_run_fault_injection_hook_for_tests=(
+            _after_paper_run_fault_injection_hook_for_tests
+        ),
+    )
+
+
+def _run_24h_paper_operator_impl(
+    *,
+    config: PaperOperatorRunConfig,
+    feed: ReadOnlyMarketFeed | None,
+    _after_paper_run_fault_injection_hook_for_tests: (
+        Callable[[Path], None] | None
+    ),
+) -> PaperOperatorRunResult:
+    """Run the workflow; optional mutation hook is private and test-only."""
 
     operator_run_dir = config.operator_run_dir
     _prepare_operator_run_dir(config)
@@ -184,8 +217,8 @@ def run_24h_paper_operator(
             feed=feed,
         )
 
-        if after_paper_run_hook is not None:
-            after_paper_run_hook(config.paper_run_dir)
+        if _after_paper_run_fault_injection_hook_for_tests is not None:
+            _after_paper_run_fault_injection_hook_for_tests(config.paper_run_dir)
 
         stage = "observability"
         observability_result = summarize_paper_run(

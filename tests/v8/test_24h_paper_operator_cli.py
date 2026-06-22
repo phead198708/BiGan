@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import shlex
 from dataclasses import replace
@@ -11,6 +12,7 @@ from typing import Any
 
 import pytest
 
+import bigan.v8.paper.operator_cli as operator_cli
 from bigan.v8.paper import (
     DeterministicReplayFeed,
     PaperOperatorCLIError,
@@ -119,9 +121,9 @@ def test_24h_paper_operator_missing_intermediate_artifact_fails_closed(
     config = _config(tmp_path, run_id="operator-missing-artifact")
 
     with pytest.raises(PaperOperatorCLIError, match="observability"):
-        run_24h_paper_operator(
+        operator_cli._run_24h_paper_operator_with_fault_injection_for_tests(
             config=config,
-            after_paper_run_hook=delete_feed_health,
+            _after_paper_run_fault_injection_hook_for_tests=delete_feed_health,
         )
 
     manifest = _read_json(config.manifest_path)
@@ -129,6 +131,13 @@ def test_24h_paper_operator_missing_intermediate_artifact_fails_closed(
     assert manifest["reason_codes"] == ["observability_failed"]
     assert manifest["capital_deployment_allowed"] is False
     assert not config.observability_dir.exists()
+
+
+def test_24h_paper_operator_public_api_has_no_artifact_mutation_hook() -> None:
+    signature = inspect.signature(run_24h_paper_operator)
+
+    assert "after_paper_run_hook" not in signature.parameters
+    assert "_after_paper_run_fault_injection_hook_for_tests" not in signature.parameters
 
 
 def test_24h_paper_operator_refuses_to_overwrite_existing_run(
