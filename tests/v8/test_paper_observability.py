@@ -156,6 +156,25 @@ def test_paper_observability_refuses_output_inside_source_run(
     assert not output_dir.exists()
 
 
+def test_paper_observability_refuses_output_containing_source_run(
+    tmp_path: Path,
+) -> None:
+    run_dir = _healthy_run(tmp_path)
+    output_dir = run_dir.parent
+
+    with pytest.raises(PaperObservabilityError, match="must not contain run_dir"):
+        summarize_paper_run(
+            run_dir=run_dir,
+            output_dir=output_dir,
+            overwrite_existing=True,
+        )
+
+    assert output_dir.exists()
+    assert (run_dir / "paper_run_summary.json").exists()
+    assert (run_dir / "paper_ledger.jsonl").exists()
+    assert not (output_dir / "paper_observability_report.json").exists()
+
+
 def test_paper_observability_missing_boundary_flags_are_critical(
     tmp_path: Path,
 ) -> None:

@@ -413,6 +413,8 @@ def _assert_output_dir_safe(
         raise PaperObservabilityError(f"output_dir must not equal {source_label}")
     if source_path in output_path.parents:
         raise PaperObservabilityError(f"output_dir must not be inside {source_label}")
+    if output_path in source_path.parents:
+        raise PaperObservabilityError(f"output_dir must not contain {source_label}")
 
 
 def _load_paper_artifacts(run_dir: Path) -> dict[str, Any]:

@@ -39,6 +39,9 @@ Every generated report preserves:
 If source artifacts violate the paper boundary, the observability report emits
 critical alerts and recommends stopping the paper run.
 
+The output directory must be separate from the source run directory. It cannot
+equal the source run, live inside it, or contain it as a child directory.
+
 ## Summarize A Run
 
 ```bash
