@@ -113,6 +113,21 @@ profitability claim and is not a production model inference path. A future
 Polymarket-specific policy-training ticket should replace the fixture signal
 source with a trained BTC 15m UP/DOWN model.
 
+The adapter is rule-aware and settlement-aware. It writes Polymarket-specific
+ledger and settlement artifacts into the paper run bundle:
+
+```text
+polymarket_position_ledger.jsonl
+polymarket_settlement_events.jsonl
+polymarket_position_summary.json
+polymarket_pnl_breakdown.json
+```
+
+`polymarket_pnl_breakdown.json` separates pre-resolution trade PnL from
+end-of-market settlement PnL. BUY events use executable ask prices, SELL events
+use executable bid prices, and remaining open positions are redeemed according
+to the normalized market resolution rule.
+
 ## Paper Summary Semantics
 
 For BTC 15m runs, the generated `paper_run_summary.json` uses the market window:
@@ -169,6 +184,9 @@ Use `--mode gh-command` to write a `gh issue comment` command. Use
 
 ```bash
 PYTHONPATH=src python -m pytest \
+  tests/v8/test_polymarket_rules.py \
+  tests/v8/test_polymarket_ledger.py \
+  tests/v8/test_polymarket_settlement_engine.py \
   tests/v8/test_polymarket_contracts.py \
   tests/v8/test_polymarket_btc15m_adapter.py \
   tests/v8/test_polymarket_paper_pipeline.py -q

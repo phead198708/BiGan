@@ -9,6 +9,8 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from bigan.v8.paper import summarize_paper_run
 from bigan.v8.polymarket import (
     PolymarketAdapterRunConfig,
@@ -31,6 +33,17 @@ def test_polymarket_mocked_pipeline_produces_observability_and_comment(
     )
     summary = result.adapter_summary
     paper_summary = _read_json(result.paper_run_dir / "paper_run_summary.json")
+    paper_bundle = _read_json(result.paper_run_dir / "paper_bundle_manifest.json")
+    pnl_breakdown = _read_json(result.paper_run_dir / "polymarket_pnl_breakdown.json")
+    position_summary = _read_json(
+        result.paper_run_dir / "polymarket_position_summary.json"
+    )
+    settlement_events = _read_jsonl(
+        result.paper_run_dir / "polymarket_settlement_events.jsonl"
+    )
+    position_ledger = _read_jsonl(
+        result.paper_run_dir / "polymarket_position_ledger.jsonl"
+    )
     observability = _read_json(
         result.observability_dir / "paper_observability_report.json"
     )
@@ -57,6 +70,9 @@ def test_polymarket_mocked_pipeline_produces_observability_and_comment(
     assert summary["wallet_signing_enabled"] is False
     assert summary["policy_signal_source"] == "synthetic_fixture"
     assert summary["trained_model_used"] is False
+    assert summary["polymarket_resolved_outcome"] == "UP"
+    assert summary["polymarket_settlement_pnl"] > 0.0
+    assert summary["polymarket_total_pnl"] > 0.0
     assert _sha256_file(result.adapter_dir / "polymarket_feature_rows.jsonl") == (
         summary["artifact_hashes"]["feature_rows"]
     )
@@ -76,6 +92,34 @@ def test_polymarket_mocked_pipeline_produces_observability_and_comment(
     assert paper_summary["wallet_signing_enabled"] is False
     assert paper_summary["policy_signal_source"] == "synthetic_fixture"
     assert paper_summary["trained_model_used"] is False
+    assert paper_summary["polymarket_resolved_outcome"] == "UP"
+    assert paper_summary["polymarket_realized_trade_pnl"] == 0.0
+    assert paper_summary["polymarket_settlement_pnl"] > 0.0
+    assert paper_summary["polymarket_total_pnl"] > 0.0
+    assert paper_summary["polymarket_settled_position_count"] == 1
+    assert paper_summary["polymarket_unresolved_position_count"] == 0
+
+    assert settlement_events[0]["resolved_outcome"] == "UP"
+    assert settlement_events[0]["settlement_pnl"] > 0.0
+    assert position_summary["unresolved_position_count"] == 0
+    assert any(event["action"] == "BUY" for event in position_ledger)
+    assert position_ledger[-1]["action"] == "SETTLE"
+    assert pnl_breakdown["pnl_reconciled"] is True
+    assert pnl_breakdown["total_polymarket_pnl"] == pytest.approx(
+        pnl_breakdown["realized_trade_pnl"]
+        + pnl_breakdown["settlement_pnl"]
+        + pnl_breakdown["complete_set_pnl"]
+        - pnl_breakdown["fees"]
+        - pnl_breakdown["slippage"]
+    )
+    for artifact_name in (
+        "polymarket_position_ledger",
+        "polymarket_settlement_events",
+        "polymarket_position_summary",
+        "polymarket_pnl_breakdown",
+    ):
+        assert artifact_name in paper_bundle["artifacts"]
+        assert artifact_name in paper_summary["artifact_hashes"]
 
     assert observability["operator_recommendation"] == "continue_paper_run"
     assert observability["phase6_status"] == "approved_for_staged_live"
@@ -83,16 +127,22 @@ def test_polymarket_mocked_pipeline_produces_observability_and_comment(
     assert observability["capital_at_risk"] is False
     assert observability["polymarket_write_enabled"] is False
     assert observability["wallet_signing_enabled"] is False
+    assert observability["performance_metrics"]["polymarket_settlement_pnl"] > 0.0
+    assert observability["performance_metrics"]["polymarket_total_pnl"] > 0.0
     assert "polymarket_write_enabled: `false`" in operator_summary
     assert "wallet_signing_enabled: `false`" in operator_summary
+    assert "polymarket_settlement_pnl" in operator_summary
 
     assert comment_payload["operator_recommendation"] == "continue_paper_run"
     assert comment_payload["paper_only"] is True
     assert comment_payload["capital_at_risk"] is False
     assert comment_payload["polymarket_write_enabled"] is False
     assert comment_payload["wallet_signing_enabled"] is False
+    assert comment_payload["polymarket_settlement_pnl"] > 0.0
+    assert comment_payload["polymarket_total_pnl"] > 0.0
     assert "| polymarket_write_enabled | `false` |" in comment_body
     assert "| wallet_signing_enabled | `false` |" in comment_body
+    assert "polymarket_settlement_pnl" in comment_body
     assert (result.github_comment_dir / "github_paper_comment_gh_command.sh").exists()
 
     forbidden_fields = {"order_id", "private_key", "wallet_signature"}

@@ -38,6 +38,10 @@ from bigan.v8.polymarket.paper_decision import (
     build_polymarket_paper_decisions,
     polymarket_decisions_to_phase4,
 )
+from bigan.v8.polymarket.settlement import (
+    PolymarketSettlementEngineResult,
+    run_polymarket_settlement_engine,
+)
 
 DEFAULT_POLYMARKET_ADAPTER_CREATED_AT = "2026-06-22T07:00:00Z"
 POLYMARKET_ADAPTER_PHASE = "polymarket_btc15m_adapter"
@@ -112,6 +116,7 @@ class PolymarketAdapterRunResult:
     feature_rows: tuple[PolymarketFeatureRow, ...]
     label_rows: tuple[PolymarketLabelRow, ...]
     decisions: tuple[PolymarketBinaryDecision, ...]
+    settlement_result: PolymarketSettlementEngineResult
     adapter_summary: dict[str, Any]
     console_summary: dict[str, Any]
 
@@ -306,12 +311,21 @@ def run_polymarket_btc15m_paper_pipeline(
             capital_at_risk=False,
         ),
     )
+    settlement_result = run_polymarket_settlement_engine(
+        market=market,
+        token_snapshots=snapshots,
+        decisions=decisions,
+        reference_price_end=btc_rows[-1].effective_mid_price,
+        output_dir=config.paper_run_dir,
+    )
     _write_observability_inputs(
         run_dir=config.paper_run_dir,
         market=market,
         feature_rows=feature_rows,
         decisions=decisions,
         paper_result=paper_result,
+        polymarket_artifact_paths=settlement_result.artifact_paths,
+        polymarket_pnl_breakdown=settlement_result.pnl_breakdown,
         created_at=config.created_at,
     )
     observability_result = summarize_paper_run(
@@ -336,7 +350,8 @@ def run_polymarket_btc15m_paper_pipeline(
         feature_rows=feature_rows,
         label_rows=label_rows,
         decisions=decisions,
-        adapter_paths=adapter_paths,
+        adapter_paths={**adapter_paths, **settlement_result.artifact_paths},
+        polymarket_pnl_breakdown=settlement_result.pnl_breakdown,
         paper_summary_path=config.paper_run_dir / "paper_run_summary.json",
         observability_report_path=(
             observability_result.artifact_paths["observability_report"]
@@ -364,6 +379,18 @@ def run_polymarket_btc15m_paper_pipeline(
         "wallet_signing_enabled": False,
         "policy_signal_source": POLICY_SIGNAL_SOURCE_SYNTHETIC_FIXTURE,
         "trained_model_used": False,
+        "polymarket_resolved_outcome": settlement_result.pnl_breakdown[
+            "resolved_outcome"
+        ],
+        "polymarket_realized_trade_pnl": settlement_result.pnl_breakdown[
+            "realized_trade_pnl"
+        ],
+        "polymarket_settlement_pnl": settlement_result.pnl_breakdown[
+            "settlement_pnl"
+        ],
+        "polymarket_total_pnl": settlement_result.pnl_breakdown[
+            "total_polymarket_pnl"
+        ],
     }
     _write_json(config.run_dir / "polymarket_pipeline_summary.json", console_summary)
     return PolymarketAdapterRunResult(
@@ -377,6 +404,7 @@ def run_polymarket_btc15m_paper_pipeline(
         feature_rows=feature_rows,
         label_rows=label_rows,
         decisions=decisions,
+        settlement_result=settlement_result,
         adapter_summary=adapter_summary,
         console_summary=console_summary,
     )
@@ -515,6 +543,8 @@ def _write_observability_inputs(
     feature_rows: tuple[PolymarketFeatureRow, ...],
     decisions: tuple[PolymarketBinaryDecision, ...],
     paper_result: Any,
+    polymarket_artifact_paths: dict[str, Path],
+    polymarket_pnl_breakdown: dict[str, Any],
     created_at: str,
 ) -> None:
     if paper_result.phase5_result.report_path is None:
@@ -585,6 +615,7 @@ def _write_observability_inputs(
             ),
         }
     )
+    artifact_paths.update(polymarket_artifact_paths)
     artifact_hashes = {
         name: _sha256_file(path)
         for name, path in sorted(artifact_paths.items())
@@ -654,6 +685,26 @@ def _write_observability_inputs(
         "wallet_signing_enabled": False,
         "policy_signal_source": POLICY_SIGNAL_SOURCE_SYNTHETIC_FIXTURE,
         "trained_model_used": False,
+        "polymarket_resolved_outcome": polymarket_pnl_breakdown[
+            "resolved_outcome"
+        ],
+        "polymarket_realized_trade_pnl": polymarket_pnl_breakdown[
+            "realized_trade_pnl"
+        ],
+        "polymarket_unrealized_mark_pnl": polymarket_pnl_breakdown[
+            "unrealized_mark_pnl"
+        ],
+        "polymarket_settlement_pnl": polymarket_pnl_breakdown["settlement_pnl"],
+        "polymarket_complete_set_pnl": polymarket_pnl_breakdown["complete_set_pnl"],
+        "polymarket_fees": polymarket_pnl_breakdown["fees"],
+        "polymarket_slippage": polymarket_pnl_breakdown["slippage"],
+        "polymarket_total_pnl": polymarket_pnl_breakdown["total_polymarket_pnl"],
+        "polymarket_settled_position_count": polymarket_pnl_breakdown[
+            "settled_position_count"
+        ],
+        "polymarket_unresolved_position_count": polymarket_pnl_breakdown[
+            "unresolved_position_count"
+        ],
         "artifact_hashes": artifact_hashes,
     }
     _write_json(run_dir / "paper_run_summary.json", summary)
@@ -672,6 +723,16 @@ def _write_observability_inputs(
             "wallet_signing_enabled": False,
             "policy_signal_source": POLICY_SIGNAL_SOURCE_SYNTHETIC_FIXTURE,
             "trained_model_used": False,
+            "polymarket_resolved_outcome": polymarket_pnl_breakdown[
+                "resolved_outcome"
+            ],
+            "polymarket_realized_trade_pnl": polymarket_pnl_breakdown[
+                "realized_trade_pnl"
+            ],
+            "polymarket_settlement_pnl": polymarket_pnl_breakdown["settlement_pnl"],
+            "polymarket_total_pnl": polymarket_pnl_breakdown[
+                "total_polymarket_pnl"
+            ],
             "phase6_deployment_status": phase6_report.deployment_status,
             "artifacts": {
                 name: {
@@ -695,6 +756,7 @@ def _adapter_summary(
     label_rows: tuple[PolymarketLabelRow, ...],
     decisions: tuple[PolymarketBinaryDecision, ...],
     adapter_paths: dict[str, Path],
+    polymarket_pnl_breakdown: dict[str, Any],
     paper_summary_path: Path,
     observability_report_path: Path,
     github_comment_payload_path: Path,
@@ -742,6 +804,14 @@ def _adapter_summary(
         "wallet_signing_enabled": False,
         "policy_signal_source": POLICY_SIGNAL_SOURCE_SYNTHETIC_FIXTURE,
         "trained_model_used": False,
+        "polymarket_resolved_outcome": polymarket_pnl_breakdown[
+            "resolved_outcome"
+        ],
+        "polymarket_realized_trade_pnl": polymarket_pnl_breakdown[
+            "realized_trade_pnl"
+        ],
+        "polymarket_settlement_pnl": polymarket_pnl_breakdown["settlement_pnl"],
+        "polymarket_total_pnl": polymarket_pnl_breakdown["total_polymarket_pnl"],
         "artifact_hashes": hashes,
         "artifact_paths": {
             name: str(path) for name, path in sorted(adapter_paths.items())
@@ -809,11 +879,23 @@ def _snapshot_outcome(
 
 def _normalize_settlement_rule(raw_rule: str) -> str:
     normalized = " ".join(raw_rule.lower().split())
-    if (
-        ("greater than" in normalized or ">" in normalized or "higher" in normalized)
-        and "start" in normalized
-        and "end" in normalized
-    ):
+    has_gt = "greater than" in normalized or ">" in normalized or "higher" in normalized
+    has_gte = ">=" in normalized or "greater than or equal" in normalized
+    has_reference_window = (
+        ("start" in normalized and "end" in normalized)
+        or ("open" in normalized and "close" in normalized)
+    )
+    has_unknown_50_50 = (
+        "50/50" in normalized
+        or "50-50" in normalized
+        or "unknown" in normalized
+        or "unresolved" in normalized
+    )
+    if (has_gt or has_gte) and has_reference_window:
+        if has_unknown_50_50:
+            return "btc_reference_price_close_gt_open_unknown_50_50"
+        if has_gte:
+            return "btc_reference_price_close_gte_open_up_else_down"
         return "btc_reference_price_end_gt_start_up_else_down"
     raise PolymarketAdapterError("unknown_settlement_rule")
 

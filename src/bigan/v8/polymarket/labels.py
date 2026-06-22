@@ -147,6 +147,11 @@ def _up_wins(
     reference_price_start: float,
     reference_price_end: float,
 ) -> bool:
-    if settlement_rule != "btc_reference_price_end_gt_start_up_else_down":
-        raise PolymarketAdapterError("unknown_settlement_rule")
-    return reference_price_end > reference_price_start
+    if settlement_rule in {
+        "btc_reference_price_end_gt_start_up_else_down",
+        "btc_reference_price_close_gt_open_unknown_50_50",
+    }:
+        return reference_price_end > reference_price_start
+    if settlement_rule == "btc_reference_price_close_gte_open_up_else_down":
+        return reference_price_end >= reference_price_start
+    raise PolymarketAdapterError("unknown_settlement_rule")

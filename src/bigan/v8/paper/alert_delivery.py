@@ -106,6 +106,9 @@ class GitHubPaperCommentPayload:
     live_exchange_write_enabled: bool
     polymarket_write_enabled: bool
     wallet_signing_enabled: bool
+    polymarket_realized_trade_pnl: float
+    polymarket_settlement_pnl: float
+    polymarket_total_pnl: float
     source_artifact_hashes: dict[str, str]
     input_artifact_hashes: dict[str, str]
     input_artifact_paths: dict[str, str]
@@ -285,6 +288,24 @@ def _build_payload(
         live_exchange_write_enabled=report.get("live_exchange_write_enabled") is True,
         polymarket_write_enabled=report.get("polymarket_write_enabled") is True,
         wallet_signing_enabled=report.get("wallet_signing_enabled") is True,
+        polymarket_realized_trade_pnl=float(
+            report.get("performance_metrics", {}).get(
+                "polymarket_realized_trade_pnl",
+                0.0,
+            )
+            or 0.0
+        ),
+        polymarket_settlement_pnl=float(
+            report.get("performance_metrics", {}).get(
+                "polymarket_settlement_pnl",
+                0.0,
+            )
+            or 0.0
+        ),
+        polymarket_total_pnl=float(
+            report.get("performance_metrics", {}).get("polymarket_total_pnl", 0.0)
+            or 0.0
+        ),
         source_artifact_hashes=source_artifact_hashes
         if config.include_hashes
         else {},
@@ -361,6 +382,12 @@ def _comment_body(
             "**Key Metrics**",
             "",
             f"- cumulative_net_return: `{report['performance_metrics']['cumulative_net_return']}`",
+            "- polymarket_realized_trade_pnl: "
+            f"`{report['performance_metrics'].get('polymarket_realized_trade_pnl', 0.0)}`",
+            "- polymarket_settlement_pnl: "
+            f"`{report['performance_metrics'].get('polymarket_settlement_pnl', 0.0)}`",
+            "- polymarket_total_pnl: "
+            f"`{report['performance_metrics'].get('polymarket_total_pnl', 0.0)}`",
             f"- max_drawdown: `{report['risk_metrics']['max_drawdown']}`",
             f"- cost_drift_ratio: `{report['risk_metrics']['cost_drift_ratio']}`",
             f"- feed_gap_count: `{report['feed_metrics']['feed_gap_count']}`",

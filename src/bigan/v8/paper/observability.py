@@ -720,6 +720,17 @@ def _extract_metrics(
             summary.get("total_execution_cost", pnl.get("total_execution_cost"))
         ),
         "row_count": _int(summary.get("row_count", pnl.get("row_count"))),
+        "polymarket_realized_trade_pnl": _number(
+            summary.get("polymarket_realized_trade_pnl")
+        ),
+        "polymarket_settlement_pnl": _number(
+            summary.get("polymarket_settlement_pnl")
+        ),
+        "polymarket_complete_set_pnl": _number(
+            summary.get("polymarket_complete_set_pnl")
+        ),
+        "polymarket_total_pnl": _number(summary.get("polymarket_total_pnl")),
+        "polymarket_resolved_outcome": summary.get("polymarket_resolved_outcome"),
     }
     risk_metrics = {
         "max_drawdown": _number(summary.get("max_drawdown", pnl.get("max_drawdown"))),
@@ -1318,6 +1329,9 @@ def _operator_markdown(report: PaperRunObservabilityReport) -> str:
         "## Key Metrics",
         "",
         f"- cumulative_net_return: `{report.performance_metrics['cumulative_net_return']}`",
+        f"- polymarket_realized_trade_pnl: `{report.performance_metrics['polymarket_realized_trade_pnl']}`",
+        f"- polymarket_settlement_pnl: `{report.performance_metrics['polymarket_settlement_pnl']}`",
+        f"- polymarket_total_pnl: `{report.performance_metrics['polymarket_total_pnl']}`",
         f"- max_drawdown: `{report.risk_metrics['max_drawdown']}`",
         f"- cost_drift_ratio: `{report.risk_metrics['cost_drift_ratio']}`",
         f"- feed_gap_count: `{report.feed_metrics['feed_gap_count']}`",
