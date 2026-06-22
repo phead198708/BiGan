@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -58,6 +60,22 @@ def test_live_readonly_operator_short_mocked_run_completes(
     assert "| feed_mode | `live-readonly` |" in comment_body
     assert "| provider_name | `mock_live_provider` |" in comment_body
     assert "| instrument_id | `BTCUSDT` |" in comment_body
+
+
+def test_live_24h_entrypoint_help_imports_from_script_path() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "examples/v8/run_live_24h_paper_operator.py",
+            "--help",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "--feed-mode" in completed.stdout
+    assert "live-readonly" in completed.stdout
 
 
 def test_live_readonly_feed_gap_blocks_phase6_fail_closed(tmp_path: Path) -> None:
