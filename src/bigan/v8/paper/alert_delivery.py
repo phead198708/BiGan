@@ -104,6 +104,8 @@ class GitHubPaperCommentPayload:
     capital_at_risk: bool
     broker_exchange_write_enabled: bool
     live_exchange_write_enabled: bool
+    polymarket_write_enabled: bool
+    wallet_signing_enabled: bool
     source_artifact_hashes: dict[str, str]
     input_artifact_hashes: dict[str, str]
     input_artifact_paths: dict[str, str]
@@ -281,6 +283,8 @@ def _build_payload(
         )
         is True,
         live_exchange_write_enabled=report.get("live_exchange_write_enabled") is True,
+        polymarket_write_enabled=report.get("polymarket_write_enabled") is True,
+        wallet_signing_enabled=report.get("wallet_signing_enabled") is True,
         source_artifact_hashes=source_artifact_hashes
         if config.include_hashes
         else {},
@@ -338,6 +342,10 @@ def _comment_body(
         f"`{str(report['broker_exchange_write_enabled']).lower()}` |",
         "| live_exchange_write_enabled | "
         f"`{str(report['live_exchange_write_enabled']).lower()}` |",
+        "| polymarket_write_enabled | "
+        f"`{str(report.get('polymarket_write_enabled', False)).lower()}` |",
+        "| wallet_signing_enabled | "
+        f"`{str(report.get('wallet_signing_enabled', False)).lower()}` |",
         "",
         "**Operator Action**",
         "",
@@ -377,6 +385,16 @@ def _comment_body(
             _expected_flag_line(
                 "live_exchange_write_enabled",
                 report["live_exchange_write_enabled"],
+                False,
+            ),
+            _expected_flag_line(
+                "polymarket_write_enabled",
+                report.get("polymarket_write_enabled", False),
+                False,
+            ),
+            _expected_flag_line(
+                "wallet_signing_enabled",
+                report.get("wallet_signing_enabled", False),
                 False,
             ),
             "- automatic_deployment_promotion: `false` expected `false`",

@@ -6,6 +6,7 @@ import hashlib
 import json
 import shutil
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,7 @@ from bigan.v8.polymarket.paper_decision import (
 
 DEFAULT_POLYMARKET_ADAPTER_CREATED_AT = "2026-06-22T07:00:00Z"
 POLYMARKET_ADAPTER_PHASE = "polymarket_btc15m_adapter"
+POLICY_SIGNAL_SOURCE_SYNTHETIC_FIXTURE = "synthetic_fixture"
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +362,8 @@ def run_polymarket_btc15m_paper_pipeline(
         "capital_at_risk": False,
         "polymarket_write_enabled": False,
         "wallet_signing_enabled": False,
+        "policy_signal_source": POLICY_SIGNAL_SOURCE_SYNTHETIC_FIXTURE,
+        "trained_model_used": False,
     }
     _write_json(config.run_dir / "polymarket_pipeline_summary.json", console_summary)
     return PolymarketAdapterRunResult(
@@ -589,9 +593,9 @@ def _write_observability_inputs(
     summary = {
         "schema_version": POLYMARKET_ADAPTER_SCHEMA_VERSION,
         "run_id": paper_result.paper_report.run_id,
-        "started_at": created_at,
-        "ended_at": created_at,
-        "duration_seconds": 0,
+        "started_at": _ts_to_utc(market.market_start_ts),
+        "ended_at": _ts_to_utc(market.market_end_ts),
+        "duration_seconds": market.horizon_ms // 1000,
         "configured_duration_seconds": POLYMARKET_BTC15M_HORIZON_MS // 1000,
         "stop_reason": "fixture_complete",
         "feed_event_count": feed_count,
@@ -646,6 +650,10 @@ def _write_observability_inputs(
         "capital_at_risk": False,
         "broker_exchange_write_enabled": False,
         "live_exchange_write_enabled": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "policy_signal_source": POLICY_SIGNAL_SOURCE_SYNTHETIC_FIXTURE,
+        "trained_model_used": False,
         "artifact_hashes": artifact_hashes,
     }
     _write_json(run_dir / "paper_run_summary.json", summary)
@@ -662,6 +670,8 @@ def _write_observability_inputs(
             "live_exchange_write_enabled": False,
             "polymarket_write_enabled": False,
             "wallet_signing_enabled": False,
+            "policy_signal_source": POLICY_SIGNAL_SOURCE_SYNTHETIC_FIXTURE,
+            "trained_model_used": False,
             "phase6_deployment_status": phase6_report.deployment_status,
             "artifacts": {
                 name: {
@@ -730,6 +740,8 @@ def _adapter_summary(
         "live_exchange_write_enabled": False,
         "polymarket_write_enabled": False,
         "wallet_signing_enabled": False,
+        "policy_signal_source": POLICY_SIGNAL_SOURCE_SYNTHETIC_FIXTURE,
+        "trained_model_used": False,
         "artifact_hashes": hashes,
         "artifact_paths": {
             name: str(path) for name, path in sorted(adapter_paths.items())
@@ -856,6 +868,12 @@ def _assert_safe_flags(config: PolymarketAdapterRunConfig) -> None:
         raise ValueError("polymarket writes are forbidden")
     if config.wallet_signing_enabled:
         raise ValueError("wallet signing is forbidden")
+
+
+def _ts_to_utc(ts_ms: int) -> str:
+    return datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
 
 def _augment_report_safety_flags(path: Path) -> None:

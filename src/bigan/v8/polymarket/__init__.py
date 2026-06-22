@@ -18,6 +18,7 @@ from bigan.v8.polymarket.features import build_polymarket_feature_rows
 from bigan.v8.polymarket.labels import build_polymarket_label_rows
 from bigan.v8.polymarket.market_adapter import (
     DEFAULT_POLYMARKET_ADAPTER_CREATED_AT,
+    POLICY_SIGNAL_SOURCE_SYNTHETIC_FIXTURE,
     POLYMARKET_ADAPTER_PHASE,
     PolymarketAdapterRunConfig,
     PolymarketAdapterRunResult,
@@ -41,6 +42,7 @@ __all__ = [
     "POLYMARKET_BTC15M_HORIZON_MS",
     "POLYMARKET_BTC15M_MARKET_FAMILY",
     "POLYMARKET_SOURCE",
+    "POLICY_SIGNAL_SOURCE_SYNTHETIC_FIXTURE",
     "PolymarketAdapterError",
     "PolymarketAdapterRunConfig",
     "PolymarketAdapterRunResult",

@@ -101,6 +101,40 @@ Phase 4 `AdaptiveDecision` rows, then passed through the existing v8 paper
 harness, Phase 5 safety layer, Phase 6 CI/CD evidence, observability, and
 GitHub comment payload generation.
 
+The deterministic example runner uses synthetic fixture policy signals:
+
+```text
+policy_signal_source=synthetic_fixture
+trained_model_used=false
+```
+
+This validates adapter plumbing and paper-only evidence generation. It is not a
+profitability claim and is not a production model inference path. A future
+Polymarket-specific policy-training ticket should replace the fixture signal
+source with a trained BTC 15m UP/DOWN model.
+
+## Paper Summary Semantics
+
+For BTC 15m runs, the generated `paper_run_summary.json` uses the market window:
+
+```text
+started_at = market_start_ts converted to UTC
+ended_at = market_end_ts converted to UTC
+duration_seconds = 900
+configured_duration_seconds = 900
+```
+
+The summary, bundle manifest, observability report, operator summary, and
+GitHub comment payload all expose the Polymarket-specific safety flags:
+
+```text
+polymarket_write_enabled=false
+wallet_signing_enabled=false
+```
+
+For Polymarket runs, missing or enabled write/wallet fields are critical
+paper-boundary alerts.
+
 ## Deterministic Run
 
 ```bash

@@ -183,6 +183,8 @@ class PaperRunObservabilityReport:
     capital_at_risk: bool
     broker_exchange_write_enabled: bool
     live_exchange_write_enabled: bool
+    polymarket_write_enabled: bool
+    wallet_signing_enabled: bool
     feed_health_status: str
     safety_status: str
     phase6_status: str
@@ -527,6 +529,17 @@ def _build_observability_report(
         alert.code in {"live_write_flag_missing", "live_write_enabled"}
         for alert in alerts
     )
+    polymarket_run = _is_polymarket_run(summary)
+    polymarket_write_clean = not any(
+        alert.code
+        in {"polymarket_write_flag_missing", "polymarket_write_enabled"}
+        for alert in alerts
+    )
+    wallet_signing_clean = not any(
+        alert.code
+        in {"wallet_signing_flag_missing", "wallet_signing_enabled"}
+        for alert in alerts
+    )
     return PaperRunObservabilityReport(
         phase=PAPER_OBSERVABILITY_PHASE,
         run_id=str(summary["run_id"]),
@@ -543,6 +556,16 @@ def _build_observability_report(
         or summary.get("broker_exchange_write_enabled") is not False,
         live_exchange_write_enabled=not live_write_clean
         or summary.get("live_exchange_write_enabled") is not False,
+        polymarket_write_enabled=polymarket_run
+        and (
+            not polymarket_write_clean
+            or summary.get("polymarket_write_enabled") is not False
+        ),
+        wallet_signing_enabled=polymarket_run
+        and (
+            not wallet_signing_clean
+            or summary.get("wallet_signing_enabled") is not False
+        ),
         feed_health_status=metrics["feed_health_status"],
         safety_status=metrics["safety_status"],
         phase6_status=metrics["phase6_status"],
@@ -1059,6 +1082,75 @@ def _add_paper_boundary_alerts(
             expected=False,
         ):
             break
+    if _is_polymarket_run(payloads["paper_run_summary"]):
+        _add_polymarket_boundary_alerts(alerts, payloads)
+
+
+def _add_polymarket_boundary_alerts(
+    alerts: list[PaperAlert],
+    payloads: dict[str, dict[str, Any]],
+) -> None:
+    for source_name in ("paper_run_summary", "paper_bundle_manifest"):
+        payload = payloads[source_name]
+        for field_name, missing_code, enabled_code in (
+            (
+                "polymarket_write_enabled",
+                "polymarket_write_flag_missing",
+                "polymarket_write_enabled",
+            ),
+            (
+                "wallet_signing_enabled",
+                "wallet_signing_flag_missing",
+                "wallet_signing_enabled",
+            ),
+        ):
+            if field_name not in payload:
+                _append_alert(
+                    alerts,
+                    severity="critical",
+                    category="paper_boundary",
+                    code=missing_code,
+                    message=(
+                        f"Polymarket boundary field {field_name} is missing. "
+                        f"Source: {source_name}."
+                    ),
+                    metric_name=f"{source_name}.{field_name}",
+                    metric_value=None,
+                    threshold=False,
+                    recommendation=(
+                        "Treat missing Polymarket write/wallet evidence as "
+                        "fail-closed."
+                    ),
+                )
+                continue
+            if payload[field_name] is not False:
+                _append_alert(
+                    alerts,
+                    severity="critical",
+                    category="paper_boundary",
+                    code=enabled_code,
+                    message=(
+                        f"Polymarket boundary field {field_name} is unsafe. "
+                        f"Source: {source_name}."
+                    ),
+                    metric_name=f"{source_name}.{field_name}",
+                    metric_value=payload[field_name],
+                    threshold=False,
+                    recommendation=(
+                        "Disable all Polymarket write and wallet-signing paths."
+                    ),
+                )
+
+
+def _is_polymarket_run(summary: dict[str, Any]) -> bool:
+    feed_mode = str(summary.get("feed_mode") or "")
+    provider_name = str(summary.get("provider_name") or "")
+    return (
+        feed_mode.startswith("polymarket")
+        or provider_name.startswith("mocked_polymarket")
+        or "polymarket_write_enabled" in summary
+        or "wallet_signing_enabled" in summary
+    )
 
 
 def _check_boundary_field(
@@ -1190,6 +1282,8 @@ def _dashboard_summary(report: PaperRunObservabilityReport) -> dict[str, Any]:
         "capital_at_risk": report.capital_at_risk,
         "broker_exchange_write_enabled": report.broker_exchange_write_enabled,
         "live_exchange_write_enabled": report.live_exchange_write_enabled,
+        "polymarket_write_enabled": report.polymarket_write_enabled,
+        "wallet_signing_enabled": report.wallet_signing_enabled,
         "performance_metrics": report.performance_metrics,
         "risk_metrics": report.risk_metrics,
         "feed_metrics": report.feed_metrics,
@@ -1218,6 +1312,8 @@ def _operator_markdown(report: PaperRunObservabilityReport) -> str:
         f"- operator_recommendation: `{report.operator_recommendation}`",
         f"- paper_only: `{str(report.paper_only).lower()}`",
         f"- capital_at_risk: `{str(report.capital_at_risk).lower()}`",
+        f"- polymarket_write_enabled: `{str(report.polymarket_write_enabled).lower()}`",
+        f"- wallet_signing_enabled: `{str(report.wallet_signing_enabled).lower()}`",
         "",
         "## Key Metrics",
         "",
