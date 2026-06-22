@@ -76,6 +76,76 @@ def test_live_24h_entrypoint_help_imports_from_script_path() -> None:
 
     assert "--feed-mode" in completed.stdout
     assert "live-readonly" in completed.stdout
+    assert "--github-round-progress-comments" in completed.stdout
+
+
+def test_live_readonly_operator_can_emit_round_progress_comments(
+    tmp_path: Path,
+) -> None:
+    result = run_24h_paper_operator(
+        config=_config(
+            tmp_path,
+            run_id="live-progress",
+            post_mode="gh_command",
+            round_progress_comments_enabled=True,
+        ),
+        feed=_mock_live_feed(row_count=5),
+    )
+    progress_dir = result.round_progress_comment_dir
+    payload_rows = _read_jsonl(
+        progress_dir / "github_round_progress_payloads.jsonl"
+    )
+    first_payload = _read_json(
+        progress_dir / "round_000001_github_progress_payload.json"
+    )
+    first_comment = (
+        progress_dir / "round_000001_github_progress_comment.md"
+    ).read_text(encoding="utf-8")
+    first_command = (
+        progress_dir / "round_000001_github_progress_gh_command.sh"
+    ).read_text(encoding="utf-8")
+
+    assert result.manifest["round_progress_comments_enabled"] is True
+    assert result.manifest["round_progress_comment_post_mode"] == "gh_command"
+    assert result.manifest["round_progress_comment_count"] == 5
+    assert result.manifest["last_commented_round"] == 5
+    assert result.manifest["round_progress_payload_stream_sha256"] is not None
+    assert len(payload_rows) == 5
+    assert first_payload["round_index"] == 1
+    assert first_payload["feed_mode"] == "live-readonly"
+    assert first_payload["real_live_data"] is True
+    assert first_payload["paper_only"] is True
+    assert first_payload["capital_at_risk"] is False
+    assert first_payload["broker_exchange_write_allowed"] is False
+    assert "| round_index | `1` |" in first_comment
+    assert "| instrument_id | `BTCUSDT` |" in first_comment
+    assert "gh issue comment 129" in first_command
+    assert "round_000001_github_progress_comment.md" in first_command
+
+
+def test_live_readonly_round_progress_comments_respect_interval_and_max(
+    tmp_path: Path,
+) -> None:
+    result = run_24h_paper_operator(
+        config=_config(
+            tmp_path,
+            run_id="live-progress-throttled",
+            round_progress_comments_enabled=True,
+            round_progress_comment_interval_rounds=2,
+            max_round_progress_comments=1,
+        ),
+        feed=_mock_live_feed(row_count=5),
+    )
+    progress_dir = result.round_progress_comment_dir
+    payload_rows = _read_jsonl(
+        progress_dir / "github_round_progress_payloads.jsonl"
+    )
+
+    assert result.manifest["round_progress_comment_count"] == 1
+    assert result.manifest["last_commented_round"] == 2
+    assert payload_rows[0]["round_index"] == 2
+    assert (progress_dir / "round_000002_github_progress_comment.md").exists()
+    assert not (progress_dir / "round_000004_github_progress_comment.md").exists()
 
 
 def test_live_readonly_feed_gap_blocks_phase6_fail_closed(tmp_path: Path) -> None:
@@ -274,6 +344,9 @@ def _config(
     post_mode: str = "dry_run",
     overwrite_existing: bool = False,
     stop_after_events: int | None = None,
+    round_progress_comments_enabled: bool = False,
+    round_progress_comment_interval_rounds: int = 1,
+    max_round_progress_comments: int = 0,
 ) -> PaperOperatorRunConfig:
     return PaperOperatorRunConfig(
         run_id=run_id,
@@ -291,6 +364,11 @@ def _config(
         instrument_id="BTCUSDT",
         overwrite_existing=overwrite_existing,
         stop_after_events=stop_after_events,
+        round_progress_comments_enabled=round_progress_comments_enabled,
+        round_progress_comment_interval_rounds=(
+            round_progress_comment_interval_rounds
+        ),
+        max_round_progress_comments=max_round_progress_comments,
     )
 
 
@@ -377,6 +455,14 @@ class _UnsafeMockLiveFeed(_MockLiveFeed):
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 def _sha256_file(path: Path) -> str:

@@ -49,6 +49,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--request-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--max-reconnect-attempts", type=int, default=3)
     parser.add_argument("--max-stale-seconds", type=float, default=120.0)
+    parser.add_argument(
+        "--github-round-progress-comments",
+        action="store_true",
+        help=(
+            "Post/write per-round GitHub progress comment evidence. "
+            "Default is off to avoid noisy issue threads."
+        ),
+    )
+    parser.add_argument(
+        "--round-progress-comment-mode",
+        choices=("dry-run", "gh-command", "direct-comment"),
+        help="Override per-round comment mode; defaults to --mode when enabled.",
+    )
+    parser.add_argument(
+        "--round-progress-comment-interval-rounds",
+        type=int,
+        default=1,
+        help="Emit one progress comment every N rounds when enabled.",
+    )
+    parser.add_argument(
+        "--max-round-progress-comments",
+        type=int,
+        default=0,
+        help="Maximum progress comments to emit; 0 means unlimited.",
+    )
     parser.add_argument("--overwrite-existing", action="store_true")
     args = parser.parse_args(argv)
 
@@ -69,6 +94,12 @@ def main(argv: list[str] | None = None) -> int:
         request_timeout_seconds=args.request_timeout_seconds,
         max_reconnect_attempts=args.max_reconnect_attempts,
         max_stale_seconds=args.max_stale_seconds,
+        github_round_progress_comments=args.github_round_progress_comments,
+        round_progress_comment_mode=args.round_progress_comment_mode,
+        round_progress_comment_interval_rounds=(
+            args.round_progress_comment_interval_rounds
+        ),
+        max_round_progress_comments=args.max_round_progress_comments,
         overwrite_existing=args.overwrite_existing,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))

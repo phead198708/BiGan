@@ -33,6 +33,13 @@ from bigan.v8.paper.observability import (
     PaperObservabilityResult,
     summarize_paper_run,
 )
+from bigan.v8.paper.progress_comments import (
+    DEFAULT_ROUND_PROGRESS_COMMENT_CREATED_AT,
+    ROUND_PROGRESS_PAYLOAD_STREAM_FILENAME,
+    GitHubRoundProgressCommentConfig,
+    GitHubRoundProgressCommentWriter,
+    disabled_round_progress_comment_summary,
+)
 from bigan.v8.paper.soak import (
     DEFAULT_READONLY_SHADOW_CREATED_AT,
     ReadOnlyShadowSoakConfig,
@@ -81,6 +88,13 @@ class PaperOperatorRunConfig:
     soak_created_at: str = DEFAULT_READONLY_SHADOW_CREATED_AT
     observability_created_at: str = DEFAULT_OBSERVABILITY_CREATED_AT
     alert_delivery_created_at: str = DEFAULT_ALERT_DELIVERY_CREATED_AT
+    round_progress_comment_created_at: str = (
+        DEFAULT_ROUND_PROGRESS_COMMENT_CREATED_AT
+    )
+    round_progress_comments_enabled: bool = False
+    round_progress_comment_post_mode: OperatorPostMode | None = None
+    round_progress_comment_interval_rounds: int = 1
+    max_round_progress_comments: int = 0
     overwrite_existing: bool = False
     stop_after_events: int | None = None
     inject_degradation: bool = False
@@ -101,6 +115,20 @@ class PaperOperatorRunConfig:
             raise ValueError("issue_number must be positive")
         if self.post_mode not in ("dry_run", "gh_command", "direct_comment"):
             raise ValueError("post_mode must be dry_run, gh_command, or direct_comment")
+        if self.round_progress_comment_post_mode is not None and (
+            self.round_progress_comment_post_mode
+            not in ("dry_run", "gh_command", "direct_comment")
+        ):
+            raise ValueError(
+                "round_progress_comment_post_mode must be dry_run, "
+                "gh_command, direct_comment, or None"
+            )
+        if self.round_progress_comment_interval_rounds <= 0:
+            raise ValueError(
+                "round_progress_comment_interval_rounds must be positive"
+            )
+        if self.max_round_progress_comments < 0:
+            raise ValueError("max_round_progress_comments must be non-negative")
         if self.duration_seconds <= 0:
             raise ValueError("duration_seconds must be positive")
         if self.feed_event_interval_seconds <= 0:
@@ -158,6 +186,10 @@ class PaperOperatorRunConfig:
         return self.operator_run_dir / "github_comment"
 
     @property
+    def round_progress_comment_dir(self) -> Path:
+        return self.operator_run_dir / "round_progress_comments"
+
+    @property
     def manifest_path(self) -> Path:
         return self.operator_run_dir / "operator_run_manifest.json"
 
@@ -176,11 +208,13 @@ class PaperOperatorRunResult:
     paper_run_dir: Path
     observability_dir: Path
     github_comment_dir: Path
+    round_progress_comment_dir: Path
     manifest_path: Path
     manifest: dict[str, Any]
     console_summary: dict[str, Any]
     observability_result: PaperObservabilityResult
     comment_result: GitHubPaperCommentDeliveryResult
+    round_progress_comment_summary: dict[str, Any]
 
 
 def run_24h_paper_operator(
@@ -229,6 +263,8 @@ def _run_24h_paper_operator_impl(
     stage = "paper_run"
     try:
         resolved_feed = _resolve_operator_feed(config=config, feed=feed)
+        round_progress_writer = _round_progress_comment_writer(config)
+        round_progress_callback = _round_progress_callback(round_progress_writer)
         run_readonly_shadow_soak(
             config=ReadOnlyShadowSoakConfig(
                 run_id=config.run_id,
@@ -250,6 +286,11 @@ def _run_24h_paper_operator_impl(
                 capital_at_risk=config.capital_at_risk,
             ),
             feed=resolved_feed,
+            round_progress_callback=round_progress_callback,
+        )
+        round_progress_summary = _round_progress_comment_summary(
+            config=config,
+            writer=round_progress_writer,
         )
 
         if _after_paper_run_fault_injection_hook_for_tests is not None:
@@ -281,6 +322,7 @@ def _run_24h_paper_operator_impl(
             config=config,
             observability_result=observability_result,
             comment_result=comment_result,
+            round_progress_comment_summary=round_progress_summary,
         )
         _write_json(config.manifest_path, manifest)
         console_summary = _console_summary(
@@ -294,11 +336,13 @@ def _run_24h_paper_operator_impl(
             paper_run_dir=config.paper_run_dir,
             observability_dir=config.observability_dir,
             github_comment_dir=config.github_comment_dir,
+            round_progress_comment_dir=config.round_progress_comment_dir,
             manifest_path=config.manifest_path,
             manifest=manifest,
             console_summary=console_summary,
             observability_result=observability_result,
             comment_result=comment_result,
+            round_progress_comment_summary=round_progress_summary,
         )
     except Exception as exc:
         _write_failure_manifest(
@@ -360,11 +404,110 @@ def _prepare_operator_run_dir(config: PaperOperatorRunConfig) -> None:
     run_dir.mkdir(parents=True)
 
 
+def _round_progress_comment_writer(
+    config: PaperOperatorRunConfig,
+) -> GitHubRoundProgressCommentWriter | None:
+    if not config.round_progress_comments_enabled:
+        return None
+    post_mode = config.round_progress_comment_post_mode or config.post_mode
+    return GitHubRoundProgressCommentWriter(
+        GitHubRoundProgressCommentConfig(
+            repo_full_name=config.repo_full_name,
+            issue_number=config.issue_number,
+            output_dir=config.round_progress_comment_dir,
+            run_id=config.run_id,
+            feed_mode=config.feed_mode,
+            provider_name=config.provider_name,
+            provider_endpoint=config.provider_endpoint,
+            instrument_id=config.instrument_id,
+            post_mode=post_mode,
+            created_at=config.round_progress_comment_created_at,
+            comment_interval_rounds=config.round_progress_comment_interval_rounds,
+            max_comments=config.max_round_progress_comments,
+            overwrite_existing=False,
+            broker_exchange_write_enabled=config.broker_exchange_write_enabled,
+            live_exchange_write_enabled=config.live_exchange_write_enabled,
+            paper_only=config.paper_only,
+            capital_at_risk=config.capital_at_risk,
+        )
+    )
+
+
+def _round_progress_callback(
+    writer: GitHubRoundProgressCommentWriter | None,
+) -> Callable[[int, Any], None] | None:
+    if writer is None:
+        return None
+
+    def callback(round_index: int, event: Any) -> None:
+        writer.maybe_comment_round(round_index=round_index, event=event)
+
+    return callback
+
+
+def _round_progress_comment_summary(
+    *,
+    config: PaperOperatorRunConfig,
+    writer: GitHubRoundProgressCommentWriter | None,
+) -> dict[str, Any]:
+    if writer is not None:
+        return writer.summary()
+    return disabled_round_progress_comment_summary(
+        output_dir=config.round_progress_comment_dir,
+        post_mode=config.round_progress_comment_post_mode or config.post_mode,
+        comment_interval_rounds=config.round_progress_comment_interval_rounds,
+        max_comments=config.max_round_progress_comments,
+    )
+
+
+def _round_progress_comment_failure_summary(
+    config: PaperOperatorRunConfig,
+) -> dict[str, Any]:
+    if not config.round_progress_comments_enabled:
+        return _round_progress_comment_summary(config=config, writer=None)
+    progress_dir = config.round_progress_comment_dir
+    stream_path = progress_dir / ROUND_PROGRESS_PAYLOAD_STREAM_FILENAME
+    rows = _read_jsonl_if_exists(stream_path)
+    return {
+        "round_progress_comments_enabled": True,
+        "round_progress_comment_dir": str(progress_dir),
+        "round_progress_comment_post_mode": (
+            config.round_progress_comment_post_mode or config.post_mode
+        ),
+        "round_progress_comment_interval_rounds": (
+            config.round_progress_comment_interval_rounds
+        ),
+        "max_round_progress_comments": config.max_round_progress_comments,
+        "round_progress_comment_count": len(rows),
+        "last_commented_round": None
+        if not rows
+        else rows[-1].get("round_index"),
+        "round_progress_payload_stream_path": str(stream_path)
+        if stream_path.exists()
+        else None,
+        "round_progress_payload_stream_sha256": _optional_sha256_file(stream_path),
+        "round_progress_comment_artifact_hashes": (
+            _progress_comment_artifact_hashes(progress_dir)
+        ),
+    }
+
+
+def _progress_comment_artifact_hashes(progress_dir: Path) -> dict[str, str]:
+    if not progress_dir.exists():
+        return {}
+    return {
+        str(path.relative_to(progress_dir)): _sha256_file(path)
+        for path in sorted(progress_dir.iterdir())
+        if path.is_file()
+    }
+
+
 def _operator_manifest(
     *,
     config: PaperOperatorRunConfig,
     observability_result: PaperObservabilityResult,
     comment_result: GitHubPaperCommentDeliveryResult,
+    round_progress_comment_summary: dict[str, Any],
 ) -> dict[str, Any]:
     summary = _read_json(config.paper_run_dir / "paper_run_summary.json")
     phase5 = _read_json(config.paper_run_dir / "phase5_safety_layer_report.json")
@@ -390,6 +533,7 @@ def _operator_manifest(
         "paper_run_dir": str(config.paper_run_dir),
         "observability_dir": str(config.observability_dir),
         "github_comment_dir": str(config.github_comment_dir),
+        **round_progress_comment_summary,
         "feed_mode": feed_mode,
         "real_live_data": feed_mode == LIVE_READONLY_FEED_MODE,
         "deterministic_replay": feed_mode == DETERMINISTIC_REPLAY_FEED_MODE,
@@ -541,6 +685,14 @@ def _console_summary(
             if "gh_command" not in comment_result.artifact_paths
             else str(comment_result.artifact_paths["gh_command"])
         ),
+        "round_progress_comments_enabled": manifest[
+            "round_progress_comments_enabled"
+        ],
+        "round_progress_comment_count": manifest["round_progress_comment_count"],
+        "round_progress_comment_dir": manifest["round_progress_comment_dir"],
+        "round_progress_payload_stream_path": manifest[
+            "round_progress_payload_stream_path"
+        ],
         "paper_only": manifest["paper_only"],
         "capital_at_risk": manifest["capital_at_risk"],
         "status": manifest["status"],
@@ -567,6 +719,7 @@ def _write_failure_manifest(
         "paper_run_dir": str(config.paper_run_dir),
         "observability_dir": str(config.observability_dir),
         "github_comment_dir": str(config.github_comment_dir),
+        **_round_progress_comment_failure_summary(config),
         "feed_mode": config.feed_mode,
         "real_live_data": config.feed_mode == LIVE_READONLY_FEED_MODE,
         "deterministic_replay": config.feed_mode == DETERMINISTIC_REPLAY_FEED_MODE,
@@ -655,6 +808,16 @@ def _read_json_if_exists(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     return _read_json(path)
+
+
+def _read_jsonl_if_exists(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

@@ -111,11 +111,57 @@ operator_runs/<run_id>/
     github_paper_comment_payload.json
     github_paper_comment.md
     github_paper_comment_gh_command.sh
+  round_progress_comments/          # only when explicitly enabled
+    github_round_progress_payloads.jsonl
+    round_000001_github_progress_payload.json
+    round_000001_github_progress_comment.md
+    round_000001_github_progress_gh_command.sh
   operator_run_manifest.json
 ```
 
 The GitHub command uses an absolute `--body-file` path, so it can be copied from
 the console or executed from outside the output directory.
+
+## Per-round GitHub Progress Comments
+
+By default the operator emits only the final GitHub summary comment. Per-round
+GitHub progress comments are opt-in because a 24h run with 60-second polling can
+produce about 1440 issue comments.
+
+To write or post a progress comment after every round:
+
+```bash
+PYTHONPATH=src python examples/v8/run_24h_paper_operator.py \
+  --run-id readonly_shadow_24h_with_progress_001 \
+  --output-dir examples/v8/operator_runs \
+  --repo phead198708/BiGan \
+  --issue-number 124 \
+  --mode gh-command \
+  --duration-hours 24 \
+  --heartbeat-interval-seconds 60 \
+  --summary-interval-seconds 300 \
+  --github-round-progress-comments \
+  --round-progress-comment-interval-rounds 1 \
+  --max-round-progress-comments 0
+```
+
+Use `--round-progress-comment-mode direct-comment` to post round progress
+comments through `gh issue comment`; otherwise the progress comment mode follows
+`--mode`. Use `--round-progress-comment-interval-rounds 60` or a positive
+`--max-round-progress-comments` cap for less noisy long soaks.
+
+The final manifest records:
+
+```text
+round_progress_comments_enabled
+round_progress_comment_post_mode
+round_progress_comment_interval_rounds
+max_round_progress_comments
+round_progress_comment_count
+last_commented_round
+round_progress_payload_stream_path
+round_progress_payload_stream_sha256
+```
 
 ## STOP Behavior
 

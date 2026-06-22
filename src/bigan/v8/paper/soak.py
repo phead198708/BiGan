@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -136,6 +137,7 @@ def run_readonly_shadow_soak(
     *,
     config: ReadOnlyShadowSoakConfig,
     feed: ReadOnlyMarketFeed | None = None,
+    round_progress_callback: Callable[[int, ReadOnlyFeedEvent], None] | None = None,
 ) -> ReadOnlyShadowSoakResult:
     """Run bounded read-only paper shadow soak and write all audit artifacts."""
 
@@ -155,6 +157,7 @@ def run_readonly_shadow_soak(
         feed=resolved_feed,
         config=config,
         run_dir=run_dir,
+        round_progress_callback=round_progress_callback,
     )
     adapter_feed_health = resolved_feed.health_snapshot()
     resolved_feed.close()
@@ -323,6 +326,7 @@ def _consume_feed(
     feed: ReadOnlyMarketFeed,
     config: ReadOnlyShadowSoakConfig,
     run_dir: Path,
+    round_progress_callback: Callable[[int, ReadOnlyFeedEvent], None] | None = None,
 ) -> tuple[tuple[ReadOnlyFeedEvent, ...], str, bool]:
     stop_file = run_dir / "STOP"
     events: list[ReadOnlyFeedEvent] = []
@@ -334,6 +338,8 @@ def _consume_feed(
             stop_reason = "operator_stop"
             break
         events.append(event)
+        if round_progress_callback is not None:
+            round_progress_callback(len(events), event)
         if (
             config.stop_after_events is not None
             and len(events) >= config.stop_after_events

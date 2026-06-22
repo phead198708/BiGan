@@ -49,6 +49,20 @@ does not require trading credentials. The adapter also supports Binance-style
 `bidPrice` / `askPrice` ticker payloads when that public endpoint is available
 from the runtime environment.
 
+The live read-only operator emits only the final GitHub summary comment by
+default. To also comment on every completed round, add:
+
+```text
+--github-round-progress-comments
+--round-progress-comment-mode direct-comment
+--round-progress-comment-interval-rounds 1
+--max-round-progress-comments 0
+```
+
+For 24h runs this can create about 1440 GitHub issue comments at 60-second
+polling, so use a larger interval or a positive max cap when the issue thread
+should stay compact.
+
 ## Short Local Smoke
 
 The live adapter is intended for real wall-clock runs. CI uses mocked live
@@ -174,6 +188,9 @@ operator_run_manifest_sha256
 paper_run_summary_sha256
 observability_report_sha256
 github_comment_payload_sha256
+round_progress_comments_enabled
+round_progress_comment_count
+round_progress_payload_stream_sha256
 ```
 
 ## CI Validation

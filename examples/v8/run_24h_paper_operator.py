@@ -46,6 +46,10 @@ def run_24h_paper_operator_cli(
     request_timeout_seconds: float = 10.0,
     max_reconnect_attempts: int = 3,
     max_stale_seconds: float = 120.0,
+    github_round_progress_comments: bool = False,
+    round_progress_comment_mode: str | None = None,
+    round_progress_comment_interval_rounds: int = 1,
+    max_round_progress_comments: int = 0,
     overwrite_existing: bool = False,
     stop_after_events: int | None = None,
     inject_degradation: bool = False,
@@ -74,6 +78,14 @@ def run_24h_paper_operator_cli(
             request_timeout_seconds=request_timeout_seconds,
             max_reconnect_attempts=max_reconnect_attempts,
             max_stale_seconds=max_stale_seconds,
+            round_progress_comments_enabled=github_round_progress_comments,
+            round_progress_comment_post_mode=None
+            if round_progress_comment_mode is None
+            else _MODE_MAP[round_progress_comment_mode],  # type: ignore[arg-type]
+            round_progress_comment_interval_rounds=(
+                round_progress_comment_interval_rounds
+            ),
+            max_round_progress_comments=max_round_progress_comments,
             overwrite_existing=overwrite_existing,
             stop_after_events=stop_after_events,
             inject_degradation=inject_degradation,
@@ -113,6 +125,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--request-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--max-reconnect-attempts", type=int, default=3)
     parser.add_argument("--max-stale-seconds", type=float, default=120.0)
+    parser.add_argument(
+        "--github-round-progress-comments",
+        action="store_true",
+        help=(
+            "Post/write per-round GitHub progress comment evidence. "
+            "Default is off to avoid noisy issue threads."
+        ),
+    )
+    parser.add_argument(
+        "--round-progress-comment-mode",
+        choices=tuple(_MODE_MAP),
+        help="Override per-round comment mode; defaults to --mode when enabled.",
+    )
+    parser.add_argument(
+        "--round-progress-comment-interval-rounds",
+        type=int,
+        default=1,
+        help="Emit one progress comment every N rounds when enabled.",
+    )
+    parser.add_argument(
+        "--max-round-progress-comments",
+        type=int,
+        default=0,
+        help="Maximum progress comments to emit; 0 means unlimited.",
+    )
     parser.add_argument("--stop-after-events", type=int)
     parser.add_argument(
         "--inject-degradation",
@@ -145,6 +182,12 @@ def main(argv: list[str] | None = None) -> int:
             request_timeout_seconds=args.request_timeout_seconds,
             max_reconnect_attempts=args.max_reconnect_attempts,
             max_stale_seconds=args.max_stale_seconds,
+            github_round_progress_comments=args.github_round_progress_comments,
+            round_progress_comment_mode=args.round_progress_comment_mode,
+            round_progress_comment_interval_rounds=(
+                args.round_progress_comment_interval_rounds
+            ),
+            max_round_progress_comments=args.max_round_progress_comments,
             stop_after_events=args.stop_after_events,
             inject_degradation=args.inject_degradation,
             overwrite_existing=args.overwrite_existing,
