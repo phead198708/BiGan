@@ -46,6 +46,7 @@ class ReadOnlyShadowSoakConfig:
 
     run_id: str
     output_dir: Path | str
+    run_dir_override: Path | str | None = None
     duration_seconds: int = 24 * 60 * 60
     feed_event_interval_seconds: int = 60
     heartbeat_interval_seconds: int = 60
@@ -64,6 +65,11 @@ class ReadOnlyShadowSoakConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.output_dir, Path):
             object.__setattr__(self, "output_dir", Path(self.output_dir))
+        if self.run_dir_override is not None and not isinstance(
+            self.run_dir_override,
+            Path,
+        ):
+            object.__setattr__(self, "run_dir_override", Path(self.run_dir_override))
         if not self.run_id.strip():
             raise ValueError("run_id is required")
         if self.duration_seconds <= 0:
@@ -93,11 +99,18 @@ class ReadOnlyShadowSoakConfig:
 
     @property
     def run_dir(self) -> Path:
+        if self.run_dir_override is not None:
+            return self.run_dir_override.expanduser().resolve()
         return self.output_dir.expanduser().resolve() / self.run_id
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["output_dir"] = str(self.output_dir)
+        payload["run_dir_override"] = (
+            None
+            if self.run_dir_override is None
+            else str(self.run_dir_override)
+        )
         return payload
 
 
