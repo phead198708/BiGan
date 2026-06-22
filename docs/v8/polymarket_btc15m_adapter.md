@@ -126,7 +126,9 @@ polymarket_pnl_breakdown.json
 `polymarket_pnl_breakdown.json` separates pre-resolution trade PnL from
 end-of-market settlement PnL. BUY events use executable ask prices, SELL events
 use executable bid prices, and remaining open positions are redeemed according
-to the normalized market resolution rule.
+to the normalized market resolution rule. Unknown / 50-50 resolution requires an
+explicit `resolution_status=unknown_50_50`; normal close/open ties follow the
+configured comparator.
 
 ## Paper Summary Semantics
 

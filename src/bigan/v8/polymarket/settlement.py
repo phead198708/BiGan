@@ -21,6 +21,7 @@ from bigan.v8.polymarket.ledger import (
 )
 from bigan.v8.polymarket.rules import (
     PolymarketResolutionRule,
+    PolymarketResolutionStatus,
     PolymarketRuleResolution,
     build_btc15m_resolution_rule,
     resolve_polymarket_rule,
@@ -34,6 +35,7 @@ class PolymarketSettlementEvent:
     market_id: str
     condition_id: str
     slug: str
+    resolution_status: str
     resolved_outcome: str
     payout_up: float
     payout_down: float
@@ -54,9 +56,12 @@ class PolymarketSettlementEvent:
             market_id=self.market_id,
             condition_id=self.condition_id,
             slug=self.slug,
+            resolution_status=self.resolution_status,
             resolved_outcome=self.resolved_outcome,
             raw_resolution_sha256=self.raw_resolution_sha256,
         )
+        if self.resolution_status not in ("normal", "unknown_50_50"):
+            raise ValueError("unsupported resolution_status")
         if self.resolved_outcome not in ("UP", "DOWN", "UNKNOWN_50_50"):
             raise ValueError("unsupported resolved_outcome")
         for field_name in ("payout_up", "payout_down"):
@@ -93,6 +98,7 @@ def run_polymarket_settlement_engine(
     token_snapshots: tuple[PolymarketTokenSnapshot, ...],
     decisions: tuple[PolymarketBinaryDecision, ...],
     reference_price_end: float,
+    resolution_status: PolymarketResolutionStatus = "normal",
     output_dir: Path | str | None = None,
 ) -> PolymarketSettlementEngineResult:
     """Replay paper decisions through a Polymarket position and settlement ledger."""
@@ -102,6 +108,7 @@ def run_polymarket_settlement_engine(
         rule,
         reference_price_start=market.reference_price_at_start,
         reference_price_end=reference_price_end,
+        resolution_status=resolution_status,
     )
     ledger = PolymarketPositionLedger(
         market_id=market.market_id,
@@ -164,23 +171,55 @@ def _apply_decision(
     decision: PolymarketBinaryDecision,
     snapshots: dict[int, dict[str, PolymarketTokenSnapshot]],
 ) -> None:
-    if decision.selected_outcome == "NO_TRADE" or decision.paper_notional <= 0.0:
+    action = decision.paper_action
+    if action == "NO_TRADE":
         ledger.no_trade(
             ts=decision.decision_ts,
             reason_codes=tuple(decision.reason_codes) or ("paper_no_trade",),
         )
         return
+    if action == "HOLD":
+        ts_snapshots = snapshots.get(decision.decision_ts, {})
+        ledger.hold(
+            ts=decision.decision_ts,
+            mark_up=ts_snapshots.get("UP").mid_price if "UP" in ts_snapshots else None,
+            mark_down=(
+                ts_snapshots.get("DOWN").mid_price if "DOWN" in ts_snapshots else None
+            ),
+            reason_codes=tuple(decision.reason_codes) or ("paper_hold",),
+        )
+        return
     snapshot = snapshots.get(decision.decision_ts, {}).get(decision.selected_outcome)
     if snapshot is None:
         raise PolymarketAdapterError("missing_decision_token_snapshot")
-    qty = decision.paper_notional / snapshot.ask_price
-    ledger.buy(
-        ts=decision.decision_ts,
-        outcome=decision.selected_outcome,
-        qty=qty,
-        ask_price=snapshot.ask_price,
-        reason_codes=("paper_buy", "ask_price_execution", *decision.reason_codes),
-    )
+    if action.startswith("BUY_"):
+        qty = decision.paper_notional / snapshot.ask_price
+        ledger.buy(
+            ts=decision.decision_ts,
+            outcome=decision.selected_outcome,
+            qty=qty,
+            ask_price=snapshot.ask_price,
+            reason_codes=("paper_buy", "ask_price_execution", *decision.reason_codes),
+        )
+        return
+    if action.startswith("SELL_"):
+        qty = decision.paper_notional / snapshot.bid_price
+        try:
+            ledger.sell(
+                ts=decision.decision_ts,
+                outcome=decision.selected_outcome,
+                qty=qty,
+                bid_price=snapshot.bid_price,
+                reason_codes=(
+                    "paper_sell",
+                    "bid_price_execution",
+                    *decision.reason_codes,
+                ),
+            )
+        except ValueError as exc:
+            raise PolymarketAdapterError("sell_exceeds_open_position") from exc
+        return
+    raise PolymarketAdapterError("unsupported_paper_action")
 
 
 def _settle_ledger(
@@ -207,6 +246,7 @@ def _settle_ledger(
         market_id=market.market_id,
         condition_id=market.condition_id,
         slug=market.slug,
+        resolution_status=resolution.resolution_status,
         resolved_outcome=resolution.resolved_outcome,
         payout_up=resolution.payout_up,
         payout_down=resolution.payout_down,
@@ -231,6 +271,7 @@ def _position_summary(
         "condition_id": market.condition_id,
         "slug": market.slug,
         "resolved_outcome": resolution.resolved_outcome,
+        "resolution_status": resolution.resolution_status,
         "pre_settlement_position_up": pre_settlement["position_up"],
         "pre_settlement_position_down": pre_settlement["position_down"],
         "position_up": post_settlement["position_up"],
@@ -268,6 +309,7 @@ def _pnl_breakdown(
         "condition_id": market.condition_id,
         "slug": market.slug,
         "resolved_outcome": resolution.resolved_outcome,
+        "resolution_status": resolution.resolution_status,
         "realized_trade_pnl": realized_trade_pnl,
         "unrealized_mark_pnl": ledger.unrealized_mark_pnl,
         "settlement_pnl": settlement_pnl,

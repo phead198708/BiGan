@@ -40,6 +40,24 @@ UP = 0.5
 DOWN = 0.5
 ```
 
+Unknown / 50-50 is not inferred from an ordinary price tie. Resolution status is
+explicit:
+
+```text
+resolution_status=normal
+resolution_status=unknown_50_50
+```
+
+Normal price ties follow the comparator:
+
+```text
+close_gt_open:
+  close == open => DOWN
+
+close_gte_open:
+  close == open => UP
+```
+
 ## Ledger Semantics
 
 The position ledger records paper-only outcome-token events:
@@ -60,6 +78,29 @@ BUY uses ask price
 SELL uses bid price
 mid price is not executable PnL
 ```
+
+Polymarket paper decisions carry explicit action semantics:
+
+```text
+BUY_UP
+BUY_DOWN
+SELL_UP
+SELL_DOWN
+HOLD
+NO_TRADE
+```
+
+The settlement engine dispatches these actions directly:
+
+```text
+BUY_*  -> ledger.buy(... ask_price)
+SELL_* -> ledger.sell(... bid_price)
+HOLD   -> ledger.hold(...)
+NO_TRADE -> ledger.no_trade(...)
+```
+
+SELL fails closed if the requested paper quantity exceeds the open paper
+position.
 
 Ledger events do not contain real order ids, wallet signatures, private keys, or
 broker/CLOB write handles.

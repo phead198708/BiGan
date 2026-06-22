@@ -18,6 +18,7 @@ from bigan.v8.polymarket.contracts import (
 PolymarketComparator = Literal["close_gt_open", "close_gte_open"]
 PolymarketTieBreaker = Literal["up", "down", "unknown"]
 PolymarketResolvedOutcome = Literal["UP", "DOWN", "UNKNOWN_50_50"]
+PolymarketResolutionStatus = Literal["normal", "unknown_50_50"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +91,7 @@ class PolymarketRuleResolution:
     payout_down: float
     reference_price_start: float
     reference_price_end: float
+    resolution_status: PolymarketResolutionStatus
     comparator: PolymarketComparator
     tie_breaker: PolymarketTieBreaker
     raw_resolution_sha256: str
@@ -105,11 +107,19 @@ class PolymarketRuleResolution:
             market_id=self.market_id,
             condition_id=self.condition_id,
             slug=self.slug,
+            resolution_status=self.resolution_status,
             resolved_outcome=self.resolved_outcome,
             raw_resolution_sha256=self.raw_resolution_sha256,
         )
         if self.resolved_outcome not in ("UP", "DOWN", "UNKNOWN_50_50"):
             raise ValueError("unsupported resolved_outcome")
+        if self.resolution_status not in ("normal", "unknown_50_50"):
+            raise ValueError("unsupported resolution_status")
+        if (
+            self.resolved_outcome == "UNKNOWN_50_50"
+            and self.resolution_status != "unknown_50_50"
+        ):
+            raise ValueError("UNKNOWN_50_50 requires explicit resolution status")
         if not 0.0 <= self.payout_up <= 1.0:
             raise ValueError("payout_up must be in [0, 1]")
         if not 0.0 <= self.payout_down <= 1.0:
@@ -190,6 +200,7 @@ def resolve_polymarket_rule(
     *,
     reference_price_start: float,
     reference_price_end: float,
+    resolution_status: PolymarketResolutionStatus = "normal",
 ) -> PolymarketRuleResolution:
     """Resolve a normalized rule into payout semantics."""
 
@@ -199,10 +210,13 @@ def resolve_polymarket_rule(
     ):
         if value <= 0.0 or not math.isfinite(value):
             raise ValueError(f"{field_name} must be positive and finite")
+    if resolution_status not in ("normal", "unknown_50_50"):
+        raise ValueError("unsupported resolution_status")
     resolved_outcome = _resolved_outcome(
         rule=rule,
         reference_price_start=reference_price_start,
         reference_price_end=reference_price_end,
+        resolution_status=resolution_status,
     )
     payout_up, payout_down = payout_for_resolved_outcome(resolved_outcome)
     return PolymarketRuleResolution(
@@ -214,6 +228,7 @@ def resolve_polymarket_rule(
         payout_down=payout_down,
         reference_price_start=reference_price_start,
         reference_price_end=reference_price_end,
+        resolution_status=resolution_status,
         comparator=rule.comparator,
         tie_breaker=rule.tie_breaker,
         raw_resolution_sha256=canonical_json_sha256(
@@ -222,6 +237,7 @@ def resolve_polymarket_rule(
                 "condition_id": rule.condition_id,
                 "reference_price_start": reference_price_start,
                 "reference_price_end": reference_price_end,
+                "resolution_status": resolution_status,
                 "resolved_outcome": resolved_outcome,
                 "raw_rule_sha256": rule.raw_rule_sha256,
             }
@@ -246,18 +262,19 @@ def _resolved_outcome(
     rule: PolymarketResolutionRule,
     reference_price_start: float,
     reference_price_end: float,
+    resolution_status: PolymarketResolutionStatus,
 ) -> PolymarketResolvedOutcome:
+    if resolution_status == "unknown_50_50":
+        if not rule.unknown_50_50_enabled:
+            raise PolymarketAdapterError("unknown_50_50_disabled")
+        return "UNKNOWN_50_50"
     if reference_price_end > reference_price_start:
         return "UP"
     if reference_price_end < reference_price_start:
         return "DOWN"
     if rule.comparator == "close_gte_open":
         return "UP"
-    if rule.tie_breaker == "up":
-        return "UP"
-    if rule.tie_breaker == "down":
-        return "DOWN"
-    return "UNKNOWN_50_50"
+    return "DOWN"
 
 
 def _infer_comparator(raw_rule_text: str) -> PolymarketComparator:

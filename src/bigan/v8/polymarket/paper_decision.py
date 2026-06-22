@@ -194,6 +194,7 @@ def _decision_for_signal(
         max_paper_size=max_paper_size,
         paper_notional=paper_notional,
         reason_codes=("positive_edge", "paper_only_guard"),
+        paper_action=f"BUY_{selected_outcome}",  # type: ignore[arg-type]
     )
 
 
@@ -223,6 +224,7 @@ def _no_trade_decision(
         max_paper_size=0.0,
         paper_notional=0.0,
         reason_codes=(*reason_codes, "paper_only_guard"),
+        paper_action="NO_TRADE",
     )
 
 

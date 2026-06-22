@@ -9,6 +9,8 @@ import pytest
 
 from bigan.v8.phase0 import MarketData
 from bigan.v8.polymarket import (
+    PolymarketAdapterError,
+    PolymarketBinaryDecision,
     PolymarketPolicySignal,
     build_polymarket_feature_rows,
     build_polymarket_paper_decisions,
@@ -80,12 +82,133 @@ def test_unknown_50_50_settlement_pays_both_outcomes_half(tmp_path: Path) -> Non
         token_snapshots=snapshots,
         decisions=decisions,
         reference_price_end=market.reference_price_at_start,
+        resolution_status="unknown_50_50",
         output_dir=tmp_path,
     )
 
+    assert result.resolution.resolution_status == "unknown_50_50"
     assert result.settlement_events[0].resolved_outcome == "UNKNOWN_50_50"
     assert result.settlement_events[0].payout_up == 0.5
     assert result.settlement_events[0].payout_down == 0.5
+
+
+def test_normal_tie_with_50_50_fallback_rule_resolves_down(tmp_path: Path) -> None:
+    payload = synthetic_btc15m_market_payload()
+    payload["settlement_rule"] = (
+        "UP wins if close is greater than open; if unresolved, resolves 50-50."
+    )
+    market = normalize_btc15m_binary_market(payload)
+    snapshots = normalize_token_snapshots(
+        market=market,
+        rows=synthetic_token_snapshot_rows(market),
+    )
+    decisions = _decisions_for_market(market, snapshots, outcome="DOWN")
+
+    result = run_polymarket_settlement_engine(
+        market=market,
+        token_snapshots=snapshots,
+        decisions=decisions,
+        reference_price_end=market.reference_price_at_start,
+        output_dir=tmp_path,
+    )
+
+    assert result.resolution.resolution_status == "normal"
+    assert result.settlement_events[0].resolved_outcome == "DOWN"
+    assert result.settlement_events[0].payout_up == 0.0
+    assert result.settlement_events[0].payout_down == 1.0
+
+
+def test_buy_up_then_sell_up_realizes_positive_trade_pnl(tmp_path: Path) -> None:
+    market, snapshots, _ = _fixture_decisions(outcome="UP")
+    buy, sell = _buy_then_sell_decisions(
+        market=market,
+        snapshots=snapshots,
+        outcome="UP",
+        sell_snapshot_index=2,
+    )
+
+    result = run_polymarket_settlement_engine(
+        market=market,
+        token_snapshots=snapshots,
+        decisions=(buy, sell),
+        reference_price_end=market.reference_price_at_start + 10.0,
+        output_dir=tmp_path,
+    )
+    sell_event = [
+        event for event in result.ledger_events if event.action == "SELL"
+    ][0]
+
+    assert result.pnl_breakdown["realized_trade_pnl"] > 0.0
+    assert result.pnl_breakdown["settlement_pnl"] == 0.0
+    assert sell_event.fill_price == _snapshot(snapshots, sell.decision_ts, "UP").bid_price
+
+
+def test_buy_up_then_sell_up_realizes_negative_trade_pnl(tmp_path: Path) -> None:
+    market, snapshots, _ = _fixture_decisions(outcome="UP")
+    buy, sell = _buy_then_sell_decisions(
+        market=market,
+        snapshots=snapshots,
+        outcome="UP",
+        sell_snapshot_index=1,
+    )
+
+    result = run_polymarket_settlement_engine(
+        market=market,
+        token_snapshots=snapshots,
+        decisions=(buy, sell),
+        reference_price_end=market.reference_price_at_start + 10.0,
+        output_dir=tmp_path,
+    )
+
+    assert result.pnl_breakdown["realized_trade_pnl"] < 0.0
+    assert result.pnl_breakdown["settlement_pnl"] == 0.0
+    assert result.pnl_breakdown["unresolved_position_count"] == 0
+
+
+def test_sell_up_without_open_position_fails_closed(tmp_path: Path) -> None:
+    market, snapshots, _ = _fixture_decisions(outcome="UP")
+    sell_snapshot = _snapshot(snapshots, market.market_start_ts, "UP")
+    decision = _decision(
+        market=market,
+        ts=sell_snapshot.ts,
+        outcome="UP",
+        action="SELL_UP",
+        paper_notional=0.1,
+    )
+
+    with pytest.raises(PolymarketAdapterError, match="sell_exceeds_open_position"):
+        run_polymarket_settlement_engine(
+            market=market,
+            token_snapshots=snapshots,
+            decisions=(decision,),
+            reference_price_end=market.reference_price_at_start + 10.0,
+            output_dir=tmp_path,
+        )
+
+
+def test_buy_down_then_sell_down_uses_down_bid(tmp_path: Path) -> None:
+    market, snapshots, _ = _fixture_decisions(outcome="DOWN")
+    buy, sell = _buy_then_sell_decisions(
+        market=market,
+        snapshots=snapshots,
+        outcome="DOWN",
+        sell_snapshot_index=2,
+    )
+    sell_snapshot = _snapshot(snapshots, sell.decision_ts, "DOWN")
+
+    result = run_polymarket_settlement_engine(
+        market=market,
+        token_snapshots=snapshots,
+        decisions=(buy, sell),
+        reference_price_end=market.reference_price_at_start - 10.0,
+        output_dir=tmp_path,
+    )
+    sell_event = [
+        event for event in result.ledger_events if event.action == "SELL"
+    ][0]
+
+    assert sell_event.outcome == "DOWN"
+    assert sell_event.fill_price == sell_snapshot.bid_price
 
 
 def test_settlement_artifacts_preserve_paper_only_safety_flags(tmp_path: Path) -> None:
@@ -163,6 +286,75 @@ def _decisions_for_market(market, snapshots, *, outcome: str):
         min_confidence=0.1,
         min_edge=0.0,
         max_paper_size=0.2,
+    )
+
+
+def _buy_then_sell_decisions(
+    *,
+    market,
+    snapshots,
+    outcome: str,
+    sell_snapshot_index: int,
+):
+    buy_snapshot = _snapshot(snapshots, market.market_start_ts, outcome)
+    outcome_snapshots = [
+        snapshot for snapshot in snapshots if snapshot.outcome == outcome
+    ]
+    sell_snapshot = outcome_snapshots[sell_snapshot_index]
+    buy_notional = 0.2
+    bought_qty = buy_notional / buy_snapshot.ask_price
+    sell_notional = bought_qty * sell_snapshot.bid_price
+    buy = _decision(
+        market=market,
+        ts=buy_snapshot.ts,
+        outcome=outcome,
+        action=f"BUY_{outcome}",
+        paper_notional=buy_notional,
+    )
+    sell = _decision(
+        market=market,
+        ts=sell_snapshot.ts,
+        outcome=outcome,
+        action=f"SELL_{outcome}",
+        paper_notional=sell_notional,
+    )
+    return buy, sell
+
+
+def _decision(
+    *,
+    market,
+    ts: int,
+    outcome: str,
+    action: str,
+    paper_notional: float,
+) -> PolymarketBinaryDecision:
+    return PolymarketBinaryDecision(
+        decision_ts=ts,
+        market_id=market.market_id,
+        condition_id=market.condition_id,
+        slug=market.slug,
+        selected_outcome=outcome,
+        selected_token_id=market.token_id_for_outcome(outcome),
+        opposite_token_id=market.opposite_token_id_for_outcome(outcome),
+        v8_action=0.8,
+        v8_confidence=0.9,
+        v8_score=0.9,
+        estimated_probability=0.8 if outcome == "UP" else 0.2,
+        token_mid_price=None,
+        edge=0.1,
+        max_paper_size=0.2,
+        paper_notional=paper_notional,
+        reason_codes=("test_fixture",),
+        paper_action=action,
+    )
+
+
+def _snapshot(snapshots, ts: int, outcome: str):
+    return next(
+        snapshot
+        for snapshot in snapshots
+        if snapshot.ts == ts and snapshot.outcome == outcome
     )
 
 

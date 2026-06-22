@@ -239,6 +239,7 @@ def run_polymarket_btc15m_paper_pipeline(
     market_payload: dict[str, Any] | None = None,
     token_snapshot_rows: list[dict[str, Any]] | None = None,
     btc_market_rows: list[dict[str, Any]] | None = None,
+    polymarket_decisions: tuple[PolymarketBinaryDecision, ...] | None = None,
 ) -> PolymarketAdapterRunResult:
     """Run deterministic mocked BTC 15m adapter through v8 paper evidence."""
 
@@ -270,12 +271,17 @@ def run_polymarket_btc15m_paper_pipeline(
         token_snapshots=snapshots,
         reference_price_end=btc_rows[-1].effective_mid_price,
     )
-    decisions = build_polymarket_paper_decisions(
-        market=market,
-        feature_rows=feature_rows,
-        token_snapshots=snapshots,
-        policy_signals=_default_policy_signals(feature_rows),
-    )
+    if polymarket_decisions is None:
+        decisions = build_polymarket_paper_decisions(
+            market=market,
+            feature_rows=feature_rows,
+            token_snapshots=snapshots,
+            policy_signals=_default_policy_signals(feature_rows),
+        )
+    else:
+        decisions = polymarket_decisions
+    if not decisions:
+        raise PolymarketAdapterError("no_polymarket_decisions")
     phase4_decisions = polymarket_decisions_to_phase4(
         decisions=decisions,
         labels=label_rows,

@@ -17,6 +17,14 @@ POLYMARKET_SOURCE = "polymarket"
 
 PolymarketOutcome = Literal["UP", "DOWN"]
 PolymarketDecisionOutcome = Literal["UP", "DOWN", "NO_TRADE"]
+PolymarketDecisionAction = Literal[
+    "BUY_UP",
+    "BUY_DOWN",
+    "SELL_UP",
+    "SELL_DOWN",
+    "HOLD",
+    "NO_TRADE",
+]
 PolymarketMarketStatus = Literal["open", "closed", "settled"]
 
 
@@ -323,6 +331,7 @@ class PolymarketBinaryDecision:
     max_paper_size: float
     paper_notional: float
     reason_codes: tuple[str, ...]
+    paper_action: PolymarketDecisionAction = "NO_TRADE"
     paper_only: bool = True
     capital_at_risk: bool = False
     broker_exchange_write_enabled: bool = False
@@ -338,8 +347,30 @@ class PolymarketBinaryDecision:
         )
         if self.selected_outcome not in ("UP", "DOWN", "NO_TRADE"):
             raise ValueError("selected_outcome must be UP, DOWN, or NO_TRADE")
+        if self.paper_action not in (
+            "BUY_UP",
+            "BUY_DOWN",
+            "SELL_UP",
+            "SELL_DOWN",
+            "HOLD",
+            "NO_TRADE",
+        ):
+            raise ValueError("unsupported paper_action")
+        if self.paper_action == "NO_TRADE" and self.selected_outcome != "NO_TRADE":
+            raise ValueError("NO_TRADE action must use NO_TRADE selected_outcome")
+        if self.paper_action == "HOLD" and self.selected_outcome != "NO_TRADE":
+            raise ValueError("HOLD action must use NO_TRADE selected_outcome")
+        if self.paper_action in {"BUY_UP", "SELL_UP"} and self.selected_outcome != "UP":
+            raise ValueError("UP actions require selected_outcome=UP")
+        if (
+            self.paper_action in {"BUY_DOWN", "SELL_DOWN"}
+            and self.selected_outcome != "DOWN"
+        ):
+            raise ValueError("DOWN actions require selected_outcome=DOWN")
         if self.selected_outcome != "NO_TRADE" and not self.selected_token_id:
             raise ValueError("selected token is required for trade decisions")
+        if self.paper_action.startswith("SELL_") and self.paper_notional <= 0.0:
+            raise ValueError("SELL actions require positive paper_notional")
         if not 0.0 <= self.v8_action <= 1.0:
             raise ValueError("v8_action must be in [0, 1]")
         if not 0.0 <= self.v8_confidence <= 1.0:

@@ -14,7 +14,12 @@ import pytest
 from bigan.v8.paper import summarize_paper_run
 from bigan.v8.polymarket import (
     PolymarketAdapterRunConfig,
+    PolymarketBinaryDecision,
+    normalize_btc15m_binary_market,
+    normalize_token_snapshots,
     run_polymarket_btc15m_paper_pipeline,
+    synthetic_btc15m_market_payload,
+    synthetic_token_snapshot_rows,
 )
 from examples.v8.run_polymarket_btc15m_paper import (
     run_polymarket_btc15m_paper_cli,
@@ -182,6 +187,43 @@ def test_polymarket_missing_or_enabled_safety_flags_are_critical(
     assert "wallet_signing_enabled" in codes
 
 
+def test_polymarket_pipeline_surfaces_sell_path_realized_trade_pnl(
+    tmp_path: Path,
+) -> None:
+    market = normalize_btc15m_binary_market(synthetic_btc15m_market_payload())
+    snapshots = normalize_token_snapshots(
+        market=market,
+        rows=synthetic_token_snapshot_rows(market),
+    )
+    buy, sell = _buy_then_sell_decisions(
+        market=market,
+        snapshots=snapshots,
+        outcome="UP",
+    )
+
+    result = run_polymarket_btc15m_paper_pipeline(
+        config=PolymarketAdapterRunConfig(
+            run_id="polymarket-sell-path-pnl",
+            output_dir=tmp_path,
+        ),
+        polymarket_decisions=(buy, sell),
+    )
+    paper_summary = _read_json(result.paper_run_dir / "paper_run_summary.json")
+    observability = _read_json(
+        result.observability_dir / "paper_observability_report.json"
+    )
+    comment_payload = _read_json(
+        result.github_comment_dir / "github_paper_comment_payload.json"
+    )
+    ledger_rows = _read_jsonl(result.paper_run_dir / "polymarket_position_ledger.jsonl")
+
+    assert any(row["action"] == "SELL" for row in ledger_rows)
+    assert paper_summary["polymarket_realized_trade_pnl"] > 0.0
+    assert paper_summary["polymarket_settlement_pnl"] == 0.0
+    assert observability["performance_metrics"]["polymarket_realized_trade_pnl"] > 0.0
+    assert comment_payload["polymarket_realized_trade_pnl"] > 0.0
+
+
 def test_polymarket_example_cli_is_deterministic(tmp_path: Path) -> None:
     first = run_polymarket_btc15m_paper_cli(
         run_id="polymarket-deterministic",
@@ -249,4 +291,73 @@ def _sha256_file(path: Path) -> str:
 def _ts_to_utc(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _buy_then_sell_decisions(
+    *,
+    market,
+    snapshots,
+    outcome: str,
+) -> tuple[PolymarketBinaryDecision, PolymarketBinaryDecision]:
+    buy_snapshot = _snapshot(snapshots, market.market_start_ts, outcome)
+    outcome_snapshots = [
+        snapshot for snapshot in snapshots if snapshot.outcome == outcome
+    ]
+    sell_snapshot = outcome_snapshots[2]
+    buy_notional = 0.2
+    bought_qty = buy_notional / buy_snapshot.ask_price
+    sell_notional = bought_qty * sell_snapshot.bid_price
+    return (
+        _decision(
+            market=market,
+            ts=buy_snapshot.ts,
+            outcome=outcome,
+            action=f"BUY_{outcome}",
+            paper_notional=buy_notional,
+        ),
+        _decision(
+            market=market,
+            ts=sell_snapshot.ts,
+            outcome=outcome,
+            action=f"SELL_{outcome}",
+            paper_notional=sell_notional,
+        ),
+    )
+
+
+def _decision(
+    *,
+    market,
+    ts: int,
+    outcome: str,
+    action: str,
+    paper_notional: float,
+) -> PolymarketBinaryDecision:
+    return PolymarketBinaryDecision(
+        decision_ts=ts,
+        market_id=market.market_id,
+        condition_id=market.condition_id,
+        slug=market.slug,
+        selected_outcome=outcome,
+        selected_token_id=market.token_id_for_outcome(outcome),
+        opposite_token_id=market.opposite_token_id_for_outcome(outcome),
+        v8_action=0.8,
+        v8_confidence=0.9,
+        v8_score=0.9,
+        estimated_probability=0.8 if outcome == "UP" else 0.2,
+        token_mid_price=None,
+        edge=0.1,
+        max_paper_size=0.2,
+        paper_notional=paper_notional,
+        reason_codes=("test_fixture",),
+        paper_action=action,
+    )
+
+
+def _snapshot(snapshots, ts: int, outcome: str):
+    return next(
+        snapshot
+        for snapshot in snapshots
+        if snapshot.ts == ts and snapshot.outcome == outcome
     )
