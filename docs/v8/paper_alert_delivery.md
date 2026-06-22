@@ -41,6 +41,10 @@ live_exchange_write_enabled=false
 Blocked, degraded, or boundary-violating runs must include a clear do-not-promote
 message.
 
+Critical alerts are never capped or omitted from the GitHub comment. The
+`max_alerts_to_inline` limit only applies to warning/info alerts, and omitted
+counts are reported as non-critical omissions.
+
 ## Dry Run
 
 ```bash
@@ -81,8 +85,11 @@ github_paper_comment_gh_command.sh
 The command is copy-pasteable:
 
 ```bash
-gh issue comment 124 --repo phead198708/BiGan --body-file github_paper_comment.md
+gh issue comment 124 --repo phead198708/BiGan --body-file /absolute/path/to/github_paper_comment.md
 ```
+
+The generated `--body-file` path is absolute so the command can be copied or run
+from outside the output directory.
 
 ## Direct Comment Mode
 
@@ -140,6 +147,16 @@ The comment includes:
 - next recommended operator action
 - observability artifact hashes
 - source paper artifact hashes
+
+The paper safety section reports observed-vs-expected values:
+
+```text
+paper_only: <actual> expected true
+capital_at_risk: <actual> expected false
+broker_exchange_write_enabled: <actual> expected false
+live_exchange_write_enabled: <actual> expected false
+automatic_deployment_promotion: false expected false
+```
 
 Healthy runs should show:
 

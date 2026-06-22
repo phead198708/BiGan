@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+import bigan.v8.paper.alert_delivery as alert_delivery
 from bigan.v8.paper import (
     DeterministicReplayFeed,
     GitHubCommentDeliveryConfig,
@@ -90,6 +93,63 @@ def test_paper_alert_delivery_feed_anomaly_includes_feed_alerts(
     assert "feed_health_status | `failed`" in body
 
 
+def test_paper_alert_delivery_never_omits_critical_alerts(
+    tmp_path: Path,
+) -> None:
+    observability_dir = _healthy_observability(tmp_path)
+    _overwrite_observability_alerts(
+        observability_dir,
+        [
+            _alert("warning", "first_warning", "first warning"),
+            _alert("warning", "second_warning", "second warning"),
+            _alert("critical", "late_critical_stop", "late critical stop"),
+        ],
+    )
+
+    result = deliver_github_paper_comment(
+        observability_dir=observability_dir,
+        config=_config(
+            tmp_path / "comment-critical-after-warning",
+            post_mode="dry_run",
+            max_alerts_to_inline=1,
+        ),
+    )
+    body = result.artifact_paths["comment_body"].read_text(encoding="utf-8")
+
+    assert "`late_critical_stop`" in body
+    assert "late critical stop" in body
+    assert "`first_warning`" in body
+    assert "`second_warning`" not in body
+    assert "`1` non-critical alerts omitted from inline summary" in body
+
+
+def test_paper_alert_delivery_zero_inline_limit_still_includes_critical_alerts(
+    tmp_path: Path,
+) -> None:
+    observability_dir = _healthy_observability(tmp_path)
+    _overwrite_observability_alerts(
+        observability_dir,
+        [
+            _alert("warning", "warning_before_critical", "warning before critical"),
+            _alert("critical", "critical_survives_zero_limit", "critical survives"),
+        ],
+    )
+
+    result = deliver_github_paper_comment(
+        observability_dir=observability_dir,
+        config=_config(
+            tmp_path / "comment-zero-inline",
+            post_mode="dry_run",
+            max_alerts_to_inline=0,
+        ),
+    )
+    body = result.artifact_paths["comment_body"].read_text(encoding="utf-8")
+
+    assert "`critical_survives_zero_limit`" in body
+    assert "`warning_before_critical`" not in body
+    assert "`1` non-critical alerts omitted from inline summary" in body
+
+
 def test_paper_alert_delivery_boundary_violation_warns_do_not_promote(
     tmp_path: Path,
 ) -> None:
@@ -103,9 +163,15 @@ def test_paper_alert_delivery_boundary_violation_warns_do_not_promote(
 
     assert result.payload.operator_recommendation == "stop_paper_run"
     assert result.payload.paper_only is False
+    assert result.payload.capital_at_risk is True
     assert "Do not promote to live trading" in body
     assert "`paper_only_missing`" in body
     assert "paper_only | `false`" in body
+    assert "capital_at_risk | `true`" in body
+    assert "- paper_only: `false` expected `true`" in body
+    assert "- capital_at_risk: `true` expected `false`" in body
+    assert "- real capital: `false`" not in body
+    assert "- broker/exchange write path: `false`" not in body
 
 
 def test_paper_alert_delivery_missing_observability_report_fails_closed(
@@ -154,9 +220,90 @@ def test_paper_alert_delivery_gh_command_mode_writes_command(
     assert "--repo phead198708/BiGan" in command
     assert "--body-file" in command
     assert "github_paper_comment.md" in command
+    assert payload["gh_command"] == command.strip()
+    body_file = Path(shlex.split(command)[shlex.split(command).index("--body-file") + 1])
+    assert body_file.is_absolute()
+    assert body_file == result.artifact_paths["comment_body"]
+    assert body_file.exists()
     assert payload["gh_command"] is not None
     assert payload["issue_number"] == 126
     assert payload["repo_full_name"] == "phead198708/BiGan"
+
+
+def test_paper_alert_delivery_non_direct_modes_do_not_call_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observability_dir = _healthy_observability(tmp_path)
+
+    def fail_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("subprocess.run should not be called")
+
+    monkeypatch.setattr(alert_delivery.subprocess, "run", fail_run)
+
+    deliver_github_paper_comment(
+        observability_dir=observability_dir,
+        config=_config(tmp_path / "comment-dry-no-subprocess", post_mode="dry_run"),
+    )
+    deliver_github_paper_comment(
+        observability_dir=observability_dir,
+        config=_config(tmp_path / "comment-gh-no-subprocess", post_mode="gh_command"),
+    )
+
+
+def test_paper_alert_delivery_direct_comment_calls_gh_and_writes_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observability_dir = _healthy_observability(tmp_path)
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> SimpleNamespace:
+        calls.append(
+            {
+                "command": command,
+                "check": check,
+                "capture_output": capture_output,
+                "text": text,
+            }
+        )
+        return SimpleNamespace(
+            stdout="https://github.com/phead198708/BiGan/issues/126#issuecomment-1\n"
+        )
+
+    monkeypatch.setattr(alert_delivery.subprocess, "run", fake_run)
+
+    result = deliver_github_paper_comment(
+        observability_dir=observability_dir,
+        config=_config(tmp_path / "comment-direct", post_mode="direct_comment"),
+    )
+
+    assert calls == [
+        {
+            "command": [
+                "gh",
+                "issue",
+                "comment",
+                "126",
+                "--repo",
+                "phead198708/BiGan",
+                "--body-file",
+                str(result.artifact_paths["comment_body"]),
+            ],
+            "check": True,
+            "capture_output": True,
+            "text": True,
+        }
+    ]
+    receipt = _read_json(result.artifact_paths["delivery_receipt"])
+    assert receipt == result.delivery_receipt
+    assert receipt["comment_url"].endswith("#issuecomment-1")
 
 
 def test_paper_alert_delivery_cli_outputs_console_summary(
@@ -182,20 +329,23 @@ def test_paper_alert_delivery_cli_outputs_console_summary(
 
 def test_paper_alert_delivery_outputs_are_deterministic(tmp_path: Path) -> None:
     observability_dir = _healthy_observability(tmp_path)
+    output_dir = tmp_path / "comment-repeat"
 
     first = deliver_github_paper_comment(
         observability_dir=observability_dir,
-        config=_config(tmp_path / "comment-first", post_mode="gh_command"),
+        config=_config(output_dir, post_mode="gh_command"),
     )
+    first_hashes = {
+        key: _sha256_file(first.artifact_paths[key])
+        for key in ("payload", "comment_body", "gh_command")
+    }
     second = deliver_github_paper_comment(
         observability_dir=observability_dir,
-        config=_config(tmp_path / "comment-second", post_mode="gh_command"),
+        config=_config(output_dir, post_mode="gh_command"),
     )
 
     for key in ("payload", "comment_body", "gh_command"):
-        assert _sha256_file(first.artifact_paths[key]) == _sha256_file(
-            second.artifact_paths[key]
-        )
+        assert first_hashes[key] == _sha256_file(second.artifact_paths[key])
 
 
 def _healthy_observability(tmp_path: Path) -> Path:
@@ -254,6 +404,7 @@ def _boundary_violation_observability(tmp_path: Path) -> Path:
     summary_path = run.output_dir / "paper_run_summary.json"
     summary = _read_json(summary_path)
     summary.pop("paper_only")
+    summary["capital_at_risk"] = True
     _write_json(summary_path, summary)
     return _summarize(tmp_path, run.output_dir, "paper-alert-delivery-boundary")
 
@@ -308,14 +459,44 @@ def _config(
     output_dir: Path,
     *,
     post_mode: str,
+    max_alerts_to_inline: int = 20,
 ) -> GitHubCommentDeliveryConfig:
     return GitHubCommentDeliveryConfig(
         repo_full_name="phead198708/BiGan",
         issue_number=126,
         output_dir=output_dir,
         post_mode=post_mode,  # type: ignore[arg-type]
+        max_alerts_to_inline=max_alerts_to_inline,
         overwrite_existing=True,
     )
+
+
+def _overwrite_observability_alerts(
+    observability_dir: Path,
+    alerts: list[dict[str, str]],
+) -> None:
+    report_path = observability_dir / "paper_observability_report.json"
+    report = _read_json(report_path)
+    report["alert_count"] = len(alerts)
+    report["alert_severity_counts"] = {
+        "critical": sum(1 for alert in alerts if alert["severity"] == "critical"),
+        "warning": sum(1 for alert in alerts if alert["severity"] == "warning"),
+        "info": sum(1 for alert in alerts if alert["severity"] == "info"),
+    }
+    if report["alert_severity_counts"]["critical"] > 0:
+        report["operator_recommendation"] = "blocked_fail_closed"
+        report["phase6_status"] = "blocked_fail_closed"
+    _write_json(report_path, report)
+    _write_jsonl(observability_dir / "paper_alerts.jsonl", alerts)
+
+
+def _alert(severity: str, code: str, message: str) -> dict[str, str]:
+    return {
+        "severity": severity,
+        "category": "regression_fixture",
+        "code": code,
+        "message": message,
+    }
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -325,6 +506,13 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True, allow_nan=False),
+        encoding="utf-8",
+    )
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, str]]) -> None:
+    path.write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n",
         encoding="utf-8",
     )
 

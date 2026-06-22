@@ -248,7 +248,7 @@ def _build_payload(
     )
     command = None
     if config.post_mode in {"gh_command", "direct_comment"}:
-        command = _gh_command(config, Path("github_paper_comment.md"))
+        command = _gh_command(config, _comment_body_path_for_command(config))
     return GitHubPaperCommentPayload(
         phase=PAPER_ALERT_DELIVERY_PHASE,
         run_id=str(report["run_id"]),
@@ -335,17 +335,7 @@ def _comment_body(
         "**Alert Summary**",
         "",
     ]
-    if not alerts:
-        lines.append("- none")
-    else:
-        for alert in alerts[: config.max_alerts_to_inline]:
-            lines.append(
-                f"- `{alert['severity']}` `{alert['category']}` "
-                f"`{alert['code']}`: {alert['message']}"
-            )
-        omitted = len(alerts) - config.max_alerts_to_inline
-        if omitted > 0:
-            lines.append(f"- `{omitted}` additional alerts omitted from inline summary")
+    lines.extend(_alert_summary_lines(alerts, config.max_alerts_to_inline))
     lines.extend(
         [
             "",
@@ -358,12 +348,21 @@ def _comment_body(
             f"- feed_late_event_count: `{report['feed_metrics']['feed_late_event_count']}`",
             f"- feed_out_of_order_count: `{report['feed_metrics']['feed_out_of_order_count']}`",
             "",
-            "**Paper Safety Boundary**",
+            "**Observed Paper Safety Flags**",
             "",
-            "- real orders: `false`",
-            "- real capital: `false`",
-            "- broker/exchange write path: `false`",
-            "- automatic deployment promotion: `false`",
+            _expected_flag_line("paper_only", report["paper_only"], True),
+            _expected_flag_line("capital_at_risk", report["capital_at_risk"], False),
+            _expected_flag_line(
+                "broker_exchange_write_enabled",
+                report["broker_exchange_write_enabled"],
+                False,
+            ),
+            _expected_flag_line(
+                "live_exchange_write_enabled",
+                report["live_exchange_write_enabled"],
+                False,
+            ),
+            "- automatic_deployment_promotion: `false` expected `false`",
             "",
         ]
     )
@@ -385,6 +384,51 @@ def _comment_body(
     lines.append(f"_created_at: `{config.created_at}`_")
     lines.append("")
     return "\n".join(lines)
+
+
+def _alert_summary_lines(
+    alerts: list[dict[str, Any]],
+    max_noncritical_alerts: int,
+) -> list[str]:
+    if not alerts:
+        return ["- none"]
+
+    critical_alerts = [
+        alert for alert in alerts if str(alert.get("severity")) == "critical"
+    ]
+    noncritical_alerts = [
+        alert for alert in alerts if str(alert.get("severity")) != "critical"
+    ]
+
+    lines: list[str] = []
+    if critical_alerts:
+        lines.append("- critical alerts:")
+        lines.extend(_format_alert_line(alert) for alert in critical_alerts)
+    else:
+        lines.append("- critical alerts: none")
+
+    inline_noncritical = noncritical_alerts[:max_noncritical_alerts]
+    if inline_noncritical:
+        lines.append("- warning/info alerts:")
+        lines.extend(_format_alert_line(alert) for alert in inline_noncritical)
+
+    omitted_noncritical = len(noncritical_alerts) - len(inline_noncritical)
+    if omitted_noncritical > 0:
+        lines.append(
+            f"- `{omitted_noncritical}` non-critical alerts omitted from inline summary"
+        )
+    return lines
+
+
+def _format_alert_line(alert: dict[str, Any]) -> str:
+    return (
+        f"  - `{alert['severity']}` `{alert['category']}` "
+        f"`{alert['code']}`: {alert['message']}"
+    )
+
+
+def _expected_flag_line(name: str, actual: Any, expected: bool) -> str:
+    return f"- {name}: `{str(actual).lower()}` expected `{str(expected).lower()}`"
 
 
 def _operator_action(recommendation: str, do_not_promote: bool) -> str:
@@ -432,6 +476,10 @@ def _gh_command(config: GitHubCommentDeliveryConfig, body_file: Path) -> str:
             shlex.quote(str(body_file)),
         ]
     )
+
+
+def _comment_body_path_for_command(config: GitHubCommentDeliveryConfig) -> Path:
+    return Path(config.output_dir).expanduser().resolve() / "github_paper_comment.md"
 
 
 def _post_direct_comment(
