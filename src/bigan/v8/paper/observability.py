@@ -38,6 +38,7 @@ OBSERVABILITY_OUTPUT_FILENAMES: tuple[str, ...] = (
     "paper_operator_summary.md",
     "paper_alerts.jsonl",
     "paper_dashboard_summary.json",
+    "paper_periodic_metrics.csv",
 )
 
 _REQUIRED_STATIC_ARTIFACTS: dict[str, str] = {
@@ -54,6 +55,44 @@ _REQUIRED_STATIC_ARTIFACTS: dict[str, str] = {
     "paper_soak_periodic_summaries": "paper_soak_periodic_summaries.jsonl",
 }
 _PHASE6_REPORT_GLOB = "phase6_cicd_pipeline_report_*.json"
+_ALL_BOUNDARY_FIELDS: dict[str, bool] = {
+    "paper_only": True,
+    "capital_at_risk": False,
+    "broker_exchange_write_enabled": False,
+    "live_exchange_write_enabled": False,
+}
+_PAPER_ONLY_BOUNDARY_FIELDS: dict[str, bool] = {
+    "paper_only": True,
+    "capital_at_risk": False,
+}
+_JSON_BOUNDARY_FIELDS: dict[str, dict[str, bool]] = {
+    "paper_run_summary": _ALL_BOUNDARY_FIELDS,
+    "paper_bundle_manifest": _ALL_BOUNDARY_FIELDS,
+    "feed_health_report": _ALL_BOUNDARY_FIELDS,
+    "phase5_report": _ALL_BOUNDARY_FIELDS,
+    "phase6_report": _ALL_BOUNDARY_FIELDS,
+    "paper_positions": _PAPER_ONLY_BOUNDARY_FIELDS,
+    "paper_pnl_report": _PAPER_ONLY_BOUNDARY_FIELDS,
+}
+_JSONL_BOUNDARY_FIELDS: dict[str, dict[str, bool]] = {
+    "paper_orders": _PAPER_ONLY_BOUNDARY_FIELDS,
+    "paper_fills": _PAPER_ONLY_BOUNDARY_FIELDS,
+    "paper_ledger": _PAPER_ONLY_BOUNDARY_FIELDS,
+    "paper_soak_heartbeat": _ALL_BOUNDARY_FIELDS,
+    "paper_soak_periodic_summaries": _ALL_BOUNDARY_FIELDS,
+}
+_BOUNDARY_MISSING_CODES: dict[str, str] = {
+    "paper_only": "paper_only_missing",
+    "capital_at_risk": "capital_at_risk_missing",
+    "broker_exchange_write_enabled": "broker_write_flag_missing",
+    "live_exchange_write_enabled": "live_write_flag_missing",
+}
+_BOUNDARY_VIOLATION_CODES: dict[str, str] = {
+    "paper_only": "paper_only_violation",
+    "capital_at_risk": "capital_risk_violation",
+    "broker_exchange_write_enabled": "broker_write_enabled",
+    "live_exchange_write_enabled": "live_write_enabled",
+}
 
 
 class PaperObservabilityError(RuntimeError):
@@ -202,7 +241,28 @@ def summarize_paper_run(
     """Read paper artifacts and write deterministic operator observability files."""
 
     resolved_thresholds = thresholds or PaperObservabilityThresholds()
+    source_path = Path(run_dir).expanduser().resolve()
     output_path = Path(output_dir).expanduser().resolve()
+    _assert_output_dir_safe(
+        source_path=source_path,
+        output_path=output_path,
+        source_label="run_dir",
+    )
+    compare_path = (
+        None if compare_run_dir is None else Path(compare_run_dir).expanduser().resolve()
+    )
+    if compare_path is not None:
+        _assert_output_dir_safe(
+            source_path=compare_path,
+            output_path=output_path,
+            source_label="compare_run_dir",
+        )
+
+    loaded = _load_paper_artifacts(source_path)
+    comparison_loaded = (
+        None if compare_path is None else _load_paper_artifacts(compare_path)
+    )
+
     if output_path.exists():
         if not overwrite_existing:
             raise FileExistsError(
@@ -212,7 +272,6 @@ def summarize_paper_run(
         shutil.rmtree(output_path)
     output_path.mkdir(parents=True)
 
-    loaded = _load_paper_artifacts(Path(run_dir))
     report = _build_observability_report(
         loaded,
         thresholds=resolved_thresholds,
@@ -236,11 +295,11 @@ def summarize_paper_run(
     )
 
     comparison_report = None
-    if compare_run_dir is not None:
+    if comparison_loaded is not None:
         comparison_report = compare_paper_runs(
             report,
             _build_observability_report(
-                _load_paper_artifacts(Path(compare_run_dir)),
+                comparison_loaded,
                 thresholds=resolved_thresholds,
                 created_at=created_at,
             ),
@@ -344,6 +403,18 @@ def compare_paper_runs(
     )
 
 
+def _assert_output_dir_safe(
+    *,
+    source_path: Path,
+    output_path: Path,
+    source_label: str,
+) -> None:
+    if output_path == source_path:
+        raise PaperObservabilityError(f"output_dir must not equal {source_label}")
+    if source_path in output_path.parents:
+        raise PaperObservabilityError(f"output_dir must not be inside {source_label}")
+
+
 def _load_paper_artifacts(run_dir: Path) -> dict[str, Any]:
     source_dir = run_dir.expanduser().resolve()
     if not source_dir.exists() or not source_dir.is_dir():
@@ -417,16 +488,20 @@ def _build_observability_report(
     severity_counts = _alert_severity_counts(alerts)
     recommendation = _operator_recommendation(alerts, metrics["phase6_status"])
     paper_only_clean = not any(
-        alert.code == "paper_only_violation" for alert in alerts
+        alert.code in {"paper_only_missing", "paper_only_violation"}
+        for alert in alerts
     )
     capital_clean = not any(
-        alert.code == "capital_risk_violation" for alert in alerts
+        alert.code in {"capital_at_risk_missing", "capital_risk_violation"}
+        for alert in alerts
     )
     broker_write_clean = not any(
-        alert.code == "broker_write_enabled" for alert in alerts
+        alert.code in {"broker_write_flag_missing", "broker_write_enabled"}
+        for alert in alerts
     )
     live_write_clean = not any(
-        alert.code == "live_write_enabled" for alert in alerts
+        alert.code in {"live_write_flag_missing", "live_write_enabled"}
+        for alert in alerts
     )
     return PaperRunObservabilityReport(
         phase=PAPER_OBSERVABILITY_PHASE,
@@ -801,98 +876,43 @@ def _add_paper_boundary_alerts(
     jsonl: dict[str, list[dict[str, Any]]],
 ) -> None:
     for source_name, payload in payloads.items():
-        _check_boundary_field(
-            alerts,
-            source_name=source_name,
-            field_name="paper_only",
-            observed=payload.get("paper_only"),
-            expected=True,
-            code="paper_only_violation",
-            message="Paper artifact is not marked paper_only=true.",
-        )
-        _check_boundary_field(
-            alerts,
-            source_name=source_name,
-            field_name="capital_at_risk",
-            observed=payload.get("capital_at_risk"),
-            expected=False,
-            code="capital_risk_violation",
-            message="Paper artifact indicates capital at risk.",
-        )
-        _check_boundary_field(
-            alerts,
-            source_name=source_name,
-            field_name="broker_exchange_write_enabled",
-            observed=payload.get("broker_exchange_write_enabled"),
-            expected=False,
-            code="broker_write_enabled",
-            message="Paper artifact indicates broker/exchange writes enabled.",
-        )
-        _check_boundary_field(
-            alerts,
-            source_name=source_name,
-            field_name="live_exchange_write_enabled",
-            observed=payload.get("live_exchange_write_enabled"),
-            expected=False,
-            code="live_write_enabled",
-            message="Paper artifact indicates live exchange writes enabled.",
-        )
+        for field_name, expected in _JSON_BOUNDARY_FIELDS.get(source_name, {}).items():
+            _check_boundary_field(
+                alerts,
+                source_name=source_name,
+                field_name=field_name,
+                payload=payload,
+                expected=expected,
+            )
     for source_name, rows in jsonl.items():
-        for row in rows:
-            if row.get("paper_only") is not True:
-                _append_alert(
+        required_fields = _JSONL_BOUNDARY_FIELDS.get(source_name, {})
+        for field_name, expected in required_fields.items():
+            for row in rows:
+                if _check_boundary_field(
                     alerts,
-                    severity="critical",
-                    category="paper_boundary",
-                    code="paper_only_violation",
-                    message=f"{source_name} row is not paper_only=true.",
-                    metric_name=f"{source_name}.paper_only",
-                    metric_value=row.get("paper_only"),
-                    threshold=True,
-                    recommendation="Discard this run as a paper safety violation.",
-                )
-                break
-        for row in rows:
-            if row.get("capital_at_risk") is not False:
-                _append_alert(
-                    alerts,
-                    severity="critical",
-                    category="paper_boundary",
-                    code="capital_risk_violation",
-                    message=f"{source_name} row indicates capital at risk.",
-                    metric_name=f"{source_name}.capital_at_risk",
-                    metric_value=row.get("capital_at_risk"),
-                    threshold=False,
-                    recommendation="Discard this run as a capital-risk violation.",
-                )
-                break
+                    source_name=f"{source_name} row",
+                    field_name=field_name,
+                    payload=row,
+                    expected=expected,
+                ):
+                    break
     positions = payloads["paper_positions"]
     for position in positions.get("positions", ()):
-        if position.get("paper_only") is not True:
-            _append_alert(
-                alerts,
-                severity="critical",
-                category="paper_boundary",
-                code="paper_only_violation",
-                message="Paper position row is not paper_only=true.",
-                metric_name="paper_positions.positions.paper_only",
-                metric_value=position.get("paper_only"),
-                threshold=True,
-                recommendation="Discard this run as a paper safety violation.",
-            )
+        if _check_boundary_field(
+            alerts,
+            source_name="paper_positions position",
+            field_name="paper_only",
+            payload=position,
+            expected=True,
+        ):
             break
-        if position.get("capital_at_risk") is not False:
-            _append_alert(
-                alerts,
-                severity="critical",
-                category="paper_boundary",
-                code="capital_risk_violation",
-                message="Paper position row indicates capital at risk.",
-                metric_name="paper_positions.positions.capital_at_risk",
-                metric_value=position.get("capital_at_risk"),
-                threshold=False,
-                recommendation="Discard this run as a capital-risk violation.",
-            )
+        if _check_boundary_field(
+            alerts,
+            source_name="paper_positions position",
+            field_name="capital_at_risk",
+            payload=position,
+            expected=False,
+        ):
             break
 
 
@@ -901,25 +921,43 @@ def _check_boundary_field(
     *,
     source_name: str,
     field_name: str,
-    observed: Any,
+    payload: dict[str, Any],
     expected: Any,
-    code: str,
-    message: str,
-) -> None:
-    if observed is None:
-        return
+) -> bool:
+    if field_name not in payload:
+        _append_alert(
+            alerts,
+            severity="critical",
+            category="paper_boundary",
+            code=_BOUNDARY_MISSING_CODES[field_name],
+            message=(
+                f"Paper boundary field {field_name} is missing. "
+                f"Source: {source_name}."
+            ),
+            metric_name=f"{source_name}.{field_name}",
+            metric_value=None,
+            threshold=expected,
+            recommendation="Treat missing paper-boundary evidence as fail-closed.",
+        )
+        return True
+    observed = payload[field_name]
     if observed != expected:
         _append_alert(
             alerts,
             severity="critical",
             category="paper_boundary",
-            code=code,
-            message=f"{message} Source: {source_name}.",
+            code=_BOUNDARY_VIOLATION_CODES[field_name],
+            message=(
+                f"Paper boundary field {field_name} is unsafe. "
+                f"Source: {source_name}."
+            ),
             metric_name=f"{source_name}.{field_name}",
             metric_value=observed,
             threshold=expected,
             recommendation="Treat this as a paper boundary violation.",
         )
+        return True
+    return False
 
 
 def _add_performance_alerts(

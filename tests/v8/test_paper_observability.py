@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from bigan.v8.paper import (
+    OBSERVABILITY_OUTPUT_FILENAMES,
     DeterministicReplayFeed,
     PaperObservabilityError,
     ReadOnlyShadowSoakConfig,
@@ -112,12 +113,128 @@ def test_paper_observability_missing_required_artifact_fails_closed(
 ) -> None:
     run_dir = _healthy_run(tmp_path)
     (run_dir / "feed_health_report.json").unlink()
+    output_dir = tmp_path / "observability-missing"
 
     with pytest.raises(PaperObservabilityError, match="missing required"):
         summarize_paper_run(
             run_dir=run_dir,
-            output_dir=tmp_path / "observability-missing",
+            output_dir=output_dir,
         )
+    assert not output_dir.exists()
+
+
+def test_paper_observability_refuses_to_overwrite_source_run(
+    tmp_path: Path,
+) -> None:
+    run_dir = _healthy_run(tmp_path)
+
+    with pytest.raises(PaperObservabilityError, match="must not equal run_dir"):
+        summarize_paper_run(
+            run_dir=run_dir,
+            output_dir=run_dir,
+            overwrite_existing=True,
+        )
+
+    assert (run_dir / "paper_run_summary.json").exists()
+    assert (run_dir / "paper_ledger.jsonl").exists()
+    assert not (run_dir / "paper_observability_report.json").exists()
+
+
+def test_paper_observability_refuses_output_inside_source_run(
+    tmp_path: Path,
+) -> None:
+    run_dir = _healthy_run(tmp_path)
+    output_dir = run_dir / "operator_report"
+
+    with pytest.raises(PaperObservabilityError, match="must not be inside run_dir"):
+        summarize_paper_run(
+            run_dir=run_dir,
+            output_dir=output_dir,
+            overwrite_existing=True,
+        )
+
+    assert not output_dir.exists()
+
+
+def test_paper_observability_missing_boundary_flags_are_critical(
+    tmp_path: Path,
+) -> None:
+    run_dir = _healthy_run(tmp_path)
+    summary_path = run_dir / "paper_run_summary.json"
+    summary = _read_json(summary_path)
+    summary.pop("paper_only")
+    _write_json(summary_path, summary)
+
+    result = summarize_paper_run(
+        run_dir=run_dir,
+        output_dir=tmp_path / "observability-missing-paper-only",
+    )
+    codes = _alert_codes(result.report)
+
+    assert result.report.operator_recommendation == "stop_paper_run"
+    assert result.report.paper_only is False
+    assert "paper_only_missing" in codes
+    assert "artifact_hash_mismatch" in codes
+
+
+def test_paper_observability_missing_capital_flag_is_critical(
+    tmp_path: Path,
+) -> None:
+    run_dir = _healthy_run(tmp_path)
+    pnl_path = run_dir / "paper_pnl_report.json"
+    pnl_report = _read_json(pnl_path)
+    pnl_report.pop("capital_at_risk")
+    _write_json(pnl_path, pnl_report)
+
+    result = summarize_paper_run(
+        run_dir=run_dir,
+        output_dir=tmp_path / "observability-missing-capital",
+    )
+    codes = _alert_codes(result.report)
+
+    assert result.report.operator_recommendation == "stop_paper_run"
+    assert result.report.capital_at_risk is True
+    assert "capital_at_risk_missing" in codes
+
+
+def test_paper_observability_missing_write_flag_is_critical(
+    tmp_path: Path,
+) -> None:
+    run_dir = _healthy_run(tmp_path)
+    feed_path = run_dir / "feed_health_report.json"
+    feed_report = _read_json(feed_path)
+    feed_report.pop("broker_exchange_write_enabled")
+    _write_json(feed_path, feed_report)
+
+    result = summarize_paper_run(
+        run_dir=run_dir,
+        output_dir=tmp_path / "observability-missing-broker-write",
+    )
+    codes = _alert_codes(result.report)
+
+    assert result.report.operator_recommendation == "stop_paper_run"
+    assert result.report.broker_exchange_write_enabled is True
+    assert "broker_write_flag_missing" in codes
+
+
+def test_paper_observability_jsonl_missing_paper_only_is_critical(
+    tmp_path: Path,
+) -> None:
+    run_dir = _healthy_run(tmp_path)
+    orders_path = run_dir / "paper_orders.jsonl"
+    rows = _read_jsonl(orders_path)
+    rows[0].pop("paper_only")
+    _write_jsonl(orders_path, rows)
+
+    result = summarize_paper_run(
+        run_dir=run_dir,
+        output_dir=tmp_path / "observability-jsonl-missing-paper-only",
+    )
+    codes = _alert_codes(result.report)
+
+    assert result.report.operator_recommendation == "stop_paper_run"
+    assert result.report.paper_only is False
+    assert "paper_only_missing" in codes
 
 
 def test_paper_observability_outputs_are_deterministic(tmp_path: Path) -> None:
@@ -165,6 +282,10 @@ def test_paper_observability_cli_and_comparison_outputs(tmp_path: Path) -> None:
         "approved_for_staged_live->blocked_fail_closed"
     )
     assert comparison["recommendation"] == "right_run_risk_increased"
+
+
+def test_paper_observability_output_filename_contract_includes_csv() -> None:
+    assert "paper_periodic_metrics.csv" in OBSERVABILITY_OUTPUT_FILENAMES
 
 
 def _healthy_run(tmp_path: Path) -> Path:
@@ -288,9 +409,28 @@ def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True, allow_nan=False),
+        encoding="utf-8",
+    )
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.write_text(
+        "".join(
+            json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            + "\n"
+            for row in rows
+        ),
         encoding="utf-8",
     )
 
