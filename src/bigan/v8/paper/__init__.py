@@ -1,5 +1,16 @@
 """Paper-only execution harness for v8."""
 
+from bigan.v8.paper.alert_delivery import (
+    DEFAULT_ALERT_DELIVERY_CREATED_AT,
+    GITHUB_COMMENT_OUTPUT_FILENAMES,
+    PAPER_ALERT_DELIVERY_PHASE,
+    GitHubCommentDeliveryConfig,
+    GitHubPaperCommentDeliveryResult,
+    GitHubPaperCommentPayload,
+    PaperAlertDeliveryError,
+    build_github_paper_comment_payload,
+    deliver_github_paper_comment,
+)
 from bigan.v8.paper.contracts import (
     DEFAULT_PAPER_CREATED_AT,
     PAPER_ARTIFACT_FILENAMES,
@@ -60,9 +71,12 @@ from bigan.v8.paper.soak import (
 
 __all__ = [
     "DEFAULT_PAPER_CREATED_AT",
+    "DEFAULT_ALERT_DELIVERY_CREATED_AT",
     "DEFAULT_OBSERVABILITY_CREATED_AT",
     "DEFAULT_READONLY_SHADOW_CREATED_AT",
+    "GITHUB_COMMENT_OUTPUT_FILENAMES",
     "OBSERVABILITY_OUTPUT_FILENAMES",
+    "PAPER_ALERT_DELIVERY_PHASE",
     "PAPER_ARTIFACT_FILENAMES",
     "PAPER_OBSERVABILITY_PHASE",
     "PAPER_TRADING_HARNESS_PHASE",
@@ -71,6 +85,9 @@ __all__ = [
     "DeterministicReplayFeed",
     "FeedHealthAcceptanceReport",
     "FeedHealthSnapshot",
+    "GitHubCommentDeliveryConfig",
+    "GitHubPaperCommentDeliveryResult",
+    "GitHubPaperCommentPayload",
     "PaperDegradationConfig",
     "PaperFill",
     "PaperHarnessConfig",
@@ -95,6 +112,7 @@ __all__ = [
     "ReadOnlyShadowSoakResult",
     "assert_readonly_feed_safe",
     "build_feed_health_acceptance_report",
+    "build_github_paper_comment_payload",
     "build_paper_observability_report",
     "canonical_payload_sha256",
     "compare_paper_runs",
@@ -106,4 +124,6 @@ __all__ = [
     "summarize_paper_run",
     "synthetic_phase4_decisions",
     "synthetic_readonly_feed_events",
+    "PaperAlertDeliveryError",
+    "deliver_github_paper_comment",
 ]
