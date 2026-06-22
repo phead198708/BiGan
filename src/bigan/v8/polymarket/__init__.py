@@ -15,6 +15,12 @@ from bigan.v8.polymarket.contracts import (
     canonical_json_sha256,
     looks_like_sha256,
 )
+from bigan.v8.polymarket.corpus import (
+    PolymarketCorpusBuildConfig,
+    PolymarketCorpusBuildResult,
+    build_polymarket_btc_corpus,
+    write_deterministic_polymarket_corpus_fixtures,
+)
 from bigan.v8.polymarket.features import build_polymarket_feature_rows
 from bigan.v8.polymarket.labels import build_polymarket_label_rows
 from bigan.v8.polymarket.ledger import (
@@ -44,6 +50,7 @@ from bigan.v8.polymarket.rules import (
     PolymarketResolutionStatus,
     PolymarketRuleResolution,
     build_btc15m_resolution_rule,
+    build_btc_updown_resolution_rule,
     resolve_polymarket_rule,
 )
 from bigan.v8.polymarket.settlement import (
@@ -65,6 +72,8 @@ __all__ = [
     "PolymarketAdapterRunResult",
     "PolymarketBinaryDecision",
     "PolymarketBinaryMarket",
+    "PolymarketCorpusBuildConfig",
+    "PolymarketCorpusBuildResult",
     "PolymarketDecisionAction",
     "PolymarketFeatureRow",
     "PolymarketLabelRow",
@@ -78,6 +87,8 @@ __all__ = [
     "PolymarketSettlementEvent",
     "PolymarketTokenSnapshot",
     "build_btc15m_resolution_rule",
+    "build_btc_updown_resolution_rule",
+    "build_polymarket_btc_corpus",
     "build_polymarket_feature_rows",
     "build_polymarket_label_rows",
     "build_polymarket_paper_decisions",
@@ -92,4 +103,5 @@ __all__ = [
     "synthetic_btc15m_market_payload",
     "synthetic_btc_market_rows",
     "synthetic_token_snapshot_rows",
+    "write_deterministic_polymarket_corpus_fixtures",
 ]

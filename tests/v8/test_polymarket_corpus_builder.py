@@ -1,0 +1,221 @@
+"""Builder tests for the deterministic Polymarket BTC corpus."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from bigan.v8.polymarket.contracts import looks_like_sha256
+from bigan.v8.polymarket.corpus import (
+    BTC_UPDOWN_MARKET_HORIZONS_MS,
+    NORMALIZED_CORPUS_FILENAMES,
+    RAW_CORPUS_FILENAMES,
+    PolymarketCorpusBuildConfig,
+    build_polymarket_btc_corpus,
+    write_deterministic_polymarket_corpus_fixtures,
+)
+
+EXPECTED_ACTIONS = {
+    "NO_TRADE",
+    "BUY_UP_HOLD_TO_SETTLEMENT",
+    "BUY_DOWN_HOLD_TO_SETTLEMENT",
+    "BUY_UP_SELL_BEFORE_CLOSE",
+    "BUY_DOWN_SELL_BEFORE_CLOSE",
+}
+
+
+def test_builder_accepts_fixture_files_and_writes_required_outputs(tmp_path: Path) -> None:
+    result = _build_fixture_corpus(tmp_path)
+    output_dir = result.output_dir
+
+    for filename in NORMALIZED_CORPUS_FILENAMES:
+        assert (output_dir / filename).exists(), filename
+    assert (output_dir / "polymarket_corpus_manifest.json").exists()
+
+    manifest = _read_json(output_dir / "polymarket_corpus_manifest.json")
+    summary = _read_json(output_dir / "polymarket_corpus_summary.json")
+
+    assert manifest["market_count"] == 3
+    assert manifest["feature_row_count"] == 12
+    assert manifest["label_row_count"] == 60
+    assert manifest["market_family_counts"] == {
+        "btc_updown_5m": 1,
+        "btc_updown_15m": 1,
+        "btc_updown_1h": 1,
+    }
+    assert summary["market_family_counts"] == manifest["market_family_counts"]
+    assert summary["split"]["max_train_decision_ts"] < summary["split"]["min_shadow_decision_ts"]
+    assert summary["raw_artifact_hashes"] == manifest["raw_artifact_hashes"]
+    manifest_normalized_hashes = dict(manifest["normalized_artifact_hashes"])
+    manifest_normalized_hashes.pop("corpus_summary")
+    assert summary["normalized_artifact_hashes"] == manifest_normalized_hashes
+    assert manifest["paper_only"] is True
+    assert manifest["capital_at_risk"] is False
+    assert manifest["polymarket_write_enabled"] is False
+    assert manifest["wallet_signing_enabled"] is False
+
+    assert set(manifest["raw_artifact_hashes"]) == set(RAW_CORPUS_FILENAMES)
+    for digest in manifest["raw_artifact_hashes"].values():
+        assert looks_like_sha256(digest)
+    for digest in manifest["normalized_artifact_hashes"].values():
+        assert looks_like_sha256(digest)
+    for digest in result.artifact_hashes.values():
+        assert looks_like_sha256(digest)
+
+
+def test_every_market_has_rule_manifest_and_up_down_tokens(tmp_path: Path) -> None:
+    result = _build_fixture_corpus(tmp_path)
+    markets = _read_jsonl(result.output_dir / "polymarket_market_metadata.jsonl")
+    rules = _read_jsonl(result.output_dir / "polymarket_market_rules.jsonl")
+
+    assert {row["market_family"] for row in markets} == set(BTC_UPDOWN_MARKET_HORIZONS_MS)
+    rule_by_market = {row["market_id"]: row for row in rules}
+    for market in markets:
+        assert market["market_id"] in rule_by_market
+        assert market["up_token_id"]
+        assert market["down_token_id"]
+        assert market["up_token_id"] != market["down_token_id"]
+        rule = rule_by_market[market["market_id"]]
+        assert rule["paper_only"] is True
+        assert rule["capital_at_risk"] is False
+        assert rule["candle_close_ts"] - rule["candle_open_ts"] == market["horizon_ms"]
+        assert looks_like_sha256(rule["raw_rule_sha256"])
+
+
+def test_labels_use_ask_for_entries_and_bid_for_sell_before_close(
+    tmp_path: Path,
+) -> None:
+    result = _build_fixture_corpus(tmp_path)
+    labels = _read_jsonl(result.output_dir / "polymarket_label_rows.jsonl")
+    snapshots = _read_jsonl(result.output_dir / "polymarket_token_book_snapshots.jsonl")
+    markets = {
+        row["market_id"]: row
+        for row in _read_jsonl(result.output_dir / "polymarket_market_metadata.jsonl")
+    }
+
+    assert {row["action"] for row in labels} == EXPECTED_ACTIONS
+    for label in labels:
+        if label["action"] == "NO_TRADE":
+            assert label["entry_bid"] == 0.0
+            assert label["entry_ask"] == 0.0
+            assert label["total_net_return"] == 0.0
+            continue
+
+        entry_snapshot = _last_snapshot(
+            snapshots=snapshots,
+            market_id=label["market_id"],
+            outcome=label["outcome"],
+            decision_ts=label["decision_ts"],
+        )
+        assert label["entry_bid"] == pytest.approx(entry_snapshot["bid_price"])
+        assert label["entry_ask"] == pytest.approx(entry_snapshot["ask_price"])
+        assert label["entry_mid"] == pytest.approx(entry_snapshot["mid_price"])
+
+        if label["action"].endswith("SELL_BEFORE_CLOSE"):
+            exit_snapshot = _last_snapshot(
+                snapshots=snapshots,
+                market_id=label["market_id"],
+                outcome=label["outcome"],
+                decision_ts=markets[label["market_id"]]["market_end_ts"] - 1,
+            )
+            assert label["exit_bid"] == pytest.approx(exit_snapshot["bid_price"])
+            assert label["exit_ask"] == pytest.approx(exit_snapshot["ask_price"])
+            assert label["realized_trade_return"] == pytest.approx(
+                label["exit_bid"] / label["entry_ask"] - 1.0
+            )
+            assert label["settlement_return"] == 0.0
+        else:
+            assert label["exit_bid"] == 0.0
+            assert label["exit_ask"] == 0.0
+            assert label["settlement_return"] == pytest.approx(
+                label["settlement_payout"] / label["entry_ask"] - 1.0
+            )
+
+        expected_net = (
+            label["realized_trade_return"]
+            + label["settlement_return"]
+            - label["fees"]
+            - label["slippage"]
+            - label["liquidity_impact"]
+        )
+        assert label["total_net_return"] == pytest.approx(expected_net)
+        assert label["is_positive"] is (label["total_net_return"] > 0.0)
+
+
+def test_rebuilding_from_identical_fixtures_produces_identical_hashes(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+
+    first = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "first",
+        )
+    )
+    second = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "second",
+        )
+    )
+
+    for artifact_name in (
+        "market_rules",
+        "market_metadata",
+        "token_book_snapshots",
+        "token_trades",
+        "btc_reference_candles",
+        "resolution_events",
+        "feature_rows",
+        "label_rows",
+        "train_shadow_split",
+        "corpus_summary",
+        "corpus_manifest",
+    ):
+        assert first.artifact_hashes[artifact_name] == second.artifact_hashes[artifact_name]
+
+
+def _build_fixture_corpus(tmp_path: Path):
+    raw_dir = tmp_path / "raw"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    return build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus",
+        )
+    )
+
+
+def _last_snapshot(
+    *,
+    snapshots: list[dict],
+    market_id: str,
+    outcome: str,
+    decision_ts: int,
+) -> dict:
+    eligible = [
+        row
+        for row in snapshots
+        if row["market_id"] == market_id
+        and row["outcome"] == outcome
+        and row["ts"] <= decision_ts
+        and row["available_at_ts"] <= decision_ts
+    ]
+    assert eligible
+    return max(eligible, key=lambda row: (row["ts"], row["available_at_ts"]))
+
+
+def _read_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]

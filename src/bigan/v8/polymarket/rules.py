@@ -159,7 +159,40 @@ def build_btc15m_resolution_rule(
 ) -> PolymarketResolutionRule:
     """Build the normalized BTC 15m resolution rule for a paper market."""
 
-    text = raw_rule_text or market.settlement_rule
+    return build_btc_updown_resolution_rule(
+        market_id=market.market_id,
+        condition_id=market.condition_id,
+        slug=market.slug,
+        market_family=market.market_family,
+        resolution_source=market.reference_price_source,
+        candle_open_ts=market.market_start_ts,
+        candle_close_ts=market.market_end_ts,
+        raw_rule_text=raw_rule_text or market.settlement_rule,
+        comparator=comparator,
+        tie_breaker=tie_breaker,
+        unknown_50_50_enabled=unknown_50_50_enabled,
+    )
+
+
+def build_btc_updown_resolution_rule(
+    *,
+    market_id: str,
+    condition_id: str,
+    slug: str,
+    market_family: str,
+    resolution_source: str,
+    candle_open_ts: int,
+    candle_close_ts: int,
+    raw_rule_text: str,
+    comparator: PolymarketComparator | None = None,
+    tie_breaker: PolymarketTieBreaker | None = None,
+    unknown_50_50_enabled: bool | None = None,
+) -> PolymarketResolutionRule:
+    """Build a normalized BTC UP/DOWN resolution rule for any supported horizon."""
+
+    if candle_close_ts <= candle_open_ts:
+        raise ValueError("candle_close_ts must be after candle_open_ts")
+    text = raw_rule_text
     resolved_comparator = comparator or _infer_comparator(text)
     resolved_tie_breaker = tie_breaker or _infer_tie_breaker(
         text=text,
@@ -171,14 +204,14 @@ def build_btc15m_resolution_rule(
         else unknown_50_50_enabled
     )
     return PolymarketResolutionRule(
-        market_id=market.market_id,
-        condition_id=market.condition_id,
-        slug=market.slug,
-        market_family=market.market_family,
-        resolution_source=market.reference_price_source,
-        candle_interval_ms=market.horizon_ms,
-        candle_open_ts=market.market_start_ts,
-        candle_close_ts=market.market_end_ts,
+        market_id=market_id,
+        condition_id=condition_id,
+        slug=slug,
+        market_family=market_family,
+        resolution_source=resolution_source,
+        candle_interval_ms=candle_close_ts - candle_open_ts,
+        candle_open_ts=candle_open_ts,
+        candle_close_ts=candle_close_ts,
         open_price_field="reference_price_at_start",
         close_price_field="reference_price_at_end",
         comparator=resolved_comparator,
@@ -187,8 +220,8 @@ def build_btc15m_resolution_rule(
         raw_rule_text=text,
         raw_rule_sha256=canonical_json_sha256(
             {
-                "market_id": market.market_id,
-                "condition_id": market.condition_id,
+                "market_id": market_id,
+                "condition_id": condition_id,
                 "raw_rule_text": text,
             }
         ),
