@@ -54,6 +54,7 @@ PYTHONPATH=src python examples/v8/run_readonly_shadow_soak.py \
 Expected result:
 
 - `feed_event_count > 0`
+- `feed_health_passed=true`
 - `heartbeat_count > 0`
 - `periodic_summary_count > 0`
 - Phase 5 kill-switch is not triggered
@@ -75,6 +76,28 @@ Expected result:
 - Phase 5 report is produced
 - Phase 5 kill-switch is triggered
 - Phase 5 reason codes are non-empty
+- Phase 6 reports `blocked_fail_closed`
+
+## Feed-Health Hard Gate
+
+Feed-health anomalies are hard gates for the read-only shadow soak. The runner
+records the feed-health acceptance report in `feed_health_report.json`, mirrors
+it into `paper_run_summary.json`, and injects it into the Phase 6 `monitoring`
+stage metadata.
+
+Any non-empty feed-health reason code blocks Phase 6 fail closed:
+
+```text
+feed_gap_breach
+feed_late_event_breach
+feed_out_of_order_breach
+heartbeat_missing
+```
+
+Expected blocked result for those cases:
+
+- `feed_health_passed=false`
+- `feed_health_reason_codes` is non-empty
 - Phase 6 reports `blocked_fail_closed`
 
 ## Operator Stop Validation
@@ -157,6 +180,8 @@ print(json.dumps({
     "run_id": summary["run_id"],
     "stop_reason": summary["stop_reason"],
     "feed_event_count": summary["feed_event_count"],
+    "feed_health_passed": summary["feed_health_passed"],
+    "feed_health_reason_codes": summary["feed_health_reason_codes"],
     "heartbeat_count": summary["heartbeat_count"],
     "periodic_summary_count": summary["periodic_summary_count"],
     "phase5_kill_switch_triggered": summary["phase5_kill_switch_triggered"],

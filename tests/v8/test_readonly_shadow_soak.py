@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,8 @@ def test_readonly_shadow_soak_healthy_short_run_approves_phase6(
     assert summary["feed_gap_count"] == 0
     assert summary["feed_late_event_count"] == 0
     assert summary["feed_out_of_order_count"] == 0
+    assert summary["feed_health_passed"] is True
+    assert summary["feed_health_reason_codes"] == []
     assert summary["paper_only"] is True
     assert summary["capital_at_risk"] is False
     assert summary["broker_exchange_write_enabled"] is False
@@ -45,6 +48,65 @@ def test_readonly_shadow_soak_healthy_short_run_approves_phase6(
     _assert_bundle_hashes(result)
     _assert_summary_hashes(result)
     _assert_paper_only_artifacts(result.output_dir)
+
+
+def test_readonly_shadow_soak_feed_gap_blocks_phase6(tmp_path: Path) -> None:
+    events = list(synthetic_readonly_feed_events(row_count=5))
+    events[2] = replace(
+        events[2],
+        event_ts=events[1].event_ts + 180_000,
+        received_ts=events[1].event_ts + 180_250,
+    )
+    events[3] = replace(
+        events[3],
+        event_ts=events[2].event_ts + 60_000,
+        received_ts=events[2].event_ts + 60_250,
+    )
+    events[4] = replace(
+        events[4],
+        event_ts=events[3].event_ts + 60_000,
+        received_ts=events[3].event_ts + 60_250,
+    )
+
+    result = _run_with_feed(tmp_path, run_id="readonly-feed-gap", events=events)
+
+    _assert_feed_health_blocks_phase6(
+        result,
+        expected_code="feed_gap_breach",
+        metric_name="feed_gap_count",
+    )
+
+
+def test_readonly_shadow_soak_late_feed_event_blocks_phase6(tmp_path: Path) -> None:
+    events = list(synthetic_readonly_feed_events(row_count=5))
+    events[2] = replace(events[2], received_ts=events[2].event_ts + 20_000)
+
+    result = _run_with_feed(tmp_path, run_id="readonly-late-feed", events=events)
+
+    _assert_feed_health_blocks_phase6(
+        result,
+        expected_code="feed_late_event_breach",
+        metric_name="feed_late_event_count",
+    )
+
+
+def test_readonly_shadow_soak_out_of_order_feed_blocks_phase6(
+    tmp_path: Path,
+) -> None:
+    events = list(synthetic_readonly_feed_events(row_count=5))
+    events[2] = replace(
+        events[2],
+        event_ts=events[1].event_ts - 10_000,
+        received_ts=events[1].event_ts - 9_750,
+    )
+
+    result = _run_with_feed(tmp_path, run_id="readonly-out-of-order", events=events)
+
+    _assert_feed_health_blocks_phase6(
+        result,
+        expected_code="feed_out_of_order_breach",
+        metric_name="feed_out_of_order_count",
+    )
 
 
 def test_readonly_shadow_soak_degradation_blocks_phase6(tmp_path: Path) -> None:
@@ -159,6 +221,45 @@ def _config(
         live_exchange_write_enabled=live_exchange_write_enabled,
         overwrite_existing=False,
     )
+
+
+def _run_with_feed(
+    tmp_path: Path,
+    *,
+    run_id: str,
+    events: list[ReadOnlyFeedEvent],
+) -> Any:
+    return run_readonly_shadow_soak(
+        config=_config(tmp_path, run_id=run_id, duration_seconds=600),
+        feed=DeterministicReplayFeed(events=tuple(events)),
+    )
+
+
+def _assert_feed_health_blocks_phase6(
+    result: Any,
+    *,
+    expected_code: str,
+    metric_name: str,
+) -> None:
+    summary = result.final_summary
+    phase6 = result.harness_result.phase6_result.report
+    gate_by_stage = {gate["stage"]: gate for gate in phase6.stage_gates}
+    monitoring_gate = gate_by_stage["monitoring"]
+    monitoring_stage = {
+        stage["stage"]: stage
+        for stage in phase6.release_manifest["stage_evidence"]
+    }["monitoring"]
+
+    assert summary["feed_health_passed"] is False
+    assert expected_code in summary["feed_health_reason_codes"]
+    assert summary[metric_name] > 0
+    assert summary["phase6_deployment_status"] == "blocked_fail_closed"
+    assert phase6.deployment_status == "blocked_fail_closed"
+    assert monitoring_gate["allowed"] is False
+    assert expected_code in monitoring_gate["reason_codes"]
+    assert monitoring_stage["passed"] is False
+    assert monitoring_stage["metadata"]["feed_health_passed"] is False
+    assert expected_code in monitoring_stage["metadata"]["feed_health_reason_codes"]
 
 
 def _assert_required_artifacts(artifact_paths: dict[str, Path]) -> None:

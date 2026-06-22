@@ -66,6 +66,10 @@ def run_readonly_shadow_cli(
         "run_id": result.run_id,
         "stop_reason": result.final_summary["stop_reason"],
         "feed_event_count": result.final_summary["feed_event_count"],
+        "feed_health_passed": result.final_summary["feed_health_passed"],
+        "feed_health_reason_codes": result.final_summary[
+            "feed_health_reason_codes"
+        ],
         "heartbeat_count": result.final_summary["heartbeat_count"],
         "periodic_summary_count": result.final_summary["periodic_summary_count"],
         "paper_only": result.final_summary["paper_only"],

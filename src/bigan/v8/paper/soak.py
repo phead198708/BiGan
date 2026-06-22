@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,15 +18,23 @@ from bigan.v8.paper.contracts import (
 from bigan.v8.paper.engine import PaperHarnessResult, run_paper_trading_harness
 from bigan.v8.paper.feed import (
     DeterministicReplayFeed,
+    FeedHealthAcceptanceReport,
     FeedHealthSnapshot,
     ReadOnlyFeedError,
     ReadOnlyFeedEvent,
     ReadOnlyMarketFeed,
     assert_readonly_feed_safe,
+    build_feed_health_acceptance_report,
     compute_feed_health,
     synthetic_readonly_feed_events,
 )
 from bigan.v8.phase4 import AdaptiveDecision
+from bigan.v8.phase6 import (
+    CICDPipelineConfig,
+    CICDStageEvidence,
+    RollbackPlan,
+    run_phase6_cicd_pipeline,
+)
 
 READONLY_SHADOW_SCHEMA_VERSION = "bigan-v8-readonly-shadow-soak-v1"
 DEFAULT_READONLY_SHADOW_CREATED_AT = "2026-06-22T03:00:00Z"
@@ -104,6 +112,7 @@ class ReadOnlyShadowSoakResult:
     heartbeat_rows: tuple[dict[str, Any], ...]
     periodic_summary_rows: tuple[dict[str, Any], ...]
     feed_health: FeedHealthSnapshot
+    feed_health_acceptance: FeedHealthAcceptanceReport
     harness_result: PaperHarnessResult
     final_summary: dict[str, Any]
     bundle_manifest: dict[str, Any]
@@ -138,17 +147,6 @@ def run_readonly_shadow_soak(
     if not feed_events:
         raise PaperTradingError("read-only shadow soak requires at least one feed event")
 
-    decisions = _decisions_from_feed_events(feed_events)
-    harness_result = run_paper_trading_harness(
-        decisions=decisions,
-        config=_paper_harness_config(
-            config,
-            run_dir,
-            decision_count=len(decisions),
-        ),
-    )
-    artifact_paths = dict(harness_result.artifact_paths)
-
     heartbeat_rows = tuple(_heartbeat_rows(feed_events, config))
     periodic_rows = tuple(
         _periodic_summary_rows(
@@ -161,6 +159,32 @@ def run_readonly_shadow_soak(
         feed_events,
         max_allowed_gap_ms=int(config.max_feed_gap_seconds * 1000),
         max_event_lag_ms=int(config.max_event_lag_seconds * 1000),
+    )
+    feed_health_acceptance = build_feed_health_acceptance_report(
+        feed_health,
+        heartbeat_count=len(heartbeat_rows),
+        max_allowed_gap_seconds=config.max_feed_gap_seconds,
+        max_event_lag_seconds=config.max_event_lag_seconds,
+    )
+
+    decisions = _decisions_from_feed_events(
+        _paper_harness_events(feed_events, feed_health)
+    )
+    harness_result = run_paper_trading_harness(
+        decisions=decisions,
+        config=_paper_harness_config(
+            config,
+            run_dir,
+            decision_count=len(decisions),
+        ),
+    )
+    artifact_paths = dict(harness_result.artifact_paths)
+    harness_result = _apply_feed_health_phase6_gate(
+        config=config,
+        harness_result=harness_result,
+        artifact_paths=artifact_paths,
+        feed_health=feed_health,
+        feed_health_acceptance=feed_health_acceptance,
     )
     _augment_report_safety_flags(artifact_paths["phase5_report"])
     _augment_report_safety_flags(artifact_paths["phase6_report"])
@@ -187,6 +211,9 @@ def run_readonly_shadow_soak(
         {
             "schema_version": READONLY_SHADOW_SCHEMA_VERSION,
             **feed_health.to_dict(),
+            "feed_health_passed": feed_health_acceptance.passed,
+            "feed_health_reason_codes": list(feed_health_acceptance.reason_codes),
+            "acceptance": feed_health_acceptance.to_dict(),
             "stop_file_seen": stop_file_seen,
         },
     )
@@ -197,6 +224,7 @@ def run_readonly_shadow_soak(
         heartbeat_rows=heartbeat_rows,
         periodic_rows=periodic_rows,
         feed_health=feed_health,
+        feed_health_acceptance=feed_health_acceptance,
         harness_result=harness_result,
         stop_reason=stop_reason,
         artifact_paths=artifact_paths,
@@ -206,6 +234,7 @@ def run_readonly_shadow_soak(
         config=config,
         harness_result=harness_result,
         feed_health=feed_health,
+        feed_health_acceptance=feed_health_acceptance,
         final_summary=final_summary,
         artifact_paths=artifact_paths,
     )
@@ -218,6 +247,7 @@ def run_readonly_shadow_soak(
         heartbeat_rows=heartbeat_rows,
         periodic_summary_rows=periodic_rows,
         feed_health=feed_health,
+        feed_health_acceptance=feed_health_acceptance,
         harness_result=harness_result,
         final_summary=final_summary,
         bundle_manifest=bundle_manifest,
@@ -321,6 +351,26 @@ def _decisions_from_feed_events(
     return tuple(decisions)
 
 
+def _paper_harness_events(
+    events: tuple[ReadOnlyFeedEvent, ...],
+    feed_health: FeedHealthSnapshot,
+) -> tuple[ReadOnlyFeedEvent, ...]:
+    if feed_health.feed_out_of_order_count == 0:
+        return events
+    # Preserve raw feed evidence, but keep paper harness inputs acceptable to
+    # Phase 5 so Phase 6 can publish the fail-closed feed-health verdict.
+    return tuple(
+        sorted(
+            events,
+            key=lambda event: (
+                event.event_ts,
+                event.received_ts,
+                event.feed_sequence,
+            ),
+        )
+    )
+
+
 def _paper_harness_config(
     config: ReadOnlyShadowSoakConfig,
     run_dir: Path,
@@ -356,6 +406,112 @@ def _paper_harness_config(
     )
 
 
+def _apply_feed_health_phase6_gate(
+    *,
+    config: ReadOnlyShadowSoakConfig,
+    harness_result: PaperHarnessResult,
+    artifact_paths: dict[str, Path],
+    feed_health: FeedHealthSnapshot,
+    feed_health_acceptance: FeedHealthAcceptanceReport,
+) -> PaperHarnessResult:
+    base_phase6_result = harness_result.phase6_result
+    base_report = base_phase6_result.report
+    base_manifest = base_report.release_manifest
+    stage_evidence = _phase6_stage_evidence_with_feed_health(
+        stage_payloads=base_manifest["stage_evidence"],
+        feed_health=feed_health,
+        feed_health_acceptance=feed_health_acceptance,
+    )
+    rollback_plan = _phase6_rollback_plan(base_manifest["rollback_plan"])
+    phase6_config_payload = dict(base_report.config)
+    phase6_config_payload["output_dir"] = config.run_dir
+    phase6_result = run_phase6_cicd_pipeline(
+        candidate_run_id=base_report.candidate_run_id,
+        stage_evidence=stage_evidence,
+        rollback_plan=rollback_plan,
+        config=CICDPipelineConfig(**phase6_config_payload),
+    )
+    if phase6_result.report_path is None:
+        raise PaperTradingError("feed-health-gated Phase 6 did not write a report")
+    previous_phase6_path = artifact_paths["phase6_report"]
+    artifact_paths["phase6_report"] = phase6_result.report_path
+    if (
+        previous_phase6_path != phase6_result.report_path
+        and previous_phase6_path.exists()
+    ):
+        previous_phase6_path.unlink()
+    bundle_manifest = {
+        **harness_result.bundle_manifest,
+        "phase6_deployment_status": phase6_result.report.deployment_status,
+        "phase6_report_sha256": _file_sha256(phase6_result.report_path),
+    }
+    return replace(
+        harness_result,
+        phase6_result=phase6_result,
+        bundle_manifest=bundle_manifest,
+        artifact_paths=artifact_paths,
+    )
+
+
+def _phase6_stage_evidence_with_feed_health(
+    *,
+    stage_payloads: list[dict[str, Any]],
+    feed_health: FeedHealthSnapshot,
+    feed_health_acceptance: FeedHealthAcceptanceReport,
+) -> tuple[CICDStageEvidence, ...]:
+    stage_evidence: list[CICDStageEvidence] = []
+    for stage_payload in stage_payloads:
+        metadata = dict(stage_payload["metadata"])
+        passed = bool(stage_payload["passed"])
+        if stage_payload["stage"] == "monitoring":
+            metadata.update(
+                {
+                    "feed_health_passed": feed_health_acceptance.passed,
+                    "feed_health_reason_codes": list(
+                        feed_health_acceptance.reason_codes
+                    ),
+                    "feed_gap_breach": feed_health_acceptance.feed_gap_breach,
+                    "feed_late_event_breach": (
+                        feed_health_acceptance.feed_late_event_breach
+                    ),
+                    "feed_out_of_order_breach": (
+                        feed_health_acceptance.feed_out_of_order_breach
+                    ),
+                    "heartbeat_missing": feed_health_acceptance.heartbeat_missing,
+                    "feed_event_count": feed_health.feed_event_count,
+                    "feed_gap_count": feed_health.feed_gap_count,
+                    "max_feed_gap_seconds": feed_health.max_feed_gap_seconds,
+                    "feed_late_event_count": feed_health.feed_late_event_count,
+                    "feed_out_of_order_count": (
+                        feed_health.feed_out_of_order_count
+                    ),
+                }
+            )
+            passed = passed and feed_health_acceptance.passed
+        stage_evidence.append(
+            CICDStageEvidence(
+                stage=stage_payload["stage"],
+                passed=passed,
+                artifact_sha256=stage_payload["artifact_sha256"],
+                report_sha256=stage_payload["report_sha256"],
+                run_id=stage_payload["run_id"],
+                metadata=metadata,
+            )
+        )
+    return tuple(stage_evidence)
+
+
+def _phase6_rollback_plan(payload: dict[str, Any]) -> RollbackPlan:
+    return RollbackPlan(
+        stable_model_id=payload["stable_model_id"],
+        stable_model_sha256=payload["stable_model_sha256"],
+        safe_parameter_sha256=payload["safe_parameter_sha256"],
+        safe_parameters=payload["safe_parameters"],
+        rollback_artifact_sha256=payload["rollback_artifact_sha256"],
+        latency_measurements_ms=tuple(payload["latency_measurements_ms"]),
+    )
+
+
 def _heartbeat_rows(
     events: tuple[ReadOnlyFeedEvent, ...],
     config: ReadOnlyShadowSoakConfig,
@@ -363,7 +519,7 @@ def _heartbeat_rows(
     rows: list[dict[str, Any]] = []
     next_ts = events[0].event_ts
     interval_ms = config.heartbeat_interval_seconds * 1000
-    for event in events:
+    for consumed_count, event in enumerate(events, start=1):
         while event.event_ts >= next_ts:
             rows.append(
                 {
@@ -371,7 +527,7 @@ def _heartbeat_rows(
                     "heartbeat_ts": next_ts,
                     "last_feed_event_ts": event.event_ts,
                     "last_feed_sequence": event.feed_sequence,
-                    "feed_event_count": event.feed_sequence + 1,
+                    "feed_event_count": consumed_count,
                     "paper_only": True,
                     "capital_at_risk": False,
                     "broker_exchange_write_enabled": False,
@@ -442,6 +598,7 @@ def _final_summary(
     heartbeat_rows: tuple[dict[str, Any], ...],
     periodic_rows: tuple[dict[str, Any], ...],
     feed_health: FeedHealthSnapshot,
+    feed_health_acceptance: FeedHealthAcceptanceReport,
     harness_result: PaperHarnessResult,
     stop_reason: str,
     artifact_paths: dict[str, Path],
@@ -470,6 +627,14 @@ def _final_summary(
         "max_feed_gap_seconds": feed_health.max_feed_gap_seconds,
         "feed_late_event_count": feed_health.feed_late_event_count,
         "feed_out_of_order_count": feed_health.feed_out_of_order_count,
+        "feed_health_passed": feed_health_acceptance.passed,
+        "feed_health_reason_codes": list(feed_health_acceptance.reason_codes),
+        "feed_gap_breach": feed_health_acceptance.feed_gap_breach,
+        "feed_late_event_breach": feed_health_acceptance.feed_late_event_breach,
+        "feed_out_of_order_breach": (
+            feed_health_acceptance.feed_out_of_order_breach
+        ),
+        "heartbeat_missing": feed_health_acceptance.heartbeat_missing,
         "heartbeat_count": len(heartbeat_rows),
         "periodic_summary_count": len(periodic_rows),
         "row_count": len(decisions),
@@ -512,6 +677,7 @@ def _bundle_manifest(
     config: ReadOnlyShadowSoakConfig,
     harness_result: PaperHarnessResult,
     feed_health: FeedHealthSnapshot,
+    feed_health_acceptance: FeedHealthAcceptanceReport,
     final_summary: dict[str, Any],
     artifact_paths: dict[str, Path],
 ) -> dict[str, Any]:
@@ -534,11 +700,22 @@ def _bundle_manifest(
         "max_feed_gap_seconds": feed_health.max_feed_gap_seconds,
         "feed_late_event_count": feed_health.feed_late_event_count,
         "feed_out_of_order_count": feed_health.feed_out_of_order_count,
+        "feed_health_passed": feed_health_acceptance.passed,
+        "feed_health_reason_codes": list(feed_health_acceptance.reason_codes),
+        "feed_gap_breach": feed_health_acceptance.feed_gap_breach,
+        "feed_late_event_breach": feed_health_acceptance.feed_late_event_breach,
+        "feed_out_of_order_breach": (
+            feed_health_acceptance.feed_out_of_order_breach
+        ),
+        "heartbeat_missing": feed_health_acceptance.heartbeat_missing,
         "heartbeat_count": final_summary["heartbeat_count"],
         "periodic_summary_count": final_summary["periodic_summary_count"],
         "paper_run_summary_sha256": artifacts["paper_run_summary"]["sha256"],
         "phase5_report_sha256": artifacts["phase5_report"]["sha256"],
         "phase6_report_sha256": artifacts["phase6_report"]["sha256"],
+        "phase6_deployment_status": (
+            harness_result.phase6_result.report.deployment_status
+        ),
         "paper_only": True,
         "capital_at_risk": False,
         "broker_exchange_write_enabled": False,
@@ -563,7 +740,8 @@ def _augment_report_safety_flags(path: Path) -> None:
 def _elapsed_seconds(events: tuple[ReadOnlyFeedEvent, ...] | list[ReadOnlyFeedEvent]) -> int:
     if len(events) <= 1:
         return 0
-    return int((events[-1].event_ts - events[0].event_ts) / 1000)
+    event_times = [event.event_ts for event in events]
+    return int((max(event_times) - min(event_times)) / 1000)
 
 
 def _ended_at(started_at: str, duration_seconds: int) -> str:

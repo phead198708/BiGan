@@ -24,11 +24,13 @@ from bigan.v8.paper.engine import (
 )
 from bigan.v8.paper.feed import (
     DeterministicReplayFeed,
+    FeedHealthAcceptanceReport,
     FeedHealthSnapshot,
     ReadOnlyFeedError,
     ReadOnlyFeedEvent,
     ReadOnlyMarketFeed,
     assert_readonly_feed_safe,
+    build_feed_health_acceptance_report,
     compute_feed_health,
     synthetic_readonly_feed_events,
 )
@@ -50,6 +52,7 @@ __all__ = [
     "PRIMARY_PAPER_ARTIFACT_FILENAMES",
     "READONLY_SHADOW_SCHEMA_VERSION",
     "DeterministicReplayFeed",
+    "FeedHealthAcceptanceReport",
     "FeedHealthSnapshot",
     "PaperDegradationConfig",
     "PaperFill",
@@ -68,6 +71,7 @@ __all__ = [
     "ReadOnlyShadowSoakConfig",
     "ReadOnlyShadowSoakResult",
     "assert_readonly_feed_safe",
+    "build_feed_health_acceptance_report",
     "canonical_payload_sha256",
     "compute_feed_health",
     "paper_fills_to_live_observations",

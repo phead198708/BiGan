@@ -124,6 +124,61 @@ class FeedHealthSnapshot:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class FeedHealthAcceptanceReport:
+    """Hard-gate acceptance result for one read-only feed-health snapshot."""
+
+    passed: bool
+    reason_codes: tuple[str, ...]
+    feed_gap_breach: bool
+    feed_late_event_breach: bool
+    feed_out_of_order_breach: bool
+    heartbeat_missing: bool
+    feed_event_count: int
+    heartbeat_count: int
+    max_allowed_gap_seconds: float
+    max_event_lag_seconds: float
+    read_only: bool = True
+    write_capable: bool = False
+    paper_only: bool = True
+    capital_at_risk: bool = False
+    broker_exchange_write_enabled: bool = False
+    live_exchange_write_enabled: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.passed, bool):
+            raise ValueError("passed must be a boolean")
+        if any(not code for code in self.reason_codes):
+            raise ValueError("reason_codes must not contain empty values")
+        if self.feed_event_count < 0:
+            raise ValueError("feed_event_count must be non-negative")
+        if self.heartbeat_count < 0:
+            raise ValueError("heartbeat_count must be non-negative")
+        if self.max_allowed_gap_seconds <= 0.0:
+            raise ValueError("max_allowed_gap_seconds must be positive")
+        if self.max_event_lag_seconds < 0.0:
+            raise ValueError("max_event_lag_seconds must be non-negative")
+        if self.passed != (not self.reason_codes):
+            raise ValueError("passed must match reason_codes emptiness")
+        if self.read_only is not True:
+            raise ReadOnlyFeedError("feed acceptance must be read-only")
+        if self.write_capable is not False:
+            raise ReadOnlyFeedError("feed acceptance cannot be write-capable")
+        if self.paper_only is not True:
+            raise ReadOnlyFeedError("feed acceptance must be paper-only")
+        if self.capital_at_risk is not False:
+            raise ReadOnlyFeedError("feed acceptance cannot put capital at risk")
+        if self.broker_exchange_write_enabled:
+            raise ReadOnlyFeedError("broker/exchange writes are forbidden")
+        if self.live_exchange_write_enabled:
+            raise ReadOnlyFeedError("live exchange writes are forbidden")
+
+    def to_dict(self) -> dict[str, object]:
+        payload = asdict(self)
+        payload["reason_codes"] = list(self.reason_codes)
+        return payload
+
+
 class ReadOnlyMarketFeed(Protocol):
     """Minimal read-only market feed interface for paper shadow runs."""
 
@@ -255,6 +310,44 @@ def compute_feed_health(
         max_feed_gap_seconds=max_gap_ms / 1000.0,
         feed_late_event_count=late_count,
         feed_out_of_order_count=out_of_order_count,
+    )
+
+
+def build_feed_health_acceptance_report(
+    feed_health: FeedHealthSnapshot,
+    *,
+    heartbeat_count: int,
+    max_allowed_gap_seconds: float,
+    max_event_lag_seconds: float,
+) -> FeedHealthAcceptanceReport:
+    """Build the fail-closed acceptance report used by Phase 6 monitoring."""
+
+    if heartbeat_count < 0:
+        raise ValueError("heartbeat_count must be non-negative")
+    feed_gap_breach = feed_health.feed_gap_count > 0
+    feed_late_event_breach = feed_health.feed_late_event_count > 0
+    feed_out_of_order_breach = feed_health.feed_out_of_order_count > 0
+    heartbeat_missing = heartbeat_count <= 0
+    reason_codes: list[str] = []
+    if feed_gap_breach:
+        reason_codes.append("feed_gap_breach")
+    if feed_late_event_breach:
+        reason_codes.append("feed_late_event_breach")
+    if feed_out_of_order_breach:
+        reason_codes.append("feed_out_of_order_breach")
+    if heartbeat_missing:
+        reason_codes.append("heartbeat_missing")
+    return FeedHealthAcceptanceReport(
+        passed=not reason_codes,
+        reason_codes=tuple(reason_codes),
+        feed_gap_breach=feed_gap_breach,
+        feed_late_event_breach=feed_late_event_breach,
+        feed_out_of_order_breach=feed_out_of_order_breach,
+        heartbeat_missing=heartbeat_missing,
+        feed_event_count=feed_health.feed_event_count,
+        heartbeat_count=heartbeat_count,
+        max_allowed_gap_seconds=max_allowed_gap_seconds,
+        max_event_lag_seconds=max_event_lag_seconds,
     )
 
 
