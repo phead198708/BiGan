@@ -35,6 +35,20 @@ from bigan.v8.paper.feed import (
     synthetic_readonly_feed_events,
 )
 from bigan.v8.paper.ledger import PaperLedger
+from bigan.v8.paper.observability import (
+    DEFAULT_OBSERVABILITY_CREATED_AT,
+    OBSERVABILITY_OUTPUT_FILENAMES,
+    PAPER_OBSERVABILITY_PHASE,
+    PaperAlert,
+    PaperObservabilityError,
+    PaperObservabilityResult,
+    PaperObservabilityThresholds,
+    PaperRunComparisonReport,
+    PaperRunObservabilityReport,
+    build_paper_observability_report,
+    compare_paper_runs,
+    summarize_paper_run,
+)
 from bigan.v8.paper.replay import synthetic_phase4_decisions
 from bigan.v8.paper.soak import (
     DEFAULT_READONLY_SHADOW_CREATED_AT,
@@ -46,8 +60,11 @@ from bigan.v8.paper.soak import (
 
 __all__ = [
     "DEFAULT_PAPER_CREATED_AT",
+    "DEFAULT_OBSERVABILITY_CREATED_AT",
     "DEFAULT_READONLY_SHADOW_CREATED_AT",
+    "OBSERVABILITY_OUTPUT_FILENAMES",
     "PAPER_ARTIFACT_FILENAMES",
+    "PAPER_OBSERVABILITY_PHASE",
     "PAPER_TRADING_HARNESS_PHASE",
     "PRIMARY_PAPER_ARTIFACT_FILENAMES",
     "READONLY_SHADOW_SCHEMA_VERSION",
@@ -60,11 +77,17 @@ __all__ = [
     "PaperHarnessResult",
     "PaperLedger",
     "PaperLedgerEntry",
+    "PaperObservabilityError",
+    "PaperObservabilityResult",
+    "PaperObservabilityThresholds",
     "PaperOrder",
     "PaperPositionSnapshot",
     "PaperRunReport",
+    "PaperRunComparisonReport",
+    "PaperRunObservabilityReport",
     "PaperSide",
     "PaperTradingError",
+    "PaperAlert",
     "ReadOnlyFeedError",
     "ReadOnlyFeedEvent",
     "ReadOnlyMarketFeed",
@@ -72,12 +95,15 @@ __all__ = [
     "ReadOnlyShadowSoakResult",
     "assert_readonly_feed_safe",
     "build_feed_health_acceptance_report",
+    "build_paper_observability_report",
     "canonical_payload_sha256",
+    "compare_paper_runs",
     "compute_feed_health",
     "paper_fills_to_live_observations",
     "run_readonly_shadow_soak",
     "run_paper_trading_harness",
     "stream_sha256",
+    "summarize_paper_run",
     "synthetic_phase4_decisions",
     "synthetic_readonly_feed_events",
 ]
