@@ -18,6 +18,16 @@ from bigan.v8.paper.alert_delivery import (
 )
 from bigan.v8.paper.contracts import json_ready
 from bigan.v8.paper.feed import ReadOnlyMarketFeed
+from bigan.v8.paper.live_feed import (
+    DEFAULT_PUBLIC_INSTRUMENT_ID,
+    DEFAULT_PUBLIC_PROVIDER_ENDPOINT,
+    DEFAULT_PUBLIC_PROVIDER_NAME,
+    DETERMINISTIC_REPLAY_FEED_MODE,
+    LIVE_READONLY_FEED_MODE,
+    FeedMode,
+    LiveReadOnlyFeedConfig,
+)
+from bigan.v8.paper.live_feed_adapters import create_public_live_readonly_feed
 from bigan.v8.paper.observability import (
     DEFAULT_OBSERVABILITY_CREATED_AT,
     PaperObservabilityResult,
@@ -60,6 +70,13 @@ class PaperOperatorRunConfig:
     feed_event_interval_seconds: int = 60
     heartbeat_interval_seconds: int = 60
     summary_interval_seconds: int = 300
+    feed_mode: FeedMode = DETERMINISTIC_REPLAY_FEED_MODE
+    provider_name: str = DEFAULT_PUBLIC_PROVIDER_NAME
+    provider_endpoint: str = DEFAULT_PUBLIC_PROVIDER_ENDPOINT
+    instrument_id: str = DEFAULT_PUBLIC_INSTRUMENT_ID
+    request_timeout_seconds: float = 10.0
+    max_reconnect_attempts: int = 3
+    max_stale_seconds: float = 120.0
     created_at: str = DEFAULT_OPERATOR_CREATED_AT
     soak_created_at: str = DEFAULT_READONLY_SHADOW_CREATED_AT
     observability_created_at: str = DEFAULT_OBSERVABILITY_CREATED_AT
@@ -92,6 +109,23 @@ class PaperOperatorRunConfig:
             raise ValueError("heartbeat_interval_seconds must be positive")
         if self.summary_interval_seconds <= 0:
             raise ValueError("summary_interval_seconds must be positive")
+        if self.feed_mode not in (
+            DETERMINISTIC_REPLAY_FEED_MODE,
+            LIVE_READONLY_FEED_MODE,
+        ):
+            raise ValueError("feed_mode must be deterministic-replay or live-readonly")
+        if not self.provider_name.strip():
+            raise ValueError("provider_name is required")
+        if not self.provider_endpoint.strip():
+            raise ValueError("provider_endpoint is required")
+        if not self.instrument_id.strip():
+            raise ValueError("instrument_id is required")
+        if self.request_timeout_seconds <= 0.0:
+            raise ValueError("request_timeout_seconds must be positive")
+        if self.max_reconnect_attempts < 0:
+            raise ValueError("max_reconnect_attempts must be non-negative")
+        if self.max_stale_seconds <= 0.0:
+            raise ValueError("max_stale_seconds must be positive")
         if self.stop_after_events is not None and self.stop_after_events <= 0:
             raise ValueError("stop_after_events must be positive when provided")
         if self.max_feed_gap_seconds <= 0.0:
@@ -194,6 +228,7 @@ def _run_24h_paper_operator_impl(
     _prepare_operator_run_dir(config)
     stage = "paper_run"
     try:
+        resolved_feed = _resolve_operator_feed(config=config, feed=feed)
         run_readonly_shadow_soak(
             config=ReadOnlyShadowSoakConfig(
                 run_id=config.run_id,
@@ -214,7 +249,7 @@ def _run_24h_paper_operator_impl(
                 paper_only=config.paper_only,
                 capital_at_risk=config.capital_at_risk,
             ),
-            feed=feed,
+            feed=resolved_feed,
         )
 
         if _after_paper_run_fault_injection_hook_for_tests is not None:
@@ -276,6 +311,43 @@ def _run_24h_paper_operator_impl(
         ) from exc
 
 
+def _resolve_operator_feed(
+    *,
+    config: PaperOperatorRunConfig,
+    feed: ReadOnlyMarketFeed | None,
+) -> ReadOnlyMarketFeed | None:
+    if config.feed_mode == DETERMINISTIC_REPLAY_FEED_MODE:
+        return feed
+    if config.feed_mode != LIVE_READONLY_FEED_MODE:
+        raise PaperOperatorCLIError(f"unsupported feed_mode: {config.feed_mode}")
+    if feed is not None:
+        if getattr(feed, "feed_mode", None) != LIVE_READONLY_FEED_MODE:
+            raise PaperOperatorCLIError(
+                "live-readonly mode requires a live-readonly feed adapter; "
+                "refusing deterministic replay fallback"
+            )
+        if getattr(feed, "read_only", False) is not True:
+            raise PaperOperatorCLIError("live feed must be read-only")
+        if getattr(feed, "write_capable", True) is not False:
+            raise PaperOperatorCLIError("write-capable live feed is forbidden")
+        return feed
+    return create_public_live_readonly_feed(
+        LiveReadOnlyFeedConfig(
+            provider_name=config.provider_name,
+            provider_endpoint=config.provider_endpoint,
+            instrument_id=config.instrument_id,
+            poll_interval_seconds=float(config.feed_event_interval_seconds),
+            request_timeout_seconds=config.request_timeout_seconds,
+            max_reconnect_attempts=config.max_reconnect_attempts,
+            max_allowed_gap_seconds=config.max_feed_gap_seconds,
+            max_event_lag_seconds=config.max_event_lag_seconds,
+            max_stale_seconds=config.max_stale_seconds,
+            expected_wall_clock_duration_seconds=config.duration_seconds,
+            started_at=config.soak_created_at,
+        )
+    )
+
+
 def _prepare_operator_run_dir(config: PaperOperatorRunConfig) -> None:
     run_dir = config.operator_run_dir
     if run_dir.exists():
@@ -297,9 +369,14 @@ def _operator_manifest(
     summary = _read_json(config.paper_run_dir / "paper_run_summary.json")
     phase5 = _read_json(config.paper_run_dir / "phase5_safety_layer_report.json")
     phase6_path = _phase6_report_path(config.paper_run_dir)
+    live_metadata_path = config.paper_run_dir / "live_feed_metadata.json"
+    live_health_path = config.paper_run_dir / "live_feed_health_report.json"
+    live_metadata = _read_json_if_exists(live_metadata_path)
+    live_health = _read_json_if_exists(live_health_path)
     report = observability_result.report
     status = _operator_status(summary, report)
     reason_codes = _reason_codes(summary, report, status)
+    feed_mode = str(summary.get("feed_mode", config.feed_mode))
     return {
         "schema_version": PAPER_OPERATOR_SCHEMA_VERSION,
         "run_id": config.run_id,
@@ -313,6 +390,21 @@ def _operator_manifest(
         "paper_run_dir": str(config.paper_run_dir),
         "observability_dir": str(config.observability_dir),
         "github_comment_dir": str(config.github_comment_dir),
+        "feed_mode": feed_mode,
+        "real_live_data": feed_mode == LIVE_READONLY_FEED_MODE,
+        "deterministic_replay": feed_mode == DETERMINISTIC_REPLAY_FEED_MODE,
+        "provider_name": summary.get(
+            "provider_name",
+            live_metadata.get("provider_name", config.provider_name),
+        ),
+        "provider_endpoint_or_endpoint_type": live_metadata.get(
+            "provider_endpoint_or_endpoint_type",
+            config.provider_endpoint,
+        ),
+        "instrument_id": summary.get(
+            "instrument_id",
+            live_metadata.get("instrument_id", config.instrument_id),
+        ),
         "paper_summary_path": str(config.paper_run_dir / "paper_run_summary.json"),
         "observability_report_path": str(
             observability_result.artifact_paths["observability_report"]
@@ -355,6 +447,38 @@ def _operator_manifest(
         else "blocked_fail_closed",
         "phase6_deployment_status": str(summary["phase6_deployment_status"]),
         "phase6_report_sha256": _sha256_file(phase6_path),
+        "live_feed_metadata_path": str(live_metadata_path)
+        if live_metadata_path.exists()
+        else None,
+        "live_feed_metadata_sha256": _optional_sha256_file(live_metadata_path),
+        "live_feed_health_path": str(live_health_path)
+        if live_health_path.exists()
+        else None,
+        "live_feed_health_sha256": _optional_sha256_file(live_health_path),
+        "provider_disconnect_count": summary.get(
+            "provider_disconnect_count",
+            live_health.get("provider_disconnect_count", 0),
+        ),
+        "provider_reconnect_count": summary.get(
+            "provider_reconnect_count",
+            live_health.get("provider_reconnect_count", 0),
+        ),
+        "provider_error_count": summary.get(
+            "provider_error_count",
+            live_health.get("provider_error_count", 0),
+        ),
+        "stale_event_count": summary.get(
+            "stale_event_count",
+            live_health.get("stale_event_count", 0),
+        ),
+        "empty_response_count": summary.get(
+            "empty_response_count",
+            live_health.get("empty_response_count", 0),
+        ),
+        "rate_limit_count": summary.get(
+            "rate_limit_count",
+            live_health.get("rate_limit_count", 0),
+        ),
         "feed_health_passed": bool(summary["feed_health_passed"]),
         "feed_health_status": report.feed_health_status,
         "alert_count": report.alert_count,
@@ -393,6 +517,11 @@ def _console_summary(
         "run_id": manifest["run_id"],
         "operator_run_dir": manifest["operator_run_dir"],
         "run_dir": manifest["paper_run_dir"],
+        "feed_mode": manifest["feed_mode"],
+        "real_live_data": manifest["real_live_data"],
+        "deterministic_replay": manifest["deterministic_replay"],
+        "provider_name": manifest["provider_name"],
+        "instrument_id": manifest["instrument_id"],
         "paper_summary_path": manifest["paper_summary_path"],
         "phase5_status": manifest["phase5_status"],
         "phase6_deployment_status": manifest["phase6_deployment_status"],
@@ -438,6 +567,9 @@ def _write_failure_manifest(
         "paper_run_dir": str(config.paper_run_dir),
         "observability_dir": str(config.observability_dir),
         "github_comment_dir": str(config.github_comment_dir),
+        "feed_mode": config.feed_mode,
+        "provider_name": config.provider_name,
+        "instrument_id": config.instrument_id,
         "paper_only": config.paper_only,
         "capital_at_risk": config.capital_at_risk,
         "broker_exchange_write_enabled": config.broker_exchange_write_enabled,
@@ -510,6 +642,12 @@ def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _read_json_if_exists(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return _read_json(path)
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -524,3 +662,9 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _optional_sha256_file(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return _sha256_file(path)

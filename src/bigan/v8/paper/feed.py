@@ -87,6 +87,13 @@ class FeedHealthSnapshot:
     max_feed_gap_seconds: float
     feed_late_event_count: int
     feed_out_of_order_count: int
+    provider_disconnect_count: int = 0
+    provider_reconnect_count: int = 0
+    provider_error_count: int = 0
+    stale_event_count: int = 0
+    empty_response_count: int = 0
+    rate_limit_count: int = 0
+    last_successful_receive_ts: int | None = None
     read_only: bool = True
     write_capable: bool = False
     paper_only: bool = True
@@ -103,10 +110,25 @@ class FeedHealthSnapshot:
             raise ValueError("feed_late_event_count must be non-negative")
         if self.feed_out_of_order_count < 0:
             raise ValueError("feed_out_of_order_count must be non-negative")
+        for field_name in (
+            "provider_disconnect_count",
+            "provider_reconnect_count",
+            "provider_error_count",
+            "stale_event_count",
+            "empty_response_count",
+            "rate_limit_count",
+        ):
+            if int(getattr(self, field_name)) < 0:
+                raise ValueError(f"{field_name} must be non-negative")
         if self.max_feed_gap_seconds < 0.0 or not math.isfinite(
             self.max_feed_gap_seconds
         ):
             raise ValueError("max_feed_gap_seconds must be finite and non-negative")
+        if (
+            self.last_successful_receive_ts is not None
+            and self.last_successful_receive_ts < 0
+        ):
+            raise ValueError("last_successful_receive_ts must be non-negative")
         if self.read_only is not True:
             raise ReadOnlyFeedError("feed health must be read-only")
         if self.write_capable is not False:
@@ -138,6 +160,9 @@ class FeedHealthAcceptanceReport:
     heartbeat_count: int
     max_allowed_gap_seconds: float
     max_event_lag_seconds: float
+    stale_event_breach: bool = False
+    provider_error_breach: bool = False
+    empty_response_breach: bool = False
     read_only: bool = True
     write_capable: bool = False
     paper_only: bool = True
@@ -310,6 +335,7 @@ def compute_feed_health(
         max_feed_gap_seconds=max_gap_ms / 1000.0,
         feed_late_event_count=late_count,
         feed_out_of_order_count=out_of_order_count,
+        last_successful_receive_ts=None if not events else events[-1].received_ts,
     )
 
 
@@ -328,6 +354,9 @@ def build_feed_health_acceptance_report(
     feed_late_event_breach = feed_health.feed_late_event_count > 0
     feed_out_of_order_breach = feed_health.feed_out_of_order_count > 0
     heartbeat_missing = heartbeat_count <= 0
+    stale_event_breach = feed_health.stale_event_count > 0
+    provider_error_breach = feed_health.provider_error_count > 0
+    empty_response_breach = feed_health.empty_response_count > 0
     reason_codes: list[str] = []
     if feed_gap_breach:
         reason_codes.append("feed_gap_breach")
@@ -335,6 +364,12 @@ def build_feed_health_acceptance_report(
         reason_codes.append("feed_late_event_breach")
     if feed_out_of_order_breach:
         reason_codes.append("feed_out_of_order_breach")
+    if stale_event_breach:
+        reason_codes.append("stale_event_breach")
+    if provider_error_breach:
+        reason_codes.append("provider_error_breach")
+    if empty_response_breach:
+        reason_codes.append("empty_response_breach")
     if heartbeat_missing:
         reason_codes.append("heartbeat_missing")
     return FeedHealthAcceptanceReport(
@@ -344,6 +379,9 @@ def build_feed_health_acceptance_report(
         feed_late_event_breach=feed_late_event_breach,
         feed_out_of_order_breach=feed_out_of_order_breach,
         heartbeat_missing=heartbeat_missing,
+        stale_event_breach=stale_event_breach,
+        provider_error_breach=provider_error_breach,
+        empty_response_breach=empty_response_breach,
         feed_event_count=feed_health.feed_event_count,
         heartbeat_count=heartbeat_count,
         max_allowed_gap_seconds=max_allowed_gap_seconds,

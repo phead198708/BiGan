@@ -37,6 +37,13 @@ def run_24h_paper_operator_cli(
     heartbeat_interval_seconds: int = 60,
     summary_interval_seconds: int = 300,
     feed_event_interval_seconds: int = 60,
+    feed_mode: str = "deterministic-replay",
+    provider: str = "binance_public_24hr_ticker",
+    provider_endpoint: str = "https://api.binance.com/api/v3/ticker/24hr",
+    instrument: str = "BTCUSDT",
+    request_timeout_seconds: float = 10.0,
+    max_reconnect_attempts: int = 3,
+    max_stale_seconds: float = 120.0,
     overwrite_existing: bool = False,
     stop_after_events: int | None = None,
     inject_degradation: bool = False,
@@ -58,6 +65,13 @@ def run_24h_paper_operator_cli(
             feed_event_interval_seconds=feed_event_interval_seconds,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             summary_interval_seconds=summary_interval_seconds,
+            feed_mode=feed_mode,  # type: ignore[arg-type]
+            provider_name=provider,
+            provider_endpoint=provider_endpoint,
+            instrument_id=instrument,
+            request_timeout_seconds=request_timeout_seconds,
+            max_reconnect_attempts=max_reconnect_attempts,
+            max_stale_seconds=max_stale_seconds,
             overwrite_existing=overwrite_existing,
             stop_after_events=stop_after_events,
             inject_degradation=inject_degradation,
@@ -83,6 +97,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--feed-event-interval-seconds", type=int, default=60)
     parser.add_argument("--heartbeat-interval-seconds", type=int, default=60)
     parser.add_argument("--summary-interval-seconds", type=int, default=300)
+    parser.add_argument(
+        "--feed-mode",
+        choices=("deterministic-replay", "live-readonly"),
+        default="deterministic-replay",
+    )
+    parser.add_argument("--provider", default="binance_public_24hr_ticker")
+    parser.add_argument(
+        "--provider-endpoint",
+        default="https://api.binance.com/api/v3/ticker/24hr",
+    )
+    parser.add_argument("--instrument", default="BTCUSDT")
+    parser.add_argument("--request-timeout-seconds", type=float, default=10.0)
+    parser.add_argument("--max-reconnect-attempts", type=int, default=3)
+    parser.add_argument("--max-stale-seconds", type=float, default=120.0)
     parser.add_argument("--stop-after-events", type=int)
     parser.add_argument(
         "--inject-degradation",
@@ -108,6 +136,13 @@ def main(argv: list[str] | None = None) -> int:
             feed_event_interval_seconds=args.feed_event_interval_seconds,
             heartbeat_interval_seconds=args.heartbeat_interval_seconds,
             summary_interval_seconds=args.summary_interval_seconds,
+            feed_mode=args.feed_mode,
+            provider=args.provider,
+            provider_endpoint=args.provider_endpoint,
+            instrument=args.instrument,
+            request_timeout_seconds=args.request_timeout_seconds,
+            max_reconnect_attempts=args.max_reconnect_attempts,
+            max_stale_seconds=args.max_stale_seconds,
             stop_after_events=args.stop_after_events,
             inject_degradation=args.inject_degradation,
             overwrite_existing=args.overwrite_existing,

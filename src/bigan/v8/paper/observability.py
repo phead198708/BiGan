@@ -54,6 +54,10 @@ _REQUIRED_STATIC_ARTIFACTS: dict[str, str] = {
     "paper_soak_heartbeat": "paper_soak_heartbeat.jsonl",
     "paper_soak_periodic_summaries": "paper_soak_periodic_summaries.jsonl",
 }
+_OPTIONAL_STATIC_ARTIFACTS: dict[str, str] = {
+    "live_feed_metadata": "live_feed_metadata.json",
+    "live_feed_health_report": "live_feed_health_report.json",
+}
 _PHASE6_REPORT_GLOB = "phase6_cicd_pipeline_report_*.json"
 _ALL_BOUNDARY_FIELDS: dict[str, bool] = {
     "paper_only": True,
@@ -73,6 +77,8 @@ _JSON_BOUNDARY_FIELDS: dict[str, dict[str, bool]] = {
     "phase6_report": _ALL_BOUNDARY_FIELDS,
     "paper_positions": _PAPER_ONLY_BOUNDARY_FIELDS,
     "paper_pnl_report": _PAPER_ONLY_BOUNDARY_FIELDS,
+    "live_feed_metadata": _ALL_BOUNDARY_FIELDS,
+    "live_feed_health_report": _ALL_BOUNDARY_FIELDS,
 }
 _JSONL_BOUNDARY_FIELDS: dict[str, dict[str, bool]] = {
     "paper_orders": _PAPER_ONLY_BOUNDARY_FIELDS,
@@ -447,6 +453,10 @@ def _required_artifact_paths(source_dir: Path) -> dict[str, Path]:
         key: source_dir / filename
         for key, filename in _REQUIRED_STATIC_ARTIFACTS.items()
     }
+    for key, filename in _OPTIONAL_STATIC_ARTIFACTS.items():
+        path = source_dir / filename
+        if path.exists():
+            paths[key] = path
     phase6_paths = sorted(source_dir.glob(_PHASE6_REPORT_GLOB))
     if len(phase6_paths) != 1:
         raise PaperObservabilityError(
@@ -473,11 +483,23 @@ def _build_observability_report(
     hashes = loaded["artifact_hashes"]
     summary = payloads["paper_run_summary"]
     feed = payloads["feed_health_report"]
+    live_metadata = payloads.get("live_feed_metadata", {})
+    live_health = payloads.get("live_feed_health_report", {})
     phase5 = payloads["phase5_report"]
     phase6 = payloads["phase6_report"]
     pnl = payloads["paper_pnl_report"]
     positions = payloads["paper_positions"]
-    metrics = _extract_metrics(summary, feed, phase5, phase6, pnl, positions, jsonl)
+    metrics = _extract_metrics(
+        summary,
+        feed,
+        phase5,
+        phase6,
+        pnl,
+        positions,
+        jsonl,
+        live_metadata=live_metadata,
+        live_health=live_health,
+    )
     alerts: list[PaperAlert] = []
     _add_artifact_integrity_alerts(alerts, loaded)
     _add_feed_alerts(alerts, metrics)
@@ -545,6 +567,9 @@ def _extract_metrics(
     pnl: dict[str, Any],
     positions: dict[str, Any],
     jsonl: dict[str, list[dict[str, Any]]],
+    *,
+    live_metadata: dict[str, Any],
+    live_health: dict[str, Any],
 ) -> dict[str, Any]:
     safety_action = phase5.get("safety_action", {})
     drift_metrics = phase5.get("drift_metrics", {})
@@ -558,6 +583,24 @@ def _extract_metrics(
         feed.get("feed_health_passed"),
     )
     feed_metrics = {
+        "feed_mode": str(
+            summary.get(
+                "feed_mode",
+                live_metadata.get("feed_mode", "deterministic-replay"),
+            )
+        ),
+        "real_live_data": summary.get("real_live_data") is True
+        or live_metadata.get("feed_mode") == "live-readonly",
+        "deterministic_replay": summary.get("deterministic_replay") is True
+        or live_metadata.get("feed_mode") != "live-readonly",
+        "provider_name": summary.get(
+            "provider_name",
+            live_metadata.get("provider_name"),
+        ),
+        "instrument_id": summary.get(
+            "instrument_id",
+            live_metadata.get("instrument_id"),
+        ),
         "feed_event_count": _int(summary.get("feed_event_count")),
         "feed_gap_count": _int(summary.get("feed_gap_count", feed.get("feed_gap_count"))),
         "max_feed_gap_seconds": _number(
@@ -591,6 +634,58 @@ def _extract_metrics(
                 feed.get("feed_health_reason_codes", ()),
             )
             or []
+        ),
+        "provider_disconnect_count": _int(
+            summary.get(
+                "provider_disconnect_count",
+                live_health.get(
+                    "provider_disconnect_count",
+                    feed.get("provider_disconnect_count"),
+                ),
+            )
+        ),
+        "provider_reconnect_count": _int(
+            summary.get(
+                "provider_reconnect_count",
+                live_health.get(
+                    "provider_reconnect_count",
+                    feed.get("provider_reconnect_count"),
+                ),
+            )
+        ),
+        "provider_error_count": _int(
+            summary.get(
+                "provider_error_count",
+                live_health.get("provider_error_count", feed.get("provider_error_count")),
+            )
+        ),
+        "stale_event_count": _int(
+            summary.get(
+                "stale_event_count",
+                live_health.get("stale_event_count", feed.get("stale_event_count")),
+            )
+        ),
+        "empty_response_count": _int(
+            summary.get(
+                "empty_response_count",
+                live_health.get(
+                    "empty_response_count",
+                    feed.get("empty_response_count"),
+                ),
+            )
+        ),
+        "rate_limit_count": _int(
+            summary.get(
+                "rate_limit_count",
+                live_health.get("rate_limit_count", feed.get("rate_limit_count")),
+            )
+        ),
+        "last_successful_receive_ts": summary.get(
+            "last_successful_receive_ts",
+            live_health.get(
+                "last_successful_receive_ts",
+                feed.get("last_successful_receive_ts"),
+            ),
         ),
     }
     performance_metrics = {
@@ -749,6 +844,54 @@ def _add_feed_alerts(alerts: list[PaperAlert], metrics: dict[str, Any]) -> None:
             metric_value=feed["feed_out_of_order_count"],
             threshold=0,
             recommendation="Block staged-live approval until ordering is restored.",
+        )
+    if feed["stale_event_count"] > 0:
+        _append_alert(
+            alerts,
+            severity="critical",
+            category="feed",
+            code="stale_event_breach",
+            message="Live read-only feed produced stale events.",
+            metric_name="stale_event_count",
+            metric_value=feed["stale_event_count"],
+            threshold=0,
+            recommendation="Block promotion until provider freshness is restored.",
+        )
+    if feed["provider_error_count"] > 0:
+        _append_alert(
+            alerts,
+            severity="critical",
+            category="feed",
+            code="provider_error_breach",
+            message="Live read-only provider reported connection or request errors.",
+            metric_name="provider_error_count",
+            metric_value=feed["provider_error_count"],
+            threshold=0,
+            recommendation="Investigate provider stability before continuing.",
+        )
+    if feed["empty_response_count"] > 0:
+        _append_alert(
+            alerts,
+            severity="critical",
+            category="feed",
+            code="empty_response_breach",
+            message="Live read-only provider returned empty responses.",
+            metric_name="empty_response_count",
+            metric_value=feed["empty_response_count"],
+            threshold=0,
+            recommendation="Block the run until data completeness is proven.",
+        )
+    if feed["rate_limit_count"] > 0:
+        _append_alert(
+            alerts,
+            severity="warning",
+            category="feed",
+            code="provider_rate_limited",
+            message="Live read-only provider reported rate limiting.",
+            metric_name="rate_limit_count",
+            metric_value=feed["rate_limit_count"],
+            threshold=0,
+            recommendation="Increase poll interval or switch provider before 24h soak.",
         )
     if feed["heartbeat_count"] == 0:
         _append_alert(
@@ -1063,6 +1206,9 @@ def _operator_markdown(report: PaperRunObservabilityReport) -> str:
         "# v8 Paper Operator Summary",
         "",
         f"- run_id: `{report.run_id}`",
+        f"- feed_mode: `{report.feed_metrics['feed_mode']}`",
+        f"- provider_name: `{report.feed_metrics['provider_name']}`",
+        f"- instrument_id: `{report.feed_metrics['instrument_id']}`",
         f"- phase6_deployment_status: `{report.phase6_status}`",
         f"- feed_health_status: `{report.feed_health_status}`",
         f"- safety_status: `{report.safety_status}`",
@@ -1081,6 +1227,12 @@ def _operator_markdown(report: PaperRunObservabilityReport) -> str:
         f"- feed_gap_count: `{report.feed_metrics['feed_gap_count']}`",
         f"- feed_late_event_count: `{report.feed_metrics['feed_late_event_count']}`",
         f"- feed_out_of_order_count: `{report.feed_metrics['feed_out_of_order_count']}`",
+        f"- stale_event_count: `{report.feed_metrics['stale_event_count']}`",
+        f"- provider_disconnect_count: `{report.feed_metrics['provider_disconnect_count']}`",
+        f"- provider_reconnect_count: `{report.feed_metrics['provider_reconnect_count']}`",
+        f"- provider_error_count: `{report.feed_metrics['provider_error_count']}`",
+        f"- empty_response_count: `{report.feed_metrics['empty_response_count']}`",
+        f"- rate_limit_count: `{report.feed_metrics['rate_limit_count']}`",
         "",
         "## Alerts",
         "",

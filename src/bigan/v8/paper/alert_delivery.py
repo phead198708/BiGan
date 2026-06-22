@@ -95,6 +95,9 @@ class GitHubPaperCommentPayload:
     warning_alert_count: int
     operator_recommendation: str
     phase6_deployment_status: str
+    feed_mode: str
+    provider_name: str | None
+    instrument_id: str | None
     feed_health_status: str
     safety_status: str
     paper_only: bool
@@ -266,6 +269,9 @@ def _build_payload(
         warning_alert_count=int(report["alert_severity_counts"]["warning"]),
         operator_recommendation=str(report["operator_recommendation"]),
         phase6_deployment_status=str(report["phase6_status"]),
+        feed_mode=str(report.get("feed_metrics", {}).get("feed_mode")),
+        provider_name=report.get("feed_metrics", {}).get("provider_name"),
+        instrument_id=report.get("feed_metrics", {}).get("instrument_id"),
         feed_health_status=str(report["feed_health_status"]),
         safety_status=str(report["safety_status"]),
         paper_only=report.get("paper_only") is True,
@@ -314,6 +320,11 @@ def _comment_body(
         "| Field | Value |",
         "| --- | --- |",
         f"| run_id | `{report['run_id']}` |",
+        f"| feed_mode | `{report['feed_metrics']['feed_mode']}` |",
+        f"| real_live_data | `{str(report['feed_metrics']['real_live_data']).lower()}` |",
+        f"| deterministic_replay | `{str(report['feed_metrics']['deterministic_replay']).lower()}` |",
+        f"| provider_name | `{report['feed_metrics']['provider_name']}` |",
+        f"| instrument_id | `{report['feed_metrics']['instrument_id']}` |",
         f"| operator_recommendation | `{recommendation}` |",
         f"| phase6_deployment_status | `{phase6_status}` |",
         f"| feed_health_status | `{report['feed_health_status']}` |",
@@ -347,6 +358,12 @@ def _comment_body(
             f"- feed_gap_count: `{report['feed_metrics']['feed_gap_count']}`",
             f"- feed_late_event_count: `{report['feed_metrics']['feed_late_event_count']}`",
             f"- feed_out_of_order_count: `{report['feed_metrics']['feed_out_of_order_count']}`",
+            f"- stale_event_count: `{report['feed_metrics']['stale_event_count']}`",
+            f"- provider_disconnect_count: `{report['feed_metrics']['provider_disconnect_count']}`",
+            f"- provider_reconnect_count: `{report['feed_metrics']['provider_reconnect_count']}`",
+            f"- provider_error_count: `{report['feed_metrics']['provider_error_count']}`",
+            f"- empty_response_count: `{report['feed_metrics']['empty_response_count']}`",
+            f"- rate_limit_count: `{report['feed_metrics']['rate_limit_count']}`",
             "",
             "**Observed Paper Safety Flags**",
             "",

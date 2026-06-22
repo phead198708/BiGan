@@ -156,6 +156,7 @@ def run_readonly_shadow_soak(
         config=config,
         run_dir=run_dir,
     )
+    adapter_feed_health = resolved_feed.health_snapshot()
     resolved_feed.close()
     if not feed_events:
         raise PaperTradingError("read-only shadow soak requires at least one feed event")
@@ -168,10 +169,13 @@ def run_readonly_shadow_soak(
             config=config,
         )
     )
-    feed_health = compute_feed_health(
-        feed_events,
-        max_allowed_gap_ms=int(config.max_feed_gap_seconds * 1000),
-        max_event_lag_ms=int(config.max_event_lag_seconds * 1000),
+    feed_health = _merge_feed_health(
+        computed=compute_feed_health(
+            feed_events,
+            max_allowed_gap_ms=int(config.max_feed_gap_seconds * 1000),
+            max_event_lag_ms=int(config.max_event_lag_seconds * 1000),
+        ),
+        adapter=adapter_feed_health,
     )
     feed_health_acceptance = build_feed_health_acceptance_report(
         feed_health,
@@ -213,6 +217,18 @@ def run_readonly_shadow_soak(
             "paper_run_summary": run_dir / "paper_run_summary.json",
         }
     )
+    live_feed_metadata = _live_feed_metadata_payload(
+        feed=resolved_feed,
+        config=config,
+        feed_events=feed_events,
+    )
+    if live_feed_metadata is not None:
+        artifact_paths.update(
+            {
+                "live_feed_metadata": run_dir / "live_feed_metadata.json",
+                "live_feed_health_report": run_dir / "live_feed_health_report.json",
+            }
+        )
     _write_jsonl(
         artifact_paths["readonly_feed_events"],
         [event.to_dict() for event in feed_events],
@@ -230,6 +246,23 @@ def run_readonly_shadow_soak(
             "stop_file_seen": stop_file_seen,
         },
     )
+    if live_feed_metadata is not None:
+        _write_json(artifact_paths["live_feed_metadata"], live_feed_metadata)
+        _write_json(
+            artifact_paths["live_feed_health_report"],
+            {
+                "schema_version": READONLY_SHADOW_SCHEMA_VERSION,
+                "feed_mode": live_feed_metadata["feed_mode"],
+                "provider_name": live_feed_metadata["provider_name"],
+                "instrument_id": live_feed_metadata["instrument_id"],
+                **feed_health.to_dict(),
+                "feed_health_passed": feed_health_acceptance.passed,
+                "feed_health_reason_codes": list(
+                    feed_health_acceptance.reason_codes
+                ),
+                "acceptance": feed_health_acceptance.to_dict(),
+            },
+        )
     final_summary = _final_summary(
         config=config,
         feed_events=feed_events,
@@ -241,6 +274,7 @@ def run_readonly_shadow_soak(
         harness_result=harness_result,
         stop_reason=stop_reason,
         artifact_paths=artifact_paths,
+        live_feed_metadata=live_feed_metadata,
     )
     _write_json(artifact_paths["paper_run_summary"], final_summary)
     bundle_manifest = _bundle_manifest(
@@ -250,6 +284,7 @@ def run_readonly_shadow_soak(
         feed_health_acceptance=feed_health_acceptance,
         final_summary=final_summary,
         artifact_paths=artifact_paths,
+        live_feed_metadata=live_feed_metadata,
     )
     _write_json(artifact_paths["paper_bundle_manifest"], bundle_manifest)
     return ReadOnlyShadowSoakResult(
@@ -498,6 +533,19 @@ def _phase6_stage_evidence_with_feed_health(
                     "feed_out_of_order_count": (
                         feed_health.feed_out_of_order_count
                     ),
+                    "provider_disconnect_count": (
+                        feed_health.provider_disconnect_count
+                    ),
+                    "provider_reconnect_count": (
+                        feed_health.provider_reconnect_count
+                    ),
+                    "provider_error_count": feed_health.provider_error_count,
+                    "stale_event_count": feed_health.stale_event_count,
+                    "empty_response_count": feed_health.empty_response_count,
+                    "rate_limit_count": feed_health.rate_limit_count,
+                    "last_successful_receive_ts": (
+                        feed_health.last_successful_receive_ts
+                    ),
                 }
             )
             passed = passed and feed_health_acceptance.passed
@@ -615,6 +663,7 @@ def _final_summary(
     harness_result: PaperHarnessResult,
     stop_reason: str,
     artifact_paths: dict[str, Path],
+    live_feed_metadata: dict[str, Any] | None,
 ) -> dict[str, Any]:
     fills = harness_result.fills
     phase5_report = harness_result.phase5_result.report
@@ -640,6 +689,13 @@ def _final_summary(
         "max_feed_gap_seconds": feed_health.max_feed_gap_seconds,
         "feed_late_event_count": feed_health.feed_late_event_count,
         "feed_out_of_order_count": feed_health.feed_out_of_order_count,
+        "provider_disconnect_count": feed_health.provider_disconnect_count,
+        "provider_reconnect_count": feed_health.provider_reconnect_count,
+        "provider_error_count": feed_health.provider_error_count,
+        "stale_event_count": feed_health.stale_event_count,
+        "empty_response_count": feed_health.empty_response_count,
+        "rate_limit_count": feed_health.rate_limit_count,
+        "last_successful_receive_ts": feed_health.last_successful_receive_ts,
         "feed_health_passed": feed_health_acceptance.passed,
         "feed_health_reason_codes": list(feed_health_acceptance.reason_codes),
         "feed_gap_breach": feed_health_acceptance.feed_gap_breach,
@@ -647,6 +703,9 @@ def _final_summary(
         "feed_out_of_order_breach": (
             feed_health_acceptance.feed_out_of_order_breach
         ),
+        "stale_event_breach": feed_health_acceptance.stale_event_breach,
+        "provider_error_breach": feed_health_acceptance.provider_error_breach,
+        "empty_response_breach": feed_health_acceptance.empty_response_breach,
         "heartbeat_missing": feed_health_acceptance.heartbeat_missing,
         "heartbeat_count": len(heartbeat_rows),
         "periodic_summary_count": len(periodic_rows),
@@ -677,6 +736,15 @@ def _final_summary(
         "phase6_deployment_status": (
             harness_result.phase6_result.report.deployment_status
         ),
+        "feed_mode": _feed_mode(live_feed_metadata),
+        "real_live_data": live_feed_metadata is not None,
+        "deterministic_replay": live_feed_metadata is None,
+        "provider_name": None
+        if live_feed_metadata is None
+        else live_feed_metadata["provider_name"],
+        "instrument_id": None
+        if live_feed_metadata is None
+        else live_feed_metadata["instrument_id"],
         "paper_only": True,
         "capital_at_risk": False,
         "broker_exchange_write_enabled": False,
@@ -693,6 +761,7 @@ def _bundle_manifest(
     feed_health_acceptance: FeedHealthAcceptanceReport,
     final_summary: dict[str, Any],
     artifact_paths: dict[str, Path],
+    live_feed_metadata: dict[str, Any] | None,
 ) -> dict[str, Any]:
     artifacts = {
         name: {
@@ -713,6 +782,13 @@ def _bundle_manifest(
         "max_feed_gap_seconds": feed_health.max_feed_gap_seconds,
         "feed_late_event_count": feed_health.feed_late_event_count,
         "feed_out_of_order_count": feed_health.feed_out_of_order_count,
+        "provider_disconnect_count": feed_health.provider_disconnect_count,
+        "provider_reconnect_count": feed_health.provider_reconnect_count,
+        "provider_error_count": feed_health.provider_error_count,
+        "stale_event_count": feed_health.stale_event_count,
+        "empty_response_count": feed_health.empty_response_count,
+        "rate_limit_count": feed_health.rate_limit_count,
+        "last_successful_receive_ts": feed_health.last_successful_receive_ts,
         "feed_health_passed": feed_health_acceptance.passed,
         "feed_health_reason_codes": list(feed_health_acceptance.reason_codes),
         "feed_gap_breach": feed_health_acceptance.feed_gap_breach,
@@ -720,6 +796,9 @@ def _bundle_manifest(
         "feed_out_of_order_breach": (
             feed_health_acceptance.feed_out_of_order_breach
         ),
+        "stale_event_breach": feed_health_acceptance.stale_event_breach,
+        "provider_error_breach": feed_health_acceptance.provider_error_breach,
+        "empty_response_breach": feed_health_acceptance.empty_response_breach,
         "heartbeat_missing": feed_health_acceptance.heartbeat_missing,
         "heartbeat_count": final_summary["heartbeat_count"],
         "periodic_summary_count": final_summary["periodic_summary_count"],
@@ -729,12 +808,63 @@ def _bundle_manifest(
         "phase6_deployment_status": (
             harness_result.phase6_result.report.deployment_status
         ),
+        "feed_mode": _feed_mode(live_feed_metadata),
+        "real_live_data": live_feed_metadata is not None,
+        "deterministic_replay": live_feed_metadata is None,
+        "provider_name": None
+        if live_feed_metadata is None
+        else live_feed_metadata["provider_name"],
+        "instrument_id": None
+        if live_feed_metadata is None
+        else live_feed_metadata["instrument_id"],
         "paper_only": True,
         "capital_at_risk": False,
         "broker_exchange_write_enabled": False,
         "live_exchange_write_enabled": False,
         "artifacts": artifacts,
     }
+
+
+def _merge_feed_health(
+    *,
+    computed: FeedHealthSnapshot,
+    adapter: FeedHealthSnapshot,
+) -> FeedHealthSnapshot:
+    return replace(
+        computed,
+        provider_disconnect_count=adapter.provider_disconnect_count,
+        provider_reconnect_count=adapter.provider_reconnect_count,
+        provider_error_count=adapter.provider_error_count,
+        stale_event_count=adapter.stale_event_count,
+        empty_response_count=adapter.empty_response_count,
+        rate_limit_count=adapter.rate_limit_count,
+        last_successful_receive_ts=adapter.last_successful_receive_ts
+        if adapter.last_successful_receive_ts is not None
+        else computed.last_successful_receive_ts,
+    )
+
+
+def _live_feed_metadata_payload(
+    *,
+    feed: ReadOnlyMarketFeed,
+    config: ReadOnlyShadowSoakConfig,
+    feed_events: tuple[ReadOnlyFeedEvent, ...],
+) -> dict[str, Any] | None:
+    metadata_snapshot = getattr(feed, "metadata_snapshot", None)
+    if not callable(metadata_snapshot):
+        return None
+    metadata = metadata_snapshot(
+        ended_at=_ended_at(config.created_at, _elapsed_seconds(feed_events))
+    )
+    if hasattr(metadata, "to_dict"):
+        return dict(metadata.to_dict())
+    return dict(metadata)
+
+
+def _feed_mode(live_feed_metadata: dict[str, Any] | None) -> str:
+    if live_feed_metadata is None:
+        return "deterministic-replay"
+    return str(live_feed_metadata["feed_mode"])
 
 
 def _augment_report_safety_flags(path: Path) -> None:
