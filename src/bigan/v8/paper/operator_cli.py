@@ -568,14 +568,17 @@ def _write_failure_manifest(
         "observability_dir": str(config.observability_dir),
         "github_comment_dir": str(config.github_comment_dir),
         "feed_mode": config.feed_mode,
+        "real_live_data": config.feed_mode == LIVE_READONLY_FEED_MODE,
+        "deterministic_replay": config.feed_mode == DETERMINISTIC_REPLAY_FEED_MODE,
         "provider_name": config.provider_name,
+        "provider_endpoint_or_endpoint_type": config.provider_endpoint,
         "instrument_id": config.instrument_id,
         "paper_only": config.paper_only,
         "capital_at_risk": config.capital_at_risk,
         "broker_exchange_write_enabled": config.broker_exchange_write_enabled,
         "live_exchange_write_enabled": config.live_exchange_write_enabled,
         "status": "failed_fail_closed",
-        "reason_codes": [f"{stage}_failed"],
+        "reason_codes": _failure_reason_codes(stage=stage, error=error),
         "failed_stage": stage,
         "error_type": type(error).__name__,
         "error_message": str(error),
@@ -584,6 +587,12 @@ def _write_failure_manifest(
         "broker_exchange_write_allowed": False,
     }
     _write_json(config.manifest_path, manifest)
+
+
+def _failure_reason_codes(*, stage: str, error: Exception) -> list[str]:
+    codes = [f"{stage}_failed"]
+    codes.extend(str(code) for code in getattr(error, "reason_codes", ()) or ())
+    return list(dict.fromkeys(codes))
 
 
 def _operator_status(

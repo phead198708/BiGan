@@ -9,6 +9,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 
 from bigan.v8.paper.feed import (
@@ -19,6 +20,7 @@ from bigan.v8.paper.feed import (
 from bigan.v8.paper.live_feed import (
     LIVE_READONLY_FEED_MODE,
     LiveFeedMetadata,
+    LiveProviderPayloadError,
     LiveReadOnlyFeedConfig,
     LiveReadOnlyFeedError,
     build_live_feed_metadata,
@@ -61,14 +63,17 @@ class PublicTickerLiveReadOnlyFeed:
         self._empty_response_count = 0
         self._rate_limit_count = 0
         self._last_successful_receive_ts: int | None = None
-        self._started_monotonic: float | None = None
-        self._ended_monotonic: float | None = None
+        self._started_epoch_seconds: float | None = None
+        self._ended_epoch_seconds: float | None = None
+        self._started_at_wall_clock: str | None = None
+        self._ended_at_wall_clock: str | None = None
         self._was_disconnected = False
 
     def iter_events(self) -> Iterator[ReadOnlyFeedEvent]:
         if self._closed:
             return
-        self._started_monotonic = self._clock()
+        self._started_epoch_seconds = self._clock()
+        self._started_at_wall_clock = _utc_iso(self._started_epoch_seconds)
         sequence = 0
         while not self._closed:
             if (
@@ -93,6 +98,9 @@ class PublicTickerLiveReadOnlyFeed:
                     self._sleep(self.config.poll_interval_seconds)
                     continue
                 event = self._event_from_payload(payload, sequence)
+            except LiveReadOnlyFeedError:
+                self._mark_ended()
+                raise
             except urllib.error.HTTPError as exc:
                 if exc.code == 429:
                     self._rate_limit_count += 1
@@ -110,7 +118,7 @@ class PublicTickerLiveReadOnlyFeed:
             sequence += 1
             yield event
             self._sleep(self.config.poll_interval_seconds)
-        self._ended_monotonic = self._clock()
+        self._mark_ended()
 
     def health_snapshot(self) -> FeedHealthSnapshot:
         base = compute_feed_health(
@@ -142,14 +150,14 @@ class PublicTickerLiveReadOnlyFeed:
         )
         return build_live_feed_metadata(
             config=self.config,
-            ended_at=ended_at,
+            started_at_wall_clock=self._started_at_wall_clock,
+            ended_at_wall_clock=self._ended_at_wall_clock or ended_at,
             wall_clock_duration_seconds=int(observed_seconds),
         )
 
     def close(self) -> None:
         self._closed = True
-        if self._ended_monotonic is None:
-            self._ended_monotonic = self._clock()
+        self._mark_ended()
 
     def _event_from_payload(
         self,
@@ -157,17 +165,65 @@ class PublicTickerLiveReadOnlyFeed:
         sequence: int,
     ) -> ReadOnlyFeedEvent:
         now_ms = int(self._clock() * 1000)
-        bid = _required_positive_float(payload, "bidPrice", "bid_price")
-        ask = _required_positive_float(payload, "askPrice", "ask_price")
-        mid_payload = payload.get("midPrice", payload.get("mid_price"))
-        mid = (bid + ask) / 2.0 if mid_payload is None else float(mid_payload)
+        bid = _required_positive_float(
+            payload,
+            ("bidPrice", "bid_price", "bid"),
+            missing_reason="missing_bid_price",
+            non_positive_reason="non_positive_bid_price",
+        )
+        ask = _required_positive_float(
+            payload,
+            ("askPrice", "ask_price", "ask"),
+            missing_reason="missing_ask_price",
+            non_positive_reason="non_positive_ask_price",
+        )
+        mid_payload = payload.get(
+            "midPrice",
+            payload.get("mid_price", payload.get("price")),
+        )
+        try:
+            mid = (bid + ask) / 2.0 if mid_payload is None else float(mid_payload)
+        except (TypeError, ValueError) as exc:
+            raise LiveProviderPayloadError(
+                "invalid_mid_price",
+                "mid price must be numeric",
+            ) from exc
         if mid <= 0.0:
-            raise LiveReadOnlyFeedError("mid price must be positive")
-        volume = float(payload.get("volume", payload.get("quoteVolume", 0.0)) or 0.0)
+            raise LiveProviderPayloadError(
+                "non_positive_mid_price",
+                "mid price must be positive",
+            )
+        if ask < bid:
+            raise LiveProviderPayloadError(
+                "ask_below_bid_price",
+                "ask price must be greater than or equal to bid price",
+            )
+        try:
+            volume = float(payload.get("volume", payload.get("quoteVolume", 0.0)) or 0.0)
+        except (TypeError, ValueError) as exc:
+            raise LiveProviderPayloadError(
+                "invalid_volume",
+                "volume must be numeric",
+            ) from exc
         if volume < 0.0:
-            raise LiveReadOnlyFeedError("volume must be non-negative")
-        trade_count = int(payload.get("count", payload.get("trade_count", 0)) or 0)
-        close_time = int(payload.get("closeTime", payload.get("event_ts", now_ms)))
+            raise LiveProviderPayloadError(
+                "negative_volume",
+                "volume must be non-negative",
+            )
+        try:
+            trade_count = int(payload.get("count", payload.get("trade_count", 0)) or 0)
+        except (TypeError, ValueError) as exc:
+            raise LiveProviderPayloadError(
+                "invalid_trade_count",
+                "trade_count must be an integer",
+            ) from exc
+        try:
+            close_time = _event_timestamp_ms(payload, default_ts=now_ms)
+        except (TypeError, ValueError) as exc:
+            raise LiveProviderPayloadError(
+                "invalid_event_timestamp",
+                "event timestamp must be an integer",
+            ) from exc
         if now_ms - close_time > int(self.config.max_stale_seconds * 1000):
             self._stale_event_count += 1
         spread_bps = ((ask - bid) / mid) * 10_000.0
@@ -200,14 +256,27 @@ class PublicTickerLiveReadOnlyFeed:
         failures = max(self._provider_disconnect_count, self._empty_response_count)
         if failures > self.config.max_reconnect_attempts:
             raise LiveReadOnlyFeedError(
-                "live provider reconnect budget exhausted: " + reason
+                "live provider reconnect budget exhausted: " + reason,
+                reason_codes=(
+                    "provider_error_breach",
+                    "provider_reconnect_budget_exhausted",
+                ),
             )
 
     def _elapsed_wall_clock_seconds(self) -> float:
-        if self._started_monotonic is None:
+        if self._started_epoch_seconds is None:
             return 0.0
-        end = self._ended_monotonic if self._ended_monotonic is not None else self._clock()
-        return max(0.0, end - self._started_monotonic)
+        end = (
+            self._ended_epoch_seconds
+            if self._ended_epoch_seconds is not None
+            else self._clock()
+        )
+        return max(0.0, end - self._started_epoch_seconds)
+
+    def _mark_ended(self) -> None:
+        if self._ended_epoch_seconds is None:
+            self._ended_epoch_seconds = self._clock()
+            self._ended_at_wall_clock = _utc_iso(self._ended_epoch_seconds)
 
 
 def create_public_live_readonly_feed(
@@ -219,7 +288,14 @@ def create_public_live_readonly_feed(
 
 
 def _provider_url(config: LiveReadOnlyFeedConfig) -> str:
-    parsed = urllib.parse.urlparse(config.provider_endpoint)
+    endpoint = (
+        config.provider_endpoint.replace("{instrument_id}", config.instrument_id)
+        .replace("{instrument}", config.instrument_id)
+        .replace("{symbol}", config.instrument_id)
+    )
+    parsed = urllib.parse.urlparse(endpoint)
+    if "binance.com" not in parsed.netloc:
+        return endpoint
     query = dict(urllib.parse.parse_qsl(parsed.query))
     query.setdefault("symbol", config.instrument_id)
     return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query)))
@@ -245,14 +321,63 @@ def _request_json(url: str, timeout: float) -> Mapping[str, Any]:
 
 def _required_positive_float(
     payload: Mapping[str, Any],
-    *names: str,
+    names: tuple[str, ...],
+    *,
+    missing_reason: str,
+    non_positive_reason: str,
 ) -> float:
     for name in names:
         if name in payload and payload[name] is not None:
-            value = float(payload[name])
+            try:
+                value = float(payload[name])
+            except (TypeError, ValueError) as exc:
+                raise LiveProviderPayloadError(
+                    non_positive_reason.replace("non_positive", "invalid"),
+                    f"{name} must be numeric",
+                ) from exc
             if value <= 0.0:
-                raise LiveReadOnlyFeedError(f"{name} must be positive")
+                raise LiveProviderPayloadError(
+                    non_positive_reason,
+                    f"{name} must be positive",
+                )
             return value
-    raise LiveReadOnlyFeedError(
-        "provider payload missing required price field: " + "/".join(names)
+    raise LiveProviderPayloadError(
+        missing_reason,
+        "provider payload missing required price field: " + "/".join(names),
     )
+
+
+def _event_timestamp_ms(payload: Mapping[str, Any], *, default_ts: int) -> int:
+    value = payload.get("closeTime", payload.get("event_ts", payload.get("time")))
+    if value is None:
+        return default_ts
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value)
+    if text.isdigit():
+        return int(text)
+    return int(_parse_provider_iso8601(text).timestamp() * 1000)
+
+
+def _parse_provider_iso8601(value: str) -> datetime:
+    text = value
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    if "." in text:
+        before, after = text.split(".", 1)
+        if "+" in after:
+            fraction, timezone = after.split("+", 1)
+            text = f"{before}.{fraction[:6]}+{timezone}"
+        elif "-" in after:
+            fraction, timezone = after.split("-", 1)
+            text = f"{before}.{fraction[:6]}-{timezone}"
+        else:
+            text = f"{before}.{after[:6]}"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _utc_iso(epoch_seconds: float) -> str:
+    return datetime.fromtimestamp(epoch_seconds, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

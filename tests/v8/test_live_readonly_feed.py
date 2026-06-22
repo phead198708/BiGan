@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from bigan.v8.paper import (
+    LiveProviderPayloadError,
     LiveReadOnlyFeedConfig,
     LiveReadOnlyFeedError,
     PublicTickerLiveReadOnlyFeed,
@@ -35,6 +36,11 @@ def test_public_live_adapter_emits_readonly_events() -> None:
     assert events[0].instrument_id == "BTCUSDT"
     assert health.feed_event_count == 2
     assert health.last_successful_receive_ts == events[-1].received_ts
+    metadata = adapter.metadata_snapshot(ended_at="unused")
+    assert metadata.started_at_wall_clock == "1970-01-01T00:16:40Z"
+    assert metadata.ended_at_wall_clock == "1970-01-01T00:18:40Z"
+    assert metadata.wall_clock_duration_seconds == 120
+    assert metadata.configured_duration_seconds == 300
 
 
 def test_public_live_adapter_records_disconnect_and_reconnect() -> None:
@@ -63,6 +69,59 @@ def test_public_live_adapter_records_disconnect_and_reconnect() -> None:
     assert health.provider_error_count == 1
 
 
+def test_public_live_adapter_normalizes_coinbase_ticker_payload() -> None:
+    clock = _MutableClock(1_000.0)
+
+    def coinbase_request(_url: str, _timeout: float) -> dict[str, object]:
+        return {
+            "bid": "99.95",
+            "ask": "100.05",
+            "price": "100.00",
+            "volume": "42.5",
+            "time": "1970-01-01T00:16:39.123456789Z",
+        }
+
+    adapter = PublicTickerLiveReadOnlyFeed(
+        config=_live_config(
+            max_event_count=1,
+            provider_endpoint="https://api.exchange.coinbase.com/products/BTC-USD/ticker",
+            instrument_id="BTC-USD",
+        ),
+        request_json=coinbase_request,
+        clock=clock,
+        sleep=clock.advance,
+    )
+
+    events = list(adapter.iter_events())
+
+    assert events[0].instrument_id == "BTC-USD"
+    assert events[0].bid_price == 99.95
+    assert events[0].ask_price == 100.05
+    assert events[0].mid_price == 100.0
+    assert events[0].event_ts == 999_123
+
+
+def test_public_live_adapter_transport_timeout_uses_provider_error_reason() -> None:
+    clock = _MutableClock(1_000.0)
+
+    def timeout_request(_url: str, _timeout: float) -> dict[str, object]:
+        raise TimeoutError("provider timeout")
+
+    adapter = PublicTickerLiveReadOnlyFeed(
+        config=_live_config(max_event_count=1, max_reconnect_attempts=0),
+        request_json=timeout_request,
+        clock=clock,
+        sleep=clock.advance,
+    )
+
+    with pytest.raises(LiveReadOnlyFeedError, match="reconnect budget") as exc_info:
+        list(adapter.iter_events())
+    assert exc_info.value.reason_codes == (
+        "provider_error_breach",
+        "provider_reconnect_budget_exhausted",
+    )
+
+
 def test_public_live_adapter_missing_price_fails_closed() -> None:
     clock = _MutableClock(1_000.0)
 
@@ -76,8 +135,12 @@ def test_public_live_adapter_missing_price_fails_closed() -> None:
         sleep=clock.advance,
     )
 
-    with pytest.raises(LiveReadOnlyFeedError, match="reconnect budget exhausted"):
+    with pytest.raises(LiveProviderPayloadError, match="missing_ask_price") as exc_info:
         list(adapter.iter_events())
+    assert exc_info.value.reason_codes == (
+        "invalid_provider_payload",
+        "missing_ask_price",
+    )
 
 
 def test_public_live_adapter_non_positive_price_fails_closed() -> None:
@@ -95,8 +158,15 @@ def test_public_live_adapter_non_positive_price_fails_closed() -> None:
         sleep=clock.advance,
     )
 
-    with pytest.raises(LiveReadOnlyFeedError, match="reconnect budget exhausted"):
+    with pytest.raises(
+        LiveProviderPayloadError,
+        match="non_positive_bid_price",
+    ) as exc_info:
         list(adapter.iter_events())
+    assert exc_info.value.reason_codes == (
+        "invalid_provider_payload",
+        "non_positive_bid_price",
+    )
 
 
 def test_public_live_adapter_stale_data_produces_reason_code() -> None:
@@ -145,11 +215,13 @@ def _live_config(
     max_event_count: int,
     max_reconnect_attempts: int = 3,
     max_stale_seconds: float = 120.0,
+    provider_endpoint: str = "https://example.test/ticker",
+    instrument_id: str = "BTCUSDT",
 ) -> LiveReadOnlyFeedConfig:
     return LiveReadOnlyFeedConfig(
         provider_name="mock_public_ticker",
-        provider_endpoint="https://example.test/ticker",
-        instrument_id="BTCUSDT",
+        provider_endpoint=provider_endpoint,
+        instrument_id=instrument_id,
         poll_interval_seconds=60.0,
         request_timeout_seconds=1.0,
         max_reconnect_attempts=max_reconnect_attempts,

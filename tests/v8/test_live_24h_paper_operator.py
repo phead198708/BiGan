@@ -16,6 +16,7 @@ from bigan.v8.paper import (
     LiveReadOnlyFeedConfig,
     PaperOperatorCLIError,
     PaperOperatorRunConfig,
+    PublicTickerLiveReadOnlyFeed,
     ReadOnlyFeedEvent,
     build_live_feed_metadata,
     compute_feed_health,
@@ -168,6 +169,47 @@ def test_live_readonly_mode_refuses_deterministic_replay_fallback(
     manifest = _read_json(config.manifest_path)
     assert manifest["status"] == "failed_fail_closed"
     assert manifest["reason_codes"] == ["paper_run_failed"]
+    assert manifest["feed_mode"] == "live-readonly"
+    assert manifest["real_live_data"] is True
+    assert manifest["deterministic_replay"] is False
+
+
+def test_live_readonly_invalid_provider_payload_has_specific_manifest_reason(
+    tmp_path: Path,
+) -> None:
+    clock = _MutableClock(1_000.0)
+
+    def missing_ask(_url: str, _timeout: float) -> dict[str, object]:
+        return {"bidPrice": "100.0", "closeTime": int(clock() * 1000)}
+
+    config = _config(tmp_path, run_id="live-invalid-payload")
+    feed = PublicTickerLiveReadOnlyFeed(
+        config=LiveReadOnlyFeedConfig(
+            provider_name="mock_live_provider",
+            provider_endpoint="mock://readonly",
+            instrument_id="BTCUSDT",
+            poll_interval_seconds=60.0,
+            request_timeout_seconds=1.0,
+            max_event_count=1,
+        ),
+        request_json=missing_ask,
+        clock=clock,
+        sleep=clock.advance,
+    )
+
+    with pytest.raises(PaperOperatorCLIError, match="missing_ask_price"):
+        run_24h_paper_operator(config=config, feed=feed)
+
+    manifest = _read_json(config.manifest_path)
+    assert manifest["status"] == "failed_fail_closed"
+    assert manifest["reason_codes"] == [
+        "paper_run_failed",
+        "invalid_provider_payload",
+        "missing_ask_price",
+    ]
+    assert manifest["real_live_data"] is True
+    assert manifest["deterministic_replay"] is False
+    assert manifest["capital_deployment_allowed"] is False
 
 
 def test_live_readonly_stop_path_writes_metadata(tmp_path: Path) -> None:
@@ -296,7 +338,8 @@ class _MockLiveFeed:
         )
         return build_live_feed_metadata(
             config=config,
-            ended_at=ended_at,
+            started_at_wall_clock="2026-06-22T03:00:00Z",
+            ended_at_wall_clock=ended_at,
             wall_clock_duration_seconds=300,
         )
 
@@ -320,3 +363,14 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class _MutableClock:
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds

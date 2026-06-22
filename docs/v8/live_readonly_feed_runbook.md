@@ -34,16 +34,20 @@ PYTHONPATH=src python examples/v8/run_live_24h_paper_operator.py \
   --repo phead198708/BiGan \
   --issue-number 129 \
   --mode gh-command \
-  --provider binance_public_24hr_ticker \
-  --instrument BTCUSDT \
+  --feed-mode live-readonly \
+  --provider coinbase_public_ticker \
+  --provider-endpoint https://api.exchange.coinbase.com/products/BTC-USD/ticker \
+  --instrument BTC-USD \
   --duration-hours 24 \
   --poll-interval-seconds 60 \
   --heartbeat-interval-seconds 60 \
   --summary-interval-seconds 300
 ```
 
-The default provider adapter uses a public REST ticker endpoint and does not
-require trading credentials.
+The default provider adapter uses a public Coinbase REST ticker endpoint and
+does not require trading credentials. The adapter also supports Binance-style
+`bidPrice` / `askPrice` ticker payloads when that public endpoint is available
+from the runtime environment.
 
 ## Short Local Smoke
 
@@ -81,6 +85,10 @@ deterministic_replay
 provider_name
 provider_endpoint_or_endpoint_type
 instrument_id
+started_at_wall_clock
+ended_at_wall_clock
+wall_clock_duration_seconds
+configured_duration_seconds
 live_feed_metadata_sha256
 live_feed_health_sha256
 provider_disconnect_count
@@ -140,7 +148,10 @@ provider_name
 instrument_id
 started_at
 ended_at
+started_at_wall_clock
+ended_at_wall_clock
 wall_clock_duration_seconds >= 86340
+configured_duration_seconds
 feed_event_count > 0
 heartbeat_count > 0
 periodic_summary_count > 0

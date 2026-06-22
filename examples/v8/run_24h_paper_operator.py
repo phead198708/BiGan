@@ -38,9 +38,11 @@ def run_24h_paper_operator_cli(
     summary_interval_seconds: int = 300,
     feed_event_interval_seconds: int = 60,
     feed_mode: str = "deterministic-replay",
-    provider: str = "binance_public_24hr_ticker",
-    provider_endpoint: str = "https://api.binance.com/api/v3/ticker/24hr",
-    instrument: str = "BTCUSDT",
+    provider: str = "coinbase_public_ticker",
+    provider_endpoint: str = (
+        "https://api.exchange.coinbase.com/products/BTC-USD/ticker"
+    ),
+    instrument: str = "BTC-USD",
     request_timeout_seconds: float = 10.0,
     max_reconnect_attempts: int = 3,
     max_stale_seconds: float = 120.0,
@@ -102,12 +104,12 @@ def main(argv: list[str] | None = None) -> int:
         choices=("deterministic-replay", "live-readonly"),
         default="deterministic-replay",
     )
-    parser.add_argument("--provider", default="binance_public_24hr_ticker")
+    parser.add_argument("--provider", default="coinbase_public_ticker")
     parser.add_argument(
         "--provider-endpoint",
-        default="https://api.binance.com/api/v3/ticker/24hr",
+        default="https://api.exchange.coinbase.com/products/BTC-USD/ticker",
     )
-    parser.add_argument("--instrument", default="BTCUSDT")
+    parser.add_argument("--instrument", default="BTC-USD")
     parser.add_argument("--request-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--max-reconnect-attempts", type=int, default=3)
     parser.add_argument("--max-stale-seconds", type=float, default=120.0)

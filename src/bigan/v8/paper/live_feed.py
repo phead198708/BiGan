@@ -11,15 +11,37 @@ LIVE_READONLY_FEED_SCHEMA_VERSION = "bigan-v8-live-readonly-feed-v1"
 DETERMINISTIC_REPLAY_FEED_MODE = "deterministic-replay"
 LIVE_READONLY_FEED_MODE = "live-readonly"
 DEFAULT_LIVE_FEED_STARTED_AT = "2026-06-22T08:00:00Z"
-DEFAULT_PUBLIC_PROVIDER_NAME = "binance_public_24hr_ticker"
-DEFAULT_PUBLIC_PROVIDER_ENDPOINT = "https://api.binance.com/api/v3/ticker/24hr"
-DEFAULT_PUBLIC_INSTRUMENT_ID = "BTCUSDT"
+DEFAULT_PUBLIC_PROVIDER_NAME = "coinbase_public_ticker"
+DEFAULT_PUBLIC_PROVIDER_ENDPOINT = (
+    "https://api.exchange.coinbase.com/products/BTC-USD/ticker"
+)
+DEFAULT_PUBLIC_INSTRUMENT_ID = "BTC-USD"
 
 FeedMode = Literal["deterministic-replay", "live-readonly"]
 
 
 class LiveReadOnlyFeedError(ReadOnlyFeedError):
     """Raised when a live read-only feed cannot be consumed safely."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_codes: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.reason_codes = reason_codes
+
+
+class LiveProviderPayloadError(LiveReadOnlyFeedError):
+    """Raised when provider data cannot be normalized safely."""
+
+    def __init__(self, reason_code: str, message: str) -> None:
+        super().__init__(
+            f"{reason_code}: {message}",
+            reason_codes=("invalid_provider_payload", reason_code),
+        )
+        self.reason_code = reason_code
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +122,10 @@ class LiveFeedMetadata:
     request_timeout_seconds: float
     started_at: str
     ended_at: str
+    started_at_wall_clock: str
+    ended_at_wall_clock: str
     wall_clock_duration_seconds: int
+    configured_duration_seconds: int
     read_only: bool
     write_capable: bool
     paper_only: bool
@@ -113,6 +138,8 @@ class LiveFeedMetadata:
             raise ValueError("feed_mode must be deterministic-replay or live-readonly")
         if self.wall_clock_duration_seconds < 0:
             raise ValueError("wall_clock_duration_seconds must be non-negative")
+        if self.configured_duration_seconds <= 0:
+            raise ValueError("configured_duration_seconds must be positive")
         if self.read_only is not True:
             raise LiveReadOnlyFeedError("live feed metadata must be read-only")
         if self.write_capable is not False:
@@ -133,11 +160,13 @@ class LiveFeedMetadata:
 def build_live_feed_metadata(
     *,
     config: LiveReadOnlyFeedConfig,
-    ended_at: str,
+    started_at_wall_clock: str | None = None,
+    ended_at_wall_clock: str,
     wall_clock_duration_seconds: int,
 ) -> LiveFeedMetadata:
-    """Build deterministic metadata for one live read-only feed run."""
+    """Build metadata for one live read-only feed run."""
 
+    started_at = started_at_wall_clock or config.started_at
     return LiveFeedMetadata(
         schema_version=LIVE_READONLY_FEED_SCHEMA_VERSION,
         feed_mode=LIVE_READONLY_FEED_MODE,
@@ -146,9 +175,12 @@ def build_live_feed_metadata(
         instrument_id=config.instrument_id,
         poll_interval_seconds=config.poll_interval_seconds,
         request_timeout_seconds=config.request_timeout_seconds,
-        started_at=config.started_at,
-        ended_at=ended_at,
+        started_at=started_at,
+        ended_at=ended_at_wall_clock,
+        started_at_wall_clock=started_at,
+        ended_at_wall_clock=ended_at_wall_clock,
         wall_clock_duration_seconds=wall_clock_duration_seconds,
+        configured_duration_seconds=config.expected_wall_clock_duration_seconds,
         read_only=True,
         write_capable=False,
         paper_only=True,

@@ -28,12 +28,18 @@ def main(argv: list[str] | None = None) -> int:
         choices=("dry-run", "gh-command", "direct-comment"),
         default="gh-command",
     )
-    parser.add_argument("--provider", default="binance_public_24hr_ticker")
+    parser.add_argument(
+        "--feed-mode",
+        choices=("live-readonly",),
+        default="live-readonly",
+        help="Explicit live feed mode; replay fallback is not supported here.",
+    )
+    parser.add_argument("--provider", default="coinbase_public_ticker")
     parser.add_argument(
         "--provider-endpoint",
-        default="https://api.binance.com/api/v3/ticker/24hr",
+        default="https://api.exchange.coinbase.com/products/BTC-USD/ticker",
     )
-    parser.add_argument("--instrument", default="BTCUSDT")
+    parser.add_argument("--instrument", default="BTC-USD")
     parser.add_argument("--duration-hours", type=float, default=24.0)
     parser.add_argument("--poll-interval-seconds", type=int, default=60)
     parser.add_argument("--heartbeat-interval-seconds", type=int, default=60)
@@ -54,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
         feed_event_interval_seconds=args.poll_interval_seconds,
         heartbeat_interval_seconds=args.heartbeat_interval_seconds,
         summary_interval_seconds=args.summary_interval_seconds,
-        feed_mode="live-readonly",
+        feed_mode=args.feed_mode,
         provider=args.provider,
         provider_endpoint=args.provider_endpoint,
         instrument=args.instrument,
