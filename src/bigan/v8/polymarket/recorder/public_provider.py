@@ -9,7 +9,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import orjson
@@ -35,6 +35,10 @@ BTC_UPDOWN_FAMILY_BY_SLUG = {
 }
 DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 POLYMARKET_CLOB_WS_SOURCE_CHANNEL = "polymarket_clob_ws_market"
+BTC_FEATURE_SOURCE_COINBASE = "coinbase_btc_usd"
+BTC_FEATURE_SOURCE_KRAKEN = "kraken_xbt_usd"
+BTC_FEATURE_SOURCE_BINANCE = "binance_btcusdt"
+DEFAULT_BTC_FEATURE_SOURCE_ORDER = ("coinbase", "kraken", "binance")
 
 
 class RealCorpusPublicProviderError(RuntimeError):
@@ -107,10 +111,10 @@ class PolymarketRealCorpusPublicProvider(Protocol):
 class PolymarketPublicHTTPRealCorpusProvider:
     """Read-only public provider for Polymarket BTC UP/DOWN corpus facts.
 
-    This provider reads Gamma/Data API/CLOB websocket/Binance endpoints and
-    normalizes what those endpoints actually expose. It does not synthesize
-    historical bid/ask orderbooks from price history, and it does not use
-    Binance as the official Polymarket settlement source.
+    This provider reads Gamma/Data API/CLOB websocket/BTC reference endpoints
+    and normalizes what those endpoints actually expose. It does not synthesize
+    historical bid/ask orderbooks from price history, and it does not use BTC
+    feature candles as official Polymarket settlement evidence.
     """
 
     read_only = True
@@ -130,7 +134,10 @@ class PolymarketPublicHTTPRealCorpusProvider:
         clob_book_endpoint: str = "https://clob.polymarket.com/book",
         clob_ws_url: str = DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
         data_trades_endpoint: str = "https://data-api.polymarket.com/trades",
+        coinbase_candles_endpoint: str = "https://api.exchange.coinbase.com/products/BTC-USD/candles",
+        kraken_ohlc_endpoint: str = "https://api.kraken.com/0/public/OHLC",
         binance_klines_endpoint: str = "https://api.binance.com/api/v3/klines",
+        btc_feature_source_order: tuple[str, ...] = DEFAULT_BTC_FEATURE_SOURCE_ORDER,
         max_markets: int = 3,
         recent_trade_limit: int = 250,
         timeout_seconds: float = 15.0,
@@ -143,12 +150,23 @@ class PolymarketPublicHTTPRealCorpusProvider:
             raise ValueError("max_markets must be positive")
         if recent_trade_limit <= 0:
             raise ValueError("recent_trade_limit must be positive")
+        source_order = tuple(dict.fromkeys(source.strip().lower() for source in btc_feature_source_order))
+        unsupported_sources = set(source_order) - {"coinbase", "kraken", "binance"}
+        if unsupported_sources:
+            raise ValueError(
+                "unsupported BTC feature sources: " + ", ".join(sorted(unsupported_sources))
+            )
+        if not source_order:
+            raise ValueError("btc_feature_source_order must not be empty")
         self.market_slugs = tuple(dict.fromkeys(slug.strip() for slug in market_slugs if slug.strip()))
         self.gamma_markets_endpoint = gamma_markets_endpoint
         self.clob_book_endpoint = clob_book_endpoint
         self.clob_ws_url = clob_ws_url
         self.data_trades_endpoint = data_trades_endpoint
+        self.coinbase_candles_endpoint = coinbase_candles_endpoint
+        self.kraken_ohlc_endpoint = kraken_ohlc_endpoint
         self.binance_klines_endpoint = binance_klines_endpoint
+        self.btc_feature_source_order = source_order
         self.max_markets = max_markets
         self.recent_trade_limit = recent_trade_limit
         self.timeout_seconds = timeout_seconds
@@ -264,12 +282,123 @@ class PolymarketPublicHTTPRealCorpusProvider:
         if not markets:
             return []
         timeframe_ms = config.candle_timeframe_ms
-        interval = _binance_interval(timeframe_ms)
         min_ts = min(int(market["market_start_ts"]) for market in markets) - 15 * 60_000
         max_ts = max(int(market["market_end_ts"]) for market in markets)
-        end_ts = min(max_ts + timeframe_ms, self._current_time_ms())
+        collection_now_ms = self._current_time_ms()
+        end_ts = min(max_ts + timeframe_ms, collection_now_ms)
         if end_ts <= min_ts:
             return []
+        failures: list[str] = []
+        for source in self.btc_feature_source_order:
+            try:
+                if source == "coinbase":
+                    rows = self._coinbase_feature_candle_rows(
+                        min_ts=min_ts,
+                        end_ts=end_ts,
+                        timeframe_ms=timeframe_ms,
+                        collection_now_ms=collection_now_ms,
+                    )
+                elif source == "kraken":
+                    rows = self._kraken_feature_candle_rows(
+                        min_ts=min_ts,
+                        end_ts=end_ts,
+                        timeframe_ms=timeframe_ms,
+                        collection_now_ms=collection_now_ms,
+                    )
+                else:
+                    rows = self._binance_feature_candle_rows(
+                        min_ts=min_ts,
+                        end_ts=end_ts,
+                        timeframe_ms=timeframe_ms,
+                        collection_now_ms=collection_now_ms,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{source}: {exc}")
+                continue
+            if rows:
+                return rows
+            failures.append(f"{source}: no usable closed candles")
+        raise RealCorpusPublicProviderError(
+            "No BTC feature candles were available from public sources: "
+            + "; ".join(failures),
+            reason_codes=("btc_feature_candle_sources_unavailable",),
+        )
+
+    def _coinbase_feature_candle_rows(
+        self,
+        *,
+        min_ts: int,
+        end_ts: int,
+        timeframe_ms: int,
+        collection_now_ms: int,
+    ) -> list[dict[str, Any]]:
+        params = urllib.parse.urlencode(
+            {
+                "start": _iso_millis(min_ts),
+                "end": _iso_millis(end_ts),
+                "granularity": timeframe_ms // 1000,
+            }
+        )
+        payload = self._get_json(f"{self.coinbase_candles_endpoint}?{params}")
+        if not isinstance(payload, list):
+            raise RealCorpusPublicProviderError(
+                "Invalid Coinbase candles public payload.",
+                reason_codes=("invalid_btc_feature_candle_payload",),
+            )
+        return [
+            row
+            for row in (
+                self._normalize_coinbase_candle(row, timeframe_ms, collection_now_ms)
+                for row in payload
+            )
+            if row is not None
+        ]
+
+    def _kraken_feature_candle_rows(
+        self,
+        *,
+        min_ts: int,
+        end_ts: int,
+        timeframe_ms: int,
+        collection_now_ms: int,
+    ) -> list[dict[str, Any]]:
+        params = urllib.parse.urlencode(
+            {
+                "pair": "XBTUSD",
+                "interval": _kraken_interval(timeframe_ms),
+                "since": min_ts // 1000,
+            }
+        )
+        payload = self._get_json(f"{self.kraken_ohlc_endpoint}?{params}")
+        if not isinstance(payload, dict):
+            raise RealCorpusPublicProviderError(
+                "Invalid Kraken OHLC public payload.",
+                reason_codes=("invalid_btc_feature_candle_payload",),
+            )
+        if payload.get("error"):
+            raise RealCorpusPublicProviderError(
+                "Kraken OHLC public payload returned errors: " + str(payload.get("error")),
+                reason_codes=("invalid_btc_feature_candle_payload",),
+            )
+        rows = _kraken_ohlc_rows(payload)
+        return [
+            row
+            for row in (
+                self._normalize_kraken_ohlc(row, timeframe_ms, collection_now_ms)
+                for row in rows
+            )
+            if row is not None and int(row["ts"]) < end_ts
+        ]
+
+    def _binance_feature_candle_rows(
+        self,
+        *,
+        min_ts: int,
+        end_ts: int,
+        timeframe_ms: int,
+        collection_now_ms: int,
+    ) -> list[dict[str, Any]]:
+        interval = _binance_interval(timeframe_ms)
         params = urllib.parse.urlencode(
             {
                 "symbol": "BTCUSDT",
@@ -288,7 +417,8 @@ class PolymarketPublicHTTPRealCorpusProvider:
         return [
             row
             for row in (
-                self._normalize_binance_kline(row, timeframe_ms, config) for row in payload
+                self._normalize_binance_kline(row, timeframe_ms, collection_now_ms)
+                for row in payload
             )
             if row is not None
         ]
@@ -476,12 +606,14 @@ class PolymarketPublicHTTPRealCorpusProvider:
         self,
         row: Any,
         timeframe_ms: int,
-        config: PolymarketRealCorpusRecorderConfig,
+        collection_now_ms: int,
     ) -> dict[str, Any] | None:
         if not isinstance(row, list | tuple) or len(row) < 6:
             return None
         ts = int(row[0])
         close_time = ts + timeframe_ms
+        if close_time > collection_now_ms:
+            return None
         return {
             "ts": ts,
             "close_time": close_time,
@@ -492,7 +624,57 @@ class PolymarketPublicHTTPRealCorpusProvider:
             "close_price": float(row[4]),
             "volume": float(row[5]),
             "timeframe_ms": timeframe_ms,
-            "source": config.btc_feature_candle_source,
+            "source": BTC_FEATURE_SOURCE_BINANCE,
+        }
+
+    def _normalize_coinbase_candle(
+        self,
+        row: Any,
+        timeframe_ms: int,
+        collection_now_ms: int,
+    ) -> dict[str, Any] | None:
+        if not isinstance(row, list | tuple) or len(row) < 6:
+            return None
+        ts = int(row[0]) * 1000
+        close_time = ts + timeframe_ms
+        if close_time > collection_now_ms:
+            return None
+        return {
+            "ts": ts,
+            "close_time": close_time,
+            "available_at_ts": close_time,
+            "open_price": float(row[3]),
+            "high_price": float(row[2]),
+            "low_price": float(row[1]),
+            "close_price": float(row[4]),
+            "volume": float(row[5]),
+            "timeframe_ms": timeframe_ms,
+            "source": BTC_FEATURE_SOURCE_COINBASE,
+        }
+
+    def _normalize_kraken_ohlc(
+        self,
+        row: Any,
+        timeframe_ms: int,
+        collection_now_ms: int,
+    ) -> dict[str, Any] | None:
+        if not isinstance(row, list | tuple) or len(row) < 7:
+            return None
+        ts = int(float(row[0])) * 1000
+        close_time = ts + timeframe_ms
+        if close_time > collection_now_ms:
+            return None
+        return {
+            "ts": ts,
+            "close_time": close_time,
+            "available_at_ts": close_time,
+            "open_price": float(row[1]),
+            "high_price": float(row[2]),
+            "low_price": float(row[3]),
+            "close_price": float(row[4]),
+            "volume": float(row[6]),
+            "timeframe_ms": timeframe_ms,
+            "source": BTC_FEATURE_SOURCE_KRAKEN,
         }
 
     def _get_json(self, url: str) -> Any:
@@ -831,6 +1013,41 @@ def _expected_outcome_for_token(*, market: dict[str, Any], token_id: str) -> str
     if token_id == str(market.get("down_token_id")):
         return "DOWN"
     return None
+
+
+def _iso_millis(ts_ms: int) -> str:
+    return (
+        datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _kraken_ohlc_rows(payload: dict[str, Any]) -> list[Any]:
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return []
+    for key, value in result.items():
+        if key == "last":
+            continue
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _kraken_interval(timeframe_ms: int) -> int:
+    mapping = {
+        60_000: 1,
+        300_000: 5,
+        900_000: 15,
+        3_600_000: 60,
+    }
+    if timeframe_ms not in mapping:
+        raise RealCorpusPublicProviderError(
+            f"Unsupported BTC feature candle timeframe_ms={timeframe_ms}",
+            reason_codes=("unsupported_btc_feature_candle_timeframe",),
+        )
+    return mapping[timeframe_ms]
 
 
 def _binance_interval(timeframe_ms: int) -> str:

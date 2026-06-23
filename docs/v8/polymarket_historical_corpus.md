@@ -24,7 +24,8 @@ The builder accepts local deterministic raw files:
 - `raw_polymarket_markets.jsonl`
 - `raw_polymarket_orderbooks.jsonl`
 - `raw_polymarket_trades.jsonl`
-- `raw_binance_btcusdt_klines.jsonl`
+- `raw_binance_btcusdt_klines.jsonl` (legacy BTC feature-candle contract name;
+  row-level `source` records the actual provider)
 - `raw_polymarket_resolutions.jsonl`
 
 The example runner can generate a small fixture corpus for CI and local smoke tests.
@@ -63,9 +64,10 @@ Book snapshots, trades, and candles are eligible for a feature row only when the
 own `available_at_ts` is not later than the row `decision_ts`. Future settlement
 data is never available to feature construction.
 
-For `raw_binance_btcusdt_klines.jsonl`, `ts` is treated as the kline open
-timestamp. OHLC close-derived fields, including `close_price`, are usable only
-after the kline has closed:
+For `raw_binance_btcusdt_klines.jsonl`, `ts` is treated as the candle open
+timestamp regardless of whether the row came from Coinbase, Kraken, or Binance.
+OHLC close-derived fields, including `close_price`, are usable only after the
+candle has closed:
 
 - `available_at_ts >= ts + timeframe_ms`
 - if no availability field is supplied, the builder derives `available_at_ts`

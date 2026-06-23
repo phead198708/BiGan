@@ -20,10 +20,11 @@ The converter never uses `selected_side`, `outcome_side`, `model_probability`,
 `prob_up_15m`, `edge`, or realized paper PnL as labels. Settlement labels are built
 only by the public Phase 2 corpus builder from reference prices and market rules.
 
-Do not substitute Binance BTC prices for Polymarket settlement references unless
-the specific Polymarket market rule names Binance as the official resolution
-source. The existing `raw_binance_btcusdt_klines.jsonl` corpus filename is a
-causal BTC feature input contract, not proof that settlement labels use Binance.
+Do not substitute public BTC feature prices for Polymarket settlement references
+unless the specific Polymarket market rule names that provider as the official
+resolution source. The existing `raw_binance_btcusdt_klines.jsonl` corpus
+filename is a legacy causal BTC feature input contract; row-level `source`
+records whether the data came from Coinbase, Kraken, or Binance.
 
 ## Command
 

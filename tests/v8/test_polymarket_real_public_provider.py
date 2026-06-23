@@ -16,7 +16,11 @@ def test_public_http_provider_normalizes_public_market_rows_without_fake_resolut
     orderbook_source = FakeOrderBookSource()
     provider = PolymarketPublicHTTPRealCorpusProvider(
         current_time_ms=1_700_001_000_000,
-        fetch_json=FakePublicFetch(include_reference_prices=False, fail_clob_books=True),
+        fetch_json=FakePublicFetch(
+            include_reference_prices=False,
+            fail_clob_books=True,
+            fail_binance=True,
+        ),
         orderbook_source=orderbook_source,
     )
     config = PolymarketRealCorpusRecorderConfig(
@@ -44,6 +48,7 @@ def test_public_http_provider_normalizes_public_market_rows_without_fake_resolut
     assert orderbook_source.requested_token_ids == ("up-token", "down-token")
     assert len(trades) == 2
     assert len(candles) == 2
+    assert {row["source"] for row in candles} == {"coinbase_btc_usd"}
     assert resolutions == []
 
 
@@ -86,6 +91,52 @@ def test_public_http_provider_can_use_rest_orderbook_fallback_when_explicit() ->
 
     assert len(books) == 2
     assert {row["outcome"] for row in books} == {"UP", "DOWN"}
+
+
+def test_public_http_provider_falls_back_to_kraken_feature_candles() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=FakePublicFetch(
+            include_reference_prices=False,
+            fail_coinbase=True,
+            fail_binance=True,
+        ),
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    candles = provider.btc_feature_candle_rows(markets, config)
+
+    assert len(candles) == 2
+    assert {row["source"] for row in candles} == {"kraken_xbt_usd"}
+
+
+def test_public_http_provider_uses_binance_feature_candles_as_last_resort() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=FakePublicFetch(
+            include_reference_prices=False,
+            fail_coinbase=True,
+            fail_kraken=True,
+        ),
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    candles = provider.btc_feature_candle_rows(markets, config)
+
+    assert len(candles) == 2
+    assert {row["source"] for row in candles} == {"binance_btcusdt"}
 
 
 def test_websocket_orderbook_source_projects_market_channel_events() -> None:
@@ -141,9 +192,15 @@ class FakePublicFetch:
         *,
         include_reference_prices: bool,
         fail_clob_books: bool = False,
+        fail_coinbase: bool = False,
+        fail_kraken: bool = False,
+        fail_binance: bool = False,
     ) -> None:
         self.include_reference_prices = include_reference_prices
         self.fail_clob_books = fail_clob_books
+        self.fail_coinbase = fail_coinbase
+        self.fail_kraken = fail_kraken
+        self.fail_binance = fail_binance
 
     def __call__(self, url: str):
         parsed = urllib.parse.urlparse(url)
@@ -191,7 +248,47 @@ class FakePublicFetch:
             if token_id == "up-token":
                 return _book_payload(token_id=token_id, bid=0.56, ask=0.58)
             return _book_payload(token_id=token_id, bid=0.42, ask=0.44)
+        if "api.exchange.coinbase.com" in parsed.netloc:
+            if self.fail_coinbase:
+                raise RuntimeError("Coinbase unavailable")
+            return [
+                [1_699_999_100, "64990", "65010", "65000", "65005", "10"],
+                [1_699_999_160, "65000", "65020", "65005", "65012", "11"],
+            ]
+        if "api.kraken.com" in parsed.netloc:
+            if self.fail_kraken:
+                raise RuntimeError("Kraken unavailable")
+            return {
+                "error": [],
+                "result": {
+                    "XXBTZUSD": [
+                        [
+                            1_699_999_100,
+                            "65000",
+                            "65010",
+                            "64990",
+                            "65005",
+                            "65002",
+                            "10",
+                            2,
+                        ],
+                        [
+                            1_699_999_160,
+                            "65005",
+                            "65020",
+                            "65000",
+                            "65012",
+                            "65008",
+                            "11",
+                            3,
+                        ],
+                    ],
+                    "last": "1699999160",
+                },
+            }
         if "api.binance.com" in parsed.netloc:
+            if self.fail_binance:
+                raise AssertionError("Binance should only be used as last-resort backfill")
             return [
                 [1_699_999_100_000, "65000", "65010", "64990", "65005", "10"],
                 [1_699_999_160_000, "65005", "65020", "65000", "65012", "11"],

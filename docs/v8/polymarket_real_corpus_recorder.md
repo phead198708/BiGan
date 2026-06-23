@@ -63,10 +63,13 @@ The command writes:
 
 ## Settlement Source Rule
 
-Do not use Binance BTC prices as Polymarket settlement references unless the
-specific market rule explicitly declares Binance as the official resolution
-source. The current Phase 2 raw filename `raw_binance_btcusdt_klines.jsonl` is a
-causal feature-candle input. It is not a settlement oracle.
+Do not use public BTC feature prices as Polymarket settlement references unless
+the specific market rule explicitly declares that source as the official
+resolution source. The current Phase 2 raw filename
+`raw_binance_btcusdt_klines.jsonl` is a legacy causal feature-candle input
+contract. Check each candle row's `source` field for the actual provider
+(`coinbase_btc_usd`, `kraken_xbt_usd`, or `binance_btcusdt`). These rows are not
+settlement oracle evidence.
 
 For a market to become training eligible, the recorder must capture:
 
@@ -146,10 +149,11 @@ This provider reads only public endpoints:
 - Gamma market metadata by BTC UP/DOWN slug.
 - CLOB current orderbook snapshots.
 - Data API public trades.
-- Binance BTCUSDT candles as causal feature candles.
+- BTC feature candles from Coinbase first, Kraken second, and Binance only as
+  nullable/backfill-style fallback.
 
 It does not synthesize historical executable bid/ask snapshots from price
-history, and it does not use Binance as Polymarket settlement evidence. BTC
+history, and it does not use public BTC feature candles as Polymarket settlement evidence. BTC
 UP/DOWN settlement provenance is currently normalized from the Gamma
 `resolutionSource`, which for current BTC markets points to Chainlink BTC/USD
 Data Streams. If official Chainlink start/end reference prices are not present in
