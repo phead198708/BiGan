@@ -21,6 +21,13 @@ from bigan.v8.polymarket.corpus import (
     build_polymarket_btc_corpus,
     write_deterministic_polymarket_corpus_fixtures,
 )
+from bigan.v8.polymarket.execution_ev import (
+    PolymarketEVDecision,
+    build_polymarket_ev_decisions,
+    decide_polymarket_ev_action,
+    ev_threshold_report,
+    run_polymarket_policy_replay,
+)
 from bigan.v8.polymarket.features import build_polymarket_feature_rows
 from bigan.v8.polymarket.labels import build_polymarket_label_rows
 from bigan.v8.polymarket.ledger import (
@@ -58,6 +65,18 @@ from bigan.v8.polymarket.settlement import (
     PolymarketSettlementEvent,
     run_polymarket_settlement_engine,
 )
+from bigan.v8.polymarket.training import (
+    PolymarketPolicyDataset,
+    PolymarketPolicyExample,
+    PolymarketPolicyModel,
+    PolymarketPolicyPrediction,
+    PolymarketPolicyTrainingConfig,
+    PolymarketPolicyTrainingResult,
+    load_polymarket_policy_dataset,
+    predict_polymarket_policy_examples,
+    run_polymarket_policy_training,
+    train_polymarket_probability_model,
+)
 
 __all__ = [
     "DEFAULT_POLYMARKET_ADAPTER_CREATED_AT",
@@ -75,10 +94,17 @@ __all__ = [
     "PolymarketCorpusBuildConfig",
     "PolymarketCorpusBuildResult",
     "PolymarketDecisionAction",
+    "PolymarketEVDecision",
     "PolymarketFeatureRow",
     "PolymarketLabelRow",
     "PolymarketLedgerEvent",
+    "PolymarketPolicyDataset",
+    "PolymarketPolicyExample",
+    "PolymarketPolicyModel",
+    "PolymarketPolicyPrediction",
     "PolymarketPolicySignal",
+    "PolymarketPolicyTrainingConfig",
+    "PolymarketPolicyTrainingResult",
     "PolymarketPositionLedger",
     "PolymarketResolutionRule",
     "PolymarketResolutionStatus",
@@ -88,20 +114,28 @@ __all__ = [
     "PolymarketTokenSnapshot",
     "build_btc15m_resolution_rule",
     "build_btc_updown_resolution_rule",
+    "build_polymarket_ev_decisions",
     "build_polymarket_btc_corpus",
     "build_polymarket_feature_rows",
     "build_polymarket_label_rows",
     "build_polymarket_paper_decisions",
     "canonical_json_sha256",
+    "decide_polymarket_ev_action",
+    "ev_threshold_report",
+    "load_polymarket_policy_dataset",
     "looks_like_sha256",
     "normalize_btc15m_binary_market",
     "normalize_token_snapshots",
     "polymarket_decisions_to_phase4",
     "resolve_polymarket_rule",
     "run_polymarket_btc15m_paper_pipeline",
+    "run_polymarket_policy_replay",
+    "run_polymarket_policy_training",
     "run_polymarket_settlement_engine",
     "synthetic_btc15m_market_payload",
     "synthetic_btc_market_rows",
     "synthetic_token_snapshot_rows",
+    "predict_polymarket_policy_examples",
+    "train_polymarket_probability_model",
     "write_deterministic_polymarket_corpus_fixtures",
 ]
