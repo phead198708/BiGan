@@ -6,15 +6,18 @@ import json
 import urllib.parse
 
 from bigan.v8.polymarket import (
+    PolymarketCLOBWebSocketOrderBookSource,
     PolymarketPublicHTTPRealCorpusProvider,
     PolymarketRealCorpusRecorderConfig,
 )
 
 
 def test_public_http_provider_normalizes_public_market_rows_without_fake_resolution() -> None:
+    orderbook_source = FakeOrderBookSource()
     provider = PolymarketPublicHTTPRealCorpusProvider(
         current_time_ms=1_700_001_000_000,
-        fetch_json=FakePublicFetch(include_reference_prices=False),
+        fetch_json=FakePublicFetch(include_reference_prices=False, fail_clob_books=True),
+        orderbook_source=orderbook_source,
     )
     config = PolymarketRealCorpusRecorderConfig(
         run_id="provider",
@@ -38,6 +41,7 @@ def test_public_http_provider_normalizes_public_market_rows_without_fake_resolut
     assert markets[0]["down_token_id"] == "down-token"
     assert len(books) == 2
     assert {row["outcome"] for row in books} == {"UP", "DOWN"}
+    assert orderbook_source.requested_token_ids == ("up-token", "down-token")
     assert len(trades) == 2
     assert len(candles) == 2
     assert resolutions == []
@@ -64,9 +68,82 @@ def test_public_http_provider_uses_official_reference_prices_when_present() -> N
     assert resolutions[0]["reference_price_end"] == 65025.0
 
 
+def test_public_http_provider_can_use_rest_orderbook_fallback_when_explicit() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=FakePublicFetch(include_reference_prices=False),
+        use_rest_orderbooks=True,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    books = provider.orderbook_rows(markets, config)
+
+    assert len(books) == 2
+    assert {row["outcome"] for row in books} == {"UP", "DOWN"}
+
+
+def test_websocket_orderbook_source_projects_market_channel_events() -> None:
+    source = PolymarketCLOBWebSocketOrderBookSource(timeout_seconds=1.0)
+    book_payloads: dict[str, dict] = {}
+    fallback_payloads: dict[str, dict] = {}
+
+    source._update_payload_maps(
+        payload={
+            "asset_id": "up-token",
+            "market": "0xcondition",
+            "timestamp": "1700000000000",
+            "hash": "book-hash",
+            "bids": [{"price": "0.56", "size": "100"}],
+            "asks": [{"price": "0.58", "size": "120"}],
+        },
+        receive_time_ms=1_700_000_000_123,
+        target_tokens={"up-token", "down-token"},
+        book_payloads=book_payloads,
+        fallback_payloads=fallback_payloads,
+    )
+    source._update_payload_maps(
+        payload={
+            "market": "0xcondition",
+            "price_changes": [
+                {
+                    "asset_id": "down-token",
+                    "price": "0.42",
+                    "size": "25",
+                    "side": "BUY",
+                    "hash": "delta-hash",
+                    "best_bid": "0.42",
+                    "best_ask": "0.44",
+                }
+            ],
+        },
+        receive_time_ms=1_700_000_000_124,
+        target_tokens={"up-token", "down-token"},
+        book_payloads=book_payloads,
+        fallback_payloads=fallback_payloads,
+    )
+
+    assert book_payloads["up-token"]["bids"] == [{"price": "0.56", "size": "100"}]
+    assert book_payloads["up-token"]["source_event_type"] == "book"
+    assert fallback_payloads["down-token"]["bids"] == [{"price": "0.42", "size": "0"}]
+    assert fallback_payloads["down-token"]["timestamp"] == 1_700_000_000_124
+    assert fallback_payloads["down-token"]["source_event_type"] == "price_change"
+
+
 class FakePublicFetch:
-    def __init__(self, *, include_reference_prices: bool) -> None:
+    def __init__(
+        self,
+        *,
+        include_reference_prices: bool,
+        fail_clob_books: bool = False,
+    ) -> None:
         self.include_reference_prices = include_reference_prices
+        self.fail_clob_books = fail_clob_books
 
     def __call__(self, url: str):
         parsed = urllib.parse.urlparse(url)
@@ -108,6 +185,8 @@ class FakePublicFetch:
                 payload["referencePriceEnd"] = "65025"
             return [payload]
         if "clob.polymarket.com" in parsed.netloc:
+            if self.fail_clob_books:
+                raise AssertionError("REST CLOB /book should not be called")
             token_id = query["token_id"][0]
             if token_id == "up-token":
                 return _book_payload(token_id=token_id, bid=0.56, ask=0.58)
@@ -118,6 +197,18 @@ class FakePublicFetch:
                 [1_699_999_160_000, "65005", "65020", "65000", "65012", "11"],
             ]
         raise AssertionError(f"unexpected url: {url}")
+
+
+class FakeOrderBookSource:
+    def __init__(self) -> None:
+        self.requested_token_ids: tuple[str, ...] = ()
+
+    def book_payloads(self, token_ids: tuple[str, ...]) -> dict[str, dict]:
+        self.requested_token_ids = token_ids
+        return {
+            "up-token": _book_payload(token_id="up-token", bid=0.56, ask=0.58),
+            "down-token": _book_payload(token_id="down-token", bid=0.42, ask=0.44),
+        }
 
 
 def _book_payload(*, token_id: str, bid: float, ask: float) -> dict:

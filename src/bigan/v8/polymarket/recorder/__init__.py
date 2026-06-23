@@ -13,6 +13,9 @@ from bigan.v8.polymarket.recorder.contracts import (
 )
 from bigan.v8.polymarket.recorder.operator import record_polymarket_real_corpus
 from bigan.v8.polymarket.recorder.public_provider import (
+    DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
+    PolymarketCLOBWebSocketOrderBookSource,
+    PolymarketOrderBookSource,
     PolymarketPublicHTTPRealCorpusProvider,
     PolymarketRealCorpusPublicProvider,
     RealCorpusPublicProviderError,
@@ -26,6 +29,9 @@ __all__ = [
     "DEFAULT_SAMPLING_POLICY_SECONDS",
     "POLYMARKET_REAL_CORPUS_RECORDER_PHASE",
     "POLYMARKET_REAL_CORPUS_RECORDER_SCHEMA_VERSION",
+    "DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL",
+    "PolymarketCLOBWebSocketOrderBookSource",
+    "PolymarketOrderBookSource",
     "PolymarketRealCorpusRecorderConfig",
     "PolymarketRealCorpusRecorderResult",
     "PolymarketPublicHTTPRealCorpusProvider",

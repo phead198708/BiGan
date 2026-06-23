@@ -71,6 +71,9 @@ from bigan.v8.polymarket.paper_decision import (
     polymarket_decisions_to_phase4,
 )
 from bigan.v8.polymarket.recorder import (
+    DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
+    PolymarketCLOBWebSocketOrderBookSource,
+    PolymarketOrderBookSource,
     PolymarketPublicHTTPRealCorpusProvider,
     PolymarketRealCorpusPublicProvider,
     PolymarketRealCorpusRecorderConfig,
@@ -128,6 +131,7 @@ __all__ = [
     "POLYMARKET_REAL_CORPUS_RETRAINING_GATE_PHASE",
     "POLYMARKET_REAL_CORPUS_RETRAINING_GATE_SCHEMA_VERSION",
     "POLYMARKET_SOURCE",
+    "DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL",
     "V8_POLYMARKET_TRAINING_CORPUS_DIR",
     "V8_TRAINING_CORPUS_ROOT",
     "POLICY_SIGNAL_SOURCE_SYNTHETIC_FIXTURE",
@@ -165,6 +169,8 @@ __all__ = [
     "PolymarketPolicyTrainingConfig",
     "PolymarketPolicyTrainingResult",
     "PolymarketPositionLedger",
+    "PolymarketCLOBWebSocketOrderBookSource",
+    "PolymarketOrderBookSource",
     "PolymarketPublicHTTPRealCorpusProvider",
     "PolymarketRealCorpusRecorderConfig",
     "PolymarketRealCorpusPublicProvider",

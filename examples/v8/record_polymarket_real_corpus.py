@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from bigan.v8.polymarket import (  # noqa: E402
+    DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
     V8_TRAINING_CORPUS_ROOT,
     PolymarketPublicHTTPRealCorpusProvider,
     PolymarketRealCorpusRecorderConfig,
@@ -42,6 +43,9 @@ def run_record_polymarket_real_corpus_cli(
     use_public_http_provider: bool = False,
     market_slugs: tuple[str, ...] = (),
     max_markets: int = 3,
+    clob_ws_url: str = DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
+    public_provider_timeout_seconds: float = 15.0,
+    use_rest_orderbooks: bool = False,
     export_training_corpus: bool = True,
     training_corpus_root: Path | str = V8_TRAINING_CORPUS_ROOT,
     overwrite_existing: bool = False,
@@ -50,6 +54,9 @@ def run_record_polymarket_real_corpus_cli(
         PolymarketPublicHTTPRealCorpusProvider(
             market_slugs=market_slugs,
             max_markets=max_markets,
+            clob_ws_url=clob_ws_url,
+            timeout_seconds=public_provider_timeout_seconds,
+            use_rest_orderbooks=use_rest_orderbooks,
         )
         if use_public_http_provider
         else None
@@ -158,7 +165,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--use-public-http-provider",
         action="store_true",
-        help="Use read-only public Polymarket/Data/CLOB/Binance HTTP provider.",
+        help="Use read-only public Gamma/Data/CLOB WS/Binance provider.",
+    )
+    parser.add_argument(
+        "--use-rest-orderbooks",
+        action="store_true",
+        help="Use legacy CLOB REST /book for orderbooks instead of the default websocket source.",
+    )
+    parser.add_argument(
+        "--clob-ws-url",
+        default=DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
+        help="Read-only Polymarket CLOB market-channel websocket URL.",
+    )
+    parser.add_argument(
+        "--public-provider-timeout-seconds",
+        type=float,
+        default=15.0,
+        help="Timeout for public HTTP reads and websocket orderbook collection.",
     )
     parser.add_argument(
         "--market-slug",
@@ -198,6 +221,9 @@ def main(argv: list[str] | None = None) -> int:
         use_public_http_provider=args.use_public_http_provider,
         market_slugs=tuple(args.market_slugs or ()),
         max_markets=args.max_markets,
+        clob_ws_url=args.clob_ws_url,
+        public_provider_timeout_seconds=args.public_provider_timeout_seconds,
+        use_rest_orderbooks=args.use_rest_orderbooks,
         export_training_corpus=not args.no_export_training_corpus,
         training_corpus_root=args.training_corpus_root,
         overwrite_existing=args.overwrite_existing,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -11,6 +12,16 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Protocol
 
+import orjson
+import websockets
+
+from bigan.ingestion.message_types import (
+    BestBidAskEvent,
+    BookEvent,
+    PriceChangeEvent,
+    UnknownEvent,
+    parse_event,
+)
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.corpus import BTC_UPDOWN_MARKET_HORIZONS_MS
 from bigan.v8.polymarket.corpus.contracts import safety_fields
@@ -22,6 +33,8 @@ BTC_UPDOWN_FAMILY_BY_SLUG = {
     "15m": "btc_updown_15m",
     "1h": "btc_updown_1h",
 }
+DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+POLYMARKET_CLOB_WS_SOURCE_CHANNEL = "polymarket_clob_ws_market"
 
 
 class RealCorpusPublicProviderError(RuntimeError):
@@ -30,6 +43,13 @@ class RealCorpusPublicProviderError(RuntimeError):
     def __init__(self, message: str, *, reason_codes: tuple[str, ...]) -> None:
         super().__init__(message)
         self.reason_codes = reason_codes
+
+
+class PolymarketOrderBookSource(Protocol):
+    """Read-only source for CLOB book snapshots keyed by token id."""
+
+    def book_payloads(self, token_ids: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+        """Return CLOB-like book payloads keyed by token id."""
 
 
 class PolymarketRealCorpusPublicProvider(Protocol):
@@ -85,12 +105,12 @@ class PolymarketRealCorpusPublicProvider(Protocol):
 
 
 class PolymarketPublicHTTPRealCorpusProvider:
-    """Read-only public HTTP provider for Polymarket BTC UP/DOWN corpus facts.
+    """Read-only public provider for Polymarket BTC UP/DOWN corpus facts.
 
-    This provider reads Gamma/Data API/CLOB/Binance endpoints and normalizes what
-    those endpoints actually expose. It does not synthesize historical bid/ask
-    orderbooks from price history, and it does not use Binance as the official
-    Polymarket settlement source.
+    This provider reads Gamma/Data API/CLOB websocket/Binance endpoints and
+    normalizes what those endpoints actually expose. It does not synthesize
+    historical bid/ask orderbooks from price history, and it does not use
+    Binance as the official Polymarket settlement source.
     """
 
     read_only = True
@@ -108,6 +128,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
         market_slugs: tuple[str, ...] = (),
         gamma_markets_endpoint: str = "https://gamma-api.polymarket.com/markets",
         clob_book_endpoint: str = "https://clob.polymarket.com/book",
+        clob_ws_url: str = DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
         data_trades_endpoint: str = "https://data-api.polymarket.com/trades",
         binance_klines_endpoint: str = "https://api.binance.com/api/v3/klines",
         max_markets: int = 3,
@@ -115,6 +136,8 @@ class PolymarketPublicHTTPRealCorpusProvider:
         timeout_seconds: float = 15.0,
         current_time_ms: int | None = None,
         fetch_json: Callable[[str], Any] | None = None,
+        orderbook_source: PolymarketOrderBookSource | None = None,
+        use_rest_orderbooks: bool = False,
     ) -> None:
         if max_markets <= 0:
             raise ValueError("max_markets must be positive")
@@ -123,6 +146,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
         self.market_slugs = tuple(dict.fromkeys(slug.strip() for slug in market_slugs if slug.strip()))
         self.gamma_markets_endpoint = gamma_markets_endpoint
         self.clob_book_endpoint = clob_book_endpoint
+        self.clob_ws_url = clob_ws_url
         self.data_trades_endpoint = data_trades_endpoint
         self.binance_klines_endpoint = binance_klines_endpoint
         self.max_markets = max_markets
@@ -130,6 +154,15 @@ class PolymarketPublicHTTPRealCorpusProvider:
         self.timeout_seconds = timeout_seconds
         self.current_time_ms = current_time_ms
         self._fetch_json = fetch_json
+        if orderbook_source is not None:
+            self.orderbook_source = orderbook_source
+        elif use_rest_orderbooks:
+            self.orderbook_source = None
+        else:
+            self.orderbook_source = PolymarketCLOBWebSocketOrderBookSource(
+                ws_url=clob_ws_url,
+                timeout_seconds=timeout_seconds,
+            )
 
     def market_rows(
         self,
@@ -160,6 +193,32 @@ class PolymarketPublicHTTPRealCorpusProvider:
         config: PolymarketRealCorpusRecorderConfig,
     ) -> list[dict[str, Any]]:
         del config
+        if self.orderbook_source is not None:
+            return self._orderbook_rows_from_source(markets)
+        return self._orderbook_rows_from_rest(markets)
+
+    def _orderbook_rows_from_source(self, markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        payloads = self.orderbook_source.book_payloads(_token_ids_for_markets(markets))
+        rows: list[dict[str, Any]] = []
+        for market in markets:
+            for outcome, token_id in (
+                ("UP", str(market["up_token_id"])),
+                ("DOWN", str(market["down_token_id"])),
+            ):
+                payload = payloads.get(token_id)
+                if payload is None:
+                    continue
+                row = self._normalize_book_payload(
+                    market=market,
+                    outcome=outcome,
+                    token_id=token_id,
+                    payload=payload,
+                )
+                if row is not None:
+                    rows.append(row)
+        return rows
+
+    def _orderbook_rows_from_rest(self, markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for market in markets:
             for outcome, token_id in (
@@ -363,7 +422,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
         payload: dict[str, Any],
     ) -> dict[str, Any] | None:
         bids = _price_levels(payload.get("bids"))
-        asks = _price_levels(payload.get("asks"))
+        asks = _price_levels(payload.get("asks") if "asks" in payload else payload.get("ask"))
         if not bids or not asks:
             return None
         best_bid_price, best_bid_size = max(bids, key=lambda level: level[0])
@@ -449,6 +508,253 @@ class PolymarketPublicHTTPRealCorpusProvider:
 
     def _current_time_ms(self) -> int:
         return self.current_time_ms if self.current_time_ms is not None else int(time.time() * 1000)
+
+
+class PolymarketCLOBWebSocketOrderBookSource:
+    """Short-lived read-only collector for CLOB market-channel book snapshots."""
+
+    read_only = True
+    write_capable = False
+    paper_only = True
+    capital_at_risk = False
+    broker_exchange_write_enabled = False
+    live_exchange_write_enabled = False
+    polymarket_write_enabled = False
+    wallet_signing_enabled = False
+
+    _KEEPALIVE_TOKENS = (b"PONG", b"PING", b"pong", b"ping")
+
+    def __init__(
+        self,
+        *,
+        ws_url: str = DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
+        timeout_seconds: float = 15.0,
+        custom_feature_enabled: bool = True,
+    ) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        if not ws_url.strip():
+            raise ValueError("ws_url is required")
+        self.ws_url = ws_url
+        self.timeout_seconds = timeout_seconds
+        self.custom_feature_enabled = custom_feature_enabled
+
+    def book_payloads(self, token_ids: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+        token_ids = tuple(dict.fromkeys(str(token_id) for token_id in token_ids if str(token_id)))
+        if not token_ids:
+            return {}
+        try:
+            return asyncio.run(self._collect_book_payloads(token_ids))
+        except RealCorpusPublicProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise RealCorpusPublicProviderError(
+                f"CLOB websocket orderbook collection failed: {exc}",
+                reason_codes=("polymarket_clob_ws_orderbook_collection_failed",),
+            ) from exc
+
+    async def _collect_book_payloads(
+        self,
+        token_ids: tuple[str, ...],
+    ) -> dict[str, dict[str, Any]]:
+        target_tokens = set(token_ids)
+        book_payloads: dict[str, dict[str, Any]] = {}
+        fallback_payloads: dict[str, dict[str, Any]] = {}
+        deadline = time.monotonic() + self.timeout_seconds
+        try:
+            async with websockets.connect(
+                self.ws_url,
+                ping_interval=None,
+                ping_timeout=None,
+                close_timeout=5,
+                max_size=2**24,
+            ) as ws:
+                await ws.send(
+                    orjson.dumps(
+                        {
+                            "assets_ids": sorted(target_tokens),
+                            "type": "market",
+                            "custom_feature_enabled": self.custom_feature_enabled,
+                        }
+                    )
+                )
+                while time.monotonic() < deadline and set(book_payloads) != target_tokens:
+                    timeout = max(0.001, deadline - time.monotonic())
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                    except TimeoutError:
+                        break
+                    receive_time_ms = int(time.time() * 1000)
+                    for payload in _decode_market_ws_payloads(raw):
+                        self._update_payload_maps(
+                            payload=payload,
+                            receive_time_ms=receive_time_ms,
+                            target_tokens=target_tokens,
+                            book_payloads=book_payloads,
+                            fallback_payloads=fallback_payloads,
+                        )
+        except Exception as exc:  # noqa: BLE001
+            raise RealCorpusPublicProviderError(
+                f"CLOB websocket orderbook collection failed: {exc}",
+                reason_codes=("polymarket_clob_ws_orderbook_collection_failed",),
+            ) from exc
+
+        merged = dict(fallback_payloads)
+        merged.update(book_payloads)
+        if not merged:
+            raise RealCorpusPublicProviderError(
+                "CLOB websocket emitted no orderbook payloads before timeout.",
+                reason_codes=("polymarket_clob_ws_no_orderbooks",),
+            )
+        return {token_id: merged[token_id] for token_id in token_ids if token_id in merged}
+
+    def _update_payload_maps(
+        self,
+        *,
+        payload: dict[str, Any],
+        receive_time_ms: int,
+        target_tokens: set[str],
+        book_payloads: dict[str, dict[str, Any]],
+        fallback_payloads: dict[str, dict[str, Any]],
+    ) -> None:
+        normalized_payload = _market_ws_payload_for_parse(
+            payload=payload,
+            receive_time_ms=receive_time_ms,
+        )
+        if normalized_payload is None:
+            return
+        try:
+            event = parse_event(normalized_payload, receive_time_ms=receive_time_ms)
+        except UnknownEvent:
+            return
+        except Exception:
+            return
+        if isinstance(event, BookEvent) and event.asset_id in target_tokens:
+            book_payloads[event.asset_id] = _book_event_payload(event)
+            return
+        if isinstance(event, BestBidAskEvent) and event.asset_id in target_tokens:
+            top_payload = _top_of_book_payload(
+                asset_id=event.asset_id,
+                market=event.market,
+                timestamp=int(event.timestamp),
+                best_bid=event.best_bid,
+                best_ask=event.best_ask,
+                receive_time=event.receive_time,
+                source_event_type="best_bid_ask",
+            )
+            if top_payload is not None:
+                fallback_payloads[event.asset_id] = top_payload
+            return
+        if isinstance(event, PriceChangeEvent):
+            for change in event.price_changes:
+                if change.asset_id not in target_tokens:
+                    continue
+                top_payload = _top_of_book_payload(
+                    asset_id=change.asset_id,
+                    market=event.market,
+                    timestamp=int(event.timestamp),
+                    best_bid=change.best_bid,
+                    best_ask=change.best_ask,
+                    receive_time=event.receive_time,
+                    source_event_type="price_change",
+                )
+                if top_payload is not None:
+                    fallback_payloads[change.asset_id] = top_payload
+
+
+def _token_ids_for_markets(markets: list[dict[str, Any]]) -> tuple[str, ...]:
+    token_ids: list[str] = []
+    for market in markets:
+        token_ids.extend([str(market["up_token_id"]), str(market["down_token_id"])])
+    return tuple(dict.fromkeys(token_ids))
+
+
+def _decode_market_ws_payloads(raw: bytes | str) -> list[dict[str, Any]]:
+    raw_bytes = raw if isinstance(raw, bytes) else raw.encode("utf-8")
+    stripped = raw_bytes.strip()
+    if stripped in PolymarketCLOBWebSocketOrderBookSource._KEEPALIVE_TOKENS:
+        return []
+    try:
+        payload = orjson.loads(raw_bytes)
+    except orjson.JSONDecodeError:
+        return []
+    if isinstance(payload, dict):
+        return [payload]
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def _market_ws_payload_for_parse(
+    *,
+    payload: dict[str, Any],
+    receive_time_ms: int,
+) -> dict[str, Any] | None:
+    normalized = dict(payload)
+    if "event_type" not in normalized:
+        inferred = _infer_market_ws_event_type(normalized)
+        if inferred is None:
+            return None
+        normalized["event_type"] = inferred
+    if "timestamp" not in normalized:
+        normalized["timestamp"] = str(receive_time_ms)
+    if "asks" not in normalized and "ask" in normalized:
+        normalized["asks"] = normalized["ask"]
+    return normalized
+
+
+def _infer_market_ws_event_type(payload: dict[str, Any]) -> str | None:
+    if "price_changes" in payload:
+        return "price_change"
+    if "asset_id" in payload and "bids" in payload and ("asks" in payload or "ask" in payload):
+        return "book"
+    if "asset_id" in payload and ("best_bid" in payload or "best_ask" in payload):
+        return "best_bid_ask"
+    return None
+
+
+def _book_event_payload(event: BookEvent) -> dict[str, Any]:
+    return {
+        "market": event.market,
+        "asset_id": event.asset_id,
+        "timestamp": int(event.timestamp),
+        "receive_time": event.receive_time,
+        "source_channel": POLYMARKET_CLOB_WS_SOURCE_CHANNEL,
+        "source_event_type": "book",
+        "hash": event.hash,
+        "bids": _price_level_dicts(event.bids),
+        "asks": _price_level_dicts(event.asks),
+    }
+
+
+def _price_level_dicts(levels: list[Any]) -> list[dict[str, str]]:
+    return [{"price": str(level.price), "size": str(level.size)} for level in levels]
+
+
+def _top_of_book_payload(
+    *,
+    asset_id: str,
+    market: str,
+    timestamp: int,
+    best_bid: Any,
+    best_ask: Any,
+    receive_time: int | None,
+    source_event_type: str,
+) -> dict[str, Any] | None:
+    bid = _optional_float(best_bid)
+    ask = _optional_float(best_ask)
+    if bid is None or ask is None:
+        return None
+    return {
+        "market": market,
+        "asset_id": asset_id,
+        "timestamp": timestamp,
+        "receive_time": receive_time,
+        "source_channel": POLYMARKET_CLOB_WS_SOURCE_CHANNEL,
+        "source_event_type": source_event_type,
+        "bids": [{"price": str(bid), "size": "0"}],
+        "asks": [{"price": str(ask), "size": "0"}],
+    }
 
 
 def _json_list(value: Any) -> list[Any]:
