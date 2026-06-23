@@ -140,7 +140,14 @@ def validate_market_books(
     policy = config.resolved_sampling_policy_seconds()
     max_book_age_ms = policy[str(market["market_family"])] * 1000
     valid_rows: list[dict[str, Any]] = []
-    for decision_ts in sample_times_for_market(market, config):
+    required_sample_times = _required_book_sample_times(
+        market=market,
+        config=config,
+        by_outcome=by_outcome,
+    )
+    if not required_sample_times:
+        reasons.add("missing_complete_up_down_orderbook")
+    for decision_ts in required_sample_times:
         sampled = {
             outcome: _latest_causal_book_for_sample(
                 rows=rows,
@@ -220,6 +227,51 @@ def _latest_causal_book_for_sample(
         and decision_ts - int(row["ts"]) < max_book_age_ms
     ]
     return eligible[-1] if eligible else None
+
+
+def _required_book_sample_times(
+    *,
+    market: dict[str, Any],
+    config: PolymarketRealCorpusRecorderConfig,
+    by_outcome: dict[str, list[dict[str, Any]]],
+) -> tuple[int, ...]:
+    sample_times = sample_times_for_market(market, config)
+    if config.mock_public_data:
+        return sample_times
+    if not by_outcome["UP"] or not by_outcome["DOWN"]:
+        return sample_times
+    collection_start_ts = max(
+        min(int(row.get("available_at_ts") or row["ts"]) for row in by_outcome["UP"]),
+        min(int(row.get("available_at_ts") or row["ts"]) for row in by_outcome["DOWN"]),
+    )
+    collection_end_ts = _collection_end_ts_for_live_rows(
+        market=market,
+        by_outcome=by_outcome,
+    )
+    return tuple(
+        decision_ts
+        for decision_ts in sample_times
+        if collection_start_ts <= decision_ts <= collection_end_ts
+    )
+
+
+def _collection_end_ts_for_live_rows(
+    *,
+    market: dict[str, Any],
+    by_outcome: dict[str, list[dict[str, Any]]],
+) -> int:
+    by_outcome_collection_ends: list[int] = []
+    for rows in by_outcome.values():
+        row_collection_ends = [
+            int(row["collection_end_ts"])
+            for row in rows
+            if row.get("collection_end_ts") is not None
+        ]
+        if row_collection_ends:
+            by_outcome_collection_ends.append(max(row_collection_ends))
+    if by_outcome_collection_ends:
+        return min(by_outcome_collection_ends)
+    return int(market["market_end_ts"])
 
 
 def _finite_positive(value: Any) -> bool:

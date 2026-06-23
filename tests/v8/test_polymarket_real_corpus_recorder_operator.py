@@ -298,6 +298,80 @@ def test_orderbook_validation_rejects_future_only_snapshots() -> None:
     assert reasons == ["missing_complete_up_down_orderbook"]
 
 
+def test_live_orderbook_validation_starts_at_first_collected_complete_book() -> None:
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="mid-round-books",
+        output_dir="/tmp/mid-round-books",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+    market = discover_mock_market_rows(config)[0]
+    rows = []
+    for sample_index, decision_ts in enumerate(sample_times_for_market(market, config)[1:]):
+        for outcome, token_id, mid in (
+            ("UP", market["up_token_id"], 0.56 + sample_index * 0.01),
+            ("DOWN", market["down_token_id"], 0.44 - sample_index * 0.01),
+        ):
+            rows.append(
+                {
+                    "market_id": market["market_id"],
+                    "token_id": token_id,
+                    "outcome": outcome,
+                    "ts": decision_ts,
+                    "available_at_ts": decision_ts,
+                    "bid_price": mid - 0.01,
+                    "ask_price": mid + 0.01,
+                    "mid_price": mid,
+                    "bid_size": 100.0,
+                    "ask_size": 100.0,
+                    "liquidity_depth": 200.0,
+                }
+            )
+
+    valid, reasons = validate_market_books(market=market, book_rows=rows, config=config)
+
+    assert reasons == []
+    assert len(valid) == len(rows)
+
+
+def test_live_orderbook_validation_does_not_require_uncollected_future_samples() -> None:
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="partial-live-books",
+        output_dir="/tmp/partial-live-books",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+    market = discover_mock_market_rows(config)[0]
+    decision_ts = sample_times_for_market(market, config)[2]
+    rows = []
+    for outcome, token_id, mid in (
+        ("UP", market["up_token_id"], 0.56),
+        ("DOWN", market["down_token_id"], 0.44),
+    ):
+        rows.append(
+            {
+                "market_id": market["market_id"],
+                "token_id": token_id,
+                "outcome": outcome,
+                "ts": decision_ts,
+                "available_at_ts": decision_ts,
+                "collection_end_ts": decision_ts,
+                "bid_price": mid - 0.01,
+                "ask_price": mid + 0.01,
+                "mid_price": mid,
+                "bid_size": 100.0,
+                "ask_size": 100.0,
+                "liquidity_depth": 200.0,
+            }
+        )
+
+    valid, reasons = validate_market_books(market=market, book_rows=rows, config=config)
+
+    assert reasons == []
+    assert len(valid) == 2
+    assert {row["ts"] for row in valid} == {decision_ts}
+
+
 def test_non_mock_public_collection_provider_error_fails_closed(
     tmp_path: Path,
 ) -> None:

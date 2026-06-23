@@ -34,6 +34,11 @@ BTC_UPDOWN_FAMILY_BY_SLUG = {
     "15m": "btc_updown_15m",
     "1h": "btc_updown_1h",
 }
+BTC_UPDOWN_SLUG_HORIZON_BY_FAMILY = {
+    "btc_updown_5m": "5m",
+    "btc_updown_15m": "15m",
+    "btc_updown_1h": "1h",
+}
 DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 POLYMARKET_CLOB_WS_SOURCE_CHANNEL = "polymarket_clob_ws_market"
 BTC_FEATURE_SOURCE_COINBASE = "coinbase_btc_usd"
@@ -143,6 +148,8 @@ class PolymarketPublicHTTPRealCorpusProvider:
         max_markets: int = 3,
         recent_trade_limit: int = 250,
         timeout_seconds: float = 15.0,
+        orderbook_snapshot_interval_seconds: float = 1.0,
+        seed_rest_orderbooks_before_stream: bool = True,
         current_time_ms: int | None = None,
         fetch_json: Callable[[str], Any] | None = None,
         orderbook_source: PolymarketOrderBookSource | None = None,
@@ -152,6 +159,8 @@ class PolymarketPublicHTTPRealCorpusProvider:
             raise ValueError("max_markets must be positive")
         if recent_trade_limit <= 0:
             raise ValueError("recent_trade_limit must be positive")
+        if orderbook_snapshot_interval_seconds <= 0:
+            raise ValueError("orderbook_snapshot_interval_seconds must be positive")
         source_order = tuple(dict.fromkeys(source.strip().lower() for source in btc_feature_source_order))
         unsupported_sources = set(source_order) - {"coinbase", "kraken", "binance"}
         if unsupported_sources:
@@ -173,6 +182,8 @@ class PolymarketPublicHTTPRealCorpusProvider:
         self.max_markets = max_markets
         self.recent_trade_limit = recent_trade_limit
         self.timeout_seconds = timeout_seconds
+        self.orderbook_snapshot_interval_seconds = orderbook_snapshot_interval_seconds
+        self.seed_rest_orderbooks_before_stream = seed_rest_orderbooks_before_stream
         self.current_time_ms = current_time_ms
         self._fetch_json = fetch_json
         if orderbook_source is not None:
@@ -183,13 +194,14 @@ class PolymarketPublicHTTPRealCorpusProvider:
             self.orderbook_source = PolymarketCLOBWebSocketOrderBookSource(
                 ws_url=clob_ws_url,
                 timeout_seconds=timeout_seconds,
+                snapshot_interval_seconds=orderbook_snapshot_interval_seconds,
             )
 
     def market_rows(
         self,
         config: PolymarketRealCorpusRecorderConfig,
     ) -> list[dict[str, Any]]:
-        slugs = self.market_slugs or self._discover_recent_btc_updown_slugs()
+        slugs = self.market_slugs or self._discover_current_btc_updown_slugs(config)
         rows = []
         for slug in slugs[: self.max_markets]:
             payloads = self._fetch_gamma_market_payloads(slug)
@@ -229,8 +241,13 @@ class PolymarketPublicHTTPRealCorpusProvider:
         snapshot_getter = getattr(self.orderbook_source, "book_payload_snapshots", None)
         if not callable(snapshot_getter):
             return []
-        snapshots = snapshot_getter(_token_ids_for_markets(markets))
         rows: list[dict[str, Any]] = []
+        if self.seed_rest_orderbooks_before_stream and isinstance(
+            self.orderbook_source,
+            PolymarketCLOBWebSocketOrderBookSource,
+        ):
+            rows.extend(self._raw_orderbook_rows_from_rest(markets))
+        snapshots = snapshot_getter(_token_ids_for_markets(markets))
         for payloads in snapshots:
             for market in markets:
                 for outcome, token_id in (
@@ -248,7 +265,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
                     )
                     if row is not None:
                         rows.append(row)
-        return rows
+        return _with_orderbook_collection_end(rows)
 
     def _orderbook_rows_from_source(self, markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
         payloads = self.orderbook_source.book_payloads(_token_ids_for_markets(markets))
@@ -269,9 +286,12 @@ class PolymarketPublicHTTPRealCorpusProvider:
                 )
                 if row is not None:
                     rows.append(row)
-        return rows
+        return _with_orderbook_collection_end(rows)
 
     def _orderbook_rows_from_rest(self, markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return _with_orderbook_collection_end(self._raw_orderbook_rows_from_rest(markets))
+
+    def _raw_orderbook_rows_from_rest(self, markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         payloads = self._fetch_clob_books(_token_ids_for_markets(markets))
         for market in markets:
@@ -489,7 +509,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
                     }
                 )
                 continue
-            raw_payload = dict(market.get("raw_public_payload") or {})
+            raw_payload = self._gamma_resolution_payload_for_market(market)
             start = _optional_float(
                 raw_payload.get("referencePriceStart")
                 or raw_payload.get("reference_price_start")
@@ -551,24 +571,43 @@ class PolymarketPublicHTTPRealCorpusProvider:
             return {}
         return {str(market_id): dict(payload) for market_id, payload in payloads.items()}
 
-    def _discover_recent_btc_updown_slugs(self) -> tuple[str, ...]:
-        params = urllib.parse.urlencode({"limit": self.recent_trade_limit})
-        payload = self._get_json(f"{self.data_trades_endpoint}?{params}")
-        if not isinstance(payload, list):
-            raise RealCorpusPublicProviderError(
-                "Invalid Polymarket Data API trades payload.",
-                reason_codes=("invalid_polymarket_trade_payload",),
+    def _gamma_resolution_payload_for_market(self, market: dict[str, Any]) -> dict[str, Any]:
+        base_payload = dict(market.get("raw_public_payload") or {})
+        slug = str(market.get("slug") or "")
+        if not slug:
+            return base_payload
+        try:
+            payloads = self._fetch_gamma_market_payloads(slug)
+        except RealCorpusPublicProviderError:
+            return base_payload
+        except Exception:
+            return base_payload
+        condition_id = str(market.get("condition_id") or market.get("market_id") or "")
+        for payload in payloads:
+            payload_slug = str(payload.get("slug") or payload.get("market_slug") or "")
+            payload_condition = str(
+                payload.get("conditionId") or payload.get("condition_id") or ""
             )
+            if payload_slug != slug:
+                continue
+            if condition_id and payload_condition and payload_condition != condition_id:
+                continue
+            merged = dict(base_payload)
+            merged.update(payload)
+            return merged
+        return base_payload
+
+    def _discover_current_btc_updown_slugs(
+        self,
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> tuple[str, ...]:
+        now_ms = self._current_time_ms()
         slugs: list[str] = []
-        for trade in payload:
-            slug = str(dict(trade).get("slug") or "")
-            if BTC_UPDOWN_SLUG_PATTERN.match(slug) and slug not in slugs:
-                slugs.append(slug)
-        if not slugs:
-            raise RealCorpusPublicProviderError(
-                "No recent BTC UP/DOWN trade slugs were found in public data.",
-                reason_codes=("real_public_collection_empty_market_discovery",),
-            )
+        for family in config.market_families:
+            horizon_name = BTC_UPDOWN_SLUG_HORIZON_BY_FAMILY[str(family)]
+            horizon_ms = BTC_UPDOWN_MARKET_HORIZONS_MS[str(family)]
+            start_epoch_seconds = (now_ms // horizon_ms) * horizon_ms // 1000
+            slugs.append(f"btc-updown-{horizon_name}-{start_epoch_seconds}")
         return tuple(slugs)
 
     def _fetch_gamma_market_payloads(self, slug: str) -> list[dict[str, Any]]:
@@ -631,11 +670,12 @@ class PolymarketPublicHTTPRealCorpusProvider:
         family = BTC_UPDOWN_FAMILY_BY_SLUG[match.group(1)]
         if family not in config.market_families:
             return None
-        if payload.get("ready") is False or payload.get("funded") is False:
-            return None
         start_ts = int(match.group(2)) * 1000
         horizon_ms = BTC_UPDOWN_MARKET_HORIZONS_MS[family]
         end_ts = start_ts + horizon_ms
+        now_ms = self._current_time_ms()
+        if not self.market_slugs and not (start_ts <= now_ms < end_ts):
+            return None
         outcomes = _json_list(payload.get("outcomes"))
         token_ids = _json_list(payload.get("clobTokenIds"))
         token_by_outcome = _token_by_up_down_outcome(outcomes=outcomes, token_ids=token_ids)
@@ -1097,6 +1137,13 @@ def _token_ids_for_markets(markets: list[dict[str, Any]]) -> tuple[str, ...]:
     for market in markets:
         token_ids.extend([str(market["up_token_id"]), str(market["down_token_id"])])
     return tuple(dict.fromkeys(token_ids))
+
+
+def _with_orderbook_collection_end(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    collection_end_ts = max(int(row.get("available_at_ts") or row["ts"]) for row in rows)
+    return [dict(row, collection_end_ts=collection_end_ts) for row in rows]
 
 
 def _decode_market_ws_payloads(raw: bytes | str) -> list[dict[str, Any]]:

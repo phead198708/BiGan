@@ -45,6 +45,8 @@ def run_record_polymarket_real_corpus_cli(
     max_markets: int = 3,
     clob_ws_url: str = DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
     public_provider_timeout_seconds: float = 15.0,
+    orderbook_snapshot_interval_seconds: float = 1.0,
+    seed_rest_orderbooks_before_stream: bool = True,
     use_rest_orderbooks: bool = False,
     export_training_corpus: bool = True,
     training_corpus_root: Path | str = V8_TRAINING_CORPUS_ROOT,
@@ -56,6 +58,8 @@ def run_record_polymarket_real_corpus_cli(
             max_markets=max_markets,
             clob_ws_url=clob_ws_url,
             timeout_seconds=public_provider_timeout_seconds,
+            orderbook_snapshot_interval_seconds=orderbook_snapshot_interval_seconds,
+            seed_rest_orderbooks_before_stream=seed_rest_orderbooks_before_stream,
             use_rest_orderbooks=use_rest_orderbooks,
         )
         if use_public_http_provider
@@ -184,6 +188,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Timeout for public HTTP reads and websocket orderbook collection.",
     )
     parser.add_argument(
+        "--orderbook-snapshot-interval-seconds",
+        type=float,
+        default=1.0,
+        help="Interval for read-only CLOB websocket orderbook snapshots.",
+    )
+    parser.add_argument(
+        "--no-rest-orderbook-seed",
+        action="store_true",
+        help="Disable the initial read-only REST /book seed before websocket snapshots.",
+    )
+    parser.add_argument(
         "--market-slug",
         action="append",
         dest="market_slugs",
@@ -223,6 +238,8 @@ def main(argv: list[str] | None = None) -> int:
         max_markets=args.max_markets,
         clob_ws_url=args.clob_ws_url,
         public_provider_timeout_seconds=args.public_provider_timeout_seconds,
+        orderbook_snapshot_interval_seconds=args.orderbook_snapshot_interval_seconds,
+        seed_rest_orderbooks_before_stream=not args.no_rest_orderbook_seed,
         use_rest_orderbooks=args.use_rest_orderbooks,
         export_training_corpus=not args.no_export_training_corpus,
         training_corpus_root=args.training_corpus_root,
