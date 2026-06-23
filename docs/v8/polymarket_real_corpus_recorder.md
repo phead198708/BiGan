@@ -43,6 +43,12 @@ python examples/v8/record_polymarket_real_corpus.py \
   --overwrite-existing
 ```
 
+`--output-dir` is required for recorder run artifacts.
+
+`/Volumes/PHILIPS/v8` is reserved only for direct-training corpora. Recorder run
+artifacts, rejected rows, and provider diagnostics should stay outside that
+directory.
+
 The command writes:
 
 - `real_corpus_recorder_manifest.json`
@@ -123,6 +129,43 @@ provider, `mock_public_data=false` remains fail-closed by design. With a
 configured provider, any fetch or normalization exception is written to
 `real_corpus_rejected_rows.jsonl` with provider/stage/reason details and the
 real-history training gate remains closed.
+
+The CLI can run the read-only public HTTP provider:
+
+```bash
+PYTHONPATH=src python examples/v8/record_polymarket_real_corpus.py \
+  --run-id real-public-probe \
+  --output-dir /tmp/bigan-v8-real-public-recorder \
+  --use-public-http-provider \
+  --market-family btc_updown_5m \
+  --overwrite-existing
+```
+
+This provider reads only public endpoints:
+
+- Gamma market metadata by BTC UP/DOWN slug.
+- CLOB current orderbook snapshots.
+- Data API public trades.
+- Binance BTCUSDT candles as causal feature candles.
+
+It does not synthesize historical executable bid/ask snapshots from price
+history, and it does not use Binance as Polymarket settlement evidence. BTC
+UP/DOWN settlement provenance is currently normalized from the Gamma
+`resolutionSource`, which for current BTC markets points to Chainlink BTC/USD
+Data Streams. If official Chainlink start/end reference prices are not present in
+the public market payload, resolution rows remain missing and the recorder fails
+closed before training eligibility.
+
+When a real recorder run becomes `real_historical_training_eligible=true`, only
+the validated Phase 2 corpus is exported by default to:
+
+```text
+/Volumes/PHILIPS/v8/polymarket/<run_id>
+```
+
+That export contains direct training files plus `training_corpus_provenance.json`.
+It must not contain recorder run artifacts, paper run artifacts, live run
+artifacts, model artifacts, or GitHub comment payloads.
 
 Granular read flags are separate from training eligibility:
 

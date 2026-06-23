@@ -12,7 +12,11 @@ from bigan.v8.polymarket.recorder.contracts import (
     PolymarketRealCorpusRecorderResult,
 )
 from bigan.v8.polymarket.recorder.operator import record_polymarket_real_corpus
-from bigan.v8.polymarket.recorder.public_provider import PolymarketRealCorpusPublicProvider
+from bigan.v8.polymarket.recorder.public_provider import (
+    PolymarketPublicHTTPRealCorpusProvider,
+    PolymarketRealCorpusPublicProvider,
+    RealCorpusPublicProviderError,
+)
 
 __all__ = [
     "DEFAULT_BTC_FEATURE_CANDLE_SOURCE",
@@ -24,6 +28,8 @@ __all__ = [
     "POLYMARKET_REAL_CORPUS_RECORDER_SCHEMA_VERSION",
     "PolymarketRealCorpusRecorderConfig",
     "PolymarketRealCorpusRecorderResult",
+    "PolymarketPublicHTTPRealCorpusProvider",
     "PolymarketRealCorpusPublicProvider",
+    "RealCorpusPublicProviderError",
     "record_polymarket_real_corpus",
 ]

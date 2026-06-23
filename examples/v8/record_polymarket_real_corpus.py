@@ -13,7 +13,10 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from bigan.v8.polymarket import (  # noqa: E402
+    V8_TRAINING_CORPUS_ROOT,
+    PolymarketPublicHTTPRealCorpusProvider,
     PolymarketRealCorpusRecorderConfig,
+    export_trainable_corpus,
     record_polymarket_real_corpus,
 )
 from bigan.v8.polymarket.corpus import (  # noqa: E402
@@ -36,8 +39,21 @@ def run_record_polymarket_real_corpus_cli(
     ended_at: str = DEFAULT_RECORDER_ENDED_AT,
     build_phase2_corpus: bool = True,
     mock_public_data: bool = True,
+    use_public_http_provider: bool = False,
+    market_slugs: tuple[str, ...] = (),
+    max_markets: int = 3,
+    export_training_corpus: bool = True,
+    training_corpus_root: Path | str = V8_TRAINING_CORPUS_ROOT,
     overwrite_existing: bool = False,
 ) -> dict:
+    public_provider = (
+        PolymarketPublicHTTPRealCorpusProvider(
+            market_slugs=market_slugs,
+            max_markets=max_markets,
+        )
+        if use_public_http_provider
+        else None
+    )
     result = record_polymarket_real_corpus(
         PolymarketRealCorpusRecorderConfig(
             run_id=run_id,
@@ -49,14 +65,45 @@ def run_record_polymarket_real_corpus_cli(
             build_phase2_corpus=build_phase2_corpus,
             mock_public_data=mock_public_data,
             overwrite_existing=overwrite_existing,
-        )
+        ),
+        public_provider=public_provider,
     )
     report = result.report
+    exported_training_corpus_dir = None
+    if (
+        export_training_corpus
+        and report["real_historical_training_eligible"] is True
+        and result.corpus_dir is not None
+    ):
+        exported_training_corpus_dir = export_trainable_corpus(
+            corpus_dir=result.corpus_dir,
+            corpus_id=run_id,
+            destination_root=training_corpus_root,
+            overwrite_existing=overwrite_existing,
+            provenance={
+                "source": "polymarket_real_corpus_recorder",
+                "run_id": run_id,
+                "recorder_manifest_path": str(
+                    result.artifact_paths["real_corpus_recorder_manifest"]
+                ),
+                "recorder_report_path": str(result.artifact_paths["real_corpus_recorder_report"]),
+                "phase2_corpus_manifest_sha256": report["phase2_corpus_manifest_sha256"],
+                "real_historical_corpus_used": report["real_historical_corpus_used"],
+                "manual_live_evidence_eligible": report["manual_live_evidence_eligible"],
+                "mock_public_data_used": report["mock_public_data_used"],
+                "synthetic_public_data_used": report["synthetic_public_data_used"],
+                "synthetic_corpus_used": report["synthetic_corpus_used"],
+            },
+        )
     return {
         "run_id": report["run_id"],
         "run_dir": str(result.run_dir),
         "raw_dir": str(result.raw_dir),
         "corpus_dir": None if result.corpus_dir is None else str(result.corpus_dir),
+        "exported_training_corpus_dir": (
+            None if exported_training_corpus_dir is None else str(exported_training_corpus_dir)
+        ),
+        "training_corpus_root": str(training_corpus_root),
         "recorder_manifest_path": str(result.artifact_paths["real_corpus_recorder_manifest"]),
         "recorder_report_path": str(result.artifact_paths["real_corpus_recorder_report"]),
         "rejected_rows_path": str(result.artifact_paths["real_corpus_rejected_rows"]),
@@ -108,11 +155,34 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-build-phase2-corpus", action="store_true")
     parser.add_argument("--mock-public-data", action="store_true")
     parser.add_argument("--no-mock-public-data", action="store_true")
+    parser.add_argument(
+        "--use-public-http-provider",
+        action="store_true",
+        help="Use read-only public Polymarket/Data/CLOB/Binance HTTP provider.",
+    )
+    parser.add_argument(
+        "--market-slug",
+        action="append",
+        dest="market_slugs",
+        help="Specific BTC UP/DOWN slug to record, repeatable.",
+    )
+    parser.add_argument("--max-markets", type=int, default=3)
+    parser.add_argument(
+        "--training-corpus-root",
+        default=str(V8_TRAINING_CORPUS_ROOT),
+        help=(
+            "External root for validated direct-training corpora only. "
+            "Defaults to /Volumes/PHILIPS/v8."
+        ),
+    )
+    parser.add_argument("--no-export-training-corpus", action="store_true")
     parser.add_argument("--overwrite-existing", action="store_true")
     args = parser.parse_args(argv)
 
     mock_public_data = True
     if args.no_mock_public_data:
+        mock_public_data = False
+    if args.use_public_http_provider:
         mock_public_data = False
     if args.mock_public_data:
         mock_public_data = True
@@ -125,6 +195,11 @@ def main(argv: list[str] | None = None) -> int:
         ended_at=args.ended_at,
         build_phase2_corpus=not args.no_build_phase2_corpus,
         mock_public_data=mock_public_data,
+        use_public_http_provider=args.use_public_http_provider,
+        market_slugs=tuple(args.market_slugs or ()),
+        max_markets=args.max_markets,
+        export_training_corpus=not args.no_export_training_corpus,
+        training_corpus_root=args.training_corpus_root,
         overwrite_existing=args.overwrite_existing,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))

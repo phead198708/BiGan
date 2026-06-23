@@ -71,9 +71,11 @@ from bigan.v8.polymarket.paper_decision import (
     polymarket_decisions_to_phase4,
 )
 from bigan.v8.polymarket.recorder import (
+    PolymarketPublicHTTPRealCorpusProvider,
     PolymarketRealCorpusPublicProvider,
     PolymarketRealCorpusRecorderConfig,
     PolymarketRealCorpusRecorderResult,
+    RealCorpusPublicProviderError,
     record_polymarket_real_corpus,
 )
 from bigan.v8.polymarket.rules import (
@@ -88,6 +90,12 @@ from bigan.v8.polymarket.settlement import (
     PolymarketSettlementEngineResult,
     PolymarketSettlementEvent,
     run_polymarket_settlement_engine,
+)
+from bigan.v8.polymarket.storage import (
+    V8_POLYMARKET_TRAINING_CORPUS_DIR,
+    V8_TRAINING_CORPUS_ROOT,
+    export_trainable_corpus,
+    require_v8_training_corpus_root,
 )
 from bigan.v8.polymarket.training import (
     DEFAULT_REAL_CORPUS_MODEL_VERSION,
@@ -120,6 +128,8 @@ __all__ = [
     "POLYMARKET_REAL_CORPUS_RETRAINING_GATE_PHASE",
     "POLYMARKET_REAL_CORPUS_RETRAINING_GATE_SCHEMA_VERSION",
     "POLYMARKET_SOURCE",
+    "V8_POLYMARKET_TRAINING_CORPUS_DIR",
+    "V8_TRAINING_CORPUS_ROOT",
     "POLICY_SIGNAL_SOURCE_SYNTHETIC_FIXTURE",
     "PolymarketAdapterError",
     "PolymarketAdapterRunConfig",
@@ -155,6 +165,7 @@ __all__ = [
     "PolymarketPolicyTrainingConfig",
     "PolymarketPolicyTrainingResult",
     "PolymarketPositionLedger",
+    "PolymarketPublicHTTPRealCorpusProvider",
     "PolymarketRealCorpusRecorderConfig",
     "PolymarketRealCorpusPublicProvider",
     "PolymarketRealCorpusRecorderResult",
@@ -163,6 +174,7 @@ __all__ = [
     "PolymarketResolutionRule",
     "PolymarketResolutionStatus",
     "PolymarketRuleResolution",
+    "RealCorpusPublicProviderError",
     "PolymarketSettlementEngineResult",
     "PolymarketSettlementEvent",
     "PolymarketTokenSnapshot",
@@ -175,6 +187,7 @@ __all__ = [
     "build_polymarket_paper_decisions",
     "canonical_json_sha256",
     "convert_live_signals_to_phase2_corpus",
+    "export_trainable_corpus",
     "decide_polymarket_ev_action",
     "ev_threshold_report",
     "load_polymarket_policy_dataset",
@@ -184,6 +197,7 @@ __all__ = [
     "polymarket_decisions_to_phase4",
     "resolve_polymarket_rule",
     "record_polymarket_real_corpus",
+    "require_v8_training_corpus_root",
     "run_polymarket_btc15m_paper_pipeline",
     "run_polymarket_live_paper",
     "run_polymarket_policy_replay",

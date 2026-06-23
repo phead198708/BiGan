@@ -46,6 +46,9 @@ The gate writes:
 - `policy_training/*/polymarket_policy_model_manifest.json`
 - all standard #133 policy training artifacts when accepted
 
+These are run/model artifacts and should not be written to `/Volumes/PHILIPS/v8`.
+That mounted directory is reserved for direct-training corpora only.
+
 The model manifest is augmented with #134-readable provenance:
 
 - `real_historical_corpus_used=true`
