@@ -70,6 +70,11 @@ from bigan.v8.polymarket.paper_decision import (
     build_polymarket_paper_decisions,
     polymarket_decisions_to_phase4,
 )
+from bigan.v8.polymarket.recorder import (
+    PolymarketRealCorpusRecorderConfig,
+    PolymarketRealCorpusRecorderResult,
+    record_polymarket_real_corpus,
+)
 from bigan.v8.polymarket.rules import (
     PolymarketResolutionRule,
     PolymarketResolutionStatus,
@@ -138,6 +143,8 @@ __all__ = [
     "PolymarketPolicyTrainingConfig",
     "PolymarketPolicyTrainingResult",
     "PolymarketPositionLedger",
+    "PolymarketRealCorpusRecorderConfig",
+    "PolymarketRealCorpusRecorderResult",
     "PolymarketResolutionRule",
     "PolymarketResolutionStatus",
     "PolymarketRuleResolution",
@@ -161,6 +168,7 @@ __all__ = [
     "normalize_token_snapshots",
     "polymarket_decisions_to_phase4",
     "resolve_polymarket_rule",
+    "record_polymarket_real_corpus",
     "run_polymarket_btc15m_paper_pipeline",
     "run_polymarket_live_paper",
     "run_polymarket_policy_replay",
