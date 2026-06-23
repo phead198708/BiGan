@@ -24,6 +24,11 @@ from bigan.v8.polymarket.corpus.contracts import (
 )
 from bigan.v8.polymarket.corpus.features import build_polymarket_corpus_feature_rows
 from bigan.v8.polymarket.corpus.labels import build_polymarket_corpus_label_rows
+from bigan.v8.polymarket.corpus.live_converter import (
+    LiveSignalCorpusConversionConfig,
+    LiveSignalCorpusConversionResult,
+    convert_live_signals_to_phase2_corpus,
+)
 from bigan.v8.polymarket.corpus.splits import build_polymarket_train_shadow_split
 
 __all__ = [
@@ -43,9 +48,12 @@ __all__ = [
     "PolymarketCorpusResolutionEvent",
     "PolymarketCorpusSplit",
     "PolymarketCorpusTrade",
+    "LiveSignalCorpusConversionConfig",
+    "LiveSignalCorpusConversionResult",
     "build_polymarket_btc_corpus",
     "build_polymarket_corpus_feature_rows",
     "build_polymarket_corpus_label_rows",
     "build_polymarket_train_shadow_split",
+    "convert_live_signals_to_phase2_corpus",
     "write_deterministic_polymarket_corpus_fixtures",
 ]

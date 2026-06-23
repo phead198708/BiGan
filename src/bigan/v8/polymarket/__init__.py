@@ -16,9 +16,12 @@ from bigan.v8.polymarket.contracts import (
     looks_like_sha256,
 )
 from bigan.v8.polymarket.corpus import (
+    LiveSignalCorpusConversionConfig,
+    LiveSignalCorpusConversionResult,
     PolymarketCorpusBuildConfig,
     PolymarketCorpusBuildResult,
     build_polymarket_btc_corpus,
+    convert_live_signals_to_phase2_corpus,
     write_deterministic_polymarket_corpus_fixtures,
 )
 from bigan.v8.polymarket.execution_ev import (
@@ -119,6 +122,8 @@ __all__ = [
     "PolymarketLabelRow",
     "PolymarketLedgerEvent",
     "PolymarketHTTPReadOnlyFeed",
+    "LiveSignalCorpusConversionConfig",
+    "LiveSignalCorpusConversionResult",
     "PolymarketLiveMarket",
     "PolymarketLiveOrderBook",
     "PolymarketLivePaperConfig",
@@ -147,6 +152,7 @@ __all__ = [
     "build_polymarket_label_rows",
     "build_polymarket_paper_decisions",
     "canonical_json_sha256",
+    "convert_live_signals_to_phase2_corpus",
     "decide_polymarket_ev_action",
     "ev_threshold_report",
     "load_polymarket_policy_dataset",
