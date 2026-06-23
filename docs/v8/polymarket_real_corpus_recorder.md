@@ -81,3 +81,26 @@ counts, training eligibility, and whether a Phase 2 corpus was built. Mock smoke
 runs set `deterministic_replay=true` and `real_historical_corpus_used=false`.
 Real public-data collection should set `real_historical_corpus_used=true` once the
 read-only API client is wired into the recorder seam.
+
+Eligibility is intentionally split:
+
+- `phase2_corpus_build_eligible`: the raw bundle can be normalized by the Phase 2
+  corpus builder.
+- `real_historical_training_eligible`: the bundle came from real public data and
+  may be used by the real-history training gate.
+- `manual_live_evidence_eligible`: the bundle is eligible to unblock downstream
+  manual live evidence.
+
+Mocked recorder output may set `phase2_corpus_build_eligible=true` for smoke
+coverage, but it must keep:
+
+- `mock_public_data_used=true`
+- `synthetic_public_data_used=true`
+- `synthetic_corpus_used=true`
+- `real_historical_training_eligible=false`
+- `manual_live_evidence_eligible=false`
+
+When `--no-mock-public-data` is used before the real read-only providers are
+wired, the recorder fails closed. It still writes the run bundle and empty raw
+files, and `real_corpus_rejected_rows.jsonl` includes provider-level reasons such
+as `real_public_collection_not_configured`.

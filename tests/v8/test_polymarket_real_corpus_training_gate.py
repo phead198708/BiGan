@@ -20,8 +20,14 @@ def test_recorder_output_phase2_corpus_has_temporal_split_and_hashes(tmp_path: P
         )
     )
     assert result.phase2_result is not None
-    assert result.report["training_eligible"] is True
+    assert result.report["training_eligible"] is False
+    assert result.report["phase2_corpus_build_eligible"] is True
+    assert result.report["real_historical_training_eligible"] is False
+    assert result.report["manual_live_evidence_eligible"] is False
     assert result.report["phase2_corpus_built"] is True
+    assert result.report["mock_public_data_used"] is True
+    assert result.report["synthetic_public_data_used"] is True
+    assert result.report["synthetic_corpus_used"] is True
     assert result.report["fixture_corpus_used"] is False
 
     split = _read_json(result.phase2_result.output_dir / "polymarket_train_shadow_split.json")
@@ -36,6 +42,12 @@ def test_recorder_output_phase2_corpus_has_temporal_split_and_hashes(tmp_path: P
     assert looks_like_sha256(split["shadow_dataset_hash"])
     assert corpus_manifest["raw_artifact_hashes"] == recorder_manifest["raw_artifact_hashes"]
     assert looks_like_sha256(recorder_manifest["phase2_corpus_manifest_sha256"])
+    assert recorder_manifest["phase2_corpus_build_eligible"] is True
+    assert recorder_manifest["real_historical_training_eligible"] is False
+    assert recorder_manifest["manual_live_evidence_eligible"] is False
+    assert recorder_manifest["mock_public_data_used"] is True
+    assert recorder_manifest["synthetic_public_data_used"] is True
+    assert recorder_manifest["synthetic_corpus_used"] is True
     assert recorder_manifest["real_historical_corpus_used"] is False
     assert recorder_manifest["fixture_corpus_used"] is False
 

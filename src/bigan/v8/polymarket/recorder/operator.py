@@ -56,13 +56,14 @@ def record_polymarket_real_corpus(
         shutil.rmtree(run_dir)
     config.raw_dir.mkdir(parents=True)
 
-    market_candidates = _discover_market_rows(config)
+    provider_failures = _provider_failures(config)
+    market_candidates = [] if provider_failures else _discover_market_rows(config)
     book_candidates = _orderbook_rows(market_candidates, config)
     trade_candidates = _trade_rows(market_candidates, config)
     resolution_candidates = _resolution_rows(market_candidates, config)
 
     raw_payloads = empty_raw_payloads()
-    rejected_rows: list[dict[str, Any]] = []
+    rejected_rows: list[dict[str, Any]] = list(provider_failures)
     accepted_markets: list[dict[str, Any]] = []
     for market in market_candidates:
         market_reasons = _validate_market_row(market)
@@ -148,6 +149,7 @@ def record_polymarket_real_corpus(
         rejected_rows=rejected_rows,
         phase2_result=phase2_result,
         phase2_error=phase2_error,
+        provider_failures=provider_failures,
     )
     manifest = _recorder_manifest(
         config=config,
@@ -177,12 +179,38 @@ def record_polymarket_real_corpus(
 
 
 def _discover_market_rows(config: PolymarketRealCorpusRecorderConfig) -> list[dict[str, Any]]:
-    if not config.mock_public_data:
-        raise NotImplementedError(
-            "real public API collection is intentionally not enabled in CI; "
-            "wire a read-only client into this seam before running with mock_public_data=False"
-        )
     return discover_mock_market_rows(config)
+
+
+def _provider_failures(config: PolymarketRealCorpusRecorderConfig) -> list[dict[str, Any]]:
+    if config.mock_public_data:
+        return []
+    return [
+        {
+            "provider": "polymarket_gamma",
+            "provider_stage": "market_discovery",
+            "reject_reasons": ["real_public_collection_not_configured"],
+            "details": "Gamma market normalization is not wired for production collection yet.",
+        },
+        {
+            "provider": "polymarket_clob",
+            "provider_stage": "orderbook_and_trade_collection",
+            "reject_reasons": ["real_public_collection_not_configured"],
+            "details": "CLOB read-only orderbook/trade collection is not wired yet.",
+        },
+        {
+            "provider": "btc_reference",
+            "provider_stage": "feature_candle_collection",
+            "reject_reasons": ["real_public_collection_not_configured"],
+            "details": "Configured BTC feature candle collection is not wired yet.",
+        },
+        {
+            "provider": "polymarket_resolution",
+            "provider_stage": "resolution_collection",
+            "reject_reasons": ["real_public_collection_not_configured"],
+            "details": "Official settlement reference collection is not wired yet.",
+        },
+    ]
 
 
 def _orderbook_rows(
@@ -263,6 +291,7 @@ def _recorder_report(
     rejected_rows: list[dict[str, Any]],
     phase2_result: Any,
     phase2_error: str | None,
+    provider_failures: list[dict[str, Any]],
 ) -> dict[str, Any]:
     reject_counts = Counter()
     for row in rejected_rows:
@@ -272,6 +301,20 @@ def _recorder_report(
     phase2_corpus_manifest_sha256 = None
     if phase2_result is not None:
         phase2_corpus_manifest_sha256 = phase2_result.artifact_hashes.get("corpus_manifest")
+    phase2_corpus_build_eligible = (
+        phase2_result is not None and market_count > 0 and not phase2_error
+    )
+    real_historical_training_eligible = phase2_corpus_build_eligible and not config.mock_public_data
+    public_collection_status = (
+        "mocked"
+        if config.mock_public_data
+        else "blocked_fail_closed"
+        if provider_failures
+        else "completed"
+    )
+    public_collection_reason_codes = sorted(
+        {reason for row in provider_failures for reason in row.get("reject_reasons", [])}
+    )
     return {
         "schema_version": POLYMARKET_REAL_CORPUS_RECORDER_SCHEMA_VERSION,
         "phase": POLYMARKET_REAL_CORPUS_RECORDER_PHASE,
@@ -281,9 +324,15 @@ def _recorder_report(
         "wall_clock_duration_seconds": 0.0,
         "market_families": list(config.market_families),
         "sampling_policy": config.resolved_sampling_policy_seconds(),
-        "live_polymarket_data": not config.mock_public_data,
-        "live_btc_reference_data": not config.mock_public_data,
+        "requested_live_public_collection": not config.mock_public_data,
+        "public_collection_status": public_collection_status,
+        "public_collection_reason_codes": public_collection_reason_codes,
+        "live_polymarket_data": real_historical_training_eligible,
+        "live_btc_reference_data": real_historical_training_eligible,
         "deterministic_replay": config.mock_public_data,
+        "mock_public_data_used": config.mock_public_data,
+        "synthetic_public_data_used": config.mock_public_data,
+        "synthetic_corpus_used": config.mock_public_data,
         "raw_polymarket_market_count": market_count,
         "raw_orderbook_row_count": len(raw_payloads["raw_polymarket_orderbooks.jsonl"]),
         "raw_trade_row_count": len(raw_payloads["raw_polymarket_trades.jsonl"]),
@@ -291,11 +340,14 @@ def _recorder_report(
         "raw_resolution_count": len(raw_payloads["raw_polymarket_resolutions.jsonl"]),
         "rejected_row_count": len(rejected_rows),
         "reject_reason_counts": dict(sorted(reject_counts.items())),
-        "training_eligible": phase2_result is not None and market_count > 0 and not phase2_error,
+        "training_eligible": real_historical_training_eligible,
+        "phase2_corpus_build_eligible": phase2_corpus_build_eligible,
+        "real_historical_training_eligible": real_historical_training_eligible,
+        "manual_live_evidence_eligible": real_historical_training_eligible,
         "phase2_corpus_built": phase2_result is not None,
         "phase2_error": phase2_error,
         "phase2_corpus_manifest_sha256": phase2_corpus_manifest_sha256,
-        "real_historical_corpus_used": not config.mock_public_data,
+        "real_historical_corpus_used": real_historical_training_eligible,
         "fixture_corpus_used": False,
         **safety_fields(),
     }
@@ -324,11 +376,20 @@ def _recorder_manifest(
             filename: len(raw_payloads[filename]) for filename in RAW_CORPUS_FILENAMES
         },
         "training_eligible": report["training_eligible"],
+        "phase2_corpus_build_eligible": report["phase2_corpus_build_eligible"],
+        "real_historical_training_eligible": report["real_historical_training_eligible"],
+        "manual_live_evidence_eligible": report["manual_live_evidence_eligible"],
         "phase2_corpus_built": phase2_result is not None,
         "phase2_corpus_dir": None if phase2_result is None else str(phase2_result.output_dir),
         "phase2_corpus_manifest_sha256": report["phase2_corpus_manifest_sha256"],
+        "mock_public_data_used": report["mock_public_data_used"],
+        "synthetic_public_data_used": report["synthetic_public_data_used"],
+        "synthetic_corpus_used": report["synthetic_corpus_used"],
         "real_historical_corpus_used": report["real_historical_corpus_used"],
         "fixture_corpus_used": report["fixture_corpus_used"],
+        "requested_live_public_collection": report["requested_live_public_collection"],
+        "public_collection_status": report["public_collection_status"],
+        "public_collection_reason_codes": report["public_collection_reason_codes"],
         **safety_fields(),
     }
 
