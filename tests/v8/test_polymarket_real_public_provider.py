@@ -190,6 +190,7 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
     source = PolymarketCLOBWebSocketOrderBookSource(timeout_seconds=1.0)
     book_payloads: dict[str, dict] = {}
     fallback_payloads: dict[str, dict] = {}
+    resolution_payloads: dict[str, dict] = {}
 
     source._update_payload_maps(
         payload={
@@ -204,6 +205,7 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
         target_tokens={"up-token", "down-token"},
         book_payloads=book_payloads,
         fallback_payloads=fallback_payloads,
+        resolution_payloads=resolution_payloads,
     )
     source._update_payload_maps(
         payload={
@@ -224,6 +226,23 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
         target_tokens={"up-token", "down-token"},
         book_payloads=book_payloads,
         fallback_payloads=fallback_payloads,
+        resolution_payloads=resolution_payloads,
+    )
+    source._update_payload_maps(
+        payload={
+            "event_type": "market_resolved",
+            "market": "0xcondition",
+            "timestamp": "1700000300000",
+            "assets_ids": ["up-token", "down-token"],
+            "outcomes": ["Up", "Down"],
+            "winning_asset_id": "up-token",
+            "winning_outcome": "Up",
+        },
+        receive_time_ms=1_700_000_300_001,
+        target_tokens={"up-token", "down-token"},
+        book_payloads=book_payloads,
+        fallback_payloads=fallback_payloads,
+        resolution_payloads=resolution_payloads,
     )
 
     assert book_payloads["up-token"]["bids"] == [{"price": "0.56", "size": "100"}]
@@ -231,6 +250,34 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
     assert fallback_payloads["down-token"]["bids"] == [{"price": "0.42", "size": "0"}]
     assert fallback_payloads["down-token"]["timestamp"] == 1_700_000_000_124
     assert fallback_payloads["down-token"]["source_event_type"] == "price_change"
+    assert resolution_payloads["0xcondition"]["winning_asset_id"] == "up-token"
+    assert resolution_payloads["0xcondition"]["winning_outcome"] == "Up"
+
+
+def test_public_http_provider_uses_websocket_market_resolved_event() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=FakePublicFetch(
+            include_reference_prices=False,
+            outcome_prices=("0.57", "0.43"),
+        ),
+        orderbook_source=FakeResolvedOrderBookSource(),
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    resolutions = provider.resolution_rows(markets, config)
+
+    assert len(resolutions) == 1
+    assert resolutions[0]["resolution_source_type"] == "polymarket_clob_ws_market_resolved"
+    assert resolutions[0]["resolved_outcome"] == "UP"
+    assert resolutions[0]["payout_up"] == 1.0
+    assert resolutions[0]["payout_down"] == 0.0
 
 
 def test_public_http_provider_prefers_stream_orderbook_snapshots_when_available() -> None:
@@ -419,6 +466,23 @@ class FakeStreamOrderBookSource(FakeOrderBookSource):
                 ),
             },
         ]
+
+
+class FakeResolvedOrderBookSource(FakeOrderBookSource):
+    def market_resolution_payloads(self, token_ids: tuple[str, ...]) -> dict[str, dict]:
+        self.requested_token_ids = token_ids
+        return {
+            "0xcondition": {
+                "event_type": "market_resolved",
+                "market": "0xcondition",
+                "timestamp": 1_700_000_300_000,
+                "receive_time": 1_700_000_300_001,
+                "assets_ids": ["up-token", "down-token"],
+                "outcomes": ["Up", "Down"],
+                "winning_asset_id": "up-token",
+                "winning_outcome": "Up",
+            }
+        }
 
 
 def _book_payload(
