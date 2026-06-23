@@ -179,6 +179,104 @@ def test_rebuilding_from_identical_fixtures_produces_identical_hashes(
         assert first.artifact_hashes[artifact_name] == second.artifact_hashes[artifact_name]
 
 
+@pytest.mark.parametrize(
+    ("filename", "market_id", "outcome", "patch", "error_match"),
+    (
+        (
+            "raw_polymarket_orderbooks.jsonl",
+            "btc5m-up",
+            "UP",
+            {"token_id": "wrong-token", "outcome": "UP"},
+            "unknown token_id",
+        ),
+        (
+            "raw_polymarket_orderbooks.jsonl",
+            "btc5m-up",
+            "UP",
+            {"outcome": "DOWN"},
+            "token_id/outcome mismatch",
+        ),
+        (
+            "raw_polymarket_trades.jsonl",
+            "btc5m-up",
+            "DOWN",
+            {"token_id": "wrong-token", "outcome": "DOWN"},
+            "unknown token_id",
+        ),
+        (
+            "raw_polymarket_trades.jsonl",
+            "btc5m-up",
+            "DOWN",
+            {"outcome": "UP"},
+            "token_id/outcome mismatch",
+        ),
+    ),
+)
+def test_token_id_outcome_mismatches_fail_closed(
+    tmp_path: Path,
+    filename: str,
+    market_id: str,
+    outcome: str,
+    patch: dict,
+    error_match: str,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    _patch_first_row(
+        raw_dir / filename,
+        market_id=market_id,
+        outcome=outcome,
+        patch=patch,
+    )
+
+    with pytest.raises(ValueError, match=error_match):
+        build_polymarket_btc_corpus(
+            PolymarketCorpusBuildConfig(
+                input_dir=raw_dir,
+                output_dir=tmp_path / "corpus",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("filename", "output_filename"),
+    (
+        ("raw_polymarket_orderbooks.jsonl", "polymarket_token_book_snapshots.jsonl"),
+        ("raw_polymarket_trades.jsonl", "polymarket_token_trades.jsonl"),
+    ),
+)
+def test_missing_token_id_with_valid_outcome_uses_canonical_market_token(
+    tmp_path: Path,
+    filename: str,
+    output_filename: str,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    patched = _patch_first_row(
+        raw_dir / filename,
+        market_id="btc5m-up",
+        outcome="UP",
+        patch={"token_id": None, "outcome": "UP"},
+    )
+
+    result = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus",
+        )
+    )
+    normalized_rows = _read_jsonl(result.output_dir / output_filename)
+    canonical_row = next(
+        row
+        for row in normalized_rows
+        if row["market_id"] == patched["market_id"]
+        and row["outcome"] == "UP"
+        and row["ts"] == patched["ts"]
+    )
+
+    assert canonical_row["token_id"] == "btc5m-up-up-token"
+
+
 def _build_fixture_corpus(tmp_path: Path):
     raw_dir = tmp_path / "raw"
     write_deterministic_polymarket_corpus_fixtures(raw_dir)
@@ -188,6 +286,26 @@ def _build_fixture_corpus(tmp_path: Path):
             output_dir=tmp_path / "corpus",
         )
     )
+
+
+def _patch_first_row(
+    path: Path,
+    *,
+    market_id: str,
+    outcome: str,
+    patch: dict,
+) -> dict:
+    rows = _read_jsonl(path)
+    for row in rows:
+        if row["market_id"] == market_id and row["outcome"] == outcome:
+            for key, value in patch.items():
+                if value is None:
+                    row.pop(key, None)
+                else:
+                    row[key] = value
+            _write_jsonl(path, rows)
+            return row
+    raise AssertionError(f"missing fixture row for {market_id} {outcome}")
 
 
 def _last_snapshot(
@@ -219,3 +337,10 @@ def _read_jsonl(path: Path) -> list[dict]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in rows),
+        encoding="utf-8",
+    )

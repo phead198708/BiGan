@@ -67,6 +67,43 @@ def test_future_book_snapshot_is_not_used_as_feature_or_entry_label(
     assert first_entry_label["entry_ask"] == pytest.approx(original_first_up["ask_price"])
 
 
+def test_current_kline_close_is_not_used_before_candle_is_available(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    sentinel = _make_current_open_candle_extreme(raw_dir)
+
+    result = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus",
+        )
+    )
+    features = _read_jsonl(result.output_dir / "polymarket_feature_rows.jsonl")
+
+    open_feature = _feature_at(
+        features=features,
+        market_id="btc5m-up",
+        decision_ts=sentinel["current_open_ts"],
+    )
+    assert open_feature["features"]["btc_mid_price"] == pytest.approx(
+        sentinel["previous_close"]
+    )
+    assert open_feature["features"]["btc_mid_price"] != pytest.approx(
+        sentinel["current_close"]
+    )
+
+    closed_feature = _feature_at(
+        features=features,
+        market_id="btc5m-up",
+        decision_ts=sentinel["current_open_ts"] + sentinel["timeframe_ms"],
+    )
+    assert closed_feature["features"]["btc_mid_price"] == pytest.approx(
+        sentinel["current_close"]
+    )
+
+
 def test_train_shadow_split_is_temporal_and_leak_free(tmp_path: Path) -> None:
     result = _build_fixture_corpus(tmp_path)
     split = _read_json(result.output_dir / "polymarket_train_shadow_split.json")
@@ -149,6 +186,44 @@ def _append_future_up_snapshot(raw_dir: Path) -> dict:
         encoding="utf-8",
     )
     return first_up
+
+
+def _make_current_open_candle_extreme(raw_dir: Path) -> dict:
+    markets = _read_jsonl(raw_dir / "raw_polymarket_markets.jsonl")
+    start_ts = next(row["market_start_ts"] for row in markets if row["market_id"] == "btc5m-up")
+    path = raw_dir / "raw_binance_btcusdt_klines.jsonl"
+    candles = _read_jsonl(path)
+    current = next(row for row in candles if row["ts"] == start_ts)
+    previous = next(row for row in candles if row["ts"] == start_ts - row["timeframe_ms"])
+    current_close = 72_000.0
+    current.update(
+        {
+            "open_price": 65_000.0,
+            "high_price": current_close + 10.0,
+            "low_price": 64_990.0,
+            "close_price": current_close,
+            "available_at_ts": current["ts"] + current["timeframe_ms"],
+            "close_time": current["ts"] + current["timeframe_ms"],
+        }
+    )
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in candles),
+        encoding="utf-8",
+    )
+    return {
+        "current_open_ts": current["ts"],
+        "timeframe_ms": current["timeframe_ms"],
+        "previous_close": previous["close_price"],
+        "current_close": current_close,
+    }
+
+
+def _feature_at(*, features: list[dict], market_id: str, decision_ts: int) -> dict:
+    return next(
+        row
+        for row in features
+        if row["market_id"] == market_id and row["decision_ts"] == decision_ts
+    )
 
 
 def _build_fixture_corpus(tmp_path: Path):

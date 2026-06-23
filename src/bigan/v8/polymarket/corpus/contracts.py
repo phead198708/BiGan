@@ -264,6 +264,12 @@ class PolymarketCorpusTrade:
 
 @dataclass(frozen=True, slots=True)
 class BinanceBTCCandle:
+    """Closed Binance BTCUSDT kline.
+
+    `ts` is the candle open timestamp. OHLC close-derived fields are not causal
+    until the whole kline has closed and become available.
+    """
+
     ts: int
     available_at_ts: int
     open_price: float
@@ -275,8 +281,10 @@ class BinanceBTCCandle:
     source: str = "binance_btcusdt"
 
     def __post_init__(self) -> None:
-        if self.available_at_ts < self.ts:
-            raise ValueError("available_at_ts cannot be earlier than ts")
+        if self.timeframe_ms <= 0:
+            raise ValueError("timeframe_ms must be positive")
+        if self.available_at_ts < self.ts + self.timeframe_ms:
+            raise ValueError("available_at_ts must be at or after candle close")
         for field_name in ("open_price", "high_price", "low_price", "close_price"):
             value = float(getattr(self, field_name))
             if value <= 0.0 or not math.isfinite(value):
@@ -285,8 +293,8 @@ class BinanceBTCCandle:
             raise ValueError("high_price must cover open/close")
         if self.low_price > min(self.open_price, self.close_price):
             raise ValueError("low_price must cover open/close")
-        if self.volume < 0.0 or self.timeframe_ms <= 0:
-            raise ValueError("volume/timeframe must be valid")
+        if self.volume < 0.0:
+            raise ValueError("volume must be non-negative")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

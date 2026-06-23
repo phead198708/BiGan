@@ -14,6 +14,7 @@ from bigan.v8.polymarket.corpus.contracts import (
     POLYMARKET_CORPUS_SCHEMA_VERSION,
     RAW_CORPUS_FILENAMES,
     BinanceBTCCandle,
+    CorpusOutcome,
     PolymarketCorpusBookSnapshot,
     PolymarketCorpusBuildConfig,
     PolymarketCorpusBuildResult,
@@ -277,16 +278,18 @@ def write_deterministic_polymarket_corpus_fixtures(
     ts = candle_start
     while ts <= candle_end:
         close = 65_000.0 + sequence * 3.0 + (sequence % 5)
+        timeframe_ms = 60_000
         candles.append(
             {
                 "ts": ts,
-                "available_at_ts": ts,
+                "close_time": ts + timeframe_ms,
+                "available_at_ts": ts + timeframe_ms,
                 "open_price": close - 1.0,
                 "high_price": close + 2.0,
                 "low_price": close - 2.0,
                 "close_price": close,
                 "volume": 100.0 + sequence,
-                "timeframe_ms": 60_000,
+                "timeframe_ms": timeframe_ms,
                 "source": "binance_btcusdt",
             }
         )
@@ -373,12 +376,13 @@ def _normalize_book_snapshots(
         if market is None:
             continue
         outcome = _outcome_for_row(market=market, row=row)
+        token_id = market.token_id_for_outcome(outcome)
         bid = float(row.get("bid_price") or row.get("bid"))
         ask = float(row.get("ask_price") or row.get("ask"))
         snapshots.append(
             PolymarketCorpusBookSnapshot(
                 market_id=market.market_id,
-                token_id=str(row.get("token_id") or market.token_id_for_outcome(outcome)),
+                token_id=token_id,
                 outcome=outcome,
                 ts=int(row["ts"]),
                 available_at_ts=int(row.get("available_at_ts") or row["ts"]),
@@ -414,10 +418,11 @@ def _normalize_trades(
         if market is None:
             continue
         outcome = _outcome_for_row(market=market, row=row)
+        token_id = market.token_id_for_outcome(outcome)
         trades.append(
             PolymarketCorpusTrade(
                 market_id=market.market_id,
-                token_id=str(row.get("token_id") or market.token_id_for_outcome(outcome)),
+                token_id=token_id,
                 outcome=outcome,
                 ts=int(row["ts"]),
                 available_at_ts=int(row.get("available_at_ts") or row["ts"]),
@@ -436,25 +441,28 @@ def _normalize_trades(
 
 
 def _normalize_candles(rows: list[dict[str, Any]]) -> tuple[BinanceBTCCandle, ...]:
-    return tuple(
-        sorted(
-            (
-                BinanceBTCCandle(
-                    ts=int(row["ts"]),
-                    available_at_ts=int(row.get("available_at_ts") or row["ts"]),
-                    open_price=float(row.get("open_price") or row["open"]),
-                    high_price=float(row.get("high_price") or row["high"]),
-                    low_price=float(row.get("low_price") or row["low"]),
-                    close_price=float(row.get("close_price") or row["close"]),
-                    volume=float(row.get("volume") or 0.0),
-                    timeframe_ms=int(row.get("timeframe_ms") or 60_000),
-                    source=str(row.get("source") or "binance_btcusdt"),
-                )
-                for row in rows
-            ),
-            key=lambda item: item.ts,
+    candles = []
+    for row in rows:
+        ts = int(row["ts"])
+        timeframe_ms = int(row.get("timeframe_ms") or 60_000)
+        candles.append(
+            BinanceBTCCandle(
+                ts=ts,
+                available_at_ts=_candle_available_at_ts(
+                    row=row,
+                    ts=ts,
+                    timeframe_ms=timeframe_ms,
+                ),
+                open_price=float(row.get("open_price") or row["open"]),
+                high_price=float(row.get("high_price") or row["high"]),
+                low_price=float(row.get("low_price") or row["low"]),
+                close_price=float(row.get("close_price") or row["close"]),
+                volume=float(row.get("volume") or 0.0),
+                timeframe_ms=timeframe_ms,
+                source=str(row.get("source") or "binance_btcusdt"),
+            )
         )
-    )
+    return tuple(sorted(candles, key=lambda item: item.ts))
 
 
 def _normalize_resolutions(
@@ -553,16 +561,40 @@ def _outcome_for_row(
     *,
     market: PolymarketCorpusMarket,
     row: dict[str, Any],
-) -> str:
-    token_id = str(row.get("token_id") or "")
-    if token_id == market.up_token_id:
-        return "UP"
-    if token_id == market.down_token_id:
-        return "DOWN"
-    outcome = str(row.get("outcome") or "").upper()
+) -> CorpusOutcome:
+    token_id = str(row.get("token_id") or "").strip()
+    outcome = str(row.get("outcome") or "").upper().strip()
+    if outcome and outcome not in {"UP", "DOWN"}:
+        raise ValueError(f"unsupported outcome for market {market.market_id}: {outcome}")
+    if token_id:
+        if token_id == market.up_token_id:
+            token_outcome = "UP"
+        elif token_id == market.down_token_id:
+            token_outcome = "DOWN"
+        else:
+            raise ValueError(f"unknown token_id for market {market.market_id}: {token_id}")
+        if outcome and outcome != token_outcome:
+            raise ValueError(
+                f"token_id/outcome mismatch for market {market.market_id}: "
+                f"{token_id} implies {token_outcome}, row says {outcome}"
+            )
+        return token_outcome
     if outcome in {"UP", "DOWN"}:
         return outcome
     raise ValueError("cannot infer UP/DOWN outcome")
+
+
+def _candle_available_at_ts(
+    *,
+    row: dict[str, Any],
+    ts: int,
+    timeframe_ms: int,
+) -> int:
+    for field_name in ("available_at_ts", "close_time", "close_ts", "candle_close_ts"):
+        value = row.get(field_name)
+        if value is not None:
+            return int(value)
+    return ts + timeframe_ms
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

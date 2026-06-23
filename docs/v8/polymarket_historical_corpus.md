@@ -63,6 +63,29 @@ Book snapshots, trades, and candles are eligible for a feature row only when the
 own `available_at_ts` is not later than the row `decision_ts`. Future settlement
 data is never available to feature construction.
 
+For `raw_binance_btcusdt_klines.jsonl`, `ts` is treated as the kline open
+timestamp. OHLC close-derived fields, including `close_price`, are usable only
+after the kline has closed:
+
+- `available_at_ts >= ts + timeframe_ms`
+- if no availability field is supplied, the builder derives `available_at_ts`
+  as `ts + timeframe_ms`
+- a candle whose open timestamp equals `decision_ts` is not eligible at that
+  same `decision_ts`
+
+If intra-candle BTC reference prices are required, they must come from a separate
+tick or snapshot input rather than from final kline close fields.
+
+For Polymarket token rows, `token_id` is the source of truth when present. The
+builder fails closed when:
+
+- `token_id` is unknown for the market
+- `token_id` maps to UP but `outcome=DOWN`
+- `token_id` maps to DOWN but `outcome=UP`
+
+Rows without `token_id` may use `outcome` as a fallback and are normalized to the
+canonical market token id.
+
 Labels are the only stage allowed to use future information. They may use the
 settlement outcome and the final eligible pre-close book snapshot to compute
 future-aware returns.

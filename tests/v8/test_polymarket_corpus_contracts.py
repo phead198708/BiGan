@@ -11,6 +11,7 @@ from bigan.v8.polymarket.contracts import looks_like_sha256
 from bigan.v8.polymarket.corpus import (
     BTC_UPDOWN_MARKET_HORIZONS_MS,
     RAW_CORPUS_FILENAMES,
+    BinanceBTCCandle,
     PolymarketCorpusBuildConfig,
     PolymarketCorpusMarket,
     write_deterministic_polymarket_corpus_fixtures,
@@ -120,6 +121,33 @@ def test_market_contract_enforces_horizon_token_identity_and_sha() -> None:
         )
 
 
+def test_binance_kline_close_price_is_only_available_after_candle_close() -> None:
+    with pytest.raises(ValueError, match="candle close"):
+        BinanceBTCCandle(
+            ts=1_000,
+            available_at_ts=1_000,
+            open_price=100.0,
+            high_price=102.0,
+            low_price=99.0,
+            close_price=101.0,
+            volume=10.0,
+            timeframe_ms=60_000,
+        )
+
+    candle = BinanceBTCCandle(
+        ts=1_000,
+        available_at_ts=61_000,
+        open_price=100.0,
+        high_price=102.0,
+        low_price=99.0,
+        close_price=101.0,
+        volume=10.0,
+        timeframe_ms=60_000,
+    )
+
+    assert candle.available_at_ts == candle.ts + candle.timeframe_ms
+
+
 def test_fixture_writer_emits_canonical_local_raw_files(tmp_path: Path) -> None:
     paths = write_deterministic_polymarket_corpus_fixtures(tmp_path)
 
@@ -142,6 +170,10 @@ def test_fixture_writer_emits_canonical_local_raw_files(tmp_path: Path) -> None:
     assert {row["market_family"] for row in markets} == set(BTC_UPDOWN_MARKET_HORIZONS_MS)
     for row in markets:
         assert row["up_token_id"] != row["down_token_id"]
+
+    candles = _read_jsonl(paths["raw_binance_btcusdt_klines.jsonl"])
+    for row in candles:
+        assert row["available_at_ts"] >= row["ts"] + row["timeframe_ms"]
 
     raw_hashes = {filename: path.read_bytes() for filename, path in paths.items()}
     assert all(raw_hashes.values())
