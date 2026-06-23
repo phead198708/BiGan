@@ -105,6 +105,7 @@ class _MarketAccumulator:
     condition_id: str | None = None
     reference_price_start: float | None = None
     reference_price_end: float | None = None
+    settlement_reference_source: str | None = None
     resolution_status: str = "normal"
     settlement_rule: str = DEFAULT_SETTLEMENT_RULE
     rows: list[dict[str, Any]] | None = None
@@ -366,6 +367,20 @@ def _update_market_resolution(market: _MarketAccumulator, row: dict[str, Any]) -
     raw_rule = str(row.get("settlement_rule") or "").strip()
     if raw_rule:
         market.settlement_rule = raw_rule
+    reference_source = _first_string(
+        row,
+        (
+            "settlement_reference_source",
+            "resolution_source",
+            "polymarket_resolution_source",
+            "reference_price_source",
+        ),
+    )
+    if reference_source:
+        if market.settlement_reference_source is None:
+            market.settlement_reference_source = reference_source
+        elif market.settlement_reference_source != reference_source:
+            market.reject_reasons.add("inconsistent_settlement_reference_source")
 
 
 def _build_raw_payloads(
@@ -387,6 +402,8 @@ def _build_raw_payloads(
             reasons.add("missing_btc_reference_candles")
         if market.reference_price_start is None or market.reference_price_end is None:
             reasons.add("missing_verified_resolution")
+        if not market.settlement_reference_source:
+            reasons.add("missing_verified_resolution_source")
         if reasons:
             rejected.append(
                 {
@@ -419,7 +436,7 @@ def _market_row(market: _MarketAccumulator) -> dict[str, Any]:
         "settlement_ts": market.market_end_ts,
         "up_token_id": market.up_token_id,
         "down_token_id": market.down_token_id,
-        "reference_price_source": "binance_btcusdt",
+        "reference_price_source": market.settlement_reference_source,
         "settlement_rule": market.settlement_rule,
         **safety_fields(),
     }
@@ -570,6 +587,7 @@ def _resolution_row(market: _MarketAccumulator) -> dict[str, Any]:
         "market_id": market.market_id,
         "reference_price_start": market.reference_price_start,
         "reference_price_end": market.reference_price_end,
+        "reference_price_source": market.settlement_reference_source,
         "resolution_status": market.resolution_status,
         **safety_fields(),
     }
@@ -616,6 +634,7 @@ def _conversion_report(
             "requires_executable_bid_ask": not config.allow_midpoint_price_proxy,
             "allows_midpoint_price_proxy": config.allow_midpoint_price_proxy,
             "requires_verified_resolution": True,
+            "requires_verified_resolution_source": True,
             "uses_model_signal_as_label": False,
         },
         **safety_fields(),
@@ -655,6 +674,17 @@ def _first_float(row: dict[str, Any], names: tuple[str, ...]) -> float | None:
             continue
         if math.isfinite(numeric):
             return numeric
+    return None
+
+
+def _first_string(row: dict[str, Any], names: tuple[str, ...]) -> str | None:
+    for name in names:
+        value = row.get(name)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
     return None
 
 

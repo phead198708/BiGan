@@ -10,12 +10,20 @@ can verify all required market evidence:
 - BTC UP/DOWN market slug and deterministic market window.
 - UP and DOWN token IDs.
 - Point-in-time executable UP and DOWN bid/ask quotes.
-- Point-in-time BTC reference observations.
-- Verified settlement reference prices for market start and market end.
+- Point-in-time BTC observations for causal features.
+- Verified settlement reference prices for market start and market end from the
+  official Polymarket market rule source.
+- Explicit settlement reference source provenance from the Polymarket market
+  rules or resolution metadata.
 
 The converter never uses `selected_side`, `outcome_side`, `model_probability`,
 `prob_up_15m`, `edge`, or realized paper PnL as labels. Settlement labels are built
 only by the public Phase 2 corpus builder from reference prices and market rules.
+
+Do not substitute Binance BTC prices for Polymarket settlement references unless
+the specific Polymarket market rule names Binance as the official resolution
+source. The existing `raw_binance_btcusdt_klines.jsonl` corpus filename is a
+causal BTC feature input contract, not proof that settlement labels use Binance.
 
 ## Command
 
@@ -53,9 +61,9 @@ SHA-256 hashes, safety flags, accepted/rejected counts, and reject reason counts
 
 Existing v7-style `data/live` signal files generally contain model-side observations
 such as market price, selected side, token IDs, and timestamps. They often do not
-contain executable bid/ask snapshots or verified settlement reference prices. Those
-rows are expected to be rejected by this converter until the live recorder captures
-the missing evidence.
+contain executable bid/ask snapshots, official settlement reference prices, or
+settlement reference source provenance. Those rows are expected to be rejected by
+this converter until the live recorder captures the missing evidence.
 
 This is the desired behavior: rejected observations can guide recorder improvements,
 but they must not silently become training labels.
