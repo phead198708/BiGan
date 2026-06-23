@@ -19,6 +19,7 @@ from bigan.v8.polymarket import (  # noqa: E402
     PolymarketRealCorpusRecorderConfig,
     export_trainable_corpus,
     record_polymarket_real_corpus,
+    round_corpus_id_from_corpus_dir,
 )
 from bigan.v8.polymarket.corpus import (  # noqa: E402
     BTC_UPDOWN_MARKET_HORIZONS_MS,
@@ -81,19 +82,26 @@ def run_record_polymarket_real_corpus_cli(
     )
     report = result.report
     exported_training_corpus_dir = None
+    exported_training_corpus_id = None
+    exported_training_round_slug = None
     if (
         export_training_corpus
         and report["real_historical_training_eligible"] is True
         and result.corpus_dir is not None
     ):
+        exported_training_round_slug = round_corpus_id_from_corpus_dir(result.corpus_dir)
+        exported_training_corpus_id = exported_training_round_slug
         exported_training_corpus_dir = export_trainable_corpus(
             corpus_dir=result.corpus_dir,
-            corpus_id=run_id,
+            corpus_id=exported_training_corpus_id,
             destination_root=training_corpus_root,
             overwrite_existing=overwrite_existing,
             provenance={
                 "source": "polymarket_real_corpus_recorder",
                 "run_id": run_id,
+                "round_slug": exported_training_round_slug,
+                "corpus_id": exported_training_corpus_id,
+                "round_scoped_export": True,
                 "recorder_manifest_path": str(
                     result.artifact_paths["real_corpus_recorder_manifest"]
                 ),
@@ -114,6 +122,8 @@ def run_record_polymarket_real_corpus_cli(
         "exported_training_corpus_dir": (
             None if exported_training_corpus_dir is None else str(exported_training_corpus_dir)
         ),
+        "exported_training_corpus_id": exported_training_corpus_id,
+        "exported_training_round_slug": exported_training_round_slug,
         "training_corpus_root": str(training_corpus_root),
         "recorder_manifest_path": str(result.artifact_paths["real_corpus_recorder_manifest"]),
         "recorder_report_path": str(result.artifact_paths["real_corpus_recorder_report"]),

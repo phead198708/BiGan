@@ -62,3 +62,36 @@ def export_trainable_corpus(
         encoding="utf-8",
     )
     return target
+
+
+def round_corpus_id_from_corpus_dir(corpus_dir: Path | str) -> str:
+    """Return the single accepted Polymarket round slug for a corpus directory."""
+
+    source = Path(corpus_dir).expanduser().resolve()
+    metadata_path = source / "polymarket_market_metadata.jsonl"
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"missing market metadata: {metadata_path}")
+    slugs = {
+        str(row.get("slug") or "").strip()
+        for row in _read_jsonl(metadata_path)
+        if str(row.get("slug") or "").strip()
+    }
+    if not slugs:
+        raise ValueError(f"no round slug found in market metadata: {metadata_path}")
+    if len(slugs) != 1:
+        raise ValueError(
+            "round-scoped training corpus export requires exactly one round slug; "
+            f"found {len(slugs)}"
+        )
+    return next(iter(slugs))
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows

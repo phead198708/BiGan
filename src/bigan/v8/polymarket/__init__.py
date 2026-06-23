@@ -71,7 +71,12 @@ from bigan.v8.polymarket.paper_decision import (
     polymarket_decisions_to_phase4,
 )
 from bigan.v8.polymarket.recorder import (
+    ASYNC_SETTLEMENT_SCHEMA_VERSION,
     DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
+    PENDING_CAPTURE_PHASE,
+    PENDING_FINALIZATION_PHASE,
+    PendingRoundCaptureResult,
+    PendingRoundFinalizationResult,
     PolymarketCLOBWebSocketOrderBookSource,
     PolymarketOrderBookSource,
     PolymarketPublicHTTPRealCorpusProvider,
@@ -79,6 +84,8 @@ from bigan.v8.polymarket.recorder import (
     PolymarketRealCorpusRecorderConfig,
     PolymarketRealCorpusRecorderResult,
     RealCorpusPublicProviderError,
+    capture_polymarket_pending_round,
+    finalize_polymarket_pending_round,
     record_polymarket_real_corpus,
 )
 from bigan.v8.polymarket.rules import (
@@ -99,6 +106,7 @@ from bigan.v8.polymarket.storage import (
     V8_TRAINING_CORPUS_ROOT,
     export_trainable_corpus,
     require_v8_training_corpus_root,
+    round_corpus_id_from_corpus_dir,
 )
 from bigan.v8.polymarket.training import (
     DEFAULT_REAL_CORPUS_MODEL_VERSION,
@@ -131,6 +139,9 @@ __all__ = [
     "POLYMARKET_REAL_CORPUS_RETRAINING_GATE_PHASE",
     "POLYMARKET_REAL_CORPUS_RETRAINING_GATE_SCHEMA_VERSION",
     "POLYMARKET_SOURCE",
+    "ASYNC_SETTLEMENT_SCHEMA_VERSION",
+    "PENDING_CAPTURE_PHASE",
+    "PENDING_FINALIZATION_PHASE",
     "DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL",
     "V8_POLYMARKET_TRAINING_CORPUS_DIR",
     "V8_TRAINING_CORPUS_ROOT",
@@ -169,6 +180,8 @@ __all__ = [
     "PolymarketPolicyTrainingConfig",
     "PolymarketPolicyTrainingResult",
     "PolymarketPositionLedger",
+    "PendingRoundCaptureResult",
+    "PendingRoundFinalizationResult",
     "PolymarketCLOBWebSocketOrderBookSource",
     "PolymarketOrderBookSource",
     "PolymarketPublicHTTPRealCorpusProvider",
@@ -192,8 +205,10 @@ __all__ = [
     "build_polymarket_label_rows",
     "build_polymarket_paper_decisions",
     "canonical_json_sha256",
+    "capture_polymarket_pending_round",
     "convert_live_signals_to_phase2_corpus",
     "export_trainable_corpus",
+    "finalize_polymarket_pending_round",
     "decide_polymarket_ev_action",
     "ev_threshold_report",
     "load_polymarket_policy_dataset",
@@ -203,6 +218,7 @@ __all__ = [
     "polymarket_decisions_to_phase4",
     "resolve_polymarket_rule",
     "record_polymarket_real_corpus",
+    "round_corpus_id_from_corpus_dir",
     "require_v8_training_corpus_root",
     "run_polymarket_btc15m_paper_pipeline",
     "run_polymarket_live_paper",

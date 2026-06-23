@@ -291,6 +291,59 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
     assert resolution_payloads["0xcondition"]["winning_outcome"] == "Up"
 
 
+def test_websocket_orderbook_source_keeps_partial_snapshots_after_disconnect(monkeypatch) -> None:
+    source = PolymarketCLOBWebSocketOrderBookSource(
+        timeout_seconds=0.05,
+        snapshot_interval_seconds=0.001,
+    )
+    websocket = FakeDisconnectingWebSocket(
+        [
+            json.dumps(
+                [
+                    {
+                        "asset_id": "up-token",
+                        "market": "0xcondition",
+                        "timestamp": "1700000000000",
+                        "hash": "up-book-hash",
+                        "bids": [{"price": "0.56", "size": "100"}],
+                        "asks": [{"price": "0.58", "size": "120"}],
+                    },
+                    {
+                        "asset_id": "down-token",
+                        "market": "0xcondition",
+                        "timestamp": "1700000000000",
+                        "hash": "down-book-hash",
+                        "bids": [{"price": "0.42", "size": "90"}],
+                        "asks": [{"price": "0.44", "size": "110"}],
+                    },
+                ]
+            ),
+            json.dumps(
+                {
+                    "event_type": "market_resolved",
+                    "market": "0xcondition",
+                    "timestamp": "1700000300000",
+                    "assets_ids": ["up-token", "down-token"],
+                    "outcomes": ["Up", "Down"],
+                    "winning_asset_id": "up-token",
+                    "winning_outcome": "Up",
+                }
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.recorder.public_provider.websockets.connect",
+        lambda *args, **kwargs: websocket,
+    )
+
+    snapshots = source.book_payload_snapshots(("up-token", "down-token"))
+    resolutions = source.market_resolution_payloads(("up-token", "down-token"))
+
+    assert len(snapshots) >= 1
+    assert set(snapshots[0]) == {"up-token", "down-token"}
+    assert resolutions["0xcondition"]["winning_asset_id"] == "up-token"
+
+
 def test_public_http_provider_uses_websocket_market_resolved_event() -> None:
     provider = PolymarketPublicHTTPRealCorpusProvider(
         current_time_ms=1_700_001_000_000,
@@ -576,6 +629,26 @@ class FakeWebSocketStreamOrderBookSource(PolymarketCLOBWebSocketOrderBookSource)
                 ),
             }
         ]
+
+
+class FakeDisconnectingWebSocket:
+    def __init__(self, messages: list[str]) -> None:
+        self.messages = list(messages)
+        self.sent_messages: list[bytes] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    async def send(self, message: bytes) -> None:
+        self.sent_messages.append(message)
+
+    async def recv(self) -> str:
+        if self.messages:
+            return self.messages.pop(0)
+        raise RuntimeError("no close frame received or sent")
 
 
 class FakeResolvedOrderBookSource(FakeOrderBookSource):

@@ -937,48 +937,53 @@ class PolymarketCLOBWebSocketOrderBookSource:
         fallback_payloads: dict[str, dict[str, Any]] = {}
         resolution_payloads: dict[str, dict[str, Any]] = {}
         deadline = time.monotonic() + self.timeout_seconds
-        try:
-            async with websockets.connect(
-                self.ws_url,
-                ping_interval=None,
-                ping_timeout=None,
-                close_timeout=5,
-                max_size=2**24,
-            ) as ws:
-                await ws.send(
-                    orjson.dumps(
-                        {
-                            "assets_ids": sorted(target_tokens),
-                            "type": "market",
-                            "custom_feature_enabled": self.custom_feature_enabled,
-                        }
-                    )
-                )
-                while time.monotonic() < deadline and set(book_payloads) != target_tokens:
-                    timeout = max(0.001, deadline - time.monotonic())
-                    try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
-                    except TimeoutError:
-                        break
-                    receive_time_ms = int(time.time() * 1000)
-                    for payload in _decode_market_ws_payloads(raw):
-                        self._update_payload_maps(
-                            payload=payload,
-                            receive_time_ms=receive_time_ms,
-                            target_tokens=target_tokens,
-                            book_payloads=book_payloads,
-                            fallback_payloads=fallback_payloads,
-                            resolution_payloads=resolution_payloads,
+        connection_error: Exception | None = None
+        while time.monotonic() < deadline and set(book_payloads) != target_tokens:
+            try:
+                async with websockets.connect(
+                    self.ws_url,
+                    ping_interval=None,
+                    ping_timeout=None,
+                    close_timeout=5,
+                    max_size=2**24,
+                ) as ws:
+                    await ws.send(
+                        orjson.dumps(
+                            {
+                                "assets_ids": sorted(target_tokens),
+                                "type": "market",
+                                "custom_feature_enabled": self.custom_feature_enabled,
+                            }
                         )
-        except Exception as exc:  # noqa: BLE001
-            raise RealCorpusPublicProviderError(
-                f"CLOB websocket orderbook collection failed: {exc}",
-                reason_codes=("polymarket_clob_ws_orderbook_collection_failed",),
-            ) from exc
+                    )
+                    while time.monotonic() < deadline and set(book_payloads) != target_tokens:
+                        timeout = max(0.001, deadline - time.monotonic())
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                        except TimeoutError:
+                            break
+                        receive_time_ms = int(time.time() * 1000)
+                        for payload in _decode_market_ws_payloads(raw):
+                            self._update_payload_maps(
+                                payload=payload,
+                                receive_time_ms=receive_time_ms,
+                                target_tokens=target_tokens,
+                                book_payloads=book_payloads,
+                                fallback_payloads=fallback_payloads,
+                                resolution_payloads=resolution_payloads,
+                            )
+            except Exception as exc:  # noqa: BLE001
+                connection_error = exc
+                await _sleep_until_reconnect(deadline)
 
         merged = dict(fallback_payloads)
         merged.update(book_payloads)
         if not merged:
+            if connection_error is not None:
+                raise RealCorpusPublicProviderError(
+                    f"CLOB websocket orderbook collection failed: {connection_error}",
+                    reason_codes=("polymarket_clob_ws_orderbook_collection_failed",),
+                ) from connection_error
             raise RealCorpusPublicProviderError(
                 "CLOB websocket emitted no orderbook payloads before timeout.",
                 reason_codes=("polymarket_clob_ws_no_orderbooks",),
@@ -1007,61 +1012,68 @@ class PolymarketCLOBWebSocketOrderBookSource:
         snapshots: list[dict[str, dict[str, Any]]] = []
         deadline = time.monotonic() + self.timeout_seconds
         next_snapshot_at = time.monotonic()
-        try:
-            async with websockets.connect(
-                self.ws_url,
-                ping_interval=None,
-                ping_timeout=None,
-                close_timeout=5,
-                max_size=2**24,
-            ) as ws:
-                await ws.send(
-                    orjson.dumps(
-                        {
-                            "assets_ids": sorted(target_tokens),
-                            "type": "market",
-                            "custom_feature_enabled": self.custom_feature_enabled,
-                        }
+        connection_error: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                async with websockets.connect(
+                    self.ws_url,
+                    ping_interval=None,
+                    ping_timeout=None,
+                    close_timeout=5,
+                    max_size=2**24,
+                ) as ws:
+                    await ws.send(
+                        orjson.dumps(
+                            {
+                                "assets_ids": sorted(target_tokens),
+                                "type": "market",
+                                "custom_feature_enabled": self.custom_feature_enabled,
+                            }
+                        )
                     )
-                )
-                while time.monotonic() < deadline:
-                    now = time.monotonic()
-                    timeout = max(0.001, min(deadline, next_snapshot_at) - now)
-                    try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
-                    except TimeoutError:
-                        raw = None
-                    if raw is not None:
-                        receive_time_ms = int(time.time() * 1000)
-                        for payload in _decode_market_ws_payloads(raw):
-                            self._update_payload_maps(
-                                payload=payload,
-                                receive_time_ms=receive_time_ms,
-                                target_tokens=target_tokens,
-                                book_payloads=book_payloads,
-                                fallback_payloads=fallback_payloads,
-                                resolution_payloads=resolution_payloads,
-                            )
-                    if time.monotonic() >= next_snapshot_at:
-                        merged = dict(fallback_payloads)
-                        merged.update(book_payloads)
-                        if merged:
-                            observation_time_ms = int(time.time() * 1000)
-                            snapshots.append(
-                                _observed_snapshot_payloads(
-                                    merged=merged,
-                                    token_ids=token_ids,
-                                    observation_time_ms=observation_time_ms,
+                    while time.monotonic() < deadline:
+                        now = time.monotonic()
+                        timeout = max(0.001, min(deadline, next_snapshot_at) - now)
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                        except TimeoutError:
+                            raw = None
+                        if raw is not None:
+                            receive_time_ms = int(time.time() * 1000)
+                            for payload in _decode_market_ws_payloads(raw):
+                                self._update_payload_maps(
+                                    payload=payload,
+                                    receive_time_ms=receive_time_ms,
+                                    target_tokens=target_tokens,
+                                    book_payloads=book_payloads,
+                                    fallback_payloads=fallback_payloads,
+                                    resolution_payloads=resolution_payloads,
                                 )
+                        if time.monotonic() >= next_snapshot_at:
+                            merged = dict(fallback_payloads)
+                            merged.update(book_payloads)
+                            if merged:
+                                observation_time_ms = int(time.time() * 1000)
+                                snapshots.append(
+                                    _observed_snapshot_payloads(
+                                        merged=merged,
+                                        token_ids=token_ids,
+                                        observation_time_ms=observation_time_ms,
+                                    )
+                                )
+                            next_snapshot_at = (
+                                time.monotonic() + self.snapshot_interval_seconds
                             )
-                        next_snapshot_at = time.monotonic() + self.snapshot_interval_seconds
-        except Exception as exc:  # noqa: BLE001
-            raise RealCorpusPublicProviderError(
-                f"CLOB websocket orderbook snapshot collection failed: {exc}",
-                reason_codes=("polymarket_clob_ws_orderbook_collection_failed",),
-            ) from exc
+            except Exception as exc:  # noqa: BLE001
+                connection_error = exc
+                await _sleep_until_reconnect(deadline)
 
         if not snapshots:
+            if connection_error is not None:
+                raise RealCorpusPublicProviderError(
+                    f"CLOB websocket orderbook snapshot collection failed: {connection_error}",
+                    reason_codes=("polymarket_clob_ws_orderbook_collection_failed",),
+                ) from connection_error
             raise RealCorpusPublicProviderError(
                 "CLOB websocket emitted no orderbook snapshots before timeout.",
                 reason_codes=("polymarket_clob_ws_no_orderbooks",),
@@ -1130,6 +1142,12 @@ class PolymarketCLOBWebSocketOrderBookSource:
             winning_asset_id = str(resolution_payload.get("winning_asset_id") or "")
             if winning_asset_id in target_tokens or event_tokens & target_tokens:
                 resolution_payloads[str(resolution_payload["market"])] = resolution_payload
+
+
+async def _sleep_until_reconnect(deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining > 0:
+        await asyncio.sleep(min(1.0, remaining))
 
 
 def _token_ids_for_markets(markets: list[dict[str, Any]]) -> tuple[str, ...]:
