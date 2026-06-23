@@ -34,6 +34,7 @@ def run_polymarket_async_round_collector_cli(
     round_count: int,
     market_family: str = "btc_updown_5m",
     public_provider_timeout_seconds: float = 330.0,
+    public_provider_http_timeout_seconds: float = 15.0,
     orderbook_snapshot_interval_seconds: float = 1.0,
     settlement_poll_interval_seconds: float = 15.0,
     settlement_grace_seconds: float = 0.0,
@@ -45,6 +46,8 @@ def run_polymarket_async_round_collector_cli(
         raise ValueError("round_count must be positive")
     if public_provider_timeout_seconds <= 0:
         raise ValueError("public_provider_timeout_seconds must be positive")
+    if public_provider_http_timeout_seconds <= 0:
+        raise ValueError("public_provider_http_timeout_seconds must be positive")
     if settlement_poll_interval_seconds <= 0:
         raise ValueError("settlement_poll_interval_seconds must be positive")
     if settlement_grace_seconds < 0:
@@ -86,6 +89,7 @@ def run_polymarket_async_round_collector_cli(
                 max_markets=1,
                 clob_ws_url=clob_ws_url,
                 timeout_seconds=public_provider_timeout_seconds,
+                http_timeout_seconds=public_provider_http_timeout_seconds,
                 orderbook_snapshot_interval_seconds=orderbook_snapshot_interval_seconds,
             )
             config = PolymarketRealCorpusRecorderConfig(
@@ -134,6 +138,64 @@ def run_polymarket_async_round_collector_cli(
     summary_path = batch_dir / "batch_summary.json"
     _write_json(summary_path, summary)
     summary["batch_summary_path"] = str(summary_path)
+    return summary
+
+
+def run_polymarket_async_finalizer_cli(
+    *,
+    batch_id: str,
+    output_dir: Path | str,
+    settlement_poll_interval_seconds: float = 15.0,
+    settlement_grace_seconds: float = 0.0,
+    training_corpus_root: Path | str = V8_TRAINING_CORPUS_ROOT,
+    clob_ws_url: str = DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
+    overwrite_existing: bool = False,
+) -> dict[str, Any]:
+    if settlement_poll_interval_seconds <= 0:
+        raise ValueError("settlement_poll_interval_seconds must be positive")
+    if settlement_grace_seconds < 0:
+        raise ValueError("settlement_grace_seconds must be non-negative")
+    root = Path(output_dir).expanduser().resolve()
+    batch_dir = root / batch_id
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    lock = threading.Lock()
+    finalizations: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    deadline = time.monotonic() + settlement_grace_seconds
+    while True:
+        _finalize_pending_once(
+            output_dir=root,
+            destination_root=Path(training_corpus_root),
+            clob_ws_url=clob_ws_url,
+            overwrite_existing=overwrite_existing,
+            finalizations=finalizations,
+            errors=errors,
+            lock=lock,
+        )
+        if settlement_grace_seconds <= 0 or time.monotonic() >= deadline:
+            break
+        time.sleep(min(settlement_poll_interval_seconds, deadline - time.monotonic()))
+    summary = {
+        "batch_id": batch_id,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "finalize_only": True,
+        "finalization_attempt_count": len(finalizations),
+        "exported_round_count": sum(
+            1 for item in finalizations if item.get("finalization_status") == "exported"
+        ),
+        "pending_resolution_count": sum(
+            1
+            for item in finalizations
+            if item.get("finalization_status") == "pending_resolution"
+        ),
+        "error_count": len(errors),
+        "finalizations": finalizations,
+        "errors": errors,
+    }
+    summary_path = batch_dir / "finalizer_summary.json"
+    _write_json(summary_path, summary)
+    summary["finalizer_summary_path"] = str(summary_path)
     return summary
 
 
@@ -266,26 +328,44 @@ def main(argv: list[str] | None = None) -> int:
         default="btc_updown_5m",
     )
     parser.add_argument("--public-provider-timeout-seconds", type=float, default=330.0)
+    parser.add_argument("--public-provider-http-timeout-seconds", type=float, default=15.0)
     parser.add_argument("--orderbook-snapshot-interval-seconds", type=float, default=1.0)
     parser.add_argument("--settlement-poll-interval-seconds", type=float, default=15.0)
     parser.add_argument("--settlement-grace-seconds", type=float, default=0.0)
     parser.add_argument("--training-corpus-root", default=str(V8_TRAINING_CORPUS_ROOT))
     parser.add_argument("--clob-ws-url", default=DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL)
+    parser.add_argument(
+        "--finalize-only",
+        action="store_true",
+        help="Only scan pending round captures and try settlement finalization.",
+    )
     parser.add_argument("--overwrite-existing", action="store_true")
     args = parser.parse_args(argv)
-    summary = run_polymarket_async_round_collector_cli(
-        batch_id=args.batch_id,
-        output_dir=args.output_dir,
-        round_count=args.round_count,
-        market_family=args.market_family,
-        public_provider_timeout_seconds=args.public_provider_timeout_seconds,
-        orderbook_snapshot_interval_seconds=args.orderbook_snapshot_interval_seconds,
-        settlement_poll_interval_seconds=args.settlement_poll_interval_seconds,
-        settlement_grace_seconds=args.settlement_grace_seconds,
-        training_corpus_root=args.training_corpus_root,
-        clob_ws_url=args.clob_ws_url,
-        overwrite_existing=args.overwrite_existing,
-    )
+    if args.finalize_only:
+        summary = run_polymarket_async_finalizer_cli(
+            batch_id=args.batch_id,
+            output_dir=args.output_dir,
+            settlement_poll_interval_seconds=args.settlement_poll_interval_seconds,
+            settlement_grace_seconds=args.settlement_grace_seconds,
+            training_corpus_root=args.training_corpus_root,
+            clob_ws_url=args.clob_ws_url,
+            overwrite_existing=args.overwrite_existing,
+        )
+    else:
+        summary = run_polymarket_async_round_collector_cli(
+            batch_id=args.batch_id,
+            output_dir=args.output_dir,
+            round_count=args.round_count,
+            market_family=args.market_family,
+            public_provider_timeout_seconds=args.public_provider_timeout_seconds,
+            public_provider_http_timeout_seconds=args.public_provider_http_timeout_seconds,
+            orderbook_snapshot_interval_seconds=args.orderbook_snapshot_interval_seconds,
+            settlement_poll_interval_seconds=args.settlement_poll_interval_seconds,
+            settlement_grace_seconds=args.settlement_grace_seconds,
+            training_corpus_root=args.training_corpus_root,
+            clob_ws_url=args.clob_ws_url,
+            overwrite_existing=args.overwrite_existing,
+        )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 

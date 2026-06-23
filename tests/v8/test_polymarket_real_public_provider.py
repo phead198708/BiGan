@@ -177,6 +177,20 @@ def test_public_http_provider_configures_default_websocket_snapshot_interval() -
     assert provider.orderbook_source.snapshot_interval_seconds == 2.5
 
 
+def test_public_http_provider_separates_http_and_orderbook_timeouts() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=FakePublicFetch(include_reference_prices=False),
+        timeout_seconds=330.0,
+        http_timeout_seconds=15.0,
+    )
+
+    assert provider.timeout_seconds == 330.0
+    assert provider.http_timeout_seconds == 15.0
+    assert isinstance(provider.orderbook_source, PolymarketCLOBWebSocketOrderBookSource)
+    assert provider.orderbook_source.timeout_seconds == 330.0
+
+
 def test_public_http_provider_falls_back_to_kraken_feature_candles() -> None:
     provider = PolymarketPublicHTTPRealCorpusProvider(
         current_time_ms=1_700_001_000_000,

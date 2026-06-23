@@ -148,6 +148,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
         max_markets: int = 3,
         recent_trade_limit: int = 250,
         timeout_seconds: float = 15.0,
+        http_timeout_seconds: float | None = None,
         orderbook_snapshot_interval_seconds: float = 1.0,
         seed_rest_orderbooks_before_stream: bool = True,
         current_time_ms: int | None = None,
@@ -159,6 +160,10 @@ class PolymarketPublicHTTPRealCorpusProvider:
             raise ValueError("max_markets must be positive")
         if recent_trade_limit <= 0:
             raise ValueError("recent_trade_limit must be positive")
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        if http_timeout_seconds is not None and http_timeout_seconds <= 0:
+            raise ValueError("http_timeout_seconds must be positive")
         if orderbook_snapshot_interval_seconds <= 0:
             raise ValueError("orderbook_snapshot_interval_seconds must be positive")
         source_order = tuple(dict.fromkeys(source.strip().lower() for source in btc_feature_source_order))
@@ -182,6 +187,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
         self.max_markets = max_markets
         self.recent_trade_limit = recent_trade_limit
         self.timeout_seconds = timeout_seconds
+        self.http_timeout_seconds = timeout_seconds if http_timeout_seconds is None else http_timeout_seconds
         self.orderbook_snapshot_interval_seconds = orderbook_snapshot_interval_seconds
         self.seed_rest_orderbooks_before_stream = seed_rest_orderbooks_before_stream
         self.current_time_ms = current_time_ms
@@ -847,7 +853,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
             headers={"User-Agent": "bigan-v8-polymarket-real-corpus-readonly/1.0"},
             method="GET",
         )
-        with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+        with urllib.request.urlopen(request, timeout=self.http_timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
 
     def _current_time_ms(self) -> int:

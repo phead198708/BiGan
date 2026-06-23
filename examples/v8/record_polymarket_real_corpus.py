@@ -46,6 +46,7 @@ def run_record_polymarket_real_corpus_cli(
     max_markets: int = 3,
     clob_ws_url: str = DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
     public_provider_timeout_seconds: float = 15.0,
+    public_provider_http_timeout_seconds: float | None = 15.0,
     orderbook_snapshot_interval_seconds: float = 1.0,
     seed_rest_orderbooks_before_stream: bool = True,
     use_rest_orderbooks: bool = False,
@@ -59,6 +60,7 @@ def run_record_polymarket_real_corpus_cli(
             max_markets=max_markets,
             clob_ws_url=clob_ws_url,
             timeout_seconds=public_provider_timeout_seconds,
+            http_timeout_seconds=public_provider_http_timeout_seconds,
             orderbook_snapshot_interval_seconds=orderbook_snapshot_interval_seconds,
             seed_rest_orderbooks_before_stream=seed_rest_orderbooks_before_stream,
             use_rest_orderbooks=use_rest_orderbooks,
@@ -195,7 +197,13 @@ def main(argv: list[str] | None = None) -> int:
         "--public-provider-timeout-seconds",
         type=float,
         default=15.0,
-        help="Timeout for public HTTP reads and websocket orderbook collection.",
+        help="Timeout for websocket orderbook collection.",
+    )
+    parser.add_argument(
+        "--public-provider-http-timeout-seconds",
+        type=float,
+        default=15.0,
+        help="Timeout for public HTTP reads; keep shorter than websocket collection windows.",
     )
     parser.add_argument(
         "--orderbook-snapshot-interval-seconds",
@@ -248,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
         max_markets=args.max_markets,
         clob_ws_url=args.clob_ws_url,
         public_provider_timeout_seconds=args.public_provider_timeout_seconds,
+        public_provider_http_timeout_seconds=args.public_provider_http_timeout_seconds,
         orderbook_snapshot_interval_seconds=args.orderbook_snapshot_interval_seconds,
         seed_rest_orderbooks_before_stream=not args.no_rest_orderbook_seed,
         use_rest_orderbooks=args.use_rest_orderbooks,
