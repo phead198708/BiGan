@@ -71,6 +71,7 @@ from bigan.v8.polymarket.paper_decision import (
     polymarket_decisions_to_phase4,
 )
 from bigan.v8.polymarket.recorder import (
+    PolymarketRealCorpusPublicProvider,
     PolymarketRealCorpusRecorderConfig,
     PolymarketRealCorpusRecorderResult,
     record_polymarket_real_corpus,
@@ -144,6 +145,7 @@ __all__ = [
     "PolymarketPolicyTrainingResult",
     "PolymarketPositionLedger",
     "PolymarketRealCorpusRecorderConfig",
+    "PolymarketRealCorpusPublicProvider",
     "PolymarketRealCorpusRecorderResult",
     "PolymarketResolutionRule",
     "PolymarketResolutionStatus",

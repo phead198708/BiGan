@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
-from bigan.v8.polymarket.contracts import looks_like_sha256
+from bigan.v8.polymarket.contracts import canonical_json_sha256, looks_like_sha256
 from bigan.v8.polymarket.corpus import RAW_CORPUS_FILENAMES
 from bigan.v8.polymarket.recorder import (
     PolymarketRealCorpusRecorderConfig,
     record_polymarket_real_corpus,
 )
+from bigan.v8.polymarket.recorder.btc_reference import mock_btc_feature_candle_rows
+from bigan.v8.polymarket.recorder.market_discovery import discover_mock_market_rows
+from bigan.v8.polymarket.recorder.orderbook_state import mock_orderbook_rows, mock_trade_rows
+from bigan.v8.polymarket.recorder.resolution import mock_resolution_rows
 
 
 def test_recorder_writes_raw_files_manifest_and_phase2_corpus(tmp_path: Path) -> None:
@@ -41,6 +46,10 @@ def test_recorder_writes_raw_files_manifest_and_phase2_corpus(tmp_path: Path) ->
     assert result.report["requested_live_public_collection"] is False
     assert result.report["public_collection_status"] == "mocked"
     assert result.report["public_collection_reason_codes"] == []
+    assert result.report["live_polymarket_data_read"] is False
+    assert result.report["live_btc_reference_data_read"] is False
+    assert result.report["live_polymarket_data"] is False
+    assert result.report["live_btc_reference_data"] is False
     assert result.report["paper_only"] is True
     assert result.report["capital_at_risk"] is False
     assert result.phase2_result is not None
@@ -156,6 +165,8 @@ def test_non_mock_public_collection_fails_closed_with_provider_reasons(
     ]
     assert result.report["live_polymarket_data"] is False
     assert result.report["live_btc_reference_data"] is False
+    assert result.report["live_polymarket_data_read"] is False
+    assert result.report["live_btc_reference_data_read"] is False
     assert result.report["mock_public_data_used"] is False
     assert result.report["synthetic_public_data_used"] is False
     assert result.report["synthetic_corpus_used"] is False
@@ -180,7 +191,163 @@ def test_non_mock_public_collection_fails_closed_with_provider_reasons(
         assert _read_jsonl(result.raw_dir / filename) == []
 
 
+def test_non_mock_public_collection_can_complete_with_configured_provider(
+    tmp_path: Path,
+) -> None:
+    result = record_polymarket_real_corpus(
+        PolymarketRealCorpusRecorderConfig(
+            run_id="real-provider-happy",
+            output_dir=tmp_path,
+            mock_public_data=False,
+        ),
+        public_provider=FakeRealPublicProvider(),
+    )
+
+    assert result.report["training_eligible"] is True
+    assert result.report["phase2_corpus_build_eligible"] is True
+    assert result.report["real_historical_training_eligible"] is True
+    assert result.report["manual_live_evidence_eligible"] is True
+    assert result.report["phase2_corpus_built"] is True
+    assert result.report["public_collection_status"] == "completed"
+    assert result.report["public_collection_reason_codes"] == []
+    assert result.report["live_polymarket_data_read"] is True
+    assert result.report["live_btc_reference_data_read"] is True
+    assert result.report["live_polymarket_data"] is True
+    assert result.report["live_btc_reference_data"] is True
+    assert result.report["mock_public_data_used"] is False
+    assert result.report["synthetic_public_data_used"] is False
+    assert result.report["synthetic_corpus_used"] is False
+    assert result.report["real_historical_corpus_used"] is True
+    assert result.report["deterministic_replay"] is False
+    assert result.report["raw_polymarket_market_count"] == 3
+    assert result.report["raw_orderbook_row_count"] == 24
+    assert result.report["raw_trade_row_count"] == 6
+    assert result.report["raw_resolution_count"] == 3
+    assert result.report["raw_btc_candle_row_count"] > 0
+    assert result.report["rejected_row_count"] == 0
+    assert result.phase2_result is not None
+    assert looks_like_sha256(result.report["phase2_corpus_manifest_sha256"])
+
+    recorder_manifest = _read_json(result.artifact_paths["real_corpus_recorder_manifest"])
+    assert recorder_manifest["real_historical_corpus_used"] is True
+    assert recorder_manifest["mock_public_data_used"] is False
+    assert recorder_manifest["synthetic_corpus_used"] is False
+
+
+def test_non_mock_public_collection_provider_error_fails_closed(
+    tmp_path: Path,
+) -> None:
+    result = record_polymarket_real_corpus(
+        PolymarketRealCorpusRecorderConfig(
+            run_id="real-provider-clob-failure",
+            output_dir=tmp_path,
+            mock_public_data=False,
+        ),
+        public_provider=FailingOrderbookProvider(),
+    )
+
+    assert result.report["training_eligible"] is False
+    assert result.report["phase2_corpus_build_eligible"] is False
+    assert result.report["real_historical_training_eligible"] is False
+    assert result.report["manual_live_evidence_eligible"] is False
+    assert result.report["phase2_corpus_built"] is False
+    assert result.report["public_collection_status"] == "blocked_fail_closed"
+    assert result.report["public_collection_reason_codes"] == [
+        "real_public_collection_provider_error"
+    ]
+    assert result.report["live_polymarket_data_read"] is False
+    assert result.report["live_btc_reference_data_read"] is False
+    assert result.report["real_historical_corpus_used"] is False
+    assert result.report["raw_polymarket_market_count"] == 0
+    assert result.report["reject_reason_counts"]["real_public_collection_provider_error"] == 1
+    assert result.report["reject_reason_counts"]["missing_complete_up_down_orderbook"] == 3
+
+    rejected = _read_jsonl(result.artifact_paths["real_corpus_rejected_rows"])
+    assert any(
+        row.get("provider") == "polymarket_clob"
+        and row.get("provider_stage") == "orderbook_collection"
+        and row.get("reject_reasons") == ["real_public_collection_provider_error"]
+        for row in rejected
+    )
+
+
 def _read_jsonl(path: Path) -> list[dict]:
     return [
         json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
+
+
+def _read_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+class FakeRealPublicProvider:
+    read_only = True
+    write_capable = False
+    paper_only = True
+    capital_at_risk = False
+    broker_exchange_write_enabled = False
+    live_exchange_write_enabled = False
+    polymarket_write_enabled = False
+    wallet_signing_enabled = False
+
+    def market_rows(
+        self,
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> list[dict[str, Any]]:
+        return [_as_real_public_market_row(row) for row in discover_mock_market_rows(config)]
+
+    def orderbook_rows(
+        self,
+        markets: list[dict[str, Any]],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> list[dict[str, Any]]:
+        return mock_orderbook_rows(markets, config)
+
+    def trade_rows(
+        self,
+        markets: list[dict[str, Any]],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> list[dict[str, Any]]:
+        del config
+        return mock_trade_rows(markets)
+
+    def btc_feature_candle_rows(
+        self,
+        markets: list[dict[str, Any]],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> list[dict[str, Any]]:
+        return mock_btc_feature_candle_rows(markets, config)
+
+    def resolution_rows(
+        self,
+        markets: list[dict[str, Any]],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> list[dict[str, Any]]:
+        return mock_resolution_rows(markets, config)
+
+
+class FailingOrderbookProvider(FakeRealPublicProvider):
+    def orderbook_rows(
+        self,
+        markets: list[dict[str, Any]],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> list[dict[str, Any]]:
+        del markets, config
+        raise RuntimeError("CLOB orderbook endpoint unavailable")
+
+
+def _as_real_public_market_row(row: dict[str, Any]) -> dict[str, Any]:
+    market = dict(row)
+    market["raw_market_sha256"] = canonical_json_sha256(
+        {
+            "market_id": market["market_id"],
+            "family": market["market_family"],
+            "source": "fake_real_public_provider",
+        }
+    )
+    market["raw_public_payload"] = {
+        "mock_public_data": False,
+        "provider": "fake_real_public_provider",
+    }
+    return market

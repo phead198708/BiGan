@@ -79,8 +79,9 @@ do not enter the Phase 2 builder.
 The manifest and report include raw artifact hashes, row counts, reject reason
 counts, training eligibility, and whether a Phase 2 corpus was built. Mock smoke
 runs set `deterministic_replay=true` and `real_historical_corpus_used=false`.
-Real public-data collection should set `real_historical_corpus_used=true` once the
-read-only API client is wired into the recorder seam.
+Real public-data collection sets `real_historical_corpus_used=true` only when a
+configured read-only provider returns accepted Polymarket rows, accepted BTC
+feature candles, and the Phase 2 corpus build succeeds.
 
 Eligibility is intentionally split:
 
@@ -104,3 +105,30 @@ When `--no-mock-public-data` is used before the real read-only providers are
 wired, the recorder fails closed. It still writes the run bundle and empty raw
 files, and `real_corpus_rejected_rows.jsonl` includes provider-level reasons such
 as `real_public_collection_not_configured`.
+
+## Real Provider Seam
+
+The operator supports an explicit `public_provider=` argument for non-mock runs.
+That provider must implement the `PolymarketRealCorpusPublicProvider` contract and
+return normalized raw rows for:
+
+- Polymarket Gamma market discovery.
+- Polymarket CLOB orderbook collection.
+- Polymarket CLOB trade collection.
+- BTC feature candle collection.
+- Official Polymarket resolution/reference collection.
+
+The default CLI does not auto-connect to public APIs. Without a configured
+provider, `mock_public_data=false` remains fail-closed by design. With a
+configured provider, any fetch or normalization exception is written to
+`real_corpus_rejected_rows.jsonl` with provider/stage/reason details and the
+real-history training gate remains closed.
+
+Granular read flags are separate from training eligibility:
+
+- `live_polymarket_data_read`: accepted real Polymarket market/orderbook rows
+  were written.
+- `live_btc_reference_data_read`: accepted real BTC feature candle rows were
+  written.
+- `real_historical_training_eligible`: the accepted real raw bundle produced a
+  Phase 2 corpus and had no provider-stage failures.

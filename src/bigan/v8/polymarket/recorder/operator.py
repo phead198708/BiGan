@@ -35,6 +35,7 @@ from bigan.v8.polymarket.recorder.orderbook_state import (
     validate_market_books,
     validate_trade_rows,
 )
+from bigan.v8.polymarket.recorder.public_provider import PolymarketRealCorpusPublicProvider
 from bigan.v8.polymarket.recorder.resolution import (
     mock_resolution_rows,
     validate_resolution_row,
@@ -43,6 +44,8 @@ from bigan.v8.polymarket.recorder.resolution import (
 
 def record_polymarket_real_corpus(
     config: PolymarketRealCorpusRecorderConfig,
+    *,
+    public_provider: PolymarketRealCorpusPublicProvider | None = None,
 ) -> PolymarketRealCorpusRecorderResult:
     """Record read-only Polymarket market facts into Phase 2 raw corpus artifacts."""
 
@@ -56,11 +59,14 @@ def record_polymarket_real_corpus(
         shutil.rmtree(run_dir)
     config.raw_dir.mkdir(parents=True)
 
-    provider_failures = _provider_failures(config)
-    market_candidates = [] if provider_failures else _discover_market_rows(config)
-    book_candidates = _orderbook_rows(market_candidates, config)
-    trade_candidates = _trade_rows(market_candidates, config)
-    resolution_candidates = _resolution_rows(market_candidates, config)
+    (
+        provider_failures,
+        market_candidates,
+        book_candidates,
+        trade_candidates,
+        candle_candidates,
+        resolution_candidates,
+    ) = _collect_public_rows(config=config, public_provider=public_provider)
 
     raw_payloads = empty_raw_payloads()
     rejected_rows: list[dict[str, Any]] = list(provider_failures)
@@ -98,8 +104,13 @@ def record_polymarket_real_corpus(
         if resolution is not None:
             raw_payloads["raw_polymarket_resolutions.jsonl"].append(resolution)
 
-    candles, candle_reasons = validate_btc_feature_candles(
+    candle_rows = (
         mock_btc_feature_candle_rows(accepted_markets, config)
+        if config.mock_public_data
+        else candle_candidates
+    )
+    candles, candle_reasons = validate_btc_feature_candles(
+        candle_rows if accepted_markets else []
     )
     if candle_reasons:
         for market in accepted_markets:
@@ -178,13 +189,76 @@ def record_polymarket_real_corpus(
     )
 
 
-def _discover_market_rows(config: PolymarketRealCorpusRecorderConfig) -> list[dict[str, Any]]:
-    return discover_mock_market_rows(config)
-
-
-def _provider_failures(config: PolymarketRealCorpusRecorderConfig) -> list[dict[str, Any]]:
+def _collect_public_rows(
+    *,
+    config: PolymarketRealCorpusRecorderConfig,
+    public_provider: PolymarketRealCorpusPublicProvider | None,
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
     if config.mock_public_data:
-        return []
+        market_candidates = discover_mock_market_rows(config)
+        return (
+            [],
+            market_candidates,
+            mock_orderbook_rows(market_candidates, config),
+            mock_trade_rows(market_candidates),
+            [],
+            mock_resolution_rows(market_candidates, config),
+        )
+    if public_provider is None:
+        return (_provider_not_configured_failures(), [], [], [], [], [])
+
+    provider_failures = _provider_safety_failures(public_provider)
+    if provider_failures:
+        return (provider_failures, [], [], [], [], [])
+
+    market_candidates = _call_provider_stage(
+        provider="polymarket_gamma",
+        provider_stage="market_discovery",
+        failures=provider_failures,
+        callback=lambda: public_provider.market_rows(config),
+    )
+    book_candidates = _call_provider_stage(
+        provider="polymarket_clob",
+        provider_stage="orderbook_collection",
+        failures=provider_failures,
+        callback=lambda: public_provider.orderbook_rows(market_candidates, config),
+    )
+    trade_candidates = _call_provider_stage(
+        provider="polymarket_clob",
+        provider_stage="trade_collection",
+        failures=provider_failures,
+        callback=lambda: public_provider.trade_rows(market_candidates, config),
+    )
+    candle_candidates = _call_provider_stage(
+        provider="btc_reference",
+        provider_stage="feature_candle_collection",
+        failures=provider_failures,
+        callback=lambda: public_provider.btc_feature_candle_rows(market_candidates, config),
+    )
+    resolution_candidates = _call_provider_stage(
+        provider="polymarket_resolution",
+        provider_stage="resolution_collection",
+        failures=provider_failures,
+        callback=lambda: public_provider.resolution_rows(market_candidates, config),
+    )
+    return (
+        provider_failures,
+        market_candidates,
+        book_candidates,
+        trade_candidates,
+        candle_candidates,
+        resolution_candidates,
+    )
+
+
+def _provider_not_configured_failures() -> list[dict[str, Any]]:
     return [
         {
             "provider": "polymarket_gamma",
@@ -213,26 +287,61 @@ def _provider_failures(config: PolymarketRealCorpusRecorderConfig) -> list[dict[
     ]
 
 
-def _orderbook_rows(
-    markets: list[dict[str, Any]],
-    config: PolymarketRealCorpusRecorderConfig,
+def _provider_safety_failures(provider: PolymarketRealCorpusPublicProvider) -> list[dict[str, Any]]:
+    expected = {
+        "read_only": True,
+        "write_capable": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "broker_exchange_write_enabled": False,
+        "live_exchange_write_enabled": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    bad_fields = [
+        field_name
+        for field_name, expected_value in expected.items()
+        if getattr(provider, field_name, None) is not expected_value
+    ]
+    if not bad_fields:
+        return []
+    return [
+        {
+            "provider": type(provider).__name__,
+            "provider_stage": "provider_safety_validation",
+            "reject_reasons": ["unsafe_public_provider"],
+            "details": "Unsafe public provider flags: " + ", ".join(sorted(bad_fields)),
+        }
+    ]
+
+
+def _call_provider_stage(
+    *,
+    provider: str,
+    provider_stage: str,
+    failures: list[dict[str, Any]],
+    callback: Any,
 ) -> list[dict[str, Any]]:
-    return mock_orderbook_rows(markets, config)
+    try:
+        rows = callback()
+    except Exception as exc:
+        failures.append(
+            {
+                "provider": provider,
+                "provider_stage": provider_stage,
+                "reject_reasons": _exception_reason_codes(exc),
+                "details": str(exc),
+            }
+        )
+        return []
+    return [dict(row) for row in rows]
 
 
-def _trade_rows(
-    markets: list[dict[str, Any]],
-    config: PolymarketRealCorpusRecorderConfig,
-) -> list[dict[str, Any]]:
-    del config
-    return mock_trade_rows(markets)
-
-
-def _resolution_rows(
-    markets: list[dict[str, Any]],
-    config: PolymarketRealCorpusRecorderConfig,
-) -> list[dict[str, Any]]:
-    return mock_resolution_rows(markets, config)
+def _exception_reason_codes(exc: Exception) -> list[str]:
+    reason_codes = getattr(exc, "reason_codes", ())
+    if reason_codes:
+        return sorted({str(reason) for reason in reason_codes})
+    return ["real_public_collection_provider_error"]
 
 
 def _validate_market_row(market: dict[str, Any]) -> list[str]:
@@ -304,7 +413,20 @@ def _recorder_report(
     phase2_corpus_build_eligible = (
         phase2_result is not None and market_count > 0 and not phase2_error
     )
-    real_historical_training_eligible = phase2_corpus_build_eligible and not config.mock_public_data
+    live_polymarket_data_read = (
+        not config.mock_public_data
+        and market_count > 0
+        and len(raw_payloads["raw_polymarket_orderbooks.jsonl"]) > 0
+    )
+    live_btc_reference_data_read = (
+        not config.mock_public_data and len(raw_payloads["raw_binance_btcusdt_klines.jsonl"]) > 0
+    )
+    real_historical_training_eligible = (
+        phase2_corpus_build_eligible
+        and live_polymarket_data_read
+        and live_btc_reference_data_read
+        and not provider_failures
+    )
     public_collection_status = (
         "mocked"
         if config.mock_public_data
@@ -327,8 +449,10 @@ def _recorder_report(
         "requested_live_public_collection": not config.mock_public_data,
         "public_collection_status": public_collection_status,
         "public_collection_reason_codes": public_collection_reason_codes,
-        "live_polymarket_data": real_historical_training_eligible,
-        "live_btc_reference_data": real_historical_training_eligible,
+        "live_polymarket_data_read": live_polymarket_data_read,
+        "live_btc_reference_data_read": live_btc_reference_data_read,
+        "live_polymarket_data": live_polymarket_data_read,
+        "live_btc_reference_data": live_btc_reference_data_read,
         "deterministic_replay": config.mock_public_data,
         "mock_public_data_used": config.mock_public_data,
         "synthetic_public_data_used": config.mock_public_data,
@@ -390,6 +514,10 @@ def _recorder_manifest(
         "requested_live_public_collection": report["requested_live_public_collection"],
         "public_collection_status": report["public_collection_status"],
         "public_collection_reason_codes": report["public_collection_reason_codes"],
+        "live_polymarket_data_read": report["live_polymarket_data_read"],
+        "live_btc_reference_data_read": report["live_btc_reference_data_read"],
+        "live_polymarket_data": report["live_polymarket_data"],
+        "live_btc_reference_data": report["live_btc_reference_data"],
         **safety_fields(),
     }
 
