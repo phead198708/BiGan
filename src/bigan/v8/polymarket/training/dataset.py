@@ -95,7 +95,7 @@ def load_polymarket_policy_dataset(
             "examples": [example.to_dict() for example in ordered_examples],
         }
     )
-    train, validation, shadow = _split_examples(ordered_examples, config)
+    train, validation, shadow, split_metadata = _split_examples(ordered_examples, config)
     return PolymarketPolicyDataset(
         examples=ordered_examples,
         feature_columns=feature_columns,
@@ -109,6 +109,7 @@ def load_polymarket_policy_dataset(
         train_examples=train,
         validation_examples=validation,
         shadow_examples=shadow,
+        split_metadata=split_metadata,
     )
 
 
@@ -128,6 +129,7 @@ def dataset_profile(dataset: PolymarketPolicyDataset) -> dict[str, Any]:
         "label_schema_hash": dataset.label_schema_hash,
         "training_corpus_hash": dataset.training_corpus_hash,
         "dataset_hash": dataset.dataset_hash,
+        **dataset.split_metadata,
         **compact_safety_fields(),
     }
 
@@ -163,24 +165,70 @@ def _split_examples(
     tuple[PolymarketPolicyExample, ...],
     tuple[PolymarketPolicyExample, ...],
     tuple[PolymarketPolicyExample, ...],
+    dict[str, Any],
 ]:
-    if len(examples) < 4:
-        raise ValueError("policy dataset requires at least four examples")
-    train_count = max(1, int(len(examples) * config.train_fraction))
-    validation_count = max(1, int(len(examples) * config.validation_fraction))
-    if train_count + validation_count >= len(examples):
-        validation_count = 1
-        train_count = len(examples) - 2
-    train = examples[:train_count]
-    validation = examples[train_count : train_count + validation_count]
-    shadow = examples[train_count + validation_count :]
+    decision_times = tuple(sorted({example.decision_ts for example in examples}))
+    if len(decision_times) < 3:
+        raise ValueError("policy dataset requires at least three unique decision_ts values")
+    train_time_count = max(1, int(len(decision_times) * config.train_fraction))
+    train_time_count = min(train_time_count, len(decision_times) - 2)
+    validation_time_count = max(1, int(len(decision_times) * config.validation_fraction))
+    validation_time_count = min(
+        validation_time_count,
+        len(decision_times) - train_time_count - 1,
+    )
+    train_times = set(decision_times[:train_time_count])
+    validation_times = set(
+        decision_times[train_time_count : train_time_count + validation_time_count]
+    )
+    shadow_times = set(decision_times[train_time_count + validation_time_count :])
+    train = tuple(example for example in examples if example.decision_ts in train_times)
+    validation = tuple(
+        example for example in examples if example.decision_ts in validation_times
+    )
+    shadow = tuple(example for example in examples if example.decision_ts in shadow_times)
     if not train or not validation or not shadow:
         raise ValueError("train, validation, and shadow splits must be non-empty")
-    if train[-1].decision_ts > validation[0].decision_ts:
-        raise ValueError("validation split must follow train split")
-    if validation[-1].decision_ts > shadow[0].decision_ts:
-        raise ValueError("shadow split must follow validation split")
-    return train, validation, shadow
+    split_metadata = _split_metadata(
+        decision_times=decision_times,
+        train=train,
+        validation=validation,
+        shadow=shadow,
+    )
+    if split_metadata["train_max_ts"] >= split_metadata["validation_min_ts"]:
+        raise ValueError("validation split must strictly follow train split")
+    if split_metadata["validation_max_ts"] >= split_metadata["shadow_min_ts"]:
+        raise ValueError("shadow split must strictly follow validation split")
+    return train, validation, shadow, split_metadata
+
+
+def _split_metadata(
+    *,
+    decision_times: tuple[int, ...],
+    train: tuple[PolymarketPolicyExample, ...],
+    validation: tuple[PolymarketPolicyExample, ...],
+    shadow: tuple[PolymarketPolicyExample, ...],
+) -> dict[str, Any]:
+    train_ts = {example.decision_ts for example in train}
+    validation_ts = {example.decision_ts for example in validation}
+    shadow_ts = {example.decision_ts for example in shadow}
+    if train_ts & validation_ts or validation_ts & shadow_ts or train_ts & shadow_ts:
+        raise ValueError("decision_ts values must not cross split boundaries")
+    return {
+        "split_strategy": "unique_decision_ts_temporal",
+        "split_ordering_key": "decision_ts",
+        "unique_decision_ts_count": len(decision_times),
+        "train_decision_ts_count": len(train_ts),
+        "validation_decision_ts_count": len(validation_ts),
+        "shadow_decision_ts_count": len(shadow_ts),
+        "strict_temporal_separation": True,
+        "train_min_ts": min(train_ts),
+        "train_max_ts": max(train_ts),
+        "validation_min_ts": min(validation_ts),
+        "validation_max_ts": max(validation_ts),
+        "shadow_min_ts": min(shadow_ts),
+        "shadow_max_ts": max(shadow_ts),
+    }
 
 
 def _family_counts(examples: tuple[PolymarketPolicyExample, ...]) -> dict[str, int]:

@@ -86,7 +86,12 @@ def test_policy_replay_uses_phase1_settlement_and_reports_pnl(
 
     assert replay["phase1_position_ledger_used"] is True
     assert replay["phase1_settlement_engine_used"] is True
-    assert replay["trade_count"] > 0
+    assert replay["calibration_split"] == "validation"
+    assert replay["replay_split"] == "shadow"
+    assert replay["out_of_sample_replay"] is True
+    assert replay["replay_prediction_count"] == len(result.dataset.shadow_examples)
+    assert replay["replay_decision_count"] == len(result.dataset.shadow_examples)
+    assert replay["trade_count"] >= 0
     assert replay["settled_position_count"] >= 0
     assert "realized_trade_pnl" in replay
     assert "settlement_pnl" in replay
@@ -95,6 +100,20 @@ def test_policy_replay_uses_phase1_settlement_and_reports_pnl(
     assert ev_report["trained_model_used"] is True
     assert ev_report["synthetic_fixture_signal_used"] is False
     assert ev_report["policy_signal_source"] == "trained_model"
+    assert ev_report["replay_split"] == "shadow"
+    assert ev_report["out_of_sample_replay"] is True
+    decisions = _read_jsonl(result.artifact_paths["ev_decisions"])
+    shadow_keys = {
+        (example.market_id, example.decision_ts)
+        for example in result.dataset.shadow_examples
+    }
+    train_keys = {
+        (example.market_id, example.decision_ts)
+        for example in result.dataset.train_examples
+    }
+    decision_keys = {(row["market_id"], row["decision_ts"]) for row in decisions}
+    assert decision_keys == shadow_keys
+    assert not decision_keys & train_keys
     _assert_safe(replay)
     _assert_safe(ev_report)
 
@@ -159,6 +178,14 @@ def _prediction(*, probability: float, confidence: float) -> PolymarketPolicyPre
 
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 def _assert_safe(payload: dict) -> None:

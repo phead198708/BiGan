@@ -153,6 +153,7 @@ class PolymarketPolicyDataset:
     train_examples: tuple[PolymarketPolicyExample, ...]
     validation_examples: tuple[PolymarketPolicyExample, ...]
     shadow_examples: tuple[PolymarketPolicyExample, ...]
+    split_metadata: dict[str, Any]
     paper_only: bool = True
     capital_at_risk: bool = False
     polymarket_write_enabled: bool = False
@@ -168,6 +169,7 @@ class PolymarketPolicyDataset:
                 raise ValueError(f"{field_name} must be SHA-256")
         if not self.train_examples or not self.validation_examples or not self.shadow_examples:
             raise ValueError("train, validation, and shadow examples must be non-empty")
+        _validate_split_metadata(self.split_metadata)
         _validate_safety_boundary(self)
 
     def to_dict(self) -> dict[str, Any]:
@@ -257,6 +259,9 @@ class PolymarketPolicyTrainingResult:
     dataset: PolymarketPolicyDataset
     model: PolymarketPolicyModel
     predictions: tuple[PolymarketPolicyPrediction, ...]
+    train_predictions: tuple[PolymarketPolicyPrediction, ...]
+    validation_predictions: tuple[PolymarketPolicyPrediction, ...]
+    shadow_predictions: tuple[PolymarketPolicyPrediction, ...]
     artifact_paths: dict[str, Path]
     artifact_hashes: dict[str, str]
     model_manifest: dict[str, Any]
@@ -300,3 +305,25 @@ def _validate_safety_boundary(payload: Any) -> None:
     for field_name, expected in compact_safety_fields().items():
         if getattr(payload, field_name) is not expected:
             raise ValueError(f"{field_name} must be {str(expected).lower()}")
+
+
+def _validate_split_metadata(split_metadata: dict[str, Any]) -> None:
+    required = (
+        "train_min_ts",
+        "train_max_ts",
+        "validation_min_ts",
+        "validation_max_ts",
+        "shadow_min_ts",
+        "shadow_max_ts",
+    )
+    missing = [field_name for field_name in required if field_name not in split_metadata]
+    if missing:
+        raise ValueError(f"split_metadata missing fields: {', '.join(missing)}")
+    train_max = int(split_metadata["train_max_ts"])
+    validation_min = int(split_metadata["validation_min_ts"])
+    validation_max = int(split_metadata["validation_max_ts"])
+    shadow_min = int(split_metadata["shadow_min_ts"])
+    if train_max >= validation_min:
+        raise ValueError("train split must strictly precede validation split")
+    if validation_max >= shadow_min:
+        raise ValueError("validation split must strictly precede shadow split")

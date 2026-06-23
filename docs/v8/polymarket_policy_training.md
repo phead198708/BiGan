@@ -46,6 +46,24 @@ resolved_outcome=UNKNOWN_50_50  -> target_up_probability=0.5
 PnL is not used as the primary training target. PnL appears only in validation,
 EV threshold reporting, and paper replay evidence.
 
+## Temporal Splits
+
+The dataset is split by unique `decision_ts`, not by row count. All markets that
+share the same `decision_ts` remain in the same partition, and the runner
+enforces strict timestamp separation:
+
+```text
+max(train.decision_ts) < min(validation.decision_ts)
+max(validation.decision_ts) < min(shadow.decision_ts)
+```
+
+Dataset profiles and model manifests record:
+
+- `train_min_ts` / `train_max_ts`
+- `validation_min_ts` / `validation_max_ts`
+- `shadow_min_ts` / `shadow_max_ts`
+- `strict_temporal_separation=true`
+
 ## Model Output
 
 The model writes trained-model predictions with:
@@ -89,6 +107,11 @@ Metrics are also reported by time-to-close bucket:
 - `5-15m`
 - `15m+`
 
+Primary calibration is split-specific. The default primary calibration split is
+`validation`, while `train`, `validation`, and `shadow` calibration sections are
+all written for audit. Validation by-family and time-to-close bucket metrics use
+only the selected out-of-sample validation split, never train rows.
+
 ## EV Execution
 
 The EV layer turns `P(UP)` into paper actions:
@@ -127,6 +150,9 @@ Paper replay uses Phase 1 Polymarket primitives:
 
 Replay reports include:
 
+- `calibration_split`
+- `replay_split`
+- `out_of_sample_replay`
 - `trade_count`
 - `no_trade_count`
 - `settled_position_count`
@@ -138,6 +164,8 @@ Replay reports include:
 - `critical_alert_count`
 
 This replay is deterministic and does not imply expected production profitability.
+By default, EV replay is built only from `shadow` predictions. Full predictions
+are still written as a debug artifact, alongside split-specific prediction sets.
 
 ## Artifacts
 
@@ -152,6 +180,9 @@ The runner writes:
 - `polymarket_ev_threshold_report.json`
 - `polymarket_policy_replay_report.json`
 - `polymarket_policy_predictions.jsonl`
+- `polymarket_policy_train_predictions.jsonl`
+- `polymarket_policy_validation_predictions.jsonl`
+- `polymarket_policy_shadow_predictions.jsonl`
 - `polymarket_ev_decisions.jsonl`
 - `polymarket_policy_training_summary.md`
 
@@ -164,6 +195,10 @@ The model manifest records:
 - label schema hash
 - model SHA-256
 - train / validation / shadow row counts
+- train / validation / shadow timestamp ranges
+- primary calibration split
+- replay split
+- `out_of_sample_replay=true`
 - paper-only safety flags
 
 ## Local Smoke

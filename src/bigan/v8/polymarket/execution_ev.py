@@ -220,15 +220,22 @@ def build_polymarket_ev_decisions(
     return tuple(decisions)
 
 
-def ev_threshold_report(decisions: tuple[PolymarketEVDecision, ...]) -> dict[str, Any]:
+def ev_threshold_report(
+    decisions: tuple[PolymarketEVDecision, ...],
+    *,
+    replay_split: str = "shadow",
+) -> dict[str, Any]:
     """Summarize why EV execution traded or skipped."""
 
+    _validate_replay_split(replay_split)
     action_counts = Counter(decision.action for decision in decisions)
     reason_counts: Counter[str] = Counter()
     for decision in decisions:
         reason_counts.update(decision.reason_codes)
     return {
         "schema_version": "bigan-v8-polymarket-ev-threshold-report-v1",
+        "replay_split": replay_split,
+        "out_of_sample_replay": True,
         "decision_count": len(decisions),
         "action_counts": dict(sorted(action_counts.items())),
         "reason_counts": dict(sorted(reason_counts.items())),
@@ -247,9 +254,24 @@ def run_polymarket_policy_replay(
     decisions: tuple[PolymarketEVDecision, ...],
     config: PolymarketPolicyTrainingConfig,
     calibration_error: float,
+    calibration_split: str = "validation",
+    replay_split: str = "shadow",
+    prediction_count: int | None = None,
 ) -> dict[str, Any]:
     """Replay EV decisions through Phase 1 ledger and settlement primitives."""
 
+    _validate_replay_split(calibration_split)
+    _validate_replay_split(replay_split)
+    replay_examples = _dataset_examples_for_split(dataset, replay_split)
+    replay_keys = {(example.market_id, example.decision_ts) for example in replay_examples}
+    decision_keys = {(decision.market_id, decision.decision_ts) for decision in decisions}
+    if len(decision_keys) != len(decisions):
+        raise ValueError("replay decisions must not contain duplicate market_id/decision_ts")
+    if not decision_keys.issubset(replay_keys):
+        raise ValueError("replay decisions must come from the selected out-of-sample split")
+    replay_prediction_count = len(replay_examples) if prediction_count is None else prediction_count
+    if replay_prediction_count != len(decisions):
+        raise ValueError("replay prediction count must match replay decision count")
     ledgers = {
         market_id: PolymarketPositionLedger(
             market_id=market_id,
@@ -306,6 +328,13 @@ def run_polymarket_policy_replay(
         max_drawdown = min(max_drawdown, cumulative - peak)
     return {
         "schema_version": "bigan-v8-polymarket-policy-replay-v1",
+        "calibration_split": calibration_split,
+        "replay_split": replay_split,
+        "out_of_sample_replay": True,
+        "replay_prediction_count": replay_prediction_count,
+        "replay_decision_count": len(decisions),
+        "replay_min_ts": min((decision.decision_ts for decision in decisions), default=None),
+        "replay_max_ts": max((decision.decision_ts for decision in decisions), default=None),
         "trade_count": sum(decision.action.startswith(("BUY", "SELL")) for decision in decisions),
         "no_trade_count": sum(decision.action == "NO_TRADE" for decision in decisions),
         "settled_position_count": sum(event["qty"] > 0.0 for event in settlement_events),
@@ -329,6 +358,22 @@ def run_polymarket_policy_replay(
         ],
         **compact_safety_fields(),
     }
+
+
+def _validate_replay_split(replay_split: str) -> None:
+    if replay_split not in ("validation", "shadow"):
+        raise ValueError("replay_split must be validation or shadow")
+
+
+def _dataset_examples_for_split(
+    dataset: PolymarketPolicyDataset,
+    replay_split: str,
+) -> tuple[Any, ...]:
+    if replay_split == "validation":
+        return dataset.validation_examples
+    if replay_split == "shadow":
+        return dataset.shadow_examples
+    raise ValueError("replay_split must be validation or shadow")
 
 
 def _apply_replay_decision(

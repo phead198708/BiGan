@@ -3,6 +3,7 @@
 from bigan.v8.polymarket.training.calibration import (
     TIME_TO_CLOSE_BUCKETS,
     calibration_report,
+    split_calibration_report,
     validation_report,
 )
 from bigan.v8.polymarket.training.contracts import (
@@ -53,6 +54,7 @@ __all__ = [
     "load_polymarket_policy_dataset",
     "predict_polymarket_policy_examples",
     "run_polymarket_policy_training",
+    "split_calibration_report",
     "train_polymarket_probability_model",
     "validation_report",
 ]

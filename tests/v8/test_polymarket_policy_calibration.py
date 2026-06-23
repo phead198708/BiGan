@@ -33,9 +33,30 @@ def test_calibration_and_validation_reports_cover_families_and_time_buckets(
     calibration = _read_json(result.artifact_paths["calibration_report"])
     validation = _read_json(result.artifact_paths["validation_report"])
 
-    assert calibration["sample_count"] == len(result.predictions)
+    assert calibration["primary_calibration_split"] == "validation"
+    assert calibration["sample_count"] == len(result.dataset.validation_examples)
     assert calibration["calibration_error"] >= 0.0
     assert calibration["buckets"]
+    assert calibration["train_calibration"]["sample_count"] == len(
+        result.dataset.train_examples
+    )
+    assert calibration["validation_calibration"]["sample_count"] == len(
+        result.dataset.validation_examples
+    )
+    assert calibration["shadow_calibration"]["sample_count"] == len(
+        result.dataset.shadow_examples
+    )
+    assert (
+        calibration["primary_calibration"]["sample_count"]
+        == calibration["validation_calibration"]["sample_count"]
+    )
+    assert calibration["sample_counts_by_split"] == {
+        "train": len(result.dataset.train_examples),
+        "validation": len(result.dataset.validation_examples),
+        "shadow": len(result.dataset.shadow_examples),
+    }
+    assert validation["evaluation_split"] == "validation"
+    assert validation["out_of_sample_validation"] is True
     assert validation["validation"]["sample_count"] > 0
     assert validation["validation"]["logloss"] >= 0.0
     assert validation["validation"]["brier_score"] >= 0.0
@@ -44,6 +65,13 @@ def test_calibration_and_validation_reports_cover_families_and_time_buckets(
         "btc_updown_15m",
         "btc_updown_1h",
     }
+    assert (
+        sum(
+            row["sample_count"]
+            for row in validation["metrics_by_market_family"].values()
+        )
+        == len(result.dataset.validation_examples)
+    )
     assert set(validation["metrics_by_time_to_close_bucket"]) == {
         "0-30s",
         "30-60s",
@@ -52,6 +80,13 @@ def test_calibration_and_validation_reports_cover_families_and_time_buckets(
         "5-15m",
         "15m+",
     }
+    assert (
+        sum(
+            row["sample_count"]
+            for row in validation["metrics_by_time_to_close_bucket"].values()
+        )
+        == len(result.dataset.validation_examples)
+    )
     assert validation["model_is_calibrated_better_than_naive_baseline"] is True
     _assert_safe(calibration)
     _assert_safe(validation)

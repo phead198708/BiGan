@@ -13,7 +13,10 @@ from bigan.v8.polymarket.execution_ev import (
     ev_threshold_report,
     run_polymarket_policy_replay,
 )
-from bigan.v8.polymarket.training.calibration import calibration_report, validation_report
+from bigan.v8.polymarket.training.calibration import (
+    split_calibration_report,
+    validation_report,
+)
 from bigan.v8.polymarket.training.contracts import (
     POLYMARKET_POLICY_SCHEMA_VERSION,
     POLYMARKET_POLICY_SIGNAL_SOURCE_TRAINED_MODEL,
@@ -52,23 +55,36 @@ def run_polymarket_policy_training(
         (prediction.market_id, prediction.decision_ts): prediction
         for prediction in predictions
     }
-    validation_predictions = tuple(
-        predictions_by_key[(example.market_id, example.decision_ts)]
-        for example in dataset.validation_examples
+    train_predictions = _predictions_for_examples(predictions_by_key, dataset.train_examples)
+    validation_predictions = _predictions_for_examples(
+        predictions_by_key,
+        dataset.validation_examples,
     )
-    calibration = calibration_report(predictions)
+    shadow_predictions = _predictions_for_examples(predictions_by_key, dataset.shadow_examples)
+    primary_calibration_split = "validation"
+    replay_split = "shadow"
+    calibration = split_calibration_report(
+        train_predictions=train_predictions,
+        validation_predictions=validation_predictions,
+        shadow_predictions=shadow_predictions,
+        primary_calibration_split=primary_calibration_split,
+    )
     validation = validation_report(
         validation_predictions=validation_predictions,
-        all_predictions=predictions,
         train_examples=dataset.train_examples,
+        evaluation_split=primary_calibration_split,
     )
-    decisions = build_polymarket_ev_decisions(predictions=predictions, config=config)
-    ev_report = ev_threshold_report(decisions)
+    replay_predictions = shadow_predictions
+    decisions = build_polymarket_ev_decisions(predictions=replay_predictions, config=config)
+    ev_report = ev_threshold_report(decisions, replay_split=replay_split)
     replay_report = run_polymarket_policy_replay(
         dataset=dataset,
         decisions=decisions,
         config=config,
         calibration_error=float(calibration["calibration_error"]),
+        calibration_split=primary_calibration_split,
+        replay_split=replay_split,
+        prediction_count=len(replay_predictions),
     )
     artifact_paths = _write_artifacts(
         run_dir=run_dir,
@@ -76,6 +92,11 @@ def run_polymarket_policy_training(
         profile=profile,
         model=model.to_dict(),
         predictions=[prediction.to_dict() for prediction in predictions],
+        train_predictions=[prediction.to_dict() for prediction in train_predictions],
+        validation_predictions=[
+            prediction.to_dict() for prediction in validation_predictions
+        ],
+        shadow_predictions=[prediction.to_dict() for prediction in shadow_predictions],
         decisions=[decision.to_dict() for decision in decisions],
         calibration=calibration,
         validation=validation,
@@ -99,6 +120,9 @@ def run_polymarket_policy_training(
         dataset=dataset,
         model=model,
         predictions=predictions,
+        train_predictions=train_predictions,
+        validation_predictions=validation_predictions,
+        shadow_predictions=shadow_predictions,
         artifact_paths=artifact_paths,
         artifact_hashes=artifact_hashes,
         model_manifest=model_manifest,
@@ -116,6 +140,9 @@ def _write_artifacts(
     profile: dict[str, Any],
     model: dict[str, Any],
     predictions: list[dict[str, Any]],
+    train_predictions: list[dict[str, Any]],
+    validation_predictions: list[dict[str, Any]],
+    shadow_predictions: list[dict[str, Any]],
     decisions: list[dict[str, Any]],
     calibration: dict[str, Any],
     validation: dict[str, Any],
@@ -131,7 +158,11 @@ def _write_artifacts(
         "validation_report": run_dir / "polymarket_policy_validation_report.json",
         "ev_threshold_report": run_dir / "polymarket_ev_threshold_report.json",
         "replay_report": run_dir / "polymarket_policy_replay_report.json",
+        "all_predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "predictions": run_dir / "polymarket_policy_predictions.jsonl",
+        "train_predictions": run_dir / "polymarket_policy_train_predictions.jsonl",
+        "validation_predictions": run_dir / "polymarket_policy_validation_predictions.jsonl",
+        "shadow_predictions": run_dir / "polymarket_policy_shadow_predictions.jsonl",
         "ev_decisions": run_dir / "polymarket_ev_decisions.jsonl",
         "summary": run_dir / "polymarket_policy_training_summary.md",
     }
@@ -143,6 +174,9 @@ def _write_artifacts(
     _write_json(paths["ev_threshold_report"], ev_report)
     _write_json(paths["replay_report"], replay_report)
     _write_jsonl(paths["predictions"], predictions)
+    _write_jsonl(paths["train_predictions"], train_predictions)
+    _write_jsonl(paths["validation_predictions"], validation_predictions)
+    _write_jsonl(paths["shadow_predictions"], shadow_predictions)
     _write_jsonl(paths["ev_decisions"], decisions)
     paths["summary"].write_text(
         _summary_markdown(
@@ -164,6 +198,19 @@ def _model_manifest(
     validation: dict[str, Any],
     replay_report: dict[str, Any],
 ) -> dict[str, Any]:
+    split_fields = {
+        field_name: dataset_profile[field_name]
+        for field_name in (
+            "split_strategy",
+            "strict_temporal_separation",
+            "train_min_ts",
+            "train_max_ts",
+            "validation_min_ts",
+            "validation_max_ts",
+            "shadow_min_ts",
+            "shadow_max_ts",
+        )
+    }
     return {
         "schema_version": POLYMARKET_POLICY_SCHEMA_VERSION,
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
@@ -180,6 +227,10 @@ def _model_manifest(
         "train_row_count": dataset_profile["train_row_count"],
         "validation_row_count": dataset_profile["validation_row_count"],
         "shadow_row_count": dataset_profile["shadow_row_count"],
+        **split_fields,
+        "calibration_split": replay_report["calibration_split"],
+        "replay_split": replay_report["replay_split"],
+        "out_of_sample_replay": replay_report["out_of_sample_replay"],
         "created_at": config.created_at,
         "direct_pnl_optimization": False,
         "pnl_usage": "validation_and_ev_replay_only",
@@ -212,6 +263,9 @@ def _summary_markdown(
             f"- train_row_count: {profile['train_row_count']}",
             f"- validation_row_count: {profile['validation_row_count']}",
             f"- shadow_row_count: {profile['shadow_row_count']}",
+            f"- calibration_split: {replay_report['calibration_split']}",
+            f"- replay_split: {replay_report['replay_split']}",
+            f"- out_of_sample_replay: {str(replay_report['out_of_sample_replay']).lower()}",
             f"- validation_brier_score: {validation['validation']['brier_score']}",
             f"- calibration_error: {replay_report['calibration_error']}",
             f"- trade_count: {replay_report['trade_count']}",
@@ -224,6 +278,16 @@ def _summary_markdown(
             "- wallet_signing_enabled: false",
             "",
         ]
+    )
+
+
+def _predictions_for_examples(
+    predictions_by_key: dict[tuple[str, int], Any],
+    examples: tuple[Any, ...],
+) -> tuple[Any, ...]:
+    return tuple(
+        predictions_by_key[(example.market_id, example.decision_ts)]
+        for example in examples
     )
 
 

@@ -23,6 +23,7 @@ TIME_TO_CLOSE_BUCKETS: tuple[tuple[str, float, float], ...] = (
 )
 THRESHOLDS = (0.50, 0.55, 0.60, 0.65)
 EPSILON = 1e-12
+OUT_OF_SAMPLE_SPLITS = ("validation", "shadow")
 
 
 def calibration_report(
@@ -55,14 +56,51 @@ def calibration_report(
     }
 
 
+def split_calibration_report(
+    *,
+    train_predictions: tuple[PolymarketPolicyPrediction, ...],
+    validation_predictions: tuple[PolymarketPolicyPrediction, ...],
+    shadow_predictions: tuple[PolymarketPolicyPrediction, ...],
+    primary_calibration_split: str = "validation",
+) -> dict[str, Any]:
+    """Build split-specific calibration evidence with an explicit primary split."""
+
+    if primary_calibration_split not in OUT_OF_SAMPLE_SPLITS:
+        raise ValueError("primary_calibration_split must be validation or shadow")
+    split_reports = {
+        "train": calibration_report(train_predictions),
+        "validation": calibration_report(validation_predictions),
+        "shadow": calibration_report(shadow_predictions),
+    }
+    primary = split_reports[primary_calibration_split]
+    return {
+        "schema_version": "bigan-v8-polymarket-policy-split-calibration-v1",
+        "primary_calibration_split": primary_calibration_split,
+        "sample_count": primary["sample_count"],
+        "calibration_error": primary["calibration_error"],
+        "buckets": primary["buckets"],
+        "primary_calibration": primary,
+        "train_calibration": split_reports["train"],
+        "validation_calibration": split_reports["validation"],
+        "shadow_calibration": split_reports["shadow"],
+        "sample_counts_by_split": {
+            split_name: report["sample_count"]
+            for split_name, report in split_reports.items()
+        },
+        **compact_safety_fields(),
+    }
+
+
 def validation_report(
     *,
     validation_predictions: tuple[PolymarketPolicyPrediction, ...],
-    all_predictions: tuple[PolymarketPolicyPrediction, ...],
     train_examples: tuple[PolymarketPolicyExample, ...],
+    evaluation_split: str = "validation",
 ) -> dict[str, Any]:
     """Build validation metrics by family and time-to-close bucket."""
 
+    if evaluation_split not in OUT_OF_SAMPLE_SPLITS:
+        raise ValueError("evaluation_split must be validation or shadow")
     train_baseline = sum(example.target_up_probability for example in train_examples) / len(
         train_examples
     )
@@ -70,16 +108,15 @@ def validation_report(
     naive_brier = _brier_for_constant(validation_predictions, train_baseline)
     by_family = {
         family: _metrics(
-            tuple(row for row in all_predictions if row.market_family == family)
+            tuple(row for row in validation_predictions if row.market_family == family)
         )
         for family in BTC_UPDOWN_MARKET_HORIZONS_MS
-        if any(row.market_family == family for row in all_predictions)
     }
     by_time_to_close = {
         name: _metrics(
             tuple(
                 row
-                for row in all_predictions
+                for row in validation_predictions
                 if lower <= float(row.features.get("time_to_close_seconds", 0.0)) < upper
             )
         )
@@ -88,6 +125,8 @@ def validation_report(
     model_brier = float(validation_metrics["brier_score"])
     return {
         "schema_version": "bigan-v8-polymarket-policy-validation-v1",
+        "evaluation_split": evaluation_split,
+        "out_of_sample_validation": True,
         "validation": validation_metrics,
         "naive_baseline": {
             "probability": train_baseline,
