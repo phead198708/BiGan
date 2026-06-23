@@ -73,6 +73,53 @@ def test_public_http_provider_uses_official_reference_prices_when_present() -> N
     assert resolutions[0]["reference_price_end"] == 65025.0
 
 
+def test_public_http_provider_uses_settled_gamma_outcome_prices_after_round() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=FakePublicFetch(
+            include_reference_prices=False,
+            outcome_prices=("0", "1"),
+        ),
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    resolutions = provider.resolution_rows(markets, config)
+
+    assert len(resolutions) == 1
+    assert "reference_price_start" not in resolutions[0]
+    assert resolutions[0]["resolution_source_type"] == "gamma_outcome_prices"
+    assert resolutions[0]["resolved_outcome"] == "DOWN"
+    assert resolutions[0]["payout_up"] == 0.0
+    assert resolutions[0]["payout_down"] == 1.0
+
+
+def test_public_http_provider_does_not_treat_live_outcome_prices_as_resolution() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=FakePublicFetch(
+            include_reference_prices=False,
+            outcome_prices=("0.57", "0.43"),
+        ),
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    resolutions = provider.resolution_rows(markets, config)
+
+    assert resolutions == []
+
+
 def test_public_http_provider_can_use_rest_orderbook_fallback_when_explicit() -> None:
     provider = PolymarketPublicHTTPRealCorpusProvider(
         current_time_ms=1_700_001_000_000,
@@ -186,17 +233,44 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
     assert fallback_payloads["down-token"]["source_event_type"] == "price_change"
 
 
+def test_public_http_provider_prefers_stream_orderbook_snapshots_when_available() -> None:
+    orderbook_source = FakeStreamOrderBookSource()
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=FakePublicFetch(include_reference_prices=True),
+        orderbook_source=orderbook_source,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    books = provider.orderbook_rows(markets, config)
+
+    assert orderbook_source.requested_token_ids == ("up-token", "down-token")
+    assert len(books) == 4
+    assert {row["available_at_ts"] for row in books} == {
+        1_700_000_000_100,
+        1_700_000_059_100,
+    }
+
+
 class FakePublicFetch:
     def __init__(
         self,
         *,
         include_reference_prices: bool,
+        outcome_prices: tuple[str, str] | None = None,
         fail_clob_books: bool = False,
         fail_coinbase: bool = False,
         fail_kraken: bool = False,
         fail_binance: bool = False,
     ) -> None:
         self.include_reference_prices = include_reference_prices
+        self.outcome_prices = outcome_prices
         self.fail_clob_books = fail_clob_books
         self.fail_coinbase = fail_coinbase
         self.fail_kraken = fail_kraken
@@ -240,6 +314,8 @@ class FakePublicFetch:
             if self.include_reference_prices:
                 payload["referencePriceStart"] = "65000"
                 payload["referencePriceEnd"] = "65025"
+            if self.outcome_prices is not None:
+                payload["outcomePrices"] = json.dumps(list(self.outcome_prices))
             return [payload]
         if "clob.polymarket.com" in parsed.netloc:
             if self.fail_clob_books:
@@ -308,11 +384,58 @@ class FakeOrderBookSource:
         }
 
 
-def _book_payload(*, token_id: str, bid: float, ask: float) -> dict:
-    return {
+class FakeStreamOrderBookSource(FakeOrderBookSource):
+    def book_payload_snapshots(self, token_ids: tuple[str, ...]) -> list[dict[str, dict]]:
+        self.requested_token_ids = token_ids
+        return [
+            {
+                "up-token": _book_payload(
+                    token_id="up-token",
+                    bid=0.56,
+                    ask=0.58,
+                    receive_time=1_700_000_000_100,
+                ),
+                "down-token": _book_payload(
+                    token_id="down-token",
+                    bid=0.42,
+                    ask=0.44,
+                    receive_time=1_700_000_000_100,
+                ),
+            },
+            {
+                "up-token": _book_payload(
+                    token_id="up-token",
+                    bid=0.57,
+                    ask=0.59,
+                    timestamp="1700000059000",
+                    receive_time=1_700_000_059_100,
+                ),
+                "down-token": _book_payload(
+                    token_id="down-token",
+                    bid=0.41,
+                    ask=0.43,
+                    timestamp="1700000059000",
+                    receive_time=1_700_000_059_100,
+                ),
+            },
+        ]
+
+
+def _book_payload(
+    *,
+    token_id: str,
+    bid: float,
+    ask: float,
+    timestamp: str = "1700000000000",
+    receive_time: int | None = None,
+) -> dict:
+    payload = {
         "market": "0xcondition",
         "asset_id": token_id,
-        "timestamp": "1700000000000",
+        "timestamp": timestamp,
         "bids": [{"price": str(bid), "size": "100"}],
         "asks": [{"price": str(ask), "size": "120"}],
     }
+    if receive_time is not None:
+        payload["receive_time"] = receive_time
+    return payload

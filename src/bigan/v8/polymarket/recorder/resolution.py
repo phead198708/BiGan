@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from bigan.v8.polymarket.corpus.contracts import safety_fields
@@ -53,11 +54,49 @@ def validate_resolution_row(
         reasons.add("missing_verified_resolution_source")
     if row.get("reference_price_source") != market.get("reference_price_source"):
         reasons.add("resolution_source_mismatch")
-    if float(row.get("reference_price_start") or 0.0) <= 0.0:
-        reasons.add("invalid_reference_price_start")
-    if float(row.get("reference_price_end") or 0.0) <= 0.0:
-        reasons.add("invalid_reference_price_end")
+    has_reference_prices = (
+        row.get("reference_price_start") is not None
+        and row.get("reference_price_end") is not None
+    )
+    if has_reference_prices:
+        if _optional_positive_float(row.get("reference_price_start")) is None:
+            reasons.add("invalid_reference_price_start")
+        if _optional_positive_float(row.get("reference_price_end")) is None:
+            reasons.add("invalid_reference_price_end")
+    elif not _valid_payout_resolution(row):
+        reasons.add("missing_verified_resolution")
     status = str(row.get("resolution_status") or "")
     if status not in {"normal", "unknown_50_50"}:
         reasons.add("invalid_resolution_status")
     return (None, sorted(reasons)) if reasons else (row, [])
+
+
+def _valid_payout_resolution(row: dict[str, Any]) -> bool:
+    resolved_outcome = str(row.get("resolved_outcome") or "").upper()
+    if resolved_outcome == "UNKNOWN":
+        resolved_outcome = "UNKNOWN_50_50"
+    payout_up = _optional_float(row.get("payout_up"))
+    payout_down = _optional_float(row.get("payout_down"))
+    if payout_up is None or payout_down is None:
+        return False
+    if resolved_outcome == "UP":
+        return (payout_up, payout_down) == (1.0, 0.0)
+    if resolved_outcome == "DOWN":
+        return (payout_up, payout_down) == (0.0, 1.0)
+    if resolved_outcome == "UNKNOWN_50_50":
+        return (payout_up, payout_down) == (0.5, 0.5)
+    return False
+
+
+def _optional_positive_float(value: Any) -> float | None:
+    numeric = _optional_float(value)
+    if numeric is None or numeric <= 0.0 or not math.isfinite(numeric):
+        return None
+    return numeric
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None

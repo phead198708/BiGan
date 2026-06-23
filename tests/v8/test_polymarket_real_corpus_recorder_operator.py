@@ -14,7 +14,12 @@ from bigan.v8.polymarket.recorder import (
 )
 from bigan.v8.polymarket.recorder.btc_reference import mock_btc_feature_candle_rows
 from bigan.v8.polymarket.recorder.market_discovery import discover_mock_market_rows
-from bigan.v8.polymarket.recorder.orderbook_state import mock_orderbook_rows, mock_trade_rows
+from bigan.v8.polymarket.recorder.orderbook_state import (
+    mock_orderbook_rows,
+    mock_trade_rows,
+    sample_times_for_market,
+    validate_market_books,
+)
 from bigan.v8.polymarket.recorder.resolution import mock_resolution_rows
 
 
@@ -234,6 +239,65 @@ def test_non_mock_public_collection_can_complete_with_configured_provider(
     assert recorder_manifest["synthetic_corpus_used"] is False
 
 
+def test_non_mock_public_collection_accepts_causal_off_grid_orderbook_snapshots(
+    tmp_path: Path,
+) -> None:
+    result = record_polymarket_real_corpus(
+        PolymarketRealCorpusRecorderConfig(
+            run_id="real-provider-asof-books",
+            output_dir=tmp_path,
+            market_families=("btc_updown_5m",),
+            mock_public_data=False,
+        ),
+        public_provider=OffGridOrderbookProvider(),
+    )
+
+    assert result.report["training_eligible"] is True
+    assert result.report["phase2_corpus_built"] is True
+    assert result.report["raw_polymarket_market_count"] == 1
+    assert result.report["raw_orderbook_row_count"] == 10
+    assert result.report["reject_reason_counts"] == {}
+    features = _read_jsonl(result.phase2_result.output_dir / "polymarket_feature_rows.jsonl")
+    assert len(features) == 5
+    assert all(row["max_input_ts"] <= row["decision_ts"] for row in features)
+    assert all(row["available_at_ts"] <= row["decision_ts"] for row in features)
+
+
+def test_orderbook_validation_rejects_future_only_snapshots() -> None:
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="future-books",
+        output_dir="/tmp/future-books",
+        market_families=("btc_updown_5m",),
+    )
+    market = discover_mock_market_rows(config)[0]
+    first_sample = sample_times_for_market(market, config)[0]
+    rows = []
+    for outcome, token_id, mid in (
+        ("UP", market["up_token_id"], 0.56),
+        ("DOWN", market["down_token_id"], 0.44),
+    ):
+        rows.append(
+            {
+                "market_id": market["market_id"],
+                "token_id": token_id,
+                "outcome": outcome,
+                "ts": first_sample + 1_000,
+                "available_at_ts": first_sample + 1_000,
+                "bid_price": mid - 0.01,
+                "ask_price": mid + 0.01,
+                "mid_price": mid,
+                "bid_size": 100.0,
+                "ask_size": 100.0,
+                "liquidity_depth": 200.0,
+            }
+        )
+
+    valid, reasons = validate_market_books(market=market, book_rows=rows, config=config)
+
+    assert valid == []
+    assert reasons == ["missing_complete_up_down_orderbook"]
+
+
 def test_non_mock_public_collection_provider_error_fails_closed(
     tmp_path: Path,
 ) -> None:
@@ -335,6 +399,38 @@ class FailingOrderbookProvider(FakeRealPublicProvider):
     ) -> list[dict[str, Any]]:
         del markets, config
         raise RuntimeError("CLOB orderbook endpoint unavailable")
+
+
+class OffGridOrderbookProvider(FakeRealPublicProvider):
+    def orderbook_rows(
+        self,
+        markets: list[dict[str, Any]],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for market in markets[:1]:
+            for sample_index, decision_ts in enumerate(sample_times_for_market(market, config)):
+                book_ts = decision_ts if sample_index == 0 else decision_ts - 1_000
+                for outcome, token_id, mid in (
+                    ("UP", market["up_token_id"], 0.56 + sample_index * 0.01),
+                    ("DOWN", market["down_token_id"], 0.44 - sample_index * 0.01),
+                ):
+                    rows.append(
+                        {
+                            "market_id": market["market_id"],
+                            "token_id": token_id,
+                            "outcome": outcome,
+                            "ts": book_ts,
+                            "available_at_ts": book_ts,
+                            "bid_price": mid - 0.01,
+                            "ask_price": mid + 0.01,
+                            "mid_price": mid,
+                            "bid_size": 100.0,
+                            "ask_size": 100.0,
+                            "liquidity_depth": 200.0,
+                        }
+                    )
+        return rows
 
 
 def _as_real_public_market_row(row: dict[str, Any]) -> dict[str, Any]:

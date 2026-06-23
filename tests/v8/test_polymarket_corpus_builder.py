@@ -179,6 +179,48 @@ def test_rebuilding_from_identical_fixtures_produces_identical_hashes(
         assert first.artifact_hashes[artifact_name] == second.artifact_hashes[artifact_name]
 
 
+def test_builder_accepts_verified_payout_only_resolution_rows(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    resolutions_path = raw_dir / "raw_polymarket_resolutions.jsonl"
+    resolutions = _read_jsonl(resolutions_path)
+    for row in resolutions:
+        if row["market_id"] != "btc5m-up":
+            continue
+        row.pop("reference_price_start")
+        row.pop("reference_price_end")
+        row["resolution_status"] = "normal"
+        row["resolved_outcome"] = "UP"
+        row["payout_up"] = 1.0
+        row["payout_down"] = 0.0
+        row["resolution_source_type"] = "gamma_outcome_prices"
+    _write_jsonl(resolutions_path, resolutions)
+
+    result = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus",
+        )
+    )
+
+    normalized_resolutions = _read_jsonl(
+        result.output_dir / "polymarket_resolution_events.jsonl"
+    )
+    payout_only = next(row for row in normalized_resolutions if row["market_id"] == "btc5m-up")
+    assert payout_only["reference_price_start"] is None
+    assert payout_only["reference_price_end"] is None
+    assert payout_only["resolved_outcome"] == "UP"
+    assert payout_only["payout_up"] == 1.0
+    labels = _read_jsonl(result.output_dir / "polymarket_label_rows.jsonl")
+    settlement_labels = [
+        row
+        for row in labels
+        if row["market_id"] == "btc5m-up" and row["action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+    ]
+    assert settlement_labels
+    assert {row["settlement_payout"] for row in settlement_labels} == {1.0}
+
+
 @pytest.mark.parametrize(
     ("filename", "market_id", "outcome", "patch", "error_match"),
     (

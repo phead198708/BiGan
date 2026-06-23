@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,9 @@ from bigan.v8.polymarket.corpus.labels import build_polymarket_corpus_label_rows
 from bigan.v8.polymarket.corpus.splits import build_polymarket_train_shadow_split
 from bigan.v8.polymarket.rules import (
     PolymarketResolutionRule,
+    PolymarketResolvedOutcome,
     build_btc_updown_resolution_rule,
+    payout_for_resolved_outcome,
     resolve_polymarket_rule,
 )
 
@@ -478,31 +481,52 @@ def _normalize_resolutions(
         if market is None:
             continue
         rule = rules[market.market_id]
-        resolved = resolve_polymarket_rule(
-            rule,
-            reference_price_start=float(row["reference_price_start"]),
-            reference_price_end=float(row["reference_price_end"]),
-            resolution_status=str(row.get("resolution_status") or "normal"),  # type: ignore[arg-type]
-        )
+        start = _optional_positive_float(row.get("reference_price_start"))
+        end = _optional_positive_float(row.get("reference_price_end"))
+        status = str(row.get("resolution_status") or "normal")
+        if (start is None) != (end is None):
+            raise ValueError("reference prices must both be present or both be null")
+        if start is not None and end is not None:
+            resolved = resolve_polymarket_rule(
+                rule,
+                reference_price_start=start,
+                reference_price_end=end,
+                resolution_status=status,  # type: ignore[arg-type]
+            )
+            reference_price_start = resolved.reference_price_start
+            reference_price_end = resolved.reference_price_end
+            resolved_outcome = resolved.resolved_outcome
+            payout_up = resolved.payout_up
+            payout_down = resolved.payout_down
+            resolution_status = resolved.resolution_status
+        else:
+            resolved_outcome = _resolved_outcome_from_row(row)
+            payout_up, payout_down = _resolution_payouts_from_row(
+                row=row,
+                resolved_outcome=resolved_outcome,
+            )
+            reference_price_start = None
+            reference_price_end = None
+            resolution_status = status
         events.append(
             PolymarketCorpusResolutionEvent(
                 market_id=market.market_id,
                 condition_id=market.condition_id,
                 slug=market.slug,
                 market_family=market.market_family,
-                reference_price_start=resolved.reference_price_start,
-                reference_price_end=resolved.reference_price_end,
-                resolution_status=resolved.resolution_status,  # type: ignore[arg-type]
-                resolved_outcome=resolved.resolved_outcome,
-                payout_up=resolved.payout_up,
-                payout_down=resolved.payout_down,
+                reference_price_start=reference_price_start,
+                reference_price_end=reference_price_end,
+                resolution_status=resolution_status,  # type: ignore[arg-type]
+                resolved_outcome=resolved_outcome,
+                payout_up=payout_up,
+                payout_down=payout_down,
                 resolution_rule_sha256=rule.raw_rule_sha256,
                 raw_resolution_sha256=stable_hash(
                     {
                         **row,
-                        "resolved_outcome": resolved.resolved_outcome,
-                        "payout_up": resolved.payout_up,
-                        "payout_down": resolved.payout_down,
+                        "resolved_outcome": resolved_outcome,
+                        "payout_up": payout_up,
+                        "payout_down": payout_down,
                     }
                 ),
                 paper_only=row.get("paper_only", True) is True,
@@ -516,6 +540,46 @@ def _normalize_resolutions(
     if len(events) != len(markets):
         raise ValueError("every market must have one resolution event")
     return tuple(sorted(events, key=lambda item: (item.market_id, item.resolved_outcome)))
+
+
+def _resolved_outcome_from_row(row: dict[str, Any]) -> PolymarketResolvedOutcome:
+    resolved_outcome = str(row.get("resolved_outcome") or "").upper()
+    if resolved_outcome == "UNKNOWN":
+        resolved_outcome = "UNKNOWN_50_50"
+    if resolved_outcome not in {"UP", "DOWN", "UNKNOWN_50_50"}:
+        raise ValueError("payout-only resolution requires resolved_outcome")
+    return resolved_outcome  # type: ignore[return-value]
+
+
+def _resolution_payouts_from_row(
+    *,
+    row: dict[str, Any],
+    resolved_outcome: PolymarketResolvedOutcome,
+) -> tuple[float, float]:
+    expected_up, expected_down = payout_for_resolved_outcome(resolved_outcome)
+    payout_up = _optional_float(row.get("payout_up"))
+    payout_down = _optional_float(row.get("payout_down"))
+    if payout_up is None and payout_down is None:
+        return expected_up, expected_down
+    if payout_up != expected_up or payout_down != expected_down:
+        raise ValueError("resolution payout vector does not match resolved_outcome")
+    return payout_up, payout_down
+
+
+def _optional_positive_float(value: Any) -> float | None:
+    numeric = _optional_float(value)
+    if numeric is None:
+        return None
+    if numeric <= 0.0 or not math.isfinite(numeric):
+        raise ValueError("reference prices must be positive")
+    return numeric
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _corpus_summary(

@@ -210,10 +210,42 @@ class PolymarketPublicHTTPRealCorpusProvider:
         markets: list[dict[str, Any]],
         config: PolymarketRealCorpusRecorderConfig,
     ) -> list[dict[str, Any]]:
-        del config
         if self.orderbook_source is not None:
+            rows = self._orderbook_rows_from_stream_source(markets, config)
+            if rows:
+                return rows
             return self._orderbook_rows_from_source(markets)
         return self._orderbook_rows_from_rest(markets)
+
+    def _orderbook_rows_from_stream_source(
+        self,
+        markets: list[dict[str, Any]],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> list[dict[str, Any]]:
+        del config
+        snapshot_getter = getattr(self.orderbook_source, "book_payload_snapshots", None)
+        if not callable(snapshot_getter):
+            return []
+        snapshots = snapshot_getter(_token_ids_for_markets(markets))
+        rows: list[dict[str, Any]] = []
+        for payloads in snapshots:
+            for market in markets:
+                for outcome, token_id in (
+                    ("UP", str(market["up_token_id"])),
+                    ("DOWN", str(market["down_token_id"])),
+                ):
+                    payload = payloads.get(token_id)
+                    if payload is None:
+                        continue
+                    row = self._normalize_book_payload(
+                        market=market,
+                        outcome=outcome,
+                        token_id=token_id,
+                        payload=payload,
+                    )
+                    if row is not None:
+                        rows.append(row)
+        return rows
 
     def _orderbook_rows_from_source(self, markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
         payloads = self.orderbook_source.book_payloads(_token_ids_for_markets(markets))
@@ -443,18 +475,39 @@ class PolymarketPublicHTTPRealCorpusProvider:
                 or raw_payload.get("reference_price_at_end")
             )
             if start is None or end is None:
-                continue
-            rows.append(
-                {
-                    "market_id": market["market_id"],
-                    "reference_price_start": start,
-                    "reference_price_end": end,
-                    "reference_price_source": market["reference_price_source"],
-                    "resolution_status": _resolution_status_from_payload(raw_payload),
-                    "raw_resolution_text": str(raw_payload.get("description") or ""),
-                    **safety_fields(),
-                }
-            )
+                payout_resolution = _payout_resolution_from_gamma_payload(
+                    payload=raw_payload,
+                    market=market,
+                    current_time_ms=self._current_time_ms(),
+                )
+                if payout_resolution is None:
+                    continue
+                rows.append(
+                    {
+                        "market_id": market["market_id"],
+                        "reference_price_source": market["reference_price_source"],
+                        "resolution_status": payout_resolution["resolution_status"],
+                        "resolved_outcome": payout_resolution["resolved_outcome"],
+                        "payout_up": payout_resolution["payout_up"],
+                        "payout_down": payout_resolution["payout_down"],
+                        "resolution_source_type": "gamma_outcome_prices",
+                        "raw_resolution_text": str(raw_payload.get("description") or ""),
+                        **safety_fields(),
+                    }
+                )
+            else:
+                rows.append(
+                    {
+                        "market_id": market["market_id"],
+                        "reference_price_start": start,
+                        "reference_price_end": end,
+                        "reference_price_source": market["reference_price_source"],
+                        "resolution_status": _resolution_status_from_payload(raw_payload),
+                        "resolution_source_type": "reference_prices",
+                        "raw_resolution_text": str(raw_payload.get("description") or ""),
+                        **safety_fields(),
+                    }
+                )
         return rows
 
     def _discover_recent_btc_updown_slugs(self) -> tuple[str, ...]:
@@ -558,12 +611,14 @@ class PolymarketPublicHTTPRealCorpusProvider:
         best_bid_price, best_bid_size = max(bids, key=lambda level: level[0])
         best_ask_price, best_ask_size = min(asks, key=lambda level: level[0])
         timestamp = int(payload.get("timestamp") or self._current_time_ms())
+        receive_time = int(payload.get("receive_time") or timestamp)
+        available_at_ts = max(timestamp, receive_time)
         return {
             "market_id": market["market_id"],
             "token_id": token_id,
             "outcome": outcome,
             "ts": timestamp,
-            "available_at_ts": timestamp,
+            "available_at_ts": available_at_ts,
             "bid_price": best_bid_price,
             "ask_price": best_ask_price,
             "mid_price": round((best_bid_price + best_ask_price) / 2.0, 8),
@@ -735,6 +790,23 @@ class PolymarketCLOBWebSocketOrderBookSource:
                 reason_codes=("polymarket_clob_ws_orderbook_collection_failed",),
             ) from exc
 
+    def book_payload_snapshots(
+        self,
+        token_ids: tuple[str, ...],
+    ) -> list[dict[str, dict[str, Any]]]:
+        token_ids = tuple(dict.fromkeys(str(token_id) for token_id in token_ids if str(token_id)))
+        if not token_ids:
+            return []
+        try:
+            return asyncio.run(self._collect_book_payload_snapshots(token_ids))
+        except RealCorpusPublicProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise RealCorpusPublicProviderError(
+                f"CLOB websocket orderbook snapshot collection failed: {exc}",
+                reason_codes=("polymarket_clob_ws_orderbook_collection_failed",),
+            ) from exc
+
     async def _collect_book_payloads(
         self,
         token_ids: tuple[str, ...],
@@ -789,6 +861,72 @@ class PolymarketCLOBWebSocketOrderBookSource:
                 reason_codes=("polymarket_clob_ws_no_orderbooks",),
             )
         return {token_id: merged[token_id] for token_id in token_ids if token_id in merged}
+
+    async def _collect_book_payload_snapshots(
+        self,
+        token_ids: tuple[str, ...],
+    ) -> list[dict[str, dict[str, Any]]]:
+        target_tokens = set(token_ids)
+        book_payloads: dict[str, dict[str, Any]] = {}
+        fallback_payloads: dict[str, dict[str, Any]] = {}
+        snapshots: list[dict[str, dict[str, Any]]] = []
+        deadline = time.monotonic() + self.timeout_seconds
+        try:
+            async with websockets.connect(
+                self.ws_url,
+                ping_interval=None,
+                ping_timeout=None,
+                close_timeout=5,
+                max_size=2**24,
+            ) as ws:
+                await ws.send(
+                    orjson.dumps(
+                        {
+                            "assets_ids": sorted(target_tokens),
+                            "type": "market",
+                            "custom_feature_enabled": self.custom_feature_enabled,
+                        }
+                    )
+                )
+                while time.monotonic() < deadline:
+                    timeout = max(0.001, deadline - time.monotonic())
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                    except TimeoutError:
+                        break
+                    receive_time_ms = int(time.time() * 1000)
+                    before_merged = dict(fallback_payloads)
+                    before_merged.update(book_payloads)
+                    for payload in _decode_market_ws_payloads(raw):
+                        self._update_payload_maps(
+                            payload=payload,
+                            receive_time_ms=receive_time_ms,
+                            target_tokens=target_tokens,
+                            book_payloads=book_payloads,
+                            fallback_payloads=fallback_payloads,
+                        )
+                    merged = dict(fallback_payloads)
+                    merged.update(book_payloads)
+                    if merged and merged != before_merged:
+                        snapshots.append(
+                            {
+                                token_id: dict(merged[token_id])
+                                for token_id in token_ids
+                                if token_id in merged
+                            }
+                        )
+        except Exception as exc:  # noqa: BLE001
+            raise RealCorpusPublicProviderError(
+                f"CLOB websocket orderbook snapshot collection failed: {exc}",
+                reason_codes=("polymarket_clob_ws_orderbook_collection_failed",),
+            ) from exc
+
+        if not snapshots:
+            raise RealCorpusPublicProviderError(
+                "CLOB websocket emitted no orderbook snapshots before timeout.",
+                reason_codes=("polymarket_clob_ws_no_orderbooks",),
+            )
+        return snapshots
 
     def _update_payload_maps(
         self,
@@ -1070,3 +1208,52 @@ def _resolution_status_from_payload(payload: dict[str, Any]) -> str:
     if len(prices) == 2 and all(str(price) == "0.5" for price in prices):
         return "unknown_50_50"
     return "normal"
+
+
+def _payout_resolution_from_gamma_payload(
+    *,
+    payload: dict[str, Any],
+    market: dict[str, Any],
+    current_time_ms: int,
+) -> dict[str, Any] | None:
+    if current_time_ms < int(market["market_end_ts"]):
+        return None
+    outcomes = _json_list(payload.get("outcomes"))
+    prices = [_optional_float(value) for value in _json_list(payload.get("outcomePrices"))]
+    if len(outcomes) != 2 or len(prices) != 2 or any(price is None for price in prices):
+        return None
+    payout_by_outcome = {
+        str(outcome).strip().upper(): float(price)
+        for outcome, price in zip(outcomes, prices, strict=True)
+        if str(outcome).strip().upper() in {"UP", "DOWN"} and price is not None
+    }
+    if set(payout_by_outcome) != {"UP", "DOWN"}:
+        return None
+    up = payout_by_outcome["UP"]
+    down = payout_by_outcome["DOWN"]
+    if _near_payout(up, 1.0) and _near_payout(down, 0.0):
+        return {
+            "resolution_status": "normal",
+            "resolved_outcome": "UP",
+            "payout_up": 1.0,
+            "payout_down": 0.0,
+        }
+    if _near_payout(up, 0.0) and _near_payout(down, 1.0):
+        return {
+            "resolution_status": "normal",
+            "resolved_outcome": "DOWN",
+            "payout_up": 0.0,
+            "payout_down": 1.0,
+        }
+    if _near_payout(up, 0.5) and _near_payout(down, 0.5):
+        return {
+            "resolution_status": "unknown_50_50",
+            "resolved_outcome": "UNKNOWN_50_50",
+            "payout_up": 0.5,
+            "payout_down": 0.5,
+        }
+    return None
+
+
+def _near_payout(value: float, expected: float) -> bool:
+    return abs(value - expected) <= 1e-9

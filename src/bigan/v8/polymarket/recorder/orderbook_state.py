@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
 from typing import Any
 
 from bigan.v8.polymarket.corpus.contracts import safety_fields
@@ -114,7 +113,7 @@ def validate_market_books(
         str(market["up_token_id"]): "UP",
         str(market["down_token_id"]): "DOWN",
     }
-    by_sample: dict[int, dict[str, dict[str, Any]]] = defaultdict(dict)
+    by_outcome: dict[str, list[dict[str, Any]]] = {"UP": [], "DOWN": []}
     for row in book_rows:
         if row.get("market_id") != market["market_id"]:
             continue
@@ -127,24 +126,35 @@ def validate_market_books(
         if outcome != expected_outcome:
             reasons.add("token_id_outcome_mismatch")
             continue
-        decision_ts = int(row["ts"])
-        if int(row.get("available_at_ts") or decision_ts) > decision_ts:
+        book_ts = int(row["ts"])
+        available_at_ts = int(row.get("available_at_ts") or book_ts)
+        if available_at_ts < book_ts:
             reasons.add("stale_or_future_orderbook")
             continue
         if not _valid_book_prices(row):
             reasons.add("invalid_orderbook_prices")
             continue
-        by_sample[decision_ts][expected_outcome] = row
+        by_outcome[expected_outcome].append(row)
+    for rows in by_outcome.values():
+        rows.sort(key=lambda item: (int(item["ts"]), int(item.get("available_at_ts") or item["ts"])))
+    policy = config.resolved_sampling_policy_seconds()
+    max_book_age_ms = policy[str(market["market_family"])] * 1000
+    valid_rows: list[dict[str, Any]] = []
     for decision_ts in sample_times_for_market(market, config):
-        if set(by_sample.get(decision_ts, {})) != {"UP", "DOWN"}:
+        sampled = {
+            outcome: _latest_causal_book_for_sample(
+                rows=rows,
+                decision_ts=decision_ts,
+                max_book_age_ms=max_book_age_ms,
+            )
+            for outcome, rows in by_outcome.items()
+        }
+        if sampled["UP"] is None or sampled["DOWN"] is None:
             reasons.add("missing_complete_up_down_orderbook")
+            continue
+        valid_rows.extend([sampled["UP"], sampled["DOWN"]])
     if reasons:
         return [], sorted(reasons)
-    valid_rows = [
-        by_sample[decision_ts][outcome]
-        for decision_ts in sample_times_for_market(market, config)
-        for outcome in ("UP", "DOWN")
-    ]
     return valid_rows, []
 
 
@@ -194,6 +204,22 @@ def _valid_book_prices(row: dict[str, Any]) -> bool:
         and _finite_non_negative(row.get("ask_size"))
         and _finite_non_negative(row.get("liquidity_depth"))
     )
+
+
+def _latest_causal_book_for_sample(
+    *,
+    rows: list[dict[str, Any]],
+    decision_ts: int,
+    max_book_age_ms: int,
+) -> dict[str, Any] | None:
+    eligible = [
+        row
+        for row in rows
+        if int(row["ts"]) <= decision_ts
+        and int(row.get("available_at_ts") or row["ts"]) <= decision_ts
+        and decision_ts - int(row["ts"]) < max_book_age_ms
+    ]
+    return eligible[-1] if eligible else None
 
 
 def _finite_positive(value: Any) -> bool:

@@ -306,8 +306,8 @@ class PolymarketCorpusResolutionEvent:
     condition_id: str
     slug: str
     market_family: CorpusMarketFamily
-    reference_price_start: float
-    reference_price_end: float
+    reference_price_start: float | None
+    reference_price_end: float | None
     resolution_status: CorpusResolutionStatus
     resolved_outcome: str
     payout_up: float
@@ -333,8 +333,29 @@ class PolymarketCorpusResolutionEvent:
             raise ValueError("unsupported resolution_status")
         if self.resolved_outcome not in ("UP", "DOWN", "UNKNOWN_50_50"):
             raise ValueError("unsupported resolved_outcome")
-        if self.reference_price_start <= 0.0 or self.reference_price_end <= 0.0:
+        if (self.reference_price_start is None) != (self.reference_price_end is None):
+            raise ValueError("reference prices must both be present or both be null")
+        if (
+            self.reference_price_start is not None
+            and self.reference_price_end is not None
+            and (self.reference_price_start <= 0.0 or self.reference_price_end <= 0.0)
+        ):
             raise ValueError("reference prices must be positive")
+        if self.resolved_outcome == "UNKNOWN_50_50" and self.resolution_status != "unknown_50_50":
+            raise ValueError("UNKNOWN_50_50 requires unknown_50_50 status")
+        if not 0.0 <= self.payout_up <= 1.0:
+            raise ValueError("payout_up must be in [0, 1]")
+        if not 0.0 <= self.payout_down <= 1.0:
+            raise ValueError("payout_down must be in [0, 1]")
+        if self.resolved_outcome == "UP" and (self.payout_up, self.payout_down) != (1.0, 0.0):
+            raise ValueError("UP resolution must pay UP=1 and DOWN=0")
+        if self.resolved_outcome == "DOWN" and (self.payout_up, self.payout_down) != (0.0, 1.0):
+            raise ValueError("DOWN resolution must pay UP=0 and DOWN=1")
+        if self.resolved_outcome == "UNKNOWN_50_50" and (
+            self.payout_up,
+            self.payout_down,
+        ) != (0.5, 0.5):
+            raise ValueError("UNKNOWN_50_50 resolution must pay both outcomes 0.5")
         if not looks_like_sha256(self.resolution_rule_sha256):
             raise ValueError("resolution_rule_sha256 must be SHA-256")
         if not looks_like_sha256(self.raw_resolution_sha256):
