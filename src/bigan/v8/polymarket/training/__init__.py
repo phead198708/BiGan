@@ -27,6 +27,15 @@ from bigan.v8.polymarket.training.model import (
     predict_polymarket_policy_examples,
     train_polymarket_probability_model,
 )
+from bigan.v8.polymarket.training.real_corpus_gate import (
+    DEFAULT_REAL_CORPUS_MODEL_VERSION,
+    DEFAULT_REAL_CORPUS_TRAINING_RUN_ID,
+    POLYMARKET_REAL_CORPUS_RETRAINING_GATE_PHASE,
+    POLYMARKET_REAL_CORPUS_RETRAINING_GATE_SCHEMA_VERSION,
+    PolymarketRealCorpusRetrainingGateConfig,
+    PolymarketRealCorpusRetrainingGateResult,
+    run_polymarket_real_corpus_retraining_gate,
+)
 
 
 def run_polymarket_policy_training(*args, **kwargs):
@@ -41,19 +50,26 @@ __all__ = [
     "POLYMARKET_POLICY_SCHEMA_VERSION",
     "POLYMARKET_POLICY_SIGNAL_SOURCE_TRAINED_MODEL",
     "POLYMARKET_POLICY_TRAINING_PHASE",
+    "POLYMARKET_REAL_CORPUS_RETRAINING_GATE_PHASE",
+    "POLYMARKET_REAL_CORPUS_RETRAINING_GATE_SCHEMA_VERSION",
     "TARGET_LABEL_ACTION",
     "TIME_TO_CLOSE_BUCKETS",
+    "DEFAULT_REAL_CORPUS_MODEL_VERSION",
+    "DEFAULT_REAL_CORPUS_TRAINING_RUN_ID",
     "PolymarketPolicyDataset",
     "PolymarketPolicyExample",
     "PolymarketPolicyModel",
     "PolymarketPolicyPrediction",
     "PolymarketPolicyTrainingConfig",
     "PolymarketPolicyTrainingResult",
+    "PolymarketRealCorpusRetrainingGateConfig",
+    "PolymarketRealCorpusRetrainingGateResult",
     "calibration_report",
     "dataset_profile",
     "load_polymarket_policy_dataset",
     "predict_polymarket_policy_examples",
     "run_polymarket_policy_training",
+    "run_polymarket_real_corpus_retraining_gate",
     "split_calibration_report",
     "train_polymarket_probability_model",
     "validation_report",

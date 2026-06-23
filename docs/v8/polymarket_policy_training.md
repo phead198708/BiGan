@@ -211,3 +211,8 @@ PYTHONPATH=src python examples/v8/train_polymarket_btc_policy.py \
 
 The default smoke path generates deterministic Phase 2 fixture corpus data first,
 then trains and replays the policy model.
+
+For real public-data recorder bundles, use
+`examples/v8/run_polymarket_real_corpus_retraining_gate.py` instead. That gate
+rejects mocked/synthetic recorder bundles before training and augments the model
+manifest with real-history provenance fields for #134.

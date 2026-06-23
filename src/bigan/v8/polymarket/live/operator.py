@@ -333,6 +333,21 @@ def _verify_model_manifest(*, model_manifest: dict[str, Any], model_path: Path) 
         raise ValueError("policy_signal_source must be trained_model")
     if model_manifest.get("direct_pnl_optimization") is not False:
         raise ValueError("direct_pnl_optimization must be false")
+    if model_manifest.get("real_historical_corpus_used") is True:
+        for field_name in ("policy_dataset_hash", "split_hash"):
+            value = str(model_manifest.get(field_name, ""))
+            if not looks_like_sha256(value):
+                raise ValueError(f"{field_name} must be SHA-256")
+        if model_manifest.get("manual_live_evidence_eligible") is not True:
+            raise ValueError("manual_live_evidence_eligible must be true")
+        for field_name in (
+            "fixture_corpus_used",
+            "synthetic_corpus_used",
+            "fixture_model_used",
+            "synthetic_fixture_signal_used",
+        ):
+            if model_manifest.get(field_name) is not False:
+                raise ValueError(f"{field_name} must be false")
     for field_name, expected in compact_safety_fields().items():
         if model_manifest.get(field_name) is not expected:
             raise ValueError(f"model manifest violates {field_name}")
@@ -686,6 +701,19 @@ def _operator_manifest(
         "model_manifest_path": None if model_manifest_path is None else model_manifest_path.name,
         "model_manifest_sha256": model_manifest_sha256,
         "model_version": model_manifest.get("model_version"),
+        "real_historical_corpus_used": model_manifest.get(
+            "real_historical_corpus_used", False
+        ),
+        "fixture_corpus_used": model_manifest.get("fixture_corpus_used", False),
+        "synthetic_corpus_used": model_manifest.get("synthetic_corpus_used", False),
+        "fixture_model_used": model_manifest.get("fixture_model_used", False),
+        "manual_live_evidence_eligible": model_manifest.get(
+            "manual_live_evidence_eligible", False
+        ),
+        "policy_dataset_hash": model_manifest.get(
+            "policy_dataset_hash", model_manifest.get("dataset_hash")
+        ),
+        "split_hash": model_manifest.get("split_hash"),
         "market_families": list(config.market_families),
         "started_at": config.started_at,
         "ended_at": ended_at,
@@ -736,6 +764,13 @@ def _github_comment_payload(
             "run_id",
             "commit_sha",
             "model_manifest_sha256",
+            "real_historical_corpus_used",
+            "fixture_corpus_used",
+            "synthetic_corpus_used",
+            "fixture_model_used",
+            "manual_live_evidence_eligible",
+            "policy_dataset_hash",
+            "split_hash",
             "market_families",
             "started_at",
             "ended_at",
