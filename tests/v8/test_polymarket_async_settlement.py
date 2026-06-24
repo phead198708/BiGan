@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,10 @@ from bigan.v8.polymarket.recorder import (
 )
 from bigan.v8.polymarket.recorder.btc_reference import mock_btc_feature_candle_rows
 from bigan.v8.polymarket.recorder.market_discovery import discover_mock_market_rows
-from bigan.v8.polymarket.recorder.orderbook_state import mock_orderbook_rows, mock_trade_rows
+from bigan.v8.polymarket.recorder.orderbook_state import (
+    mock_orderbook_rows,
+    mock_trade_rows,
+)
 
 
 def test_pending_capture_does_not_call_resolution_or_export(tmp_path: Path) -> None:
@@ -37,6 +41,30 @@ def test_pending_capture_does_not_call_resolution_or_export(tmp_path: Path) -> N
     assert result.report["training_eligible"] is False
     assert result.report["exported_training_corpus_dir"] is None
     assert (result.raw_dir / "raw_polymarket_resolutions.jsonl").read_text() == ""
+
+
+def test_pending_capture_explains_orderbook_rejection_without_raw_book_dump(
+    tmp_path: Path,
+) -> None:
+    provider = AsyncSettlementMissingBookProvider(resolved=False)
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="pending-missing-book",
+        output_dir=tmp_path,
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    result = capture_polymarket_pending_round(config, public_provider=provider)
+
+    assert result.report["capture_status"] == "blocked_fail_closed"
+    assert result.report["reject_reason_counts"] == {"missing_complete_up_down_orderbook": 1}
+    rejected = _read_jsonl(result.artifact_paths["pending_round_rejected_rows"])
+    detail = rejected[0]["reason_details"]["orderbook_completeness"]
+    assert detail["raw_book_rows_persisted"] is False
+    assert detail["valid_book_rows_by_outcome"]["UP"] > 0
+    assert detail["valid_book_rows_by_outcome"]["DOWN"] == 0
+    assert detail["explanation"] == "No valid DOWN orderbook rows were available for this market."
+    assert "raw_rows" not in detail
 
 
 def test_pending_finalization_waits_for_resolution_before_export(tmp_path: Path) -> None:
@@ -166,6 +194,19 @@ class AsyncSettlementFakeProvider:
         ]
 
 
+class AsyncSettlementMissingBookProvider(AsyncSettlementFakeProvider):
+    def orderbook_rows(
+        self,
+        markets: list[dict[str, Any]],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in mock_orderbook_rows(markets, config)
+            if row.get("outcome") == "UP"
+        ]
+
+
 def _as_real_public_market_row(row: dict[str, Any]) -> dict[str, Any]:
     market = dict(row)
     market["raw_market_sha256"] = canonical_json_sha256(
@@ -177,3 +218,11 @@ def _as_real_public_market_row(row: dict[str, Any]) -> dict[str, Any]:
     )
     market["raw_public_payload"] = {"mock_public_data": False}
     return market
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]

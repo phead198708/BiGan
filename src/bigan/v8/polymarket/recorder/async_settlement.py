@@ -30,6 +30,7 @@ from bigan.v8.polymarket.recorder.operator import (
     _validate_market_row,
 )
 from bigan.v8.polymarket.recorder.orderbook_state import (
+    orderbook_failure_explanation,
     validate_market_books,
     validate_trade_rows,
 )
@@ -136,7 +137,18 @@ def capture_polymarket_pending_round(
         )
         reasons = sorted(set(market_reasons + book_reasons + trade_reasons))
         if reasons:
-            rejected_rows.append(_rejected_market(market, reasons))
+            rejected_rows.append(
+                _rejected_market(
+                    market,
+                    reasons,
+                    reason_details=_reason_details_for_capture_rejection(
+                        market=market,
+                        book_rows=book_candidates,
+                        config=config,
+                        book_reasons=book_reasons,
+                    ),
+                )
+            )
             continue
         accepted_markets.append(market)
         raw_payloads["raw_polymarket_markets.jsonl"].append(_raw_market_row(market))
@@ -532,12 +544,46 @@ def _write_raw_files(raw_dir: Path, raw_payloads: dict[str, list[dict[str, Any]]
         _write_jsonl(raw_dir / filename, raw_payloads[filename])
 
 
-def _rejected_market(market: dict[str, Any], reasons: list[str]) -> dict[str, Any]:
-    return {
+def _rejected_market(
+    market: dict[str, Any],
+    reasons: list[str],
+    *,
+    reason_details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    row = {
         "market_id": market.get("market_id"),
         "slug": market.get("slug"),
         "market_family": market.get("market_family"),
         "reject_reasons": sorted(set(reasons)),
+    }
+    if reason_details:
+        row["reason_details"] = reason_details
+    return row
+
+
+def _reason_details_for_capture_rejection(
+    *,
+    market: dict[str, Any],
+    book_rows: list[dict[str, Any]],
+    config: PolymarketRealCorpusRecorderConfig,
+    book_reasons: list[str],
+) -> dict[str, Any] | None:
+    orderbook_reasons = {
+        "missing_complete_up_down_orderbook",
+        "insufficient_decision_timestamps",
+        "unknown_token_id",
+        "token_id_outcome_mismatch",
+        "stale_or_future_orderbook",
+        "invalid_orderbook_prices",
+    }
+    if not (set(book_reasons) & orderbook_reasons):
+        return None
+    return {
+        "orderbook_completeness": orderbook_failure_explanation(
+            market=market,
+            book_rows=book_rows,
+            config=config,
+        )
     }
 
 

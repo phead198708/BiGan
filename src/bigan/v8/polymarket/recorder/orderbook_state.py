@@ -167,6 +167,111 @@ def validate_market_books(
     return valid_rows, []
 
 
+def orderbook_failure_explanation(
+    *,
+    market: dict[str, Any],
+    book_rows: list[dict[str, Any]],
+    config: PolymarketRealCorpusRecorderConfig,
+) -> dict[str, Any]:
+    """Return aggregate book completeness diagnostics without raw book data."""
+
+    expected_tokens = {
+        str(market["up_token_id"]): "UP",
+        str(market["down_token_id"]): "DOWN",
+    }
+    by_outcome: dict[str, list[dict[str, Any]]] = {"UP": [], "DOWN": []}
+    invalid_counts = {
+        "unknown_token_id": 0,
+        "token_id_outcome_mismatch": 0,
+        "invalid_book_timestamp": 0,
+        "stale_or_future_orderbook": 0,
+        "invalid_orderbook_prices": 0,
+    }
+    matched_market_row_count = 0
+    for row in book_rows:
+        if row.get("market_id") != market["market_id"]:
+            continue
+        matched_market_row_count += 1
+        token_id = str(row.get("token_id") or "")
+        expected_outcome = expected_tokens.get(token_id)
+        if expected_outcome is None:
+            invalid_counts["unknown_token_id"] += 1
+            continue
+        outcome = str(row.get("outcome") or "").upper()
+        if outcome != expected_outcome:
+            invalid_counts["token_id_outcome_mismatch"] += 1
+            continue
+        try:
+            book_ts = int(row["ts"])
+            available_at_ts = int(row.get("available_at_ts") or book_ts)
+        except (KeyError, TypeError, ValueError):
+            invalid_counts["invalid_book_timestamp"] += 1
+            continue
+        if available_at_ts < book_ts:
+            invalid_counts["stale_or_future_orderbook"] += 1
+            continue
+        if not _valid_book_prices(row):
+            invalid_counts["invalid_orderbook_prices"] += 1
+            continue
+        by_outcome[expected_outcome].append(row)
+    for rows in by_outcome.values():
+        rows.sort(key=lambda item: (int(item["ts"]), int(item.get("available_at_ts") or item["ts"])))
+
+    policy = config.resolved_sampling_policy_seconds()
+    max_book_age_ms = policy[str(market["market_family"])] * 1000
+    required_sample_times = _required_book_sample_times(
+        market=market,
+        config=config,
+        by_outcome=by_outcome,
+    )
+    complete_sample_count = 0
+    missing_by_outcome = {"UP": 0, "DOWN": 0}
+    for decision_ts in required_sample_times:
+        sampled = {
+            outcome: _latest_causal_book_for_sample(
+                rows=rows,
+                decision_ts=decision_ts,
+                max_book_age_ms=max_book_age_ms,
+            )
+            for outcome, rows in by_outcome.items()
+        }
+        if sampled["UP"] is not None and sampled["DOWN"] is not None:
+            complete_sample_count += 1
+            continue
+        if sampled["UP"] is None:
+            missing_by_outcome["UP"] += 1
+        if sampled["DOWN"] is None:
+            missing_by_outcome["DOWN"] += 1
+
+    valid_counts_by_outcome = {
+        outcome: len(rows) for outcome, rows in sorted(by_outcome.items())
+    }
+    min_required = 2
+    return {
+        "type": "orderbook_completeness",
+        "explanation": _orderbook_failure_message(
+            valid_counts_by_outcome=valid_counts_by_outcome,
+            required_sample_count=len(required_sample_times),
+            complete_sample_count=complete_sample_count,
+            missing_by_outcome=missing_by_outcome,
+            min_required=min_required,
+        ),
+        "candidate_book_row_count": len(book_rows),
+        "matched_market_book_row_count": matched_market_row_count,
+        "valid_book_rows_by_outcome": valid_counts_by_outcome,
+        "invalid_book_reason_counts": {
+            reason: count for reason, count in invalid_counts.items() if count
+        },
+        "required_decision_timestamp_count": len(required_sample_times),
+        "complete_decision_timestamp_count": complete_sample_count,
+        "missing_complete_decision_timestamps_by_outcome": {
+            outcome: count for outcome, count in missing_by_outcome.items() if count
+        },
+        "min_required_complete_decision_timestamps": min_required,
+        "raw_book_rows_persisted": False,
+    }
+
+
 def validate_trade_rows(
     *,
     market: dict[str, Any],
@@ -274,6 +379,40 @@ def _collection_end_ts_for_live_rows(
     if by_outcome_collection_ends:
         return min(by_outcome_collection_ends)
     return int(market["market_end_ts"])
+
+
+def _orderbook_failure_message(
+    *,
+    valid_counts_by_outcome: dict[str, int],
+    required_sample_count: int,
+    complete_sample_count: int,
+    missing_by_outcome: dict[str, int],
+    min_required: int,
+) -> str:
+    if valid_counts_by_outcome["UP"] == 0 and valid_counts_by_outcome["DOWN"] == 0:
+        return "No valid UP or DOWN orderbook rows were available for this market."
+    if valid_counts_by_outcome["UP"] == 0:
+        return "No valid UP orderbook rows were available for this market."
+    if valid_counts_by_outcome["DOWN"] == 0:
+        return "No valid DOWN orderbook rows were available for this market."
+    if required_sample_count < min_required:
+        return (
+            "Orderbook rows were available, but they covered fewer than "
+            f"{min_required} required decision timestamps."
+        )
+    if complete_sample_count < min_required:
+        missing = ", ".join(
+            f"{outcome} missing at {count} timestamp(s)"
+            for outcome, count in sorted(missing_by_outcome.items())
+            if count
+        )
+        suffix = f" ({missing})." if missing else "."
+        return (
+            "Orderbook rows were available, but fewer than "
+            f"{min_required} complete UP/DOWN decision timestamps could be formed"
+            f"{suffix}"
+        )
+    return "Orderbook rows failed validation before a complete causal book could be formed."
 
 
 def _finite_positive(value: Any) -> bool:

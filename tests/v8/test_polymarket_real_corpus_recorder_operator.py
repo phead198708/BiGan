@@ -17,6 +17,7 @@ from bigan.v8.polymarket.recorder.market_discovery import discover_mock_market_r
 from bigan.v8.polymarket.recorder.orderbook_state import (
     mock_orderbook_rows,
     mock_trade_rows,
+    orderbook_failure_explanation,
     sample_times_for_market,
     validate_market_books,
 )
@@ -105,6 +106,12 @@ def test_recorder_fail_closes_on_missing_complete_up_down_book(tmp_path: Path) -
     assert result.report["reject_reason_counts"]["missing_complete_up_down_orderbook"] == 1
     rejected = _read_jsonl(result.artifact_paths["real_corpus_rejected_rows"])
     assert rejected[0]["reject_reasons"] == ["missing_complete_up_down_orderbook"]
+    detail = rejected[0]["reason_details"]["orderbook_completeness"]
+    assert detail["raw_book_rows_persisted"] is False
+    assert detail["valid_book_rows_by_outcome"]["UP"] > 0
+    assert detail["valid_book_rows_by_outcome"]["DOWN"] > 0
+    assert detail["missing_complete_decision_timestamps_by_outcome"]["DOWN"] == 1
+    assert "raw_rows" not in detail
 
 
 def test_recorder_fail_closes_on_missing_official_settlement_source(tmp_path: Path) -> None:
@@ -408,6 +415,14 @@ def test_live_orderbook_validation_rejects_single_decision_timestamp() -> None:
 
     assert valid == []
     assert reasons == ["insufficient_decision_timestamps"]
+    detail = orderbook_failure_explanation(market=market, book_rows=rows, config=config)
+    assert detail["raw_book_rows_persisted"] is False
+    assert detail["candidate_book_row_count"] == 2
+    assert detail["matched_market_book_row_count"] == 2
+    assert detail["valid_book_rows_by_outcome"] == {"DOWN": 1, "UP": 1}
+    assert detail["complete_decision_timestamp_count"] == 1
+    assert detail["min_required_complete_decision_timestamps"] == 2
+    assert "fewer than 2 required decision timestamps" in detail["explanation"]
 
 
 def test_non_mock_public_collection_provider_error_fails_closed(

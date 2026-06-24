@@ -32,6 +32,7 @@ from bigan.v8.polymarket.recorder.market_discovery import discover_mock_market_r
 from bigan.v8.polymarket.recorder.orderbook_state import (
     mock_orderbook_rows,
     mock_trade_rows,
+    orderbook_failure_explanation,
     validate_market_books,
     validate_trade_rows,
 )
@@ -89,12 +90,16 @@ def record_polymarket_real_corpus(
         reasons = sorted(set(market_reasons + book_reasons + trade_reasons + resolution_reasons))
         if reasons:
             rejected_rows.append(
-                {
-                    "market_id": market.get("market_id"),
-                    "slug": market.get("slug"),
-                    "market_family": market.get("market_family"),
-                    "reject_reasons": reasons,
-                }
+                _rejected_market(
+                    market,
+                    reasons,
+                    reason_details=_reason_details_for_capture_rejection(
+                        market=market,
+                        book_rows=book_candidates,
+                        config=config,
+                        book_reasons=book_reasons,
+                    ),
+                )
             )
             continue
         accepted_markets.append(market)
@@ -372,6 +377,49 @@ def _validate_market_row(market: dict[str, Any]) -> list[str]:
         if market.get(field_name) is not expected:
             reasons.append(f"unsafe_{field_name}")
     return reasons
+
+
+def _rejected_market(
+    market: dict[str, Any],
+    reasons: list[str],
+    *,
+    reason_details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    row = {
+        "market_id": market.get("market_id"),
+        "slug": market.get("slug"),
+        "market_family": market.get("market_family"),
+        "reject_reasons": sorted(set(reasons)),
+    }
+    if reason_details:
+        row["reason_details"] = reason_details
+    return row
+
+
+def _reason_details_for_capture_rejection(
+    *,
+    market: dict[str, Any],
+    book_rows: list[dict[str, Any]],
+    config: PolymarketRealCorpusRecorderConfig,
+    book_reasons: list[str],
+) -> dict[str, Any] | None:
+    orderbook_reasons = {
+        "missing_complete_up_down_orderbook",
+        "insufficient_decision_timestamps",
+        "unknown_token_id",
+        "token_id_outcome_mismatch",
+        "stale_or_future_orderbook",
+        "invalid_orderbook_prices",
+    }
+    if not (set(book_reasons) & orderbook_reasons):
+        return None
+    return {
+        "orderbook_completeness": orderbook_failure_explanation(
+            market=market,
+            book_rows=book_rows,
+            config=config,
+        )
+    }
 
 
 def _raw_market_row(market: dict[str, Any]) -> dict[str, Any]:
