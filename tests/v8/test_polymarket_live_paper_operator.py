@@ -6,7 +6,12 @@ import hashlib
 import json
 from pathlib import Path
 
-from bigan.v8.polymarket import PolymarketLivePaperConfig, run_polymarket_live_paper
+from bigan.v8.polymarket import (
+    PolymarketCorpusBuildConfig,
+    PolymarketLivePaperConfig,
+    build_polymarket_btc_corpus,
+    run_polymarket_live_paper,
+)
 
 
 def test_live_paper_operator_writes_required_artifacts_and_comment(
@@ -51,10 +56,12 @@ def test_live_paper_operator_writes_required_artifacts_and_comment(
     assert manifest["trade_count"] > 0
     assert manifest["resolved_market_count"] == 3
     assert manifest["unresolved_market_count"] == 0
-    assert manifest["round_artifact_export_mode"] == "post_feed_sidecar_export"
+    assert manifest["round_artifact_export_mode"] == "round_finalization_lifecycle"
     assert manifest["round_artifacts_written"] == 3
     assert manifest["training_raw_round_count"] == 3
     assert manifest["paper_audit_round_count"] == 3
+    assert _looks_like_sha256(manifest["latest_round_summary_sha256"])
+    assert _looks_like_sha256(manifest["latest_run_summary_sha256"])
     assert manifest["capital_deployment_allowed"] is False
     assert manifest["live_deployment_allowed"] is False
     _assert_safe(manifest)
@@ -94,9 +101,57 @@ def test_live_paper_operator_writes_required_artifacts_and_comment(
         assert (round_dir / "run_summary_after_round.md").exists()
         assert (training_raw_dir / "round_training_manifest.json").exists()
         assert (paper_audit_dir / "paper_audit_manifest.json").exists()
+        _assert_round_summary_has_training_context(round_dir / "round_summary.json")
+        _assert_training_manifest_has_provenance(
+            training_raw_dir / "round_training_manifest.json",
+            result.operator_manifest["model_manifest_sha256"],
+            source_operator_run_id="healthy",
+        )
         _assert_training_raw_is_model_output_free(training_raw_dir)
         assert _read_jsonl(paper_audit_dir / "polymarket_model_predictions.jsonl")
         assert _read_jsonl(paper_audit_dir / "polymarket_ev_decisions.jsonl")
+
+
+def test_generated_round_training_raw_can_be_consumed_by_phase2_builder(
+    tmp_path: Path,
+) -> None:
+    result = _run(tmp_path, "phase2-consumption")
+    training_index = _read_jsonl(result.artifact_paths["training_raw_index"])
+    training_raw_dir = result.run_dir / training_index[0]["training_raw_dir"]
+    training_manifest = _read_json(training_raw_dir / "round_training_manifest.json")
+
+    corpus = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=training_raw_dir,
+            output_dir=tmp_path / "round_phase2_corpus",
+            market_families=("btc_updown_5m", "btc_updown_15m", "btc_updown_1h"),
+            overwrite_existing=True,
+        )
+    )
+
+    assert corpus.manifest["feature_row_count"] > 0
+    assert corpus.manifest["label_row_count"] > 0
+    assert corpus.manifest["raw_artifact_hashes"] == training_manifest["artifact_hashes"]
+
+
+def test_training_eligibility_is_round_local_when_run_fails_closed(
+    tmp_path: Path,
+) -> None:
+    result = _run(tmp_path, "round-local", inject_missing_token_book=True)
+    manifest = result.operator_manifest
+    rounds_index = _read_jsonl(result.artifact_paths["rounds_index"])
+    training_index = _read_jsonl(result.artifact_paths["training_raw_index"])
+
+    assert manifest["operator_status"] == "blocked_fail_closed"
+    assert "missing_token_book" in manifest["critical_reason_codes"]
+    assert len(rounds_index) == 3
+    assert len(training_index) == 3
+    assert all(row["round_training_eligible"] for row in training_index)
+    first_round = rounds_index[0]
+    assert first_round["expected_sample_count"] == 3
+    assert first_round["complete_up_down_book_sample_count"] == 2
+    assert first_round["incomplete_book_sample_count"] == 1
+    assert first_round["round_reason_codes"] == []
 
 
 def test_missing_and_stale_inputs_fail_closed(tmp_path: Path) -> None:
@@ -185,6 +240,12 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _looks_like_sha256(value: str) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        char in "0123456789abcdef" for char in value
+    )
+
+
 def _assert_training_raw_is_model_output_free(training_raw_dir: Path) -> None:
     forbidden_fields = {
         "model_prediction",
@@ -204,10 +265,57 @@ def _assert_training_raw_is_model_output_free(training_raw_dir: Path) -> None:
     manifest = _read_json(training_raw_dir / "round_training_manifest.json")
     assert manifest["phase2_raw_compatible"] is True
     assert manifest["training_eligible"] is True
+    assert manifest["round_training_eligible"] is True
     for field in forbidden_fields:
         if field in {"estimated_up_probability"}:
             continue
         assert field in manifest["excluded_audit_fields"]
+
+
+def _assert_round_summary_has_training_context(path: Path) -> None:
+    summary = _read_json(path)
+    assert summary["round_training_eligible"] is True
+    assert summary["round_reason_codes"] == []
+    assert summary["round_feed_health"]["reason_codes"] == []
+    assert summary["round_resolution_health"]["reason_codes"] == []
+    assert summary["expected_sample_count"] == 3
+    assert summary["complete_up_down_book_sample_count"] == 3
+    assert summary["incomplete_book_sample_count"] == 0
+    assert summary["book_coverage_ratio"] == 1.0
+    assert summary["first_complete_book_ts"] < summary["last_complete_book_ts"]
+
+
+def _assert_training_manifest_has_provenance(
+    path: Path,
+    model_manifest_sha256: str,
+    *,
+    source_operator_run_id: str,
+) -> None:
+    manifest = _read_json(path)
+    for field in (
+        "source_operator_run_id",
+        "source_round_id",
+        "source_market_id",
+        "source_model_run_id",
+        "source_model_manifest_sha256",
+        "source_collection_mode",
+        "live_polymarket_data",
+        "live_btc_reference_data",
+        "deterministic_replay",
+    ):
+        assert field in manifest
+    assert manifest["source_operator_run_id"] == source_operator_run_id
+    assert manifest["source_round_id"] == manifest["round_id"]
+    assert manifest["source_market_id"] == manifest["market_id"]
+    assert manifest["source_model_manifest_sha256"] == model_manifest_sha256
+    assert manifest["source_collection_mode"] == "mock_live"
+    assert manifest["live_polymarket_data"] is False
+    assert manifest["live_btc_reference_data"] is False
+    assert manifest["deterministic_replay"] is True
+    assert manifest["expected_sample_count"] == 3
+    assert manifest["complete_up_down_book_sample_count"] == 3
+    assert manifest["incomplete_book_sample_count"] == 0
+    assert manifest["book_coverage_ratio"] == 1.0
 
 
 def _assert_safe(payload: dict) -> None:

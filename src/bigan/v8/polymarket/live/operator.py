@@ -118,19 +118,15 @@ def run_polymarket_live_paper(
             config=_ev_config(config, run_dir),
         )
         ledgers = _apply_decisions(markets=markets, decisions=decisions, config=config)
-        settlement_events = _settle_markets(
-            config=config,
-            markets=markets,
-            candles=candles,
-            ledgers=ledgers,
-        )
-        ledger_events = [
-            event.to_dict()
-            for ledger in ledgers.values()
-            for event in ledger.events
-        ]
     else:
         ledgers = _empty_ledgers(markets)
+    settlement_events = _settle_markets(
+        config=config,
+        markets=markets,
+        candles=candles,
+        ledgers=ledgers,
+    )
+    ledger_events = [event.to_dict() for ledger in ledgers.values() for event in ledger.events]
 
     pnl_breakdown = _pnl_breakdown(
         config=config,
@@ -512,8 +508,12 @@ def _settle_markets(
     for market in markets:
         if not market.resolution_available:
             continue
-        candle = candles_by_market[market.market_id]
-        ledger = ledgers[market.market_id]
+        if not market.settlement_rule:
+            continue
+        candle = candles_by_market.get(market.market_id)
+        ledger = ledgers.get(market.market_id)
+        if candle is None or ledger is None:
+            continue
         pre = ledger.position_snapshot()
         rule = build_btc_updown_resolution_rule(
             market_id=market.market_id,
@@ -774,6 +774,8 @@ def _operator_manifest(
         "paper_audit_round_count": round_artifacts["paper_audit_round_count"],
         "latest_round_summary": round_artifacts["latest_round_summary"],
         "latest_run_summary": round_artifacts["latest_run_summary"],
+        "latest_round_summary_sha256": round_artifacts.get("latest_round_summary_sha256"),
+        "latest_run_summary_sha256": round_artifacts.get("latest_run_summary_sha256"),
         **safety_fields(),
     }
 
@@ -1006,116 +1008,52 @@ def _write_round_artifacts(
     latest_run_summary_sha256 = None
 
     for market in sorted(markets, key=lambda item: (item.market_start_ts, item.market_id)):
-        round_id = _round_id(market)
-        round_dir = rounds_root / round_id
-        training_raw_dir = round_dir / "training_raw"
-        paper_audit_dir = round_dir / "paper_audit"
-        round_dir.mkdir(parents=True, exist_ok=True)
-        paper_audit_dir.mkdir(parents=True, exist_ok=True)
-
-        market_predictions = predictions_by_market.get(market.market_id, [])
-        market_decisions = decisions_by_market.get(market.market_id, [])
-        market_ledger_events = ledger_by_market.get(market.market_id, [])
-        market_settlement = settlement_by_market.get(market.market_id)
-        market_orderbooks = orderbooks_by_market.get(market.market_id, [])
-        market_trades = trades_by_market.get(market.market_id, [])
-        candle = candles_by_market.get(market.market_id)
-        training_eligible = (
-            not reason_codes
-            and market_settlement is not None
-            and candle is not None
-            and _has_complete_books(market_orderbooks)
-        )
-        fail_closed_reason_codes = _round_fail_closed_reason_codes(
-            training_eligible=training_eligible,
-            has_settlement=market_settlement is not None,
-            has_candle=candle is not None,
-            has_complete_books=_has_complete_books(market_orderbooks),
-            reason_codes=reason_codes,
-        )
-
-        paper_audit_hashes = _write_paper_audit_bundle(
-            paper_audit_dir=paper_audit_dir,
-            predictions=market_predictions,
-            decisions=market_decisions,
-            ledger_events=market_ledger_events,
-            settlement_events=[] if market_settlement is None else [market_settlement],
-            observability_report=observability_report,
-            market_id=market.market_id,
-        )
-        training_manifest_sha256 = None
-        if training_eligible and candle is not None and market_settlement is not None:
-            training_manifest_sha256 = _write_training_raw_bundle(
-                training_raw_dir=training_raw_dir,
-                market=market,
-                orderbooks=market_orderbooks,
-                trades=market_trades,
-                candle=candle,
-                settlement=market_settlement,
-            )
-
-        round_summary = _round_summary(
+        finalized = _finalize_round_artifacts(
+            config=config,
+            run_dir=run_dir,
+            rounds_root=rounds_root,
             market=market,
-            candle=candle,
-            settlement=market_settlement,
-            predictions=market_predictions,
-            decisions=market_decisions,
-            ledger_events=market_ledger_events,
-            reason_codes=fail_closed_reason_codes,
+            orderbooks=orderbooks_by_market.get(market.market_id, []),
+            trades=trades_by_market.get(market.market_id, []),
+            candle=candles_by_market.get(market.market_id),
+            predictions=predictions_by_market.get(market.market_id, []),
+            decisions=decisions_by_market.get(market.market_id, []),
+            ledger_events=ledger_by_market.get(market.market_id, []),
+            settlement=settlement_by_market.get(market.market_id),
+            observability_report=observability_report,
+            completed_round_summaries=round_summaries,
             model_manifest=model_manifest,
             model_manifest_sha256=model_manifest_sha256,
-        )
-        round_summary_path = round_dir / "round_summary.json"
-        round_summary_md_path = round_dir / "round_summary.md"
-        _write_json(round_summary_path, round_summary)
-        _write_text(round_summary_md_path, _round_summary_markdown(round_summary))
-        round_summary_sha256 = _sha256_file(round_summary_path)
-        round_summaries.append(round_summary)
-
-        latest_run_summary = _run_summary_after_round(
-            config=config,
-            round_summaries=round_summaries,
+            run_reason_codes=reason_codes,
             status=status,
             recommendation=recommendation,
-            reason_codes=reason_codes,
         )
-        run_summary_path = round_dir / "run_summary_after_round.json"
-        run_summary_md_path = round_dir / "run_summary_after_round.md"
-        _write_json(run_summary_path, latest_run_summary)
-        _write_text(run_summary_md_path, _run_summary_markdown(latest_run_summary))
-        latest_round_summary_sha256 = round_summary_sha256
-        latest_run_summary_sha256 = _sha256_file(run_summary_path)
-
-        index_row = {
-            "round_id": round_id,
-            "market_id": market.market_id,
-            "slug": market.slug,
-            "market_family": market.market_family,
-            "round_dir": str(round_dir.relative_to(run_dir)),
-            "training_raw_dir": (
-                str(training_raw_dir.relative_to(run_dir)) if training_eligible else None
-            ),
-            "paper_audit_dir": str(paper_audit_dir.relative_to(run_dir)),
-            "round_summary_sha256": round_summary_sha256,
-            "training_manifest_sha256": training_manifest_sha256,
-            "paper_audit_manifest_sha256": paper_audit_hashes["paper_audit_manifest"],
-            "resolution_status": round_summary["resolution_status"],
-            "resolved_outcome": round_summary["resolved_outcome"],
-            "training_eligible": training_eligible,
-            "fail_closed_reason_codes": fail_closed_reason_codes,
-            **safety_fields(),
-        }
+        round_summaries.append(finalized["round_summary"])
+        index_row = finalized["index_row"]
         round_index_rows.append(index_row)
         paper_audit_index_rows.append(index_row)
-        if training_eligible:
+        if finalized["training_eligible"]:
             training_index_rows.append(index_row)
+        latest_run_summary = finalized["latest_run_summary"]
+        latest_round_summary_sha256 = finalized["latest_round_summary_sha256"]
+        latest_run_summary_sha256 = finalized["latest_run_summary_sha256"]
+        _write_round_lifecycle_indexes(
+            artifact_paths=artifact_paths,
+            round_index_rows=round_index_rows,
+            training_index_rows=training_index_rows,
+            paper_audit_index_rows=paper_audit_index_rows,
+            latest_run_summary=latest_run_summary,
+        )
 
-    _write_jsonl(artifact_paths["rounds_index"], round_index_rows)
-    _write_jsonl(artifact_paths["training_raw_index"], training_index_rows)
-    _write_jsonl(artifact_paths["paper_audit_index"], paper_audit_index_rows)
-    _write_json(artifact_paths["paper_run_summary_latest"], latest_run_summary)
+    _write_round_lifecycle_indexes(
+        artifact_paths=artifact_paths,
+        round_index_rows=round_index_rows,
+        training_index_rows=training_index_rows,
+        paper_audit_index_rows=paper_audit_index_rows,
+        latest_run_summary=latest_run_summary,
+    )
     return {
-        "round_artifact_export_mode": "post_feed_sidecar_export",
+        "round_artifact_export_mode": "round_finalization_lifecycle",
         "round_artifacts_written": len(round_index_rows),
         "training_raw_round_count": len(training_index_rows),
         "paper_audit_round_count": len(paper_audit_index_rows),
@@ -1126,14 +1064,173 @@ def _write_round_artifacts(
     }
 
 
+def _finalize_round_artifacts(
+    *,
+    config: PolymarketLivePaperConfig,
+    run_dir: Path,
+    rounds_root: Path,
+    market: PolymarketLiveMarket,
+    orderbooks: list[PolymarketLiveOrderBook],
+    trades: list[PolymarketLiveTrade],
+    candle: BinanceBTCCandle | None,
+    predictions: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
+    ledger_events: list[dict[str, Any]],
+    settlement: dict[str, Any] | None,
+    observability_report: dict[str, Any],
+    completed_round_summaries: list[dict[str, Any]],
+    model_manifest: dict[str, Any],
+    model_manifest_sha256: str,
+    run_reason_codes: tuple[str, ...],
+    status: str,
+    recommendation: str,
+) -> dict[str, Any]:
+    round_id = _round_id(market)
+    round_dir = rounds_root / round_id
+    training_raw_dir = round_dir / "training_raw"
+    paper_audit_dir = round_dir / "paper_audit"
+    round_dir.mkdir(parents=True, exist_ok=True)
+    paper_audit_dir.mkdir(parents=True, exist_ok=True)
+
+    book_coverage = _book_coverage_metrics(orderbooks)
+    training_eligible = (
+        settlement is not None
+        and candle is not None
+        and book_coverage["complete_up_down_book_sample_count"] > 0
+    )
+    fail_closed_reason_codes = _round_fail_closed_reason_codes(
+        training_eligible=training_eligible,
+        has_settlement=settlement is not None,
+        has_candle=candle is not None,
+        book_coverage=book_coverage,
+    )
+    round_feed_health = _round_feed_health(
+        book_coverage=book_coverage,
+        has_candle=candle is not None,
+    )
+    round_model_health = _round_model_health(
+        predictions=predictions,
+        decisions=decisions,
+        run_reason_codes=run_reason_codes,
+    )
+    round_resolution_health = _round_resolution_health(settlement=settlement, candle=candle)
+
+    paper_audit_hashes = _write_paper_audit_bundle(
+        paper_audit_dir=paper_audit_dir,
+        predictions=predictions,
+        decisions=decisions,
+        ledger_events=ledger_events,
+        settlement_events=[] if settlement is None else [settlement],
+        observability_report=observability_report,
+        market_id=market.market_id,
+    )
+    training_manifest_sha256 = None
+    if training_eligible and candle is not None and settlement is not None:
+        training_manifest_sha256 = _write_training_raw_bundle(
+            config=config,
+            training_raw_dir=training_raw_dir,
+            market=market,
+            orderbooks=orderbooks,
+            trades=trades,
+            candle=candle,
+            settlement=settlement,
+            book_coverage=book_coverage,
+            model_manifest=model_manifest,
+            model_manifest_sha256=model_manifest_sha256,
+        )
+
+    round_summary = _round_summary(
+        market=market,
+        candle=candle,
+        settlement=settlement,
+        predictions=predictions,
+        decisions=decisions,
+        ledger_events=ledger_events,
+        reason_codes=fail_closed_reason_codes,
+        training_eligible=training_eligible,
+        book_coverage=book_coverage,
+        round_feed_health=round_feed_health,
+        round_model_health=round_model_health,
+        round_resolution_health=round_resolution_health,
+        model_manifest=model_manifest,
+        model_manifest_sha256=model_manifest_sha256,
+    )
+    round_summary_path = round_dir / "round_summary.json"
+    round_summary_md_path = round_dir / "round_summary.md"
+    _write_json(round_summary_path, round_summary)
+    _write_text(round_summary_md_path, _round_summary_markdown(round_summary))
+    round_summary_sha256 = _sha256_file(round_summary_path)
+
+    latest_run_summary = _run_summary_after_round(
+        config=config,
+        round_summaries=[*completed_round_summaries, round_summary],
+        status=status,
+        recommendation=recommendation,
+        reason_codes=run_reason_codes,
+    )
+    run_summary_path = round_dir / "run_summary_after_round.json"
+    run_summary_md_path = round_dir / "run_summary_after_round.md"
+    _write_json(run_summary_path, latest_run_summary)
+    _write_text(run_summary_md_path, _run_summary_markdown(latest_run_summary))
+
+    index_row = {
+        "round_id": round_id,
+        "market_id": market.market_id,
+        "slug": market.slug,
+        "market_family": market.market_family,
+        "round_dir": str(round_dir.relative_to(run_dir)),
+        "training_raw_dir": str(training_raw_dir.relative_to(run_dir))
+        if training_eligible
+        else None,
+        "paper_audit_dir": str(paper_audit_dir.relative_to(run_dir)),
+        "round_summary_sha256": round_summary_sha256,
+        "training_manifest_sha256": training_manifest_sha256,
+        "paper_audit_manifest_sha256": paper_audit_hashes["paper_audit_manifest"],
+        "resolution_status": round_summary["resolution_status"],
+        "resolved_outcome": round_summary["resolved_outcome"],
+        "training_eligible": training_eligible,
+        "round_training_eligible": training_eligible,
+        "round_reason_codes": fail_closed_reason_codes,
+        "fail_closed_reason_codes": fail_closed_reason_codes,
+        **book_coverage,
+        **safety_fields(),
+    }
+    return {
+        "round_summary": round_summary,
+        "index_row": index_row,
+        "training_eligible": training_eligible,
+        "latest_run_summary": latest_run_summary,
+        "latest_round_summary_sha256": round_summary_sha256,
+        "latest_run_summary_sha256": _sha256_file(run_summary_path),
+    }
+
+
+def _write_round_lifecycle_indexes(
+    *,
+    artifact_paths: dict[str, Path],
+    round_index_rows: list[dict[str, Any]],
+    training_index_rows: list[dict[str, Any]],
+    paper_audit_index_rows: list[dict[str, Any]],
+    latest_run_summary: dict[str, Any],
+) -> None:
+    _write_jsonl(artifact_paths["rounds_index"], round_index_rows)
+    _write_jsonl(artifact_paths["training_raw_index"], training_index_rows)
+    _write_jsonl(artifact_paths["paper_audit_index"], paper_audit_index_rows)
+    _write_json(artifact_paths["paper_run_summary_latest"], latest_run_summary)
+
+
 def _write_training_raw_bundle(
     *,
+    config: PolymarketLivePaperConfig,
     training_raw_dir: Path,
     market: PolymarketLiveMarket,
     orderbooks: list[PolymarketLiveOrderBook],
     trades: list[PolymarketLiveTrade],
     candle: BinanceBTCCandle,
     settlement: dict[str, Any],
+    book_coverage: dict[str, Any],
+    model_manifest: dict[str, Any],
+    model_manifest_sha256: str,
 ) -> str:
     training_raw_dir.mkdir(parents=True, exist_ok=True)
     paths = {
@@ -1152,12 +1249,18 @@ def _write_training_raw_bundle(
         paths["raw_polymarket_trades"],
         [_training_trade_row(row) for row in sorted(trades, key=lambda item: (item.ts, item.outcome))],
     )
-    _write_jsonl(paths["raw_binance_btcusdt_klines"], [_training_candle_row(candle)])
+    _write_jsonl(
+        paths["raw_binance_btcusdt_klines"],
+        [
+            _training_feature_reference_candle_row(market),
+            _training_candle_row(candle),
+        ],
+    )
     _write_jsonl(
         paths["raw_polymarket_resolutions"],
         [_training_resolution_row(market=market, candle=candle, settlement=settlement)],
     )
-    artifact_hashes = {name: _sha256_file(path) for name, path in sorted(paths.items())}
+    artifact_hashes = {path.name: _sha256_file(path) for path in sorted(paths.values())}
     manifest = {
         "schema_version": "bigan-v8-polymarket-live-round-training-raw-v1",
         "phase": "polymarket_live_round_training_raw",
@@ -1166,7 +1269,19 @@ def _write_training_raw_bundle(
         "condition_id": market.condition_id,
         "slug": market.slug,
         "training_eligible": True,
+        "round_training_eligible": True,
         "phase2_raw_compatible": True,
+        "source_operator_run_id": config.run_id,
+        "source_round_id": _round_id(market),
+        "source_market_id": market.market_id,
+        "source_model_run_id": _model_run_id(model_manifest),
+        "source_model_manifest_sha256": model_manifest_sha256,
+        "source_collection_mode": "mock_live" if config.mock_live else "live_readonly",
+        "live_polymarket_data": not config.mock_live,
+        "live_btc_reference_data": not config.mock_live,
+        "live_binance_reference_data": not config.mock_live,
+        "deterministic_replay": config.mock_live,
+        **book_coverage,
         "artifact_hashes": artifact_hashes,
         "excluded_audit_fields": [
             "model_prediction",
@@ -1232,6 +1347,11 @@ def _round_summary(
     decisions: list[dict[str, Any]],
     ledger_events: list[dict[str, Any]],
     reason_codes: list[str],
+    training_eligible: bool,
+    book_coverage: dict[str, Any],
+    round_feed_health: dict[str, Any],
+    round_model_health: dict[str, Any],
+    round_resolution_health: dict[str, Any],
     model_manifest: dict[str, Any],
     model_manifest_sha256: str,
 ) -> dict[str, Any]:
@@ -1260,6 +1380,12 @@ def _round_summary(
         "settlement_pnl": float(last_event.get("settlement_pnl", 0.0)),
         "total_pnl": float(last_event.get("total_pnl", 0.0)),
         "reason_codes": reason_codes,
+        "round_reason_codes": reason_codes,
+        "round_feed_health": round_feed_health,
+        "round_model_health": round_model_health,
+        "round_resolution_health": round_resolution_health,
+        "round_training_eligible": training_eligible,
+        **book_coverage,
         "model_run_id": _model_run_id(model_manifest),
         "model_manifest_sha256": model_manifest_sha256,
         "model_sha256": model_manifest.get("model_sha256"),
@@ -1380,6 +1506,26 @@ def _training_trade_row(row: PolymarketLiveTrade) -> dict[str, Any]:
     }
 
 
+def _training_feature_reference_candle_row(market: PolymarketLiveMarket) -> dict[str, Any]:
+    timeframe_ms = 60_000
+    close_ts = market.market_start_ts
+    open_ts = close_ts - timeframe_ms
+    return {
+        "ts": open_ts,
+        "close_time": close_ts,
+        "available_at_ts": close_ts,
+        "open_price": market.reference_price_at_start,
+        "high_price": market.reference_price_at_start,
+        "low_price": market.reference_price_at_start,
+        "close_price": market.reference_price_at_start,
+        "volume": 0.0,
+        "timeframe_ms": timeframe_ms,
+        "source": market.reference_price_source,
+        "reference_role": "causal_feature_reference",
+        **safety_fields(),
+    }
+
+
 def _training_candle_row(candle: BinanceBTCCandle) -> dict[str, Any]:
     return {
         "ts": candle.open_ts,
@@ -1478,26 +1624,90 @@ def _round_fail_closed_reason_codes(
     training_eligible: bool,
     has_settlement: bool,
     has_candle: bool,
-    has_complete_books: bool,
-    reason_codes: tuple[str, ...],
+    book_coverage: dict[str, Any],
 ) -> list[str]:
     if training_eligible:
         return []
-    reasons = set(reason_codes)
+    reasons: set[str] = set()
     if not has_settlement:
         reasons.add("pending_resolution")
     if not has_candle:
         reasons.add("missing_reference_candle")
-    if not has_complete_books:
+    if int(book_coverage["complete_up_down_book_sample_count"]) <= 0:
         reasons.add("missing_complete_up_down_orderbook")
     return sorted(reasons)
 
 
-def _has_complete_books(orderbooks: list[PolymarketLiveOrderBook]) -> bool:
+def _book_coverage_metrics(orderbooks: list[PolymarketLiveOrderBook]) -> dict[str, Any]:
     by_ts: dict[int, set[str]] = defaultdict(set)
     for row in orderbooks:
         by_ts[row.ts].add(row.outcome)
-    return any(outcomes == {"UP", "DOWN"} for outcomes in by_ts.values())
+    complete_timestamps = sorted(ts for ts, outcomes in by_ts.items() if outcomes == {"UP", "DOWN"})
+    expected_sample_count = len(by_ts)
+    complete_count = len(complete_timestamps)
+    incomplete_count = max(0, expected_sample_count - complete_count)
+    return {
+        "expected_sample_count": expected_sample_count,
+        "complete_up_down_book_sample_count": complete_count,
+        "incomplete_book_sample_count": incomplete_count,
+        "book_coverage_ratio": (
+            0.0 if expected_sample_count == 0 else complete_count / expected_sample_count
+        ),
+        "first_complete_book_ts": complete_timestamps[0] if complete_timestamps else None,
+        "last_complete_book_ts": complete_timestamps[-1] if complete_timestamps else None,
+    }
+
+
+def _round_feed_health(
+    *,
+    book_coverage: dict[str, Any],
+    has_candle: bool,
+) -> dict[str, Any]:
+    reason_codes = []
+    if int(book_coverage["complete_up_down_book_sample_count"]) <= 0:
+        reason_codes.append("missing_complete_up_down_orderbook")
+    if not has_candle:
+        reason_codes.append("missing_reference_candle")
+    return {
+        "book_coverage": book_coverage,
+        "has_reference_candle": has_candle,
+        "reason_codes": reason_codes,
+    }
+
+
+def _round_model_health(
+    *,
+    predictions: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
+    run_reason_codes: tuple[str, ...],
+) -> dict[str, Any]:
+    model_reason_codes = [
+        code
+        for code in run_reason_codes
+        if "model" in code or "manifest" in code or "fixture" in code or "synthetic" in code
+    ]
+    return {
+        "prediction_count": len(predictions),
+        "decision_count": len(decisions),
+        "reason_codes": sorted(set(model_reason_codes)),
+    }
+
+
+def _round_resolution_health(
+    *,
+    settlement: dict[str, Any] | None,
+    candle: BinanceBTCCandle | None,
+) -> dict[str, Any]:
+    reason_codes = []
+    if settlement is None:
+        reason_codes.append("pending_resolution")
+    if candle is None:
+        reason_codes.append("missing_reference_candle")
+    return {
+        "resolution_available": settlement is not None,
+        "reference_candle_available": candle is not None,
+        "reason_codes": reason_codes,
+    }
 
 
 def _group_objects(rows: tuple[Any, ...]) -> dict[str, list[Any]]:
