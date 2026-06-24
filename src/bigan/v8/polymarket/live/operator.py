@@ -174,6 +174,25 @@ def run_polymarket_live_paper(
             pnl_breakdown=pnl_breakdown,
         ),
     )
+    round_artifacts = _write_round_artifacts(
+        config=config,
+        run_dir=run_dir,
+        artifact_paths=artifact_paths,
+        markets=markets,
+        orderbooks=orderbooks,
+        trades=trades,
+        candles=candles,
+        predictions=predictions,
+        decisions=decisions,
+        ledger_events=ledger_events,
+        settlement_events=settlement_events,
+        observability_report=observability_report,
+        model_manifest=model_manifest,
+        model_manifest_sha256=model_manifest_sha256,
+        reason_codes=tuple(reason_codes),
+        status=status,
+        recommendation=recommendation,
+    )
 
     core_hashes = _artifact_hashes(
         artifact_paths,
@@ -195,6 +214,7 @@ def run_polymarket_live_paper(
         model_manifest_path=model_manifest_path,
         model_manifest_sha256=model_manifest_sha256,
         reason_codes=tuple(reason_codes),
+        round_artifacts=round_artifacts,
     )
     _write_json(artifact_paths["polymarket_live_operator_manifest"], operator_manifest)
     operator_manifest_sha256 = _sha256_file(
@@ -208,6 +228,7 @@ def run_polymarket_live_paper(
         observability_report_sha256=_sha256_file(
             artifact_paths["paper_observability_report"]
         ),
+        round_artifacts=round_artifacts,
     )
     payload_hash = canonical_json_sha256(comment_payload)
     comment_payload["github_comment_payload_sha256"] = payload_hash
@@ -691,6 +712,7 @@ def _operator_manifest(
     model_manifest_path: Path | None,
     model_manifest_sha256: str,
     reason_codes: tuple[str, ...],
+    round_artifacts: dict[str, Any],
 ) -> dict[str, Any]:
     ended_at = _ended_at(config)
     return {
@@ -746,6 +768,12 @@ def _operator_manifest(
         },
         "observability_passed": observability_report["critical_alert_count"] == 0,
         "artifact_hashes": artifact_hashes,
+        "round_artifact_export_mode": round_artifacts["round_artifact_export_mode"],
+        "round_artifacts_written": round_artifacts["round_artifacts_written"],
+        "training_raw_round_count": round_artifacts["training_raw_round_count"],
+        "paper_audit_round_count": round_artifacts["paper_audit_round_count"],
+        "latest_round_summary": round_artifacts["latest_round_summary"],
+        "latest_run_summary": round_artifacts["latest_run_summary"],
         **safety_fields(),
     }
 
@@ -757,6 +785,7 @@ def _github_comment_payload(
     operator_manifest_sha256: str,
     pnl_breakdown_sha256: str,
     observability_report_sha256: str,
+    round_artifacts: dict[str, Any],
 ) -> dict[str, Any]:
     payload = {
         key: operator_manifest[key]
@@ -810,6 +839,30 @@ def _github_comment_payload(
             "operator_manifest_sha256": operator_manifest_sha256,
             "pnl_breakdown_sha256": pnl_breakdown_sha256,
             "observability_report_sha256": observability_report_sha256,
+            "round_artifact_export_mode": round_artifacts[
+                "round_artifact_export_mode"
+            ],
+            "last_completed_round_id": round_artifacts["latest_run_summary"].get(
+                "last_completed_round_id"
+            ),
+            "rounds_seen": round_artifacts["latest_run_summary"].get("rounds_seen", 0),
+            "rounds_resolved": round_artifacts["latest_run_summary"].get(
+                "rounds_resolved", 0
+            ),
+            "rounds_failed_closed": round_artifacts["latest_run_summary"].get(
+                "rounds_failed_closed", 0
+            ),
+            "rounds_pending_resolution": round_artifacts["latest_run_summary"].get(
+                "rounds_pending_resolution", 0
+            ),
+            "training_raw_round_count": round_artifacts["training_raw_round_count"],
+            "paper_audit_round_count": round_artifacts["paper_audit_round_count"],
+            "latest_round_summary_sha256": round_artifacts.get(
+                "latest_round_summary_sha256"
+            ),
+            "latest_run_summary_sha256": round_artifacts.get(
+                "latest_run_summary_sha256"
+            ),
         }
     )
     return payload
@@ -835,6 +888,13 @@ def _github_comment_markdown(payload: dict[str, Any]) -> str:
         "trade_count",
         "no_trade_count",
         "settled_position_count",
+        "last_completed_round_id",
+        "rounds_seen",
+        "rounds_resolved",
+        "rounds_failed_closed",
+        "rounds_pending_resolution",
+        "training_raw_round_count",
+        "paper_audit_round_count",
         "realized_trade_pnl",
         "settlement_pnl",
         "total_polymarket_pnl",
@@ -853,6 +913,9 @@ def _github_comment_markdown(payload: dict[str, Any]) -> str:
         "operator_manifest_sha256",
         "pnl_breakdown_sha256",
         "observability_report_sha256",
+        "round_artifact_export_mode",
+        "latest_round_summary_sha256",
+        "latest_run_summary_sha256",
         "github_comment_payload_sha256",
     )
     lines = ["## v8 Polymarket live paper evidence", ""]
@@ -891,6 +954,587 @@ def _operator_summary_markdown(
             "",
         ]
     )
+
+
+def _write_round_artifacts(
+    *,
+    config: PolymarketLivePaperConfig,
+    run_dir: Path,
+    artifact_paths: dict[str, Path],
+    markets: tuple[PolymarketLiveMarket, ...],
+    orderbooks: tuple[PolymarketLiveOrderBook, ...],
+    trades: tuple[PolymarketLiveTrade, ...],
+    candles: tuple[BinanceBTCCandle, ...],
+    predictions: tuple[Any, ...],
+    decisions: tuple[Any, ...],
+    ledger_events: list[dict[str, Any]],
+    settlement_events: list[dict[str, Any]],
+    observability_report: dict[str, Any],
+    model_manifest: dict[str, Any],
+    model_manifest_sha256: str,
+    reason_codes: tuple[str, ...],
+    status: str,
+    recommendation: str,
+) -> dict[str, Any]:
+    rounds_root = run_dir / "rounds"
+    rounds_root.mkdir(parents=True, exist_ok=True)
+    candles_by_market = {candle.market_id: candle for candle in candles}
+    settlement_by_market = {row["market_id"]: row for row in settlement_events}
+    predictions_by_market = _group_dict_rows(
+        [_with_full_safety(prediction.to_dict()) for prediction in predictions],
+        key="market_id",
+    )
+    decisions_by_market = _group_dict_rows(
+        [_with_full_safety(decision.to_dict()) for decision in decisions],
+        key="market_id",
+    )
+    ledger_by_market = _group_dict_rows(ledger_events, key="market_id")
+    orderbooks_by_market = _group_objects(orderbooks)
+    trades_by_market = _group_objects(trades)
+
+    round_index_rows: list[dict[str, Any]] = []
+    training_index_rows: list[dict[str, Any]] = []
+    paper_audit_index_rows: list[dict[str, Any]] = []
+    round_summaries: list[dict[str, Any]] = []
+    latest_run_summary: dict[str, Any] = _empty_run_summary(
+        config=config,
+        status=status,
+        recommendation=recommendation,
+        reason_codes=reason_codes,
+    )
+    latest_round_summary_sha256 = None
+    latest_run_summary_sha256 = None
+
+    for market in sorted(markets, key=lambda item: (item.market_start_ts, item.market_id)):
+        round_id = _round_id(market)
+        round_dir = rounds_root / round_id
+        training_raw_dir = round_dir / "training_raw"
+        paper_audit_dir = round_dir / "paper_audit"
+        round_dir.mkdir(parents=True, exist_ok=True)
+        paper_audit_dir.mkdir(parents=True, exist_ok=True)
+
+        market_predictions = predictions_by_market.get(market.market_id, [])
+        market_decisions = decisions_by_market.get(market.market_id, [])
+        market_ledger_events = ledger_by_market.get(market.market_id, [])
+        market_settlement = settlement_by_market.get(market.market_id)
+        market_orderbooks = orderbooks_by_market.get(market.market_id, [])
+        market_trades = trades_by_market.get(market.market_id, [])
+        candle = candles_by_market.get(market.market_id)
+        training_eligible = (
+            not reason_codes
+            and market_settlement is not None
+            and candle is not None
+            and _has_complete_books(market_orderbooks)
+        )
+        fail_closed_reason_codes = _round_fail_closed_reason_codes(
+            training_eligible=training_eligible,
+            has_settlement=market_settlement is not None,
+            has_candle=candle is not None,
+            has_complete_books=_has_complete_books(market_orderbooks),
+            reason_codes=reason_codes,
+        )
+
+        paper_audit_hashes = _write_paper_audit_bundle(
+            paper_audit_dir=paper_audit_dir,
+            predictions=market_predictions,
+            decisions=market_decisions,
+            ledger_events=market_ledger_events,
+            settlement_events=[] if market_settlement is None else [market_settlement],
+            observability_report=observability_report,
+            market_id=market.market_id,
+        )
+        training_manifest_sha256 = None
+        if training_eligible and candle is not None and market_settlement is not None:
+            training_manifest_sha256 = _write_training_raw_bundle(
+                training_raw_dir=training_raw_dir,
+                market=market,
+                orderbooks=market_orderbooks,
+                trades=market_trades,
+                candle=candle,
+                settlement=market_settlement,
+            )
+
+        round_summary = _round_summary(
+            market=market,
+            candle=candle,
+            settlement=market_settlement,
+            predictions=market_predictions,
+            decisions=market_decisions,
+            ledger_events=market_ledger_events,
+            reason_codes=fail_closed_reason_codes,
+            model_manifest=model_manifest,
+            model_manifest_sha256=model_manifest_sha256,
+        )
+        round_summary_path = round_dir / "round_summary.json"
+        round_summary_md_path = round_dir / "round_summary.md"
+        _write_json(round_summary_path, round_summary)
+        _write_text(round_summary_md_path, _round_summary_markdown(round_summary))
+        round_summary_sha256 = _sha256_file(round_summary_path)
+        round_summaries.append(round_summary)
+
+        latest_run_summary = _run_summary_after_round(
+            config=config,
+            round_summaries=round_summaries,
+            status=status,
+            recommendation=recommendation,
+            reason_codes=reason_codes,
+        )
+        run_summary_path = round_dir / "run_summary_after_round.json"
+        run_summary_md_path = round_dir / "run_summary_after_round.md"
+        _write_json(run_summary_path, latest_run_summary)
+        _write_text(run_summary_md_path, _run_summary_markdown(latest_run_summary))
+        latest_round_summary_sha256 = round_summary_sha256
+        latest_run_summary_sha256 = _sha256_file(run_summary_path)
+
+        index_row = {
+            "round_id": round_id,
+            "market_id": market.market_id,
+            "slug": market.slug,
+            "market_family": market.market_family,
+            "round_dir": str(round_dir.relative_to(run_dir)),
+            "training_raw_dir": (
+                str(training_raw_dir.relative_to(run_dir)) if training_eligible else None
+            ),
+            "paper_audit_dir": str(paper_audit_dir.relative_to(run_dir)),
+            "round_summary_sha256": round_summary_sha256,
+            "training_manifest_sha256": training_manifest_sha256,
+            "paper_audit_manifest_sha256": paper_audit_hashes["paper_audit_manifest"],
+            "resolution_status": round_summary["resolution_status"],
+            "resolved_outcome": round_summary["resolved_outcome"],
+            "training_eligible": training_eligible,
+            "fail_closed_reason_codes": fail_closed_reason_codes,
+            **safety_fields(),
+        }
+        round_index_rows.append(index_row)
+        paper_audit_index_rows.append(index_row)
+        if training_eligible:
+            training_index_rows.append(index_row)
+
+    _write_jsonl(artifact_paths["rounds_index"], round_index_rows)
+    _write_jsonl(artifact_paths["training_raw_index"], training_index_rows)
+    _write_jsonl(artifact_paths["paper_audit_index"], paper_audit_index_rows)
+    _write_json(artifact_paths["paper_run_summary_latest"], latest_run_summary)
+    return {
+        "round_artifact_export_mode": "post_feed_sidecar_export",
+        "round_artifacts_written": len(round_index_rows),
+        "training_raw_round_count": len(training_index_rows),
+        "paper_audit_round_count": len(paper_audit_index_rows),
+        "latest_round_summary": round_summaries[-1] if round_summaries else {},
+        "latest_run_summary": latest_run_summary,
+        "latest_round_summary_sha256": latest_round_summary_sha256,
+        "latest_run_summary_sha256": latest_run_summary_sha256,
+    }
+
+
+def _write_training_raw_bundle(
+    *,
+    training_raw_dir: Path,
+    market: PolymarketLiveMarket,
+    orderbooks: list[PolymarketLiveOrderBook],
+    trades: list[PolymarketLiveTrade],
+    candle: BinanceBTCCandle,
+    settlement: dict[str, Any],
+) -> str:
+    training_raw_dir.mkdir(parents=True, exist_ok=True)
+    paths = {
+        "raw_polymarket_markets": training_raw_dir / "raw_polymarket_markets.jsonl",
+        "raw_polymarket_orderbooks": training_raw_dir / "raw_polymarket_orderbooks.jsonl",
+        "raw_polymarket_trades": training_raw_dir / "raw_polymarket_trades.jsonl",
+        "raw_binance_btcusdt_klines": training_raw_dir / "raw_binance_btcusdt_klines.jsonl",
+        "raw_polymarket_resolutions": training_raw_dir / "raw_polymarket_resolutions.jsonl",
+    }
+    _write_jsonl(paths["raw_polymarket_markets"], [_training_market_row(market)])
+    _write_jsonl(
+        paths["raw_polymarket_orderbooks"],
+        [_training_orderbook_row(row) for row in sorted(orderbooks, key=lambda item: (item.ts, item.outcome))],
+    )
+    _write_jsonl(
+        paths["raw_polymarket_trades"],
+        [_training_trade_row(row) for row in sorted(trades, key=lambda item: (item.ts, item.outcome))],
+    )
+    _write_jsonl(paths["raw_binance_btcusdt_klines"], [_training_candle_row(candle)])
+    _write_jsonl(
+        paths["raw_polymarket_resolutions"],
+        [_training_resolution_row(market=market, candle=candle, settlement=settlement)],
+    )
+    artifact_hashes = {name: _sha256_file(path) for name, path in sorted(paths.items())}
+    manifest = {
+        "schema_version": "bigan-v8-polymarket-live-round-training-raw-v1",
+        "phase": "polymarket_live_round_training_raw",
+        "round_id": _round_id(market),
+        "market_id": market.market_id,
+        "condition_id": market.condition_id,
+        "slug": market.slug,
+        "training_eligible": True,
+        "phase2_raw_compatible": True,
+        "artifact_hashes": artifact_hashes,
+        "excluded_audit_fields": [
+            "model_prediction",
+            "model_probability",
+            "paper_action",
+            "paper_pnl",
+            "selected_side",
+            "edge",
+            "ev_buy_up",
+            "ev_buy_down",
+        ],
+        **safety_fields(),
+    }
+    manifest_path = training_raw_dir / "round_training_manifest.json"
+    _write_json(manifest_path, manifest)
+    return _sha256_file(manifest_path)
+
+
+def _write_paper_audit_bundle(
+    *,
+    paper_audit_dir: Path,
+    predictions: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
+    ledger_events: list[dict[str, Any]],
+    settlement_events: list[dict[str, Any]],
+    observability_report: dict[str, Any],
+    market_id: str,
+) -> dict[str, str]:
+    paths = {
+        "polymarket_model_predictions": paper_audit_dir / "polymarket_model_predictions.jsonl",
+        "polymarket_ev_decisions": paper_audit_dir / "polymarket_ev_decisions.jsonl",
+        "polymarket_position_ledger": paper_audit_dir / "polymarket_position_ledger.jsonl",
+        "polymarket_settlement_events": paper_audit_dir / "polymarket_settlement_events.jsonl",
+        "polymarket_pnl_breakdown": paper_audit_dir / "polymarket_pnl_breakdown.json",
+        "paper_observability_report": paper_audit_dir / "paper_observability_report.json",
+    }
+    _write_jsonl(paths["polymarket_model_predictions"], predictions)
+    _write_jsonl(paths["polymarket_ev_decisions"], decisions)
+    _write_jsonl(paths["polymarket_position_ledger"], ledger_events)
+    _write_jsonl(paths["polymarket_settlement_events"], settlement_events)
+    _write_json(paths["polymarket_pnl_breakdown"], _audit_pnl_breakdown(market_id, ledger_events))
+    _write_json(paths["paper_observability_report"], observability_report)
+    artifact_hashes = {name: _sha256_file(path) for name, path in sorted(paths.items())}
+    manifest = {
+        "schema_version": "bigan-v8-polymarket-live-round-paper-audit-v1",
+        "phase": "polymarket_live_round_paper_audit",
+        "market_id": market_id,
+        "artifact_hashes": artifact_hashes,
+        **safety_fields(),
+    }
+    manifest_path = paper_audit_dir / "paper_audit_manifest.json"
+    _write_json(manifest_path, manifest)
+    artifact_hashes["paper_audit_manifest"] = _sha256_file(manifest_path)
+    return artifact_hashes
+
+
+def _round_summary(
+    *,
+    market: PolymarketLiveMarket,
+    candle: BinanceBTCCandle | None,
+    settlement: dict[str, Any] | None,
+    predictions: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
+    ledger_events: list[dict[str, Any]],
+    reason_codes: list[str],
+    model_manifest: dict[str, Any],
+    model_manifest_sha256: str,
+) -> dict[str, Any]:
+    last_event = ledger_events[-1] if ledger_events else {}
+    action_counts = Counter(row["action"] for row in decisions)
+    return {
+        "schema_version": "bigan-v8-polymarket-live-round-summary-v1",
+        "round_id": _round_id(market),
+        "market_id": market.market_id,
+        "condition_id": market.condition_id,
+        "slug": market.slug,
+        "market_family": market.market_family,
+        "market_start_ts": market.market_start_ts,
+        "market_end_ts": market.market_end_ts,
+        "settlement_ts": market.settlement_ts,
+        "resolution_status": None if settlement is None else settlement["resolution_status"],
+        "resolved_outcome": None if settlement is None else settlement["resolved_outcome"],
+        "reference_price_start": None if candle is None else candle.open_price,
+        "reference_price_end": None if candle is None else candle.close_price,
+        "prediction_count": len(predictions),
+        "decision_count": len(decisions),
+        "action_counts": dict(sorted(action_counts.items())),
+        "paper_position_up": float(last_event.get("position_up", 0.0)),
+        "paper_position_down": float(last_event.get("position_down", 0.0)),
+        "realized_trade_pnl": float(last_event.get("realized_trade_pnl", 0.0)),
+        "settlement_pnl": float(last_event.get("settlement_pnl", 0.0)),
+        "total_pnl": float(last_event.get("total_pnl", 0.0)),
+        "reason_codes": reason_codes,
+        "model_run_id": _model_run_id(model_manifest),
+        "model_manifest_sha256": model_manifest_sha256,
+        "model_sha256": model_manifest.get("model_sha256"),
+        "real_historical_corpus_used": model_manifest.get(
+            "real_historical_corpus_used", False
+        ),
+        "fixture_corpus_used": model_manifest.get("fixture_corpus_used", False),
+        "synthetic_corpus_used": model_manifest.get("synthetic_corpus_used", False),
+        "fixture_model_used": model_manifest.get("fixture_model_used", False),
+        **safety_fields(),
+    }
+
+
+def _run_summary_after_round(
+    *,
+    config: PolymarketLivePaperConfig,
+    round_summaries: list[dict[str, Any]],
+    status: str,
+    recommendation: str,
+    reason_codes: tuple[str, ...],
+) -> dict[str, Any]:
+    resolved = [row for row in round_summaries if row["resolved_outcome"] is not None]
+    pending = [
+        row
+        for row in round_summaries
+        if row["resolved_outcome"] is None and not row["reason_codes"]
+    ]
+    failed = [row for row in round_summaries if row["reason_codes"]]
+    return {
+        "schema_version": "bigan-v8-polymarket-live-run-summary-after-round-v1",
+        "run_id": config.run_id,
+        "rounds_seen": len(round_summaries),
+        "rounds_resolved": len(resolved),
+        "rounds_failed_closed": len(failed),
+        "rounds_pending_resolution": len(pending),
+        "total_prediction_count": sum(row["prediction_count"] for row in round_summaries),
+        "total_decision_count": sum(row["decision_count"] for row in round_summaries),
+        "total_trade_count": sum(
+            count
+            for row in round_summaries
+            for action, count in row["action_counts"].items()
+            if action.startswith(("BUY", "SELL"))
+        ),
+        "cumulative_trade_pnl": sum(row["realized_trade_pnl"] for row in round_summaries),
+        "cumulative_settlement_pnl": sum(row["settlement_pnl"] for row in round_summaries),
+        "cumulative_total_pnl": sum(row["total_pnl"] for row in round_summaries),
+        "max_drawdown": _summary_max_drawdown(round_summaries),
+        "critical_alert_count": len(set(reason_codes)),
+        "critical_reason_codes": sorted(set(reason_codes)),
+        "last_completed_round_id": None if not resolved else resolved[-1]["round_id"],
+        "operator_status": status,
+        "operator_recommendation": recommendation,
+        **safety_fields(),
+    }
+
+
+def _empty_run_summary(
+    *,
+    config: PolymarketLivePaperConfig,
+    status: str,
+    recommendation: str,
+    reason_codes: tuple[str, ...],
+) -> dict[str, Any]:
+    return _run_summary_after_round(
+        config=config,
+        round_summaries=[],
+        status=status,
+        recommendation=recommendation,
+        reason_codes=reason_codes,
+    )
+
+
+def _training_market_row(market: PolymarketLiveMarket) -> dict[str, Any]:
+    return {
+        "market_id": market.market_id,
+        "condition_id": market.condition_id,
+        "slug": market.slug,
+        "market_family": market.market_family,
+        "market_start_ts": market.market_start_ts,
+        "market_end_ts": market.market_end_ts,
+        "settlement_ts": market.settlement_ts,
+        "up_token_id": market.up_token_id,
+        "down_token_id": market.down_token_id,
+        "reference_price_source": market.reference_price_source,
+        "settlement_rule": market.settlement_rule,
+        **safety_fields(),
+    }
+
+
+def _training_orderbook_row(row: PolymarketLiveOrderBook) -> dict[str, Any]:
+    return {
+        "market_id": row.market_id,
+        "token_id": row.token_id,
+        "outcome": row.outcome,
+        "ts": row.ts,
+        "available_at_ts": row.received_ts,
+        "bid_price": row.bid_price,
+        "ask_price": row.ask_price,
+        "mid_price": row.mid_price,
+        "bid_size": row.bid_size,
+        "ask_size": row.ask_size,
+        "liquidity_depth": row.liquidity_depth,
+        **safety_fields(),
+    }
+
+
+def _training_trade_row(row: PolymarketLiveTrade) -> dict[str, Any]:
+    return {
+        "market_id": row.market_id,
+        "token_id": row.token_id,
+        "outcome": row.outcome,
+        "ts": row.ts,
+        "available_at_ts": row.ts,
+        "price": row.price,
+        "size": row.size,
+        "side": row.side,
+        **safety_fields(),
+    }
+
+
+def _training_candle_row(candle: BinanceBTCCandle) -> dict[str, Any]:
+    return {
+        "ts": candle.open_ts,
+        "close_time": candle.close_ts,
+        "available_at_ts": candle.close_ts,
+        "open_price": candle.open_price,
+        "high_price": candle.high_price,
+        "low_price": candle.low_price,
+        "close_price": candle.close_price,
+        "volume": 0.0,
+        "timeframe_ms": candle.close_ts - candle.open_ts,
+        "source": candle.source,
+        **safety_fields(),
+    }
+
+
+def _training_resolution_row(
+    *,
+    market: PolymarketLiveMarket,
+    candle: BinanceBTCCandle,
+    settlement: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "market_id": market.market_id,
+        "reference_price_start": candle.open_price,
+        "reference_price_end": candle.close_price,
+        "resolution_status": settlement["resolution_status"],
+        "resolved_outcome": settlement["resolved_outcome"],
+        "raw_resolution_text": (
+            f"{market.slug} resolved {settlement['resolved_outcome']} "
+            f"from {candle.open_price} to {candle.close_price}"
+        ),
+        **safety_fields(),
+    }
+
+
+def _audit_pnl_breakdown(market_id: str, ledger_events: list[dict[str, Any]]) -> dict[str, Any]:
+    last_event = ledger_events[-1] if ledger_events else {}
+    return {
+        "schema_version": POLYMARKET_LIVE_SCHEMA_VERSION,
+        "market_id": market_id,
+        "realized_trade_pnl": float(last_event.get("realized_trade_pnl", 0.0)),
+        "settlement_pnl": float(last_event.get("settlement_pnl", 0.0)),
+        "complete_set_pnl": float(last_event.get("complete_set_pnl", 0.0)),
+        "fees": sum(float(row.get("fees", 0.0)) for row in ledger_events),
+        "slippage": sum(float(row.get("slippage", 0.0)) for row in ledger_events),
+        "total_polymarket_pnl": float(last_event.get("total_pnl", 0.0)),
+        **safety_fields(),
+    }
+
+
+def _round_summary_markdown(summary: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# Round Summary",
+            "",
+            f"- round_id: {summary['round_id']}",
+            f"- resolved_outcome: {summary['resolved_outcome']}",
+            f"- prediction_count: {summary['prediction_count']}",
+            f"- decision_count: {summary['decision_count']}",
+            f"- total_pnl: {summary['total_pnl']}",
+            f"- reason_codes: {', '.join(summary['reason_codes'])}",
+            f"- model_manifest_sha256: {summary['model_manifest_sha256']}",
+            "- paper_only: true",
+            "- capital_at_risk: false",
+            "- polymarket_write_enabled: false",
+            "- wallet_signing_enabled: false",
+            "",
+        ]
+    )
+
+
+def _run_summary_markdown(summary: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# Run Summary After Round",
+            "",
+            f"- run_id: {summary['run_id']}",
+            f"- rounds_seen: {summary['rounds_seen']}",
+            f"- rounds_resolved: {summary['rounds_resolved']}",
+            f"- rounds_failed_closed: {summary['rounds_failed_closed']}",
+            f"- rounds_pending_resolution: {summary['rounds_pending_resolution']}",
+            f"- cumulative_total_pnl: {summary['cumulative_total_pnl']}",
+            f"- last_completed_round_id: {summary['last_completed_round_id']}",
+            f"- operator_status: {summary['operator_status']}",
+            f"- operator_recommendation: {summary['operator_recommendation']}",
+            "- paper_only: true",
+            "- capital_at_risk: false",
+            "",
+        ]
+    )
+
+
+def _round_fail_closed_reason_codes(
+    *,
+    training_eligible: bool,
+    has_settlement: bool,
+    has_candle: bool,
+    has_complete_books: bool,
+    reason_codes: tuple[str, ...],
+) -> list[str]:
+    if training_eligible:
+        return []
+    reasons = set(reason_codes)
+    if not has_settlement:
+        reasons.add("pending_resolution")
+    if not has_candle:
+        reasons.add("missing_reference_candle")
+    if not has_complete_books:
+        reasons.add("missing_complete_up_down_orderbook")
+    return sorted(reasons)
+
+
+def _has_complete_books(orderbooks: list[PolymarketLiveOrderBook]) -> bool:
+    by_ts: dict[int, set[str]] = defaultdict(set)
+    for row in orderbooks:
+        by_ts[row.ts].add(row.outcome)
+    return any(outcomes == {"UP", "DOWN"} for outcomes in by_ts.values())
+
+
+def _group_objects(rows: tuple[Any, ...]) -> dict[str, list[Any]]:
+    grouped: dict[str, list[Any]] = defaultdict(list)
+    for row in rows:
+        grouped[row.market_id].append(row)
+    return dict(grouped)
+
+
+def _group_dict_rows(rows: list[dict[str, Any]], *, key: str) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row[key])].append(row)
+    return dict(grouped)
+
+
+def _round_id(market: PolymarketLiveMarket) -> str:
+    return market.slug or market.market_id
+
+
+def _model_run_id(model_manifest: dict[str, Any]) -> str | None:
+    for key in ("real_corpus_gate_run_id", "run_id", "recorder_run_id", "model_version"):
+        value = model_manifest.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _summary_max_drawdown(round_summaries: list[dict[str, Any]]) -> float:
+    cumulative = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for row in round_summaries:
+        cumulative += float(row["total_pnl"])
+        peak = max(peak, cumulative)
+        max_drawdown = min(max_drawdown, cumulative - peak)
+    return abs(max_drawdown)
 
 
 def _status_and_recommendation(
@@ -991,6 +1635,10 @@ def _artifact_paths(run_dir: Path) -> dict[str, Path]:
         "polymarket_live_operator_manifest": run_dir / "polymarket_live_operator_manifest.json",
         "paper_observability_report": run_dir / "paper_observability_report.json",
         "paper_operator_summary": run_dir / "paper_operator_summary.md",
+        "rounds_index": run_dir / "rounds_index.jsonl",
+        "training_raw_index": run_dir / "training_raw_index.jsonl",
+        "paper_audit_index": run_dir / "paper_audit_index.jsonl",
+        "paper_run_summary_latest": run_dir / "paper_run_summary_latest.json",
         "github_paper_comment_payload": run_dir / "github_paper_comment_payload.json",
         "github_paper_comment_md": run_dir / "github_paper_comment.md",
     }

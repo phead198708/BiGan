@@ -28,6 +28,10 @@ def test_live_paper_operator_writes_required_artifacts_and_comment(
         "polymarket_live_operator_manifest",
         "paper_observability_report",
         "paper_operator_summary",
+        "rounds_index",
+        "training_raw_index",
+        "paper_audit_index",
+        "paper_run_summary_latest",
         "github_paper_comment_payload",
         "github_paper_comment_md",
     }
@@ -47,6 +51,10 @@ def test_live_paper_operator_writes_required_artifacts_and_comment(
     assert manifest["trade_count"] > 0
     assert manifest["resolved_market_count"] == 3
     assert manifest["unresolved_market_count"] == 0
+    assert manifest["round_artifact_export_mode"] == "post_feed_sidecar_export"
+    assert manifest["round_artifacts_written"] == 3
+    assert manifest["training_raw_round_count"] == 3
+    assert manifest["paper_audit_round_count"] == 3
     assert manifest["capital_deployment_allowed"] is False
     assert manifest["live_deployment_allowed"] is False
     _assert_safe(manifest)
@@ -61,8 +69,34 @@ def test_live_paper_operator_writes_required_artifacts_and_comment(
     assert "realized_trade_pnl" in comment
     assert "settlement_pnl" in comment
     assert "total_polymarket_pnl" in comment
+    assert "round_artifact_export_mode" in comment
     for row in (*predictions, *decisions, *ledger):
         _assert_safe(row)
+
+    rounds_index = _read_jsonl(result.artifact_paths["rounds_index"])
+    training_index = _read_jsonl(result.artifact_paths["training_raw_index"])
+    paper_audit_index = _read_jsonl(result.artifact_paths["paper_audit_index"])
+    latest_summary = _read_json(result.artifact_paths["paper_run_summary_latest"])
+    assert len(rounds_index) == 3
+    assert len(training_index) == 3
+    assert len(paper_audit_index) == 3
+    assert latest_summary["rounds_seen"] == 3
+    assert latest_summary["rounds_resolved"] == 3
+    assert latest_summary["rounds_failed_closed"] == 0
+    assert latest_summary["rounds_pending_resolution"] == 0
+    for row in training_index:
+        round_dir = result.run_dir / row["round_dir"]
+        training_raw_dir = result.run_dir / row["training_raw_dir"]
+        paper_audit_dir = result.run_dir / row["paper_audit_dir"]
+        assert (round_dir / "round_summary.json").exists()
+        assert (round_dir / "round_summary.md").exists()
+        assert (round_dir / "run_summary_after_round.json").exists()
+        assert (round_dir / "run_summary_after_round.md").exists()
+        assert (training_raw_dir / "round_training_manifest.json").exists()
+        assert (paper_audit_dir / "paper_audit_manifest.json").exists()
+        _assert_training_raw_is_model_output_free(training_raw_dir)
+        assert _read_jsonl(paper_audit_dir / "polymarket_model_predictions.jsonl")
+        assert _read_jsonl(paper_audit_dir / "polymarket_ev_decisions.jsonl")
 
 
 def test_missing_and_stale_inputs_fail_closed(tmp_path: Path) -> None:
@@ -113,6 +147,10 @@ def test_mock_live_operator_is_deterministic(tmp_path: Path) -> None:
         "polymarket_ev_decisions",
         "polymarket_pnl_breakdown",
         "paper_observability_report",
+        "rounds_index",
+        "training_raw_index",
+        "paper_audit_index",
+        "paper_run_summary_latest",
         "github_paper_comment_payload",
     ):
         assert _sha256(first.artifact_paths[artifact_name]) == _sha256(
@@ -139,8 +177,37 @@ def _read_jsonl(path: Path) -> list[dict]:
     ]
 
 
+def _read_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _assert_training_raw_is_model_output_free(training_raw_dir: Path) -> None:
+    forbidden_fields = {
+        "model_prediction",
+        "model_probability",
+        "paper_action",
+        "paper_pnl",
+        "selected_side",
+        "edge",
+        "ev_buy_up",
+        "ev_buy_down",
+        "estimated_up_probability",
+    }
+    for path in training_raw_dir.glob("raw_*.jsonl"):
+        for row in _read_jsonl(path):
+            assert not (forbidden_fields & set(row)), path.name
+            _assert_safe(row)
+    manifest = _read_json(training_raw_dir / "round_training_manifest.json")
+    assert manifest["phase2_raw_compatible"] is True
+    assert manifest["training_eligible"] is True
+    for field in forbidden_fields:
+        if field in {"estimated_up_probability"}:
+            continue
+        assert field in manifest["excluded_audit_fields"]
 
 
 def _assert_safe(payload: dict) -> None:
