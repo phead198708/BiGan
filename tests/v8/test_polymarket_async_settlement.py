@@ -81,6 +81,20 @@ def test_pending_finalization_waits_for_resolution_before_export(tmp_path: Path)
     provenance = finalized.exported_training_corpus_dir / "training_corpus_provenance.json"
     assert '"round_scoped_export": true' in provenance.read_text(encoding="utf-8")
 
+    provider.resolved = False
+    finalized_from_existing_raw = finalize_polymarket_pending_round(
+        capture.run_dir,
+        public_provider=provider,
+        destination_root=tmp_path / "training_root",
+        overwrite_existing=True,
+    )
+
+    assert provider.resolution_calls == 3
+    assert finalized_from_existing_raw.report["finalization_status"] == "exported"
+    assert finalized_from_existing_raw.report["reject_reason_counts"] == {}
+    assert finalized_from_existing_raw.report["raw_resolution_count"] == 1
+    assert finalized_from_existing_raw.exported_training_corpus_dir is not None
+
 
 class AsyncSettlementFakeProvider:
     read_only = True

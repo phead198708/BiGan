@@ -139,6 +139,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
         gamma_markets_endpoint: str = "https://gamma-api.polymarket.com/markets",
         clob_book_endpoint: str = "https://clob.polymarket.com/book",
         clob_books_endpoint: str = "https://clob.polymarket.com/books",
+        clob_market_endpoint: str = "https://clob.polymarket.com/markets",
         clob_ws_url: str = DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
         data_trades_endpoint: str = "https://data-api.polymarket.com/trades",
         coinbase_candles_endpoint: str = "https://api.exchange.coinbase.com/products/BTC-USD/candles",
@@ -178,6 +179,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
         self.gamma_markets_endpoint = gamma_markets_endpoint
         self.clob_book_endpoint = clob_book_endpoint
         self.clob_books_endpoint = clob_books_endpoint
+        self.clob_market_endpoint = clob_market_endpoint
         self.clob_ws_url = clob_ws_url
         self.data_trades_endpoint = data_trades_endpoint
         self.coinbase_candles_endpoint = coinbase_candles_endpoint
@@ -515,6 +517,26 @@ class PolymarketPublicHTTPRealCorpusProvider:
                     }
                 )
                 continue
+            clob_market_payload = self._clob_market_payload_for_market(market)
+            clob_resolution = _payout_resolution_from_clob_market_payload(
+                payload=clob_market_payload,
+                market=market,
+            )
+            if clob_resolution is not None:
+                rows.append(
+                    {
+                        "market_id": market["market_id"],
+                        "reference_price_source": market["reference_price_source"],
+                        "resolution_status": clob_resolution["resolution_status"],
+                        "resolved_outcome": clob_resolution["resolved_outcome"],
+                        "payout_up": clob_resolution["payout_up"],
+                        "payout_down": clob_resolution["payout_down"],
+                        "resolution_source_type": "polymarket_clob_market_tokens",
+                        "raw_resolution_text": str(clob_market_payload),
+                        **safety_fields(),
+                    }
+                )
+                continue
             raw_payload = self._gamma_resolution_payload_for_market(market)
             start = _optional_float(
                 raw_payload.get("referencePriceStart")
@@ -576,6 +598,18 @@ class PolymarketPublicHTTPRealCorpusProvider:
         except RealCorpusPublicProviderError:
             return {}
         return {str(market_id): dict(payload) for market_id, payload in payloads.items()}
+
+    def _clob_market_payload_for_market(self, market: dict[str, Any]) -> dict[str, Any]:
+        condition_id = str(market.get("condition_id") or market.get("market_id") or "")
+        if not condition_id:
+            return {}
+        try:
+            payload = self._get_json(f"{self.clob_market_endpoint}/{condition_id}")
+        except RealCorpusPublicProviderError:
+            return {}
+        except Exception:
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
 
     def _gamma_resolution_payload_for_market(self, market: dict[str, Any]) -> dict[str, Any]:
         base_payload = dict(market.get("raw_public_payload") or {})
@@ -1497,6 +1531,63 @@ def _payout_resolution_from_market_resolved_payload(
             "payout_down": 0.0,
         }
     if winning_asset_id == str(market["down_token_id"]) or winning_outcome == "DOWN":
+        return {
+            "resolution_status": "normal",
+            "resolved_outcome": "DOWN",
+            "payout_up": 0.0,
+            "payout_down": 1.0,
+        }
+    return None
+
+
+def _payout_resolution_from_clob_market_payload(
+    *,
+    payload: dict[str, Any] | None,
+    market: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not payload or payload.get("closed") is not True:
+        return None
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, list):
+        return None
+    winning_token_ids = {
+        str(token.get("token_id") or token.get("asset_id") or "")
+        for token in tokens
+        if isinstance(token, dict) and token.get("winner") is True
+    }
+    if str(market["up_token_id"]) in winning_token_ids:
+        return {
+            "resolution_status": "normal",
+            "resolved_outcome": "UP",
+            "payout_up": 1.0,
+            "payout_down": 0.0,
+        }
+    if str(market["down_token_id"]) in winning_token_ids:
+        return {
+            "resolution_status": "normal",
+            "resolved_outcome": "DOWN",
+            "payout_up": 0.0,
+            "payout_down": 1.0,
+        }
+    prices_by_token = {
+        str(token.get("token_id") or token.get("asset_id") or ""): _optional_float(
+            token.get("price")
+        )
+        for token in tokens
+        if isinstance(token, dict)
+    }
+    up_price = prices_by_token.get(str(market["up_token_id"]))
+    down_price = prices_by_token.get(str(market["down_token_id"]))
+    if up_price is None or down_price is None:
+        return None
+    if _near_payout(up_price, 1.0) and _near_payout(down_price, 0.0):
+        return {
+            "resolution_status": "normal",
+            "resolved_outcome": "UP",
+            "payout_up": 1.0,
+            "payout_down": 0.0,
+        }
+    if _near_payout(up_price, 0.0) and _near_payout(down_price, 1.0):
         return {
             "resolution_status": "normal",
             "resolved_outcome": "DOWN",

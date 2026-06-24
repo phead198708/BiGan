@@ -147,6 +147,8 @@ def validate_market_books(
     )
     if not required_sample_times:
         reasons.add("missing_complete_up_down_orderbook")
+    elif len(required_sample_times) < 2:
+        reasons.add("insufficient_decision_timestamps")
     for decision_ts in required_sample_times:
         sampled = {
             outcome: _latest_causal_book_for_sample(

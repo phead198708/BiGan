@@ -40,6 +40,7 @@ def run_polymarket_async_round_collector_cli(
     settlement_grace_seconds: float = 0.0,
     training_corpus_root: Path | str = V8_TRAINING_CORPUS_ROOT,
     clob_ws_url: str = DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
+    max_round_start_lag_seconds: float = 30.0,
     overwrite_existing: bool = False,
 ) -> dict[str, Any]:
     if round_count <= 0:
@@ -52,6 +53,8 @@ def run_polymarket_async_round_collector_cli(
         raise ValueError("settlement_poll_interval_seconds must be positive")
     if settlement_grace_seconds < 0:
         raise ValueError("settlement_grace_seconds must be non-negative")
+    if max_round_start_lag_seconds < 0:
+        raise ValueError("max_round_start_lag_seconds must be non-negative")
 
     root = Path(output_dir).expanduser().resolve()
     batch_dir = root / batch_id
@@ -69,6 +72,7 @@ def run_polymarket_async_round_collector_cli(
                 destination_root=Path(training_corpus_root),
                 clob_ws_url=clob_ws_url,
                 overwrite_existing=overwrite_existing,
+                batch_id_prefix=batch_id,
                 finalizations=finalizations,
                 errors=errors,
                 lock=lock,
@@ -84,6 +88,10 @@ def run_polymarket_async_round_collector_cli(
 
     try:
         for index in range(1, round_count + 1):
+            _sleep_until_round_start_window(
+                market_family=market_family,
+                max_round_start_lag_seconds=max_round_start_lag_seconds,
+            )
             run_id = f"{batch_id}-round{index:02d}-{_utc_stamp()}"
             provider = PolymarketPublicHTTPRealCorpusProvider(
                 max_markets=1,
@@ -130,6 +138,7 @@ def run_polymarket_async_round_collector_cli(
         destination_root=Path(training_corpus_root),
         clob_ws_url=clob_ws_url,
         overwrite_existing=overwrite_existing,
+        batch_id_prefix=batch_id,
         finalizations=finalizations,
         errors=errors,
         lock=lock,
@@ -168,6 +177,7 @@ def run_polymarket_async_finalizer_cli(
             destination_root=Path(training_corpus_root),
             clob_ws_url=clob_ws_url,
             overwrite_existing=overwrite_existing,
+            batch_id_prefix=None,
             finalizations=finalizations,
             errors=errors,
             lock=lock,
@@ -205,6 +215,7 @@ def _finalize_pending_once(
     destination_root: Path,
     clob_ws_url: str,
     overwrite_existing: bool,
+    batch_id_prefix: str | None,
     finalizations: list[dict[str, Any]],
     errors: list[dict[str, str]],
     lock: threading.Lock,
@@ -216,6 +227,10 @@ def _finalize_pending_once(
     }
     for manifest_path in sorted(output_dir.glob("*/pending_round_capture_manifest.json")):
         run_dir = manifest_path.parent
+        if batch_id_prefix is not None and not run_dir.name.startswith(
+            f"{batch_id_prefix}-round"
+        ):
+            continue
         if run_dir.name in seen_exported:
             continue
         capture_manifest = _read_json(manifest_path)
@@ -305,6 +320,33 @@ def _utc_stamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
+def _sleep_until_round_start_window(
+    *,
+    market_family: str,
+    max_round_start_lag_seconds: float,
+) -> None:
+    sleep_seconds = _round_start_alignment_sleep_seconds(
+        market_family=market_family,
+        max_round_start_lag_seconds=max_round_start_lag_seconds,
+        now_epoch_seconds=time.time(),
+    )
+    if sleep_seconds > 0:
+        time.sleep(sleep_seconds)
+
+
+def _round_start_alignment_sleep_seconds(
+    *,
+    market_family: str,
+    max_round_start_lag_seconds: float,
+    now_epoch_seconds: float,
+) -> float:
+    horizon_seconds = BTC_UPDOWN_MARKET_HORIZONS_MS[market_family] / 1000.0
+    elapsed = now_epoch_seconds % horizon_seconds
+    if elapsed <= max_round_start_lag_seconds:
+        return 0.0
+    return horizon_seconds - elapsed + 1.0
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -334,6 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--settlement-grace-seconds", type=float, default=0.0)
     parser.add_argument("--training-corpus-root", default=str(V8_TRAINING_CORPUS_ROOT))
     parser.add_argument("--clob-ws-url", default=DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL)
+    parser.add_argument("--max-round-start-lag-seconds", type=float, default=30.0)
     parser.add_argument(
         "--finalize-only",
         action="store_true",
@@ -349,6 +392,7 @@ def main(argv: list[str] | None = None) -> int:
             settlement_grace_seconds=args.settlement_grace_seconds,
             training_corpus_root=args.training_corpus_root,
             clob_ws_url=args.clob_ws_url,
+            max_round_start_lag_seconds=args.max_round_start_lag_seconds,
             overwrite_existing=args.overwrite_existing,
         )
     else:

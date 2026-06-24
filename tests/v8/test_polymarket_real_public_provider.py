@@ -146,6 +146,33 @@ def test_public_http_provider_does_not_treat_live_outcome_prices_as_resolution()
     assert resolutions == []
 
 
+def test_public_http_provider_uses_clob_market_tokens_for_resolution() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_400_000,
+        market_slugs=("btc-updown-5m-1700001000",),
+        fetch_json=FakePublicFetch(
+            include_reference_prices=False,
+            fail_gamma_resolution_refetch=True,
+            clob_market_winner_token_id="down-token",
+        ),
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    resolutions = provider.resolution_rows(markets, config)
+
+    assert len(resolutions) == 1
+    assert resolutions[0]["resolution_source_type"] == "polymarket_clob_market_tokens"
+    assert resolutions[0]["resolved_outcome"] == "DOWN"
+    assert resolutions[0]["payout_up"] == 0.0
+    assert resolutions[0]["payout_down"] == 1.0
+
+
 def test_public_http_provider_can_use_rest_orderbook_fallback_when_explicit() -> None:
     provider = PolymarketPublicHTTPRealCorpusProvider(
         current_time_ms=1_700_001_000_000,
@@ -445,6 +472,8 @@ class FakePublicFetch:
         fail_coinbase: bool = False,
         fail_kraken: bool = False,
         fail_binance: bool = False,
+        fail_gamma_resolution_refetch: bool = False,
+        clob_market_winner_token_id: str | None = None,
     ) -> None:
         self.include_reference_prices = include_reference_prices
         self.outcome_prices = outcome_prices
@@ -452,6 +481,8 @@ class FakePublicFetch:
         self.fail_coinbase = fail_coinbase
         self.fail_kraken = fail_kraken
         self.fail_binance = fail_binance
+        self.fail_gamma_resolution_refetch = fail_gamma_resolution_refetch
+        self.clob_market_winner_token_id = clob_market_winner_token_id
 
     def __call__(self, url: str):
         parsed = urllib.parse.urlparse(url)
@@ -478,6 +509,9 @@ class FakePublicFetch:
                 ]
             raise AssertionError("market discovery should use the current round slug, not trades")
         if "gamma-api.polymarket.com" in parsed.netloc:
+            if self.fail_gamma_resolution_refetch and hasattr(self, "_served_gamma_once"):
+                return []
+            self._served_gamma_once = True
             slug = query.get("slug", ["btc-updown-5m-1700001000"])[0]
             payload = {
                 "conditionId": "0xcondition",
@@ -496,6 +530,27 @@ class FakePublicFetch:
                 payload["outcomePrices"] = json.dumps(list(self.outcome_prices))
             return [payload]
         if "clob.polymarket.com" in parsed.netloc:
+            if parsed.path.startswith("/markets/"):
+                tokens = [
+                    {
+                        "token_id": "up-token",
+                        "outcome": "Up",
+                        "price": 1 if self.clob_market_winner_token_id == "up-token" else 0,
+                        "winner": self.clob_market_winner_token_id == "up-token",
+                    },
+                    {
+                        "token_id": "down-token",
+                        "outcome": "Down",
+                        "price": 1 if self.clob_market_winner_token_id == "down-token" else 0,
+                        "winner": self.clob_market_winner_token_id == "down-token",
+                    },
+                ]
+                return {
+                    "condition_id": "0xcondition",
+                    "market_slug": "btc-updown-5m-1700001000",
+                    "closed": self.clob_market_winner_token_id is not None,
+                    "tokens": tokens,
+                }
             if self.fail_clob_books:
                 raise AssertionError("REST CLOB /book should not be called")
             token_id = query["token_id"][0]

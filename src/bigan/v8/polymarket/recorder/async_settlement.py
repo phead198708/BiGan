@@ -206,11 +206,16 @@ def finalize_polymarket_pending_round(
     resolution_rows: list[dict[str, Any]] = []
 
     if market_rows:
-        resolution_candidates = _call_provider_stage(
+        existing_resolution_candidates = list(raw_payloads["raw_polymarket_resolutions.jsonl"])
+        provider_resolution_candidates = _call_provider_stage(
             provider="polymarket_resolution",
             provider_stage="resolution_collection",
             failures=rejected_rows,
             callback=lambda: public_provider.resolution_rows(market_rows, config),
+        )
+        resolution_candidates = _preferred_resolution_candidates(
+            existing_resolution_candidates=existing_resolution_candidates,
+            provider_resolution_candidates=provider_resolution_candidates,
         )
         for market in market_rows:
             resolution, reasons = validate_resolution_row(
@@ -232,14 +237,15 @@ def finalize_polymarket_pending_round(
             }
         )
 
+    raw_payloads["raw_polymarket_resolutions.jsonl"] = resolution_rows
+    _sort_raw_payloads(raw_payloads)
+    _write_raw_files(raw_dir, raw_payloads)
+
     corpus_dir = None
     phase2_result = None
     exported_training_corpus_dir = None
     phase2_error = None
     if market_rows and len(resolution_rows) == len(market_rows):
-        raw_payloads["raw_polymarket_resolutions.jsonl"] = resolution_rows
-        _sort_raw_payloads(raw_payloads)
-        _write_raw_files(raw_dir, raw_payloads)
         try:
             phase2_result = build_polymarket_btc_corpus(
                 PolymarketCorpusBuildConfig(
@@ -337,6 +343,26 @@ def _pending_finalization_paths(run_dir: Path, raw_dir: Path) -> dict[str, Path]
         ),
         **{filename: raw_dir / filename for filename in RAW_CORPUS_FILENAMES},
     }
+
+
+def _preferred_resolution_candidates(
+    *,
+    existing_resolution_candidates: list[dict[str, Any]],
+    provider_resolution_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    provider_market_ids = {
+        str(row.get("market_id") or "")
+        for row in provider_resolution_candidates
+        if str(row.get("market_id") or "")
+    }
+    return [
+        *provider_resolution_candidates,
+        *[
+            row
+            for row in existing_resolution_candidates
+            if str(row.get("market_id") or "") not in provider_market_ids
+        ],
+    ]
 
 
 def _pending_capture_report(
