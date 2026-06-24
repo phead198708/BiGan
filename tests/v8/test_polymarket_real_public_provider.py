@@ -173,6 +173,37 @@ def test_public_http_provider_uses_clob_market_tokens_for_resolution() -> None:
     assert resolutions[0]["payout_down"] == 1.0
 
 
+def test_public_http_provider_enriches_clob_resolution_with_gamma_event_prices() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_400_000,
+        market_slugs=("btc-updown-5m-1700001000",),
+        fetch_json=FakePublicFetch(
+            include_reference_prices=False,
+            fail_gamma_resolution_refetch=True,
+            clob_market_winner_token_id="down-token",
+            event_reference_prices=("65001.5", "64999.0"),
+        ),
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    resolutions = provider.resolution_rows(markets, config)
+
+    assert len(resolutions) == 1
+    assert resolutions[0]["resolution_source_type"] == "polymarket_clob_market_tokens"
+    assert resolutions[0]["reference_price_source_type"] == "gamma_event_metadata"
+    assert resolutions[0]["reference_price_start"] == 65001.5
+    assert resolutions[0]["reference_price_end"] == 64999.0
+    assert resolutions[0]["resolved_outcome"] == "DOWN"
+    assert resolutions[0]["payout_up"] == 0.0
+    assert resolutions[0]["payout_down"] == 1.0
+
+
 def test_public_http_provider_can_use_rest_orderbook_fallback_when_explicit() -> None:
     provider = PolymarketPublicHTTPRealCorpusProvider(
         current_time_ms=1_700_001_000_000,
@@ -474,6 +505,7 @@ class FakePublicFetch:
         fail_binance: bool = False,
         fail_gamma_resolution_refetch: bool = False,
         clob_market_winner_token_id: str | None = None,
+        event_reference_prices: tuple[str, str] | None = None,
     ) -> None:
         self.include_reference_prices = include_reference_prices
         self.outcome_prices = outcome_prices
@@ -483,6 +515,7 @@ class FakePublicFetch:
         self.fail_binance = fail_binance
         self.fail_gamma_resolution_refetch = fail_gamma_resolution_refetch
         self.clob_market_winner_token_id = clob_market_winner_token_id
+        self.event_reference_prices = event_reference_prices
 
     def __call__(self, url: str):
         parsed = urllib.parse.urlparse(url)
@@ -509,6 +542,25 @@ class FakePublicFetch:
                 ]
             raise AssertionError("market discovery should use the current round slug, not trades")
         if "gamma-api.polymarket.com" in parsed.netloc:
+            if parsed.path.startswith("/events/slug/"):
+                slug = parsed.path.rsplit("/", 1)[-1]
+                if self.event_reference_prices is None:
+                    return {}
+                start, end = self.event_reference_prices
+                return {
+                    "slug": slug,
+                    "eventMetadata": {
+                        "priceToBeat": start,
+                        "finalPrice": end,
+                    },
+                    "markets": [
+                        {
+                            "conditionId": "0xcondition",
+                            "slug": slug,
+                            "endDate": "2023-11-14T22:18:20Z",
+                        }
+                    ],
+                }
             if self.fail_gamma_resolution_refetch and hasattr(self, "_served_gamma_once"):
                 return []
             self._served_gamma_once = True
@@ -614,6 +666,8 @@ class DeferredResolutionFetch(FakePublicFetch):
         parsed = urllib.parse.urlparse(url)
         if "gamma-api.polymarket.com" not in parsed.netloc:
             return super().__call__(url)
+        if parsed.path.startswith("/events/slug/"):
+            return {}
         self.gamma_fetch_count += 1
         payload = super().__call__(url)[0]
         if self.gamma_fetch_count >= 2:

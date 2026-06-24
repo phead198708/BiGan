@@ -137,6 +137,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
         *,
         market_slugs: tuple[str, ...] = (),
         gamma_markets_endpoint: str = "https://gamma-api.polymarket.com/markets",
+        gamma_events_endpoint: str = "https://gamma-api.polymarket.com/events/slug",
         clob_book_endpoint: str = "https://clob.polymarket.com/book",
         clob_books_endpoint: str = "https://clob.polymarket.com/books",
         clob_market_endpoint: str = "https://clob.polymarket.com/markets",
@@ -177,6 +178,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
             raise ValueError("btc_feature_source_order must not be empty")
         self.market_slugs = tuple(dict.fromkeys(slug.strip() for slug in market_slugs if slug.strip()))
         self.gamma_markets_endpoint = gamma_markets_endpoint
+        self.gamma_events_endpoint = gamma_events_endpoint
         self.clob_book_endpoint = clob_book_endpoint
         self.clob_books_endpoint = clob_books_endpoint
         self.clob_market_endpoint = clob_market_endpoint
@@ -498,6 +500,13 @@ class PolymarketPublicHTTPRealCorpusProvider:
         rows = []
         ws_resolution_payloads = self._resolution_payloads_from_orderbook_source(markets)
         for market in markets:
+            raw_payload = self._gamma_resolution_payload_for_market(market)
+            event_payload = self._gamma_event_payload_for_market(market)
+            reference_price_fields = _reference_price_fields_for_resolution(
+                market=market,
+                event_payload=event_payload,
+                gamma_market_payload=raw_payload,
+            )
             ws_resolution = _payout_resolution_from_market_resolved_payload(
                 payload=ws_resolution_payloads.get(str(market["market_id"])),
                 market=market,
@@ -513,6 +522,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
                         "payout_down": ws_resolution["payout_down"],
                         "resolution_source_type": "polymarket_clob_ws_market_resolved",
                         "raw_resolution_text": str(ws_resolution_payloads.get(str(market["market_id"]))),
+                        **reference_price_fields,
                         **safety_fields(),
                     }
                 )
@@ -533,22 +543,12 @@ class PolymarketPublicHTTPRealCorpusProvider:
                         "payout_down": clob_resolution["payout_down"],
                         "resolution_source_type": "polymarket_clob_market_tokens",
                         "raw_resolution_text": str(clob_market_payload),
+                        **reference_price_fields,
                         **safety_fields(),
                     }
                 )
                 continue
-            raw_payload = self._gamma_resolution_payload_for_market(market)
-            start = _optional_float(
-                raw_payload.get("referencePriceStart")
-                or raw_payload.get("reference_price_start")
-                or raw_payload.get("reference_price_at_start")
-            )
-            end = _optional_float(
-                raw_payload.get("referencePriceEnd")
-                or raw_payload.get("reference_price_end")
-                or raw_payload.get("reference_price_at_end")
-            )
-            if start is None or end is None:
+            if not reference_price_fields:
                 payout_resolution = _payout_resolution_from_gamma_payload(
                     payload=raw_payload,
                     market=market,
@@ -573,12 +573,11 @@ class PolymarketPublicHTTPRealCorpusProvider:
                 rows.append(
                     {
                         "market_id": market["market_id"],
-                        "reference_price_start": start,
-                        "reference_price_end": end,
                         "reference_price_source": market["reference_price_source"],
                         "resolution_status": _resolution_status_from_payload(raw_payload),
                         "resolution_source_type": "reference_prices",
                         "raw_resolution_text": str(raw_payload.get("description") or ""),
+                        **reference_price_fields,
                         **safety_fields(),
                     }
                 )
@@ -636,6 +635,20 @@ class PolymarketPublicHTTPRealCorpusProvider:
             merged.update(payload)
             return merged
         return base_payload
+
+    def _gamma_event_payload_for_market(self, market: dict[str, Any]) -> dict[str, Any]:
+        slug = str(market.get("slug") or "")
+        if not slug:
+            return {}
+        try:
+            payload = self._get_json(
+                f"{self.gamma_events_endpoint.rstrip('/')}/{urllib.parse.quote(slug, safe='')}"
+            )
+        except RealCorpusPublicProviderError:
+            return {}
+        except Exception:
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
 
     def _discover_current_btc_updown_slugs(
         self,
@@ -1394,6 +1407,81 @@ def _price_levels(value: Any) -> list[tuple[float, float]]:
         if price is not None and size is not None:
             levels.append((price, size))
     return levels
+
+
+def _reference_price_fields_for_resolution(
+    *,
+    market: dict[str, Any],
+    event_payload: dict[str, Any],
+    gamma_market_payload: dict[str, Any],
+) -> dict[str, Any]:
+    raw_market_payload = market.get("raw_public_payload")
+    for source_type, payload in (
+        ("raw_market_payload", raw_market_payload),
+        ("gamma_event_metadata", event_payload),
+        ("gamma_market_payload", gamma_market_payload),
+    ):
+        if not isinstance(payload, dict):
+            continue
+        pair = _reference_price_pair_from_payload(payload)
+        if pair is None:
+            continue
+        start, end = pair
+        return {
+            "reference_price_start": start,
+            "reference_price_end": end,
+            "reference_price_source_type": source_type,
+        }
+    return {}
+
+
+def _reference_price_pair_from_payload(payload: dict[str, Any]) -> tuple[float, float] | None:
+    for candidate in _reference_price_candidates(payload):
+        start = _first_positive_float(
+            candidate,
+            "referencePriceStart",
+            "reference_price_start",
+            "reference_price_at_start",
+            "priceToBeat",
+            "price_to_beat",
+            "openPrice",
+            "open_price",
+            "start_price",
+        )
+        end = _first_positive_float(
+            candidate,
+            "referencePriceEnd",
+            "reference_price_end",
+            "reference_price_at_end",
+            "finalPrice",
+            "final_price",
+            "closePrice",
+            "close_price",
+            "target_price",
+        )
+        if start is not None and end is not None:
+            return start, end
+    return None
+
+
+def _reference_price_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    metadata = payload.get("eventMetadata")
+    if isinstance(metadata, dict):
+        candidates.append(metadata)
+    candidates.append(payload)
+    markets = payload.get("markets")
+    if isinstance(markets, list):
+        candidates.extend(dict(row) for row in markets if isinstance(row, dict))
+    return candidates
+
+
+def _first_positive_float(payload: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _optional_float(payload.get(key))
+        if value is not None and value > 0.0:
+            return value
+    return None
 
 
 def _optional_float(value: Any) -> float | None:
