@@ -151,6 +151,7 @@ def test_training_eligibility_is_round_local_when_run_fails_closed(
     assert first_round["expected_sample_count"] == 3
     assert first_round["complete_up_down_book_sample_count"] == 2
     assert first_round["incomplete_book_sample_count"] == 1
+    assert first_round["training_eligibility_policy"] == "min_one_complete_book_sample"
     assert first_round["round_reason_codes"] == []
 
 
@@ -266,6 +267,7 @@ def _assert_training_raw_is_model_output_free(training_raw_dir: Path) -> None:
     assert manifest["phase2_raw_compatible"] is True
     assert manifest["training_eligible"] is True
     assert manifest["round_training_eligible"] is True
+    assert manifest["training_eligibility_policy"] == "min_one_complete_book_sample"
     for field in forbidden_fields:
         if field in {"estimated_up_probability"}:
             continue
@@ -278,6 +280,7 @@ def _assert_round_summary_has_training_context(path: Path) -> None:
     assert summary["round_reason_codes"] == []
     assert summary["round_feed_health"]["reason_codes"] == []
     assert summary["round_resolution_health"]["reason_codes"] == []
+    assert summary["training_eligibility_policy"] == "min_one_complete_book_sample"
     assert summary["expected_sample_count"] == 3
     assert summary["complete_up_down_book_sample_count"] == 3
     assert summary["incomplete_book_sample_count"] == 0
@@ -312,6 +315,7 @@ def _assert_training_manifest_has_provenance(
     assert manifest["live_polymarket_data"] is False
     assert manifest["live_btc_reference_data"] is False
     assert manifest["deterministic_replay"] is True
+    assert manifest["training_eligibility_policy"] == "min_one_complete_book_sample"
     assert manifest["expected_sample_count"] == 3
     assert manifest["complete_up_down_book_sample_count"] == 3
     assert manifest["incomplete_book_sample_count"] == 0

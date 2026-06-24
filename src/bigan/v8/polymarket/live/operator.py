@@ -38,6 +38,8 @@ from bigan.v8.polymarket.training import (
     predict_polymarket_policy_examples,
 )
 
+TRAINING_ELIGIBILITY_POLICY = "min_one_complete_book_sample"
+
 
 def run_polymarket_live_paper(
     config: PolymarketLivePaperConfig,
@@ -1192,6 +1194,7 @@ def _finalize_round_artifacts(
         "round_training_eligible": training_eligible,
         "round_reason_codes": fail_closed_reason_codes,
         "fail_closed_reason_codes": fail_closed_reason_codes,
+        "training_eligibility_policy": TRAINING_ELIGIBILITY_POLICY,
         **book_coverage,
         **safety_fields(),
     }
@@ -1203,6 +1206,12 @@ def _finalize_round_artifacts(
         "latest_round_summary_sha256": round_summary_sha256,
         "latest_run_summary_sha256": _sha256_file(run_summary_path),
     }
+
+
+def finalize_polymarket_round_artifacts(**kwargs: Any) -> dict[str, Any]:
+    """Shared round finalization service for batch and async settlement paths."""
+
+    return _finalize_round_artifacts(**kwargs)
 
 
 def _write_round_lifecycle_indexes(
@@ -1217,6 +1226,25 @@ def _write_round_lifecycle_indexes(
     _write_jsonl(artifact_paths["training_raw_index"], training_index_rows)
     _write_jsonl(artifact_paths["paper_audit_index"], paper_audit_index_rows)
     _write_json(artifact_paths["paper_run_summary_latest"], latest_run_summary)
+
+
+def write_polymarket_round_lifecycle_indexes(
+    *,
+    artifact_paths: dict[str, Path],
+    round_index_rows: list[dict[str, Any]],
+    training_index_rows: list[dict[str, Any]],
+    paper_audit_index_rows: list[dict[str, Any]],
+    latest_run_summary: dict[str, Any],
+) -> None:
+    """Flush round lifecycle indexes after each durable round finalization."""
+
+    _write_round_lifecycle_indexes(
+        artifact_paths=artifact_paths,
+        round_index_rows=round_index_rows,
+        training_index_rows=training_index_rows,
+        paper_audit_index_rows=paper_audit_index_rows,
+        latest_run_summary=latest_run_summary,
+    )
 
 
 def _write_training_raw_bundle(
@@ -1270,6 +1298,7 @@ def _write_training_raw_bundle(
         "slug": market.slug,
         "training_eligible": True,
         "round_training_eligible": True,
+        "training_eligibility_policy": TRAINING_ELIGIBILITY_POLICY,
         "phase2_raw_compatible": True,
         "source_operator_run_id": config.run_id,
         "source_round_id": _round_id(market),
@@ -1385,6 +1414,7 @@ def _round_summary(
         "round_model_health": round_model_health,
         "round_resolution_health": round_resolution_health,
         "round_training_eligible": training_eligible,
+        "training_eligibility_policy": TRAINING_ELIGIBILITY_POLICY,
         **book_coverage,
         "model_run_id": _model_run_id(model_manifest),
         "model_manifest_sha256": model_manifest_sha256,

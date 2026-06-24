@@ -18,7 +18,11 @@ from bigan.v8.polymarket.live.contracts import (
     PolymarketLivePaperResult,
     PolymarketLiveTrade,
 )
-from bigan.v8.polymarket.live.operator import run_polymarket_live_paper
+from bigan.v8.polymarket.live.operator import (
+    finalize_polymarket_round_artifacts,
+    run_polymarket_live_paper,
+    write_polymarket_round_lifecycle_indexes,
+)
 from bigan.v8.polymarket.live.polymarket_feed import (
     MockPolymarketLiveFeed,
     PolymarketHTTPReadOnlyFeed,
@@ -41,5 +45,7 @@ __all__ = [
     "PolymarketLivePaperError",
     "PolymarketLivePaperResult",
     "PolymarketLiveTrade",
+    "finalize_polymarket_round_artifacts",
     "run_polymarket_live_paper",
+    "write_polymarket_round_lifecycle_indexes",
 ]

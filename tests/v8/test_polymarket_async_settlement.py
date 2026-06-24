@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+import bigan.v8.polymarket.recorder.async_settlement as async_settlement_module
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.recorder import (
     PolymarketRealCorpusRecorderConfig,
@@ -108,6 +111,23 @@ def test_pending_finalization_waits_for_resolution_before_export(tmp_path: Path)
     assert (finalized.exported_training_corpus_dir / "polymarket_label_rows.jsonl").exists()
     provenance = finalized.exported_training_corpus_dir / "training_corpus_provenance.json"
     assert '"round_scoped_export": true' in provenance.read_text(encoding="utf-8")
+    assert finalized.report["round_artifact_export_mode"] == "round_finalization_lifecycle"
+    assert finalized.report["round_artifacts_written"] == 1
+    assert finalized.report["training_raw_round_count"] == 1
+    assert finalized.report["paper_audit_round_count"] == 1
+    rounds_index = _read_jsonl(finalized.artifact_paths["rounds_index"])
+    assert len(rounds_index) == 1
+    round_dir = finalized.run_dir / rounds_index[0]["round_dir"]
+    training_raw_dir = finalized.run_dir / rounds_index[0]["training_raw_dir"]
+    assert (round_dir / "round_summary.json").exists()
+    assert (round_dir / "paper_audit" / "paper_audit_manifest.json").exists()
+    assert (training_raw_dir / "round_training_manifest.json").exists()
+    assert _read_json(round_dir / "round_summary.json")["training_eligibility_policy"] == (
+        "min_one_complete_book_sample"
+    )
+    assert _read_json(training_raw_dir / "round_training_manifest.json")[
+        "training_eligibility_policy"
+    ] == "min_one_complete_book_sample"
 
     provider.resolved = False
     finalized_from_existing_raw = finalize_polymarket_pending_round(
@@ -122,6 +142,73 @@ def test_pending_finalization_waits_for_resolution_before_export(tmp_path: Path)
     assert finalized_from_existing_raw.report["reject_reason_counts"] == {}
     assert finalized_from_existing_raw.report["raw_resolution_count"] == 1
     assert finalized_from_existing_raw.exported_training_corpus_dir is not None
+    assert finalized_from_existing_raw.report["round_artifacts_newly_finalized"] == 0
+
+
+def test_pending_finalization_round_artifacts_survive_crash_and_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = AsyncSettlementTwoRoundProvider(resolved=True)
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="pending-two-rounds",
+        output_dir=tmp_path,
+        market_families=("btc_updown_5m", "btc_updown_15m"),
+        mock_public_data=False,
+    )
+    capture = capture_polymarket_pending_round(config, public_provider=provider)
+    real_writer = async_settlement_module.write_polymarket_round_lifecycle_indexes
+    flush_count = 0
+
+    def crash_after_first_flush(**kwargs: Any) -> None:
+        nonlocal flush_count
+        flush_count += 1
+        real_writer(**kwargs)
+        if flush_count == 1:
+            raise RuntimeError("simulated crash after first round artifact flush")
+
+    monkeypatch.setattr(
+        async_settlement_module,
+        "write_polymarket_round_lifecycle_indexes",
+        crash_after_first_flush,
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        finalize_polymarket_pending_round(
+            capture.run_dir,
+            public_provider=provider,
+            destination_root=tmp_path / "training_root",
+        )
+
+    rounds_index_path = capture.run_dir / "rounds_index.jsonl"
+    persisted_rows = _read_jsonl(rounds_index_path)
+    assert len(persisted_rows) == 1
+    assert (capture.run_dir / persisted_rows[0]["round_dir"] / "round_summary.json").exists()
+    assert (
+        capture.run_dir
+        / persisted_rows[0]["training_raw_dir"]
+        / "round_training_manifest.json"
+    ).exists()
+
+    monkeypatch.setattr(
+        async_settlement_module,
+        "write_polymarket_round_lifecycle_indexes",
+        real_writer,
+    )
+    provider.resolved = False
+    resumed = finalize_polymarket_pending_round(
+        capture.run_dir,
+        public_provider=provider,
+        destination_root=tmp_path / "training_root",
+        overwrite_existing=True,
+    )
+
+    assert resumed.report["finalization_status"] == "blocked_fail_closed"
+    assert resumed.report["phase2_corpus_built"] is True
+    assert "exactly one round slug" in resumed.report["phase2_error"]
+    assert resumed.report["round_artifacts_written"] == 2
+    assert resumed.report["round_artifacts_newly_finalized"] == 1
+    assert len(_read_jsonl(rounds_index_path)) == 2
+    assert len(_read_jsonl(capture.run_dir / "training_raw_index.jsonl")) == 2
 
 
 class AsyncSettlementFakeProvider:
@@ -207,6 +294,14 @@ class AsyncSettlementMissingBookProvider(AsyncSettlementFakeProvider):
         ]
 
 
+class AsyncSettlementTwoRoundProvider(AsyncSettlementFakeProvider):
+    def market_rows(
+        self,
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> list[dict[str, Any]]:
+        return [_as_real_public_market_row(row) for row in discover_mock_market_rows(config)[:2]]
+
+
 def _as_real_public_market_row(row: dict[str, Any]) -> dict[str, Any]:
     market = dict(row)
     market["raw_market_sha256"] = canonical_json_sha256(
@@ -226,3 +321,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))

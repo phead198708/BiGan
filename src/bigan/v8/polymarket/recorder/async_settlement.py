@@ -9,12 +9,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.corpus import (
     RAW_CORPUS_FILENAMES,
     PolymarketCorpusBuildConfig,
     build_polymarket_btc_corpus,
 )
 from bigan.v8.polymarket.corpus.contracts import safety_fields
+from bigan.v8.polymarket.live import (
+    finalize_polymarket_round_artifacts,
+    write_polymarket_round_lifecycle_indexes,
+)
+from bigan.v8.polymarket.live.contracts import (
+    BinanceBTCCandle,
+    PolymarketLiveMarket,
+    PolymarketLiveOrderBook,
+    PolymarketLivePaperConfig,
+    PolymarketLiveTrade,
+)
 from bigan.v8.polymarket.recorder.btc_reference import validate_btc_feature_candles
 from bigan.v8.polymarket.recorder.contracts import (
     POLYMARKET_REAL_CORPUS_RECORDER_SCHEMA_VERSION,
@@ -36,6 +48,7 @@ from bigan.v8.polymarket.recorder.orderbook_state import (
 )
 from bigan.v8.polymarket.recorder.public_provider import PolymarketRealCorpusPublicProvider
 from bigan.v8.polymarket.recorder.resolution import validate_resolution_row
+from bigan.v8.polymarket.rules import build_btc_updown_resolution_rule, resolve_polymarket_rule
 from bigan.v8.polymarket.storage import (
     V8_TRAINING_CORPUS_ROOT,
     export_trainable_corpus,
@@ -252,6 +265,14 @@ def finalize_polymarket_pending_round(
     raw_payloads["raw_polymarket_resolutions.jsonl"] = resolution_rows
     _sort_raw_payloads(raw_payloads)
     _write_raw_files(raw_dir, raw_payloads)
+    round_artifact_evidence = _finalize_pending_round_lifecycle_artifacts(
+        config=config,
+        run_dir=resolved_run_dir,
+        raw_payloads=raw_payloads,
+        finalization_reason_codes=tuple(
+            sorted({reason for row in rejected_rows for reason in row.get("reject_reasons", [])})
+        ),
+    )
 
     corpus_dir = None
     phase2_result = None
@@ -306,6 +327,7 @@ def finalize_polymarket_pending_round(
         phase2_result=phase2_result,
         phase2_error=phase2_error,
         exported_training_corpus_dir=exported_training_corpus_dir,
+        round_artifact_evidence=round_artifact_evidence,
     )
     finalization_manifest = _pending_finalization_manifest(
         config=config,
@@ -313,6 +335,7 @@ def finalize_polymarket_pending_round(
         report=report,
         phase2_result=phase2_result,
         exported_training_corpus_dir=exported_training_corpus_dir,
+        round_artifact_evidence=round_artifact_evidence,
     )
     _write_json(artifact_paths["pending_round_finalization_report"], report)
     _write_json(artifact_paths["pending_round_finalization_manifest"], finalization_manifest)
@@ -353,8 +376,340 @@ def _pending_finalization_paths(run_dir: Path, raw_dir: Path) -> dict[str, Path]
         "pending_round_finalization_rejected_rows": (
             run_dir / "pending_round_finalization_rejected_rows.jsonl"
         ),
+        **_pending_round_lifecycle_paths(run_dir),
         **{filename: raw_dir / filename for filename in RAW_CORPUS_FILENAMES},
     }
+
+
+def _pending_round_lifecycle_paths(run_dir: Path) -> dict[str, Path]:
+    return {
+        "rounds_index": run_dir / "rounds_index.jsonl",
+        "training_raw_index": run_dir / "training_raw_index.jsonl",
+        "paper_audit_index": run_dir / "paper_audit_index.jsonl",
+        "paper_run_summary_latest": run_dir / "paper_run_summary_latest.json",
+    }
+
+
+def _finalize_pending_round_lifecycle_artifacts(
+    *,
+    config: PolymarketRealCorpusRecorderConfig,
+    run_dir: Path,
+    raw_payloads: dict[str, list[dict[str, Any]]],
+    finalization_reason_codes: tuple[str, ...],
+) -> dict[str, Any]:
+    markets = raw_payloads["raw_polymarket_markets.jsonl"]
+    resolutions_by_market = {
+        str(row["market_id"]): row
+        for row in raw_payloads["raw_polymarket_resolutions.jsonl"]
+        if row.get("market_id")
+    }
+    if not markets or not resolutions_by_market:
+        return _empty_round_artifact_evidence()
+
+    artifact_paths = _pending_round_lifecycle_paths(run_dir)
+    round_index_rows = _read_jsonl(artifact_paths["rounds_index"])
+    training_index_rows = _read_jsonl(artifact_paths["training_raw_index"])
+    paper_audit_index_rows = _read_jsonl(artifact_paths["paper_audit_index"])
+    finalized_market_ids = {str(row.get("market_id") or "") for row in round_index_rows}
+    round_summaries = _read_existing_round_summaries(
+        run_dir=run_dir,
+        round_index_rows=round_index_rows,
+    )
+    latest_run_summary = _read_json_or_empty(artifact_paths["paper_run_summary_latest"])
+    live_config = _live_config_for_pending_round(config)
+    model_manifest = _pending_round_model_manifest(config)
+    model_manifest_sha256 = canonical_json_sha256(model_manifest)
+    status = "completed" if not finalization_reason_codes else "blocked_fail_closed"
+    recommendation = "continue_paper_run" if status == "completed" else "blocked_fail_closed"
+
+    finalized_count = 0
+    for market_row in sorted(markets, key=lambda row: (int(row["market_start_ts"]), str(row["market_id"]))):
+        market_id = str(market_row["market_id"])
+        if market_id in finalized_market_ids:
+            continue
+        resolution = resolutions_by_market.get(market_id)
+        if resolution is None:
+            continue
+        live_market = _live_market_from_pending_raw(market_row, resolution)
+        settlement_candle = _settlement_candle_from_pending_raw(market_row, resolution)
+        finalized = finalize_polymarket_round_artifacts(
+            config=live_config,
+            run_dir=run_dir,
+            rounds_root=run_dir / "rounds",
+            market=live_market,
+            orderbooks=_live_orderbooks_from_pending_raw(market_id, raw_payloads),
+            trades=_live_trades_from_pending_raw(market_id, raw_payloads),
+            candle=settlement_candle,
+            predictions=[],
+            decisions=[],
+            ledger_events=[],
+            settlement=_settlement_event_from_pending_raw(
+                market=market_row,
+                resolution=resolution,
+                candle=settlement_candle,
+            ),
+            observability_report=_pending_round_observability_report(
+                config=config,
+                reason_codes=finalization_reason_codes,
+            ),
+            completed_round_summaries=round_summaries,
+            model_manifest=model_manifest,
+            model_manifest_sha256=model_manifest_sha256,
+            run_reason_codes=finalization_reason_codes,
+            status=status,
+            recommendation=recommendation,
+        )
+        round_summaries.append(finalized["round_summary"])
+        index_row = finalized["index_row"]
+        round_index_rows.append(index_row)
+        paper_audit_index_rows.append(index_row)
+        if finalized["training_eligible"]:
+            training_index_rows.append(index_row)
+        latest_run_summary = finalized["latest_run_summary"]
+        write_polymarket_round_lifecycle_indexes(
+            artifact_paths=artifact_paths,
+            round_index_rows=round_index_rows,
+            training_index_rows=training_index_rows,
+            paper_audit_index_rows=paper_audit_index_rows,
+            latest_run_summary=latest_run_summary,
+        )
+        finalized_market_ids.add(market_id)
+        finalized_count += 1
+
+    if not artifact_paths["paper_run_summary_latest"].exists():
+        write_polymarket_round_lifecycle_indexes(
+            artifact_paths=artifact_paths,
+            round_index_rows=round_index_rows,
+            training_index_rows=training_index_rows,
+            paper_audit_index_rows=paper_audit_index_rows,
+            latest_run_summary=latest_run_summary,
+        )
+    return {
+        "round_artifact_export_mode": "round_finalization_lifecycle",
+        "round_artifacts_written": len(round_index_rows),
+        "round_artifacts_newly_finalized": finalized_count,
+        "training_raw_round_count": len(training_index_rows),
+        "paper_audit_round_count": len(paper_audit_index_rows),
+        "round_lifecycle_index_paths": {
+            name: str(path) for name, path in sorted(artifact_paths.items())
+        },
+        "latest_run_summary_sha256": (
+            None
+            if not artifact_paths["paper_run_summary_latest"].exists()
+            else _sha256_file(artifact_paths["paper_run_summary_latest"])
+        ),
+    }
+
+
+def _empty_round_artifact_evidence() -> dict[str, Any]:
+    return {
+        "round_artifact_export_mode": "round_finalization_lifecycle",
+        "round_artifacts_written": 0,
+        "round_artifacts_newly_finalized": 0,
+        "training_raw_round_count": 0,
+        "paper_audit_round_count": 0,
+        "round_lifecycle_index_paths": {},
+        "latest_run_summary_sha256": None,
+    }
+
+
+def _live_config_for_pending_round(
+    config: PolymarketRealCorpusRecorderConfig,
+) -> PolymarketLivePaperConfig:
+    return PolymarketLivePaperConfig(
+        run_id=config.run_id,
+        output_dir=config.output_dir,
+        mock_live=config.mock_public_data,
+        market_families=tuple(config.market_families),
+        created_at=config.created_at,
+        started_at=config.started_at,
+        overwrite_existing=True,
+    )
+
+
+def _pending_round_model_manifest(config: PolymarketRealCorpusRecorderConfig) -> dict[str, Any]:
+    return {
+        "run_id": config.run_id,
+        "model_version": "pending-round-finalize-only",
+        "recorder_run_id": config.run_id,
+        "real_historical_corpus_used": not config.mock_public_data,
+        "fixture_corpus_used": False,
+        "synthetic_corpus_used": config.mock_public_data,
+        "fixture_model_used": False,
+        "round_finalization_only": True,
+        **safety_fields(),
+    }
+
+
+def _live_market_from_pending_raw(
+    market: dict[str, Any],
+    resolution: dict[str, Any],
+) -> PolymarketLiveMarket:
+    return PolymarketLiveMarket(
+        market_id=str(market["market_id"]),
+        condition_id=str(market["condition_id"]),
+        slug=str(market["slug"]),
+        market_family=str(market["market_family"]),
+        horizon_ms=int(market["horizon_ms"]),
+        market_start_ts=int(market["market_start_ts"]),
+        market_end_ts=int(market["market_end_ts"]),
+        settlement_ts=int(market["settlement_ts"]),
+        up_token_id=str(market["up_token_id"]),
+        down_token_id=str(market["down_token_id"]),
+        reference_price_source=str(market["reference_price_source"]),
+        settlement_rule=str(market["settlement_rule"]),
+        reference_price_at_start=float(resolution["reference_price_start"]),
+        status="resolved",
+        resolution_available=True,
+        raw_market_sha256=str(market.get("raw_public_payload_sha256") or ""),
+    )
+
+
+def _live_orderbooks_from_pending_raw(
+    market_id: str,
+    raw_payloads: dict[str, list[dict[str, Any]]],
+) -> list[PolymarketLiveOrderBook]:
+    rows = []
+    for row in raw_payloads["raw_polymarket_orderbooks.jsonl"]:
+        if row.get("market_id") != market_id:
+            continue
+        rows.append(
+            PolymarketLiveOrderBook(
+                market_id=market_id,
+                token_id=str(row["token_id"]),
+                outcome=str(row["outcome"]).upper(),  # type: ignore[arg-type]
+                ts=int(row["ts"]),
+                received_ts=int(row.get("available_at_ts") or row["ts"]),
+                bid_price=float(row["bid_price"]),
+                ask_price=float(row["ask_price"]),
+                mid_price=float(row["mid_price"]),
+                bid_size=float(row.get("bid_size") or 0.0),
+                ask_size=float(row.get("ask_size") or 0.0),
+                liquidity_depth=float(row.get("liquidity_depth") or 0.0),
+                source=str(row.get("source") or "polymarket_corpus_recorder"),
+            )
+        )
+    return rows
+
+
+def _live_trades_from_pending_raw(
+    market_id: str,
+    raw_payloads: dict[str, list[dict[str, Any]]],
+) -> list[PolymarketLiveTrade]:
+    rows = []
+    for row in raw_payloads["raw_polymarket_trades.jsonl"]:
+        if row.get("market_id") != market_id:
+            continue
+        rows.append(
+            PolymarketLiveTrade(
+                market_id=market_id,
+                token_id=str(row["token_id"]),
+                outcome=str(row["outcome"]).upper(),  # type: ignore[arg-type]
+                ts=int(row["ts"]),
+                price=float(row["price"]),
+                size=float(row.get("size") or 0.0),
+                side=str(row.get("side") or "UNKNOWN"),
+                source=str(row.get("source") or "polymarket_corpus_recorder"),
+            )
+        )
+    return rows
+
+
+def _settlement_candle_from_pending_raw(
+    market: dict[str, Any],
+    resolution: dict[str, Any],
+) -> BinanceBTCCandle:
+    start = float(resolution["reference_price_start"])
+    end = float(resolution["reference_price_end"])
+    return BinanceBTCCandle(
+        market_id=str(market["market_id"]),
+        market_family=str(market["market_family"]),
+        open_ts=int(market["market_start_ts"]),
+        close_ts=int(market["market_end_ts"]),
+        open_price=start,
+        close_price=end,
+        high_price=max(start, end),
+        low_price=min(start, end),
+        source=str(resolution.get("reference_price_source") or market["reference_price_source"]),
+    )
+
+
+def _settlement_event_from_pending_raw(
+    *,
+    market: dict[str, Any],
+    resolution: dict[str, Any],
+    candle: BinanceBTCCandle,
+) -> dict[str, Any]:
+    rule = build_btc_updown_resolution_rule(
+        market_id=str(market["market_id"]),
+        condition_id=str(market["condition_id"]),
+        slug=str(market["slug"]),
+        market_family=str(market["market_family"]),
+        resolution_source=str(resolution.get("reference_price_source") or market["reference_price_source"]),
+        candle_open_ts=int(market["market_start_ts"]),
+        candle_close_ts=int(market["market_end_ts"]),
+        raw_rule_text=str(market["settlement_rule"]),
+    )
+    resolved = resolve_polymarket_rule(
+        rule,
+        reference_price_start=candle.open_price,
+        reference_price_end=candle.close_price,
+    )
+    return {
+        "market_id": str(market["market_id"]),
+        "condition_id": str(market["condition_id"]),
+        "slug": str(market["slug"]),
+        "resolution_status": str(resolution["resolution_status"]),
+        "resolved_outcome": resolved.resolved_outcome,
+        "payout_up": resolved.payout_up,
+        "payout_down": resolved.payout_down,
+        "qty_up_settled": 0.0,
+        "qty_down_settled": 0.0,
+        "settlement_cashflow": 0.0,
+        "settlement_pnl": 0.0,
+        "raw_resolution_sha256": resolved.raw_resolution_sha256,
+        **safety_fields(),
+    }
+
+
+def _pending_round_observability_report(
+    *,
+    config: PolymarketRealCorpusRecorderConfig,
+    reason_codes: tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        "schema_version": ASYNC_SETTLEMENT_SCHEMA_VERSION,
+        "phase": PENDING_FINALIZATION_PHASE,
+        "run_id": config.run_id,
+        "operator_status": "completed" if not reason_codes else "blocked_fail_closed",
+        "operator_recommendation": (
+            "continue_paper_run" if not reason_codes else "blocked_fail_closed"
+        ),
+        "critical_alert_count": len(set(reason_codes)),
+        "critical_reason_codes": sorted(set(reason_codes)),
+        "round_finalization_only": True,
+        **safety_fields(),
+    }
+
+
+def _read_existing_round_summaries(
+    *,
+    run_dir: Path,
+    round_index_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    summaries = []
+    for row in round_index_rows:
+        round_dir = row.get("round_dir")
+        if not round_dir:
+            continue
+        path = run_dir / str(round_dir) / "round_summary.json"
+        if path.exists():
+            summaries.append(_read_json(path))
+    return summaries
+
+
+def _read_json_or_empty(path: Path) -> dict[str, Any]:
+    return _read_json(path) if path.exists() else {}
 
 
 def _preferred_resolution_candidates(
@@ -453,6 +808,7 @@ def _pending_finalization_report(
     phase2_result: Any,
     phase2_error: str | None,
     exported_training_corpus_dir: Path | None,
+    round_artifact_evidence: dict[str, Any],
 ) -> dict[str, Any]:
     market_count = len(raw_payloads["raw_polymarket_markets.jsonl"])
     resolution_count = len(raw_payloads["raw_polymarket_resolutions.jsonl"])
@@ -484,6 +840,17 @@ def _pending_finalization_report(
             if phase2_result is None
             else phase2_result.artifact_hashes.get("corpus_manifest")
         ),
+        **{
+            key: round_artifact_evidence[key]
+            for key in (
+                "round_artifact_export_mode",
+                "round_artifacts_written",
+                "round_artifacts_newly_finalized",
+                "training_raw_round_count",
+                "paper_audit_round_count",
+                "latest_run_summary_sha256",
+            )
+        },
         "exported_training_corpus_dir": (
             None if exported_training_corpus_dir is None else str(exported_training_corpus_dir)
         ),
@@ -503,6 +870,7 @@ def _pending_finalization_manifest(
     report: dict[str, Any],
     phase2_result: Any,
     exported_training_corpus_dir: Path | None,
+    round_artifact_evidence: dict[str, Any],
 ) -> dict[str, Any]:
     raw_paths = {filename: config.raw_dir / filename for filename in RAW_CORPUS_FILENAMES}
     return {
@@ -521,6 +889,21 @@ def _pending_finalization_manifest(
         "phase2_corpus_built": phase2_result is not None,
         "phase2_corpus_dir": None if phase2_result is None else str(phase2_result.output_dir),
         "phase2_corpus_manifest_sha256": report["phase2_corpus_manifest_sha256"],
+        "round_artifact_export_mode": round_artifact_evidence[
+            "round_artifact_export_mode"
+        ],
+        "round_artifacts_written": round_artifact_evidence["round_artifacts_written"],
+        "round_artifacts_newly_finalized": round_artifact_evidence[
+            "round_artifacts_newly_finalized"
+        ],
+        "training_raw_round_count": round_artifact_evidence["training_raw_round_count"],
+        "paper_audit_round_count": round_artifact_evidence["paper_audit_round_count"],
+        "latest_run_summary_sha256": round_artifact_evidence[
+            "latest_run_summary_sha256"
+        ],
+        "round_lifecycle_index_paths": round_artifact_evidence[
+            "round_lifecycle_index_paths"
+        ],
         "exported_training_corpus_dir": (
             None if exported_training_corpus_dir is None else str(exported_training_corpus_dir)
         ),
