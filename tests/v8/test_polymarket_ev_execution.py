@@ -118,6 +118,41 @@ def test_policy_replay_uses_phase1_settlement_and_reports_pnl(
     _assert_safe(ev_report)
 
 
+def test_policy_replay_accepts_verified_outcome_without_reference_prices(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    corpus_dir = tmp_path / "corpus"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=corpus_dir,
+        )
+    )
+    resolutions_path = corpus_dir / "polymarket_resolution_events.jsonl"
+    resolutions = _read_jsonl(resolutions_path)
+    for row in resolutions:
+        row["reference_price_start"] = None
+        row["reference_price_end"] = None
+    _write_jsonl(resolutions_path, resolutions)
+
+    result = run_polymarket_policy_training(
+        PolymarketPolicyTrainingConfig(
+            corpus_dir=corpus_dir,
+            output_dir=tmp_path / "policy",
+        )
+    )
+
+    replay = _read_json(result.artifact_paths["replay_report"])
+    assert replay["settlement_resolution_source_counts"] == {
+        "verified_outcome_payout_vector": replay["settlement_event_count"]
+    }
+    assert replay["phase1_position_ledger_used"] is True
+    assert replay["phase1_settlement_engine_used"] is True
+    _assert_safe(replay)
+
+
 def _run_training(tmp_path: Path):
     raw_dir = tmp_path / "raw"
     corpus_dir = tmp_path / "corpus"
@@ -186,6 +221,13 @@ def _read_jsonl(path: Path) -> list[dict]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in rows),
+        encoding="utf-8",
+    )
 
 
 def _assert_safe(payload: dict) -> None:

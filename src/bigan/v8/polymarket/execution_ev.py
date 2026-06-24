@@ -8,7 +8,11 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from bigan.v8.polymarket.ledger import PolymarketPositionLedger
-from bigan.v8.polymarket.rules import build_btc_updown_resolution_rule, resolve_polymarket_rule
+from bigan.v8.polymarket.rules import (
+    build_btc_updown_resolution_rule,
+    payout_for_resolved_outcome,
+    resolve_polymarket_rule,
+)
 from bigan.v8.polymarket.training.contracts import (
     PolicyAction,
     PolicyOutcome,
@@ -286,6 +290,7 @@ def run_polymarket_policy_replay(
         ledger = ledgers[decision.market_id]
         _apply_replay_decision(ledger=ledger, decision=decision, config=config)
     settlement_events = []
+    settlement_source_counts: Counter[str] = Counter()
     for market_id, ledger in sorted(ledgers.items()):
         metadata = dataset.market_metadata[market_id]
         resolution = dataset.resolution_events[market_id]
@@ -299,17 +304,16 @@ def run_polymarket_policy_replay(
             candle_close_ts=metadata["market_end_ts"],
             raw_rule_text=metadata["settlement_rule"],
         )
-        resolved = resolve_polymarket_rule(
-            rule,
-            reference_price_start=float(resolution["reference_price_start"]),
-            reference_price_end=float(resolution["reference_price_end"]),
-            resolution_status=resolution["resolution_status"],
+        payout_up, payout_down, settlement_source = _settlement_payout_vector(
+            rule=rule,
+            resolution=resolution,
         )
+        settlement_source_counts[settlement_source] += 1
         event = ledger.settle(
             ts=metadata["settlement_ts"],
-            payout_up=resolved.payout_up,
-            payout_down=resolved.payout_down,
-            reason_codes=("phase1_settlement_engine", "paper_settlement"),
+            payout_up=payout_up,
+            payout_down=payout_down,
+            reason_codes=("phase1_settlement_engine", "paper_settlement", settlement_source),
         )
         settlement_events.append(event.to_dict())
     all_events = [event.to_dict() for ledger in ledgers.values() for event in ledger.events]
@@ -351,10 +355,12 @@ def run_polymarket_policy_replay(
         "settlement_event_count": len(settlement_events),
         "phase1_position_ledger_used": True,
         "phase1_settlement_engine_used": True,
+        "settlement_resolution_source_counts": dict(sorted(settlement_source_counts.items())),
         "settlement_engine_components": [
             "PolymarketPositionLedger",
             "build_btc_updown_resolution_rule",
             "resolve_polymarket_rule",
+            "verified_outcome_payout_vector",
         ],
         **compact_safety_fields(),
     }
@@ -374,6 +380,40 @@ def _dataset_examples_for_split(
     if replay_split == "shadow":
         return dataset.shadow_examples
     raise ValueError("replay_split must be validation or shadow")
+
+
+def _settlement_payout_vector(
+    *,
+    rule: Any,
+    resolution: dict[str, Any],
+) -> tuple[float, float, str]:
+    reference_price_start = resolution.get("reference_price_start")
+    reference_price_end = resolution.get("reference_price_end")
+    if reference_price_start is not None and reference_price_end is not None:
+        resolved = resolve_polymarket_rule(
+            rule,
+            reference_price_start=float(reference_price_start),
+            reference_price_end=float(reference_price_end),
+            resolution_status=resolution["resolution_status"],
+        )
+        return resolved.payout_up, resolved.payout_down, "reference_price_rule_resolution"
+
+    resolved_outcome = str(resolution.get("resolved_outcome") or "")
+    if resolved_outcome not in ("UP", "DOWN", "UNKNOWN_50_50"):
+        raise ValueError("resolution requires reference prices or verified resolved_outcome")
+    if resolution.get("resolution_status") not in ("normal", "unknown_50_50"):
+        raise ValueError("unsupported resolution_status")
+    expected_payout_up, expected_payout_down = payout_for_resolved_outcome(
+        resolved_outcome,  # type: ignore[arg-type]
+    )
+    payout_up = float(resolution.get("payout_up", expected_payout_up))
+    payout_down = float(resolution.get("payout_down", expected_payout_down))
+    if not (
+        math.isclose(payout_up, expected_payout_up, abs_tol=1e-12)
+        and math.isclose(payout_down, expected_payout_down, abs_tol=1e-12)
+    ):
+        raise ValueError("resolution payout vector does not match resolved_outcome")
+    return payout_up, payout_down, "verified_outcome_payout_vector"
 
 
 def _apply_replay_decision(
