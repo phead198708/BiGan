@@ -1310,6 +1310,12 @@ def _write_training_raw_bundle(
         "live_btc_reference_data": not config.mock_live,
         "live_binance_reference_data": not config.mock_live,
         "deterministic_replay": config.mock_live,
+        "round_finalization_only": bool(
+            model_manifest.get("round_finalization_only", False)
+        ),
+        "model_signal_used": bool(model_manifest.get("model_signal_used", True)),
+        "paper_decision_used": bool(model_manifest.get("paper_decision_used", True)),
+        "paper_audit_only": bool(model_manifest.get("paper_audit_only", False)),
         **book_coverage,
         "artifact_hashes": artifact_hashes,
         "excluded_audit_fields": [
@@ -1359,6 +1365,16 @@ def _write_paper_audit_bundle(
         "phase": "polymarket_live_round_paper_audit",
         "market_id": market_id,
         "artifact_hashes": artifact_hashes,
+        "round_finalization_only": bool(
+            observability_report.get("round_finalization_only", False)
+        ),
+        "model_signal_used": bool(
+            observability_report.get("model_signal_used", bool(predictions))
+        ),
+        "paper_decision_used": bool(
+            observability_report.get("paper_decision_used", bool(decisions))
+        ),
+        "paper_audit_only": bool(observability_report.get("paper_audit_only", False)),
         **safety_fields(),
     }
     manifest_path = paper_audit_dir / "paper_audit_manifest.json"
@@ -1398,6 +1414,8 @@ def _round_summary(
         "settlement_ts": market.settlement_ts,
         "resolution_status": None if settlement is None else settlement["resolution_status"],
         "resolved_outcome": None if settlement is None else settlement["resolved_outcome"],
+        "payout_up": None if settlement is None else settlement["payout_up"],
+        "payout_down": None if settlement is None else settlement["payout_down"],
         "reference_price_start": None if candle is None else candle.open_price,
         "reference_price_end": None if candle is None else candle.close_price,
         "prediction_count": len(predictions),
@@ -1425,6 +1443,16 @@ def _round_summary(
         "fixture_corpus_used": model_manifest.get("fixture_corpus_used", False),
         "synthetic_corpus_used": model_manifest.get("synthetic_corpus_used", False),
         "fixture_model_used": model_manifest.get("fixture_model_used", False),
+        "round_finalization_only": bool(
+            model_manifest.get("round_finalization_only", False)
+        ),
+        "model_signal_used": bool(
+            model_manifest.get("model_signal_used", bool(predictions))
+        ),
+        "paper_decision_used": bool(
+            model_manifest.get("paper_decision_used", bool(decisions))
+        ),
+        "paper_audit_only": bool(model_manifest.get("paper_audit_only", False)),
         **safety_fields(),
     }
 
@@ -1584,6 +1612,8 @@ def _training_resolution_row(
         "reference_price_end": candle.close_price,
         "resolution_status": settlement["resolution_status"],
         "resolved_outcome": settlement["resolved_outcome"],
+        "payout_up": settlement["payout_up"],
+        "payout_down": settlement["payout_down"],
         "raw_resolution_text": (
             f"{market.slug} resolved {settlement['resolved_outcome']} "
             f"from {candle.open_price} to {candle.close_price}"

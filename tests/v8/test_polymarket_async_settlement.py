@@ -145,6 +145,58 @@ def test_pending_finalization_waits_for_resolution_before_export(tmp_path: Path)
     assert finalized_from_existing_raw.report["round_artifacts_newly_finalized"] == 0
 
 
+def test_pending_finalization_preserves_unknown_50_50_resolution(
+    tmp_path: Path,
+) -> None:
+    provider = AsyncSettlementFakeProvider(
+        resolved=True,
+        resolution_status="unknown_50_50",
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="pending-unknown-50-50",
+        output_dir=tmp_path,
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+    capture = capture_polymarket_pending_round(config, public_provider=provider)
+
+    finalized = finalize_polymarket_pending_round(
+        capture.run_dir,
+        public_provider=provider,
+        destination_root=tmp_path / "training_root",
+        overwrite_existing=True,
+    )
+
+    assert finalized.report["finalization_status"] == "exported"
+    assert finalized.report["training_eligible"] is True
+    rounds_index = _read_jsonl(finalized.artifact_paths["rounds_index"])
+    assert len(rounds_index) == 1
+    round_dir = finalized.run_dir / rounds_index[0]["round_dir"]
+    training_raw_dir = finalized.run_dir / rounds_index[0]["training_raw_dir"]
+    paper_audit_dir = finalized.run_dir / rounds_index[0]["paper_audit_dir"]
+
+    round_summary = _read_json(round_dir / "round_summary.json")
+    training_manifest = _read_json(training_raw_dir / "round_training_manifest.json")
+    training_resolution = _read_jsonl(
+        training_raw_dir / "raw_polymarket_resolutions.jsonl"
+    )[0]
+    paper_settlement = _read_jsonl(
+        paper_audit_dir / "polymarket_settlement_events.jsonl"
+    )[0]
+    paper_audit_manifest = _read_json(paper_audit_dir / "paper_audit_manifest.json")
+
+    for payload in (round_summary, training_resolution, paper_settlement):
+        assert payload["resolution_status"] == "unknown_50_50"
+        assert payload["resolved_outcome"] == "UNKNOWN_50_50"
+        assert payload["payout_up"] == 0.5
+        assert payload["payout_down"] == 0.5
+    for payload in (round_summary, training_manifest, paper_audit_manifest):
+        assert payload["round_finalization_only"] is True
+        assert payload["model_signal_used"] is False
+        assert payload["paper_decision_used"] is False
+        assert payload["paper_audit_only"] is True
+
+
 def test_pending_finalization_round_artifacts_survive_crash_and_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -221,8 +273,14 @@ class AsyncSettlementFakeProvider:
     polymarket_write_enabled = False
     wallet_signing_enabled = False
 
-    def __init__(self, *, resolved: bool) -> None:
+    def __init__(
+        self,
+        *,
+        resolved: bool,
+        resolution_status: str = "normal",
+    ) -> None:
         self.resolved = resolved
+        self.resolution_status = resolution_status
         self.resolution_calls = 0
 
     def market_rows(
@@ -268,7 +326,7 @@ class AsyncSettlementFakeProvider:
                 "reference_price_start": 65000.0,
                 "reference_price_end": 65025.0,
                 "reference_price_source": market["reference_price_source"],
-                "resolution_status": "normal",
+                "resolution_status": self.resolution_status,
                 "raw_resolution_text": "Resolved from official test reference.",
                 "paper_only": True,
                 "capital_at_risk": False,

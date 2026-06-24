@@ -537,6 +537,9 @@ def _pending_round_model_manifest(config: PolymarketRealCorpusRecorderConfig) ->
         "synthetic_corpus_used": config.mock_public_data,
         "fixture_model_used": False,
         "round_finalization_only": True,
+        "model_signal_used": False,
+        "paper_decision_used": False,
+        "paper_audit_only": True,
         **safety_fields(),
     }
 
@@ -640,6 +643,7 @@ def _settlement_event_from_pending_raw(
     resolution: dict[str, Any],
     candle: BinanceBTCCandle,
 ) -> dict[str, Any]:
+    resolution_status = str(resolution["resolution_status"])
     rule = build_btc_updown_resolution_rule(
         market_id=str(market["market_id"]),
         condition_id=str(market["condition_id"]),
@@ -649,17 +653,19 @@ def _settlement_event_from_pending_raw(
         candle_open_ts=int(market["market_start_ts"]),
         candle_close_ts=int(market["market_end_ts"]),
         raw_rule_text=str(market["settlement_rule"]),
+        unknown_50_50_enabled=True if resolution_status == "unknown_50_50" else None,
     )
     resolved = resolve_polymarket_rule(
         rule,
         reference_price_start=candle.open_price,
         reference_price_end=candle.close_price,
+        resolution_status=resolution_status,
     )
     return {
         "market_id": str(market["market_id"]),
         "condition_id": str(market["condition_id"]),
         "slug": str(market["slug"]),
-        "resolution_status": str(resolution["resolution_status"]),
+        "resolution_status": resolution_status,
         "resolved_outcome": resolved.resolved_outcome,
         "payout_up": resolved.payout_up,
         "payout_down": resolved.payout_down,
@@ -688,6 +694,9 @@ def _pending_round_observability_report(
         "critical_alert_count": len(set(reason_codes)),
         "critical_reason_codes": sorted(set(reason_codes)),
         "round_finalization_only": True,
+        "model_signal_used": False,
+        "paper_decision_used": False,
+        "paper_audit_only": True,
         **safety_fields(),
     }
 

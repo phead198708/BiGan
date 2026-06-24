@@ -487,6 +487,7 @@ def _normalize_resolutions(
         if (start is None) != (end is None):
             raise ValueError("reference prices must both be present or both be null")
         if start is not None and end is not None:
+            rule = _rule_for_resolution_status(rule, status)
             resolved = resolve_polymarket_rule(
                 rule,
                 reference_price_start=start,
@@ -540,6 +541,27 @@ def _normalize_resolutions(
     if len(events) != len(markets):
         raise ValueError("every market must have one resolution event")
     return tuple(sorted(events, key=lambda item: (item.market_id, item.resolved_outcome)))
+
+
+def _rule_for_resolution_status(
+    rule: PolymarketResolutionRule,
+    status: str,
+) -> PolymarketResolutionRule:
+    if status != "unknown_50_50" or rule.unknown_50_50_enabled:
+        return rule
+    return build_btc_updown_resolution_rule(
+        market_id=rule.market_id,
+        condition_id=rule.condition_id,
+        slug=rule.slug,
+        market_family=rule.market_family,
+        resolution_source=rule.resolution_source,
+        candle_open_ts=rule.candle_open_ts,
+        candle_close_ts=rule.candle_close_ts,
+        raw_rule_text=rule.raw_rule_text,
+        comparator=rule.comparator,
+        tie_breaker=rule.tie_breaker,
+        unknown_50_50_enabled=True,
+    )
 
 
 def _resolved_outcome_from_row(row: dict[str, Any]) -> PolymarketResolvedOutcome:
