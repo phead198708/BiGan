@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -16,6 +16,23 @@ DEFAULT_POLICY_CREATED_AT = "1970-01-01T00:00:00Z"
 
 PolicyAction = Literal["BUY_UP", "BUY_DOWN", "SELL_UP", "SELL_DOWN", "HOLD", "NO_TRADE"]
 PolicyOutcome = Literal["UP", "DOWN", "NO_TRADE"]
+PolicyLabelAction = Literal[
+    "NO_TRADE",
+    "BUY_UP_HOLD_TO_SETTLEMENT",
+    "BUY_DOWN_HOLD_TO_SETTLEMENT",
+    "BUY_UP_SELL_BEFORE_CLOSE",
+    "BUY_DOWN_SELL_BEFORE_CLOSE",
+]
+
+ACTION_VALUE_LABEL_ACTIONS: tuple[PolicyLabelAction, ...] = (
+    "NO_TRADE",
+    "BUY_UP_HOLD_TO_SETTLEMENT",
+    "BUY_DOWN_HOLD_TO_SETTLEMENT",
+    "BUY_UP_SELL_BEFORE_CLOSE",
+    "BUY_DOWN_SELL_BEFORE_CLOSE",
+)
+PRIMARY_POLICY_TARGET_ACTION_VALUE = "action_expected_net_return"
+AUXILIARY_OUTCOME_TARGET = "resolved_up_probability"
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +123,14 @@ class PolymarketPolicyExample:
     target_up_probability: float
     resolved_outcome: str
     resolution_status: str
+    action_return_targets: dict[str, float] = field(default_factory=dict)
+    realized_trade_return_targets: dict[str, float] = field(default_factory=dict)
+    settlement_return_targets: dict[str, float] = field(default_factory=dict)
+    action_is_positive_targets: dict[str, bool] = field(default_factory=dict)
+    best_policy_action: str = "NO_TRADE"
+    best_action_expected_return: float = 0.0
+    second_best_action_expected_return: float = 0.0
+    best_action_margin: float = 0.0
     paper_only: bool = True
     capital_at_risk: bool = False
     polymarket_write_enabled: bool = False
@@ -126,6 +151,35 @@ class PolymarketPolicyExample:
             raise ValueError("policy examples must preserve feature causality")
         if not 0.0 <= self.target_up_probability <= 1.0:
             raise ValueError("target_up_probability must be in [0, 1]")
+        _validate_action_return_targets(self.action_return_targets, allow_empty=True)
+        _validate_numeric_target_mapping(
+            self.realized_trade_return_targets,
+            allow_empty=True,
+            field_name="realized_trade_return_targets",
+        )
+        _validate_numeric_target_mapping(
+            self.settlement_return_targets,
+            allow_empty=True,
+            field_name="settlement_return_targets",
+        )
+        if self.action_is_positive_targets:
+            unsupported = set(self.action_is_positive_targets) - set(ACTION_VALUE_LABEL_ACTIONS)
+            if unsupported:
+                raise ValueError(
+                    "action_is_positive_targets contains unsupported actions: "
+                    + ", ".join(sorted(unsupported))
+                )
+        if self.best_policy_action not in ACTION_VALUE_LABEL_ACTIONS:
+            raise ValueError("best_policy_action must be a supported label action")
+        for field_name in (
+            "best_action_expected_return",
+            "second_best_action_expected_return",
+            "best_action_margin",
+        ):
+            if not math.isfinite(float(getattr(self, field_name))):
+                raise ValueError(f"{field_name} must be finite")
+        if self.best_action_margin < -1e-12:
+            raise ValueError("best_action_margin must be non-negative")
         if not self.features:
             raise ValueError("features must not be empty")
         for name, value in self.features.items():
@@ -200,6 +254,20 @@ class PolymarketPolicyPrediction:
     training_corpus_hash: str
     features: dict[str, float]
     target_up_probability: float | None = None
+    p_up_auxiliary: float | None = None
+    expected_return_by_action: dict[str, float] = field(default_factory=dict)
+    expected_return_no_trade: float | None = None
+    expected_return_buy_up_hold_to_settlement: float | None = None
+    expected_return_buy_down_hold_to_settlement: float | None = None
+    expected_return_buy_up_sell_before_close: float | None = None
+    expected_return_buy_down_sell_before_close: float | None = None
+    best_policy_action: str | None = None
+    best_action_expected_return: float | None = None
+    second_best_action_expected_return: float | None = None
+    best_action_margin: float | None = None
+    policy_confidence: float | None = None
+    action_value_head_enabled: bool = False
+    outcome_probability_head_enabled: bool = True
     paper_only: bool = True
     capital_at_risk: bool = False
     polymarket_write_enabled: bool = False
@@ -208,10 +276,34 @@ class PolymarketPolicyPrediction:
     def __post_init__(self) -> None:
         if not 0.0 <= self.estimated_up_probability <= 1.0:
             raise ValueError("estimated_up_probability must be in [0, 1]")
+        if self.p_up_auxiliary is not None and not 0.0 <= self.p_up_auxiliary <= 1.0:
+            raise ValueError("p_up_auxiliary must be in [0, 1]")
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("confidence must be in [0, 1]")
+        if self.policy_confidence is not None and not 0.0 <= self.policy_confidence <= 1.0:
+            raise ValueError("policy_confidence must be in [0, 1]")
         if not math.isfinite(self.score):
             raise ValueError("score must be finite")
+        _validate_action_return_targets(
+            self.expected_return_by_action,
+            allow_empty=not self.action_value_head_enabled,
+        )
+        if self.action_value_head_enabled:
+            if self.best_policy_action not in ACTION_VALUE_LABEL_ACTIONS:
+                raise ValueError("best_policy_action must be present for action-value output")
+            for field_name in (
+                "best_action_expected_return",
+                "second_best_action_expected_return",
+                "best_action_margin",
+                "expected_return_no_trade",
+                "expected_return_buy_up_hold_to_settlement",
+                "expected_return_buy_down_hold_to_settlement",
+                "expected_return_buy_up_sell_before_close",
+                "expected_return_buy_down_sell_before_close",
+            ):
+                value = getattr(self, field_name)
+                if value is None or not math.isfinite(float(value)):
+                    raise ValueError(f"{field_name} must be finite for action-value output")
         if not looks_like_sha256(self.feature_schema_hash):
             raise ValueError("feature_schema_hash must be SHA-256")
         if not looks_like_sha256(self.training_corpus_hash):
@@ -234,6 +326,13 @@ class PolymarketPolicyModel:
     training_corpus_hash: str
     dataset_hash: str
     train_row_count: int
+    primary_policy_target: str = PRIMARY_POLICY_TARGET_ACTION_VALUE
+    outcome_probability_head_enabled: bool = True
+    action_value_head_enabled: bool = False
+    compatibility_probability_fallback_enabled: bool = True
+    global_action_returns: dict[str, float] = field(default_factory=dict)
+    market_family_action_returns: dict[str, dict[str, float]] = field(default_factory=dict)
+    family_action_feature_offsets: dict[str, dict[str, float]] = field(default_factory=dict)
     paper_only: bool = True
     capital_at_risk: bool = False
     polymarket_write_enabled: bool = False
@@ -247,6 +346,28 @@ class PolymarketPolicyModel:
                 raise ValueError(f"{field_name} must be SHA-256")
         if self.train_row_count <= 0:
             raise ValueError("train_row_count must be positive")
+        if self.primary_policy_target not in (
+            PRIMARY_POLICY_TARGET_ACTION_VALUE,
+            AUXILIARY_OUTCOME_TARGET,
+            "resolved_up_probability_only",
+        ):
+            raise ValueError("unsupported primary_policy_target")
+        _validate_action_return_targets(
+            self.global_action_returns,
+            allow_empty=not self.action_value_head_enabled,
+        )
+        for family, returns in self.market_family_action_returns.items():
+            if not family.strip():
+                raise ValueError("market_family_action_returns keys must be non-empty")
+            _validate_action_return_targets(returns, allow_empty=False)
+        for family, offsets in self.family_action_feature_offsets.items():
+            if not family.strip():
+                raise ValueError("family_action_feature_offsets keys must be non-empty")
+            _validate_numeric_target_mapping(
+                offsets,
+                allow_empty=True,
+                field_name="family_action_feature_offsets",
+            )
         _validate_safety_boundary(self)
 
     def to_dict(self) -> dict[str, Any]:
@@ -327,3 +448,41 @@ def _validate_split_metadata(split_metadata: dict[str, Any]) -> None:
         raise ValueError("train split must strictly precede validation split")
     if validation_max >= shadow_min:
         raise ValueError("validation split must strictly precede shadow split")
+
+
+def _validate_action_return_targets(
+    values: dict[str, float],
+    *,
+    allow_empty: bool,
+) -> None:
+    _validate_numeric_target_mapping(
+        values,
+        allow_empty=allow_empty,
+        field_name="action_return_targets",
+    )
+    if values:
+        missing = set(ACTION_VALUE_LABEL_ACTIONS) - set(values)
+        if missing:
+            raise ValueError(
+                "action return targets missing actions: " + ", ".join(sorted(missing))
+            )
+
+
+def _validate_numeric_target_mapping(
+    values: dict[str, float],
+    *,
+    allow_empty: bool,
+    field_name: str,
+) -> None:
+    if not values:
+        if allow_empty:
+            return
+        raise ValueError(f"{field_name} must not be empty")
+    unsupported = set(values) - set(ACTION_VALUE_LABEL_ACTIONS)
+    if unsupported:
+        raise ValueError(
+            f"{field_name} contains unsupported actions: " + ", ".join(sorted(unsupported))
+        )
+    for action, value in values.items():
+        if not math.isfinite(float(value)):
+            raise ValueError(f"{field_name}.{action} must be finite")

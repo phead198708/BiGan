@@ -294,6 +294,10 @@ def _load_or_create_model(
             "trained_model_used": True,
             "policy_signal_source": "trained_model",
             "synthetic_fixture_signal_used": False,
+            "primary_policy_target": "resolved_up_probability_only",
+            "outcome_probability_head_enabled": True,
+            "action_value_head_enabled": False,
+            "compatibility_probability_fallback_enabled": True,
             "direct_pnl_optimization": False,
             "out_of_sample_replay": True,
             **compact_safety_fields(),
@@ -328,6 +332,38 @@ def _load_or_create_model(
         training_corpus_hash=str(payload["training_corpus_hash"]),
         dataset_hash=str(payload["dataset_hash"]),
         train_row_count=int(payload["train_row_count"]),
+        primary_policy_target=str(
+            payload.get("primary_policy_target", "resolved_up_probability_only")
+        ),
+        outcome_probability_head_enabled=bool(
+            payload.get("outcome_probability_head_enabled", True)
+        ),
+        action_value_head_enabled=bool(payload.get("action_value_head_enabled", False)),
+        compatibility_probability_fallback_enabled=bool(
+            payload.get("compatibility_probability_fallback_enabled", True)
+        ),
+        global_action_returns={
+            str(action): float(value)
+            for action, value in dict(payload.get("global_action_returns", {})).items()
+        },
+        market_family_action_returns={
+            str(family): {
+                str(action): float(value)
+                for action, value in dict(action_returns).items()
+            }
+            for family, action_returns in dict(
+                payload.get("market_family_action_returns", {})
+            ).items()
+        },
+        family_action_feature_offsets={
+            str(family): {
+                str(action): float(value)
+                for action, value in dict(action_returns).items()
+            }
+            for family, action_returns in dict(
+                payload.get("family_action_feature_offsets", {})
+            ).items()
+        },
     )
     expected = manifest.get("model_sha256")
     actual = _sha256_file(model_path)
@@ -1327,6 +1363,14 @@ def _write_training_raw_bundle(
             "edge",
             "ev_buy_up",
             "ev_buy_down",
+            "estimated_up_probability",
+            "p_up_auxiliary",
+            "expected_return_by_action",
+            "best_policy_action",
+            "best_action_expected_return",
+            "second_best_action_expected_return",
+            "best_action_margin",
+            "policy_confidence",
         ],
         **safety_fields(),
     }
@@ -1887,6 +1931,10 @@ def _fixture_model() -> PolymarketPolicyModel:
         training_corpus_hash=training_corpus_hash,
         dataset_hash=dataset_hash,
         train_row_count=9,
+        primary_policy_target="resolved_up_probability_only",
+        outcome_probability_head_enabled=True,
+        action_value_head_enabled=False,
+        compatibility_probability_fallback_enabled=True,
     )
 
 

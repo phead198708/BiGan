@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 
 from bigan.v8.polymarket import (
+    ACTION_VALUE_LABEL_ACTIONS,
+    PRIMARY_POLICY_TARGET_ACTION_VALUE,
     PolymarketCorpusBuildConfig,
     PolymarketPolicyExample,
     PolymarketPolicyTrainingConfig,
@@ -45,10 +47,15 @@ def test_training_dataset_loads_phase2_corpus_outputs(tmp_path: Path) -> None:
         "btc_updown_15m",
         "btc_updown_1h",
     }
+    dataset_payload = dataset.to_dict()
     for example in dataset.examples:
         assert example.feature_cutoff_ts <= example.decision_ts
         assert example.max_input_ts <= example.decision_ts
         assert 0.0 <= example.target_up_probability <= 1.0
+        assert set(example.action_return_targets) == set(ACTION_VALUE_LABEL_ACTIONS)
+        assert example.best_policy_action in ACTION_VALUE_LABEL_ACTIONS
+        assert example.best_action_expected_return >= example.second_best_action_expected_return
+    assert dataset_payload["examples"][0]["action_return_targets"]
 
 
 def test_feature_schema_hash_is_deterministic(tmp_path: Path) -> None:
@@ -135,9 +142,20 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         assert looks_like_sha256(result.artifact_hashes[name])
 
     manifest = _read_json(result.artifact_paths["model_manifest"])
+    profile = _read_json(result.artifact_paths["dataset_profile"])
     assert manifest["schema_version"] == "bigan-v8-polymarket-policy-v1"
-    assert manifest["target"] == "resolved_up"
-    assert manifest["model_output"] == "estimated_up_probability"
+    assert manifest["target"] == PRIMARY_POLICY_TARGET_ACTION_VALUE
+    assert manifest["primary_policy_target"] == PRIMARY_POLICY_TARGET_ACTION_VALUE
+    assert manifest["auxiliary_outcome_target"] == "resolved_up_probability"
+    assert manifest["model_output"] == "action_expected_returns_with_p_up_auxiliary"
+    assert "best_policy_action" in manifest["model_outputs"]
+    assert manifest["outcome_probability_head_enabled"] is True
+    assert manifest["action_value_head_enabled"] is True
+    assert profile["primary_policy_target"] == PRIMARY_POLICY_TARGET_ACTION_VALUE
+    assert profile["action_value_head_enabled"] is True
+    assert profile["action_label_coverage_by_action"] == {
+        action: len(result.dataset.examples) for action in ACTION_VALUE_LABEL_ACTIONS
+    }
     assert set(manifest["market_families"]) == {
         "btc_updown_5m",
         "btc_updown_15m",

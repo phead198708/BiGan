@@ -258,6 +258,13 @@ def _assert_training_raw_is_model_output_free(training_raw_dir: Path) -> None:
         "ev_buy_up",
         "ev_buy_down",
         "estimated_up_probability",
+        "p_up_auxiliary",
+        "expected_return_by_action",
+        "best_policy_action",
+        "best_action_expected_return",
+        "second_best_action_expected_return",
+        "best_action_margin",
+        "policy_confidence",
     }
     for path in training_raw_dir.glob("raw_*.jsonl"):
         for row in _read_jsonl(path):
@@ -269,8 +276,6 @@ def _assert_training_raw_is_model_output_free(training_raw_dir: Path) -> None:
     assert manifest["round_training_eligible"] is True
     assert manifest["training_eligibility_policy"] == "min_one_complete_book_sample"
     for field in forbidden_fields:
-        if field in {"estimated_up_probability"}:
-            continue
         assert field in manifest["excluded_audit_fields"]
 
 

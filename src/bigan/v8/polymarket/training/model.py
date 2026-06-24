@@ -1,4 +1,4 @@
-"""Lightweight deterministic P(UP) model for Polymarket BTC policy training."""
+"""Lightweight deterministic action-value model for Polymarket BTC policy training."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import math
 from collections import defaultdict
 
 from bigan.v8.polymarket.training.contracts import (
+    ACTION_VALUE_LABEL_ACTIONS,
+    PRIMARY_POLICY_TARGET_ACTION_VALUE,
     PolymarketPolicyDataset,
     PolymarketPolicyExample,
     PolymarketPolicyModel,
@@ -16,22 +18,26 @@ from bigan.v8.polymarket.training.contracts import (
 EPSILON = 1e-6
 
 
-def train_polymarket_probability_model(
+def train_polymarket_action_value_model(
     dataset: PolymarketPolicyDataset,
     config: PolymarketPolicyTrainingConfig,
 ) -> PolymarketPolicyModel:
-    """Train an auditable probability model for P(UP).
+    """Train an auditable action-value policy baseline.
 
-    This first production-safe model is intentionally simple and deterministic:
-    it learns market-family target frequencies and a family-specific offset
-    between target outcomes and contemporaneous UP mid prices. PnL is never used
-    as the training target.
+    The primary target is cost-aware expected net return per action. P(UP) is
+    retained as an auxiliary outcome/calibration head for sanity checks.
     """
 
     targets = [example.target_up_probability for example in dataset.train_examples]
     global_probability = _clamp(sum(targets) / len(targets), EPSILON, 1.0 - EPSILON)
     family_targets: dict[str, list[float]] = defaultdict(list)
     family_offsets: dict[str, list[float]] = defaultdict(list)
+    global_action_values: dict[str, list[float]] = {
+        action: [] for action in ACTION_VALUE_LABEL_ACTIONS
+    }
+    family_action_values: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: {action: [] for action in ACTION_VALUE_LABEL_ACTIONS}
+    )
     for example in dataset.train_examples:
         family_targets[example.market_family].append(example.target_up_probability)
         up_mid = example.features.get("up_mid")
@@ -39,6 +45,10 @@ def train_polymarket_probability_model(
             family_offsets[example.market_family].append(
                 example.target_up_probability - float(up_mid)
             )
+        action_returns = _required_action_returns(example)
+        for action, value in action_returns.items():
+            global_action_values[action].append(value)
+            family_action_values[example.market_family][action].append(value)
     family_probabilities = {
         family: _clamp(sum(values) / len(values), EPSILON, 1.0 - EPSILON)
         for family, values in family_targets.items()
@@ -47,6 +57,14 @@ def train_polymarket_probability_model(
         family: sum(values) / len(values)
         for family, values in family_offsets.items()
         if values
+    }
+    global_action_returns = {
+        action: _mean(values)
+        for action, values in global_action_values.items()
+    }
+    market_family_action_returns = {
+        family: {action: _mean(values) for action, values in action_values.items()}
+        for family, action_values in family_action_values.items()
     }
     return PolymarketPolicyModel(
         model_version=config.model_version,
@@ -59,7 +77,23 @@ def train_polymarket_probability_model(
         training_corpus_hash=dataset.training_corpus_hash,
         dataset_hash=dataset.dataset_hash,
         train_row_count=len(dataset.train_examples),
+        primary_policy_target=PRIMARY_POLICY_TARGET_ACTION_VALUE,
+        outcome_probability_head_enabled=True,
+        action_value_head_enabled=True,
+        compatibility_probability_fallback_enabled=True,
+        global_action_returns=global_action_returns,
+        market_family_action_returns=market_family_action_returns,
+        family_action_feature_offsets={},
     )
+
+
+def train_polymarket_probability_model(
+    dataset: PolymarketPolicyDataset,
+    config: PolymarketPolicyTrainingConfig,
+) -> PolymarketPolicyModel:
+    """Compatibility alias for the new action-value policy model."""
+
+    return train_polymarket_action_value_model(dataset, config)
 
 
 def predict_polymarket_policy_examples(
@@ -87,6 +121,11 @@ def _prediction(
     else:
         probability = _clamp(up_mid, EPSILON, 1.0 - EPSILON)
     confidence = _clamp(abs(probability - 0.5) * 2.0, 0.0, 1.0)
+    expected_return_by_action = _expected_action_returns(model, example)
+    best_action, best_return, second_best_return, best_margin = _rank_actions(
+        expected_return_by_action
+    )
+    policy_confidence = _policy_confidence(best_return=best_return, best_margin=best_margin)
     return PolymarketPolicyPrediction(
         market_id=example.market_id,
         condition_id=example.condition_id,
@@ -103,6 +142,28 @@ def _prediction(
         training_corpus_hash=model.training_corpus_hash,
         features=example.features,
         target_up_probability=example.target_up_probability,
+        p_up_auxiliary=probability,
+        expected_return_by_action=expected_return_by_action,
+        expected_return_no_trade=expected_return_by_action["NO_TRADE"],
+        expected_return_buy_up_hold_to_settlement=expected_return_by_action[
+            "BUY_UP_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_down_hold_to_settlement=expected_return_by_action[
+            "BUY_DOWN_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_up_sell_before_close=expected_return_by_action[
+            "BUY_UP_SELL_BEFORE_CLOSE"
+        ],
+        expected_return_buy_down_sell_before_close=expected_return_by_action[
+            "BUY_DOWN_SELL_BEFORE_CLOSE"
+        ],
+        best_policy_action=best_action,
+        best_action_expected_return=best_return,
+        second_best_action_expected_return=second_best_return,
+        best_action_margin=best_margin,
+        policy_confidence=policy_confidence,
+        action_value_head_enabled=bool(model.action_value_head_enabled),
+        outcome_probability_head_enabled=bool(model.outcome_probability_head_enabled),
     )
 
 
@@ -119,3 +180,49 @@ def _logit(probability: float) -> float:
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return min(upper, max(lower, float(value)))
+
+
+def _required_action_returns(example: PolymarketPolicyExample) -> dict[str, float]:
+    missing = set(ACTION_VALUE_LABEL_ACTIONS) - set(example.action_return_targets)
+    if missing:
+        raise ValueError(
+            "training example missing action return targets: " + ", ".join(sorted(missing))
+        )
+    return {
+        action: float(example.action_return_targets[action])
+        for action in ACTION_VALUE_LABEL_ACTIONS
+    }
+
+
+def _expected_action_returns(
+    model: PolymarketPolicyModel,
+    example: PolymarketPolicyExample,
+) -> dict[str, float]:
+    if model.action_value_head_enabled:
+        base = model.market_family_action_returns.get(
+            example.market_family,
+            model.global_action_returns,
+        )
+        if base:
+            return {action: float(base[action]) for action in ACTION_VALUE_LABEL_ACTIONS}
+    return dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, 0.0)
+
+
+def _rank_actions(action_returns: dict[str, float]) -> tuple[str, float, float, float]:
+    ranked = sorted(
+        ((action, float(action_returns[action])) for action in ACTION_VALUE_LABEL_ACTIONS),
+        key=lambda item: (-item[1], item[0]),
+    )
+    best_action, best_return = ranked[0]
+    second_best_return = ranked[1][1] if len(ranked) > 1 else best_return
+    return best_action, best_return, second_best_return, best_return - second_best_return
+
+
+def _policy_confidence(*, best_return: float, best_margin: float) -> float:
+    return _clamp(abs(best_return) * 2.0 + max(0.0, best_margin) * 5.0, 0.0, 1.0)
+
+
+def _mean(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return sum(values) / len(values)

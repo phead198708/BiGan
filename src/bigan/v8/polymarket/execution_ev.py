@@ -14,6 +14,8 @@ from bigan.v8.polymarket.rules import (
     resolve_polymarket_rule,
 )
 from bigan.v8.polymarket.training.contracts import (
+    ACTION_VALUE_LABEL_ACTIONS,
+    PRIMARY_POLICY_TARGET_ACTION_VALUE,
     PolicyAction,
     PolicyOutcome,
     PolymarketPolicyDataset,
@@ -43,6 +45,15 @@ class PolymarketEVDecision:
     used_price_side: str
     paper_notional: float
     reason_codes: tuple[str, ...]
+    p_up_auxiliary: float | None = None
+    expected_return_by_action: dict[str, float] | None = None
+    best_policy_action: str | None = None
+    best_action_expected_return: float | None = None
+    second_best_action_expected_return: float | None = None
+    best_action_margin: float | None = None
+    policy_confidence: float | None = None
+    action_value_head_used: bool = False
+    probability_ev_fallback_used: bool = True
     trained_model_used: bool = True
     policy_signal_source: str = "trained_model"
     synthetic_fixture_signal_used: bool = False
@@ -67,6 +78,25 @@ class PolymarketEVDecision:
             raise ValueError("execution_price and paper_notional must be non-negative")
         if not self.reason_codes:
             raise ValueError("reason_codes are required")
+        if self.action_value_head_used:
+            if self.best_policy_action not in ACTION_VALUE_LABEL_ACTIONS:
+                raise ValueError("best_policy_action must be present for action-value decisions")
+            if not self.expected_return_by_action:
+                raise ValueError("expected_return_by_action is required for action-value decisions")
+            missing = set(ACTION_VALUE_LABEL_ACTIONS) - set(self.expected_return_by_action)
+            if missing:
+                raise ValueError(
+                    "expected_return_by_action missing actions: " + ", ".join(sorted(missing))
+                )
+            for field_name in (
+                "best_action_expected_return",
+                "second_best_action_expected_return",
+                "best_action_margin",
+                "policy_confidence",
+            ):
+                value = getattr(self, field_name)
+                if value is None or not math.isfinite(float(value)):
+                    raise ValueError(f"{field_name} must be finite for action-value decisions")
         for field_name, expected in compact_safety_fields().items():
             if getattr(self, field_name) is not expected:
                 raise ValueError(f"{field_name} must be {expected}")
@@ -97,6 +127,20 @@ def decide_polymarket_ev_action(
     probability = prediction.estimated_up_probability
     ev_buy_up = probability - up_ask - cost
     ev_buy_down = (1.0 - probability) - down_ask - cost
+    if (
+        prediction.action_value_head_enabled
+        and prediction.expected_return_by_action
+        and existing_position_up <= 0.0
+        and existing_position_down <= 0.0
+    ):
+        return _action_value_decision(
+            prediction=prediction,
+            config=config,
+            ev_buy_up=ev_buy_up,
+            ev_buy_down=ev_buy_down,
+            up_ask=up_ask,
+            down_ask=down_ask,
+        )
     if prediction.confidence < config.min_confidence:
         return _decision(
             prediction=prediction,
@@ -240,6 +284,18 @@ def ev_threshold_report(
         "schema_version": "bigan-v8-polymarket-ev-threshold-report-v1",
         "replay_split": replay_split,
         "out_of_sample_replay": True,
+        "primary_policy_target": (
+            PRIMARY_POLICY_TARGET_ACTION_VALUE
+            if any(decision.action_value_head_used for decision in decisions)
+            else "resolved_up_probability_only"
+        ),
+        "action_value_head_enabled": any(decision.action_value_head_used for decision in decisions),
+        "action_value_decision_count": sum(
+            decision.action_value_head_used for decision in decisions
+        ),
+        "probability_ev_fallback_decision_count": sum(
+            decision.probability_ev_fallback_used for decision in decisions
+        ),
         "decision_count": len(decisions),
         "action_counts": dict(sorted(action_counts.items())),
         "reason_counts": dict(sorted(reason_counts.items())),
@@ -350,6 +406,8 @@ def run_polymarket_policy_replay(
         "total_polymarket_pnl": total_pnl,
         "max_drawdown": abs(max_drawdown),
         "calibration_error": calibration_error,
+        "outcome_calibration_error": calibration_error,
+        "action_value_policy_metrics": _action_value_policy_metrics(decisions),
         "critical_alert_count": 0,
         "ledger_event_count": len(all_events),
         "settlement_event_count": len(settlement_events),
@@ -489,6 +547,8 @@ def _decision(
     used_price_side: str,
     paper_notional: float,
     reason_codes: tuple[str, ...],
+    action_value_head_used: bool = False,
+    probability_ev_fallback_used: bool = True,
 ) -> PolymarketEVDecision:
     return PolymarketEVDecision(
         market_id=prediction.market_id,
@@ -507,7 +567,119 @@ def _decision(
         used_price_side=used_price_side,
         paper_notional=paper_notional,
         reason_codes=(*reason_codes, "trained_model_used", "paper_only_guard"),
+        p_up_auxiliary=prediction.p_up_auxiliary or prediction.estimated_up_probability,
+        expected_return_by_action=dict(prediction.expected_return_by_action),
+        best_policy_action=prediction.best_policy_action,
+        best_action_expected_return=prediction.best_action_expected_return,
+        second_best_action_expected_return=prediction.second_best_action_expected_return,
+        best_action_margin=prediction.best_action_margin,
+        policy_confidence=prediction.policy_confidence,
+        action_value_head_used=action_value_head_used,
+        probability_ev_fallback_used=probability_ev_fallback_used,
     )
+
+
+def _action_value_decision(
+    *,
+    prediction: PolymarketPolicyPrediction,
+    config: PolymarketPolicyTrainingConfig,
+    ev_buy_up: float,
+    ev_buy_down: float,
+    up_ask: float,
+    down_ask: float,
+) -> PolymarketEVDecision:
+    confidence = (
+        prediction.policy_confidence
+        if prediction.policy_confidence is not None
+        else prediction.confidence
+    )
+    best_action = str(prediction.best_policy_action)
+    best_return = float(prediction.best_action_expected_return or 0.0)
+    if confidence < config.min_confidence:
+        return _decision(
+            prediction=prediction,
+            action="NO_TRADE",
+            selected_outcome="NO_TRADE",
+            ev_buy_up=ev_buy_up,
+            ev_buy_down=ev_buy_down,
+            execution_price=0.0,
+            used_price_side="none",
+            paper_notional=0.0,
+            reason_codes=("low_policy_confidence", "action_value_head_used"),
+            action_value_head_used=True,
+            probability_ev_fallback_used=False,
+        )
+    if best_action == "NO_TRADE":
+        return _decision(
+            prediction=prediction,
+            action="NO_TRADE",
+            selected_outcome="NO_TRADE",
+            ev_buy_up=ev_buy_up,
+            ev_buy_down=ev_buy_down,
+            execution_price=0.0,
+            used_price_side="none",
+            paper_notional=0.0,
+            reason_codes=("action_value_no_trade_selected", "action_value_head_used"),
+            action_value_head_used=True,
+            probability_ev_fallback_used=False,
+        )
+    if best_return < config.ev_threshold:
+        return _decision(
+            prediction=prediction,
+            action="NO_TRADE",
+            selected_outcome="NO_TRADE",
+            ev_buy_up=ev_buy_up,
+            ev_buy_down=ev_buy_down,
+            execution_price=0.0,
+            used_price_side="none",
+            paper_notional=0.0,
+            reason_codes=("action_value_threshold_not_met", "action_value_head_used"),
+            action_value_head_used=True,
+            probability_ev_fallback_used=False,
+        )
+    if best_action.startswith("BUY_UP_"):
+        return _decision(
+            prediction=prediction,
+            action="BUY_UP",
+            selected_outcome="UP",
+            ev_buy_up=ev_buy_up,
+            ev_buy_down=ev_buy_down,
+            execution_price=up_ask,
+            used_price_side="ask",
+            paper_notional=_paper_notional(best_return, config),
+            reason_codes=(
+                "positive_action_value_buy_up",
+                _policy_reason(best_action),
+                "ask_price_execution",
+                "action_value_head_used",
+            ),
+            action_value_head_used=True,
+            probability_ev_fallback_used=False,
+        )
+    if best_action.startswith("BUY_DOWN_"):
+        return _decision(
+            prediction=prediction,
+            action="BUY_DOWN",
+            selected_outcome="DOWN",
+            ev_buy_up=ev_buy_up,
+            ev_buy_down=ev_buy_down,
+            execution_price=down_ask,
+            used_price_side="ask",
+            paper_notional=_paper_notional(best_return, config),
+            reason_codes=(
+                "positive_action_value_buy_down",
+                _policy_reason(best_action),
+                "ask_price_execution",
+                "action_value_head_used",
+            ),
+            action_value_head_used=True,
+            probability_ev_fallback_used=False,
+        )
+    raise ValueError(f"unsupported best_policy_action: {best_action}")
+
+
+def _policy_reason(best_action: str) -> str:
+    return "policy_" + best_action.lower()
 
 
 def _execution_cost(
@@ -528,3 +700,38 @@ def _execution_cost(
 
 def _paper_notional(ev: float, config: PolymarketPolicyTrainingConfig) -> float:
     return min(config.max_paper_notional, max(0.01, ev * config.max_paper_notional * 5.0))
+
+
+def _action_value_policy_metrics(
+    decisions: tuple[PolymarketEVDecision, ...],
+) -> dict[str, Any]:
+    action_value_decisions = tuple(
+        decision for decision in decisions if decision.action_value_head_used
+    )
+    best_returns = [
+        float(decision.best_action_expected_return)
+        for decision in action_value_decisions
+        if decision.best_action_expected_return is not None
+    ]
+    margins = [
+        float(decision.best_action_margin)
+        for decision in action_value_decisions
+        if decision.best_action_margin is not None
+    ]
+    return {
+        "schema_version": "bigan-v8-polymarket-action-value-policy-metrics-v1",
+        "primary_policy_target": PRIMARY_POLICY_TARGET_ACTION_VALUE,
+        "sample_count": len(action_value_decisions),
+        "action_value_head_used_count": len(action_value_decisions),
+        "mean_best_action_expected_return": _mean(best_returns),
+        "mean_best_action_margin": _mean(margins),
+        "best_policy_action_counts": dict(
+            sorted(Counter(decision.best_policy_action for decision in action_value_decisions).items())
+        ),
+    }
+
+
+def _mean(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)

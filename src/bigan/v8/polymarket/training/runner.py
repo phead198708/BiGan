@@ -18,9 +18,11 @@ from bigan.v8.polymarket.training.calibration import (
     validation_report,
 )
 from bigan.v8.polymarket.training.contracts import (
+    AUXILIARY_OUTCOME_TARGET,
     POLYMARKET_POLICY_SCHEMA_VERSION,
     POLYMARKET_POLICY_SIGNAL_SOURCE_TRAINED_MODEL,
     POLYMARKET_POLICY_TRAINING_PHASE,
+    PRIMARY_POLICY_TARGET_ACTION_VALUE,
     PolymarketPolicyTrainingConfig,
     PolymarketPolicyTrainingResult,
     compact_safety_fields,
@@ -28,7 +30,7 @@ from bigan.v8.polymarket.training.contracts import (
 from bigan.v8.polymarket.training.dataset import dataset_profile, load_polymarket_policy_dataset
 from bigan.v8.polymarket.training.model import (
     predict_polymarket_policy_examples,
-    train_polymarket_probability_model,
+    train_polymarket_action_value_model,
 )
 
 
@@ -49,7 +51,7 @@ def run_polymarket_policy_training(
 
     dataset = load_polymarket_policy_dataset(config)
     profile = dataset_profile(dataset)
-    model = train_polymarket_probability_model(dataset, config)
+    model = train_polymarket_action_value_model(dataset, config)
     predictions = predict_polymarket_policy_examples(model, dataset.examples)
     predictions_by_key = {
         (prediction.market_id, prediction.decision_ts): prediction
@@ -215,9 +217,28 @@ def _model_manifest(
         "schema_version": POLYMARKET_POLICY_SCHEMA_VERSION,
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
         "model_version": config.model_version,
-        "model_family": "deterministic_frequency_probability",
-        "target": "resolved_up",
-        "model_output": "estimated_up_probability",
+        "model_family": "deterministic_action_value_probability",
+        "target": PRIMARY_POLICY_TARGET_ACTION_VALUE,
+        "primary_policy_target": PRIMARY_POLICY_TARGET_ACTION_VALUE,
+        "auxiliary_outcome_target": AUXILIARY_OUTCOME_TARGET,
+        "model_output": "action_expected_returns_with_p_up_auxiliary",
+        "model_outputs": [
+            "p_up_auxiliary",
+            "estimated_up_probability",
+            "expected_return_by_action",
+            "best_policy_action",
+            "best_action_expected_return",
+            "second_best_action_expected_return",
+            "best_action_margin",
+            "policy_confidence",
+        ],
+        "outcome_probability_head_enabled": True,
+        "action_value_head_enabled": True,
+        "compatibility_probability_fallback_enabled": True,
+        "action_label_coverage_by_action": dataset_profile[
+            "action_label_coverage_by_action"
+        ],
+        "best_policy_action_counts": dataset_profile["best_policy_action_counts"],
         "market_families": sorted(dataset_profile["market_family_counts"]),
         "training_corpus_hash": dataset_profile["training_corpus_hash"],
         "feature_schema_hash": dataset_profile["feature_schema_hash"],
@@ -233,7 +254,7 @@ def _model_manifest(
         "out_of_sample_replay": replay_report["out_of_sample_replay"],
         "created_at": config.created_at,
         "direct_pnl_optimization": False,
-        "pnl_usage": "validation_and_ev_replay_only",
+        "pnl_usage": "net_return_label_supervision_validation_and_ev_replay",
         "trained_model_used": True,
         "policy_signal_source": POLYMARKET_POLICY_SIGNAL_SOURCE_TRAINED_MODEL,
         "synthetic_fixture_signal_used": False,
@@ -266,8 +287,11 @@ def _summary_markdown(
             f"- calibration_split: {replay_report['calibration_split']}",
             f"- replay_split: {replay_report['replay_split']}",
             f"- out_of_sample_replay: {str(replay_report['out_of_sample_replay']).lower()}",
+            f"- primary_policy_target: {PRIMARY_POLICY_TARGET_ACTION_VALUE}",
+            f"- action_value_head_enabled: {str(ev_report['action_value_head_enabled']).lower()}",
             f"- validation_brier_score: {validation['validation']['brier_score']}",
             f"- calibration_error: {replay_report['calibration_error']}",
+            f"- mean_best_action_expected_return: {replay_report['action_value_policy_metrics']['mean_best_action_expected_return']}",
             f"- trade_count: {replay_report['trade_count']}",
             f"- no_trade_count: {replay_report['no_trade_count']}",
             f"- total_polymarket_pnl: {replay_report['total_polymarket_pnl']}",

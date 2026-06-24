@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from bigan.v8.polymarket import (
+    ACTION_VALUE_LABEL_ACTIONS,
     PolymarketCorpusBuildConfig,
     PolymarketPolicyPrediction,
     PolymarketPolicyTrainingConfig,
@@ -77,6 +79,50 @@ def test_low_confidence_leads_to_no_trade(tmp_path: Path) -> None:
     assert "low_confidence" in decision.reason_codes
 
 
+def test_action_value_output_is_preferred_over_probability_ev(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    action_returns = dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, -0.05)
+    action_returns["NO_TRADE"] = 0.0
+    action_returns["BUY_DOWN_HOLD_TO_SETTLEMENT"] = 0.08
+    prediction = replace(
+        _prediction(probability=0.95, confidence=0.90),
+        p_up_auxiliary=0.95,
+        expected_return_by_action=action_returns,
+        expected_return_no_trade=action_returns["NO_TRADE"],
+        expected_return_buy_up_hold_to_settlement=action_returns[
+            "BUY_UP_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_down_hold_to_settlement=action_returns[
+            "BUY_DOWN_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_up_sell_before_close=action_returns[
+            "BUY_UP_SELL_BEFORE_CLOSE"
+        ],
+        expected_return_buy_down_sell_before_close=action_returns[
+            "BUY_DOWN_SELL_BEFORE_CLOSE"
+        ],
+        best_policy_action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+        best_action_expected_return=0.08,
+        second_best_action_expected_return=0.0,
+        best_action_margin=0.08,
+        policy_confidence=0.70,
+        action_value_head_enabled=True,
+        outcome_probability_head_enabled=True,
+    )
+
+    decision = decide_polymarket_ev_action(prediction=prediction, config=config)
+
+    assert decision.action == "BUY_DOWN"
+    assert decision.selected_outcome == "DOWN"
+    assert decision.execution_price == prediction.features["down_ask"]
+    assert decision.used_price_side == "ask"
+    assert decision.best_policy_action == "BUY_DOWN_HOLD_TO_SETTLEMENT"
+    assert decision.best_action_expected_return == 0.08
+    assert decision.action_value_head_used is True
+    assert decision.probability_ev_fallback_used is False
+    assert "action_value_head_used" in decision.reason_codes
+
+
 def test_policy_replay_uses_phase1_settlement_and_reports_pnl(
     tmp_path: Path,
 ) -> None:
@@ -102,6 +148,21 @@ def test_policy_replay_uses_phase1_settlement_and_reports_pnl(
     assert ev_report["policy_signal_source"] == "trained_model"
     assert ev_report["replay_split"] == "shadow"
     assert ev_report["out_of_sample_replay"] is True
+    assert ev_report["primary_policy_target"] == "action_expected_net_return"
+    assert ev_report["action_value_head_enabled"] is True
+    assert ev_report["action_value_decision_count"] > 0
+    assert (
+        ev_report["action_value_decision_count"]
+        + ev_report["probability_ev_fallback_decision_count"]
+        == len(result.dataset.shadow_examples)
+    )
+    assert replay["outcome_calibration_error"] == replay["calibration_error"]
+    assert replay["action_value_policy_metrics"]["primary_policy_target"] == (
+        "action_expected_net_return"
+    )
+    assert replay["action_value_policy_metrics"]["sample_count"] == ev_report[
+        "action_value_decision_count"
+    ]
     decisions = _read_jsonl(result.artifact_paths["ev_decisions"])
     shadow_keys = {
         (example.market_id, example.decision_ts)
@@ -114,6 +175,7 @@ def test_policy_replay_uses_phase1_settlement_and_reports_pnl(
     decision_keys = {(row["market_id"], row["decision_ts"]) for row in decisions}
     assert decision_keys == shadow_keys
     assert not decision_keys & train_keys
+    assert any(row["action_value_head_used"] is True for row in decisions)
     _assert_safe(replay)
     _assert_safe(ev_report)
 

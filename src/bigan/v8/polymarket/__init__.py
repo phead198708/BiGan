@@ -109,10 +109,13 @@ from bigan.v8.polymarket.storage import (
     round_corpus_id_from_corpus_dir,
 )
 from bigan.v8.polymarket.training import (
+    ACTION_VALUE_LABEL_ACTIONS,
+    AUXILIARY_OUTCOME_TARGET,
     DEFAULT_REAL_CORPUS_MODEL_VERSION,
     DEFAULT_REAL_CORPUS_TRAINING_RUN_ID,
     POLYMARKET_REAL_CORPUS_RETRAINING_GATE_PHASE,
     POLYMARKET_REAL_CORPUS_RETRAINING_GATE_SCHEMA_VERSION,
+    PRIMARY_POLICY_TARGET_ACTION_VALUE,
     PolymarketPolicyDataset,
     PolymarketPolicyExample,
     PolymarketPolicyModel,
@@ -125,6 +128,7 @@ from bigan.v8.polymarket.training import (
     predict_polymarket_policy_examples,
     run_polymarket_policy_training,
     run_polymarket_real_corpus_retraining_gate,
+    train_polymarket_action_value_model,
     train_polymarket_probability_model,
 )
 
@@ -140,6 +144,9 @@ __all__ = [
     "POLYMARKET_REAL_CORPUS_RETRAINING_GATE_SCHEMA_VERSION",
     "POLYMARKET_SOURCE",
     "ASYNC_SETTLEMENT_SCHEMA_VERSION",
+    "ACTION_VALUE_LABEL_ACTIONS",
+    "AUXILIARY_OUTCOME_TARGET",
+    "PRIMARY_POLICY_TARGET_ACTION_VALUE",
     "PENDING_CAPTURE_PHASE",
     "PENDING_FINALIZATION_PHASE",
     "DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL",
@@ -230,6 +237,7 @@ __all__ = [
     "synthetic_btc_market_rows",
     "synthetic_token_snapshot_rows",
     "predict_polymarket_policy_examples",
+    "train_polymarket_action_value_model",
     "train_polymarket_probability_model",
     "write_deterministic_polymarket_corpus_fixtures",
 ]

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from bigan.v8.polymarket import (
+    ACTION_VALUE_LABEL_ACTIONS,
     PolymarketCorpusBuildConfig,
     PolymarketPolicyTrainingConfig,
     build_polymarket_btc_corpus,
@@ -24,6 +25,17 @@ def test_model_predictions_are_probabilities_with_confidence(tmp_path: Path) -> 
         assert prediction.model_version == result.model.model_version
         assert prediction.feature_schema_hash == result.dataset.feature_schema_hash
         assert prediction.training_corpus_hash == result.dataset.training_corpus_hash
+        assert prediction.p_up_auxiliary == prediction.estimated_up_probability
+        assert prediction.action_value_head_enabled is True
+        assert prediction.outcome_probability_head_enabled is True
+        assert set(prediction.expected_return_by_action) == set(ACTION_VALUE_LABEL_ACTIONS)
+        assert prediction.best_policy_action in ACTION_VALUE_LABEL_ACTIONS
+        assert prediction.best_action_expected_return is not None
+        assert prediction.second_best_action_expected_return is not None
+        assert prediction.best_action_margin is not None
+        assert prediction.best_action_margin >= 0.0
+        assert prediction.policy_confidence is not None
+        assert 0.0 <= prediction.policy_confidence <= 1.0
 
 
 def test_calibration_and_validation_reports_cover_families_and_time_buckets(

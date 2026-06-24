@@ -2,9 +2,9 @@
 
 This document describes the deterministic Phase 3 Polymarket policy training path
 for BTC Up/Down markets. It consumes the Phase 2 historical corpus, trains an
-offline probability model for `P(UP)`, converts probabilities into paper-only EV
-execution decisions, and replays those decisions through Phase 1 ledger and
-settlement primitives.
+offline action-value policy model, keeps `P(UP)` as an auxiliary calibration
+head, converts policy outputs into paper-only decisions, and replays those
+decisions through Phase 1 ledger and settlement primitives.
 
 ## Safety Boundary
 
@@ -34,8 +34,27 @@ The runner consumes a Phase 2 corpus directory containing:
 - `polymarket_feature_rows.jsonl`
 - `polymarket_label_rows.jsonl`
 
-Training examples are built from causal feature rows and the settlement-aware
-`BUY_UP_HOLD_TO_SETTLEMENT` label. The supervised target is:
+Training examples are built from causal feature rows and all action-level labels
+for each `(market_id, decision_ts)` state:
+
+```text
+NO_TRADE
+BUY_UP_HOLD_TO_SETTLEMENT
+BUY_DOWN_HOLD_TO_SETTLEMENT
+BUY_UP_SELL_BEFORE_CLOSE
+BUY_DOWN_SELL_BEFORE_CLOSE
+```
+
+The primary supervised target is cost-aware action value:
+
+```text
+primary_policy_target = action_expected_net_return
+action_return_targets[action] = total_net_return
+best_policy_action = argmax(action_return_targets)
+best_action_margin = best_return - second_best_return
+```
+
+The auxiliary outcome head remains:
 
 ```text
 resolved_outcome=UP             -> target_up_probability=1.0
@@ -43,8 +62,8 @@ resolved_outcome=DOWN           -> target_up_probability=0.0
 resolved_outcome=UNKNOWN_50_50  -> target_up_probability=0.5
 ```
 
-PnL is not used as the primary training target. PnL appears only in validation,
-EV threshold reporting, and paper replay evidence.
+This is supervised from Phase 2 net-return labels, not direct live PnL
+optimization. The manifest keeps `direct_pnl_optimization=false`.
 
 ## Temporal Splits
 
@@ -68,7 +87,14 @@ Dataset profiles and model manifests record:
 
 The model writes trained-model predictions with:
 
+- `p_up_auxiliary`
 - `estimated_up_probability`
+- `expected_return_by_action`
+- `best_policy_action`
+- `best_action_expected_return`
+- `second_best_action_expected_return`
+- `best_action_margin`
+- `policy_confidence`
 - `confidence`
 - `score`
 - `calibration_bucket`
@@ -76,8 +102,8 @@ The model writes trained-model predictions with:
 - `feature_schema_hash`
 - `training_corpus_hash`
 
-The first implementation uses a deterministic frequency/market-implied model so
-CI remains lightweight and reproducible. It is intentionally conservative and
+The first implementation uses deterministic frequency and action-return baselines
+so CI remains lightweight and reproducible. It is intentionally conservative and
 auditable rather than a profitability claim.
 
 ## Evaluation
@@ -112,9 +138,20 @@ Primary calibration is split-specific. The default primary calibration split is
 all written for audit. Validation by-family and time-to-close bucket metrics use
 only the selected out-of-sample validation split, never train rows.
 
-## EV Execution
+## Policy Execution
 
-The EV layer turns `P(UP)` into paper actions:
+The execution layer consumes action-value outputs first:
+
+```text
+expected_return_by_action
+best_policy_action
+best_action_expected_return
+best_action_margin
+policy_confidence
+```
+
+If no action-value head is available, the compatibility fallback turns `P(UP)`
+into paper actions:
 
 ```text
 EV_BUY_UP   = P(UP)     - ask_up   - costs
@@ -139,6 +176,8 @@ Every EV decision records:
 - `trained_model_used=true`
 - `policy_signal_source=trained_model`
 - `synthetic_fixture_signal_used=false`
+- `action_value_head_used`
+- `probability_ev_fallback_used`
 
 ## Paper Replay
 
@@ -161,6 +200,8 @@ Replay reports include:
 - `total_polymarket_pnl`
 - `max_drawdown`
 - `calibration_error`
+- `outcome_calibration_error`
+- `action_value_policy_metrics`
 - `critical_alert_count`
 
 This replay is deterministic and does not imply expected production profitability.
@@ -199,6 +240,10 @@ The model manifest records:
 - primary calibration split
 - replay split
 - `out_of_sample_replay=true`
+- `primary_policy_target=action_expected_net_return`
+- `outcome_probability_head_enabled=true`
+- `action_value_head_enabled=true`
+- action-label coverage by action
 - paper-only safety flags
 
 ## Local Smoke

@@ -10,6 +10,9 @@ from typing import Any
 
 from bigan.v8.polymarket.corpus import BTC_UPDOWN_MARKET_HORIZONS_MS
 from bigan.v8.polymarket.training.contracts import (
+    ACTION_VALUE_LABEL_ACTIONS,
+    AUXILIARY_OUTCOME_TARGET,
+    PRIMARY_POLICY_TARGET_ACTION_VALUE,
     PolymarketPolicyDataset,
     PolymarketPolicyExample,
     PolymarketPolicyTrainingConfig,
@@ -19,9 +22,11 @@ from bigan.v8.polymarket.training.contracts import (
 
 TARGET_LABEL_ACTION = "BUY_UP_HOLD_TO_SETTLEMENT"
 LABEL_SCHEMA = {
-    "target": "resolved_up_probability",
-    "source_action": TARGET_LABEL_ACTION,
-    "mapping": {
+    "primary_target": PRIMARY_POLICY_TARGET_ACTION_VALUE,
+    "auxiliary_target": AUXILIARY_OUTCOME_TARGET,
+    "action_labels": list(ACTION_VALUE_LABEL_ACTIONS),
+    "source_actions": list(ACTION_VALUE_LABEL_ACTIONS),
+    "outcome_probability_mapping": {
         "UP": 1.0,
         "DOWN": 0.0,
         "UNKNOWN_50_50": 0.5,
@@ -46,18 +51,43 @@ def load_polymarket_policy_dataset(
         row["market_id"]: row
         for row in _read_jsonl(corpus_dir / "polymarket_resolution_events.jsonl")
     }
-    target_labels = {
-        (row["market_id"], row["decision_ts"]): row
-        for row in _read_jsonl(corpus_dir / "polymarket_label_rows.jsonl")
-        if row["action"] == TARGET_LABEL_ACTION
-    }
+    labels_by_key = _labels_by_decision_state(corpus_dir / "polymarket_label_rows.jsonl")
     examples = []
     for row in _read_jsonl(corpus_dir / "polymarket_feature_rows.jsonl"):
         _assert_corpus_safety(row)
-        label = target_labels.get((row["market_id"], row["decision_ts"]))
-        if label is None:
-            continue
-        _assert_corpus_safety(label)
+        labels = labels_by_key.get((row["market_id"], int(row["decision_ts"])))
+        if labels is None:
+            raise ValueError(
+                "feature row is missing action labels for "
+                f"{row['market_id']} at decision_ts={row['decision_ts']}"
+            )
+        missing_actions = set(ACTION_VALUE_LABEL_ACTIONS) - set(labels)
+        if missing_actions:
+            raise ValueError(
+                "policy action labels missing required actions for "
+                f"{row['market_id']} at decision_ts={row['decision_ts']}: "
+                + ", ".join(sorted(missing_actions))
+            )
+        label = labels[TARGET_LABEL_ACTION]
+        action_return_targets = {
+            action: float(labels[action]["total_net_return"])
+            for action in ACTION_VALUE_LABEL_ACTIONS
+        }
+        realized_trade_return_targets = {
+            action: float(labels[action]["realized_trade_return"])
+            for action in ACTION_VALUE_LABEL_ACTIONS
+        }
+        settlement_return_targets = {
+            action: float(labels[action]["settlement_return"])
+            for action in ACTION_VALUE_LABEL_ACTIONS
+        }
+        action_is_positive_targets = {
+            action: bool(labels[action]["is_positive"])
+            for action in ACTION_VALUE_LABEL_ACTIONS
+        }
+        best_action, best_return, second_best_return, best_margin = _best_action(
+            action_return_targets
+        )
         examples.append(
             PolymarketPolicyExample(
                 market_id=row["market_id"],
@@ -72,6 +102,14 @@ def load_polymarket_policy_dataset(
                 target_up_probability=_target_up_probability(label["resolved_outcome"]),
                 resolved_outcome=label["resolved_outcome"],
                 resolution_status=label["resolution_status"],
+                action_return_targets=action_return_targets,
+                realized_trade_return_targets=realized_trade_return_targets,
+                settlement_return_targets=settlement_return_targets,
+                action_is_positive_targets=action_is_positive_targets,
+                best_policy_action=best_action,
+                best_action_expected_return=best_return,
+                second_best_action_expected_return=second_best_return,
+                best_action_margin=best_margin,
             )
         )
     if not examples:
@@ -124,6 +162,12 @@ def dataset_profile(dataset: PolymarketPolicyDataset) -> dict[str, Any]:
         "shadow_row_count": len(dataset.shadow_examples),
         "market_count": len(dataset.market_metadata),
         "market_family_counts": _family_counts(dataset.examples),
+        "primary_policy_target": PRIMARY_POLICY_TARGET_ACTION_VALUE,
+        "auxiliary_outcome_target": AUXILIARY_OUTCOME_TARGET,
+        "action_value_head_enabled": True,
+        "outcome_probability_head_enabled": True,
+        "action_label_coverage_by_action": _action_label_coverage(dataset.examples),
+        "best_policy_action_counts": _best_policy_action_counts(dataset.examples),
         "feature_columns": list(dataset.feature_columns),
         "feature_schema_hash": dataset.feature_schema_hash,
         "label_schema_hash": dataset.label_schema_hash,
@@ -156,6 +200,34 @@ def _target_up_probability(resolved_outcome: str) -> float:
     if resolved_outcome == "UNKNOWN_50_50":
         return 0.5
     raise ValueError(f"unsupported resolved_outcome: {resolved_outcome}")
+
+
+def _labels_by_decision_state(path: Path) -> dict[tuple[str, int], dict[str, dict[str, Any]]]:
+    grouped: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
+    for row in _read_jsonl(path):
+        _assert_corpus_safety(row)
+        action = str(row["action"])
+        if action not in ACTION_VALUE_LABEL_ACTIONS:
+            continue
+        key = (str(row["market_id"]), int(row["decision_ts"]))
+        if action in grouped.setdefault(key, {}):
+            raise ValueError(
+                f"duplicate policy label action for {key[0]} at decision_ts={key[1]}: {action}"
+            )
+        grouped[key][action] = row
+    if not grouped:
+        raise ValueError("no action-value policy labels found")
+    return grouped
+
+
+def _best_action(action_returns: dict[str, float]) -> tuple[str, float, float, float]:
+    ranked = sorted(
+        ((action, float(value)) for action, value in action_returns.items()),
+        key=lambda item: (-item[1], item[0]),
+    )
+    best_action, best_return = ranked[0]
+    second_best_return = ranked[1][1] if len(ranked) > 1 else best_return
+    return best_action, best_return, second_best_return, best_return - second_best_return
 
 
 def _split_examples(
@@ -236,6 +308,24 @@ def _family_counts(examples: tuple[PolymarketPolicyExample, ...]) -> dict[str, i
     for example in examples:
         counts[example.market_family] = counts.get(example.market_family, 0) + 1
     return {family: count for family, count in counts.items() if count > 0}
+
+
+def _action_label_coverage(examples: tuple[PolymarketPolicyExample, ...]) -> dict[str, int]:
+    counts = dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, 0)
+    for example in examples:
+        for action in ACTION_VALUE_LABEL_ACTIONS:
+            if action in example.action_return_targets:
+                counts[action] += 1
+    return counts
+
+
+def _best_policy_action_counts(
+    examples: tuple[PolymarketPolicyExample, ...],
+) -> dict[str, int]:
+    counts = dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, 0)
+    for example in examples:
+        counts[example.best_policy_action] = counts.get(example.best_policy_action, 0) + 1
+    return {action: count for action, count in counts.items() if count > 0}
 
 
 def _assert_corpus_safety(payload: dict[str, Any]) -> None:

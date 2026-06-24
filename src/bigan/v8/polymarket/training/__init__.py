@@ -7,10 +7,13 @@ from bigan.v8.polymarket.training.calibration import (
     validation_report,
 )
 from bigan.v8.polymarket.training.contracts import (
+    ACTION_VALUE_LABEL_ACTIONS,
+    AUXILIARY_OUTCOME_TARGET,
     DEFAULT_POLICY_CREATED_AT,
     POLYMARKET_POLICY_SCHEMA_VERSION,
     POLYMARKET_POLICY_SIGNAL_SOURCE_TRAINED_MODEL,
     POLYMARKET_POLICY_TRAINING_PHASE,
+    PRIMARY_POLICY_TARGET_ACTION_VALUE,
     PolymarketPolicyDataset,
     PolymarketPolicyExample,
     PolymarketPolicyModel,
@@ -25,6 +28,7 @@ from bigan.v8.polymarket.training.dataset import (
 )
 from bigan.v8.polymarket.training.model import (
     predict_polymarket_policy_examples,
+    train_polymarket_action_value_model,
     train_polymarket_probability_model,
 )
 from bigan.v8.polymarket.training.real_corpus_gate import (
@@ -50,6 +54,9 @@ __all__ = [
     "POLYMARKET_POLICY_SCHEMA_VERSION",
     "POLYMARKET_POLICY_SIGNAL_SOURCE_TRAINED_MODEL",
     "POLYMARKET_POLICY_TRAINING_PHASE",
+    "ACTION_VALUE_LABEL_ACTIONS",
+    "AUXILIARY_OUTCOME_TARGET",
+    "PRIMARY_POLICY_TARGET_ACTION_VALUE",
     "POLYMARKET_REAL_CORPUS_RETRAINING_GATE_PHASE",
     "POLYMARKET_REAL_CORPUS_RETRAINING_GATE_SCHEMA_VERSION",
     "TARGET_LABEL_ACTION",
@@ -71,6 +78,7 @@ __all__ = [
     "run_polymarket_policy_training",
     "run_polymarket_real_corpus_retraining_gate",
     "split_calibration_report",
+    "train_polymarket_action_value_model",
     "train_polymarket_probability_model",
     "validation_report",
 ]
