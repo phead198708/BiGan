@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from examples.v8.run_polymarket_async_round_collector import (
     _round_start_alignment_sleep_seconds,
+    main,
 )
 
 
@@ -27,3 +31,26 @@ def test_round_start_alignment_waits_when_started_late_in_round() -> None:
         )
         == 54.0
     )
+
+
+def test_finalize_only_cli_accepts_shared_collector_args(tmp_path: Path) -> None:
+    assert (
+        main(
+            [
+                "--batch-id",
+                "finalize-smoke",
+                "--output-dir",
+                str(tmp_path),
+                "--finalize-only",
+                "--max-round-start-lag-seconds",
+                "30",
+            ]
+        )
+        == 0
+    )
+
+    summary_path = tmp_path / "finalize-smoke" / "finalizer_summary.json"
+    summary = json.loads(summary_path.read_text())
+    assert summary["finalize_only"] is True
+    assert summary["finalization_attempt_count"] == 0
+    assert summary["error_count"] == 0

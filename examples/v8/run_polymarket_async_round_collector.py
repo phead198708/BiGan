@@ -392,7 +392,6 @@ def main(argv: list[str] | None = None) -> int:
             settlement_grace_seconds=args.settlement_grace_seconds,
             training_corpus_root=args.training_corpus_root,
             clob_ws_url=args.clob_ws_url,
-            max_round_start_lag_seconds=args.max_round_start_lag_seconds,
             overwrite_existing=args.overwrite_existing,
         )
     else:
