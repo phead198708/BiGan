@@ -89,35 +89,65 @@ def run_polymarket_live_paper(
     model_manifest: dict[str, Any] = {}
     model_manifest_path: Path | None = None
     model_manifest_sha256 = ""
+    model: PolymarketPolicyModel | None = None
+    real_time_streaming = config.stream_observability and not config.mock_live
 
-    try:
-        market_rows, orderbook_rows, trade_rows, tick_rows, candle_rows = _load_feed_rows(
-            config,
-            streaming_writer=streaming,
-        )
-        if streaming is not None:
-            streaming.record_feed_checkpoint(
-                stage="feed_loaded",
-                market_count=len(market_rows),
-                latest_market_id=_latest_market_id_from_rows(market_rows),
-                orderbook_count=len(orderbook_rows),
-                trade_count=len(trade_rows),
-                tick_count=len(tick_rows),
-                candle_count=len(candle_rows),
-                force=True,
+    if real_time_streaming:
+        try:
+            model, model_manifest, model_manifest_path = _load_or_create_model(config, run_dir)
+            model_manifest_sha256 = _sha256_file(model_manifest_path)
+            if config.inject_model_manifest_mismatch:
+                model_manifest["model_sha256"] = "0" * 64
+                raise ValueError("model_manifest_mismatch")
+            _verify_model_manifest(model_manifest=model_manifest, model_path=model_manifest_path)
+        except Exception as exc:
+            reason_codes.extend(
+                _exception_reason_codes(exc, fallback="model_manifest_mismatch")
             )
-        _write_jsonl(artifact_paths["live_market_metadata"], market_rows)
-        _write_jsonl(artifact_paths["live_token_orderbooks"], orderbook_rows)
-        _write_jsonl(artifact_paths["live_token_trades"], trade_rows)
-        _write_jsonl(artifact_paths["live_btc_reference_ticks"], tick_rows)
-        _write_jsonl(artifact_paths["live_btc_reference_candles"], candle_rows)
-        markets = tuple(PolymarketLiveMarket(**row) for row in market_rows)
-        orderbooks = tuple(PolymarketLiveOrderBook(**row) for row in orderbook_rows)
-        trades = tuple(PolymarketLiveTrade(**row) for row in trade_rows)
-        ticks = tuple(BinanceBTCReferenceTick(**row) for row in tick_rows)
-        candles = tuple(BinanceBTCCandle(**row) for row in candle_rows)
-    except Exception as exc:
-        reason_codes.extend(_exception_reason_codes(exc, fallback="feed_contract_violation"))
+    snapshot_callback = (
+        _RealTimeStreamingSnapshotProcessor(
+            config=config,
+            run_dir=run_dir,
+            streaming_writer=streaming,
+            model=model,
+            model_manifest_sha256=model_manifest_sha256,
+        )
+        if real_time_streaming and streaming is not None and model is not None
+        else None
+    )
+
+    if not reason_codes:
+        try:
+            market_rows, orderbook_rows, trade_rows, tick_rows, candle_rows = _load_feed_rows(
+                config,
+                streaming_writer=streaming,
+                on_feed_snapshot=snapshot_callback,
+            )
+            if streaming is not None:
+                streaming.record_feed_checkpoint(
+                    stage="feed_loaded",
+                    market_count=len(market_rows),
+                    latest_market_id=_latest_market_id_from_rows(market_rows),
+                    orderbook_count=len(orderbook_rows),
+                    trade_count=len(trade_rows),
+                    tick_count=len(tick_rows),
+                    candle_count=len(candle_rows),
+                    force=True,
+                )
+            _write_jsonl(artifact_paths["live_market_metadata"], market_rows)
+            _write_jsonl(artifact_paths["live_token_orderbooks"], orderbook_rows)
+            _write_jsonl(artifact_paths["live_token_trades"], trade_rows)
+            _write_jsonl(artifact_paths["live_btc_reference_ticks"], tick_rows)
+            _write_jsonl(artifact_paths["live_btc_reference_candles"], candle_rows)
+            markets = tuple(PolymarketLiveMarket(**row) for row in market_rows)
+            orderbooks = tuple(PolymarketLiveOrderBook(**row) for row in orderbook_rows)
+            trades = tuple(PolymarketLiveTrade(**row) for row in trade_rows)
+            ticks = tuple(BinanceBTCReferenceTick(**row) for row in tick_rows)
+            candles = tuple(BinanceBTCCandle(**row) for row in candle_rows)
+        except Exception as exc:
+            reason_codes.extend(_exception_reason_codes(exc, fallback="feed_contract_violation"))
+            _write_missing_feed_artifacts(artifact_paths)
+    else:
         _write_missing_feed_artifacts(artifact_paths)
 
     feed_health = _feed_health(
@@ -131,8 +161,7 @@ def run_polymarket_live_paper(
     )
     reason_codes.extend(feed_health["critical_reason_codes"])
 
-    model: PolymarketPolicyModel | None = None
-    if not reason_codes:
+    if model is None and not reason_codes:
         try:
             model, model_manifest, model_manifest_path = _load_or_create_model(config, run_dir)
             model_manifest_sha256 = _sha256_file(model_manifest_path)
@@ -148,7 +177,7 @@ def run_polymarket_live_paper(
     if model is not None and not reason_codes:
         examples = _policy_examples(markets=markets, orderbooks=orderbooks)
         predictions = predict_polymarket_policy_examples(model, examples)
-        if streaming is not None:
+        if streaming is not None and not real_time_streaming:
             streaming.append_signal_events(
                 predictions=predictions,
                 model_manifest_sha256=model_manifest_sha256,
@@ -157,7 +186,7 @@ def run_polymarket_live_paper(
             predictions=predictions,
             config=_ev_config(config, run_dir),
         )
-        if streaming is not None:
+        if streaming is not None and not real_time_streaming:
             streaming.append_execution_events(decisions=decisions)
         ledgers = _apply_decisions(markets=markets, decisions=decisions, config=config)
     else:
@@ -169,7 +198,7 @@ def run_polymarket_live_paper(
         ledgers=ledgers,
     )
     ledger_events = [event.to_dict() for ledger in ledgers.values() for event in ledger.events]
-    if streaming is not None:
+    if streaming is not None and not real_time_streaming:
         streaming.append_position_snapshots(
             markets=markets,
             ledger_events=ledger_events,
@@ -183,7 +212,7 @@ def run_polymarket_live_paper(
         decisions=decisions,
         settlement_events=settlement_events,
     )
-    if streaming is not None:
+    if streaming is not None and not real_time_streaming:
         streaming.append_pnl_snapshots(
             markets=markets,
             ledger_events=ledger_events,
@@ -326,6 +355,7 @@ def _load_feed_rows(
     config: PolymarketLivePaperConfig,
     *,
     streaming_writer: Any | None = None,
+    on_feed_snapshot: Any | None = None,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -334,7 +364,11 @@ def _load_feed_rows(
     list[dict[str, Any]],
 ]:
     if not config.mock_live:
-        return load_real_live_feed_rows(config, streaming_writer=streaming_writer)
+        return load_real_live_feed_rows(
+            config,
+            streaming_writer=streaming_writer,
+            on_feed_snapshot=on_feed_snapshot,
+        )
     polymarket_feed = MockPolymarketLiveFeed(config)
     market_rows = polymarket_feed.market_rows()
     markets = tuple(PolymarketLiveMarket(**row) for row in market_rows)
@@ -585,6 +619,16 @@ def _apply_decisions(
     config: PolymarketLivePaperConfig,
 ) -> dict[str, PolymarketPositionLedger]:
     ledgers = _empty_ledgers(markets)
+    _apply_decisions_to_ledgers(ledgers=ledgers, decisions=decisions, config=config)
+    return ledgers
+
+
+def _apply_decisions_to_ledgers(
+    *,
+    ledgers: dict[str, PolymarketPositionLedger],
+    decisions: tuple[Any, ...],
+    config: PolymarketLivePaperConfig,
+) -> None:
     for decision in sorted(decisions, key=lambda item: (item.decision_ts, item.market_id)):
         ledger = ledgers[decision.market_id]
         fees = decision.paper_notional * config.fee_rate
@@ -637,7 +681,6 @@ def _apply_decisions(
             ledger.hold(ts=decision.decision_ts, reason_codes=tuple(decision.reason_codes))
         else:
             ledger.no_trade(ts=decision.decision_ts, reason_codes=tuple(decision.reason_codes))
-    return ledgers
 
 
 def _settle_markets(
@@ -2055,6 +2098,107 @@ def _fixture_model() -> PolymarketPolicyModel:
         fallback_action_value_model_family="market_family_mean_baseline",
         feature_conditioned_action_value_model_enabled=False,
     )
+
+
+class _RealTimeStreamingSnapshotProcessor:
+    """Generate paper signals and PnL checkpoints from live feed snapshots."""
+
+    def __init__(
+        self,
+        *,
+        config: PolymarketLivePaperConfig,
+        run_dir: Path,
+        streaming_writer: _StreamingObservabilityWriter,
+        model: PolymarketPolicyModel,
+        model_manifest_sha256: str,
+    ) -> None:
+        self._config = config
+        self._run_dir = run_dir
+        self._streaming_writer = streaming_writer
+        self._model = model
+        self._model_manifest_sha256 = model_manifest_sha256
+        self._seen_example_keys: set[tuple[str, int]] = set()
+        self._ledgers: dict[str, PolymarketPositionLedger] = {}
+        self._decisions: list[Any] = []
+
+    def __call__(
+        self,
+        *,
+        market_rows: list[dict[str, Any]],
+        orderbook_rows: list[dict[str, Any]],
+        trade_rows: list[dict[str, Any]],
+        tick_rows: list[dict[str, Any]],
+        candle_rows: list[dict[str, Any]],
+    ) -> None:
+        del trade_rows, tick_rows, candle_rows
+        markets = tuple(PolymarketLiveMarket(**row) for row in market_rows)
+        orderbooks = tuple(PolymarketLiveOrderBook(**row) for row in orderbook_rows)
+        self._ensure_ledgers(markets)
+        examples = _policy_examples(markets=markets, orderbooks=orderbooks)
+        new_examples = tuple(
+            example
+            for example in examples
+            if (example.market_id, example.decision_ts) not in self._seen_example_keys
+        )
+        if not new_examples:
+            return
+        for example in new_examples:
+            self._seen_example_keys.add((example.market_id, example.decision_ts))
+        predictions = predict_polymarket_policy_examples(self._model, new_examples)
+        self._streaming_writer.append_signal_events(
+            predictions=predictions,
+            model_manifest_sha256=self._model_manifest_sha256,
+        )
+        decisions = build_polymarket_ev_decisions(
+            predictions=predictions,
+            config=_ev_config(self._config, self._run_dir),
+        )
+        self._streaming_writer.append_execution_events(decisions=decisions)
+        before_counts = {
+            market_id: len(ledger.events) for market_id, ledger in self._ledgers.items()
+        }
+        _apply_decisions_to_ledgers(
+            ledgers=self._ledgers,
+            decisions=decisions,
+            config=self._config,
+        )
+        new_ledger_events = []
+        for market_id, ledger in sorted(self._ledgers.items()):
+            previous_count = before_counts.get(market_id, 0)
+            new_ledger_events.extend(
+                event.to_dict() for event in ledger.events[previous_count:]
+            )
+        self._decisions.extend(decisions)
+        pnl_breakdown = _pnl_breakdown(
+            config=self._config,
+            markets=markets,
+            ledgers=self._ledgers,
+            decisions=tuple(self._decisions),
+            settlement_events=[],
+        )
+        self._streaming_writer.append_position_snapshots(
+            markets=markets,
+            ledger_events=new_ledger_events,
+            decisions=decisions,
+        )
+        self._streaming_writer.append_pnl_snapshots(
+            markets=markets,
+            ledger_events=new_ledger_events,
+            decisions=decisions,
+            pnl_breakdown=pnl_breakdown,
+        )
+
+    def _ensure_ledgers(self, markets: tuple[PolymarketLiveMarket, ...]) -> None:
+        for market in markets:
+            if market.market_id in self._ledgers:
+                continue
+            self._ledgers[market.market_id] = PolymarketPositionLedger(
+                market_id=market.market_id,
+                condition_id=market.condition_id,
+                slug=market.slug,
+                up_token_id=market.up_token_id,
+                down_token_id=market.down_token_id,
+            )
 
 
 class _StreamingObservabilityWriter:

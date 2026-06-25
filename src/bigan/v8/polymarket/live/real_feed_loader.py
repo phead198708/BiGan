@@ -18,6 +18,7 @@ def load_real_live_feed_rows(
     config: PolymarketLivePaperConfig,
     *,
     streaming_writer: Any | None = None,
+    on_feed_snapshot: Any | None = None,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -109,6 +110,14 @@ def load_real_live_feed_rows(
                 trade_count=len(trade_rows),
                 tick_count=len(tick_rows),
                 candle_count=len(candle_rows),
+            )
+        if on_feed_snapshot is not None and recorder_markets:
+            on_feed_snapshot(
+                market_rows=list(markets_by_id.values()),
+                orderbook_rows=list(orderbook_rows),
+                trade_rows=list(trade_rows),
+                tick_rows=list(tick_rows),
+                candle_rows=list(candle_rows),
             )
 
         sleep_seconds = float(config.poll_interval_seconds) - (time.monotonic() - poll_started)
