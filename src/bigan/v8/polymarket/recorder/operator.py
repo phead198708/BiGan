@@ -423,7 +423,7 @@ def _reason_details_for_capture_rejection(
 
 
 def _raw_market_row(market: dict[str, Any]) -> dict[str, Any]:
-    return {
+    row = {
         "market_id": market["market_id"],
         "condition_id": market["condition_id"],
         "slug": market["slug"],
@@ -439,6 +439,17 @@ def _raw_market_row(market: dict[str, Any]) -> dict[str, Any]:
         "raw_public_payload_sha256": market.get("raw_market_sha256"),
         **safety_fields(),
     }
+    reference_price_start = market.get("reference_price_start")
+    if reference_price_start is None:
+        reference_price_start = market.get("reference_price_at_start")
+    if reference_price_start is not None:
+        row["reference_price_start"] = reference_price_start
+        row["reference_price_at_start"] = reference_price_start
+    if market.get("reference_price_start_source_type") is not None:
+        row["reference_price_start_source_type"] = market[
+            "reference_price_start_source_type"
+        ]
+    return row
 
 
 def _recorder_report(

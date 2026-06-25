@@ -312,6 +312,7 @@ def test_delayed_real_live_missing_candles_preserves_final_replay_stats(
             mock_live=False,
             market_families=("btc_updown_5m",),
             settlement_mode="delayed",
+            settlement_wait_timeout_seconds=0,
             stream_observability=True,
             status_interval_seconds=1,
             heartbeat_interval_seconds=1,

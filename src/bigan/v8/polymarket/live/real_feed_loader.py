@@ -172,6 +172,194 @@ def load_real_live_feed_rows(
     return market_rows, orderbook_rows, trade_rows, tick_rows, candle_rows
 
 
+def wait_for_real_live_settlement_rows(
+    config: PolymarketLivePaperConfig,
+    *,
+    market_rows: list[dict[str, Any]],
+    candle_rows: list[dict[str, Any]],
+    streaming_writer: Any | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Poll read-only public resolution rows after a delayed live paper run."""
+
+    timeout_seconds = int(config.settlement_wait_timeout_seconds)
+    report: dict[str, Any] = {
+        "settlement_wait_enabled": (
+            config.settlement_mode == "delayed" and not config.mock_live
+        ),
+        "settlement_wait_timeout_seconds": timeout_seconds,
+        "settlement_wait_poll_interval_seconds": int(
+            config.settlement_poll_interval_seconds
+        ),
+        "settlement_wait_poll_count": 0,
+        "settlement_wait_elapsed_seconds": 0,
+        "settlement_wait_timed_out": False,
+        "settlement_wait_resolved_market_count": sum(
+            1 for row in market_rows if row.get("resolution_available") is True
+        ),
+        "settlement_wait_unresolved_market_count": sum(
+            1 for row in market_rows if row.get("resolution_available") is not True
+        ),
+        "settlement_wait_error_count": 0,
+        "settlement_wait_last_error": None,
+    }
+    if (
+        config.mock_live
+        or config.settlement_mode != "delayed"
+        or timeout_seconds <= 0
+        or not market_rows
+    ):
+        report["settlement_wait_enabled"] = False
+        return market_rows, candle_rows, report
+
+    from bigan.v8.polymarket.recorder.public_provider import (
+        PolymarketPublicHTTPRealCorpusProvider,
+    )
+
+    started_monotonic = time.monotonic()
+    deadline = started_monotonic + float(timeout_seconds)
+    recorder_config = _recorder_config(
+        config,
+        started_at=config.started_at or started_at_now(),
+    )
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        max_markets=max(1, len(market_rows)),
+        timeout_seconds=max(10.0, float(config.settlement_poll_interval_seconds)),
+        http_timeout_seconds=max(10.0, float(config.settlement_poll_interval_seconds)),
+        orderbook_snapshot_interval_seconds=float(config.poll_interval_seconds),
+        use_rest_orderbooks=True,
+    )
+    resolution_rows: list[dict[str, Any]] = []
+    last_error: str | None = None
+    now_ms = int(time.time() * 1000)
+    recorder_market_rows = [_recorder_market_row_from_live(row) for row in market_rows]
+    existing_candles_by_market = {str(row["market_id"]): row for row in candle_rows}
+    resolution_by_market = {
+        str(row["market_id"]): resolution
+        for row in recorder_market_rows
+        for resolution in [
+            _existing_resolution_from_live(
+                market=row,
+                candle=existing_candles_by_market.get(str(row["market_id"])),
+            )
+        ]
+        if resolution is not None
+    }
+
+    while True:
+        report["settlement_wait_poll_count"] += 1
+        try:
+            candidates = provider.resolution_rows(recorder_market_rows, recorder_config)
+            resolution_rows = [
+                row
+                for row in candidates
+                if _has_valid_reference_prices(row)
+            ]
+            resolution_by_market.update(
+                {str(row["market_id"]): row for row in resolution_rows}
+            )
+        except Exception as exc:  # noqa: BLE001
+            report["settlement_wait_error_count"] += 1
+            last_error = str(exc)
+
+        now_ms = int(time.time() * 1000)
+        if streaming_writer is not None:
+            streaming_writer.record_feed_checkpoint(
+                stage="waiting_for_settlement",
+                market_count=len(market_rows),
+                latest_market_id=market_rows[-1].get("market_id") if market_rows else None,
+                orderbook_count=0,
+                trade_count=0,
+                tick_count=0,
+                candle_count=len(candle_rows),
+                force=True,
+            )
+
+        if len(resolution_by_market) == len(market_rows) or time.monotonic() >= deadline:
+            break
+        sleep_seconds = min(
+            float(config.settlement_poll_interval_seconds),
+            max(0.0, deadline - time.monotonic()),
+        )
+        if sleep_seconds > 0.0:
+            time.sleep(sleep_seconds)
+
+    updated_candles_by_market = dict(existing_candles_by_market)
+    for market in recorder_market_rows:
+        resolution = resolution_by_market.get(str(market["market_id"]))
+        if resolution is not None:
+            updated_candles_by_market[str(market["market_id"])] = _live_candle_row(
+                market,
+                resolution,
+            )
+    updated_market_rows = [
+        _live_market_row(
+            market,
+            resolution=resolution_by_market.get(str(market["market_id"])),
+            now_ms=now_ms,
+        )
+        for market in recorder_market_rows
+    ]
+    elapsed_seconds = max(0, int(time.monotonic() - started_monotonic))
+    unresolved_count = len(market_rows) - len(resolution_by_market)
+    report.update(
+        {
+            "settlement_wait_elapsed_seconds": elapsed_seconds,
+            "settlement_wait_timed_out": unresolved_count > 0,
+            "settlement_wait_resolved_market_count": len(resolution_by_market),
+            "settlement_wait_unresolved_market_count": unresolved_count,
+            "settlement_wait_last_error": last_error,
+        }
+    )
+    return (
+        updated_market_rows,
+        [
+            updated_candles_by_market[market_id]
+            for market_id in sorted(updated_candles_by_market)
+        ],
+        report,
+    )
+
+
+def started_at_now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _recorder_market_row_from_live(row: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(row)
+    payload["reference_price_start"] = row.get(
+        "reference_price_start",
+        row.get("reference_price_at_start"),
+    )
+    payload["reference_price_at_start"] = row.get(
+        "reference_price_at_start",
+        row.get("reference_price_start"),
+    )
+    return payload
+
+
+def _existing_resolution_from_live(
+    *,
+    market: dict[str, Any],
+    candle: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if market.get("resolution_available") is not True or candle is None:
+        return None
+    start = _optional_positive_float(
+        market.get("reference_price_start")
+        if market.get("reference_price_start") is not None
+        else market.get("reference_price_at_start")
+    )
+    end = _optional_positive_float(candle.get("close_price"))
+    if start is None or end is None:
+        return None
+    return {
+        "market_id": str(market["market_id"]),
+        "reference_price_source": str(market.get("reference_price_source") or ""),
+        "reference_price_start": start,
+        "reference_price_end": end,
+    }
+
+
 def _recorder_config(
     config: PolymarketLivePaperConfig,
     *,

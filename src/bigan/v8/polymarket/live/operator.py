@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256, looks_like_sha256
-from bigan.v8.polymarket.corpus import BTC_UPDOWN_MARKET_HORIZONS_MS
+from bigan.v8.polymarket.corpus import (
+    BTC_UPDOWN_MARKET_HORIZONS_MS,
+    PolymarketCorpusBuildConfig,
+    build_polymarket_btc_corpus,
+)
 from bigan.v8.polymarket.execution_ev import (
     StatefulPolymarketDecisionEngine,
     build_polymarket_ev_decisions,
@@ -35,8 +39,15 @@ from bigan.v8.polymarket.live.contracts import (
     safety_fields,
 )
 from bigan.v8.polymarket.live.polymarket_feed import MockPolymarketLiveFeed
-from bigan.v8.polymarket.live.real_feed_loader import load_real_live_feed_rows
+from bigan.v8.polymarket.live.real_feed_loader import (
+    load_real_live_feed_rows,
+    wait_for_real_live_settlement_rows,
+)
 from bigan.v8.polymarket.rules import build_btc_updown_resolution_rule, resolve_polymarket_rule
+from bigan.v8.polymarket.storage import (
+    export_trainable_corpus,
+    round_corpus_id_from_corpus_dir,
+)
 from bigan.v8.polymarket.training import (
     PolymarketPolicyExample,
     PolymarketPolicyModel,
@@ -93,6 +104,7 @@ def run_polymarket_live_paper(
     model_manifest_path: Path | None = None
     model_manifest_sha256 = ""
     model: PolymarketPolicyModel | None = None
+    settlement_wait_report = _empty_settlement_wait_report(config)
     real_time_streaming = config.stream_observability and not config.mock_live
 
     if real_time_streaming:
@@ -125,6 +137,16 @@ def run_polymarket_live_paper(
                 config,
                 streaming_writer=streaming,
                 on_feed_snapshot=snapshot_callback,
+            )
+            (
+                market_rows,
+                candle_rows,
+                settlement_wait_report,
+            ) = _wait_for_settlement_rows(
+                config=config,
+                market_rows=market_rows,
+                candle_rows=candle_rows,
+                streaming_writer=streaming,
             )
             if streaming is not None:
                 streaming.record_feed_checkpoint(
@@ -247,6 +269,7 @@ def run_polymarket_live_paper(
         status=status,
         recommendation=recommendation,
         reason_codes=tuple(reason_codes),
+        settlement_wait_report=settlement_wait_report,
     )
     if streaming is not None:
         streaming.write_status(
@@ -309,6 +332,15 @@ def run_polymarket_live_paper(
         status=status,
         recommendation=recommendation,
     )
+    export_evidence = _export_round_training_corpora(
+        config=config,
+        run_dir=run_dir,
+        artifact_paths=artifact_paths,
+        round_artifacts=round_artifacts,
+        model_manifest=model_manifest,
+        model_manifest_sha256=model_manifest_sha256,
+    )
+    round_artifacts.update(export_evidence)
 
     core_hashes = _artifact_hashes(
         artifact_paths,
@@ -331,6 +363,7 @@ def run_polymarket_live_paper(
         model_manifest_path=model_manifest_path,
         model_manifest_sha256=model_manifest_sha256,
         reason_codes=tuple(reason_codes),
+        settlement_wait_report=settlement_wait_report,
         round_artifacts=round_artifacts,
     )
     _write_json(artifact_paths["polymarket_live_operator_manifest"], operator_manifest)
@@ -395,6 +428,53 @@ def _load_feed_rows(
         binance_feed.tick_rows(markets),
         binance_feed.candle_rows(markets),
     )
+
+
+def _empty_settlement_wait_report(config: PolymarketLivePaperConfig) -> dict[str, Any]:
+    return {
+        "settlement_wait_enabled": False,
+        "settlement_wait_timeout_seconds": int(config.settlement_wait_timeout_seconds),
+        "settlement_wait_poll_interval_seconds": int(
+            config.settlement_poll_interval_seconds
+        ),
+        "settlement_wait_poll_count": 0,
+        "settlement_wait_elapsed_seconds": 0,
+        "settlement_wait_timed_out": False,
+        "settlement_wait_resolved_market_count": 0,
+        "settlement_wait_unresolved_market_count": 0,
+        "settlement_wait_error_count": 0,
+        "settlement_wait_last_error": None,
+    }
+
+
+def _wait_for_settlement_rows(
+    *,
+    config: PolymarketLivePaperConfig,
+    market_rows: list[dict[str, Any]],
+    candle_rows: list[dict[str, Any]],
+    streaming_writer: Any | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    if config.mock_live or config.settlement_mode != "delayed":
+        return market_rows, candle_rows, _empty_settlement_wait_report(config)
+    try:
+        return wait_for_real_live_settlement_rows(
+            config,
+            market_rows=market_rows,
+            candle_rows=candle_rows,
+            streaming_writer=streaming_writer,
+        )
+    except Exception as exc:  # noqa: BLE001
+        report = _empty_settlement_wait_report(config)
+        report.update(
+            {
+                "settlement_wait_enabled": True,
+                "settlement_wait_timed_out": True,
+                "settlement_wait_unresolved_market_count": len(market_rows),
+                "settlement_wait_error_count": 1,
+                "settlement_wait_last_error": str(exc),
+            }
+        )
+        return market_rows, candle_rows, report
 
 
 def _load_or_create_model(
@@ -705,7 +785,7 @@ def _settle_markets(
     candles: tuple[BinanceBTCCandle, ...],
     ledgers: dict[str, PolymarketPositionLedger],
 ) -> list[dict[str, Any]]:
-    if config.stop_requested or config.settlement_mode == "delayed":
+    if config.stop_requested:
         return []
     candles_by_market = {candle.market_id: candle for candle in candles}
     settlement_events = []
@@ -825,8 +905,12 @@ def _feed_health(
         "missing_market_rule_count": missing_market_rule_count,
         "missing_token_book_count": missing_token_book_count,
         "missing_reference_candle_count": missing_reference_candle_count,
-        "settlement_pending_count": int(config.settlement_mode == "delayed") * len(markets),
-        "settlement_resolved_count": int(config.settlement_mode == "resolved") * len(markets),
+        "settlement_pending_count": sum(
+            1 for market in markets if not market.resolution_available
+        ),
+        "settlement_resolved_count": sum(
+            1 for market in markets if market.resolution_available
+        ),
         "critical_reason_codes": sorted(set(reason_codes)),
         **safety_fields(),
     }
@@ -887,6 +971,7 @@ def _observability_report(
     status: str,
     recommendation: str,
     reason_codes: tuple[str, ...],
+    settlement_wait_report: dict[str, Any],
 ) -> dict[str, Any]:
     critical = sorted(set(reason_codes))
     return {
@@ -899,6 +984,7 @@ def _observability_report(
         "critical_reason_codes": critical,
         "capital_deployment_allowed": False,
         "live_deployment_allowed": False,
+        "settlement_wait_report": settlement_wait_report,
         "feed_health": feed_health,
         "pnl_breakdown": pnl_breakdown,
         **safety_fields(),
@@ -918,6 +1004,7 @@ def _operator_manifest(
     model_manifest_path: Path | None,
     model_manifest_sha256: str,
     reason_codes: tuple[str, ...],
+    settlement_wait_report: dict[str, Any],
     round_artifacts: dict[str, Any],
 ) -> dict[str, Any]:
     ended_at = _ended_at(config)
@@ -953,6 +1040,7 @@ def _operator_manifest(
         "operator_recommendation": recommendation,
         "capital_deployment_allowed": False,
         "live_deployment_allowed": False,
+        **settlement_wait_report,
         **feed_health,
         "critical_alert_count": len(set(reason_codes)),
         "critical_reason_codes": sorted(set(reason_codes)),
@@ -977,6 +1065,25 @@ def _operator_manifest(
         "round_artifact_export_mode": round_artifacts["round_artifact_export_mode"],
         "round_artifacts_written": round_artifacts["round_artifacts_written"],
         "training_raw_round_count": round_artifacts["training_raw_round_count"],
+        "export_training_corpus_enabled": round_artifacts[
+            "export_training_corpus_enabled"
+        ],
+        "exported_training_corpus_count": round_artifacts[
+            "exported_training_corpus_count"
+        ],
+        "exported_training_corpus_dirs": round_artifacts[
+            "exported_training_corpus_dirs"
+        ],
+        "exported_training_corpus_ids": round_artifacts[
+            "exported_training_corpus_ids"
+        ],
+        "training_corpus_root": round_artifacts["training_corpus_root"],
+        "training_corpus_export_error_count": round_artifacts[
+            "training_corpus_export_error_count"
+        ],
+        "training_corpus_export_errors": round_artifacts[
+            "training_corpus_export_errors"
+        ],
         "paper_audit_round_count": round_artifacts["paper_audit_round_count"],
         "latest_round_summary": round_artifacts["latest_round_summary"],
         "latest_run_summary": round_artifacts["latest_run_summary"],
@@ -1015,6 +1122,13 @@ def _github_comment_payload(
             "live_polymarket_data",
             "live_binance_reference_data",
             "deterministic_replay",
+            "settlement_wait_enabled",
+            "settlement_wait_timeout_seconds",
+            "settlement_wait_poll_count",
+            "settlement_wait_elapsed_seconds",
+            "settlement_wait_timed_out",
+            "settlement_wait_resolved_market_count",
+            "settlement_wait_unresolved_market_count",
             "market_count",
             "resolved_market_count",
             "unresolved_market_count",
@@ -1038,6 +1152,12 @@ def _github_comment_payload(
             "wallet_signing_enabled",
             "broker_exchange_write_enabled",
             "live_exchange_write_enabled",
+            "export_training_corpus_enabled",
+            "exported_training_corpus_count",
+            "exported_training_corpus_dirs",
+            "exported_training_corpus_ids",
+            "training_corpus_root",
+            "training_corpus_export_error_count",
         )
     }
     payload.update(
@@ -1064,10 +1184,13 @@ def _github_comment_payload(
                 "rounds_pending_resolution", 0
             ),
             "training_raw_round_count": round_artifacts["training_raw_round_count"],
-            "paper_audit_round_count": round_artifacts["paper_audit_round_count"],
-            "latest_round_summary_sha256": round_artifacts.get(
-                "latest_round_summary_sha256"
-            ),
+        "paper_audit_round_count": round_artifacts["paper_audit_round_count"],
+        "training_corpus_export_errors": round_artifacts[
+            "training_corpus_export_errors"
+        ],
+        "latest_round_summary_sha256": round_artifacts.get(
+            "latest_round_summary_sha256"
+        ),
             "latest_run_summary_sha256": round_artifacts.get(
                 "latest_run_summary_sha256"
             ),
@@ -1088,6 +1211,13 @@ def _github_comment_markdown(payload: dict[str, Any]) -> str:
         "live_polymarket_data",
         "live_binance_reference_data",
         "deterministic_replay",
+        "settlement_wait_enabled",
+        "settlement_wait_timeout_seconds",
+        "settlement_wait_poll_count",
+        "settlement_wait_elapsed_seconds",
+        "settlement_wait_timed_out",
+        "settlement_wait_resolved_market_count",
+        "settlement_wait_unresolved_market_count",
         "market_count",
         "resolved_market_count",
         "unresolved_market_count",
@@ -1103,6 +1233,12 @@ def _github_comment_markdown(payload: dict[str, Any]) -> str:
         "rounds_pending_resolution",
         "training_raw_round_count",
         "paper_audit_round_count",
+        "export_training_corpus_enabled",
+        "exported_training_corpus_count",
+        "exported_training_corpus_dirs",
+        "exported_training_corpus_ids",
+        "training_corpus_root",
+        "training_corpus_export_error_count",
         "realized_trade_pnl",
         "settlement_pnl",
         "total_polymarket_pnl",
@@ -1150,6 +1286,10 @@ def _operator_summary_markdown(
             f"- operator_status: {observability_report['operator_status']}",
             f"- operator_recommendation: {observability_report['operator_recommendation']}",
             f"- critical_alert_count: {observability_report['critical_alert_count']}",
+            (
+                "- settlement_wait_timed_out: "
+                f"{observability_report['settlement_wait_report']['settlement_wait_timed_out']}"
+            ),
             f"- prediction_count: {pnl_breakdown['prediction_count']}",
             f"- decision_count: {pnl_breakdown['decision_count']}",
             f"- trade_count: {pnl_breakdown['trade_count']}",
@@ -1268,6 +1408,100 @@ def _write_round_artifacts(
         "latest_round_summary_sha256": latest_round_summary_sha256,
         "latest_run_summary_sha256": latest_run_summary_sha256,
     }
+
+
+def _export_round_training_corpora(
+    *,
+    config: PolymarketLivePaperConfig,
+    run_dir: Path,
+    artifact_paths: dict[str, Path],
+    round_artifacts: dict[str, Any],
+    model_manifest: dict[str, Any],
+    model_manifest_sha256: str,
+) -> dict[str, Any]:
+    enabled = bool(config.export_training_corpus and not config.mock_live)
+    evidence: dict[str, Any] = {
+        "export_training_corpus_enabled": enabled,
+        "training_corpus_root": str(config.training_corpus_root),
+        "exported_training_corpus_count": 0,
+        "exported_training_corpus_dirs": [],
+        "exported_training_corpus_ids": [],
+        "training_corpus_export_error_count": 0,
+        "training_corpus_export_errors": [],
+    }
+    if not enabled:
+        return evidence
+
+    training_rows = _read_jsonl(artifact_paths["training_raw_index"])
+    corpus_root = Path(config.training_corpus_root).expanduser()
+    for row in training_rows:
+        training_raw_dir_value = row.get("training_raw_dir")
+        if not training_raw_dir_value:
+            continue
+        training_raw_dir = run_dir / str(training_raw_dir_value)
+        round_id = str(row.get("round_id") or training_raw_dir.parent.name)
+        corpus_dir = run_dir / "phase2_training_corpora" / round_id
+        try:
+            phase2_result = build_polymarket_btc_corpus(
+                PolymarketCorpusBuildConfig(
+                    input_dir=training_raw_dir,
+                    output_dir=corpus_dir,
+                    created_at=config.created_at,
+                    market_families=tuple(config.market_families),  # type: ignore[arg-type]
+                    overwrite_existing=True,
+                )
+            )
+            corpus_id = round_corpus_id_from_corpus_dir(phase2_result.output_dir)
+            exported_dir = export_trainable_corpus(
+                corpus_dir=phase2_result.output_dir,
+                corpus_id=corpus_id,
+                destination_root=corpus_root,
+                overwrite_existing=config.overwrite_existing,
+                provenance={
+                    "source": "polymarket_live_paper_settlement_finalization",
+                    "run_id": config.run_id,
+                    "round_slug": corpus_id,
+                    "corpus_id": corpus_id,
+                    "round_scoped_export": True,
+                    "operator_manifest_pending": True,
+                    "round_id": row.get("round_id"),
+                    "round_dir": row.get("round_dir"),
+                    "training_raw_dir": row.get("training_raw_dir"),
+                    "training_manifest_sha256": row.get(
+                        "training_manifest_sha256"
+                    ),
+                    "phase2_corpus_manifest_sha256": phase2_result.artifact_hashes.get(
+                        "corpus_manifest"
+                    ),
+                    "source_model_run_id": _model_run_id(model_manifest),
+                    "source_model_manifest_sha256": model_manifest_sha256,
+                    "real_historical_corpus_used": True,
+                    "manual_live_evidence_eligible": True,
+                    "mock_public_data_used": False,
+                    "synthetic_public_data_used": False,
+                    "synthetic_corpus_used": False,
+                    **safety_fields(),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            evidence["training_corpus_export_errors"].append(
+                {
+                    "round_id": row.get("round_id"),
+                    "training_raw_dir": str(training_raw_dir),
+                    "error": str(exc),
+                }
+            )
+            continue
+        evidence["exported_training_corpus_dirs"].append(str(exported_dir))
+        evidence["exported_training_corpus_ids"].append(corpus_id)
+
+    evidence["exported_training_corpus_count"] = len(
+        evidence["exported_training_corpus_dirs"]
+    )
+    evidence["training_corpus_export_error_count"] = len(
+        evidence["training_corpus_export_errors"]
+    )
+    return evidence
 
 
 def _finalize_round_artifacts(
@@ -1746,6 +1980,9 @@ def _training_market_row(market: PolymarketLiveMarket) -> dict[str, Any]:
         "up_token_id": market.up_token_id,
         "down_token_id": market.down_token_id,
         "reference_price_source": market.reference_price_source,
+        "reference_price_start": market.reference_price_at_start,
+        "reference_price_at_start": market.reference_price_at_start,
+        "reference_price_start_source_type": "polymarket_live_market",
         "settlement_rule": market.settlement_rule,
         **safety_fields(),
     }
@@ -2032,6 +2269,8 @@ def _status_and_recommendation(
 ) -> tuple[str, str]:
     if config.stop_requested:
         return "operator_stopped", "stop_paper_run"
+    if set(critical_reason_codes) == {"settlement_pending"}:
+        return "awaiting_settlement", "await_settlement"
     if critical_reason_codes:
         return "blocked_fail_closed", "blocked_fail_closed"
     return "completed", "continue_paper_run"
@@ -2989,6 +3228,19 @@ def _post_github_comment(*, config: PolymarketLivePaperConfig, body_path: Path) 
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

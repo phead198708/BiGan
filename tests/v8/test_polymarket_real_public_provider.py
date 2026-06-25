@@ -41,6 +41,9 @@ def test_public_http_provider_normalizes_public_market_rows_without_fake_resolut
     assert markets[0]["market_start_ts"] == 1_700_001_000_000
     assert markets[0]["market_end_ts"] == 1_700_001_300_000
     assert markets[0]["reference_price_source"] == "https://data.chain.link/streams/btc-usd"
+    assert markets[0]["reference_price_start"] == 65000.0
+    assert markets[0]["reference_price_at_start"] == 65000.0
+    assert markets[0]["reference_price_start_source_type"] == "gamma_market_payload"
     assert markets[0]["up_token_id"] == "up-token"
     assert markets[0]["down_token_id"] == "down-token"
     assert len(books) == 2
@@ -571,6 +574,7 @@ class FakePublicFetch:
                 "question": "Bitcoin Up or Down - test",
                 "description": "The resolution source is Chainlink BTC/USD.",
                 "resolutionSource": "https://data.chain.link/streams/btc-usd",
+                "priceToBeat": "65000",
                 "outcomes": json.dumps(["Up", "Down"]),
                 "clobTokenIds": json.dumps(["up-token", "down-token"]),
                 "endDate": "2023-11-14T22:18:20Z",

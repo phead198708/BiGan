@@ -738,7 +738,8 @@ class PolymarketPublicHTTPRealCorpusProvider:
         if not condition_id:
             return None
         reference_source = str(payload.get("resolutionSource") or "").strip()
-        return {
+        reference_price_start = _reference_price_start_from_payload(payload)
+        row = {
             "market_id": condition_id,
             "condition_id": condition_id,
             "slug": slug,
@@ -755,6 +756,11 @@ class PolymarketPublicHTTPRealCorpusProvider:
             "raw_public_payload": payload,
             **safety_fields(),
         }
+        if reference_price_start is not None:
+            row["reference_price_start"] = reference_price_start
+            row["reference_price_at_start"] = reference_price_start
+            row["reference_price_start_source_type"] = "gamma_market_payload"
+        return row
 
     def _normalize_book_payload(
         self,
@@ -1435,15 +1441,30 @@ def _reference_price_fields_for_resolution(
     return {}
 
 
+def _reference_price_start_from_payload(payload: dict[str, Any]) -> float | None:
+    for candidate in _reference_price_candidates(payload):
+        start = _first_positive_float(
+            candidate,
+            "priceToBeat",
+            "price_to_beat",
+            "referencePriceStart",
+            "reference_price_start",
+            "reference_price_at_start",
+        )
+        if start is not None:
+            return start
+    return None
+
+
 def _reference_price_pair_from_payload(payload: dict[str, Any]) -> tuple[float, float] | None:
     for candidate in _reference_price_candidates(payload):
         start = _first_positive_float(
             candidate,
+            "priceToBeat",
+            "price_to_beat",
             "referencePriceStart",
             "reference_price_start",
             "reference_price_at_start",
-            "priceToBeat",
-            "price_to_beat",
             "openPrice",
             "open_price",
             "start_price",

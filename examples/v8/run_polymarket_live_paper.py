@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from bigan.v8.polymarket import (  # noqa: E402
+    V8_TRAINING_CORPUS_ROOT,
     PolymarketLivePaperConfig,
     run_polymarket_live_paper,
 )
@@ -38,6 +39,10 @@ def run_polymarket_live_paper_cli(
     heartbeat_interval_seconds: int = 60,
     flush_event_files: bool = False,
     settlement_mode: str = "resolved",
+    settlement_wait_timeout_seconds: int = 600,
+    settlement_poll_interval_seconds: int = 15,
+    export_training_corpus: bool = False,
+    training_corpus_root: Path | str = V8_TRAINING_CORPUS_ROOT,
     stop_requested: bool = False,
     overwrite_existing: bool = False,
 ) -> dict:
@@ -60,6 +65,10 @@ def run_polymarket_live_paper_cli(
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             flush_event_files=flush_event_files,
             settlement_mode=settlement_mode,  # type: ignore[arg-type]
+            settlement_wait_timeout_seconds=settlement_wait_timeout_seconds,
+            settlement_poll_interval_seconds=settlement_poll_interval_seconds,
+            export_training_corpus=export_training_corpus,
+            training_corpus_root=training_corpus_root,
             stop_requested=stop_requested,
             overwrite_existing=overwrite_existing,
         )
@@ -76,6 +85,14 @@ def run_polymarket_live_paper_cli(
         "trade_count": manifest["trade_count"],
         "resolved_market_count": manifest["resolved_market_count"],
         "unresolved_market_count": manifest["unresolved_market_count"],
+        "settlement_wait_enabled": manifest["settlement_wait_enabled"],
+        "settlement_wait_timeout_seconds": manifest["settlement_wait_timeout_seconds"],
+        "settlement_wait_poll_count": manifest["settlement_wait_poll_count"],
+        "settlement_wait_timed_out": manifest["settlement_wait_timed_out"],
+        "export_training_corpus_enabled": manifest["export_training_corpus_enabled"],
+        "exported_training_corpus_count": manifest["exported_training_corpus_count"],
+        "exported_training_corpus_dirs": manifest["exported_training_corpus_dirs"],
+        "training_corpus_root": manifest["training_corpus_root"],
         "total_polymarket_pnl": manifest["total_polymarket_pnl"],
         "live_polymarket_data": manifest["live_polymarket_data"],
         "live_binance_reference_data": manifest["live_binance_reference_data"],
@@ -118,6 +135,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--heartbeat-interval-seconds", type=int, default=60)
     parser.add_argument("--flush-event-files", action="store_true")
     parser.add_argument("--settlement-mode", choices=("resolved", "delayed"), default="resolved")
+    parser.add_argument("--settlement-wait-timeout-seconds", type=int, default=600)
+    parser.add_argument("--settlement-poll-interval-seconds", type=int, default=15)
+    parser.add_argument(
+        "--export-training-corpus",
+        dest="export_training_corpus",
+        action="store_true",
+        default=None,
+    )
+    parser.add_argument(
+        "--no-export-training-corpus",
+        dest="export_training_corpus",
+        action="store_false",
+    )
+    parser.add_argument("--training-corpus-root", default=str(V8_TRAINING_CORPUS_ROOT))
     parser.add_argument("--stop-requested", action="store_true")
     parser.add_argument("--overwrite-existing", action="store_true")
     args = parser.parse_args(argv)
@@ -131,6 +162,11 @@ def main(argv: list[str] | None = None) -> int:
         mock_live = False
     if args.mock_live:
         mock_live = True
+    export_training_corpus = (
+        not mock_live
+        if args.export_training_corpus is None
+        else bool(args.export_training_corpus)
+    )
     summary = run_polymarket_live_paper_cli(
         run_id=args.run_id,
         output_dir=args.output_dir,
@@ -149,6 +185,10 @@ def main(argv: list[str] | None = None) -> int:
         heartbeat_interval_seconds=args.heartbeat_interval_seconds,
         flush_event_files=args.flush_event_files,
         settlement_mode=args.settlement_mode,
+        settlement_wait_timeout_seconds=args.settlement_wait_timeout_seconds,
+        settlement_poll_interval_seconds=args.settlement_poll_interval_seconds,
+        export_training_corpus=export_training_corpus,
+        training_corpus_root=args.training_corpus_root,
         stop_requested=args.stop_requested,
         overwrite_existing=args.overwrite_existing,
     )

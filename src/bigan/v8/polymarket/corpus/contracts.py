@@ -150,6 +150,7 @@ class PolymarketCorpusMarket:
     reference_price_source: str
     settlement_rule: str
     raw_market_sha256: str
+    reference_price_start: float | None = None
     paper_only: bool = True
     capital_at_risk: bool = False
     broker_exchange_write_enabled: bool = False
@@ -180,6 +181,11 @@ class PolymarketCorpusMarket:
             raise ValueError("UP and DOWN token ids must differ")
         if not looks_like_sha256(self.raw_market_sha256):
             raise ValueError("raw_market_sha256 must be SHA-256")
+        if self.reference_price_start is not None and (
+            self.reference_price_start <= 0.0
+            or not math.isfinite(self.reference_price_start)
+        ):
+            raise ValueError("reference_price_start must be positive and finite")
         _validate_safety_boundary(self)
 
     def token_id_for_outcome(self, outcome: CorpusOutcome) -> str:

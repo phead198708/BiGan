@@ -337,6 +337,11 @@ def _normalize_markets(
                 reference_price_source=str(row.get("reference_price_source") or "binance_btcusdt"),
                 settlement_rule=str(row["settlement_rule"]),
                 raw_market_sha256=stable_hash(row),
+                reference_price_start=_optional_positive_float(
+                    row.get("reference_price_start")
+                    if row.get("reference_price_start") is not None
+                    else row.get("reference_price_at_start")
+                ),
                 paper_only=row.get("paper_only", True) is True,
                 capital_at_risk=row.get("capital_at_risk", False) is True,
                 broker_exchange_write_enabled=row.get("broker_exchange_write_enabled", False) is True,

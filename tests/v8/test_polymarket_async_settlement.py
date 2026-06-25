@@ -190,6 +190,7 @@ def test_pending_finalization_preserves_unknown_50_50_resolution(
         assert payload["resolved_outcome"] == "UNKNOWN_50_50"
         assert payload["payout_up"] == 0.5
         assert payload["payout_down"] == 0.5
+        assert payload["reference_price_start"] == 65000.0
     for payload in (round_summary, training_manifest, paper_audit_manifest):
         assert payload["round_finalization_only"] is True
         assert payload["model_signal_used"] is False

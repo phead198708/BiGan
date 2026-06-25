@@ -657,7 +657,7 @@ def _settlement_event_from_pending_raw(
     )
     resolved = resolve_polymarket_rule(
         rule,
-        reference_price_start=candle.open_price,
+        reference_price_start=float(resolution["reference_price_start"]),
         reference_price_end=candle.close_price,
         resolution_status=resolution_status,
     )
@@ -669,6 +669,8 @@ def _settlement_event_from_pending_raw(
         "resolved_outcome": resolved.resolved_outcome,
         "payout_up": resolved.payout_up,
         "payout_down": resolved.payout_down,
+        "reference_price_start": resolved.reference_price_start,
+        "reference_price_end": resolved.reference_price_end,
         "qty_up_settled": 0.0,
         "qty_down_settled": 0.0,
         "settlement_cashflow": 0.0,

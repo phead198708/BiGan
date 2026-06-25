@@ -21,8 +21,14 @@ LiveOperatorRecommendation = Literal[
     "continue_paper_run",
     "stop_paper_run",
     "blocked_fail_closed",
+    "await_settlement",
 ]
-LiveOperatorStatus = Literal["completed", "operator_stopped", "blocked_fail_closed"]
+LiveOperatorStatus = Literal[
+    "completed",
+    "operator_stopped",
+    "blocked_fail_closed",
+    "awaiting_settlement",
+]
 LiveMarketStatus = Literal["open", "closed", "resolved", "settlement_pending"]
 LiveOutcome = Literal["UP", "DOWN"]
 
@@ -64,6 +70,10 @@ class PolymarketLivePaperConfig:
     max_stale_orderbook_seconds: int = 60
     max_stale_reference_seconds: int = 60
     settlement_mode: SettlementMode = "resolved"
+    settlement_wait_timeout_seconds: int = 600
+    settlement_poll_interval_seconds: int = 15
+    export_training_corpus: bool = False
+    training_corpus_root: Path | str = Path("/Volumes/PHILIPS/v8")
     stop_requested: bool = False
     inject_missing_market_rule: bool = False
     inject_missing_token_book: bool = False
@@ -89,6 +99,12 @@ class PolymarketLivePaperConfig:
             object.__setattr__(self, "model_manifest", Path(self.model_manifest))
         if self.model_path is not None and not isinstance(self.model_path, Path):
             object.__setattr__(self, "model_path", Path(self.model_path))
+        if not isinstance(self.training_corpus_root, Path):
+            object.__setattr__(
+                self,
+                "training_corpus_root",
+                Path(self.training_corpus_root),
+            )
         if self.mode not in ("dry-run", "gh-command"):
             raise ValueError("mode must be dry-run or gh-command")
         if not self.repo_full_name.strip() or "/" not in self.repo_full_name:
@@ -125,6 +141,10 @@ class PolymarketLivePaperConfig:
             raise ValueError("max_stale_reference_seconds must be positive")
         if self.settlement_mode not in ("resolved", "delayed"):
             raise ValueError("settlement_mode must be resolved or delayed")
+        if self.settlement_wait_timeout_seconds < 0:
+            raise ValueError("settlement_wait_timeout_seconds must be non-negative")
+        if self.settlement_poll_interval_seconds <= 0:
+            raise ValueError("settlement_poll_interval_seconds must be positive")
         if not self.created_at or not self.started_at:
             raise ValueError("created_at and started_at are required")
         _validate_full_safety_boundary(self)
@@ -141,6 +161,7 @@ class PolymarketLivePaperConfig:
             None if self.model_manifest is None else str(self.model_manifest)
         )
         payload["model_path"] = None if self.model_path is None else str(self.model_path)
+        payload["training_corpus_root"] = str(self.training_corpus_root)
         return payload
 
 
