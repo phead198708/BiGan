@@ -112,8 +112,12 @@ def load_real_live_feed_rows(
                 candle_count=len(candle_rows),
             )
         if on_feed_snapshot is not None and recorder_markets:
+            snapshot_market_rows = [
+                _live_market_row(market, resolution=None, now_ms=now_ms)
+                for market in markets_by_id.values()
+            ]
             on_feed_snapshot(
-                market_rows=list(markets_by_id.values()),
+                market_rows=snapshot_market_rows,
                 orderbook_rows=list(orderbook_rows),
                 trade_rows=list(trade_rows),
                 tick_rows=list(tick_rows),
@@ -134,7 +138,7 @@ def load_real_live_feed_rows(
     }
     for market in recorder_markets:
         resolution = resolutions_by_market.get(str(market["market_id"]))
-        if resolution is not None:
+        if resolution is not None and _has_valid_reference_prices(resolution):
             candle_rows.append(_live_candle_row(market, resolution))
 
     market_rows = [
@@ -157,9 +161,13 @@ def load_real_live_feed_rows(
                 break
             except Exception:
                 continue
-    if not candle_rows:
+    latest_positive_tick = _latest_positive_tick(tick_rows)
+    should_backfill_missing_candles = config.settlement_mode == "delayed" or not candle_rows
+    if latest_positive_tick is not None and should_backfill_missing_candles:
+        candle_market_ids = {str(row["market_id"]) for row in candle_rows}
         for market in recorder_markets:
-            candle_rows.append(_fallback_candle_row(market, tick_rows[-1]))
+            if str(market["market_id"]) not in candle_market_ids:
+                candle_rows.append(_fallback_candle_row(market, latest_positive_tick))
 
     return market_rows, orderbook_rows, trade_rows, tick_rows, candle_rows
 
@@ -367,8 +375,10 @@ def _live_tick_row(payload: dict[str, Any], *, now_ms: int) -> dict[str, Any]:
 
 
 def _live_candle_row(market: dict[str, Any], resolution: dict[str, Any]) -> dict[str, Any]:
-    start = float(resolution.get("reference_price_start") or 0.0)
-    end = float(resolution.get("reference_price_end") or start)
+    start = _optional_positive_float(resolution.get("reference_price_start"))
+    end = _optional_positive_float(resolution.get("reference_price_end"))
+    if start is None or end is None:
+        raise ValueError("invalid_reference_candle")
     return {
         "market_id": str(market["market_id"]),
         "market_family": str(market["market_family"]),
@@ -391,7 +401,9 @@ def _live_candle_row(market: dict[str, Any], resolution: dict[str, Any]) -> dict
 
 
 def _fallback_candle_row(market: dict[str, Any], tick: dict[str, Any]) -> dict[str, Any]:
-    price = float(tick["mid_price"])
+    price = _optional_positive_float(tick.get("mid_price"))
+    if price is None:
+        raise ValueError("invalid_reference_tick")
     return {
         "market_id": str(market["market_id"]),
         "market_family": str(market["market_family"]),
@@ -411,3 +423,17 @@ def _fallback_candle_row(market: dict[str, Any], tick: dict[str, Any]) -> dict[s
         "polymarket_write_enabled": False,
         "wallet_signing_enabled": False,
     }
+
+
+def _has_valid_reference_prices(resolution: dict[str, Any]) -> bool:
+    return (
+        _optional_positive_float(resolution.get("reference_price_start")) is not None
+        and _optional_positive_float(resolution.get("reference_price_end")) is not None
+    )
+
+
+def _latest_positive_tick(tick_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for tick in reversed(tick_rows):
+        if _optional_positive_float(tick.get("mid_price")) is not None:
+            return tick
+    return None

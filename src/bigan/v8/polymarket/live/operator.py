@@ -810,7 +810,7 @@ def _feed_health(
     missing_reference_candle_count = sum(
         int(market.market_id not in candle_market_ids) for market in markets
     )
-    if missing_reference_candle_count:
+    if missing_reference_candle_count and config.settlement_mode == "resolved":
         reason_codes.append("missing_reference_candle")
     return {
         "polymarket_metadata_event_count": len(markets),
@@ -2934,6 +2934,16 @@ def _exception_reason_codes(exc: Exception, *, fallback: str) -> list[str]:
         return ["missing_market_rule"]
     if "streaming_replay_mismatch" in text:
         return ["streaming_replay_mismatch"]
+    if "invalid_reference_candle" in text or any(
+        field in text
+        for field in (
+            "open_price must be positive",
+            "close_price must be positive",
+            "high_price must be positive",
+            "low_price must be positive",
+        )
+    ):
+        return ["invalid_reference_candle"]
     return [fallback]
 
 

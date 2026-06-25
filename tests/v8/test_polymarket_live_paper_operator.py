@@ -5,13 +5,18 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
+import bigan.v8.polymarket.live.operator as live_operator
 from bigan.v8.polymarket import (
     PolymarketCorpusBuildConfig,
     PolymarketLivePaperConfig,
     build_polymarket_btc_corpus,
     run_polymarket_live_paper,
 )
+from bigan.v8.polymarket.live.binance_reference_feed import MockBinanceBTCReferenceFeed
+from bigan.v8.polymarket.live.contracts import PolymarketLiveMarket
+from bigan.v8.polymarket.live.polymarket_feed import MockPolymarketLiveFeed
 
 
 def test_live_paper_operator_writes_required_artifacts_and_comment(
@@ -252,6 +257,79 @@ def test_mock_live_operator_is_deterministic(tmp_path: Path) -> None:
         assert _sha256(first.artifact_paths[artifact_name]) == _sha256(
             second.artifact_paths[artifact_name]
         )
+
+
+def test_delayed_real_live_missing_candles_preserves_final_replay_stats(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    def fake_real_live_feed_rows(
+        config: PolymarketLivePaperConfig,
+        *,
+        streaming_writer: Any | None = None,
+        on_feed_snapshot: Any | None = None,
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+    ]:
+        polymarket_feed = MockPolymarketLiveFeed(config)
+        market_rows = polymarket_feed.market_rows()
+        markets = tuple(PolymarketLiveMarket(**row) for row in market_rows)
+        orderbook_rows = polymarket_feed.orderbook_rows(markets)
+        trade_rows = polymarket_feed.trade_rows(markets)
+        tick_rows = MockBinanceBTCReferenceFeed(config).tick_rows(markets)
+        candle_rows: list[dict[str, Any]] = []
+        if on_feed_snapshot is not None:
+            on_feed_snapshot(
+                market_rows=market_rows,
+                orderbook_rows=orderbook_rows,
+                trade_rows=trade_rows,
+                tick_rows=tick_rows,
+                candle_rows=candle_rows,
+            )
+        if streaming_writer is not None:
+            streaming_writer.record_feed_checkpoint(
+                stage="collecting_feed",
+                market_count=len(market_rows),
+                latest_market_id=market_rows[-1]["market_id"],
+                orderbook_count=len(orderbook_rows),
+                trade_count=len(trade_rows),
+                tick_count=len(tick_rows),
+                candle_count=len(candle_rows),
+                force=True,
+            )
+        return market_rows, orderbook_rows, trade_rows, tick_rows, candle_rows
+
+    monkeypatch.setattr(live_operator, "load_real_live_feed_rows", fake_real_live_feed_rows)
+
+    result = live_operator.run_polymarket_live_paper(
+        PolymarketLivePaperConfig(
+            run_id="delayed-missing-candles",
+            output_dir=tmp_path,
+            mock_live=False,
+            market_families=("btc_updown_5m",),
+            settlement_mode="delayed",
+            stream_observability=True,
+            status_interval_seconds=1,
+            heartbeat_interval_seconds=1,
+            flush_event_files=True,
+            overwrite_existing=True,
+        )
+    )
+    manifest = result.operator_manifest
+
+    assert manifest["prediction_count"] == 3
+    assert manifest["decision_count"] == 3
+    assert manifest["missing_reference_candle_count"] == 1
+    assert "feed_contract_violation" not in manifest["critical_reason_codes"]
+    assert "missing_reference_candle" not in manifest["critical_reason_codes"]
+    assert len(_read_jsonl(result.artifact_paths["signal_events"])) == 3
+    assert len(_read_jsonl(result.artifact_paths["execution_events"])) == 3
+    assert len(_read_jsonl(result.artifact_paths["polymarket_model_predictions"])) == 3
+    assert len(_read_jsonl(result.artifact_paths["polymarket_ev_decisions"])) == 3
 
 
 def _run(tmp_path: Path, run_id: str, **overrides):
