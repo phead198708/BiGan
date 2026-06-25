@@ -11,6 +11,7 @@ from bigan.v8.polymarket import (
     PolymarketCorpusBuildConfig,
     PolymarketPolicyPrediction,
     PolymarketPolicyTrainingConfig,
+    StatefulPolymarketDecisionEngine,
     build_polymarket_btc_corpus,
     build_polymarket_ev_decisions,
     decide_polymarket_ev_action,
@@ -189,6 +190,71 @@ def test_sell_before_close_intent_triggers_planned_exit(tmp_path: Path) -> None:
     assert decisions[1].probability_ev_fallback_used is False
 
 
+def test_stateful_decision_engine_matches_batch_replay_lifecycle(
+    tmp_path: Path,
+) -> None:
+    config = PolymarketPolicyTrainingConfig(
+        corpus_dir=tmp_path / "corpus",
+        output_dir=tmp_path / "policy",
+        ev_threshold=0.01,
+        sell_before_close_exit_buffer_seconds=30,
+    )
+    action_returns = dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, -0.05)
+    action_returns["BUY_UP_SELL_BEFORE_CLOSE"] = 0.08
+    first = replace(
+        _prediction(probability=0.80, confidence=0.80),
+        p_up_auxiliary=0.80,
+        expected_return_by_action=action_returns,
+        expected_return_no_trade=action_returns["NO_TRADE"],
+        expected_return_buy_up_hold_to_settlement=action_returns[
+            "BUY_UP_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_down_hold_to_settlement=action_returns[
+            "BUY_DOWN_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_up_sell_before_close=action_returns[
+            "BUY_UP_SELL_BEFORE_CLOSE"
+        ],
+        expected_return_buy_down_sell_before_close=action_returns[
+            "BUY_DOWN_SELL_BEFORE_CLOSE"
+        ],
+        best_policy_action="BUY_UP_SELL_BEFORE_CLOSE",
+        best_action_expected_return=0.08,
+        second_best_action_expected_return=-0.05,
+        best_action_margin=0.13,
+        policy_confidence=0.80,
+        action_value_head_enabled=True,
+        outcome_probability_head_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        feature_conditioned_action_value_model_enabled=True,
+    )
+    second = replace(first, decision_ts=80_000)
+    third = replace(first, decision_ts=95_000)
+
+    engine = StatefulPolymarketDecisionEngine(config=config)
+    incremental_decisions = (
+        engine.decide(first),
+        engine.decide(second),
+        engine.decide(third),
+    )
+    batch_decisions = build_polymarket_ev_decisions(
+        predictions=(first, second, third),
+        config=config,
+    )
+
+    assert incremental_decisions == engine.decisions
+    assert _decision_lifecycle_signature(incremental_decisions) == (
+        _decision_lifecycle_signature(batch_decisions)
+    )
+    assert [decision.action for decision in incremental_decisions] == [
+        "BUY_UP",
+        "HOLD",
+        "SELL_UP",
+    ]
+    assert incremental_decisions[1].policy_exit_reason == "hold_until_exit_condition"
+    assert "planned_sell_before_close_exit" in incremental_decisions[2].reason_codes
+
+
 def test_policy_replay_uses_phase1_settlement_and_reports_pnl(
     tmp_path: Path,
 ) -> None:
@@ -361,6 +427,22 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
         "".join(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def _decision_lifecycle_signature(decisions: tuple) -> list[tuple]:
+    return [
+        (
+            decision.market_id,
+            decision.decision_ts,
+            decision.action,
+            decision.selected_outcome,
+            decision.entry_policy_action,
+            decision.intended_exit_policy,
+            decision.planned_exit_before_ts,
+            decision.policy_exit_reason,
+        )
+        for decision in decisions
+    ]
 
 
 def _assert_safe(payload: dict) -> None:

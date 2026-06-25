@@ -15,7 +15,10 @@ from typing import Any
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256, looks_like_sha256
 from bigan.v8.polymarket.corpus import BTC_UPDOWN_MARKET_HORIZONS_MS
-from bigan.v8.polymarket.execution_ev import build_polymarket_ev_decisions
+from bigan.v8.polymarket.execution_ev import (
+    StatefulPolymarketDecisionEngine,
+    build_polymarket_ev_decisions,
+)
 from bigan.v8.polymarket.ledger import PolymarketPositionLedger
 from bigan.v8.polymarket.live.binance_reference_feed import MockBinanceBTCReferenceFeed
 from bigan.v8.polymarket.live.contracts import (
@@ -2131,9 +2134,10 @@ class _RealTimeStreamingSnapshotProcessor:
         self._model_manifest_sha256 = model_manifest_sha256
         self._seen_example_keys: set[tuple[str, int]] = set()
         self._ledgers: dict[str, PolymarketPositionLedger] = {}
+        self._decision_engine = StatefulPolymarketDecisionEngine(
+            config=_ev_config(config, run_dir)
+        )
         self._all_predictions: list[Any] = []
-        self._decisions: list[Any] = []
-        self._emitted_decisions_by_key: dict[tuple[str, int], Any] = {}
 
     def __call__(
         self,
@@ -2164,16 +2168,7 @@ class _RealTimeStreamingSnapshotProcessor:
             model_manifest_sha256=self._model_manifest_sha256,
         )
         self._all_predictions.extend(predictions)
-        all_decisions = build_polymarket_ev_decisions(
-            predictions=tuple(self._all_predictions),
-            config=_ev_config(self._config, self._run_dir),
-        )
-        self._assert_emitted_decisions_stable(all_decisions)
-        new_decisions = tuple(
-            decision
-            for decision in all_decisions
-            if _decision_key(decision) not in self._emitted_decisions_by_key
-        )
+        new_decisions = self._decision_engine.decide_many(predictions)
         if not new_decisions:
             return
         self._streaming_writer.append_execution_events(decisions=new_decisions)
@@ -2191,14 +2186,11 @@ class _RealTimeStreamingSnapshotProcessor:
             new_ledger_events.extend(
                 event.to_dict() for event in ledger.events[previous_count:]
             )
-        for decision in new_decisions:
-            self._emitted_decisions_by_key[_decision_key(decision)] = decision
-        self._decisions = list(all_decisions)
         pnl_breakdown = _pnl_breakdown(
             config=self._config,
             markets=markets,
             ledgers=self._ledgers,
-            decisions=tuple(self._decisions),
+            decisions=self._decision_engine.decisions,
             settlement_events=[],
         )
         self._streaming_writer.append_position_snapshots(
@@ -2225,7 +2217,7 @@ class _RealTimeStreamingSnapshotProcessor:
             _prediction_sequence_signature(predictions)
         ):
             raise RuntimeError("streaming_replay_mismatch: predictions diverged")
-        if _decision_sequence_signature(tuple(self._decisions)) != (
+        if _decision_sequence_signature(self._decision_engine.decisions) != (
             _decision_sequence_signature(decisions)
         ):
             raise RuntimeError("streaming_replay_mismatch: decisions diverged")
@@ -2235,7 +2227,7 @@ class _RealTimeStreamingSnapshotProcessor:
             config=self._config,
             markets=markets,
             ledgers=self._ledgers,
-            decisions=tuple(self._decisions),
+            decisions=self._decision_engine.decisions,
             settlement_events=[],
         )
         final_replay_pnl = _pnl_breakdown(
@@ -2261,22 +2253,6 @@ class _RealTimeStreamingSnapshotProcessor:
                 up_token_id=market.up_token_id,
                 down_token_id=market.down_token_id,
             )
-
-    def _assert_emitted_decisions_stable(self, decisions: tuple[Any, ...]) -> None:
-        for decision in decisions:
-            key = _decision_key(decision)
-            emitted = self._emitted_decisions_by_key.get(key)
-            if emitted is None:
-                continue
-            if _decision_sequence_signature((emitted,)) != _decision_sequence_signature(
-                (decision,)
-            ):
-                raise RuntimeError("streaming_replay_mismatch: emitted decision changed")
-
-
-def _decision_key(decision: Any) -> tuple[str, int]:
-    return str(decision.market_id), int(decision.decision_ts)
-
 
 def _prediction_sequence_signature(predictions: tuple[Any, ...]) -> list[dict[str, Any]]:
     return [

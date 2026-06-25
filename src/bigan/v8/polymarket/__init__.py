@@ -26,6 +26,7 @@ from bigan.v8.polymarket.corpus import (
 )
 from bigan.v8.polymarket.execution_ev import (
     PolymarketEVDecision,
+    StatefulPolymarketDecisionEngine,
     build_polymarket_ev_decisions,
     decide_polymarket_ev_action,
     ev_threshold_report,
@@ -206,6 +207,7 @@ __all__ = [
     "PolymarketSettlementEngineResult",
     "PolymarketSettlementEvent",
     "PolymarketTokenSnapshot",
+    "StatefulPolymarketDecisionEngine",
     "build_btc15m_resolution_rule",
     "build_btc_updown_resolution_rule",
     "build_polymarket_ev_decisions",

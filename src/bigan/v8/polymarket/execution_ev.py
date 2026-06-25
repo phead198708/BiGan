@@ -328,13 +328,46 @@ def build_polymarket_ev_decisions(
 ) -> tuple[PolymarketEVDecision, ...]:
     """Build sequential EV decisions while tracking paper-only open positions."""
 
-    positions: dict[str, dict[str, Any]] = {}
-    decisions: list[PolymarketEVDecision] = []
-    for prediction in sorted(predictions, key=lambda row: (row.decision_ts, row.market_id)):
-        position = positions.setdefault(prediction.market_id, _empty_position_state())
+    engine = StatefulPolymarketDecisionEngine(config=config)
+    return engine.decide_many(predictions)
+
+
+class StatefulPolymarketDecisionEngine:
+    """Stateful paper decision lifecycle shared by batch replay and live streaming."""
+
+    def __init__(self, *, config: PolymarketPolicyTrainingConfig) -> None:
+        self._config = config
+        self._positions: dict[str, dict[str, Any]] = {}
+        self._decisions: list[PolymarketEVDecision] = []
+        self._seen_keys: set[tuple[int, str]] = set()
+        self._last_key: tuple[int, str] | None = None
+
+    @property
+    def decisions(self) -> tuple[PolymarketEVDecision, ...]:
+        return tuple(self._decisions)
+
+    def decide_many(
+        self,
+        predictions: tuple[PolymarketPolicyPrediction, ...],
+    ) -> tuple[PolymarketEVDecision, ...]:
+        decisions = []
+        for prediction in sorted(predictions, key=lambda row: (row.decision_ts, row.market_id)):
+            decisions.append(self.decide(prediction))
+        return tuple(decisions)
+
+    def decide(self, prediction: PolymarketPolicyPrediction) -> PolymarketEVDecision:
+        key = (int(prediction.decision_ts), str(prediction.market_id))
+        if key in self._seen_keys:
+            raise ValueError("duplicate_prediction_decision_key")
+        if self._last_key is not None and key < self._last_key:
+            raise ValueError("decision_state_out_of_order")
+        position = self._positions.setdefault(
+            prediction.market_id,
+            _empty_position_state(),
+        )
         decision = decide_polymarket_ev_action(
             prediction=prediction,
-            config=config,
+            config=self._config,
             existing_position_up=float(position["UP"]),
             existing_position_down=float(position["DOWN"]),
             existing_up_entry_policy_action=position["UP_entry_policy_action"],
@@ -344,6 +377,18 @@ def build_polymarket_ev_decisions(
             existing_up_planned_exit_before_ts=position["UP_planned_exit_before_ts"],
             existing_down_planned_exit_before_ts=position["DOWN_planned_exit_before_ts"],
         )
+        self._apply_position_state(position=position, decision=decision)
+        self._seen_keys.add(key)
+        self._last_key = key
+        self._decisions.append(decision)
+        return decision
+
+    @staticmethod
+    def _apply_position_state(
+        *,
+        position: dict[str, Any],
+        decision: PolymarketEVDecision,
+    ) -> None:
         if decision.action == "BUY_UP":
             _open_position_state(position, "UP", decision)
         elif decision.action == "BUY_DOWN":
@@ -352,8 +397,6 @@ def build_polymarket_ev_decisions(
             _close_position_state(position, "UP")
         elif decision.action == "SELL_DOWN":
             _close_position_state(position, "DOWN")
-        decisions.append(decision)
-    return tuple(decisions)
 
 
 def ev_threshold_report(
