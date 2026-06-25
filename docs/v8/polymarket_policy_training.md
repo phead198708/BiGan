@@ -101,10 +101,20 @@ The model writes trained-model predictions with:
 - `model_version`
 - `feature_schema_hash`
 - `training_corpus_hash`
+- `action_value_model_family`
+- `feature_conditioned_action_value_model_enabled`
 
-The first implementation uses deterministic frequency and action-return baselines
-so CI remains lightweight and reproducible. It is intentionally conservative and
-auditable rather than a profitability claim.
+The implementation uses a deterministic feature-conditioned action-return model:
+
+```text
+action_value_model_family=feature_conditioned_action_return_model
+fallback_action_value_model_family=market_family_mean_baseline
+```
+
+Each action has a family/global mean fallback plus point-in-time feature residual
+coefficients. This keeps the model lightweight and auditable while ensuring
+different states inside the same market family can produce different expected
+returns by action.
 
 ## Evaluation
 
@@ -162,6 +172,17 @@ BUY decisions use executable ask prices. SELL decisions use executable bid price
 Low confidence predictions become `NO_TRADE`. Existing paper positions become
 `HOLD` unless sell EV deterioration triggers a bid-side exit.
 
+If the selected entry label ends with `SELL_BEFORE_CLOSE`, the decision records:
+
+- `entry_policy_action`
+- `intended_exit_policy=sell_before_close`
+- `planned_exit_before_ts`
+- `policy_exit_reason`
+
+The sequential paper decision builder preserves this state and emits a bid-side
+`SELL_UP` or `SELL_DOWN` once the configured exit window is reached. Labels that
+end with `HOLD_TO_SETTLEMENT` keep `intended_exit_policy=hold_to_settlement`.
+
 Allowed actions are:
 
 - `BUY_UP`
@@ -178,6 +199,10 @@ Every EV decision records:
 - `synthetic_fixture_signal_used=false`
 - `action_value_head_used`
 - `probability_ev_fallback_used`
+- `entry_policy_action`
+- `intended_exit_policy`
+- `planned_exit_before_ts`
+- `policy_exit_reason`
 
 ## Paper Replay
 
@@ -202,6 +227,8 @@ Replay reports include:
 - `calibration_error`
 - `outcome_calibration_error`
 - `action_value_policy_metrics`
+- `intended_exit_policy_counts`
+- `planned_sell_before_close_exit_count`
 - `critical_alert_count`
 
 This replay is deterministic and does not imply expected production profitability.
@@ -243,6 +270,8 @@ The model manifest records:
 - `primary_policy_target=action_expected_net_return`
 - `outcome_probability_head_enabled=true`
 - `action_value_head_enabled=true`
+- `action_value_model_family=feature_conditioned_action_return_model`
+- `feature_conditioned_action_value_model_enabled=true`
 - action-label coverage by action
 - paper-only safety flags
 

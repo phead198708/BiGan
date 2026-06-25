@@ -182,6 +182,46 @@ def test_missing_and_stale_inputs_fail_closed(tmp_path: Path) -> None:
         _assert_safe(manifest)
 
 
+def test_real_history_manual_evidence_rejects_probability_only_model(
+    tmp_path: Path,
+) -> None:
+    fixture = _run(tmp_path / "fixture", "fixture-model")
+    model_path = fixture.run_dir / "polymarket_live_fixture_model.json"
+    manifest_path = fixture.run_dir / "polymarket_live_fixture_model_manifest.json"
+    manifest = _read_json(manifest_path)
+    manifest.update(
+        {
+            "real_historical_corpus_used": True,
+            "manual_live_evidence_eligible": True,
+            "fixture_corpus_used": False,
+            "synthetic_corpus_used": False,
+            "fixture_model_used": False,
+            "synthetic_fixture_signal_used": False,
+            "policy_dataset_hash": "a" * 64,
+            "split_hash": "b" * 64,
+        }
+    )
+    _write_json(manifest_path, manifest)
+
+    result = run_polymarket_live_paper(
+        PolymarketLivePaperConfig(
+            run_id="reject-probability-only",
+            output_dir=tmp_path,
+            model_manifest=manifest_path,
+            model_path=model_path,
+            overwrite_existing=True,
+        )
+    )
+
+    assert result.operator_manifest["operator_status"] == "blocked_fail_closed"
+    assert result.operator_manifest["operator_recommendation"] == "blocked_fail_closed"
+    assert "probability_only_model_not_allowed" in result.operator_manifest[
+        "critical_reason_codes"
+    ]
+    assert result.operator_manifest["capital_deployment_allowed"] is False
+    assert result.operator_manifest["live_deployment_allowed"] is False
+
+
 def test_stop_path_writes_manifest_and_artifacts(tmp_path: Path) -> None:
     result = _run(tmp_path, "operator-stop", stop_requested=True)
     manifest = result.operator_manifest
@@ -237,6 +277,13 @@ def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _write_json(path: Path, payload: dict) -> None:
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -265,6 +312,12 @@ def _assert_training_raw_is_model_output_free(training_raw_dir: Path) -> None:
         "second_best_action_expected_return",
         "best_action_margin",
         "policy_confidence",
+        "action_value_model_family",
+        "feature_conditioned_action_value_model_enabled",
+        "entry_policy_action",
+        "intended_exit_policy",
+        "planned_exit_before_ts",
+        "policy_exit_reason",
     }
     for path in training_raw_dir.glob("raw_*.jsonl"):
         for row in _read_jsonl(path):

@@ -21,7 +21,7 @@ POLYMARKET_REAL_CORPUS_RETRAINING_GATE_SCHEMA_VERSION = (
     "bigan-v8-polymarket-real-corpus-retraining-gate-v1"
 )
 POLYMARKET_REAL_CORPUS_RETRAINING_GATE_PHASE = "polymarket_real_corpus_retraining_gate"
-DEFAULT_REAL_CORPUS_MODEL_VERSION = "polymarket_real_history_probability_v1"
+DEFAULT_REAL_CORPUS_MODEL_VERSION = "polymarket_real_history_action_value_v1"
 DEFAULT_REAL_CORPUS_TRAINING_RUN_ID = "polymarket_real_history_policy_run"
 
 

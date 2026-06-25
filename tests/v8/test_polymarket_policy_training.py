@@ -151,6 +151,11 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert "best_policy_action" in manifest["model_outputs"]
     assert manifest["outcome_probability_head_enabled"] is True
     assert manifest["action_value_head_enabled"] is True
+    assert manifest["model_version"] == "polymarket_action_value_policy_v1"
+    assert manifest["action_value_model_family"] == "feature_conditioned_action_return_model"
+    assert manifest["fallback_action_value_model_family"] == "market_family_mean_baseline"
+    assert manifest["feature_conditioned_action_value_model_enabled"] is True
+    assert manifest["action_value_feature_columns"]
     assert profile["primary_policy_target"] == PRIMARY_POLICY_TARGET_ACTION_VALUE
     assert profile["action_value_head_enabled"] is True
     assert profile["action_label_coverage_by_action"] == {
@@ -180,6 +185,33 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert manifest["synthetic_fixture_signal_used"] is False
     assert manifest["paper_replay_used_phase1_settlement_engine"] is True
     _assert_safe(manifest)
+
+
+def test_feature_conditioned_action_returns_vary_by_state_within_family(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = _build_corpus(tmp_path)
+    result = run_polymarket_policy_training(
+        PolymarketPolicyTrainingConfig(
+            corpus_dir=corpus_dir,
+            output_dir=tmp_path / "policy",
+        )
+    )
+
+    by_family = {}
+    for prediction in result.predictions:
+        by_family.setdefault(prediction.market_family, []).append(prediction)
+    comparable = next(rows for rows in by_family.values() if len(rows) >= 2)
+    first, second = comparable[0], comparable[-1]
+
+    assert first.market_family == second.market_family
+    assert first.features != second.features
+    assert first.action_value_model_family == "feature_conditioned_action_return_model"
+    assert first.feature_conditioned_action_value_model_enabled is True
+    assert any(
+        first.expected_return_by_action[action] != second.expected_return_by_action[action]
+        for action in ACTION_VALUE_LABEL_ACTIONS
+    )
 
 
 def _build_corpus(tmp_path: Path) -> Path:

@@ -28,6 +28,8 @@ def test_model_predictions_are_probabilities_with_confidence(tmp_path: Path) -> 
         assert prediction.p_up_auxiliary == prediction.estimated_up_probability
         assert prediction.action_value_head_enabled is True
         assert prediction.outcome_probability_head_enabled is True
+        assert prediction.action_value_model_family == "feature_conditioned_action_return_model"
+        assert prediction.feature_conditioned_action_value_model_enabled is True
         assert set(prediction.expected_return_by_action) == set(ACTION_VALUE_LABEL_ACTIONS)
         assert prediction.best_policy_action in ACTION_VALUE_LABEL_ACTIONS
         assert prediction.best_action_expected_return is not None

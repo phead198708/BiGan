@@ -16,6 +16,8 @@ from bigan.v8.polymarket.training.contracts import (
 )
 
 EPSILON = 1e-6
+ACTION_RETURN_RIDGE = 1e-9
+ACTION_RETURN_COEFFICIENT_LIMIT = 5.0
 
 
 def train_polymarket_action_value_model(
@@ -66,6 +68,18 @@ def train_polymarket_action_value_model(
         family: {action: _mean(values) for action, values in action_values.items()}
         for family, action_values in family_action_values.items()
     }
+    action_value_feature_columns = _action_value_feature_columns(dataset)
+    action_return_feature_means = _feature_means(
+        dataset.train_examples,
+        action_value_feature_columns,
+    )
+    action_return_feature_coefficients = _action_return_feature_coefficients(
+        examples=dataset.train_examples,
+        feature_columns=action_value_feature_columns,
+        feature_means=action_return_feature_means,
+        market_family_action_returns=market_family_action_returns,
+        global_action_returns=global_action_returns,
+    )
     return PolymarketPolicyModel(
         model_version=config.model_version,
         feature_columns=dataset.feature_columns,
@@ -81,6 +95,12 @@ def train_polymarket_action_value_model(
         outcome_probability_head_enabled=True,
         action_value_head_enabled=True,
         compatibility_probability_fallback_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        fallback_action_value_model_family="market_family_mean_baseline",
+        feature_conditioned_action_value_model_enabled=True,
+        action_value_feature_columns=action_value_feature_columns,
+        action_return_feature_means=action_return_feature_means,
+        action_return_feature_coefficients=action_return_feature_coefficients,
         global_action_returns=global_action_returns,
         market_family_action_returns=market_family_action_returns,
         family_action_feature_offsets={},
@@ -100,7 +120,7 @@ def predict_polymarket_policy_examples(
     model: PolymarketPolicyModel,
     examples: tuple[PolymarketPolicyExample, ...],
 ) -> tuple[PolymarketPolicyPrediction, ...]:
-    """Score examples with the trained probability model."""
+    """Score examples with the trained action-value policy model."""
 
     return tuple(_prediction(model, example) for example in examples)
 
@@ -164,6 +184,10 @@ def _prediction(
         policy_confidence=policy_confidence,
         action_value_head_enabled=bool(model.action_value_head_enabled),
         outcome_probability_head_enabled=bool(model.outcome_probability_head_enabled),
+        action_value_model_family=model.action_value_model_family,
+        feature_conditioned_action_value_model_enabled=(
+            model.feature_conditioned_action_value_model_enabled
+        ),
     )
 
 
@@ -204,8 +228,33 @@ def _expected_action_returns(
             model.global_action_returns,
         )
         if base:
-            return {action: float(base[action]) for action in ACTION_VALUE_LABEL_ACTIONS}
+            expected = {action: float(base[action]) for action in ACTION_VALUE_LABEL_ACTIONS}
+            if model.feature_conditioned_action_value_model_enabled:
+                for action in ACTION_VALUE_LABEL_ACTIONS:
+                    expected[action] = _feature_conditioned_return(
+                        baseline=expected[action],
+                        coefficients=model.action_return_feature_coefficients.get(action, {}),
+                        feature_means=model.action_return_feature_means,
+                        example=example,
+                    )
+            return expected
     return dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, 0.0)
+
+
+def _feature_conditioned_return(
+    *,
+    baseline: float,
+    coefficients: dict[str, float],
+    feature_means: dict[str, float],
+    example: PolymarketPolicyExample,
+) -> float:
+    value = float(baseline)
+    for feature_name, coefficient in coefficients.items():
+        value += float(coefficient) * (
+            float(example.features.get(feature_name, 0.0))
+            - float(feature_means.get(feature_name, 0.0))
+        )
+    return _clamp(value, -10.0, 10.0)
 
 
 def _rank_actions(action_returns: dict[str, float]) -> tuple[str, float, float, float]:
@@ -226,3 +275,65 @@ def _mean(values: list[float]) -> float:
     if not values:
         return 0.0
     return sum(values) / len(values)
+
+
+def _action_value_feature_columns(dataset: PolymarketPolicyDataset) -> tuple[str, ...]:
+    return tuple(
+        feature_name
+        for feature_name in dataset.feature_columns
+        if not feature_name.startswith("family_")
+    )
+
+
+def _feature_means(
+    examples: tuple[PolymarketPolicyExample, ...],
+    feature_columns: tuple[str, ...],
+) -> dict[str, float]:
+    return {
+        feature_name: _mean(
+            [float(example.features.get(feature_name, 0.0)) for example in examples]
+        )
+        for feature_name in feature_columns
+    }
+
+
+def _action_return_feature_coefficients(
+    *,
+    examples: tuple[PolymarketPolicyExample, ...],
+    feature_columns: tuple[str, ...],
+    feature_means: dict[str, float],
+    market_family_action_returns: dict[str, dict[str, float]],
+    global_action_returns: dict[str, float],
+) -> dict[str, dict[str, float]]:
+    coefficients: dict[str, dict[str, float]] = {}
+    for action in ACTION_VALUE_LABEL_ACTIONS:
+        action_coefficients: dict[str, float] = {}
+        for feature_name in feature_columns:
+            numerator = 0.0
+            denominator = ACTION_RETURN_RIDGE
+            for example in examples:
+                base = market_family_action_returns.get(
+                    example.market_family,
+                    global_action_returns,
+                )
+                residual = (
+                    float(example.action_return_targets[action])
+                    - float(base.get(action, global_action_returns[action]))
+                )
+                centered_feature = (
+                    float(example.features.get(feature_name, 0.0))
+                    - float(feature_means[feature_name])
+                )
+                numerator += centered_feature * residual
+                denominator += centered_feature * centered_feature
+            coefficient = numerator / denominator if denominator > 0.0 else 0.0
+            if math.isfinite(coefficient):
+                action_coefficients[feature_name] = _clamp(
+                    coefficient,
+                    -ACTION_RETURN_COEFFICIENT_LIMIT,
+                    ACTION_RETURN_COEFFICIENT_LIMIT,
+                )
+            else:
+                action_coefficients[feature_name] = 0.0
+        coefficients[action] = action_coefficients
+    return coefficients

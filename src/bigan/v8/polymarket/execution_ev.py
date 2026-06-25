@@ -52,7 +52,13 @@ class PolymarketEVDecision:
     second_best_action_expected_return: float | None = None
     best_action_margin: float | None = None
     policy_confidence: float | None = None
+    entry_policy_action: str | None = None
+    intended_exit_policy: str = "none"
+    planned_exit_before_ts: int | None = None
+    policy_exit_reason: str | None = None
     action_value_head_used: bool = False
+    action_value_model_family: str = "resolved_up_probability_only"
+    feature_conditioned_action_value_model_used: bool = False
     probability_ev_fallback_used: bool = True
     trained_model_used: bool = True
     policy_signal_source: str = "trained_model"
@@ -79,6 +85,8 @@ class PolymarketEVDecision:
         if not self.reason_codes:
             raise ValueError("reason_codes are required")
         if self.action_value_head_used:
+            if not self.action_value_model_family.strip():
+                raise ValueError("action_value_model_family is required")
             if self.best_policy_action not in ACTION_VALUE_LABEL_ACTIONS:
                 raise ValueError("best_policy_action must be present for action-value decisions")
             if not self.expected_return_by_action:
@@ -97,6 +105,12 @@ class PolymarketEVDecision:
                 value = getattr(self, field_name)
                 if value is None or not math.isfinite(float(value)):
                     raise ValueError(f"{field_name} must be finite for action-value decisions")
+        if self.intended_exit_policy not in ("none", "hold_to_settlement", "sell_before_close"):
+            raise ValueError("unsupported intended_exit_policy")
+        if self.entry_policy_action is not None and self.entry_policy_action not in ACTION_VALUE_LABEL_ACTIONS:
+            raise ValueError("entry_policy_action must be a supported label action")
+        if self.intended_exit_policy == "sell_before_close" and self.planned_exit_before_ts is None:
+            raise ValueError("sell_before_close decisions require planned_exit_before_ts")
         for field_name, expected in compact_safety_fields().items():
             if getattr(self, field_name) is not expected:
                 raise ValueError(f"{field_name} must be {expected}")
@@ -115,6 +129,12 @@ def decide_polymarket_ev_action(
     config: PolymarketPolicyTrainingConfig,
     existing_position_up: float = 0.0,
     existing_position_down: float = 0.0,
+    existing_up_entry_policy_action: str | None = None,
+    existing_down_entry_policy_action: str | None = None,
+    existing_up_intended_exit_policy: str = "none",
+    existing_down_intended_exit_policy: str = "none",
+    existing_up_planned_exit_before_ts: int | None = None,
+    existing_down_planned_exit_before_ts: int | None = None,
 ) -> PolymarketEVDecision:
     """Convert one probability prediction into an EV paper action."""
 
@@ -127,6 +147,52 @@ def decide_polymarket_ev_action(
     probability = prediction.estimated_up_probability
     ev_buy_up = probability - up_ask - cost
     ev_buy_down = (1.0 - probability) - down_ask - cost
+    if _planned_exit_due(
+        prediction=prediction,
+        existing_position=existing_position_up,
+        intended_exit_policy=existing_up_intended_exit_policy,
+        planned_exit_before_ts=existing_up_planned_exit_before_ts,
+    ):
+        return _decision(
+            prediction=prediction,
+            action="SELL_UP",
+            selected_outcome="UP",
+            ev_buy_up=ev_buy_up,
+            ev_buy_down=ev_buy_down,
+            execution_price=up_bid,
+            used_price_side="bid",
+            paper_notional=existing_position_up * up_bid,
+            reason_codes=("planned_sell_before_close_exit", "bid_price_execution"),
+            entry_policy_action=existing_up_entry_policy_action,
+            intended_exit_policy="sell_before_close",
+            planned_exit_before_ts=existing_up_planned_exit_before_ts,
+            policy_exit_reason="planned_sell_before_close",
+            action_value_head_used=prediction.action_value_head_enabled,
+            probability_ev_fallback_used=False,
+        )
+    if _planned_exit_due(
+        prediction=prediction,
+        existing_position=existing_position_down,
+        intended_exit_policy=existing_down_intended_exit_policy,
+        planned_exit_before_ts=existing_down_planned_exit_before_ts,
+    ):
+        return _decision(
+            prediction=prediction,
+            action="SELL_DOWN",
+            selected_outcome="DOWN",
+            ev_buy_up=ev_buy_up,
+            ev_buy_down=ev_buy_down,
+            execution_price=down_bid,
+            used_price_side="bid",
+            paper_notional=existing_position_down * down_bid,
+            reason_codes=("planned_sell_before_close_exit", "bid_price_execution"),
+            entry_policy_action=existing_down_entry_policy_action,
+            intended_exit_policy="sell_before_close",
+            planned_exit_before_ts=existing_down_planned_exit_before_ts,
+            policy_exit_reason="planned_sell_before_close",
+            action_value_head_used=prediction.action_value_head_enabled,
+            probability_ev_fallback_used=False,
+        )
     if (
         prediction.action_value_head_enabled
         and prediction.expected_return_by_action
@@ -165,6 +231,10 @@ def decide_polymarket_ev_action(
                 used_price_side="bid",
                 paper_notional=existing_position_up * up_bid,
                 reason_codes=("sell_up_ev_deteriorated", "bid_price_execution"),
+                entry_policy_action=existing_up_entry_policy_action,
+                intended_exit_policy=existing_up_intended_exit_policy,
+                planned_exit_before_ts=existing_up_planned_exit_before_ts,
+                policy_exit_reason="probability_ev_deteriorated",
             )
         return _decision(
             prediction=prediction,
@@ -176,6 +246,10 @@ def decide_polymarket_ev_action(
             used_price_side="none",
             paper_notional=0.0,
             reason_codes=("existing_up_position", "hold_threshold_not_met"),
+            entry_policy_action=existing_up_entry_policy_action,
+            intended_exit_policy=existing_up_intended_exit_policy,
+            planned_exit_before_ts=existing_up_planned_exit_before_ts,
+            policy_exit_reason="hold_until_exit_condition",
         )
     if existing_position_down > 0.0:
         down_probability = 1.0 - probability
@@ -190,6 +264,10 @@ def decide_polymarket_ev_action(
                 used_price_side="bid",
                 paper_notional=existing_position_down * down_bid,
                 reason_codes=("sell_down_ev_deteriorated", "bid_price_execution"),
+                entry_policy_action=existing_down_entry_policy_action,
+                intended_exit_policy=existing_down_intended_exit_policy,
+                planned_exit_before_ts=existing_down_planned_exit_before_ts,
+                policy_exit_reason="probability_ev_deteriorated",
             )
         return _decision(
             prediction=prediction,
@@ -201,6 +279,10 @@ def decide_polymarket_ev_action(
             used_price_side="none",
             paper_notional=0.0,
             reason_codes=("existing_down_position", "hold_threshold_not_met"),
+            entry_policy_action=existing_down_entry_policy_action,
+            intended_exit_policy=existing_down_intended_exit_policy,
+            planned_exit_before_ts=existing_down_planned_exit_before_ts,
+            policy_exit_reason="hold_until_exit_condition",
         )
     if ev_buy_up >= config.ev_threshold and ev_buy_up >= ev_buy_down:
         return _decision(
@@ -246,24 +328,30 @@ def build_polymarket_ev_decisions(
 ) -> tuple[PolymarketEVDecision, ...]:
     """Build sequential EV decisions while tracking paper-only open positions."""
 
-    positions: dict[str, dict[str, float]] = {}
+    positions: dict[str, dict[str, Any]] = {}
     decisions: list[PolymarketEVDecision] = []
     for prediction in sorted(predictions, key=lambda row: (row.decision_ts, row.market_id)):
-        position = positions.setdefault(prediction.market_id, {"UP": 0.0, "DOWN": 0.0})
+        position = positions.setdefault(prediction.market_id, _empty_position_state())
         decision = decide_polymarket_ev_action(
             prediction=prediction,
             config=config,
-            existing_position_up=position["UP"],
-            existing_position_down=position["DOWN"],
+            existing_position_up=float(position["UP"]),
+            existing_position_down=float(position["DOWN"]),
+            existing_up_entry_policy_action=position["UP_entry_policy_action"],
+            existing_down_entry_policy_action=position["DOWN_entry_policy_action"],
+            existing_up_intended_exit_policy=str(position["UP_intended_exit_policy"]),
+            existing_down_intended_exit_policy=str(position["DOWN_intended_exit_policy"]),
+            existing_up_planned_exit_before_ts=position["UP_planned_exit_before_ts"],
+            existing_down_planned_exit_before_ts=position["DOWN_planned_exit_before_ts"],
         )
         if decision.action == "BUY_UP":
-            position["UP"] += decision.paper_notional / decision.execution_price
+            _open_position_state(position, "UP", decision)
         elif decision.action == "BUY_DOWN":
-            position["DOWN"] += decision.paper_notional / decision.execution_price
+            _open_position_state(position, "DOWN", decision)
         elif decision.action == "SELL_UP":
-            position["UP"] = 0.0
+            _close_position_state(position, "UP")
         elif decision.action == "SELL_DOWN":
-            position["DOWN"] = 0.0
+            _close_position_state(position, "DOWN")
         decisions.append(decision)
     return tuple(decisions)
 
@@ -289,6 +377,10 @@ def ev_threshold_report(
             if any(decision.action_value_head_used for decision in decisions)
             else "resolved_up_probability_only"
         ),
+        "action_value_model_family": _action_value_model_family(decisions),
+        "feature_conditioned_action_value_model_used": any(
+            decision.feature_conditioned_action_value_model_used for decision in decisions
+        ),
         "action_value_head_enabled": any(decision.action_value_head_used for decision in decisions),
         "action_value_decision_count": sum(
             decision.action_value_head_used for decision in decisions
@@ -298,6 +390,13 @@ def ev_threshold_report(
         ),
         "decision_count": len(decisions),
         "action_counts": dict(sorted(action_counts.items())),
+        "intended_exit_policy_counts": dict(
+            sorted(Counter(decision.intended_exit_policy for decision in decisions).items())
+        ),
+        "planned_sell_before_close_exit_count": sum(
+            "planned_sell_before_close_exit" in decision.reason_codes
+            for decision in decisions
+        ),
         "reason_counts": dict(sorted(reason_counts.items())),
         "trained_model_used": True,
         "synthetic_fixture_signal_used": False,
@@ -408,6 +507,13 @@ def run_polymarket_policy_replay(
         "calibration_error": calibration_error,
         "outcome_calibration_error": calibration_error,
         "action_value_policy_metrics": _action_value_policy_metrics(decisions),
+        "intended_exit_policy_counts": dict(
+            sorted(Counter(decision.intended_exit_policy for decision in decisions).items())
+        ),
+        "planned_sell_before_close_exit_count": sum(
+            "planned_sell_before_close_exit" in decision.reason_codes
+            for decision in decisions
+        ),
         "critical_alert_count": 0,
         "ledger_event_count": len(all_events),
         "settlement_event_count": len(settlement_events),
@@ -547,6 +653,10 @@ def _decision(
     used_price_side: str,
     paper_notional: float,
     reason_codes: tuple[str, ...],
+    entry_policy_action: str | None = None,
+    intended_exit_policy: str = "none",
+    planned_exit_before_ts: int | None = None,
+    policy_exit_reason: str | None = None,
     action_value_head_used: bool = False,
     probability_ev_fallback_used: bool = True,
 ) -> PolymarketEVDecision:
@@ -574,7 +684,16 @@ def _decision(
         second_best_action_expected_return=prediction.second_best_action_expected_return,
         best_action_margin=prediction.best_action_margin,
         policy_confidence=prediction.policy_confidence,
+        entry_policy_action=entry_policy_action,
+        intended_exit_policy=intended_exit_policy,
+        planned_exit_before_ts=planned_exit_before_ts,
+        policy_exit_reason=policy_exit_reason,
         action_value_head_used=action_value_head_used,
+        action_value_model_family=prediction.action_value_model_family,
+        feature_conditioned_action_value_model_used=(
+            prediction.feature_conditioned_action_value_model_enabled
+            and action_value_head_used
+        ),
         probability_ev_fallback_used=probability_ev_fallback_used,
     )
 
@@ -638,6 +757,7 @@ def _action_value_decision(
             probability_ev_fallback_used=False,
         )
     if best_action.startswith("BUY_UP_"):
+        intended_exit_policy = _intended_exit_policy(best_action)
         return _decision(
             prediction=prediction,
             action="BUY_UP",
@@ -653,10 +773,19 @@ def _action_value_decision(
                 "ask_price_execution",
                 "action_value_head_used",
             ),
+            entry_policy_action=best_action,
+            intended_exit_policy=intended_exit_policy,
+            planned_exit_before_ts=_planned_exit_before_ts(
+                prediction=prediction,
+                config=config,
+                intended_exit_policy=intended_exit_policy,
+            ),
+            policy_exit_reason=intended_exit_policy,
             action_value_head_used=True,
             probability_ev_fallback_used=False,
         )
     if best_action.startswith("BUY_DOWN_"):
+        intended_exit_policy = _intended_exit_policy(best_action)
         return _decision(
             prediction=prediction,
             action="BUY_DOWN",
@@ -672,6 +801,14 @@ def _action_value_decision(
                 "ask_price_execution",
                 "action_value_head_used",
             ),
+            entry_policy_action=best_action,
+            intended_exit_policy=intended_exit_policy,
+            planned_exit_before_ts=_planned_exit_before_ts(
+                prediction=prediction,
+                config=config,
+                intended_exit_policy=intended_exit_policy,
+            ),
+            policy_exit_reason=intended_exit_policy,
             action_value_head_used=True,
             probability_ev_fallback_used=False,
         )
@@ -680,6 +817,77 @@ def _action_value_decision(
 
 def _policy_reason(best_action: str) -> str:
     return "policy_" + best_action.lower()
+
+
+def _intended_exit_policy(best_action: str) -> str:
+    if best_action.endswith("_SELL_BEFORE_CLOSE"):
+        return "sell_before_close"
+    if best_action.endswith("_HOLD_TO_SETTLEMENT"):
+        return "hold_to_settlement"
+    return "none"
+
+
+def _planned_exit_before_ts(
+    *,
+    prediction: PolymarketPolicyPrediction,
+    config: PolymarketPolicyTrainingConfig,
+    intended_exit_policy: str,
+) -> int | None:
+    if intended_exit_policy != "sell_before_close":
+        return None
+    time_to_close_ms = max(
+        0,
+        int(float(prediction.features.get("time_to_close_seconds", 0.0)) * 1000),
+    )
+    market_end_ts = prediction.decision_ts + time_to_close_ms
+    exit_buffer_ms = int(config.sell_before_close_exit_buffer_seconds * 1000)
+    return max(prediction.decision_ts, market_end_ts - exit_buffer_ms)
+
+
+def _planned_exit_due(
+    *,
+    prediction: PolymarketPolicyPrediction,
+    existing_position: float,
+    intended_exit_policy: str,
+    planned_exit_before_ts: int | None,
+) -> bool:
+    return (
+        existing_position > 0.0
+        and intended_exit_policy == "sell_before_close"
+        and planned_exit_before_ts is not None
+        and prediction.decision_ts >= planned_exit_before_ts
+    )
+
+
+def _empty_position_state() -> dict[str, Any]:
+    return {
+        "UP": 0.0,
+        "DOWN": 0.0,
+        "UP_entry_policy_action": None,
+        "DOWN_entry_policy_action": None,
+        "UP_intended_exit_policy": "none",
+        "DOWN_intended_exit_policy": "none",
+        "UP_planned_exit_before_ts": None,
+        "DOWN_planned_exit_before_ts": None,
+    }
+
+
+def _open_position_state(
+    position: dict[str, Any],
+    outcome: str,
+    decision: PolymarketEVDecision,
+) -> None:
+    position[outcome] = float(position[outcome]) + decision.paper_notional / decision.execution_price
+    position[f"{outcome}_entry_policy_action"] = decision.entry_policy_action
+    position[f"{outcome}_intended_exit_policy"] = decision.intended_exit_policy
+    position[f"{outcome}_planned_exit_before_ts"] = decision.planned_exit_before_ts
+
+
+def _close_position_state(position: dict[str, Any], outcome: str) -> None:
+    position[outcome] = 0.0
+    position[f"{outcome}_entry_policy_action"] = None
+    position[f"{outcome}_intended_exit_policy"] = "none"
+    position[f"{outcome}_planned_exit_before_ts"] = None
 
 
 def _execution_cost(
@@ -728,6 +936,10 @@ def _action_value_policy_metrics(
         "best_policy_action_counts": dict(
             sorted(Counter(decision.best_policy_action for decision in action_value_decisions).items())
         ),
+        "action_value_model_family": _action_value_model_family(decisions),
+        "feature_conditioned_action_value_model_used": any(
+            decision.feature_conditioned_action_value_model_used for decision in action_value_decisions
+        ),
     }
 
 
@@ -735,3 +947,16 @@ def _mean(values: list[float]) -> float | None:
     if not values:
         return None
     return sum(values) / len(values)
+
+
+def _action_value_model_family(decisions: tuple[PolymarketEVDecision, ...]) -> str:
+    families = {
+        decision.action_value_model_family
+        for decision in decisions
+        if decision.action_value_head_used
+    }
+    if not families:
+        return "resolved_up_probability_only"
+    if len(families) != 1:
+        return "mixed_action_value_model_family"
+    return next(iter(families))

@@ -65,7 +65,12 @@ def run_polymarket_policy_training_cli(
         "ev_threshold_report_path": str(result.artifact_paths["ev_threshold_report"]),
         "replay_report_path": str(result.artifact_paths["replay_report"]),
         "market_families": result.model_manifest["market_families"],
+        "model_version": result.model_manifest["model_version"],
         "primary_policy_target": result.model_manifest["primary_policy_target"],
+        "action_value_model_family": result.model_manifest["action_value_model_family"],
+        "feature_conditioned_action_value_model_enabled": result.model_manifest[
+            "feature_conditioned_action_value_model_enabled"
+        ],
         "action_value_head_enabled": result.model_manifest["action_value_head_enabled"],
         "outcome_probability_head_enabled": result.model_manifest[
             "outcome_probability_head_enabled"

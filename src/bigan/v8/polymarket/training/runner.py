@@ -109,6 +109,7 @@ def run_polymarket_policy_training(
     model_manifest = _model_manifest(
         config=config,
         dataset_profile=profile,
+        model=model,
         model_sha256=model_sha256,
         validation=validation,
         replay_report=replay_report,
@@ -196,6 +197,7 @@ def _model_manifest(
     *,
     config: PolymarketPolicyTrainingConfig,
     dataset_profile: dict[str, Any],
+    model: Any,
     model_sha256: str,
     validation: dict[str, Any],
     replay_report: dict[str, Any],
@@ -235,6 +237,12 @@ def _model_manifest(
         "outcome_probability_head_enabled": True,
         "action_value_head_enabled": True,
         "compatibility_probability_fallback_enabled": True,
+        "action_value_model_family": model.action_value_model_family,
+        "fallback_action_value_model_family": model.fallback_action_value_model_family,
+        "feature_conditioned_action_value_model_enabled": (
+            model.feature_conditioned_action_value_model_enabled
+        ),
+        "action_value_feature_columns": list(model.action_value_feature_columns),
         "action_label_coverage_by_action": dataset_profile[
             "action_label_coverage_by_action"
         ],
@@ -289,6 +297,7 @@ def _summary_markdown(
             f"- out_of_sample_replay: {str(replay_report['out_of_sample_replay']).lower()}",
             f"- primary_policy_target: {PRIMARY_POLICY_TARGET_ACTION_VALUE}",
             f"- action_value_head_enabled: {str(ev_report['action_value_head_enabled']).lower()}",
+            f"- action_value_model_family: {ev_report['action_value_model_family']}",
             f"- validation_brier_score: {validation['validation']['brier_score']}",
             f"- calibration_error: {replay_report['calibration_error']}",
             f"- mean_best_action_expected_return: {replay_report['action_value_policy_metrics']['mean_best_action_expected_return']}",

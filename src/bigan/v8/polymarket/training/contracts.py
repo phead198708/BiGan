@@ -13,6 +13,7 @@ POLYMARKET_POLICY_SCHEMA_VERSION = "bigan-v8-polymarket-policy-v1"
 POLYMARKET_POLICY_TRAINING_PHASE = "polymarket_policy_training"
 POLYMARKET_POLICY_SIGNAL_SOURCE_TRAINED_MODEL = "trained_model"
 DEFAULT_POLICY_CREATED_AT = "1970-01-01T00:00:00Z"
+DEFAULT_ACTION_VALUE_MODEL_VERSION = "polymarket_action_value_policy_v1"
 
 PolicyAction = Literal["BUY_UP", "BUY_DOWN", "SELL_UP", "SELL_DOWN", "HOLD", "NO_TRADE"]
 PolicyOutcome = Literal["UP", "DOWN", "NO_TRADE"]
@@ -42,7 +43,7 @@ class PolymarketPolicyTrainingConfig:
     corpus_dir: Path | str
     output_dir: Path | str
     run_id: str = "polymarket_policy_fixture_run"
-    model_version: str = "polymarket_policy_probability_v1"
+    model_version: str = DEFAULT_ACTION_VALUE_MODEL_VERSION
     created_at: str = DEFAULT_POLICY_CREATED_AT
     train_fraction: float = 0.60
     validation_fraction: float = 0.25
@@ -52,6 +53,7 @@ class PolymarketPolicyTrainingConfig:
     fee_rate: float = 0.0002
     slippage_rate: float = 0.0005
     liquidity_impact_rate: float = 0.0001
+    sell_before_close_exit_buffer_seconds: int = 30
     overwrite_existing: bool = False
     paper_only: bool = True
     capital_at_risk: bool = False
@@ -90,6 +92,8 @@ class PolymarketPolicyTrainingConfig:
             value = float(getattr(self, field_name))
             if value < 0.0 or not math.isfinite(value):
                 raise ValueError(f"{field_name} must be non-negative and finite")
+        if self.sell_before_close_exit_buffer_seconds <= 0:
+            raise ValueError("sell_before_close_exit_buffer_seconds must be positive")
         _validate_safety_boundary(self)
 
     @property
@@ -268,6 +272,8 @@ class PolymarketPolicyPrediction:
     policy_confidence: float | None = None
     action_value_head_enabled: bool = False
     outcome_probability_head_enabled: bool = True
+    action_value_model_family: str = "resolved_up_probability_only"
+    feature_conditioned_action_value_model_enabled: bool = False
     paper_only: bool = True
     capital_at_risk: bool = False
     polymarket_write_enabled: bool = False
@@ -282,6 +288,8 @@ class PolymarketPolicyPrediction:
             raise ValueError("confidence must be in [0, 1]")
         if self.policy_confidence is not None and not 0.0 <= self.policy_confidence <= 1.0:
             raise ValueError("policy_confidence must be in [0, 1]")
+        if not self.action_value_model_family.strip():
+            raise ValueError("action_value_model_family is required")
         if not math.isfinite(self.score):
             raise ValueError("score must be finite")
         _validate_action_return_targets(
@@ -330,6 +338,12 @@ class PolymarketPolicyModel:
     outcome_probability_head_enabled: bool = True
     action_value_head_enabled: bool = False
     compatibility_probability_fallback_enabled: bool = True
+    action_value_model_family: str = "market_family_mean_baseline"
+    fallback_action_value_model_family: str = "market_family_mean_baseline"
+    feature_conditioned_action_value_model_enabled: bool = False
+    action_value_feature_columns: tuple[str, ...] = ()
+    action_return_feature_means: dict[str, float] = field(default_factory=dict)
+    action_return_feature_coefficients: dict[str, dict[str, float]] = field(default_factory=dict)
     global_action_returns: dict[str, float] = field(default_factory=dict)
     market_family_action_returns: dict[str, dict[str, float]] = field(default_factory=dict)
     family_action_feature_offsets: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -352,6 +366,24 @@ class PolymarketPolicyModel:
             "resolved_up_probability_only",
         ):
             raise ValueError("unsupported primary_policy_target")
+        _require_non_empty(
+            action_value_model_family=self.action_value_model_family,
+            fallback_action_value_model_family=self.fallback_action_value_model_family,
+        )
+        if self.feature_conditioned_action_value_model_enabled and not self.action_value_feature_columns:
+            raise ValueError("action_value_feature_columns are required for feature-conditioned model")
+        for feature_name in self.action_value_feature_columns:
+            if not feature_name.strip():
+                raise ValueError("action_value_feature_columns must be non-empty")
+        for feature_name, value in self.action_return_feature_means.items():
+            if not feature_name.strip() or not math.isfinite(float(value)):
+                raise ValueError("action_return_feature_means must be finite")
+        for action, coefficients in self.action_return_feature_coefficients.items():
+            if action not in ACTION_VALUE_LABEL_ACTIONS:
+                raise ValueError("action_return_feature_coefficients contains unsupported action")
+            for feature_name, value in coefficients.items():
+                if not feature_name.strip() or not math.isfinite(float(value)):
+                    raise ValueError("action_return_feature_coefficients must be finite")
         _validate_action_return_targets(
             self.global_action_returns,
             allow_empty=not self.action_value_head_enabled,

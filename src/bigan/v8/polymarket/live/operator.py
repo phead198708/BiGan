@@ -298,6 +298,8 @@ def _load_or_create_model(
             "outcome_probability_head_enabled": True,
             "action_value_head_enabled": False,
             "compatibility_probability_fallback_enabled": True,
+            "action_value_model_family": "resolved_up_probability_only",
+            "feature_conditioned_action_value_model_enabled": False,
             "direct_pnl_optimization": False,
             "out_of_sample_replay": True,
             **compact_safety_fields(),
@@ -342,6 +344,29 @@ def _load_or_create_model(
         compatibility_probability_fallback_enabled=bool(
             payload.get("compatibility_probability_fallback_enabled", True)
         ),
+        action_value_model_family=str(
+            payload.get("action_value_model_family", "market_family_mean_baseline")
+        ),
+        fallback_action_value_model_family=str(
+            payload.get("fallback_action_value_model_family", "market_family_mean_baseline")
+        ),
+        feature_conditioned_action_value_model_enabled=bool(
+            payload.get("feature_conditioned_action_value_model_enabled", False)
+        ),
+        action_value_feature_columns=tuple(payload.get("action_value_feature_columns", ())),
+        action_return_feature_means={
+            str(feature): float(value)
+            for feature, value in dict(payload.get("action_return_feature_means", {})).items()
+        },
+        action_return_feature_coefficients={
+            str(action): {
+                str(feature): float(value)
+                for feature, value in dict(coefficients).items()
+            }
+            for action, coefficients in dict(
+                payload.get("action_return_feature_coefficients", {})
+            ).items()
+        },
         global_action_returns={
             str(action): float(value)
             for action, value in dict(payload.get("global_action_returns", {})).items()
@@ -389,6 +414,14 @@ def _verify_model_manifest(*, model_manifest: dict[str, Any], model_path: Path) 
     if model_manifest.get("direct_pnl_optimization") is not False:
         raise ValueError("direct_pnl_optimization must be false")
     if model_manifest.get("real_historical_corpus_used") is True:
+        if model_manifest.get("primary_policy_target") != "action_expected_net_return":
+            raise ValueError("primary_policy_target must be action_expected_net_return")
+        if model_manifest.get("action_value_head_enabled") is not True:
+            raise ValueError("action_value_head_enabled must be true")
+        if model_manifest.get("outcome_probability_head_enabled") is not True:
+            raise ValueError("outcome_probability_head_enabled must be true")
+        if model_manifest.get("feature_conditioned_action_value_model_enabled") is not True:
+            raise ValueError("feature_conditioned_action_value_model_enabled must be true")
         for field_name in ("policy_dataset_hash", "split_hash"):
             value = str(model_manifest.get(field_name, ""))
             if not looks_like_sha256(value):
@@ -1371,6 +1404,12 @@ def _write_training_raw_bundle(
             "second_best_action_expected_return",
             "best_action_margin",
             "policy_confidence",
+            "action_value_model_family",
+            "feature_conditioned_action_value_model_enabled",
+            "entry_policy_action",
+            "intended_exit_policy",
+            "planned_exit_before_ts",
+            "policy_exit_reason",
         ],
         **safety_fields(),
     }
@@ -1935,6 +1974,9 @@ def _fixture_model() -> PolymarketPolicyModel:
         outcome_probability_head_enabled=True,
         action_value_head_enabled=False,
         compatibility_probability_fallback_enabled=True,
+        action_value_model_family="resolved_up_probability_only",
+        fallback_action_value_model_family="market_family_mean_baseline",
+        feature_conditioned_action_value_model_enabled=False,
     )
 
 
@@ -1989,6 +2031,12 @@ def _exception_reason_codes(exc: Exception, *, fallback: str) -> list[str]:
     text = str(exc)
     if "model_manifest_mismatch" in text:
         return ["model_manifest_mismatch"]
+    if (
+        "primary_policy_target" in text
+        or "action_value_head_enabled" in text
+        or "feature_conditioned_action_value_model_enabled" in text
+    ):
+        return ["probability_only_model_not_allowed"]
     if "settlement_rule is required" in text:
         return ["missing_market_rule"]
     return [fallback]

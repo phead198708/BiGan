@@ -12,6 +12,7 @@ from bigan.v8.polymarket import (
     PolymarketPolicyPrediction,
     PolymarketPolicyTrainingConfig,
     build_polymarket_btc_corpus,
+    build_polymarket_ev_decisions,
     decide_polymarket_ev_action,
     run_polymarket_policy_training,
     write_deterministic_polymarket_corpus_fixtures,
@@ -108,6 +109,8 @@ def test_action_value_output_is_preferred_over_probability_ev(tmp_path: Path) ->
         policy_confidence=0.70,
         action_value_head_enabled=True,
         outcome_probability_head_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        feature_conditioned_action_value_model_enabled=True,
     )
 
     decision = decide_polymarket_ev_action(prediction=prediction, config=config)
@@ -121,6 +124,69 @@ def test_action_value_output_is_preferred_over_probability_ev(tmp_path: Path) ->
     assert decision.action_value_head_used is True
     assert decision.probability_ev_fallback_used is False
     assert "action_value_head_used" in decision.reason_codes
+
+
+def test_sell_before_close_intent_triggers_planned_exit(tmp_path: Path) -> None:
+    config = PolymarketPolicyTrainingConfig(
+        corpus_dir=tmp_path / "corpus",
+        output_dir=tmp_path / "policy",
+        ev_threshold=0.01,
+        sell_before_close_exit_buffer_seconds=30,
+    )
+    action_returns = dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, -0.05)
+    action_returns["BUY_UP_SELL_BEFORE_CLOSE"] = 0.08
+    first = replace(
+        _prediction(probability=0.80, confidence=0.80),
+        p_up_auxiliary=0.80,
+        expected_return_by_action=action_returns,
+        expected_return_no_trade=action_returns["NO_TRADE"],
+        expected_return_buy_up_hold_to_settlement=action_returns[
+            "BUY_UP_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_down_hold_to_settlement=action_returns[
+            "BUY_DOWN_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_up_sell_before_close=action_returns[
+            "BUY_UP_SELL_BEFORE_CLOSE"
+        ],
+        expected_return_buy_down_sell_before_close=action_returns[
+            "BUY_DOWN_SELL_BEFORE_CLOSE"
+        ],
+        best_policy_action="BUY_UP_SELL_BEFORE_CLOSE",
+        best_action_expected_return=0.08,
+        second_best_action_expected_return=-0.05,
+        best_action_margin=0.13,
+        policy_confidence=0.80,
+        action_value_head_enabled=True,
+        outcome_probability_head_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        feature_conditioned_action_value_model_enabled=True,
+    )
+    second_features = dict(first.features)
+    second_features["time_to_close_seconds"] = 25.0
+    second = replace(
+        first,
+        decision_ts=95_000,
+        features=second_features,
+        expected_return_by_action=dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, 0.0),
+        best_policy_action="NO_TRADE",
+        best_action_expected_return=0.0,
+        second_best_action_expected_return=0.0,
+        best_action_margin=0.0,
+    )
+
+    decisions = build_polymarket_ev_decisions(predictions=(first, second), config=config)
+
+    assert [decision.action for decision in decisions] == ["BUY_UP", "SELL_UP"]
+    assert decisions[0].entry_policy_action == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert decisions[0].intended_exit_policy == "sell_before_close"
+    assert decisions[0].planned_exit_before_ts == 91_000
+    assert decisions[1].entry_policy_action == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert decisions[1].intended_exit_policy == "sell_before_close"
+    assert decisions[1].planned_exit_before_ts == 91_000
+    assert decisions[1].used_price_side == "bid"
+    assert "planned_sell_before_close_exit" in decisions[1].reason_codes
+    assert decisions[1].probability_ev_fallback_used is False
 
 
 def test_policy_replay_uses_phase1_settlement_and_reports_pnl(
@@ -149,6 +215,8 @@ def test_policy_replay_uses_phase1_settlement_and_reports_pnl(
     assert ev_report["replay_split"] == "shadow"
     assert ev_report["out_of_sample_replay"] is True
     assert ev_report["primary_policy_target"] == "action_expected_net_return"
+    assert ev_report["action_value_model_family"] == "feature_conditioned_action_return_model"
+    assert ev_report["feature_conditioned_action_value_model_used"] is True
     assert ev_report["action_value_head_enabled"] is True
     assert ev_report["action_value_decision_count"] > 0
     assert (
@@ -159,6 +227,9 @@ def test_policy_replay_uses_phase1_settlement_and_reports_pnl(
     assert replay["outcome_calibration_error"] == replay["calibration_error"]
     assert replay["action_value_policy_metrics"]["primary_policy_target"] == (
         "action_expected_net_return"
+    )
+    assert replay["action_value_policy_metrics"]["action_value_model_family"] == (
+        "feature_conditioned_action_return_model"
     )
     assert replay["action_value_policy_metrics"]["sample_count"] == ev_report[
         "action_value_decision_count"
