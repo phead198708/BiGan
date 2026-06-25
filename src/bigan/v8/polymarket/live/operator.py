@@ -189,6 +189,18 @@ def run_polymarket_live_paper(
         if streaming is not None and not real_time_streaming:
             streaming.append_execution_events(decisions=decisions)
         ledgers = _apply_decisions(markets=markets, decisions=decisions, config=config)
+        if real_time_streaming and snapshot_callback is not None:
+            try:
+                snapshot_callback.assert_replay_equivalent(
+                    markets=markets,
+                    predictions=predictions,
+                    decisions=decisions,
+                    ledgers=ledgers,
+                )
+            except Exception as exc:
+                reason_codes.extend(
+                    _exception_reason_codes(exc, fallback="streaming_replay_mismatch")
+                )
     else:
         ledgers = _empty_ledgers(markets)
     settlement_events = _settle_markets(
@@ -2119,7 +2131,9 @@ class _RealTimeStreamingSnapshotProcessor:
         self._model_manifest_sha256 = model_manifest_sha256
         self._seen_example_keys: set[tuple[str, int]] = set()
         self._ledgers: dict[str, PolymarketPositionLedger] = {}
+        self._all_predictions: list[Any] = []
         self._decisions: list[Any] = []
+        self._emitted_decisions_by_key: dict[tuple[str, int], Any] = {}
 
     def __call__(
         self,
@@ -2149,17 +2163,26 @@ class _RealTimeStreamingSnapshotProcessor:
             predictions=predictions,
             model_manifest_sha256=self._model_manifest_sha256,
         )
-        decisions = build_polymarket_ev_decisions(
-            predictions=predictions,
+        self._all_predictions.extend(predictions)
+        all_decisions = build_polymarket_ev_decisions(
+            predictions=tuple(self._all_predictions),
             config=_ev_config(self._config, self._run_dir),
         )
-        self._streaming_writer.append_execution_events(decisions=decisions)
+        self._assert_emitted_decisions_stable(all_decisions)
+        new_decisions = tuple(
+            decision
+            for decision in all_decisions
+            if _decision_key(decision) not in self._emitted_decisions_by_key
+        )
+        if not new_decisions:
+            return
+        self._streaming_writer.append_execution_events(decisions=new_decisions)
         before_counts = {
             market_id: len(ledger.events) for market_id, ledger in self._ledgers.items()
         }
         _apply_decisions_to_ledgers(
             ledgers=self._ledgers,
-            decisions=decisions,
+            decisions=new_decisions,
             config=self._config,
         )
         new_ledger_events = []
@@ -2168,7 +2191,9 @@ class _RealTimeStreamingSnapshotProcessor:
             new_ledger_events.extend(
                 event.to_dict() for event in ledger.events[previous_count:]
             )
-        self._decisions.extend(decisions)
+        for decision in new_decisions:
+            self._emitted_decisions_by_key[_decision_key(decision)] = decision
+        self._decisions = list(all_decisions)
         pnl_breakdown = _pnl_breakdown(
             config=self._config,
             markets=markets,
@@ -2179,14 +2204,51 @@ class _RealTimeStreamingSnapshotProcessor:
         self._streaming_writer.append_position_snapshots(
             markets=markets,
             ledger_events=new_ledger_events,
-            decisions=decisions,
+            decisions=new_decisions,
         )
         self._streaming_writer.append_pnl_snapshots(
             markets=markets,
             ledger_events=new_ledger_events,
-            decisions=decisions,
+            decisions=new_decisions,
             pnl_breakdown=pnl_breakdown,
         )
+
+    def assert_replay_equivalent(
+        self,
+        *,
+        markets: tuple[PolymarketLiveMarket, ...],
+        predictions: tuple[Any, ...],
+        decisions: tuple[Any, ...],
+        ledgers: dict[str, PolymarketPositionLedger],
+    ) -> None:
+        if _prediction_sequence_signature(tuple(self._all_predictions)) != (
+            _prediction_sequence_signature(predictions)
+        ):
+            raise RuntimeError("streaming_replay_mismatch: predictions diverged")
+        if _decision_sequence_signature(tuple(self._decisions)) != (
+            _decision_sequence_signature(decisions)
+        ):
+            raise RuntimeError("streaming_replay_mismatch: decisions diverged")
+        if _ledger_sequence_signature(self._ledgers) != _ledger_sequence_signature(ledgers):
+            raise RuntimeError("streaming_replay_mismatch: ledgers diverged")
+        streaming_pnl = _pnl_breakdown(
+            config=self._config,
+            markets=markets,
+            ledgers=self._ledgers,
+            decisions=tuple(self._decisions),
+            settlement_events=[],
+        )
+        final_replay_pnl = _pnl_breakdown(
+            config=self._config,
+            markets=markets,
+            ledgers=ledgers,
+            decisions=decisions,
+            settlement_events=[],
+        )
+        if _pnl_equivalence_signature(streaming_pnl) != (
+            _pnl_equivalence_signature(final_replay_pnl)
+        ):
+            raise RuntimeError("streaming_replay_mismatch: pnl diverged")
 
     def _ensure_ledgers(self, markets: tuple[PolymarketLiveMarket, ...]) -> None:
         for market in markets:
@@ -2199,6 +2261,128 @@ class _RealTimeStreamingSnapshotProcessor:
                 up_token_id=market.up_token_id,
                 down_token_id=market.down_token_id,
             )
+
+    def _assert_emitted_decisions_stable(self, decisions: tuple[Any, ...]) -> None:
+        for decision in decisions:
+            key = _decision_key(decision)
+            emitted = self._emitted_decisions_by_key.get(key)
+            if emitted is None:
+                continue
+            if _decision_sequence_signature((emitted,)) != _decision_sequence_signature(
+                (decision,)
+            ):
+                raise RuntimeError("streaming_replay_mismatch: emitted decision changed")
+
+
+def _decision_key(decision: Any) -> tuple[str, int]:
+    return str(decision.market_id), int(decision.decision_ts)
+
+
+def _prediction_sequence_signature(predictions: tuple[Any, ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "market_id": str(prediction.market_id),
+            "decision_ts": int(prediction.decision_ts),
+            "estimated_up_probability": _signature_float(
+                prediction.estimated_up_probability
+            ),
+            "best_policy_action": prediction.best_policy_action,
+            "best_action_expected_return": _optional_signature_float(
+                prediction.best_action_expected_return
+            ),
+        }
+        for prediction in sorted(predictions, key=lambda row: (row.decision_ts, row.market_id))
+    ]
+
+
+def _decision_sequence_signature(decisions: tuple[Any, ...]) -> list[dict[str, Any]]:
+    payloads = []
+    for decision in sorted(decisions, key=lambda row: (row.decision_ts, row.market_id)):
+        payload = decision.to_dict()
+        payloads.append(
+            {
+                "market_id": payload["market_id"],
+                "decision_ts": payload["decision_ts"],
+                "action": payload["action"],
+                "selected_outcome": payload["selected_outcome"],
+                "execution_price": _signature_float(payload["execution_price"]),
+                "paper_notional": _signature_float(payload["paper_notional"]),
+                "reason_codes": list(payload["reason_codes"]),
+                "entry_policy_action": payload.get("entry_policy_action"),
+                "intended_exit_policy": payload.get("intended_exit_policy"),
+                "planned_exit_before_ts": payload.get("planned_exit_before_ts"),
+                "policy_exit_reason": payload.get("policy_exit_reason"),
+                "best_policy_action": payload.get("best_policy_action"),
+                "best_action_expected_return": _optional_signature_float(
+                    payload.get("best_action_expected_return")
+                ),
+            }
+        )
+    return payloads
+
+
+def _ledger_sequence_signature(
+    ledgers: dict[str, PolymarketPositionLedger],
+) -> list[dict[str, Any]]:
+    events = []
+    for market_id, ledger in sorted(ledgers.items()):
+        for event in ledger.events:
+            payload = event.to_dict()
+            events.append(
+                {
+                    "market_id": market_id,
+                    "ts": payload["ts"],
+                    "action": payload["action"],
+                    "outcome": payload["outcome"],
+                    "qty": _signature_float(payload["qty"]),
+                    "fill_price": _signature_float(payload["fill_price"]),
+                    "position_up": _signature_float(payload["position_up"]),
+                    "position_down": _signature_float(payload["position_down"]),
+                    "realized_trade_pnl": _signature_float(
+                        payload["realized_trade_pnl"]
+                    ),
+                    "unrealized_mark_pnl": _signature_float(
+                        payload["unrealized_mark_pnl"]
+                    ),
+                    "total_pnl": _signature_float(payload["total_pnl"]),
+                    "fees": _signature_float(payload["fees"]),
+                    "slippage": _signature_float(payload["slippage"]),
+                    "reason_codes": list(payload["reason_codes"]),
+                }
+            )
+    return sorted(events, key=lambda row: (row["market_id"], row["ts"], row["action"]))
+
+
+def _pnl_equivalence_signature(payload: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "market_count",
+        "unresolved_market_count",
+        "prediction_count",
+        "decision_count",
+        "trade_count",
+        "no_trade_count",
+        "realized_trade_pnl",
+        "unrealized_mark_pnl",
+        "settlement_pnl",
+        "complete_set_pnl",
+        "fees",
+        "slippage",
+        "total_polymarket_pnl",
+    )
+    return {
+        key: _signature_float(payload[key]) if isinstance(payload[key], float) else payload[key]
+        for key in keys
+    }
+
+
+def _signature_float(value: float) -> float:
+    return round(float(value), 12)
+
+
+def _optional_signature_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return _signature_float(float(value))
 
 
 class _StreamingObservabilityWriter:
@@ -2772,6 +2956,8 @@ def _exception_reason_codes(exc: Exception, *, fallback: str) -> list[str]:
         return ["probability_only_model_not_allowed"]
     if "settlement_rule is required" in text:
         return ["missing_market_rule"]
+    if "streaming_replay_mismatch" in text:
+        return ["streaming_replay_mismatch"]
     return [fallback]
 
 
