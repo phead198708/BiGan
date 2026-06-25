@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
+import time
 from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -30,6 +32,7 @@ from bigan.v8.polymarket.live.contracts import (
     safety_fields,
 )
 from bigan.v8.polymarket.live.polymarket_feed import MockPolymarketLiveFeed
+from bigan.v8.polymarket.live.real_feed_loader import load_real_live_feed_rows
 from bigan.v8.polymarket.rules import build_btc_updown_resolution_rule, resolve_polymarket_rule
 from bigan.v8.polymarket.training import (
     PolymarketPolicyExample,
@@ -39,6 +42,15 @@ from bigan.v8.polymarket.training import (
 )
 
 TRAINING_ELIGIBILITY_POLICY = "min_one_complete_book_sample"
+STREAMING_ARTIFACT_NAMES = {
+    "live_status",
+    "live_status_md",
+    "operator_heartbeat",
+    "signal_events",
+    "execution_events",
+    "position_snapshots",
+    "pnl_snapshots",
+}
 
 
 def run_polymarket_live_paper(
@@ -56,7 +68,14 @@ def run_polymarket_live_paper(
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True)
 
-    artifact_paths = _artifact_paths(run_dir)
+    artifact_paths = _artifact_paths(run_dir, stream_observability=config.stream_observability)
+    streaming = (
+        _StreamingObservabilityWriter(config=config, artifact_paths=artifact_paths)
+        if config.stream_observability
+        else None
+    )
+    if streaming is not None:
+        streaming.record_operator_start()
     reason_codes: list[str] = []
     markets: tuple[PolymarketLiveMarket, ...] = ()
     orderbooks: tuple[PolymarketLiveOrderBook, ...] = ()
@@ -72,7 +91,21 @@ def run_polymarket_live_paper(
     model_manifest_sha256 = ""
 
     try:
-        market_rows, orderbook_rows, trade_rows, tick_rows, candle_rows = _load_feed_rows(config)
+        market_rows, orderbook_rows, trade_rows, tick_rows, candle_rows = _load_feed_rows(
+            config,
+            streaming_writer=streaming,
+        )
+        if streaming is not None:
+            streaming.record_feed_checkpoint(
+                stage="feed_loaded",
+                market_count=len(market_rows),
+                latest_market_id=_latest_market_id_from_rows(market_rows),
+                orderbook_count=len(orderbook_rows),
+                trade_count=len(trade_rows),
+                tick_count=len(tick_rows),
+                candle_count=len(candle_rows),
+                force=True,
+            )
         _write_jsonl(artifact_paths["live_market_metadata"], market_rows)
         _write_jsonl(artifact_paths["live_token_orderbooks"], orderbook_rows)
         _write_jsonl(artifact_paths["live_token_trades"], trade_rows)
@@ -115,10 +148,17 @@ def run_polymarket_live_paper(
     if model is not None and not reason_codes:
         examples = _policy_examples(markets=markets, orderbooks=orderbooks)
         predictions = predict_polymarket_policy_examples(model, examples)
+        if streaming is not None:
+            streaming.append_signal_events(
+                predictions=predictions,
+                model_manifest_sha256=model_manifest_sha256,
+            )
         decisions = build_polymarket_ev_decisions(
             predictions=predictions,
             config=_ev_config(config, run_dir),
         )
+        if streaming is not None:
+            streaming.append_execution_events(decisions=decisions)
         ledgers = _apply_decisions(markets=markets, decisions=decisions, config=config)
     else:
         ledgers = _empty_ledgers(markets)
@@ -129,6 +169,12 @@ def run_polymarket_live_paper(
         ledgers=ledgers,
     )
     ledger_events = [event.to_dict() for ledger in ledgers.values() for event in ledger.events]
+    if streaming is not None:
+        streaming.append_position_snapshots(
+            markets=markets,
+            ledger_events=ledger_events,
+            decisions=decisions,
+        )
 
     pnl_breakdown = _pnl_breakdown(
         config=config,
@@ -137,6 +183,13 @@ def run_polymarket_live_paper(
         decisions=decisions,
         settlement_events=settlement_events,
     )
+    if streaming is not None:
+        streaming.append_pnl_snapshots(
+            markets=markets,
+            ledger_events=ledger_events,
+            decisions=decisions,
+            pnl_breakdown=pnl_breakdown,
+        )
     if pnl_breakdown["unresolved_market_count"] > 0 and config.settlement_mode == "delayed":
         reason_codes.append("settlement_pending")
     status, recommendation = _status_and_recommendation(
@@ -151,6 +204,27 @@ def run_polymarket_live_paper(
         recommendation=recommendation,
         reason_codes=tuple(reason_codes),
     )
+    if streaming is not None:
+        streaming.write_status(
+            operator_status=status,
+            stage="final",
+            markets=markets,
+            predictions=predictions,
+            decisions=decisions,
+            ledger_events=ledger_events,
+            pnl_breakdown=pnl_breakdown,
+            critical_reason_codes=tuple(reason_codes),
+            force=True,
+        )
+        streaming.emit_heartbeat(
+            stage="final",
+            operator_status=status,
+            force=True,
+            critical_reason_codes=tuple(reason_codes),
+            prediction_count=len(predictions),
+            decision_count=len(decisions),
+            trade_count=pnl_breakdown["trade_count"],
+        )
 
     _write_jsonl(
         artifact_paths["polymarket_model_predictions"],
@@ -198,6 +272,7 @@ def run_polymarket_live_paper(
             "polymarket_live_operator_manifest",
             "github_paper_comment_payload",
             "github_paper_comment_md",
+            *STREAMING_ARTIFACT_NAMES,
         },
     )
     operator_manifest = _operator_manifest(
@@ -249,6 +324,8 @@ def run_polymarket_live_paper(
 
 def _load_feed_rows(
     config: PolymarketLivePaperConfig,
+    *,
+    streaming_writer: Any | None = None,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -257,9 +334,7 @@ def _load_feed_rows(
     list[dict[str, Any]],
 ]:
     if not config.mock_live:
-        raise NotImplementedError(
-            "real live polling is intentionally not run by CI; use explicit integration wiring"
-        )
+        return load_real_live_feed_rows(config, streaming_writer=streaming_writer)
     polymarket_feed = MockPolymarketLiveFeed(config)
     market_rows = polymarket_feed.market_rows()
     markets = tuple(PolymarketLiveMarket(**row) for row in market_rows)
@@ -598,7 +673,7 @@ def _settle_markets(
         )
         resolution = resolve_polymarket_rule(
             rule,
-            reference_price_start=candle.open_price,
+            reference_price_start=market.reference_price_at_start,
             reference_price_end=candle.close_price,
         )
         event = ledger.settle(
@@ -616,6 +691,8 @@ def _settle_markets(
                 "resolved_outcome": resolution.resolved_outcome,
                 "payout_up": resolution.payout_up,
                 "payout_down": resolution.payout_down,
+                "reference_price_start": market.reference_price_at_start,
+                "reference_price_end": candle.close_price,
                 "qty_up_settled": pre["position_up"],
                 "qty_down_settled": pre["position_down"],
                 "settlement_cashflow": event.cash_delta,
@@ -1499,7 +1576,7 @@ def _round_summary(
         "resolved_outcome": None if settlement is None else settlement["resolved_outcome"],
         "payout_up": None if settlement is None else settlement["payout_up"],
         "payout_down": None if settlement is None else settlement["payout_down"],
-        "reference_price_start": None if candle is None else candle.open_price,
+        "reference_price_start": market.reference_price_at_start,
         "reference_price_end": None if candle is None else candle.close_price,
         "prediction_count": len(predictions),
         "decision_count": len(decisions),
@@ -1691,7 +1768,7 @@ def _training_resolution_row(
 ) -> dict[str, Any]:
     return {
         "market_id": market.market_id,
-        "reference_price_start": candle.open_price,
+        "reference_price_start": market.reference_price_at_start,
         "reference_price_end": candle.close_price,
         "resolution_status": settlement["resolution_status"],
         "resolved_outcome": settlement["resolved_outcome"],
@@ -1699,7 +1776,7 @@ def _training_resolution_row(
         "payout_down": settlement["payout_down"],
         "raw_resolution_text": (
             f"{market.slug} resolved {settlement['resolved_outcome']} "
-            f"from {candle.open_price} to {candle.close_price}"
+            f"from {market.reference_price_at_start} to {candle.close_price}"
         ),
         **safety_fields(),
     }
@@ -1980,8 +2057,452 @@ def _fixture_model() -> PolymarketPolicyModel:
     )
 
 
-def _artifact_paths(run_dir: Path) -> dict[str, Path]:
-    return {
+class _StreamingObservabilityWriter:
+    """Durable operational checkpoints for long-running paper-only live runs."""
+
+    def __init__(
+        self,
+        *,
+        config: PolymarketLivePaperConfig,
+        artifact_paths: dict[str, Path],
+    ) -> None:
+        self._config = config
+        self._paths = artifact_paths
+        self._started_monotonic = time.monotonic()
+        self._last_status_monotonic = 0.0
+        self._last_heartbeat_monotonic = 0.0
+        for name in (
+            "operator_heartbeat",
+            "signal_events",
+            "execution_events",
+            "position_snapshots",
+            "pnl_snapshots",
+        ):
+            self._paths[name].parent.mkdir(parents=True, exist_ok=True)
+            self._paths[name].touch(exist_ok=True)
+
+    def record_operator_start(self) -> None:
+        self.write_status(operator_status="running", stage="operator_starting", force=True)
+        self.emit_heartbeat(
+            stage="operator_starting",
+            operator_status="running",
+            force=True,
+        )
+
+    def record_feed_checkpoint(
+        self,
+        *,
+        stage: str,
+        market_count: int,
+        latest_market_id: str | None,
+        orderbook_count: int,
+        trade_count: int,
+        tick_count: int,
+        candle_count: int,
+        force: bool = False,
+    ) -> None:
+        extra = {
+            "rounds_seen": market_count,
+            "latest_market_id": latest_market_id,
+            "feed_orderbook_count": orderbook_count,
+            "feed_trade_count": trade_count,
+            "feed_tick_count": tick_count,
+            "feed_candle_count": candle_count,
+        }
+        self.write_status(
+            operator_status="running",
+            stage=stage,
+            count_overrides=extra,
+            force=force,
+        )
+        self.emit_heartbeat(
+            stage=stage,
+            operator_status="running",
+            force=force,
+            **extra,
+        )
+
+    def append_signal_events(
+        self,
+        *,
+        predictions: tuple[Any, ...],
+        model_manifest_sha256: str,
+    ) -> None:
+        rows = []
+        for prediction in predictions:
+            payload = prediction.to_dict()
+            rows.append(
+                {
+                    "ts": payload["decision_ts"],
+                    "market_id": payload["market_id"],
+                    "market_family": payload["market_family"],
+                    "estimated_up_probability": payload["estimated_up_probability"],
+                    "p_up_auxiliary": payload.get("p_up_auxiliary"),
+                    "expected_return_by_action": payload.get("expected_return_by_action", {}),
+                    "best_policy_action": payload.get("best_policy_action"),
+                    "best_action_expected_return": payload.get(
+                        "best_action_expected_return"
+                    ),
+                    "second_best_action_expected_return": payload.get(
+                        "second_best_action_expected_return"
+                    ),
+                    "best_action_margin": payload.get("best_action_margin"),
+                    "policy_confidence": payload.get("policy_confidence"),
+                    "action_value_model_family": payload.get("action_value_model_family"),
+                    "feature_conditioned_action_value_model_enabled": payload.get(
+                        "feature_conditioned_action_value_model_enabled"
+                    ),
+                    "model_version": payload["model_version"],
+                    "model_manifest_sha256": model_manifest_sha256,
+                    **safety_fields(),
+                }
+            )
+        self._append_jsonl(self._paths["signal_events"], rows)
+        self.write_status(
+            operator_status="running",
+            stage="signals_generated",
+            predictions=predictions,
+            force=True,
+        )
+
+    def append_execution_events(self, *, decisions: tuple[Any, ...]) -> None:
+        rows = []
+        for decision in decisions:
+            payload = decision.to_dict()
+            rows.append(
+                {
+                    "ts": payload["decision_ts"],
+                    "market_id": payload["market_id"],
+                    "action": payload["action"],
+                    "selected_outcome": payload["selected_outcome"],
+                    "execution_price": payload["execution_price"],
+                    "used_price_side": payload["used_price_side"],
+                    "paper_notional": payload["paper_notional"],
+                    "reason_codes": payload["reason_codes"],
+                    "entry_policy_action": payload.get("entry_policy_action"),
+                    "intended_exit_policy": payload.get("intended_exit_policy"),
+                    "planned_exit_before_ts": payload.get("planned_exit_before_ts"),
+                    "policy_exit_reason": payload.get("policy_exit_reason"),
+                    "action_value_head_used": payload.get("action_value_head_used"),
+                    "probability_ev_fallback_used": payload.get(
+                        "probability_ev_fallback_used"
+                    ),
+                    **safety_fields(),
+                }
+            )
+        self._append_jsonl(self._paths["execution_events"], rows)
+        self.write_status(
+            operator_status="running",
+            stage="decisions_generated",
+            decisions=decisions,
+            force=True,
+        )
+
+    def append_position_snapshots(
+        self,
+        *,
+        markets: tuple[PolymarketLiveMarket, ...],
+        ledger_events: list[dict[str, Any]],
+        decisions: tuple[Any, ...],
+    ) -> None:
+        decisions_by_key = {
+            (decision.market_id, decision.decision_ts): decision.to_dict()
+            for decision in decisions
+        }
+        rows = []
+        for event in ledger_events:
+            decision = decisions_by_key.get((event["market_id"], event["ts"]), {})
+            rows.append(
+                {
+                    "ts": event["ts"],
+                    "market_id": event["market_id"],
+                    "position_up": event["position_up"],
+                    "position_down": event["position_down"],
+                    "entry_policy_action": decision.get("entry_policy_action"),
+                    "intended_exit_policy": decision.get("intended_exit_policy"),
+                    "planned_exit_before_ts": decision.get("planned_exit_before_ts"),
+                    "last_action": event["action"],
+                    **safety_fields(),
+                }
+            )
+        if not rows:
+            rows.extend(
+                {
+                    "ts": market.market_start_ts,
+                    "market_id": market.market_id,
+                    "position_up": 0.0,
+                    "position_down": 0.0,
+                    "entry_policy_action": None,
+                    "intended_exit_policy": None,
+                    "planned_exit_before_ts": None,
+                    "last_action": "NO_TRADE",
+                    **safety_fields(),
+                }
+                for market in markets
+            )
+        self._append_jsonl(self._paths["position_snapshots"], rows)
+
+    def append_pnl_snapshots(
+        self,
+        *,
+        markets: tuple[PolymarketLiveMarket, ...],
+        ledger_events: list[dict[str, Any]],
+        decisions: tuple[Any, ...],
+        pnl_breakdown: dict[str, Any],
+    ) -> None:
+        trade_counts_by_market: Counter[str] = Counter()
+        no_trade_counts_by_market: Counter[str] = Counter()
+        for decision in decisions:
+            if decision.action.startswith(("BUY", "SELL")):
+                trade_counts_by_market[decision.market_id] += 1
+            elif decision.action == "NO_TRADE":
+                no_trade_counts_by_market[decision.market_id] += 1
+        rows = []
+        for event in ledger_events:
+            rows.append(
+                {
+                    "ts": event["ts"],
+                    "market_id": event["market_id"],
+                    "open_position_up": event["position_up"],
+                    "open_position_down": event["position_down"],
+                    "realized_trade_pnl": event["realized_trade_pnl"],
+                    "unrealized_mark_pnl": event["unrealized_mark_pnl"],
+                    "settlement_pnl": event["settlement_pnl"],
+                    "fees": event["fees"],
+                    "slippage": event["slippage"],
+                    "estimated_total_pnl": event["total_pnl"],
+                    "trade_count": trade_counts_by_market[event["market_id"]],
+                    "no_trade_count": no_trade_counts_by_market[event["market_id"]],
+                    **safety_fields(),
+                }
+            )
+        if not rows:
+            rows.extend(
+                {
+                    "ts": market.market_start_ts,
+                    "market_id": market.market_id,
+                    "open_position_up": 0.0,
+                    "open_position_down": 0.0,
+                    "realized_trade_pnl": 0.0,
+                    "unrealized_mark_pnl": 0.0,
+                    "settlement_pnl": 0.0,
+                    "fees": 0.0,
+                    "slippage": 0.0,
+                    "estimated_total_pnl": 0.0,
+                    "trade_count": 0,
+                    "no_trade_count": 0,
+                    **safety_fields(),
+                }
+                for market in markets
+            )
+        self._append_jsonl(self._paths["pnl_snapshots"], rows)
+        self.write_status(
+            operator_status="running",
+            stage="pnl_updated",
+            markets=markets,
+            decisions=decisions,
+            ledger_events=ledger_events,
+            pnl_breakdown=pnl_breakdown,
+            force=True,
+        )
+
+    def write_status(
+        self,
+        *,
+        operator_status: str,
+        stage: str,
+        markets: tuple[PolymarketLiveMarket, ...] = (),
+        predictions: tuple[Any, ...] = (),
+        decisions: tuple[Any, ...] = (),
+        ledger_events: list[dict[str, Any]] | None = None,
+        pnl_breakdown: dict[str, Any] | None = None,
+        critical_reason_codes: tuple[str, ...] = (),
+        count_overrides: dict[str, Any] | None = None,
+        force: bool = False,
+    ) -> None:
+        now = time.monotonic()
+        if (
+            not force
+            and now - self._last_status_monotonic
+            < self._config.status_interval_seconds
+        ):
+            return
+        self._last_status_monotonic = now
+        ledger_events = ledger_events or []
+        status = self._status_payload(
+            operator_status=operator_status,
+            stage=stage,
+            markets=markets,
+            predictions=predictions,
+            decisions=decisions,
+            ledger_events=ledger_events,
+            pnl_breakdown=pnl_breakdown,
+            critical_reason_codes=critical_reason_codes,
+            count_overrides=count_overrides or {},
+        )
+        self._atomic_write_json(self._paths["live_status"], status)
+        self._atomic_write_text(self._paths["live_status_md"], _live_status_markdown(status))
+
+    def emit_heartbeat(
+        self,
+        *,
+        stage: str,
+        operator_status: str,
+        force: bool = False,
+        critical_reason_codes: tuple[str, ...] = (),
+        **extra: Any,
+    ) -> None:
+        now = time.monotonic()
+        if (
+            not force
+            and now - self._last_heartbeat_monotonic
+            < self._config.heartbeat_interval_seconds
+        ):
+            return
+        self._last_heartbeat_monotonic = now
+        row = {
+            "run_id": self._config.run_id,
+            "operator_status": operator_status,
+            "stage": stage,
+            "heartbeat_at": _now_iso(),
+            "elapsed_seconds": self._elapsed_seconds(),
+            "critical_reason_codes": list(critical_reason_codes),
+            **extra,
+            **safety_fields(),
+        }
+        self._append_jsonl(self._paths["operator_heartbeat"], [row])
+
+    def _status_payload(
+        self,
+        *,
+        operator_status: str,
+        stage: str,
+        markets: tuple[PolymarketLiveMarket, ...],
+        predictions: tuple[Any, ...],
+        decisions: tuple[Any, ...],
+        ledger_events: list[dict[str, Any]],
+        pnl_breakdown: dict[str, Any] | None,
+        critical_reason_codes: tuple[str, ...],
+        count_overrides: dict[str, Any],
+    ) -> dict[str, Any]:
+        latest_event_by_market: dict[str, dict[str, Any]] = {}
+        for event in ledger_events:
+            latest_event_by_market[event["market_id"]] = event
+        open_up = sum(float(row.get("position_up", 0.0)) for row in latest_event_by_market.values())
+        open_down = sum(
+            float(row.get("position_down", 0.0)) for row in latest_event_by_market.values()
+        )
+        latest_decision_ts = None
+        if decisions:
+            latest_decision_ts = max(int(decision.decision_ts) for decision in decisions)
+        elif predictions:
+            latest_decision_ts = max(int(prediction.decision_ts) for prediction in predictions)
+        latest_market_id = None
+        if markets:
+            latest_market_id = sorted(markets, key=lambda item: item.market_start_ts)[-1].market_id
+        action_counts = Counter(decision.action for decision in decisions)
+        realized = (
+            float(pnl_breakdown.get("realized_trade_pnl", 0.0))
+            if pnl_breakdown
+            else sum(float(row.get("realized_trade_pnl", 0.0)) for row in latest_event_by_market.values())
+        )
+        unrealized = (
+            float(pnl_breakdown.get("unrealized_mark_pnl", 0.0))
+            if pnl_breakdown
+            else sum(float(row.get("unrealized_mark_pnl", 0.0)) for row in latest_event_by_market.values())
+        )
+        settlement = (
+            float(pnl_breakdown.get("settlement_pnl", 0.0))
+            if pnl_breakdown
+            else sum(float(row.get("settlement_pnl", 0.0)) for row in latest_event_by_market.values())
+        )
+        total = (
+            float(pnl_breakdown.get("total_polymarket_pnl", 0.0))
+            if pnl_breakdown
+            else sum(float(row.get("total_pnl", 0.0)) for row in latest_event_by_market.values())
+        )
+        payload = {
+            "run_id": self._config.run_id,
+            "operator_status": operator_status,
+            "stage": stage,
+            "started_at": self._config.started_at,
+            "last_update_at": _now_iso(),
+            "elapsed_seconds": self._elapsed_seconds(),
+            "configured_duration_seconds": self._config.duration_seconds,
+            "remaining_seconds": max(
+                0,
+                self._config.duration_seconds - self._elapsed_seconds(),
+            ),
+            "market_family": self._config.market_families[0]
+            if len(self._config.market_families) == 1
+            else "mixed",
+            "market_families": list(self._config.market_families),
+            "source_collection_mode": "mock_live" if self._config.mock_live else "live_readonly",
+            "rounds_seen": len(markets),
+            "latest_market_id": latest_market_id,
+            "latest_decision_ts": latest_decision_ts,
+            "prediction_count": len(predictions),
+            "decision_count": len(decisions),
+            "trade_count": sum(
+                count
+                for action, count in action_counts.items()
+                if action.startswith(("BUY", "SELL"))
+            ),
+            "no_trade_count": action_counts.get("NO_TRADE", 0),
+            "open_position_up": open_up,
+            "open_position_down": open_down,
+            "realized_trade_pnl": realized,
+            "unrealized_mark_pnl": unrealized,
+            "settlement_pnl": settlement,
+            "estimated_total_pnl": total,
+            "critical_reason_codes": sorted(set(critical_reason_codes)),
+            **safety_fields(),
+        }
+        payload.update(count_overrides)
+        return payload
+
+    def _append_jsonl(self, path: Path, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(
+                    json.dumps(
+                        _json_ready(row),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                    + "\n"
+                )
+            handle.flush()
+            if self._config.flush_event_files:
+                os.fsync(handle.fileno())
+
+    @staticmethod
+    def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.write_text(
+            json.dumps(_json_ready(payload), indent=2, sort_keys=True, allow_nan=False),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+
+    @staticmethod
+    def _atomic_write_text(path: Path, body: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, path)
+
+    def _elapsed_seconds(self) -> int:
+        return max(0, int(time.monotonic() - self._started_monotonic))
+
+
+def _artifact_paths(run_dir: Path, *, stream_observability: bool = False) -> dict[str, Path]:
+    paths = {
         "live_market_metadata": run_dir / "live_market_metadata.jsonl",
         "live_token_orderbooks": run_dir / "live_token_orderbooks.jsonl",
         "live_token_trades": run_dir / "live_token_trades.jsonl",
@@ -2002,6 +2523,19 @@ def _artifact_paths(run_dir: Path) -> dict[str, Path]:
         "github_paper_comment_payload": run_dir / "github_paper_comment_payload.json",
         "github_paper_comment_md": run_dir / "github_paper_comment.md",
     }
+    if stream_observability:
+        paths.update(
+            {
+                "live_status": run_dir / "live_status.json",
+                "live_status_md": run_dir / "live_status.md",
+                "operator_heartbeat": run_dir / "operator_heartbeat.jsonl",
+                "signal_events": run_dir / "signal_events.jsonl",
+                "execution_events": run_dir / "execution_events.jsonl",
+                "position_snapshots": run_dir / "position_snapshots.jsonl",
+                "pnl_snapshots": run_dir / "pnl_snapshots.jsonl",
+            }
+        )
+    return paths
 
 
 def _write_missing_feed_artifacts(paths: dict[str, Path]) -> None:
@@ -2014,6 +2548,61 @@ def _write_missing_feed_artifacts(paths: dict[str, Path]) -> None:
     ):
         if not paths[name].exists():
             _write_jsonl(paths[name], [])
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _latest_market_id_from_rows(rows: list[dict[str, Any]]) -> str | None:
+    if not rows:
+        return None
+    return str(
+        sorted(
+            rows,
+            key=lambda row: (
+                int(row.get("market_start_ts", 0)),
+                str(row.get("market_id", "")),
+            ),
+        )[-1].get("market_id")
+    )
+
+
+def _live_status_markdown(status: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# Polymarket Live Paper Status",
+            "",
+            f"- run_id: {status['run_id']}",
+            f"- operator_status: {status['operator_status']}",
+            f"- stage: {status['stage']}",
+            (
+                "- elapsed / remaining: "
+                f"{status['elapsed_seconds']} / {status['remaining_seconds']} seconds"
+            ),
+            f"- latest round / latest market: {status.get('latest_market_id')}",
+            f"- prediction_count: {status['prediction_count']}",
+            f"- decision_count: {status['decision_count']}",
+            f"- trade_count: {status['trade_count']}",
+            (
+                "- open position: "
+                f"UP={status['open_position_up']} DOWN={status['open_position_down']}"
+            ),
+            f"- realized_trade_pnl: {status['realized_trade_pnl']}",
+            f"- unrealized_mark_pnl: {status['unrealized_mark_pnl']}",
+            f"- settlement_pnl: {status['settlement_pnl']}",
+            f"- estimated_total_pnl: {status['estimated_total_pnl']}",
+            (
+                "- critical_reason_codes: "
+                + ", ".join(status.get("critical_reason_codes", []))
+            ),
+            "- paper_only: true",
+            "- capital_at_risk: false",
+            "- polymarket_write_enabled: false",
+            "- wallet_signing_enabled: false",
+            "",
+        ]
+    )
 
 
 def _artifact_hashes(paths: dict[str, Path], *, exclude: set[str]) -> dict[str, str]:

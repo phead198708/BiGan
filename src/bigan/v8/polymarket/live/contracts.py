@@ -51,6 +51,10 @@ class PolymarketLivePaperConfig:
     duration_seconds: int = 300
     poll_interval_seconds: int = 5
     summary_interval_seconds: int = 300
+    stream_observability: bool = False
+    status_interval_seconds: int = 15
+    heartbeat_interval_seconds: int = 60
+    flush_event_files: bool = False
     ev_threshold: float = 0.015
     min_confidence: float = 0.05
     max_paper_notional: float = 0.20
@@ -100,6 +104,10 @@ class PolymarketLivePaperConfig:
             raise ValueError("poll_interval_seconds must be positive")
         if self.summary_interval_seconds <= 0:
             raise ValueError("summary_interval_seconds must be positive")
+        if self.status_interval_seconds <= 0:
+            raise ValueError("status_interval_seconds must be positive")
+        if self.heartbeat_interval_seconds <= 0:
+            raise ValueError("heartbeat_interval_seconds must be positive")
         for field_name in (
             "ev_threshold",
             "min_confidence",

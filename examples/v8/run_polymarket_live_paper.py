@@ -33,6 +33,10 @@ def run_polymarket_live_paper_cli(
     duration_seconds: int = 300,
     poll_interval_seconds: int = 5,
     summary_interval_seconds: int = 300,
+    stream_observability: bool = False,
+    status_interval_seconds: int = 15,
+    heartbeat_interval_seconds: int = 60,
+    flush_event_files: bool = False,
     settlement_mode: str = "resolved",
     stop_requested: bool = False,
     overwrite_existing: bool = False,
@@ -51,6 +55,10 @@ def run_polymarket_live_paper_cli(
             duration_seconds=duration_seconds,
             poll_interval_seconds=poll_interval_seconds,
             summary_interval_seconds=summary_interval_seconds,
+            stream_observability=stream_observability,
+            status_interval_seconds=status_interval_seconds,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+            flush_event_files=flush_event_files,
             settlement_mode=settlement_mode,  # type: ignore[arg-type]
             stop_requested=stop_requested,
             overwrite_existing=overwrite_existing,
@@ -80,6 +88,7 @@ def run_polymarket_live_paper_cli(
             result.artifact_paths["polymarket_live_operator_manifest"]
         ),
         "github_comment_path": str(result.artifact_paths["github_paper_comment_md"]),
+        "live_status_path": str(result.artifact_paths.get("live_status", "")),
     }
 
 
@@ -104,6 +113,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--duration-seconds", type=int, default=300)
     parser.add_argument("--poll-interval-seconds", type=int, default=5)
     parser.add_argument("--summary-interval-seconds", type=int, default=300)
+    parser.add_argument("--stream-observability", action="store_true")
+    parser.add_argument("--status-interval-seconds", type=int, default=15)
+    parser.add_argument("--heartbeat-interval-seconds", type=int, default=60)
+    parser.add_argument("--flush-event-files", action="store_true")
     parser.add_argument("--settlement-mode", choices=("resolved", "delayed"), default="resolved")
     parser.add_argument("--stop-requested", action="store_true")
     parser.add_argument("--overwrite-existing", action="store_true")
@@ -131,6 +144,10 @@ def main(argv: list[str] | None = None) -> int:
         duration_seconds=duration_seconds,
         poll_interval_seconds=args.poll_interval_seconds,
         summary_interval_seconds=args.summary_interval_seconds,
+        stream_observability=args.stream_observability,
+        status_interval_seconds=args.status_interval_seconds,
+        heartbeat_interval_seconds=args.heartbeat_interval_seconds,
+        flush_event_files=args.flush_event_files,
         settlement_mode=args.settlement_mode,
         stop_requested=args.stop_requested,
         overwrite_existing=args.overwrite_existing,
