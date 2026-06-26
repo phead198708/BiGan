@@ -58,6 +58,10 @@ from bigan.v8.polymarket.training import (
 
 TRAINING_ELIGIBILITY_POLICY = "min_one_complete_book_sample"
 LIVE_FEATURE_SCHEMA_MISMATCH = "live_feature_schema_mismatch"
+ACTION_VALUE_CALIBRATION_MISSING = "action_value_calibration_missing"
+ACTION_VALUE_POLICY_COLLAPSE = "action_value_policy_collapse"
+P_UP_ACTION_DISAGREEMENT_EXCESSIVE = "p_up_action_disagreement_excessive"
+ACTION_VALUE_DECISION_INELIGIBLE = "action_value_paper_decision_ineligible"
 STREAMING_ARTIFACT_NAMES = {
     "live_status",
     "live_status_md",
@@ -674,6 +678,9 @@ def _verify_model_manifest(*, model_manifest: dict[str, Any], model_path: Path) 
                 raise ValueError(f"{field_name} must be SHA-256")
         if model_manifest.get("manual_live_evidence_eligible") is not True:
             raise ValueError("manual_live_evidence_eligible must be true")
+        if model_manifest.get("action_value_paper_decision_eligible") is not True:
+            reasons = _action_value_paper_decision_ineligible_reasons(model_manifest)
+            raise ValueError(",".join(reasons))
         for field_name in (
             "fixture_corpus_used",
             "synthetic_corpus_used",
@@ -687,6 +694,30 @@ def _verify_model_manifest(*, model_manifest: dict[str, Any], model_path: Path) 
             raise ValueError(f"model manifest violates {field_name}")
     if model_path.name.endswith("manifest.json") and not model_path.exists():
         raise FileNotFoundError(model_path)
+
+
+def _action_value_paper_decision_ineligible_reasons(
+    model_manifest: dict[str, Any],
+) -> tuple[str, ...]:
+    raw_reasons = model_manifest.get("action_value_paper_decision_ineligible_reasons", ())
+    if isinstance(raw_reasons, str):
+        raw_reasons = (raw_reasons,)
+    reasons = {
+        str(reason).strip()
+        for reason in raw_reasons
+        if str(reason).strip()
+    }
+    if reasons:
+        return tuple(sorted(reasons))
+    if model_manifest.get("action_value_calibration_artifact_used") is not True:
+        reasons.add(ACTION_VALUE_CALIBRATION_MISSING)
+    if model_manifest.get("best_action_concentration_passed") is False:
+        reasons.add(ACTION_VALUE_POLICY_COLLAPSE)
+    if model_manifest.get("p_up_action_disagreement_within_limit") is False:
+        reasons.add(P_UP_ACTION_DISAGREEMENT_EXCESSIVE)
+    if not reasons:
+        reasons.add(ACTION_VALUE_DECISION_INELIGIBLE)
+    return tuple(sorted(reasons))
 
 
 def _empty_action_value_feature_parity_report() -> dict[str, Any]:
@@ -1186,6 +1217,12 @@ def _operator_manifest(
         "manual_live_evidence_eligible": model_manifest.get(
             "manual_live_evidence_eligible", False
         ),
+        "action_value_paper_decision_eligible": model_manifest.get(
+            "action_value_paper_decision_eligible", False
+        ),
+        "action_value_paper_decision_ineligible_reasons": model_manifest.get(
+            "action_value_paper_decision_ineligible_reasons", []
+        ),
         "policy_dataset_hash": model_manifest.get(
             "policy_dataset_hash", model_manifest.get("dataset_hash")
         ),
@@ -1276,6 +1313,8 @@ def _github_comment_payload(
             "synthetic_corpus_used",
             "fixture_model_used",
             "manual_live_evidence_eligible",
+            "action_value_paper_decision_eligible",
+            "action_value_paper_decision_ineligible_reasons",
             "policy_dataset_hash",
             "split_hash",
             "market_families",
@@ -3359,6 +3398,18 @@ def _exception_reason_codes(exc: Exception, *, fallback: str) -> list[str]:
     text = str(exc)
     if LIVE_FEATURE_SCHEMA_MISMATCH in text:
         return [LIVE_FEATURE_SCHEMA_MISMATCH]
+    action_value_reasons = [
+        reason
+        for reason in (
+            ACTION_VALUE_CALIBRATION_MISSING,
+            ACTION_VALUE_POLICY_COLLAPSE,
+            P_UP_ACTION_DISAGREEMENT_EXCESSIVE,
+            ACTION_VALUE_DECISION_INELIGIBLE,
+        )
+        if reason in text
+    ]
+    if action_value_reasons:
+        return action_value_reasons
     if "model_manifest_mismatch" in text:
         return ["model_manifest_mismatch"]
     if "action_value_target_field" in text or "fixed_notional_target_used" in text:

@@ -235,6 +235,58 @@ def test_real_history_manual_evidence_rejects_probability_only_model(
     assert result.operator_manifest["live_deployment_allowed"] is False
 
 
+def test_real_history_action_value_requires_paper_decision_eligibility(
+    tmp_path: Path,
+) -> None:
+    manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(tmp_path)
+    manifest = _read_json(manifest_path)
+    manifest.update(
+        {
+            "real_historical_corpus_used": True,
+            "manual_live_evidence_eligible": True,
+            "policy_dataset_hash": "a" * 64,
+            "split_hash": "b" * 64,
+            "action_value_calibration_artifact_used": False,
+            "execution_uses_calibrated_action_value": False,
+            "calibration_support_passed": False,
+            "best_action_concentration_passed": True,
+            "p_up_action_disagreement_within_limit": True,
+            "action_value_paper_decision_eligible": False,
+            "action_value_paper_decision_ineligible_reasons": [
+                "action_value_calibration_missing"
+            ],
+        }
+    )
+    _write_json(manifest_path, manifest)
+
+    result = run_polymarket_live_paper(
+        PolymarketLivePaperConfig(
+            run_id="reject-uncalibrated-action-value",
+            output_dir=tmp_path,
+            model_manifest=manifest_path,
+            model_path=model_path,
+            stream_observability=True,
+            status_interval_seconds=1,
+            heartbeat_interval_seconds=1,
+            overwrite_existing=True,
+        )
+    )
+
+    assert result.operator_manifest["operator_status"] == "blocked_fail_closed"
+    assert result.operator_manifest["operator_recommendation"] == "blocked_fail_closed"
+    assert "action_value_calibration_missing" in result.operator_manifest[
+        "critical_reason_codes"
+    ]
+    assert result.operator_manifest["prediction_count"] == 0
+    assert result.operator_manifest["decision_count"] == 0
+    assert result.operator_manifest["trade_count"] == 0
+    assert result.operator_manifest["action_value_paper_decision_eligible"] is False
+    assert result.operator_manifest["capital_deployment_allowed"] is False
+    assert result.operator_manifest["live_deployment_allowed"] is False
+    assert _read_jsonl(result.artifact_paths["polymarket_model_predictions"]) == []
+    assert _read_jsonl(result.artifact_paths["polymarket_ev_decisions"]) == []
+
+
 def test_action_value_feature_schema_mismatch_fails_closed(tmp_path: Path) -> None:
     manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(tmp_path)
 

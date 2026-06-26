@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from bigan.v8.polymarket.training.calibration import (
     validation_report,
 )
 from bigan.v8.polymarket.training.contracts import (
+    ACTION_VALUE_LABEL_ACTIONS,
     AUXILIARY_OUTCOME_TARGET,
     POLYMARKET_POLICY_SCHEMA_VERSION,
     POLYMARKET_POLICY_SIGNAL_SOURCE_TRAINED_MODEL,
@@ -36,6 +38,11 @@ from bigan.v8.polymarket.training.model import (
     predict_polymarket_policy_examples,
     train_polymarket_action_value_model,
 )
+
+ACTION_VALUE_CONCENTRATION_WARN_THRESHOLD = 0.80
+ACTION_VALUE_CONCENTRATION_FAIL_THRESHOLD = 0.95
+P_UP_ACTION_DISAGREEMENT_FAIL_THRESHOLD = 0.50
+P_UP_MATERIAL_DISAGREEMENT_THRESHOLD = 0.55
 
 
 def run_polymarket_policy_training(
@@ -92,6 +99,10 @@ def run_polymarket_policy_training(
         replay_split=replay_split,
         prediction_count=len(replay_predictions),
     )
+    signal_sanity = _action_value_signal_sanity_report(
+        validation_predictions=validation_predictions,
+        shadow_predictions=shadow_predictions,
+    )
     artifact_paths = _write_artifacts(
         run_dir=run_dir,
         config=config,
@@ -108,6 +119,7 @@ def run_polymarket_policy_training(
         validation=validation,
         ev_report=ev_report,
         replay_report=replay_report,
+        signal_sanity=signal_sanity,
     )
     model_sha256 = _sha256_file(artifact_paths["model"])
     model_manifest = _model_manifest(
@@ -117,6 +129,7 @@ def run_polymarket_policy_training(
         model_sha256=model_sha256,
         validation=validation,
         replay_report=replay_report,
+        signal_sanity=signal_sanity,
     )
     _write_json(artifact_paths["model_manifest"], model_manifest)
     artifact_hashes = {
@@ -137,6 +150,7 @@ def run_polymarket_policy_training(
         validation_report=validation,
         ev_threshold_report=ev_report,
         replay_report=replay_report,
+        action_value_signal_sanity_report=signal_sanity,
     )
 
 
@@ -155,6 +169,7 @@ def _write_artifacts(
     validation: dict[str, Any],
     ev_report: dict[str, Any],
     replay_report: dict[str, Any],
+    signal_sanity: dict[str, Any],
 ) -> dict[str, Path]:
     paths = {
         "training_config": run_dir / "polymarket_policy_training_config.json",
@@ -165,6 +180,12 @@ def _write_artifacts(
         "validation_report": run_dir / "polymarket_policy_validation_report.json",
         "ev_threshold_report": run_dir / "polymarket_ev_threshold_report.json",
         "replay_report": run_dir / "polymarket_policy_replay_report.json",
+        "action_value_signal_sanity_report": (
+            run_dir / "polymarket_action_value_signal_sanity_report.json"
+        ),
+        "action_value_signal_sanity_summary": (
+            run_dir / "polymarket_action_value_signal_sanity_report.md"
+        ),
         "all_predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "train_predictions": run_dir / "polymarket_policy_train_predictions.jsonl",
@@ -180,6 +201,7 @@ def _write_artifacts(
     _write_json(paths["validation_report"], validation)
     _write_json(paths["ev_threshold_report"], ev_report)
     _write_json(paths["replay_report"], replay_report)
+    _write_json(paths["action_value_signal_sanity_report"], signal_sanity)
     _write_jsonl(paths["predictions"], predictions)
     _write_jsonl(paths["train_predictions"], train_predictions)
     _write_jsonl(paths["validation_predictions"], validation_predictions)
@@ -194,6 +216,10 @@ def _write_artifacts(
         ),
         encoding="utf-8",
     )
+    paths["action_value_signal_sanity_summary"].write_text(
+        _signal_sanity_markdown(signal_sanity),
+        encoding="utf-8",
+    )
     return paths
 
 
@@ -205,6 +231,7 @@ def _model_manifest(
     model_sha256: str,
     validation: dict[str, Any],
     replay_report: dict[str, Any],
+    signal_sanity: dict[str, Any],
 ) -> dict[str, Any]:
     split_fields = {
         field_name: dataset_profile[field_name]
@@ -226,6 +253,8 @@ def _model_manifest(
         "model_family": "deterministic_action_value_probability",
         "target": PRIMARY_POLICY_TARGET_ACTION_VALUE,
         "primary_policy_target": PRIMARY_POLICY_TARGET_ACTION_VALUE,
+        "legacy_primary_policy_target": PRIMARY_POLICY_TARGET_ACTION_VALUE,
+        "primary_policy_target_unit": "fixed_notional_net_pnl_per_notional",
         "auxiliary_outcome_target": AUXILIARY_OUTCOME_TARGET,
         "model_output": "action_expected_returns_with_p_up_auxiliary",
         "model_outputs": [
@@ -248,6 +277,28 @@ def _model_manifest(
         ),
         "action_value_target_field": ACTION_VALUE_TARGET_FIELD,
         "fixed_notional_target_used": True,
+        "action_value_calibration_artifact_used": signal_sanity[
+            "action_value_calibration_artifact_used"
+        ],
+        "execution_uses_calibrated_action_value": signal_sanity[
+            "execution_uses_calibrated_action_value"
+        ],
+        "calibration_support_passed": signal_sanity[
+            "calibration_support_passed"
+        ],
+        "best_action_concentration_passed": signal_sanity[
+            "best_action_concentration_passed"
+        ],
+        "p_up_action_disagreement_within_limit": signal_sanity[
+            "p_up_action_disagreement_within_limit"
+        ],
+        "action_value_paper_decision_eligible": signal_sanity[
+            "action_value_paper_decision_eligible"
+        ],
+        "action_value_paper_decision_ineligible_reasons": signal_sanity[
+            "action_value_paper_decision_ineligible_reasons"
+        ],
+        "action_value_signal_sanity_report": signal_sanity,
         "action_value_feature_columns": list(model.action_value_feature_columns),
         "required_action_value_feature_columns": list(model.action_value_feature_columns),
         "action_label_coverage_by_action": dataset_profile[
@@ -313,6 +364,183 @@ def _summary_markdown(
             f"- no_trade_count: {replay_report['no_trade_count']}",
             f"- total_polymarket_pnl: {replay_report['total_polymarket_pnl']}",
             f"- ev_action_counts: {json.dumps(ev_report['action_counts'], sort_keys=True)}",
+            "- paper_only: true",
+            "- capital_at_risk: false",
+            "- polymarket_write_enabled: false",
+            "- wallet_signing_enabled: false",
+            "",
+        ]
+    )
+
+
+def _action_value_signal_sanity_report(
+    *,
+    validation_predictions: tuple[Any, ...],
+    shadow_predictions: tuple[Any, ...],
+) -> dict[str, Any]:
+    split_predictions = {
+        "validation": validation_predictions,
+        "shadow": shadow_predictions,
+    }
+    all_predictions = tuple(
+        prediction
+        for predictions in split_predictions.values()
+        for prediction in predictions
+        if bool(getattr(prediction, "action_value_head_enabled", False))
+    )
+    action_counts = Counter(
+        str(prediction.best_policy_action) for prediction in all_predictions
+    )
+    sample_count = sum(action_counts.values())
+    best_action_max_action, best_action_max_count = (
+        ("", 0) if sample_count == 0 else action_counts.most_common(1)[0]
+    )
+    best_action_max_ratio = (
+        0.0 if sample_count == 0 else best_action_max_count / sample_count
+    )
+    disagreement_examples = [
+        _p_up_action_disagreement_example(prediction)
+        for prediction in all_predictions
+        if _p_up_action_disagrees(prediction)
+    ]
+    disagreement_rate = (
+        0.0 if sample_count == 0 else len(disagreement_examples) / sample_count
+    )
+    best_action_concentration_passed = (
+        best_action_max_ratio <= ACTION_VALUE_CONCENTRATION_FAIL_THRESHOLD
+    )
+    p_up_action_disagreement_within_limit = (
+        disagreement_rate <= P_UP_ACTION_DISAGREEMENT_FAIL_THRESHOLD
+    )
+    ineligible_reasons = {"action_value_calibration_missing"}
+    if not best_action_concentration_passed:
+        ineligible_reasons.add("action_value_policy_collapse")
+    if not p_up_action_disagreement_within_limit:
+        ineligible_reasons.add("p_up_action_disagreement_excessive")
+    return {
+        "schema_version": POLYMARKET_POLICY_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "signal_sanity_report_version": "action_value_signal_sanity_v1",
+        "out_of_sample_split_names": sorted(split_predictions),
+        "sample_count": sample_count,
+        "split_sample_counts": {
+            split_name: len(predictions)
+            for split_name, predictions in sorted(split_predictions.items())
+        },
+        "action_value_calibration_artifact_used": False,
+        "execution_uses_calibrated_action_value": False,
+        "calibration_support_passed": False,
+        "best_action_counts": {
+            action: action_counts.get(action, 0) for action in ACTION_VALUE_LABEL_ACTIONS
+        },
+        "best_action_counts_by_split": {
+            split_name: _action_counts(predictions)
+            for split_name, predictions in sorted(split_predictions.items())
+        },
+        "best_action_max_action": best_action_max_action or None,
+        "best_action_max_count": best_action_max_count,
+        "best_action_max_ratio": best_action_max_ratio,
+        "best_action_concentration_warn_threshold": (
+            ACTION_VALUE_CONCENTRATION_WARN_THRESHOLD
+        ),
+        "best_action_concentration_fail_threshold": (
+            ACTION_VALUE_CONCENTRATION_FAIL_THRESHOLD
+        ),
+        "best_action_concentration_warning": (
+            best_action_max_ratio > ACTION_VALUE_CONCENTRATION_WARN_THRESHOLD
+        ),
+        "best_action_concentration_passed": best_action_concentration_passed,
+        "p_up_action_disagreement_count": len(disagreement_examples),
+        "p_up_action_disagreement_rate": disagreement_rate,
+        "p_up_action_disagreement_fail_threshold": (
+            P_UP_ACTION_DISAGREEMENT_FAIL_THRESHOLD
+        ),
+        "p_up_material_disagreement_threshold": P_UP_MATERIAL_DISAGREEMENT_THRESHOLD,
+        "p_up_action_disagreement_within_limit": (
+            p_up_action_disagreement_within_limit
+        ),
+        "p_up_action_disagreement_examples": disagreement_examples[:20],
+        "action_value_paper_decision_eligible": False,
+        "action_value_paper_decision_ineligible_reasons": sorted(ineligible_reasons),
+        **compact_safety_fields(),
+    }
+
+
+def _action_counts(predictions: tuple[Any, ...]) -> dict[str, int]:
+    counts = Counter(
+        str(prediction.best_policy_action)
+        for prediction in predictions
+        if bool(getattr(prediction, "action_value_head_enabled", False))
+    )
+    return {action: counts.get(action, 0) for action in ACTION_VALUE_LABEL_ACTIONS}
+
+
+def _p_up_action_disagrees(prediction: Any) -> bool:
+    action = str(getattr(prediction, "best_policy_action", ""))
+    p_up = getattr(prediction, "p_up_auxiliary", None)
+    if p_up is None:
+        p_up = getattr(prediction, "estimated_up_probability", None)
+    if p_up is None:
+        return False
+    p_up = float(p_up)
+    if action.startswith("BUY_DOWN_"):
+        return p_up >= P_UP_MATERIAL_DISAGREEMENT_THRESHOLD
+    if action.startswith("BUY_UP_"):
+        return p_up <= 1.0 - P_UP_MATERIAL_DISAGREEMENT_THRESHOLD
+    return False
+
+
+def _p_up_action_disagreement_example(prediction: Any) -> dict[str, Any]:
+    p_up = getattr(prediction, "p_up_auxiliary", None)
+    if p_up is None:
+        p_up = getattr(prediction, "estimated_up_probability", None)
+    return {
+        "market_id": getattr(prediction, "market_id", ""),
+        "decision_ts": getattr(prediction, "decision_ts", 0),
+        "p_up_auxiliary": p_up,
+        "estimated_up_probability": getattr(
+            prediction,
+            "estimated_up_probability",
+            None,
+        ),
+        "best_policy_action": getattr(prediction, "best_policy_action", None),
+        "best_action_expected_return": getattr(
+            prediction,
+            "best_action_expected_return",
+            None,
+        ),
+        "best_action_margin": getattr(prediction, "best_action_margin", None),
+    }
+
+
+def _signal_sanity_markdown(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# Polymarket Action-Value Signal Sanity Report",
+            "",
+            f"- sample_count: {report['sample_count']}",
+            "- action_value_calibration_artifact_used: "
+            f"{str(report['action_value_calibration_artifact_used']).lower()}",
+            "- execution_uses_calibrated_action_value: "
+            f"{str(report['execution_uses_calibrated_action_value']).lower()}",
+            f"- calibration_support_passed: {str(report['calibration_support_passed']).lower()}",
+            f"- best_action_counts: {json.dumps(report['best_action_counts'], sort_keys=True)}",
+            f"- best_action_max_action: {report['best_action_max_action']}",
+            f"- best_action_max_ratio: {report['best_action_max_ratio']}",
+            "- best_action_concentration_warning: "
+            f"{str(report['best_action_concentration_warning']).lower()}",
+            "- best_action_concentration_passed: "
+            f"{str(report['best_action_concentration_passed']).lower()}",
+            "- p_up_action_disagreement_count: "
+            f"{report['p_up_action_disagreement_count']}",
+            "- p_up_action_disagreement_rate: "
+            f"{report['p_up_action_disagreement_rate']}",
+            "- p_up_action_disagreement_within_limit: "
+            f"{str(report['p_up_action_disagreement_within_limit']).lower()}",
+            "- action_value_paper_decision_eligible: "
+            f"{str(report['action_value_paper_decision_eligible']).lower()}",
+            "- action_value_paper_decision_ineligible_reasons: "
+            f"{json.dumps(report['action_value_paper_decision_ineligible_reasons'])}",
             "- paper_only: true",
             "- capital_at_risk: false",
             "- polymarket_write_enabled: false",

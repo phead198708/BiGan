@@ -98,6 +98,10 @@ def test_real_corpus_retraining_gate_runs_training_for_real_eligible_bundle(
     assert model_manifest["action_value_model_family"] == "feature_conditioned_action_return_model"
     assert model_manifest["feature_conditioned_action_value_model_enabled"] is True
     assert model_manifest["direct_pnl_optimization"] is False
+    assert model_manifest["action_value_paper_decision_eligible"] is False
+    assert "action_value_calibration_missing" in model_manifest[
+        "action_value_paper_decision_ineligible_reasons"
+    ]
     assert model_manifest["training_corpus_hash"] == recorder.report[
         "phase2_corpus_manifest_sha256"
     ]

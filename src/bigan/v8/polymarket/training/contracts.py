@@ -422,6 +422,7 @@ class PolymarketPolicyTrainingResult:
     validation_report: dict[str, Any]
     ev_threshold_report: dict[str, Any]
     replay_report: dict[str, Any]
+    action_value_signal_sanity_report: dict[str, Any]
 
 
 def safety_fields() -> dict[str, bool]:

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from bigan.v8.polymarket import (
     ACTION_VALUE_LABEL_ACTIONS,
@@ -14,6 +17,7 @@ from bigan.v8.polymarket import (
     PolymarketPolicyTrainingConfig,
     build_polymarket_btc_corpus,
     load_polymarket_policy_dataset,
+    predict_polymarket_policy_examples,
     run_polymarket_policy_training,
     write_deterministic_polymarket_corpus_fixtures,
 )
@@ -134,6 +138,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "validation_report",
         "ev_threshold_report",
         "replay_report",
+        "action_value_signal_sanity_report",
+        "action_value_signal_sanity_summary",
         "all_predictions",
         "predictions",
         "train_predictions",
@@ -152,6 +158,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert manifest["schema_version"] == "bigan-v8-polymarket-policy-v1"
     assert manifest["target"] == PRIMARY_POLICY_TARGET_ACTION_VALUE
     assert manifest["primary_policy_target"] == PRIMARY_POLICY_TARGET_ACTION_VALUE
+    assert manifest["legacy_primary_policy_target"] == PRIMARY_POLICY_TARGET_ACTION_VALUE
+    assert manifest["primary_policy_target_unit"] == "fixed_notional_net_pnl_per_notional"
     assert manifest["auxiliary_outcome_target"] == "resolved_up_probability"
     assert manifest["model_output"] == "action_expected_returns_with_p_up_auxiliary"
     assert "best_policy_action" in manifest["model_outputs"]
@@ -163,6 +171,18 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert manifest["feature_conditioned_action_value_model_enabled"] is True
     assert manifest["action_value_target_field"] == ACTION_VALUE_TARGET_FIELD
     assert manifest["fixed_notional_target_used"] is True
+    assert manifest["action_value_calibration_artifact_used"] is False
+    assert manifest["execution_uses_calibrated_action_value"] is False
+    assert manifest["calibration_support_passed"] is False
+    assert isinstance(manifest["best_action_concentration_passed"], bool)
+    assert isinstance(manifest["p_up_action_disagreement_within_limit"], bool)
+    assert manifest["action_value_paper_decision_eligible"] is False
+    assert "action_value_calibration_missing" in manifest[
+        "action_value_paper_decision_ineligible_reasons"
+    ]
+    assert manifest["action_value_signal_sanity_report"][
+        "action_value_paper_decision_eligible"
+    ] is False
     assert manifest["action_value_feature_columns"]
     assert manifest["required_action_value_feature_columns"] == manifest[
         "action_value_feature_columns"
@@ -225,6 +245,34 @@ def test_feature_conditioned_action_returns_vary_by_state_within_family(
         first.expected_return_by_action[action] != second.expected_return_by_action[action]
         for action in ACTION_VALUE_LABEL_ACTIONS
     )
+
+
+def test_action_value_prediction_api_rejects_missing_features_by_default(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = _build_corpus(tmp_path)
+    result = run_polymarket_policy_training(
+        PolymarketPolicyTrainingConfig(
+            corpus_dir=corpus_dir,
+            output_dir=tmp_path / "policy",
+        )
+    )
+    missing_feature = result.model.action_value_feature_columns[0]
+    example = result.dataset.examples[0]
+    sparse_features = dict(example.features)
+    sparse_features.pop(missing_feature)
+    sparse_example = replace(example, features=sparse_features)
+
+    with pytest.raises(ValueError, match="action_value_feature_missing"):
+        predict_polymarket_policy_examples(result.model, (sparse_example,))
+
+    diagnostic_predictions = predict_polymarket_policy_examples(
+        result.model,
+        (sparse_example,),
+        missing_feature_mode="train_mean_impute",
+    )
+    assert len(diagnostic_predictions) == 1
+    assert diagnostic_predictions[0].best_policy_action in ACTION_VALUE_LABEL_ACTIONS
 
 
 def _build_corpus(tmp_path: Path) -> Path:
