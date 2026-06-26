@@ -27,7 +27,11 @@ from bigan.v8.polymarket.training.contracts import (
     PolymarketPolicyTrainingResult,
     compact_safety_fields,
 )
-from bigan.v8.polymarket.training.dataset import dataset_profile, load_polymarket_policy_dataset
+from bigan.v8.polymarket.training.dataset import (
+    ACTION_VALUE_TARGET_FIELD,
+    dataset_profile,
+    load_polymarket_policy_dataset,
+)
 from bigan.v8.polymarket.training.model import (
     predict_polymarket_policy_examples,
     train_polymarket_action_value_model,
@@ -242,7 +246,10 @@ def _model_manifest(
         "feature_conditioned_action_value_model_enabled": (
             model.feature_conditioned_action_value_model_enabled
         ),
+        "action_value_target_field": ACTION_VALUE_TARGET_FIELD,
+        "fixed_notional_target_used": True,
         "action_value_feature_columns": list(model.action_value_feature_columns),
+        "required_action_value_feature_columns": list(model.action_value_feature_columns),
         "action_label_coverage_by_action": dataset_profile[
             "action_label_coverage_by_action"
         ],
@@ -262,7 +269,7 @@ def _model_manifest(
         "out_of_sample_replay": replay_report["out_of_sample_replay"],
         "created_at": config.created_at,
         "direct_pnl_optimization": False,
-        "pnl_usage": "net_return_label_supervision_validation_and_ev_replay",
+        "pnl_usage": "fixed_notional_net_pnl_label_supervision_validation_and_ev_replay",
         "trained_model_used": True,
         "policy_signal_source": POLYMARKET_POLICY_SIGNAL_SOURCE_TRAINED_MODEL,
         "synthetic_fixture_signal_used": False,
@@ -296,6 +303,7 @@ def _summary_markdown(
             f"- replay_split: {replay_report['replay_split']}",
             f"- out_of_sample_replay: {str(replay_report['out_of_sample_replay']).lower()}",
             f"- primary_policy_target: {PRIMARY_POLICY_TARGET_ACTION_VALUE}",
+            f"- action_value_target_field: {ACTION_VALUE_TARGET_FIELD}",
             f"- action_value_head_enabled: {str(ev_report['action_value_head_enabled']).lower()}",
             f"- action_value_model_family: {ev_report['action_value_model_family']}",
             f"- validation_brier_score: {validation['validation']['brier_score']}",

@@ -21,9 +21,12 @@ from bigan.v8.polymarket.training.contracts import (
 )
 
 TARGET_LABEL_ACTION = "BUY_UP_HOLD_TO_SETTLEMENT"
+ACTION_VALUE_TARGET_FIELD = "total_net_pnl_per_notional"
 LABEL_SCHEMA = {
     "primary_target": PRIMARY_POLICY_TARGET_ACTION_VALUE,
     "auxiliary_target": AUXILIARY_OUTCOME_TARGET,
+    "action_value_target_field": ACTION_VALUE_TARGET_FIELD,
+    "fixed_notional_target_used": True,
     "action_labels": list(ACTION_VALUE_LABEL_ACTIONS),
     "source_actions": list(ACTION_VALUE_LABEL_ACTIONS),
     "outcome_probability_mapping": {
@@ -69,8 +72,13 @@ def load_polymarket_policy_dataset(
                 + ", ".join(sorted(missing_actions))
             )
         label = labels[TARGET_LABEL_ACTION]
+        _assert_action_value_target_fields(
+            labels=labels,
+            market_id=row["market_id"],
+            decision_ts=int(row["decision_ts"]),
+        )
         action_return_targets = {
-            action: float(labels[action]["total_net_return"])
+            action: float(labels[action][ACTION_VALUE_TARGET_FIELD])
             for action in ACTION_VALUE_LABEL_ACTIONS
         }
         realized_trade_return_targets = {
@@ -164,6 +172,8 @@ def dataset_profile(dataset: PolymarketPolicyDataset) -> dict[str, Any]:
         "market_family_counts": _family_counts(dataset.examples),
         "primary_policy_target": PRIMARY_POLICY_TARGET_ACTION_VALUE,
         "auxiliary_outcome_target": AUXILIARY_OUTCOME_TARGET,
+        "action_value_target_field": ACTION_VALUE_TARGET_FIELD,
+        "fixed_notional_target_used": True,
         "action_value_head_enabled": True,
         "outcome_probability_head_enabled": True,
         "action_label_coverage_by_action": _action_label_coverage(dataset.examples),
@@ -218,6 +228,26 @@ def _labels_by_decision_state(path: Path) -> dict[tuple[str, int], dict[str, dic
     if not grouped:
         raise ValueError("no action-value policy labels found")
     return grouped
+
+
+def _assert_action_value_target_fields(
+    *,
+    labels: dict[str, dict[str, Any]],
+    market_id: str,
+    decision_ts: int,
+) -> None:
+    missing = sorted(
+        action
+        for action in ACTION_VALUE_LABEL_ACTIONS
+        if ACTION_VALUE_TARGET_FIELD not in labels[action]
+    )
+    if missing:
+        raise ValueError(
+            "policy action labels missing "
+            f"{ACTION_VALUE_TARGET_FIELD} for {market_id} "
+            f"at decision_ts={decision_ts}: "
+            + ", ".join(missing)
+        )
 
 
 def _best_action(action_returns: dict[str, float]) -> tuple[str, float, float, float]:

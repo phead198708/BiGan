@@ -91,6 +91,7 @@ def _label_for_action(
             realized_trade_return=0.0,
             settlement_return=0.0,
             total_net_return=0.0,
+            total_net_pnl_per_notional=0.0,
             fees=0.0,
             slippage=0.0,
             liquidity_impact=0.0,
@@ -120,6 +121,7 @@ def _label_for_action(
         payout = resolution.payout_up if outcome == "UP" else resolution.payout_down
         realized_trade_return = 0.0
         settlement_return = payout / entry.ask_price - 1.0
+        gross_pnl_per_notional = payout - entry.ask_price
         exit_bid = 0.0
         exit_ask = 0.0
     else:
@@ -128,9 +130,16 @@ def _label_for_action(
         exit_ask = exit_snapshot.ask_price
         realized_trade_return = exit_bid / entry.ask_price - 1.0
         settlement_return = 0.0
+        gross_pnl_per_notional = exit_bid - entry.ask_price
     total_net_return = (
         realized_trade_return
         + settlement_return
+        - fees
+        - slippage
+        - liquidity_impact
+    )
+    total_net_pnl_per_notional = (
+        gross_pnl_per_notional
         - fees
         - slippage
         - liquidity_impact
@@ -153,6 +162,7 @@ def _label_for_action(
         realized_trade_return=realized_trade_return,
         settlement_return=settlement_return,
         total_net_return=total_net_return,
+        total_net_pnl_per_notional=total_net_pnl_per_notional,
         fees=fees,
         slippage=slippage,
         liquidity_impact=liquidity_impact,

@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256, looks_like_sha256
 
-POLYMARKET_CORPUS_SCHEMA_VERSION = "bigan-v8-polymarket-corpus-v1"
+POLYMARKET_CORPUS_SCHEMA_VERSION = "bigan-v8-polymarket-corpus-v2"
 POLYMARKET_CORPUS_PHASE = "polymarket_historical_corpus"
 DEFAULT_CORPUS_CREATED_AT = "1970-01-01T00:00:00Z"
 
@@ -427,6 +427,7 @@ class PolymarketCorpusLabelRow:
     realized_trade_return: float
     settlement_return: float
     total_net_return: float
+    total_net_pnl_per_notional: float
     fees: float
     slippage: float
     liquidity_impact: float
@@ -456,6 +457,15 @@ class PolymarketCorpusLabelRow:
             raise ValueError("unsupported label action")
         if self.outcome not in ("UP", "DOWN", "NONE"):
             raise ValueError("unsupported label outcome")
+        for field_name in (
+            "realized_trade_return",
+            "settlement_return",
+            "total_net_return",
+            "total_net_pnl_per_notional",
+        ):
+            value = float(getattr(self, field_name))
+            if not math.isfinite(value):
+                raise ValueError(f"{field_name} must be finite")
         for field_name in (
             "entry_bid",
             "entry_ask",

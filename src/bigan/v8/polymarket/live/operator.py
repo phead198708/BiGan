@@ -49,6 +49,7 @@ from bigan.v8.polymarket.storage import (
     round_corpus_id_from_corpus_dir,
 )
 from bigan.v8.polymarket.training import (
+    ACTION_VALUE_TARGET_FIELD,
     PolymarketPolicyExample,
     PolymarketPolicyModel,
     PolymarketPolicyTrainingConfig,
@@ -56,6 +57,7 @@ from bigan.v8.polymarket.training import (
 )
 
 TRAINING_ELIGIBILITY_POLICY = "min_one_complete_book_sample"
+LIVE_FEATURE_SCHEMA_MISMATCH = "live_feature_schema_mismatch"
 STREAMING_ARTIFACT_NAMES = {
     "live_status",
     "live_status_md",
@@ -105,6 +107,7 @@ def run_polymarket_live_paper(
     model_manifest_sha256 = ""
     model: PolymarketPolicyModel | None = None
     settlement_wait_report = _empty_settlement_wait_report(config)
+    feature_parity_report = _empty_action_value_feature_parity_report()
     real_time_streaming = config.stream_observability and not config.mock_live
 
     if real_time_streaming:
@@ -125,6 +128,7 @@ def run_polymarket_live_paper(
             run_dir=run_dir,
             streaming_writer=streaming,
             model=model,
+            model_manifest=model_manifest,
             model_manifest_sha256=model_manifest_sha256,
         )
         if real_time_streaming and streaming is not None and model is not None
@@ -201,31 +205,57 @@ def run_polymarket_live_paper(
 
     if model is not None and not reason_codes:
         examples = _policy_examples(markets=markets, orderbooks=orderbooks)
-        predictions = predict_polymarket_policy_examples(model, examples)
-        if streaming is not None and not real_time_streaming:
-            streaming.append_signal_events(
-                predictions=predictions,
-                model_manifest_sha256=model_manifest_sha256,
-            )
-        decisions = build_polymarket_ev_decisions(
-            predictions=predictions,
-            config=_ev_config(config, run_dir),
+        feature_parity_report = _action_value_feature_parity_report(
+            model=model,
+            model_manifest=model_manifest,
+            examples=examples,
         )
-        if streaming is not None and not real_time_streaming:
-            streaming.append_execution_events(decisions=decisions)
-        ledgers = _apply_decisions(markets=markets, decisions=decisions, config=config)
-        if real_time_streaming and snapshot_callback is not None:
-            try:
-                snapshot_callback.assert_replay_equivalent(
+        if not feature_parity_report["action_value_feature_parity_passed"]:
+            reason_codes.append(LIVE_FEATURE_SCHEMA_MISMATCH)
+            ledgers = _empty_ledgers(markets)
+            if streaming is not None:
+                feature_fields = _feature_parity_status_fields(feature_parity_report)
+                streaming.write_status(
+                    operator_status="blocked_fail_closed",
+                    stage=LIVE_FEATURE_SCHEMA_MISMATCH,
                     markets=markets,
+                    critical_reason_codes=tuple(reason_codes),
+                    count_overrides=feature_fields,
+                    force=True,
+                )
+                streaming.emit_heartbeat(
+                    stage=LIVE_FEATURE_SCHEMA_MISMATCH,
+                    operator_status="blocked_fail_closed",
+                    force=True,
+                    critical_reason_codes=tuple(reason_codes),
+                    **feature_fields,
+                )
+        else:
+            predictions = predict_polymarket_policy_examples(model, examples)
+            if streaming is not None and not real_time_streaming:
+                streaming.append_signal_events(
                     predictions=predictions,
-                    decisions=decisions,
-                    ledgers=ledgers,
+                    model_manifest_sha256=model_manifest_sha256,
                 )
-            except Exception as exc:
-                reason_codes.extend(
-                    _exception_reason_codes(exc, fallback="streaming_replay_mismatch")
-                )
+            decisions = build_polymarket_ev_decisions(
+                predictions=predictions,
+                config=_ev_config(config, run_dir),
+            )
+            if streaming is not None and not real_time_streaming:
+                streaming.append_execution_events(decisions=decisions)
+            ledgers = _apply_decisions(markets=markets, decisions=decisions, config=config)
+            if real_time_streaming and snapshot_callback is not None:
+                try:
+                    snapshot_callback.assert_replay_equivalent(
+                        markets=markets,
+                        predictions=predictions,
+                        decisions=decisions,
+                        ledgers=ledgers,
+                    )
+                except Exception as exc:
+                    reason_codes.extend(
+                        _exception_reason_codes(exc, fallback="streaming_replay_mismatch")
+                    )
     else:
         ledgers = _empty_ledgers(markets)
     settlement_events = _settle_markets(
@@ -270,6 +300,7 @@ def run_polymarket_live_paper(
         recommendation=recommendation,
         reason_codes=tuple(reason_codes),
         settlement_wait_report=settlement_wait_report,
+        feature_parity_report=feature_parity_report,
     )
     if streaming is not None:
         streaming.write_status(
@@ -281,6 +312,7 @@ def run_polymarket_live_paper(
             ledger_events=ledger_events,
             pnl_breakdown=pnl_breakdown,
             critical_reason_codes=tuple(reason_codes),
+            count_overrides=_feature_parity_status_fields(feature_parity_report),
             force=True,
         )
         streaming.emit_heartbeat(
@@ -291,6 +323,7 @@ def run_polymarket_live_paper(
             prediction_count=len(predictions),
             decision_count=len(decisions),
             trade_count=pnl_breakdown["trade_count"],
+            **_feature_parity_status_fields(feature_parity_report),
         )
 
     _write_jsonl(
@@ -364,6 +397,7 @@ def run_polymarket_live_paper(
         model_manifest_sha256=model_manifest_sha256,
         reason_codes=tuple(reason_codes),
         settlement_wait_report=settlement_wait_report,
+        feature_parity_report=feature_parity_report,
         round_artifacts=round_artifacts,
     )
     _write_json(artifact_paths["polymarket_live_operator_manifest"], operator_manifest)
@@ -626,6 +660,14 @@ def _verify_model_manifest(*, model_manifest: dict[str, Any], model_path: Path) 
             raise ValueError("outcome_probability_head_enabled must be true")
         if model_manifest.get("feature_conditioned_action_value_model_enabled") is not True:
             raise ValueError("feature_conditioned_action_value_model_enabled must be true")
+        if model_manifest.get("action_value_target_field") != ACTION_VALUE_TARGET_FIELD:
+            raise ValueError(
+                f"action_value_target_field must be {ACTION_VALUE_TARGET_FIELD}"
+            )
+        if model_manifest.get("fixed_notional_target_used") is not True:
+            raise ValueError("fixed_notional_target_used must be true")
+        if not model_manifest.get("required_action_value_feature_columns"):
+            raise ValueError("required_action_value_feature_columns must not be empty")
         for field_name in ("policy_dataset_hash", "split_hash"):
             value = str(model_manifest.get(field_name, ""))
             if not looks_like_sha256(value):
@@ -645,6 +687,122 @@ def _verify_model_manifest(*, model_manifest: dict[str, Any], model_path: Path) 
             raise ValueError(f"model manifest violates {field_name}")
     if model_path.name.endswith("manifest.json") and not model_path.exists():
         raise FileNotFoundError(model_path)
+
+
+def _empty_action_value_feature_parity_report() -> dict[str, Any]:
+    return {
+        "action_value_feature_parity_passed": True,
+        "feature_conditioned_action_value_model_enabled": False,
+        "required_action_value_feature_columns": [],
+        "required_action_value_feature_count": 0,
+        "checked_action_value_example_count": 0,
+        "missing_action_value_feature_example_count": 0,
+        "missing_action_value_features": [],
+        "missing_action_value_feature_count": 0,
+        "missing_action_value_feature_examples": [],
+    }
+
+
+def _required_action_value_feature_columns(
+    *,
+    model: PolymarketPolicyModel,
+    model_manifest: dict[str, Any],
+) -> tuple[str, ...]:
+    raw_columns = model_manifest.get("required_action_value_feature_columns")
+    if raw_columns is None:
+        raw_columns = model_manifest.get("action_value_feature_columns")
+    if raw_columns is None:
+        raw_columns = model.action_value_feature_columns
+    if isinstance(raw_columns, str):
+        raw_columns = (raw_columns,)
+    columns = []
+    for raw in raw_columns:
+        feature_name = str(raw).strip()
+        if feature_name and feature_name not in columns:
+            columns.append(feature_name)
+    return tuple(sorted(columns))
+
+
+def _action_value_feature_parity_report(
+    *,
+    model: PolymarketPolicyModel,
+    model_manifest: dict[str, Any],
+    examples: tuple[PolymarketPolicyExample, ...],
+) -> dict[str, Any]:
+    report = _empty_action_value_feature_parity_report()
+    feature_conditioned = bool(
+        model.action_value_head_enabled
+        and model.feature_conditioned_action_value_model_enabled
+    )
+    required = _required_action_value_feature_columns(
+        model=model,
+        model_manifest=model_manifest,
+    )
+    report.update(
+        {
+            "feature_conditioned_action_value_model_enabled": feature_conditioned,
+            "required_action_value_feature_columns": list(required),
+            "required_action_value_feature_count": len(required),
+            "checked_action_value_example_count": len(examples),
+        }
+    )
+    if not feature_conditioned or not required:
+        return report
+
+    missing_features: set[str] = set()
+    missing_examples = []
+    required_set = set(required)
+    for example in examples:
+        missing = sorted(required_set - set(example.features))
+        if not missing:
+            continue
+        missing_features.update(missing)
+        if len(missing_examples) < 20:
+            missing_examples.append(
+                {
+                    "market_id": example.market_id,
+                    "decision_ts": example.decision_ts,
+                    "missing_action_value_features": missing,
+                    "missing_action_value_feature_count": len(missing),
+                }
+            )
+
+    missing = sorted(missing_features)
+    report.update(
+        {
+            "action_value_feature_parity_passed": not missing,
+            "missing_action_value_feature_example_count": sum(
+                1 for example in examples if required_set - set(example.features)
+            ),
+            "missing_action_value_features": missing,
+            "missing_action_value_feature_count": len(missing),
+            "missing_action_value_feature_examples": missing_examples,
+        }
+    )
+    return report
+
+
+def _feature_parity_status_fields(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "action_value_feature_parity_passed": bool(
+            report.get("action_value_feature_parity_passed", True)
+        ),
+        "required_action_value_feature_count": int(
+            report.get("required_action_value_feature_count", 0)
+        ),
+        "required_action_value_feature_columns": list(
+            report.get("required_action_value_feature_columns", [])
+        ),
+        "missing_action_value_feature_count": int(
+            report.get("missing_action_value_feature_count", 0)
+        ),
+        "missing_action_value_features": list(
+            report.get("missing_action_value_features", [])
+        ),
+        "missing_action_value_feature_example_count": int(
+            report.get("missing_action_value_feature_example_count", 0)
+        ),
+    }
 
 
 def _policy_examples(
@@ -972,6 +1130,7 @@ def _observability_report(
     recommendation: str,
     reason_codes: tuple[str, ...],
     settlement_wait_report: dict[str, Any],
+    feature_parity_report: dict[str, Any],
 ) -> dict[str, Any]:
     critical = sorted(set(reason_codes))
     return {
@@ -985,6 +1144,7 @@ def _observability_report(
         "capital_deployment_allowed": False,
         "live_deployment_allowed": False,
         "settlement_wait_report": settlement_wait_report,
+        "live_feature_parity_report": feature_parity_report,
         "feed_health": feed_health,
         "pnl_breakdown": pnl_breakdown,
         **safety_fields(),
@@ -1005,6 +1165,7 @@ def _operator_manifest(
     model_manifest_sha256: str,
     reason_codes: tuple[str, ...],
     settlement_wait_report: dict[str, Any],
+    feature_parity_report: dict[str, Any],
     round_artifacts: dict[str, Any],
 ) -> dict[str, Any]:
     ended_at = _ended_at(config)
@@ -1044,6 +1205,8 @@ def _operator_manifest(
         **feed_health,
         "critical_alert_count": len(set(reason_codes)),
         "critical_reason_codes": sorted(set(reason_codes)),
+        **_feature_parity_status_fields(feature_parity_report),
+        "live_feature_parity_report": feature_parity_report,
         **{
             key: pnl_breakdown[key]
             for key in (
@@ -2364,12 +2527,14 @@ class _RealTimeStreamingSnapshotProcessor:
         run_dir: Path,
         streaming_writer: _StreamingObservabilityWriter,
         model: PolymarketPolicyModel,
+        model_manifest: dict[str, Any],
         model_manifest_sha256: str,
     ) -> None:
         self._config = config
         self._run_dir = run_dir
         self._streaming_writer = streaming_writer
         self._model = model
+        self._model_manifest = model_manifest
         self._model_manifest_sha256 = model_manifest_sha256
         self._seen_example_keys: set[tuple[str, int]] = set()
         self._ledgers: dict[str, PolymarketPositionLedger] = {}
@@ -2377,6 +2542,7 @@ class _RealTimeStreamingSnapshotProcessor:
             config=_ev_config(config, run_dir)
         )
         self._all_predictions: list[Any] = []
+        self._feature_parity_failed = False
 
     def __call__(
         self,
@@ -2398,6 +2564,31 @@ class _RealTimeStreamingSnapshotProcessor:
             if (example.market_id, example.decision_ts) not in self._seen_example_keys
         )
         if not new_examples:
+            return
+        feature_parity_report = _action_value_feature_parity_report(
+            model=self._model,
+            model_manifest=self._model_manifest,
+            examples=new_examples,
+        )
+        if not feature_parity_report["action_value_feature_parity_passed"]:
+            feature_fields = _feature_parity_status_fields(feature_parity_report)
+            if not self._feature_parity_failed:
+                self._streaming_writer.write_status(
+                    operator_status="blocked_fail_closed",
+                    stage=LIVE_FEATURE_SCHEMA_MISMATCH,
+                    markets=markets,
+                    critical_reason_codes=(LIVE_FEATURE_SCHEMA_MISMATCH,),
+                    count_overrides=feature_fields,
+                    force=True,
+                )
+                self._streaming_writer.emit_heartbeat(
+                    stage=LIVE_FEATURE_SCHEMA_MISMATCH,
+                    operator_status="blocked_fail_closed",
+                    force=True,
+                    critical_reason_codes=(LIVE_FEATURE_SCHEMA_MISMATCH,),
+                    **feature_fields,
+                )
+            self._feature_parity_failed = True
             return
         for example in new_examples:
             self._seen_example_keys.add((example.market_id, example.decision_ts))
@@ -3139,6 +3330,11 @@ def _live_status_markdown(status: dict[str, Any]) -> str:
                 "- critical_reason_codes: "
                 + ", ".join(status.get("critical_reason_codes", []))
             ),
+            (
+                "- action_value_feature_parity: "
+                f"{status.get('action_value_feature_parity_passed', True)} "
+                f"missing={status.get('missing_action_value_feature_count', 0)}"
+            ),
             "- paper_only: true",
             "- capital_at_risk: false",
             "- polymarket_write_enabled: false",
@@ -3161,7 +3357,11 @@ def _exception_reason_codes(exc: Exception, *, fallback: str) -> list[str]:
     if codes:
         return list(codes)
     text = str(exc)
+    if LIVE_FEATURE_SCHEMA_MISMATCH in text:
+        return [LIVE_FEATURE_SCHEMA_MISMATCH]
     if "model_manifest_mismatch" in text:
+        return ["model_manifest_mismatch"]
+    if "action_value_target_field" in text or "fixed_notional_target_used" in text:
         return ["model_manifest_mismatch"]
     if (
         "primary_policy_target" in text

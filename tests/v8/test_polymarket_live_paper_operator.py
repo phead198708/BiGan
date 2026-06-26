@@ -9,13 +9,21 @@ from typing import Any
 
 import bigan.v8.polymarket.live.operator as live_operator
 from bigan.v8.polymarket import (
+    ACTION_VALUE_LABEL_ACTIONS,
+    ACTION_VALUE_TARGET_FIELD,
+    PRIMARY_POLICY_TARGET_ACTION_VALUE,
     PolymarketCorpusBuildConfig,
     PolymarketLivePaperConfig,
+    PolymarketPolicyModel,
     build_polymarket_btc_corpus,
+    canonical_json_sha256,
     run_polymarket_live_paper,
 )
 from bigan.v8.polymarket.live.binance_reference_feed import MockBinanceBTCReferenceFeed
-from bigan.v8.polymarket.live.contracts import PolymarketLiveMarket
+from bigan.v8.polymarket.live.contracts import (
+    PolymarketLiveMarket,
+    compact_safety_fields,
+)
 from bigan.v8.polymarket.live.polymarket_feed import MockPolymarketLiveFeed
 
 
@@ -227,6 +235,41 @@ def test_real_history_manual_evidence_rejects_probability_only_model(
     assert result.operator_manifest["live_deployment_allowed"] is False
 
 
+def test_action_value_feature_schema_mismatch_fails_closed(tmp_path: Path) -> None:
+    manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(tmp_path)
+
+    result = run_polymarket_live_paper(
+        PolymarketLivePaperConfig(
+            run_id="feature-schema-mismatch",
+            output_dir=tmp_path,
+            model_manifest=manifest_path,
+            model_path=model_path,
+            stream_observability=True,
+            status_interval_seconds=1,
+            heartbeat_interval_seconds=1,
+            overwrite_existing=True,
+        )
+    )
+    manifest = result.operator_manifest
+    status = _read_json(result.artifact_paths["live_status"])
+
+    assert manifest["operator_status"] == "blocked_fail_closed"
+    assert "live_feature_schema_mismatch" in manifest["critical_reason_codes"]
+    assert manifest["prediction_count"] == 0
+    assert manifest["decision_count"] == 0
+    assert manifest["trade_count"] == 0
+    assert manifest["action_value_feature_parity_passed"] is False
+    assert manifest["missing_action_value_feature_count"] == 1
+    assert manifest["missing_action_value_features"] == ["btc_mid_price"]
+    assert manifest["required_action_value_feature_columns"] == ["btc_mid_price"]
+    assert status["action_value_feature_parity_passed"] is False
+    assert status["missing_action_value_features"] == ["btc_mid_price"]
+    assert _read_jsonl(result.artifact_paths["signal_events"]) == []
+    assert _read_jsonl(result.artifact_paths["execution_events"]) == []
+    assert _read_jsonl(result.artifact_paths["polymarket_model_predictions"]) == []
+    assert _read_jsonl(result.artifact_paths["polymarket_ev_decisions"]) == []
+
+
 def test_stop_path_writes_manifest_and_artifacts(tmp_path: Path) -> None:
     result = _run(tmp_path, "operator-stop", stop_requested=True)
     manifest = result.operator_manifest
@@ -361,6 +404,81 @@ def _write_json(path: Path, payload: dict) -> None:
         json.dumps(payload, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+def _write_action_value_model_requiring_btc_mid_price(tmp_path: Path) -> tuple[Path, Path]:
+    action_returns = dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, -0.05)
+    action_returns["NO_TRADE"] = 0.0
+    action_returns["BUY_UP_HOLD_TO_SETTLEMENT"] = 0.04
+    feature_columns = ("btc_mid_price",)
+    feature_schema_hash = canonical_json_sha256({"feature_columns": list(feature_columns)})
+    label_schema_hash = canonical_json_sha256(
+        {
+            "target": PRIMARY_POLICY_TARGET_ACTION_VALUE,
+            "action_value_target_field": ACTION_VALUE_TARGET_FIELD,
+        }
+    )
+    training_corpus_hash = canonical_json_sha256({"source": "feature_schema_test"})
+    dataset_hash = canonical_json_sha256({"dataset": "feature_schema_test"})
+    model = PolymarketPolicyModel(
+        model_version="feature_schema_action_value_model",
+        feature_columns=feature_columns,
+        global_probability=0.50,
+        market_family_probabilities={"btc_updown_5m": 0.50},
+        family_feature_offsets={"btc_updown_5m": 0.0},
+        feature_schema_hash=feature_schema_hash,
+        label_schema_hash=label_schema_hash,
+        training_corpus_hash=training_corpus_hash,
+        dataset_hash=dataset_hash,
+        train_row_count=3,
+        primary_policy_target=PRIMARY_POLICY_TARGET_ACTION_VALUE,
+        outcome_probability_head_enabled=True,
+        action_value_head_enabled=True,
+        compatibility_probability_fallback_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        fallback_action_value_model_family="market_family_mean_baseline",
+        feature_conditioned_action_value_model_enabled=True,
+        action_value_feature_columns=feature_columns,
+        action_return_feature_means={"btc_mid_price": 50000.0},
+        action_return_feature_coefficients={action: {} for action in ACTION_VALUE_LABEL_ACTIONS},
+        global_action_returns=action_returns,
+        market_family_action_returns={"btc_updown_5m": action_returns},
+    )
+    model_path = tmp_path / "feature_schema_action_value_model.json"
+    manifest_path = tmp_path / "feature_schema_action_value_model_manifest.json"
+    _write_json(model_path, model.to_dict())
+    manifest = {
+        "schema_version": "bigan-v8-polymarket-policy-v1",
+        "model_version": model.model_version,
+        "model_sha256": _sha256(model_path),
+        "feature_schema_hash": model.feature_schema_hash,
+        "label_schema_hash": model.label_schema_hash,
+        "training_corpus_hash": model.training_corpus_hash,
+        "dataset_hash": model.dataset_hash,
+        "trained_model_used": True,
+        "policy_signal_source": "trained_model",
+        "synthetic_fixture_signal_used": False,
+        "primary_policy_target": PRIMARY_POLICY_TARGET_ACTION_VALUE,
+        "outcome_probability_head_enabled": True,
+        "action_value_head_enabled": True,
+        "compatibility_probability_fallback_enabled": True,
+        "action_value_model_family": "feature_conditioned_action_return_model",
+        "fallback_action_value_model_family": "market_family_mean_baseline",
+        "feature_conditioned_action_value_model_enabled": True,
+        "action_value_target_field": ACTION_VALUE_TARGET_FIELD,
+        "fixed_notional_target_used": True,
+        "action_value_feature_columns": list(feature_columns),
+        "required_action_value_feature_columns": list(feature_columns),
+        "direct_pnl_optimization": False,
+        "real_historical_corpus_used": False,
+        "fixture_corpus_used": False,
+        "synthetic_corpus_used": False,
+        "fixture_model_used": False,
+        "manual_live_evidence_eligible": False,
+        **compact_safety_fields(),
+    }
+    _write_json(manifest_path, manifest)
+    return manifest_path, model_path
 
 
 def _sha256(path: Path) -> str:

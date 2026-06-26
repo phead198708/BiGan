@@ -7,6 +7,7 @@ from pathlib import Path
 
 from bigan.v8.polymarket import (
     ACTION_VALUE_LABEL_ACTIONS,
+    ACTION_VALUE_TARGET_FIELD,
     PRIMARY_POLICY_TARGET_ACTION_VALUE,
     PolymarketCorpusBuildConfig,
     PolymarketPolicyExample,
@@ -28,6 +29,7 @@ def test_training_dataset_loads_phase2_corpus_outputs(tmp_path: Path) -> None:
     )
 
     dataset = load_polymarket_policy_dataset(config)
+    labels = _labels_by_decision_state(corpus_dir / "polymarket_label_rows.jsonl")
 
     assert len(dataset.examples) == 12
     assert dataset.feature_columns
@@ -53,6 +55,10 @@ def test_training_dataset_loads_phase2_corpus_outputs(tmp_path: Path) -> None:
         assert example.max_input_ts <= example.decision_ts
         assert 0.0 <= example.target_up_probability <= 1.0
         assert set(example.action_return_targets) == set(ACTION_VALUE_LABEL_ACTIONS)
+        for action in ACTION_VALUE_LABEL_ACTIONS:
+            assert example.action_return_targets[action] == labels[
+                (example.market_id, example.decision_ts)
+            ][action][ACTION_VALUE_TARGET_FIELD]
         assert example.best_policy_action in ACTION_VALUE_LABEL_ACTIONS
         assert example.best_action_expected_return >= example.second_best_action_expected_return
     assert dataset_payload["examples"][0]["action_return_targets"]
@@ -155,8 +161,15 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert manifest["action_value_model_family"] == "feature_conditioned_action_return_model"
     assert manifest["fallback_action_value_model_family"] == "market_family_mean_baseline"
     assert manifest["feature_conditioned_action_value_model_enabled"] is True
+    assert manifest["action_value_target_field"] == ACTION_VALUE_TARGET_FIELD
+    assert manifest["fixed_notional_target_used"] is True
     assert manifest["action_value_feature_columns"]
+    assert manifest["required_action_value_feature_columns"] == manifest[
+        "action_value_feature_columns"
+    ]
     assert profile["primary_policy_target"] == PRIMARY_POLICY_TARGET_ACTION_VALUE
+    assert profile["action_value_target_field"] == ACTION_VALUE_TARGET_FIELD
+    assert profile["fixed_notional_target_used"] is True
     assert profile["action_value_head_enabled"] is True
     assert profile["action_label_coverage_by_action"] == {
         action: len(result.dataset.examples) for action in ACTION_VALUE_LABEL_ACTIONS
@@ -254,6 +267,23 @@ def _example(*, market_index: int, decision_ts: int) -> PolymarketPolicyExample:
 
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _labels_by_decision_state(path: Path) -> dict[tuple[str, int], dict[str, dict]]:
+    labels: dict[tuple[str, int], dict[str, dict]] = {}
+    for row in _read_jsonl(path):
+        if row["action"] not in ACTION_VALUE_LABEL_ACTIONS:
+            continue
+        labels.setdefault((row["market_id"], row["decision_ts"]), {})[row["action"]] = row
+    return labels
 
 
 def _assert_safe(payload: dict) -> None:

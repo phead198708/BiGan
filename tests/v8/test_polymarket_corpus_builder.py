@@ -101,6 +101,7 @@ def test_labels_use_ask_for_entries_and_bid_for_sell_before_close(
             assert label["entry_bid"] == 0.0
             assert label["entry_ask"] == 0.0
             assert label["total_net_return"] == 0.0
+            assert label["total_net_pnl_per_notional"] == 0.0
             continue
 
         entry_snapshot = _last_snapshot(
@@ -126,12 +127,14 @@ def test_labels_use_ask_for_entries_and_bid_for_sell_before_close(
                 label["exit_bid"] / label["entry_ask"] - 1.0
             )
             assert label["settlement_return"] == 0.0
+            gross_pnl_per_notional = label["exit_bid"] - label["entry_ask"]
         else:
             assert label["exit_bid"] == 0.0
             assert label["exit_ask"] == 0.0
             assert label["settlement_return"] == pytest.approx(
                 label["settlement_payout"] / label["entry_ask"] - 1.0
             )
+            gross_pnl_per_notional = label["settlement_payout"] - label["entry_ask"]
 
         expected_net = (
             label["realized_trade_return"]
@@ -140,7 +143,16 @@ def test_labels_use_ask_for_entries_and_bid_for_sell_before_close(
             - label["slippage"]
             - label["liquidity_impact"]
         )
+        expected_pnl_per_notional = (
+            gross_pnl_per_notional
+            - label["fees"]
+            - label["slippage"]
+            - label["liquidity_impact"]
+        )
         assert label["total_net_return"] == pytest.approx(expected_net)
+        assert label["total_net_pnl_per_notional"] == pytest.approx(
+            expected_pnl_per_notional
+        )
         assert label["is_positive"] is (label["total_net_return"] > 0.0)
 
 

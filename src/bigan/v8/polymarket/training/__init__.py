@@ -23,6 +23,7 @@ from bigan.v8.polymarket.training.contracts import (
     PolymarketPolicyTrainingResult,
 )
 from bigan.v8.polymarket.training.dataset import (
+    ACTION_VALUE_TARGET_FIELD,
     TARGET_LABEL_ACTION,
     dataset_profile,
     load_polymarket_policy_dataset,
@@ -59,6 +60,7 @@ __all__ = [
     "AUXILIARY_OUTCOME_TARGET",
     "DEFAULT_ACTION_VALUE_MODEL_VERSION",
     "PRIMARY_POLICY_TARGET_ACTION_VALUE",
+    "ACTION_VALUE_TARGET_FIELD",
     "POLYMARKET_REAL_CORPUS_RETRAINING_GATE_PHASE",
     "POLYMARKET_REAL_CORPUS_RETRAINING_GATE_SCHEMA_VERSION",
     "TARGET_LABEL_ACTION",
