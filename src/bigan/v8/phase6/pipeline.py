@@ -443,6 +443,15 @@ def _monitoring_reason_codes(metadata: dict[str, Any]) -> list[str]:
         reason_codes.append("risk_tracking_missing")
     if metadata.get("kill_switch_wired") is not True:
         reason_codes.append("kill_switch_not_wired")
+    if metadata.get("feed_health_passed") is False:
+        reason_codes.extend(
+            _coerce_reason_codes(
+                metadata.get("feed_health_reason_codes"),
+                fallback="feed_health_failed",
+            )
+        )
+    elif "feed_health_passed" in metadata and metadata.get("feed_health_passed") is not True:
+        reason_codes.append("feed_health_status_missing")
     return reason_codes
 
 
@@ -584,6 +593,13 @@ def _first_non_zero_rollout_index(rollout_plan: tuple[float, ...]) -> int:
 
 def _float_equal(left: float, right: float) -> bool:
     return abs(left - right) <= 1e-12
+
+
+def _coerce_reason_codes(value: Any, *, fallback: str) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return [fallback]
+    reason_codes = [code for code in value if isinstance(code, str) and code]
+    return reason_codes or [fallback]
 
 
 def _looks_like_sha256(value: Any) -> bool:
