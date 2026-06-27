@@ -54,6 +54,8 @@ from bigan.v8.polymarket.training.model import (
     train_polymarket_action_value_model,
 )
 from bigan.v8.polymarket.training.model_ranking_diagnostics import (
+    action_representation_diagnostic_markdown,
+    build_action_representation_diagnostic_report,
     build_model_ranking_candidate_comparison,
     build_model_ranking_error_report,
     build_ranking_overlay_zero_entry_diagnostic_report,
@@ -201,6 +203,13 @@ def run_polymarket_policy_training(
         calibrated_shadow_predictions=shadow_predictions,
         execution_buffer=float(config.ev_threshold),
     )
+    action_representation_diagnostic = build_action_representation_diagnostic_report(
+        validation_examples=dataset.validation_examples,
+        validation_predictions=validation_predictions,
+        shadow_examples=dataset.shadow_examples,
+        shadow_predictions=shadow_predictions,
+        execution_buffer=float(config.ev_threshold),
+    )
     ranking_overlay_zero_entry_diagnostic = (
         build_ranking_overlay_zero_entry_diagnostic_report(
             validation_examples=dataset.validation_examples,
@@ -242,6 +251,7 @@ def run_polymarket_policy_training(
         signal_sanity=signal_sanity,
         model_ranking_error=model_ranking_error,
         model_ranking_candidate_comparison=model_ranking_candidate_comparison,
+        action_representation_diagnostic=action_representation_diagnostic,
         ranking_overlay_zero_entry_diagnostic=ranking_overlay_zero_entry_diagnostic,
         source_model_eligibility=source_model_eligibility,
     )
@@ -267,6 +277,9 @@ def run_polymarket_policy_training(
         ),
         "model_ranking_candidate_comparison_sha256": _sha256_file(
             artifact_paths["model_ranking_candidate_comparison"]
+        ),
+        "action_representation_diagnostic_sha256": _sha256_file(
+            artifact_paths["action_representation_diagnostic_report"]
         ),
         "ranking_overlay_zero_entry_diagnostic_sha256": _sha256_file(
             artifact_paths["ranking_overlay_zero_entry_diagnostic_report"]
@@ -318,6 +331,7 @@ def run_polymarket_policy_training(
         ),
         model_ranking_error_report=model_ranking_error,
         model_ranking_candidate_comparison_report=model_ranking_candidate_comparison,
+        action_representation_diagnostic_report=action_representation_diagnostic,
         ranking_overlay_zero_entry_diagnostic_report=(
             ranking_overlay_zero_entry_diagnostic
         ),
@@ -498,6 +512,7 @@ def _write_artifacts(
     signal_sanity: dict[str, Any],
     model_ranking_error: dict[str, Any],
     model_ranking_candidate_comparison: dict[str, Any],
+    action_representation_diagnostic: dict[str, Any],
     ranking_overlay_zero_entry_diagnostic: dict[str, Any],
     source_model_eligibility: dict[str, Any],
 ) -> dict[str, Path]:
@@ -549,6 +564,12 @@ def _write_artifacts(
         "model_ranking_candidate_comparison_summary": (
             run_dir / "model_ranking_candidate_comparison.md"
         ),
+        "action_representation_diagnostic_report": (
+            run_dir / "action_representation_diagnostic_report.json"
+        ),
+        "action_representation_diagnostic_summary": (
+            run_dir / "action_representation_diagnostic_report.md"
+        ),
         "ranking_overlay_zero_entry_diagnostic_report": (
             run_dir / "ranking_overlay_zero_entry_diagnostic_report.json"
         ),
@@ -597,6 +618,10 @@ def _write_artifacts(
         model_ranking_candidate_comparison,
     )
     _write_json(
+        paths["action_representation_diagnostic_report"],
+        action_representation_diagnostic,
+    )
+    _write_json(
         paths["ranking_overlay_zero_entry_diagnostic_report"],
         ranking_overlay_zero_entry_diagnostic,
     )
@@ -641,6 +666,10 @@ def _write_artifacts(
         model_ranking_candidate_comparison_markdown(
             model_ranking_candidate_comparison
         ),
+        encoding="utf-8",
+    )
+    paths["action_representation_diagnostic_summary"].write_text(
+        action_representation_diagnostic_markdown(action_representation_diagnostic),
         encoding="utf-8",
     )
     paths["ranking_overlay_zero_entry_diagnostic_summary"].write_text(
@@ -965,6 +994,12 @@ def _model_manifest(
         ),
         "model_ranking_candidate_comparison_sha256": action_family_artifact_hashes[
             "model_ranking_candidate_comparison_sha256"
+        ],
+        "action_representation_diagnostic_report_path": (
+            "action_representation_diagnostic_report.json"
+        ),
+        "action_representation_diagnostic_sha256": action_family_artifact_hashes[
+            "action_representation_diagnostic_sha256"
         ],
         "ranking_overlay_zero_entry_diagnostic_report_path": (
             "ranking_overlay_zero_entry_diagnostic_report.json"

@@ -461,6 +461,7 @@ class PolymarketPolicyTrainingResult:
     action_family_counterfactual_replay_report: dict[str, Any]
     model_ranking_error_report: dict[str, Any]
     model_ranking_candidate_comparison_report: dict[str, Any]
+    action_representation_diagnostic_report: dict[str, Any]
     ranking_overlay_zero_entry_diagnostic_report: dict[str, Any]
     source_model_eligibility_report: dict[str, Any]
 

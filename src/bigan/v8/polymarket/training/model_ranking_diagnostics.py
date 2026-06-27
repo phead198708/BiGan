@@ -10,6 +10,7 @@ from typing import Any
 from bigan.v8.polymarket.action_value_guards import (
     action_value_action_family,
     action_value_bucket_payload,
+    action_value_fine_action_family,
 )
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training.action_family_eligibility import (
@@ -40,6 +41,9 @@ SOURCE_MODEL_ELIGIBILITY_SCHEMA_VERSION = (
 RANKING_OVERLAY_ZERO_ENTRY_DIAGNOSTIC_SCHEMA_VERSION = (
     "bigan-v8-polymarket-ranking-overlay-zero-entry-diagnostic-v1"
 )
+ACTION_REPRESENTATION_DIAGNOSTIC_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-action-representation-diagnostic-v1"
+)
 BEST_ACTION_CONCENTRATION_FAIL_THRESHOLD = 0.95
 P_UP_ACTION_DISAGREEMENT_FAIL_THRESHOLD = 0.50
 P_UP_MATERIAL_DISAGREEMENT_THRESHOLD = 0.55
@@ -54,6 +58,7 @@ RANKING_OVERLAY_G_MODEL_SCORE_TIEBREAKER_WEIGHT = 0.001
 RANKING_OVERLAY_DIAGNOSTIC_MIN_BUCKET_SUPPORT_VALUES = (3, 5, 10)
 RANKING_OVERLAY_DIAGNOSTIC_SHRINKAGE_PRIOR_SUPPORT_VALUES = (5, 10, 20)
 RANKING_OVERLAY_DIAGNOSTIC_BUFFER_MULTIPLIERS = (0.0, 0.5, 1.0)
+ACTION_REPRESENTATION_MIN_BUCKET_SUPPORT = 10
 
 
 def build_model_ranking_error_report(
@@ -258,6 +263,95 @@ def build_ranking_overlay_zero_entry_diagnostic_report(
     }
     report["ranking_overlay_zero_entry_diagnostic_report_id"] = (
         canonical_json_sha256(report)
+    )
+    return report
+
+
+def build_action_representation_diagnostic_report(
+    *,
+    validation_examples: tuple[PolymarketPolicyExample, ...],
+    validation_predictions: tuple[PolymarketPolicyPrediction, ...],
+    shadow_examples: tuple[PolymarketPolicyExample, ...],
+    shadow_predictions: tuple[PolymarketPolicyPrediction, ...],
+    execution_buffer: float,
+) -> dict[str, Any]:
+    """Diagnose fine action-family, label, and feature representation quality."""
+
+    _validate_aligned(validation_examples, validation_predictions)
+    _validate_aligned(shadow_examples, shadow_predictions)
+    split_reports = {
+        "validation": _action_representation_split_report(
+            split_name="validation",
+            examples=validation_examples,
+            predictions=validation_predictions,
+            execution_buffer=execution_buffer,
+        ),
+        "shadow": _action_representation_split_report(
+            split_name="shadow",
+            examples=shadow_examples,
+            predictions=shadow_predictions,
+            execution_buffer=execution_buffer,
+        ),
+    }
+    validation_sell = split_reports["validation"]["sell_before_close_summary"]
+    shadow_sell = split_reports["shadow"]["sell_before_close_summary"]
+    report = {
+        "schema_version": ACTION_REPRESENTATION_DIAGNOSTIC_SCHEMA_VERSION,
+        "policy_schema_version": POLYMARKET_POLICY_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "diagnostic_only": True,
+        "promotion_evidence_eligible": False,
+        "source_model_candidate_eligible": False,
+        "requires_promotion_replay_gate": True,
+        "paper_run_resume_allowed": False,
+        "paper_run_resume_blocked_reason": "promotion_replay_gate_required",
+        "execution_buffer": execution_buffer,
+        "min_positive_bucket_support": ACTION_REPRESENTATION_MIN_BUCKET_SUPPORT,
+        "fine_action_family_definition": (
+            "side|intended_exit_policy|price_bucket|time_to_close_bucket"
+        ),
+        "label_exit_path_assessment": {
+            "sell_before_close_entry_price": "entry ask at decision_ts",
+            "sell_before_close_exit_price": (
+                "last available bid at market_end_ts - 1"
+            ),
+            "sell_before_close_exit_path_is_fixed_terminal_bid": True,
+            "sell_before_close_exit_path_coarse": True,
+            "coarse_exit_path_risk_codes": [
+                "single_terminal_exit_bid_path",
+                "no_intraround_exit_optimization",
+                "no_queue_fill_probability_model",
+            ],
+        },
+        "validation": split_reports["validation"],
+        "shadow": split_reports["shadow"],
+        "sell_before_close_overall": {
+            "validation_mean": validation_sell["realized_return_mean"],
+            "validation_sum": validation_sell["realized_return_sum"],
+            "validation_support": validation_sell["support_count"],
+            "shadow_mean": shadow_sell["realized_return_mean"],
+            "shadow_sum": shadow_sell["realized_return_sum"],
+            "shadow_support": shadow_sell["support_count"],
+        },
+        "needs_more_sell_before_close_positive_bucket_data": (
+            split_reports["validation"][
+                "supported_positive_sell_before_close_bucket_count"
+            ]
+            == 0
+            or split_reports["shadow"][
+                "supported_positive_sell_before_close_bucket_count"
+            ]
+            == 0
+        ),
+        "notes": [
+            "diagnostic-only artifact; does not change production gates",
+            "fine families are causal feature buckets and use no future data",
+            "label review focuses on sell-before-close fixed terminal bid exit path",
+        ],
+        **compact_safety_fields(),
+    }
+    report["action_representation_diagnostic_report_id"] = canonical_json_sha256(
+        report
     )
     return report
 
@@ -482,6 +576,80 @@ def ranking_overlay_zero_entry_diagnostic_markdown(report: dict[str, Any]) -> st
             )
         )
     return "\n".join(lines) + "\n"
+
+
+def action_representation_diagnostic_markdown(report: dict[str, Any]) -> str:
+    """Render compact action representation diagnostics."""
+
+    sell = report["sell_before_close_overall"]
+    lines = [
+        "# Action Representation Diagnostic",
+        "",
+        f"- schema_version: `{report['schema_version']}`",
+        f"- diagnostic_only: `{str(report['diagnostic_only']).lower()}`",
+        f"- source_model_candidate_eligible: `{str(report['source_model_candidate_eligible']).lower()}`",
+        f"- paper_run_resume_allowed: `{str(report['paper_run_resume_allowed']).lower()}`",
+        f"- fine_action_family_definition: `{report['fine_action_family_definition']}`",
+        "- sell_before_close_exit_path_coarse: "
+        f"`{str(report['label_exit_path_assessment']['sell_before_close_exit_path_coarse']).lower()}`",
+        "",
+        "## SELL_BEFORE_CLOSE Overall",
+        "",
+        "| split | support | mean | sum | positive_supported_buckets |",
+        "|---|---:|---:|---:|---:|",
+        "| validation | {support} | {mean:.6f} | {total:.6f} | {buckets} |".format(
+            support=sell["validation_support"],
+            mean=sell["validation_mean"],
+            total=sell["validation_sum"],
+            buckets=report["validation"][
+                "supported_positive_sell_before_close_bucket_count"
+            ],
+        ),
+        "| shadow | {support} | {mean:.6f} | {total:.6f} | {buckets} |".format(
+            support=sell["shadow_support"],
+            mean=sell["shadow_mean"],
+            total=sell["shadow_sum"],
+            buckets=report["shadow"][
+                "supported_positive_sell_before_close_bucket_count"
+            ],
+        ),
+        "",
+        "## Top Negative SELL_BEFORE_CLOSE Buckets",
+        "",
+    ]
+    for split_name in ("validation", "shadow"):
+        lines.append(f"### {split_name}")
+        for row in report[split_name]["sell_before_close_negative_contributors"][:5]:
+            lines.append(
+                "- "
+                f"{row['fine_action_family']}: support={row['support_count']} "
+                f"markets={row['unique_market_count']} "
+                f"mean={row['realized_return_mean']} "
+                f"sum={row['realized_return_sum']}"
+            )
+        lines.append("")
+        lines.append("Top negative high-score examples:")
+        for row in report[split_name][
+            "top_negative_high_score_sell_before_close_examples"
+        ][:5]:
+            lines.append(
+                "- "
+                f"{row['decision_ts']} {row['action']} "
+                f"{row['fine_action_family']} "
+                f"score={row['calibrated_score']} "
+                f"return={row['realized_return']}"
+            )
+        lines.append("")
+    lines.extend(
+        [
+            "- paper_only: true",
+            "- capital_at_risk: false",
+            "- polymarket_write_enabled: false",
+            "- wallet_signing_enabled: false",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def source_model_eligibility_markdown(report: dict[str, Any]) -> str:
@@ -953,6 +1121,247 @@ def _candidate_report(
     }
 
 
+def _action_representation_split_report(
+    *,
+    split_name: str,
+    examples: tuple[PolymarketPolicyExample, ...],
+    predictions: tuple[PolymarketPolicyPrediction, ...],
+    execution_buffer: float,
+) -> dict[str, Any]:
+    rows = [
+        _action_representation_row(
+            split_name=split_name,
+            example=example,
+            prediction=prediction,
+            action=action,
+        )
+        for example, prediction in zip(examples, predictions, strict=True)
+        for action in ACTION_VALUE_LABEL_ACTIONS
+        if action != "NO_TRADE"
+    ]
+    sell_rows = [
+        row
+        for row in rows
+        if row["intended_exit_policy"] == "sell_before_close"
+    ]
+    sell_groups = _action_representation_group_summaries(
+        rows=sell_rows,
+        group_fields=(
+            "fine_action_family",
+            "side",
+            "intended_exit_policy",
+            "price_bucket",
+            "time_to_close_bucket",
+        ),
+        execution_buffer=execution_buffer,
+    )
+    positive_sell_groups = [
+        row
+        for row in sell_groups
+        if row["support_count"] >= ACTION_REPRESENTATION_MIN_BUCKET_SUPPORT
+        and row["realized_return_mean"] > execution_buffer
+        and row["realized_return_sum"] > 0.0
+    ]
+    return {
+        "split": split_name,
+        "example_count": len(examples),
+        "action_count": len(rows),
+        "sell_before_close_summary": _action_representation_metrics(
+            sell_rows,
+            execution_buffer=execution_buffer,
+        ),
+        "action_family_summary": _action_representation_group_summaries(
+            rows=rows,
+            group_fields=("action_family",),
+            execution_buffer=execution_buffer,
+        ),
+        "fine_action_family_summary": _action_representation_group_summaries(
+            rows=rows,
+            group_fields=("fine_action_family",),
+            execution_buffer=execution_buffer,
+        ),
+        "side_exit_policy_price_time_summary": _action_representation_group_summaries(
+            rows=rows,
+            group_fields=(
+                "side",
+                "intended_exit_policy",
+                "price_bucket",
+                "time_to_close_bucket",
+            ),
+            execution_buffer=execution_buffer,
+        ),
+        "sell_before_close_negative_contributors": [
+            row for row in sell_groups if row["realized_return_sum"] < 0.0
+        ][:10],
+        "sell_before_close_positive_supported_buckets": positive_sell_groups[:10],
+        "top_negative_high_score_sell_before_close_examples": (
+            _action_representation_top_negative_examples(sell_rows)
+        ),
+        "supported_positive_sell_before_close_bucket_count": len(
+            positive_sell_groups
+        ),
+        "sell_before_close_unique_market_count": len(
+            {row["market_id"] for row in sell_rows}
+        ),
+        "min_positive_bucket_support": ACTION_REPRESENTATION_MIN_BUCKET_SUPPORT,
+        "execution_buffer": execution_buffer,
+    }
+
+
+def _action_representation_row(
+    *,
+    split_name: str,
+    example: PolymarketPolicyExample,
+    prediction: PolymarketPolicyPrediction,
+    action: str,
+) -> dict[str, Any]:
+    raw_score = float(prediction.expected_return_by_action[action])
+    scores = _score_map(prediction)
+    bucket = action_value_bucket_payload(
+        action=action,
+        features=prediction.features,
+        raw_score=raw_score,
+    )
+    return {
+        "split": split_name,
+        "market_id": example.market_id,
+        "condition_id": example.condition_id,
+        "slug": example.slug,
+        "market_family": example.market_family,
+        "decision_ts": int(example.decision_ts),
+        "action": action,
+        "action_family": bucket["action_family"],
+        "fine_action_family": bucket["fine_action_family"],
+        "side": bucket["side"],
+        "intended_exit_policy": bucket["intended_exit_policy"],
+        "price_bucket": bucket["price_bucket"],
+        "time_to_close_bucket": bucket["time_to_close_bucket"],
+        "raw_score_bucket": bucket["raw_score_bucket"],
+        "raw_score": raw_score,
+        "calibrated_score": float(scores[action]),
+        "realized_return": float(example.action_return_targets[action]),
+        "realized_trade_return": float(
+            example.realized_trade_return_targets.get(action, 0.0)
+        ),
+        "settlement_return": float(
+            example.settlement_return_targets.get(action, 0.0)
+        ),
+        "is_positive": bool(example.action_is_positive_targets.get(action, False)),
+        "entry_up_ask": prediction.features.get("up_ask"),
+        "entry_down_ask": prediction.features.get("down_ask"),
+        "entry_up_bid": prediction.features.get("up_bid"),
+        "entry_down_bid": prediction.features.get("down_bid"),
+        "time_to_close_seconds": prediction.features.get("time_to_close_seconds"),
+        "market_age_seconds": prediction.features.get("market_age_seconds"),
+    }
+
+
+def _action_representation_top_negative_examples(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    negative_high_score_rows = [
+        row
+        for row in rows
+        if row["realized_return"] < 0.0 and row["calibrated_score"] > 0.0
+    ]
+    ranked = sorted(
+        negative_high_score_rows,
+        key=lambda row: (
+            -float(row["calibrated_score"]),
+            float(row["realized_return"]),
+            str(row["market_id"]),
+            int(row["decision_ts"]),
+            str(row["action"]),
+        ),
+    )
+    fields = (
+        "market_id",
+        "condition_id",
+        "slug",
+        "decision_ts",
+        "action",
+        "fine_action_family",
+        "side",
+        "price_bucket",
+        "time_to_close_bucket",
+        "raw_score",
+        "calibrated_score",
+        "realized_return",
+        "realized_trade_return",
+        "settlement_return",
+        "entry_up_ask",
+        "entry_down_ask",
+        "entry_up_bid",
+        "entry_down_bid",
+        "time_to_close_seconds",
+        "market_age_seconds",
+    )
+    return [{field: row[field] for field in fields} for row in ranked[:10]]
+
+
+def _action_representation_group_summaries(
+    *,
+    rows: list[dict[str, Any]],
+    group_fields: tuple[str, ...],
+    execution_buffer: float,
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[tuple(str(row[field]) for field in group_fields)].append(row)
+    summaries = []
+    for key, group_rows in grouped.items():
+        payload = {field: key[index] for index, field in enumerate(group_fields)}
+        payload.update(
+            _action_representation_metrics(
+                group_rows,
+                execution_buffer=execution_buffer,
+            )
+        )
+        summaries.append(payload)
+    return sorted(
+        summaries,
+        key=lambda row: (
+            float(row["realized_return_sum"]),
+            -int(row["support_count"]),
+            tuple(str(row[field]) for field in group_fields),
+        ),
+    )
+
+
+def _action_representation_metrics(
+    rows: list[dict[str, Any]],
+    *,
+    execution_buffer: float,
+) -> dict[str, Any]:
+    realized_returns = [float(row["realized_return"]) for row in rows]
+    trade_returns = [float(row["realized_trade_return"]) for row in rows]
+    settlement_returns = [float(row["settlement_return"]) for row in rows]
+    calibrated_scores = [float(row["calibrated_score"]) for row in rows]
+    support_count = len(rows)
+    unique_market_count = len({row["market_id"] for row in rows})
+    positive_count = sum(1 for value in realized_returns if value > 0.0)
+    realized_sum = sum(realized_returns)
+    realized_mean = _mean(realized_returns)
+    return {
+        "support_count": support_count,
+        "unique_market_count": unique_market_count,
+        "realized_return_mean": realized_mean,
+        "realized_return_sum": realized_sum,
+        "realized_trade_return_mean": _mean(trade_returns),
+        "settlement_return_mean": _mean(settlement_returns),
+        "calibrated_score_mean": _mean(calibrated_scores),
+        "positive_count": positive_count,
+        "positive_rate": 0.0 if support_count == 0 else positive_count / support_count,
+        "mean_exceeds_execution_buffer": realized_mean > execution_buffer,
+        "sum_positive": realized_sum > 0.0,
+        "supported_positive_bucket": (
+            support_count >= ACTION_REPRESENTATION_MIN_BUCKET_SUPPORT
+            and realized_mean > execution_buffer
+            and realized_sum > 0.0
+        ),
+    }
+
+
 def _zero_entry_candidate_report(
     *,
     spec: dict[str, Any],
@@ -991,6 +1400,8 @@ def _zero_entry_candidate_report(
         for field in (
             "action",
             "action_family",
+            "fine_action_family",
+            "intended_exit_policy",
             "side",
             "price_bucket",
             "time_to_close_bucket",
@@ -1039,6 +1450,10 @@ def _zero_entry_action_row(
     overlay: dict[str, Any],
 ) -> dict[str, Any]:
     family = action_value_action_family(action)
+    fine_family = action_value_fine_action_family(
+        action=action,
+        features=prediction.features,
+    )
     bucket = action_value_bucket_payload(
         action=action,
         features=prediction.features,
@@ -1046,7 +1461,7 @@ def _zero_entry_action_row(
     )
     bucket_key = _overlay_bucket_key(action=action, prediction=prediction)
     bucket_evidence = overlay["bucket_evidence"].get(bucket_key)
-    family_evidence = overlay["family_evidence"].get(family)
+    family_evidence = overlay["family_evidence"].get(fine_family)
     bucket_missing = bucket_evidence is None
     family_missing = family_evidence is None
     bucket_support_failed = bool(
@@ -1086,6 +1501,8 @@ def _zero_entry_action_row(
         "decision_ts": prediction.decision_ts,
         "action": action,
         "action_family": family,
+        "fine_action_family": fine_family,
+        "intended_exit_policy": bucket["intended_exit_policy"],
         "side": bucket["side"],
         "price_bucket": bucket["price_bucket"],
         "time_to_close_bucket": bucket["time_to_close_bucket"],
@@ -1602,7 +2019,12 @@ def _fit_bucket_overlay(
             bucket_key = _overlay_bucket_key(action=action, prediction=prediction)
             realized_return = float(example.action_return_targets[action])
             bucket_rows[bucket_key].append(realized_return)
-            family_rows[action_value_action_family(action)].append(realized_return)
+            family_rows[
+                action_value_fine_action_family(
+                    action=action,
+                    features=prediction.features,
+                )
+            ].append(realized_return)
     bucket_evidence = {
         key: _overlay_evidence(
             name=key,
@@ -1727,7 +2149,10 @@ def _overlay_score(
 ) -> float:
     if action == "NO_TRADE":
         return score
-    family = action_value_action_family(action)
+    family = action_value_fine_action_family(
+        action=action,
+        features=prediction.features,
+    )
     bucket_key = _overlay_bucket_key(action=action, prediction=prediction)
     family_evidence = overlay["family_evidence"].get(family)
     bucket_evidence = overlay["bucket_evidence"].get(bucket_key)

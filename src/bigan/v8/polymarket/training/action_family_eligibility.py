@@ -79,6 +79,12 @@ def build_action_family_eligibility_report(
         execution_buffer=execution_buffer,
         min_support=min_support,
     )
+    fine_family_gate_results = _gate_results(
+        rows=rows,
+        group_field="fine_action_family",
+        execution_buffer=execution_buffer,
+        min_support=min_support,
+    )
     enabled_families = sorted(
         family
         for family, gate in family_gate_results.items()
@@ -120,16 +126,25 @@ def build_action_family_eligibility_report(
         "ineligible_action_families": ineligible_families,
         "action_family_gate_results": family_gate_results,
         "action_gate_results": action_gate_results,
+        "fine_action_family_gate_results": fine_family_gate_results,
         "action_family_paper_decision_eligible": paper_decision_eligible,
         "action_family_paper_decision_ineligible_reasons": reason_codes,
         "reason_codes": reason_codes,
         "high_score_by_action": _group_summaries(rows, ("action",)),
         "high_score_by_action_family": _group_summaries(rows, ("action_family",)),
+        "high_score_by_fine_action_family": _group_summaries(
+            rows,
+            ("fine_action_family",),
+        ),
         "high_score_by_side": _group_summaries(rows, ("side",)),
         "high_score_by_price_bucket": _group_summaries(rows, ("price_bucket",)),
         "high_score_by_time_to_close_bucket": _group_summaries(
             rows,
             ("time_to_close_bucket",),
+        ),
+        "high_score_by_side_exit_policy_price_time_bucket": _group_summaries(
+            rows,
+            ("side", "intended_exit_policy", "price_bucket", "time_to_close_bucket"),
         ),
         "high_score_by_raw_score_bucket": _group_summaries(
             rows,
@@ -484,6 +499,15 @@ def action_family_eligibility_markdown(report: dict[str, Any]) -> str:
             f"sum={gate['realized_return_sum']} "
             f"passed={str(gate['gate_passed']).lower()}"
         )
+    lines.extend(["", "## Fine Family Gates", ""])
+    for family, gate in sorted(report["fine_action_family_gate_results"].items()):
+        lines.append(
+            "- "
+            f"{family}: support={gate['support_count']} "
+            f"mean={gate['realized_return_mean']} "
+            f"sum={gate['realized_return_sum']} "
+            f"passed={str(gate['gate_passed']).lower()}"
+        )
     lines.extend(
         [
             "",
@@ -738,6 +762,7 @@ def _row_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     calibrated_scores = [row["calibrated_score"] for row in rows]
     action_counts = Counter(str(row["action"]) for row in rows)
     family_counts = Counter(str(row["action_family"]) for row in rows)
+    fine_family_counts = Counter(str(row["fine_action_family"]) for row in rows)
     side_counts = Counter(str(row["side"]) for row in rows)
     unique_market_count = len({str(row["market_id"]) for row in rows})
     support_count = len(rows)
@@ -749,6 +774,7 @@ def _row_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "calibrated_score_mean": _mean(calibrated_scores),
         "action_distribution": dict(sorted(action_counts.items())),
         "action_family_distribution": dict(sorted(family_counts.items())),
+        "fine_action_family_distribution": dict(sorted(fine_family_counts.items())),
         "side_distribution": dict(sorted(side_counts.items())),
         "paper_decision_count_estimate": support_count,
         "unique_market_count": unique_market_count,

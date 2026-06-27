@@ -153,6 +153,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "model_ranking_error_summary",
         "model_ranking_candidate_comparison",
         "model_ranking_candidate_comparison_summary",
+        "action_representation_diagnostic_report",
+        "action_representation_diagnostic_summary",
         "ranking_overlay_zero_entry_diagnostic_report",
         "ranking_overlay_zero_entry_diagnostic_summary",
         "source_model_eligibility_report",
@@ -398,6 +400,56 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "model_ranking_candidate_comparison.json"
     )
     assert looks_like_sha256(manifest["model_ranking_candidate_comparison_sha256"])
+    action_representation = _read_json(
+        result.artifact_paths["action_representation_diagnostic_report"]
+    )
+    action_representation_id = action_representation[
+        "action_representation_diagnostic_report_id"
+    ]
+    action_representation_payload = dict(action_representation)
+    action_representation_payload.pop("action_representation_diagnostic_report_id")
+    assert canonical_json_sha256(action_representation_payload) == (
+        action_representation_id
+    )
+    assert action_representation["schema_version"] == (
+        "bigan-v8-polymarket-action-representation-diagnostic-v1"
+    )
+    assert action_representation["diagnostic_only"] is True
+    assert action_representation["promotion_evidence_eligible"] is False
+    assert action_representation["source_model_candidate_eligible"] is False
+    assert action_representation["paper_run_resume_allowed"] is False
+    assert action_representation["fine_action_family_definition"] == (
+        "side|intended_exit_policy|price_bucket|time_to_close_bucket"
+    )
+    assert action_representation["label_exit_path_assessment"][
+        "sell_before_close_exit_path_coarse"
+    ] is True
+    assert "single_terminal_exit_bid_path" in action_representation[
+        "label_exit_path_assessment"
+    ]["coarse_exit_path_risk_codes"]
+    for split_name in ("validation", "shadow"):
+        split = action_representation[split_name]
+        assert split["sell_before_close_summary"]["support_count"] > 0
+        assert "action_family_summary" in split
+        assert "fine_action_family_summary" in split
+        assert "side_exit_policy_price_time_summary" in split
+        assert "sell_before_close_negative_contributors" in split
+        assert "sell_before_close_positive_supported_buckets" in split
+        assert "top_negative_high_score_sell_before_close_examples" in split
+        for row in split["fine_action_family_summary"]:
+            assert "fine_action_family" in row
+            assert "unique_market_count" in row
+            assert "realized_trade_return_mean" in row
+        for row in split["top_negative_high_score_sell_before_close_examples"]:
+            assert "fine_action_family" in row
+            assert "calibrated_score" in row
+            assert "realized_return" in row
+            assert "time_to_close_seconds" in row
+    assert result.action_representation_diagnostic_report == action_representation
+    assert manifest["action_representation_diagnostic_report_path"] == (
+        "action_representation_diagnostic_report.json"
+    )
+    assert looks_like_sha256(manifest["action_representation_diagnostic_sha256"])
     zero_entry_report = _read_json(
         result.artifact_paths["ranking_overlay_zero_entry_diagnostic_report"]
     )
@@ -448,6 +500,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         assert set(candidate["grouped_summaries"]) == {
             "action",
             "action_family",
+            "fine_action_family",
+            "intended_exit_policy",
             "side",
             "price_bucket",
             "time_to_close_bucket",
@@ -480,8 +534,11 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert action_family_report["family_high_score_execution_buffer"] == 0.015
     assert "action_family_paper_decision_eligible" in action_family_report
     assert "action_family_gate_results" in action_family_report
+    assert "fine_action_family_gate_results" in action_family_report
     assert "high_score_by_action" in action_family_report
+    assert "high_score_by_fine_action_family" in action_family_report
     assert "high_score_by_action_family_side_price_time_raw_bucket" in action_family_report
+    assert "high_score_by_side_exit_policy_price_time_bucket" in action_family_report
     assert manifest["action_family_eligibility_report_path"] == (
         "action_family_eligibility_report.json"
     )

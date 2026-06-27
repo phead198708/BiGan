@@ -55,6 +55,19 @@ def action_value_intended_exit_policy(action: str) -> str:
     return "none"
 
 
+def action_value_fine_action_family(*, action: str, features: dict[str, Any]) -> str:
+    """Return side + exit policy + causal price/time bucket action family."""
+
+    return "|".join(
+        (
+            action_value_action_side(action),
+            action_value_intended_exit_policy(action),
+            action_value_price_bucket(action=action, features=features),
+            action_value_time_to_close_bucket(features),
+        )
+    )
+
+
 def action_value_price_bucket(*, action: str, features: dict[str, Any]) -> str:
     """Bucket the executable entry price used by the action."""
 
@@ -125,6 +138,10 @@ def action_value_bucket_payload(
     return {
         "action": action,
         "action_family": action_value_action_family(action),
+        "fine_action_family": action_value_fine_action_family(
+            action=action,
+            features=features,
+        ),
         "side": action_value_action_side(action),
         "intended_exit_policy": action_value_intended_exit_policy(action),
         "price_bucket": action_value_price_bucket(action=action, features=features),
