@@ -550,6 +550,11 @@ def _write_artifacts(
     _write_json(paths["replay_report"], replay_report)
     _write_json(paths["action_value_calibration"], action_value_calibration)
     _write_json(paths["action_value_signal_sanity_report"], signal_sanity)
+    _write_candidate_artifacts(
+        run_dir=run_dir,
+        model_ranking_candidate_comparison=model_ranking_candidate_comparison,
+        source_model_eligibility=source_model_eligibility,
+    )
     _write_json(paths["model_ranking_error_report"], model_ranking_error)
     _write_json(
         paths["model_ranking_candidate_comparison"],
@@ -619,6 +624,79 @@ def _write_artifacts(
         encoding="utf-8",
     )
     return paths
+
+
+def _write_candidate_artifacts(
+    *,
+    run_dir: Path,
+    model_ranking_candidate_comparison: dict[str, Any],
+    source_model_eligibility: dict[str, Any],
+) -> None:
+    root = run_dir / "policy_candidate_artifacts"
+    root.mkdir(parents=True, exist_ok=True)
+    exported = []
+    best_candidate_name = model_ranking_candidate_comparison.get("best_candidate_name")
+    for candidate in model_ranking_candidate_comparison["candidates"]:
+        should_export = bool(candidate.get("candidate_artifact_required")) or (
+            candidate["candidate_name"] == best_candidate_name
+        )
+        predictions = candidate.pop("candidate_predictions", [])
+        manifest = candidate.pop("candidate_manifest", None)
+        overlay = candidate.pop("ranking_overlay", None)
+        if not should_export or manifest is None or overlay is None:
+            continue
+        safe_name = _safe_artifact_name(candidate["candidate_name"])
+        files = {
+            "predictions": (
+                root / f"polymarket_policy_candidate_{safe_name}_predictions.jsonl"
+            ),
+            "manifest": (
+                root / f"polymarket_policy_candidate_{safe_name}_manifest.json"
+            ),
+            "ranking_overlay": (
+                root
+                / f"polymarket_policy_candidate_{safe_name}_ranking_overlay.json"
+            ),
+        }
+        _write_jsonl(files["predictions"], predictions)
+        _write_json(files["ranking_overlay"], overlay)
+        manifest = dict(manifest)
+        manifest["candidate_prediction_count"] = len(predictions)
+        manifest["candidate_artifact_paths"] = {
+            key: _relative_path(path, run_dir)
+            for key, path in sorted(files.items())
+            if key != "manifest"
+        }
+        manifest["candidate_artifact_hashes"] = {
+            "predictions": _sha256_file(files["predictions"]),
+            "ranking_overlay": _sha256_file(files["ranking_overlay"]),
+        }
+        _write_json(files["manifest"], manifest)
+        artifact_paths = {
+            key: _relative_path(path, run_dir) for key, path in sorted(files.items())
+        }
+        artifact_hashes = {
+            key: _sha256_file(path) for key, path in sorted(files.items())
+        }
+        summary = {
+            "candidate_name": candidate["candidate_name"],
+            "source_model_candidate_eligible": candidate[
+                "source_model_candidate_eligible"
+            ],
+            "candidate_artifact_reason": candidate["candidate_artifact_reason"],
+            "artifact_paths": artifact_paths,
+            "artifact_hashes": artifact_hashes,
+        }
+        candidate["candidate_artifacts"] = summary
+        exported.append(summary)
+    model_ranking_candidate_comparison["candidate_artifact_count"] = len(exported)
+    model_ranking_candidate_comparison["candidate_artifacts"] = exported
+    source_model_eligibility["candidate_artifact_count"] = len(exported)
+    source_model_eligibility["candidate_artifacts"] = exported
+
+
+def _safe_artifact_name(value: str) -> str:
+    return "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in value)
 
 
 def _write_counterfactual_replay_artifacts(

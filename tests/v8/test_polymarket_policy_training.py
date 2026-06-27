@@ -28,6 +28,9 @@ from bigan.v8.polymarket.training.action_family_eligibility import (
     build_action_family_counterfactual_prediction_sets,
 )
 from bigan.v8.polymarket.training.dataset import _split_examples
+from bigan.v8.polymarket.training.model_ranking_diagnostics import (
+    build_model_ranking_candidate_comparison,
+)
 
 
 def test_training_dataset_loads_phase2_corpus_outputs(tmp_path: Path) -> None:
@@ -283,6 +286,12 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "bigan-v8-polymarket-model-ranking-candidate-comparison-v1"
     )
     assert candidate_comparison["candidate_count"] >= 6
+    assert candidate_comparison["source_model_candidate_eligible"] is False
+    assert candidate_comparison["requires_promotion_replay_gate"] is True
+    assert candidate_comparison["paper_run_resume_allowed"] is False
+    assert candidate_comparison["paper_run_resume_blocked_reason"] == (
+        "promotion_replay_gate_required"
+    )
     assert {
         "A_current_model_baseline",
         "B_family_specific_calibration_only",
@@ -310,9 +319,36 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "bigan-v8-polymarket-source-model-eligibility-v1"
     )
     assert source_eligibility["source_model_eligible"] is False
+    assert source_eligibility["source_model_candidate_eligible"] is False
+    assert source_eligibility["requires_promotion_replay_gate"] is True
     assert source_eligibility["paper_run_resume_allowed"] is False
+    assert source_eligibility["paper_run_resume_blocked_reason"] == (
+        "promotion_replay_gate_required"
+    )
     assert source_eligibility["hard_gates"]["calibration_quality_passed"] is False
     assert source_eligibility["candidate_count"] == candidate_comparison["candidate_count"]
+    assert candidate_comparison["candidate_artifact_count"] >= 2
+    exported_names = {
+        artifact["candidate_name"]
+        for artifact in candidate_comparison["candidate_artifacts"]
+    }
+    assert {
+        "G_bucketed_lcb_rank_selector",
+        "H_positive_bucket_rank_selector",
+    }.issubset(exported_names)
+    for artifact in candidate_comparison["candidate_artifacts"]:
+        assert set(artifact["artifact_paths"]) == {
+            "manifest",
+            "predictions",
+            "ranking_overlay",
+        }
+        for artifact_path in artifact["artifact_paths"].values():
+            assert (result.run_dir / artifact_path).exists()
+        for artifact_hash in artifact["artifact_hashes"].values():
+            assert looks_like_sha256(artifact_hash)
+    assert source_eligibility["candidate_artifacts"] == candidate_comparison[
+        "candidate_artifacts"
+    ]
     assert manifest["model_ranking_error_report_path"] == (
         "model_ranking_error_report.json"
     )
@@ -623,6 +659,116 @@ def test_hold_to_settlement_disabled_counterfactual_reranks_to_sell_before_close
     assert decisions[0].planned_exit_before_ts is not None
 
 
+def test_bucketed_overlay_uses_validation_only_and_selects_supported_positive_bucket(
+    tmp_path: Path,
+) -> None:
+    validation_examples, raw_validation, calibrated_validation = (
+        _overlay_examples_and_predictions(
+            count=10,
+            positive_sell_return=0.20,
+            negative_hold_return=-0.20,
+        )
+    )
+    shadow_examples, raw_shadow, calibrated_shadow = _overlay_examples_and_predictions(
+        count=1,
+        positive_sell_return=-0.90,
+        negative_hold_return=0.90,
+        start_ts=20_000,
+    )
+
+    comparison = build_model_ranking_candidate_comparison(
+        validation_examples=validation_examples,
+        raw_validation_predictions=raw_validation,
+        calibrated_validation_predictions=calibrated_validation,
+        shadow_examples=shadow_examples,
+        raw_shadow_predictions=raw_shadow,
+        calibrated_shadow_predictions=calibrated_shadow,
+        execution_buffer=0.015,
+    )
+
+    for candidate_name in (
+        "G_bucketed_lcb_rank_selector",
+        "H_positive_bucket_rank_selector",
+    ):
+        candidate = _candidate_by_name(comparison, candidate_name)
+        assert candidate["ranking_overlay_fit_split"] == "validation"
+        assert candidate["ranking_overlay_evaluation_split"] == "shadow"
+        assert candidate["ranking_overlay_uses_shadow_split"] is False
+        assert candidate["candidate_predictions"][0][
+            "calibrated_best_policy_action"
+        ] == "BUY_UP_SELL_BEFORE_CLOSE"
+
+
+def test_bucketed_overlay_blocks_low_support_validation_buckets(tmp_path: Path) -> None:
+    validation_examples, raw_validation, calibrated_validation = (
+        _overlay_examples_and_predictions(
+            count=2,
+            positive_sell_return=0.20,
+            negative_hold_return=-0.20,
+        )
+    )
+    shadow_examples, raw_shadow, calibrated_shadow = _overlay_examples_and_predictions(
+        count=1,
+        positive_sell_return=0.20,
+        negative_hold_return=-0.20,
+        start_ts=20_000,
+    )
+
+    comparison = build_model_ranking_candidate_comparison(
+        validation_examples=validation_examples,
+        raw_validation_predictions=raw_validation,
+        calibrated_validation_predictions=calibrated_validation,
+        shadow_examples=shadow_examples,
+        raw_shadow_predictions=raw_shadow,
+        calibrated_shadow_predictions=calibrated_shadow,
+        execution_buffer=0.015,
+    )
+
+    for candidate_name in (
+        "G_bucketed_lcb_rank_selector",
+        "H_positive_bucket_rank_selector",
+    ):
+        candidate = _candidate_by_name(comparison, candidate_name)
+        assert candidate["candidate_predictions"][0][
+            "calibrated_best_policy_action"
+        ] == "NO_TRADE"
+
+
+def test_bucketed_overlay_blocks_negative_validation_buckets(tmp_path: Path) -> None:
+    validation_examples, raw_validation, calibrated_validation = (
+        _overlay_examples_and_predictions(
+            count=10,
+            positive_sell_return=-0.20,
+            negative_hold_return=-0.10,
+        )
+    )
+    shadow_examples, raw_shadow, calibrated_shadow = _overlay_examples_and_predictions(
+        count=1,
+        positive_sell_return=0.20,
+        negative_hold_return=-0.20,
+        start_ts=20_000,
+    )
+
+    comparison = build_model_ranking_candidate_comparison(
+        validation_examples=validation_examples,
+        raw_validation_predictions=raw_validation,
+        calibrated_validation_predictions=calibrated_validation,
+        shadow_examples=shadow_examples,
+        raw_shadow_predictions=raw_shadow,
+        calibrated_shadow_predictions=calibrated_shadow,
+        execution_buffer=0.015,
+    )
+
+    for candidate_name in (
+        "G_bucketed_lcb_rank_selector",
+        "H_positive_bucket_rank_selector",
+    ):
+        candidate = _candidate_by_name(comparison, candidate_name)
+        assert candidate["candidate_predictions"][0][
+            "calibrated_best_policy_action"
+        ] == "NO_TRADE"
+
+
 def test_action_value_prediction_api_rejects_missing_features_by_default(
     tmp_path: Path,
 ) -> None:
@@ -687,6 +833,140 @@ def _example(*, market_index: int, decision_ts: int) -> PolymarketPolicyExample:
         resolved_outcome="UP" if market_index == 0 else "DOWN",
         resolution_status="RESOLVED",
     )
+
+
+def _overlay_examples_and_predictions(
+    *,
+    count: int,
+    positive_sell_return: float,
+    negative_hold_return: float,
+    start_ts: int = 10_000,
+) -> tuple[
+    tuple[PolymarketPolicyExample, ...],
+    tuple[PolymarketPolicyPrediction, ...],
+    tuple[PolymarketPolicyPrediction, ...],
+]:
+    examples = []
+    predictions = []
+    for index in range(count):
+        action_returns = dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, -0.30)
+        action_returns["NO_TRADE"] = 0.0
+        action_returns["BUY_UP_SELL_BEFORE_CLOSE"] = positive_sell_return
+        action_returns["BUY_DOWN_SELL_BEFORE_CLOSE"] = positive_sell_return
+        action_returns["BUY_DOWN_HOLD_TO_SETTLEMENT"] = negative_hold_return
+        decision_ts = start_ts + index
+        features = {
+            "up_bid": 0.43,
+            "up_ask": 0.45,
+            "up_mid": 0.44,
+            "down_bid": 0.53,
+            "down_ask": 0.55,
+            "down_mid": 0.54,
+            "time_to_close_seconds": 120.0,
+        }
+        example = PolymarketPolicyExample(
+            market_id=f"overlay-market-{decision_ts}",
+            condition_id=f"overlay-condition-{decision_ts}",
+            slug=f"overlay-slug-{decision_ts}",
+            market_family="btc_updown_5m",
+            horizon_ms=300_000,
+            decision_ts=decision_ts,
+            feature_cutoff_ts=decision_ts,
+            max_input_ts=decision_ts,
+            features=features,
+            target_up_probability=1.0,
+            resolved_outcome="UP",
+            resolution_status="RESOLVED",
+            action_return_targets=action_returns,
+            best_policy_action=_rank_action_returns(action_returns)[0][0],
+            best_action_expected_return=_rank_action_returns(action_returns)[0][1],
+            second_best_action_expected_return=_rank_action_returns(action_returns)[1][1],
+            best_action_margin=(
+                _rank_action_returns(action_returns)[0][1]
+                - _rank_action_returns(action_returns)[1][1]
+            ),
+        )
+        prediction = _overlay_prediction(
+            example=example,
+            action_returns={
+                "NO_TRADE": 0.0,
+                "BUY_UP_HOLD_TO_SETTLEMENT": -0.10,
+                "BUY_DOWN_HOLD_TO_SETTLEMENT": 0.50,
+                "BUY_UP_SELL_BEFORE_CLOSE": 0.10,
+                "BUY_DOWN_SELL_BEFORE_CLOSE": -0.10,
+            },
+        )
+        examples.append(example)
+        predictions.append(prediction)
+    return tuple(examples), tuple(predictions), tuple(predictions)
+
+
+def _overlay_prediction(
+    *,
+    example: PolymarketPolicyExample,
+    action_returns: dict[str, float],
+) -> PolymarketPolicyPrediction:
+    return PolymarketPolicyPrediction(
+        market_id=example.market_id,
+        condition_id=example.condition_id,
+        slug=example.slug,
+        market_family=example.market_family,
+        horizon_ms=example.horizon_ms,
+        decision_ts=example.decision_ts,
+        estimated_up_probability=0.70,
+        confidence=0.90,
+        score=0.50,
+        calibration_bucket="overlay-test",
+        model_version="overlay-test-model",
+        feature_schema_hash="a" * 64,
+        training_corpus_hash="b" * 64,
+        features=dict(example.features),
+        target_up_probability=example.target_up_probability,
+        p_up_auxiliary=0.70,
+        expected_return_by_action=action_returns,
+        expected_return_no_trade=action_returns["NO_TRADE"],
+        expected_return_buy_up_hold_to_settlement=action_returns[
+            "BUY_UP_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_down_hold_to_settlement=action_returns[
+            "BUY_DOWN_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_up_sell_before_close=action_returns[
+            "BUY_UP_SELL_BEFORE_CLOSE"
+        ],
+        expected_return_buy_down_sell_before_close=action_returns[
+            "BUY_DOWN_SELL_BEFORE_CLOSE"
+        ],
+        best_policy_action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+        best_action_expected_return=0.50,
+        second_best_action_expected_return=0.10,
+        best_action_margin=0.40,
+        calibrated_expected_pnl_per_notional_by_action=action_returns,
+        calibrated_best_policy_action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+        calibrated_expected_pnl_per_notional=0.50,
+        calibrated_second_best_expected_pnl_per_notional=0.10,
+        calibrated_action_margin=0.40,
+        action_value_calibration_applied=True,
+        action_value_calibration_id="c" * 64,
+        calibration_support_count=10,
+        calibration_bucket_count=len(ACTION_VALUE_LABEL_ACTIONS),
+        policy_confidence=0.90,
+        action_value_head_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        feature_conditioned_action_value_model_enabled=True,
+    )
+
+
+def _candidate_by_name(comparison: dict, candidate_name: str) -> dict:
+    return next(
+        candidate
+        for candidate in comparison["candidates"]
+        if candidate["candidate_name"] == candidate_name
+    )
+
+
+def _rank_action_returns(action_returns: dict[str, float]) -> list[tuple[str, float]]:
+    return sorted(action_returns.items(), key=lambda item: (-float(item[1]), item[0]))
 
 
 def _read_json(path: Path) -> dict:

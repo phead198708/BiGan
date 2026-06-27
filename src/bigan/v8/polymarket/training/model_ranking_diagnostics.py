@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter, defaultdict
 from dataclasses import replace
 from typing import Any
@@ -39,6 +40,8 @@ SOURCE_MODEL_ELIGIBILITY_SCHEMA_VERSION = (
 BEST_ACTION_CONCENTRATION_FAIL_THRESHOLD = 0.95
 P_UP_ACTION_DISAGREEMENT_FAIL_THRESHOLD = 0.50
 P_UP_MATERIAL_DISAGREEMENT_THRESHOLD = 0.55
+RANKING_OVERLAY_MIN_BUCKET_SUPPORT = 3
+RANKING_OVERLAY_MIN_FAMILY_SUPPORT = 10
 
 
 def build_model_ranking_error_report(
@@ -130,8 +133,11 @@ def build_model_ranking_candidate_comparison(
             )
         )
     eligible_candidates = [
-        candidate for candidate in candidates if candidate["source_model_eligible"]
+        candidate
+        for candidate in candidates
+        if candidate["source_model_candidate_eligible"]
     ]
+    source_model_candidate_eligible = bool(eligible_candidates)
     report = {
         "schema_version": MODEL_RANKING_CANDIDATE_COMPARISON_SCHEMA_VERSION,
         "policy_schema_version": POLYMARKET_POLICY_SCHEMA_VERSION,
@@ -141,8 +147,12 @@ def build_model_ranking_candidate_comparison(
         "candidate_names": [candidate["candidate_name"] for candidate in candidates],
         "best_candidate_name": _best_candidate(candidates)["candidate_name"],
         "best_candidate_source_model_eligible": _best_candidate(candidates)[
-            "source_model_eligible"
+            "source_model_candidate_eligible"
         ],
+        "source_model_candidate_eligible": source_model_candidate_eligible,
+        "requires_promotion_replay_gate": True,
+        "paper_run_resume_allowed": False,
+        "paper_run_resume_blocked_reason": "promotion_replay_gate_required",
         "no_candidate_eligible": not eligible_candidates,
         "no_candidate_eligible_reason_codes": sorted(
             {
@@ -171,13 +181,15 @@ def build_source_model_eligibility_report(
     candidate_eligible = [
         candidate
         for candidate in model_ranking_candidate_comparison["candidates"]
-        if candidate["source_model_eligible"]
+        if candidate["source_model_candidate_eligible"]
     ]
     report = {
         "schema_version": SOURCE_MODEL_ELIGIBILITY_SCHEMA_VERSION,
         "policy_schema_version": POLYMARKET_POLICY_SCHEMA_VERSION,
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
         "source_model_eligible": source_model_eligible,
+        "source_model_candidate_eligible": bool(candidate_eligible),
+        "requires_promotion_replay_gate": True,
         "source_model_ineligible_reason_codes": signal_sanity[
             "action_value_paper_decision_ineligible_reasons"
         ],
@@ -237,14 +249,9 @@ def build_source_model_eligibility_report(
                 "no_candidate_eligible_reason_codes"
             ]
         ),
-        "paper_run_resume_allowed": (
-            source_model_eligible and bool(candidate_eligible)
-        ),
-        "paper_run_resume_blocked_reason": (
-            None
-            if source_model_eligible and candidate_eligible
-            else "eligible_source_model_and_positive_replay_required"
-        ),
+        "paper_run_resume_allowed": False,
+        "paper_run_resume_blocked_reason": "promotion_replay_gate_required",
+        "candidate_artifacts": [],
         **compact_safety_fields(),
     }
     report["source_model_eligibility_report_id"] = canonical_json_sha256(report)
@@ -324,6 +331,8 @@ def source_model_eligibility_markdown(report: dict[str, Any]) -> str:
         "",
         f"- schema_version: `{report['schema_version']}`",
         f"- source_model_eligible: `{str(report['source_model_eligible']).lower()}`",
+        f"- source_model_candidate_eligible: `{str(report['source_model_candidate_eligible']).lower()}`",
+        f"- requires_promotion_replay_gate: `{str(report['requires_promotion_replay_gate']).lower()}`",
         f"- source_model_ineligible_reason_codes: `{reasons}`",
         f"- eligible_candidate_count: `{report['eligible_candidate_count']}`",
         f"- no_candidate_eligible: `{str(report['no_candidate_eligible']).lower()}`",
@@ -457,6 +466,26 @@ def _candidate_specs(
         predictions=calibrated_validation_predictions,
         execution_buffer=execution_buffer,
     )
+    lcb_overlay = _fit_bucket_overlay(
+        examples=validation_examples,
+        predictions=calibrated_validation_predictions,
+        execution_buffer=execution_buffer,
+        method="bucketed_lcb_rank_selector",
+        min_bucket_support=RANKING_OVERLAY_MIN_BUCKET_SUPPORT,
+        min_family_support=RANKING_OVERLAY_MIN_FAMILY_SUPPORT,
+        require_lcb_over_buffer=True,
+        require_positive_only=False,
+    )
+    positive_overlay = _fit_bucket_overlay(
+        examples=validation_examples,
+        predictions=calibrated_validation_predictions,
+        execution_buffer=execution_buffer,
+        method="positive_bucket_rank_selector",
+        min_bucket_support=RANKING_OVERLAY_MIN_BUCKET_SUPPORT,
+        min_family_support=RANKING_OVERLAY_MIN_FAMILY_SUPPORT,
+        require_lcb_over_buffer=False,
+        require_positive_only=True,
+    )
     return (
         {
             "candidate_name": "A_current_model_baseline",
@@ -517,6 +546,32 @@ def _candidate_specs(
             "eligible_families": None,
             "notes": [
                 "diagnostic proxy only; no model-family retrain is promoted by #145"
+            ],
+        },
+        {
+            "candidate_name": "G_bucketed_lcb_rank_selector",
+            "candidate_type": "bucketed_lcb_rank_selector",
+            "score_source": "fallback",
+            "corrections": {},
+            "correction_group": "none",
+            "eligible_families": None,
+            "ranking_overlay": lcb_overlay,
+            "notes": [
+                "validation-fitted bucket/family lower-confidence-bound selector",
+                "shadow labels are not used for fit",
+            ],
+        },
+        {
+            "candidate_name": "H_positive_bucket_rank_selector",
+            "candidate_type": "positive_bucket_rank_selector",
+            "score_source": "fallback",
+            "corrections": {},
+            "correction_group": "none",
+            "eligible_families": None,
+            "ranking_overlay": positive_overlay,
+            "notes": [
+                "validation-fitted positive bucket/family selector",
+                "shadow labels are not used for fit",
             ],
         },
     )
@@ -596,19 +651,36 @@ def _candidate_report(
         ineligible_reasons.update(
             family_report["action_family_paper_decision_ineligible_reasons"]
         )
+    high_score_sum_positive = (
+        float(family_report["high_score_realized_return_sum"]) > 0.0
+    )
+    if not high_score_sum_positive:
+        ineligible_reasons.add("action_value_high_score_return_sum_not_positive")
     source_model_eligible = (
         calibration_support_passed
         and calibration_quality_passed
         and bool(family_report["action_family_paper_decision_eligible"])
         and concentration_passed
         and disagreement_passed
+        and high_score_sum_positive
     )
+    overlay = spec.get("ranking_overlay")
+    ranking_overlay_used = overlay is not None
     return {
         "candidate_name": spec["candidate_name"],
         "candidate_type": spec["candidate_type"],
         "score_source": spec["score_source"],
         "correction_group": spec["correction_group"],
         "notes": list(spec["notes"]),
+        "ranking_overlay_used": ranking_overlay_used,
+        "ranking_overlay_method": None if overlay is None else overlay["method"],
+        "ranking_overlay_fit_split": None if overlay is None else overlay["fit_split"],
+        "ranking_overlay_evaluation_split": None
+        if overlay is None
+        else overlay["evaluation_split"],
+        "ranking_overlay_uses_shadow_split": False
+        if overlay is not None
+        else None,
         "shadow_raw_mae": raw_mae,
         "shadow_calibrated_mae": calibrated_mae,
         "shadow_top_1_action_hit_rate": ranking["top_1_action_hit_rate"],
@@ -622,6 +694,7 @@ def _candidate_report(
         "high_score_realized_return_sum": family_report[
             "high_score_realized_return_sum"
         ],
+        "high_score_realized_return_sum_positive": high_score_sum_positive,
         "action_family_gates": family_report["action_family_gate_results"],
         "action_family_paper_decision_eligible": family_report[
             "action_family_paper_decision_eligible"
@@ -637,6 +710,9 @@ def _candidate_report(
         "p_up_action_disagreement_within_limit": disagreement_passed,
         "p_up_action_disagreement_rate": disagreement_rate,
         "source_model_eligible": source_model_eligible,
+        "source_model_candidate_eligible": source_model_eligible,
+        "requires_promotion_replay_gate": True,
+        "paper_run_resume_allowed": False,
         "ineligible_reason_codes": sorted(ineligible_reasons),
         "selected_action_distribution": dict(sorted(action_counts.items())),
         "ranking_summary": {
@@ -651,6 +727,44 @@ def _candidate_report(
                 "mean_oracle_best_action_realized_return",
             )
         },
+        "candidate_artifact_required": (
+            source_model_eligible
+            or ranking_overlay_used
+            or spec["candidate_name"].startswith("D_")
+        ),
+        "candidate_artifact_reason": (
+            "source_model_candidate_eligible"
+            if source_model_eligible
+            else "ranking_overlay_candidate"
+            if ranking_overlay_used
+            else "best_near_eligible_diagnostic"
+            if spec["candidate_name"].startswith("D_")
+            else "not_exported"
+        ),
+        "candidate_predictions": [
+            prediction.to_dict() for prediction in shadow_predictions
+        ],
+        "candidate_manifest": _candidate_manifest(
+            candidate_name=spec["candidate_name"],
+            candidate_type=spec["candidate_type"],
+            ranking_overlay=overlay,
+            source_model_eligible=source_model_eligible,
+            action_family_paper_decision_eligible=family_report[
+                "action_family_paper_decision_eligible"
+            ],
+            calibration_quality_passed=calibration_quality_passed,
+            best_action_concentration_passed=concentration_passed,
+            p_up_action_disagreement_within_limit=disagreement_passed,
+            high_score_support_count=family_report["high_score_support_count"],
+            high_score_realized_return_mean=family_report[
+                "high_score_realized_return_mean"
+            ],
+            high_score_realized_return_sum=family_report[
+                "high_score_realized_return_sum"
+            ],
+            ineligible_reason_codes=sorted(ineligible_reasons),
+        ),
+        "ranking_overlay": _candidate_overlay_payload(spec),
         **compact_safety_fields(),
     }
 
@@ -685,6 +799,14 @@ def _apply_candidate_spec(
                 and action_value_action_family(action) not in set(eligible_families)
             ):
                 scores[action] = -1_000_000.0
+            overlay = spec.get("ranking_overlay")
+            if overlay is not None:
+                scores[action] = _overlay_score(
+                    action=action,
+                    prediction=fallback,
+                    score=float(scores[action]),
+                    overlay=overlay,
+                )
         calibrated.append(
             _prediction_with_scores(
                 prediction=fallback,
@@ -803,6 +925,227 @@ def _fit_family_prior_penalties(
         if mean_return <= execution_buffer:
             penalties[family] = -_clamp(execution_buffer - mean_return + 0.01, 0.0, 0.50)
     return penalties
+
+
+def _fit_bucket_overlay(
+    *,
+    examples: tuple[PolymarketPolicyExample, ...],
+    predictions: tuple[PolymarketPolicyPrediction, ...],
+    execution_buffer: float,
+    method: str,
+    min_bucket_support: int,
+    min_family_support: int,
+    require_lcb_over_buffer: bool,
+    require_positive_only: bool,
+) -> dict[str, Any]:
+    bucket_rows: dict[str, list[float]] = defaultdict(list)
+    family_rows: dict[str, list[float]] = defaultdict(list)
+    for example, prediction in zip(examples, predictions, strict=True):
+        for action in ACTION_VALUE_LABEL_ACTIONS:
+            if action == "NO_TRADE":
+                continue
+            bucket_key = _overlay_bucket_key(action=action, prediction=prediction)
+            realized_return = float(example.action_return_targets[action])
+            bucket_rows[bucket_key].append(realized_return)
+            family_rows[action_value_action_family(action)].append(realized_return)
+    bucket_evidence = {
+        key: _overlay_evidence(
+            name=key,
+            returns=returns,
+            min_support=min_bucket_support,
+            execution_buffer=execution_buffer,
+            require_lcb_over_buffer=require_lcb_over_buffer,
+            require_positive_only=require_positive_only,
+        )
+        for key, returns in sorted(bucket_rows.items())
+    }
+    family_evidence = {
+        key: _overlay_evidence(
+            name=key,
+            returns=returns,
+            min_support=min_family_support,
+            execution_buffer=execution_buffer,
+            require_lcb_over_buffer=require_lcb_over_buffer,
+            require_positive_only=require_positive_only,
+        )
+        for key, returns in sorted(family_rows.items())
+    }
+    return {
+        "schema_version": "bigan-v8-polymarket-ranking-overlay-v1",
+        "method": method,
+        "fit_split": "validation",
+        "evaluation_split": "shadow",
+        "uses_shadow_for_fit": False,
+        "min_bucket_support": min_bucket_support,
+        "min_family_support": min_family_support,
+        "execution_buffer": execution_buffer,
+        "require_lcb_over_buffer": require_lcb_over_buffer,
+        "require_positive_only": require_positive_only,
+        "unsupported_action_score": -1.0,
+        "score_combination": (
+            "supported_bucket_lcb_plus_model_score"
+            if require_lcb_over_buffer
+            else "supported_bucket_mean_plus_model_score"
+        ),
+        "bucket_evidence": bucket_evidence,
+        "family_evidence": family_evidence,
+        **compact_safety_fields(),
+    }
+
+
+def _overlay_evidence(
+    *,
+    name: str,
+    returns: list[float],
+    min_support: int,
+    execution_buffer: float,
+    require_lcb_over_buffer: bool,
+    require_positive_only: bool,
+) -> dict[str, Any]:
+    support_count = len(returns)
+    mean_return = _mean(returns)
+    stdev = _stdev(returns)
+    lcb = mean_return - (stdev / math.sqrt(support_count)) if support_count else 0.0
+    support_passed = support_count >= min_support
+    positive_passed = mean_return > 0.0
+    lcb_passed = lcb > execution_buffer
+    buffer_passed = mean_return > execution_buffer
+    if require_lcb_over_buffer:
+        passed = support_passed and lcb_passed
+    elif require_positive_only:
+        passed = support_passed and positive_passed
+    else:
+        passed = support_passed and buffer_passed
+    return {
+        "name": name,
+        "support_count": support_count,
+        "min_support": min_support,
+        "support_passed": support_passed,
+        "realized_return_mean": mean_return,
+        "realized_return_sum": sum(float(value) for value in returns),
+        "realized_return_stdev": stdev,
+        "risk_adjusted_lcb": lcb,
+        "execution_buffer": execution_buffer,
+        "positive_passed": positive_passed,
+        "mean_exceeds_execution_buffer": buffer_passed,
+        "lcb_exceeds_execution_buffer": lcb_passed,
+        "evidence_passed": passed,
+    }
+
+
+def _overlay_score(
+    *,
+    action: str,
+    prediction: PolymarketPolicyPrediction,
+    score: float,
+    overlay: dict[str, Any],
+) -> float:
+    if action == "NO_TRADE":
+        return score
+    family = action_value_action_family(action)
+    bucket_key = _overlay_bucket_key(action=action, prediction=prediction)
+    family_evidence = overlay["family_evidence"].get(family)
+    bucket_evidence = overlay["bucket_evidence"].get(bucket_key)
+    if not family_evidence or not bucket_evidence:
+        return float(overlay["unsupported_action_score"])
+    if not family_evidence["evidence_passed"] or not bucket_evidence["evidence_passed"]:
+        return float(overlay["unsupported_action_score"])
+    if overlay["method"] == "bucketed_lcb_rank_selector":
+        return score + float(bucket_evidence["risk_adjusted_lcb"])
+    return score + float(bucket_evidence["realized_return_mean"])
+
+
+def _overlay_bucket_key(
+    *,
+    action: str,
+    prediction: PolymarketPolicyPrediction,
+) -> str:
+    bucket = action_value_bucket_payload(
+        action=action,
+        features=prediction.features,
+        raw_score=float(prediction.expected_return_by_action[action]),
+    )
+    return "|".join(
+        [
+            action,
+            str(bucket["action_family"]),
+            str(bucket["side"]),
+            str(bucket["price_bucket"]),
+            str(bucket["time_to_close_bucket"]),
+            str(bucket["raw_score_bucket"]),
+        ]
+    )
+
+
+def _candidate_manifest(
+    *,
+    candidate_name: str,
+    candidate_type: str,
+    ranking_overlay: dict[str, Any] | None,
+    source_model_eligible: bool,
+    action_family_paper_decision_eligible: bool,
+    calibration_quality_passed: bool,
+    best_action_concentration_passed: bool,
+    p_up_action_disagreement_within_limit: bool,
+    high_score_support_count: int,
+    high_score_realized_return_mean: float,
+    high_score_realized_return_sum: float,
+    ineligible_reason_codes: list[str],
+) -> dict[str, Any]:
+    ranking_overlay_used = ranking_overlay is not None
+    return {
+        "schema_version": "bigan-v8-polymarket-policy-candidate-v1",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": candidate_name,
+        "candidate_type": candidate_type,
+        "source_model_candidate_eligible": source_model_eligible,
+        "ranking_overlay_used": ranking_overlay_used,
+        "ranking_overlay_method": None
+        if ranking_overlay is None
+        else ranking_overlay["method"],
+        "ranking_overlay_fit_split": None
+        if ranking_overlay is None
+        else ranking_overlay["fit_split"],
+        "ranking_overlay_evaluation_split": None
+        if ranking_overlay is None
+        else ranking_overlay["evaluation_split"],
+        "ranking_overlay_uses_shadow_split": False
+        if ranking_overlay is not None
+        else None,
+        "action_value_paper_decision_eligible": source_model_eligible,
+        "action_family_paper_decision_eligible": action_family_paper_decision_eligible,
+        "calibration_quality_passed": calibration_quality_passed,
+        "best_action_concentration_passed": best_action_concentration_passed,
+        "p_up_action_disagreement_within_limit": (
+            p_up_action_disagreement_within_limit
+        ),
+        "requires_promotion_replay_gate": True,
+        "paper_run_resume_allowed": False,
+        "paper_run_resume_blocked_reason": "promotion_replay_gate_required",
+        "high_score_support_count": high_score_support_count,
+        "high_score_realized_return_mean": high_score_realized_return_mean,
+        "high_score_realized_return_sum": high_score_realized_return_sum,
+        "ineligible_reason_codes": ineligible_reason_codes,
+        **compact_safety_fields(),
+    }
+
+
+def _candidate_overlay_payload(spec: dict[str, Any]) -> dict[str, Any]:
+    overlay = spec.get("ranking_overlay")
+    if overlay is None:
+        return {
+            "schema_version": "bigan-v8-polymarket-ranking-overlay-v1",
+            "candidate_name": spec["candidate_name"],
+            "ranking_overlay_used": False,
+            "fit_split": "validation",
+            "evaluation_split": "shadow",
+            "uses_shadow_for_fit": False,
+            **compact_safety_fields(),
+        }
+    payload = dict(overlay)
+    payload["candidate_name"] = spec["candidate_name"]
+    payload["ranking_overlay_used"] = True
+    return payload
 
 
 def _ranking_breakdowns(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -949,6 +1292,14 @@ def _mean(values: list[float]) -> float:
     if not values:
         return 0.0
     return sum(float(value) for value in values) / len(values)
+
+
+def _stdev(values: list[float]) -> float:
+    if len(values) <= 1:
+        return 0.0
+    mean = _mean(values)
+    variance = sum((float(value) - mean) ** 2 for value in values) / (len(values) - 1)
+    return math.sqrt(variance)
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
