@@ -384,6 +384,66 @@ def test_live_eligible_action_value_model_uses_calibration_artifact(
     )
 
 
+def test_live_action_value_rejects_action_family_artifact_hash_mismatch(
+    tmp_path: Path,
+) -> None:
+    manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(
+        tmp_path,
+        feature_columns=("up_mid",),
+    )
+    calibration_path = _write_action_value_calibration_artifact(tmp_path)
+    action_family_path, longshot_guard_path = _write_action_family_guard_artifacts(tmp_path)
+    manifest = _read_json(manifest_path)
+    manifest.update(
+        {
+            "real_historical_corpus_used": True,
+            "manual_live_evidence_eligible": True,
+            "policy_dataset_hash": "a" * 64,
+            "split_hash": "b" * 64,
+            "action_value_calibration_artifact_path": calibration_path.name,
+            "action_value_calibration_sha256": _sha256(calibration_path),
+            "action_value_calibration_id": "c" * 64,
+            "action_value_calibration_artifact_used": True,
+            "execution_uses_calibrated_action_value": True,
+            "calibration_support_passed": True,
+            "calibration_quality_passed": True,
+            "best_action_concentration_passed": True,
+            "p_up_action_disagreement_within_limit": True,
+            "action_family_eligibility_report_path": action_family_path.name,
+            "action_family_eligibility_sha256": "d" * 64,
+            "action_family_paper_decision_eligible": True,
+            "action_family_paper_decision_ineligible_reasons": [],
+            "hold_to_settlement_longshot_guard_report_path": longshot_guard_path.name,
+            "hold_to_settlement_longshot_guard_sha256": _sha256(longshot_guard_path),
+            "hold_to_settlement_longshot_guard_enabled": True,
+            "hold_to_settlement_longshot_guard_reason_codes": [
+                "hold_to_settlement_longshot_guard",
+                "action_family_ineligible",
+            ],
+            "action_value_paper_decision_eligible": True,
+            "action_value_paper_decision_ineligible_reasons": [],
+        }
+    )
+    _write_json(manifest_path, manifest)
+
+    result = run_polymarket_live_paper(
+        PolymarketLivePaperConfig(
+            run_id="reject-action-family-artifact-hash",
+            output_dir=tmp_path,
+            model_manifest=manifest_path,
+            model_path=model_path,
+            overwrite_existing=True,
+        )
+    )
+
+    assert result.operator_manifest["operator_status"] == "blocked_fail_closed"
+    assert "action_family_artifact_mismatch" in result.operator_manifest[
+        "critical_reason_codes"
+    ]
+    assert result.operator_manifest["prediction_count"] == 0
+    assert result.operator_manifest["decision_count"] == 0
+
+
 def test_live_action_value_rejects_invalid_calibration_artifact_content(
     tmp_path: Path,
 ) -> None:
@@ -816,6 +876,49 @@ def _write_action_value_calibration_artifact(tmp_path: Path) -> Path:
     path = tmp_path / "polymarket_action_value_calibration.json"
     _write_json(path, artifact)
     return path
+
+
+def _write_action_family_guard_artifacts(tmp_path: Path) -> tuple[Path, Path]:
+    action_family = {
+        "schema_version": "bigan-v8-polymarket-action-family-eligibility-v1",
+        "phase": "polymarket_policy_training",
+        "replay_split": "shadow",
+        "out_of_sample_replay": True,
+        "action_family_paper_decision_eligible": True,
+        "action_family_paper_decision_ineligible_reasons": [],
+        "action_family_gate_results": {
+            "SELL_BEFORE_CLOSE": {
+                "support_count": 10,
+                "min_support": 10,
+                "support_passed": True,
+                "realized_return_mean": 0.03,
+                "realized_return_sum": 0.3,
+                "realized_return_mean_exceeds_execution_buffer": True,
+                "realized_return_sum_positive": True,
+                "execution_buffer": 0.015,
+                "gate_passed": True,
+            }
+        },
+        **compact_safety_fields(),
+    }
+    longshot_guard = {
+        "schema_version": "bigan-v8-polymarket-hold-to-settlement-longshot-guard-v1",
+        "phase": "polymarket_policy_training",
+        "replay_split": "shadow",
+        "out_of_sample_replay": True,
+        "guard_enabled": True,
+        "guard_mode": "block_to_no_trade",
+        "guard_reason_codes": [
+            "hold_to_settlement_longshot_guard",
+            "action_family_ineligible",
+        ],
+        **compact_safety_fields(),
+    }
+    action_family_path = tmp_path / "action_family_eligibility_report.json"
+    longshot_guard_path = tmp_path / "hold_to_settlement_longshot_guard_report.json"
+    _write_json(action_family_path, action_family)
+    _write_json(longshot_guard_path, longshot_guard)
+    return action_family_path, longshot_guard_path
 
 
 def _sha256(path: Path) -> str:

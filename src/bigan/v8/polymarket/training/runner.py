@@ -6,6 +6,7 @@ import hashlib
 import json
 import shutil
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from bigan.v8.polymarket.execution_ev import (
 from bigan.v8.polymarket.training.action_family_eligibility import (
     action_family_eligibility_markdown,
     action_family_replay_variants_markdown,
+    build_action_family_counterfactual_prediction_sets,
     build_action_family_eligibility_report,
     build_action_family_replay_variants_report,
     build_hold_to_settlement_longshot_guard_report,
@@ -153,6 +155,19 @@ def run_polymarket_policy_training(
         replay_split=replay_split,
         prediction_count=len(replay_predictions),
     )
+    counterfactual_prediction_sets = build_action_family_counterfactual_prediction_sets(
+        examples=dataset.shadow_examples,
+        predictions=shadow_predictions,
+        execution_buffer=float(config.ev_threshold),
+    )
+    action_family_counterfactual_replays = _build_action_family_counterfactual_replays(
+        dataset=dataset,
+        prediction_sets=counterfactual_prediction_sets,
+        config=config,
+        calibration_error=float(calibration["calibration_error"]),
+        calibration_split=primary_calibration_split,
+        replay_split=replay_split,
+    )
     signal_sanity = _action_value_signal_sanity_report(
         validation_predictions=validation_predictions,
         shadow_predictions=shadow_predictions,
@@ -180,12 +195,27 @@ def run_polymarket_policy_training(
         action_family_eligibility=action_family_eligibility,
         hold_to_settlement_longshot_guard=hold_to_settlement_longshot_guard,
         action_family_replay_variants=action_family_replay_variants,
+        action_family_counterfactual_replays=action_family_counterfactual_replays,
         signal_sanity=signal_sanity,
     )
     model_sha256 = _sha256_file(artifact_paths["model"])
     action_value_calibration_sha256 = _sha256_file(
         artifact_paths["action_value_calibration"]
     )
+    action_family_artifact_hashes = {
+        "action_family_eligibility_sha256": _sha256_file(
+            artifact_paths["action_family_eligibility_report"]
+        ),
+        "hold_to_settlement_longshot_guard_sha256": _sha256_file(
+            artifact_paths["hold_to_settlement_longshot_guard_report"]
+        ),
+        "action_family_replay_variants_sha256": _sha256_file(
+            artifact_paths["action_family_replay_variants_report"]
+        ),
+        "action_family_counterfactual_replay_sha256": _sha256_file(
+            artifact_paths["action_family_counterfactual_replay_report"]
+        ),
+    }
     model_manifest = _model_manifest(
         config=config,
         dataset_profile=profile,
@@ -198,6 +228,7 @@ def run_polymarket_policy_training(
         signal_sanity=signal_sanity,
         action_family_eligibility=action_family_eligibility,
         hold_to_settlement_longshot_guard=hold_to_settlement_longshot_guard,
+        action_family_artifact_hashes=action_family_artifact_hashes,
     )
     _write_json(artifact_paths["model_manifest"], model_manifest)
     artifact_hashes = {
@@ -222,7 +253,160 @@ def run_polymarket_policy_training(
         action_family_eligibility_report=action_family_eligibility,
         hold_to_settlement_longshot_guard_report=hold_to_settlement_longshot_guard,
         action_family_replay_variants_report=action_family_replay_variants,
+        action_family_counterfactual_replay_report=(
+            _read_json(artifact_paths["action_family_counterfactual_replay_report"])
+        ),
     )
+
+
+def _build_action_family_counterfactual_replays(
+    *,
+    dataset: Any,
+    prediction_sets: tuple[dict[str, Any], ...],
+    config: PolymarketPolicyTrainingConfig,
+    calibration_error: float,
+    calibration_split: str,
+    replay_split: str,
+) -> tuple[dict[str, Any], ...]:
+    replays = []
+    for prediction_set in prediction_sets:
+        replay_config = replace(
+            config,
+            ev_threshold=float(prediction_set["ev_threshold"]),
+        )
+        predictions = tuple(prediction_set["predictions"])
+        decisions = build_polymarket_ev_decisions(
+            predictions=predictions,
+            config=replay_config,
+        )
+        ev_report = ev_threshold_report(decisions, replay_split=replay_split)
+        replay_report = run_polymarket_policy_replay(
+            dataset=dataset,
+            decisions=decisions,
+            config=replay_config,
+            calibration_error=calibration_error,
+            calibration_split=calibration_split,
+            replay_split=replay_split,
+            prediction_count=len(predictions),
+        )
+        ledger_pnl_report = _counterfactual_ledger_pnl_report(
+            prediction_set=prediction_set,
+            ev_report=ev_report,
+            replay_report=replay_report,
+        )
+        replays.append(
+            {
+                "variant": prediction_set["variant"],
+                "description": prediction_set["description"],
+                "counterfactual_replay_mode": prediction_set[
+                    "counterfactual_replay_mode"
+                ],
+                "allowed_mode": prediction_set["allowed_mode"],
+                "ev_threshold": prediction_set["ev_threshold"],
+                "eligible_action_families": prediction_set[
+                    "eligible_action_families"
+                ],
+                "family_gate_results": prediction_set["family_gate_results"],
+                "predictions": [prediction.to_dict() for prediction in predictions],
+                "decisions": [decision.to_dict() for decision in decisions],
+                "ev_report": ev_report,
+                "replay_report": replay_report,
+                "ledger_pnl_report": ledger_pnl_report,
+                "summary": _counterfactual_variant_summary(
+                    prediction_set=prediction_set,
+                    ev_report=ev_report,
+                    replay_report=replay_report,
+                    ledger_pnl_report=ledger_pnl_report,
+                ),
+            }
+        )
+    return tuple(replays)
+
+
+def _counterfactual_ledger_pnl_report(
+    *,
+    prediction_set: dict[str, Any],
+    ev_report: dict[str, Any],
+    replay_report: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": (
+            "bigan-v8-polymarket-action-family-counterfactual-ledger-pnl-v1"
+        ),
+        "variant": prediction_set["variant"],
+        "counterfactual_replay_mode": prediction_set["counterfactual_replay_mode"],
+        "allowed_mode": prediction_set["allowed_mode"],
+        "ev_threshold": prediction_set["ev_threshold"],
+        "prediction_count": int(prediction_set["prediction_count"]),
+        "decision_count": ev_report["decision_count"],
+        "action_counts": ev_report["action_counts"],
+        "reason_counts": ev_report["reason_counts"],
+        "trade_count": replay_report["trade_count"],
+        "no_trade_count": replay_report["no_trade_count"],
+        "settled_position_count": replay_report["settled_position_count"],
+        "realized_trade_pnl": replay_report["realized_trade_pnl"],
+        "settlement_pnl": replay_report["settlement_pnl"],
+        "complete_set_pnl": replay_report["complete_set_pnl"],
+        "fees": replay_report["fees"],
+        "slippage": replay_report["slippage"],
+        "total_polymarket_pnl": replay_report["total_polymarket_pnl"],
+        "max_drawdown": replay_report["max_drawdown"],
+        "ledger_event_count": replay_report["ledger_event_count"],
+        "settlement_event_count": replay_report["settlement_event_count"],
+        "phase1_position_ledger_used": replay_report["phase1_position_ledger_used"],
+        "phase1_settlement_engine_used": replay_report["phase1_settlement_engine_used"],
+        "promotion_evidence_eligible": False,
+        "promotion_evidence_ineligible_reasons": [
+            "source_model_paper_decision_ineligible"
+        ],
+        **compact_safety_fields(),
+    }
+
+
+def _counterfactual_variant_summary(
+    *,
+    prediction_set: dict[str, Any],
+    ev_report: dict[str, Any],
+    replay_report: dict[str, Any],
+    ledger_pnl_report: dict[str, Any],
+) -> dict[str, Any]:
+    action_counts = ev_report["action_counts"]
+    entry_decision_count = int(action_counts.get("BUY_UP", 0)) + int(
+        action_counts.get("BUY_DOWN", 0)
+    )
+    blocked_reasons = ["source_model_paper_decision_ineligible"]
+    if float(replay_report["total_polymarket_pnl"]) <= 0.0:
+        blocked_reasons.append("counterfactual_replay_pnl_not_positive")
+    if entry_decision_count <= 0:
+        blocked_reasons.append("counterfactual_replay_no_entry_decisions")
+    return {
+        "variant": prediction_set["variant"],
+        "description": prediction_set["description"],
+        "counterfactual_replay_mode": prediction_set["counterfactual_replay_mode"],
+        "allowed_mode": prediction_set["allowed_mode"],
+        "ev_threshold": prediction_set["ev_threshold"],
+        "eligible_action_families": prediction_set["eligible_action_families"],
+        "prediction_count": int(prediction_set["prediction_count"]),
+        "decision_count": ev_report["decision_count"],
+        "entry_decision_count": entry_decision_count,
+        "trade_count": replay_report["trade_count"],
+        "no_trade_count": replay_report["no_trade_count"],
+        "action_counts": action_counts,
+        "reason_counts": ev_report["reason_counts"],
+        "total_polymarket_pnl": replay_report["total_polymarket_pnl"],
+        "realized_trade_pnl": replay_report["realized_trade_pnl"],
+        "settlement_pnl": replay_report["settlement_pnl"],
+        "fees": replay_report["fees"],
+        "slippage": replay_report["slippage"],
+        "max_drawdown": replay_report["max_drawdown"],
+        "ledger_event_count": ledger_pnl_report["ledger_event_count"],
+        "settlement_event_count": ledger_pnl_report["settlement_event_count"],
+        "promotion_evidence_eligible": False,
+        "promotion_evidence_ineligible_reasons": sorted(set(blocked_reasons)),
+        "blocked": True,
+        "blocked_reasons": sorted(set(blocked_reasons)),
+        **compact_safety_fields(),
+    }
 
 
 def _write_artifacts(
@@ -244,6 +428,7 @@ def _write_artifacts(
     action_family_eligibility: dict[str, Any],
     hold_to_settlement_longshot_guard: dict[str, Any],
     action_family_replay_variants: dict[str, Any],
+    action_family_counterfactual_replays: tuple[dict[str, Any], ...],
     signal_sanity: dict[str, Any],
 ) -> dict[str, Path]:
     paths = {
@@ -280,6 +465,12 @@ def _write_artifacts(
         "action_family_replay_variants_summary": (
             run_dir / "action_family_replay_variants_report.md"
         ),
+        "action_family_counterfactual_replay_report": (
+            run_dir / "action_family_counterfactual_replay_report.json"
+        ),
+        "action_family_counterfactual_replay_summary": (
+            run_dir / "action_family_counterfactual_replay_report.md"
+        ),
         "all_predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "train_predictions": run_dir / "polymarket_policy_train_predictions.jsonl",
@@ -303,6 +494,14 @@ def _write_artifacts(
         hold_to_settlement_longshot_guard,
     )
     _write_json(paths["action_family_replay_variants_report"], action_family_replay_variants)
+    action_family_counterfactual_replay = _write_counterfactual_replay_artifacts(
+        run_dir=run_dir,
+        counterfactual_replays=action_family_counterfactual_replays,
+    )
+    _write_json(
+        paths["action_family_counterfactual_replay_report"],
+        action_family_counterfactual_replay,
+    )
     _write_jsonl(paths["predictions"], predictions)
     _write_jsonl(paths["train_predictions"], train_predictions)
     _write_jsonl(paths["validation_predictions"], validation_predictions)
@@ -333,7 +532,59 @@ def _write_artifacts(
         action_family_replay_variants_markdown(action_family_replay_variants),
         encoding="utf-8",
     )
+    paths["action_family_counterfactual_replay_summary"].write_text(
+        _counterfactual_replay_markdown(action_family_counterfactual_replay),
+        encoding="utf-8",
+    )
     return paths
+
+
+def _write_counterfactual_replay_artifacts(
+    *,
+    run_dir: Path,
+    counterfactual_replays: tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    root = run_dir / "action_family_counterfactual_replays"
+    root.mkdir(parents=True, exist_ok=True)
+    variant_summaries = []
+    for replay in counterfactual_replays:
+        variant_dir = root / replay["variant"]
+        variant_dir.mkdir(parents=True, exist_ok=True)
+        files = {
+            "predictions": variant_dir / "predictions.jsonl",
+            "decisions": variant_dir / "decisions.jsonl",
+            "ev_threshold_report": variant_dir / "ev_threshold_report.json",
+            "policy_replay_report": variant_dir / "policy_replay_report.json",
+            "ledger_pnl_report": variant_dir / "ledger_pnl_report.json",
+        }
+        _write_jsonl(files["predictions"], replay["predictions"])
+        _write_jsonl(files["decisions"], replay["decisions"])
+        _write_json(files["ev_threshold_report"], replay["ev_report"])
+        _write_json(files["policy_replay_report"], replay["replay_report"])
+        _write_json(files["ledger_pnl_report"], replay["ledger_pnl_report"])
+        summary = dict(replay["summary"])
+        summary["artifact_paths"] = {
+            name: _relative_path(path, run_dir) for name, path in sorted(files.items())
+        }
+        summary["artifact_hashes"] = {
+            name: _sha256_file(path) for name, path in sorted(files.items())
+        }
+        variant_summaries.append(summary)
+    return {
+        "schema_version": (
+            "bigan-v8-polymarket-action-family-counterfactual-replay-v1"
+        ),
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "report_mode": "re_ranked_counterfactual_policy_replay",
+        "filtered_estimate_report_path": "action_family_replay_variants_report.json",
+        "promotion_evidence_eligible": False,
+        "promotion_evidence_ineligible_reasons": [
+            "source_model_paper_decision_ineligible"
+        ],
+        "variant_count": len(variant_summaries),
+        "variants": variant_summaries,
+        **compact_safety_fields(),
+    }
 
 
 def _model_manifest(
@@ -349,6 +600,7 @@ def _model_manifest(
     signal_sanity: dict[str, Any],
     action_family_eligibility: dict[str, Any],
     hold_to_settlement_longshot_guard: dict[str, Any],
+    action_family_artifact_hashes: dict[str, str],
 ) -> dict[str, Any]:
     split_fields = {
         field_name: dataset_profile[field_name]
@@ -454,12 +706,27 @@ def _model_manifest(
             "action_value_paper_decision_ineligible_reasons"
         ],
         "action_family_eligibility_report_path": "action_family_eligibility_report.json",
+        "action_family_eligibility_sha256": action_family_artifact_hashes[
+            "action_family_eligibility_sha256"
+        ],
         "hold_to_settlement_longshot_guard_report_path": (
             "hold_to_settlement_longshot_guard_report.json"
         ),
+        "hold_to_settlement_longshot_guard_sha256": action_family_artifact_hashes[
+            "hold_to_settlement_longshot_guard_sha256"
+        ],
         "action_family_replay_variants_report_path": (
             "action_family_replay_variants_report.json"
         ),
+        "action_family_replay_variants_sha256": action_family_artifact_hashes[
+            "action_family_replay_variants_sha256"
+        ],
+        "action_family_counterfactual_replay_report_path": (
+            "action_family_counterfactual_replay_report.json"
+        ),
+        "action_family_counterfactual_replay_sha256": action_family_artifact_hashes[
+            "action_family_counterfactual_replay_sha256"
+        ],
         "action_family_paper_decision_eligible": action_family_eligibility[
             "action_family_paper_decision_eligible"
         ],
@@ -850,6 +1117,46 @@ def _signal_sanity_markdown(report: dict[str, Any]) -> str:
     )
 
 
+def _counterfactual_replay_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Action-Family Counterfactual Replay Report",
+        "",
+        f"- report_mode: {report['report_mode']}",
+        f"- variant_count: {report['variant_count']}",
+        "- promotion_evidence_eligible: "
+        f"{str(report['promotion_evidence_eligible']).lower()}",
+        "- promotion_evidence_ineligible_reasons: "
+        f"{json.dumps(report['promotion_evidence_ineligible_reasons'])}",
+        "",
+        "## Variants",
+        "",
+    ]
+    for variant in report["variants"]:
+        lines.append(
+            "- "
+            f"{variant['variant']}: "
+            f"threshold={variant['ev_threshold']} "
+            f"entries={variant['entry_decision_count']} "
+            f"trades={variant['trade_count']} "
+            f"pnl={variant['total_polymarket_pnl']} "
+            f"max_drawdown={variant['max_drawdown']} "
+            f"actions={json.dumps(variant['action_counts'], sort_keys=True)} "
+            f"blocked={str(variant['blocked']).lower()} "
+            f"reasons={json.dumps(variant['blocked_reasons'])}"
+        )
+    lines.extend(
+        [
+            "",
+            "- paper_only: true",
+            "- capital_at_risk: false",
+            "- polymarket_write_enabled: false",
+            "- wallet_signing_enabled: false",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _predictions_for_examples(
     predictions_by_key: dict[tuple[str, int], Any],
     examples: tuple[Any, ...],
@@ -858,6 +1165,10 @@ def _predictions_for_examples(
         predictions_by_key[(example.market_id, example.decision_ts)]
         for example in examples
     )
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -886,6 +1197,10 @@ def _json_ready(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return value
+
+
+def _relative_path(path: Path, root: Path) -> str:
+    return str(path.relative_to(root))
 
 
 def _sha256_file(path: Path) -> str:

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
+from dataclasses import replace
 from typing import Any
 
 from bigan.v8.polymarket.action_value_guards import (
     ACTION_FAMILY_HIGH_SCORE_UNPROFITABLE,
     ACTION_FAMILY_HOLD_TO_SETTLEMENT,
     ACTION_FAMILY_INELIGIBLE,
+    ACTION_FAMILY_NO_TRADE,
     ACTION_FAMILY_SELL_BEFORE_CLOSE,
     BUY_DOWN_HOLD_TO_SETTLEMENT_UNPROFITABLE,
     BUY_UP_HOLD_TO_SETTLEMENT_UNPROFITABLE,
@@ -18,6 +20,7 @@ from bigan.v8.polymarket.action_value_guards import (
     LONGSHOT_GUARD_PRICE_BUCKETS,
     LONGSHOT_GUARD_RAW_SCORE_BUCKETS,
     LONGSHOT_GUARD_TIME_TO_CLOSE_BUCKETS,
+    action_value_action_family,
     action_value_bucket_payload,
 )
 from bigan.v8.polymarket.training.action_value_calibration import (
@@ -41,6 +44,9 @@ HOLD_TO_SETTLEMENT_LONGSHOT_GUARD_SCHEMA_VERSION = (
 )
 ACTION_FAMILY_REPLAY_VARIANTS_SCHEMA_VERSION = (
     "bigan-v8-polymarket-action-family-replay-variants-v1"
+)
+ACTION_FAMILY_COUNTERFACTUAL_REPLAY_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-action-family-counterfactual-replay-v1"
 )
 ACTION_FAMILY_MIN_HIGH_SCORE_SUPPORT = ACTION_VALUE_HIGH_SCORE_MIN_SUPPORT
 P_UP_MATERIAL_DISAGREEMENT_THRESHOLD = 0.55
@@ -327,6 +333,9 @@ def build_action_family_replay_variants_report(
         "schema_version": ACTION_FAMILY_REPLAY_VARIANTS_SCHEMA_VERSION,
         "policy_schema_version": POLYMARKET_POLICY_SCHEMA_VERSION,
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "report_mode": "filtered_high_score_estimate",
+        "promotion_evidence_eligible": False,
+        "counterfactual_replay_required_for_promotion": True,
         "replay_split": "shadow",
         "out_of_sample_replay": True,
         "execution_buffer": execution_buffer,
@@ -335,6 +344,103 @@ def build_action_family_replay_variants_report(
         "threshold_sweep_with_action_family_gates": threshold_sweep,
         **compact_safety_fields(),
     }
+
+
+def build_action_family_counterfactual_prediction_sets(
+    *,
+    examples: tuple[PolymarketPolicyExample, ...],
+    predictions: tuple[PolymarketPolicyPrediction, ...],
+    execution_buffer: float,
+    thresholds: tuple[float, ...] = (0.0, 0.03, 0.05),
+    min_support: int = ACTION_FAMILY_MIN_HIGH_SCORE_SUPPORT,
+) -> tuple[dict[str, Any], ...]:
+    """Build re-ranked counterfactual prediction sets for replay."""
+
+    _validate_aligned(examples, predictions)
+    baseline_rows = _high_score_rows(
+        examples=examples,
+        predictions=predictions,
+        high_score_threshold=ACTION_VALUE_HIGH_SCORE_THRESHOLD,
+    )
+    baseline_gates = _gate_results(
+        rows=baseline_rows,
+        group_field="action_family",
+        execution_buffer=execution_buffer,
+        min_support=min_support,
+    )
+    passed_baseline_families = {
+        family for family, gate in baseline_gates.items() if gate["gate_passed"]
+    }
+    passed_bucket_keys = _passed_bucket_keys(
+        rows=baseline_rows,
+        execution_buffer=execution_buffer,
+        min_support=min_support,
+    )
+    variants = [
+        _counterfactual_variant(
+            variant="A_baseline_current_policy_with_runtime_guards",
+            predictions=predictions,
+            ev_threshold=execution_buffer,
+            allowed_mode="baseline",
+            family_gate_results=baseline_gates,
+            eligible_action_families=sorted(passed_baseline_families),
+            description="baseline calibrated policy replay using runtime guards",
+        ),
+        _counterfactual_variant(
+            variant="B_hold_to_settlement_disabled_reranked",
+            predictions=predictions,
+            ev_threshold=execution_buffer,
+            allowed_mode="hold_to_settlement_disabled",
+            description="disable HOLD_TO_SETTLEMENT, then re-rank remaining calibrated actions",
+        ),
+        _counterfactual_variant(
+            variant="C_sell_before_close_only_reranked",
+            predictions=predictions,
+            ev_threshold=execution_buffer,
+            allowed_mode="sell_before_close_only",
+            description="allow SELL_BEFORE_CLOSE actions only, then re-rank",
+        ),
+        _counterfactual_variant(
+            variant="D_hold_to_settlement_allowed_only_for_passed_buckets_reranked",
+            predictions=predictions,
+            ev_threshold=execution_buffer,
+            allowed_mode="passed_family_and_bucket_only",
+            family_gate_results=baseline_gates,
+            eligible_action_families=sorted(passed_baseline_families),
+            passed_bucket_keys=passed_bucket_keys,
+            description="allow actions only when family and HOLD bucket gates pass",
+        ),
+    ]
+    for threshold in thresholds:
+        candidate_rows = _high_score_rows(
+            examples=examples,
+            predictions=predictions,
+            high_score_threshold=threshold,
+        )
+        family_gates = _gate_results(
+            rows=candidate_rows,
+            group_field="action_family",
+            execution_buffer=execution_buffer,
+            min_support=min_support,
+        )
+        passed_families = {
+            family for family, gate in family_gates.items() if gate["gate_passed"]
+        }
+        variants.append(
+            _counterfactual_variant(
+                variant=f"E_threshold_{threshold:.2f}_action_family_gates_reranked",
+                predictions=predictions,
+                ev_threshold=threshold,
+                allowed_mode="action_family_gates_enabled",
+                family_gate_results=family_gates,
+                eligible_action_families=sorted(passed_families),
+                description=(
+                    "re-rank using only action families that pass gates at the "
+                    f"{threshold:.2f} high-score threshold"
+                ),
+            )
+        )
+    return tuple(variants)
 
 
 def action_family_eligibility_markdown(report: dict[str, Any]) -> str:
@@ -742,6 +848,144 @@ def _passed_bucket_keys(
         if gate["gate_passed"]:
             passed.add(key)
     return passed
+
+
+def _counterfactual_variant(
+    *,
+    variant: str,
+    predictions: tuple[PolymarketPolicyPrediction, ...],
+    ev_threshold: float,
+    allowed_mode: str,
+    description: str,
+    family_gate_results: dict[str, dict[str, Any]] | None = None,
+    eligible_action_families: list[str] | None = None,
+    passed_bucket_keys: set[tuple[str, str, str, str]] | None = None,
+) -> dict[str, Any]:
+    eligible_families = tuple(eligible_action_families or ())
+    bucket_keys = passed_bucket_keys or set()
+    if allowed_mode == "baseline":
+        replay_predictions = predictions
+    else:
+        replay_predictions = tuple(
+            _rerank_counterfactual_prediction(
+                prediction=prediction,
+                allowed_mode=allowed_mode,
+                eligible_action_families=eligible_families,
+                passed_bucket_keys=bucket_keys,
+            )
+            for prediction in predictions
+        )
+    return {
+        "variant": variant,
+        "description": description,
+        "counterfactual_replay_mode": "re_ranked_counterfactual_policy_replay",
+        "allowed_mode": allowed_mode,
+        "ev_threshold": ev_threshold,
+        "eligible_action_families": list(eligible_families),
+        "family_gate_results": family_gate_results or {},
+        "prediction_count": len(replay_predictions),
+        "predictions": replay_predictions,
+        **compact_safety_fields(),
+    }
+
+
+def _rerank_counterfactual_prediction(
+    *,
+    prediction: PolymarketPolicyPrediction,
+    allowed_mode: str,
+    eligible_action_families: tuple[str, ...],
+    passed_bucket_keys: set[tuple[str, str, str, str]],
+) -> PolymarketPolicyPrediction:
+    allowed_actions = [
+        action
+        for action in ACTION_VALUE_LABEL_ACTIONS
+        if _counterfactual_action_allowed(
+            action=action,
+            prediction=prediction,
+            allowed_mode=allowed_mode,
+            eligible_action_families=eligible_action_families,
+            passed_bucket_keys=passed_bucket_keys,
+        )
+    ]
+    if "NO_TRADE" not in allowed_actions:
+        allowed_actions.append("NO_TRADE")
+    calibrated_returns = prediction.calibrated_expected_pnl_per_notional_by_action
+    if not calibrated_returns:
+        calibrated_returns = prediction.expected_return_by_action
+    calibrated_best, calibrated_best_return, calibrated_second, calibrated_margin = (
+        _rank_allowed_actions(
+            returns={action: float(calibrated_returns[action]) for action in allowed_actions},
+        )
+    )
+    raw_best, raw_best_return, raw_second, raw_margin = _rank_allowed_actions(
+        returns={
+            action: float(prediction.expected_return_by_action[action])
+            for action in allowed_actions
+        },
+    )
+    return replace(
+        prediction,
+        best_policy_action=raw_best,
+        best_action_expected_return=raw_best_return,
+        second_best_action_expected_return=raw_second,
+        best_action_margin=raw_margin,
+        calibrated_best_policy_action=calibrated_best,
+        calibrated_expected_pnl_per_notional=calibrated_best_return,
+        calibrated_second_best_expected_pnl_per_notional=calibrated_second,
+        calibrated_action_margin=calibrated_margin,
+    )
+
+
+def _counterfactual_action_allowed(
+    *,
+    action: str,
+    prediction: PolymarketPolicyPrediction,
+    allowed_mode: str,
+    eligible_action_families: tuple[str, ...],
+    passed_bucket_keys: set[tuple[str, str, str, str]],
+) -> bool:
+    family = action_value_action_family(action)
+    if family == ACTION_FAMILY_NO_TRADE:
+        return True
+    if allowed_mode == "hold_to_settlement_disabled":
+        return family != ACTION_FAMILY_HOLD_TO_SETTLEMENT
+    if allowed_mode == "sell_before_close_only":
+        return family == ACTION_FAMILY_SELL_BEFORE_CLOSE
+    if allowed_mode == "passed_family_and_bucket_only":
+        if family not in eligible_action_families:
+            return False
+        if family != ACTION_FAMILY_HOLD_TO_SETTLEMENT:
+            return True
+        return _prediction_bucket_key(action=action, prediction=prediction) in passed_bucket_keys
+    if allowed_mode == "action_family_gates_enabled":
+        return family in eligible_action_families
+    raise ValueError(f"unsupported counterfactual allowed_mode: {allowed_mode}")
+
+
+def _prediction_bucket_key(
+    *,
+    action: str,
+    prediction: PolymarketPolicyPrediction,
+) -> tuple[str, str, str, str]:
+    raw_score = float(prediction.expected_return_by_action[action])
+    bucket = action_value_bucket_payload(
+        action=action,
+        features=prediction.features,
+        raw_score=raw_score,
+    )
+    return (
+        action,
+        str(bucket["price_bucket"]),
+        str(bucket["time_to_close_bucket"]),
+        str(bucket["raw_score_bucket"]),
+    )
+
+
+def _rank_allowed_actions(returns: dict[str, float]) -> tuple[str, float, float, float]:
+    ranked = sorted(returns.items(), key=lambda item: (-item[1], item[0]))
+    best_action, best_return = ranked[0]
+    second_return = ranked[1][1] if len(ranked) > 1 else best_return
+    return best_action, best_return, second_return, best_return - second_return
 
 
 def _bucket_key(row: dict[str, Any]) -> tuple[str, str, str, str]:

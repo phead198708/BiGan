@@ -58,6 +58,10 @@ from bigan.v8.polymarket.training import (
     PolymarketPolicyTrainingConfig,
     predict_polymarket_policy_examples,
 )
+from bigan.v8.polymarket.training.action_family_eligibility import (
+    ACTION_FAMILY_ELIGIBILITY_SCHEMA_VERSION,
+    HOLD_TO_SETTLEMENT_LONGSHOT_GUARD_SCHEMA_VERSION,
+)
 from bigan.v8.polymarket.training.action_value_calibration import (
     apply_action_value_calibration,
 )
@@ -83,6 +87,11 @@ ACTION_VALUE_POLICY_COLLAPSE = "action_value_policy_collapse"
 P_UP_ACTION_DISAGREEMENT_EXCESSIVE = "p_up_action_disagreement_excessive"
 ACTION_VALUE_DECISION_INELIGIBLE = "action_value_paper_decision_ineligible"
 ACTION_VALUE_FEATURE_COLUMNS_MISMATCH = "action_value_feature_columns_mismatch"
+ACTION_FAMILY_ARTIFACT_MISSING = "action_family_artifact_missing"
+ACTION_FAMILY_ARTIFACT_MISMATCH = "action_family_artifact_mismatch"
+ACTION_FAMILY_ARTIFACT_SCHEMA_MISMATCH = "action_family_artifact_schema_mismatch"
+ACTION_FAMILY_ARTIFACT_CONTENT_INVALID = "action_family_artifact_content_invalid"
+ACTION_FAMILY_ARTIFACT_SAFETY_VIOLATION = "action_family_artifact_safety_violation"
 STREAMING_ARTIFACT_NAMES = {
     "live_status",
     "live_status_md",
@@ -725,6 +734,10 @@ def _verify_model_manifest(
                 raise ValueError(f"{field_name} must be SHA-256")
         if model_manifest.get("manual_live_evidence_eligible") is not True:
             raise ValueError("manual_live_evidence_eligible must be true")
+        _validate_optional_action_family_artifacts(
+            model_manifest=model_manifest,
+            model_manifest_path=model_manifest_path,
+        )
         if model_manifest.get("action_value_paper_decision_eligible") is not True:
             reasons = _action_value_paper_decision_ineligible_reasons(model_manifest)
             raise ValueError(",".join(reasons))
@@ -778,6 +791,110 @@ def _action_value_calibration_artifact_path(
     if path.is_absolute():
         return path
     return model_manifest_path.parent / path
+
+
+def _validate_optional_action_family_artifacts(
+    *,
+    model_manifest: dict[str, Any],
+    model_manifest_path: Path,
+) -> None:
+    _validate_optional_action_family_artifact(
+        model_manifest=model_manifest,
+        model_manifest_path=model_manifest_path,
+        path_field="action_family_eligibility_report_path",
+        sha_field="action_family_eligibility_sha256",
+        expected_schema=ACTION_FAMILY_ELIGIBILITY_SCHEMA_VERSION,
+        validator=_validate_action_family_eligibility_report,
+    )
+    _validate_optional_action_family_artifact(
+        model_manifest=model_manifest,
+        model_manifest_path=model_manifest_path,
+        path_field="hold_to_settlement_longshot_guard_report_path",
+        sha_field="hold_to_settlement_longshot_guard_sha256",
+        expected_schema=HOLD_TO_SETTLEMENT_LONGSHOT_GUARD_SCHEMA_VERSION,
+        validator=_validate_hold_to_settlement_longshot_guard_report,
+    )
+
+
+def _validate_optional_action_family_artifact(
+    *,
+    model_manifest: dict[str, Any],
+    model_manifest_path: Path,
+    path_field: str,
+    sha_field: str,
+    expected_schema: str,
+    validator: Any,
+) -> None:
+    raw_path = model_manifest.get(path_field)
+    raw_sha = model_manifest.get(sha_field)
+    if raw_path is None and raw_sha is None:
+        return
+    if raw_path is None or raw_sha is None:
+        raise ValueError(ACTION_FAMILY_ARTIFACT_MISSING)
+    if not looks_like_sha256(str(raw_sha)):
+        raise ValueError(f"{sha_field} must be SHA-256")
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = model_manifest_path.parent / path
+    if not path.exists():
+        raise ValueError(ACTION_FAMILY_ARTIFACT_MISSING)
+    if _sha256_file(path) != str(raw_sha):
+        raise ValueError(ACTION_FAMILY_ARTIFACT_MISMATCH)
+    artifact = _read_json(path)
+    if artifact.get("schema_version") != expected_schema:
+        raise ValueError(ACTION_FAMILY_ARTIFACT_SCHEMA_MISMATCH)
+    for field_name, expected in compact_safety_fields().items():
+        if artifact.get(field_name) is not expected:
+            raise ValueError(ACTION_FAMILY_ARTIFACT_SAFETY_VIOLATION)
+    validator(artifact=artifact, model_manifest=model_manifest)
+
+
+def _validate_action_family_eligibility_report(
+    *,
+    artifact: dict[str, Any],
+    model_manifest: dict[str, Any],
+) -> None:
+    if artifact.get("action_family_paper_decision_eligible") != model_manifest.get(
+        "action_family_paper_decision_eligible"
+    ):
+        raise ValueError(ACTION_FAMILY_ARTIFACT_CONTENT_INVALID)
+    artifact_reasons = tuple(
+        sorted(str(reason) for reason in artifact.get(
+            "action_family_paper_decision_ineligible_reasons",
+            (),
+        ))
+    )
+    manifest_reasons = tuple(
+        sorted(str(reason) for reason in model_manifest.get(
+            "action_family_paper_decision_ineligible_reasons",
+            (),
+        ))
+    )
+    if artifact_reasons != manifest_reasons:
+        raise ValueError(ACTION_FAMILY_ARTIFACT_CONTENT_INVALID)
+
+
+def _validate_hold_to_settlement_longshot_guard_report(
+    *,
+    artifact: dict[str, Any],
+    model_manifest: dict[str, Any],
+) -> None:
+    if artifact.get("guard_enabled") != model_manifest.get(
+        "hold_to_settlement_longshot_guard_enabled"
+    ):
+        raise ValueError(ACTION_FAMILY_ARTIFACT_CONTENT_INVALID)
+    artifact_reasons = tuple(sorted(str(reason) for reason in artifact.get("guard_reason_codes", ())))
+    manifest_reasons = tuple(
+        sorted(
+            str(reason)
+            for reason in model_manifest.get(
+                "hold_to_settlement_longshot_guard_reason_codes",
+                (),
+            )
+        )
+    )
+    if artifact_reasons != manifest_reasons:
+        raise ValueError(ACTION_FAMILY_ARTIFACT_CONTENT_INVALID)
 
 
 def _apply_model_manifest_action_value_calibration(
@@ -3702,6 +3819,11 @@ def _exception_reason_codes(exc: Exception, *, fallback: str) -> list[str]:
             P_UP_ACTION_DISAGREEMENT_EXCESSIVE,
             ACTION_VALUE_DECISION_INELIGIBLE,
             ACTION_VALUE_FEATURE_COLUMNS_MISMATCH,
+            ACTION_FAMILY_ARTIFACT_MISSING,
+            ACTION_FAMILY_ARTIFACT_MISMATCH,
+            ACTION_FAMILY_ARTIFACT_SCHEMA_MISMATCH,
+            ACTION_FAMILY_ARTIFACT_CONTENT_INVALID,
+            ACTION_FAMILY_ARTIFACT_SAFETY_VIOLATION,
         )
         if reason in text
     ]

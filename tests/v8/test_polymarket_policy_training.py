@@ -147,6 +147,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "hold_to_settlement_longshot_guard_summary",
         "action_family_replay_variants_report",
         "action_family_replay_variants_summary",
+        "action_family_counterfactual_replay_report",
+        "action_family_counterfactual_replay_summary",
         "all_predictions",
         "predictions",
         "train_predictions",
@@ -291,6 +293,51 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         variant["threshold"]
         for variant in replay_variants["threshold_sweep_with_action_family_gates"]
     ] == [0.0, 0.03, 0.05]
+    assert replay_variants["report_mode"] == "filtered_high_score_estimate"
+    assert replay_variants["promotion_evidence_eligible"] is False
+    counterfactual_replay = _read_json(
+        result.artifact_paths["action_family_counterfactual_replay_report"]
+    )
+    assert counterfactual_replay["schema_version"] == (
+        "bigan-v8-polymarket-action-family-counterfactual-replay-v1"
+    )
+    assert counterfactual_replay["report_mode"] == (
+        "re_ranked_counterfactual_policy_replay"
+    )
+    assert counterfactual_replay["promotion_evidence_eligible"] is False
+    assert [variant["variant"] for variant in counterfactual_replay["variants"]] == [
+        "A_baseline_current_policy_with_runtime_guards",
+        "B_hold_to_settlement_disabled_reranked",
+        "C_sell_before_close_only_reranked",
+        "D_hold_to_settlement_allowed_only_for_passed_buckets_reranked",
+        "E_threshold_0.00_action_family_gates_reranked",
+        "E_threshold_0.03_action_family_gates_reranked",
+        "E_threshold_0.05_action_family_gates_reranked",
+    ]
+    for variant in counterfactual_replay["variants"]:
+        assert variant["counterfactual_replay_mode"] == (
+            "re_ranked_counterfactual_policy_replay"
+        )
+        assert variant["prediction_count"] == len(result.dataset.shadow_examples)
+        assert variant["decision_count"] == len(result.dataset.shadow_examples)
+        assert set(variant["artifact_paths"]) == {
+            "decisions",
+            "ev_threshold_report",
+            "ledger_pnl_report",
+            "policy_replay_report",
+            "predictions",
+        }
+        for artifact_path in variant["artifact_paths"].values():
+            assert (result.run_dir / artifact_path).exists()
+        for artifact_hash in variant["artifact_hashes"].values():
+            assert looks_like_sha256(artifact_hash)
+    assert manifest["action_family_counterfactual_replay_report_path"] == (
+        "action_family_counterfactual_replay_report.json"
+    )
+    assert looks_like_sha256(manifest["action_family_counterfactual_replay_sha256"])
+    assert looks_like_sha256(manifest["action_family_eligibility_sha256"])
+    assert looks_like_sha256(manifest["hold_to_settlement_longshot_guard_sha256"])
+    assert looks_like_sha256(manifest["action_family_replay_variants_sha256"])
     action_value_calibration = _read_json(result.artifact_paths["action_value_calibration"])
     assert action_value_calibration["calibration_support_passed"] is True
     assert action_value_calibration["calibration_quality_passed"] is False
