@@ -22,9 +22,12 @@ ACTION_VALUE_CALIBRATION_SCHEMA_VERSION = (
 )
 ACTION_VALUE_MIN_CALIBRATION_SUPPORT_PER_ACTION = 3
 ACTION_VALUE_MIN_BUCKET_SUPPORT = 1
+ACTION_VALUE_BUCKET_SHRINKAGE_PRIOR = 10.0
 ACTION_VALUE_CORRECTION_LIMIT = 0.50
 ACTION_VALUE_QUALITY_MAE_TOLERANCE = 1e-12
 ACTION_VALUE_HIGH_SCORE_THRESHOLD = 0.0
+ACTION_VALUE_HIGH_SCORE_MIN_SUPPORT = 10
+ACTION_VALUE_DEFAULT_EXECUTION_BUFFER = 0.015
 
 
 def build_action_value_calibration_artifact(
@@ -33,6 +36,7 @@ def build_action_value_calibration_artifact(
     calibration_predictions: tuple[PolymarketPolicyPrediction, ...],
     evaluation_examples: tuple[PolymarketPolicyExample, ...],
     evaluation_predictions: tuple[PolymarketPolicyPrediction, ...],
+    execution_buffer: float = ACTION_VALUE_DEFAULT_EXECUTION_BUFFER,
 ) -> dict[str, Any]:
     """Fit a deterministic action-value bias correction on validation data."""
 
@@ -105,9 +109,15 @@ def build_action_value_calibration_artifact(
         action_corrections=corrections,
         calibration_buckets=calibration_buckets,
     )
+    shadow_mae_comparison = _mae_comparison(
+        examples=evaluation_examples,
+        predictions=evaluation_predictions,
+        action_corrections=corrections,
+        calibration_buckets=calibration_buckets,
+    )
     shadow_calibrated_mae_not_worse = (
-        float(shadow_evaluation_metrics["calibrated_mae"])
-        <= float(shadow_evaluation_metrics["raw_mae"])
+        float(shadow_mae_comparison["bucketed_calibrated_mae"])
+        <= float(shadow_mae_comparison["raw_mae"])
         + ACTION_VALUE_QUALITY_MAE_TOLERANCE
     )
     shadow_high_score_bucket = _high_score_bucket_report(
@@ -115,10 +125,12 @@ def build_action_value_calibration_artifact(
         predictions=evaluation_predictions,
         action_corrections=corrections,
         calibration_buckets=calibration_buckets,
+        execution_buffer=execution_buffer,
     )
     calibration_quality_passed = (
         shadow_calibrated_mae_not_worse
-        and bool(shadow_high_score_bucket["realized_return_positive"])
+        and bool(shadow_high_score_bucket["support_passed"])
+        and bool(shadow_high_score_bucket["realized_return_exceeds_execution_buffer"])
     )
     artifact = {
         "schema_version": ACTION_VALUE_CALIBRATION_SCHEMA_VERSION,
@@ -128,6 +140,8 @@ def build_action_value_calibration_artifact(
         "calibration_granularity": "action_price_time_raw_score_bucket_v1",
         "bucketed_calibration_enabled": True,
         "fallback_calibration_method": "validation_action_bias_correction",
+        "bucket_shrinkage_enabled": True,
+        "bucket_shrinkage_prior": ACTION_VALUE_BUCKET_SHRINKAGE_PRIOR,
         "calibration_fit_split": "validation",
         "calibration_evaluation_split": "shadow",
         "calibration_uses_training_split": False,
@@ -142,20 +156,33 @@ def build_action_value_calibration_artifact(
             ACTION_VALUE_MIN_CALIBRATION_SUPPORT_PER_ACTION
         ),
         "min_calibration_bucket_support": ACTION_VALUE_MIN_BUCKET_SUPPORT,
+        "high_score_min_support": ACTION_VALUE_HIGH_SCORE_MIN_SUPPORT,
+        "high_score_execution_buffer": execution_buffer,
         "calibration_support_passed": support_passed,
         "calibration_support_level": "sufficient" if support_passed else "insufficient",
         "calibration_quality_passed": calibration_quality_passed,
         "calibration_quality_gates": {
             "shadow_calibrated_mae_not_worse": shadow_calibrated_mae_not_worse,
-            "shadow_calibrated_mae": shadow_evaluation_metrics["calibrated_mae"],
-            "shadow_raw_mae": shadow_evaluation_metrics["raw_mae"],
+            "shadow_raw_mae": shadow_mae_comparison["raw_mae"],
+            "shadow_action_level_calibrated_mae": shadow_mae_comparison[
+                "action_level_calibrated_mae"
+            ],
+            "shadow_bucketed_calibrated_mae": shadow_mae_comparison[
+                "bucketed_calibrated_mae"
+            ],
             "mae_tolerance": ACTION_VALUE_QUALITY_MAE_TOLERANCE,
-            "high_score_bucket_realized_return_positive": (
-                shadow_high_score_bucket["realized_return_positive"]
+            "high_score_bucket_min_support_passed": (
+                shadow_high_score_bucket["support_passed"]
+            ),
+            "high_score_bucket_realized_return_exceeds_buffer": (
+                shadow_high_score_bucket["realized_return_exceeds_execution_buffer"]
             ),
             "high_score_threshold": ACTION_VALUE_HIGH_SCORE_THRESHOLD,
+            "high_score_min_support": ACTION_VALUE_HIGH_SCORE_MIN_SUPPORT,
+            "high_score_execution_buffer": execution_buffer,
         },
         "shadow_high_score_bucket": shadow_high_score_bucket,
+        "shadow_mae_comparison": shadow_mae_comparison,
         "action_corrections": corrections,
         "action_calibration_buckets": action_buckets,
         "calibration_buckets": calibration_buckets,
@@ -293,12 +320,60 @@ def _calibration_metrics(
     }
 
 
+def _mae_comparison(
+    *,
+    examples: tuple[PolymarketPolicyExample, ...],
+    predictions: tuple[PolymarketPolicyPrediction, ...],
+    action_corrections: dict[str, float],
+    calibration_buckets: dict[str, Any],
+) -> dict[str, Any]:
+    raw_errors = []
+    action_level_errors = []
+    bucketed_errors = []
+    for example, prediction in zip(examples, predictions, strict=True):
+        for action in ACTION_VALUE_LABEL_ACTIONS:
+            target = float(example.action_return_targets[action])
+            raw = float(prediction.expected_return_by_action[action])
+            action_level = _clamp(
+                raw + float(action_corrections[action]),
+                -10.0,
+                10.0,
+            )
+            bucketed = _calibrated_action_value(
+                action=action,
+                prediction=prediction,
+                action_corrections=action_corrections,
+                calibration_buckets=calibration_buckets,
+            )
+            raw_errors.append(target - raw)
+            action_level_errors.append(target - action_level)
+            bucketed_errors.append(target - bucketed)
+    return {
+        "sample_count": len(examples),
+        "action_value_point_count": len(raw_errors),
+        "raw_mae": _mean([abs(value) for value in raw_errors]),
+        "action_level_calibrated_mae": _mean(
+            [abs(value) for value in action_level_errors]
+        ),
+        "bucketed_calibrated_mae": _mean([abs(value) for value in bucketed_errors]),
+        "action_level_delta_vs_raw_mae": (
+            _mean([abs(value) for value in action_level_errors])
+            - _mean([abs(value) for value in raw_errors])
+        ),
+        "bucketed_delta_vs_raw_mae": (
+            _mean([abs(value) for value in bucketed_errors])
+            - _mean([abs(value) for value in raw_errors])
+        ),
+    }
+
+
 def _high_score_bucket_report(
     *,
     examples: tuple[PolymarketPolicyExample, ...],
     predictions: tuple[PolymarketPolicyPrediction, ...],
     action_corrections: dict[str, float],
     calibration_buckets: dict[str, Any],
+    execution_buffer: float,
 ) -> dict[str, Any]:
     realized_returns = []
     calibrated_scores = []
@@ -319,15 +394,21 @@ def _high_score_bucket_report(
             calibrated_scores.append(best_return)
             realized_returns.append(float(example.action_return_targets[best_action]))
     realized_return_mean = _mean(realized_returns)
+    support_passed = len(realized_returns) >= ACTION_VALUE_HIGH_SCORE_MIN_SUPPORT
+    realized_return_exceeds_buffer = (
+        support_passed and realized_return_mean > execution_buffer
+    )
     return {
         "bucket_name": "shadow_calibrated_best_score_ge_threshold",
         "score_threshold": ACTION_VALUE_HIGH_SCORE_THRESHOLD,
+        "min_support": ACTION_VALUE_HIGH_SCORE_MIN_SUPPORT,
+        "execution_buffer": execution_buffer,
         "support_count": len(realized_returns),
+        "support_passed": support_passed,
         "realized_return_mean": realized_return_mean,
         "calibrated_score_mean": _mean(calibrated_scores),
-        "realized_return_positive": (
-            len(realized_returns) > 0 and realized_return_mean > 0.0
-        ),
+        "realized_return_positive": len(realized_returns) > 0 and realized_return_mean > 0.0,
+        "realized_return_exceeds_execution_buffer": realized_return_exceeds_buffer,
         "best_action_counts": dict(sorted(_counts(actions).items())),
     }
 
@@ -339,8 +420,12 @@ def _bucket_payloads(
     for bucket_key, rows in sorted(bucket_rows.items()):
         residuals = [row["residual"] for row in rows]
         raw_correction = _mean(residuals)
+        shrunk_correction = _shrink_correction(
+            correction=raw_correction,
+            support_count=len(rows),
+        )
         correction = _clamp(
-            raw_correction,
+            shrunk_correction,
             -ACTION_VALUE_CORRECTION_LIMIT,
             ACTION_VALUE_CORRECTION_LIMIT,
         )
@@ -355,10 +440,13 @@ def _bucket_payloads(
             ),
             "residual_mean": raw_correction,
             "residual_mae": _mean([abs(value) for value in residuals]),
+            "unshrunk_correction": raw_correction,
+            "shrinkage_prior": ACTION_VALUE_BUCKET_SHRINKAGE_PRIOR,
+            "shrinkage_weight": _shrinkage_weight(len(rows)),
             "correction": correction,
             "correction_clipped": not math.isclose(
                 correction,
-                raw_correction,
+                shrunk_correction,
                 abs_tol=1e-12,
             ),
         }
@@ -433,6 +521,16 @@ def _counts(values: list[str]) -> dict[str, int]:
     for value in values:
         counts[value] = counts.get(value, 0) + 1
     return counts
+
+
+def _shrink_correction(*, correction: float, support_count: int) -> float:
+    return float(correction) * _shrinkage_weight(support_count)
+
+
+def _shrinkage_weight(support_count: int) -> float:
+    return float(support_count) / (
+        float(support_count) + ACTION_VALUE_BUCKET_SHRINKAGE_PRIOR
+    )
 
 
 def _validate_aligned(

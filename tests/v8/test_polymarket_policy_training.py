@@ -183,9 +183,35 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert manifest["calibration_quality_gates"][
         "shadow_calibrated_mae_not_worse"
     ] is False
-    assert manifest["calibration_quality_gates"][
-        "high_score_bucket_realized_return_positive"
-    ] is False
+    assert isinstance(
+        manifest["calibration_quality_gates"][
+            "high_score_bucket_min_support_passed"
+        ],
+        bool,
+    )
+    assert isinstance(
+        manifest["calibration_quality_gates"][
+            "high_score_bucket_realized_return_exceeds_buffer"
+        ],
+        bool,
+    )
+    assert manifest["shadow_mae_comparison"]["raw_mae"] == manifest[
+        "calibration_quality_gates"
+    ]["shadow_raw_mae"]
+    assert (
+        manifest["shadow_mae_comparison"]["action_level_calibrated_mae"]
+        == manifest["calibration_quality_gates"][
+            "shadow_action_level_calibrated_mae"
+        ]
+    )
+    assert (
+        manifest["shadow_mae_comparison"]["bucketed_calibrated_mae"]
+        == manifest["calibration_quality_gates"]["shadow_bucketed_calibrated_mae"]
+    )
+    assert manifest["bucket_shrinkage_enabled"] is True
+    assert manifest["bucket_shrinkage_prior"] > 0.0
+    assert manifest["high_score_min_support"] >= 10
+    assert manifest["high_score_execution_buffer"] == 0.015
     assert manifest["action_value_calibration_support_count"] > 0
     assert manifest["action_value_calibration_bucket_count"] >= len(ACTION_VALUE_LABEL_ACTIONS)
     assert isinstance(manifest["best_action_concentration_passed"], bool)
@@ -203,7 +229,18 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert action_value_calibration["calibration_fit_split"] == "validation"
     assert action_value_calibration["calibration_evaluation_split"] == "shadow"
     assert action_value_calibration["bucketed_calibration_enabled"] is True
+    assert action_value_calibration["bucket_shrinkage_enabled"] is True
+    assert action_value_calibration["bucket_shrinkage_prior"] > 0.0
     assert action_value_calibration["calibration_buckets"]
+    low_support_bucket = next(
+        bucket
+        for bucket in action_value_calibration["calibration_buckets"].values()
+        if bucket["support_count"] <= 2
+    )
+    assert abs(low_support_bucket["correction"]) <= abs(
+        low_support_bucket["unshrunk_correction"]
+    ) + 1e-12
+    assert 0.0 < low_support_bucket["shrinkage_weight"] < 1.0
     assert manifest["action_value_feature_columns"]
     assert manifest["required_action_value_feature_columns"] == manifest[
         "action_value_feature_columns"

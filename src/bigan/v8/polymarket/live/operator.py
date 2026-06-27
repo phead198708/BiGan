@@ -835,17 +835,96 @@ def _validate_action_value_calibration_artifact(
         value = corrections[action]
         if not isinstance(value, int | float) or not math.isfinite(float(value)):
             raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
-    if not isinstance(calibration_artifact.get("calibration_buckets"), dict):
+    if calibration_artifact.get("bucket_shrinkage_enabled") is not True:
         raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+    shrinkage_prior = calibration_artifact.get("bucket_shrinkage_prior")
+    if not _is_finite_number(shrinkage_prior) or float(shrinkage_prior) <= 0.0:
+        raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+    calibration_buckets = calibration_artifact.get("calibration_buckets")
+    if not isinstance(calibration_buckets, dict) or not calibration_buckets:
+        raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+    for bucket in calibration_buckets.values():
+        if not isinstance(bucket, dict):
+            raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+        support_count = bucket.get("support_count")
+        if (
+            isinstance(support_count, bool)
+            or not isinstance(support_count, int)
+            or support_count < 0
+        ):
+            raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+        for field_name in (
+            "correction",
+            "unshrunk_correction",
+            "shrinkage_prior",
+            "shrinkage_weight",
+        ):
+            if not _is_finite_number(bucket.get(field_name)):
+                raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+        shrinkage_weight = float(bucket["shrinkage_weight"])
+        if not 0.0 <= shrinkage_weight <= 1.0:
+            raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
     gates = calibration_artifact.get("calibration_quality_gates")
     if not isinstance(gates, dict):
         raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+    shadow_mae_comparison = calibration_artifact.get("shadow_mae_comparison")
+    if not isinstance(shadow_mae_comparison, dict):
+        raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+    for field_name in (
+        "raw_mae",
+        "action_level_calibrated_mae",
+        "bucketed_calibrated_mae",
+    ):
+        if not _is_finite_number(shadow_mae_comparison.get(field_name)):
+            raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+    high_score_min_support = calibration_artifact.get("high_score_min_support")
+    if (
+        isinstance(high_score_min_support, bool)
+        or not isinstance(high_score_min_support, int)
+        or high_score_min_support <= 0
+    ):
+        raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+    high_score_execution_buffer = calibration_artifact.get("high_score_execution_buffer")
+    if (
+        not _is_finite_number(high_score_execution_buffer)
+        or float(high_score_execution_buffer) < 0.0
+    ):
+        raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
     for field_name in (
         "shadow_calibrated_mae_not_worse",
-        "high_score_bucket_realized_return_positive",
+        "high_score_bucket_min_support_passed",
+        "high_score_bucket_realized_return_exceeds_buffer",
     ):
         if gates.get(field_name) is not True:
             raise ValueError(ACTION_VALUE_CALIBRATION_QUALITY_FAILED)
+    high_score_bucket = calibration_artifact.get("shadow_high_score_bucket")
+    if not isinstance(high_score_bucket, dict):
+        raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+    support_count = high_score_bucket.get("support_count")
+    if (
+        isinstance(support_count, bool)
+        or not isinstance(support_count, int)
+        or support_count < high_score_min_support
+    ):
+        raise ValueError(ACTION_VALUE_CALIBRATION_QUALITY_FAILED)
+    if high_score_bucket.get("support_passed") is not True:
+        raise ValueError(ACTION_VALUE_CALIBRATION_QUALITY_FAILED)
+    realized_return_mean = high_score_bucket.get("realized_return_mean")
+    if (
+        not _is_finite_number(realized_return_mean)
+        or float(realized_return_mean) <= float(high_score_execution_buffer)
+    ):
+        raise ValueError(ACTION_VALUE_CALIBRATION_QUALITY_FAILED)
+    if high_score_bucket.get("realized_return_exceeds_execution_buffer") is not True:
+        raise ValueError(ACTION_VALUE_CALIBRATION_QUALITY_FAILED)
+
+
+def _is_finite_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int | float)
+        and math.isfinite(float(value))
+    )
 
 
 def _action_value_paper_decision_ineligible_reasons(

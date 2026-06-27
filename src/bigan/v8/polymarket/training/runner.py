@@ -102,6 +102,7 @@ def run_polymarket_policy_training(
         calibration_predictions=raw_validation_predictions,
         evaluation_examples=dataset.shadow_examples,
         evaluation_predictions=raw_shadow_predictions,
+        execution_buffer=float(config.ev_threshold),
     )
     predictions = apply_action_value_calibration(
         predictions=raw_predictions,
@@ -348,6 +349,15 @@ def _model_manifest(
         "shadow_high_score_bucket": action_value_calibration[
             "shadow_high_score_bucket"
         ],
+        "shadow_mae_comparison": action_value_calibration["shadow_mae_comparison"],
+        "bucket_shrinkage_enabled": action_value_calibration[
+            "bucket_shrinkage_enabled"
+        ],
+        "bucket_shrinkage_prior": action_value_calibration["bucket_shrinkage_prior"],
+        "high_score_min_support": action_value_calibration["high_score_min_support"],
+        "high_score_execution_buffer": action_value_calibration[
+            "high_score_execution_buffer"
+        ],
         "action_value_calibration_artifact_used": signal_sanity[
             "action_value_calibration_artifact_used"
         ],
@@ -535,6 +545,15 @@ def _action_value_signal_sanity_report(
         "shadow_high_score_bucket": action_value_calibration[
             "shadow_high_score_bucket"
         ],
+        "shadow_mae_comparison": action_value_calibration["shadow_mae_comparison"],
+        "bucket_shrinkage_enabled": action_value_calibration[
+            "bucket_shrinkage_enabled"
+        ],
+        "bucket_shrinkage_prior": action_value_calibration["bucket_shrinkage_prior"],
+        "high_score_min_support": action_value_calibration["high_score_min_support"],
+        "high_score_execution_buffer": action_value_calibration[
+            "high_score_execution_buffer"
+        ],
         "calibration_support_count": action_value_calibration[
             "calibration_support_count"
         ],
@@ -660,8 +679,21 @@ def _signal_sanity_markdown(report: dict[str, Any]) -> str:
             f"- calibration_quality_passed: {str(report['calibration_quality_passed']).lower()}",
             "- shadow_calibrated_mae_not_worse: "
             f"{str(report['calibration_quality_gates']['shadow_calibrated_mae_not_worse']).lower()}",
-            "- high_score_bucket_realized_return_positive: "
-            f"{str(report['calibration_quality_gates']['high_score_bucket_realized_return_positive']).lower()}",
+            "- shadow_raw_mae: "
+            f"{report['shadow_mae_comparison']['raw_mae']}",
+            "- shadow_action_level_calibrated_mae: "
+            f"{report['shadow_mae_comparison']['action_level_calibrated_mae']}",
+            "- shadow_bucketed_calibrated_mae: "
+            f"{report['shadow_mae_comparison']['bucketed_calibrated_mae']}",
+            "- bucket_shrinkage_enabled: "
+            f"{str(report['bucket_shrinkage_enabled']).lower()}",
+            f"- bucket_shrinkage_prior: {report['bucket_shrinkage_prior']}",
+            "- high_score_bucket_min_support_passed: "
+            f"{str(report['calibration_quality_gates']['high_score_bucket_min_support_passed']).lower()}",
+            "- high_score_bucket_realized_return_exceeds_buffer: "
+            f"{str(report['calibration_quality_gates']['high_score_bucket_realized_return_exceeds_buffer']).lower()}",
+            f"- high_score_min_support: {report['high_score_min_support']}",
+            f"- high_score_execution_buffer: {report['high_score_execution_buffer']}",
             f"- best_action_counts: {json.dumps(report['best_action_counts'], sort_keys=True)}",
             f"- best_action_max_action: {report['best_action_max_action']}",
             f"- best_action_max_ratio: {report['best_action_max_ratio']}",

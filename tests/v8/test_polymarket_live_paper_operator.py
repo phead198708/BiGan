@@ -435,6 +435,69 @@ def test_live_action_value_rejects_invalid_calibration_artifact_content(
     assert result.operator_manifest["decision_count"] == 0
 
 
+def test_live_action_value_rejects_high_score_bucket_without_support_or_buffer(
+    tmp_path: Path,
+) -> None:
+    manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(
+        tmp_path,
+        feature_columns=("up_mid",),
+    )
+    calibration_path = _write_action_value_calibration_artifact(tmp_path)
+    artifact = _read_json(calibration_path)
+    artifact["calibration_quality_passed"] = True
+    artifact["calibration_quality_gates"][
+        "high_score_bucket_min_support_passed"
+    ] = False
+    artifact["calibration_quality_gates"][
+        "high_score_bucket_realized_return_exceeds_buffer"
+    ] = False
+    artifact["shadow_high_score_bucket"]["support_count"] = 9
+    artifact["shadow_high_score_bucket"]["support_passed"] = False
+    artifact["shadow_high_score_bucket"]["realized_return_mean"] = 0.015
+    artifact["shadow_high_score_bucket"][
+        "realized_return_exceeds_execution_buffer"
+    ] = False
+    _write_json(calibration_path, artifact)
+    manifest = _read_json(manifest_path)
+    manifest.update(
+        {
+            "real_historical_corpus_used": True,
+            "manual_live_evidence_eligible": True,
+            "policy_dataset_hash": "a" * 64,
+            "split_hash": "b" * 64,
+            "action_value_calibration_artifact_path": calibration_path.name,
+            "action_value_calibration_sha256": _sha256(calibration_path),
+            "action_value_calibration_id": "c" * 64,
+            "action_value_calibration_artifact_used": True,
+            "execution_uses_calibrated_action_value": True,
+            "calibration_support_passed": True,
+            "calibration_quality_passed": True,
+            "best_action_concentration_passed": True,
+            "p_up_action_disagreement_within_limit": True,
+            "action_value_paper_decision_eligible": True,
+            "action_value_paper_decision_ineligible_reasons": [],
+        }
+    )
+    _write_json(manifest_path, manifest)
+
+    result = run_polymarket_live_paper(
+        PolymarketLivePaperConfig(
+            run_id="reject-high-score-calibration-gates",
+            output_dir=tmp_path,
+            model_manifest=manifest_path,
+            model_path=model_path,
+            overwrite_existing=True,
+        )
+    )
+
+    assert result.operator_manifest["operator_status"] == "blocked_fail_closed"
+    assert live_operator.ACTION_VALUE_CALIBRATION_QUALITY_FAILED in (
+        result.operator_manifest["critical_reason_codes"]
+    )
+    assert result.operator_manifest["prediction_count"] == 0
+    assert result.operator_manifest["decision_count"] == 0
+
+
 def test_action_value_feature_schema_mismatch_fails_closed(tmp_path: Path) -> None:
     manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(tmp_path)
 
@@ -688,15 +751,50 @@ def _write_action_value_calibration_artifact(tmp_path: Path) -> Path:
     artifact = {
         "schema_version": "bigan-v8-polymarket-action-value-calibration-v1",
         "phase": "polymarket_policy_training",
-        "calibration_method": "validation_action_bias_correction",
+        "calibration_method": "validation_bucketed_action_bias_correction_v1",
         "calibration_fit_split": "validation",
         "calibration_evaluation_split": "shadow",
         "calibration_uses_training_split": False,
+        "bucket_shrinkage_enabled": True,
+        "bucket_shrinkage_prior": 10.0,
+        "high_score_min_support": 10,
+        "high_score_execution_buffer": 0.015,
         "calibration_support_passed": True,
         "calibration_quality_passed": True,
         "calibration_quality_gates": {
             "shadow_calibrated_mae_not_worse": True,
+            "shadow_raw_mae": 0.12,
+            "shadow_action_level_calibrated_mae": 0.09,
+            "shadow_bucketed_calibrated_mae": 0.08,
+            "mae_tolerance": 1e-12,
+            "high_score_bucket_min_support_passed": True,
+            "high_score_bucket_realized_return_exceeds_buffer": True,
             "high_score_bucket_realized_return_positive": True,
+            "high_score_threshold": 0.0,
+            "high_score_min_support": 10,
+            "high_score_execution_buffer": 0.015,
+        },
+        "shadow_mae_comparison": {
+            "sample_count": 10,
+            "action_value_point_count": 50,
+            "raw_mae": 0.12,
+            "action_level_calibrated_mae": 0.09,
+            "bucketed_calibrated_mae": 0.08,
+            "action_level_delta_vs_raw_mae": -0.03,
+            "bucketed_delta_vs_raw_mae": -0.04,
+        },
+        "shadow_high_score_bucket": {
+            "bucket_name": "shadow_calibrated_best_score_ge_threshold",
+            "score_threshold": 0.0,
+            "min_support": 10,
+            "execution_buffer": 0.015,
+            "support_count": 10,
+            "support_passed": True,
+            "realized_return_mean": 0.03,
+            "calibrated_score_mean": 0.04,
+            "realized_return_positive": True,
+            "realized_return_exceeds_execution_buffer": True,
+            "best_action_counts": {"BUY_UP_HOLD_TO_SETTLEMENT": 10},
         },
         "calibration_support_count": 3,
         "calibration_bucket_count": len(ACTION_VALUE_LABEL_ACTIONS),
@@ -705,6 +803,9 @@ def _write_action_value_calibration_artifact(tmp_path: Path) -> Path:
             f"action={action}|price=none|time=0-30s|raw=0.00-0.05": {
                 "bucket_key": f"action={action}|price=none|time=0-30s|raw=0.00-0.05",
                 "support_count": 1,
+                "unshrunk_correction": 0.0,
+                "shrinkage_prior": 10.0,
+                "shrinkage_weight": 1.0 / 11.0,
                 "correction": 0.0,
             }
             for action in ACTION_VALUE_LABEL_ACTIONS
