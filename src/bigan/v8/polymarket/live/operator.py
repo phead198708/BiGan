@@ -737,6 +737,7 @@ def _verify_model_manifest(
         _validate_optional_action_family_artifacts(
             model_manifest=model_manifest,
             model_manifest_path=model_manifest_path,
+            required=bool(model_manifest.get("action_value_paper_decision_eligible")),
         )
         if model_manifest.get("action_value_paper_decision_eligible") is not True:
             reasons = _action_value_paper_decision_ineligible_reasons(model_manifest)
@@ -797,6 +798,7 @@ def _validate_optional_action_family_artifacts(
     *,
     model_manifest: dict[str, Any],
     model_manifest_path: Path,
+    required: bool = False,
 ) -> None:
     _validate_optional_action_family_artifact(
         model_manifest=model_manifest,
@@ -805,6 +807,7 @@ def _validate_optional_action_family_artifacts(
         sha_field="action_family_eligibility_sha256",
         expected_schema=ACTION_FAMILY_ELIGIBILITY_SCHEMA_VERSION,
         validator=_validate_action_family_eligibility_report,
+        required=required,
     )
     _validate_optional_action_family_artifact(
         model_manifest=model_manifest,
@@ -813,6 +816,7 @@ def _validate_optional_action_family_artifacts(
         sha_field="hold_to_settlement_longshot_guard_sha256",
         expected_schema=HOLD_TO_SETTLEMENT_LONGSHOT_GUARD_SCHEMA_VERSION,
         validator=_validate_hold_to_settlement_longshot_guard_report,
+        required=required,
     )
 
 
@@ -824,10 +828,13 @@ def _validate_optional_action_family_artifact(
     sha_field: str,
     expected_schema: str,
     validator: Any,
+    required: bool = False,
 ) -> None:
     raw_path = model_manifest.get(path_field)
     raw_sha = model_manifest.get(sha_field)
     if raw_path is None and raw_sha is None:
+        if required:
+            raise ValueError(ACTION_FAMILY_ARTIFACT_MISSING)
         return
     if raw_path is None or raw_sha is None:
         raise ValueError(ACTION_FAMILY_ARTIFACT_MISSING)

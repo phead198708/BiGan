@@ -14,14 +14,19 @@ from bigan.v8.polymarket import (
     PRIMARY_POLICY_TARGET_ACTION_VALUE,
     PolymarketCorpusBuildConfig,
     PolymarketPolicyExample,
+    PolymarketPolicyPrediction,
     PolymarketPolicyTrainingConfig,
     build_polymarket_btc_corpus,
+    build_polymarket_ev_decisions,
     load_polymarket_policy_dataset,
     predict_polymarket_policy_examples,
     run_polymarket_policy_training,
     write_deterministic_polymarket_corpus_fixtures,
 )
 from bigan.v8.polymarket.contracts import looks_like_sha256
+from bigan.v8.polymarket.training.action_family_eligibility import (
+    build_action_family_counterfactual_prediction_sets,
+)
 from bigan.v8.polymarket.training.dataset import _split_examples
 
 
@@ -418,6 +423,115 @@ def test_feature_conditioned_action_returns_vary_by_state_within_family(
         first.expected_return_by_action[action] != second.expected_return_by_action[action]
         for action in ACTION_VALUE_LABEL_ACTIONS
     )
+
+
+def test_hold_to_settlement_disabled_counterfactual_reranks_to_sell_before_close(
+    tmp_path: Path,
+) -> None:
+    action_returns = dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, -0.20)
+    action_returns["NO_TRADE"] = 0.0
+    action_returns["BUY_UP_HOLD_TO_SETTLEMENT"] = 0.20
+    action_returns["BUY_UP_SELL_BEFORE_CLOSE"] = 0.12
+    example = PolymarketPolicyExample(
+        market_id="market-rerank",
+        condition_id="condition-rerank",
+        slug="btc-updown-rerank",
+        market_family="btc_updown_5m",
+        horizon_ms=300_000,
+        decision_ts=1_000_000,
+        feature_cutoff_ts=1_000_000,
+        max_input_ts=1_000_000,
+        features={
+            "up_bid": 0.43,
+            "up_ask": 0.45,
+            "up_mid": 0.44,
+            "down_bid": 0.53,
+            "down_ask": 0.55,
+            "down_mid": 0.54,
+            "time_to_close_seconds": 120.0,
+        },
+        target_up_probability=1.0,
+        resolved_outcome="UP",
+        resolution_status="RESOLVED",
+        action_return_targets=action_returns,
+        best_policy_action="BUY_UP_HOLD_TO_SETTLEMENT",
+        best_action_expected_return=0.20,
+        second_best_action_expected_return=0.12,
+        best_action_margin=0.08,
+    )
+    prediction = PolymarketPolicyPrediction(
+        market_id=example.market_id,
+        condition_id=example.condition_id,
+        slug=example.slug,
+        market_family=example.market_family,
+        horizon_ms=example.horizon_ms,
+        decision_ts=example.decision_ts,
+        estimated_up_probability=0.70,
+        confidence=0.90,
+        score=0.20,
+        calibration_bucket="test-bucket",
+        model_version="test-action-value-model",
+        feature_schema_hash="a" * 64,
+        training_corpus_hash="b" * 64,
+        features=dict(example.features),
+        target_up_probability=example.target_up_probability,
+        p_up_auxiliary=0.70,
+        expected_return_by_action=action_returns,
+        expected_return_no_trade=0.0,
+        expected_return_buy_up_hold_to_settlement=0.20,
+        expected_return_buy_down_hold_to_settlement=-0.20,
+        expected_return_buy_up_sell_before_close=0.12,
+        expected_return_buy_down_sell_before_close=-0.20,
+        best_policy_action="BUY_UP_HOLD_TO_SETTLEMENT",
+        best_action_expected_return=0.20,
+        second_best_action_expected_return=0.12,
+        best_action_margin=0.08,
+        calibrated_expected_pnl_per_notional_by_action=action_returns,
+        calibrated_best_policy_action="BUY_UP_HOLD_TO_SETTLEMENT",
+        calibrated_expected_pnl_per_notional=0.20,
+        calibrated_second_best_expected_pnl_per_notional=0.12,
+        calibrated_action_margin=0.08,
+        action_value_calibration_applied=True,
+        action_value_calibration_id="c" * 64,
+        calibration_support_count=10,
+        calibration_bucket_count=len(ACTION_VALUE_LABEL_ACTIONS),
+        policy_confidence=0.90,
+        action_value_head_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        feature_conditioned_action_value_model_enabled=True,
+    )
+
+    variants = build_action_family_counterfactual_prediction_sets(
+        examples=(example,),
+        predictions=(prediction,),
+        execution_buffer=0.015,
+        thresholds=(),
+    )
+    hold_disabled = next(
+        variant
+        for variant in variants
+        if variant["variant"] == "B_hold_to_settlement_disabled_reranked"
+    )
+    reranked_prediction = hold_disabled["predictions"][0]
+    decisions = build_polymarket_ev_decisions(
+        predictions=(reranked_prediction,),
+        config=PolymarketPolicyTrainingConfig(
+            corpus_dir=tmp_path / "corpus",
+            output_dir=tmp_path / "policy",
+            ev_threshold=0.015,
+        ),
+    )
+
+    assert reranked_prediction.best_policy_action == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert (
+        reranked_prediction.calibrated_best_policy_action
+        == "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+    assert reranked_prediction.calibrated_expected_pnl_per_notional == 0.12
+    assert decisions[0].action == "BUY_UP"
+    assert decisions[0].entry_policy_action == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert decisions[0].intended_exit_policy == "sell_before_close"
+    assert decisions[0].planned_exit_before_ts is not None
 
 
 def test_action_value_prediction_api_rejects_missing_features_by_default(

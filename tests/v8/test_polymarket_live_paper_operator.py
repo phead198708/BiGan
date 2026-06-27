@@ -307,6 +307,7 @@ def test_real_history_action_value_feature_column_drift_fails_closed(
             "calibration_support_passed": True,
             "best_action_concentration_passed": True,
             "p_up_action_disagreement_within_limit": True,
+            **_valid_action_family_manifest_fields(tmp_path),
             "action_value_paper_decision_eligible": True,
             "action_value_paper_decision_ineligible_reasons": [],
         }
@@ -355,6 +356,7 @@ def test_live_eligible_action_value_model_uses_calibration_artifact(
             "calibration_quality_passed": True,
             "best_action_concentration_passed": True,
             "p_up_action_disagreement_within_limit": True,
+            **_valid_action_family_manifest_fields(tmp_path),
             "action_value_paper_decision_eligible": True,
             "action_value_paper_decision_ineligible_reasons": [],
         }
@@ -382,6 +384,56 @@ def test_live_eligible_action_value_model_uses_calibration_artifact(
     assert all(
         row["calibrated_expected_pnl_per_notional_by_action"] for row in predictions
     )
+
+
+def test_live_eligible_real_history_action_value_requires_action_family_artifacts(
+    tmp_path: Path,
+) -> None:
+    manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(
+        tmp_path,
+        feature_columns=("up_mid",),
+    )
+    calibration_path = _write_action_value_calibration_artifact(tmp_path)
+    manifest = _read_json(manifest_path)
+    manifest.update(
+        {
+            "real_historical_corpus_used": True,
+            "manual_live_evidence_eligible": True,
+            "policy_dataset_hash": "a" * 64,
+            "split_hash": "b" * 64,
+            "action_value_calibration_artifact_path": calibration_path.name,
+            "action_value_calibration_sha256": _sha256(calibration_path),
+            "action_value_calibration_id": "c" * 64,
+            "action_value_calibration_artifact_used": True,
+            "execution_uses_calibrated_action_value": True,
+            "calibration_support_passed": True,
+            "calibration_quality_passed": True,
+            "best_action_concentration_passed": True,
+            "p_up_action_disagreement_within_limit": True,
+            "action_family_paper_decision_eligible": True,
+            "action_family_paper_decision_ineligible_reasons": [],
+            "action_value_paper_decision_eligible": True,
+            "action_value_paper_decision_ineligible_reasons": [],
+        }
+    )
+    _write_json(manifest_path, manifest)
+
+    result = run_polymarket_live_paper(
+        PolymarketLivePaperConfig(
+            run_id="reject-missing-action-family-artifacts",
+            output_dir=tmp_path,
+            model_manifest=manifest_path,
+            model_path=model_path,
+            overwrite_existing=True,
+        )
+    )
+
+    assert result.operator_manifest["operator_status"] == "blocked_fail_closed"
+    assert "action_family_artifact_missing" in result.operator_manifest[
+        "critical_reason_codes"
+    ]
+    assert result.operator_manifest["prediction_count"] == 0
+    assert result.operator_manifest["decision_count"] == 0
 
 
 def test_live_action_value_rejects_action_family_artifact_hash_mismatch(
@@ -471,6 +523,7 @@ def test_live_action_value_rejects_invalid_calibration_artifact_content(
             "calibration_quality_passed": True,
             "best_action_concentration_passed": True,
             "p_up_action_disagreement_within_limit": True,
+            **_valid_action_family_manifest_fields(tmp_path),
             "action_value_paper_decision_eligible": True,
             "action_value_paper_decision_ineligible_reasons": [],
         }
@@ -534,6 +587,7 @@ def test_live_action_value_rejects_high_score_bucket_without_support_or_buffer(
             "calibration_quality_passed": True,
             "best_action_concentration_passed": True,
             "p_up_action_disagreement_within_limit": True,
+            **_valid_action_family_manifest_fields(tmp_path),
             "action_value_paper_decision_eligible": True,
             "action_value_paper_decision_ineligible_reasons": [],
         }
@@ -919,6 +973,23 @@ def _write_action_family_guard_artifacts(tmp_path: Path) -> tuple[Path, Path]:
     _write_json(action_family_path, action_family)
     _write_json(longshot_guard_path, longshot_guard)
     return action_family_path, longshot_guard_path
+
+
+def _valid_action_family_manifest_fields(tmp_path: Path) -> dict[str, Any]:
+    action_family_path, longshot_guard_path = _write_action_family_guard_artifacts(tmp_path)
+    return {
+        "action_family_eligibility_report_path": action_family_path.name,
+        "action_family_eligibility_sha256": _sha256(action_family_path),
+        "action_family_paper_decision_eligible": True,
+        "action_family_paper_decision_ineligible_reasons": [],
+        "hold_to_settlement_longshot_guard_report_path": longshot_guard_path.name,
+        "hold_to_settlement_longshot_guard_sha256": _sha256(longshot_guard_path),
+        "hold_to_settlement_longshot_guard_enabled": True,
+        "hold_to_settlement_longshot_guard_reason_codes": [
+            "hold_to_settlement_longshot_guard",
+            "action_family_ineligible",
+        ],
+    }
 
 
 def _sha256(path: Path) -> str:
