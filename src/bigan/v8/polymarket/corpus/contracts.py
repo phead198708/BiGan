@@ -9,9 +9,15 @@ from typing import Any, Literal
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256, looks_like_sha256
 
-POLYMARKET_CORPUS_SCHEMA_VERSION = "bigan-v8-polymarket-corpus-v2"
+POLYMARKET_CORPUS_SCHEMA_VERSION = "bigan-v8-polymarket-corpus-v3"
 POLYMARKET_CORPUS_PHASE = "polymarket_historical_corpus"
 DEFAULT_CORPUS_CREATED_AT = "1970-01-01T00:00:00Z"
+POLYMARKET_SELL_BEFORE_CLOSE_LABEL_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-sell-before-close-executable-exit-v1"
+)
+POLYMARKET_SELL_BEFORE_CLOSE_LABEL_REDESIGN_REPORT_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-sell-before-close-label-redesign-report-v1"
+)
 
 BTC_UPDOWN_MARKET_HORIZONS_MS: dict[str, int] = {
     "btc_updown_5m": 5 * 60 * 1000,
@@ -36,6 +42,8 @@ NORMALIZED_CORPUS_FILENAMES: tuple[str, ...] = (
     "polymarket_resolution_events.jsonl",
     "polymarket_feature_rows.jsonl",
     "polymarket_label_rows.jsonl",
+    "sell_before_close_label_redesign_report.json",
+    "sell_before_close_label_redesign_report.md",
     "polymarket_train_shadow_split.json",
     "polymarket_corpus_summary.json",
 )
@@ -43,6 +51,12 @@ NORMALIZED_CORPUS_FILENAMES: tuple[str, ...] = (
 CorpusMarketFamily = Literal["btc_updown_5m", "btc_updown_15m", "btc_updown_1h"]
 CorpusOutcome = Literal["UP", "DOWN"]
 CorpusLabelOutcome = Literal["UP", "DOWN", "NONE"]
+CorpusSellBeforeCloseExecutionClass = Literal[
+    "not_applicable",
+    "realizable_sell_before_close",
+    "theoretical_sell_before_close",
+    "non_executable_sell_before_close",
+]
 CorpusLabelAction = Literal[
     "NO_TRADE",
     "BUY_UP_HOLD_TO_SETTLEMENT",
@@ -70,6 +84,10 @@ class PolymarketCorpusBuildConfig:
     max_time_to_close_seconds: int | None = None
     include_trade_labels: bool = True
     include_settlement_labels: bool = True
+    sell_before_close_entry_notional: float = 1.0
+    sell_before_close_min_exit_notional: float = 1.0
+    sell_before_close_min_queue_fill_probability: float = 0.50
+    sell_before_close_exit_buffer_seconds: int = 1
     train_fraction: float = 0.67
     overwrite_existing: bool = False
     paper_only: bool = True
@@ -108,6 +126,18 @@ class PolymarketCorpusBuildConfig:
             raise ValueError("train_fraction must be in (0, 1)")
         if not self.include_trade_labels and not self.include_settlement_labels:
             raise ValueError("at least one label family must be enabled")
+        for field_name in (
+            "sell_before_close_entry_notional",
+            "sell_before_close_min_exit_notional",
+            "sell_before_close_min_queue_fill_probability",
+        ):
+            value = float(getattr(self, field_name))
+            if value <= 0.0 or not math.isfinite(value):
+                raise ValueError(f"{field_name} must be positive and finite")
+        if self.sell_before_close_min_queue_fill_probability > 1.0:
+            raise ValueError("sell_before_close_min_queue_fill_probability must be <= 1")
+        if self.sell_before_close_exit_buffer_seconds < 0:
+            raise ValueError("sell_before_close_exit_buffer_seconds must be non-negative")
         _validate_safety_boundary(self)
 
     def resolved_sample_intervals(self) -> dict[str, int]:
@@ -438,6 +468,17 @@ class PolymarketCorpusLabelRow:
     tie_breaker: str
     resolution_rule_sha256: str
     raw_resolution_sha256: str
+    sell_before_close_label_schema_version: str = (
+        POLYMARKET_SELL_BEFORE_CLOSE_LABEL_SCHEMA_VERSION
+    )
+    sell_before_close_execution_class: CorpusSellBeforeCloseExecutionClass = "not_applicable"
+    sell_before_close_exit_path: dict[str, Any] | None = None
+    label_uses_executable_exit_path: bool = False
+    theoretical_terminal_bid_return: float = 0.0
+    realized_executable_sell_before_close_return: float = 0.0
+    execution_gap_return: float = 0.0
+    queue_fill_probability_estimate: float = 0.0
+    executable_liquidity_notional: float = 0.0
     paper_only: bool = True
     capital_at_risk: bool = False
     broker_exchange_write_enabled: bool = False
@@ -482,8 +523,51 @@ class PolymarketCorpusLabelRow:
                 raise ValueError(f"{field_name} must be non-negative and finite")
         if self.action != "NO_TRADE" and self.entry_ask <= 0.0:
             raise ValueError("tradable labels require positive entry_ask")
-        if self.action.endswith("SELL_BEFORE_CLOSE") and self.exit_bid <= 0.0:
-            raise ValueError("sell labels require positive exit_bid")
+        valid_exit_classes = {
+            "not_applicable",
+            "realizable_sell_before_close",
+            "theoretical_sell_before_close",
+            "non_executable_sell_before_close",
+        }
+        if self.sell_before_close_execution_class not in valid_exit_classes:
+            raise ValueError("unsupported sell_before_close_execution_class")
+        for field_name in (
+            "theoretical_terminal_bid_return",
+            "realized_executable_sell_before_close_return",
+            "execution_gap_return",
+            "queue_fill_probability_estimate",
+            "executable_liquidity_notional",
+        ):
+            value = float(getattr(self, field_name))
+            if not math.isfinite(value):
+                raise ValueError(f"{field_name} must be finite")
+        if not 0.0 <= self.queue_fill_probability_estimate <= 1.0:
+            raise ValueError("queue_fill_probability_estimate must be in [0, 1]")
+        if self.executable_liquidity_notional < 0.0:
+            raise ValueError("executable_liquidity_notional must be non-negative")
+        if self.action.endswith("SELL_BEFORE_CLOSE"):
+            if self.sell_before_close_label_schema_version != (
+                POLYMARKET_SELL_BEFORE_CLOSE_LABEL_SCHEMA_VERSION
+            ):
+                raise ValueError("sell-before-close labels require executable schema version")
+            if self.sell_before_close_execution_class == "not_applicable":
+                raise ValueError("sell-before-close labels require an execution class")
+            if not self.sell_before_close_exit_path:
+                raise ValueError("sell-before-close labels require an exit path")
+            if self.sell_before_close_exit_path.get("label_source") == "fixed_terminal_bid_only":
+                raise ValueError("fixed terminal bid-only sell labels are not accepted")
+            if (
+                self.sell_before_close_execution_class == "realizable_sell_before_close"
+                and (self.exit_bid <= 0.0 or not self.label_uses_executable_exit_path)
+            ):
+                raise ValueError("realizable sell labels require an executable exit bid")
+            if (
+                self.sell_before_close_execution_class != "realizable_sell_before_close"
+                and self.label_uses_executable_exit_path
+            ):
+                raise ValueError("non-realizable sell labels cannot use executable exit path")
+        elif self.sell_before_close_execution_class != "not_applicable":
+            raise ValueError("non-sell labels cannot carry sell-before-close execution class")
         if self.is_positive != (self.total_net_return > 0.0):
             raise ValueError("is_positive must equal total_net_return > 0")
         if not looks_like_sha256(self.resolution_rule_sha256):

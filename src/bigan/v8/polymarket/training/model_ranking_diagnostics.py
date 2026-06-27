@@ -295,6 +295,9 @@ def build_action_representation_diagnostic_report(
     }
     validation_sell = split_reports["validation"]["sell_before_close_summary"]
     shadow_sell = split_reports["shadow"]["sell_before_close_summary"]
+    label_exit_path_assessment = _sell_before_close_label_exit_path_assessment(
+        examples=(*validation_examples, *shadow_examples),
+    )
     report = {
         "schema_version": ACTION_REPRESENTATION_DIAGNOSTIC_SCHEMA_VERSION,
         "policy_schema_version": POLYMARKET_POLICY_SCHEMA_VERSION,
@@ -310,19 +313,7 @@ def build_action_representation_diagnostic_report(
         "fine_action_family_definition": (
             "side|intended_exit_policy|price_bucket|time_to_close_bucket"
         ),
-        "label_exit_path_assessment": {
-            "sell_before_close_entry_price": "entry ask at decision_ts",
-            "sell_before_close_exit_price": (
-                "last available bid at market_end_ts - 1"
-            ),
-            "sell_before_close_exit_path_is_fixed_terminal_bid": True,
-            "sell_before_close_exit_path_coarse": True,
-            "coarse_exit_path_risk_codes": [
-                "single_terminal_exit_bid_path",
-                "no_intraround_exit_optimization",
-                "no_queue_fill_probability_model",
-            ],
-        },
+        "label_exit_path_assessment": label_exit_path_assessment,
         "validation": split_reports["validation"],
         "shadow": split_reports["shadow"],
         "sell_before_close_overall": {
@@ -346,7 +337,7 @@ def build_action_representation_diagnostic_report(
         "notes": [
             "diagnostic-only artifact; does not change production gates",
             "fine families are causal feature buckets and use no future data",
-            "label review focuses on sell-before-close fixed terminal bid exit path",
+            "label review compares theoretical terminal bid and executable exit path",
         ],
         **compact_safety_fields(),
     }
@@ -1208,6 +1199,79 @@ def _action_representation_split_report(
     }
 
 
+def _sell_before_close_label_exit_path_assessment(
+    *,
+    examples: tuple[PolymarketPolicyExample, ...],
+) -> dict[str, Any]:
+    sell_actions = (
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+    )
+    class_counts: Counter[str] = Counter()
+    executable_path_count = 0
+    missing_metadata_count = 0
+    theoretical_positive_non_executable_count = 0
+    for example in examples:
+        for action in sell_actions:
+            execution_class = example.sell_before_close_execution_class_targets.get(
+                action,
+            )
+            if not execution_class:
+                missing_metadata_count += 1
+                continue
+            class_counts[str(execution_class)] += 1
+            if example.sell_before_close_label_uses_executable_exit_path_targets.get(
+                action,
+                False,
+            ):
+                executable_path_count += 1
+            theoretical_return = float(
+                example.sell_before_close_theoretical_return_targets.get(action, 0.0)
+            )
+            if theoretical_return > 0.0 and execution_class != (
+                "realizable_sell_before_close"
+            ):
+                theoretical_positive_non_executable_count += 1
+    redesigned_metadata_present = missing_metadata_count == 0 and bool(class_counts)
+    if not redesigned_metadata_present:
+        return {
+            "sell_before_close_entry_price": "entry ask at decision_ts",
+            "sell_before_close_exit_price": "last available bid at market_end_ts - 1",
+            "sell_before_close_exit_path_is_fixed_terminal_bid": True,
+            "sell_before_close_exit_path_coarse": True,
+            "uses_intraround_exit_opportunity_model": False,
+            "uses_queue_fill_probability_model": False,
+            "compares_theoretical_vs_executable_exit_return": False,
+            "missing_executable_exit_metadata_count": missing_metadata_count,
+            "coarse_exit_path_risk_codes": [
+                "single_terminal_exit_bid_path",
+                "no_intraround_exit_optimization",
+                "no_queue_fill_probability_model",
+            ],
+        }
+    reason_codes = []
+    if theoretical_positive_non_executable_count:
+        reason_codes.append("positive_theoretical_return_without_executable_exit")
+    return {
+        "sell_before_close_entry_price": "entry ask at decision_ts",
+        "sell_before_close_exit_price": "best executable intraround bid path",
+        "sell_before_close_theoretical_reference": "terminal bid is diagnostic only",
+        "sell_before_close_exit_path_is_fixed_terminal_bid": False,
+        "sell_before_close_exit_path_coarse": False,
+        "uses_intraround_exit_opportunity_model": True,
+        "uses_queue_fill_probability_model": True,
+        "compares_theoretical_vs_executable_exit_return": True,
+        "sell_before_close_execution_class_distribution": dict(
+            sorted(class_counts.items())
+        ),
+        "label_uses_executable_exit_path_count": executable_path_count,
+        "theoretical_positive_non_executable_count": (
+            theoretical_positive_non_executable_count
+        ),
+        "coarse_exit_path_risk_codes": reason_codes,
+    }
+
+
 def _action_representation_row(
     *,
     split_name: str,
@@ -1221,6 +1285,10 @@ def _action_representation_row(
         action=action,
         features=prediction.features,
         raw_score=raw_score,
+    )
+    execution_class = example.sell_before_close_execution_class_targets.get(
+        action,
+        "not_applicable",
     )
     return {
         "split": split_name,
@@ -1247,6 +1315,25 @@ def _action_representation_row(
             example.settlement_return_targets.get(action, 0.0)
         ),
         "is_positive": bool(example.action_is_positive_targets.get(action, False)),
+        "sell_before_close_execution_class": execution_class,
+        "label_uses_executable_exit_path": bool(
+            example.sell_before_close_label_uses_executable_exit_path_targets.get(
+                action,
+                False,
+            )
+        ),
+        "theoretical_terminal_bid_return": float(
+            example.sell_before_close_theoretical_return_targets.get(action, 0.0)
+        ),
+        "realized_executable_sell_before_close_return": float(
+            example.sell_before_close_executable_return_targets.get(action, 0.0)
+        ),
+        "execution_gap_return": float(
+            example.sell_before_close_execution_gap_targets.get(action, 0.0)
+        ),
+        "queue_fill_probability_estimate": float(
+            example.sell_before_close_queue_fill_probability_targets.get(action, 0.0)
+        ),
         "entry_up_ask": prediction.features.get("up_ask"),
         "entry_down_ask": prediction.features.get("down_ask"),
         "entry_up_bid": prediction.features.get("up_bid"),
@@ -1336,12 +1423,26 @@ def _action_representation_metrics(
     realized_returns = [float(row["realized_return"]) for row in rows]
     trade_returns = [float(row["realized_trade_return"]) for row in rows]
     settlement_returns = [float(row["settlement_return"]) for row in rows]
+    theoretical_returns = [float(row["theoretical_terminal_bid_return"]) for row in rows]
+    executable_returns = [
+        float(row["realized_executable_sell_before_close_return"]) for row in rows
+    ]
+    execution_gaps = [float(row["execution_gap_return"]) for row in rows]
+    queue_fill_probabilities = [
+        float(row["queue_fill_probability_estimate"]) for row in rows
+    ]
     calibrated_scores = [float(row["calibrated_score"]) for row in rows]
     support_count = len(rows)
     unique_market_count = len({row["market_id"] for row in rows})
     positive_count = sum(1 for value in realized_returns if value > 0.0)
     realized_sum = sum(realized_returns)
     realized_mean = _mean(realized_returns)
+    execution_class_counts = Counter(
+        str(row["sell_before_close_execution_class"]) for row in rows
+    )
+    executable_path_count = sum(
+        1 for row in rows if row["label_uses_executable_exit_path"]
+    )
     return {
         "support_count": support_count,
         "unique_market_count": unique_market_count,
@@ -1349,6 +1450,16 @@ def _action_representation_metrics(
         "realized_return_sum": realized_sum,
         "realized_trade_return_mean": _mean(trade_returns),
         "settlement_return_mean": _mean(settlement_returns),
+        "theoretical_terminal_bid_return_mean": _mean(theoretical_returns),
+        "realized_executable_sell_before_close_return_mean": _mean(
+            executable_returns
+        ),
+        "execution_gap_return_mean": _mean(execution_gaps),
+        "queue_fill_probability_mean": _mean(queue_fill_probabilities),
+        "sell_before_close_execution_class_distribution": dict(
+            sorted(execution_class_counts.items())
+        ),
+        "label_uses_executable_exit_path_count": executable_path_count,
         "calibrated_score_mean": _mean(calibrated_scores),
         "positive_count": positive_count,
         "positive_rate": 0.0 if support_count == 0 else positive_count / support_count,

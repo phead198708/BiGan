@@ -1026,6 +1026,20 @@ def _model_manifest(
         "training_corpus_hash": dataset_profile["training_corpus_hash"],
         "feature_schema_hash": dataset_profile["feature_schema_hash"],
         "label_schema_hash": dataset_profile["label_schema_hash"],
+        "sell_before_close_label_schema_version": dataset_profile[
+            "sell_before_close_label_schema_version"
+        ],
+        "sell_before_close_fixed_terminal_bid_only_labels_allowed": (
+            dataset_profile[
+                "sell_before_close_fixed_terminal_bid_only_labels_allowed"
+            ]
+        ),
+        "sell_before_close_label_gate_passed": dataset_profile[
+            "sell_before_close_label_gate_passed"
+        ],
+        "sell_before_close_execution_class_counts": dataset_profile[
+            "sell_before_close_execution_class_counts"
+        ],
         "dataset_hash": dataset_profile["dataset_hash"],
         "model_sha256": model_sha256,
         "train_row_count": dataset_profile["train_row_count"],

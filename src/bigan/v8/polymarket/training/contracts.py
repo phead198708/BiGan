@@ -131,6 +131,16 @@ class PolymarketPolicyExample:
     realized_trade_return_targets: dict[str, float] = field(default_factory=dict)
     settlement_return_targets: dict[str, float] = field(default_factory=dict)
     action_is_positive_targets: dict[str, bool] = field(default_factory=dict)
+    sell_before_close_execution_class_targets: dict[str, str] = field(default_factory=dict)
+    sell_before_close_theoretical_return_targets: dict[str, float] = field(default_factory=dict)
+    sell_before_close_executable_return_targets: dict[str, float] = field(default_factory=dict)
+    sell_before_close_execution_gap_targets: dict[str, float] = field(default_factory=dict)
+    sell_before_close_queue_fill_probability_targets: dict[str, float] = field(
+        default_factory=dict
+    )
+    sell_before_close_label_uses_executable_exit_path_targets: dict[str, bool] = field(
+        default_factory=dict
+    )
     best_policy_action: str = "NO_TRADE"
     best_action_expected_return: float = 0.0
     second_best_action_expected_return: float = 0.0
@@ -173,6 +183,35 @@ class PolymarketPolicyExample:
                     "action_is_positive_targets contains unsupported actions: "
                     + ", ".join(sorted(unsupported))
                 )
+        for mapping, field_name in (
+            (
+                self.sell_before_close_theoretical_return_targets,
+                "sell_before_close_theoretical_return_targets",
+            ),
+            (
+                self.sell_before_close_executable_return_targets,
+                "sell_before_close_executable_return_targets",
+            ),
+            (
+                self.sell_before_close_execution_gap_targets,
+                "sell_before_close_execution_gap_targets",
+            ),
+            (
+                self.sell_before_close_queue_fill_probability_targets,
+                "sell_before_close_queue_fill_probability_targets",
+            ),
+        ):
+            _validate_numeric_target_mapping(
+                mapping,
+                allow_empty=True,
+                field_name=field_name,
+            )
+        for action in self.sell_before_close_execution_class_targets:
+            if action not in ACTION_VALUE_LABEL_ACTIONS:
+                raise ValueError("unsupported sell-before-close execution class action")
+        for action in self.sell_before_close_label_uses_executable_exit_path_targets:
+            if action not in ACTION_VALUE_LABEL_ACTIONS:
+                raise ValueError("unsupported sell-before-close executable path action")
         if self.best_policy_action not in ACTION_VALUE_LABEL_ACTIONS:
             raise ValueError("best_policy_action must be a supported label action")
         for field_name in (

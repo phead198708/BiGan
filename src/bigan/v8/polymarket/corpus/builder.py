@@ -26,7 +26,11 @@ from bigan.v8.polymarket.corpus.contracts import (
     stable_hash,
 )
 from bigan.v8.polymarket.corpus.features import build_polymarket_corpus_feature_rows
-from bigan.v8.polymarket.corpus.labels import build_polymarket_corpus_label_rows
+from bigan.v8.polymarket.corpus.labels import (
+    build_polymarket_corpus_label_rows,
+    build_sell_before_close_label_redesign_report,
+    sell_before_close_label_redesign_markdown,
+)
 from bigan.v8.polymarket.corpus.splits import build_polymarket_train_shadow_split
 from bigan.v8.polymarket.rules import (
     PolymarketResolutionRule,
@@ -88,6 +92,12 @@ def build_polymarket_btc_corpus(
         feature_rows=feature_rows,
         config=config,
     )
+    sell_before_close_label_redesign_report = (
+        build_sell_before_close_label_redesign_report(
+            label_rows=label_rows,
+            config=config,
+        )
+    )
     split = build_polymarket_train_shadow_split(label_rows=label_rows, config=config)
 
     paths = {
@@ -99,6 +109,12 @@ def build_polymarket_btc_corpus(
         "resolution_events": output_dir / "polymarket_resolution_events.jsonl",
         "feature_rows": output_dir / "polymarket_feature_rows.jsonl",
         "label_rows": output_dir / "polymarket_label_rows.jsonl",
+        "sell_before_close_label_redesign_report": (
+            output_dir / "sell_before_close_label_redesign_report.json"
+        ),
+        "sell_before_close_label_redesign_summary": (
+            output_dir / "sell_before_close_label_redesign_report.md"
+        ),
         "train_shadow_split": output_dir / "polymarket_train_shadow_split.json",
         "corpus_summary": output_dir / "polymarket_corpus_summary.json",
         "corpus_manifest": output_dir / "polymarket_corpus_manifest.json",
@@ -111,6 +127,16 @@ def build_polymarket_btc_corpus(
     _write_jsonl(paths["resolution_events"], [row.to_dict() for row in resolution_events])
     _write_jsonl(paths["feature_rows"], [row.to_dict() for row in feature_rows])
     _write_jsonl(paths["label_rows"], [row.to_dict() for row in label_rows])
+    _write_json(
+        paths["sell_before_close_label_redesign_report"],
+        sell_before_close_label_redesign_report,
+    )
+    paths["sell_before_close_label_redesign_summary"].write_text(
+        sell_before_close_label_redesign_markdown(
+            sell_before_close_label_redesign_report
+        ),
+        encoding="utf-8",
+    )
     _write_json(paths["train_shadow_split"], split.to_dict())
 
     normalized_hashes = {
@@ -128,6 +154,9 @@ def build_polymarket_btc_corpus(
         normalized_hashes=normalized_hashes,
         rules=rules,
         resolutions=resolution_events,
+        sell_before_close_label_redesign_report=(
+            sell_before_close_label_redesign_report
+        ),
     )
     _write_json(paths["corpus_summary"], summary)
     normalized_hashes["corpus_summary"] = _sha256_file(paths["corpus_summary"])
@@ -145,6 +174,35 @@ def build_polymarket_btc_corpus(
         "resolution_hashes": {
             event.market_id: event.raw_resolution_sha256 for event in resolution_events
         },
+        "sell_before_close_label_schema_version": (
+            sell_before_close_label_redesign_report[
+                "sell_before_close_label_schema_version"
+            ]
+        ),
+        "sell_before_close_fixed_terminal_bid_only_labels_allowed": (
+            sell_before_close_label_redesign_report[
+                "fixed_terminal_bid_only_labels_allowed"
+            ]
+        ),
+        "sell_before_close_label_redesign_report_path": (
+            "sell_before_close_label_redesign_report.json"
+        ),
+        "sell_before_close_label_redesign_summary_path": (
+            "sell_before_close_label_redesign_report.md"
+        ),
+        "sell_before_close_label_redesign_report_id": (
+            sell_before_close_label_redesign_report[
+                "sell_before_close_label_redesign_report_id"
+            ]
+        ),
+        "sell_before_close_label_gate_passed": (
+            sell_before_close_label_redesign_report["label_gate_passed"]
+        ),
+        "sell_before_close_execution_class_counts": (
+            sell_before_close_label_redesign_report[
+                "sell_before_close_execution_class_counts"
+            ]
+        ),
         "sample_config": config.to_manifest_dict(),
         **safety_fields(),
     }
@@ -620,6 +678,7 @@ def _corpus_summary(
     normalized_hashes: dict[str, str],
     rules: dict[str, PolymarketResolutionRule],
     resolutions: tuple[PolymarketCorpusResolutionEvent, ...],
+    sell_before_close_label_redesign_report: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": POLYMARKET_CORPUS_SCHEMA_VERSION,
@@ -635,6 +694,22 @@ def _corpus_summary(
         "resolution_hashes": {
             event.market_id: event.raw_resolution_sha256 for event in resolutions
         },
+        "sell_before_close_label_schema_version": (
+            sell_before_close_label_redesign_report[
+                "sell_before_close_label_schema_version"
+            ]
+        ),
+        "sell_before_close_label_gate_passed": (
+            sell_before_close_label_redesign_report["label_gate_passed"]
+        ),
+        "sell_before_close_execution_class_counts": (
+            sell_before_close_label_redesign_report[
+                "sell_before_close_execution_class_counts"
+            ]
+        ),
+        "sell_before_close_label_gate_reason_codes": (
+            sell_before_close_label_redesign_report["label_gate_reason_codes"]
+        ),
         "sample_config": config.to_manifest_dict(),
         "split": split,
         **safety_fields(),

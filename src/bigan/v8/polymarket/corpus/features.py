@@ -51,6 +51,8 @@ def build_polymarket_corpus_feature_rows(
                     decision_ts=decision_ts,
                     up_snapshot=up_snapshot,
                     down_snapshot=down_snapshot,
+                    up_snapshots=snapshots_by_market.get((market.market_id, "UP"), ()),
+                    down_snapshots=snapshots_by_market.get((market.market_id, "DOWN"), ()),
                     market_trades=market_trades,
                     candles=candles,
                     current_candle=candle,
@@ -67,6 +69,8 @@ def _feature_row(
     decision_ts: int,
     up_snapshot: PolymarketCorpusBookSnapshot,
     down_snapshot: PolymarketCorpusBookSnapshot,
+    up_snapshots: tuple[PolymarketCorpusBookSnapshot, ...],
+    down_snapshots: tuple[PolymarketCorpusBookSnapshot, ...],
     market_trades: tuple[PolymarketCorpusTrade, ...],
     candles: tuple[BinanceBTCCandle, ...],
     current_candle: BinanceBTCCandle,
@@ -86,6 +90,10 @@ def _feature_row(
     up_spread_bps = _spread_bps(up_snapshot)
     down_spread_bps = _spread_bps(down_snapshot)
     liquidity_total = up_snapshot.liquidity_depth + down_snapshot.liquidity_depth
+    up_executable_bid_notional = up_snapshot.bid_price * up_snapshot.bid_size
+    down_executable_bid_notional = down_snapshot.bid_price * down_snapshot.bid_size
+    up_executable_ask_notional = up_snapshot.ask_price * up_snapshot.ask_size
+    down_executable_ask_notional = down_snapshot.ask_price * down_snapshot.ask_size
     features: dict[str, float | int | str | None] = {
         "market_family": market.market_family,
         "horizon_ms": market.horizon_ms,
@@ -103,9 +111,13 @@ def _feature_row(
         "up_bid": up_snapshot.bid_price,
         "up_ask": up_snapshot.ask_price,
         "up_mid": up_snapshot.mid_price,
+        "up_bid_size": up_snapshot.bid_size,
+        "up_ask_size": up_snapshot.ask_size,
         "down_bid": down_snapshot.bid_price,
         "down_ask": down_snapshot.ask_price,
         "down_mid": down_snapshot.mid_price,
+        "down_bid_size": down_snapshot.bid_size,
+        "down_ask_size": down_snapshot.ask_size,
         "up_down_mid_sum": up_snapshot.mid_price + down_snapshot.mid_price,
         "up_down_bid_sum": up_snapshot.bid_price + down_snapshot.bid_price,
         "up_down_ask_sum": up_snapshot.ask_price + down_snapshot.ask_price,
@@ -114,6 +126,59 @@ def _feature_row(
         "combined_spread_bps": up_spread_bps + down_spread_bps,
         "up_liquidity_depth": up_snapshot.liquidity_depth,
         "down_liquidity_depth": down_snapshot.liquidity_depth,
+        "up_executable_bid_notional": up_executable_bid_notional,
+        "down_executable_bid_notional": down_executable_bid_notional,
+        "up_executable_ask_notional": up_executable_ask_notional,
+        "down_executable_ask_notional": down_executable_ask_notional,
+        "up_queue_fill_probability_proxy": _queue_fill_probability_proxy(up_snapshot),
+        "down_queue_fill_probability_proxy": _queue_fill_probability_proxy(down_snapshot),
+        "up_book_staleness_ms": decision_ts - up_snapshot.ts,
+        "down_book_staleness_ms": decision_ts - down_snapshot.ts,
+        "up_book_update_lag_ms": decision_ts - up_snapshot.available_at_ts,
+        "down_book_update_lag_ms": decision_ts - down_snapshot.available_at_ts,
+        "book_snapshot_pair_ts_delta_ms": abs(up_snapshot.ts - down_snapshot.ts),
+        "up_recent_book_update_count_1m": _recent_book_update_count(
+            snapshots=up_snapshots,
+            decision_ts=decision_ts,
+            lookback_ms=60_000,
+        ),
+        "down_recent_book_update_count_1m": _recent_book_update_count(
+            snapshots=down_snapshots,
+            decision_ts=decision_ts,
+            lookback_ms=60_000,
+        ),
+        "up_recent_bid_depth_volatility_1m": _recent_depth_volatility(
+            snapshots=up_snapshots,
+            decision_ts=decision_ts,
+            lookback_ms=60_000,
+        ),
+        "down_recent_bid_depth_volatility_1m": _recent_depth_volatility(
+            snapshots=down_snapshots,
+            decision_ts=decision_ts,
+            lookback_ms=60_000,
+        ),
+        "up_recent_spread_stability_1m": _recent_spread_stability(
+            snapshots=up_snapshots,
+            decision_ts=decision_ts,
+            lookback_ms=60_000,
+        ),
+        "down_recent_spread_stability_1m": _recent_spread_stability(
+            snapshots=down_snapshots,
+            decision_ts=decision_ts,
+            lookback_ms=60_000,
+        ),
+        "up_empty_book_flag": float(
+            up_snapshot.bid_size <= 0.0 or up_snapshot.ask_size <= 0.0
+        ),
+        "down_empty_book_flag": float(
+            down_snapshot.bid_size <= 0.0 or down_snapshot.ask_size <= 0.0
+        ),
+        "up_crossed_or_locked_book_flag": float(
+            up_snapshot.bid_price >= up_snapshot.ask_price
+        ),
+        "down_crossed_or_locked_book_flag": float(
+            down_snapshot.bid_price >= down_snapshot.ask_price
+        ),
         "liquidity_imbalance": 0.0
         if liquidity_total <= 0.0
         else (up_snapshot.liquidity_depth - down_snapshot.liquidity_depth) / liquidity_total,
@@ -285,6 +350,62 @@ def _recent_trade_volume(
         if trade.outcome == outcome
         and decision_ts - lookback_ms <= trade.available_at_ts <= decision_ts
     )
+
+
+def _recent_book_update_count(
+    *,
+    snapshots: tuple[PolymarketCorpusBookSnapshot, ...],
+    decision_ts: int,
+    lookback_ms: int,
+) -> int:
+    return sum(
+        1
+        for snapshot in snapshots
+        if decision_ts - lookback_ms <= snapshot.available_at_ts <= decision_ts
+        and snapshot.ts <= decision_ts
+    )
+
+
+def _recent_depth_volatility(
+    *,
+    snapshots: tuple[PolymarketCorpusBookSnapshot, ...],
+    decision_ts: int,
+    lookback_ms: int,
+) -> float:
+    depths = [
+        snapshot.bid_size
+        for snapshot in snapshots
+        if decision_ts - lookback_ms <= snapshot.available_at_ts <= decision_ts
+        and snapshot.ts <= decision_ts
+    ]
+    if len(depths) < 2:
+        return 0.0
+    return pstdev(depths)
+
+
+def _recent_spread_stability(
+    *,
+    snapshots: tuple[PolymarketCorpusBookSnapshot, ...],
+    decision_ts: int,
+    lookback_ms: int,
+) -> float:
+    spreads = [
+        _spread_bps(snapshot)
+        for snapshot in snapshots
+        if decision_ts - lookback_ms <= snapshot.available_at_ts <= decision_ts
+        and snapshot.ts <= decision_ts
+    ]
+    if len(spreads) < 2:
+        return 1.0
+    return 1.0 / (1.0 + pstdev(spreads))
+
+
+def _queue_fill_probability_proxy(snapshot: PolymarketCorpusBookSnapshot) -> float:
+    executable_notional = snapshot.bid_price * snapshot.bid_size
+    size_score = min(1.0, executable_notional)
+    depth_score = min(1.0, snapshot.liquidity_depth / 2.0)
+    spread_score = max(0.0, 1.0 - _spread_bps(snapshot) / 2_000.0)
+    return max(0.0, min(1.0, 0.60 * size_score + 0.30 * depth_score + 0.10 * spread_score))
 
 
 def _feature_lookback_ms(name: str) -> int:

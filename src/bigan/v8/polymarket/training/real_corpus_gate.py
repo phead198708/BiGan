@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from bigan.v8.polymarket.contracts import looks_like_sha256
+from bigan.v8.polymarket.corpus import (
+    POLYMARKET_SELL_BEFORE_CLOSE_LABEL_SCHEMA_VERSION,
+)
 from bigan.v8.polymarket.training.contracts import (
     DEFAULT_POLICY_CREATED_AT,
     PolymarketPolicyTrainingConfig,
@@ -340,6 +343,15 @@ def _recorder_retraining_reason_codes(evidence: dict[str, Any]) -> list[str]:
     recorder_raw_hashes = manifest.get("raw_artifact_hashes", {})
     if corpus_manifest and corpus_manifest.get("raw_artifact_hashes") != recorder_raw_hashes:
         reasons.add("phase2_raw_artifact_hash_mismatch")
+    if corpus_manifest:
+        if corpus_manifest.get("sell_before_close_label_schema_version") != (
+            POLYMARKET_SELL_BEFORE_CLOSE_LABEL_SCHEMA_VERSION
+        ):
+            reasons.add("missing_executable_sell_before_close_label_schema")
+        if corpus_manifest.get("sell_before_close_fixed_terminal_bid_only_labels_allowed") is True:
+            reasons.add("fixed_terminal_bid_only_sell_before_close_labels_allowed")
+        if corpus_manifest.get("sell_before_close_label_gate_passed") is not True:
+            reasons.add("sell_before_close_label_redesign_gate_failed")
     return sorted(reasons)
 
 

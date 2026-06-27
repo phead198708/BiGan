@@ -71,6 +71,12 @@ def test_training_dataset_loads_phase2_corpus_outputs(tmp_path: Path) -> None:
             assert example.action_return_targets[action] == labels[
                 (example.market_id, example.decision_ts)
             ][action][ACTION_VALUE_TARGET_FIELD]
+        for action in ("BUY_UP_SELL_BEFORE_CLOSE", "BUY_DOWN_SELL_BEFORE_CLOSE"):
+            assert action in example.sell_before_close_execution_class_targets
+            assert action in example.sell_before_close_theoretical_return_targets
+            assert action in example.sell_before_close_executable_return_targets
+            assert action in example.sell_before_close_execution_gap_targets
+            assert action in example.sell_before_close_queue_fill_probability_targets
         assert example.best_policy_action in ACTION_VALUE_LABEL_ACTIONS
         assert example.best_action_expected_return >= example.second_best_action_expected_return
     assert dataset_payload["examples"][0]["action_return_targets"]
@@ -93,6 +99,30 @@ def test_feature_schema_hash_is_deterministic(tmp_path: Path) -> None:
 
     assert first.feature_schema_hash == second.feature_schema_hash
     assert first.dataset_hash == second.dataset_hash
+
+
+def test_policy_dataset_rejects_fixed_terminal_only_sell_before_close_labels(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = _build_corpus(tmp_path)
+    labels_path = corpus_dir / "polymarket_label_rows.jsonl"
+    labels = _read_jsonl(labels_path)
+    for row in labels:
+        if row["action"].endswith("SELL_BEFORE_CLOSE"):
+            row.pop("sell_before_close_label_schema_version", None)
+            row["sell_before_close_exit_path"] = {
+                "label_source": "fixed_terminal_bid_only"
+            }
+            break
+    _write_jsonl(labels_path, labels)
+
+    with pytest.raises(ValueError, match="executable exit schema"):
+        load_polymarket_policy_dataset(
+            PolymarketPolicyTrainingConfig(
+                corpus_dir=corpus_dir,
+                output_dir=tmp_path / "policy",
+            )
+        )
 
 
 def test_policy_split_keeps_shared_decision_ts_in_one_partition(tmp_path: Path) -> None:
@@ -198,6 +228,16 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert manifest["feature_conditioned_action_value_model_enabled"] is True
     assert manifest["action_value_target_field"] == ACTION_VALUE_TARGET_FIELD
     assert manifest["fixed_notional_target_used"] is True
+    assert manifest["sell_before_close_label_schema_version"] == (
+        "bigan-v8-polymarket-sell-before-close-executable-exit-v1"
+    )
+    assert manifest["sell_before_close_fixed_terminal_bid_only_labels_allowed"] is False
+    assert manifest["sell_before_close_label_gate_passed"] is True
+    assert manifest["sell_before_close_execution_class_counts"]
+    assert profile["sell_before_close_label_schema_version"] == (
+        "bigan-v8-polymarket-sell-before-close-executable-exit-v1"
+    )
+    assert profile["sell_before_close_fixed_terminal_bid_only_labels_allowed"] is False
     assert manifest["action_value_calibration_artifact_path"] == (
         "polymarket_action_value_calibration.json"
     )
@@ -423,8 +463,20 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     )
     assert action_representation["label_exit_path_assessment"][
         "sell_before_close_exit_path_coarse"
+    ] is False
+    assert action_representation["label_exit_path_assessment"][
+        "sell_before_close_exit_path_is_fixed_terminal_bid"
+    ] is False
+    assert action_representation["label_exit_path_assessment"][
+        "uses_intraround_exit_opportunity_model"
     ] is True
-    assert "single_terminal_exit_bid_path" in action_representation[
+    assert action_representation["label_exit_path_assessment"][
+        "uses_queue_fill_probability_model"
+    ] is True
+    assert action_representation["label_exit_path_assessment"][
+        "compares_theoretical_vs_executable_exit_return"
+    ] is True
+    assert "single_terminal_exit_bid_path" not in action_representation[
         "label_exit_path_assessment"
     ]["coarse_exit_path_risk_codes"]
     for split_name in ("validation", "shadow"):
@@ -440,6 +492,10 @@ def test_training_runner_writes_required_artifacts_and_manifest(
             assert "fine_action_family" in row
             assert "unique_market_count" in row
             assert "realized_trade_return_mean" in row
+            assert "theoretical_terminal_bid_return_mean" in row
+            assert "realized_executable_sell_before_close_return_mean" in row
+            assert "execution_gap_return_mean" in row
+            assert "sell_before_close_execution_class_distribution" in row
         for row in split["top_negative_high_score_sell_before_close_examples"]:
             assert "fine_action_family" in row
             assert "calibrated_score" in row
@@ -1185,6 +1241,13 @@ def _read_jsonl(path: Path) -> list[dict]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in rows),
+        encoding="utf-8",
+    )
 
 
 def _labels_by_decision_state(path: Path) -> dict[tuple[str, int], dict[str, dict]]:
