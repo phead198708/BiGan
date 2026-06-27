@@ -1,5 +1,10 @@
 """Polymarket BTC Up/Down policy training package."""
 
+from bigan.v8.polymarket.training.action_value_calibration import (
+    ACTION_VALUE_CALIBRATION_SCHEMA_VERSION,
+    apply_action_value_calibration,
+    build_action_value_calibration_artifact,
+)
 from bigan.v8.polymarket.training.calibration import (
     TIME_TO_CLOSE_BUCKETS,
     calibration_report,
@@ -65,6 +70,7 @@ __all__ = [
     "POLYMARKET_REAL_CORPUS_RETRAINING_GATE_SCHEMA_VERSION",
     "TARGET_LABEL_ACTION",
     "TIME_TO_CLOSE_BUCKETS",
+    "ACTION_VALUE_CALIBRATION_SCHEMA_VERSION",
     "DEFAULT_REAL_CORPUS_MODEL_VERSION",
     "DEFAULT_REAL_CORPUS_TRAINING_RUN_ID",
     "PolymarketPolicyDataset",
@@ -76,6 +82,8 @@ __all__ = [
     "PolymarketRealCorpusRetrainingGateConfig",
     "PolymarketRealCorpusRetrainingGateResult",
     "calibration_report",
+    "apply_action_value_calibration",
+    "build_action_value_calibration_artifact",
     "dataset_profile",
     "load_polymarket_policy_dataset",
     "predict_polymarket_policy_examples",

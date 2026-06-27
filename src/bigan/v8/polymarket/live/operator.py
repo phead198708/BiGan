@@ -55,13 +55,21 @@ from bigan.v8.polymarket.training import (
     PolymarketPolicyTrainingConfig,
     predict_polymarket_policy_examples,
 )
+from bigan.v8.polymarket.training.action_value_calibration import (
+    apply_action_value_calibration,
+)
 
 TRAINING_ELIGIBILITY_POLICY = "min_one_complete_book_sample"
 LIVE_FEATURE_SCHEMA_MISMATCH = "live_feature_schema_mismatch"
 ACTION_VALUE_CALIBRATION_MISSING = "action_value_calibration_missing"
+ACTION_VALUE_CALIBRATION_SUPPORT_INSUFFICIENT = (
+    "action_value_calibration_support_insufficient"
+)
+ACTION_VALUE_CALIBRATION_MISMATCH = "action_value_calibration_mismatch"
 ACTION_VALUE_POLICY_COLLAPSE = "action_value_policy_collapse"
 P_UP_ACTION_DISAGREEMENT_EXCESSIVE = "p_up_action_disagreement_excessive"
 ACTION_VALUE_DECISION_INELIGIBLE = "action_value_paper_decision_ineligible"
+ACTION_VALUE_FEATURE_COLUMNS_MISMATCH = "action_value_feature_columns_mismatch"
 STREAMING_ARTIFACT_NAMES = {
     "live_status",
     "live_status_md",
@@ -121,7 +129,12 @@ def run_polymarket_live_paper(
             if config.inject_model_manifest_mismatch:
                 model_manifest["model_sha256"] = "0" * 64
                 raise ValueError("model_manifest_mismatch")
-            _verify_model_manifest(model_manifest=model_manifest, model_path=model_manifest_path)
+            _verify_model_manifest(
+                model_manifest=model_manifest,
+                model_path=model_manifest_path,
+                model=model,
+                model_manifest_path=model_manifest_path,
+            )
         except Exception as exc:
             reason_codes.extend(
                 _exception_reason_codes(exc, fallback="model_manifest_mismatch")
@@ -133,6 +146,7 @@ def run_polymarket_live_paper(
             streaming_writer=streaming,
             model=model,
             model_manifest=model_manifest,
+            model_manifest_path=model_manifest_path,
             model_manifest_sha256=model_manifest_sha256,
         )
         if real_time_streaming and streaming is not None and model is not None
@@ -201,7 +215,12 @@ def run_polymarket_live_paper(
             if config.inject_model_manifest_mismatch:
                 model_manifest["model_sha256"] = "0" * 64
                 raise ValueError("model_manifest_mismatch")
-            _verify_model_manifest(model_manifest=model_manifest, model_path=model_manifest_path)
+            _verify_model_manifest(
+                model_manifest=model_manifest,
+                model_path=model_manifest_path,
+                model=model,
+                model_manifest_path=model_manifest_path,
+            )
         except Exception as exc:
             reason_codes.extend(
                 _exception_reason_codes(exc, fallback="model_manifest_mismatch")
@@ -236,6 +255,11 @@ def run_polymarket_live_paper(
                 )
         else:
             predictions = predict_polymarket_policy_examples(model, examples)
+            predictions = _apply_model_manifest_action_value_calibration(
+                predictions=predictions,
+                model_manifest=model_manifest,
+                model_manifest_path=model_manifest_path,
+            )
             if streaming is not None and not real_time_streaming:
                 streaming.append_signal_events(
                     predictions=predictions,
@@ -639,7 +663,13 @@ def _load_or_create_model(
     return model, manifest, manifest_path
 
 
-def _verify_model_manifest(*, model_manifest: dict[str, Any], model_path: Path) -> None:
+def _verify_model_manifest(
+    *,
+    model_manifest: dict[str, Any],
+    model_path: Path,
+    model: PolymarketPolicyModel,
+    model_manifest_path: Path,
+) -> None:
     for field_name in (
         "model_sha256",
         "feature_schema_hash",
@@ -672,6 +702,10 @@ def _verify_model_manifest(*, model_manifest: dict[str, Any], model_path: Path) 
             raise ValueError("fixed_notional_target_used must be true")
         if not model_manifest.get("required_action_value_feature_columns"):
             raise ValueError("required_action_value_feature_columns must not be empty")
+        if tuple(model_manifest.get("required_action_value_feature_columns", ())) != tuple(
+            model.action_value_feature_columns
+        ):
+            raise ValueError(ACTION_VALUE_FEATURE_COLUMNS_MISMATCH)
         for field_name in ("policy_dataset_hash", "split_hash"):
             value = str(model_manifest.get(field_name, ""))
             if not looks_like_sha256(value):
@@ -681,6 +715,20 @@ def _verify_model_manifest(*, model_manifest: dict[str, Any], model_path: Path) 
         if model_manifest.get("action_value_paper_decision_eligible") is not True:
             reasons = _action_value_paper_decision_ineligible_reasons(model_manifest)
             raise ValueError(",".join(reasons))
+        for field_name in ("action_value_calibration_sha256",):
+            value = str(model_manifest.get(field_name, ""))
+            if not looks_like_sha256(value):
+                raise ValueError(f"{field_name} must be SHA-256")
+        calibration_path = _action_value_calibration_artifact_path(
+            model_manifest=model_manifest,
+            model_manifest_path=model_manifest_path,
+        )
+        if not calibration_path.exists():
+            raise ValueError(ACTION_VALUE_CALIBRATION_MISSING)
+        if _sha256_file(calibration_path) != model_manifest.get(
+            "action_value_calibration_sha256"
+        ):
+            raise ValueError(ACTION_VALUE_CALIBRATION_MISMATCH)
         for field_name in (
             "fixture_corpus_used",
             "synthetic_corpus_used",
@@ -694,6 +742,44 @@ def _verify_model_manifest(*, model_manifest: dict[str, Any], model_path: Path) 
             raise ValueError(f"model manifest violates {field_name}")
     if model_path.name.endswith("manifest.json") and not model_path.exists():
         raise FileNotFoundError(model_path)
+
+
+def _action_value_calibration_artifact_path(
+    *,
+    model_manifest: dict[str, Any],
+    model_manifest_path: Path,
+) -> Path:
+    raw_path = str(
+        model_manifest.get(
+            "action_value_calibration_artifact_path",
+            "polymarket_action_value_calibration.json",
+        )
+    )
+    path = Path(raw_path)
+    if path.is_absolute():
+        return path
+    return model_manifest_path.parent / path
+
+
+def _apply_model_manifest_action_value_calibration(
+    *,
+    predictions: tuple[Any, ...],
+    model_manifest: dict[str, Any],
+    model_manifest_path: Path | None,
+) -> tuple[Any, ...]:
+    if not predictions or model_manifest.get("action_value_calibration_artifact_used") is not True:
+        return predictions
+    if model_manifest_path is None:
+        raise ValueError(ACTION_VALUE_CALIBRATION_MISSING)
+    calibration_path = _action_value_calibration_artifact_path(
+        model_manifest=model_manifest,
+        model_manifest_path=model_manifest_path,
+    )
+    calibration_artifact = _read_json(calibration_path)
+    return apply_action_value_calibration(
+        predictions=predictions,
+        calibration_artifact=calibration_artifact,
+    )
 
 
 def _action_value_paper_decision_ineligible_reasons(
@@ -711,6 +797,8 @@ def _action_value_paper_decision_ineligible_reasons(
         return tuple(sorted(reasons))
     if model_manifest.get("action_value_calibration_artifact_used") is not True:
         reasons.add(ACTION_VALUE_CALIBRATION_MISSING)
+    if model_manifest.get("calibration_support_passed") is False:
+        reasons.add(ACTION_VALUE_CALIBRATION_SUPPORT_INSUFFICIENT)
     if model_manifest.get("best_action_concentration_passed") is False:
         reasons.add(ACTION_VALUE_POLICY_COLLAPSE)
     if model_manifest.get("p_up_action_disagreement_within_limit") is False:
@@ -1974,6 +2062,15 @@ def _write_training_raw_bundle(
             "best_action_expected_return",
             "second_best_action_expected_return",
             "best_action_margin",
+            "calibrated_expected_pnl_per_notional_by_action",
+            "calibrated_best_policy_action",
+            "calibrated_expected_pnl_per_notional",
+            "calibrated_second_best_expected_pnl_per_notional",
+            "calibrated_action_margin",
+            "action_value_calibration_applied",
+            "action_value_calibration_id",
+            "calibration_support_count",
+            "calibration_bucket_count",
             "policy_confidence",
             "action_value_model_family",
             "feature_conditioned_action_value_model_enabled",
@@ -2567,6 +2664,7 @@ class _RealTimeStreamingSnapshotProcessor:
         streaming_writer: _StreamingObservabilityWriter,
         model: PolymarketPolicyModel,
         model_manifest: dict[str, Any],
+        model_manifest_path: Path | None,
         model_manifest_sha256: str,
     ) -> None:
         self._config = config
@@ -2574,6 +2672,7 @@ class _RealTimeStreamingSnapshotProcessor:
         self._streaming_writer = streaming_writer
         self._model = model
         self._model_manifest = model_manifest
+        self._model_manifest_path = model_manifest_path
         self._model_manifest_sha256 = model_manifest_sha256
         self._seen_example_keys: set[tuple[str, int]] = set()
         self._ledgers: dict[str, PolymarketPositionLedger] = {}
@@ -2632,6 +2731,11 @@ class _RealTimeStreamingSnapshotProcessor:
         for example in new_examples:
             self._seen_example_keys.add((example.market_id, example.decision_ts))
         predictions = predict_polymarket_policy_examples(self._model, new_examples)
+        predictions = _apply_model_manifest_action_value_calibration(
+            predictions=predictions,
+            model_manifest=self._model_manifest,
+            model_manifest_path=self._model_manifest_path,
+        )
         self._streaming_writer.append_signal_events(
             predictions=predictions,
             model_manifest_sha256=self._model_manifest_sha256,
@@ -2735,6 +2839,10 @@ def _prediction_sequence_signature(predictions: tuple[Any, ...]) -> list[dict[st
             "best_action_expected_return": _optional_signature_float(
                 prediction.best_action_expected_return
             ),
+            "calibrated_best_policy_action": prediction.calibrated_best_policy_action,
+            "calibrated_expected_pnl_per_notional": _optional_signature_float(
+                prediction.calibrated_expected_pnl_per_notional
+            ),
         }
         for prediction in sorted(predictions, key=lambda row: (row.decision_ts, row.market_id))
     ]
@@ -2760,6 +2868,12 @@ def _decision_sequence_signature(decisions: tuple[Any, ...]) -> list[dict[str, A
                 "best_policy_action": payload.get("best_policy_action"),
                 "best_action_expected_return": _optional_signature_float(
                     payload.get("best_action_expected_return")
+                ),
+                "calibrated_best_policy_action": payload.get(
+                    "calibrated_best_policy_action"
+                ),
+                "calibrated_expected_pnl_per_notional": _optional_signature_float(
+                    payload.get("calibrated_expected_pnl_per_notional")
                 ),
             }
         )
@@ -2920,6 +3034,33 @@ class _StreamingObservabilityWriter:
                         "second_best_action_expected_return"
                     ),
                     "best_action_margin": payload.get("best_action_margin"),
+                    "calibrated_expected_pnl_per_notional_by_action": payload.get(
+                        "calibrated_expected_pnl_per_notional_by_action",
+                        {},
+                    ),
+                    "calibrated_best_policy_action": payload.get(
+                        "calibrated_best_policy_action"
+                    ),
+                    "calibrated_expected_pnl_per_notional": payload.get(
+                        "calibrated_expected_pnl_per_notional"
+                    ),
+                    "calibrated_second_best_expected_pnl_per_notional": payload.get(
+                        "calibrated_second_best_expected_pnl_per_notional"
+                    ),
+                    "calibrated_action_margin": payload.get("calibrated_action_margin"),
+                    "action_value_calibration_applied": payload.get(
+                        "action_value_calibration_applied",
+                        False,
+                    ),
+                    "action_value_calibration_id": payload.get(
+                        "action_value_calibration_id"
+                    ),
+                    "calibration_support_count": payload.get(
+                        "calibration_support_count"
+                    ),
+                    "calibration_bucket_count": payload.get(
+                        "calibration_bucket_count"
+                    ),
                     "policy_confidence": payload.get("policy_confidence"),
                     "action_value_model_family": payload.get("action_value_model_family"),
                     "feature_conditioned_action_value_model_enabled": payload.get(
@@ -3402,9 +3543,12 @@ def _exception_reason_codes(exc: Exception, *, fallback: str) -> list[str]:
         reason
         for reason in (
             ACTION_VALUE_CALIBRATION_MISSING,
+            ACTION_VALUE_CALIBRATION_SUPPORT_INSUFFICIENT,
+            ACTION_VALUE_CALIBRATION_MISMATCH,
             ACTION_VALUE_POLICY_COLLAPSE,
             P_UP_ACTION_DISAGREEMENT_EXCESSIVE,
             ACTION_VALUE_DECISION_INELIGIBLE,
+            ACTION_VALUE_FEATURE_COLUMNS_MISMATCH,
         )
         if reason in text
     ]

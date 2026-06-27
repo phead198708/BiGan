@@ -14,6 +14,10 @@ from bigan.v8.polymarket.execution_ev import (
     ev_threshold_report,
     run_polymarket_policy_replay,
 )
+from bigan.v8.polymarket.training.action_value_calibration import (
+    apply_action_value_calibration,
+    build_action_value_calibration_artifact,
+)
 from bigan.v8.polymarket.training.calibration import (
     split_calibration_report,
     validation_report,
@@ -63,7 +67,46 @@ def run_polymarket_policy_training(
     dataset = load_polymarket_policy_dataset(config)
     profile = dataset_profile(dataset)
     model = train_polymarket_action_value_model(dataset, config)
-    predictions = predict_polymarket_policy_examples(model, dataset.examples)
+    raw_predictions = predict_polymarket_policy_examples(model, dataset.examples)
+    raw_predictions_by_key = {
+        (prediction.market_id, prediction.decision_ts): prediction
+        for prediction in raw_predictions
+    }
+    raw_train_predictions = _predictions_for_examples(
+        raw_predictions_by_key,
+        dataset.train_examples,
+    )
+    raw_validation_predictions = _predictions_for_examples(
+        raw_predictions_by_key,
+        dataset.validation_examples,
+    )
+    raw_shadow_predictions = _predictions_for_examples(
+        raw_predictions_by_key,
+        dataset.shadow_examples,
+    )
+    primary_calibration_split = "validation"
+    replay_split = "shadow"
+    calibration = split_calibration_report(
+        train_predictions=raw_train_predictions,
+        validation_predictions=raw_validation_predictions,
+        shadow_predictions=raw_shadow_predictions,
+        primary_calibration_split=primary_calibration_split,
+    )
+    validation = validation_report(
+        validation_predictions=raw_validation_predictions,
+        train_examples=dataset.train_examples,
+        evaluation_split=primary_calibration_split,
+    )
+    action_value_calibration = build_action_value_calibration_artifact(
+        calibration_examples=dataset.validation_examples,
+        calibration_predictions=raw_validation_predictions,
+        evaluation_examples=dataset.shadow_examples,
+        evaluation_predictions=raw_shadow_predictions,
+    )
+    predictions = apply_action_value_calibration(
+        predictions=raw_predictions,
+        calibration_artifact=action_value_calibration,
+    )
     predictions_by_key = {
         (prediction.market_id, prediction.decision_ts): prediction
         for prediction in predictions
@@ -74,19 +117,6 @@ def run_polymarket_policy_training(
         dataset.validation_examples,
     )
     shadow_predictions = _predictions_for_examples(predictions_by_key, dataset.shadow_examples)
-    primary_calibration_split = "validation"
-    replay_split = "shadow"
-    calibration = split_calibration_report(
-        train_predictions=train_predictions,
-        validation_predictions=validation_predictions,
-        shadow_predictions=shadow_predictions,
-        primary_calibration_split=primary_calibration_split,
-    )
-    validation = validation_report(
-        validation_predictions=validation_predictions,
-        train_examples=dataset.train_examples,
-        evaluation_split=primary_calibration_split,
-    )
     replay_predictions = shadow_predictions
     decisions = build_polymarket_ev_decisions(predictions=replay_predictions, config=config)
     ev_report = ev_threshold_report(decisions, replay_split=replay_split)
@@ -102,6 +132,7 @@ def run_polymarket_policy_training(
     signal_sanity = _action_value_signal_sanity_report(
         validation_predictions=validation_predictions,
         shadow_predictions=shadow_predictions,
+        action_value_calibration=action_value_calibration,
     )
     artifact_paths = _write_artifacts(
         run_dir=run_dir,
@@ -119,14 +150,20 @@ def run_polymarket_policy_training(
         validation=validation,
         ev_report=ev_report,
         replay_report=replay_report,
+        action_value_calibration=action_value_calibration,
         signal_sanity=signal_sanity,
     )
     model_sha256 = _sha256_file(artifact_paths["model"])
+    action_value_calibration_sha256 = _sha256_file(
+        artifact_paths["action_value_calibration"]
+    )
     model_manifest = _model_manifest(
         config=config,
         dataset_profile=profile,
         model=model,
         model_sha256=model_sha256,
+        action_value_calibration=action_value_calibration,
+        action_value_calibration_sha256=action_value_calibration_sha256,
         validation=validation,
         replay_report=replay_report,
         signal_sanity=signal_sanity,
@@ -169,6 +206,7 @@ def _write_artifacts(
     validation: dict[str, Any],
     ev_report: dict[str, Any],
     replay_report: dict[str, Any],
+    action_value_calibration: dict[str, Any],
     signal_sanity: dict[str, Any],
 ) -> dict[str, Path]:
     paths = {
@@ -180,6 +218,7 @@ def _write_artifacts(
         "validation_report": run_dir / "polymarket_policy_validation_report.json",
         "ev_threshold_report": run_dir / "polymarket_ev_threshold_report.json",
         "replay_report": run_dir / "polymarket_policy_replay_report.json",
+        "action_value_calibration": run_dir / "polymarket_action_value_calibration.json",
         "action_value_signal_sanity_report": (
             run_dir / "polymarket_action_value_signal_sanity_report.json"
         ),
@@ -201,6 +240,7 @@ def _write_artifacts(
     _write_json(paths["validation_report"], validation)
     _write_json(paths["ev_threshold_report"], ev_report)
     _write_json(paths["replay_report"], replay_report)
+    _write_json(paths["action_value_calibration"], action_value_calibration)
     _write_json(paths["action_value_signal_sanity_report"], signal_sanity)
     _write_jsonl(paths["predictions"], predictions)
     _write_jsonl(paths["train_predictions"], train_predictions)
@@ -229,6 +269,8 @@ def _model_manifest(
     dataset_profile: dict[str, Any],
     model: Any,
     model_sha256: str,
+    action_value_calibration: dict[str, Any],
+    action_value_calibration_sha256: str,
     validation: dict[str, Any],
     replay_report: dict[str, Any],
     signal_sanity: dict[str, Any],
@@ -277,6 +319,26 @@ def _model_manifest(
         ),
         "action_value_target_field": ACTION_VALUE_TARGET_FIELD,
         "fixed_notional_target_used": True,
+        "action_value_calibration_id": action_value_calibration[
+            "action_value_calibration_id"
+        ],
+        "action_value_calibration_artifact_path": "polymarket_action_value_calibration.json",
+        "action_value_calibration_sha256": action_value_calibration_sha256,
+        "action_value_calibration_method": action_value_calibration[
+            "calibration_method"
+        ],
+        "action_value_calibration_fit_split": action_value_calibration[
+            "calibration_fit_split"
+        ],
+        "action_value_calibration_evaluation_split": action_value_calibration[
+            "calibration_evaluation_split"
+        ],
+        "action_value_calibration_support_count": action_value_calibration[
+            "calibration_support_count"
+        ],
+        "action_value_calibration_bucket_count": action_value_calibration[
+            "calibration_bucket_count"
+        ],
         "action_value_calibration_artifact_used": signal_sanity[
             "action_value_calibration_artifact_used"
         ],
@@ -377,6 +439,7 @@ def _action_value_signal_sanity_report(
     *,
     validation_predictions: tuple[Any, ...],
     shadow_predictions: tuple[Any, ...],
+    action_value_calibration: dict[str, Any],
 ) -> dict[str, Any]:
     split_predictions = {
         "validation": validation_predictions,
@@ -388,9 +451,7 @@ def _action_value_signal_sanity_report(
         for prediction in predictions
         if bool(getattr(prediction, "action_value_head_enabled", False))
     )
-    action_counts = Counter(
-        str(prediction.best_policy_action) for prediction in all_predictions
-    )
+    action_counts = Counter(_execution_policy_action(prediction) for prediction in all_predictions)
     sample_count = sum(action_counts.values())
     best_action_max_action, best_action_max_count = (
         ("", 0) if sample_count == 0 else action_counts.most_common(1)[0]
@@ -412,11 +473,21 @@ def _action_value_signal_sanity_report(
     p_up_action_disagreement_within_limit = (
         disagreement_rate <= P_UP_ACTION_DISAGREEMENT_FAIL_THRESHOLD
     )
-    ineligible_reasons = {"action_value_calibration_missing"}
+    calibration_support_passed = bool(
+        action_value_calibration["calibration_support_passed"]
+    )
+    ineligible_reasons = set()
+    if not calibration_support_passed:
+        ineligible_reasons.add("action_value_calibration_support_insufficient")
     if not best_action_concentration_passed:
         ineligible_reasons.add("action_value_policy_collapse")
     if not p_up_action_disagreement_within_limit:
         ineligible_reasons.add("p_up_action_disagreement_excessive")
+    paper_decision_eligible = (
+        calibration_support_passed
+        and best_action_concentration_passed
+        and p_up_action_disagreement_within_limit
+    )
     return {
         "schema_version": POLYMARKET_POLICY_SCHEMA_VERSION,
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
@@ -427,9 +498,27 @@ def _action_value_signal_sanity_report(
             split_name: len(predictions)
             for split_name, predictions in sorted(split_predictions.items())
         },
-        "action_value_calibration_artifact_used": False,
-        "execution_uses_calibrated_action_value": False,
-        "calibration_support_passed": False,
+        "action_value_calibration_artifact_used": True,
+        "action_value_calibration_id": action_value_calibration[
+            "action_value_calibration_id"
+        ],
+        "action_value_calibration_method": action_value_calibration[
+            "calibration_method"
+        ],
+        "action_value_calibration_fit_split": action_value_calibration[
+            "calibration_fit_split"
+        ],
+        "action_value_calibration_evaluation_split": action_value_calibration[
+            "calibration_evaluation_split"
+        ],
+        "execution_uses_calibrated_action_value": True,
+        "calibration_support_passed": calibration_support_passed,
+        "calibration_support_count": action_value_calibration[
+            "calibration_support_count"
+        ],
+        "calibration_bucket_count": action_value_calibration[
+            "calibration_bucket_count"
+        ],
         "best_action_counts": {
             action: action_counts.get(action, 0) for action in ACTION_VALUE_LABEL_ACTIONS
         },
@@ -460,7 +549,7 @@ def _action_value_signal_sanity_report(
             p_up_action_disagreement_within_limit
         ),
         "p_up_action_disagreement_examples": disagreement_examples[:20],
-        "action_value_paper_decision_eligible": False,
+        "action_value_paper_decision_eligible": paper_decision_eligible,
         "action_value_paper_decision_ineligible_reasons": sorted(ineligible_reasons),
         **compact_safety_fields(),
     }
@@ -468,15 +557,22 @@ def _action_value_signal_sanity_report(
 
 def _action_counts(predictions: tuple[Any, ...]) -> dict[str, int]:
     counts = Counter(
-        str(prediction.best_policy_action)
+        _execution_policy_action(prediction)
         for prediction in predictions
         if bool(getattr(prediction, "action_value_head_enabled", False))
     )
     return {action: counts.get(action, 0) for action in ACTION_VALUE_LABEL_ACTIONS}
 
 
+def _execution_policy_action(prediction: Any) -> str:
+    calibrated_action = getattr(prediction, "calibrated_best_policy_action", None)
+    if calibrated_action is not None:
+        return str(calibrated_action)
+    return str(getattr(prediction, "best_policy_action", ""))
+
+
 def _p_up_action_disagrees(prediction: Any) -> bool:
-    action = str(getattr(prediction, "best_policy_action", ""))
+    action = _execution_policy_action(prediction)
     p_up = getattr(prediction, "p_up_auxiliary", None)
     if p_up is None:
         p_up = getattr(prediction, "estimated_up_probability", None)
@@ -504,12 +600,27 @@ def _p_up_action_disagreement_example(prediction: Any) -> dict[str, Any]:
             None,
         ),
         "best_policy_action": getattr(prediction, "best_policy_action", None),
+        "calibrated_best_policy_action": getattr(
+            prediction,
+            "calibrated_best_policy_action",
+            None,
+        ),
         "best_action_expected_return": getattr(
             prediction,
             "best_action_expected_return",
             None,
         ),
+        "calibrated_expected_pnl_per_notional": getattr(
+            prediction,
+            "calibrated_expected_pnl_per_notional",
+            None,
+        ),
         "best_action_margin": getattr(prediction, "best_action_margin", None),
+        "calibrated_action_margin": getattr(
+            prediction,
+            "calibrated_action_margin",
+            None,
+        ),
     }
 
 

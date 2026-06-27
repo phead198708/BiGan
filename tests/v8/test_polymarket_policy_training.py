@@ -138,6 +138,7 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "validation_report",
         "ev_threshold_report",
         "replay_report",
+        "action_value_calibration",
         "action_value_signal_sanity_report",
         "action_value_signal_sanity_summary",
         "all_predictions",
@@ -171,18 +172,28 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert manifest["feature_conditioned_action_value_model_enabled"] is True
     assert manifest["action_value_target_field"] == ACTION_VALUE_TARGET_FIELD
     assert manifest["fixed_notional_target_used"] is True
-    assert manifest["action_value_calibration_artifact_used"] is False
-    assert manifest["execution_uses_calibrated_action_value"] is False
-    assert manifest["calibration_support_passed"] is False
+    assert manifest["action_value_calibration_artifact_path"] == (
+        "polymarket_action_value_calibration.json"
+    )
+    assert looks_like_sha256(manifest["action_value_calibration_sha256"])
+    assert manifest["action_value_calibration_artifact_used"] is True
+    assert manifest["execution_uses_calibrated_action_value"] is True
+    assert manifest["calibration_support_passed"] is True
+    assert manifest["action_value_calibration_support_count"] > 0
+    assert manifest["action_value_calibration_bucket_count"] == len(
+        ACTION_VALUE_LABEL_ACTIONS
+    )
     assert isinstance(manifest["best_action_concentration_passed"], bool)
     assert isinstance(manifest["p_up_action_disagreement_within_limit"], bool)
-    assert manifest["action_value_paper_decision_eligible"] is False
-    assert "action_value_calibration_missing" in manifest[
-        "action_value_paper_decision_ineligible_reasons"
-    ]
+    assert manifest["action_value_paper_decision_eligible"] is True
+    assert manifest["action_value_paper_decision_ineligible_reasons"] == []
     assert manifest["action_value_signal_sanity_report"][
         "action_value_paper_decision_eligible"
-    ] is False
+    ] is True
+    action_value_calibration = _read_json(result.artifact_paths["action_value_calibration"])
+    assert action_value_calibration["calibration_support_passed"] is True
+    assert action_value_calibration["calibration_fit_split"] == "validation"
+    assert action_value_calibration["calibration_evaluation_split"] == "shadow"
     assert manifest["action_value_feature_columns"]
     assert manifest["required_action_value_feature_columns"] == manifest[
         "action_value_feature_columns"
