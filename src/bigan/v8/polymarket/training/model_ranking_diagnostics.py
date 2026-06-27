@@ -37,6 +37,9 @@ MODEL_RANKING_CANDIDATE_COMPARISON_SCHEMA_VERSION = (
 SOURCE_MODEL_ELIGIBILITY_SCHEMA_VERSION = (
     "bigan-v8-polymarket-source-model-eligibility-v1"
 )
+RANKING_OVERLAY_ZERO_ENTRY_DIAGNOSTIC_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-ranking-overlay-zero-entry-diagnostic-v1"
+)
 BEST_ACTION_CONCENTRATION_FAIL_THRESHOLD = 0.95
 P_UP_ACTION_DISAGREEMENT_FAIL_THRESHOLD = 0.50
 P_UP_MATERIAL_DISAGREEMENT_THRESHOLD = 0.55
@@ -48,6 +51,9 @@ RANKING_OVERLAY_SHRINKAGE_PRIOR_MEAN = 0.0
 RANKING_OVERLAY_H_BUCKET_EVIDENCE_WEIGHT = 0.90
 RANKING_OVERLAY_H_MODEL_SCORE_WEIGHT = 0.10
 RANKING_OVERLAY_G_MODEL_SCORE_TIEBREAKER_WEIGHT = 0.001
+RANKING_OVERLAY_DIAGNOSTIC_MIN_BUCKET_SUPPORT_VALUES = (3, 5, 10)
+RANKING_OVERLAY_DIAGNOSTIC_SHRINKAGE_PRIOR_SUPPORT_VALUES = (5, 10, 20)
+RANKING_OVERLAY_DIAGNOSTIC_BUFFER_MULTIPLIERS = (0.0, 0.5, 1.0)
 
 
 def build_model_ranking_error_report(
@@ -171,6 +177,88 @@ def build_model_ranking_candidate_comparison(
         **compact_safety_fields(),
     }
     report["model_ranking_candidate_comparison_id"] = canonical_json_sha256(report)
+    return report
+
+
+def build_ranking_overlay_zero_entry_diagnostic_report(
+    *,
+    validation_examples: tuple[PolymarketPolicyExample, ...],
+    raw_validation_predictions: tuple[PolymarketPolicyPrediction, ...],
+    calibrated_validation_predictions: tuple[PolymarketPolicyPrediction, ...],
+    shadow_examples: tuple[PolymarketPolicyExample, ...],
+    raw_shadow_predictions: tuple[PolymarketPolicyPrediction, ...],
+    calibrated_shadow_predictions: tuple[PolymarketPolicyPrediction, ...],
+    execution_buffer: float,
+) -> dict[str, Any]:
+    """Explain why validation-fitted G/H overlays produce zero entries."""
+
+    _validate_aligned(validation_examples, raw_validation_predictions)
+    _validate_aligned(validation_examples, calibrated_validation_predictions)
+    _validate_aligned(shadow_examples, raw_shadow_predictions)
+    _validate_aligned(shadow_examples, calibrated_shadow_predictions)
+
+    overlay_specs = [
+        spec
+        for spec in _candidate_specs(
+            validation_examples=validation_examples,
+            raw_validation_predictions=raw_validation_predictions,
+            calibrated_validation_predictions=calibrated_validation_predictions,
+            execution_buffer=execution_buffer,
+        )
+        if spec.get("ranking_overlay") is not None
+    ]
+    candidates = [
+        _zero_entry_candidate_report(
+            spec=spec,
+            raw_shadow_predictions=raw_shadow_predictions,
+            calibrated_shadow_predictions=calibrated_shadow_predictions,
+        )
+        for spec in overlay_specs
+    ]
+    diagnostic_sweeps = _overlay_diagnostic_sweeps(
+        validation_examples=validation_examples,
+        calibrated_validation_predictions=calibrated_validation_predictions,
+        shadow_examples=shadow_examples,
+        raw_shadow_predictions=raw_shadow_predictions,
+        calibrated_shadow_predictions=calibrated_shadow_predictions,
+        execution_buffer=execution_buffer,
+    )
+    report = {
+        "schema_version": RANKING_OVERLAY_ZERO_ENTRY_DIAGNOSTIC_SCHEMA_VERSION,
+        "policy_schema_version": POLYMARKET_POLICY_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "diagnostic_only": True,
+        "promotion_evidence_eligible": False,
+        "source_model_candidate_eligible": False,
+        "requires_promotion_replay_gate": True,
+        "paper_run_resume_allowed": False,
+        "paper_run_resume_blocked_reason": "promotion_replay_gate_required",
+        "fit_split": "validation",
+        "evaluation_split": "shadow",
+        "uses_shadow_for_fit": False,
+        "execution_buffer": execution_buffer,
+        "candidate_count": len(candidates),
+        "candidate_names": [candidate["candidate_name"] for candidate in candidates],
+        "candidates": candidates,
+        "diagnostic_sweeps": diagnostic_sweeps,
+        "diagnostic_sweep_settings": {
+            "min_bucket_support_values": list(
+                RANKING_OVERLAY_DIAGNOSTIC_MIN_BUCKET_SUPPORT_VALUES
+            ),
+            "shrinkage_prior_support_values": list(
+                RANKING_OVERLAY_DIAGNOSTIC_SHRINKAGE_PRIOR_SUPPORT_VALUES
+            ),
+            "buffer_multipliers": list(RANKING_OVERLAY_DIAGNOSTIC_BUFFER_MULTIPLIERS),
+        },
+        "notes": [
+            "diagnostic-only artifact; never authorizes #134",
+            "sweeps are sensitivity checks and cannot promote a source model",
+        ],
+        **compact_safety_fields(),
+    }
+    report["ranking_overlay_zero_entry_diagnostic_report_id"] = (
+        canonical_json_sha256(report)
+    )
     return report
 
 
@@ -322,6 +410,75 @@ def model_ranking_candidate_comparison_markdown(report: dict[str, Any]) -> str:
                 mean=candidate["high_score_realized_return_mean"],
                 total=candidate["high_score_realized_return_sum"],
                 reasons=reasons,
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def ranking_overlay_zero_entry_diagnostic_markdown(report: dict[str, Any]) -> str:
+    """Render compact zero-entry diagnostics for G/H overlays."""
+
+    lines = [
+        "# Ranking Overlay Zero-Entry Diagnostic",
+        "",
+        f"- schema_version: `{report['schema_version']}`",
+        f"- diagnostic_only: `{str(report['diagnostic_only']).lower()}`",
+        f"- promotion_evidence_eligible: `{str(report['promotion_evidence_eligible']).lower()}`",
+        f"- source_model_candidate_eligible: `{str(report['source_model_candidate_eligible']).lower()}`",
+        f"- paper_run_resume_allowed: `{str(report['paper_run_resume_allowed']).lower()}`",
+        "",
+        "| candidate | predictions | actions | no_trade_selected | selected_non_no_trade | passed_actions | bucket_support_failed | family_support_failed | bucket_metric_failed | family_metric_failed | bucket_sum_failed |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for candidate in report["candidates"]:
+        lines.append(
+            "| {name} | {predictions} | {actions} | {no_trade} | {selected} | "
+            "{passed} | {bucket_support} | {family_support} | "
+            "{bucket_metric} | {family_metric} | {bucket_sum} |".format(
+                name=candidate["candidate_name"],
+                predictions=candidate["prediction_count"],
+                actions=candidate["action_count_considered"],
+                no_trade=candidate["no_trade_selected_count"],
+                selected=candidate["selected_non_no_trade_count"],
+                passed=candidate["passed_bucket_and_family_count"],
+                bucket_support=candidate["bucket_support_failed_count"],
+                family_support=candidate["family_support_failed_count"],
+                bucket_metric=candidate["bucket_lcb_or_mean_failed_count"],
+                family_metric=candidate["family_lcb_or_mean_failed_count"],
+                bucket_sum=candidate["bucket_sum_failed_count"],
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "Diagnostic sweeps are non-promotion sensitivity checks only.",
+            "",
+            "| candidate | rows | max_selected_non_no_trade | max_high_score_support | best_high_score_mean |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
+    for candidate_name in report["candidate_names"]:
+        rows = [
+            row
+            for row in report["diagnostic_sweeps"]
+            if row["candidate_name"] == candidate_name
+        ]
+        lines.append(
+            "| {name} | {rows} | {selected} | {support} | {mean:.6f} |".format(
+                name=candidate_name,
+                rows=len(rows),
+                selected=max(
+                    (row["selected_non_no_trade_count"] for row in rows),
+                    default=0,
+                ),
+                support=max(
+                    (row["shadow_high_score_support"] for row in rows),
+                    default=0,
+                ),
+                mean=max(
+                    (row["shadow_high_score_mean"] for row in rows),
+                    default=0.0,
+                ),
             )
         )
     return "\n".join(lines) + "\n"
@@ -796,6 +953,475 @@ def _candidate_report(
     }
 
 
+def _zero_entry_candidate_report(
+    *,
+    spec: dict[str, Any],
+    raw_shadow_predictions: tuple[PolymarketPolicyPrediction, ...],
+    calibrated_shadow_predictions: tuple[PolymarketPolicyPrediction, ...],
+) -> dict[str, Any]:
+    overlay = spec["ranking_overlay"]
+    overlay_predictions = _apply_candidate_spec(
+        predictions=raw_shadow_predictions,
+        fallback_predictions=calibrated_shadow_predictions,
+        spec=spec,
+    )
+    selected_actions = [_selected_action(prediction) for prediction in overlay_predictions]
+    rows = [
+        _zero_entry_action_row(
+            action=action,
+            prediction=prediction,
+            selected_action=selected_action,
+            overlay=overlay,
+        )
+        for prediction, selected_action in zip(
+            calibrated_shadow_predictions,
+            selected_actions,
+            strict=True,
+        )
+        for action in ACTION_VALUE_LABEL_ACTIONS
+        if action != "NO_TRADE"
+    ]
+    metric_field = _overlay_metric_field(overlay)
+    stage_counts = _zero_entry_stage_counts(
+        rows=rows,
+        selected_actions=selected_actions,
+    )
+    grouped_summaries = {
+        field: _zero_entry_group_summaries(rows=rows, field=field)
+        for field in (
+            "action",
+            "action_family",
+            "side",
+            "price_bucket",
+            "time_to_close_bucket",
+            "raw_score_bucket",
+            "market_family",
+        )
+    }
+    return {
+        "candidate_name": spec["candidate_name"],
+        "ranking_overlay_method": overlay["method"],
+        "diagnostic_only": True,
+        "fit_split": overlay["fit_split"],
+        "evaluation_split": overlay["evaluation_split"],
+        "uses_shadow_for_fit": overlay["uses_shadow_for_fit"],
+        "min_bucket_support": overlay["min_bucket_support"],
+        "min_family_support": overlay["min_family_support"],
+        "shrinkage_prior_support": overlay["shrinkage_prior_support"],
+        "shrinkage_prior_mean": overlay["shrinkage_prior_mean"],
+        "execution_buffer": overlay["execution_buffer"],
+        "metric_field": metric_field,
+        "blocking_stage_counts_are_non_exclusive": True,
+        **stage_counts,
+        "grouped_summaries": grouped_summaries,
+        "top_near_pass_buckets": _near_pass_evidence(
+            evidence=overlay["bucket_evidence"],
+            metric_field=metric_field,
+            limit=10,
+        ),
+        "top_near_pass_families": _near_pass_evidence(
+            evidence=overlay["family_evidence"],
+            metric_field=metric_field,
+            limit=10,
+        ),
+        "source_model_candidate_eligible": False,
+        "promotion_eligible": False,
+        "paper_run_resume_allowed": False,
+        **compact_safety_fields(),
+    }
+
+
+def _zero_entry_action_row(
+    *,
+    action: str,
+    prediction: PolymarketPolicyPrediction,
+    selected_action: str,
+    overlay: dict[str, Any],
+) -> dict[str, Any]:
+    family = action_value_action_family(action)
+    bucket = action_value_bucket_payload(
+        action=action,
+        features=prediction.features,
+        raw_score=float(prediction.expected_return_by_action[action]),
+    )
+    bucket_key = _overlay_bucket_key(action=action, prediction=prediction)
+    bucket_evidence = overlay["bucket_evidence"].get(bucket_key)
+    family_evidence = overlay["family_evidence"].get(family)
+    bucket_missing = bucket_evidence is None
+    family_missing = family_evidence is None
+    bucket_support_failed = bool(
+        bucket_evidence is not None and not bucket_evidence["support_passed"]
+    )
+    family_support_failed = bool(
+        family_evidence is not None and not family_evidence["support_passed"]
+    )
+    bucket_metric_failed = bool(
+        bucket_evidence is not None
+        and bucket_evidence["support_passed"]
+        and not _overlay_metric_passed(bucket_evidence, overlay)
+    )
+    family_metric_failed = bool(
+        family_evidence is not None
+        and family_evidence["support_passed"]
+        and not _overlay_metric_passed(family_evidence, overlay)
+    )
+    bucket_sum_failed = bool(
+        bucket_evidence is not None
+        and bucket_evidence["support_passed"]
+        and not bucket_evidence["sum_positive_passed"]
+    )
+    family_sum_failed = bool(
+        family_evidence is not None
+        and family_evidence["support_passed"]
+        and not family_evidence["sum_positive_passed"]
+    )
+    passed_bucket = bool(
+        bucket_evidence is not None and bucket_evidence["evidence_passed"]
+    )
+    passed_family = bool(
+        family_evidence is not None and family_evidence["evidence_passed"]
+    )
+    return {
+        "market_id": prediction.market_id,
+        "decision_ts": prediction.decision_ts,
+        "action": action,
+        "action_family": family,
+        "side": bucket["side"],
+        "price_bucket": bucket["price_bucket"],
+        "time_to_close_bucket": bucket["time_to_close_bucket"],
+        "raw_score_bucket": bucket["raw_score_bucket"],
+        "market_family": prediction.market_family,
+        "selected_action": selected_action,
+        "candidate_selected_this_action": selected_action == action,
+        "bucket_missing": bucket_missing,
+        "family_missing": family_missing,
+        "bucket_support_failed": bucket_support_failed,
+        "family_support_failed": family_support_failed,
+        "bucket_lcb_or_mean_failed": bucket_metric_failed,
+        "family_lcb_or_mean_failed": family_metric_failed,
+        "bucket_sum_failed": bucket_sum_failed,
+        "family_sum_failed": family_sum_failed,
+        "passed_bucket_and_family": passed_bucket and passed_family,
+        "primary_blocking_stage": _primary_blocking_stage(
+            bucket_missing=bucket_missing,
+            family_missing=family_missing,
+            bucket_support_failed=bucket_support_failed,
+            family_support_failed=family_support_failed,
+            bucket_metric_failed=bucket_metric_failed,
+            family_metric_failed=family_metric_failed,
+            bucket_sum_failed=bucket_sum_failed,
+            family_sum_failed=family_sum_failed,
+            passed_bucket_and_family=passed_bucket and passed_family,
+        ),
+    }
+
+
+def _zero_entry_stage_counts(
+    *,
+    rows: list[dict[str, Any]],
+    selected_actions: list[str],
+) -> dict[str, Any]:
+    return {
+        "prediction_count": len(selected_actions),
+        "action_count_considered": len(rows),
+        "non_no_trade_candidate_count": len(rows),
+        "no_trade_selected_count": sum(
+            1 for action in selected_actions if action == "NO_TRADE"
+        ),
+        "selected_non_no_trade_count": sum(
+            1 for action in selected_actions if action != "NO_TRADE"
+        ),
+        "bucket_missing_count": _bool_count(rows, "bucket_missing"),
+        "family_missing_count": _bool_count(rows, "family_missing"),
+        "bucket_support_failed_count": _bool_count(rows, "bucket_support_failed"),
+        "family_support_failed_count": _bool_count(rows, "family_support_failed"),
+        "bucket_lcb_or_mean_failed_count": _bool_count(
+            rows,
+            "bucket_lcb_or_mean_failed",
+        ),
+        "family_lcb_or_mean_failed_count": _bool_count(
+            rows,
+            "family_lcb_or_mean_failed",
+        ),
+        "bucket_sum_failed_count": _bool_count(rows, "bucket_sum_failed"),
+        "family_sum_failed_count": _bool_count(rows, "family_sum_failed"),
+        "passed_bucket_and_family_count": _bool_count(
+            rows,
+            "passed_bucket_and_family",
+        ),
+        "primary_blocking_stage_counts": dict(
+            sorted(Counter(row["primary_blocking_stage"] for row in rows).items())
+        ),
+    }
+
+
+def _zero_entry_group_summaries(
+    *,
+    rows: list[dict[str, Any]],
+    field: str,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row[field])].append(row)
+    return [
+        {
+            "name": key,
+            "action_count_considered": len(group_rows),
+            "selected_action_count": _bool_count(
+                group_rows,
+                "candidate_selected_this_action",
+            ),
+            "bucket_missing_count": _bool_count(group_rows, "bucket_missing"),
+            "family_missing_count": _bool_count(group_rows, "family_missing"),
+            "bucket_support_failed_count": _bool_count(
+                group_rows,
+                "bucket_support_failed",
+            ),
+            "family_support_failed_count": _bool_count(
+                group_rows,
+                "family_support_failed",
+            ),
+            "bucket_lcb_or_mean_failed_count": _bool_count(
+                group_rows,
+                "bucket_lcb_or_mean_failed",
+            ),
+            "family_lcb_or_mean_failed_count": _bool_count(
+                group_rows,
+                "family_lcb_or_mean_failed",
+            ),
+            "bucket_sum_failed_count": _bool_count(group_rows, "bucket_sum_failed"),
+            "family_sum_failed_count": _bool_count(group_rows, "family_sum_failed"),
+            "passed_bucket_and_family_count": _bool_count(
+                group_rows,
+                "passed_bucket_and_family",
+            ),
+            "primary_blocking_stage_counts": dict(
+                sorted(
+                    Counter(
+                        row["primary_blocking_stage"] for row in group_rows
+                    ).items()
+                )
+            ),
+        }
+        for key, group_rows in sorted(grouped.items())
+    ]
+
+
+def _near_pass_evidence(
+    *,
+    evidence: dict[str, dict[str, Any]],
+    metric_field: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    rows = []
+    for name, row in evidence.items():
+        if row["evidence_passed"]:
+            continue
+        support_deficit = max(int(row["min_support"]) - int(row["support_count"]), 0)
+        metric_deficit = max(
+            float(row["execution_buffer"]) - float(row[metric_field]),
+            0.0,
+        )
+        sum_deficit = max(-float(row["realized_return_sum"]), 0.0)
+        rows.append(
+            {
+                "name": name,
+                "support_count": row["support_count"],
+                "min_support": row["min_support"],
+                "support_deficit": support_deficit,
+                "realized_return_mean": row["realized_return_mean"],
+                "realized_return_sum": row["realized_return_sum"],
+                "risk_adjusted_lcb": row["risk_adjusted_lcb"],
+                "shrunk_risk_adjusted_lcb": row["shrunk_risk_adjusted_lcb"],
+                "metric_field": metric_field,
+                "metric_value": row[metric_field],
+                "metric_deficit": metric_deficit,
+                "sum_deficit": sum_deficit,
+                "support_passed": row["support_passed"],
+                "sum_positive_passed": row["sum_positive_passed"],
+                "mean_exceeds_execution_buffer": row[
+                    "mean_exceeds_execution_buffer"
+                ],
+                "lcb_exceeds_execution_buffer": row["lcb_exceeds_execution_buffer"],
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["support_deficit"],
+            row["metric_deficit"],
+            row["sum_deficit"],
+            -int(row["support_count"]),
+            row["name"],
+        ),
+    )[:limit]
+
+
+def _overlay_diagnostic_sweeps(
+    *,
+    validation_examples: tuple[PolymarketPolicyExample, ...],
+    calibrated_validation_predictions: tuple[PolymarketPolicyPrediction, ...],
+    shadow_examples: tuple[PolymarketPolicyExample, ...],
+    raw_shadow_predictions: tuple[PolymarketPolicyPrediction, ...],
+    calibrated_shadow_predictions: tuple[PolymarketPolicyPrediction, ...],
+    execution_buffer: float,
+) -> list[dict[str, Any]]:
+    rows = []
+    for candidate in (
+        {
+            "candidate_name": "G_bucketed_lcb_rank_selector",
+            "candidate_type": "bucketed_lcb_rank_selector",
+            "method": "bucketed_lcb_rank_selector",
+            "require_lcb_over_buffer": True,
+            "require_positive_only": False,
+        },
+        {
+            "candidate_name": "H_positive_bucket_rank_selector",
+            "candidate_type": "positive_bucket_rank_selector",
+            "method": "positive_bucket_rank_selector",
+            "require_lcb_over_buffer": False,
+            "require_positive_only": True,
+        },
+    ):
+        for min_bucket_support in RANKING_OVERLAY_DIAGNOSTIC_MIN_BUCKET_SUPPORT_VALUES:
+            for prior_support in (
+                RANKING_OVERLAY_DIAGNOSTIC_SHRINKAGE_PRIOR_SUPPORT_VALUES
+            ):
+                for multiplier in RANKING_OVERLAY_DIAGNOSTIC_BUFFER_MULTIPLIERS:
+                    sweep_buffer = float(execution_buffer) * float(multiplier)
+                    overlay = _fit_bucket_overlay(
+                        examples=validation_examples,
+                        predictions=calibrated_validation_predictions,
+                        execution_buffer=sweep_buffer,
+                        method=candidate["method"],
+                        min_bucket_support=min_bucket_support,
+                        min_family_support=RANKING_OVERLAY_MIN_FAMILY_SUPPORT,
+                        require_lcb_over_buffer=candidate[
+                            "require_lcb_over_buffer"
+                        ],
+                        require_positive_only=candidate["require_positive_only"],
+                        shrinkage_prior_support=prior_support,
+                    )
+                    spec = {
+                        "candidate_name": candidate["candidate_name"],
+                        "candidate_type": candidate["candidate_type"],
+                        "score_source": "fallback",
+                        "corrections": {},
+                        "correction_group": "none",
+                        "eligible_families": None,
+                        "ranking_overlay": overlay,
+                        "notes": ["diagnostic-only sweep"],
+                    }
+                    predictions = _apply_candidate_spec(
+                        predictions=raw_shadow_predictions,
+                        fallback_predictions=calibrated_shadow_predictions,
+                        spec=spec,
+                    )
+                    family_report = build_action_family_eligibility_report(
+                        examples=shadow_examples,
+                        predictions=predictions,
+                        execution_buffer=sweep_buffer,
+                    )
+                    selected_non_no_trade_count = sum(
+                        1 for prediction in predictions if _selected_action(prediction) != "NO_TRADE"
+                    )
+                    rows.append(
+                        {
+                            "candidate_name": candidate["candidate_name"],
+                            "diagnostic_only": True,
+                            "settings": {
+                                "min_bucket_support": min_bucket_support,
+                                "min_family_support": RANKING_OVERLAY_MIN_FAMILY_SUPPORT,
+                                "shrinkage_prior_support": prior_support,
+                                "shrinkage_prior_mean": (
+                                    RANKING_OVERLAY_SHRINKAGE_PRIOR_MEAN
+                                ),
+                                "buffer_multiplier": multiplier,
+                                "execution_buffer": sweep_buffer,
+                            },
+                            "passed_bucket_count": sum(
+                                1
+                                for item in overlay["bucket_evidence"].values()
+                                if item["evidence_passed"]
+                            ),
+                            "passed_family_count": sum(
+                                1
+                                for item in overlay["family_evidence"].values()
+                                if item["evidence_passed"]
+                            ),
+                            "selected_non_no_trade_count": (
+                                selected_non_no_trade_count
+                            ),
+                            "shadow_high_score_support": family_report[
+                                "high_score_support_count"
+                            ],
+                            "shadow_high_score_mean": family_report[
+                                "high_score_realized_return_mean"
+                            ],
+                            "shadow_high_score_sum": family_report[
+                                "high_score_realized_return_sum"
+                            ],
+                            "source_model_candidate_eligible": False,
+                            "promotion_eligible": False,
+                            "paper_run_resume_allowed": False,
+                            **compact_safety_fields(),
+                        }
+                    )
+    return rows
+
+
+def _primary_blocking_stage(
+    *,
+    bucket_missing: bool,
+    family_missing: bool,
+    bucket_support_failed: bool,
+    family_support_failed: bool,
+    bucket_metric_failed: bool,
+    family_metric_failed: bool,
+    bucket_sum_failed: bool,
+    family_sum_failed: bool,
+    passed_bucket_and_family: bool,
+) -> str:
+    if passed_bucket_and_family:
+        return "passed_bucket_and_family"
+    if bucket_missing:
+        return "bucket_missing"
+    if family_missing:
+        return "family_missing"
+    if bucket_support_failed:
+        return "bucket_support_failed"
+    if family_support_failed:
+        return "family_support_failed"
+    if bucket_metric_failed:
+        return "bucket_lcb_or_mean_failed"
+    if family_metric_failed:
+        return "family_lcb_or_mean_failed"
+    if bucket_sum_failed:
+        return "bucket_sum_failed"
+    if family_sum_failed:
+        return "family_sum_failed"
+    return "unknown_blocked"
+
+
+def _overlay_metric_field(overlay: dict[str, Any]) -> str:
+    if overlay["method"] == "bucketed_lcb_rank_selector":
+        return "shrunk_risk_adjusted_lcb"
+    return "realized_return_mean"
+
+
+def _overlay_metric_passed(
+    evidence: dict[str, Any],
+    overlay: dict[str, Any],
+) -> bool:
+    if overlay["method"] == "bucketed_lcb_rank_selector":
+        return bool(evidence["lcb_exceeds_execution_buffer"])
+    return bool(evidence["mean_exceeds_execution_buffer"])
+
+
+def _bool_count(rows: list[dict[str, Any]], field: str) -> int:
+    return sum(1 for row in rows if bool(row[field]))
+
+
 def _apply_candidate_spec(
     *,
     predictions: tuple[PolymarketPolicyPrediction, ...],
@@ -964,6 +1590,8 @@ def _fit_bucket_overlay(
     min_family_support: int,
     require_lcb_over_buffer: bool,
     require_positive_only: bool,
+    shrinkage_prior_support: int = RANKING_OVERLAY_SHRINKAGE_PRIOR_SUPPORT,
+    shrinkage_prior_mean: float = RANKING_OVERLAY_SHRINKAGE_PRIOR_MEAN,
 ) -> dict[str, Any]:
     bucket_rows: dict[str, list[float]] = defaultdict(list)
     family_rows: dict[str, list[float]] = defaultdict(list)
@@ -983,6 +1611,8 @@ def _fit_bucket_overlay(
             execution_buffer=execution_buffer,
             require_lcb_over_buffer=require_lcb_over_buffer,
             require_positive_only=require_positive_only,
+            shrinkage_prior_support=shrinkage_prior_support,
+            shrinkage_prior_mean=shrinkage_prior_mean,
         )
         for key, returns in sorted(bucket_rows.items())
     }
@@ -994,6 +1624,8 @@ def _fit_bucket_overlay(
             execution_buffer=execution_buffer,
             require_lcb_over_buffer=require_lcb_over_buffer,
             require_positive_only=require_positive_only,
+            shrinkage_prior_support=shrinkage_prior_support,
+            shrinkage_prior_mean=shrinkage_prior_mean,
         )
         for key, returns in sorted(family_rows.items())
     }
@@ -1006,8 +1638,8 @@ def _fit_bucket_overlay(
         "min_bucket_support": min_bucket_support,
         "min_family_support": min_family_support,
         "execution_buffer": execution_buffer,
-        "shrinkage_prior_support": RANKING_OVERLAY_SHRINKAGE_PRIOR_SUPPORT,
-        "shrinkage_prior_mean": RANKING_OVERLAY_SHRINKAGE_PRIOR_MEAN,
+        "shrinkage_prior_support": shrinkage_prior_support,
+        "shrinkage_prior_mean": shrinkage_prior_mean,
         "require_lcb_over_buffer": require_lcb_over_buffer,
         "require_positive_only": require_positive_only,
         "unsupported_action_score": -1.0,
@@ -1036,6 +1668,8 @@ def _overlay_evidence(
     execution_buffer: float,
     require_lcb_over_buffer: bool,
     require_positive_only: bool,
+    shrinkage_prior_support: int,
+    shrinkage_prior_mean: float,
 ) -> dict[str, Any]:
     support_count = len(returns)
     mean_return = _mean(returns)
@@ -1045,8 +1679,8 @@ def _overlay_evidence(
     shrunk_mean = _shrunk_mean(
         return_sum=return_sum,
         support_count=support_count,
-        prior_support=RANKING_OVERLAY_SHRINKAGE_PRIOR_SUPPORT,
-        prior_mean=RANKING_OVERLAY_SHRINKAGE_PRIOR_MEAN,
+        prior_support=shrinkage_prior_support,
+        prior_mean=shrinkage_prior_mean,
     )
     shrunk_lcb = (
         shrunk_mean - (stdev / math.sqrt(support_count)) if support_count else 0.0
@@ -1073,8 +1707,8 @@ def _overlay_evidence(
         "risk_adjusted_lcb": lcb,
         "shrunk_realized_return_mean": shrunk_mean,
         "shrunk_risk_adjusted_lcb": shrunk_lcb,
-        "shrinkage_prior_support": RANKING_OVERLAY_SHRINKAGE_PRIOR_SUPPORT,
-        "shrinkage_prior_mean": RANKING_OVERLAY_SHRINKAGE_PRIOR_MEAN,
+        "shrinkage_prior_support": shrinkage_prior_support,
+        "shrinkage_prior_mean": shrinkage_prior_mean,
         "execution_buffer": execution_buffer,
         "positive_passed": positive_passed,
         "sum_positive_passed": sum_positive_passed,

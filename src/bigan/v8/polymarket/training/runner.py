@@ -56,9 +56,11 @@ from bigan.v8.polymarket.training.model import (
 from bigan.v8.polymarket.training.model_ranking_diagnostics import (
     build_model_ranking_candidate_comparison,
     build_model_ranking_error_report,
+    build_ranking_overlay_zero_entry_diagnostic_report,
     build_source_model_eligibility_report,
     model_ranking_candidate_comparison_markdown,
     model_ranking_error_markdown,
+    ranking_overlay_zero_entry_diagnostic_markdown,
     source_model_eligibility_markdown,
 )
 
@@ -199,6 +201,17 @@ def run_polymarket_policy_training(
         calibrated_shadow_predictions=shadow_predictions,
         execution_buffer=float(config.ev_threshold),
     )
+    ranking_overlay_zero_entry_diagnostic = (
+        build_ranking_overlay_zero_entry_diagnostic_report(
+            validation_examples=dataset.validation_examples,
+            raw_validation_predictions=raw_validation_predictions,
+            calibrated_validation_predictions=validation_predictions,
+            shadow_examples=dataset.shadow_examples,
+            raw_shadow_predictions=raw_shadow_predictions,
+            calibrated_shadow_predictions=shadow_predictions,
+            execution_buffer=float(config.ev_threshold),
+        )
+    )
     source_model_eligibility = build_source_model_eligibility_report(
         signal_sanity=signal_sanity,
         action_value_calibration=action_value_calibration,
@@ -229,6 +242,7 @@ def run_polymarket_policy_training(
         signal_sanity=signal_sanity,
         model_ranking_error=model_ranking_error,
         model_ranking_candidate_comparison=model_ranking_candidate_comparison,
+        ranking_overlay_zero_entry_diagnostic=ranking_overlay_zero_entry_diagnostic,
         source_model_eligibility=source_model_eligibility,
     )
     model_sha256 = _sha256_file(artifact_paths["model"])
@@ -253,6 +267,9 @@ def run_polymarket_policy_training(
         ),
         "model_ranking_candidate_comparison_sha256": _sha256_file(
             artifact_paths["model_ranking_candidate_comparison"]
+        ),
+        "ranking_overlay_zero_entry_diagnostic_sha256": _sha256_file(
+            artifact_paths["ranking_overlay_zero_entry_diagnostic_report"]
         ),
         "source_model_eligibility_report_sha256": _sha256_file(
             artifact_paths["source_model_eligibility_report"]
@@ -301,6 +318,9 @@ def run_polymarket_policy_training(
         ),
         model_ranking_error_report=model_ranking_error,
         model_ranking_candidate_comparison_report=model_ranking_candidate_comparison,
+        ranking_overlay_zero_entry_diagnostic_report=(
+            ranking_overlay_zero_entry_diagnostic
+        ),
         source_model_eligibility_report=source_model_eligibility,
     )
 
@@ -478,6 +498,7 @@ def _write_artifacts(
     signal_sanity: dict[str, Any],
     model_ranking_error: dict[str, Any],
     model_ranking_candidate_comparison: dict[str, Any],
+    ranking_overlay_zero_entry_diagnostic: dict[str, Any],
     source_model_eligibility: dict[str, Any],
 ) -> dict[str, Path]:
     paths = {
@@ -528,6 +549,12 @@ def _write_artifacts(
         "model_ranking_candidate_comparison_summary": (
             run_dir / "model_ranking_candidate_comparison.md"
         ),
+        "ranking_overlay_zero_entry_diagnostic_report": (
+            run_dir / "ranking_overlay_zero_entry_diagnostic_report.json"
+        ),
+        "ranking_overlay_zero_entry_diagnostic_summary": (
+            run_dir / "ranking_overlay_zero_entry_diagnostic_report.md"
+        ),
         "source_model_eligibility_report": (
             run_dir / "source_model_eligibility_report.json"
         ),
@@ -569,6 +596,10 @@ def _write_artifacts(
         paths["model_ranking_candidate_comparison"],
         model_ranking_candidate_comparison,
     )
+    _write_json(
+        paths["ranking_overlay_zero_entry_diagnostic_report"],
+        ranking_overlay_zero_entry_diagnostic,
+    )
     _write_json(paths["source_model_eligibility_report"], source_model_eligibility)
     _write_json(paths["action_family_eligibility_report"], action_family_eligibility)
     _write_json(
@@ -609,6 +640,12 @@ def _write_artifacts(
     paths["model_ranking_candidate_comparison_summary"].write_text(
         model_ranking_candidate_comparison_markdown(
             model_ranking_candidate_comparison
+        ),
+        encoding="utf-8",
+    )
+    paths["ranking_overlay_zero_entry_diagnostic_summary"].write_text(
+        ranking_overlay_zero_entry_diagnostic_markdown(
+            ranking_overlay_zero_entry_diagnostic
         ),
         encoding="utf-8",
     )
@@ -929,6 +966,14 @@ def _model_manifest(
         "model_ranking_candidate_comparison_sha256": action_family_artifact_hashes[
             "model_ranking_candidate_comparison_sha256"
         ],
+        "ranking_overlay_zero_entry_diagnostic_report_path": (
+            "ranking_overlay_zero_entry_diagnostic_report.json"
+        ),
+        "ranking_overlay_zero_entry_diagnostic_sha256": (
+            action_family_artifact_hashes[
+                "ranking_overlay_zero_entry_diagnostic_sha256"
+            ]
+        ),
         "source_model_eligibility_report_path": (
             "source_model_eligibility_report.json"
         ),

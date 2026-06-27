@@ -153,6 +153,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "model_ranking_error_summary",
         "model_ranking_candidate_comparison",
         "model_ranking_candidate_comparison_summary",
+        "ranking_overlay_zero_entry_diagnostic_report",
+        "ranking_overlay_zero_entry_diagnostic_summary",
         "source_model_eligibility_report",
         "source_model_eligibility_summary",
         "action_family_eligibility_report",
@@ -396,6 +398,73 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "model_ranking_candidate_comparison.json"
     )
     assert looks_like_sha256(manifest["model_ranking_candidate_comparison_sha256"])
+    zero_entry_report = _read_json(
+        result.artifact_paths["ranking_overlay_zero_entry_diagnostic_report"]
+    )
+    zero_entry_report_id = zero_entry_report[
+        "ranking_overlay_zero_entry_diagnostic_report_id"
+    ]
+    zero_entry_payload = dict(zero_entry_report)
+    zero_entry_payload.pop("ranking_overlay_zero_entry_diagnostic_report_id")
+    assert canonical_json_sha256(zero_entry_payload) == zero_entry_report_id
+    assert zero_entry_report["schema_version"] == (
+        "bigan-v8-polymarket-ranking-overlay-zero-entry-diagnostic-v1"
+    )
+    assert zero_entry_report["diagnostic_only"] is True
+    assert zero_entry_report["promotion_evidence_eligible"] is False
+    assert zero_entry_report["source_model_candidate_eligible"] is False
+    assert zero_entry_report["paper_run_resume_allowed"] is False
+    assert zero_entry_report["uses_shadow_for_fit"] is False
+    assert {
+        "G_bucketed_lcb_rank_selector",
+        "H_positive_bucket_rank_selector",
+    } == set(zero_entry_report["candidate_names"])
+    assert len(zero_entry_report["diagnostic_sweeps"]) == 54
+    for row in zero_entry_report["diagnostic_sweeps"]:
+        assert row["diagnostic_only"] is True
+        assert row["source_model_candidate_eligible"] is False
+        assert row["promotion_eligible"] is False
+        assert row["paper_run_resume_allowed"] is False
+        assert row["paper_only"] is True
+        assert row["capital_at_risk"] is False
+    for candidate in zero_entry_report["candidates"]:
+        assert candidate["prediction_count"] == len(result.dataset.shadow_examples)
+        assert candidate["action_count_considered"] == (
+            len(result.dataset.shadow_examples)
+            * (len(ACTION_VALUE_LABEL_ACTIONS) - 1)
+        )
+        assert candidate["non_no_trade_candidate_count"] == (
+            candidate["action_count_considered"]
+        )
+        assert candidate["selected_non_no_trade_count"] >= 0
+        assert "bucket_missing_count" in candidate
+        assert "family_missing_count" in candidate
+        assert "bucket_support_failed_count" in candidate
+        assert "family_support_failed_count" in candidate
+        assert "bucket_lcb_or_mean_failed_count" in candidate
+        assert "family_lcb_or_mean_failed_count" in candidate
+        assert "bucket_sum_failed_count" in candidate
+        assert "passed_bucket_and_family_count" in candidate
+        assert set(candidate["grouped_summaries"]) == {
+            "action",
+            "action_family",
+            "side",
+            "price_bucket",
+            "time_to_close_bucket",
+            "raw_score_bucket",
+            "market_family",
+        }
+        assert "top_near_pass_buckets" in candidate
+        assert "top_near_pass_families" in candidate
+        assert candidate["source_model_candidate_eligible"] is False
+        assert candidate["promotion_eligible"] is False
+    assert result.ranking_overlay_zero_entry_diagnostic_report == zero_entry_report
+    assert manifest["ranking_overlay_zero_entry_diagnostic_report_path"] == (
+        "ranking_overlay_zero_entry_diagnostic_report.json"
+    )
+    assert looks_like_sha256(
+        manifest["ranking_overlay_zero_entry_diagnostic_sha256"]
+    )
     assert manifest["source_model_eligibility_report_path"] == (
         "source_model_eligibility_report.json"
     )
