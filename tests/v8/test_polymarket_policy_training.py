@@ -141,6 +141,12 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "action_value_calibration",
         "action_value_signal_sanity_report",
         "action_value_signal_sanity_summary",
+        "action_family_eligibility_report",
+        "action_family_eligibility_summary",
+        "hold_to_settlement_longshot_guard_report",
+        "hold_to_settlement_longshot_guard_summary",
+        "action_family_replay_variants_report",
+        "action_family_replay_variants_summary",
         "all_predictions",
         "predictions",
         "train_predictions",
@@ -217,12 +223,74 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert isinstance(manifest["best_action_concentration_passed"], bool)
     assert isinstance(manifest["p_up_action_disagreement_within_limit"], bool)
     assert manifest["action_value_paper_decision_eligible"] is False
-    assert manifest["action_value_paper_decision_ineligible_reasons"] == [
-        "action_value_calibration_quality_failed"
+    assert "action_value_calibration_quality_failed" in manifest[
+        "action_value_paper_decision_ineligible_reasons"
     ]
     assert manifest["action_value_signal_sanity_report"][
         "action_value_paper_decision_eligible"
     ] is False
+    action_family_report = _read_json(
+        result.artifact_paths["action_family_eligibility_report"]
+    )
+    assert action_family_report["schema_version"] == (
+        "bigan-v8-polymarket-action-family-eligibility-v1"
+    )
+    assert action_family_report["out_of_sample_replay"] is True
+    assert action_family_report["min_family_high_score_support"] >= 10
+    assert action_family_report["family_high_score_execution_buffer"] == 0.015
+    assert "action_family_paper_decision_eligible" in action_family_report
+    assert "action_family_gate_results" in action_family_report
+    assert "high_score_by_action" in action_family_report
+    assert "high_score_by_action_family_side_price_time_raw_bucket" in action_family_report
+    assert manifest["action_family_eligibility_report_path"] == (
+        "action_family_eligibility_report.json"
+    )
+    assert manifest["action_family_paper_decision_eligible"] == action_family_report[
+        "action_family_paper_decision_eligible"
+    ]
+    assert manifest["action_family_paper_decision_ineligible_reasons"] == (
+        action_family_report["action_family_paper_decision_ineligible_reasons"]
+    )
+    if not action_family_report["action_family_paper_decision_eligible"]:
+        for reason in action_family_report[
+            "action_family_paper_decision_ineligible_reasons"
+        ]:
+            assert reason in manifest["action_value_paper_decision_ineligible_reasons"]
+    longshot_report = _read_json(
+        result.artifact_paths["hold_to_settlement_longshot_guard_report"]
+    )
+    assert longshot_report["schema_version"] == (
+        "bigan-v8-polymarket-hold-to-settlement-longshot-guard-v1"
+    )
+    assert longshot_report["guard_enabled"] is True
+    assert longshot_report["guard_mode"] == "block_to_no_trade"
+    assert longshot_report["guard_reason_codes"] == [
+        "hold_to_settlement_longshot_guard",
+        "action_family_ineligible",
+    ]
+    assert manifest["hold_to_settlement_longshot_guard_enabled"] is True
+    assert manifest["hold_to_settlement_longshot_guard_reason_codes"] == (
+        longshot_report["guard_reason_codes"]
+    )
+    replay_variants = _read_json(
+        result.artifact_paths["action_family_replay_variants_report"]
+    )
+    assert replay_variants["schema_version"] == (
+        "bigan-v8-polymarket-action-family-replay-variants-v1"
+    )
+    assert [
+        variant["variant"]
+        for variant in replay_variants["variants"]
+    ] == [
+        "A_baseline_current_calibrated_policy_blocked",
+        "B_hold_to_settlement_disabled",
+        "C_sell_before_close_only",
+        "D_hold_to_settlement_allowed_only_for_passed_buckets",
+    ]
+    assert [
+        variant["threshold"]
+        for variant in replay_variants["threshold_sweep_with_action_family_gates"]
+    ] == [0.0, 0.03, 0.05]
     action_value_calibration = _read_json(result.artifact_paths["action_value_calibration"])
     assert action_value_calibration["calibration_support_passed"] is True
     assert action_value_calibration["calibration_quality_passed"] is False

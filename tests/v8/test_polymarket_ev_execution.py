@@ -179,6 +179,71 @@ def test_action_value_trade_requires_calibrated_edge(tmp_path: Path) -> None:
     assert "action_value_calibration_missing" in decision.reason_codes
 
 
+def test_hold_to_settlement_longshot_guard_blocks_action_value_buy(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    features = dict(_prediction(probability=0.80, confidence=0.90).features)
+    features.update(
+        {
+            "up_ask": 0.30,
+            "up_bid": 0.28,
+            "up_mid": 0.29,
+            "time_to_close_seconds": 240.0,
+        }
+    )
+    action_returns = dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, -0.05)
+    action_returns["NO_TRADE"] = 0.0
+    action_returns["BUY_UP_HOLD_TO_SETTLEMENT"] = 0.20
+    prediction = replace(
+        _prediction(probability=0.80, confidence=0.90),
+        features=features,
+        p_up_auxiliary=0.80,
+        expected_return_by_action=action_returns,
+        expected_return_no_trade=action_returns["NO_TRADE"],
+        expected_return_buy_up_hold_to_settlement=action_returns[
+            "BUY_UP_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_down_hold_to_settlement=action_returns[
+            "BUY_DOWN_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_up_sell_before_close=action_returns[
+            "BUY_UP_SELL_BEFORE_CLOSE"
+        ],
+        expected_return_buy_down_sell_before_close=action_returns[
+            "BUY_DOWN_SELL_BEFORE_CLOSE"
+        ],
+        best_policy_action="BUY_UP_HOLD_TO_SETTLEMENT",
+        best_action_expected_return=0.20,
+        second_best_action_expected_return=0.0,
+        best_action_margin=0.20,
+        policy_confidence=0.80,
+        action_value_head_enabled=True,
+        outcome_probability_head_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        feature_conditioned_action_value_model_enabled=True,
+    )
+    prediction = _with_calibrated_action_value(
+        prediction,
+        action_returns=action_returns,
+        best_action="BUY_UP_HOLD_TO_SETTLEMENT",
+        best_return=0.20,
+        second_best_return=0.0,
+    )
+
+    decision = decide_polymarket_ev_action(prediction=prediction, config=config)
+
+    assert decision.action == "NO_TRADE"
+    assert decision.selected_outcome == "NO_TRADE"
+    assert decision.paper_notional == 0.0
+    assert decision.entry_policy_action == "BUY_UP_HOLD_TO_SETTLEMENT"
+    assert decision.intended_exit_policy == "hold_to_settlement"
+    assert decision.policy_exit_reason == "hold_to_settlement_longshot_guard"
+    assert decision.action_value_calibration_used is True
+    assert "hold_to_settlement_longshot_guard" in decision.reason_codes
+    assert "action_family_ineligible" in decision.reason_codes
+
+
 def test_sell_before_close_intent_triggers_planned_exit(tmp_path: Path) -> None:
     config = PolymarketPolicyTrainingConfig(
         corpus_dir=tmp_path / "corpus",

@@ -14,6 +14,14 @@ from bigan.v8.polymarket.execution_ev import (
     ev_threshold_report,
     run_polymarket_policy_replay,
 )
+from bigan.v8.polymarket.training.action_family_eligibility import (
+    action_family_eligibility_markdown,
+    action_family_replay_variants_markdown,
+    build_action_family_eligibility_report,
+    build_action_family_replay_variants_report,
+    build_hold_to_settlement_longshot_guard_report,
+    hold_to_settlement_longshot_guard_markdown,
+)
 from bigan.v8.polymarket.training.action_value_calibration import (
     apply_action_value_calibration,
     build_action_value_calibration_artifact,
@@ -119,6 +127,21 @@ def run_polymarket_policy_training(
     )
     shadow_predictions = _predictions_for_examples(predictions_by_key, dataset.shadow_examples)
     replay_predictions = shadow_predictions
+    action_family_eligibility = build_action_family_eligibility_report(
+        examples=dataset.shadow_examples,
+        predictions=shadow_predictions,
+        execution_buffer=float(config.ev_threshold),
+    )
+    hold_to_settlement_longshot_guard = build_hold_to_settlement_longshot_guard_report(
+        examples=dataset.shadow_examples,
+        predictions=shadow_predictions,
+        execution_buffer=float(config.ev_threshold),
+    )
+    action_family_replay_variants = build_action_family_replay_variants_report(
+        examples=dataset.shadow_examples,
+        predictions=shadow_predictions,
+        execution_buffer=float(config.ev_threshold),
+    )
     decisions = build_polymarket_ev_decisions(predictions=replay_predictions, config=config)
     ev_report = ev_threshold_report(decisions, replay_split=replay_split)
     replay_report = run_polymarket_policy_replay(
@@ -134,6 +157,8 @@ def run_polymarket_policy_training(
         validation_predictions=validation_predictions,
         shadow_predictions=shadow_predictions,
         action_value_calibration=action_value_calibration,
+        action_family_eligibility=action_family_eligibility,
+        hold_to_settlement_longshot_guard=hold_to_settlement_longshot_guard,
     )
     artifact_paths = _write_artifacts(
         run_dir=run_dir,
@@ -152,6 +177,9 @@ def run_polymarket_policy_training(
         ev_report=ev_report,
         replay_report=replay_report,
         action_value_calibration=action_value_calibration,
+        action_family_eligibility=action_family_eligibility,
+        hold_to_settlement_longshot_guard=hold_to_settlement_longshot_guard,
+        action_family_replay_variants=action_family_replay_variants,
         signal_sanity=signal_sanity,
     )
     model_sha256 = _sha256_file(artifact_paths["model"])
@@ -168,6 +196,8 @@ def run_polymarket_policy_training(
         validation=validation,
         replay_report=replay_report,
         signal_sanity=signal_sanity,
+        action_family_eligibility=action_family_eligibility,
+        hold_to_settlement_longshot_guard=hold_to_settlement_longshot_guard,
     )
     _write_json(artifact_paths["model_manifest"], model_manifest)
     artifact_hashes = {
@@ -189,6 +219,9 @@ def run_polymarket_policy_training(
         ev_threshold_report=ev_report,
         replay_report=replay_report,
         action_value_signal_sanity_report=signal_sanity,
+        action_family_eligibility_report=action_family_eligibility,
+        hold_to_settlement_longshot_guard_report=hold_to_settlement_longshot_guard,
+        action_family_replay_variants_report=action_family_replay_variants,
     )
 
 
@@ -208,6 +241,9 @@ def _write_artifacts(
     ev_report: dict[str, Any],
     replay_report: dict[str, Any],
     action_value_calibration: dict[str, Any],
+    action_family_eligibility: dict[str, Any],
+    hold_to_settlement_longshot_guard: dict[str, Any],
+    action_family_replay_variants: dict[str, Any],
     signal_sanity: dict[str, Any],
 ) -> dict[str, Path]:
     paths = {
@@ -226,6 +262,24 @@ def _write_artifacts(
         "action_value_signal_sanity_summary": (
             run_dir / "polymarket_action_value_signal_sanity_report.md"
         ),
+        "action_family_eligibility_report": (
+            run_dir / "action_family_eligibility_report.json"
+        ),
+        "action_family_eligibility_summary": (
+            run_dir / "action_family_eligibility_report.md"
+        ),
+        "hold_to_settlement_longshot_guard_report": (
+            run_dir / "hold_to_settlement_longshot_guard_report.json"
+        ),
+        "hold_to_settlement_longshot_guard_summary": (
+            run_dir / "hold_to_settlement_longshot_guard_report.md"
+        ),
+        "action_family_replay_variants_report": (
+            run_dir / "action_family_replay_variants_report.json"
+        ),
+        "action_family_replay_variants_summary": (
+            run_dir / "action_family_replay_variants_report.md"
+        ),
         "all_predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "train_predictions": run_dir / "polymarket_policy_train_predictions.jsonl",
@@ -243,6 +297,12 @@ def _write_artifacts(
     _write_json(paths["replay_report"], replay_report)
     _write_json(paths["action_value_calibration"], action_value_calibration)
     _write_json(paths["action_value_signal_sanity_report"], signal_sanity)
+    _write_json(paths["action_family_eligibility_report"], action_family_eligibility)
+    _write_json(
+        paths["hold_to_settlement_longshot_guard_report"],
+        hold_to_settlement_longshot_guard,
+    )
+    _write_json(paths["action_family_replay_variants_report"], action_family_replay_variants)
     _write_jsonl(paths["predictions"], predictions)
     _write_jsonl(paths["train_predictions"], train_predictions)
     _write_jsonl(paths["validation_predictions"], validation_predictions)
@@ -261,6 +321,18 @@ def _write_artifacts(
         _signal_sanity_markdown(signal_sanity),
         encoding="utf-8",
     )
+    paths["action_family_eligibility_summary"].write_text(
+        action_family_eligibility_markdown(action_family_eligibility),
+        encoding="utf-8",
+    )
+    paths["hold_to_settlement_longshot_guard_summary"].write_text(
+        hold_to_settlement_longshot_guard_markdown(hold_to_settlement_longshot_guard),
+        encoding="utf-8",
+    )
+    paths["action_family_replay_variants_summary"].write_text(
+        action_family_replay_variants_markdown(action_family_replay_variants),
+        encoding="utf-8",
+    )
     return paths
 
 
@@ -275,6 +347,8 @@ def _model_manifest(
     validation: dict[str, Any],
     replay_report: dict[str, Any],
     signal_sanity: dict[str, Any],
+    action_family_eligibility: dict[str, Any],
+    hold_to_settlement_longshot_guard: dict[str, Any],
 ) -> dict[str, Any]:
     split_fields = {
         field_name: dataset_profile[field_name]
@@ -379,6 +453,29 @@ def _model_manifest(
         "action_value_paper_decision_ineligible_reasons": signal_sanity[
             "action_value_paper_decision_ineligible_reasons"
         ],
+        "action_family_eligibility_report_path": "action_family_eligibility_report.json",
+        "hold_to_settlement_longshot_guard_report_path": (
+            "hold_to_settlement_longshot_guard_report.json"
+        ),
+        "action_family_replay_variants_report_path": (
+            "action_family_replay_variants_report.json"
+        ),
+        "action_family_paper_decision_eligible": action_family_eligibility[
+            "action_family_paper_decision_eligible"
+        ],
+        "action_family_paper_decision_ineligible_reasons": action_family_eligibility[
+            "action_family_paper_decision_ineligible_reasons"
+        ],
+        "action_family_eligibility_report": action_family_eligibility,
+        "hold_to_settlement_longshot_guard_enabled": (
+            hold_to_settlement_longshot_guard["guard_enabled"]
+        ),
+        "hold_to_settlement_longshot_guard_reason_codes": (
+            hold_to_settlement_longshot_guard["guard_reason_codes"]
+        ),
+        "hold_to_settlement_longshot_guard_report": (
+            hold_to_settlement_longshot_guard
+        ),
         "action_value_signal_sanity_report": signal_sanity,
         "action_value_feature_columns": list(model.action_value_feature_columns),
         "required_action_value_feature_columns": list(model.action_value_feature_columns),
@@ -459,6 +556,8 @@ def _action_value_signal_sanity_report(
     validation_predictions: tuple[Any, ...],
     shadow_predictions: tuple[Any, ...],
     action_value_calibration: dict[str, Any],
+    action_family_eligibility: dict[str, Any],
+    hold_to_settlement_longshot_guard: dict[str, Any],
 ) -> dict[str, Any]:
     split_predictions = {
         "validation": validation_predictions,
@@ -507,11 +606,18 @@ def _action_value_signal_sanity_report(
         ineligible_reasons.add("action_value_policy_collapse")
     if not p_up_action_disagreement_within_limit:
         ineligible_reasons.add("p_up_action_disagreement_excessive")
+    if not action_family_eligibility["action_family_paper_decision_eligible"]:
+        ineligible_reasons.update(
+            action_family_eligibility[
+                "action_family_paper_decision_ineligible_reasons"
+            ]
+        )
     paper_decision_eligible = (
         calibration_support_passed
         and calibration_quality_passed
         and best_action_concentration_passed
         and p_up_action_disagreement_within_limit
+        and action_family_eligibility["action_family_paper_decision_eligible"]
     )
     return {
         "schema_version": POLYMARKET_POLICY_SCHEMA_VERSION,
@@ -590,6 +696,22 @@ def _action_value_signal_sanity_report(
             p_up_action_disagreement_within_limit
         ),
         "p_up_action_disagreement_examples": disagreement_examples[:20],
+        "action_family_paper_decision_eligible": action_family_eligibility[
+            "action_family_paper_decision_eligible"
+        ],
+        "action_family_paper_decision_ineligible_reasons": action_family_eligibility[
+            "action_family_paper_decision_ineligible_reasons"
+        ],
+        "action_family_eligibility_report": action_family_eligibility,
+        "hold_to_settlement_longshot_guard_enabled": (
+            hold_to_settlement_longshot_guard["guard_enabled"]
+        ),
+        "hold_to_settlement_longshot_guard_reason_codes": (
+            hold_to_settlement_longshot_guard["guard_reason_codes"]
+        ),
+        "hold_to_settlement_longshot_guard_report": (
+            hold_to_settlement_longshot_guard
+        ),
         "action_value_paper_decision_eligible": paper_decision_eligible,
         "action_value_paper_decision_ineligible_reasons": sorted(ineligible_reasons),
         **compact_safety_fields(),
@@ -707,6 +829,14 @@ def _signal_sanity_markdown(report: dict[str, Any]) -> str:
             f"{report['p_up_action_disagreement_rate']}",
             "- p_up_action_disagreement_within_limit: "
             f"{str(report['p_up_action_disagreement_within_limit']).lower()}",
+            "- action_family_paper_decision_eligible: "
+            f"{str(report['action_family_paper_decision_eligible']).lower()}",
+            "- action_family_paper_decision_ineligible_reasons: "
+            f"{json.dumps(report['action_family_paper_decision_ineligible_reasons'])}",
+            "- hold_to_settlement_longshot_guard_enabled: "
+            f"{str(report['hold_to_settlement_longshot_guard_enabled']).lower()}",
+            "- hold_to_settlement_longshot_guard_reason_codes: "
+            f"{json.dumps(report['hold_to_settlement_longshot_guard_reason_codes'])}",
             "- action_value_paper_decision_eligible: "
             f"{str(report['action_value_paper_decision_eligible']).lower()}",
             "- action_value_paper_decision_ineligible_reasons: "

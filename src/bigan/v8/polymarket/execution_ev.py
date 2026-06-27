@@ -7,6 +7,12 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from bigan.v8.polymarket.action_value_guards import (
+    ACTION_FAMILY_INELIGIBLE,
+    HOLD_TO_SETTLEMENT_LONGSHOT_GUARD,
+    action_value_intended_exit_policy,
+    hold_to_settlement_longshot_guard_applies,
+)
 from bigan.v8.polymarket.ledger import PolymarketPositionLedger
 from bigan.v8.polymarket.rules import (
     build_btc_updown_resolution_rule,
@@ -873,6 +879,32 @@ def _action_value_decision(
             action_value_head_used=True,
             probability_ev_fallback_used=False,
         )
+    raw_best_return = float(prediction.expected_return_by_action[best_action])
+    if hold_to_settlement_longshot_guard_applies(
+        action=best_action,
+        features=prediction.features,
+        raw_score=raw_best_return,
+    ):
+        return _decision(
+            prediction=prediction,
+            action="NO_TRADE",
+            selected_outcome="NO_TRADE",
+            ev_buy_up=ev_buy_up,
+            ev_buy_down=ev_buy_down,
+            execution_price=0.0,
+            used_price_side="none",
+            paper_notional=0.0,
+            reason_codes=(
+                HOLD_TO_SETTLEMENT_LONGSHOT_GUARD,
+                ACTION_FAMILY_INELIGIBLE,
+                "action_value_head_used",
+            ),
+            entry_policy_action=best_action,
+            intended_exit_policy="hold_to_settlement",
+            policy_exit_reason=HOLD_TO_SETTLEMENT_LONGSHOT_GUARD,
+            action_value_head_used=True,
+            probability_ev_fallback_used=False,
+        )
     if best_action.startswith("BUY_UP_"):
         intended_exit_policy = _intended_exit_policy(best_action)
         return _decision(
@@ -939,11 +971,7 @@ def _policy_reason(best_action: str) -> str:
 
 
 def _intended_exit_policy(best_action: str) -> str:
-    if best_action.endswith("_SELL_BEFORE_CLOSE"):
-        return "sell_before_close"
-    if best_action.endswith("_HOLD_TO_SETTLEMENT"):
-        return "hold_to_settlement"
-    return "none"
+    return action_value_intended_exit_policy(best_action)
 
 
 def _planned_exit_before_ts(
