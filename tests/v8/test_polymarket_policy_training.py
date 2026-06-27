@@ -146,6 +146,12 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "action_value_calibration",
         "action_value_signal_sanity_report",
         "action_value_signal_sanity_summary",
+        "model_ranking_error_report",
+        "model_ranking_error_summary",
+        "model_ranking_candidate_comparison",
+        "model_ranking_candidate_comparison_summary",
+        "source_model_eligibility_report",
+        "source_model_eligibility_summary",
         "action_family_eligibility_report",
         "action_family_eligibility_summary",
         "hold_to_settlement_longshot_guard_report",
@@ -236,6 +242,89 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert manifest["action_value_signal_sanity_report"][
         "action_value_paper_decision_eligible"
     ] is False
+    ranking_error = _read_json(result.artifact_paths["model_ranking_error_report"])
+    assert ranking_error["schema_version"] == (
+        "bigan-v8-polymarket-model-ranking-error-v1"
+    )
+    assert set(ranking_error["diagnostic_splits"]) == {"validation", "shadow"}
+    for split_name, expected_count in (
+        ("validation", len(result.dataset.validation_examples)),
+        ("shadow", len(result.dataset.shadow_examples)),
+    ):
+        split = ranking_error[split_name]
+        assert split["sample_count"] == expected_count
+        assert 0.0 <= split["top_1_action_hit_rate"] <= 1.0
+        assert 0.0 <= split["top_2_action_hit_rate"] <= 1.0
+        assert 0.0 <= split["top_3_action_hit_rate"] <= 1.0
+        assert split["rows"]
+        first_row = split["rows"][0]
+        for field_name in (
+            "calibrated_best_policy_action",
+            "realized_best_action",
+            "rank_of_realized_best_action_under_calibrated_scores",
+            "score_spread_selected_minus_realized_best",
+            "selected_action_realized_return",
+            "oracle_best_action_realized_return",
+            "regret",
+        ):
+            assert field_name in first_row
+        assert set(split["breakdowns"]) == {
+            "action_family",
+            "side",
+            "price_bucket",
+            "time_to_close_bucket",
+            "raw_score_bucket",
+            "market_family",
+        }
+    candidate_comparison = _read_json(
+        result.artifact_paths["model_ranking_candidate_comparison"]
+    )
+    assert candidate_comparison["schema_version"] == (
+        "bigan-v8-polymarket-model-ranking-candidate-comparison-v1"
+    )
+    assert candidate_comparison["candidate_count"] >= 6
+    assert {
+        "A_current_model_baseline",
+        "B_family_specific_calibration_only",
+        "C_action_specific_calibration_with_family_gates",
+        "D_pairwise_rank_correction",
+        "E_action_family_prior_penalty",
+        "F_live_eligible_feature_subset_retrain_proxy",
+    }.issubset(set(candidate_comparison["candidate_names"]))
+    for candidate in candidate_comparison["candidates"]:
+        for field_name in (
+            "shadow_raw_mae",
+            "shadow_calibrated_mae",
+            "high_score_support_count",
+            "high_score_realized_return_mean",
+            "high_score_realized_return_sum",
+            "action_family_gates",
+            "source_model_eligible",
+            "ineligible_reason_codes",
+        ):
+            assert field_name in candidate
+    source_eligibility = _read_json(
+        result.artifact_paths["source_model_eligibility_report"]
+    )
+    assert source_eligibility["schema_version"] == (
+        "bigan-v8-polymarket-source-model-eligibility-v1"
+    )
+    assert source_eligibility["source_model_eligible"] is False
+    assert source_eligibility["paper_run_resume_allowed"] is False
+    assert source_eligibility["hard_gates"]["calibration_quality_passed"] is False
+    assert source_eligibility["candidate_count"] == candidate_comparison["candidate_count"]
+    assert manifest["model_ranking_error_report_path"] == (
+        "model_ranking_error_report.json"
+    )
+    assert looks_like_sha256(manifest["model_ranking_error_report_sha256"])
+    assert manifest["model_ranking_candidate_comparison_path"] == (
+        "model_ranking_candidate_comparison.json"
+    )
+    assert looks_like_sha256(manifest["model_ranking_candidate_comparison_sha256"])
+    assert manifest["source_model_eligibility_report_path"] == (
+        "source_model_eligibility_report.json"
+    )
+    assert looks_like_sha256(manifest["source_model_eligibility_report_sha256"])
     action_family_report = _read_json(
         result.artifact_paths["action_family_eligibility_report"]
     )

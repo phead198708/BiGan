@@ -459,6 +459,9 @@ class PolymarketPolicyTrainingResult:
     hold_to_settlement_longshot_guard_report: dict[str, Any]
     action_family_replay_variants_report: dict[str, Any]
     action_family_counterfactual_replay_report: dict[str, Any]
+    model_ranking_error_report: dict[str, Any]
+    model_ranking_candidate_comparison_report: dict[str, Any]
+    source_model_eligibility_report: dict[str, Any]
 
 
 def safety_fields() -> dict[str, bool]:

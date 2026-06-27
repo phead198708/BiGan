@@ -52,6 +52,14 @@ from bigan.v8.polymarket.training.model import (
     predict_polymarket_policy_examples,
     train_polymarket_action_value_model,
 )
+from bigan.v8.polymarket.training.model_ranking_diagnostics import (
+    build_model_ranking_candidate_comparison,
+    build_model_ranking_error_report,
+    build_source_model_eligibility_report,
+    model_ranking_candidate_comparison_markdown,
+    model_ranking_error_markdown,
+    source_model_eligibility_markdown,
+)
 
 ACTION_VALUE_CONCENTRATION_WARN_THRESHOLD = 0.80
 ACTION_VALUE_CONCENTRATION_FAIL_THRESHOLD = 0.95
@@ -175,6 +183,27 @@ def run_polymarket_policy_training(
         action_family_eligibility=action_family_eligibility,
         hold_to_settlement_longshot_guard=hold_to_settlement_longshot_guard,
     )
+    model_ranking_error = build_model_ranking_error_report(
+        validation_examples=dataset.validation_examples,
+        validation_predictions=validation_predictions,
+        shadow_examples=dataset.shadow_examples,
+        shadow_predictions=shadow_predictions,
+    )
+    model_ranking_candidate_comparison = build_model_ranking_candidate_comparison(
+        validation_examples=dataset.validation_examples,
+        raw_validation_predictions=raw_validation_predictions,
+        calibrated_validation_predictions=validation_predictions,
+        shadow_examples=dataset.shadow_examples,
+        raw_shadow_predictions=raw_shadow_predictions,
+        calibrated_shadow_predictions=shadow_predictions,
+        execution_buffer=float(config.ev_threshold),
+    )
+    source_model_eligibility = build_source_model_eligibility_report(
+        signal_sanity=signal_sanity,
+        action_value_calibration=action_value_calibration,
+        action_family_eligibility=action_family_eligibility,
+        model_ranking_candidate_comparison=model_ranking_candidate_comparison,
+    )
     artifact_paths = _write_artifacts(
         run_dir=run_dir,
         config=config,
@@ -197,6 +226,9 @@ def run_polymarket_policy_training(
         action_family_replay_variants=action_family_replay_variants,
         action_family_counterfactual_replays=action_family_counterfactual_replays,
         signal_sanity=signal_sanity,
+        model_ranking_error=model_ranking_error,
+        model_ranking_candidate_comparison=model_ranking_candidate_comparison,
+        source_model_eligibility=source_model_eligibility,
     )
     model_sha256 = _sha256_file(artifact_paths["model"])
     action_value_calibration_sha256 = _sha256_file(
@@ -215,6 +247,15 @@ def run_polymarket_policy_training(
         "action_family_counterfactual_replay_sha256": _sha256_file(
             artifact_paths["action_family_counterfactual_replay_report"]
         ),
+        "model_ranking_error_report_sha256": _sha256_file(
+            artifact_paths["model_ranking_error_report"]
+        ),
+        "model_ranking_candidate_comparison_sha256": _sha256_file(
+            artifact_paths["model_ranking_candidate_comparison"]
+        ),
+        "source_model_eligibility_report_sha256": _sha256_file(
+            artifact_paths["source_model_eligibility_report"]
+        ),
     }
     model_manifest = _model_manifest(
         config=config,
@@ -229,6 +270,7 @@ def run_polymarket_policy_training(
         action_family_eligibility=action_family_eligibility,
         hold_to_settlement_longshot_guard=hold_to_settlement_longshot_guard,
         action_family_artifact_hashes=action_family_artifact_hashes,
+        source_model_eligibility=source_model_eligibility,
     )
     _write_json(artifact_paths["model_manifest"], model_manifest)
     artifact_hashes = {
@@ -256,6 +298,9 @@ def run_polymarket_policy_training(
         action_family_counterfactual_replay_report=(
             _read_json(artifact_paths["action_family_counterfactual_replay_report"])
         ),
+        model_ranking_error_report=model_ranking_error,
+        model_ranking_candidate_comparison_report=model_ranking_candidate_comparison,
+        source_model_eligibility_report=source_model_eligibility,
     )
 
 
@@ -430,6 +475,9 @@ def _write_artifacts(
     action_family_replay_variants: dict[str, Any],
     action_family_counterfactual_replays: tuple[dict[str, Any], ...],
     signal_sanity: dict[str, Any],
+    model_ranking_error: dict[str, Any],
+    model_ranking_candidate_comparison: dict[str, Any],
+    source_model_eligibility: dict[str, Any],
 ) -> dict[str, Path]:
     paths = {
         "training_config": run_dir / "polymarket_policy_training_config.json",
@@ -471,6 +519,20 @@ def _write_artifacts(
         "action_family_counterfactual_replay_summary": (
             run_dir / "action_family_counterfactual_replay_report.md"
         ),
+        "model_ranking_error_report": run_dir / "model_ranking_error_report.json",
+        "model_ranking_error_summary": run_dir / "model_ranking_error_report.md",
+        "model_ranking_candidate_comparison": (
+            run_dir / "model_ranking_candidate_comparison.json"
+        ),
+        "model_ranking_candidate_comparison_summary": (
+            run_dir / "model_ranking_candidate_comparison.md"
+        ),
+        "source_model_eligibility_report": (
+            run_dir / "source_model_eligibility_report.json"
+        ),
+        "source_model_eligibility_summary": (
+            run_dir / "source_model_eligibility_report.md"
+        ),
         "all_predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "train_predictions": run_dir / "polymarket_policy_train_predictions.jsonl",
@@ -488,6 +550,12 @@ def _write_artifacts(
     _write_json(paths["replay_report"], replay_report)
     _write_json(paths["action_value_calibration"], action_value_calibration)
     _write_json(paths["action_value_signal_sanity_report"], signal_sanity)
+    _write_json(paths["model_ranking_error_report"], model_ranking_error)
+    _write_json(
+        paths["model_ranking_candidate_comparison"],
+        model_ranking_candidate_comparison,
+    )
+    _write_json(paths["source_model_eligibility_report"], source_model_eligibility)
     _write_json(paths["action_family_eligibility_report"], action_family_eligibility)
     _write_json(
         paths["hold_to_settlement_longshot_guard_report"],
@@ -518,6 +586,20 @@ def _write_artifacts(
     )
     paths["action_value_signal_sanity_summary"].write_text(
         _signal_sanity_markdown(signal_sanity),
+        encoding="utf-8",
+    )
+    paths["model_ranking_error_summary"].write_text(
+        model_ranking_error_markdown(model_ranking_error),
+        encoding="utf-8",
+    )
+    paths["model_ranking_candidate_comparison_summary"].write_text(
+        model_ranking_candidate_comparison_markdown(
+            model_ranking_candidate_comparison
+        ),
+        encoding="utf-8",
+    )
+    paths["source_model_eligibility_summary"].write_text(
+        source_model_eligibility_markdown(source_model_eligibility),
         encoding="utf-8",
     )
     paths["action_family_eligibility_summary"].write_text(
@@ -601,6 +683,7 @@ def _model_manifest(
     action_family_eligibility: dict[str, Any],
     hold_to_settlement_longshot_guard: dict[str, Any],
     action_family_artifact_hashes: dict[str, str],
+    source_model_eligibility: dict[str, Any],
 ) -> dict[str, Any]:
     split_fields = {
         field_name: dataset_profile[field_name]
@@ -744,6 +827,23 @@ def _model_manifest(
             hold_to_settlement_longshot_guard
         ),
         "action_value_signal_sanity_report": signal_sanity,
+        "model_ranking_error_report_path": "model_ranking_error_report.json",
+        "model_ranking_error_report_sha256": action_family_artifact_hashes[
+            "model_ranking_error_report_sha256"
+        ],
+        "model_ranking_candidate_comparison_path": (
+            "model_ranking_candidate_comparison.json"
+        ),
+        "model_ranking_candidate_comparison_sha256": action_family_artifact_hashes[
+            "model_ranking_candidate_comparison_sha256"
+        ],
+        "source_model_eligibility_report_path": (
+            "source_model_eligibility_report.json"
+        ),
+        "source_model_eligibility_report_sha256": action_family_artifact_hashes[
+            "source_model_eligibility_report_sha256"
+        ],
+        "source_model_eligibility_report": source_model_eligibility,
         "action_value_feature_columns": list(model.action_value_feature_columns),
         "required_action_value_feature_columns": list(model.action_value_feature_columns),
         "action_label_coverage_by_action": dataset_profile[
