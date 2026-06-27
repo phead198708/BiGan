@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.execution_ev import (
     build_polymarket_ev_decisions,
     ev_threshold_report,
@@ -555,6 +556,14 @@ def _write_artifacts(
         model_ranking_candidate_comparison=model_ranking_candidate_comparison,
         source_model_eligibility=source_model_eligibility,
     )
+    _refresh_report_id(
+        model_ranking_candidate_comparison,
+        "model_ranking_candidate_comparison_id",
+    )
+    _refresh_report_id(
+        source_model_eligibility,
+        "source_model_eligibility_report_id",
+    )
     _write_json(paths["model_ranking_error_report"], model_ranking_error)
     _write_json(
         paths["model_ranking_candidate_comparison"],
@@ -693,6 +702,11 @@ def _write_candidate_artifacts(
     model_ranking_candidate_comparison["candidate_artifacts"] = exported
     source_model_eligibility["candidate_artifact_count"] = len(exported)
     source_model_eligibility["candidate_artifacts"] = exported
+
+
+def _refresh_report_id(payload: dict[str, Any], id_field: str) -> None:
+    payload.pop(id_field, None)
+    payload[id_field] = canonical_json_sha256(payload)
 
 
 def _safe_artifact_name(value: str) -> str:

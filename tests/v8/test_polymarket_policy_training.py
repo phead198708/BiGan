@@ -23,7 +23,7 @@ from bigan.v8.polymarket import (
     run_polymarket_policy_training,
     write_deterministic_polymarket_corpus_fixtures,
 )
-from bigan.v8.polymarket.contracts import looks_like_sha256
+from bigan.v8.polymarket.contracts import canonical_json_sha256, looks_like_sha256
 from bigan.v8.polymarket.training.action_family_eligibility import (
     build_action_family_counterfactual_prediction_sets,
 )
@@ -282,6 +282,14 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     candidate_comparison = _read_json(
         result.artifact_paths["model_ranking_candidate_comparison"]
     )
+    candidate_comparison_id = candidate_comparison[
+        "model_ranking_candidate_comparison_id"
+    ]
+    candidate_comparison_payload = dict(candidate_comparison)
+    candidate_comparison_payload.pop("model_ranking_candidate_comparison_id")
+    assert canonical_json_sha256(candidate_comparison_payload) == (
+        candidate_comparison_id
+    )
     assert candidate_comparison["schema_version"] == (
         "bigan-v8-polymarket-model-ranking-candidate-comparison-v1"
     )
@@ -315,6 +323,10 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     source_eligibility = _read_json(
         result.artifact_paths["source_model_eligibility_report"]
     )
+    source_eligibility_id = source_eligibility["source_model_eligibility_report_id"]
+    source_eligibility_payload = dict(source_eligibility)
+    source_eligibility_payload.pop("source_model_eligibility_report_id")
+    assert canonical_json_sha256(source_eligibility_payload) == source_eligibility_id
     assert source_eligibility["schema_version"] == (
         "bigan-v8-polymarket-source-model-eligibility-v1"
     )
@@ -346,6 +358,33 @@ def test_training_runner_writes_required_artifacts_and_manifest(
             assert (result.run_dir / artifact_path).exists()
         for artifact_hash in artifact["artifact_hashes"].values():
             assert looks_like_sha256(artifact_hash)
+        if artifact["candidate_name"] in {
+            "G_bucketed_lcb_rank_selector",
+            "H_positive_bucket_rank_selector",
+        }:
+            overlay = _read_json(
+                result.run_dir / artifact["artifact_paths"]["ranking_overlay"]
+            )
+            candidate_manifest = _read_json(
+                result.run_dir / artifact["artifact_paths"]["manifest"]
+            )
+            assert overlay["fit_split"] == "validation"
+            assert overlay["evaluation_split"] == "shadow"
+            assert overlay["uses_shadow_for_fit"] is False
+            assert overlay["shrinkage_prior_support"] == 10
+            assert overlay["shrinkage_prior_mean"] == 0.0
+            assert "bucket_evidence_weight" in overlay
+            assert "model_score_weight" in overlay
+            assert candidate_manifest["ranking_overlay_fit_split"] == "validation"
+            assert candidate_manifest["ranking_overlay_evaluation_split"] == "shadow"
+            assert candidate_manifest["ranking_overlay_uses_shadow_split"] is False
+            assert candidate_manifest["ranking_overlay_min_bucket_support"] >= 3
+            assert candidate_manifest["ranking_overlay_min_family_support"] == 10
+            assert candidate_manifest["ranking_overlay_shrinkage_prior_support"] == 10
+            assert candidate_manifest["ranking_overlay_shrinkage_prior_mean"] == 0.0
+            assert "ranking_overlay_score_combination" in candidate_manifest
+            assert "ranking_overlay_bucket_evidence_weight" in candidate_manifest
+            assert "ranking_overlay_model_score_weight" in candidate_manifest
     assert source_eligibility["candidate_artifacts"] == candidate_comparison[
         "candidate_artifacts"
     ]
@@ -694,6 +733,10 @@ def test_bucketed_overlay_uses_validation_only_and_selects_supported_positive_bu
         assert candidate["ranking_overlay_fit_split"] == "validation"
         assert candidate["ranking_overlay_evaluation_split"] == "shadow"
         assert candidate["ranking_overlay_uses_shadow_split"] is False
+        assert candidate["ranking_overlay"]["shrinkage_prior_support"] == 10
+        assert candidate["ranking_overlay"]["shrinkage_prior_mean"] == 0.0
+        assert candidate["ranking_overlay_shrinkage_prior_support"] == 10
+        assert candidate["ranking_overlay_shrinkage_prior_mean"] == 0.0
         assert candidate["candidate_predictions"][0][
             "calibrated_best_policy_action"
         ] == "BUY_UP_SELL_BEFORE_CLOSE"
@@ -704,6 +747,43 @@ def test_bucketed_overlay_blocks_low_support_validation_buckets(tmp_path: Path) 
         _overlay_examples_and_predictions(
             count=2,
             positive_sell_return=0.20,
+            negative_hold_return=-0.20,
+        )
+    )
+    shadow_examples, raw_shadow, calibrated_shadow = _overlay_examples_and_predictions(
+        count=1,
+        positive_sell_return=0.20,
+        negative_hold_return=-0.20,
+        start_ts=20_000,
+    )
+
+    comparison = build_model_ranking_candidate_comparison(
+        validation_examples=validation_examples,
+        raw_validation_predictions=raw_validation,
+        calibrated_validation_predictions=calibrated_validation,
+        shadow_examples=shadow_examples,
+        raw_shadow_predictions=raw_shadow,
+        calibrated_shadow_predictions=calibrated_shadow,
+        execution_buffer=0.015,
+    )
+
+    for candidate_name in (
+        "G_bucketed_lcb_rank_selector",
+        "H_positive_bucket_rank_selector",
+    ):
+        candidate = _candidate_by_name(comparison, candidate_name)
+        assert candidate["candidate_predictions"][0][
+            "calibrated_best_policy_action"
+        ] == "NO_TRADE"
+
+
+def test_bucketed_overlay_requires_buffer_positive_validation_buckets(
+    tmp_path: Path,
+) -> None:
+    validation_examples, raw_validation, calibrated_validation = (
+        _overlay_examples_and_predictions(
+            count=10,
+            positive_sell_return=0.01,
             negative_hold_return=-0.20,
         )
     )

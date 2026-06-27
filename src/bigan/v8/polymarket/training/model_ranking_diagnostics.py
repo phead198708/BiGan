@@ -40,8 +40,14 @@ SOURCE_MODEL_ELIGIBILITY_SCHEMA_VERSION = (
 BEST_ACTION_CONCENTRATION_FAIL_THRESHOLD = 0.95
 P_UP_ACTION_DISAGREEMENT_FAIL_THRESHOLD = 0.50
 P_UP_MATERIAL_DISAGREEMENT_THRESHOLD = 0.55
-RANKING_OVERLAY_MIN_BUCKET_SUPPORT = 3
+RANKING_OVERLAY_G_MIN_BUCKET_SUPPORT = 10
+RANKING_OVERLAY_H_MIN_BUCKET_SUPPORT = 3
 RANKING_OVERLAY_MIN_FAMILY_SUPPORT = 10
+RANKING_OVERLAY_SHRINKAGE_PRIOR_SUPPORT = 10
+RANKING_OVERLAY_SHRINKAGE_PRIOR_MEAN = 0.0
+RANKING_OVERLAY_H_BUCKET_EVIDENCE_WEIGHT = 0.90
+RANKING_OVERLAY_H_MODEL_SCORE_WEIGHT = 0.10
+RANKING_OVERLAY_G_MODEL_SCORE_TIEBREAKER_WEIGHT = 0.001
 
 
 def build_model_ranking_error_report(
@@ -471,7 +477,7 @@ def _candidate_specs(
         predictions=calibrated_validation_predictions,
         execution_buffer=execution_buffer,
         method="bucketed_lcb_rank_selector",
-        min_bucket_support=RANKING_OVERLAY_MIN_BUCKET_SUPPORT,
+        min_bucket_support=RANKING_OVERLAY_G_MIN_BUCKET_SUPPORT,
         min_family_support=RANKING_OVERLAY_MIN_FAMILY_SUPPORT,
         require_lcb_over_buffer=True,
         require_positive_only=False,
@@ -481,7 +487,7 @@ def _candidate_specs(
         predictions=calibrated_validation_predictions,
         execution_buffer=execution_buffer,
         method="positive_bucket_rank_selector",
-        min_bucket_support=RANKING_OVERLAY_MIN_BUCKET_SUPPORT,
+        min_bucket_support=RANKING_OVERLAY_H_MIN_BUCKET_SUPPORT,
         min_family_support=RANKING_OVERLAY_MIN_FAMILY_SUPPORT,
         require_lcb_over_buffer=False,
         require_positive_only=True,
@@ -557,7 +563,7 @@ def _candidate_specs(
             "eligible_families": None,
             "ranking_overlay": lcb_overlay,
             "notes": [
-                "validation-fitted bucket/family lower-confidence-bound selector",
+                "validation-fitted shrunk bucket/family lower-confidence-bound selector",
                 "shadow labels are not used for fit",
             ],
         },
@@ -570,7 +576,7 @@ def _candidate_specs(
             "eligible_families": None,
             "ranking_overlay": positive_overlay,
             "notes": [
-                "validation-fitted positive bucket/family selector",
+                "validation-fitted buffer-positive bucket/family selector",
                 "shadow labels are not used for fit",
             ],
         },
@@ -681,6 +687,27 @@ def _candidate_report(
         "ranking_overlay_uses_shadow_split": False
         if overlay is not None
         else None,
+        "ranking_overlay_min_bucket_support": None
+        if overlay is None
+        else overlay["min_bucket_support"],
+        "ranking_overlay_min_family_support": None
+        if overlay is None
+        else overlay["min_family_support"],
+        "ranking_overlay_shrinkage_prior_support": None
+        if overlay is None
+        else overlay["shrinkage_prior_support"],
+        "ranking_overlay_shrinkage_prior_mean": None
+        if overlay is None
+        else overlay["shrinkage_prior_mean"],
+        "ranking_overlay_score_combination": None
+        if overlay is None
+        else overlay["score_combination"],
+        "ranking_overlay_bucket_evidence_weight": None
+        if overlay is None
+        else overlay["bucket_evidence_weight"],
+        "ranking_overlay_model_score_weight": None
+        if overlay is None
+        else overlay["model_score_weight"],
         "shadow_raw_mae": raw_mae,
         "shadow_calibrated_mae": calibrated_mae,
         "shadow_top_1_action_hit_rate": ranking["top_1_action_hit_rate"],
@@ -979,14 +1006,22 @@ def _fit_bucket_overlay(
         "min_bucket_support": min_bucket_support,
         "min_family_support": min_family_support,
         "execution_buffer": execution_buffer,
+        "shrinkage_prior_support": RANKING_OVERLAY_SHRINKAGE_PRIOR_SUPPORT,
+        "shrinkage_prior_mean": RANKING_OVERLAY_SHRINKAGE_PRIOR_MEAN,
         "require_lcb_over_buffer": require_lcb_over_buffer,
         "require_positive_only": require_positive_only,
         "unsupported_action_score": -1.0,
         "score_combination": (
-            "supported_bucket_lcb_plus_model_score"
+            "shrunk_lcb_evidence_primary_model_score_tiebreaker"
             if require_lcb_over_buffer
-            else "supported_bucket_mean_plus_model_score"
+            else "bucket_evidence_dominant_model_score_secondary"
         ),
+        "bucket_evidence_weight": 1.0
+        if require_lcb_over_buffer
+        else RANKING_OVERLAY_H_BUCKET_EVIDENCE_WEIGHT,
+        "model_score_weight": RANKING_OVERLAY_G_MODEL_SCORE_TIEBREAKER_WEIGHT
+        if require_lcb_over_buffer
+        else RANKING_OVERLAY_H_MODEL_SCORE_WEIGHT,
         "bucket_evidence": bucket_evidence,
         "family_evidence": family_evidence,
         **compact_safety_fields(),
@@ -1004,29 +1039,45 @@ def _overlay_evidence(
 ) -> dict[str, Any]:
     support_count = len(returns)
     mean_return = _mean(returns)
+    return_sum = sum(float(value) for value in returns)
     stdev = _stdev(returns)
     lcb = mean_return - (stdev / math.sqrt(support_count)) if support_count else 0.0
+    shrunk_mean = _shrunk_mean(
+        return_sum=return_sum,
+        support_count=support_count,
+        prior_support=RANKING_OVERLAY_SHRINKAGE_PRIOR_SUPPORT,
+        prior_mean=RANKING_OVERLAY_SHRINKAGE_PRIOR_MEAN,
+    )
+    shrunk_lcb = (
+        shrunk_mean - (stdev / math.sqrt(support_count)) if support_count else 0.0
+    )
     support_passed = support_count >= min_support
     positive_passed = mean_return > 0.0
-    lcb_passed = lcb > execution_buffer
+    sum_positive_passed = return_sum > 0.0
+    lcb_passed = shrunk_lcb > execution_buffer
     buffer_passed = mean_return > execution_buffer
     if require_lcb_over_buffer:
-        passed = support_passed and lcb_passed
+        passed = support_passed and lcb_passed and sum_positive_passed
     elif require_positive_only:
-        passed = support_passed and positive_passed
+        passed = support_passed and positive_passed and buffer_passed and sum_positive_passed
     else:
-        passed = support_passed and buffer_passed
+        passed = support_passed and buffer_passed and sum_positive_passed
     return {
         "name": name,
         "support_count": support_count,
         "min_support": min_support,
         "support_passed": support_passed,
         "realized_return_mean": mean_return,
-        "realized_return_sum": sum(float(value) for value in returns),
+        "realized_return_sum": return_sum,
         "realized_return_stdev": stdev,
         "risk_adjusted_lcb": lcb,
+        "shrunk_realized_return_mean": shrunk_mean,
+        "shrunk_risk_adjusted_lcb": shrunk_lcb,
+        "shrinkage_prior_support": RANKING_OVERLAY_SHRINKAGE_PRIOR_SUPPORT,
+        "shrinkage_prior_mean": RANKING_OVERLAY_SHRINKAGE_PRIOR_MEAN,
         "execution_buffer": execution_buffer,
         "positive_passed": positive_passed,
+        "sum_positive_passed": sum_positive_passed,
         "mean_exceeds_execution_buffer": buffer_passed,
         "lcb_exceeds_execution_buffer": lcb_passed,
         "evidence_passed": passed,
@@ -1051,8 +1102,27 @@ def _overlay_score(
     if not family_evidence["evidence_passed"] or not bucket_evidence["evidence_passed"]:
         return float(overlay["unsupported_action_score"])
     if overlay["method"] == "bucketed_lcb_rank_selector":
-        return score + float(bucket_evidence["risk_adjusted_lcb"])
-    return score + float(bucket_evidence["realized_return_mean"])
+        return float(bucket_evidence["shrunk_risk_adjusted_lcb"]) + (
+            float(overlay["model_score_weight"]) * score
+        )
+    return (
+        float(overlay["bucket_evidence_weight"])
+        * float(bucket_evidence["realized_return_mean"])
+    ) + (float(overlay["model_score_weight"]) * score)
+
+
+def _shrunk_mean(
+    *,
+    return_sum: float,
+    support_count: int,
+    prior_support: int,
+    prior_mean: float,
+) -> float:
+    denominator = support_count + prior_support
+    if denominator <= 0:
+        return 0.0
+    numerator = return_sum + (prior_support * prior_mean)
+    return float(numerator / denominator)
 
 
 def _overlay_bucket_key(
@@ -1112,6 +1182,27 @@ def _candidate_manifest(
         "ranking_overlay_uses_shadow_split": False
         if ranking_overlay is not None
         else None,
+        "ranking_overlay_min_bucket_support": None
+        if ranking_overlay is None
+        else ranking_overlay["min_bucket_support"],
+        "ranking_overlay_min_family_support": None
+        if ranking_overlay is None
+        else ranking_overlay["min_family_support"],
+        "ranking_overlay_shrinkage_prior_support": None
+        if ranking_overlay is None
+        else ranking_overlay["shrinkage_prior_support"],
+        "ranking_overlay_shrinkage_prior_mean": None
+        if ranking_overlay is None
+        else ranking_overlay["shrinkage_prior_mean"],
+        "ranking_overlay_score_combination": None
+        if ranking_overlay is None
+        else ranking_overlay["score_combination"],
+        "ranking_overlay_bucket_evidence_weight": None
+        if ranking_overlay is None
+        else ranking_overlay["bucket_evidence_weight"],
+        "ranking_overlay_model_score_weight": None
+        if ranking_overlay is None
+        else ranking_overlay["model_score_weight"],
         "action_value_paper_decision_eligible": source_model_eligible,
         "action_family_paper_decision_eligible": action_family_paper_decision_eligible,
         "calibration_quality_passed": calibration_quality_passed,
