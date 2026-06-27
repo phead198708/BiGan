@@ -101,8 +101,15 @@ def test_real_corpus_retraining_gate_runs_training_for_real_eligible_bundle(
     assert model_manifest["action_value_calibration_artifact_used"] is True
     assert model_manifest["execution_uses_calibrated_action_value"] is True
     assert model_manifest["calibration_support_passed"] is True
-    assert model_manifest["action_value_paper_decision_eligible"] is True
-    assert model_manifest["action_value_paper_decision_ineligible_reasons"] == []
+    assert isinstance(model_manifest["calibration_quality_passed"], bool)
+    if model_manifest["calibration_quality_passed"]:
+        assert model_manifest["action_value_paper_decision_eligible"] is True
+        assert model_manifest["action_value_paper_decision_ineligible_reasons"] == []
+    else:
+        assert model_manifest["action_value_paper_decision_eligible"] is False
+        assert "action_value_calibration_quality_failed" in model_manifest[
+            "action_value_paper_decision_ineligible_reasons"
+        ]
     assert model_manifest["training_corpus_hash"] == recorder.report[
         "phase2_corpus_manifest_sha256"
     ]

@@ -339,6 +339,15 @@ def _model_manifest(
         "action_value_calibration_bucket_count": action_value_calibration[
             "calibration_bucket_count"
         ],
+        "calibration_quality_passed": signal_sanity[
+            "calibration_quality_passed"
+        ],
+        "calibration_quality_gates": action_value_calibration[
+            "calibration_quality_gates"
+        ],
+        "shadow_high_score_bucket": action_value_calibration[
+            "shadow_high_score_bucket"
+        ],
         "action_value_calibration_artifact_used": signal_sanity[
             "action_value_calibration_artifact_used"
         ],
@@ -476,15 +485,21 @@ def _action_value_signal_sanity_report(
     calibration_support_passed = bool(
         action_value_calibration["calibration_support_passed"]
     )
+    calibration_quality_passed = bool(
+        action_value_calibration["calibration_quality_passed"]
+    )
     ineligible_reasons = set()
     if not calibration_support_passed:
         ineligible_reasons.add("action_value_calibration_support_insufficient")
+    if not calibration_quality_passed:
+        ineligible_reasons.add("action_value_calibration_quality_failed")
     if not best_action_concentration_passed:
         ineligible_reasons.add("action_value_policy_collapse")
     if not p_up_action_disagreement_within_limit:
         ineligible_reasons.add("p_up_action_disagreement_excessive")
     paper_decision_eligible = (
         calibration_support_passed
+        and calibration_quality_passed
         and best_action_concentration_passed
         and p_up_action_disagreement_within_limit
     )
@@ -513,6 +528,13 @@ def _action_value_signal_sanity_report(
         ],
         "execution_uses_calibrated_action_value": True,
         "calibration_support_passed": calibration_support_passed,
+        "calibration_quality_passed": calibration_quality_passed,
+        "calibration_quality_gates": action_value_calibration[
+            "calibration_quality_gates"
+        ],
+        "shadow_high_score_bucket": action_value_calibration[
+            "shadow_high_score_bucket"
+        ],
         "calibration_support_count": action_value_calibration[
             "calibration_support_count"
         ],
@@ -635,6 +657,11 @@ def _signal_sanity_markdown(report: dict[str, Any]) -> str:
             "- execution_uses_calibrated_action_value: "
             f"{str(report['execution_uses_calibrated_action_value']).lower()}",
             f"- calibration_support_passed: {str(report['calibration_support_passed']).lower()}",
+            f"- calibration_quality_passed: {str(report['calibration_quality_passed']).lower()}",
+            "- shadow_calibrated_mae_not_worse: "
+            f"{str(report['calibration_quality_gates']['shadow_calibrated_mae_not_worse']).lower()}",
+            "- high_score_bucket_realized_return_positive: "
+            f"{str(report['calibration_quality_gates']['high_score_bucket_realized_return_positive']).lower()}",
             f"- best_action_counts: {json.dumps(report['best_action_counts'], sort_keys=True)}",
             f"- best_action_max_action: {report['best_action_max_action']}",
             f"- best_action_max_ratio: {report['best_action_max_ratio']}",

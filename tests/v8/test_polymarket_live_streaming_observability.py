@@ -539,10 +539,24 @@ def _write_sell_before_close_model_artifacts(tmp_path: Path) -> tuple[Path, Path
         "calibration_method": "validation_action_bias_correction",
         "calibration_fit_split": "validation",
         "calibration_evaluation_split": "shadow",
+        "calibration_uses_training_split": False,
         "calibration_support_passed": True,
+        "calibration_quality_passed": True,
+        "calibration_quality_gates": {
+            "shadow_calibrated_mae_not_worse": True,
+            "high_score_bucket_realized_return_positive": True,
+        },
         "calibration_support_count": 3,
         "calibration_bucket_count": len(ACTION_VALUE_LABEL_ACTIONS),
         "action_corrections": dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, 0.0),
+        "calibration_buckets": {
+            f"action={action}|price=none|time=0-30s|raw=0.00-0.05": {
+                "bucket_key": f"action={action}|price=none|time=0-30s|raw=0.00-0.05",
+                "support_count": 1,
+                "correction": 0.0,
+            }
+            for action in ACTION_VALUE_LABEL_ACTIONS
+        },
         "action_value_calibration_id": "c" * 64,
         **compact_safety_fields(),
     }
@@ -569,9 +583,11 @@ def _write_sell_before_close_model_artifacts(tmp_path: Path) -> tuple[Path, Path
         "feature_conditioned_action_value_model_enabled": False,
         "action_value_calibration_artifact_path": calibration_path.name,
         "action_value_calibration_sha256": _sha256(calibration_path),
+        "action_value_calibration_id": "c" * 64,
         "action_value_calibration_artifact_used": True,
         "execution_uses_calibrated_action_value": True,
         "calibration_support_passed": True,
+        "calibration_quality_passed": True,
         "action_value_paper_decision_eligible": True,
         "action_value_paper_decision_ineligible_reasons": [],
         "direct_pnl_optimization": False,

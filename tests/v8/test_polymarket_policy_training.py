@@ -179,21 +179,31 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert manifest["action_value_calibration_artifact_used"] is True
     assert manifest["execution_uses_calibrated_action_value"] is True
     assert manifest["calibration_support_passed"] is True
+    assert manifest["calibration_quality_passed"] is False
+    assert manifest["calibration_quality_gates"][
+        "shadow_calibrated_mae_not_worse"
+    ] is False
+    assert manifest["calibration_quality_gates"][
+        "high_score_bucket_realized_return_positive"
+    ] is False
     assert manifest["action_value_calibration_support_count"] > 0
-    assert manifest["action_value_calibration_bucket_count"] == len(
-        ACTION_VALUE_LABEL_ACTIONS
-    )
+    assert manifest["action_value_calibration_bucket_count"] >= len(ACTION_VALUE_LABEL_ACTIONS)
     assert isinstance(manifest["best_action_concentration_passed"], bool)
     assert isinstance(manifest["p_up_action_disagreement_within_limit"], bool)
-    assert manifest["action_value_paper_decision_eligible"] is True
-    assert manifest["action_value_paper_decision_ineligible_reasons"] == []
+    assert manifest["action_value_paper_decision_eligible"] is False
+    assert manifest["action_value_paper_decision_ineligible_reasons"] == [
+        "action_value_calibration_quality_failed"
+    ]
     assert manifest["action_value_signal_sanity_report"][
         "action_value_paper_decision_eligible"
-    ] is True
+    ] is False
     action_value_calibration = _read_json(result.artifact_paths["action_value_calibration"])
     assert action_value_calibration["calibration_support_passed"] is True
+    assert action_value_calibration["calibration_quality_passed"] is False
     assert action_value_calibration["calibration_fit_split"] == "validation"
     assert action_value_calibration["calibration_evaluation_split"] == "shadow"
+    assert action_value_calibration["bucketed_calibration_enabled"] is True
+    assert action_value_calibration["calibration_buckets"]
     assert manifest["action_value_feature_columns"]
     assert manifest["required_action_value_feature_columns"] == manifest[
         "action_value_feature_columns"

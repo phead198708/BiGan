@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -49,6 +50,8 @@ from bigan.v8.polymarket.storage import (
     round_corpus_id_from_corpus_dir,
 )
 from bigan.v8.polymarket.training import (
+    ACTION_VALUE_CALIBRATION_SCHEMA_VERSION,
+    ACTION_VALUE_LABEL_ACTIONS,
     ACTION_VALUE_TARGET_FIELD,
     PolymarketPolicyExample,
     PolymarketPolicyModel,
@@ -66,6 +69,16 @@ ACTION_VALUE_CALIBRATION_SUPPORT_INSUFFICIENT = (
     "action_value_calibration_support_insufficient"
 )
 ACTION_VALUE_CALIBRATION_MISMATCH = "action_value_calibration_mismatch"
+ACTION_VALUE_CALIBRATION_SCHEMA_MISMATCH = "action_value_calibration_schema_mismatch"
+ACTION_VALUE_CALIBRATION_ID_MISMATCH = "action_value_calibration_id_mismatch"
+ACTION_VALUE_CALIBRATION_QUALITY_FAILED = "action_value_calibration_quality_failed"
+ACTION_VALUE_CALIBRATION_USES_TRAINING_SPLIT = (
+    "action_value_calibration_uses_training_split"
+)
+ACTION_VALUE_CALIBRATION_SAFETY_VIOLATION = (
+    "action_value_calibration_safety_violation"
+)
+ACTION_VALUE_CALIBRATION_CONTENT_INVALID = "action_value_calibration_content_invalid"
 ACTION_VALUE_POLICY_COLLAPSE = "action_value_policy_collapse"
 P_UP_ACTION_DISAGREEMENT_EXCESSIVE = "p_up_action_disagreement_excessive"
 ACTION_VALUE_DECISION_INELIGIBLE = "action_value_paper_decision_ineligible"
@@ -715,6 +728,8 @@ def _verify_model_manifest(
         if model_manifest.get("action_value_paper_decision_eligible") is not True:
             reasons = _action_value_paper_decision_ineligible_reasons(model_manifest)
             raise ValueError(",".join(reasons))
+        if model_manifest.get("calibration_quality_passed") is not True:
+            raise ValueError(ACTION_VALUE_CALIBRATION_QUALITY_FAILED)
         for field_name in ("action_value_calibration_sha256",):
             value = str(model_manifest.get(field_name, ""))
             if not looks_like_sha256(value):
@@ -729,6 +744,10 @@ def _verify_model_manifest(
             "action_value_calibration_sha256"
         ):
             raise ValueError(ACTION_VALUE_CALIBRATION_MISMATCH)
+        _validate_action_value_calibration_artifact(
+            calibration_artifact=_read_json(calibration_path),
+            model_manifest=model_manifest,
+        )
         for field_name in (
             "fixture_corpus_used",
             "synthetic_corpus_used",
@@ -776,10 +795,57 @@ def _apply_model_manifest_action_value_calibration(
         model_manifest_path=model_manifest_path,
     )
     calibration_artifact = _read_json(calibration_path)
+    _validate_action_value_calibration_artifact(
+        calibration_artifact=calibration_artifact,
+        model_manifest=model_manifest,
+    )
     return apply_action_value_calibration(
         predictions=predictions,
         calibration_artifact=calibration_artifact,
     )
+
+
+def _validate_action_value_calibration_artifact(
+    *,
+    calibration_artifact: dict[str, Any],
+    model_manifest: dict[str, Any],
+) -> None:
+    if calibration_artifact.get("schema_version") != ACTION_VALUE_CALIBRATION_SCHEMA_VERSION:
+        raise ValueError(ACTION_VALUE_CALIBRATION_SCHEMA_MISMATCH)
+    if calibration_artifact.get("action_value_calibration_id") != model_manifest.get(
+        "action_value_calibration_id"
+    ):
+        raise ValueError(ACTION_VALUE_CALIBRATION_ID_MISMATCH)
+    if calibration_artifact.get("calibration_support_passed") is not True:
+        raise ValueError(ACTION_VALUE_CALIBRATION_SUPPORT_INSUFFICIENT)
+    if calibration_artifact.get("calibration_quality_passed") is not True:
+        raise ValueError(ACTION_VALUE_CALIBRATION_QUALITY_FAILED)
+    if calibration_artifact.get("calibration_uses_training_split") is not False:
+        raise ValueError(ACTION_VALUE_CALIBRATION_USES_TRAINING_SPLIT)
+    for field_name, expected in compact_safety_fields().items():
+        if calibration_artifact.get(field_name) is not expected:
+            raise ValueError(ACTION_VALUE_CALIBRATION_SAFETY_VIOLATION)
+    corrections = calibration_artifact.get("action_corrections")
+    if not isinstance(corrections, dict):
+        raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+    missing = set(ACTION_VALUE_LABEL_ACTIONS) - set(corrections)
+    if missing:
+        raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+    for action in ACTION_VALUE_LABEL_ACTIONS:
+        value = corrections[action]
+        if not isinstance(value, int | float) or not math.isfinite(float(value)):
+            raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+    if not isinstance(calibration_artifact.get("calibration_buckets"), dict):
+        raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+    gates = calibration_artifact.get("calibration_quality_gates")
+    if not isinstance(gates, dict):
+        raise ValueError(ACTION_VALUE_CALIBRATION_CONTENT_INVALID)
+    for field_name in (
+        "shadow_calibrated_mae_not_worse",
+        "high_score_bucket_realized_return_positive",
+    ):
+        if gates.get(field_name) is not True:
+            raise ValueError(ACTION_VALUE_CALIBRATION_QUALITY_FAILED)
 
 
 def _action_value_paper_decision_ineligible_reasons(
@@ -799,6 +865,8 @@ def _action_value_paper_decision_ineligible_reasons(
         reasons.add(ACTION_VALUE_CALIBRATION_MISSING)
     if model_manifest.get("calibration_support_passed") is False:
         reasons.add(ACTION_VALUE_CALIBRATION_SUPPORT_INSUFFICIENT)
+    if model_manifest.get("calibration_quality_passed") is False:
+        reasons.add(ACTION_VALUE_CALIBRATION_QUALITY_FAILED)
     if model_manifest.get("best_action_concentration_passed") is False:
         reasons.add(ACTION_VALUE_POLICY_COLLAPSE)
     if model_manifest.get("p_up_action_disagreement_within_limit") is False:
@@ -3545,6 +3613,12 @@ def _exception_reason_codes(exc: Exception, *, fallback: str) -> list[str]:
             ACTION_VALUE_CALIBRATION_MISSING,
             ACTION_VALUE_CALIBRATION_SUPPORT_INSUFFICIENT,
             ACTION_VALUE_CALIBRATION_MISMATCH,
+            ACTION_VALUE_CALIBRATION_SCHEMA_MISMATCH,
+            ACTION_VALUE_CALIBRATION_ID_MISMATCH,
+            ACTION_VALUE_CALIBRATION_QUALITY_FAILED,
+            ACTION_VALUE_CALIBRATION_USES_TRAINING_SPLIT,
+            ACTION_VALUE_CALIBRATION_SAFETY_VIOLATION,
+            ACTION_VALUE_CALIBRATION_CONTENT_INVALID,
             ACTION_VALUE_POLICY_COLLAPSE,
             P_UP_ACTION_DISAGREEMENT_EXCESSIVE,
             ACTION_VALUE_DECISION_INELIGIBLE,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from dataclasses import replace
 from typing import Any
 
@@ -20,7 +21,10 @@ ACTION_VALUE_CALIBRATION_SCHEMA_VERSION = (
     "bigan-v8-polymarket-action-value-calibration-v1"
 )
 ACTION_VALUE_MIN_CALIBRATION_SUPPORT_PER_ACTION = 3
+ACTION_VALUE_MIN_BUCKET_SUPPORT = 1
 ACTION_VALUE_CORRECTION_LIMIT = 0.50
+ACTION_VALUE_QUALITY_MAE_TOLERANCE = 1e-12
+ACTION_VALUE_HIGH_SCORE_THRESHOLD = 0.0
 
 
 def build_action_value_calibration_artifact(
@@ -34,8 +38,9 @@ def build_action_value_calibration_artifact(
 
     _validate_aligned(calibration_examples, calibration_predictions)
     _validate_aligned(evaluation_examples, evaluation_predictions)
-    buckets: dict[str, dict[str, Any]] = {}
+    action_buckets: dict[str, dict[str, Any]] = {}
     corrections: dict[str, float] = {}
+    calibration_bucket_rows: dict[str, list[dict[str, float]]] = defaultdict(list)
     for action in ACTION_VALUE_LABEL_ACTIONS:
         rows = [
             _calibration_row(example=example, prediction=prediction, action=action)
@@ -45,10 +50,27 @@ def build_action_value_calibration_artifact(
                 strict=True,
             )
         ]
+        for example, prediction in zip(
+            calibration_examples,
+            calibration_predictions,
+            strict=True,
+        ):
+            bucket_key = _calibration_bucket_key(
+                action=action,
+                prediction=prediction,
+            )
+            calibration_bucket_rows[bucket_key].append(
+                _calibration_row(example=example, prediction=prediction, action=action)
+            )
         residuals = [row["residual"] for row in rows]
-        correction = _clamp(_mean(residuals), -ACTION_VALUE_CORRECTION_LIMIT, ACTION_VALUE_CORRECTION_LIMIT)
+        raw_correction = _mean(residuals)
+        correction = _clamp(
+            raw_correction,
+            -ACTION_VALUE_CORRECTION_LIMIT,
+            ACTION_VALUE_CORRECTION_LIMIT,
+        )
         corrections[action] = correction
-        buckets[action] = {
+        action_buckets[action] = {
             "action": action,
             "support_count": len(rows),
             "raw_expected_pnl_per_notional_mean": _mean(
@@ -57,20 +79,55 @@ def build_action_value_calibration_artifact(
             "target_expected_pnl_per_notional_mean": _mean(
                 [row["target_expected_pnl_per_notional"] for row in rows]
             ),
-            "residual_mean": _mean(residuals),
+            "residual_mean": raw_correction,
             "residual_mae": _mean([abs(value) for value in residuals]),
             "correction": correction,
-            "correction_clipped": not math.isclose(correction, _mean(residuals), abs_tol=1e-12),
+            "correction_clipped": not math.isclose(
+                correction,
+                raw_correction,
+                abs_tol=1e-12,
+            ),
         }
+    calibration_buckets = _bucket_payloads(calibration_bucket_rows)
     support_passed = all(
         bucket["support_count"] >= ACTION_VALUE_MIN_CALIBRATION_SUPPORT_PER_ACTION
-        for bucket in buckets.values()
+        for bucket in action_buckets.values()
+    )
+    calibration_metrics = _calibration_metrics(
+        examples=calibration_examples,
+        predictions=calibration_predictions,
+        action_corrections=corrections,
+        calibration_buckets=calibration_buckets,
+    )
+    shadow_evaluation_metrics = _calibration_metrics(
+        examples=evaluation_examples,
+        predictions=evaluation_predictions,
+        action_corrections=corrections,
+        calibration_buckets=calibration_buckets,
+    )
+    shadow_calibrated_mae_not_worse = (
+        float(shadow_evaluation_metrics["calibrated_mae"])
+        <= float(shadow_evaluation_metrics["raw_mae"])
+        + ACTION_VALUE_QUALITY_MAE_TOLERANCE
+    )
+    shadow_high_score_bucket = _high_score_bucket_report(
+        examples=evaluation_examples,
+        predictions=evaluation_predictions,
+        action_corrections=corrections,
+        calibration_buckets=calibration_buckets,
+    )
+    calibration_quality_passed = (
+        shadow_calibrated_mae_not_worse
+        and bool(shadow_high_score_bucket["realized_return_positive"])
     )
     artifact = {
         "schema_version": ACTION_VALUE_CALIBRATION_SCHEMA_VERSION,
         "policy_schema_version": POLYMARKET_POLICY_SCHEMA_VERSION,
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
-        "calibration_method": "validation_action_bias_correction",
+        "calibration_method": "validation_bucketed_action_bias_correction_v1",
+        "calibration_granularity": "action_price_time_raw_score_bucket_v1",
+        "bucketed_calibration_enabled": True,
+        "fallback_calibration_method": "validation_action_bias_correction",
         "calibration_fit_split": "validation",
         "calibration_evaluation_split": "shadow",
         "calibration_uses_training_split": False,
@@ -79,24 +136,31 @@ def build_action_value_calibration_artifact(
             "calibrated_expected_pnl_per_notional_by_action"
         ),
         "calibration_support_count": len(calibration_examples),
-        "calibration_bucket_count": len(buckets),
+        "calibration_bucket_count": len(calibration_buckets),
+        "action_calibration_bucket_count": len(action_buckets),
         "min_calibration_support_per_action": (
             ACTION_VALUE_MIN_CALIBRATION_SUPPORT_PER_ACTION
         ),
+        "min_calibration_bucket_support": ACTION_VALUE_MIN_BUCKET_SUPPORT,
         "calibration_support_passed": support_passed,
         "calibration_support_level": "sufficient" if support_passed else "insufficient",
+        "calibration_quality_passed": calibration_quality_passed,
+        "calibration_quality_gates": {
+            "shadow_calibrated_mae_not_worse": shadow_calibrated_mae_not_worse,
+            "shadow_calibrated_mae": shadow_evaluation_metrics["calibrated_mae"],
+            "shadow_raw_mae": shadow_evaluation_metrics["raw_mae"],
+            "mae_tolerance": ACTION_VALUE_QUALITY_MAE_TOLERANCE,
+            "high_score_bucket_realized_return_positive": (
+                shadow_high_score_bucket["realized_return_positive"]
+            ),
+            "high_score_threshold": ACTION_VALUE_HIGH_SCORE_THRESHOLD,
+        },
+        "shadow_high_score_bucket": shadow_high_score_bucket,
         "action_corrections": corrections,
-        "calibration_buckets": buckets,
-        "calibration_metrics": _calibration_metrics(
-            examples=calibration_examples,
-            predictions=calibration_predictions,
-            corrections=corrections,
-        ),
-        "shadow_evaluation_metrics": _calibration_metrics(
-            examples=evaluation_examples,
-            predictions=evaluation_predictions,
-            corrections=corrections,
-        ),
+        "action_calibration_buckets": action_buckets,
+        "calibration_buckets": calibration_buckets,
+        "calibration_metrics": calibration_metrics,
+        "shadow_evaluation_metrics": shadow_evaluation_metrics,
         **compact_safety_fields(),
     }
     artifact["action_value_calibration_id"] = canonical_json_sha256(artifact)
@@ -114,6 +178,7 @@ def apply_action_value_calibration(
         str(action): float(value)
         for action, value in dict(calibration_artifact["action_corrections"]).items()
     }
+    calibration_buckets = dict(calibration_artifact.get("calibration_buckets", {}))
     missing = set(ACTION_VALUE_LABEL_ACTIONS) - set(corrections)
     if missing:
         raise ValueError(
@@ -122,7 +187,8 @@ def apply_action_value_calibration(
     return tuple(
         _calibrated_prediction(
             prediction=prediction,
-            corrections=corrections,
+            action_corrections=corrections,
+            calibration_buckets=calibration_buckets,
             calibration_artifact=calibration_artifact,
         )
         for prediction in predictions
@@ -132,16 +198,18 @@ def apply_action_value_calibration(
 def _calibrated_prediction(
     *,
     prediction: PolymarketPolicyPrediction,
-    corrections: dict[str, float],
+    action_corrections: dict[str, float],
+    calibration_buckets: dict[str, Any],
     calibration_artifact: dict[str, Any],
 ) -> PolymarketPolicyPrediction:
     if not prediction.action_value_head_enabled:
         return prediction
     calibrated = {
-        action: _clamp(
-            float(prediction.expected_return_by_action[action]) + corrections[action],
-            -10.0,
-            10.0,
+        action: _calibrated_action_value(
+            action=action,
+            prediction=prediction,
+            action_corrections=action_corrections,
+            calibration_buckets=calibration_buckets,
         )
         for action in ACTION_VALUE_LABEL_ACTIONS
     }
@@ -160,6 +228,23 @@ def _calibrated_prediction(
         calibration_support_count=int(calibration_artifact["calibration_support_count"]),
         calibration_bucket_count=int(calibration_artifact["calibration_bucket_count"]),
     )
+
+
+def _calibrated_action_value(
+    *,
+    action: str,
+    prediction: PolymarketPolicyPrediction,
+    action_corrections: dict[str, float],
+    calibration_buckets: dict[str, Any],
+) -> float:
+    raw = float(prediction.expected_return_by_action[action])
+    bucket_key = _calibration_bucket_key(action=action, prediction=prediction)
+    bucket = calibration_buckets.get(bucket_key, {})
+    if int(bucket.get("support_count", 0)) >= ACTION_VALUE_MIN_BUCKET_SUPPORT:
+        correction = float(bucket["correction"])
+    else:
+        correction = float(action_corrections[action])
+    return _clamp(raw + correction, -10.0, 10.0)
 
 
 def _calibration_row(
@@ -181,7 +266,8 @@ def _calibration_metrics(
     *,
     examples: tuple[PolymarketPolicyExample, ...],
     predictions: tuple[PolymarketPolicyPrediction, ...],
-    corrections: dict[str, float],
+    action_corrections: dict[str, float],
+    calibration_buckets: dict[str, Any],
 ) -> dict[str, Any]:
     raw_errors = []
     calibrated_errors = []
@@ -189,7 +275,12 @@ def _calibration_metrics(
         for action in ACTION_VALUE_LABEL_ACTIONS:
             target = float(example.action_return_targets[action])
             raw = float(prediction.expected_return_by_action[action])
-            calibrated = raw + corrections[action]
+            calibrated = _calibrated_action_value(
+                action=action,
+                prediction=prediction,
+                action_corrections=action_corrections,
+                calibration_buckets=calibration_buckets,
+            )
             raw_errors.append(target - raw)
             calibrated_errors.append(target - calibrated)
     return {
@@ -200,6 +291,148 @@ def _calibration_metrics(
         "raw_bias": _mean(raw_errors),
         "calibrated_bias": _mean(calibrated_errors),
     }
+
+
+def _high_score_bucket_report(
+    *,
+    examples: tuple[PolymarketPolicyExample, ...],
+    predictions: tuple[PolymarketPolicyPrediction, ...],
+    action_corrections: dict[str, float],
+    calibration_buckets: dict[str, Any],
+) -> dict[str, Any]:
+    realized_returns = []
+    calibrated_scores = []
+    actions = []
+    for example, prediction in zip(examples, predictions, strict=True):
+        calibrated_returns = {
+            action: _calibrated_action_value(
+                action=action,
+                prediction=prediction,
+                action_corrections=action_corrections,
+                calibration_buckets=calibration_buckets,
+            )
+            for action in ACTION_VALUE_LABEL_ACTIONS
+        }
+        best_action, best_return, _, _ = _rank_actions(calibrated_returns)
+        if best_action != "NO_TRADE" and best_return >= ACTION_VALUE_HIGH_SCORE_THRESHOLD:
+            actions.append(best_action)
+            calibrated_scores.append(best_return)
+            realized_returns.append(float(example.action_return_targets[best_action]))
+    realized_return_mean = _mean(realized_returns)
+    return {
+        "bucket_name": "shadow_calibrated_best_score_ge_threshold",
+        "score_threshold": ACTION_VALUE_HIGH_SCORE_THRESHOLD,
+        "support_count": len(realized_returns),
+        "realized_return_mean": realized_return_mean,
+        "calibrated_score_mean": _mean(calibrated_scores),
+        "realized_return_positive": (
+            len(realized_returns) > 0 and realized_return_mean > 0.0
+        ),
+        "best_action_counts": dict(sorted(_counts(actions).items())),
+    }
+
+
+def _bucket_payloads(
+    bucket_rows: dict[str, list[dict[str, float]]],
+) -> dict[str, dict[str, Any]]:
+    payloads = {}
+    for bucket_key, rows in sorted(bucket_rows.items()):
+        residuals = [row["residual"] for row in rows]
+        raw_correction = _mean(residuals)
+        correction = _clamp(
+            raw_correction,
+            -ACTION_VALUE_CORRECTION_LIMIT,
+            ACTION_VALUE_CORRECTION_LIMIT,
+        )
+        payloads[bucket_key] = {
+            "bucket_key": bucket_key,
+            "support_count": len(rows),
+            "raw_expected_pnl_per_notional_mean": _mean(
+                [row["raw_expected_pnl_per_notional"] for row in rows]
+            ),
+            "target_expected_pnl_per_notional_mean": _mean(
+                [row["target_expected_pnl_per_notional"] for row in rows]
+            ),
+            "residual_mean": raw_correction,
+            "residual_mae": _mean([abs(value) for value in residuals]),
+            "correction": correction,
+            "correction_clipped": not math.isclose(
+                correction,
+                raw_correction,
+                abs_tol=1e-12,
+            ),
+        }
+    return payloads
+
+
+def _calibration_bucket_key(
+    *,
+    action: str,
+    prediction: PolymarketPolicyPrediction,
+) -> str:
+    raw_score = float(prediction.expected_return_by_action[action])
+    return "|".join(
+        (
+            f"action={action}",
+            f"price={_price_bucket(action=action, prediction=prediction)}",
+            f"time={_time_to_close_bucket(prediction)}",
+            f"raw={_raw_score_bucket(raw_score)}",
+        )
+    )
+
+
+def _price_bucket(*, action: str, prediction: PolymarketPolicyPrediction) -> str:
+    features = prediction.features
+    price = None
+    if action.startswith("BUY_UP_"):
+        price = features.get("up_ask")
+    elif action.startswith("BUY_DOWN_"):
+        price = features.get("down_ask")
+    elif action == "NO_TRADE":
+        return "none"
+    if price is None:
+        return "unknown"
+    return _number_bucket(
+        float(price),
+        thresholds=(0.20, 0.40, 0.60, 0.80),
+        labels=("<0.20", "0.20-0.40", "0.40-0.60", "0.60-0.80", ">=0.80"),
+    )
+
+
+def _time_to_close_bucket(prediction: PolymarketPolicyPrediction) -> str:
+    seconds = float(prediction.features.get("time_to_close_seconds", 0.0))
+    return _number_bucket(
+        seconds,
+        thresholds=(30.0, 60.0, 180.0, 300.0, 900.0),
+        labels=("0-30s", "30-60s", "1-3m", "3-5m", "5-15m", "15m+"),
+    )
+
+
+def _raw_score_bucket(raw_score: float) -> str:
+    return _number_bucket(
+        raw_score,
+        thresholds=(-0.10, 0.0, 0.05, 0.15),
+        labels=("<-0.10", "-0.10-0.00", "0.00-0.05", "0.05-0.15", ">=0.15"),
+    )
+
+
+def _number_bucket(
+    value: float,
+    *,
+    thresholds: tuple[float, ...],
+    labels: tuple[str, ...],
+) -> str:
+    for threshold, label in zip(thresholds, labels, strict=False):
+        if value < threshold:
+            return label
+    return labels[-1]
+
+
+def _counts(values: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return counts
 
 
 def _validate_aligned(
