@@ -129,6 +129,7 @@ def test_labels_use_ask_for_entries_and_bid_for_sell_before_close(
             exit_path = label["sell_before_close_exit_path"]
             assert exit_path["label_source"] == "intraround_executable_exit_path"
             assert exit_path["candidate_exit_snapshot_count"] >= 0
+            assert isinstance(exit_path["exit_path_reason_codes"], list)
             assert label["sell_before_close_label_schema_version"] == (
                 POLYMARKET_SELL_BEFORE_CLOSE_LABEL_SCHEMA_VERSION
             )
@@ -277,10 +278,44 @@ def test_theoretical_terminal_bid_without_executable_liquidity_fails_label_gate(
     assert label["exit_bid"] == 0.0
     assert label["realized_trade_return"] == -1.0
     assert label["theoretical_terminal_bid_return"] > 0.0
+    exit_path = label["sell_before_close_exit_path"]
+    assert exit_path["exit_path_reason_codes"] == [
+        "terminal_bid_positive_but_not_executable",
+        "min_exit_notional_not_met",
+        "queue_fill_probability_below_threshold",
+    ]
+    assert exit_path["terminal_bid"] == pytest.approx(0.90)
+    assert exit_path["best_candidate_bid"] == pytest.approx(0.90)
     assert report["label_gate_passed"] is False
     assert "positive_theoretical_return_without_executable_exit" in report[
         "label_gate_reason_codes"
     ]
+    diagnostic = next(
+        row
+        for row in report["theoretical_sell_before_close_rows"]
+        if row["market_id"] == "btc5m-up"
+        and row["decision_ts"] == 1_780_100_000_000
+        and row["action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+    assert diagnostic["slug"] == label["slug"]
+    assert diagnostic["outcome"] == "UP"
+    assert diagnostic["entry_ask"] == pytest.approx(label["entry_ask"])
+    assert diagnostic["terminal_bid"] == pytest.approx(0.90)
+    assert diagnostic["theoretical_terminal_bid_return"] == pytest.approx(
+        label["theoretical_terminal_bid_return"]
+    )
+    assert diagnostic["best_candidate_bid"] == pytest.approx(0.90)
+    assert diagnostic["queue_fill_probability_estimate"] == pytest.approx(
+        label["queue_fill_probability_estimate"]
+    )
+    assert diagnostic["executable_liquidity_notional"] == pytest.approx(
+        label["executable_liquidity_notional"]
+    )
+    assert diagnostic["min_exit_notional_met"] is False
+    assert diagnostic["exit_path_reason_code"] == (
+        "terminal_bid_positive_but_not_executable"
+    )
+    assert diagnostic["exit_path_reason_codes"] == exit_path["exit_path_reason_codes"]
 
 
 def test_rebuilding_from_identical_fixtures_produces_identical_hashes(

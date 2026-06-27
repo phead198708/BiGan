@@ -87,7 +87,7 @@ def build_sell_before_close_label_redesign_report(
     theoretical_rows = []
     for row in sell_rows:
         exit_path = row.sell_before_close_exit_path or {}
-        for reason_code in exit_path.get("exit_path_reason_codes", ()):
+        for reason_code in _exit_path_reason_codes(exit_path):
             reason_counts[str(reason_code)] += 1
         if exit_path.get("label_source") == "fixed_terminal_bid_only":
             leakage_failures.append(
@@ -147,6 +147,12 @@ def build_sell_before_close_label_redesign_report(
         "exit_buffer_seconds": int(config.sell_before_close_exit_buffer_seconds),
         "label_gate_passed": not reason_codes,
         "label_gate_reason_codes": reason_codes,
+        "theoretical_sell_before_close_rows": (
+            _theoretical_sell_before_close_rows(
+                theoretical_rows,
+                config=config,
+            )
+        ),
         "top_execution_gap_examples": _top_execution_gap_examples(sell_rows),
         "leakage_failures": leakage_failures,
         **safety_fields(),
@@ -192,6 +198,23 @@ def sell_before_close_label_redesign_markdown(report: dict[str, Any]) -> str:
             f"executable={row['realized_executable_sell_before_close_return']} "
             f"gap={row['execution_gap_return']}"
         )
+    if report.get("theoretical_sell_before_close_rows"):
+        lines.extend(
+            [
+                "",
+                "## Theoretical Positive Rows",
+                "",
+            ]
+        )
+        for row in report["theoretical_sell_before_close_rows"]:
+            lines.append(
+                "- "
+                f"{row['decision_ts']} {row['action']} {row['outcome']} "
+                f"entry_ask={row['entry_ask']} "
+                f"terminal_bid={row['terminal_bid']} "
+                f"best_candidate_bid={row['best_candidate_bid']} "
+                f"reason={','.join(row['exit_path_reason_codes'])}"
+            )
     lines.extend(
         [
             "",
@@ -393,6 +416,7 @@ def _sell_before_close_exit_path(
         )
         for snapshot in candidates
     ]
+    terminal_candidate = scored_candidates[-1] if scored_candidates else None
     executable_candidates = [
         candidate
         for candidate in scored_candidates
@@ -401,6 +425,15 @@ def _sell_before_close_exit_path(
         and candidate["queue_fill_probability_estimate"]
         >= float(config.sell_before_close_min_queue_fill_probability)
     ]
+    best_candidate = max(
+        scored_candidates,
+        key=lambda item: (
+            float(item["bid_price"]),
+            float(item["queue_fill_probability_estimate"]),
+            int(item["ts"]),
+        ),
+        default=None,
+    )
     best = (
         max(
             executable_candidates,
@@ -432,19 +465,14 @@ def _sell_before_close_exit_path(
             if theoretical_terminal_bid_return > 0.0
             else "non_executable_sell_before_close"
         )
-        reason_codes = (
-            "terminal_bid_positive_but_not_executable"
-            if theoretical_terminal_bid_return > 0.0
-            else "no_executable_intraround_exit"
-        )
-        best_candidate = max(
-            scored_candidates,
-            key=lambda item: (
-                float(item["bid_price"]),
-                float(item["queue_fill_probability_estimate"]),
-                int(item["ts"]),
+        reason_codes = _non_executable_exit_path_reason_codes(
+            theoretical_terminal_bid_return=theoretical_terminal_bid_return,
+            candidate_count=len(scored_candidates),
+            best_candidate=best_candidate,
+            min_exit_notional=float(config.sell_before_close_min_exit_notional),
+            min_queue_fill_probability=float(
+                config.sell_before_close_min_queue_fill_probability
             ),
-            default=None,
         )
         best_exit_ts = int(best_candidate["ts"]) if best_candidate else 0
         best_exit_price = 0.0
@@ -472,6 +500,30 @@ def _sell_before_close_exit_path(
         "exit_window_end_ts": exit_window_end_ts,
         "candidate_exit_snapshot_count": len(candidates),
         "candidate_exit_snapshots": tuple(scored_candidates),
+        "terminal_bid": (
+            float(terminal_candidate["bid_price"]) if terminal_candidate else 0.0
+        ),
+        "terminal_ask": (
+            float(terminal_candidate["ask_price"]) if terminal_candidate else 0.0
+        ),
+        "terminal_ts": int(terminal_candidate["ts"]) if terminal_candidate else 0,
+        "best_candidate_bid": (
+            float(best_candidate["bid_price"]) if best_candidate else 0.0
+        ),
+        "best_candidate_ask": (
+            float(best_candidate["ask_price"]) if best_candidate else 0.0
+        ),
+        "best_candidate_ts": int(best_candidate["ts"]) if best_candidate else 0,
+        "best_candidate_queue_fill_probability_estimate": (
+            float(best_candidate["queue_fill_probability_estimate"])
+            if best_candidate
+            else 0.0
+        ),
+        "best_candidate_executable_liquidity_notional": (
+            float(best_candidate["executable_liquidity_notional"])
+            if best_candidate
+            else 0.0
+        ),
         "best_executable_exit_ts": best_exit_ts,
         "best_executable_exit_price": best_exit_price,
         "best_executable_exit_ask": best_exit_ask,
@@ -544,6 +596,46 @@ def _label_gate_reason_codes(
     return sorted(reason_codes)
 
 
+def _non_executable_exit_path_reason_codes(
+    *,
+    theoretical_terminal_bid_return: float,
+    candidate_count: int,
+    best_candidate: dict[str, Any] | None,
+    min_exit_notional: float,
+    min_queue_fill_probability: float,
+) -> tuple[str, ...]:
+    reason_codes: list[str] = [
+        (
+            "terminal_bid_positive_but_not_executable"
+            if theoretical_terminal_bid_return > 0.0
+            else "no_executable_intraround_exit"
+        )
+    ]
+    if candidate_count == 0:
+        reason_codes.append("no_candidate_exit_snapshot")
+        return tuple(reason_codes)
+    if candidate_count < 2:
+        reason_codes.append("sparse_exit_snapshot_sampling")
+    if best_candidate is None:
+        reason_codes.append("missing_best_exit_candidate")
+        return tuple(reason_codes)
+    if float(best_candidate["executable_liquidity_notional"]) < min_exit_notional:
+        reason_codes.append("min_exit_notional_not_met")
+    if (
+        float(best_candidate["queue_fill_probability_estimate"])
+        < min_queue_fill_probability
+    ):
+        reason_codes.append("queue_fill_probability_below_threshold")
+    return tuple(reason_codes)
+
+
+def _exit_path_reason_codes(exit_path: dict[str, Any]) -> tuple[str, ...]:
+    raw_reason_codes = exit_path.get("exit_path_reason_codes", ())
+    if isinstance(raw_reason_codes, str):
+        return (raw_reason_codes,)
+    return tuple(str(reason_code) for reason_code in raw_reason_codes)
+
+
 def _top_execution_gap_examples(
     sell_rows: list[PolymarketCorpusLabelRow],
 ) -> list[dict[str, Any]]:
@@ -564,6 +656,14 @@ def _top_execution_gap_examples(
             "decision_ts": row.decision_ts,
             "action": row.action,
             "outcome": row.outcome,
+            "entry_ask": row.entry_ask,
+            "terminal_bid": _exit_path_float(row, "terminal_bid"),
+            "best_candidate_bid": _exit_path_float(row, "best_candidate_bid"),
+            "best_candidate_ts": _exit_path_int(row, "best_candidate_ts"),
+            "candidate_exit_snapshot_count": _exit_path_int(
+                row,
+                "candidate_exit_snapshot_count",
+            ),
             "sell_before_close_execution_class": row.sell_before_close_execution_class,
             "label_uses_executable_exit_path": row.label_uses_executable_exit_path,
             "theoretical_terminal_bid_return": row.theoretical_terminal_bid_return,
@@ -573,9 +673,78 @@ def _top_execution_gap_examples(
             "execution_gap_return": row.execution_gap_return,
             "queue_fill_probability_estimate": row.queue_fill_probability_estimate,
             "executable_liquidity_notional": row.executable_liquidity_notional,
+            "exit_path_reason_codes": _exit_path_reason_codes(
+                row.sell_before_close_exit_path or {}
+            ),
         }
         for row in ranked[:20]
     ]
+
+
+def _theoretical_sell_before_close_rows(
+    rows: list[PolymarketCorpusLabelRow],
+    *,
+    config: PolymarketCorpusBuildConfig,
+) -> list[dict[str, Any]]:
+    ranked = sorted(
+        rows,
+        key=lambda row: (
+            str(row.market_id),
+            int(row.decision_ts),
+            str(row.action),
+        ),
+    )
+    return [
+        {
+            "market_id": row.market_id,
+            "condition_id": row.condition_id,
+            "slug": row.slug,
+            "decision_ts": row.decision_ts,
+            "action": row.action,
+            "outcome": row.outcome,
+            "entry_ask": row.entry_ask,
+            "terminal_bid": _exit_path_float(row, "terminal_bid"),
+            "theoretical_terminal_bid_return": row.theoretical_terminal_bid_return,
+            "best_candidate_bid": _exit_path_float(row, "best_candidate_bid"),
+            "best_candidate_ts": _exit_path_int(row, "best_candidate_ts"),
+            "candidate_exit_snapshot_count": _exit_path_int(
+                row,
+                "candidate_exit_snapshot_count",
+            ),
+            "queue_fill_probability_estimate": row.queue_fill_probability_estimate,
+            "executable_liquidity_notional": row.executable_liquidity_notional,
+            "min_exit_notional": float(config.sell_before_close_min_exit_notional),
+            "min_queue_fill_probability": float(
+                config.sell_before_close_min_queue_fill_probability
+            ),
+            "min_exit_notional_met": (
+                row.executable_liquidity_notional
+                >= float(config.sell_before_close_min_exit_notional)
+            ),
+            "min_queue_fill_probability_met": (
+                row.queue_fill_probability_estimate
+                >= float(config.sell_before_close_min_queue_fill_probability)
+            ),
+            "exit_path_reason_code": _primary_exit_path_reason_code(row),
+            "exit_path_reason_codes": _exit_path_reason_codes(
+                row.sell_before_close_exit_path or {}
+            ),
+        }
+        for row in ranked
+    ]
+
+
+def _primary_exit_path_reason_code(row: PolymarketCorpusLabelRow) -> str:
+    reason_codes = _exit_path_reason_codes(row.sell_before_close_exit_path or {})
+    return reason_codes[0] if reason_codes else "unknown"
+
+
+def _exit_path_float(row: PolymarketCorpusLabelRow, field_name: str) -> float:
+    return float((row.sell_before_close_exit_path or {}).get(field_name, 0.0))
+
+
+def _exit_path_int(row: PolymarketCorpusLabelRow, field_name: str) -> int:
+    return int((row.sell_before_close_exit_path or {}).get(field_name, 0))
 
 
 def _mean(values: list[float]) -> float:
