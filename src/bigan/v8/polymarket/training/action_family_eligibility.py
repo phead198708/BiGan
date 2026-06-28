@@ -679,7 +679,7 @@ def _side_balance_candidate_rows(
         margin = float(prediction.calibrated_action_margin or 0.0)
         p_up = _p_up(prediction)
         rank_score = score + margin * 0.1
-        guard = _side_balance_guard_compatibility(
+        guard = evaluate_sell_before_close_guard_compatibility(
             prediction=prediction,
             action=action,
             execution_buffer=execution_buffer,
@@ -710,7 +710,7 @@ def _side_balance_candidate_rows(
     return rows
 
 
-def _side_balance_guard_compatibility(
+def evaluate_sell_before_close_guard_compatibility(
     *,
     prediction: PolymarketPolicyPrediction,
     action: str,

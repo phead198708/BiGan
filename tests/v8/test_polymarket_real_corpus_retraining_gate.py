@@ -128,6 +128,33 @@ def test_real_corpus_retraining_gate_runs_training_for_real_eligible_bundle(
         "phase2_corpus_manifest_sha256"
     ]
     assert model_manifest["policy_dataset_hash"] == model_manifest["dataset_hash"]
+    coverage_summary = model_manifest["guard_compatible_candidate_coverage_summary"]
+    assert coverage_summary["schema_version"] == (
+        "bigan-v8-polymarket-guard-compatible-candidate-coverage-v1"
+    )
+    assert result.report["pre_guard_candidate_count"] == coverage_summary[
+        "pre_guard_candidate_count"
+    ]
+    assert result.report["guard_compatible_candidate_count"] == coverage_summary[
+        "guard_compatible_candidate_count"
+    ]
+    assert result.report["guard_compatible_up_entry_count"] == coverage_summary[
+        "guard_compatible_up_entry_count"
+    ]
+    assert result.report["guard_compatible_down_entry_count"] == coverage_summary[
+        "guard_compatible_down_entry_count"
+    ]
+    assert result.report["coverage_targets_passed"] == coverage_summary[
+        "coverage_targets_passed"
+    ]
+    assert result.report["#145_ready_for_rerun"] == coverage_summary[
+        "#145_ready_for_rerun"
+    ]
+    assert result.report["#146_start_allowed"] is False
+    assert result.report["#134_resume_allowed"] is False
+    assert result.artifact_paths[
+        "policy_guard_compatible_candidate_coverage_report"
+    ].exists()
     for field_name in (
         "model_sha256",
         "model_manifest_sha256",

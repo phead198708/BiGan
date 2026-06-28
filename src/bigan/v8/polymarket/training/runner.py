@@ -51,6 +51,11 @@ from bigan.v8.polymarket.training.dataset import (
     dataset_profile,
     load_polymarket_policy_dataset,
 )
+from bigan.v8.polymarket.training.guard_compatible_coverage import (
+    build_guard_compatible_coverage_reports,
+    guard_compatible_coverage_markdown,
+    guard_compatible_coverage_summary,
+)
 from bigan.v8.polymarket.training.model import (
     predict_polymarket_policy_examples,
     train_polymarket_action_value_model,
@@ -279,6 +284,13 @@ def run_polymarket_policy_training(
             replay_split=replay_split,
         )
     )
+    guard_compatible_coverage_reports = build_guard_compatible_coverage_reports(
+        dataset=dataset,
+        train_predictions=train_predictions,
+        validation_predictions=validation_predictions,
+        shadow_predictions=shadow_predictions,
+        execution_buffer=float(config.ev_threshold),
+    )
     signal_sanity = _action_value_signal_sanity_report(
         validation_predictions=validation_predictions,
         shadow_predictions=shadow_predictions,
@@ -403,6 +415,7 @@ def run_polymarket_policy_training(
         sell_before_close_guard_threshold_sweep=(
             sell_before_close_guard_threshold_sweep
         ),
+        guard_compatible_coverage_reports=guard_compatible_coverage_reports,
     )
     model_sha256 = _sha256_file(artifact_paths["model"])
     action_value_calibration_sha256 = _sha256_file(
@@ -472,6 +485,24 @@ def run_polymarket_policy_training(
         "sell_before_close_side_balanced_candidate_report_sha256": _sha256_file(
             artifact_paths["sell_before_close_side_balanced_candidate_report"]
         ),
+        "guard_compatible_candidate_coverage_report_sha256": _sha256_file(
+            artifact_paths["guard_compatible_candidate_coverage_report"]
+        ),
+        "side_coverage_by_split_report_sha256": _sha256_file(
+            artifact_paths["side_coverage_by_split_report"]
+        ),
+        "entry_guard_pass_rate_by_side_report_sha256": _sha256_file(
+            artifact_paths["entry_guard_pass_rate_by_side_report"]
+        ),
+        "exit_reliability_pass_rate_by_side_report_sha256": _sha256_file(
+            artifact_paths["exit_reliability_pass_rate_by_side_report"]
+        ),
+        "p_up_alignment_pass_rate_by_side_report_sha256": _sha256_file(
+            artifact_paths["p_up_alignment_pass_rate_by_side_report"]
+        ),
+        "liquidity_spread_staleness_regime_report_sha256": _sha256_file(
+            artifact_paths["liquidity_spread_staleness_regime_report"]
+        ),
     }
     model_manifest = _model_manifest(
         config=config,
@@ -506,6 +537,7 @@ def run_polymarket_policy_training(
         sell_before_close_guard_threshold_sweep=(
             sell_before_close_guard_threshold_sweep
         ),
+        guard_compatible_coverage_reports=guard_compatible_coverage_reports,
     )
     _write_json(artifact_paths["model_manifest"], model_manifest)
     artifact_hashes = {
@@ -2340,6 +2372,7 @@ def _write_artifacts(
     sell_before_close_support_aware_threshold_failure_attribution: dict[str, Any],
     sell_before_close_validation_failure_drilldown: dict[str, Any],
     sell_before_close_guard_threshold_sweep: dict[str, Any],
+    guard_compatible_coverage_reports: dict[str, dict[str, Any]],
 ) -> dict[str, Path]:
     paths = {
         "training_config": run_dir / "polymarket_policy_training_config.json",
@@ -2459,6 +2492,38 @@ def _write_artifacts(
         "sell_before_close_guard_threshold_sweep_summary": (
             run_dir / "sell_before_close_guard_threshold_sweep_report.md"
         ),
+        "guard_compatible_candidate_coverage_report": (
+            run_dir / "guard_compatible_candidate_coverage_report.json"
+        ),
+        "guard_compatible_candidate_coverage_summary": (
+            run_dir / "guard_compatible_candidate_coverage_report.md"
+        ),
+        "side_coverage_by_split_report": run_dir / "side_coverage_by_split_report.json",
+        "side_coverage_by_split_summary": run_dir / "side_coverage_by_split_report.md",
+        "entry_guard_pass_rate_by_side_report": (
+            run_dir / "entry_guard_pass_rate_by_side_report.json"
+        ),
+        "entry_guard_pass_rate_by_side_summary": (
+            run_dir / "entry_guard_pass_rate_by_side_report.md"
+        ),
+        "exit_reliability_pass_rate_by_side_report": (
+            run_dir / "exit_reliability_pass_rate_by_side_report.json"
+        ),
+        "exit_reliability_pass_rate_by_side_summary": (
+            run_dir / "exit_reliability_pass_rate_by_side_report.md"
+        ),
+        "p_up_alignment_pass_rate_by_side_report": (
+            run_dir / "p_up_alignment_pass_rate_by_side_report.json"
+        ),
+        "p_up_alignment_pass_rate_by_side_summary": (
+            run_dir / "p_up_alignment_pass_rate_by_side_report.md"
+        ),
+        "liquidity_spread_staleness_regime_report": (
+            run_dir / "liquidity_spread_staleness_regime_report.json"
+        ),
+        "liquidity_spread_staleness_regime_summary": (
+            run_dir / "liquidity_spread_staleness_regime_report.md"
+        ),
         "all_predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "train_predictions": run_dir / "polymarket_policy_train_predictions.jsonl",
@@ -2480,6 +2545,13 @@ def _write_artifacts(
         paths["sell_before_close_validation_failure_drilldown_report"],
         sell_before_close_validation_failure_drilldown,
     )
+    for report_key, report in guard_compatible_coverage_reports.items():
+        summary_key = report_key.replace("_report", "_summary")
+        _write_json(paths[report_key], report)
+        paths[summary_key].write_text(
+            guard_compatible_coverage_markdown(report),
+            encoding="utf-8",
+        )
     validation_failure_drilldown_report_sha256 = _sha256_file(
         paths["sell_before_close_validation_failure_drilldown_report"]
     )
@@ -3551,6 +3623,7 @@ def _model_manifest(
     sell_before_close_support_aware_threshold_failure_attribution: dict[str, Any],
     sell_before_close_validation_failure_drilldown: dict[str, Any],
     sell_before_close_guard_threshold_sweep: dict[str, Any],
+    guard_compatible_coverage_reports: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     split_fields = {
         field_name: dataset_profile[field_name]
@@ -3580,6 +3653,10 @@ def _model_manifest(
             sell_before_close_validation_failure_drilldown
         )
     )
+    guard_compatible_coverage = guard_compatible_coverage_reports[
+        "guard_compatible_candidate_coverage_report"
+    ]
+    coverage_summary = guard_compatible_coverage_summary(guard_compatible_coverage)
     return {
         "schema_version": POLYMARKET_POLICY_SCHEMA_VERSION,
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
@@ -4088,6 +4165,62 @@ def _model_manifest(
                 sell_before_close_guard_threshold_sweep
             )
         ),
+        "guard_compatible_candidate_coverage_report_path": (
+            "guard_compatible_candidate_coverage_report.json"
+        ),
+        "guard_compatible_candidate_coverage_report_sha256": (
+            action_family_artifact_hashes[
+                "guard_compatible_candidate_coverage_report_sha256"
+            ]
+        ),
+        "side_coverage_by_split_report_path": "side_coverage_by_split_report.json",
+        "side_coverage_by_split_report_sha256": action_family_artifact_hashes[
+            "side_coverage_by_split_report_sha256"
+        ],
+        "entry_guard_pass_rate_by_side_report_path": (
+            "entry_guard_pass_rate_by_side_report.json"
+        ),
+        "entry_guard_pass_rate_by_side_report_sha256": (
+            action_family_artifact_hashes[
+                "entry_guard_pass_rate_by_side_report_sha256"
+            ]
+        ),
+        "exit_reliability_pass_rate_by_side_report_path": (
+            "exit_reliability_pass_rate_by_side_report.json"
+        ),
+        "exit_reliability_pass_rate_by_side_report_sha256": (
+            action_family_artifact_hashes[
+                "exit_reliability_pass_rate_by_side_report_sha256"
+            ]
+        ),
+        "p_up_alignment_pass_rate_by_side_report_path": (
+            "p_up_alignment_pass_rate_by_side_report.json"
+        ),
+        "p_up_alignment_pass_rate_by_side_report_sha256": (
+            action_family_artifact_hashes[
+                "p_up_alignment_pass_rate_by_side_report_sha256"
+            ]
+        ),
+        "liquidity_spread_staleness_regime_report_path": (
+            "liquidity_spread_staleness_regime_report.json"
+        ),
+        "liquidity_spread_staleness_regime_report_sha256": (
+            action_family_artifact_hashes[
+                "liquidity_spread_staleness_regime_report_sha256"
+            ]
+        ),
+        "guard_compatible_candidate_coverage_summary": (
+            coverage_summary
+        ),
+        "guard_compatible_coverage_targets_passed": (
+            coverage_summary["coverage_targets_passed"]
+        ),
+        "guard_compatible_coverage_target_failed_reason_codes": (
+            coverage_summary["coverage_target_failed_reason_codes"]
+        ),
+        "#145_ready_for_rerun": coverage_summary["#145_ready_for_rerun"],
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
         "candidate_scoped_source_model_eligibility_summary": (
             source_model_eligibility.get("candidate_scoped_eligibility_summary", [])
         ),

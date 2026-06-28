@@ -364,6 +364,14 @@ def _gate_report(
     model_manifest: dict[str, Any] | None,
 ) -> dict[str, Any]:
     accepted = not reason_codes and training_result is not None and model_manifest is not None
+    recorder_report = recorder_evidence.get("recorder_report", {})
+    coverage_summary = (
+        {}
+        if model_manifest is None
+        else model_manifest.get("guard_compatible_candidate_coverage_summary", {})
+    )
+    included_round_count = int(recorder_report.get("included_source_corpus_count", 0))
+    excluded_round_count = int(recorder_report.get("excluded_source_corpus_count", 0))
     return {
         "schema_version": POLYMARKET_REAL_CORPUS_RETRAINING_GATE_SCHEMA_VERSION,
         "phase": POLYMARKET_REAL_CORPUS_RETRAINING_GATE_PHASE,
@@ -374,7 +382,10 @@ def _gate_report(
         "gate_status": "completed" if accepted else "blocked_fail_closed",
         "reason_codes": reason_codes,
         "recorder_run_dir": str(recorder_evidence["recorder_run_dir"]),
-        "recorder_run_id": recorder_evidence.get("recorder_report", {}).get("run_id"),
+        "recorder_run_id": recorder_report.get("run_id"),
+        "source_round_count": included_round_count + excluded_round_count,
+        "included_round_count": included_round_count,
+        "excluded_round_count": excluded_round_count,
         "recorder_manifest_sha256": recorder_evidence.get("recorder_manifest_sha256"),
         "recorder_report_sha256": recorder_evidence.get("recorder_report_sha256"),
         "phase2_corpus_dir": str(recorder_evidence.get("phase2_corpus_dir", "")),
@@ -398,6 +409,43 @@ def _gate_report(
         "shadow_dataset_hash": None
         if model_manifest is None
         else model_manifest["shadow_dataset_hash"],
+        "pre_guard_candidate_count": coverage_summary.get(
+            "pre_guard_candidate_count"
+        ),
+        "guard_compatible_candidate_count": coverage_summary.get(
+            "guard_compatible_candidate_count"
+        ),
+        "guard_compatible_up_entry_count": coverage_summary.get(
+            "guard_compatible_up_entry_count"
+        ),
+        "guard_compatible_down_entry_count": coverage_summary.get(
+            "guard_compatible_down_entry_count"
+        ),
+        "guard_compatible_up_market_count": coverage_summary.get(
+            "guard_compatible_up_market_count"
+        ),
+        "guard_compatible_down_market_count": coverage_summary.get(
+            "guard_compatible_down_market_count"
+        ),
+        "guard_compatible_two_sided_entry_set_exists": coverage_summary.get(
+            "guard_compatible_two_sided_entry_set_exists"
+        ),
+        "validation_guard_compatible_up_entry_count": coverage_summary.get(
+            "validation_guard_compatible_up_entry_count"
+        ),
+        "validation_guard_compatible_down_entry_count": coverage_summary.get(
+            "validation_guard_compatible_down_entry_count"
+        ),
+        "shadow_guard_compatible_up_entry_count": coverage_summary.get(
+            "shadow_guard_compatible_up_entry_count"
+        ),
+        "shadow_guard_compatible_down_entry_count": coverage_summary.get(
+            "shadow_guard_compatible_down_entry_count"
+        ),
+        "coverage_targets_passed": coverage_summary.get("coverage_targets_passed"),
+        "#145_ready_for_rerun": coverage_summary.get("#145_ready_for_rerun", False),
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
         "real_historical_corpus_used": accepted,
         "fixture_corpus_used": False,
         "synthetic_corpus_used": False,

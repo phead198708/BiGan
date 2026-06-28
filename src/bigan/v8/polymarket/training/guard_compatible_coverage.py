@@ -1,0 +1,705 @@
+"""Diagnostic coverage reports for guard-compatible SELL_BEFORE_CLOSE candidates."""
+
+from __future__ import annotations
+
+import json
+from collections import Counter, defaultdict
+from typing import Any
+
+from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.training.action_family_eligibility import (
+    build_sell_before_close_side_balanced_prediction_set,
+)
+from bigan.v8.polymarket.training.contracts import (
+    POLYMARKET_POLICY_TRAINING_PHASE,
+    PolymarketPolicyDataset,
+    PolymarketPolicyExample,
+    PolymarketPolicyPrediction,
+    compact_safety_fields,
+)
+from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
+    SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+)
+
+GUARD_COMPATIBLE_CANDIDATE_COVERAGE_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-guard-compatible-candidate-coverage-v1"
+)
+SELL_BEFORE_CLOSE_ACTIONS = (
+    "BUY_UP_SELL_BEFORE_CLOSE",
+    "BUY_DOWN_SELL_BEFORE_CLOSE",
+)
+SIDES = ("UP", "DOWN")
+COVERAGE_TARGETS = {
+    "min_guard_compatible_candidate_count": 100,
+    "min_guard_compatible_up_entry_count": 30,
+    "min_guard_compatible_down_entry_count": 30,
+    "min_guard_compatible_up_market_count": 20,
+    "min_guard_compatible_down_market_count": 20,
+    "two_sided_guard_compatible_entry_set_exists": True,
+    "validation_guard_compatible_up_entry_count": 10,
+    "validation_guard_compatible_down_entry_count": 10,
+    "shadow_guard_compatible_up_entry_count": 10,
+    "shadow_guard_compatible_down_entry_count": 10,
+}
+
+
+def build_guard_compatible_coverage_reports(
+    *,
+    dataset: PolymarketPolicyDataset,
+    train_predictions: tuple[PolymarketPolicyPrediction, ...],
+    validation_predictions: tuple[PolymarketPolicyPrediction, ...],
+    shadow_predictions: tuple[PolymarketPolicyPrediction, ...],
+    execution_buffer: float,
+) -> dict[str, dict[str, Any]]:
+    """Build #149 diagnostic-only coverage reports."""
+
+    split_inputs = {
+        "train": (dataset.train_examples, train_predictions),
+        "validation": (dataset.validation_examples, validation_predictions),
+        "shadow": (dataset.shadow_examples, shadow_predictions),
+    }
+    prediction_by_key = {
+        (prediction.market_id, int(prediction.decision_ts)): prediction
+        for predictions in (train_predictions, validation_predictions, shadow_predictions)
+        for prediction in predictions
+    }
+    overall_predictions = tuple(
+        prediction_by_key[(example.market_id, int(example.decision_ts))]
+        for example in dataset.examples
+    )
+    by_split = {
+        split_name: _split_coverage(
+            split_name=split_name,
+            examples=examples,
+            predictions=predictions,
+            execution_buffer=execution_buffer,
+        )
+        for split_name, (examples, predictions) in split_inputs.items()
+    }
+    overall = _split_coverage(
+        split_name="overall",
+        examples=dataset.examples,
+        predictions=overall_predictions,
+        execution_buffer=execution_buffer,
+    )
+    target_results = _coverage_target_results(overall=overall, by_split=by_split)
+    coverage_targets_passed = all(row["passed"] for row in target_results)
+    base_report = {
+        "schema_version": GUARD_COMPATIBLE_CANDIDATE_COVERAGE_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+        "diagnostic_only": True,
+        "report_type": "guard_compatible_candidate_coverage",
+        "selection_pool": "guard_compatible_rows",
+        "execution_buffer": float(execution_buffer),
+        "coverage_targets": dict(COVERAGE_TARGETS),
+        "coverage_target_results": target_results,
+        "coverage_targets_passed": coverage_targets_passed,
+        "coverage_target_failed_reason_codes": [
+            row["reason_code"] for row in target_results if not row["passed"]
+        ],
+        "#145_ready_for_rerun": coverage_targets_passed,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "corpus_market_count": int(dataset.corpus_manifest.get("market_count", 0)),
+        "dataset_hash": dataset.dataset_hash,
+        "training_corpus_hash": dataset.training_corpus_hash,
+        "overall": overall,
+        "by_split": by_split,
+        **compact_safety_fields(),
+    }
+    _attach_report_id(base_report, "guard_compatible_candidate_coverage_report_id")
+    reports = {
+        "guard_compatible_candidate_coverage_report": base_report,
+        "side_coverage_by_split_report": _coverage_view_report(
+            base_report,
+            report_type="side_coverage_by_split",
+            metric_fields=(
+                "pre_guard_candidate_count",
+                "guard_compatible_candidate_count",
+                "guard_compatible_up_entry_count",
+                "guard_compatible_down_entry_count",
+                "guard_compatible_up_market_count",
+                "guard_compatible_down_market_count",
+                "guard_compatible_side_count",
+                "guard_compatible_side_entry_ratio",
+                "guard_compatible_two_sided_entry_set_exists",
+                "two_sided_guard_compatible_market_count",
+            ),
+        ),
+        "entry_guard_pass_rate_by_side_report": _coverage_view_report(
+            base_report,
+            report_type="entry_guard_pass_rate_by_side",
+            metric_fields=(
+                "candidate_count_by_side",
+                "guard_compatible_candidate_count_by_side",
+                "guard_compatible_pass_rate_by_side",
+                "exit_reliability_guard_pass_count_by_side",
+                "p_up_side_alignment_pass_count_by_side",
+            ),
+        ),
+        "exit_reliability_pass_rate_by_side_report": _coverage_view_report(
+            base_report,
+            report_type="exit_reliability_pass_rate_by_side",
+            metric_fields=(
+                "candidate_count_by_side",
+                "exit_reliability_guard_pass_count_by_side",
+                "exit_reliability_guard_pass_rate_by_side",
+            ),
+        ),
+        "p_up_alignment_pass_rate_by_side_report": _coverage_view_report(
+            base_report,
+            report_type="p_up_alignment_pass_rate_by_side",
+            metric_fields=(
+                "candidate_count_by_side",
+                "p_up_side_alignment_pass_count_by_side",
+                "p_up_side_alignment_pass_rate_by_side",
+            ),
+        ),
+        "liquidity_spread_staleness_regime_report": _coverage_view_report(
+            base_report,
+            report_type="liquidity_spread_staleness_regime",
+            metric_fields=(
+                "candidate_count_by_side",
+                "liquidity_guard_pass_count_by_side",
+                "liquidity_guard_pass_rate_by_side",
+                "spread_guard_pass_count_by_side",
+                "spread_guard_pass_rate_by_side",
+                "staleness_guard_pass_count_by_side",
+                "staleness_guard_pass_rate_by_side",
+                "queue_fill_guard_pass_count_by_side",
+                "queue_fill_guard_pass_rate_by_side",
+                "regime_rows",
+            ),
+        ),
+    }
+    for report_name, report in reports.items():
+        if report is base_report:
+            continue
+        _attach_report_id(report, f"{report_name}_id")
+    return reports
+
+
+def guard_compatible_coverage_markdown(report: dict[str, Any]) -> str:
+    """Render a compact markdown view for any #149 coverage report."""
+
+    overall = report["overall"]
+    lines = [
+        f"# {str(report['report_type']).replace('_', ' ').title()}",
+        "",
+        f"- candidate_name: `{report['candidate_name']}`",
+        f"- diagnostic_only: `{str(report['diagnostic_only']).lower()}`",
+        f"- coverage_targets_passed: `{str(report['coverage_targets_passed']).lower()}`",
+        f"- #145_ready_for_rerun: `{str(report['#145_ready_for_rerun']).lower()}`",
+        "- coverage_target_failed_reason_codes: "
+        f"`{json.dumps(report['coverage_target_failed_reason_codes'])}`",
+        "",
+        "| split | pre_guard | guard_compatible | up | down | up_markets | down_markets | two_sided | side_ratio |",
+        "|---|---:|---:|---:|---:|---:|---:|---|---:|",
+        _coverage_markdown_row("overall", overall),
+    ]
+    for split_name in ("train", "validation", "shadow"):
+        lines.append(_coverage_markdown_row(split_name, report["by_split"][split_name]))
+    if report["report_type"] == "liquidity_spread_staleness_regime":
+        lines.extend(
+            [
+                "",
+                "## Top Regimes",
+                "",
+                "| split | side | liquidity | queue | spread | staleness | candidates | guard_compatible | pass_rate |",
+                "|---|---|---|---|---|---|---:|---:|---:|",
+            ]
+        )
+        for row in overall.get("regime_rows", [])[:25]:
+            lines.append(
+                "| {split} | {side} | {liquidity} | {queue} | {spread} | {staleness} | "
+                "{candidates} | {compatible} | {rate:.6f} |".format(
+                    split=row["split_name"],
+                    side=row["side"],
+                    liquidity=row["liquidity_bucket"],
+                    queue=row["queue_fill_bucket"],
+                    spread=row["spread_bucket"],
+                    staleness=row["staleness_bucket"],
+                    candidates=row["candidate_count"],
+                    compatible=row["guard_compatible_candidate_count"],
+                    rate=row["guard_compatible_pass_rate"],
+                )
+            )
+    lines.extend(
+        [
+            "",
+            "- paper_only: true",
+            "- capital_at_risk: false",
+            "- polymarket_write_enabled: false",
+            "- wallet_signing_enabled: false",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def guard_compatible_coverage_summary(report: dict[str, Any]) -> dict[str, Any]:
+    overall = report["overall"]
+    validation = report["by_split"]["validation"]
+    shadow = report["by_split"]["shadow"]
+    return {
+        "schema_version": report["schema_version"],
+        "report_type": report["report_type"],
+        "coverage_targets_passed": report["coverage_targets_passed"],
+        "coverage_target_failed_reason_codes": report[
+            "coverage_target_failed_reason_codes"
+        ],
+        "#145_ready_for_rerun": report["#145_ready_for_rerun"],
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "pre_guard_candidate_count": overall["pre_guard_candidate_count"],
+        "guard_compatible_candidate_count": overall[
+            "guard_compatible_candidate_count"
+        ],
+        "guard_compatible_up_entry_count": overall[
+            "guard_compatible_up_entry_count"
+        ],
+        "guard_compatible_down_entry_count": overall[
+            "guard_compatible_down_entry_count"
+        ],
+        "guard_compatible_up_market_count": overall[
+            "guard_compatible_up_market_count"
+        ],
+        "guard_compatible_down_market_count": overall[
+            "guard_compatible_down_market_count"
+        ],
+        "guard_compatible_two_sided_entry_set_exists": overall[
+            "guard_compatible_two_sided_entry_set_exists"
+        ],
+        "validation_guard_compatible_up_entry_count": validation[
+            "guard_compatible_up_entry_count"
+        ],
+        "validation_guard_compatible_down_entry_count": validation[
+            "guard_compatible_down_entry_count"
+        ],
+        "shadow_guard_compatible_up_entry_count": shadow[
+            "guard_compatible_up_entry_count"
+        ],
+        "shadow_guard_compatible_down_entry_count": shadow[
+            "guard_compatible_down_entry_count"
+        ],
+    }
+
+
+def _split_coverage(
+    *,
+    split_name: str,
+    examples: tuple[PolymarketPolicyExample, ...],
+    predictions: tuple[PolymarketPolicyPrediction, ...],
+    execution_buffer: float,
+) -> dict[str, Any]:
+    _validate_aligned(examples=examples, predictions=predictions, split_name=split_name)
+    prediction_set = build_sell_before_close_side_balanced_prediction_set(
+        predictions=predictions,
+        execution_buffer=execution_buffer,
+    )
+    rows = [dict(row) for row in prediction_set["side_balance_candidate_entries"]]
+    example_by_key = {
+        (example.market_id, int(example.decision_ts)): example for example in examples
+    }
+    prediction_by_key = {
+        (prediction.market_id, int(prediction.decision_ts)): prediction
+        for prediction in predictions
+    }
+    candidates_by_side = Counter(row["selected_side"] for row in rows)
+    guard_rows = [
+        row for row in rows if bool(row.get("side_balance_guard_compatible_entry", False))
+    ]
+    guard_by_side = Counter(row["selected_side"] for row in guard_rows)
+    guard_market_by_side: dict[str, set[str]] = defaultdict(set)
+    market_sides: dict[str, set[str]] = defaultdict(set)
+    for row in guard_rows:
+        side = str(row["selected_side"])
+        market_id = str(row["market_id"])
+        guard_market_by_side[side].add(market_id)
+        market_sides[market_id].add(side)
+    positive_by_side = Counter()
+    negative_by_side = Counter()
+    positive_guard_by_side = Counter()
+    negative_guard_by_side = Counter()
+    pass_counts = {
+        "exit_reliability_guard_pass_count_by_side": Counter(),
+        "p_up_side_alignment_pass_count_by_side": Counter(),
+        "liquidity_guard_pass_count_by_side": Counter(),
+        "spread_guard_pass_count_by_side": Counter(),
+        "staleness_guard_pass_count_by_side": Counter(),
+        "queue_fill_guard_pass_count_by_side": Counter(),
+    }
+    regime_counts: dict[tuple[str, str, str, str], dict[str, int]] = defaultdict(
+        lambda: {"candidate_count": 0, "guard_compatible_candidate_count": 0}
+    )
+    for row in rows:
+        side = str(row["selected_side"])
+        action = str(row["action"])
+        key = (str(row["market_id"]), int(row["decision_ts"]))
+        example = example_by_key[key]
+        prediction = prediction_by_key[key]
+        realized = float(example.action_return_targets.get(action, 0.0))
+        if realized > 0.0:
+            positive_by_side[side] += 1
+        else:
+            negative_by_side[side] += 1
+        if bool(row.get("side_balance_guard_compatible_entry", False)):
+            if realized > 0.0:
+                positive_guard_by_side[side] += 1
+            else:
+                negative_guard_by_side[side] += 1
+        if bool(row.get("exit_reliability_guard_passed", False)):
+            pass_counts["exit_reliability_guard_pass_count_by_side"][side] += 1
+        if bool(row.get("p_up_side_alignment_passed", False)):
+            pass_counts["p_up_side_alignment_pass_count_by_side"][side] += 1
+        reason_codes = set(row.get("side_balance_guard_reason_codes", ()))
+        if "entry_blocked_insufficient_executable_bid_notional" not in reason_codes:
+            pass_counts["liquidity_guard_pass_count_by_side"][side] += 1
+        if "entry_blocked_spread_too_wide" not in reason_codes:
+            pass_counts["spread_guard_pass_count_by_side"][side] += 1
+        if "entry_blocked_stale_book" not in reason_codes:
+            pass_counts["staleness_guard_pass_count_by_side"][side] += 1
+        if "entry_blocked_low_queue_fill_probability" not in reason_codes:
+            pass_counts["queue_fill_guard_pass_count_by_side"][side] += 1
+        regime_key = _regime_key(prediction=prediction, side=side)
+        regime_counts[regime_key]["candidate_count"] += 1
+        if bool(row.get("side_balance_guard_compatible_entry", False)):
+            regime_counts[regime_key]["guard_compatible_candidate_count"] += 1
+    side_count = len(guard_by_side)
+    total_guard = sum(guard_by_side.values())
+    max_guard_side = max(guard_by_side.values(), default=0)
+    side_ratio = 0.0 if total_guard == 0 else max_guard_side / total_guard
+    candidate_count_by_side = _side_counter_payload(candidates_by_side)
+    report = {
+        "split_name": split_name,
+        "row_count": len(examples),
+        "pre_guard_candidate_count": len(rows),
+        "candidate_count_by_side": candidate_count_by_side,
+        "guard_compatible_candidate_count": total_guard,
+        "guard_compatible_candidate_count_by_side": _side_counter_payload(
+            guard_by_side
+        ),
+        "guard_compatible_up_entry_count": int(guard_by_side.get("UP", 0)),
+        "guard_compatible_down_entry_count": int(guard_by_side.get("DOWN", 0)),
+        "guard_compatible_up_market_count": len(guard_market_by_side.get("UP", set())),
+        "guard_compatible_down_market_count": len(
+            guard_market_by_side.get("DOWN", set())
+        ),
+        "guard_compatible_side_count": side_count,
+        "guard_compatible_side_entry_ratio": side_ratio,
+        "guard_compatible_two_sided_entry_set_exists": side_count >= 2,
+        "two_sided_guard_compatible_market_count": sum(
+            1 for sides in market_sides.values() if {"UP", "DOWN"} <= sides
+        ),
+        "positive_replay_candidate_count_by_side": _side_counter_payload(
+            positive_by_side
+        ),
+        "negative_replay_candidate_count_by_side": _side_counter_payload(
+            negative_by_side
+        ),
+        "positive_guard_compatible_candidate_count_by_side": _side_counter_payload(
+            positive_guard_by_side
+        ),
+        "negative_guard_compatible_candidate_count_by_side": _side_counter_payload(
+            negative_guard_by_side
+        ),
+        "regime_rows": _regime_rows(split_name=split_name, regime_counts=regime_counts),
+    }
+    for field_name, counter in pass_counts.items():
+        report[field_name] = _side_counter_payload(counter)
+        rate_field = field_name.replace("_count_by_side", "_rate_by_side")
+        report[rate_field] = _side_rate_payload(counter, candidates_by_side)
+    report["guard_compatible_pass_rate_by_side"] = _side_rate_payload(
+        guard_by_side,
+        candidates_by_side,
+    )
+    report["reason_counts"] = dict(
+        sorted(
+            Counter(
+                reason
+                for row in rows
+                for reason in row.get("side_balance_guard_reason_codes", ())
+            ).items()
+        )
+    )
+    return report
+
+
+def _coverage_target_results(
+    *,
+    overall: dict[str, Any],
+    by_split: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    checks = [
+        (
+            "min_guard_compatible_candidate_count",
+            overall["guard_compatible_candidate_count"],
+            ">=",
+        ),
+        (
+            "min_guard_compatible_up_entry_count",
+            overall["guard_compatible_up_entry_count"],
+            ">=",
+        ),
+        (
+            "min_guard_compatible_down_entry_count",
+            overall["guard_compatible_down_entry_count"],
+            ">=",
+        ),
+        (
+            "min_guard_compatible_up_market_count",
+            overall["guard_compatible_up_market_count"],
+            ">=",
+        ),
+        (
+            "min_guard_compatible_down_market_count",
+            overall["guard_compatible_down_market_count"],
+            ">=",
+        ),
+        (
+            "two_sided_guard_compatible_entry_set_exists",
+            overall["guard_compatible_two_sided_entry_set_exists"],
+            "is",
+        ),
+        (
+            "validation_guard_compatible_up_entry_count",
+            by_split["validation"]["guard_compatible_up_entry_count"],
+            ">=",
+        ),
+        (
+            "validation_guard_compatible_down_entry_count",
+            by_split["validation"]["guard_compatible_down_entry_count"],
+            ">=",
+        ),
+        (
+            "shadow_guard_compatible_up_entry_count",
+            by_split["shadow"]["guard_compatible_up_entry_count"],
+            ">=",
+        ),
+        (
+            "shadow_guard_compatible_down_entry_count",
+            by_split["shadow"]["guard_compatible_down_entry_count"],
+            ">=",
+        ),
+    ]
+    results = []
+    for target_name, actual, operator in checks:
+        required = COVERAGE_TARGETS[target_name]
+        passed = bool(actual == required) if operator == "is" else float(actual) >= float(required)
+        results.append(
+            {
+                "target_name": target_name,
+                "actual": actual,
+                "required": required,
+                "operator": operator,
+                "passed": passed,
+                "reason_code": f"coverage_target_{target_name}_failed",
+            }
+        )
+    return results
+
+
+def _coverage_view_report(
+    base_report: dict[str, Any],
+    *,
+    report_type: str,
+    metric_fields: tuple[str, ...],
+) -> dict[str, Any]:
+    base_fields = (
+        "pre_guard_candidate_count",
+        "guard_compatible_candidate_count",
+        "guard_compatible_up_entry_count",
+        "guard_compatible_down_entry_count",
+        "guard_compatible_up_market_count",
+        "guard_compatible_down_market_count",
+        "guard_compatible_side_count",
+        "guard_compatible_side_entry_ratio",
+        "guard_compatible_two_sided_entry_set_exists",
+    )
+    fields = tuple(dict.fromkeys((*base_fields, *metric_fields)))
+    return {
+        "schema_version": GUARD_COMPATIBLE_CANDIDATE_COVERAGE_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": base_report["candidate_name"],
+        "diagnostic_only": True,
+        "report_type": report_type,
+        "selection_pool": base_report["selection_pool"],
+        "execution_buffer": base_report["execution_buffer"],
+        "coverage_targets_passed": base_report["coverage_targets_passed"],
+        "coverage_target_failed_reason_codes": base_report[
+            "coverage_target_failed_reason_codes"
+        ],
+        "#145_ready_for_rerun": base_report["#145_ready_for_rerun"],
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "overall": _select_fields(base_report["overall"], fields),
+        "by_split": {
+            split_name: _select_fields(split_report, fields)
+            for split_name, split_report in base_report["by_split"].items()
+        },
+        **compact_safety_fields(),
+    }
+
+
+def _select_fields(report: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    return {
+        "split_name": report["split_name"],
+        **{field: report[field] for field in fields if field in report},
+    }
+
+
+def _coverage_markdown_row(split_name: str, report: dict[str, Any]) -> str:
+    return (
+        "| {split} | {pre} | {compatible} | {up} | {down} | {up_markets} | "
+        "{down_markets} | {two_sided} | {ratio:.6f} |"
+    ).format(
+        split=split_name,
+        pre=report["pre_guard_candidate_count"],
+        compatible=report["guard_compatible_candidate_count"],
+        up=report["guard_compatible_up_entry_count"],
+        down=report["guard_compatible_down_entry_count"],
+        up_markets=report["guard_compatible_up_market_count"],
+        down_markets=report["guard_compatible_down_market_count"],
+        two_sided=str(report["guard_compatible_two_sided_entry_set_exists"]).lower(),
+        ratio=report["guard_compatible_side_entry_ratio"],
+    )
+
+
+def _regime_key(
+    *,
+    prediction: PolymarketPolicyPrediction,
+    side: str,
+) -> tuple[str, str, str, str, str]:
+    return (
+        side,
+        _bucket_notional(_side_feature(prediction.features, side, "executable_bid_notional")),
+        _bucket_probability(_side_feature(prediction.features, side, "queue_fill_probability_proxy")),
+        _bucket_spread(_side_feature(prediction.features, side, "spread_bps")),
+        _bucket_staleness(
+            _side_feature(prediction.features, side, "book_staleness_ms")
+            or _side_feature(prediction.features, side, "book_update_lag_ms")
+        ),
+    )
+
+
+def _regime_rows(
+    *,
+    split_name: str,
+    regime_counts: dict[tuple[str, str, str, str, str], dict[str, int]],
+) -> list[dict[str, Any]]:
+    rows = []
+    for (side, liquidity, queue, spread, staleness), counts in regime_counts.items():
+        candidates = int(counts["candidate_count"])
+        compatible = int(counts["guard_compatible_candidate_count"])
+        rows.append(
+            {
+                "split_name": split_name,
+                "side": side,
+                "liquidity_bucket": liquidity,
+                "queue_fill_bucket": queue,
+                "spread_bucket": spread,
+                "staleness_bucket": staleness,
+                "candidate_count": candidates,
+                "guard_compatible_candidate_count": compatible,
+                "guard_compatible_pass_rate": 0.0
+                if candidates == 0
+                else compatible / candidates,
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            -int(row["candidate_count"]),
+            str(row["liquidity_bucket"]),
+            str(row["queue_fill_bucket"]),
+            str(row["spread_bucket"]),
+            str(row["staleness_bucket"]),
+        ),
+    )
+
+
+def _side_feature(features: dict[str, Any], side: str, field: str) -> float | None:
+    prefix = "up" if side == "UP" else "down"
+    value = features.get(f"{prefix}_{field}")
+    return None if value is None else float(value)
+
+
+def _bucket_notional(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    if value < 0.20:
+        return "<0.20"
+    if value < 1.00:
+        return "0.20-1.00"
+    return ">=1.00"
+
+
+def _bucket_probability(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    if value < 0.50:
+        return "<0.50"
+    if value < 0.65:
+        return "0.50-0.65"
+    if value < 0.80:
+        return "0.65-0.80"
+    return ">=0.80"
+
+
+def _bucket_spread(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    if value <= 300.0:
+        return "<=300"
+    if value <= 900.0:
+        return "300-900"
+    return ">900"
+
+
+def _bucket_staleness(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    if value <= 1_000.0:
+        return "<=1s"
+    if value <= 10_000.0:
+        return "1s-10s"
+    return ">10s"
+
+
+def _side_counter_payload(counter: Counter[str]) -> dict[str, int]:
+    return {side: int(counter.get(side, 0)) for side in SIDES}
+
+
+def _side_rate_payload(
+    numerator: Counter[str],
+    denominator: Counter[str],
+) -> dict[str, float]:
+    return {
+        side: 0.0
+        if int(denominator.get(side, 0)) == 0
+        else int(numerator.get(side, 0)) / int(denominator.get(side, 0))
+        for side in SIDES
+    }
+
+
+def _validate_aligned(
+    *,
+    examples: tuple[PolymarketPolicyExample, ...],
+    predictions: tuple[PolymarketPolicyPrediction, ...],
+    split_name: str,
+) -> None:
+    if len(examples) != len(predictions):
+        raise ValueError(f"{split_name} coverage examples/predictions length mismatch")
+    for example, prediction in zip(examples, predictions, strict=True):
+        if (example.market_id, int(example.decision_ts)) != (
+            prediction.market_id,
+            int(prediction.decision_ts),
+        ):
+            raise ValueError(f"{split_name} coverage examples/predictions misaligned")
+
+
+def _attach_report_id(report: dict[str, Any], field_name: str) -> None:
+    payload = dict(report)
+    payload.pop(field_name, None)
+    report[field_name] = canonical_json_sha256(payload)

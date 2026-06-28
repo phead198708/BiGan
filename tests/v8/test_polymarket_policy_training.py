@@ -228,6 +228,18 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "sell_before_close_side_balanced_candidate_summary",
         "sell_before_close_guard_threshold_sweep_report",
         "sell_before_close_guard_threshold_sweep_summary",
+        "guard_compatible_candidate_coverage_report",
+        "guard_compatible_candidate_coverage_summary",
+        "side_coverage_by_split_report",
+        "side_coverage_by_split_summary",
+        "entry_guard_pass_rate_by_side_report",
+        "entry_guard_pass_rate_by_side_summary",
+        "exit_reliability_pass_rate_by_side_report",
+        "exit_reliability_pass_rate_by_side_summary",
+        "p_up_alignment_pass_rate_by_side_report",
+        "p_up_alignment_pass_rate_by_side_summary",
+        "liquidity_spread_staleness_regime_report",
+        "liquidity_spread_staleness_regime_summary",
         "action_family_eligibility_report",
         "action_family_eligibility_summary",
         "hold_to_settlement_longshot_guard_report",
@@ -609,6 +621,72 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert source_eligibility[
         "sell_before_close_side_balanced_candidate_summary"
     ]["selected_entry_guard_attrition_summary"] == attrition_summary
+    coverage = _read_json(
+        result.artifact_paths["guard_compatible_candidate_coverage_report"]
+    )
+    assert coverage["schema_version"] == (
+        "bigan-v8-polymarket-guard-compatible-candidate-coverage-v1"
+    )
+    assert coverage["diagnostic_only"] is True
+    assert coverage["selection_pool"] == "guard_compatible_rows"
+    assert coverage["#146_start_allowed"] is False
+    assert coverage["#134_resume_allowed"] is False
+    assert set(coverage["by_split"]) == {"train", "validation", "shadow"}
+    for split_name in ("overall", "train", "validation", "shadow"):
+        split = coverage["overall"] if split_name == "overall" else coverage["by_split"][split_name]
+        assert "pre_guard_candidate_count" in split
+        assert "guard_compatible_candidate_count" in split
+        assert "guard_compatible_up_entry_count" in split
+        assert "guard_compatible_down_entry_count" in split
+        assert "exit_reliability_guard_pass_count_by_side" in split
+        assert "p_up_side_alignment_pass_count_by_side" in split
+        assert "liquidity_guard_pass_count_by_side" in split
+        assert "spread_guard_pass_count_by_side" in split
+        assert "staleness_guard_pass_count_by_side" in split
+        assert "queue_fill_guard_pass_count_by_side" in split
+        assert "positive_replay_candidate_count_by_side" in split
+        assert "negative_replay_candidate_count_by_side" in split
+    assert coverage["coverage_target_results"]
+    assert isinstance(coverage["coverage_targets_passed"], bool)
+    assert coverage["guard_compatible_candidate_coverage_report_id"]
+    for report_name in (
+        "side_coverage_by_split_report",
+        "entry_guard_pass_rate_by_side_report",
+        "exit_reliability_pass_rate_by_side_report",
+        "p_up_alignment_pass_rate_by_side_report",
+        "liquidity_spread_staleness_regime_report",
+    ):
+        report = _read_json(result.artifact_paths[report_name])
+        assert report["diagnostic_only"] is True
+        assert report["#146_start_allowed"] is False
+        assert report["#134_resume_allowed"] is False
+        assert set(report["by_split"]) == {"train", "validation", "shadow"}
+        assert looks_like_sha256(report[f"{report_name}_id"])
+    assert manifest["guard_compatible_candidate_coverage_report_path"] == (
+        "guard_compatible_candidate_coverage_report.json"
+    )
+    assert looks_like_sha256(
+        manifest["guard_compatible_candidate_coverage_report_sha256"]
+    )
+    assert manifest["side_coverage_by_split_report_path"] == (
+        "side_coverage_by_split_report.json"
+    )
+    assert looks_like_sha256(manifest["side_coverage_by_split_report_sha256"])
+    assert looks_like_sha256(manifest["entry_guard_pass_rate_by_side_report_sha256"])
+    assert looks_like_sha256(
+        manifest["exit_reliability_pass_rate_by_side_report_sha256"]
+    )
+    assert looks_like_sha256(
+        manifest["p_up_alignment_pass_rate_by_side_report_sha256"]
+    )
+    assert looks_like_sha256(
+        manifest["liquidity_spread_staleness_regime_report_sha256"]
+    )
+    assert manifest["guard_compatible_candidate_coverage_summary"][
+        "coverage_targets_passed"
+    ] == coverage["coverage_targets_passed"]
+    assert manifest["#146_start_allowed"] is False
+    assert manifest["#134_resume_allowed"] is False
     assert manifest["candidate_scoped_source_model_eligibility_summary"] == (
         source_eligibility["candidate_scoped_eligibility_summary"]
     )
