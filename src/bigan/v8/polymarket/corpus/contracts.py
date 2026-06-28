@@ -55,6 +55,7 @@ CorpusSellBeforeCloseExecutionClass = Literal[
     "not_applicable",
     "realizable_sell_before_close",
     "theoretical_sell_before_close",
+    "sparse_theoretical_sell_before_close",
     "non_executable_sell_before_close",
 ]
 CorpusLabelAction = Literal[
@@ -527,6 +528,7 @@ class PolymarketCorpusLabelRow:
             "not_applicable",
             "realizable_sell_before_close",
             "theoretical_sell_before_close",
+            "sparse_theoretical_sell_before_close",
             "non_executable_sell_before_close",
         }
         if self.sell_before_close_execution_class not in valid_exit_classes:

@@ -144,6 +144,7 @@ def test_labels_use_ask_for_entries_and_bid_for_sell_before_close(
             assert label["sell_before_close_execution_class"] in {
                 "realizable_sell_before_close",
                 "theoretical_sell_before_close",
+                "sparse_theoretical_sell_before_close",
                 "non_executable_sell_before_close",
             }
             if label["label_uses_executable_exit_path"]:
@@ -394,6 +395,76 @@ def test_near_miss_theoretical_sell_before_close_count_is_reported(
         "terminal_bid_positive_but_not_executable",
         "min_exit_notional_not_met",
     ]
+
+
+def test_sparse_single_snapshot_theoretical_sell_before_close_is_explicit(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    orderbooks_path = raw_dir / "raw_polymarket_orderbooks.jsonl"
+    rows = _read_jsonl(orderbooks_path)
+    sparse_rows = []
+    for row in rows:
+        if row["market_id"] == "btc5m-up" and row["outcome"] == "UP":
+            if row["ts"] not in {1_780_100_000_000, 1_780_100_060_000}:
+                continue
+            if row["ts"] == 1_780_100_000_000:
+                row["bid_price"] = 0.30
+                row["ask_price"] = 0.32
+                row["mid_price"] = 0.31
+                row["bid_size"] = 10.0
+                row["liquidity_depth"] = 20.0
+            else:
+                row["bid_price"] = 0.90
+                row["ask_price"] = 0.92
+                row["mid_price"] = 0.91
+                row["bid_size"] = 0.01
+                row["liquidity_depth"] = 0.01
+        sparse_rows.append(row)
+    _write_jsonl(orderbooks_path, sparse_rows)
+
+    result = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus",
+        )
+    )
+    labels = _read_jsonl(result.output_dir / "polymarket_label_rows.jsonl")
+    report = _read_json(result.output_dir / "sell_before_close_label_redesign_report.json")
+    label = next(
+        row
+        for row in labels
+        if row["market_id"] == "btc5m-up"
+        and row["decision_ts"] == 1_780_100_000_000
+        and row["action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+
+    assert label["sell_before_close_execution_class"] == (
+        "sparse_theoretical_sell_before_close"
+    )
+    assert label["sell_before_close_exit_path"]["candidate_exit_snapshot_count"] == 1
+    assert label["sell_before_close_exit_path"]["exit_path_reason_codes"] == [
+        "terminal_bid_positive_but_not_executable",
+        "sparse_exit_snapshot_sampling",
+        "min_exit_notional_not_met",
+        "queue_fill_probability_below_threshold",
+    ]
+    assert report["theoretical_sell_before_close_count"] >= 1
+    assert report["sparse_theoretical_sell_before_close_count"] >= 1
+    assert report["sell_before_close_execution_class_counts"][
+        "sparse_theoretical_sell_before_close"
+    ] >= 1
+    diagnostic = next(
+        row
+        for row in report["theoretical_sell_before_close_rows"]
+        if row["market_id"] == "btc5m-up"
+        and row["decision_ts"] == 1_780_100_000_000
+        and row["action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+    assert diagnostic["exit_path_reason_codes"] == (
+        label["sell_before_close_exit_path"]["exit_path_reason_codes"]
+    )
 
 
 def test_rebuilding_from_identical_fixtures_produces_identical_hashes(

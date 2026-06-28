@@ -340,6 +340,7 @@ def _assert_sell_before_close_label_redesign(row: dict[str, Any]) -> None:
     if execution_class not in {
         "realizable_sell_before_close",
         "theoretical_sell_before_close",
+        "sparse_theoretical_sell_before_close",
         "non_executable_sell_before_close",
     }:
         raise ValueError("sell-before-close label missing execution class")

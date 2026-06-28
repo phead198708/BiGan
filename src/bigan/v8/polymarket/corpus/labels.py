@@ -101,7 +101,9 @@ def build_sell_before_close_label_redesign_report(
             )
         if row.sell_before_close_execution_class == "realizable_sell_before_close":
             executable_rows.append(row)
-        elif row.sell_before_close_execution_class == "theoretical_sell_before_close":
+        elif _is_theoretical_sell_before_close_class(
+            row.sell_before_close_execution_class
+        ):
             theoretical_rows.append(row)
     reason_codes = _label_gate_reason_codes(
         sell_rows=sell_rows,
@@ -126,6 +128,9 @@ def build_sell_before_close_label_redesign_report(
         "exit_path_reason_code_counts": dict(sorted(reason_counts.items())),
         "realizable_sell_before_close_count": len(executable_rows),
         "theoretical_sell_before_close_count": len(theoretical_rows),
+        "sparse_theoretical_sell_before_close_count": class_counts[
+            "sparse_theoretical_sell_before_close"
+        ],
         "non_executable_sell_before_close_count": class_counts[
             "non_executable_sell_before_close"
         ],
@@ -492,9 +497,10 @@ def _sell_before_close_exit_path(
         label_uses_executable_exit_path = True
     else:
         exit_path_quality = (
-            "theoretical_sell_before_close"
-            if theoretical_terminal_bid_return > 0.0
-            else "non_executable_sell_before_close"
+            _theoretical_exit_path_quality(
+                theoretical_terminal_bid_return=theoretical_terminal_bid_return,
+                candidate_count=len(scored_candidates),
+            )
         )
         reason_codes = _non_executable_exit_path_reason_codes(
             theoretical_terminal_bid_return=theoretical_terminal_bid_return,
@@ -658,6 +664,25 @@ def _non_executable_exit_path_reason_codes(
     ):
         reason_codes.append("queue_fill_probability_below_threshold")
     return tuple(reason_codes)
+
+
+def _theoretical_exit_path_quality(
+    *,
+    theoretical_terminal_bid_return: float,
+    candidate_count: int,
+) -> str:
+    if theoretical_terminal_bid_return <= 0.0:
+        return "non_executable_sell_before_close"
+    if candidate_count == 1:
+        return "sparse_theoretical_sell_before_close"
+    return "theoretical_sell_before_close"
+
+
+def _is_theoretical_sell_before_close_class(execution_class: str) -> bool:
+    return execution_class in {
+        "theoretical_sell_before_close",
+        "sparse_theoretical_sell_before_close",
+    }
 
 
 def _min_exit_notional_source(
