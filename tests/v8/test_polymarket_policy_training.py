@@ -39,6 +39,10 @@ from bigan.v8.polymarket.training.sell_before_close_exit_reliability import (
     build_sell_before_close_exit_reliability_guard_decisions,
     build_sell_before_close_exit_reliability_report,
 )
+from bigan.v8.polymarket.training.sell_before_close_promotion_support import (
+    SELL_BEFORE_CLOSE_PROMOTION_SUPPORT_THRESHOLDS,
+    evaluate_sell_before_close_promotion_support,
+)
 from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
 )
@@ -204,6 +208,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "sell_before_close_p_up_disagreement_diagnostic_summary",
         "sell_before_close_exit_reliability_report",
         "sell_before_close_exit_reliability_summary",
+        "sell_before_close_promotion_support_gate_report",
+        "sell_before_close_promotion_support_gate_summary",
         "sell_before_close_guard_threshold_sweep_report",
         "sell_before_close_guard_threshold_sweep_summary",
         "action_family_eligibility_report",
@@ -405,6 +411,16 @@ def test_training_runner_writes_required_artifacts_and_manifest(
             "replay_settlement_pnl",
             "replay_total_polymarket_pnl",
             "replay_residual_settlement_drag",
+            "promotion_support_eligible",
+            "promotion_support_gate_passed",
+            "promotion_support_reason_codes",
+            "promotion_support_thresholds",
+            "promotion_replay_entry_decision_count",
+            "promotion_replay_sell_decision_count",
+            "promotion_replay_unique_market_count",
+            "promotion_replay_side_count",
+            "promotion_replay_side_distribution",
+            "promotion_replay_mean_pnl_per_entry",
         ):
             assert field_name in candidate
     sell_only_candidate = _candidate_by_name(
@@ -599,6 +615,77 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert manifest["sell_before_close_i_vs_j_vs_k_replay_comparison"] == (
         source_eligibility["i_vs_j_vs_k_replay_comparison"]
     )
+    support_gate = _read_json(
+        result.artifact_paths["sell_before_close_promotion_support_gate_report"]
+    )
+    assert support_gate["schema_version"] == (
+        "bigan-v8-polymarket-sell-before-close-promotion-support-gate-v1"
+    )
+    assert support_gate["thresholds"] == SELL_BEFORE_CLOSE_PROMOTION_SUPPORT_THRESHOLDS
+    assert support_gate["candidate_name"] == (
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME
+    )
+    assert support_gate["support_gate_passed"] is False
+    assert support_gate["promotion_evidence_eligible"] is False
+    assert support_gate["paper_run_resume_allowed"] is False
+    assert "promotion_replay_entry_support_insufficient" in support_gate[
+        "support_gate_reason_codes"
+    ]
+    assert len(support_gate["i_vs_j_vs_k_promotion_support_comparison"]) == 3
+    k_support = _candidate_by_name(
+        {"candidates": support_gate["candidate_rows"]},
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+    assert k_support["promotion_support_eligible"] is False
+    assert k_support["paper_run_resume_allowed"] is False
+    k_candidate = _candidate_by_name(
+        candidate_comparison,
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+    assert k_candidate["source_model_candidate_eligible"] is False
+    assert k_candidate["promotion_support_eligible"] is False
+    assert "promotion_replay_entry_support_insufficient" in k_candidate[
+        "ineligible_reason_codes"
+    ]
+    assert manifest["sell_before_close_promotion_support_gate_report_path"] == (
+        "sell_before_close_promotion_support_gate_report.json"
+    )
+    assert looks_like_sha256(
+        manifest["sell_before_close_promotion_support_gate_report_sha256"]
+    )
+    assert manifest["sell_before_close_promotion_support_gate_summary"] == (
+        source_eligibility["sell_before_close_promotion_support_gate_summary"]
+    )
+    assert candidate_comparison[
+        "sell_before_close_promotion_support_gate_summary"
+    ] == source_eligibility["sell_before_close_promotion_support_gate_summary"]
+    assert manifest[
+        "sell_before_close_i_vs_j_vs_k_promotion_support_comparison"
+    ] == source_eligibility[
+        "sell_before_close_i_vs_j_vs_k_promotion_support_comparison"
+    ]
+    assert manifest["sell_before_close_promotion_support_gate_passed"] is False
+    assert manifest["sell_before_close_promotion_support_reason_codes"] == (
+        support_gate["support_gate_reason_codes"]
+    )
+    assert manifest["sell_before_close_promotion_support_entry_decision_count"] == (
+        support_gate["entry_decision_count"]
+    )
+    assert manifest["sell_before_close_promotion_support_unique_market_count"] == (
+        support_gate["unique_market_count"]
+    )
+    assert manifest["sell_before_close_promotion_support_side_count"] == (
+        support_gate["side_count"]
+    )
+    assert manifest["sell_before_close_promotion_support_sell_decision_count"] == (
+        support_gate["sell_decision_count"]
+    )
+    assert manifest["sell_before_close_promotion_support_total_pnl"] == (
+        support_gate["total_pnl"]
+    )
+    assert manifest["sell_before_close_promotion_support_mean_pnl_per_entry"] == (
+        support_gate["mean_pnl_per_entry"]
+    )
     threshold_sweep = _read_json(
         result.artifact_paths["sell_before_close_guard_threshold_sweep_report"]
     )
@@ -606,6 +693,10 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert threshold_sweep["uses_shadow_for_fit"] is False
     assert threshold_sweep["promotion_evidence_eligible"] is False
     assert threshold_sweep["paper_run_resume_allowed"] is False
+    assert threshold_sweep["best_threshold_sweep_support_gate_passed"] is False
+    assert "promotion_replay_entry_support_insufficient" in threshold_sweep[
+        "best_threshold_sweep_support_gate_reason_codes"
+    ]
     assert threshold_sweep["row_count"] >= 1
     assert threshold_sweep["best_threshold_sweep_row"] is not None
     assert manifest["sell_before_close_guard_threshold_sweep_summary"] == (
@@ -920,6 +1011,15 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "re_ranked_counterfactual_policy_replay"
     )
     assert counterfactual_replay["promotion_evidence_eligible"] is False
+    assert counterfactual_replay["paper_run_resume_allowed"] is False
+    assert counterfactual_replay["#134_resume_allowed"] is False
+    assert counterfactual_replay["#146_start_allowed"] is False
+    assert "promotion_replay_entry_support_insufficient" in counterfactual_replay[
+        "promotion_evidence_ineligible_reasons"
+    ]
+    assert counterfactual_replay[
+        "sell_before_close_promotion_support_gate_summary"
+    ] == source_eligibility["sell_before_close_promotion_support_gate_summary"]
     assert [variant["variant"] for variant in counterfactual_replay["variants"]] == [
         "A_baseline_current_policy_with_runtime_guards",
         "B_hold_to_settlement_disabled_reranked",
@@ -1429,6 +1529,136 @@ def test_sell_before_close_candidate_does_not_resume_without_promotion_replay(
     assert comparison["paper_run_resume_blocked_reason"] == (
         "promotion_replay_gate_required"
     )
+
+
+def test_sell_before_close_promotion_support_blocks_one_positive_trade() -> None:
+    support = evaluate_sell_before_close_promotion_support(
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        decisions=[
+            {
+                "market_id": "market-one",
+                "action": "BUY_UP",
+                "selected_outcome": "UP",
+                "intended_exit_policy": "sell_before_close",
+            },
+            {
+                "market_id": "market-one",
+                "action": "SELL_UP",
+                "selected_outcome": "UP",
+            },
+        ],
+        replay_report={
+            "total_polymarket_pnl": 0.043325818181818174,
+            "max_drawdown": 0.0,
+            "settlement_pnl": 0.0,
+            "settled_position_count": 0,
+        },
+        exit_reliability_summary={
+            "replay_residual_settlement_drag": 0.0,
+            "positions_opened_but_not_closed_before_settlement": 0,
+            "candidate_scoped_p_up_action_disagreement_rate": 0.0,
+        },
+    )
+
+    assert support["entry_decision_count"] == 1
+    assert support["sell_decision_count"] == 1
+    assert support["unique_market_count"] == 1
+    assert support["side_count"] == 1
+    assert support["total_pnl"] > 0.0
+    assert support["support_gate_passed"] is False
+    assert support["promotion_support_eligible"] is False
+    assert support["promotion_evidence_eligible"] is False
+    assert support["paper_run_resume_allowed"] is False
+    assert "promotion_replay_entry_support_insufficient" in support[
+        "support_gate_reason_codes"
+    ]
+
+
+def test_sell_before_close_promotion_support_requires_up_and_down_coverage() -> None:
+    decisions = []
+    for index in range(20):
+        decisions.extend(
+            [
+                {
+                    "market_id": f"market-{index % 10}",
+                    "action": "BUY_UP",
+                    "selected_outcome": "UP",
+                    "intended_exit_policy": "sell_before_close",
+                },
+                {
+                    "market_id": f"market-{index % 10}",
+                    "action": "SELL_UP",
+                    "selected_outcome": "UP",
+                },
+            ]
+        )
+
+    support = evaluate_sell_before_close_promotion_support(
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        decisions=decisions,
+        replay_report={
+            "total_polymarket_pnl": 0.20,
+            "max_drawdown": 0.01,
+            "settlement_pnl": 0.0,
+            "settled_position_count": 0,
+        },
+        exit_reliability_summary={
+            "replay_residual_settlement_drag": 0.0,
+            "positions_opened_but_not_closed_before_settlement": 0,
+            "candidate_scoped_p_up_action_disagreement_rate": 0.0,
+        },
+    )
+
+    assert support["entry_decision_count"] == 20
+    assert support["sell_decision_count"] == 20
+    assert support["unique_market_count"] == 10
+    assert support["side_count"] == 1
+    assert support["side_distribution"] == {"UP": 20}
+    assert support["support_gate_passed"] is False
+    assert support["support_gate_reason_codes"] == [
+        "promotion_replay_side_coverage_insufficient"
+    ]
+
+
+def test_sell_before_close_promotion_support_passes_with_minimum_coverage() -> None:
+    decisions = []
+    for index in range(20):
+        side = "UP" if index % 2 == 0 else "DOWN"
+        decisions.extend(
+            [
+                {
+                    "market_id": f"market-{index % 10}",
+                    "action": f"BUY_{side}",
+                    "selected_outcome": side,
+                    "intended_exit_policy": "sell_before_close",
+                },
+                {
+                    "market_id": f"market-{index % 10}",
+                    "action": f"SELL_{side}",
+                    "selected_outcome": side,
+                },
+            ]
+        )
+
+    support = evaluate_sell_before_close_promotion_support(
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        decisions=decisions,
+        replay_report={
+            "total_polymarket_pnl": 0.20,
+            "max_drawdown": 0.01,
+            "settlement_pnl": 0.0,
+            "settled_position_count": 0,
+        },
+        exit_reliability_summary={
+            "replay_residual_settlement_drag": 0.0,
+            "positions_opened_but_not_closed_before_settlement": 0,
+            "candidate_scoped_p_up_action_disagreement_rate": 0.0,
+        },
+    )
+
+    assert support["support_gate_passed"] is True
+    assert support["promotion_support_eligible"] is True
+    assert support["support_gate_reason_codes"] == []
 
 
 def test_sell_before_close_p_up_disagreement_diagnostic_is_candidate_scoped() -> None:
