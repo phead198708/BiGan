@@ -446,9 +446,40 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "mixed_evidence",
         "insufficient_evidence",
     }
+    assert "sell_before_close_residual_settlement_drag" not in manifest
+    assert "sell_before_close_label_row_settlement_pnl_sum" in manifest
+    assert "sell_before_close_label_row_residual_settlement_drag" in manifest
+    assert "sell_before_close_replay_realized_trade_pnl" in manifest
+    assert "sell_before_close_replay_settlement_pnl" in manifest
+    assert "sell_before_close_replay_total_polymarket_pnl" in manifest
+    assert "sell_before_close_replay_residual_settlement_drag" in manifest
+    assert (
+        "sell_before_close_replay_positions_opened_but_not_closed_before_settlement"
+        in manifest
+    )
+    assert (
+        "sell_before_close_settlement_drag_attribution_interpretation"
+        in manifest
+    )
     assert manifest["sell_before_close_p_up_disagreement_diagnostic_summary"] == (
         source_eligibility["sell_before_close_p_up_disagreement_diagnostic_summary"]
     )
+    embedded_summary = manifest[
+        "sell_before_close_p_up_disagreement_diagnostic_summary"
+    ]
+    for field_name in (
+        "label_row_sell_before_close_settlement_pnl_sum",
+        "label_row_sell_before_close_residual_settlement_drag",
+        "replay_realized_trade_pnl",
+        "replay_settlement_pnl",
+        "replay_total_polymarket_pnl",
+        "replay_residual_settlement_drag",
+        "replay_positions_opened_but_not_closed_before_settlement",
+        "replay_exit_signal_missing_count",
+        "replay_exit_opportunities_missed_due_to_gate_count",
+        "settlement_drag_attribution_interpretation",
+    ):
+        assert field_name in embedded_summary
     assert candidate_comparison[
         "sell_before_close_p_up_disagreement_diagnostic_summary"
     ] == source_eligibility[
@@ -1256,8 +1287,41 @@ def test_sell_before_close_p_up_disagreement_diagnostic_is_candidate_scoped() ->
         "sell_before_close_disagreed_trade_pnl_sum"
     ] == pytest.approx(0.30)
     assert report["summary"][
-        "sell_before_close_disagreed_settlement_pnl_sum"
+        "label_row_sell_before_close_disagreed_settlement_pnl_sum"
     ] == pytest.approx(-0.50)
+    assert report["summary"][
+        "label_row_sell_before_close_agreed_settlement_pnl_sum"
+    ] == pytest.approx(0.50)
+    assert report["summary"][
+        "label_row_sell_before_close_settlement_pnl_sum"
+    ] == pytest.approx(0.0)
+    assert report["summary"][
+        "label_row_sell_before_close_residual_settlement_drag"
+    ] == pytest.approx(0.0)
+    assert report["summary"][
+        "sell_before_close_residual_settlement_drag_deprecated_alias"
+    ] == pytest.approx(0.0)
+    assert report["summary"]["replay_settlement_pnl"] == pytest.approx(-2.0)
+    assert report["summary"]["replay_residual_settlement_drag"] == pytest.approx(
+        -2.0
+    )
+    assert report["summary"][
+        "replay_positions_opened_but_not_closed_before_settlement"
+    ] == 3
+    assert report["summary"][
+        "replay_exit_signal_missing_count"
+    ] == 3
+    assert report["summary"][
+        "replay_exit_opportunities_missed_due_to_gate_count"
+    ] == 4
+    assert report["summary"][
+        "settlement_drag_attribution_interpretation"
+    ] == (
+        "label_rows_no_settlement_drag_but_replay_has_residual_settlement_drag"
+    )
+    assert report["settlement_drag_attribution_interpretation"] == (
+        "label_rows_no_settlement_drag_but_replay_has_residual_settlement_drag"
+    )
     assert report["summary"]["sell_before_close_disagreed_total_pnl_sum"] == (
         pytest.approx(-0.20)
     )
@@ -1383,7 +1447,7 @@ def _with_sell_before_close_diagnostic_targets(
         "NO_TRADE": 0.0,
         "BUY_UP_HOLD_TO_SETTLEMENT": -0.50,
         "BUY_DOWN_HOLD_TO_SETTLEMENT": -0.50,
-        "BUY_UP_SELL_BEFORE_CLOSE": 0.08,
+        "BUY_UP_SELL_BEFORE_CLOSE": 1.30,
         "BUY_DOWN_SELL_BEFORE_CLOSE": -0.10,
     }
     trade_returns = {
@@ -1397,7 +1461,7 @@ def _with_sell_before_close_diagnostic_targets(
         "NO_TRADE": 0.0,
         "BUY_UP_HOLD_TO_SETTLEMENT": -0.50,
         "BUY_DOWN_HOLD_TO_SETTLEMENT": -0.50,
-        "BUY_UP_SELL_BEFORE_CLOSE": 0.03,
+        "BUY_UP_SELL_BEFORE_CLOSE": 1.25,
         "BUY_DOWN_SELL_BEFORE_CLOSE": -0.25,
     }
     ranked = _rank_action_returns(action_returns)

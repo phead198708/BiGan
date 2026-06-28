@@ -1163,14 +1163,44 @@ def _model_manifest(
                 "sell_before_close_disagreed_trade_pnl_sum"
             ]
         ),
-        "sell_before_close_disagreed_settlement_pnl_sum": (
+        "sell_before_close_label_row_settlement_pnl_sum": (
             sell_before_close_p_up_disagreement_diagnostic["summary"][
-                "sell_before_close_disagreed_settlement_pnl_sum"
+                "label_row_sell_before_close_settlement_pnl_sum"
             ]
         ),
-        "sell_before_close_residual_settlement_drag": (
+        "sell_before_close_label_row_residual_settlement_drag": (
             sell_before_close_p_up_disagreement_diagnostic["summary"][
-                "sell_before_close_residual_settlement_drag"
+                "label_row_sell_before_close_residual_settlement_drag"
+            ]
+        ),
+        "sell_before_close_replay_realized_trade_pnl": (
+            sell_before_close_p_up_disagreement_diagnostic["summary"][
+                "replay_realized_trade_pnl"
+            ]
+        ),
+        "sell_before_close_replay_settlement_pnl": (
+            sell_before_close_p_up_disagreement_diagnostic["summary"][
+                "replay_settlement_pnl"
+            ]
+        ),
+        "sell_before_close_replay_total_polymarket_pnl": (
+            sell_before_close_p_up_disagreement_diagnostic["summary"][
+                "replay_total_polymarket_pnl"
+            ]
+        ),
+        "sell_before_close_replay_residual_settlement_drag": (
+            sell_before_close_p_up_disagreement_diagnostic["summary"][
+                "replay_residual_settlement_drag"
+            ]
+        ),
+        "sell_before_close_replay_positions_opened_but_not_closed_before_settlement": (
+            sell_before_close_p_up_disagreement_diagnostic["summary"][
+                "replay_positions_opened_but_not_closed_before_settlement"
+            ]
+        ),
+        "sell_before_close_settlement_drag_attribution_interpretation": (
+            sell_before_close_p_up_disagreement_diagnostic["summary"][
+                "settlement_drag_attribution_interpretation"
             ]
         ),
         "sell_before_close_p_up_disagreement_diagnostic_summary": (

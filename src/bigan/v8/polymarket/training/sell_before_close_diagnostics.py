@@ -128,6 +128,9 @@ def build_sell_before_close_p_up_disagreement_diagnostic_report(
         "p_up_disagreement_interpretation": summary[
             "p_up_disagreement_interpretation"
         ],
+        "settlement_drag_attribution_interpretation": summary[
+            "settlement_drag_attribution_interpretation"
+        ],
         **compact_safety_fields(),
     }
     report["sell_before_close_p_up_disagreement_diagnostic_report_id"] = (
@@ -153,6 +156,7 @@ def sell_before_close_p_up_disagreement_diagnostic_markdown(
         f"- paper_run_resume_allowed: `{str(report['paper_run_resume_allowed']).lower()}`",
         f"- row_count: `{report['row_count']}`",
         f"- p_up_disagreement_interpretation: `{report['p_up_disagreement_interpretation']}`",
+        f"- settlement_drag_attribution_interpretation: `{report['settlement_drag_attribution_interpretation']}`",
         "",
         "## Agreed vs Disagreed",
         "",
@@ -164,21 +168,39 @@ def sell_before_close_p_up_disagreement_diagnostic_markdown(
     lines.extend(
         [
             "",
-            "## Replay Attribution",
+            "## Label-Row Selected Action PnL",
+            "",
+            f"- label_row_sell_before_close_settlement_pnl_sum: `{summary['label_row_sell_before_close_settlement_pnl_sum']}`",
+            f"- label_row_sell_before_close_disagreed_settlement_pnl_sum: `{summary['label_row_sell_before_close_disagreed_settlement_pnl_sum']}`",
+            f"- label_row_sell_before_close_agreed_settlement_pnl_sum: `{summary['label_row_sell_before_close_agreed_settlement_pnl_sum']}`",
+            f"- label_row_sell_before_close_residual_settlement_drag: `{summary['label_row_sell_before_close_residual_settlement_drag']}`",
+            "",
+            "## Replay-Level Settlement Drag",
             "",
             f"- total_polymarket_pnl: `{attribution['total_polymarket_pnl']}`",
             f"- realized_trade_pnl: `{attribution['realized_trade_pnl']}`",
             f"- settlement_pnl: `{attribution['settlement_pnl']}`",
+            f"- replay_residual_settlement_drag: `{summary['replay_residual_settlement_drag']}`",
             f"- positions_opened_but_not_closed_before_settlement: `{attribution['positions_opened_but_not_closed_before_settlement']}`",
             f"- positions_reached_sell_before_close_intent_but_settled: `{attribution['positions_reached_sell_before_close_intent_but_settled']}`",
+            f"- sell_decision_count: `{attribution['sell_decision_count']}`",
+            f"- entry_decision_count: `{attribution['entry_decision_count']}`",
+            f"- exit_signal_missing_count: `{attribution['exit_signal_missing_count']}`",
+            f"- exit_opportunities_missed_due_to_gate_count: `{attribution['exit_opportunities_missed_due_to_gate_count']}`",
+            "",
+            "## Settlement Drag Interpretation",
+            "",
+            f"- settlement_drag_attribution_interpretation: `{summary['settlement_drag_attribution_interpretation']}`",
+            _settlement_drag_interpretation_text(
+                summary["settlement_drag_attribution_interpretation"]
+            ),
             "",
             "## Summary Fields",
             "",
             f"- sell_before_close_disagreed_total_pnl_sum: `{summary['sell_before_close_disagreed_total_pnl_sum']}`",
             f"- sell_before_close_agreed_total_pnl_sum: `{summary['sell_before_close_agreed_total_pnl_sum']}`",
             f"- sell_before_close_disagreed_trade_pnl_sum: `{summary['sell_before_close_disagreed_trade_pnl_sum']}`",
-            f"- sell_before_close_disagreed_settlement_pnl_sum: `{summary['sell_before_close_disagreed_settlement_pnl_sum']}`",
-            f"- sell_before_close_residual_settlement_drag: `{summary['sell_before_close_residual_settlement_drag']}`",
+            f"- sell_before_close_residual_settlement_drag_deprecated_alias: `{summary['sell_before_close_residual_settlement_drag_deprecated_alias']}`",
             "",
             "- paper_only: true",
             "- capital_at_risk: false",
@@ -211,8 +233,16 @@ def sell_before_close_p_up_disagreement_summary(
                 "sell_before_close_disagreed_total_pnl_sum",
                 "sell_before_close_agreed_total_pnl_sum",
                 "sell_before_close_disagreed_trade_pnl_sum",
-                "sell_before_close_disagreed_settlement_pnl_sum",
-                "sell_before_close_residual_settlement_drag",
+                "label_row_sell_before_close_settlement_pnl_sum",
+                "label_row_sell_before_close_residual_settlement_drag",
+                "replay_realized_trade_pnl",
+                "replay_settlement_pnl",
+                "replay_total_polymarket_pnl",
+                "replay_residual_settlement_drag",
+                "replay_positions_opened_but_not_closed_before_settlement",
+                "replay_exit_signal_missing_count",
+                "replay_exit_opportunities_missed_due_to_gate_count",
+                "settlement_drag_attribution_interpretation",
                 "candidate_scoped_p_up_action_disagreement_rate",
                 "disagreed_support_count",
                 "agreed_support_count",
@@ -346,7 +376,16 @@ def _diagnostic_summary(
     agreed_total = _sum(agreed, "total_pnl_contribution")
     disagreed_trade = _sum(disagreed, "trade_pnl_contribution")
     disagreed_settlement = _sum(disagreed, "settlement_pnl_contribution")
-    residual_drag = min(0.0, _sum(rows, "settlement_pnl_contribution"))
+    agreed_settlement = _sum(agreed, "settlement_pnl_contribution")
+    label_row_settlement = _sum(rows, "settlement_pnl_contribution")
+    label_row_residual_drag = min(0.0, label_row_settlement)
+    replay_settlement = float(replay_attribution["settlement_pnl"])
+    replay_residual_drag = min(0.0, replay_settlement)
+    settlement_drag_interpretation = _settlement_drag_attribution_interpretation(
+        row_count=len(rows),
+        label_row_residual_drag=label_row_residual_drag,
+        replay_residual_drag=replay_residual_drag,
+    )
     return {
         "row_count": len(rows),
         "disagreed_support_count": len(disagreed),
@@ -357,16 +396,54 @@ def _diagnostic_summary(
         "sell_before_close_disagreed_total_pnl_sum": disagreed_total,
         "sell_before_close_agreed_total_pnl_sum": agreed_total,
         "sell_before_close_disagreed_trade_pnl_sum": disagreed_trade,
-        "sell_before_close_disagreed_settlement_pnl_sum": disagreed_settlement,
-        "sell_before_close_residual_settlement_drag": residual_drag,
+        "label_row_sell_before_close_settlement_pnl_sum": label_row_settlement,
+        "label_row_sell_before_close_disagreed_settlement_pnl_sum": (
+            disagreed_settlement
+        ),
+        "label_row_sell_before_close_agreed_settlement_pnl_sum": agreed_settlement,
+        "label_row_sell_before_close_residual_settlement_drag": (
+            label_row_residual_drag
+        ),
+        "sell_before_close_residual_settlement_drag_deprecated_alias": (
+            label_row_residual_drag
+        ),
         "positive_trade_negative_settlement_disagreed_count": len(
             comparisons[
                 "high_p_up_disagreement_rows_with_positive_trade_pnl_negative_settlement_pnl"
             ]
         ),
-        "replay_total_polymarket_pnl": replay_attribution["total_polymarket_pnl"],
         "replay_realized_trade_pnl": replay_attribution["realized_trade_pnl"],
-        "replay_settlement_pnl": replay_attribution["settlement_pnl"],
+        "replay_settlement_pnl": replay_settlement,
+        "replay_total_polymarket_pnl": replay_attribution["total_polymarket_pnl"],
+        "replay_residual_settlement_drag": replay_residual_drag,
+        "replay_positions_opened_but_not_closed_before_settlement": (
+            replay_attribution["positions_opened_but_not_closed_before_settlement"]
+        ),
+        "replay_positions_reached_sell_before_close_intent_but_settled": (
+            replay_attribution[
+                "positions_reached_sell_before_close_intent_but_settled"
+            ]
+        ),
+        "replay_sell_decision_count": replay_attribution["sell_decision_count"],
+        "replay_entry_decision_count": replay_attribution["entry_decision_count"],
+        "replay_exit_signal_missing_count": replay_attribution[
+            "exit_signal_missing_count"
+        ],
+        "replay_exit_opportunities_missed_due_to_gate_count": replay_attribution[
+            "exit_opportunities_missed_due_to_gate_count"
+        ],
+        "replay_exit_opportunities_missed_due_to_cooldown_count": replay_attribution[
+            "exit_opportunities_missed_due_to_cooldown_count"
+        ],
+        "replay_exit_opportunities_missed_due_to_liquidity_count": replay_attribution[
+            "exit_opportunities_missed_due_to_liquidity_count"
+        ],
+        "replay_exit_opportunities_missed_due_to_timing_count": replay_attribution[
+            "exit_opportunities_missed_due_to_timing_count"
+        ],
+        "settlement_drag_attribution_interpretation": (
+            settlement_drag_interpretation
+        ),
         "p_up_disagreement_interpretation": _interpretation(
             rows=rows,
             disagreed_total=disagreed_total,
@@ -614,6 +691,48 @@ def _missed_exit_reason_counts(reason_counts: dict[str, Any]) -> dict[str, int]:
         if any(token in normalized for token in ("hold", "no_exit", "missing")):
             buckets["exit_signal_missing"] += count
     return buckets
+
+
+def _settlement_drag_attribution_interpretation(
+    *,
+    row_count: int,
+    label_row_residual_drag: float,
+    replay_residual_drag: float,
+) -> str:
+    if row_count <= 0:
+        return "insufficient_evidence"
+    label_has_drag = label_row_residual_drag < -1e-12
+    replay_has_drag = replay_residual_drag < -1e-12
+    if not label_has_drag and replay_has_drag:
+        return "label_rows_no_settlement_drag_but_replay_has_residual_settlement_drag"
+    if label_has_drag and replay_has_drag:
+        return "label_rows_and_replay_both_show_settlement_drag"
+    if label_has_drag and not replay_has_drag:
+        return "label_rows_show_settlement_drag_but_replay_does_not"
+    return "no_settlement_drag_detected"
+
+
+def _settlement_drag_interpretation_text(interpretation: str) -> str:
+    if interpretation == (
+        "label_rows_no_settlement_drag_but_replay_has_residual_settlement_drag"
+    ):
+        return (
+            "Label-row selected SELL_BEFORE_CLOSE diagnostics do not show "
+            "residual settlement drag, but replay-level residual positions do."
+        )
+    if interpretation == "label_rows_and_replay_both_show_settlement_drag":
+        return (
+            "Both label-row selected SELL_BEFORE_CLOSE diagnostics and "
+            "replay-level residual positions show settlement drag."
+        )
+    if interpretation == "label_rows_show_settlement_drag_but_replay_does_not":
+        return (
+            "Label-row selected SELL_BEFORE_CLOSE diagnostics show settlement "
+            "drag, but replay-level residual positions do not."
+        )
+    if interpretation == "no_settlement_drag_detected":
+        return "No settlement drag was detected in label rows or replay attribution."
+    return "Insufficient evidence to attribute settlement drag."
 
 
 def _interpretation(
