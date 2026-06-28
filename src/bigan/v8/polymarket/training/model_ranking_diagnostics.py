@@ -28,6 +28,14 @@ from bigan.v8.polymarket.training.contracts import (
     PolymarketPolicyPrediction,
     compact_safety_fields,
 )
+from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
+    SELL_BEFORE_CLOSE_DISABLED_SOURCE_CANDIDATE_ACTIONS,
+    SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
+    SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_THRESHOLDS,
+    SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_ACTIONS,
+    SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
+)
 
 MODEL_RANKING_ERROR_SCHEMA_VERSION = (
     "bigan-v8-polymarket-model-ranking-error-v1"
@@ -59,20 +67,6 @@ RANKING_OVERLAY_DIAGNOSTIC_MIN_BUCKET_SUPPORT_VALUES = (3, 5, 10)
 RANKING_OVERLAY_DIAGNOSTIC_SHRINKAGE_PRIOR_SUPPORT_VALUES = (5, 10, 20)
 RANKING_OVERLAY_DIAGNOSTIC_BUFFER_MULTIPLIERS = (0.0, 0.5, 1.0)
 ACTION_REPRESENTATION_MIN_BUCKET_SUPPORT = 10
-SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME = (
-    "I_sell_before_close_only_source_candidate"
-)
-SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_ACTIONS = (
-    "BUY_UP_SELL_BEFORE_CLOSE",
-    "BUY_DOWN_SELL_BEFORE_CLOSE",
-    "NO_TRADE",
-)
-SELL_BEFORE_CLOSE_DISABLED_SOURCE_CANDIDATE_ACTIONS = (
-    "BUY_UP_HOLD_TO_SETTLEMENT",
-    "BUY_DOWN_HOLD_TO_SETTLEMENT",
-)
-
-
 def build_model_ranking_error_report(
     *,
     validation_examples: tuple[PolymarketPolicyExample, ...],
@@ -460,6 +454,20 @@ def _source_candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         "disabled_action_families",
         "enabled_actions",
         "disabled_actions",
+        "exit_reliability_guard_enabled",
+        "exit_policy",
+        "entry_filter_thresholds",
+        "entry_decision_count_before_guard",
+        "entry_decision_count_after_guard",
+        "entry_filter_blocked_count",
+        "positions_opened_count",
+        "positions_closed_before_settlement_count",
+        "positions_opened_but_not_closed_before_settlement",
+        "replay_realized_trade_pnl",
+        "replay_settlement_pnl",
+        "replay_total_polymarket_pnl",
+        "replay_residual_settlement_drag",
+        "replay_total_pnl_improved_vs_i_candidate",
         "candidate_scoped_p_up_action_disagreement_rate",
         "candidate_scoped_p_up_action_disagreement_within_limit",
         "candidate_scoped_action_family_gate_results",
@@ -973,6 +981,27 @@ def _candidate_specs(
                 "HOLD_TO_SETTLEMENT is disabled and remains diagnostic-only",
             ],
         },
+        {
+            "candidate_name": SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
+            "candidate_type": "sell_before_close_exit_reliability_guard_candidate",
+            "score_source": "fallback",
+            "corrections": {},
+            "correction_group": "none",
+            "eligible_families": ("SELL_BEFORE_CLOSE",),
+            "enabled_actions": SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_ACTIONS,
+            "disabled_actions": SELL_BEFORE_CLOSE_DISABLED_SOURCE_CANDIDATE_ACTIONS,
+            "exit_reliability_guard_enabled": True,
+            "exit_policy": SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
+            "entry_filter_thresholds": dict(
+                SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_THRESHOLDS
+            ),
+            "notes": [
+                "source eligibility candidate scoped to SELL_BEFORE_CLOSE actions",
+                "entry requires causal exit-reliability guard evidence",
+                "replay enforces deterministic pre-settlement exit attempts",
+                "HOLD_TO_SETTLEMENT is disabled and remains diagnostic-only",
+            ],
+        },
     )
 
 
@@ -1047,6 +1076,12 @@ def _candidate_report(
         if _selected_action(prediction) in set(enabled_actions)
         and _selected_action(prediction) != "NO_TRADE"
     ]
+    entry_decision_count_before_guard = sum(
+        1
+        for prediction in shadow_predictions
+        if _selected_action(prediction)
+        in {"BUY_UP_SELL_BEFORE_CLOSE", "BUY_DOWN_SELL_BEFORE_CLOSE"}
+    )
     disagreement_count = sum(
         _p_up_action_disagrees(prediction)
         for prediction in candidate_scoped_disagreement_rows
@@ -1091,6 +1126,22 @@ def _candidate_report(
         "score_source": spec["score_source"],
         "correction_group": spec["correction_group"],
         "notes": list(spec["notes"]),
+        "exit_reliability_guard_enabled": bool(
+            spec.get("exit_reliability_guard_enabled", False)
+        ),
+        "exit_policy": spec.get("exit_policy"),
+        "entry_filter_thresholds": dict(spec.get("entry_filter_thresholds", {})),
+        "entry_decision_count_before_guard": entry_decision_count_before_guard,
+        "entry_decision_count_after_guard": entry_decision_count_before_guard,
+        "entry_filter_blocked_count": 0,
+        "positions_opened_count": None,
+        "positions_closed_before_settlement_count": None,
+        "positions_opened_but_not_closed_before_settlement": None,
+        "replay_realized_trade_pnl": None,
+        "replay_settlement_pnl": None,
+        "replay_total_polymarket_pnl": None,
+        "replay_residual_settlement_drag": None,
+        "replay_total_pnl_improved_vs_i_candidate": None,
         "ranking_overlay_used": ranking_overlay_used,
         "ranking_overlay_method": None if overlay is None else overlay["method"],
         "ranking_overlay_fit_split": None if overlay is None else overlay["fit_split"],

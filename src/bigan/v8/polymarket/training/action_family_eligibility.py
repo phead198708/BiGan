@@ -35,6 +35,11 @@ from bigan.v8.polymarket.training.contracts import (
     PolymarketPolicyPrediction,
     compact_safety_fields,
 )
+from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
+    SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
+    SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_THRESHOLDS,
+)
 
 ACTION_FAMILY_ELIGIBILITY_SCHEMA_VERSION = (
     "bigan-v8-polymarket-action-family-eligibility-v1"
@@ -422,6 +427,21 @@ def build_action_family_counterfactual_prediction_sets(
             allowed_mode="sell_before_close_only",
             description=(
                 "source-model candidate replay scoped to SELL_BEFORE_CLOSE actions only"
+            ),
+        ),
+        _counterfactual_variant(
+            variant=SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
+            predictions=predictions,
+            ev_threshold=execution_buffer,
+            allowed_mode="sell_before_close_exit_reliability_guard",
+            description=(
+                "SELL_BEFORE_CLOSE source candidate with causal entry guard "
+                "and policy-constrained pre-settlement exits"
+            ),
+            exit_reliability_guard_enabled=True,
+            exit_policy=SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
+            entry_filter_thresholds=dict(
+                SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_THRESHOLDS
             ),
         ),
         _counterfactual_variant(
@@ -895,6 +915,9 @@ def _counterfactual_variant(
     family_gate_results: dict[str, dict[str, Any]] | None = None,
     eligible_action_families: list[str] | None = None,
     passed_bucket_keys: set[tuple[str, str, str, str]] | None = None,
+    exit_reliability_guard_enabled: bool = False,
+    exit_policy: str | None = None,
+    entry_filter_thresholds: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     eligible_families = tuple(eligible_action_families or ())
     bucket_keys = passed_bucket_keys or set()
@@ -920,6 +943,9 @@ def _counterfactual_variant(
         "family_gate_results": family_gate_results or {},
         "prediction_count": len(replay_predictions),
         "predictions": replay_predictions,
+        "exit_reliability_guard_enabled": exit_reliability_guard_enabled,
+        "exit_policy": exit_policy,
+        "entry_filter_thresholds": dict(entry_filter_thresholds or {}),
         **compact_safety_fields(),
     }
 
@@ -985,6 +1011,8 @@ def _counterfactual_action_allowed(
     if allowed_mode == "hold_to_settlement_disabled":
         return family != ACTION_FAMILY_HOLD_TO_SETTLEMENT
     if allowed_mode == "sell_before_close_only":
+        return family == ACTION_FAMILY_SELL_BEFORE_CLOSE
+    if allowed_mode == "sell_before_close_exit_reliability_guard":
         return family == ACTION_FAMILY_SELL_BEFORE_CLOSE
     if allowed_mode == "passed_family_and_bucket_only":
         if family not in eligible_action_families:
