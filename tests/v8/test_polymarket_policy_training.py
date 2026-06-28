@@ -48,6 +48,7 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
 )
 from bigan.v8.polymarket.training.sell_before_close_support_aware_thresholds import (
+    SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_FAILURE_ATTRIBUTION_SCHEMA_VERSION,
     SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_SELECTION_SCHEMA_VERSION,
 )
 
@@ -216,6 +217,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "sell_before_close_promotion_support_gate_summary",
         "sell_before_close_support_aware_threshold_selection_report",
         "sell_before_close_support_aware_threshold_selection_summary",
+        "sell_before_close_support_aware_threshold_failure_attribution_report",
+        "sell_before_close_support_aware_threshold_failure_attribution_summary",
         "sell_before_close_guard_threshold_sweep_report",
         "sell_before_close_guard_threshold_sweep_summary",
         "action_family_eligibility_report",
@@ -415,6 +418,9 @@ def test_training_runner_writes_required_artifacts_and_manifest(
             "threshold_selection_evaluation_split",
             "uses_shadow_for_fit",
             "shadow_sweep_not_used_for_threshold_fit",
+            "threshold_selection_passed",
+            "threshold_selection_failed",
+            "threshold_selection_failure_reason_codes",
             "support_aware_threshold_selection_failed",
             "support_aware_threshold_selection_reason_codes",
             "entry_decision_count_before_guard",
@@ -506,6 +512,18 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert (
         support_aware_candidate["shadow_sweep_not_used_for_threshold_fit"] is True
     )
+    assert support_aware_candidate["threshold_selection_passed"] is False
+    assert support_aware_candidate["threshold_selection_failed"] is True
+    assert support_aware_candidate["threshold_selection_failure_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert support_aware_candidate["support_aware_threshold_selection_failed"] is True
+    assert support_aware_candidate["support_aware_threshold_selection_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert "support_aware_threshold_selection_failed" in support_aware_candidate[
+        "ineligible_reason_codes"
+    ]
     assert support_aware_candidate["source_model_candidate_eligible"] is False
     assert support_aware_candidate["paper_run_resume_allowed"] is False
     source_eligibility = _read_json(
@@ -530,6 +548,17 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert len(source_eligibility["candidate_scoped_eligibility_summary"]) == (
         candidate_comparison["candidate_count"]
     )
+    source_support_aware_summary = _candidate_by_name(
+        {"candidates": source_eligibility["candidate_scoped_eligibility_summary"]},
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+    )
+    assert source_support_aware_summary["threshold_selection_failed"] is True
+    assert source_support_aware_summary["threshold_selection_failure_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert source_support_aware_summary[
+        "support_aware_threshold_selection_failed"
+    ] is True
     assert manifest["candidate_scoped_source_model_eligibility_summary"] == (
         source_eligibility["candidate_scoped_eligibility_summary"]
     )
@@ -704,6 +733,108 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     ] == source_eligibility[
         "sell_before_close_support_aware_threshold_selection_summary"
     ]
+    assert threshold_selection["threshold_selection_passed"] is False
+    assert threshold_selection["threshold_selection_failed"] is True
+    assert threshold_selection["threshold_selection_failure_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert threshold_selection["failure_attribution_report_path"] == (
+        "sell_before_close_support_aware_threshold_failure_attribution_report.json"
+    )
+    assert looks_like_sha256(threshold_selection["failure_attribution_report_sha256"])
+    assert threshold_selection["threshold_selection_failure_interpretation"] in {
+        "support_too_sparse",
+        "one_sided_support",
+        "positive_pnl_only_at_low_support",
+        "exit_reliability_failure",
+        "p_up_alignment_over_filters",
+        "pnl_not_positive_under_support",
+        "mixed_threshold_failure",
+        "insufficient_evidence",
+    }
+    assert threshold_selection["recommended_next_action"] in {
+        "collect_more_real_corpus",
+        "expand_validation_grid_without_shadow_fit",
+        "relax_candidate_defaults_only_after_validation_evidence",
+        "revise_action_value_ranking_model",
+        "revise_p_up_auxiliary_calibration",
+        "keep_blocked",
+    }
+    assert threshold_selection["top_failed_gates"]
+    assert threshold_selection["best_near_miss_rows"]
+    failure_attribution = _read_json(
+        result.artifact_paths[
+            "sell_before_close_support_aware_threshold_failure_attribution_report"
+        ]
+    )
+    assert failure_attribution["schema_version"] == (
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_FAILURE_ATTRIBUTION_SCHEMA_VERSION
+    )
+    assert failure_attribution["diagnostic_only"] is True
+    assert failure_attribution["uses_shadow_for_fit"] is False
+    assert failure_attribution["promotion_evidence_eligible"] is False
+    assert failure_attribution["paper_run_resume_allowed"] is False
+    assert failure_attribution["row_count"] == 9600
+    assert failure_attribution["validation_row_count"] == (
+        threshold_selection["validation_row_count"]
+    )
+    assert failure_attribution["validation_passing_row_count"] == (
+        threshold_selection["validation_passing_row_count"]
+    )
+    assert failure_attribution["threshold_selection_failed"] is True
+    assert failure_attribution["threshold_selection_failure_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert failure_attribution["gate_level_attribution"]
+    for gate_row in failure_attribution["gate_level_attribution"]:
+        assert gate_row["passed_row_count"] + gate_row["failed_row_count"] == 9600
+    assert failure_attribution["reason_code_attribution"]
+    assert all(
+        row["reason_code"].startswith("validation_")
+        for row in failure_attribution["reason_code_attribution"]
+    )
+    assert failure_attribution["cumulative_blocker_combinations"]
+    assert failure_attribution["best_near_miss_rows"]
+    assert failure_attribution["best_rows_by_objective"]["least_bad_overall_row"]
+    assert len(failure_attribution["validation_threshold_rows"]) == 9600
+    assert failure_attribution[
+        "all_validation_rows_have_failed_gate_attribution"
+    ] is True
+    assert all(
+        not any(
+            reason.startswith("support_aware_validation_")
+            for reason in row["failed_reason_codes"]
+        )
+        for row in failure_attribution["validation_threshold_rows"]
+    )
+    assert manifest[
+        "sell_before_close_support_aware_threshold_failure_attribution_report_path"
+    ] == "sell_before_close_support_aware_threshold_failure_attribution_report.json"
+    assert looks_like_sha256(
+        manifest[
+            "sell_before_close_support_aware_threshold_failure_attribution_report_sha256"
+        ]
+    )
+    assert manifest[
+        "sell_before_close_support_aware_threshold_failure_attribution_summary"
+    ] == source_eligibility[
+        "sell_before_close_support_aware_threshold_failure_attribution_summary"
+    ]
+    assert candidate_comparison[
+        "sell_before_close_support_aware_threshold_failure_attribution_summary"
+    ] == source_eligibility[
+        "sell_before_close_support_aware_threshold_failure_attribution_summary"
+    ]
+    assert manifest[
+        "sell_before_close_support_aware_threshold_selection_failed"
+    ] is True
+    assert manifest["threshold_selection_failed"] is True
+    assert manifest["threshold_selection_failure_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert manifest["threshold_selection_validation_row_count"] == 9600
+    assert manifest["threshold_selection_validation_passing_row_count"] == 0
+    assert manifest["top_failed_gates"] == threshold_selection["top_failed_gates"]
     support_gate = _read_json(
         result.artifact_paths["sell_before_close_promotion_support_gate_report"]
     )
@@ -715,6 +846,17 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
     )
     assert support_gate["support_gate_passed"] is False
+    assert support_gate["threshold_selection_failed"] is True
+    assert support_gate["threshold_selection_failure_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert support_gate["support_aware_threshold_selection_failed"] is True
+    assert support_gate["failure_attribution_report_path"] == (
+        "sell_before_close_support_aware_threshold_failure_attribution_report.json"
+    )
+    assert support_gate["failure_attribution_report_sha256"] == (
+        threshold_selection["failure_attribution_report_sha256"]
+    )
     assert support_gate["promotion_evidence_eligible"] is False
     assert support_gate["paper_run_resume_allowed"] is False
     assert "promotion_replay_entry_support_insufficient" in support_gate[
@@ -1121,6 +1263,14 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert counterfactual_replay[
         "sell_before_close_promotion_support_gate_summary"
     ] == source_eligibility["sell_before_close_promotion_support_gate_summary"]
+    assert counterfactual_replay["threshold_selection_failed"] is True
+    assert counterfactual_replay["threshold_selection_failure_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert counterfactual_replay["support_aware_threshold_selection_failed"] is True
+    assert "support_aware_threshold_selection_failed" in counterfactual_replay[
+        "promotion_evidence_ineligible_reasons"
+    ]
     assert [variant["variant"] for variant in counterfactual_replay["variants"]] == [
         "A_baseline_current_policy_with_runtime_guards",
         "B_hold_to_settlement_disabled_reranked",
@@ -1180,8 +1330,16 @@ def test_training_runner_writes_required_artifacts_and_manifest(
             assert variant["threshold_selection_evaluation_split"] == "shadow"
             assert variant["uses_shadow_for_fit"] is False
             assert variant["shadow_sweep_not_used_for_threshold_fit"] is True
+            assert variant["threshold_selection_failed"] is True
+            assert variant["threshold_selection_failure_reason_codes"] == [
+                "support_aware_threshold_selection_failed"
+            ]
+            assert variant["support_aware_threshold_selection_failed"] is True
             assert variant["paper_run_resume_allowed"] is False
             assert variant["promotion_evidence_eligible"] is False
+            assert "support_aware_threshold_selection_failed" in variant[
+                "promotion_evidence_ineligible_reasons"
+            ]
             assert "sell_before_close_support_aware_threshold_selection_summary" in variant
     assert manifest["action_family_counterfactual_replay_report_path"] == (
         "action_family_counterfactual_replay_report.json"

@@ -235,11 +235,19 @@ def sell_before_close_promotion_support_gate_summary(
         "candidate_scoped_p_up_action_disagreement_rate",
         "support_gate_passed",
         "support_gate_reason_codes",
+        "threshold_selection_passed",
+        "threshold_selection_failed",
+        "threshold_selection_failure_reason_codes",
+        "support_aware_threshold_selection_failed",
+        "threshold_selection_failure_interpretation",
+        "recommended_next_action",
+        "failure_attribution_report_path",
+        "failure_attribution_report_sha256",
         "promotion_support_eligible",
         "promotion_evidence_eligible",
         "paper_run_resume_allowed",
     )
-    return {field: report[field] for field in fields}
+    return {field: report.get(field) for field in fields}
 
 
 def sell_before_close_promotion_support_gate_markdown(
@@ -254,6 +262,19 @@ def sell_before_close_promotion_support_gate_markdown(
         f"- support_gate_passed: `{str(report['support_gate_passed']).lower()}`",
         "- support_gate_reason_codes: "
         f"`{json.dumps(report['support_gate_reason_codes'])}`",
+        "- threshold_selection_passed: "
+        f"`{str(report.get('threshold_selection_passed')).lower()}`",
+        "- threshold_selection_failed: "
+        f"`{str(report.get('threshold_selection_failed')).lower()}`",
+        "- threshold_selection_failure_reason_codes: "
+        f"`{json.dumps(report.get('threshold_selection_failure_reason_codes', []))}`",
+        "- threshold_selection_failure_interpretation: "
+        f"`{report.get('threshold_selection_failure_interpretation')}`",
+        f"- recommended_next_action: `{report.get('recommended_next_action')}`",
+        "- failure_attribution_report_path: "
+        f"`{report.get('failure_attribution_report_path')}`",
+        "- failure_attribution_report_sha256: "
+        f"`{report.get('failure_attribution_report_sha256')}`",
         "- promotion_evidence_eligible: "
         f"`{str(report['promotion_evidence_eligible']).lower()}`",
         f"- paper_run_resume_allowed: `{str(report['paper_run_resume_allowed']).lower()}`",

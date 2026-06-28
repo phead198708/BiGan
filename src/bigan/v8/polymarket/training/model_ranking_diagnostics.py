@@ -466,6 +466,9 @@ def _source_candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         "threshold_selection_evaluation_split",
         "uses_shadow_for_fit",
         "shadow_sweep_not_used_for_threshold_fit",
+        "threshold_selection_passed",
+        "threshold_selection_failed",
+        "threshold_selection_failure_reason_codes",
         "support_aware_threshold_selection_failed",
         "support_aware_threshold_selection_reason_codes",
         "entry_decision_count_before_guard",
@@ -550,16 +553,19 @@ def model_ranking_candidate_comparison_markdown(report: dict[str, Any]) -> str:
         f"- best_candidate_name: `{report['best_candidate_name']}`",
         f"- no_candidate_eligible: `{str(report['no_candidate_eligible']).lower()}`",
         "",
-        "| candidate | source_eligible | enabled_families | scoped_p_up_disagreement | high_score_support | high_score_mean | high_score_sum | reasons |",
-        "|---|---|---|---:|---:|---:|---:|---|",
+        "| candidate | source_eligible | threshold_failed | enabled_families | scoped_p_up_disagreement | high_score_support | high_score_mean | high_score_sum | reasons |",
+        "|---|---|---|---|---:|---:|---:|---:|---|",
     ]
     for candidate in report["candidates"]:
         reasons = ", ".join(candidate["ineligible_reason_codes"]) or "none"
         lines.append(
-            "| {name} | {eligible} | {families} | {p_up:.6f} | {support} | "
+            "| {name} | {eligible} | {threshold_failed} | {families} | {p_up:.6f} | {support} | "
             "{mean:.6f} | {total:.6f} | {reasons} |".format(
                 name=candidate["candidate_name"],
                 eligible=str(candidate["source_model_eligible"]).lower(),
+                threshold_failed=str(
+                    candidate.get("threshold_selection_failed")
+                ).lower(),
                 families=", ".join(candidate["enabled_action_families"]) or "none",
                 p_up=candidate["candidate_scoped_p_up_action_disagreement_rate"],
                 support=candidate["high_score_support_count"],
@@ -742,16 +748,19 @@ def source_model_eligibility_markdown(report: dict[str, Any]) -> str:
             "",
             "## Candidate-Scoped Eligibility",
             "",
-            "| candidate | eligible | enabled_families | disabled_families | scoped_p_up_disagreement | support | mean | sum | reasons |",
-            "|---|---|---|---|---:|---:|---:|---:|---|",
+            "| candidate | eligible | threshold_failed | enabled_families | disabled_families | scoped_p_up_disagreement | support | mean | sum | reasons |",
+            "|---|---|---|---|---|---:|---:|---:|---:|---|",
         ]
     )
     for candidate in report["candidate_scoped_eligibility_summary"]:
         lines.append(
-            "| {name} | {eligible} | {enabled} | {disabled} | {p_up:.6f} | "
+            "| {name} | {eligible} | {threshold_failed} | {enabled} | {disabled} | {p_up:.6f} | "
             "{support} | {mean:.6f} | {total:.6f} | {reasons} |".format(
                 name=candidate["candidate_name"],
                 eligible=str(candidate["source_model_candidate_eligible"]).lower(),
+                threshold_failed=str(
+                    candidate.get("threshold_selection_failed")
+                ).lower(),
                 enabled=", ".join(candidate["enabled_action_families"]) or "none",
                 disabled=", ".join(candidate["disabled_action_families"]) or "none",
                 p_up=candidate["candidate_scoped_p_up_action_disagreement_rate"],
@@ -1225,6 +1234,11 @@ def _candidate_report(
         "shadow_sweep_not_used_for_threshold_fit": spec.get(
             "shadow_sweep_not_used_for_threshold_fit",
             True if spec.get("threshold_selection_method") else None,
+        ),
+        "threshold_selection_passed": spec.get("threshold_selection_passed"),
+        "threshold_selection_failed": spec.get("threshold_selection_failed"),
+        "threshold_selection_failure_reason_codes": list(
+            spec.get("threshold_selection_failure_reason_codes", [])
         ),
         "support_aware_threshold_selection_failed": False,
         "support_aware_threshold_selection_reason_codes": [],

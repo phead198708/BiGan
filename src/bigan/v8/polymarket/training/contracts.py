@@ -527,6 +527,10 @@ class PolymarketPolicyTrainingResult:
     sell_before_close_exit_reliability_report: dict[str, Any]
     sell_before_close_promotion_support_gate_report: dict[str, Any]
     sell_before_close_support_aware_threshold_selection_report: dict[str, Any]
+    sell_before_close_support_aware_threshold_failure_attribution_report: dict[
+        str,
+        Any,
+    ]
     sell_before_close_guard_threshold_sweep_report: dict[str, Any]
 
 
