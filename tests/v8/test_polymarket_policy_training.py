@@ -45,6 +45,10 @@ from bigan.v8.polymarket.training.sell_before_close_promotion_support import (
 )
 from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+)
+from bigan.v8.polymarket.training.sell_before_close_support_aware_thresholds import (
+    SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_SELECTION_SCHEMA_VERSION,
 )
 
 
@@ -210,6 +214,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "sell_before_close_exit_reliability_summary",
         "sell_before_close_promotion_support_gate_report",
         "sell_before_close_promotion_support_gate_summary",
+        "sell_before_close_support_aware_threshold_selection_report",
+        "sell_before_close_support_aware_threshold_selection_summary",
         "sell_before_close_guard_threshold_sweep_report",
         "sell_before_close_guard_threshold_sweep_summary",
         "action_family_eligibility_report",
@@ -378,6 +384,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "H_positive_bucket_rank_selector",
         "I_sell_before_close_only_source_candidate",
         "J_sell_before_close_exit_reliability_guard_candidate",
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
     }.issubset(set(candidate_comparison["candidate_names"]))
     for candidate in candidate_comparison["candidates"]:
         for field_name in (
@@ -402,6 +410,13 @@ def test_training_runner_writes_required_artifacts_and_manifest(
             "exit_reliability_guard_enabled",
             "exit_policy",
             "entry_filter_thresholds",
+            "threshold_selection_method",
+            "threshold_selection_fit_split",
+            "threshold_selection_evaluation_split",
+            "uses_shadow_for_fit",
+            "shadow_sweep_not_used_for_threshold_fit",
+            "support_aware_threshold_selection_failed",
+            "support_aware_threshold_selection_reason_codes",
             "entry_decision_count_before_guard",
             "entry_decision_count_after_guard",
             "entry_filter_blocked_count",
@@ -463,6 +478,36 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     )
     assert guard_candidate["entry_filter_blocked_count"] >= 0
     assert guard_candidate["paper_run_resume_allowed"] is False
+    support_aware_candidate = _candidate_by_name(
+        candidate_comparison,
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+    )
+    assert support_aware_candidate["enabled_action_families"] == [
+        "SELL_BEFORE_CLOSE"
+    ]
+    assert support_aware_candidate["disabled_action_families"] == [
+        "HOLD_TO_SETTLEMENT"
+    ]
+    assert support_aware_candidate["enabled_actions"] == [
+        "NO_TRADE",
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+    ]
+    assert support_aware_candidate["disabled_actions"] == [
+        "BUY_UP_HOLD_TO_SETTLEMENT",
+        "BUY_DOWN_HOLD_TO_SETTLEMENT",
+    ]
+    assert support_aware_candidate["threshold_selection_method"] == (
+        "validation_fitted_support_aware_thresholds"
+    )
+    assert support_aware_candidate["threshold_selection_fit_split"] == "validation"
+    assert support_aware_candidate["threshold_selection_evaluation_split"] == "shadow"
+    assert support_aware_candidate["uses_shadow_for_fit"] is False
+    assert (
+        support_aware_candidate["shadow_sweep_not_used_for_threshold_fit"] is True
+    )
+    assert support_aware_candidate["source_model_candidate_eligible"] is False
+    assert support_aware_candidate["paper_run_resume_allowed"] is False
     source_eligibility = _read_json(
         result.artifact_paths["source_model_eligibility_report"]
     )
@@ -583,6 +628,7 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "I_sell_before_close_only_source_candidate",
         "J_sell_before_close_exit_reliability_guard_candidate",
         SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
     }
     assert exit_reliability["exit_reliability_guard_candidate_summary"][
         "candidate_name"
@@ -595,6 +641,7 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     ] is False
     assert len(exit_reliability["i_vs_j_replay_comparison"]) == 2
     assert len(exit_reliability["i_vs_j_vs_k_replay_comparison"]) == 3
+    assert len(exit_reliability["i_vs_j_vs_k_vs_l_replay_comparison"]) == 4
     assert exit_reliability["exit_reliability_p_up_aligned_candidate_summary"][
         "candidate_name"
     ] == SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME
@@ -615,6 +662,48 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert manifest["sell_before_close_i_vs_j_vs_k_replay_comparison"] == (
         source_eligibility["i_vs_j_vs_k_replay_comparison"]
     )
+    assert manifest["sell_before_close_i_vs_j_vs_k_vs_l_replay_comparison"] == (
+        source_eligibility["i_vs_j_vs_k_vs_l_replay_comparison"]
+    )
+    threshold_selection = _read_json(
+        result.artifact_paths[
+            "sell_before_close_support_aware_threshold_selection_report"
+        ]
+    )
+    assert threshold_selection["schema_version"] == (
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_SELECTION_SCHEMA_VERSION
+    )
+    assert threshold_selection["candidate_name"] == (
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+    )
+    assert threshold_selection["threshold_selection_fit_split"] == "validation"
+    assert threshold_selection["threshold_selection_evaluation_split"] == "shadow"
+    assert threshold_selection["uses_shadow_for_fit"] is False
+    assert threshold_selection["shadow_sweep_not_used_for_threshold_fit"] is True
+    assert threshold_selection["diagnostic_only"] is False
+    assert threshold_selection["validation_row_count"] == 9600
+    assert threshold_selection["promotion_evidence_eligible"] is False
+    assert threshold_selection["paper_run_resume_allowed"] is False
+    if threshold_selection["selection_reason_codes"]:
+        assert threshold_selection["selection_reason_codes"] == [
+            "support_aware_threshold_selection_failed"
+        ]
+        assert threshold_selection["selected_thresholds"] == {}
+        assert threshold_selection["selected_validation_row"] is None
+        assert threshold_selection["shadow_evaluation_row"] is None
+    assert manifest[
+        "sell_before_close_support_aware_threshold_selection_report_path"
+    ] == "sell_before_close_support_aware_threshold_selection_report.json"
+    assert looks_like_sha256(
+        manifest[
+            "sell_before_close_support_aware_threshold_selection_report_sha256"
+        ]
+    )
+    assert manifest[
+        "sell_before_close_support_aware_threshold_selection_summary"
+    ] == source_eligibility[
+        "sell_before_close_support_aware_threshold_selection_summary"
+    ]
     support_gate = _read_json(
         result.artifact_paths["sell_before_close_promotion_support_gate_report"]
     )
@@ -623,7 +712,7 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     )
     assert support_gate["thresholds"] == SELL_BEFORE_CLOSE_PROMOTION_SUPPORT_THRESHOLDS
     assert support_gate["candidate_name"] == (
-        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
     )
     assert support_gate["support_gate_passed"] is False
     assert support_gate["promotion_evidence_eligible"] is False
@@ -631,7 +720,14 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert "promotion_replay_entry_support_insufficient" in support_gate[
         "support_gate_reason_codes"
     ]
-    assert len(support_gate["i_vs_j_vs_k_promotion_support_comparison"]) == 3
+    assert len(support_gate["i_vs_j_vs_k_promotion_support_comparison"]) == 4
+    assert len(support_gate["i_vs_j_vs_k_vs_l_promotion_support_comparison"]) == 4
+    l_support = _candidate_by_name(
+        {"candidates": support_gate["candidate_rows"]},
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+    )
+    assert l_support["promotion_support_eligible"] is False
+    assert l_support["paper_run_resume_allowed"] is False
     k_support = _candidate_by_name(
         {"candidates": support_gate["candidate_rows"]},
         SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
@@ -663,6 +759,11 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "sell_before_close_i_vs_j_vs_k_promotion_support_comparison"
     ] == source_eligibility[
         "sell_before_close_i_vs_j_vs_k_promotion_support_comparison"
+    ]
+    assert manifest[
+        "sell_before_close_i_vs_j_vs_k_vs_l_promotion_support_comparison"
+    ] == source_eligibility[
+        "sell_before_close_i_vs_j_vs_k_vs_l_promotion_support_comparison"
     ]
     assert manifest["sell_before_close_promotion_support_gate_passed"] is False
     assert manifest["sell_before_close_promotion_support_reason_codes"] == (
@@ -1027,6 +1128,7 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "I_sell_before_close_only_source_candidate",
         "J_sell_before_close_exit_reliability_guard_candidate",
         SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
         "D_hold_to_settlement_allowed_only_for_passed_buckets_reranked",
         "E_threshold_0.00_action_family_gates_reranked",
         "E_threshold_0.03_action_family_gates_reranked",
@@ -1066,6 +1168,21 @@ def test_training_runner_writes_required_artifacts_and_manifest(
             assert variant["paper_run_resume_allowed"] is False
             assert variant["promotion_evidence_eligible"] is False
             assert "i_vs_j_vs_k_replay_comparison" in variant
+        if (
+            variant["variant"]
+            == SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+        ):
+            assert variant["p_up_side_alignment_filter_enabled"] is True
+            assert variant["threshold_selection_method"] == (
+                "validation_fitted_support_aware_thresholds"
+            )
+            assert variant["threshold_selection_fit_split"] == "validation"
+            assert variant["threshold_selection_evaluation_split"] == "shadow"
+            assert variant["uses_shadow_for_fit"] is False
+            assert variant["shadow_sweep_not_used_for_threshold_fit"] is True
+            assert variant["paper_run_resume_allowed"] is False
+            assert variant["promotion_evidence_eligible"] is False
+            assert "sell_before_close_support_aware_threshold_selection_summary" in variant
     assert manifest["action_family_counterfactual_replay_report_path"] == (
         "action_family_counterfactual_replay_report.json"
     )

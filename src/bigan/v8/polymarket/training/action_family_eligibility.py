@@ -41,6 +41,7 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_THRESHOLDS,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
+    SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
 )
 
 ACTION_FAMILY_ELIGIBILITY_SCHEMA_VERSION = (
@@ -373,6 +374,8 @@ def build_action_family_counterfactual_prediction_sets(
     examples: tuple[PolymarketPolicyExample, ...],
     predictions: tuple[PolymarketPolicyPrediction, ...],
     execution_buffer: float,
+    support_aware_thresholds: dict[str, float] | None = None,
+    support_aware_threshold_selection_report: dict[str, Any] | None = None,
     thresholds: tuple[float, ...] = (0.0, 0.03, 0.05),
     min_support: int = ACTION_FAMILY_MIN_HIGH_SCORE_SUPPORT,
 ) -> tuple[dict[str, Any], ...]:
@@ -462,6 +465,12 @@ def build_action_family_counterfactual_prediction_sets(
                 SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS
             ),
         ),
+        build_sell_before_close_support_aware_prediction_set(
+            predictions=predictions,
+            execution_buffer=execution_buffer,
+            entry_filter_thresholds=support_aware_thresholds,
+            threshold_selection_report=support_aware_threshold_selection_report,
+        ),
         _counterfactual_variant(
             variant="D_hold_to_settlement_allowed_only_for_passed_buckets_reranked",
             predictions=predictions,
@@ -503,6 +512,65 @@ def build_action_family_counterfactual_prediction_sets(
             )
         )
     return tuple(variants)
+
+
+def build_sell_before_close_support_aware_prediction_set(
+    *,
+    predictions: tuple[PolymarketPolicyPrediction, ...],
+    execution_buffer: float,
+    entry_filter_thresholds: dict[str, float] | None,
+    threshold_selection_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the L support-aware p_up-aligned counterfactual prediction set."""
+
+    selection_failed = not entry_filter_thresholds
+    variant = _counterfactual_variant(
+        variant=SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+        predictions=predictions,
+        ev_threshold=execution_buffer,
+        allowed_mode="support_aware_selection_failed_no_trade"
+        if selection_failed
+        else "sell_before_close_support_aware_p_up_aligned",
+        description=(
+            "support-aware SELL_BEFORE_CLOSE source candidate disabled because "
+            "validation threshold selection failed"
+            if selection_failed
+            else "support-aware SELL_BEFORE_CLOSE source candidate with "
+            "validation-fitted entry thresholds and causal p_up-aligned exits"
+        ),
+        exit_reliability_guard_enabled=not selection_failed,
+        p_up_side_alignment_filter_enabled=True,
+        exit_policy=SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
+        entry_filter_thresholds=dict(entry_filter_thresholds or {}),
+    )
+    variant["threshold_selection_failed"] = selection_failed
+    variant["threshold_selection_method"] = (
+        "validation_fitted_support_aware_thresholds"
+    )
+    variant["threshold_selection_fit_split"] = "validation"
+    variant["threshold_selection_evaluation_split"] = "shadow"
+    variant["uses_shadow_for_fit"] = False
+    variant["shadow_sweep_not_used_for_threshold_fit"] = True
+    if threshold_selection_report is not None:
+        variant["support_aware_threshold_selection_summary"] = {
+            "selected_thresholds": threshold_selection_report.get(
+                "selected_thresholds",
+                {},
+            ),
+            "validation_row_count": threshold_selection_report.get(
+                "validation_row_count",
+                0,
+            ),
+            "validation_passing_row_count": threshold_selection_report.get(
+                "validation_passing_row_count",
+                0,
+            ),
+            "selection_reason_codes": threshold_selection_report.get(
+                "selection_reason_codes",
+                [],
+            ),
+        }
+    return variant
 
 
 def action_family_eligibility_markdown(report: dict[str, Any]) -> str:
@@ -1036,6 +1104,10 @@ def _counterfactual_action_allowed(
         return family == ACTION_FAMILY_SELL_BEFORE_CLOSE
     if allowed_mode == "sell_before_close_exit_reliability_p_up_aligned":
         return family == ACTION_FAMILY_SELL_BEFORE_CLOSE
+    if allowed_mode == "sell_before_close_support_aware_p_up_aligned":
+        return family == ACTION_FAMILY_SELL_BEFORE_CLOSE
+    if allowed_mode == "support_aware_selection_failed_no_trade":
+        return False
     if allowed_mode == "passed_family_and_bucket_only":
         if family not in eligible_action_families:
             return False

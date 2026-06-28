@@ -24,6 +24,7 @@ from bigan.v8.polymarket.training.action_family_eligibility import (
     build_action_family_eligibility_report,
     build_action_family_replay_variants_report,
     build_hold_to_settlement_longshot_guard_report,
+    build_sell_before_close_support_aware_prediction_set,
     hold_to_settlement_longshot_guard_markdown,
 )
 from bigan.v8.polymarket.training.action_value_calibration import (
@@ -89,6 +90,12 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
+    SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+)
+from bigan.v8.polymarket.training.sell_before_close_support_aware_thresholds import (
+    build_sell_before_close_support_aware_threshold_selection_report,
+    sell_before_close_support_aware_threshold_selection_markdown,
+    sell_before_close_support_aware_threshold_selection_summary,
 )
 
 ACTION_VALUE_CONCENTRATION_WARN_THRESHOLD = 0.80
@@ -193,10 +200,51 @@ def run_polymarket_policy_training(
         replay_split=replay_split,
         prediction_count=len(replay_predictions),
     )
+    validation_support_aware_prediction_set = (
+        build_sell_before_close_support_aware_prediction_set(
+            predictions=validation_predictions,
+            execution_buffer=float(config.ev_threshold),
+            entry_filter_thresholds=dict(
+                SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS
+            ),
+        )
+    )
+    shadow_support_aware_prediction_set = (
+        build_sell_before_close_support_aware_prediction_set(
+            predictions=shadow_predictions,
+            execution_buffer=float(config.ev_threshold),
+            entry_filter_thresholds=dict(
+                SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS
+            ),
+        )
+    )
+    sell_before_close_support_aware_threshold_selection = (
+        build_sell_before_close_support_aware_threshold_selection_report(
+            dataset=dataset,
+            validation_predictions=tuple(
+                validation_support_aware_prediction_set["predictions"]
+            ),
+            shadow_predictions=tuple(
+                shadow_support_aware_prediction_set["predictions"]
+            ),
+            config=config,
+            calibration_error=float(calibration["calibration_error"]),
+            calibration_split=primary_calibration_split,
+        )
+    )
     counterfactual_prediction_sets = build_action_family_counterfactual_prediction_sets(
         examples=dataset.shadow_examples,
         predictions=shadow_predictions,
         execution_buffer=float(config.ev_threshold),
+        support_aware_thresholds=(
+            sell_before_close_support_aware_threshold_selection[
+                "selected_thresholds"
+            ]
+            or None
+        ),
+        support_aware_threshold_selection_report=(
+            sell_before_close_support_aware_threshold_selection
+        ),
     )
     action_family_counterfactual_replays = _build_action_family_counterfactual_replays(
         dataset=dataset,
@@ -284,6 +332,9 @@ def run_polymarket_policy_training(
         sell_before_close_promotion_support_gate=(
             sell_before_close_promotion_support_gate
         ),
+        sell_before_close_support_aware_threshold_selection=(
+            sell_before_close_support_aware_threshold_selection
+        ),
     )
     source_model_eligibility = build_source_model_eligibility_report(
         signal_sanity=signal_sanity,
@@ -324,6 +375,9 @@ def run_polymarket_policy_training(
         sell_before_close_exit_reliability=sell_before_close_exit_reliability,
         sell_before_close_promotion_support_gate=(
             sell_before_close_promotion_support_gate
+        ),
+        sell_before_close_support_aware_threshold_selection=(
+            sell_before_close_support_aware_threshold_selection
         ),
         sell_before_close_guard_threshold_sweep=(
             sell_before_close_guard_threshold_sweep
@@ -373,6 +427,13 @@ def run_polymarket_policy_training(
         "sell_before_close_promotion_support_gate_report_sha256": _sha256_file(
             artifact_paths["sell_before_close_promotion_support_gate_report"]
         ),
+        "sell_before_close_support_aware_threshold_selection_report_sha256": (
+            _sha256_file(
+                artifact_paths[
+                    "sell_before_close_support_aware_threshold_selection_report"
+                ]
+            )
+        ),
     }
     model_manifest = _model_manifest(
         config=config,
@@ -394,6 +455,9 @@ def run_polymarket_policy_training(
         sell_before_close_exit_reliability=sell_before_close_exit_reliability,
         sell_before_close_promotion_support_gate=(
             sell_before_close_promotion_support_gate
+        ),
+        sell_before_close_support_aware_threshold_selection=(
+            sell_before_close_support_aware_threshold_selection
         ),
         sell_before_close_guard_threshold_sweep=(
             sell_before_close_guard_threshold_sweep
@@ -440,6 +504,9 @@ def run_polymarket_policy_training(
         ),
         sell_before_close_promotion_support_gate_report=(
             sell_before_close_promotion_support_gate
+        ),
+        sell_before_close_support_aware_threshold_selection_report=(
+            sell_before_close_support_aware_threshold_selection
         ),
         sell_before_close_guard_threshold_sweep_report=(
             sell_before_close_guard_threshold_sweep
@@ -774,6 +841,25 @@ def _counterfactual_ledger_pnl_report(
         "entry_filter_thresholds": dict(
             prediction_set.get("entry_filter_thresholds", {})
         ),
+        "threshold_selection_failed": bool(
+            prediction_set.get("threshold_selection_failed", False)
+        ),
+        "threshold_selection_method": prediction_set.get(
+            "threshold_selection_method"
+        ),
+        "threshold_selection_fit_split": prediction_set.get(
+            "threshold_selection_fit_split"
+        ),
+        "threshold_selection_evaluation_split": prediction_set.get(
+            "threshold_selection_evaluation_split"
+        ),
+        "uses_shadow_for_fit": prediction_set.get("uses_shadow_for_fit"),
+        "shadow_sweep_not_used_for_threshold_fit": prediction_set.get(
+            "shadow_sweep_not_used_for_threshold_fit"
+        ),
+        "support_aware_threshold_selection_summary": dict(
+            prediction_set.get("support_aware_threshold_selection_summary", {})
+        ),
         "exit_reliability_guard_summary": dict(
             prediction_set.get("exit_reliability_guard_summary", {})
         ),
@@ -836,6 +922,25 @@ def _counterfactual_variant_summary(
         "entry_filter_thresholds": dict(
             prediction_set.get("entry_filter_thresholds", {})
         ),
+        "threshold_selection_failed": bool(
+            prediction_set.get("threshold_selection_failed", False)
+        ),
+        "threshold_selection_method": prediction_set.get(
+            "threshold_selection_method"
+        ),
+        "threshold_selection_fit_split": prediction_set.get(
+            "threshold_selection_fit_split"
+        ),
+        "threshold_selection_evaluation_split": prediction_set.get(
+            "threshold_selection_evaluation_split"
+        ),
+        "uses_shadow_for_fit": prediction_set.get("uses_shadow_for_fit"),
+        "shadow_sweep_not_used_for_threshold_fit": prediction_set.get(
+            "shadow_sweep_not_used_for_threshold_fit"
+        ),
+        "support_aware_threshold_selection_summary": dict(
+            prediction_set.get("support_aware_threshold_selection_summary", {})
+        ),
         "exit_reliability_guard_summary": dict(
             prediction_set.get("exit_reliability_guard_summary", {})
         ),
@@ -867,6 +972,7 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
     model_ranking_candidate_comparison: dict[str, Any],
     sell_before_close_exit_reliability: dict[str, Any],
     sell_before_close_promotion_support_gate: dict[str, Any],
+    sell_before_close_support_aware_threshold_selection: dict[str, Any],
 ) -> None:
     guard_summaries = {
         SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME: (
@@ -879,6 +985,11 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
                 "exit_reliability_p_up_aligned_candidate_summary"
             )
         ),
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME: (
+            sell_before_close_exit_reliability.get(
+                "exit_reliability_support_aware_p_up_aligned_candidate_summary"
+            )
+        ),
     }
     guard_summaries = {
         name: summary for name, summary in guard_summaries.items() if summary
@@ -887,8 +998,11 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
         _refresh_candidate_comparison_rollups(model_ranking_candidate_comparison)
         return
     comparison_rows = sell_before_close_exit_reliability.get(
-        "i_vs_j_vs_k_replay_comparison",
-        [],
+        "i_vs_j_vs_k_vs_l_replay_comparison",
+        sell_before_close_exit_reliability.get(
+            "i_vs_j_vs_k_replay_comparison",
+            [],
+        ),
     )
     support_rows = {
         row["candidate_name"]: row
@@ -897,6 +1011,23 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
             [],
         )
     }
+    support_aware_selection_summary = (
+        sell_before_close_support_aware_threshold_selection_summary(
+            sell_before_close_support_aware_threshold_selection
+        )
+    )
+    support_aware_selection_failed = bool(
+        sell_before_close_support_aware_threshold_selection.get(
+            "selection_reason_codes",
+            [],
+        )
+    )
+    support_aware_selection_reasons = list(
+        sell_before_close_support_aware_threshold_selection.get(
+            "selection_reason_codes",
+            [],
+        )
+    )
     for candidate in model_ranking_candidate_comparison["candidates"]:
         guard_summary = guard_summaries.get(candidate["candidate_name"])
         if not guard_summary:
@@ -1016,6 +1147,38 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
         candidate["promotion_replay_mean_pnl_per_entry"] = support.get(
             "mean_pnl_per_entry"
         )
+        if (
+            candidate["candidate_name"]
+            == SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+        ):
+            candidate["threshold_selection_method"] = support_aware_selection_summary[
+                "threshold_selection_method"
+            ]
+            candidate["threshold_selection_fit_split"] = support_aware_selection_summary[
+                "threshold_selection_fit_split"
+            ]
+            candidate["threshold_selection_evaluation_split"] = (
+                support_aware_selection_summary[
+                    "threshold_selection_evaluation_split"
+                ]
+            )
+            candidate["uses_shadow_for_fit"] = support_aware_selection_summary[
+                "uses_shadow_for_fit"
+            ]
+            candidate["shadow_sweep_not_used_for_threshold_fit"] = (
+                support_aware_selection_summary[
+                    "shadow_sweep_not_used_for_threshold_fit"
+                ]
+            )
+            candidate["support_aware_threshold_selection_failed"] = (
+                support_aware_selection_failed
+            )
+            candidate["support_aware_threshold_selection_reason_codes"] = (
+                support_aware_selection_reasons
+            )
+            candidate["support_aware_threshold_selection_summary"] = (
+                support_aware_selection_summary
+            )
         reasons = set(candidate["ineligible_reason_codes"])
         reasons.discard("p_up_action_disagreement_excessive")
         if not candidate["candidate_scoped_p_up_action_disagreement_within_limit"]:
@@ -1031,6 +1194,13 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
             reasons.add("exit_reliability_guard_residual_positions_remaining")
         if not candidate["promotion_support_eligible"]:
             reasons.update(candidate["promotion_support_reason_codes"])
+        if (
+            candidate["candidate_name"]
+            == SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+            and support_aware_selection_failed
+        ):
+            reasons.add("support_aware_threshold_selection_failed")
+            reasons.update(support_aware_selection_reasons)
         candidate["ineligible_reason_codes"] = sorted(reasons)
         candidate["source_model_eligible"] = not reasons
         candidate["source_model_candidate_eligible"] = not reasons
@@ -1109,6 +1279,32 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
             manifest["promotion_replay_mean_pnl_per_entry"] = candidate[
                 "promotion_replay_mean_pnl_per_entry"
             ]
+            if (
+                candidate["candidate_name"]
+                == SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+            ):
+                manifest["threshold_selection_method"] = candidate[
+                    "threshold_selection_method"
+                ]
+                manifest["threshold_selection_fit_split"] = candidate[
+                    "threshold_selection_fit_split"
+                ]
+                manifest["threshold_selection_evaluation_split"] = candidate[
+                    "threshold_selection_evaluation_split"
+                ]
+                manifest["uses_shadow_for_fit"] = candidate["uses_shadow_for_fit"]
+                manifest["shadow_sweep_not_used_for_threshold_fit"] = candidate[
+                    "shadow_sweep_not_used_for_threshold_fit"
+                ]
+                manifest["support_aware_threshold_selection_failed"] = candidate[
+                    "support_aware_threshold_selection_failed"
+                ]
+                manifest["support_aware_threshold_selection_reason_codes"] = (
+                    candidate["support_aware_threshold_selection_reason_codes"]
+                )
+                manifest["support_aware_threshold_selection_summary"] = candidate[
+                    "support_aware_threshold_selection_summary"
+                ]
             manifest["candidate_scoped_p_up_action_disagreement_rate"] = (
                 candidate["candidate_scoped_p_up_action_disagreement_rate"]
             )
@@ -1158,9 +1354,48 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
         candidate["promotion_replay_mean_pnl_per_entry"] = support.get(
             "mean_pnl_per_entry"
         )
+        if (
+            candidate["candidate_name"]
+            == SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+        ):
+            candidate["threshold_selection_method"] = support_aware_selection_summary[
+                "threshold_selection_method"
+            ]
+            candidate["threshold_selection_fit_split"] = support_aware_selection_summary[
+                "threshold_selection_fit_split"
+            ]
+            candidate["threshold_selection_evaluation_split"] = (
+                support_aware_selection_summary[
+                    "threshold_selection_evaluation_split"
+                ]
+            )
+            candidate["uses_shadow_for_fit"] = support_aware_selection_summary[
+                "uses_shadow_for_fit"
+            ]
+            candidate["shadow_sweep_not_used_for_threshold_fit"] = (
+                support_aware_selection_summary[
+                    "shadow_sweep_not_used_for_threshold_fit"
+                ]
+            )
+            candidate["support_aware_threshold_selection_failed"] = (
+                support_aware_selection_failed
+            )
+            candidate["support_aware_threshold_selection_reason_codes"] = (
+                support_aware_selection_reasons
+            )
+            candidate["support_aware_threshold_selection_summary"] = (
+                support_aware_selection_summary
+            )
         reasons = set(candidate["ineligible_reason_codes"])
         if not candidate["promotion_support_eligible"]:
             reasons.update(candidate["promotion_support_reason_codes"])
+        if (
+            candidate["candidate_name"]
+            == SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+            and support_aware_selection_failed
+        ):
+            reasons.add("support_aware_threshold_selection_failed")
+            reasons.update(support_aware_selection_reasons)
         candidate["ineligible_reason_codes"] = sorted(reasons)
         candidate["source_model_eligible"] = not reasons
         candidate["source_model_candidate_eligible"] = not reasons
@@ -1197,6 +1432,32 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
             manifest["promotion_replay_mean_pnl_per_entry"] = candidate[
                 "promotion_replay_mean_pnl_per_entry"
             ]
+            if (
+                candidate["candidate_name"]
+                == SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+            ):
+                manifest["threshold_selection_method"] = candidate[
+                    "threshold_selection_method"
+                ]
+                manifest["threshold_selection_fit_split"] = candidate[
+                    "threshold_selection_fit_split"
+                ]
+                manifest["threshold_selection_evaluation_split"] = candidate[
+                    "threshold_selection_evaluation_split"
+                ]
+                manifest["uses_shadow_for_fit"] = candidate["uses_shadow_for_fit"]
+                manifest["shadow_sweep_not_used_for_threshold_fit"] = candidate[
+                    "shadow_sweep_not_used_for_threshold_fit"
+                ]
+                manifest["support_aware_threshold_selection_failed"] = candidate[
+                    "support_aware_threshold_selection_failed"
+                ]
+                manifest["support_aware_threshold_selection_reason_codes"] = (
+                    candidate["support_aware_threshold_selection_reason_codes"]
+                )
+                manifest["support_aware_threshold_selection_summary"] = candidate[
+                    "support_aware_threshold_selection_summary"
+                ]
             manifest["source_model_candidate_eligible"] = candidate[
                 "source_model_candidate_eligible"
             ]
@@ -1239,16 +1500,29 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
     model_ranking_candidate_comparison[
         "sell_before_close_exit_reliability_p_up_aligned_summary"
     ] = guard_summaries.get(SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME)
+    model_ranking_candidate_comparison[
+        "sell_before_close_exit_reliability_support_aware_p_up_aligned_summary"
+    ] = guard_summaries.get(
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+    )
     model_ranking_candidate_comparison["i_vs_j_replay_comparison"] = (
         sell_before_close_exit_reliability.get("i_vs_j_replay_comparison", [])
     )
     model_ranking_candidate_comparison["i_vs_j_vs_k_replay_comparison"] = (
+        sell_before_close_exit_reliability.get("i_vs_j_vs_k_replay_comparison", [])
+    )
+    model_ranking_candidate_comparison["i_vs_j_vs_k_vs_l_replay_comparison"] = (
         comparison_rows
     )
     model_ranking_candidate_comparison[
         "sell_before_close_promotion_support_gate_summary"
     ] = sell_before_close_promotion_support_gate_summary(
         sell_before_close_promotion_support_gate
+    )
+    model_ranking_candidate_comparison[
+        "sell_before_close_support_aware_threshold_selection_summary"
+    ] = sell_before_close_support_aware_threshold_selection_summary(
+        sell_before_close_support_aware_threshold_selection
     )
     model_ranking_candidate_comparison[
         "sell_before_close_i_vs_j_vs_k_promotion_support_comparison"
@@ -1324,6 +1598,7 @@ def _write_artifacts(
     sell_before_close_p_up_disagreement_diagnostic: dict[str, Any],
     sell_before_close_exit_reliability: dict[str, Any],
     sell_before_close_promotion_support_gate: dict[str, Any],
+    sell_before_close_support_aware_threshold_selection: dict[str, Any],
     sell_before_close_guard_threshold_sweep: dict[str, Any],
 ) -> dict[str, Path]:
     paths = {
@@ -1410,6 +1685,14 @@ def _write_artifacts(
         "sell_before_close_promotion_support_gate_summary": (
             run_dir / "sell_before_close_promotion_support_gate_report.md"
         ),
+        "sell_before_close_support_aware_threshold_selection_report": (
+            run_dir
+            / "sell_before_close_support_aware_threshold_selection_report.json"
+        ),
+        "sell_before_close_support_aware_threshold_selection_summary": (
+            run_dir
+            / "sell_before_close_support_aware_threshold_selection_report.md"
+        ),
         "sell_before_close_guard_threshold_sweep_report": (
             run_dir / "sell_before_close_guard_threshold_sweep_report.json"
         ),
@@ -1462,11 +1745,22 @@ def _write_artifacts(
     ] = sell_before_close_exit_reliability.get(
         "exit_reliability_p_up_aligned_candidate_summary"
     )
+    model_ranking_candidate_comparison[
+        "sell_before_close_exit_reliability_support_aware_p_up_aligned_summary"
+    ] = sell_before_close_exit_reliability.get(
+        "exit_reliability_support_aware_p_up_aligned_candidate_summary"
+    )
     model_ranking_candidate_comparison["i_vs_j_replay_comparison"] = (
         sell_before_close_exit_reliability.get("i_vs_j_replay_comparison", [])
     )
     model_ranking_candidate_comparison["i_vs_j_vs_k_replay_comparison"] = (
         sell_before_close_exit_reliability.get("i_vs_j_vs_k_replay_comparison", [])
+    )
+    model_ranking_candidate_comparison["i_vs_j_vs_k_vs_l_replay_comparison"] = (
+        sell_before_close_exit_reliability.get(
+            "i_vs_j_vs_k_vs_l_replay_comparison",
+            [],
+        )
     )
     model_ranking_candidate_comparison[
         "sell_before_close_guard_threshold_sweep_summary"
@@ -1479,10 +1773,24 @@ def _write_artifacts(
         sell_before_close_promotion_support_gate
     )
     model_ranking_candidate_comparison[
+        "sell_before_close_support_aware_threshold_selection_summary"
+    ] = sell_before_close_support_aware_threshold_selection_summary(
+        sell_before_close_support_aware_threshold_selection
+    )
+    model_ranking_candidate_comparison[
         "sell_before_close_i_vs_j_vs_k_promotion_support_comparison"
     ] = sell_before_close_promotion_support_gate.get(
         "i_vs_j_vs_k_promotion_support_comparison",
         [],
+    )
+    model_ranking_candidate_comparison[
+        "sell_before_close_i_vs_j_vs_k_vs_l_promotion_support_comparison"
+    ] = sell_before_close_promotion_support_gate.get(
+        "i_vs_j_vs_k_vs_l_promotion_support_comparison",
+        sell_before_close_promotion_support_gate.get(
+            "i_vs_j_vs_k_promotion_support_comparison",
+            [],
+        ),
     )
     source_model_eligibility[
         "sell_before_close_p_up_disagreement_diagnostic_summary"
@@ -1500,11 +1808,22 @@ def _write_artifacts(
     ] = sell_before_close_exit_reliability.get(
         "exit_reliability_p_up_aligned_candidate_summary"
     )
+    source_model_eligibility[
+        "sell_before_close_exit_reliability_support_aware_p_up_aligned_summary"
+    ] = sell_before_close_exit_reliability.get(
+        "exit_reliability_support_aware_p_up_aligned_candidate_summary"
+    )
     source_model_eligibility["i_vs_j_replay_comparison"] = (
         sell_before_close_exit_reliability.get("i_vs_j_replay_comparison", [])
     )
     source_model_eligibility["i_vs_j_vs_k_replay_comparison"] = (
         sell_before_close_exit_reliability.get("i_vs_j_vs_k_replay_comparison", [])
+    )
+    source_model_eligibility["i_vs_j_vs_k_vs_l_replay_comparison"] = (
+        sell_before_close_exit_reliability.get(
+            "i_vs_j_vs_k_vs_l_replay_comparison",
+            [],
+        )
     )
     source_model_eligibility[
         "sell_before_close_guard_threshold_sweep_summary"
@@ -1517,10 +1836,24 @@ def _write_artifacts(
         sell_before_close_promotion_support_gate
     )
     source_model_eligibility[
+        "sell_before_close_support_aware_threshold_selection_summary"
+    ] = sell_before_close_support_aware_threshold_selection_summary(
+        sell_before_close_support_aware_threshold_selection
+    )
+    source_model_eligibility[
         "sell_before_close_i_vs_j_vs_k_promotion_support_comparison"
     ] = sell_before_close_promotion_support_gate.get(
         "i_vs_j_vs_k_promotion_support_comparison",
         [],
+    )
+    source_model_eligibility[
+        "sell_before_close_i_vs_j_vs_k_vs_l_promotion_support_comparison"
+    ] = sell_before_close_promotion_support_gate.get(
+        "i_vs_j_vs_k_vs_l_promotion_support_comparison",
+        sell_before_close_promotion_support_gate.get(
+            "i_vs_j_vs_k_promotion_support_comparison",
+            [],
+        ),
     )
     _write_candidate_artifacts(
         run_dir=run_dir,
@@ -1562,6 +1895,10 @@ def _write_artifacts(
         sell_before_close_promotion_support_gate,
     )
     _write_json(
+        paths["sell_before_close_support_aware_threshold_selection_report"],
+        sell_before_close_support_aware_threshold_selection,
+    )
+    _write_json(
         paths["sell_before_close_guard_threshold_sweep_report"],
         sell_before_close_guard_threshold_sweep,
     )
@@ -1581,6 +1918,9 @@ def _write_artifacts(
         sell_before_close_exit_reliability=sell_before_close_exit_reliability,
         sell_before_close_promotion_support_gate=(
             sell_before_close_promotion_support_gate
+        ),
+        sell_before_close_support_aware_threshold_selection=(
+            sell_before_close_support_aware_threshold_selection
         ),
         sell_before_close_guard_threshold_sweep=(
             sell_before_close_guard_threshold_sweep
@@ -1647,6 +1987,12 @@ def _write_artifacts(
     paths["sell_before_close_promotion_support_gate_summary"].write_text(
         sell_before_close_promotion_support_gate_markdown(
             sell_before_close_promotion_support_gate
+        ),
+        encoding="utf-8",
+    )
+    paths["sell_before_close_support_aware_threshold_selection_summary"].write_text(
+        sell_before_close_support_aware_threshold_selection_markdown(
+            sell_before_close_support_aware_threshold_selection
         ),
         encoding="utf-8",
     )
@@ -1761,6 +2107,7 @@ def _write_counterfactual_replay_artifacts(
     sell_before_close_p_up_disagreement_diagnostic: dict[str, Any],
     sell_before_close_exit_reliability: dict[str, Any],
     sell_before_close_promotion_support_gate: dict[str, Any],
+    sell_before_close_support_aware_threshold_selection: dict[str, Any],
     sell_before_close_guard_threshold_sweep: dict[str, Any],
 ) -> dict[str, Any]:
     root = run_dir / "action_family_counterfactual_replays"
@@ -1795,6 +2142,7 @@ def _write_counterfactual_replay_artifacts(
             SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
             SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
             SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+            SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
         }:
             summary[
                 "sell_before_close_p_up_disagreement_diagnostic_summary"
@@ -1826,6 +2174,11 @@ def _write_counterfactual_replay_artifacts(
                 sell_before_close_promotion_support_gate_summary(
                     sell_before_close_promotion_support_gate
                 )
+            )
+            summary[
+                "sell_before_close_support_aware_threshold_selection_summary"
+            ] = sell_before_close_support_aware_threshold_selection_summary(
+                sell_before_close_support_aware_threshold_selection
             )
             summary["sell_before_close_guard_threshold_sweep_summary"] = (
                 _sell_before_close_guard_threshold_sweep_summary(
@@ -1906,9 +2259,19 @@ def _write_counterfactual_replay_artifacts(
                 "exit_reliability_p_up_aligned_candidate_summary"
             )
         ),
+        "sell_before_close_exit_reliability_support_aware_p_up_aligned_summary": (
+            sell_before_close_exit_reliability.get(
+                "exit_reliability_support_aware_p_up_aligned_candidate_summary"
+            )
+        ),
         "sell_before_close_promotion_support_gate_summary": (
             sell_before_close_promotion_support_gate_summary(
                 sell_before_close_promotion_support_gate
+            )
+        ),
+        "sell_before_close_support_aware_threshold_selection_summary": (
+            sell_before_close_support_aware_threshold_selection_summary(
+                sell_before_close_support_aware_threshold_selection
             )
         ),
         "sell_before_close_i_vs_j_vs_k_promotion_support_comparison": (
@@ -2091,6 +2454,7 @@ def _model_manifest(
     sell_before_close_p_up_disagreement_diagnostic: dict[str, Any],
     sell_before_close_exit_reliability: dict[str, Any],
     sell_before_close_promotion_support_gate: dict[str, Any],
+    sell_before_close_support_aware_threshold_selection: dict[str, Any],
     sell_before_close_guard_threshold_sweep: dict[str, Any],
 ) -> dict[str, Any]:
     split_fields = {
@@ -2393,6 +2757,12 @@ def _model_manifest(
                 [],
             )
         ),
+        "sell_before_close_i_vs_j_vs_k_vs_l_replay_comparison": (
+            sell_before_close_exit_reliability.get(
+                "i_vs_j_vs_k_vs_l_replay_comparison",
+                [],
+            )
+        ),
         "sell_before_close_promotion_support_gate_report_path": (
             "sell_before_close_promotion_support_gate_report.json"
         ),
@@ -2410,6 +2780,28 @@ def _model_manifest(
             sell_before_close_promotion_support_gate.get(
                 "i_vs_j_vs_k_promotion_support_comparison",
                 [],
+            )
+        ),
+        "sell_before_close_i_vs_j_vs_k_vs_l_promotion_support_comparison": (
+            sell_before_close_promotion_support_gate.get(
+                "i_vs_j_vs_k_vs_l_promotion_support_comparison",
+                sell_before_close_promotion_support_gate.get(
+                    "i_vs_j_vs_k_promotion_support_comparison",
+                    [],
+                ),
+            )
+        ),
+        "sell_before_close_support_aware_threshold_selection_report_path": (
+            "sell_before_close_support_aware_threshold_selection_report.json"
+        ),
+        "sell_before_close_support_aware_threshold_selection_report_sha256": (
+            action_family_artifact_hashes[
+                "sell_before_close_support_aware_threshold_selection_report_sha256"
+            ]
+        ),
+        "sell_before_close_support_aware_threshold_selection_summary": (
+            sell_before_close_support_aware_threshold_selection_summary(
+                sell_before_close_support_aware_threshold_selection
             )
         ),
         "sell_before_close_promotion_support_gate_passed": (

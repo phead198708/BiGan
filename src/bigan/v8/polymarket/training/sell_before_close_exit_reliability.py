@@ -20,6 +20,7 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
+    SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
 )
 
 SELL_BEFORE_CLOSE_EXIT_RELIABILITY_SCHEMA_VERSION = (
@@ -59,7 +60,10 @@ def build_sell_before_close_exit_reliability_guard_decisions(
     guard_thresholds = dict(
         thresholds or SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_THRESHOLDS
     )
-    if candidate_name == SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME:
+    if candidate_name in {
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+    }:
         merged = dict(SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS)
         merged.update(guard_thresholds)
         guard_thresholds = merged
@@ -296,6 +300,18 @@ def build_sell_before_close_exit_reliability_report(
                 candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
             )
         )
+    l_replay = _optional_replay_by_variant(
+        action_family_counterfactual_replays,
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+    )
+    if l_replay is not None:
+        candidate_reports.append(
+            _candidate_exit_reliability_payload(
+                dataset=dataset,
+                replay=l_replay,
+                candidate_name=SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+            )
+        )
     summary = i_payload["summary"]
     comparison = _candidate_replay_comparison(candidate_reports)
     report = {
@@ -327,7 +343,17 @@ def build_sell_before_close_exit_reliability_report(
                 SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
             }
         ],
-        "i_vs_j_vs_k_replay_comparison": comparison,
+        "i_vs_j_vs_k_replay_comparison": [
+            row
+            for row in comparison
+            if row["candidate_name"]
+            in {
+                SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
+                SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
+                SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+            }
+        ],
+        "i_vs_j_vs_k_vs_l_replay_comparison": comparison,
         "exit_reliability_guard_candidate_summary": _guard_candidate_summary(
             candidate_reports,
             candidate_name=SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
@@ -335,6 +361,12 @@ def build_sell_before_close_exit_reliability_report(
         "exit_reliability_p_up_aligned_candidate_summary": _guard_candidate_summary(
             candidate_reports,
             candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        ),
+        "exit_reliability_support_aware_p_up_aligned_candidate_summary": (
+            _guard_candidate_summary(
+                candidate_reports,
+                candidate_name=SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+            )
         ),
         "sell_before_close_exit_failure_interpretation": summary[
             "sell_before_close_exit_failure_interpretation"
@@ -654,9 +686,16 @@ def sell_before_close_exit_reliability_summary(report: dict[str, Any]) -> dict[s
         "exit_reliability_p_up_aligned_candidate_summary": report.get(
             "exit_reliability_p_up_aligned_candidate_summary"
         ),
+        "exit_reliability_support_aware_p_up_aligned_candidate_summary": report.get(
+            "exit_reliability_support_aware_p_up_aligned_candidate_summary"
+        ),
         "i_vs_j_replay_comparison": report.get("i_vs_j_replay_comparison", []),
         "i_vs_j_vs_k_replay_comparison": report.get(
             "i_vs_j_vs_k_replay_comparison",
+            [],
+        ),
+        "i_vs_j_vs_k_vs_l_replay_comparison": report.get(
+            "i_vs_j_vs_k_vs_l_replay_comparison",
             [],
         ),
     }
@@ -724,13 +763,13 @@ def sell_before_close_exit_reliability_markdown(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "## I vs J vs K Replay Comparison",
+            "## I vs J vs K vs L Replay Comparison",
             "",
             "| candidate | entries | sells | residual | trade_pnl | settlement_pnl | total_pnl | residual_drag | p_up_disagreement |",
             "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
-    for row in report.get("i_vs_j_vs_k_replay_comparison", []):
+    for row in report.get("i_vs_j_vs_k_vs_l_replay_comparison", []):
         lines.append(
             "| {candidate} | {entries} | {sells} | {residual} | {trade:.6f} | "
             "{settlement:.6f} | {total:.6f} | {drag:.6f} | {p_up:.6f} |".format(

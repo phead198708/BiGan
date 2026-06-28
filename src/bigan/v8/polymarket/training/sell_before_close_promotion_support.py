@@ -10,6 +10,7 @@ from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training.contracts import compact_safety_fields
 from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
 )
 
 SELL_BEFORE_CLOSE_PROMOTION_SUPPORT_GATE_SCHEMA_VERSION = (
@@ -68,6 +69,7 @@ def build_sell_before_close_promotion_support_gate_report(
         "candidate_count": len(rows),
         "candidate_rows": rows,
         "i_vs_j_vs_k_promotion_support_comparison": rows,
+        "i_vs_j_vs_k_vs_l_promotion_support_comparison": rows,
         "entry_decision_count": selected.get("entry_decision_count", 0),
         "sell_decision_count": selected.get("sell_decision_count", 0),
         "unique_market_count": selected.get("unique_market_count", 0),
@@ -302,6 +304,12 @@ def _thresholds(thresholds: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _selected_candidate_row(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    for row in rows:
+        if (
+            row["candidate_name"]
+            == SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+        ):
+            return row
     for row in rows:
         if row["candidate_name"] == SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME:
             return row

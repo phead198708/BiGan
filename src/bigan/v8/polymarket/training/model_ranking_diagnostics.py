@@ -37,6 +37,7 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
+    SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
 )
 
 MODEL_RANKING_ERROR_SCHEMA_VERSION = (
@@ -460,6 +461,13 @@ def _source_candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         "p_up_side_alignment_filter_enabled",
         "exit_policy",
         "entry_filter_thresholds",
+        "threshold_selection_method",
+        "threshold_selection_fit_split",
+        "threshold_selection_evaluation_split",
+        "uses_shadow_for_fit",
+        "shadow_sweep_not_used_for_threshold_fit",
+        "support_aware_threshold_selection_failed",
+        "support_aware_threshold_selection_reason_codes",
         "entry_decision_count_before_guard",
         "entry_decision_count_after_exit_guard",
         "entry_decision_count_after_p_up_alignment",
@@ -1045,6 +1053,37 @@ def _candidate_specs(
                 "HOLD_TO_SETTLEMENT is disabled and remains diagnostic-only",
             ],
         },
+        {
+            "candidate_name": (
+                SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+            ),
+            "candidate_type": (
+                "sell_before_close_support_aware_p_up_aligned_candidate"
+            ),
+            "score_source": "fallback",
+            "corrections": {},
+            "correction_group": "none",
+            "eligible_families": ("SELL_BEFORE_CLOSE",),
+            "enabled_actions": SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_ACTIONS,
+            "disabled_actions": SELL_BEFORE_CLOSE_DISABLED_SOURCE_CANDIDATE_ACTIONS,
+            "exit_reliability_guard_enabled": True,
+            "p_up_side_alignment_filter_enabled": True,
+            "exit_policy": SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
+            "entry_filter_thresholds": {},
+            "threshold_selection_method": (
+                "validation_fitted_support_aware_thresholds"
+            ),
+            "threshold_selection_fit_split": "validation",
+            "threshold_selection_evaluation_split": "shadow",
+            "uses_shadow_for_fit": False,
+            "notes": [
+                "source eligibility candidate scoped to SELL_BEFORE_CLOSE actions",
+                "inherits the stateful exit-reliability guard",
+                "uses validation-fitted support-aware entry thresholds",
+                "requires causal p_up/action side alignment before entry",
+                "HOLD_TO_SETTLEMENT is disabled and remains diagnostic-only",
+            ],
+        },
     )
 
 
@@ -1177,6 +1216,18 @@ def _candidate_report(
         ),
         "exit_policy": spec.get("exit_policy"),
         "entry_filter_thresholds": dict(spec.get("entry_filter_thresholds", {})),
+        "threshold_selection_method": spec.get("threshold_selection_method"),
+        "threshold_selection_fit_split": spec.get("threshold_selection_fit_split"),
+        "threshold_selection_evaluation_split": spec.get(
+            "threshold_selection_evaluation_split"
+        ),
+        "uses_shadow_for_fit": spec.get("uses_shadow_for_fit"),
+        "shadow_sweep_not_used_for_threshold_fit": spec.get(
+            "shadow_sweep_not_used_for_threshold_fit",
+            True if spec.get("threshold_selection_method") else None,
+        ),
+        "support_aware_threshold_selection_failed": False,
+        "support_aware_threshold_selection_reason_codes": [],
         "entry_decision_count_before_guard": entry_decision_count_before_guard,
         "entry_decision_count_after_exit_guard": entry_decision_count_before_guard,
         "entry_decision_count_after_p_up_alignment": entry_decision_count_before_guard,

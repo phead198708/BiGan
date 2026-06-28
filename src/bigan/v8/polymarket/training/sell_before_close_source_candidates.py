@@ -11,6 +11,9 @@ SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME = (
 SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME = (
     "K_sell_before_close_exit_reliability_p_up_aligned_candidate"
 )
+SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME = (
+    "L_sell_before_close_support_aware_p_up_aligned_candidate"
+)
 SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_ACTIONS = (
     "BUY_UP_SELL_BEFORE_CLOSE",
     "BUY_DOWN_SELL_BEFORE_CLOSE",
@@ -51,4 +54,13 @@ SELL_BEFORE_CLOSE_GUARD_THRESHOLD_SWEEP_GRID = {
     "min_calibrated_action_score": (0.015, 0.03, 0.05),
     "min_best_action_margin": (0.0, 0.01, 0.02),
     "min_queue_fill_probability_proxy": (0.50, 0.65, 0.80),
+}
+SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_SELECTION_GRID = {
+    "p_up_alignment_min": (0.50, 0.52, 0.55, 0.58, 0.60),
+    "min_calibrated_action_score": (0.015, 0.02, 0.03, 0.04, 0.05),
+    "min_best_action_margin": (0.0, 0.005, 0.01, 0.02),
+    "min_queue_fill_probability_proxy": (0.50, 0.60, 0.65, 0.75),
+    "min_seconds_to_close": (60.0, 75.0, 90.0, 120.0),
+    "max_entries_per_market": (1.0, 2.0),
+    "min_reentry_cooldown_seconds": (60.0, 90.0, 120.0),
 }
