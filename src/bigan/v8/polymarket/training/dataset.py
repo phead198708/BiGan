@@ -130,6 +130,21 @@ def load_polymarket_policy_dataset(
             for action in ACTION_VALUE_LABEL_ACTIONS
             if action.endswith("SELL_BEFORE_CLOSE")
         }
+        sell_before_close_exit_bid_targets = {
+            action: float(labels[action].get("exit_bid", 0.0))
+            for action in ACTION_VALUE_LABEL_ACTIONS
+            if action.endswith("SELL_BEFORE_CLOSE")
+        }
+        sell_before_close_executable_liquidity_notional_targets = {
+            action: float(labels[action].get("executable_liquidity_notional", 0.0))
+            for action in ACTION_VALUE_LABEL_ACTIONS
+            if action.endswith("SELL_BEFORE_CLOSE")
+        }
+        sell_before_close_exit_path_targets = {
+            action: dict(labels[action].get("sell_before_close_exit_path") or {})
+            for action in ACTION_VALUE_LABEL_ACTIONS
+            if action.endswith("SELL_BEFORE_CLOSE")
+        }
         sell_before_close_label_uses_executable_exit_path_targets = {
             action: bool(labels[action].get("label_uses_executable_exit_path", False))
             for action in ACTION_VALUE_LABEL_ACTIONS
@@ -174,6 +189,15 @@ def load_polymarket_policy_dataset(
                 ),
                 sell_before_close_queue_fill_probability_targets=(
                     sell_before_close_queue_fill_probability_targets
+                ),
+                sell_before_close_exit_bid_targets=(
+                    sell_before_close_exit_bid_targets
+                ),
+                sell_before_close_executable_liquidity_notional_targets=(
+                    sell_before_close_executable_liquidity_notional_targets
+                ),
+                sell_before_close_exit_path_targets=(
+                    sell_before_close_exit_path_targets
                 ),
                 sell_before_close_label_uses_executable_exit_path_targets=(
                     sell_before_close_label_uses_executable_exit_path_targets

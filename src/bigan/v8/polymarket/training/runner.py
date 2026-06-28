@@ -65,6 +65,12 @@ from bigan.v8.polymarket.training.model_ranking_diagnostics import (
     ranking_overlay_zero_entry_diagnostic_markdown,
     source_model_eligibility_markdown,
 )
+from bigan.v8.polymarket.training.sell_before_close_diagnostics import (
+    SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
+    build_sell_before_close_p_up_disagreement_diagnostic_report,
+    sell_before_close_p_up_disagreement_diagnostic_markdown,
+    sell_before_close_p_up_disagreement_summary,
+)
 
 ACTION_VALUE_CONCENTRATION_WARN_THRESHOLD = 0.80
 ACTION_VALUE_CONCENTRATION_FAIL_THRESHOLD = 0.95
@@ -227,6 +233,14 @@ def run_polymarket_policy_training(
         action_family_eligibility=action_family_eligibility,
         model_ranking_candidate_comparison=model_ranking_candidate_comparison,
     )
+    sell_before_close_p_up_disagreement_diagnostic = (
+        build_sell_before_close_p_up_disagreement_diagnostic_report(
+            shadow_examples=dataset.shadow_examples,
+            model_ranking_candidate_comparison=model_ranking_candidate_comparison,
+            action_family_counterfactual_replays=action_family_counterfactual_replays,
+            pnl_notional=float(config.max_paper_notional),
+        )
+    )
     artifact_paths = _write_artifacts(
         run_dir=run_dir,
         config=config,
@@ -254,6 +268,9 @@ def run_polymarket_policy_training(
         action_representation_diagnostic=action_representation_diagnostic,
         ranking_overlay_zero_entry_diagnostic=ranking_overlay_zero_entry_diagnostic,
         source_model_eligibility=source_model_eligibility,
+        sell_before_close_p_up_disagreement_diagnostic=(
+            sell_before_close_p_up_disagreement_diagnostic
+        ),
     )
     model_sha256 = _sha256_file(artifact_paths["model"])
     action_value_calibration_sha256 = _sha256_file(
@@ -287,6 +304,9 @@ def run_polymarket_policy_training(
         "source_model_eligibility_report_sha256": _sha256_file(
             artifact_paths["source_model_eligibility_report"]
         ),
+        "sell_before_close_p_up_disagreement_diagnostic_sha256": _sha256_file(
+            artifact_paths["sell_before_close_p_up_disagreement_diagnostic_report"]
+        ),
     }
     model_manifest = _model_manifest(
         config=config,
@@ -302,6 +322,9 @@ def run_polymarket_policy_training(
         hold_to_settlement_longshot_guard=hold_to_settlement_longshot_guard,
         action_family_artifact_hashes=action_family_artifact_hashes,
         source_model_eligibility=source_model_eligibility,
+        sell_before_close_p_up_disagreement_diagnostic=(
+            sell_before_close_p_up_disagreement_diagnostic
+        ),
     )
     _write_json(artifact_paths["model_manifest"], model_manifest)
     artifact_hashes = {
@@ -336,6 +359,9 @@ def run_polymarket_policy_training(
             ranking_overlay_zero_entry_diagnostic
         ),
         source_model_eligibility_report=source_model_eligibility,
+        sell_before_close_p_up_disagreement_diagnostic_report=(
+            sell_before_close_p_up_disagreement_diagnostic
+        ),
     )
 
 
@@ -515,6 +541,7 @@ def _write_artifacts(
     action_representation_diagnostic: dict[str, Any],
     ranking_overlay_zero_entry_diagnostic: dict[str, Any],
     source_model_eligibility: dict[str, Any],
+    sell_before_close_p_up_disagreement_diagnostic: dict[str, Any],
 ) -> dict[str, Path]:
     paths = {
         "training_config": run_dir / "polymarket_policy_training_config.json",
@@ -582,6 +609,12 @@ def _write_artifacts(
         "source_model_eligibility_summary": (
             run_dir / "source_model_eligibility_report.md"
         ),
+        "sell_before_close_p_up_disagreement_diagnostic_report": (
+            run_dir / "sell_before_close_p_up_disagreement_diagnostic_report.json"
+        ),
+        "sell_before_close_p_up_disagreement_diagnostic_summary": (
+            run_dir / "sell_before_close_p_up_disagreement_diagnostic_report.md"
+        ),
         "all_predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "train_predictions": run_dir / "polymarket_policy_train_predictions.jsonl",
@@ -599,6 +632,15 @@ def _write_artifacts(
     _write_json(paths["replay_report"], replay_report)
     _write_json(paths["action_value_calibration"], action_value_calibration)
     _write_json(paths["action_value_signal_sanity_report"], signal_sanity)
+    diagnostic_summary = sell_before_close_p_up_disagreement_summary(
+        sell_before_close_p_up_disagreement_diagnostic
+    )
+    model_ranking_candidate_comparison[
+        "sell_before_close_p_up_disagreement_diagnostic_summary"
+    ] = diagnostic_summary
+    source_model_eligibility[
+        "sell_before_close_p_up_disagreement_diagnostic_summary"
+    ] = diagnostic_summary
     _write_candidate_artifacts(
         run_dir=run_dir,
         model_ranking_candidate_comparison=model_ranking_candidate_comparison,
@@ -626,6 +668,10 @@ def _write_artifacts(
         ranking_overlay_zero_entry_diagnostic,
     )
     _write_json(paths["source_model_eligibility_report"], source_model_eligibility)
+    _write_json(
+        paths["sell_before_close_p_up_disagreement_diagnostic_report"],
+        sell_before_close_p_up_disagreement_diagnostic,
+    )
     _write_json(paths["action_family_eligibility_report"], action_family_eligibility)
     _write_json(
         paths["hold_to_settlement_longshot_guard_report"],
@@ -636,6 +682,9 @@ def _write_artifacts(
         run_dir=run_dir,
         counterfactual_replays=action_family_counterfactual_replays,
         source_model_eligibility=source_model_eligibility,
+        sell_before_close_p_up_disagreement_diagnostic=(
+            sell_before_close_p_up_disagreement_diagnostic
+        ),
     )
     _write_json(
         paths["action_family_counterfactual_replay_report"],
@@ -681,6 +730,12 @@ def _write_artifacts(
     )
     paths["source_model_eligibility_summary"].write_text(
         source_model_eligibility_markdown(source_model_eligibility),
+        encoding="utf-8",
+    )
+    paths["sell_before_close_p_up_disagreement_diagnostic_summary"].write_text(
+        sell_before_close_p_up_disagreement_diagnostic_markdown(
+            sell_before_close_p_up_disagreement_diagnostic
+        ),
         encoding="utf-8",
     )
     paths["action_family_eligibility_summary"].write_text(
@@ -785,12 +840,16 @@ def _write_counterfactual_replay_artifacts(
     run_dir: Path,
     counterfactual_replays: tuple[dict[str, Any], ...],
     source_model_eligibility: dict[str, Any],
+    sell_before_close_p_up_disagreement_diagnostic: dict[str, Any],
 ) -> dict[str, Any]:
     root = run_dir / "action_family_counterfactual_replays"
     root.mkdir(parents=True, exist_ok=True)
     variant_summaries = []
     source_model_candidate_eligible = bool(
         source_model_eligibility["source_model_candidate_eligible"]
+    )
+    diagnostic_summary = sell_before_close_p_up_disagreement_summary(
+        sell_before_close_p_up_disagreement_diagnostic
     )
     for replay in counterfactual_replays:
         variant_dir = root / replay["variant"]
@@ -799,6 +858,10 @@ def _write_counterfactual_replay_artifacts(
             summary=dict(replay["summary"]),
             source_model_candidate_eligible=source_model_candidate_eligible,
         )
+        if summary["variant"] == SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME:
+            summary[
+                "sell_before_close_p_up_disagreement_diagnostic_summary"
+            ] = diagnostic_summary
         ledger_pnl_report = dict(replay["ledger_pnl_report"])
         ledger_pnl_report["source_model_candidate_eligible"] = (
             source_model_candidate_eligible
@@ -850,6 +913,9 @@ def _write_counterfactual_replay_artifacts(
         "promotion_evidence_ineligible_reasons": (
             [] if promotion_evidence_eligible else ineligible_reasons
         ),
+        "sell_before_close_p_up_disagreement_diagnostic_summary": (
+            diagnostic_summary
+        ),
         "variant_count": len(variant_summaries),
         "variants": variant_summaries,
         **compact_safety_fields(),
@@ -894,6 +960,7 @@ def _model_manifest(
     hold_to_settlement_longshot_guard: dict[str, Any],
     action_family_artifact_hashes: dict[str, str],
     source_model_eligibility: dict[str, Any],
+    sell_before_close_p_up_disagreement_diagnostic: dict[str, Any],
 ) -> dict[str, Any]:
     split_fields = {
         field_name: dataset_profile[field_name]
@@ -1068,6 +1135,49 @@ def _model_manifest(
             "source_model_eligibility_report_sha256"
         ],
         "source_model_eligibility_report": source_model_eligibility,
+        "sell_before_close_p_up_disagreement_diagnostic_report_path": (
+            "sell_before_close_p_up_disagreement_diagnostic_report.json"
+        ),
+        "sell_before_close_p_up_disagreement_diagnostic_sha256": (
+            action_family_artifact_hashes[
+                "sell_before_close_p_up_disagreement_diagnostic_sha256"
+            ]
+        ),
+        "sell_before_close_p_up_disagreement_interpretation": (
+            sell_before_close_p_up_disagreement_diagnostic[
+                "p_up_disagreement_interpretation"
+            ]
+        ),
+        "sell_before_close_disagreed_total_pnl_sum": (
+            sell_before_close_p_up_disagreement_diagnostic["summary"][
+                "sell_before_close_disagreed_total_pnl_sum"
+            ]
+        ),
+        "sell_before_close_agreed_total_pnl_sum": (
+            sell_before_close_p_up_disagreement_diagnostic["summary"][
+                "sell_before_close_agreed_total_pnl_sum"
+            ]
+        ),
+        "sell_before_close_disagreed_trade_pnl_sum": (
+            sell_before_close_p_up_disagreement_diagnostic["summary"][
+                "sell_before_close_disagreed_trade_pnl_sum"
+            ]
+        ),
+        "sell_before_close_disagreed_settlement_pnl_sum": (
+            sell_before_close_p_up_disagreement_diagnostic["summary"][
+                "sell_before_close_disagreed_settlement_pnl_sum"
+            ]
+        ),
+        "sell_before_close_residual_settlement_drag": (
+            sell_before_close_p_up_disagreement_diagnostic["summary"][
+                "sell_before_close_residual_settlement_drag"
+            ]
+        ),
+        "sell_before_close_p_up_disagreement_diagnostic_summary": (
+            sell_before_close_p_up_disagreement_summary(
+                sell_before_close_p_up_disagreement_diagnostic
+            )
+        ),
         "candidate_scoped_source_model_eligibility_summary": (
             source_model_eligibility.get("candidate_scoped_eligibility_summary", [])
         ),

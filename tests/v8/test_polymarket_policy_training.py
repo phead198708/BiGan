@@ -31,6 +31,9 @@ from bigan.v8.polymarket.training.dataset import _split_examples
 from bigan.v8.polymarket.training.model_ranking_diagnostics import (
     build_model_ranking_candidate_comparison,
 )
+from bigan.v8.polymarket.training.sell_before_close_diagnostics import (
+    build_sell_before_close_p_up_disagreement_diagnostic_report,
+)
 
 
 def test_training_dataset_loads_phase2_corpus_outputs(tmp_path: Path) -> None:
@@ -189,6 +192,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "ranking_overlay_zero_entry_diagnostic_summary",
         "source_model_eligibility_report",
         "source_model_eligibility_summary",
+        "sell_before_close_p_up_disagreement_diagnostic_report",
+        "sell_before_close_p_up_disagreement_diagnostic_summary",
         "action_family_eligibility_report",
         "action_family_eligibility_summary",
         "hold_to_settlement_longshot_guard_report",
@@ -415,6 +420,48 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert manifest["candidate_scoped_source_model_eligibility_summary"] == (
         source_eligibility["candidate_scoped_eligibility_summary"]
     )
+    assert manifest[
+        "sell_before_close_p_up_disagreement_diagnostic_report_path"
+    ] == "sell_before_close_p_up_disagreement_diagnostic_report.json"
+    assert looks_like_sha256(
+        manifest["sell_before_close_p_up_disagreement_diagnostic_sha256"]
+    )
+    diagnostic = _read_json(
+        result.artifact_paths[
+            "sell_before_close_p_up_disagreement_diagnostic_report"
+        ]
+    )
+    assert diagnostic["schema_version"] == (
+        "bigan-v8-polymarket-sell-before-close-p-up-disagreement-diagnostic-v1"
+    )
+    assert diagnostic["candidate_name"] == (
+        "I_sell_before_close_only_source_candidate"
+    )
+    assert diagnostic["diagnostic_only"] is True
+    assert diagnostic["promotion_evidence_eligible"] is False
+    assert diagnostic["paper_run_resume_allowed"] is False
+    assert manifest["sell_before_close_p_up_disagreement_interpretation"] in {
+        "likely_model_direction_error",
+        "likely_auxiliary_p_up_action_value_semantic_mismatch",
+        "mixed_evidence",
+        "insufficient_evidence",
+    }
+    assert manifest["sell_before_close_p_up_disagreement_diagnostic_summary"] == (
+        source_eligibility["sell_before_close_p_up_disagreement_diagnostic_summary"]
+    )
+    assert candidate_comparison[
+        "sell_before_close_p_up_disagreement_diagnostic_summary"
+    ] == source_eligibility[
+        "sell_before_close_p_up_disagreement_diagnostic_summary"
+    ]
+    counterfactual_replay = _read_json(
+        result.artifact_paths["action_family_counterfactual_replay_report"]
+    )
+    assert counterfactual_replay[
+        "sell_before_close_p_up_disagreement_diagnostic_summary"
+    ] == source_eligibility[
+        "sell_before_close_p_up_disagreement_diagnostic_summary"
+    ]
     assert candidate_comparison["candidate_artifact_count"] >= 2
     exported_names = {
         artifact["candidate_name"]
@@ -1177,6 +1224,229 @@ def test_sell_before_close_candidate_does_not_resume_without_promotion_replay(
     assert comparison["paper_run_resume_allowed"] is False
     assert comparison["paper_run_resume_blocked_reason"] == (
         "promotion_replay_gate_required"
+    )
+
+
+def test_sell_before_close_p_up_disagreement_diagnostic_is_candidate_scoped() -> None:
+    shadow_examples, comparison, counterfactual_replays = (
+        _sell_before_close_diagnostic_inputs()
+    )
+
+    report = build_sell_before_close_p_up_disagreement_diagnostic_report(
+        shadow_examples=shadow_examples,
+        model_ranking_candidate_comparison=comparison,
+        action_family_counterfactual_replays=counterfactual_replays,
+        pnl_notional=0.20,
+    )
+
+    assert report["diagnostic_only"] is True
+    assert report["promotion_evidence_eligible"] is False
+    assert report["paper_run_resume_allowed"] is False
+    assert report["candidate_name"] == "I_sell_before_close_only_source_candidate"
+    assert report["row_count"] == 12
+    assert {
+        row["selected_action"] for row in report["row_level_diagnostics"]
+    } == {
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+    }
+    assert report["summary"]["disagreed_support_count"] == 10
+    assert report["summary"]["agreed_support_count"] == 2
+    assert report["summary"][
+        "sell_before_close_disagreed_trade_pnl_sum"
+    ] == pytest.approx(0.30)
+    assert report["summary"][
+        "sell_before_close_disagreed_settlement_pnl_sum"
+    ] == pytest.approx(-0.50)
+    assert report["summary"]["sell_before_close_disagreed_total_pnl_sum"] == (
+        pytest.approx(-0.20)
+    )
+    assert report["p_up_disagreement_interpretation"] == (
+        "likely_auxiliary_p_up_action_value_semantic_mismatch"
+    )
+    first_row = report["row_level_diagnostics"][0]
+    for field_name in (
+        "market_id",
+        "slug",
+        "decision_ts",
+        "market_end_ts",
+        "seconds_to_close",
+        "selected_action",
+        "selected_side",
+        "p_up",
+        "p_down",
+        "p_up_direction",
+        "action_side",
+        "p_up_action_disagrees",
+        "calibrated_action_score",
+        "second_best_action",
+        "best_action_margin",
+        "entry_ask",
+        "entry_bid",
+        "exit_bid",
+        "exit_ts",
+        "sell_before_close_execution_class",
+        "queue_fill_probability_estimate",
+        "executable_liquidity_notional",
+        "realized_trade_return",
+        "settlement_return",
+        "realized_total_return",
+        "trade_pnl_contribution",
+        "settlement_pnl_contribution",
+        "total_pnl_contribution",
+        "counterfactual_replay_variant",
+        "reason_codes",
+    ):
+        assert field_name in first_row
+    assert report["comparison_tables"][
+        "high_p_up_disagreement_rows_with_positive_trade_pnl_negative_settlement_pnl"
+    ]
+    assert report["counterfactual_replay_attribution"][
+        "positions_opened_but_not_closed_before_settlement"
+    ] == 3
+
+
+def _sell_before_close_diagnostic_inputs() -> tuple[
+    tuple[PolymarketPolicyExample, ...],
+    dict,
+    tuple[dict, ...],
+]:
+    validation_examples, raw_validation, calibrated_validation = (
+        _sell_before_close_candidate_examples_and_predictions(
+            count=12,
+            start_ts=50_000,
+            selected_sell_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+            selected_sell_realized_return=0.20,
+            hold_realized_return=-0.50,
+            p_up_auxiliary=0.70,
+        )
+    )
+    shadow_examples, raw_shadow, calibrated_shadow = (
+        _sell_before_close_candidate_examples_and_predictions(
+            count=12,
+            start_ts=60_000,
+            selected_sell_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+            selected_sell_realized_return=0.20,
+            hold_realized_return=-0.50,
+            p_up_auxiliary=0.70,
+        )
+    )
+    validation_examples = tuple(
+        _with_sell_before_close_diagnostic_targets(example)
+        for example in validation_examples
+    )
+    shadow_examples = tuple(
+        _with_sell_before_close_diagnostic_targets(example)
+        for example in shadow_examples
+    )
+    comparison = build_model_ranking_candidate_comparison(
+        validation_examples=validation_examples,
+        raw_validation_predictions=raw_validation,
+        calibrated_validation_predictions=calibrated_validation,
+        shadow_examples=shadow_examples,
+        raw_shadow_predictions=raw_shadow,
+        calibrated_shadow_predictions=calibrated_shadow,
+        execution_buffer=0.015,
+    )
+    return (
+        shadow_examples,
+        comparison,
+        (
+            {
+                "variant": "I_sell_before_close_only_source_candidate",
+                "summary": {
+                    "entry_decision_count": 12,
+                    "action_counts": {
+                        "BUY_UP": 2,
+                        "BUY_DOWN": 10,
+                        "SELL_UP": 5,
+                        "SELL_DOWN": 4,
+                    },
+                    "reason_counts": {
+                        "hold_threshold_not_met": 3,
+                        "low_confidence": 1,
+                    },
+                    "realized_trade_pnl": 1.0,
+                    "settlement_pnl": -2.0,
+                    "total_polymarket_pnl": -1.0,
+                    "settlement_event_count": 3,
+                },
+            },
+        ),
+    )
+
+
+def _with_sell_before_close_diagnostic_targets(
+    example: PolymarketPolicyExample,
+) -> PolymarketPolicyExample:
+    action_returns = {
+        "NO_TRADE": 0.0,
+        "BUY_UP_HOLD_TO_SETTLEMENT": -0.50,
+        "BUY_DOWN_HOLD_TO_SETTLEMENT": -0.50,
+        "BUY_UP_SELL_BEFORE_CLOSE": 0.08,
+        "BUY_DOWN_SELL_BEFORE_CLOSE": -0.10,
+    }
+    trade_returns = {
+        "NO_TRADE": 0.0,
+        "BUY_UP_HOLD_TO_SETTLEMENT": 0.0,
+        "BUY_DOWN_HOLD_TO_SETTLEMENT": 0.0,
+        "BUY_UP_SELL_BEFORE_CLOSE": 0.05,
+        "BUY_DOWN_SELL_BEFORE_CLOSE": 0.15,
+    }
+    settlement_returns = {
+        "NO_TRADE": 0.0,
+        "BUY_UP_HOLD_TO_SETTLEMENT": -0.50,
+        "BUY_DOWN_HOLD_TO_SETTLEMENT": -0.50,
+        "BUY_UP_SELL_BEFORE_CLOSE": 0.03,
+        "BUY_DOWN_SELL_BEFORE_CLOSE": -0.25,
+    }
+    ranked = _rank_action_returns(action_returns)
+    features = {
+        **example.features,
+        "up_executable_bid_notional": 0.20,
+        "down_executable_bid_notional": 0.20,
+    }
+    return replace(
+        example,
+        features=features,
+        action_return_targets=action_returns,
+        realized_trade_return_targets=trade_returns,
+        settlement_return_targets=settlement_returns,
+        action_is_positive_targets={
+            action: value > 0.0 for action, value in action_returns.items()
+        },
+        sell_before_close_execution_class_targets={
+            "BUY_UP_SELL_BEFORE_CLOSE": "realizable_sell_before_close",
+            "BUY_DOWN_SELL_BEFORE_CLOSE": "realizable_sell_before_close",
+        },
+        sell_before_close_queue_fill_probability_targets={
+            "BUY_UP_SELL_BEFORE_CLOSE": 0.90,
+            "BUY_DOWN_SELL_BEFORE_CLOSE": 0.80,
+        },
+        sell_before_close_exit_bid_targets={
+            "BUY_UP_SELL_BEFORE_CLOSE": 0.55,
+            "BUY_DOWN_SELL_BEFORE_CLOSE": 0.60,
+        },
+        sell_before_close_executable_liquidity_notional_targets={
+            "BUY_UP_SELL_BEFORE_CLOSE": 0.20,
+            "BUY_DOWN_SELL_BEFORE_CLOSE": 0.20,
+        },
+        sell_before_close_exit_path_targets={
+            "BUY_UP_SELL_BEFORE_CLOSE": {
+                "best_executable_exit_ts": example.decision_ts + 30_000,
+            },
+            "BUY_DOWN_SELL_BEFORE_CLOSE": {
+                "best_executable_exit_ts": example.decision_ts + 30_000,
+            },
+        },
+        sell_before_close_label_uses_executable_exit_path_targets={
+            "BUY_UP_SELL_BEFORE_CLOSE": True,
+            "BUY_DOWN_SELL_BEFORE_CLOSE": True,
+        },
+        best_policy_action=ranked[0][0],
+        best_action_expected_return=ranked[0][1],
+        second_best_action_expected_return=ranked[1][1],
+        best_action_margin=ranked[0][1] - ranked[1][1],
     )
 
 

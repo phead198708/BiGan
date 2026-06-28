@@ -138,6 +138,13 @@ class PolymarketPolicyExample:
     sell_before_close_queue_fill_probability_targets: dict[str, float] = field(
         default_factory=dict
     )
+    sell_before_close_exit_bid_targets: dict[str, float] = field(default_factory=dict)
+    sell_before_close_executable_liquidity_notional_targets: dict[str, float] = field(
+        default_factory=dict
+    )
+    sell_before_close_exit_path_targets: dict[str, dict[str, Any]] = field(
+        default_factory=dict
+    )
     sell_before_close_label_uses_executable_exit_path_targets: dict[str, bool] = field(
         default_factory=dict
     )
@@ -200,6 +207,14 @@ class PolymarketPolicyExample:
                 self.sell_before_close_queue_fill_probability_targets,
                 "sell_before_close_queue_fill_probability_targets",
             ),
+            (
+                self.sell_before_close_exit_bid_targets,
+                "sell_before_close_exit_bid_targets",
+            ),
+            (
+                self.sell_before_close_executable_liquidity_notional_targets,
+                "sell_before_close_executable_liquidity_notional_targets",
+            ),
         ):
             _validate_numeric_target_mapping(
                 mapping,
@@ -209,6 +224,11 @@ class PolymarketPolicyExample:
         for action in self.sell_before_close_execution_class_targets:
             if action not in ACTION_VALUE_LABEL_ACTIONS:
                 raise ValueError("unsupported sell-before-close execution class action")
+        for action, exit_path in self.sell_before_close_exit_path_targets.items():
+            if action not in ACTION_VALUE_LABEL_ACTIONS:
+                raise ValueError("unsupported sell-before-close exit path action")
+            if not isinstance(exit_path, dict):
+                raise ValueError("sell-before-close exit path targets must be dicts")
         for action in self.sell_before_close_label_uses_executable_exit_path_targets:
             if action not in ACTION_VALUE_LABEL_ACTIONS:
                 raise ValueError("unsupported sell-before-close executable path action")
@@ -503,6 +523,7 @@ class PolymarketPolicyTrainingResult:
     action_representation_diagnostic_report: dict[str, Any]
     ranking_overlay_zero_entry_diagnostic_report: dict[str, Any]
     source_model_eligibility_report: dict[str, Any]
+    sell_before_close_p_up_disagreement_diagnostic_report: dict[str, Any]
 
 
 def safety_fields() -> dict[str, bool]:
