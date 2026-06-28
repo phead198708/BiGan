@@ -45,6 +45,7 @@ from bigan.v8.polymarket.training.sell_before_close_promotion_support import (
 )
 from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
 )
 from bigan.v8.polymarket.training.sell_before_close_support_aware_thresholds import (
@@ -222,6 +223,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "sell_before_close_support_aware_threshold_failure_attribution_summary",
         "sell_before_close_validation_failure_drilldown_report",
         "sell_before_close_validation_failure_drilldown_summary",
+        "sell_before_close_side_balanced_candidate_report",
+        "sell_before_close_side_balanced_candidate_summary",
         "sell_before_close_guard_threshold_sweep_report",
         "sell_before_close_guard_threshold_sweep_summary",
         "action_family_eligibility_report",
@@ -389,10 +392,11 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "G_bucketed_lcb_rank_selector",
         "H_positive_bucket_rank_selector",
         "I_sell_before_close_only_source_candidate",
-        "J_sell_before_close_exit_reliability_guard_candidate",
-        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
-        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
-    }.issubset(set(candidate_comparison["candidate_names"]))
+            "J_sell_before_close_exit_reliability_guard_candidate",
+            SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+            SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+            "M_sell_before_close_side_balanced_ranking_candidate",
+        }.issubset(set(candidate_comparison["candidate_names"]))
     for candidate in candidate_comparison["candidates"]:
         for field_name in (
             "shadow_raw_mae",
@@ -445,8 +449,12 @@ def test_training_runner_writes_required_artifacts_and_manifest(
             "promotion_replay_side_count",
             "promotion_replay_side_distribution",
             "promotion_replay_mean_pnl_per_entry",
-        ):
-            assert field_name in candidate
+            "side_balance_required",
+            "side_balance_gate_passed",
+            "side_balance_thresholds",
+            "side_balance_selection_summary",
+            ):
+                assert field_name in candidate
     sell_only_candidate = _candidate_by_name(
         candidate_comparison,
         "I_sell_before_close_only_source_candidate",
@@ -661,6 +669,7 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "J_sell_before_close_exit_reliability_guard_candidate",
         SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
         SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+        "M_sell_before_close_side_balanced_ranking_candidate",
     }
     assert exit_reliability["exit_reliability_guard_candidate_summary"][
         "candidate_name"
@@ -674,6 +683,7 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert len(exit_reliability["i_vs_j_replay_comparison"]) == 2
     assert len(exit_reliability["i_vs_j_vs_k_replay_comparison"]) == 3
     assert len(exit_reliability["i_vs_j_vs_k_vs_l_replay_comparison"]) == 4
+    assert len(exit_reliability["i_vs_j_vs_k_vs_l_vs_m_replay_comparison"]) == 5
     assert exit_reliability["exit_reliability_p_up_aligned_candidate_summary"][
         "candidate_name"
     ] == SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME
@@ -696,6 +706,9 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     )
     assert manifest["sell_before_close_i_vs_j_vs_k_vs_l_replay_comparison"] == (
         source_eligibility["i_vs_j_vs_k_vs_l_replay_comparison"]
+    )
+    assert manifest["sell_before_close_i_vs_j_vs_k_vs_l_vs_m_replay_comparison"] == (
+        source_eligibility["i_vs_j_vs_k_vs_l_vs_m_replay_comparison"]
     )
     threshold_selection = _read_json(
         result.artifact_paths[
@@ -760,10 +773,11 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "positive_pnl_only_at_low_support",
         "exit_reliability_failure",
         "p_up_alignment_over_filters",
-        "pnl_not_positive_under_support",
-        "mixed_threshold_failure",
-        "insufficient_evidence",
-    }
+            "pnl_not_positive_under_support",
+            "support_prefilter_prevents_pnl_evaluation",
+            "mixed_threshold_failure",
+            "insufficient_evidence",
+        }
     assert threshold_selection["recommended_next_action"] in {
         "collect_more_real_corpus",
         "expand_validation_grid_without_shadow_fit",
@@ -871,20 +885,25 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert drilldown["side_coverage_drilldown"][
         "positive_pnl_rows_with_both_sides"
     ] == 0
+    assert drilldown["pnl_evaluated_row_count"] == 0
+    assert drilldown[
+        "pnl_not_evaluated_due_to_support_prefilter_count"
+    ] == 9600
+    assert drilldown["support_prefilter_prevents_pnl_evaluation"] is True
+    assert "support_prefilter_prevents_pnl_evaluation" in drilldown[
+        "failure_interpretations"
+    ]
     assert "one_sided_support" in drilldown["failure_interpretations"]
-    assert (
-        "pnl_not_positive_under_support"
-        in drilldown["failure_interpretations"]
-        or "action_value_ranking_failure_likely"
-        in drilldown["failure_interpretations"]
-    )
+    assert "action_value_ranking_failure_likely" not in drilldown[
+        "failure_interpretations"
+    ]
     assert "keep_blocked" in drilldown["recommended_next_actions"]
     assert drilldown["model_ranking_failure_clues"][
         "all_rows_total_pnl_failed"
-    ] is True
+    ] is False
     assert drilldown["model_ranking_failure_clues"][
         "all_rows_mean_pnl_failed"
-    ] is True
+    ] is False
     assert drilldown["model_ranking_failure_clues"][
         "side_coverage_all_rows_failed"
     ] is True
@@ -1421,6 +1440,7 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "J_sell_before_close_exit_reliability_guard_candidate",
         SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
         SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+        "M_sell_before_close_side_balanced_ranking_candidate",
         "D_hold_to_settlement_allowed_only_for_passed_buckets_reranked",
         "E_threshold_0.00_action_family_gates_reranked",
         "E_threshold_0.03_action_family_gates_reranked",
@@ -1925,6 +1945,30 @@ def test_sell_before_close_candidate_fails_closed_when_sell_family_fails(
         "ineligible_reason_codes"
     ]
     assert "action_value_calibration_quality_failed" in candidate[
+        "ineligible_reason_codes"
+    ]
+
+
+def test_side_balanced_sell_before_close_candidate_fails_closed_on_one_side(
+    tmp_path: Path,
+) -> None:
+    comparison = _sell_before_close_candidate_comparison(
+        positive_sell_return=0.20,
+        hold_return=-0.50,
+        selected_sell_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    candidate = _candidate_by_name(
+        comparison,
+        SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+    )
+
+    assert candidate["enabled_action_families"] == ["SELL_BEFORE_CLOSE"]
+    assert candidate["disabled_action_families"] == ["HOLD_TO_SETTLEMENT"]
+    assert candidate["side_balance_required"] is True
+    assert candidate["side_balance_gate_passed"] is False
+    assert candidate["source_model_candidate_eligible"] is False
+    assert "side_balance_required_gate_failed" in candidate[
         "ineligible_reason_codes"
     ]
 

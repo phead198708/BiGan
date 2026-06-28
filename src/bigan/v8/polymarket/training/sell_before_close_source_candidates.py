@@ -14,6 +14,9 @@ SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME = (
 SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME = (
     "L_sell_before_close_support_aware_p_up_aligned_candidate"
 )
+SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME = (
+    "M_sell_before_close_side_balanced_ranking_candidate"
+)
 SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_ACTIONS = (
     "BUY_UP_SELL_BEFORE_CLOSE",
     "BUY_DOWN_SELL_BEFORE_CLOSE",
@@ -64,3 +67,24 @@ SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_SELECTION_GRID = {
     "max_entries_per_market": (1.0, 2.0),
     "min_reentry_cooldown_seconds": (60.0, 90.0, 120.0),
 }
+SELL_BEFORE_CLOSE_SIDE_BALANCE_THRESHOLDS = {
+    "min_side_count": 2.0,
+    "min_per_side_entry_count": 5.0,
+    "min_per_side_market_count": 3.0,
+    "max_side_entry_ratio": 0.75,
+    "side_balance_required": True,
+    "side_quota_per_side": 10.0,
+}
+SELL_BEFORE_CLOSE_SIDE_BALANCE_REASON_CODES = (
+    "entry_blocked_side_quota_full",
+    "entry_blocked_side_balance_required",
+    "entry_blocked_side_min_support_not_met",
+    "entry_blocked_side_market_support_not_met",
+    "entry_blocked_side_ratio_limit",
+    "side_balance_candidate_selected",
+    "side_balance_up_support_insufficient",
+    "side_balance_down_support_insufficient",
+    "side_balance_market_support_insufficient",
+    "side_balance_pnl_not_positive",
+    "side_balance_support_passed",
+)

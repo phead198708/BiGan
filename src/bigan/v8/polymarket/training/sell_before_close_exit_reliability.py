@@ -20,6 +20,7 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
+    SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
 )
 
@@ -312,8 +313,29 @@ def build_sell_before_close_exit_reliability_report(
                 candidate_name=SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
             )
         )
-    summary = i_payload["summary"]
+    m_replay = _optional_replay_by_variant(
+        action_family_counterfactual_replays,
+        SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+    )
+    if m_replay is not None:
+        candidate_reports.append(
+            _candidate_exit_reliability_payload(
+                dataset=dataset,
+                replay=m_replay,
+                candidate_name=SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+            )
+        )
     comparison = _candidate_replay_comparison(candidate_reports)
+    legacy_l_candidate_names = {
+        SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+    }
+    legacy_l_comparison = [
+        row for row in comparison if row["candidate_name"] in legacy_l_candidate_names
+    ]
+    summary = i_payload["summary"]
     report = {
         "schema_version": SELL_BEFORE_CLOSE_EXIT_RELIABILITY_SCHEMA_VERSION,
         "candidate_name": SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
@@ -353,7 +375,8 @@ def build_sell_before_close_exit_reliability_report(
                 SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
             }
         ],
-        "i_vs_j_vs_k_vs_l_replay_comparison": comparison,
+        "i_vs_j_vs_k_vs_l_replay_comparison": legacy_l_comparison,
+        "i_vs_j_vs_k_vs_l_vs_m_replay_comparison": comparison,
         "exit_reliability_guard_candidate_summary": _guard_candidate_summary(
             candidate_reports,
             candidate_name=SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
@@ -366,6 +389,12 @@ def build_sell_before_close_exit_reliability_report(
             _guard_candidate_summary(
                 candidate_reports,
                 candidate_name=SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+            )
+        ),
+        "exit_reliability_side_balanced_candidate_summary": (
+            _guard_candidate_summary(
+                candidate_reports,
+                candidate_name=SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
             )
         ),
         "sell_before_close_exit_failure_interpretation": summary[
@@ -438,6 +467,13 @@ def _candidate_exit_reliability_payload(
             "entry_filter_blocked_count",
         ):
             summary[field] = guard_summary.get(field)
+    side_balance_summary = dict(replay.get("side_balance_selection_summary") or {})
+    if side_balance_summary:
+        summary["side_balance_required"] = True
+        summary["side_balance_selection_summary"] = side_balance_summary
+        summary["side_balance_gate_passed"] = bool(
+            side_balance_summary.get("side_balance_gate_passed", False)
+        )
     return {
         "candidate_name": candidate_name,
         "counterfactual_replay_variant": replay["variant"],
@@ -445,6 +481,7 @@ def _candidate_exit_reliability_payload(
         "promotion_evidence_eligible": False,
         "paper_run_resume_allowed": False,
         "exit_reliability_guard_summary": guard_summary,
+        "side_balance_selection_summary": side_balance_summary,
         "summary": summary,
         "candidate_scoped_p_up_action_disagreement": p_up_disagreement,
         "replay_report": {
@@ -497,6 +534,12 @@ def _candidate_replay_comparison(
                 ],
                 "source_model_candidate_eligible": False,
                 "ineligible_reason_codes": [],
+                "side_balance_gate_passed": bool(
+                    summary.get("side_balance_gate_passed", False)
+                ),
+                "side_balance_selection_summary": dict(
+                    summary.get("side_balance_selection_summary", {})
+                ),
             }
         )
     if rows:
@@ -524,6 +567,10 @@ def _guard_candidate_summary(
         if report["candidate_name"] == candidate_name:
             summary = report["summary"]
             guard = report["exit_reliability_guard_summary"]
+            side_balance_summary = dict(
+                report.get("side_balance_selection_summary", {})
+                or summary.get("side_balance_selection_summary", {})
+            )
             return {
                 "candidate_name": report["candidate_name"],
                 "exit_reliability_guard_enabled": True,
@@ -584,6 +631,11 @@ def _guard_candidate_summary(
                 "candidate_scoped_p_up_action_disagreement_within_limit": summary[
                     "candidate_scoped_p_up_action_disagreement_within_limit"
                 ],
+                "side_balance_required": bool(side_balance_summary),
+                "side_balance_selection_summary": side_balance_summary,
+                "side_balance_gate_passed": bool(
+                    side_balance_summary.get("side_balance_gate_passed", False)
+                ),
                 "promotion_evidence_eligible": False,
                 "paper_run_resume_allowed": False,
             }
@@ -689,6 +741,9 @@ def sell_before_close_exit_reliability_summary(report: dict[str, Any]) -> dict[s
         "exit_reliability_support_aware_p_up_aligned_candidate_summary": report.get(
             "exit_reliability_support_aware_p_up_aligned_candidate_summary"
         ),
+        "exit_reliability_side_balanced_candidate_summary": report.get(
+            "exit_reliability_side_balanced_candidate_summary"
+        ),
         "i_vs_j_replay_comparison": report.get("i_vs_j_replay_comparison", []),
         "i_vs_j_vs_k_replay_comparison": report.get(
             "i_vs_j_vs_k_replay_comparison",
@@ -696,6 +751,10 @@ def sell_before_close_exit_reliability_summary(report: dict[str, Any]) -> dict[s
         ),
         "i_vs_j_vs_k_vs_l_replay_comparison": report.get(
             "i_vs_j_vs_k_vs_l_replay_comparison",
+            [],
+        ),
+        "i_vs_j_vs_k_vs_l_vs_m_replay_comparison": report.get(
+            "i_vs_j_vs_k_vs_l_vs_m_replay_comparison",
             [],
         ),
     }
@@ -782,6 +841,31 @@ def sell_before_close_exit_reliability_markdown(report: dict[str, Any]) -> str:
                 total=row["total_pnl"],
                 drag=row["replay_residual_settlement_drag"],
                 p_up=row["p_up_disagreement_rate"],
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## I vs J vs K vs L vs M Replay Comparison",
+            "",
+            "| candidate | entries | sells | residual | trade_pnl | settlement_pnl | total_pnl | residual_drag | p_up_disagreement | side_balance |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        ]
+    )
+    for row in report.get("i_vs_j_vs_k_vs_l_vs_m_replay_comparison", []):
+        lines.append(
+            "| {candidate} | {entries} | {sells} | {residual} | {trade:.6f} | "
+            "{settlement:.6f} | {total:.6f} | {drag:.6f} | {p_up:.6f} | {side} |".format(
+                candidate=row["candidate_name"],
+                entries=row["entry_count"],
+                sells=row["sell_count"],
+                residual=row["residual_count"],
+                trade=row["realized_trade_pnl"],
+                settlement=row["settlement_pnl"],
+                total=row["total_pnl"],
+                drag=row["replay_residual_settlement_drag"],
+                p_up=row["p_up_disagreement_rate"],
+                side=str(row.get("side_balance_gate_passed", False)).lower(),
             )
         )
     lines.extend(

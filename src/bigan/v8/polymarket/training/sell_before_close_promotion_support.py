@@ -9,7 +9,11 @@ from typing import Any
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training.contracts import compact_safety_fields
 from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
+    SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_SIDE_BALANCE_THRESHOLDS,
+    SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
 )
 
@@ -59,6 +63,15 @@ def build_sell_before_close_promotion_support_gate_report(
             )
         )
     selected = _selected_candidate_row(rows)
+    legacy_l_names = {
+        SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+    }
+    legacy_l_rows = [
+        row for row in rows if row["candidate_name"] in legacy_l_names
+    ]
     report = {
         "schema_version": SELL_BEFORE_CLOSE_PROMOTION_SUPPORT_GATE_SCHEMA_VERSION,
         "candidate_name": selected.get(
@@ -68,13 +81,25 @@ def build_sell_before_close_promotion_support_gate_report(
         "thresholds": gate_thresholds,
         "candidate_count": len(rows),
         "candidate_rows": rows,
-        "i_vs_j_vs_k_promotion_support_comparison": rows,
-        "i_vs_j_vs_k_vs_l_promotion_support_comparison": rows,
+        "i_vs_j_vs_k_promotion_support_comparison": legacy_l_rows,
+        "i_vs_j_vs_k_vs_l_promotion_support_comparison": legacy_l_rows,
+        "i_vs_j_vs_k_vs_l_vs_m_promotion_support_comparison": rows,
         "entry_decision_count": selected.get("entry_decision_count", 0),
         "sell_decision_count": selected.get("sell_decision_count", 0),
         "unique_market_count": selected.get("unique_market_count", 0),
         "side_count": selected.get("side_count", 0),
         "side_distribution": selected.get("side_distribution", {}),
+        "side_balance_required": selected.get("side_balance_required", False),
+        "side_balance_gate_passed": selected.get(
+            "side_balance_gate_passed",
+            False,
+        ),
+        "side_balance_thresholds": selected.get("side_balance_thresholds", {}),
+        "up_entry_count": selected.get("up_entry_count", 0),
+        "down_entry_count": selected.get("down_entry_count", 0),
+        "up_market_count": selected.get("up_market_count", 0),
+        "down_market_count": selected.get("down_market_count", 0),
+        "side_entry_ratio": selected.get("side_entry_ratio", 0.0),
         "total_pnl": selected.get("total_pnl", 0.0),
         "mean_pnl_per_entry": selected.get("mean_pnl_per_entry", 0.0),
         "max_drawdown": selected.get("max_drawdown", 0.0),
@@ -135,6 +160,11 @@ def evaluate_sell_before_close_promotion_support(
     side_distribution = Counter(
         {side: count for side, count in side_distribution.items() if side}
     )
+    market_by_side: dict[str, set[str]] = {"UP": set(), "DOWN": set()}
+    for decision in entry_decisions:
+        side = _entry_side(decision)
+        if side in market_by_side:
+            market_by_side[side].add(str(decision.get("market_id")))
     entry_count = len(entry_decisions)
     sell_count = len(sell_decisions)
     market_count = len({str(decision.get("market_id")) for decision in entry_decisions})
@@ -185,6 +215,74 @@ def evaluate_sell_before_close_promotion_support(
         max_drawdown_ratio = max_drawdown / total_pnl
         if max_drawdown_ratio > float(ratio_limit):
             reason_codes.append("promotion_replay_drawdown_too_large")
+    side_balance_required = (
+        candidate_name == SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME
+    )
+    side_balance_thresholds = (
+        dict(SELL_BEFORE_CLOSE_SIDE_BALANCE_THRESHOLDS)
+        if side_balance_required
+        else {}
+    )
+    up_entry_count = int(side_distribution.get("UP", 0))
+    down_entry_count = int(side_distribution.get("DOWN", 0))
+    up_market_count = len(market_by_side["UP"])
+    down_market_count = len(market_by_side["DOWN"])
+    max_side_count = max(side_distribution.values(), default=0)
+    side_entry_ratio = 0.0 if entry_count == 0 else max_side_count / entry_count
+    side_balance_gate_passed = True
+    side_balance_reason_codes: list[str] = []
+    if side_balance_required:
+        side_balance_gate_passed = (
+            side_count >= int(float(side_balance_thresholds["min_side_count"]))
+            and up_entry_count
+            >= int(float(side_balance_thresholds["min_per_side_entry_count"]))
+            and down_entry_count
+            >= int(float(side_balance_thresholds["min_per_side_entry_count"]))
+            and up_market_count
+            >= int(float(side_balance_thresholds["min_per_side_market_count"]))
+            and down_market_count
+            >= int(float(side_balance_thresholds["min_per_side_market_count"]))
+            and side_entry_ratio
+            <= float(side_balance_thresholds["max_side_entry_ratio"])
+        )
+        if side_count < int(float(side_balance_thresholds["min_side_count"])):
+            reason_codes.append("entry_blocked_side_balance_required")
+            side_balance_reason_codes.append("entry_blocked_side_balance_required")
+        if up_entry_count < int(
+            float(side_balance_thresholds["min_per_side_entry_count"])
+        ):
+            reason_codes.append("side_balance_up_support_insufficient")
+            reason_codes.append("entry_blocked_side_min_support_not_met")
+            side_balance_reason_codes.append("side_balance_up_support_insufficient")
+            side_balance_reason_codes.append("entry_blocked_side_min_support_not_met")
+        if down_entry_count < int(
+            float(side_balance_thresholds["min_per_side_entry_count"])
+        ):
+            reason_codes.append("side_balance_down_support_insufficient")
+            reason_codes.append("entry_blocked_side_min_support_not_met")
+            side_balance_reason_codes.append("side_balance_down_support_insufficient")
+            side_balance_reason_codes.append("entry_blocked_side_min_support_not_met")
+        if up_market_count < int(
+            float(side_balance_thresholds["min_per_side_market_count"])
+        ) or down_market_count < int(
+            float(side_balance_thresholds["min_per_side_market_count"])
+        ):
+            reason_codes.append("side_balance_market_support_insufficient")
+            reason_codes.append("entry_blocked_side_market_support_not_met")
+            side_balance_reason_codes.append(
+                "side_balance_market_support_insufficient"
+            )
+            side_balance_reason_codes.append(
+                "entry_blocked_side_market_support_not_met"
+            )
+        if side_entry_ratio > float(side_balance_thresholds["max_side_entry_ratio"]):
+            reason_codes.append("entry_blocked_side_ratio_limit")
+            side_balance_reason_codes.append("entry_blocked_side_ratio_limit")
+        if total_pnl <= 0.0 or mean_pnl_per_entry <= 0.0:
+            reason_codes.append("side_balance_pnl_not_positive")
+            side_balance_reason_codes.append("side_balance_pnl_not_positive")
+        if side_balance_gate_passed and total_pnl > 0.0 and mean_pnl_per_entry > 0.0:
+            side_balance_reason_codes.append("side_balance_support_passed")
     support_passed = not reason_codes
     return {
         "candidate_name": candidate_name,
@@ -196,6 +294,15 @@ def evaluate_sell_before_close_promotion_support(
         "market_count": market_count,
         "side_count": side_count,
         "side_distribution": dict(sorted(side_distribution.items())),
+        "side_balance_required": side_balance_required,
+        "side_balance_gate_passed": side_balance_gate_passed,
+        "side_balance_thresholds": side_balance_thresholds,
+        "side_balance_reason_codes": sorted(set(side_balance_reason_codes)),
+        "up_entry_count": up_entry_count,
+        "down_entry_count": down_entry_count,
+        "up_market_count": up_market_count,
+        "down_market_count": down_market_count,
+        "side_entry_ratio": side_entry_ratio,
         "total_pnl": total_pnl,
         "mean_pnl_per_entry": mean_pnl_per_entry,
         "max_drawdown": max_drawdown,
@@ -227,6 +334,14 @@ def sell_before_close_promotion_support_gate_summary(
         "unique_market_count",
         "side_count",
         "side_distribution",
+        "side_balance_required",
+        "side_balance_gate_passed",
+        "side_balance_thresholds",
+        "up_entry_count",
+        "down_entry_count",
+        "up_market_count",
+        "down_market_count",
+        "side_entry_ratio",
         "total_pnl",
         "mean_pnl_per_entry",
         "max_drawdown",
@@ -289,18 +404,24 @@ def sell_before_close_promotion_support_gate_markdown(
         "",
         "## I/J/K Support Comparison",
         "",
-        "| candidate | entries | markets | sides | sells | total_pnl | mean_pnl_per_entry | max_drawdown | residual | p_up_disagreement | support | reasons |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+        "| candidate | entries | up | down | markets | sides | side_ratio | sells | total_pnl | mean_pnl_per_entry | max_drawdown | residual | p_up_disagreement | support | side_balance | reasons |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
     ]
-    for row in report.get("i_vs_j_vs_k_promotion_support_comparison", []):
+    for row in report.get(
+        "i_vs_j_vs_k_vs_l_vs_m_promotion_support_comparison",
+        report.get("i_vs_j_vs_k_promotion_support_comparison", []),
+    ):
         lines.append(
-            "| {candidate} | {entries} | {markets} | {sides} | {sells} | "
+            "| {candidate} | {entries} | {up} | {down} | {markets} | {sides} | {ratio:.4f} | {sells} | "
             "{total:.6f} | {mean:.6f} | {drawdown:.6f} | {residual} | "
-            "{p_up:.6f} | {support} | {reasons} |".format(
+            "{p_up:.6f} | {support} | {side_balance} | {reasons} |".format(
                 candidate=row["candidate_name"],
                 entries=row["entry_decision_count"],
+                up=row.get("up_entry_count", 0),
+                down=row.get("down_entry_count", 0),
                 markets=row["unique_market_count"],
                 sides=row["side_count"],
+                ratio=float(row.get("side_entry_ratio", 0.0)),
                 sells=row["sell_decision_count"],
                 total=row["total_pnl"],
                 mean=row["mean_pnl_per_entry"],
@@ -308,6 +429,7 @@ def sell_before_close_promotion_support_gate_markdown(
                 residual=row["positions_opened_but_not_closed_before_settlement"],
                 p_up=row["candidate_scoped_p_up_action_disagreement_rate"],
                 support=str(row["support_gate_passed"]).lower(),
+                side_balance=str(row.get("side_balance_gate_passed", False)).lower(),
                 reasons=", ".join(row["support_gate_reason_codes"]) or "none",
             )
         )

@@ -41,6 +41,8 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_THRESHOLDS,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
+    SELL_BEFORE_CLOSE_SIDE_BALANCE_THRESHOLDS,
+    SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
 )
 
@@ -471,6 +473,10 @@ def build_action_family_counterfactual_prediction_sets(
             entry_filter_thresholds=support_aware_thresholds,
             threshold_selection_report=support_aware_threshold_selection_report,
         ),
+        build_sell_before_close_side_balanced_prediction_set(
+            predictions=predictions,
+            execution_buffer=execution_buffer,
+        ),
         _counterfactual_variant(
             variant="D_hold_to_settlement_allowed_only_for_passed_buckets_reranked",
             predictions=predictions,
@@ -571,6 +577,276 @@ def build_sell_before_close_support_aware_prediction_set(
             ),
         }
     return variant
+
+
+def build_sell_before_close_side_balanced_prediction_set(
+    *,
+    predictions: tuple[PolymarketPolicyPrediction, ...],
+    execution_buffer: float,
+    side_balance_thresholds: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the M side-balanced SELL_BEFORE_CLOSE ranking prediction set."""
+
+    thresholds = dict(SELL_BEFORE_CLOSE_SIDE_BALANCE_THRESHOLDS)
+    if side_balance_thresholds:
+        thresholds.update(side_balance_thresholds)
+    reranked = [
+        _rerank_counterfactual_prediction(
+            prediction=prediction,
+            allowed_mode="sell_before_close_only",
+            eligible_action_families=(),
+            passed_bucket_keys=set(),
+        )
+        for prediction in predictions
+    ]
+    candidate_rows = _side_balance_candidate_rows(
+        predictions=tuple(reranked),
+        execution_buffer=execution_buffer,
+    )
+    selected_keys = _side_quota_selected_keys(
+        rows=candidate_rows,
+        thresholds=thresholds,
+    )
+    replay_predictions = tuple(
+        _side_balance_prediction(
+            prediction=prediction,
+            selected_keys=selected_keys,
+        )
+        for prediction in reranked
+    )
+    ranked_rows = _side_balance_ranked_rows(
+        rows=candidate_rows,
+        selected_keys=selected_keys,
+        thresholds=thresholds,
+    )
+    summary = _side_balance_selection_summary(
+        rows=ranked_rows,
+        thresholds=thresholds,
+    )
+    return {
+        "variant": SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+        "description": (
+            "side-balanced SELL_BEFORE_CLOSE source candidate with deterministic "
+            "validation-style side quota ranking and causal guarded exits"
+        ),
+        "counterfactual_replay_mode": "re_ranked_counterfactual_policy_replay",
+        "allowed_mode": "sell_before_close_side_balanced_ranking",
+        "ev_threshold": execution_buffer,
+        "eligible_action_families": ["SELL_BEFORE_CLOSE"],
+        "family_gate_results": {},
+        "prediction_count": len(replay_predictions),
+        "predictions": replay_predictions,
+        "exit_reliability_guard_enabled": True,
+        "p_up_side_alignment_filter_enabled": True,
+        "exit_policy": SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
+        "entry_filter_thresholds": dict(
+            SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS
+        ),
+        "side_balance_required": True,
+        "side_balance_thresholds": thresholds,
+        "side_balance_candidate_entries": ranked_rows,
+        "side_balance_selection_summary": summary,
+        "side_balance_selection_fit_split": "validation",
+        "side_balance_selection_evaluation_split": "shadow",
+        "uses_shadow_for_fit": False,
+        "shadow_sweep_not_used_for_fit": True,
+        **compact_safety_fields(),
+    }
+
+
+def _side_balance_candidate_rows(
+    *,
+    predictions: tuple[PolymarketPolicyPrediction, ...],
+    execution_buffer: float,
+) -> list[dict[str, Any]]:
+    rows = []
+    for prediction in predictions:
+        action = str(prediction.calibrated_best_policy_action)
+        if action not in {
+            "BUY_UP_SELL_BEFORE_CLOSE",
+            "BUY_DOWN_SELL_BEFORE_CLOSE",
+        }:
+            continue
+        score = float(prediction.calibrated_expected_pnl_per_notional or 0.0)
+        if score < execution_buffer:
+            continue
+        side = "UP" if action.startswith("BUY_UP_") else "DOWN"
+        margin = float(prediction.calibrated_action_margin or 0.0)
+        p_up = _p_up(prediction)
+        rank_score = score + margin * 0.1
+        rows.append(
+            {
+                "market_id": prediction.market_id,
+                "decision_ts": int(prediction.decision_ts),
+                "action": action,
+                "selected_side": side,
+                "side_balance_bucket": side,
+                "candidate_rank_score": rank_score,
+                "raw_calibrated_action_score": score,
+                "best_action_margin": margin,
+                "p_up": p_up,
+                "side_quota_rank": None,
+                "side_quota_selected": False,
+                "side_balance_reason_codes": [],
+            }
+        )
+    return rows
+
+
+def _side_quota_selected_keys(
+    *,
+    rows: list[dict[str, Any]],
+    thresholds: dict[str, Any],
+) -> set[tuple[str, int]]:
+    quota = int(float(thresholds.get("side_quota_per_side", 10.0)))
+    selected = set()
+    for side in ("UP", "DOWN"):
+        side_rows = sorted(
+            [row for row in rows if row["selected_side"] == side],
+            key=lambda row: (
+                -float(row["candidate_rank_score"]),
+                -float(row["raw_calibrated_action_score"]),
+                -float(row["best_action_margin"]),
+                int(row["decision_ts"]),
+                str(row["market_id"]),
+            ),
+        )
+        for rank, row in enumerate(side_rows, start=1):
+            row["side_quota_rank"] = rank
+            if rank <= quota:
+                selected.add((str(row["market_id"]), int(row["decision_ts"])))
+    return selected
+
+
+def _side_balance_prediction(
+    *,
+    prediction: PolymarketPolicyPrediction,
+    selected_keys: set[tuple[str, int]],
+) -> PolymarketPolicyPrediction:
+    key = (prediction.market_id, int(prediction.decision_ts))
+    action = str(prediction.calibrated_best_policy_action)
+    if key in selected_keys and action in {
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+    }:
+        return prediction
+    calibrated_returns = dict(prediction.calibrated_expected_pnl_per_notional_by_action)
+    calibrated_returns["NO_TRADE"] = max(0.0, float(calibrated_returns.get("NO_TRADE", 0.0)))
+    return replace(
+        prediction,
+        best_policy_action="NO_TRADE",
+        best_action_expected_return=float(
+            prediction.expected_return_by_action.get("NO_TRADE", 0.0)
+        ),
+        second_best_action_expected_return=float(
+            prediction.expected_return_by_action.get("NO_TRADE", 0.0)
+        ),
+        best_action_margin=0.0,
+        calibrated_best_policy_action="NO_TRADE",
+        calibrated_expected_pnl_per_notional=float(calibrated_returns["NO_TRADE"]),
+        calibrated_second_best_expected_pnl_per_notional=float(
+            calibrated_returns["NO_TRADE"]
+        ),
+        calibrated_action_margin=0.0,
+        calibrated_expected_pnl_per_notional_by_action=calibrated_returns,
+    )
+
+
+def _side_balance_ranked_rows(
+    *,
+    rows: list[dict[str, Any]],
+    selected_keys: set[tuple[str, int]],
+    thresholds: dict[str, Any],
+) -> list[dict[str, Any]]:
+    payloads = []
+    side_counts = Counter(
+        row["selected_side"]
+        for row in rows
+        if (row["market_id"], int(row["decision_ts"])) in selected_keys
+    )
+    max_ratio = float(thresholds.get("max_side_entry_ratio", 0.75))
+    total_selected = sum(side_counts.values())
+    for row in rows:
+        key = (row["market_id"], int(row["decision_ts"]))
+        selected = key in selected_keys
+        reason_codes = ["side_balance_candidate_selected"] if selected else []
+        if not selected:
+            reason_codes.append("entry_blocked_side_quota_full")
+        if selected and total_selected > 0:
+            ratio = side_counts[row["selected_side"]] / total_selected
+            if ratio > max_ratio:
+                reason_codes.append("entry_blocked_side_ratio_limit")
+        payloads.append(
+            {
+                **row,
+                "side_quota_selected": selected,
+                "side_balance_reason_codes": sorted(set(reason_codes)),
+            }
+        )
+    return sorted(
+        payloads,
+        key=lambda row: (
+            str(row["selected_side"]),
+            int(row["side_quota_rank"] or 999_999),
+            int(row["decision_ts"]),
+            str(row["market_id"]),
+        ),
+    )
+
+
+def _side_balance_selection_summary(
+    *,
+    rows: list[dict[str, Any]],
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    selected = [row for row in rows if row["side_quota_selected"]]
+    side_distribution = Counter(row["selected_side"] for row in selected)
+    market_by_side: dict[str, set[str]] = defaultdict(set)
+    for row in selected:
+        market_by_side[row["selected_side"]].add(str(row["market_id"]))
+    total = len(selected)
+    max_side = max(side_distribution.values(), default=0)
+    ratio = 0.0 if total == 0 else max_side / total
+    return {
+        "candidate_count": len(rows),
+        "selected_entry_count": total,
+        "up_entry_count": int(side_distribution.get("UP", 0)),
+        "down_entry_count": int(side_distribution.get("DOWN", 0)),
+        "up_market_count": len(market_by_side.get("UP", set())),
+        "down_market_count": len(market_by_side.get("DOWN", set())),
+        "side_count": len(side_distribution),
+        "side_entry_ratio": ratio,
+        "side_balance_thresholds": dict(thresholds),
+        "side_balance_gate_passed": _side_balance_gate_passed(
+            up_count=int(side_distribution.get("UP", 0)),
+            down_count=int(side_distribution.get("DOWN", 0)),
+            up_market_count=len(market_by_side.get("UP", set())),
+            down_market_count=len(market_by_side.get("DOWN", set())),
+            side_count=len(side_distribution),
+            side_entry_ratio=ratio,
+            thresholds=thresholds,
+        ),
+    }
+
+
+def _side_balance_gate_passed(
+    *,
+    up_count: int,
+    down_count: int,
+    up_market_count: int,
+    down_market_count: int,
+    side_count: int,
+    side_entry_ratio: float,
+    thresholds: dict[str, Any],
+) -> bool:
+    return (
+        side_count >= int(float(thresholds["min_side_count"]))
+        and up_count >= int(float(thresholds["min_per_side_entry_count"]))
+        and down_count >= int(float(thresholds["min_per_side_entry_count"]))
+        and up_market_count >= int(float(thresholds["min_per_side_market_count"]))
+        and down_market_count >= int(float(thresholds["min_per_side_market_count"]))
+        and side_entry_ratio <= float(thresholds["max_side_entry_ratio"])
+    )
 
 
 def action_family_eligibility_markdown(report: dict[str, Any]) -> str:

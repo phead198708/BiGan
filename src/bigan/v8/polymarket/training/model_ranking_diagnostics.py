@@ -15,6 +15,7 @@ from bigan.v8.polymarket.action_value_guards import (
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training.action_family_eligibility import (
     build_action_family_eligibility_report,
+    build_sell_before_close_side_balanced_prediction_set,
 )
 from bigan.v8.polymarket.training.action_value_calibration import (
     ACTION_VALUE_HIGH_SCORE_MIN_SUPPORT,
@@ -37,6 +38,8 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
+    SELL_BEFORE_CLOSE_SIDE_BALANCE_THRESHOLDS,
+    SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
 )
 
@@ -471,6 +474,13 @@ def _source_candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         "threshold_selection_failure_reason_codes",
         "support_aware_threshold_selection_failed",
         "support_aware_threshold_selection_reason_codes",
+        "side_balance_required",
+        "side_balance_gate_passed",
+        "side_balance_thresholds",
+        "side_balance_selection_summary",
+        "side_balance_selection_method",
+        "side_balance_selection_fit_split",
+        "side_balance_selection_evaluation_split",
         "entry_decision_count_before_guard",
         "entry_decision_count_after_exit_guard",
         "entry_decision_count_after_p_up_alignment",
@@ -553,13 +563,13 @@ def model_ranking_candidate_comparison_markdown(report: dict[str, Any]) -> str:
         f"- best_candidate_name: `{report['best_candidate_name']}`",
         f"- no_candidate_eligible: `{str(report['no_candidate_eligible']).lower()}`",
         "",
-        "| candidate | source_eligible | threshold_failed | enabled_families | scoped_p_up_disagreement | high_score_support | high_score_mean | high_score_sum | reasons |",
-        "|---|---|---|---|---:|---:|---:|---:|---|",
+        "| candidate | source_eligible | threshold_failed | enabled_families | side_balance | scoped_p_up_disagreement | high_score_support | high_score_mean | high_score_sum | reasons |",
+        "|---|---|---|---|---|---:|---:|---:|---:|---|",
     ]
     for candidate in report["candidates"]:
         reasons = ", ".join(candidate["ineligible_reason_codes"]) or "none"
         lines.append(
-            "| {name} | {eligible} | {threshold_failed} | {families} | {p_up:.6f} | {support} | "
+            "| {name} | {eligible} | {threshold_failed} | {families} | {side_balance} | {p_up:.6f} | {support} | "
             "{mean:.6f} | {total:.6f} | {reasons} |".format(
                 name=candidate["candidate_name"],
                 eligible=str(candidate["source_model_eligible"]).lower(),
@@ -567,6 +577,7 @@ def model_ranking_candidate_comparison_markdown(report: dict[str, Any]) -> str:
                     candidate.get("threshold_selection_failed")
                 ).lower(),
                 families=", ".join(candidate["enabled_action_families"]) or "none",
+                side_balance=str(candidate.get("side_balance_gate_passed")).lower(),
                 p_up=candidate["candidate_scoped_p_up_action_disagreement_rate"],
                 support=candidate["high_score_support_count"],
                 mean=candidate["high_score_realized_return_mean"],
@@ -748,13 +759,13 @@ def source_model_eligibility_markdown(report: dict[str, Any]) -> str:
             "",
             "## Candidate-Scoped Eligibility",
             "",
-            "| candidate | eligible | threshold_failed | enabled_families | disabled_families | scoped_p_up_disagreement | support | mean | sum | reasons |",
-            "|---|---|---|---|---|---:|---:|---:|---:|---|",
+            "| candidate | eligible | threshold_failed | enabled_families | disabled_families | side_balance | scoped_p_up_disagreement | support | mean | sum | reasons |",
+            "|---|---|---|---|---|---|---:|---:|---:|---:|---|",
         ]
     )
     for candidate in report["candidate_scoped_eligibility_summary"]:
         lines.append(
-            "| {name} | {eligible} | {threshold_failed} | {enabled} | {disabled} | {p_up:.6f} | "
+            "| {name} | {eligible} | {threshold_failed} | {enabled} | {disabled} | {side_balance} | {p_up:.6f} | "
             "{support} | {mean:.6f} | {total:.6f} | {reasons} |".format(
                 name=candidate["candidate_name"],
                 eligible=str(candidate["source_model_candidate_eligible"]).lower(),
@@ -763,6 +774,7 @@ def source_model_eligibility_markdown(report: dict[str, Any]) -> str:
                 ).lower(),
                 enabled=", ".join(candidate["enabled_action_families"]) or "none",
                 disabled=", ".join(candidate["disabled_action_families"]) or "none",
+                side_balance=str(candidate.get("side_balance_gate_passed")).lower(),
                 p_up=candidate["candidate_scoped_p_up_action_disagreement_rate"],
                 support=candidate["candidate_scoped_high_score_support_count"],
                 mean=candidate[
@@ -1093,6 +1105,36 @@ def _candidate_specs(
                 "HOLD_TO_SETTLEMENT is disabled and remains diagnostic-only",
             ],
         },
+        {
+            "candidate_name": SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+            "candidate_type": "sell_before_close_side_balanced_ranking_candidate",
+            "score_source": "fallback",
+            "corrections": {},
+            "correction_group": "none",
+            "eligible_families": ("SELL_BEFORE_CLOSE",),
+            "enabled_actions": SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_ACTIONS,
+            "disabled_actions": SELL_BEFORE_CLOSE_DISABLED_SOURCE_CANDIDATE_ACTIONS,
+            "exit_reliability_guard_enabled": True,
+            "p_up_side_alignment_filter_enabled": True,
+            "exit_policy": SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
+            "entry_filter_thresholds": dict(
+                SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS
+            ),
+            "side_balance_required": True,
+            "side_balance_thresholds": dict(SELL_BEFORE_CLOSE_SIDE_BALANCE_THRESHOLDS),
+            "side_balance_ranking_enabled": True,
+            "side_balance_selection_method": "score_ranked_per_side_quota",
+            "side_balance_selection_fit_split": "validation",
+            "side_balance_selection_evaluation_split": "shadow",
+            "uses_shadow_for_fit": False,
+            "execution_buffer": execution_buffer,
+            "notes": [
+                "source eligibility candidate scoped to SELL_BEFORE_CLOSE actions",
+                "inherits exit-reliability and p_up side-alignment gates",
+                "applies deterministic per-side score quota before replay",
+                "HOLD_TO_SETTLEMENT is disabled and remains diagnostic-only",
+            ],
+        },
     )
 
 
@@ -1173,6 +1215,20 @@ def _candidate_report(
         if _selected_action(prediction)
         in {"BUY_UP_SELL_BEFORE_CLOSE", "BUY_DOWN_SELL_BEFORE_CLOSE"}
     )
+    side_balance_required = bool(spec.get("side_balance_required", False))
+    side_balance_thresholds = dict(spec.get("side_balance_thresholds", {}))
+    side_balance_selection_summary = (
+        _side_balance_selection_summary_for_predictions(
+            predictions=shadow_predictions,
+            thresholds=side_balance_thresholds,
+        )
+        if side_balance_required
+        else {}
+    )
+    side_balance_gate_passed = (
+        not side_balance_required
+        or bool(side_balance_selection_summary.get("side_balance_gate_passed", False))
+    )
     disagreement_count = sum(
         _p_up_action_disagrees(prediction)
         for prediction in candidate_scoped_disagreement_rows
@@ -1201,6 +1257,8 @@ def _candidate_report(
     )
     if not high_score_sum_positive:
         ineligible_reasons.add("action_value_high_score_return_sum_not_positive")
+    if not side_balance_gate_passed:
+        ineligible_reasons.add("side_balance_required_gate_failed")
     source_model_eligible = (
         calibration_support_passed
         and calibration_quality_passed
@@ -1208,6 +1266,7 @@ def _candidate_report(
         and concentration_passed
         and disagreement_passed
         and high_score_sum_positive
+        and side_balance_gate_passed
     )
     overlay = spec.get("ranking_overlay")
     ranking_overlay_used = overlay is not None
@@ -1242,6 +1301,17 @@ def _candidate_report(
         ),
         "support_aware_threshold_selection_failed": False,
         "support_aware_threshold_selection_reason_codes": [],
+        "side_balance_required": side_balance_required,
+        "side_balance_gate_passed": side_balance_gate_passed,
+        "side_balance_thresholds": side_balance_thresholds,
+        "side_balance_selection_summary": side_balance_selection_summary,
+        "side_balance_selection_method": spec.get("side_balance_selection_method"),
+        "side_balance_selection_fit_split": spec.get(
+            "side_balance_selection_fit_split"
+        ),
+        "side_balance_selection_evaluation_split": spec.get(
+            "side_balance_selection_evaluation_split"
+        ),
         "entry_decision_count_before_guard": entry_decision_count_before_guard,
         "entry_decision_count_after_exit_guard": entry_decision_count_before_guard,
         "entry_decision_count_after_p_up_alignment": entry_decision_count_before_guard,
@@ -1423,6 +1493,10 @@ def _candidate_report(
             candidate_scoped_action_family_gate_results=(
                 candidate_scoped_family_report["enabled_action_family_gate_results"]
             ),
+            side_balance_required=side_balance_required,
+            side_balance_gate_passed=side_balance_gate_passed,
+            side_balance_thresholds=side_balance_thresholds,
+            side_balance_selection_summary=side_balance_selection_summary,
         ),
         "ranking_overlay": _candidate_overlay_payload(spec),
         **compact_safety_fields(),
@@ -2322,7 +2396,14 @@ def _apply_candidate_spec(
                 ),
             )
         )
-    return tuple(calibrated)
+    calibrated_predictions = tuple(calibrated)
+    if spec.get("side_balance_ranking_enabled"):
+        prediction_set = build_sell_before_close_side_balanced_prediction_set(
+            predictions=calibrated_predictions,
+            execution_buffer=float(spec.get("execution_buffer", 0.0)),
+        )
+        return tuple(prediction_set["predictions"])
+    return calibrated_predictions
 
 
 def _candidate_enabled_actions(spec: dict[str, Any]) -> list[str]:
@@ -2348,6 +2429,60 @@ def _candidate_disabled_actions(
             action for action in ACTION_VALUE_LABEL_ACTIONS if action not in enabled_actions
         ]
     return [action for action in disabled if action != "NO_TRADE"]
+
+
+def _side_balance_selection_summary_for_predictions(
+    *,
+    predictions: tuple[PolymarketPolicyPrediction, ...],
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    entry_predictions = [
+        prediction
+        for prediction in predictions
+        if _selected_action(prediction)
+        in {"BUY_UP_SELL_BEFORE_CLOSE", "BUY_DOWN_SELL_BEFORE_CLOSE"}
+    ]
+    side_distribution = Counter(
+        "UP"
+        if _selected_action(prediction) == "BUY_UP_SELL_BEFORE_CLOSE"
+        else "DOWN"
+        for prediction in entry_predictions
+    )
+    market_by_side: dict[str, set[str]] = {"UP": set(), "DOWN": set()}
+    for prediction in entry_predictions:
+        side = (
+            "UP"
+            if _selected_action(prediction) == "BUY_UP_SELL_BEFORE_CLOSE"
+            else "DOWN"
+        )
+        market_by_side[side].add(str(prediction.market_id))
+    selected_count = len(entry_predictions)
+    max_side_count = max(side_distribution.values(), default=0)
+    side_entry_ratio = 0.0 if selected_count == 0 else max_side_count / selected_count
+    up_entry_count = int(side_distribution.get("UP", 0))
+    down_entry_count = int(side_distribution.get("DOWN", 0))
+    up_market_count = len(market_by_side["UP"])
+    down_market_count = len(market_by_side["DOWN"])
+    gate_passed = (
+        len(side_distribution) >= int(float(thresholds["min_side_count"]))
+        and up_entry_count >= int(float(thresholds["min_per_side_entry_count"]))
+        and down_entry_count >= int(float(thresholds["min_per_side_entry_count"]))
+        and up_market_count >= int(float(thresholds["min_per_side_market_count"]))
+        and down_market_count >= int(float(thresholds["min_per_side_market_count"]))
+        and side_entry_ratio <= float(thresholds["max_side_entry_ratio"])
+    )
+    return {
+        "candidate_count": selected_count,
+        "selected_entry_count": selected_count,
+        "up_entry_count": up_entry_count,
+        "down_entry_count": down_entry_count,
+        "up_market_count": up_market_count,
+        "down_market_count": down_market_count,
+        "side_count": len(side_distribution),
+        "side_entry_ratio": side_entry_ratio,
+        "side_balance_thresholds": dict(thresholds),
+        "side_balance_gate_passed": gate_passed,
+    }
 
 
 def _families_for_actions(actions: list[str]) -> list[str]:
@@ -2755,6 +2890,10 @@ def _candidate_manifest(
     disabled_actions: list[str],
     candidate_scoped_p_up_action_disagreement_rate: float,
     candidate_scoped_action_family_gate_results: dict[str, Any],
+    side_balance_required: bool = False,
+    side_balance_gate_passed: bool = True,
+    side_balance_thresholds: dict[str, Any] | None = None,
+    side_balance_selection_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ranking_overlay_used = ranking_overlay is not None
     return {
@@ -2807,6 +2946,12 @@ def _candidate_manifest(
         ),
         "candidate_scoped_action_family_gate_results": (
             candidate_scoped_action_family_gate_results
+        ),
+        "side_balance_required": side_balance_required,
+        "side_balance_gate_passed": side_balance_gate_passed,
+        "side_balance_thresholds": dict(side_balance_thresholds or {}),
+        "side_balance_selection_summary": dict(
+            side_balance_selection_summary or {}
         ),
         "action_family_paper_decision_eligible": action_family_paper_decision_eligible,
         "calibration_quality_passed": calibration_quality_passed,

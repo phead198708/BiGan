@@ -84,6 +84,7 @@ FAILURE_INTERPRETATIONS_ALLOWED = {
     "p_up_alignment_not_primary_blocker",
     "exit_reliability_failure",
     "action_value_ranking_failure_likely",
+    "support_prefilter_prevents_pnl_evaluation",
     "collect_more_data_needed",
     "insufficient_evidence",
     "mixed_threshold_failure",
@@ -460,6 +461,7 @@ def build_sell_before_close_support_aware_threshold_failure_attribution_report(
     gate_attribution = _gate_level_attribution(validation_rows)
     reason_attribution = _reason_code_attribution(validation_rows)
     combination_attribution = _combination_attribution(validation_rows)
+    pnl_evaluation_summary = _pnl_evaluation_summary(validation_rows)
     near_miss_rows = _near_miss_rows(validation_rows)
     best_rows = _best_rows_by_objective(validation_rows)
     interpretation = _failure_interpretation(
@@ -493,6 +495,7 @@ def build_sell_before_close_support_aware_threshold_failure_attribution_report(
         "gate_level_attribution": gate_attribution,
         "reason_code_attribution": reason_attribution,
         "cumulative_blocker_combinations": combination_attribution,
+        **pnl_evaluation_summary,
         "best_near_miss_rows": near_miss_rows,
         "best_rows_by_objective": best_rows,
         "top_failed_gates": sorted(
@@ -537,6 +540,25 @@ def sell_before_close_support_aware_threshold_failure_attribution_summary(
         "validation_row_count": report["validation_row_count"],
         "validation_passing_row_count": report["validation_passing_row_count"],
         "validation_failed_row_count": report["validation_failed_row_count"],
+        "pnl_evaluated_row_count": report["pnl_evaluated_row_count"],
+        "pnl_not_evaluated_due_to_support_prefilter_count": report[
+            "pnl_not_evaluated_due_to_support_prefilter_count"
+        ],
+        "pnl_evaluated_positive_row_count": report[
+            "pnl_evaluated_positive_row_count"
+        ],
+        "pnl_evaluated_negative_row_count": report[
+            "pnl_evaluated_negative_row_count"
+        ],
+        "pnl_gate_failed_without_replay_count": report[
+            "pnl_gate_failed_without_replay_count"
+        ],
+        "pnl_gate_failed_after_replay_count": report[
+            "pnl_gate_failed_after_replay_count"
+        ],
+        "support_prefilter_prevents_pnl_evaluation": report[
+            "support_prefilter_prevents_pnl_evaluation"
+        ],
         "threshold_selection_passed": report["threshold_selection_passed"],
         "threshold_selection_failed": report["threshold_selection_failed"],
         "threshold_selection_failure_reason_codes": report[
@@ -671,6 +693,7 @@ def build_sell_before_close_validation_failure_drilldown_report(
     p_up_drilldown = _p_up_alignment_drilldown(validation_rows)
     threshold_drilldown = _entry_quality_threshold_drilldown(validation_rows)
     action_side_drilldown = _action_side_market_drilldown(validation_rows)
+    pnl_evaluation_summary = _pnl_evaluation_summary(validation_rows)
     model_failure_clues = _model_failure_clues(validation_rows)
     interpretations = _failure_interpretations(
         row_count=row_count,
@@ -714,6 +737,7 @@ def build_sell_before_close_validation_failure_drilldown_report(
         "p_up_alignment_drilldown": p_up_drilldown,
         "entry_quality_threshold_drilldown": threshold_drilldown,
         "action_side_market_drilldown": action_side_drilldown,
+        **pnl_evaluation_summary,
         "model_ranking_failure_clues": model_failure_clues,
         "primary_failure_interpretation": primary_interpretation,
         "failure_interpretations": interpretations,
@@ -747,6 +771,25 @@ def sell_before_close_validation_failure_drilldown_summary(
         "#134_resume_allowed": report["#134_resume_allowed"],
         "validation_row_count": report["validation_row_count"],
         "validation_passing_row_count": report["validation_passing_row_count"],
+        "pnl_evaluated_row_count": report["pnl_evaluated_row_count"],
+        "pnl_not_evaluated_due_to_support_prefilter_count": report[
+            "pnl_not_evaluated_due_to_support_prefilter_count"
+        ],
+        "pnl_evaluated_positive_row_count": report[
+            "pnl_evaluated_positive_row_count"
+        ],
+        "pnl_evaluated_negative_row_count": report[
+            "pnl_evaluated_negative_row_count"
+        ],
+        "pnl_gate_failed_without_replay_count": report[
+            "pnl_gate_failed_without_replay_count"
+        ],
+        "pnl_gate_failed_after_replay_count": report[
+            "pnl_gate_failed_after_replay_count"
+        ],
+        "support_prefilter_prevents_pnl_evaluation": report[
+            "support_prefilter_prevents_pnl_evaluation"
+        ],
         "support_passed_pnl_passed_count": quadrants[
             "support_passed_pnl_passed"
         ]["row_count"],
@@ -802,6 +845,11 @@ def sell_before_close_validation_failure_drilldown_markdown(
         f"- uses_shadow_for_fit: `{str(report['uses_shadow_for_fit']).lower()}`",
         f"- validation_row_count: `{report['validation_row_count']}`",
         f"- validation_passing_row_count: `{report['validation_passing_row_count']}`",
+        f"- pnl_evaluated_row_count: `{report['pnl_evaluated_row_count']}`",
+        "- pnl_not_evaluated_due_to_support_prefilter_count: "
+        f"`{report['pnl_not_evaluated_due_to_support_prefilter_count']}`",
+        "- support_prefilter_prevents_pnl_evaluation: "
+        f"`{str(report['support_prefilter_prevents_pnl_evaluation']).lower()}`",
         "- primary_failure_interpretation: "
         f"`{report['primary_failure_interpretation']}`",
         "- failure_interpretations: "
@@ -940,7 +988,9 @@ def _bucket_summary(
 
 
 def _support_adequate_drilldown(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    support_rows = [row for row in rows if _support_gates_passed(row)]
+    support_rows = [
+        row for row in rows if _support_gates_passed(row) and _pnl_evaluated(row)
+    ]
     positive_rows = [row for row in support_rows if float(row["total_pnl"]) > 0.0]
     best = _rank_rows(support_rows)[0] if support_rows else None
     return {
@@ -965,7 +1015,11 @@ def _support_adequate_drilldown(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _positive_pnl_drilldown(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    positive_rows = [row for row in rows if float(row["total_pnl"]) > 0.0]
+    positive_rows = [
+        row
+        for row in rows
+        if _pnl_evaluated(row) and float(row["total_pnl"]) > 0.0
+    ]
     support_passed = [row for row in positive_rows if _support_gates_passed(row)]
     best = _rank_rows(positive_rows)[0] if positive_rows else None
     return {
@@ -1113,17 +1167,28 @@ def _action_side_market_drilldown(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _model_failure_clues(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    support_rows = [row for row in rows if _support_gates_passed(row)]
-    best_total = _rank_rows(rows)[0] if rows else None
+    evaluated_rows = [row for row in rows if _pnl_evaluated(row)]
+    support_rows = [row for row in evaluated_rows if _support_gates_passed(row)]
+    best_total = _rank_rows(evaluated_rows)[0] if evaluated_rows else None
+    pnl_evaluation_summary = _pnl_evaluation_summary(rows)
     return {
-        "all_rows_total_pnl_failed": bool(rows)
-        and all(float(row["total_pnl"]) <= 0.0 for row in rows),
-        "all_rows_mean_pnl_failed": bool(rows)
-        and all(float(row["mean_pnl_per_entry"]) <= 0.0 for row in rows),
+        "all_rows_total_pnl_failed": bool(evaluated_rows)
+        and all(float(row["total_pnl"]) <= 0.0 for row in evaluated_rows),
+        "all_rows_mean_pnl_failed": bool(evaluated_rows)
+        and all(float(row["mean_pnl_per_entry"]) <= 0.0 for row in evaluated_rows),
         "support_adequate_rows_negative_pnl": bool(support_rows)
         and all(float(row["total_pnl"]) <= 0.0 for row in support_rows),
         "best_total_pnl_row_support_failed": bool(best_total)
         and not _support_gates_passed(best_total),
+        "support_prefilter_prevents_pnl_evaluation": pnl_evaluation_summary[
+            "support_prefilter_prevents_pnl_evaluation"
+        ],
+        "pnl_evaluated_row_count": pnl_evaluation_summary["pnl_evaluated_row_count"],
+        "pnl_not_evaluated_due_to_support_prefilter_count": (
+            pnl_evaluation_summary[
+                "pnl_not_evaluated_due_to_support_prefilter_count"
+            ]
+        ),
         "side_coverage_all_rows_failed": bool(rows)
         and all(
             not row["validation_gate_results"]["side_coverage_gate"]["passed"]
@@ -1149,6 +1214,8 @@ def _failure_interpretations(
     if row_count == 0:
         return ["insufficient_evidence"]
     labels = []
+    if model_failure_clues["support_prefilter_prevents_pnl_evaluation"]:
+        labels.append("support_prefilter_prevents_pnl_evaluation")
     if support_drilldown["support_adequate_row_count"] == 0:
         labels.append("support_too_sparse")
     if side_drilldown["side_coverage_failure_rate"] >= 1.0:
@@ -1162,7 +1229,8 @@ def _failure_interpretations(
         or model_failure_clues["all_rows_mean_pnl_failed"]
     ):
         labels.append("pnl_not_positive_under_support")
-        labels.append("action_value_ranking_failure_likely")
+        if not model_failure_clues["support_prefilter_prevents_pnl_evaluation"]:
+            labels.append("action_value_ranking_failure_likely")
     if p_up_drilldown["p_up_alignment_interpretation"] == "p_up_alignment_over_filters":
         labels.append("p_up_alignment_over_filters")
     elif p_up_drilldown["p_up_alignment_interpretation"] == (
@@ -1183,6 +1251,7 @@ def _failure_interpretations(
 def _primary_failure_interpretation(interpretations: list[str]) -> str:
     for label in (
         "one_sided_support",
+        "support_prefilter_prevents_pnl_evaluation",
         "action_value_ranking_failure_likely",
         "support_too_sparse",
         "support_adequate_pnl_negative",
@@ -1206,6 +1275,8 @@ def _recommended_next_actions(
     actions = []
     if side_coverage_all_rows_failed:
         actions.append("add_side_balancing_candidate")
+    if "support_prefilter_prevents_pnl_evaluation" in interpretations:
+        actions.append("collect_more_real_corpus")
     if all_rows_total_pnl_failed or all_rows_mean_pnl_failed:
         actions.append("revise_action_value_ranking_model")
     if positive_pnl_only_at_low_support or {
@@ -1238,12 +1309,49 @@ def _support_gates_passed(row: dict[str, Any]) -> bool:
 
 
 def _pnl_gates_passed(row: dict[str, Any]) -> bool:
-    return (
+    return _pnl_evaluated(row) and (
         float(row["total_pnl"]) > 0.0
         and float(row["mean_pnl_per_entry"]) > 0.0
         and int(row["residual_count"]) == 0
         and float(row["replay_residual_settlement_drag"]) >= 0.0
     )
+
+
+def _pnl_evaluated(row: dict[str, Any]) -> bool:
+    return bool(row.get("pnl_evaluated", True))
+
+
+def _pnl_evaluation_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    evaluated_rows = [row for row in rows if _pnl_evaluated(row)]
+    not_evaluated_rows = [
+        row
+        for row in rows
+        if bool(row.get("pnl_not_evaluated_due_to_support_prefilter", False))
+    ]
+    positive_rows = [
+        row for row in evaluated_rows if float(row.get("total_pnl", 0.0)) > 0.0
+    ]
+    negative_rows = [
+        row for row in evaluated_rows if float(row.get("total_pnl", 0.0)) <= 0.0
+    ]
+    failed_without_replay = [
+        row for row in rows if bool(row.get("pnl_gate_failed_without_replay", False))
+    ]
+    failed_after_replay = [
+        row for row in rows if bool(row.get("pnl_gate_failed_after_replay", False))
+    ]
+    return {
+        "pnl_evaluated_row_count": len(evaluated_rows),
+        "pnl_not_evaluated_due_to_support_prefilter_count": len(
+            not_evaluated_rows
+        ),
+        "pnl_evaluated_positive_row_count": len(positive_rows),
+        "pnl_evaluated_negative_row_count": len(negative_rows),
+        "pnl_gate_failed_without_replay_count": len(failed_without_replay),
+        "pnl_gate_failed_after_replay_count": len(failed_after_replay),
+        "support_prefilter_prevents_pnl_evaluation": bool(not_evaluated_rows)
+        and not evaluated_rows,
+    }
 
 
 def _dominant_reason_codes(
@@ -1679,6 +1787,12 @@ def _rank_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _row_core(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "thresholds": row["thresholds"],
+        "pnl_evaluated": row["pnl_evaluated"],
+        "pnl_not_evaluated_due_to_support_prefilter": row[
+            "pnl_not_evaluated_due_to_support_prefilter"
+        ],
+        "pnl_gate_failed_without_replay": row["pnl_gate_failed_without_replay"],
+        "pnl_gate_failed_after_replay": row["pnl_gate_failed_after_replay"],
         "entry_count": row["entry_count"],
         "unique_market_count": row["unique_market_count"],
         "side_count": row["side_count"],
@@ -1733,7 +1847,16 @@ def _failure_interpretation(
         row["reason_code"]: int(row["row_count"]) for row in reason_attribution
     }
     row_count = len(validation_rows)
-    positive_rows = [row for row in validation_rows if float(row["total_pnl"]) > 0.0]
+    if all(
+        bool(row.get("pnl_not_evaluated_due_to_support_prefilter", False))
+        for row in validation_rows
+    ):
+        return "support_prefilter_prevents_pnl_evaluation"
+    positive_rows = [
+        row
+        for row in validation_rows
+        if _pnl_evaluated(row) and float(row["total_pnl"]) > 0.0
+    ]
     support_reason_total = sum(
         reason_counts.get(reason, 0)
         for reason in (
@@ -1769,7 +1892,11 @@ def _failure_interpretation(
 
 
 def _recommended_next_action(interpretation: str) -> str:
-    if interpretation in {"support_too_sparse", "one_sided_support"}:
+    if interpretation in {
+        "support_too_sparse",
+        "one_sided_support",
+        "support_prefilter_prevents_pnl_evaluation",
+    }:
         return "collect_more_real_corpus"
     if interpretation in {
         "positive_pnl_only_at_low_support",
@@ -1852,10 +1979,13 @@ def _threshold_row_payload(
     support_gate_reason_codes: list[str],
     promotion_support_eligible: bool,
 ) -> dict[str, Any]:
+    pnl_evaluated = replay_report is not None
     row = {
         "candidate_name": SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
         "split_name": split_name,
         "thresholds": dict(sorted(thresholds.items())),
+        "pnl_evaluated": pnl_evaluated,
+        "pnl_not_evaluated_due_to_support_prefilter": not pnl_evaluated,
         "entry_count": int(support_counts["entry_decision_count"]),
         "sell_count": int(support_counts["sell_decision_count"]),
         "unique_market_count": int(support_counts["unique_market_count"]),
@@ -1943,6 +2073,12 @@ def _threshold_row_payload(
     row["failed_reason_codes"] = gate_reason_codes
     row["validation_support_gate_passed"] = not gate_reason_codes
     row["validation_support_gate_reason_codes"] = gate_reason_codes
+    row["pnl_gate_failed_without_replay"] = (
+        not pnl_evaluated and not _pnl_gates_passed(row)
+    )
+    row["pnl_gate_failed_after_replay"] = (
+        pnl_evaluated and not _pnl_gates_passed(row)
+    )
     return row
 
 
