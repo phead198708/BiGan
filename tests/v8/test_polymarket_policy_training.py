@@ -351,6 +351,7 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "D_pairwise_rank_correction",
         "E_action_family_prior_penalty",
         "F_live_eligible_feature_subset_retrain_proxy",
+        "I_sell_before_close_only_source_candidate",
     }.issubset(set(candidate_comparison["candidate_names"]))
     for candidate in candidate_comparison["candidates"]:
         for field_name in (
@@ -362,8 +363,33 @@ def test_training_runner_writes_required_artifacts_and_manifest(
             "action_family_gates",
             "source_model_eligible",
             "ineligible_reason_codes",
+            "enabled_action_families",
+            "disabled_action_families",
+            "enabled_actions",
+            "disabled_actions",
+            "candidate_scoped_p_up_action_disagreement_rate",
+            "candidate_scoped_p_up_action_disagreement_within_limit",
+            "candidate_scoped_action_family_gate_results",
+            "candidate_scoped_high_score_support_count",
+            "candidate_scoped_high_score_realized_return_mean",
+            "candidate_scoped_high_score_realized_return_sum",
         ):
             assert field_name in candidate
+    sell_only_candidate = _candidate_by_name(
+        candidate_comparison,
+        "I_sell_before_close_only_source_candidate",
+    )
+    assert sell_only_candidate["enabled_action_families"] == ["SELL_BEFORE_CLOSE"]
+    assert sell_only_candidate["disabled_action_families"] == ["HOLD_TO_SETTLEMENT"]
+    assert sell_only_candidate["enabled_actions"] == [
+        "NO_TRADE",
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+    ]
+    assert sell_only_candidate["disabled_actions"] == [
+        "BUY_UP_HOLD_TO_SETTLEMENT",
+        "BUY_DOWN_HOLD_TO_SETTLEMENT",
+    ]
     source_eligibility = _read_json(
         result.artifact_paths["source_model_eligibility_report"]
     )
@@ -383,6 +409,12 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     )
     assert source_eligibility["hard_gates"]["calibration_quality_passed"] is False
     assert source_eligibility["candidate_count"] == candidate_comparison["candidate_count"]
+    assert len(source_eligibility["candidate_scoped_eligibility_summary"]) == (
+        candidate_comparison["candidate_count"]
+    )
+    assert manifest["candidate_scoped_source_model_eligibility_summary"] == (
+        source_eligibility["candidate_scoped_eligibility_summary"]
+    )
     assert candidate_comparison["candidate_artifact_count"] >= 2
     exported_names = {
         artifact["candidate_name"]
@@ -660,6 +692,7 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "A_baseline_current_policy_with_runtime_guards",
         "B_hold_to_settlement_disabled_reranked",
         "C_sell_before_close_only_reranked",
+        "I_sell_before_close_only_source_candidate",
         "D_hold_to_settlement_allowed_only_for_passed_buckets_reranked",
         "E_threshold_0.00_action_family_gates_reranked",
         "E_threshold_0.03_action_family_gates_reranked",
@@ -1031,6 +1064,122 @@ def test_bucketed_overlay_blocks_negative_validation_buckets(tmp_path: Path) -> 
         ] == "NO_TRADE"
 
 
+def test_sell_before_close_source_candidate_ignores_disabled_hold_blockers(
+    tmp_path: Path,
+) -> None:
+    comparison = _sell_before_close_candidate_comparison(
+        positive_sell_return=0.20,
+        hold_return=-0.50,
+        selected_sell_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    candidate = _candidate_by_name(
+        comparison,
+        "I_sell_before_close_only_source_candidate",
+    )
+
+    assert candidate["enabled_action_families"] == ["SELL_BEFORE_CLOSE"]
+    assert candidate["disabled_action_families"] == ["HOLD_TO_SETTLEMENT"]
+    assert candidate["source_model_candidate_eligible"] is True
+    assert candidate["action_family_paper_decision_eligible"] is True
+    assert candidate["candidate_scoped_action_family_gate_results"][
+        "SELL_BEFORE_CLOSE"
+    ]["gate_passed"] is True
+    assert "HOLD_TO_SETTLEMENT" not in candidate[
+        "candidate_scoped_action_family_gate_results"
+    ]
+    assert "HOLD_TO_SETTLEMENT" in candidate[
+        "candidate_scoped_disabled_action_family_gate_results"
+    ]
+    assert "hold_to_settlement_high_score_unprofitable" not in candidate[
+        "ineligible_reason_codes"
+    ]
+    assert "buy_up_hold_to_settlement_unprofitable" not in candidate[
+        "ineligible_reason_codes"
+    ]
+    assert "buy_down_hold_to_settlement_unprofitable" not in candidate[
+        "ineligible_reason_codes"
+    ]
+    assert comparison["source_model_candidate_eligible"] is True
+
+
+def test_sell_before_close_candidate_scopes_p_up_disagreement_to_enabled_actions(
+    tmp_path: Path,
+) -> None:
+    comparison = _sell_before_close_candidate_comparison(
+        positive_sell_return=0.20,
+        hold_return=-0.50,
+        selected_sell_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    candidate = _candidate_by_name(
+        comparison,
+        "I_sell_before_close_only_source_candidate",
+    )
+    baseline = _candidate_by_name(comparison, "A_current_model_baseline")
+
+    assert baseline["p_up_action_disagreement_rate"] == pytest.approx(1.0)
+    assert candidate["candidate_scoped_p_up_action_disagreement_denominator"] == 12
+    assert candidate["candidate_scoped_p_up_action_disagreement_rate"] == pytest.approx(
+        2 / 12
+    )
+    assert candidate["candidate_scoped_p_up_action_disagreement_within_limit"] is True
+    assert candidate["source_model_candidate_eligible"] is True
+    assert "p_up_action_disagreement_excessive" not in candidate[
+        "ineligible_reason_codes"
+    ]
+
+
+def test_sell_before_close_candidate_fails_closed_when_sell_family_fails(
+    tmp_path: Path,
+) -> None:
+    comparison = _sell_before_close_candidate_comparison(
+        positive_sell_return=-0.20,
+        hold_return=-0.50,
+        selected_sell_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    candidate = _candidate_by_name(
+        comparison,
+        "I_sell_before_close_only_source_candidate",
+    )
+
+    assert candidate["source_model_candidate_eligible"] is False
+    assert candidate["action_family_paper_decision_eligible"] is False
+    assert candidate["candidate_scoped_high_score_realized_return_mean"] == pytest.approx(
+        -0.20
+    )
+    assert "action_family_high_score_unprofitable" in candidate[
+        "ineligible_reason_codes"
+    ]
+    assert "action_value_calibration_quality_failed" in candidate[
+        "ineligible_reason_codes"
+    ]
+
+
+def test_sell_before_close_candidate_does_not_resume_without_promotion_replay(
+    tmp_path: Path,
+) -> None:
+    comparison = _sell_before_close_candidate_comparison(
+        positive_sell_return=0.20,
+        hold_return=-0.50,
+        selected_sell_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    candidate = _candidate_by_name(
+        comparison,
+        "I_sell_before_close_only_source_candidate",
+    )
+
+    assert candidate["source_model_candidate_eligible"] is True
+    assert candidate["requires_promotion_replay_gate"] is True
+    assert candidate["paper_run_resume_allowed"] is False
+    assert comparison["paper_run_resume_allowed"] is False
+    assert comparison["paper_run_resume_blocked_reason"] == (
+        "promotion_replay_gate_required"
+    )
+
+
 def test_action_value_prediction_api_rejects_missing_features_by_default(
     tmp_path: Path,
 ) -> None:
@@ -1211,6 +1360,166 @@ def _overlay_prediction(
         action_value_calibration_applied=True,
         action_value_calibration_id="c" * 64,
         calibration_support_count=10,
+        calibration_bucket_count=len(ACTION_VALUE_LABEL_ACTIONS),
+        policy_confidence=0.90,
+        action_value_head_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        feature_conditioned_action_value_model_enabled=True,
+    )
+
+
+def _sell_before_close_candidate_comparison(
+    *,
+    positive_sell_return: float,
+    hold_return: float,
+    selected_sell_action: str,
+    p_up_auxiliary: float,
+) -> dict:
+    validation_examples, raw_validation, calibrated_validation = (
+        _sell_before_close_candidate_examples_and_predictions(
+            count=12,
+            start_ts=30_000,
+            selected_sell_action=selected_sell_action,
+            selected_sell_realized_return=positive_sell_return,
+            hold_realized_return=hold_return,
+            p_up_auxiliary=p_up_auxiliary,
+        )
+    )
+    shadow_examples, raw_shadow, calibrated_shadow = (
+        _sell_before_close_candidate_examples_and_predictions(
+            count=12,
+            start_ts=40_000,
+            selected_sell_action=selected_sell_action,
+            selected_sell_realized_return=positive_sell_return,
+            hold_realized_return=hold_return,
+            p_up_auxiliary=p_up_auxiliary,
+        )
+    )
+    return build_model_ranking_candidate_comparison(
+        validation_examples=validation_examples,
+        raw_validation_predictions=raw_validation,
+        calibrated_validation_predictions=calibrated_validation,
+        shadow_examples=shadow_examples,
+        raw_shadow_predictions=raw_shadow,
+        calibrated_shadow_predictions=calibrated_shadow,
+        execution_buffer=0.015,
+    )
+
+
+def _sell_before_close_candidate_examples_and_predictions(
+    *,
+    count: int,
+    start_ts: int,
+    selected_sell_action: str,
+    selected_sell_realized_return: float,
+    hold_realized_return: float,
+    p_up_auxiliary: float,
+) -> tuple[
+    tuple[PolymarketPolicyExample, ...],
+    tuple[PolymarketPolicyPrediction, ...],
+    tuple[PolymarketPolicyPrediction, ...],
+]:
+    other_sell_action = (
+        "BUY_DOWN_SELL_BEFORE_CLOSE"
+        if selected_sell_action == "BUY_UP_SELL_BEFORE_CLOSE"
+        else "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+    examples = []
+    predictions = []
+    for index in range(count):
+        decision_ts = start_ts + index
+        example = _example(market_index=index % 2, decision_ts=decision_ts)
+        active_sell_action = (
+            other_sell_action if index % 6 == 0 else selected_sell_action
+        )
+        inactive_sell_action = (
+            selected_sell_action if active_sell_action == other_sell_action else other_sell_action
+        )
+        action_targets = {
+            "NO_TRADE": 0.0,
+            "BUY_UP_HOLD_TO_SETTLEMENT": hold_realized_return,
+            "BUY_DOWN_HOLD_TO_SETTLEMENT": hold_realized_return,
+            selected_sell_action: selected_sell_realized_return,
+            other_sell_action: selected_sell_realized_return,
+        }
+        ranked_targets = _rank_action_returns(action_targets)
+        example = replace(
+            example,
+            action_return_targets=action_targets,
+            best_policy_action=ranked_targets[0][0],
+            best_action_expected_return=ranked_targets[0][1],
+            second_best_action_expected_return=ranked_targets[1][1],
+            best_action_margin=ranked_targets[0][1] - ranked_targets[1][1],
+        )
+        action_scores = {
+            "NO_TRADE": 0.0,
+            "BUY_UP_HOLD_TO_SETTLEMENT": 0.30,
+            "BUY_DOWN_HOLD_TO_SETTLEMENT": 0.50,
+            active_sell_action: 0.20,
+            inactive_sell_action: 0.10,
+        }
+        prediction = _scoped_candidate_prediction(
+            example=example,
+            action_returns=action_scores,
+            p_up_auxiliary=p_up_auxiliary,
+        )
+        examples.append(example)
+        predictions.append(prediction)
+    return tuple(examples), tuple(predictions), tuple(predictions)
+
+
+def _scoped_candidate_prediction(
+    *,
+    example: PolymarketPolicyExample,
+    action_returns: dict[str, float],
+    p_up_auxiliary: float,
+) -> PolymarketPolicyPrediction:
+    ranked = _rank_action_returns(action_returns)
+    best_action, best_return = ranked[0]
+    second_return = ranked[1][1]
+    return PolymarketPolicyPrediction(
+        market_id=example.market_id,
+        condition_id=example.condition_id,
+        slug=example.slug,
+        market_family=example.market_family,
+        horizon_ms=example.horizon_ms,
+        decision_ts=example.decision_ts,
+        estimated_up_probability=p_up_auxiliary,
+        confidence=0.90,
+        score=best_return,
+        calibration_bucket="scoped-source-candidate-test",
+        model_version="scoped-source-candidate-test-model",
+        feature_schema_hash="a" * 64,
+        training_corpus_hash="b" * 64,
+        features=dict(example.features),
+        target_up_probability=example.target_up_probability,
+        p_up_auxiliary=p_up_auxiliary,
+        expected_return_by_action=action_returns,
+        expected_return_no_trade=action_returns["NO_TRADE"],
+        expected_return_buy_up_hold_to_settlement=action_returns[
+            "BUY_UP_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_down_hold_to_settlement=action_returns[
+            "BUY_DOWN_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_up_sell_before_close=action_returns[
+            "BUY_UP_SELL_BEFORE_CLOSE"
+        ],
+        expected_return_buy_down_sell_before_close=action_returns[
+            "BUY_DOWN_SELL_BEFORE_CLOSE"
+        ],
+        best_policy_action=best_action,
+        best_action_expected_return=best_return,
+        second_best_action_expected_return=second_return,
+        best_action_margin=best_return - second_return,
+        calibrated_expected_pnl_per_notional_by_action=action_returns,
+        calibrated_best_policy_action=best_action,
+        calibrated_expected_pnl_per_notional=best_return,
+        calibrated_second_best_expected_pnl_per_notional=second_return,
+        calibrated_action_margin=best_return - second_return,
+        action_value_calibration_applied=True,
+        action_value_calibration_id="d" * 64,
+        calibration_support_count=12,
         calibration_bucket_count=len(ACTION_VALUE_LABEL_ACTIONS),
         policy_confidence=0.90,
         action_value_head_enabled=True,

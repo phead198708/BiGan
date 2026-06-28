@@ -59,6 +59,18 @@ RANKING_OVERLAY_DIAGNOSTIC_MIN_BUCKET_SUPPORT_VALUES = (3, 5, 10)
 RANKING_OVERLAY_DIAGNOSTIC_SHRINKAGE_PRIOR_SUPPORT_VALUES = (5, 10, 20)
 RANKING_OVERLAY_DIAGNOSTIC_BUFFER_MULTIPLIERS = (0.0, 0.5, 1.0)
 ACTION_REPRESENTATION_MIN_BUCKET_SUPPORT = 10
+SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME = (
+    "I_sell_before_close_only_source_candidate"
+)
+SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_ACTIONS = (
+    "BUY_UP_SELL_BEFORE_CLOSE",
+    "BUY_DOWN_SELL_BEFORE_CLOSE",
+    "NO_TRADE",
+)
+SELL_BEFORE_CLOSE_DISABLED_SOURCE_CANDIDATE_ACTIONS = (
+    "BUY_UP_HOLD_TO_SETTLEMENT",
+    "BUY_DOWN_HOLD_TO_SETTLEMENT",
+)
 
 
 def build_model_ranking_error_report(
@@ -414,6 +426,10 @@ def build_source_model_eligibility_report(
         "eligible_candidate_count": len(candidate_eligible),
         "candidate_source_model_eligible": bool(candidate_eligible),
         "candidate_names": model_ranking_candidate_comparison["candidate_names"],
+        "candidate_scoped_eligibility_summary": [
+            _source_candidate_summary(candidate)
+            for candidate in model_ranking_candidate_comparison["candidates"]
+        ],
         "best_candidate_name": model_ranking_candidate_comparison[
             "best_candidate_name"
         ],
@@ -435,6 +451,25 @@ def build_source_model_eligibility_report(
     }
     report["source_model_eligibility_report_id"] = canonical_json_sha256(report)
     return report
+
+
+def _source_candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "candidate_name",
+        "enabled_action_families",
+        "disabled_action_families",
+        "enabled_actions",
+        "disabled_actions",
+        "candidate_scoped_p_up_action_disagreement_rate",
+        "candidate_scoped_p_up_action_disagreement_within_limit",
+        "candidate_scoped_action_family_gate_results",
+        "candidate_scoped_high_score_support_count",
+        "candidate_scoped_high_score_realized_return_mean",
+        "candidate_scoped_high_score_realized_return_sum",
+        "source_model_candidate_eligible",
+        "ineligible_reason_codes",
+    )
+    return {field: candidate.get(field) for field in fields}
 
 
 def model_ranking_error_markdown(report: dict[str, Any]) -> str:
@@ -479,18 +514,18 @@ def model_ranking_candidate_comparison_markdown(report: dict[str, Any]) -> str:
         f"- best_candidate_name: `{report['best_candidate_name']}`",
         f"- no_candidate_eligible: `{str(report['no_candidate_eligible']).lower()}`",
         "",
-        "| candidate | source_eligible | shadow_raw_mae | shadow_calibrated_mae | high_score_support | high_score_mean | high_score_sum | reasons |",
-        "|---|---|---:|---:|---:|---:|---:|---|",
+        "| candidate | source_eligible | enabled_families | scoped_p_up_disagreement | high_score_support | high_score_mean | high_score_sum | reasons |",
+        "|---|---|---|---:|---:|---:|---:|---|",
     ]
     for candidate in report["candidates"]:
         reasons = ", ".join(candidate["ineligible_reason_codes"]) or "none"
         lines.append(
-            "| {name} | {eligible} | {raw:.6f} | {cal:.6f} | {support} | "
+            "| {name} | {eligible} | {families} | {p_up:.6f} | {support} | "
             "{mean:.6f} | {total:.6f} | {reasons} |".format(
                 name=candidate["candidate_name"],
                 eligible=str(candidate["source_model_eligible"]).lower(),
-                raw=candidate["shadow_raw_mae"],
-                cal=candidate["shadow_calibrated_mae"],
+                families=", ".join(candidate["enabled_action_families"]) or "none",
+                p_up=candidate["candidate_scoped_p_up_action_disagreement_rate"],
                 support=candidate["high_score_support_count"],
                 mean=candidate["high_score_realized_return_mean"],
                 total=candidate["high_score_realized_return_sum"],
@@ -666,6 +701,34 @@ def source_model_eligibility_markdown(report: dict[str, Any]) -> str:
     ]
     for gate, passed in report["hard_gates"].items():
         lines.append(f"| {gate} | {str(passed).lower()} |")
+    lines.extend(
+        [
+            "",
+            "## Candidate-Scoped Eligibility",
+            "",
+            "| candidate | eligible | enabled_families | disabled_families | scoped_p_up_disagreement | support | mean | sum | reasons |",
+            "|---|---|---|---|---:|---:|---:|---:|---|",
+        ]
+    )
+    for candidate in report["candidate_scoped_eligibility_summary"]:
+        lines.append(
+            "| {name} | {eligible} | {enabled} | {disabled} | {p_up:.6f} | "
+            "{support} | {mean:.6f} | {total:.6f} | {reasons} |".format(
+                name=candidate["candidate_name"],
+                eligible=str(candidate["source_model_candidate_eligible"]).lower(),
+                enabled=", ".join(candidate["enabled_action_families"]) or "none",
+                disabled=", ".join(candidate["disabled_action_families"]) or "none",
+                p_up=candidate["candidate_scoped_p_up_action_disagreement_rate"],
+                support=candidate["candidate_scoped_high_score_support_count"],
+                mean=candidate[
+                    "candidate_scoped_high_score_realized_return_mean"
+                ],
+                total=candidate[
+                    "candidate_scoped_high_score_realized_return_sum"
+                ],
+                reasons=", ".join(candidate["ineligible_reason_codes"]) or "none",
+            )
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -896,6 +959,20 @@ def _candidate_specs(
                 "shadow labels are not used for fit",
             ],
         },
+        {
+            "candidate_name": SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
+            "candidate_type": "sell_before_close_only_source_candidate",
+            "score_source": "fallback",
+            "corrections": {},
+            "correction_group": "none",
+            "eligible_families": ("SELL_BEFORE_CLOSE",),
+            "enabled_actions": SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_ACTIONS,
+            "disabled_actions": SELL_BEFORE_CLOSE_DISABLED_SOURCE_CANDIDATE_ACTIONS,
+            "notes": [
+                "source eligibility candidate scoped to SELL_BEFORE_CLOSE actions",
+                "HOLD_TO_SETTLEMENT is disabled and remains diagnostic-only",
+            ],
+        },
     )
 
 
@@ -909,6 +986,10 @@ def _candidate_report(
     shadow_predictions: tuple[PolymarketPolicyPrediction, ...],
     execution_buffer: float,
 ) -> dict[str, Any]:
+    enabled_actions = _candidate_enabled_actions(spec)
+    disabled_actions = _candidate_disabled_actions(spec, enabled_actions=enabled_actions)
+    enabled_action_families = _families_for_actions(enabled_actions)
+    disabled_action_families = _families_for_actions(disabled_actions)
     ranking = _ranking_split_report(
         split_name="shadow",
         examples=shadow_examples,
@@ -918,16 +999,23 @@ def _candidate_report(
         examples=shadow_examples,
         predictions=raw_shadow_predictions,
         score_getter=lambda prediction: prediction.expected_return_by_action,
+        actions=enabled_actions,
     )
     calibrated_mae = _mae(
         examples=shadow_examples,
         predictions=shadow_predictions,
         score_getter=_score_map,
+        actions=enabled_actions,
     )
     family_report = build_action_family_eligibility_report(
         examples=shadow_examples,
         predictions=shadow_predictions,
         execution_buffer=execution_buffer,
+    )
+    candidate_scoped_family_report = _candidate_scoped_family_report(
+        family_report=family_report,
+        enabled_action_families=enabled_action_families,
+        disabled_action_families=disabled_action_families,
     )
     calibration_support_passed = len(validation_examples) >= 3
     high_score_support_passed = (
@@ -953,11 +1041,20 @@ def _candidate_report(
     )
     max_action_ratio = 0.0 if sample_count == 0 else max_action_count / sample_count
     concentration_passed = max_action_ratio <= BEST_ACTION_CONCENTRATION_FAIL_THRESHOLD
+    candidate_scoped_disagreement_rows = [
+        prediction
+        for prediction in shadow_predictions
+        if _selected_action(prediction) in set(enabled_actions)
+        and _selected_action(prediction) != "NO_TRADE"
+    ]
     disagreement_count = sum(
-        _p_up_action_disagrees(prediction) for prediction in shadow_predictions
+        _p_up_action_disagrees(prediction)
+        for prediction in candidate_scoped_disagreement_rows
     )
     disagreement_rate = (
-        0.0 if not shadow_predictions else disagreement_count / len(shadow_predictions)
+        0.0
+        if not candidate_scoped_disagreement_rows
+        else disagreement_count / len(candidate_scoped_disagreement_rows)
     )
     disagreement_passed = disagreement_rate <= P_UP_ACTION_DISAGREEMENT_FAIL_THRESHOLD
     ineligible_reasons = set()
@@ -1038,6 +1135,39 @@ def _candidate_report(
             "high_score_realized_return_sum"
         ],
         "high_score_realized_return_sum_positive": high_score_sum_positive,
+        "enabled_action_families": enabled_action_families,
+        "disabled_action_families": disabled_action_families,
+        "enabled_actions": enabled_actions,
+        "disabled_actions": disabled_actions,
+        "candidate_scoped_p_up_action_disagreement_count": disagreement_count,
+        "candidate_scoped_p_up_action_disagreement_denominator": (
+            len(candidate_scoped_disagreement_rows)
+        ),
+        "candidate_scoped_p_up_action_disagreement_rate": disagreement_rate,
+        "candidate_scoped_p_up_action_disagreement_within_limit": (
+            disagreement_passed
+        ),
+        "candidate_scoped_action_family_gate_results": (
+            candidate_scoped_family_report["enabled_action_family_gate_results"]
+        ),
+        "candidate_scoped_disabled_action_family_gate_results": (
+            candidate_scoped_family_report["disabled_action_family_gate_results"]
+        ),
+        "candidate_scoped_action_gate_results": (
+            candidate_scoped_family_report["enabled_action_gate_results"]
+        ),
+        "candidate_scoped_disabled_action_gate_results": (
+            candidate_scoped_family_report["disabled_action_gate_results"]
+        ),
+        "candidate_scoped_high_score_support_count": family_report[
+            "high_score_support_count"
+        ],
+        "candidate_scoped_high_score_realized_return_mean": family_report[
+            "high_score_realized_return_mean"
+        ],
+        "candidate_scoped_high_score_realized_return_sum": family_report[
+            "high_score_realized_return_sum"
+        ],
         "action_family_gates": family_report["action_family_gate_results"],
         "action_family_paper_decision_eligible": family_report[
             "action_family_paper_decision_eligible"
@@ -1106,6 +1236,14 @@ def _candidate_report(
                 "high_score_realized_return_sum"
             ],
             ineligible_reason_codes=sorted(ineligible_reasons),
+            enabled_action_families=enabled_action_families,
+            disabled_action_families=disabled_action_families,
+            enabled_actions=enabled_actions,
+            disabled_actions=disabled_actions,
+            candidate_scoped_p_up_action_disagreement_rate=disagreement_rate,
+            candidate_scoped_action_family_gate_results=(
+                candidate_scoped_family_report["enabled_action_family_gate_results"]
+            ),
         ),
         "ranking_overlay": _candidate_overlay_payload(spec),
         **compact_safety_fields(),
@@ -1957,6 +2095,7 @@ def _apply_candidate_spec(
     spec: dict[str, Any],
 ) -> tuple[PolymarketPolicyPrediction, ...]:
     calibrated = []
+    enabled_actions = set(_candidate_enabled_actions(spec))
     for prediction, fallback in zip(predictions, fallback_predictions, strict=True):
         if spec["score_source"] == "fallback":
             scores = _score_map(fallback)
@@ -1988,6 +2127,8 @@ def _apply_candidate_spec(
                     score=float(scores[action]),
                     overlay=overlay,
                 )
+            if action not in enabled_actions:
+                scores[action] = -1_000_000.0
         calibrated.append(
             _prediction_with_scores(
                 prediction=fallback,
@@ -2003,6 +2144,104 @@ def _apply_candidate_spec(
             )
         )
     return tuple(calibrated)
+
+
+def _candidate_enabled_actions(spec: dict[str, Any]) -> list[str]:
+    actions = tuple(spec.get("enabled_actions") or ACTION_VALUE_LABEL_ACTIONS)
+    enabled = [action for action in ACTION_VALUE_LABEL_ACTIONS if action in set(actions)]
+    if "NO_TRADE" not in enabled:
+        enabled.append("NO_TRADE")
+    return enabled
+
+
+def _candidate_disabled_actions(
+    spec: dict[str, Any],
+    *,
+    enabled_actions: list[str],
+) -> list[str]:
+    configured = spec.get("disabled_actions")
+    if configured is not None:
+        disabled = [
+            action for action in ACTION_VALUE_LABEL_ACTIONS if action in set(configured)
+        ]
+    else:
+        disabled = [
+            action for action in ACTION_VALUE_LABEL_ACTIONS if action not in enabled_actions
+        ]
+    return [action for action in disabled if action != "NO_TRADE"]
+
+
+def _families_for_actions(actions: list[str]) -> list[str]:
+    return sorted(
+        {
+            action_value_action_family(action)
+            for action in actions
+            if action != "NO_TRADE"
+        }
+    )
+
+
+def _candidate_scoped_family_report(
+    *,
+    family_report: dict[str, Any],
+    enabled_action_families: list[str],
+    disabled_action_families: list[str],
+) -> dict[str, Any]:
+    enabled_families = set(enabled_action_families)
+    disabled_families = set(disabled_action_families)
+    enabled_actions = {
+        action
+        for action in ACTION_VALUE_LABEL_ACTIONS
+        if action_value_action_family(action) in enabled_families
+    }
+    disabled_actions = {
+        action
+        for action in ACTION_VALUE_LABEL_ACTIONS
+        if action_value_action_family(action) in disabled_families
+    }
+    return {
+        "enabled_action_family_gate_results": {
+            family: gate
+            for family, gate in family_report["action_family_gate_results"].items()
+            if family in enabled_families
+        },
+        "disabled_action_family_gate_results": {
+            family: family_report["action_family_gate_results"].get(
+                family,
+                _disabled_gate_placeholder(family),
+            )
+            for family in sorted(disabled_families)
+        },
+        "enabled_action_gate_results": {
+            action: gate
+            for action, gate in family_report["action_gate_results"].items()
+            if action in enabled_actions
+        },
+        "disabled_action_gate_results": {
+            action: family_report["action_gate_results"].get(
+                action,
+                _disabled_gate_placeholder(action),
+            )
+            for action in sorted(disabled_actions)
+        },
+    }
+
+
+def _disabled_gate_placeholder(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "support_count": 0,
+        "min_support": ACTION_VALUE_HIGH_SCORE_MIN_SUPPORT,
+        "support_passed": False,
+        "realized_return_mean": 0.0,
+        "realized_return_sum": 0.0,
+        "realized_return_mean_exceeds_execution_buffer": False,
+        "realized_return_sum_positive": False,
+        "execution_buffer": None,
+        "gate_passed": False,
+        "disabled_for_candidate": True,
+        "diagnostic_only": True,
+    }
 
 
 def _prediction_with_scores(
@@ -2331,6 +2570,12 @@ def _candidate_manifest(
     high_score_realized_return_mean: float,
     high_score_realized_return_sum: float,
     ineligible_reason_codes: list[str],
+    enabled_action_families: list[str],
+    disabled_action_families: list[str],
+    enabled_actions: list[str],
+    disabled_actions: list[str],
+    candidate_scoped_p_up_action_disagreement_rate: float,
+    candidate_scoped_action_family_gate_results: dict[str, Any],
 ) -> dict[str, Any]:
     ranking_overlay_used = ranking_overlay is not None
     return {
@@ -2374,6 +2619,16 @@ def _candidate_manifest(
         if ranking_overlay is None
         else ranking_overlay["model_score_weight"],
         "action_value_paper_decision_eligible": source_model_eligible,
+        "enabled_action_families": enabled_action_families,
+        "disabled_action_families": disabled_action_families,
+        "enabled_actions": enabled_actions,
+        "disabled_actions": disabled_actions,
+        "candidate_scoped_p_up_action_disagreement_rate": (
+            candidate_scoped_p_up_action_disagreement_rate
+        ),
+        "candidate_scoped_action_family_gate_results": (
+            candidate_scoped_action_family_gate_results
+        ),
         "action_family_paper_decision_eligible": action_family_paper_decision_eligible,
         "calibration_quality_passed": calibration_quality_passed,
         "best_action_concentration_passed": best_action_concentration_passed,
@@ -2492,11 +2747,13 @@ def _mae(
     examples: tuple[PolymarketPolicyExample, ...],
     predictions: tuple[PolymarketPolicyPrediction, ...],
     score_getter: Any,
+    actions: list[str] | tuple[str, ...] = ACTION_VALUE_LABEL_ACTIONS,
 ) -> float:
     errors = []
+    selected_actions = tuple(actions)
     for example, prediction in zip(examples, predictions, strict=True):
         scores = score_getter(prediction)
-        for action in ACTION_VALUE_LABEL_ACTIONS:
+        for action in selected_actions:
             errors.append(
                 abs(
                     float(scores[action])

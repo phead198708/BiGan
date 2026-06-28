@@ -416,6 +416,15 @@ def build_action_family_counterfactual_prediction_sets(
             description="allow SELL_BEFORE_CLOSE actions only, then re-rank",
         ),
         _counterfactual_variant(
+            variant="I_sell_before_close_only_source_candidate",
+            predictions=predictions,
+            ev_threshold=execution_buffer,
+            allowed_mode="sell_before_close_only",
+            description=(
+                "source-model candidate replay scoped to SELL_BEFORE_CLOSE actions only"
+            ),
+        ),
+        _counterfactual_variant(
             variant="D_hold_to_settlement_allowed_only_for_passed_buckets_reranked",
             predictions=predictions,
             ev_threshold=execution_buffer,

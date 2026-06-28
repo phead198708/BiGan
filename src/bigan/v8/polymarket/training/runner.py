@@ -635,6 +635,7 @@ def _write_artifacts(
     action_family_counterfactual_replay = _write_counterfactual_replay_artifacts(
         run_dir=run_dir,
         counterfactual_replays=action_family_counterfactual_replays,
+        source_model_eligibility=source_model_eligibility,
     )
     _write_json(
         paths["action_family_counterfactual_replay_report"],
@@ -783,13 +784,31 @@ def _write_counterfactual_replay_artifacts(
     *,
     run_dir: Path,
     counterfactual_replays: tuple[dict[str, Any], ...],
+    source_model_eligibility: dict[str, Any],
 ) -> dict[str, Any]:
     root = run_dir / "action_family_counterfactual_replays"
     root.mkdir(parents=True, exist_ok=True)
     variant_summaries = []
+    source_model_candidate_eligible = bool(
+        source_model_eligibility["source_model_candidate_eligible"]
+    )
     for replay in counterfactual_replays:
         variant_dir = root / replay["variant"]
         variant_dir.mkdir(parents=True, exist_ok=True)
+        summary = _counterfactual_summary_with_source_gate(
+            summary=dict(replay["summary"]),
+            source_model_candidate_eligible=source_model_candidate_eligible,
+        )
+        ledger_pnl_report = dict(replay["ledger_pnl_report"])
+        ledger_pnl_report["source_model_candidate_eligible"] = (
+            source_model_candidate_eligible
+        )
+        ledger_pnl_report["promotion_evidence_eligible"] = summary[
+            "promotion_evidence_eligible"
+        ]
+        ledger_pnl_report["promotion_evidence_ineligible_reasons"] = summary[
+            "promotion_evidence_ineligible_reasons"
+        ]
         files = {
             "predictions": variant_dir / "predictions.jsonl",
             "decisions": variant_dir / "decisions.jsonl",
@@ -801,8 +820,7 @@ def _write_counterfactual_replay_artifacts(
         _write_jsonl(files["decisions"], replay["decisions"])
         _write_json(files["ev_threshold_report"], replay["ev_report"])
         _write_json(files["policy_replay_report"], replay["replay_report"])
-        _write_json(files["ledger_pnl_report"], replay["ledger_pnl_report"])
-        summary = dict(replay["summary"])
+        _write_json(files["ledger_pnl_report"], ledger_pnl_report)
         summary["artifact_paths"] = {
             name: _relative_path(path, run_dir) for name, path in sorted(files.items())
         }
@@ -810,6 +828,16 @@ def _write_counterfactual_replay_artifacts(
             name: _sha256_file(path) for name, path in sorted(files.items())
         }
         variant_summaries.append(summary)
+    promotion_evidence_eligible = any(
+        bool(summary["promotion_evidence_eligible"]) for summary in variant_summaries
+    )
+    ineligible_reasons = sorted(
+        {
+            reason
+            for summary in variant_summaries
+            for reason in summary["promotion_evidence_ineligible_reasons"]
+        }
+    )
     return {
         "schema_version": (
             "bigan-v8-polymarket-action-family-counterfactual-replay-v1"
@@ -817,14 +845,38 @@ def _write_counterfactual_replay_artifacts(
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
         "report_mode": "re_ranked_counterfactual_policy_replay",
         "filtered_estimate_report_path": "action_family_replay_variants_report.json",
-        "promotion_evidence_eligible": False,
-        "promotion_evidence_ineligible_reasons": [
-            "source_model_paper_decision_ineligible"
-        ],
+        "source_model_candidate_eligible": source_model_candidate_eligible,
+        "promotion_evidence_eligible": promotion_evidence_eligible,
+        "promotion_evidence_ineligible_reasons": (
+            [] if promotion_evidence_eligible else ineligible_reasons
+        ),
         "variant_count": len(variant_summaries),
         "variants": variant_summaries,
         **compact_safety_fields(),
     }
+
+
+def _counterfactual_summary_with_source_gate(
+    *,
+    summary: dict[str, Any],
+    source_model_candidate_eligible: bool,
+) -> dict[str, Any]:
+    reasons = set()
+    if not source_model_candidate_eligible:
+        reasons.add("source_model_paper_decision_ineligible")
+    if float(summary["total_polymarket_pnl"]) <= 0.0:
+        reasons.add("counterfactual_replay_pnl_not_positive")
+    if int(summary["entry_decision_count"]) <= 0:
+        reasons.add("counterfactual_replay_no_entry_decisions")
+    promotion_evidence_eligible = not reasons
+    summary["source_model_candidate_eligible"] = source_model_candidate_eligible
+    summary["promotion_evidence_eligible"] = promotion_evidence_eligible
+    summary["promotion_evidence_ineligible_reasons"] = sorted(reasons)
+    summary["blocked"] = not promotion_evidence_eligible
+    summary["blocked_reasons"] = sorted(reasons)
+    summary["paper_run_resume_allowed"] = False
+    summary["paper_run_resume_blocked_reason"] = "promotion_replay_gate_required"
+    return summary
 
 
 def _model_manifest(
@@ -1016,6 +1068,9 @@ def _model_manifest(
             "source_model_eligibility_report_sha256"
         ],
         "source_model_eligibility_report": source_model_eligibility,
+        "candidate_scoped_source_model_eligibility_summary": (
+            source_model_eligibility.get("candidate_scoped_eligibility_summary", [])
+        ),
         "action_value_feature_columns": list(model.action_value_feature_columns),
         "required_action_value_feature_columns": list(model.action_value_feature_columns),
         "action_label_coverage_by_action": dataset_profile[
