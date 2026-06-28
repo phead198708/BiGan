@@ -39,6 +39,9 @@ from bigan.v8.polymarket.training.sell_before_close_exit_reliability import (
     build_sell_before_close_exit_reliability_guard_decisions,
     build_sell_before_close_exit_reliability_report,
 )
+from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
+    SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+)
 
 
 def test_training_dataset_loads_phase2_corpus_outputs(tmp_path: Path) -> None:
@@ -201,6 +204,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "sell_before_close_p_up_disagreement_diagnostic_summary",
         "sell_before_close_exit_reliability_report",
         "sell_before_close_exit_reliability_summary",
+        "sell_before_close_guard_threshold_sweep_report",
+        "sell_before_close_guard_threshold_sweep_summary",
         "action_family_eligibility_report",
         "action_family_eligibility_summary",
         "hold_to_settlement_longshot_guard_report",
@@ -561,6 +566,7 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     } == {
         "I_sell_before_close_only_source_candidate",
         "J_sell_before_close_exit_reliability_guard_candidate",
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
     }
     assert exit_reliability["exit_reliability_guard_candidate_summary"][
         "candidate_name"
@@ -572,11 +578,38 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "paper_run_resume_allowed"
     ] is False
     assert len(exit_reliability["i_vs_j_replay_comparison"]) == 2
+    assert len(exit_reliability["i_vs_j_vs_k_replay_comparison"]) == 3
+    assert exit_reliability["exit_reliability_p_up_aligned_candidate_summary"][
+        "candidate_name"
+    ] == SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME
+    assert exit_reliability["exit_reliability_p_up_aligned_candidate_summary"][
+        "p_up_side_alignment_filter_enabled"
+    ] is True
     assert manifest["sell_before_close_exit_reliability_guard_summary"] == (
         source_eligibility["sell_before_close_exit_reliability_guard_summary"]
     )
+    assert manifest["sell_before_close_exit_reliability_p_up_aligned_summary"] == (
+        source_eligibility[
+            "sell_before_close_exit_reliability_p_up_aligned_summary"
+        ]
+    )
     assert manifest["sell_before_close_i_vs_j_replay_comparison"] == (
         source_eligibility["i_vs_j_replay_comparison"]
+    )
+    assert manifest["sell_before_close_i_vs_j_vs_k_replay_comparison"] == (
+        source_eligibility["i_vs_j_vs_k_replay_comparison"]
+    )
+    threshold_sweep = _read_json(
+        result.artifact_paths["sell_before_close_guard_threshold_sweep_report"]
+    )
+    assert threshold_sweep["diagnostic_only"] is True
+    assert threshold_sweep["uses_shadow_for_fit"] is False
+    assert threshold_sweep["promotion_evidence_eligible"] is False
+    assert threshold_sweep["paper_run_resume_allowed"] is False
+    assert threshold_sweep["row_count"] >= 1
+    assert threshold_sweep["best_threshold_sweep_row"] is not None
+    assert manifest["sell_before_close_guard_threshold_sweep_summary"] == (
+        source_eligibility["sell_before_close_guard_threshold_sweep_summary"]
     )
     assert manifest["sell_before_close_exit_reliability_summary"] == (
         source_eligibility["sell_before_close_exit_reliability_summary"]
@@ -592,8 +625,16 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert candidate_comparison[
         "sell_before_close_exit_reliability_guard_summary"
     ] == source_eligibility["sell_before_close_exit_reliability_guard_summary"]
+    assert candidate_comparison[
+        "sell_before_close_exit_reliability_p_up_aligned_summary"
+    ] == source_eligibility[
+        "sell_before_close_exit_reliability_p_up_aligned_summary"
+    ]
     assert candidate_comparison["i_vs_j_replay_comparison"] == (
         source_eligibility["i_vs_j_replay_comparison"]
+    )
+    assert candidate_comparison["i_vs_j_vs_k_replay_comparison"] == (
+        source_eligibility["i_vs_j_vs_k_replay_comparison"]
     )
     counterfactual_replay = _read_json(
         result.artifact_paths["action_family_counterfactual_replay_report"]
@@ -885,6 +926,7 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "C_sell_before_close_only_reranked",
         "I_sell_before_close_only_source_candidate",
         "J_sell_before_close_exit_reliability_guard_candidate",
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
         "D_hold_to_settlement_allowed_only_for_passed_buckets_reranked",
         "E_threshold_0.00_action_family_gates_reranked",
         "E_threshold_0.03_action_family_gates_reranked",
@@ -918,6 +960,12 @@ def test_training_runner_writes_required_artifacts_and_manifest(
             assert variant["paper_run_resume_allowed"] is False
             assert variant["promotion_evidence_eligible"] is False
             assert "i_vs_j_replay_comparison" in variant
+        if variant["variant"] == SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME:
+            assert variant["exit_reliability_guard_enabled"] is True
+            assert variant["p_up_side_alignment_filter_enabled"] is True
+            assert variant["paper_run_resume_allowed"] is False
+            assert variant["promotion_evidence_eligible"] is False
+            assert "i_vs_j_vs_k_replay_comparison" in variant
     assert manifest["action_family_counterfactual_replay_report_path"] == (
         "action_family_counterfactual_replay_report.json"
     )
@@ -1606,6 +1654,188 @@ def test_sell_before_close_exit_reliability_guard_exits_when_executable(
     assert summary["promotion_evidence_eligible"] is False
 
 
+def test_k_p_up_side_alignment_blocks_disagreed_entries(tmp_path: Path) -> None:
+    buy_up_disagree = _guard_prediction(
+        market_id="k-up-disagree",
+        decision_ts=1_000,
+        time_to_close_seconds=120.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.40,
+    )
+    buy_down_disagree = _guard_prediction(
+        market_id="k-down-disagree",
+        decision_ts=2_000,
+        time_to_close_seconds=120.0,
+        selected_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+
+    decisions, summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=(buy_up_disagree, buy_down_disagree),
+        config=PolymarketPolicyTrainingConfig(
+            corpus_dir=tmp_path / "corpus",
+            output_dir=tmp_path / "policy",
+        ),
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+
+    assert [decision.action for decision in decisions] == ["NO_TRADE", "NO_TRADE"]
+    assert all(
+        "entry_blocked_p_up_side_alignment_failed" in decision.reason_codes
+        for decision in decisions
+    )
+    assert summary["p_up_side_alignment_filter_enabled"] is True
+    assert summary["entry_decision_count_before_guard"] == 2
+    assert summary["entry_decision_count_after_exit_guard"] == 2
+    assert summary["entry_decision_count_after_p_up_alignment"] == 0
+    assert summary["entry_filter_blocked_by_p_up_alignment_count"] == 2
+
+
+def test_k_p_up_side_alignment_reduces_scoped_disagreement(tmp_path: Path) -> None:
+    disagreed = _guard_prediction(
+        market_id="k-disagreed",
+        decision_ts=1_000,
+        time_to_close_seconds=120.0,
+        selected_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    agreed = _guard_prediction(
+        market_id="k-agreed",
+        decision_ts=2_000,
+        time_to_close_seconds=120.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    config = PolymarketPolicyTrainingConfig(
+        corpus_dir=tmp_path / "corpus",
+        output_dir=tmp_path / "policy",
+    )
+
+    _, j_summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=(disagreed, agreed),
+        config=config,
+    )
+    _, k_summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=(disagreed, agreed),
+        config=config,
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+
+    assert j_summary["candidate_scoped_p_up_action_disagreement_rate"] > 0.0
+    assert k_summary["candidate_scoped_p_up_action_disagreement_rate"] == 0.0
+    assert k_summary["entry_filter_blocked_by_p_up_alignment_count"] == 1
+
+
+def test_k_keeps_policy_constrained_planned_exit(tmp_path: Path) -> None:
+    entry = _guard_prediction(
+        market_id="k-exit",
+        decision_ts=1_000,
+        time_to_close_seconds=120.0,
+        up_bid=0.50,
+        up_ask=0.55,
+        up_executable_bid_notional=0.30,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    exit_tick = _guard_prediction(
+        market_id="k-exit",
+        decision_ts=2_000,
+        time_to_close_seconds=119.0,
+        up_bid=0.58,
+        up_ask=0.60,
+        up_executable_bid_notional=0.30,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+
+    decisions, summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=(entry, exit_tick),
+        config=PolymarketPolicyTrainingConfig(
+            corpus_dir=tmp_path / "corpus",
+            output_dir=tmp_path / "policy",
+        ),
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+
+    assert [decision.action for decision in decisions] == ["BUY_UP", "SELL_UP"]
+    assert decisions[1].policy_exit_reason == "first_executable_exit_after_entry"
+    assert "exit_executed_policy_constrained" in decisions[1].reason_codes
+    assert summary["entry_decision_count_after_p_up_alignment"] == 1
+
+
+def test_k_reentry_cooldown_blocks_immediate_reentry(tmp_path: Path) -> None:
+    entry = _guard_prediction(
+        market_id="k-reentry",
+        decision_ts=1_000,
+        time_to_close_seconds=120.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    exit_tick = _guard_prediction(
+        market_id="k-reentry",
+        decision_ts=2_000,
+        time_to_close_seconds=119.0,
+        up_bid=0.58,
+        up_executable_bid_notional=0.30,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    reentry = _guard_prediction(
+        market_id="k-reentry",
+        decision_ts=3_000,
+        time_to_close_seconds=118.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+
+    decisions, summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=(entry, exit_tick, reentry),
+        config=PolymarketPolicyTrainingConfig(
+            corpus_dir=tmp_path / "corpus",
+            output_dir=tmp_path / "policy",
+        ),
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+
+    assert [decision.action for decision in decisions] == [
+        "BUY_UP",
+        "SELL_UP",
+        "NO_TRADE",
+    ]
+    assert "entry_blocked_reentry_cooldown" in decisions[-1].reason_codes
+    assert summary["reentry_blocked_count"] == 1
+    assert summary["entries_per_market_distribution"] == {1: 1}
+
+
+def test_k_can_remain_fail_closed_when_p_up_disagreement_excessive(
+    tmp_path: Path,
+) -> None:
+    borderline_disagree = _guard_prediction(
+        market_id="k-borderline",
+        decision_ts=1_000,
+        time_to_close_seconds=120.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.42,
+    )
+
+    decisions, summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=(borderline_disagree,),
+        config=PolymarketPolicyTrainingConfig(
+            corpus_dir=tmp_path / "corpus",
+            output_dir=tmp_path / "policy",
+        ),
+        thresholds={"p_up_alignment_min": 0.40},
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+
+    assert decisions[0].action == "BUY_UP"
+    assert summary["candidate_scoped_p_up_action_disagreement_rate"] == 1.0
+    assert (
+        summary["candidate_scoped_p_up_action_disagreement_within_limit"]
+        is False
+    )
+
+
 def _sell_before_close_diagnostic_inputs() -> tuple[
     tuple[PolymarketPolicyExample, ...],
     dict,
@@ -1830,8 +2060,11 @@ def _exit_reliability_prediction(
 
 def _guard_prediction(
     *,
+    market_id: str = "guard-market",
     decision_ts: int,
     time_to_close_seconds: float,
+    selected_action: str = "BUY_UP_SELL_BEFORE_CLOSE",
+    p_up_auxiliary: float = 0.70,
     up_bid: float = 0.52,
     up_ask: float = 0.54,
     down_bid: float = 0.45,
@@ -1843,23 +2076,29 @@ def _guard_prediction(
     up_spread_bps: float = 100.0,
     down_spread_bps: float = 100.0,
 ) -> PolymarketPolicyPrediction:
+    buy_up_sell_return = 0.08 if selected_action == "BUY_UP_SELL_BEFORE_CLOSE" else -0.10
+    buy_down_sell_return = 0.08 if selected_action == "BUY_DOWN_SELL_BEFORE_CLOSE" else -0.10
     action_returns = {
         "NO_TRADE": 0.0,
         "BUY_UP_HOLD_TO_SETTLEMENT": -0.20,
         "BUY_DOWN_HOLD_TO_SETTLEMENT": -0.20,
-        "BUY_UP_SELL_BEFORE_CLOSE": 0.08,
-        "BUY_DOWN_SELL_BEFORE_CLOSE": -0.10,
+        "BUY_UP_SELL_BEFORE_CLOSE": buy_up_sell_return,
+        "BUY_DOWN_SELL_BEFORE_CLOSE": buy_down_sell_return,
     }
+    ranked_returns = sorted(
+        action_returns.items(),
+        key=lambda item: (-float(item[1]), item[0]),
+    )
     return PolymarketPolicyPrediction(
-        market_id="guard-market",
+        market_id=market_id,
         condition_id="guard-condition",
         slug="guard-slug",
         market_family="btc_updown_5m",
         horizon_ms=300_000,
         decision_ts=decision_ts,
-        estimated_up_probability=0.70,
+        estimated_up_probability=p_up_auxiliary,
         confidence=0.90,
-        score=0.08,
+        score=float(action_returns[selected_action]),
         calibration_bucket="guard-test",
         model_version="guard-test-model",
         feature_schema_hash="a" * 64,
@@ -1886,22 +2125,22 @@ def _guard_prediction(
             "time_to_close_seconds": time_to_close_seconds,
         },
         target_up_probability=1.0,
-        p_up_auxiliary=0.70,
+        p_up_auxiliary=p_up_auxiliary,
         expected_return_by_action=action_returns,
         expected_return_no_trade=0.0,
         expected_return_buy_up_hold_to_settlement=-0.20,
         expected_return_buy_down_hold_to_settlement=-0.20,
-        expected_return_buy_up_sell_before_close=0.08,
-        expected_return_buy_down_sell_before_close=-0.10,
-        best_policy_action="BUY_UP_SELL_BEFORE_CLOSE",
-        best_action_expected_return=0.08,
-        second_best_action_expected_return=0.0,
-        best_action_margin=0.08,
+        expected_return_buy_up_sell_before_close=buy_up_sell_return,
+        expected_return_buy_down_sell_before_close=buy_down_sell_return,
+        best_policy_action=ranked_returns[0][0],
+        best_action_expected_return=ranked_returns[0][1],
+        second_best_action_expected_return=ranked_returns[1][1],
+        best_action_margin=ranked_returns[0][1] - ranked_returns[1][1],
         calibrated_expected_pnl_per_notional_by_action=action_returns,
-        calibrated_best_policy_action="BUY_UP_SELL_BEFORE_CLOSE",
-        calibrated_expected_pnl_per_notional=0.08,
-        calibrated_second_best_expected_pnl_per_notional=0.0,
-        calibrated_action_margin=0.08,
+        calibrated_best_policy_action=ranked_returns[0][0],
+        calibrated_expected_pnl_per_notional=ranked_returns[0][1],
+        calibrated_second_best_expected_pnl_per_notional=ranked_returns[1][1],
+        calibrated_action_margin=ranked_returns[0][1] - ranked_returns[1][1],
         action_value_calibration_applied=True,
         action_value_calibration_id="c" * 64,
         calibration_support_count=10,

@@ -35,6 +35,8 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_THRESHOLDS,
     SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_ACTIONS,
     SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
 )
 
 MODEL_RANKING_ERROR_SCHEMA_VERSION = (
@@ -455,11 +457,19 @@ def _source_candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         "enabled_actions",
         "disabled_actions",
         "exit_reliability_guard_enabled",
+        "p_up_side_alignment_filter_enabled",
         "exit_policy",
         "entry_filter_thresholds",
         "entry_decision_count_before_guard",
+        "entry_decision_count_after_exit_guard",
+        "entry_decision_count_after_p_up_alignment",
         "entry_decision_count_after_guard",
         "entry_filter_blocked_count",
+        "entry_filter_blocked_by_p_up_alignment_count",
+        "entry_filter_blocked_by_quality_count",
+        "reentry_cooldown_seconds",
+        "reentry_blocked_count",
+        "entries_per_market_distribution",
         "positions_opened_count",
         "positions_closed_before_settlement_count",
         "positions_opened_but_not_closed_before_settlement",
@@ -1002,6 +1012,29 @@ def _candidate_specs(
                 "HOLD_TO_SETTLEMENT is disabled and remains diagnostic-only",
             ],
         },
+        {
+            "candidate_name": SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+            "candidate_type": "sell_before_close_exit_reliability_p_up_aligned_candidate",
+            "score_source": "fallback",
+            "corrections": {},
+            "correction_group": "none",
+            "eligible_families": ("SELL_BEFORE_CLOSE",),
+            "enabled_actions": SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_ACTIONS,
+            "disabled_actions": SELL_BEFORE_CLOSE_DISABLED_SOURCE_CANDIDATE_ACTIONS,
+            "exit_reliability_guard_enabled": True,
+            "p_up_side_alignment_filter_enabled": True,
+            "exit_policy": SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
+            "entry_filter_thresholds": dict(
+                SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS
+            ),
+            "notes": [
+                "source eligibility candidate scoped to SELL_BEFORE_CLOSE actions",
+                "inherits the stateful exit-reliability guard",
+                "requires causal p_up/action side alignment before entry",
+                "prevents same-market churn with re-entry controls",
+                "HOLD_TO_SETTLEMENT is disabled and remains diagnostic-only",
+            ],
+        },
     )
 
 
@@ -1129,11 +1162,21 @@ def _candidate_report(
         "exit_reliability_guard_enabled": bool(
             spec.get("exit_reliability_guard_enabled", False)
         ),
+        "p_up_side_alignment_filter_enabled": bool(
+            spec.get("p_up_side_alignment_filter_enabled", False)
+        ),
         "exit_policy": spec.get("exit_policy"),
         "entry_filter_thresholds": dict(spec.get("entry_filter_thresholds", {})),
         "entry_decision_count_before_guard": entry_decision_count_before_guard,
+        "entry_decision_count_after_exit_guard": entry_decision_count_before_guard,
+        "entry_decision_count_after_p_up_alignment": entry_decision_count_before_guard,
         "entry_decision_count_after_guard": entry_decision_count_before_guard,
         "entry_filter_blocked_count": 0,
+        "entry_filter_blocked_by_p_up_alignment_count": 0,
+        "entry_filter_blocked_by_quality_count": 0,
+        "reentry_cooldown_seconds": None,
+        "reentry_blocked_count": 0,
+        "entries_per_market_distribution": {},
         "positions_opened_count": None,
         "positions_closed_before_settlement_count": None,
         "positions_opened_but_not_closed_before_settlement": None,

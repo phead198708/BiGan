@@ -39,6 +39,8 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
     SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_THRESHOLDS,
+    SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
 )
 
 ACTION_FAMILY_ELIGIBILITY_SCHEMA_VERSION = (
@@ -442,6 +444,22 @@ def build_action_family_counterfactual_prediction_sets(
             exit_policy=SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
             entry_filter_thresholds=dict(
                 SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_THRESHOLDS
+            ),
+        ),
+        _counterfactual_variant(
+            variant=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+            predictions=predictions,
+            ev_threshold=execution_buffer,
+            allowed_mode="sell_before_close_exit_reliability_p_up_aligned",
+            description=(
+                "SELL_BEFORE_CLOSE source candidate with causal p_up-aligned "
+                "entry guard and policy-constrained exits"
+            ),
+            exit_reliability_guard_enabled=True,
+            p_up_side_alignment_filter_enabled=True,
+            exit_policy=SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
+            entry_filter_thresholds=dict(
+                SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS
             ),
         ),
         _counterfactual_variant(
@@ -916,6 +934,7 @@ def _counterfactual_variant(
     eligible_action_families: list[str] | None = None,
     passed_bucket_keys: set[tuple[str, str, str, str]] | None = None,
     exit_reliability_guard_enabled: bool = False,
+    p_up_side_alignment_filter_enabled: bool = False,
     exit_policy: str | None = None,
     entry_filter_thresholds: dict[str, float] | None = None,
 ) -> dict[str, Any]:
@@ -944,6 +963,7 @@ def _counterfactual_variant(
         "prediction_count": len(replay_predictions),
         "predictions": replay_predictions,
         "exit_reliability_guard_enabled": exit_reliability_guard_enabled,
+        "p_up_side_alignment_filter_enabled": p_up_side_alignment_filter_enabled,
         "exit_policy": exit_policy,
         "entry_filter_thresholds": dict(entry_filter_thresholds or {}),
         **compact_safety_fields(),
@@ -1013,6 +1033,8 @@ def _counterfactual_action_allowed(
     if allowed_mode == "sell_before_close_only":
         return family == ACTION_FAMILY_SELL_BEFORE_CLOSE
     if allowed_mode == "sell_before_close_exit_reliability_guard":
+        return family == ACTION_FAMILY_SELL_BEFORE_CLOSE
+    if allowed_mode == "sell_before_close_exit_reliability_p_up_aligned":
         return family == ACTION_FAMILY_SELL_BEFORE_CLOSE
     if allowed_mode == "passed_family_and_bucket_only":
         if family not in eligible_action_families:

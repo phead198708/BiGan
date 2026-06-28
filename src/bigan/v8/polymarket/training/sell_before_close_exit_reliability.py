@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 
 from bigan.v8.polymarket.action_value_guards import action_value_bucket_payload
@@ -18,6 +18,8 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
     SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_THRESHOLDS,
     SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
 )
 
 SELL_BEFORE_CLOSE_EXIT_RELIABILITY_SCHEMA_VERSION = (
@@ -49,19 +51,35 @@ def build_sell_before_close_exit_reliability_guard_decisions(
     config: PolymarketPolicyTrainingConfig,
     thresholds: dict[str, float] | None = None,
     exit_policy: str = SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
+    candidate_name: str = SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
+    p_up_side_alignment_filter_enabled: bool = False,
 ) -> tuple[tuple[PolymarketEVDecision, ...], dict[str, Any]]:
-    """Build J-candidate guarded decisions without live writes or future labels."""
+    """Build guarded SELL_BEFORE_CLOSE decisions without live writes or future labels."""
 
     guard_thresholds = dict(
         thresholds or SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_THRESHOLDS
     )
+    if candidate_name == SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME:
+        merged = dict(SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS)
+        merged.update(guard_thresholds)
+        guard_thresholds = merged
+        p_up_side_alignment_filter_enabled = True
     if exit_policy != SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY:
         raise ValueError(f"unsupported exit reliability guard policy: {exit_policy}")
     decisions = []
     positions: dict[str, dict[str, Any]] = {}
+    entries_per_market: dict[str, int] = defaultdict(int)
+    last_exit_ts_by_market: dict[str, int] = {}
     before_guard = 0
+    after_exit_guard = 0
+    after_p_up_alignment = 0
     after_guard = 0
     blocked_count = 0
+    quality_blocked_count = 0
+    p_up_alignment_blocked_count = 0
+    reentry_blocked_count = 0
+    p_up_disagreement_count = 0
+    p_up_disagreement_denominator = 0
     reason_counts: dict[str, int] = defaultdict(int)
     for prediction in sorted(
         predictions,
@@ -81,6 +99,9 @@ def build_sell_before_close_exit_reliability_guard_decisions(
             for reason in decision.reason_codes:
                 reason_counts[reason] += 1
             if closed:
+                last_exit_ts_by_market[prediction.market_id] = int(
+                    prediction.decision_ts
+                )
                 positions[prediction.market_id] = _empty_guard_position()
             continue
 
@@ -110,10 +131,53 @@ def build_sell_before_close_exit_reliability_guard_decisions(
         )
         if not guard["passed"]:
             blocked_count += 1
+            quality_blocked_count += 1
             decision = _guard_no_trade_decision(
                 prediction=prediction,
                 config=config,
                 reason_codes=tuple(guard["reason_codes"]),
+                entry_policy_action=selected_action,
+            )
+            decisions.append(decision)
+            for reason in decision.reason_codes:
+                reason_counts[reason] += 1
+            continue
+        after_exit_guard += 1
+        p_up_alignment = _p_up_alignment_assessment(
+            prediction=prediction,
+            action=selected_action,
+            thresholds=guard_thresholds,
+            enabled=p_up_side_alignment_filter_enabled,
+        )
+        if not p_up_alignment["passed"]:
+            blocked_count += 1
+            p_up_alignment_blocked_count += 1
+            decision = _guard_no_trade_decision(
+                prediction=prediction,
+                config=config,
+                reason_codes=tuple(p_up_alignment["reason_codes"]),
+                entry_policy_action=selected_action,
+            )
+            decisions.append(decision)
+            for reason in decision.reason_codes:
+                reason_counts[reason] += 1
+            continue
+        after_p_up_alignment += 1
+        turnover = _turnover_guard_assessment(
+            market_id=prediction.market_id,
+            decision_ts=int(prediction.decision_ts),
+            thresholds=guard_thresholds,
+            entries_per_market=entries_per_market,
+            last_exit_ts_by_market=last_exit_ts_by_market,
+        )
+        if not turnover["passed"]:
+            blocked_count += 1
+            if "entry_blocked_reentry_cooldown" in turnover["reason_codes"]:
+                reentry_blocked_count += 1
+            decision = _guard_no_trade_decision(
+                prediction=prediction,
+                config=config,
+                reason_codes=tuple(turnover["reason_codes"]),
                 entry_policy_action=selected_action,
             )
             decisions.append(decision)
@@ -125,21 +189,65 @@ def build_sell_before_close_exit_reliability_guard_decisions(
             prediction=prediction,
             config=config,
             action=selected_action,
-            guard_reason_codes=tuple(guard["reason_codes"]),
+            guard_reason_codes=tuple(
+                dict.fromkeys(
+                    (
+                        *guard["reason_codes"],
+                        *p_up_alignment["reason_codes"],
+                        *turnover["reason_codes"],
+                    )
+                )
+            ),
         )
         decisions.append(decision)
         for reason in decision.reason_codes:
             reason_counts[reason] += 1
+        entries_per_market[prediction.market_id] += 1
+        p_up_disagreement_denominator += 1
+        if _action_p_up_disagrees(
+            action=selected_action,
+            p_up=_prediction_p_up(prediction),
+        ):
+            p_up_disagreement_count += 1
         _open_guard_position(position=position, decision=decision, side=guard["side"])
 
+    p_up_rate = (
+        0.0
+        if p_up_disagreement_denominator == 0
+        else p_up_disagreement_count / p_up_disagreement_denominator
+    )
     summary = {
-        "candidate_name": SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
+        "candidate_name": candidate_name,
         "exit_reliability_guard_enabled": True,
+        "p_up_side_alignment_filter_enabled": p_up_side_alignment_filter_enabled,
         "exit_policy": exit_policy,
         "entry_filter_thresholds": guard_thresholds,
         "entry_decision_count_before_guard": before_guard,
+        "entry_decision_count_after_exit_guard": after_exit_guard,
+        "entry_decision_count_after_p_up_alignment": after_p_up_alignment,
         "entry_decision_count_after_guard": after_guard,
         "entry_filter_blocked_count": blocked_count,
+        "entry_filter_blocked_by_p_up_alignment_count": (
+            p_up_alignment_blocked_count
+        ),
+        "entry_filter_blocked_by_quality_count": quality_blocked_count,
+        "reentry_cooldown_seconds": float(
+            guard_thresholds.get("min_reentry_cooldown_seconds", 0.0)
+        ),
+        "reentry_blocked_count": reentry_blocked_count,
+        "entries_per_market_distribution": dict(
+            sorted(Counter(entries_per_market.values()).items())
+        ),
+        "candidate_scoped_p_up_action_disagreement_count": (
+            p_up_disagreement_count
+        ),
+        "candidate_scoped_p_up_action_disagreement_denominator": (
+            p_up_disagreement_denominator
+        ),
+        "candidate_scoped_p_up_action_disagreement_rate": p_up_rate,
+        "candidate_scoped_p_up_action_disagreement_within_limit": (
+            p_up_rate <= P_UP_ACTION_DISAGREEMENT_FAIL_THRESHOLD
+        ),
         "reason_counts": dict(sorted(reason_counts.items())),
         "promotion_evidence_eligible": False,
         "paper_run_resume_allowed": False,
@@ -176,7 +284,20 @@ def build_sell_before_close_exit_reliability_report(
                 candidate_name=SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
             )
         )
+    k_replay = _optional_replay_by_variant(
+        action_family_counterfactual_replays,
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+    if k_replay is not None:
+        candidate_reports.append(
+            _candidate_exit_reliability_payload(
+                dataset=dataset,
+                replay=k_replay,
+                candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+            )
+        )
     summary = i_payload["summary"]
+    comparison = _candidate_replay_comparison(candidate_reports)
     report = {
         "schema_version": SELL_BEFORE_CLOSE_EXIT_RELIABILITY_SCHEMA_VERSION,
         "candidate_name": SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
@@ -197,9 +318,23 @@ def build_sell_before_close_exit_reliability_report(
         "diagnostic_exit_variants": i_payload["diagnostic_exit_variants"],
         "candidate_report_count": len(candidate_reports),
         "candidate_reports": candidate_reports,
-        "i_vs_j_replay_comparison": _i_vs_j_replay_comparison(candidate_reports),
+        "i_vs_j_replay_comparison": [
+            row
+            for row in comparison
+            if row["candidate_name"]
+            in {
+                SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
+                SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
+            }
+        ],
+        "i_vs_j_vs_k_replay_comparison": comparison,
         "exit_reliability_guard_candidate_summary": _guard_candidate_summary(
-            candidate_reports
+            candidate_reports,
+            candidate_name=SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
+        ),
+        "exit_reliability_p_up_aligned_candidate_summary": _guard_candidate_summary(
+            candidate_reports,
+            candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
         ),
         "sell_before_close_exit_failure_interpretation": summary[
             "sell_before_close_exit_failure_interpretation"
@@ -304,7 +439,7 @@ def _candidate_exit_reliability_payload(
     }
 
 
-def _i_vs_j_replay_comparison(
+def _candidate_replay_comparison(
     candidate_reports: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     rows = []
@@ -325,41 +460,73 @@ def _i_vs_j_replay_comparison(
                 "replay_residual_settlement_drag": summary[
                     "replay_residual_settlement_drag"
                 ],
+                "p_up_disagreement_rate": summary[
+                    "candidate_scoped_p_up_action_disagreement_rate"
+                ],
+                "source_model_candidate_eligible": False,
+                "ineligible_reason_codes": [],
             }
         )
-    if len(rows) == 2:
-        rows[1]["total_pnl_improved_vs_i_candidate"] = (
-            float(rows[1]["total_pnl"]) > float(rows[0]["total_pnl"])
-        )
-        rows[1]["residual_count_reduced_vs_i_candidate"] = (
-            int(rows[1]["residual_count"]) < int(rows[0]["residual_count"])
-        )
-        rows[1]["residual_drag_reduced_vs_i_candidate"] = (
-            float(rows[1]["replay_residual_settlement_drag"])
-            > float(rows[0]["replay_residual_settlement_drag"])
-        )
+    if rows:
+        baseline = rows[0]
+        for row in rows[1:]:
+            row["total_pnl_improved_vs_i_candidate"] = (
+                float(row["total_pnl"]) > float(baseline["total_pnl"])
+            )
+            row["residual_count_reduced_vs_i_candidate"] = (
+                int(row["residual_count"]) < int(baseline["residual_count"])
+            )
+            row["residual_drag_reduced_vs_i_candidate"] = (
+                float(row["replay_residual_settlement_drag"])
+                > float(baseline["replay_residual_settlement_drag"])
+            )
     return rows
 
 
 def _guard_candidate_summary(
     candidate_reports: list[dict[str, Any]],
+    *,
+    candidate_name: str,
 ) -> dict[str, Any] | None:
     for report in candidate_reports:
-        if report["candidate_name"] == SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME:
+        if report["candidate_name"] == candidate_name:
             summary = report["summary"]
             guard = report["exit_reliability_guard_summary"]
             return {
                 "candidate_name": report["candidate_name"],
                 "exit_reliability_guard_enabled": True,
+                "p_up_side_alignment_filter_enabled": bool(
+                    guard.get("p_up_side_alignment_filter_enabled", False)
+                ),
                 "exit_policy": guard.get("exit_policy"),
                 "entry_filter_thresholds": guard.get("entry_filter_thresholds", {}),
                 "entry_decision_count_before_guard": guard.get(
                     "entry_decision_count_before_guard",
                 ),
+                "entry_decision_count_after_exit_guard": guard.get(
+                    "entry_decision_count_after_exit_guard",
+                ),
+                "entry_decision_count_after_p_up_alignment": guard.get(
+                    "entry_decision_count_after_p_up_alignment",
+                ),
                 "entry_decision_count_after_guard": guard.get(
                     "entry_decision_count_after_guard",
                 ),
                 "entry_filter_blocked_count": guard.get("entry_filter_blocked_count"),
+                "entry_filter_blocked_by_p_up_alignment_count": guard.get(
+                    "entry_filter_blocked_by_p_up_alignment_count",
+                    0,
+                ),
+                "entry_filter_blocked_by_quality_count": guard.get(
+                    "entry_filter_blocked_by_quality_count",
+                    0,
+                ),
+                "reentry_cooldown_seconds": guard.get("reentry_cooldown_seconds"),
+                "reentry_blocked_count": guard.get("reentry_blocked_count", 0),
+                "entries_per_market_distribution": guard.get(
+                    "entries_per_market_distribution",
+                    {},
+                ),
                 "positions_opened_count": summary["positions_opened_count"],
                 "positions_closed_before_settlement_count": summary[
                     "positions_closed_before_settlement_count"
@@ -484,7 +651,14 @@ def sell_before_close_exit_reliability_summary(report: dict[str, Any]) -> dict[s
         "exit_reliability_guard_candidate_summary": report.get(
             "exit_reliability_guard_candidate_summary"
         ),
+        "exit_reliability_p_up_aligned_candidate_summary": report.get(
+            "exit_reliability_p_up_aligned_candidate_summary"
+        ),
         "i_vs_j_replay_comparison": report.get("i_vs_j_replay_comparison", []),
+        "i_vs_j_vs_k_replay_comparison": report.get(
+            "i_vs_j_vs_k_replay_comparison",
+            [],
+        ),
     }
 
 
@@ -550,16 +724,16 @@ def sell_before_close_exit_reliability_markdown(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "## I vs J Replay Comparison",
+            "## I vs J vs K Replay Comparison",
             "",
-            "| candidate | entries | sells | residual | trade_pnl | settlement_pnl | total_pnl | residual_drag |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|",
+            "| candidate | entries | sells | residual | trade_pnl | settlement_pnl | total_pnl | residual_drag | p_up_disagreement |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
-    for row in report.get("i_vs_j_replay_comparison", []):
+    for row in report.get("i_vs_j_vs_k_replay_comparison", []):
         lines.append(
             "| {candidate} | {entries} | {sells} | {residual} | {trade:.6f} | "
-            "{settlement:.6f} | {total:.6f} | {drag:.6f} |".format(
+            "{settlement:.6f} | {total:.6f} | {drag:.6f} | {p_up:.6f} |".format(
                 candidate=row["candidate_name"],
                 entries=row["entry_count"],
                 sells=row["sell_count"],
@@ -568,6 +742,7 @@ def sell_before_close_exit_reliability_markdown(report: dict[str, Any]) -> str:
                 settlement=row["settlement_pnl"],
                 total=row["total_pnl"],
                 drag=row["replay_residual_settlement_drag"],
+                p_up=row["p_up_disagreement_rate"],
             )
         )
     lines.extend(
@@ -901,6 +1076,83 @@ def _entry_guard_assessment(
             )
         ),
     }
+
+
+def _p_up_alignment_assessment(
+    *,
+    prediction: PolymarketPolicyPrediction,
+    action: str,
+    thresholds: dict[str, float],
+    enabled: bool,
+) -> dict[str, Any]:
+    if not enabled:
+        return {
+            "passed": True,
+            "reason_codes": ("p_up_side_alignment_filter_disabled",),
+        }
+    p_up = _prediction_p_up(prediction)
+    alignment_min = float(thresholds.get("p_up_alignment_min", 0.55))
+    if action.startswith("BUY_UP"):
+        passed = p_up >= alignment_min
+    elif action.startswith("BUY_DOWN"):
+        passed = p_up <= 1.0 - alignment_min
+    else:
+        passed = True
+    return {
+        "passed": passed,
+        "reason_codes": (
+            ("p_up_side_alignment_passed",)
+            if passed
+            else (
+                "entry_blocked_p_up_action_disagreement",
+                "entry_blocked_p_up_side_alignment_failed",
+            )
+        ),
+    }
+
+
+def _turnover_guard_assessment(
+    *,
+    market_id: str,
+    decision_ts: int,
+    thresholds: dict[str, float],
+    entries_per_market: dict[str, int],
+    last_exit_ts_by_market: dict[str, int],
+) -> dict[str, Any]:
+    reasons = []
+    max_entries = int(float(thresholds.get("max_entries_per_market", 10**9)))
+    cooldown_seconds = float(thresholds.get("min_reentry_cooldown_seconds", 0.0))
+    if entries_per_market.get(market_id, 0) >= max_entries:
+        reasons.append("entry_blocked_max_entries_per_market")
+    last_exit_ts = last_exit_ts_by_market.get(market_id)
+    if last_exit_ts is not None and cooldown_seconds > 0.0:
+        elapsed_seconds = max(0.0, (int(decision_ts) - int(last_exit_ts)) / 1000.0)
+        if elapsed_seconds < cooldown_seconds:
+            reasons.append("entry_blocked_reentry_cooldown")
+    passed = not reasons
+    return {
+        "passed": passed,
+        "reason_codes": (
+            ("turnover_guard_passed",)
+            if passed
+            else tuple(dict.fromkeys(("entry_blocked_turnover_guard", *reasons)))
+        ),
+    }
+
+
+def _prediction_p_up(prediction: PolymarketPolicyPrediction) -> float:
+    value = prediction.p_up_auxiliary
+    if value is None:
+        value = prediction.estimated_up_probability
+    return float(value)
+
+
+def _action_p_up_disagrees(*, action: str, p_up: float) -> bool:
+    if action.startswith("BUY_DOWN"):
+        return p_up >= P_UP_MATERIAL_DISAGREEMENT_THRESHOLD
+    if action.startswith("BUY_UP"):
+        return p_up <= 1.0 - P_UP_MATERIAL_DISAGREEMENT_THRESHOLD
+    return False
 
 
 def _exit_blocked_reason(

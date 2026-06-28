@@ -525,6 +525,7 @@ class PolymarketPolicyTrainingResult:
     source_model_eligibility_report: dict[str, Any]
     sell_before_close_p_up_disagreement_diagnostic_report: dict[str, Any]
     sell_before_close_exit_reliability_report: dict[str, Any]
+    sell_before_close_guard_threshold_sweep_report: dict[str, Any]
 
 
 def safety_fields() -> dict[str, bool]:

@@ -7,6 +7,7 @@ import json
 import shutil
 from collections import Counter
 from dataclasses import replace
+from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +79,10 @@ from bigan.v8.polymarket.training.sell_before_close_exit_reliability import (
 )
 from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_GUARD_THRESHOLD_SWEEP_GRID,
     SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
 )
 
 ACTION_VALUE_CONCENTRATION_WARN_THRESHOLD = 0.80
@@ -196,6 +200,16 @@ def run_polymarket_policy_training(
         calibration_split=primary_calibration_split,
         replay_split=replay_split,
     )
+    sell_before_close_guard_threshold_sweep = (
+        _build_sell_before_close_guard_threshold_sweep_report(
+            dataset=dataset,
+            prediction_sets=counterfactual_prediction_sets,
+            config=config,
+            calibration_error=float(calibration["calibration_error"]),
+            calibration_split=primary_calibration_split,
+            replay_split=replay_split,
+        )
+    )
     signal_sanity = _action_value_signal_sanity_report(
         validation_predictions=validation_predictions,
         shadow_predictions=shadow_predictions,
@@ -291,6 +305,9 @@ def run_polymarket_policy_training(
             sell_before_close_p_up_disagreement_diagnostic
         ),
         sell_before_close_exit_reliability=sell_before_close_exit_reliability,
+        sell_before_close_guard_threshold_sweep=(
+            sell_before_close_guard_threshold_sweep
+        ),
     )
     model_sha256 = _sha256_file(artifact_paths["model"])
     action_value_calibration_sha256 = _sha256_file(
@@ -330,6 +347,9 @@ def run_polymarket_policy_training(
         "sell_before_close_exit_reliability_report_sha256": _sha256_file(
             artifact_paths["sell_before_close_exit_reliability_report"]
         ),
+        "sell_before_close_guard_threshold_sweep_report_sha256": _sha256_file(
+            artifact_paths["sell_before_close_guard_threshold_sweep_report"]
+        ),
     }
     model_manifest = _model_manifest(
         config=config,
@@ -349,6 +369,9 @@ def run_polymarket_policy_training(
             sell_before_close_p_up_disagreement_diagnostic
         ),
         sell_before_close_exit_reliability=sell_before_close_exit_reliability,
+        sell_before_close_guard_threshold_sweep=(
+            sell_before_close_guard_threshold_sweep
+        ),
     )
     _write_json(artifact_paths["model_manifest"], model_manifest)
     artifact_hashes = {
@@ -389,6 +412,9 @@ def run_polymarket_policy_training(
         sell_before_close_exit_reliability_report=(
             sell_before_close_exit_reliability
         ),
+        sell_before_close_guard_threshold_sweep_report=(
+            sell_before_close_guard_threshold_sweep
+        ),
     )
 
 
@@ -409,15 +435,20 @@ def _build_action_family_counterfactual_replays(
         )
         predictions = tuple(prediction_set["predictions"])
         exit_reliability_guard_summary = None
-        if prediction_set["variant"] == (
-            SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME
-        ):
+        if bool(prediction_set.get("exit_reliability_guard_enabled", False)):
             decisions, exit_reliability_guard_summary = (
                 build_sell_before_close_exit_reliability_guard_decisions(
                     predictions=predictions,
                     config=replay_config,
                     thresholds=prediction_set.get("entry_filter_thresholds"),
                     exit_policy=str(prediction_set["exit_policy"]),
+                    candidate_name=str(prediction_set["variant"]),
+                    p_up_side_alignment_filter_enabled=bool(
+                        prediction_set.get(
+                            "p_up_side_alignment_filter_enabled",
+                            False,
+                        )
+                    ),
                 )
             )
         else:
@@ -462,6 +493,9 @@ def _build_action_family_counterfactual_replays(
                 "exit_reliability_guard_enabled": bool(
                     prediction_set.get("exit_reliability_guard_enabled", False)
                 ),
+                "p_up_side_alignment_filter_enabled": bool(
+                    prediction_set.get("p_up_side_alignment_filter_enabled", False)
+                ),
                 "exit_policy": prediction_set.get("exit_policy"),
                 "entry_filter_thresholds": dict(
                     prediction_set.get("entry_filter_thresholds", {})
@@ -485,6 +519,187 @@ def _build_action_family_counterfactual_replays(
     return tuple(replays)
 
 
+def _build_sell_before_close_guard_threshold_sweep_report(
+    *,
+    dataset: Any,
+    prediction_sets: tuple[dict[str, Any], ...],
+    config: PolymarketPolicyTrainingConfig,
+    calibration_error: float,
+    calibration_split: str,
+    replay_split: str,
+) -> dict[str, Any]:
+    prediction_set = next(
+        (
+            candidate
+            for candidate in prediction_sets
+            if candidate["variant"]
+            == SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME
+        ),
+        None,
+    )
+    if prediction_set is None:
+        report = {
+            "schema_version": (
+                "bigan-v8-polymarket-sell-before-close-guard-threshold-sweep-v1"
+            ),
+            "candidate_name": SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+            "diagnostic_only": True,
+            "uses_shadow_for_fit": False,
+            "promotion_evidence_eligible": False,
+            "paper_run_resume_allowed": False,
+            "sweep_grid": SELL_BEFORE_CLOSE_GUARD_THRESHOLD_SWEEP_GRID,
+            "row_count": 0,
+            "rows": [],
+            "best_threshold_sweep_row": None,
+            "reason_codes": ["k_candidate_prediction_set_missing"],
+            **compact_safety_fields(),
+        }
+        report["sell_before_close_guard_threshold_sweep_report_id"] = (
+            canonical_json_sha256(report)
+        )
+        return report
+
+    rows = []
+    grid_items = list(SELL_BEFORE_CLOSE_GUARD_THRESHOLD_SWEEP_GRID.items())
+    for values in product(*(item[1] for item in grid_items)):
+        thresholds = dict(SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS)
+        thresholds.update(
+            {name: float(value) for (name, _), value in zip(grid_items, values, strict=True)}
+        )
+        replay_config = replace(
+            config,
+            ev_threshold=float(prediction_set["ev_threshold"]),
+        )
+        decisions, guard_summary = build_sell_before_close_exit_reliability_guard_decisions(
+            predictions=tuple(prediction_set["predictions"]),
+            config=replay_config,
+            thresholds=thresholds,
+            exit_policy=str(prediction_set["exit_policy"]),
+            candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+            p_up_side_alignment_filter_enabled=True,
+        )
+        ev_report = ev_threshold_report(decisions, replay_split=replay_split)
+        replay_report = run_polymarket_policy_replay(
+            dataset=dataset,
+            decisions=decisions,
+            config=replay_config,
+            calibration_error=calibration_error,
+            calibration_split=calibration_split,
+            replay_split=replay_split,
+            prediction_count=len(prediction_set["predictions"]),
+        )
+        action_counts = ev_report["action_counts"]
+        entry_count = int(action_counts.get("BUY_UP", 0)) + int(
+            action_counts.get("BUY_DOWN", 0)
+        )
+        sell_count = int(action_counts.get("SELL_UP", 0)) + int(
+            action_counts.get("SELL_DOWN", 0)
+        )
+        residual_count = int(replay_report["settled_position_count"])
+        residual_drag = min(0.0, float(replay_report["settlement_pnl"]))
+        p_up_within_limit = bool(
+            guard_summary[
+                "candidate_scoped_p_up_action_disagreement_within_limit"
+            ]
+        )
+        would_be_source_eligible = (
+            entry_count > 0
+            and float(replay_report["total_polymarket_pnl"]) > 0.0
+            and residual_drag >= 0.0
+            and residual_count == 0
+            and p_up_within_limit
+        )
+        rows.append(
+            {
+                "candidate_name": SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+                "thresholds": thresholds,
+                "entry_count": entry_count,
+                "sell_count": sell_count,
+                "residual_count": residual_count,
+                "realized_trade_pnl": replay_report["realized_trade_pnl"],
+                "settlement_pnl": replay_report["settlement_pnl"],
+                "total_pnl": replay_report["total_polymarket_pnl"],
+                "max_drawdown": replay_report["max_drawdown"],
+                "p_up_disagreement_count": guard_summary[
+                    "candidate_scoped_p_up_action_disagreement_count"
+                ],
+                "p_up_disagreement_denominator": guard_summary[
+                    "candidate_scoped_p_up_action_disagreement_denominator"
+                ],
+                "p_up_disagreement_rate": guard_summary[
+                    "candidate_scoped_p_up_action_disagreement_rate"
+                ],
+                "p_up_disagreement_within_limit": p_up_within_limit,
+                "residual_settlement_drag": residual_drag,
+                "entry_decision_count_before_guard": guard_summary[
+                    "entry_decision_count_before_guard"
+                ],
+                "entry_decision_count_after_exit_guard": guard_summary[
+                    "entry_decision_count_after_exit_guard"
+                ],
+                "entry_decision_count_after_p_up_alignment": guard_summary[
+                    "entry_decision_count_after_p_up_alignment"
+                ],
+                "entry_filter_blocked_count": guard_summary[
+                    "entry_filter_blocked_count"
+                ],
+                "entry_filter_blocked_by_p_up_alignment_count": guard_summary[
+                    "entry_filter_blocked_by_p_up_alignment_count"
+                ],
+                "entry_filter_blocked_by_quality_count": guard_summary[
+                    "entry_filter_blocked_by_quality_count"
+                ],
+                "reentry_blocked_count": guard_summary[
+                    "reentry_blocked_count"
+                ],
+                "would_be_source_eligible_under_existing_gates": (
+                    would_be_source_eligible
+                ),
+                "promotion_evidence_eligible": False,
+                "paper_run_resume_allowed": False,
+                **compact_safety_fields(),
+            }
+        )
+    best = (
+        sorted(
+            rows,
+            key=lambda row: (
+                not bool(row["would_be_source_eligible_under_existing_gates"]),
+                -float(row["total_pnl"]),
+                int(row["residual_count"]),
+                float(row["p_up_disagreement_rate"]),
+                tuple(sorted(row["thresholds"].items())),
+            ),
+        )[0]
+        if rows
+        else None
+    )
+    report = {
+        "schema_version": (
+            "bigan-v8-polymarket-sell-before-close-guard-threshold-sweep-v1"
+        ),
+        "candidate_name": SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        "diagnostic_only": True,
+        "uses_shadow_for_fit": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "sweep_grid": SELL_BEFORE_CLOSE_GUARD_THRESHOLD_SWEEP_GRID,
+        "row_count": len(rows),
+        "rows": rows,
+        "best_threshold_sweep_row": best,
+        "reason_codes": [
+            "diagnostic_only",
+            "shadow_sweep_not_used_for_threshold_fit",
+            "promotion_replay_gate_required",
+        ],
+        **compact_safety_fields(),
+    }
+    report["sell_before_close_guard_threshold_sweep_report_id"] = (
+        canonical_json_sha256(report)
+    )
+    return report
+
+
 def _counterfactual_ledger_pnl_report(
     *,
     prediction_set: dict[str, Any],
@@ -501,6 +716,9 @@ def _counterfactual_ledger_pnl_report(
         "ev_threshold": prediction_set["ev_threshold"],
         "exit_reliability_guard_enabled": bool(
             prediction_set.get("exit_reliability_guard_enabled", False)
+        ),
+        "p_up_side_alignment_filter_enabled": bool(
+            prediction_set.get("p_up_side_alignment_filter_enabled", False)
         ),
         "exit_policy": prediction_set.get("exit_policy"),
         "entry_filter_thresholds": dict(
@@ -561,6 +779,9 @@ def _counterfactual_variant_summary(
         "exit_reliability_guard_enabled": bool(
             prediction_set.get("exit_reliability_guard_enabled", False)
         ),
+        "p_up_side_alignment_filter_enabled": bool(
+            prediction_set.get("p_up_side_alignment_filter_enabled", False)
+        ),
         "exit_policy": prediction_set.get("exit_policy"),
         "entry_filter_thresholds": dict(
             prediction_set.get("entry_filter_thresholds", {})
@@ -596,31 +817,44 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
     model_ranking_candidate_comparison: dict[str, Any],
     sell_before_close_exit_reliability: dict[str, Any],
 ) -> None:
-    guard_summary = sell_before_close_exit_reliability.get(
-        "exit_reliability_guard_candidate_summary"
-    )
-    if not guard_summary:
+    guard_summaries = {
+        SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME: (
+            sell_before_close_exit_reliability.get(
+                "exit_reliability_guard_candidate_summary"
+            )
+        ),
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME: (
+            sell_before_close_exit_reliability.get(
+                "exit_reliability_p_up_aligned_candidate_summary"
+            )
+        ),
+    }
+    guard_summaries = {
+        name: summary for name, summary in guard_summaries.items() if summary
+    }
+    if not guard_summaries:
         _refresh_candidate_comparison_rollups(model_ranking_candidate_comparison)
         return
-    i_vs_j_rows = sell_before_close_exit_reliability.get(
-        "i_vs_j_replay_comparison",
+    comparison_rows = sell_before_close_exit_reliability.get(
+        "i_vs_j_vs_k_replay_comparison",
         [],
     )
-    j_comparison = next(
-        (
-            row
-            for row in i_vs_j_rows
-            if row["candidate_name"]
-            == SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME
-        ),
-        {},
-    )
     for candidate in model_ranking_candidate_comparison["candidates"]:
-        if candidate["candidate_name"] != (
-            SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME
-        ):
+        guard_summary = guard_summaries.get(candidate["candidate_name"])
+        if not guard_summary:
             continue
+        comparison = next(
+            (
+                row
+                for row in comparison_rows
+                if row["candidate_name"] == candidate["candidate_name"]
+            ),
+            {},
+        )
         candidate["exit_reliability_guard_enabled"] = True
+        candidate["p_up_side_alignment_filter_enabled"] = bool(
+            guard_summary.get("p_up_side_alignment_filter_enabled", False)
+        )
         candidate["exit_policy"] = guard_summary["exit_policy"]
         candidate["entry_filter_thresholds"] = guard_summary[
             "entry_filter_thresholds"
@@ -628,11 +862,30 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
         candidate["entry_decision_count_before_guard"] = guard_summary[
             "entry_decision_count_before_guard"
         ]
+        candidate["entry_decision_count_after_exit_guard"] = guard_summary[
+            "entry_decision_count_after_exit_guard"
+        ]
+        candidate["entry_decision_count_after_p_up_alignment"] = guard_summary[
+            "entry_decision_count_after_p_up_alignment"
+        ]
         candidate["entry_decision_count_after_guard"] = guard_summary[
             "entry_decision_count_after_guard"
         ]
         candidate["entry_filter_blocked_count"] = guard_summary[
             "entry_filter_blocked_count"
+        ]
+        candidate["entry_filter_blocked_by_p_up_alignment_count"] = (
+            guard_summary["entry_filter_blocked_by_p_up_alignment_count"]
+        )
+        candidate["entry_filter_blocked_by_quality_count"] = guard_summary[
+            "entry_filter_blocked_by_quality_count"
+        ]
+        candidate["reentry_cooldown_seconds"] = guard_summary[
+            "reentry_cooldown_seconds"
+        ]
+        candidate["reentry_blocked_count"] = guard_summary["reentry_blocked_count"]
+        candidate["entries_per_market_distribution"] = guard_summary[
+            "entries_per_market_distribution"
         ]
         candidate["positions_opened_count"] = guard_summary[
             "positions_opened_count"
@@ -674,7 +927,7 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
             "candidate_scoped_p_up_action_disagreement_within_limit"
         ]
         candidate["replay_total_pnl_improved_vs_i_candidate"] = bool(
-            j_comparison.get("total_pnl_improved_vs_i_candidate", False)
+            comparison.get("total_pnl_improved_vs_i_candidate", False)
         )
         reasons = set(candidate["ineligible_reason_codes"])
         reasons.discard("p_up_action_disagreement_excessive")
@@ -696,6 +949,9 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
         if candidate.get("candidate_manifest"):
             manifest = candidate["candidate_manifest"]
             manifest["exit_reliability_guard_enabled"] = True
+            manifest["p_up_side_alignment_filter_enabled"] = candidate[
+                "p_up_side_alignment_filter_enabled"
+            ]
             manifest["exit_policy"] = candidate["exit_policy"]
             manifest["entry_filter_thresholds"] = candidate[
                 "entry_filter_thresholds"
@@ -703,11 +959,30 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
             manifest["entry_decision_count_before_guard"] = candidate[
                 "entry_decision_count_before_guard"
             ]
+            manifest["entry_decision_count_after_exit_guard"] = candidate[
+                "entry_decision_count_after_exit_guard"
+            ]
+            manifest["entry_decision_count_after_p_up_alignment"] = candidate[
+                "entry_decision_count_after_p_up_alignment"
+            ]
             manifest["entry_decision_count_after_guard"] = candidate[
                 "entry_decision_count_after_guard"
             ]
             manifest["entry_filter_blocked_count"] = candidate[
                 "entry_filter_blocked_count"
+            ]
+            manifest["entry_filter_blocked_by_p_up_alignment_count"] = (
+                candidate["entry_filter_blocked_by_p_up_alignment_count"]
+            )
+            manifest["entry_filter_blocked_by_quality_count"] = candidate[
+                "entry_filter_blocked_by_quality_count"
+            ]
+            manifest["reentry_cooldown_seconds"] = candidate[
+                "reentry_cooldown_seconds"
+            ]
+            manifest["reentry_blocked_count"] = candidate["reentry_blocked_count"]
+            manifest["entries_per_market_distribution"] = candidate[
+                "entries_per_market_distribution"
             ]
             manifest["replay_total_polymarket_pnl"] = candidate[
                 "replay_total_polymarket_pnl"
@@ -730,11 +1005,34 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
             manifest["ineligible_reason_codes"] = candidate[
                 "ineligible_reason_codes"
             ]
-        break
+    candidates_by_name = {
+        candidate["candidate_name"]: candidate
+        for candidate in model_ranking_candidate_comparison["candidates"]
+    }
+    for rows in (
+        comparison_rows,
+        sell_before_close_exit_reliability.get("i_vs_j_replay_comparison", []),
+    ):
+        for row in rows:
+            candidate = candidates_by_name.get(row["candidate_name"])
+            if candidate is None:
+                continue
+            row["source_model_candidate_eligible"] = candidate[
+                "source_model_candidate_eligible"
+            ]
+            row["ineligible_reason_codes"] = candidate["ineligible_reason_codes"]
     model_ranking_candidate_comparison[
         "sell_before_close_exit_reliability_guard_summary"
-    ] = guard_summary
-    model_ranking_candidate_comparison["i_vs_j_replay_comparison"] = i_vs_j_rows
+    ] = guard_summaries.get(SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME)
+    model_ranking_candidate_comparison[
+        "sell_before_close_exit_reliability_p_up_aligned_summary"
+    ] = guard_summaries.get(SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME)
+    model_ranking_candidate_comparison["i_vs_j_replay_comparison"] = (
+        sell_before_close_exit_reliability.get("i_vs_j_replay_comparison", [])
+    )
+    model_ranking_candidate_comparison["i_vs_j_vs_k_replay_comparison"] = (
+        comparison_rows
+    )
     _refresh_candidate_comparison_rollups(model_ranking_candidate_comparison)
 
 
@@ -802,6 +1100,7 @@ def _write_artifacts(
     source_model_eligibility: dict[str, Any],
     sell_before_close_p_up_disagreement_diagnostic: dict[str, Any],
     sell_before_close_exit_reliability: dict[str, Any],
+    sell_before_close_guard_threshold_sweep: dict[str, Any],
 ) -> dict[str, Path]:
     paths = {
         "training_config": run_dir / "polymarket_policy_training_config.json",
@@ -881,6 +1180,12 @@ def _write_artifacts(
         "sell_before_close_exit_reliability_summary": (
             run_dir / "sell_before_close_exit_reliability_report.md"
         ),
+        "sell_before_close_guard_threshold_sweep_report": (
+            run_dir / "sell_before_close_guard_threshold_sweep_report.json"
+        ),
+        "sell_before_close_guard_threshold_sweep_summary": (
+            run_dir / "sell_before_close_guard_threshold_sweep_report.md"
+        ),
         "all_predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "train_predictions": run_dir / "polymarket_policy_train_predictions.jsonl",
@@ -922,8 +1227,21 @@ def _write_artifacts(
     ] = sell_before_close_exit_reliability.get(
         "exit_reliability_guard_candidate_summary"
     )
+    model_ranking_candidate_comparison[
+        "sell_before_close_exit_reliability_p_up_aligned_summary"
+    ] = sell_before_close_exit_reliability.get(
+        "exit_reliability_p_up_aligned_candidate_summary"
+    )
     model_ranking_candidate_comparison["i_vs_j_replay_comparison"] = (
         sell_before_close_exit_reliability.get("i_vs_j_replay_comparison", [])
+    )
+    model_ranking_candidate_comparison["i_vs_j_vs_k_replay_comparison"] = (
+        sell_before_close_exit_reliability.get("i_vs_j_vs_k_replay_comparison", [])
+    )
+    model_ranking_candidate_comparison[
+        "sell_before_close_guard_threshold_sweep_summary"
+    ] = _sell_before_close_guard_threshold_sweep_summary(
+        sell_before_close_guard_threshold_sweep
     )
     source_model_eligibility[
         "sell_before_close_p_up_disagreement_diagnostic_summary"
@@ -936,8 +1254,21 @@ def _write_artifacts(
     ] = sell_before_close_exit_reliability.get(
         "exit_reliability_guard_candidate_summary"
     )
+    source_model_eligibility[
+        "sell_before_close_exit_reliability_p_up_aligned_summary"
+    ] = sell_before_close_exit_reliability.get(
+        "exit_reliability_p_up_aligned_candidate_summary"
+    )
     source_model_eligibility["i_vs_j_replay_comparison"] = (
         sell_before_close_exit_reliability.get("i_vs_j_replay_comparison", [])
+    )
+    source_model_eligibility["i_vs_j_vs_k_replay_comparison"] = (
+        sell_before_close_exit_reliability.get("i_vs_j_vs_k_replay_comparison", [])
+    )
+    source_model_eligibility[
+        "sell_before_close_guard_threshold_sweep_summary"
+    ] = _sell_before_close_guard_threshold_sweep_summary(
+        sell_before_close_guard_threshold_sweep
     )
     _write_candidate_artifacts(
         run_dir=run_dir,
@@ -974,6 +1305,10 @@ def _write_artifacts(
         paths["sell_before_close_exit_reliability_report"],
         sell_before_close_exit_reliability,
     )
+    _write_json(
+        paths["sell_before_close_guard_threshold_sweep_report"],
+        sell_before_close_guard_threshold_sweep,
+    )
     _write_json(paths["action_family_eligibility_report"], action_family_eligibility)
     _write_json(
         paths["hold_to_settlement_longshot_guard_report"],
@@ -988,6 +1323,9 @@ def _write_artifacts(
             sell_before_close_p_up_disagreement_diagnostic
         ),
         sell_before_close_exit_reliability=sell_before_close_exit_reliability,
+        sell_before_close_guard_threshold_sweep=(
+            sell_before_close_guard_threshold_sweep
+        ),
     )
     _write_json(
         paths["action_family_counterfactual_replay_report"],
@@ -1044,6 +1382,12 @@ def _write_artifacts(
     paths["sell_before_close_exit_reliability_summary"].write_text(
         sell_before_close_exit_reliability_markdown(
             sell_before_close_exit_reliability
+        ),
+        encoding="utf-8",
+    )
+    paths["sell_before_close_guard_threshold_sweep_summary"].write_text(
+        _sell_before_close_guard_threshold_sweep_markdown(
+            sell_before_close_guard_threshold_sweep
         ),
         encoding="utf-8",
     )
@@ -1151,6 +1495,7 @@ def _write_counterfactual_replay_artifacts(
     source_model_eligibility: dict[str, Any],
     sell_before_close_p_up_disagreement_diagnostic: dict[str, Any],
     sell_before_close_exit_reliability: dict[str, Any],
+    sell_before_close_guard_threshold_sweep: dict[str, Any],
 ) -> dict[str, Any]:
     root = run_dir / "action_family_counterfactual_replays"
     root.mkdir(parents=True, exist_ok=True)
@@ -1174,6 +1519,7 @@ def _write_counterfactual_replay_artifacts(
         if summary["variant"] in {
             SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
             SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_CANDIDATE_NAME,
+            SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
         }:
             summary[
                 "sell_before_close_p_up_disagreement_diagnostic_summary"
@@ -1185,9 +1531,25 @@ def _write_counterfactual_replay_artifacts(
                 "i_vs_j_replay_comparison",
                 [],
             )
+            summary["i_vs_j_vs_k_replay_comparison"] = (
+                sell_before_close_exit_reliability.get(
+                    "i_vs_j_vs_k_replay_comparison",
+                    [],
+                )
+            )
             summary["sell_before_close_exit_reliability_guard_summary"] = (
                 sell_before_close_exit_reliability.get(
                     "exit_reliability_guard_candidate_summary"
+                )
+            )
+            summary["sell_before_close_exit_reliability_p_up_aligned_summary"] = (
+                sell_before_close_exit_reliability.get(
+                    "exit_reliability_p_up_aligned_candidate_summary"
+                )
+            )
+            summary["sell_before_close_guard_threshold_sweep_summary"] = (
+                _sell_before_close_guard_threshold_sweep_summary(
+                    sell_before_close_guard_threshold_sweep
                 )
             )
         ledger_pnl_report = dict(replay["ledger_pnl_report"])
@@ -1250,9 +1612,23 @@ def _write_counterfactual_replay_artifacts(
                 "exit_reliability_guard_candidate_summary"
             )
         ),
+        "sell_before_close_exit_reliability_p_up_aligned_summary": (
+            sell_before_close_exit_reliability.get(
+                "exit_reliability_p_up_aligned_candidate_summary"
+            )
+        ),
         "i_vs_j_replay_comparison": sell_before_close_exit_reliability.get(
             "i_vs_j_replay_comparison",
             [],
+        ),
+        "i_vs_j_vs_k_replay_comparison": sell_before_close_exit_reliability.get(
+            "i_vs_j_vs_k_replay_comparison",
+            [],
+        ),
+        "sell_before_close_guard_threshold_sweep_summary": (
+            _sell_before_close_guard_threshold_sweep_summary(
+                sell_before_close_guard_threshold_sweep
+            )
         ),
         "variant_count": len(variant_summaries),
         "variants": variant_summaries,
@@ -1283,6 +1659,93 @@ def _counterfactual_summary_with_source_gate(
     return summary
 
 
+def _sell_before_close_guard_threshold_sweep_summary(
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    best = report.get("best_threshold_sweep_row")
+    return {
+        "schema_version": report["schema_version"],
+        "candidate_name": report["candidate_name"],
+        "diagnostic_only": True,
+        "uses_shadow_for_fit": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "row_count": report["row_count"],
+        "best_threshold_sweep_row": best,
+    }
+
+
+def _sell_before_close_guard_threshold_sweep_markdown(
+    report: dict[str, Any],
+) -> str:
+    lines = [
+        "# SELL_BEFORE_CLOSE Guard Threshold Sweep",
+        "",
+        f"- candidate_name: `{report['candidate_name']}`",
+        f"- diagnostic_only: `{str(report['diagnostic_only']).lower()}`",
+        f"- uses_shadow_for_fit: `{str(report['uses_shadow_for_fit']).lower()}`",
+        "- promotion_evidence_eligible: "
+        f"`{str(report['promotion_evidence_eligible']).lower()}`",
+        f"- paper_run_resume_allowed: `{str(report['paper_run_resume_allowed']).lower()}`",
+        f"- row_count: `{report['row_count']}`",
+        "",
+        "## Best Diagnostic Row",
+        "",
+    ]
+    best = report.get("best_threshold_sweep_row")
+    if best is None:
+        lines.append("- none")
+    else:
+        lines.extend(
+            [
+                f"- thresholds: `{json.dumps(best['thresholds'], sort_keys=True)}`",
+                f"- entry_count: `{best['entry_count']}`",
+                f"- sell_count: `{best['sell_count']}`",
+                f"- residual_count: `{best['residual_count']}`",
+                f"- realized_trade_pnl: `{best['realized_trade_pnl']}`",
+                f"- settlement_pnl: `{best['settlement_pnl']}`",
+                f"- total_pnl: `{best['total_pnl']}`",
+                f"- max_drawdown: `{best['max_drawdown']}`",
+                f"- p_up_disagreement_rate: `{best['p_up_disagreement_rate']}`",
+                "- would_be_source_eligible_under_existing_gates: "
+                f"`{str(best['would_be_source_eligible_under_existing_gates']).lower()}`",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Rows",
+            "",
+            "| entry | sell | residual | total_pnl | residual_drag | p_up_disagreement | thresholds |",
+            "|---:|---:|---:|---:|---:|---:|---|",
+        ]
+    )
+    for row in report.get("rows", [])[:25]:
+        lines.append(
+            "| {entry} | {sell} | {residual} | {total:.6f} | {drag:.6f} | "
+            "{p_up:.6f} | `{thresholds}` |".format(
+                entry=row["entry_count"],
+                sell=row["sell_count"],
+                residual=row["residual_count"],
+                total=row["total_pnl"],
+                drag=row["residual_settlement_drag"],
+                p_up=row["p_up_disagreement_rate"],
+                thresholds=json.dumps(row["thresholds"], sort_keys=True),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "- paper_only: true",
+            "- capital_at_risk: false",
+            "- polymarket_write_enabled: false",
+            "- wallet_signing_enabled: false",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _model_manifest(
     *,
     config: PolymarketPolicyTrainingConfig,
@@ -1300,6 +1763,7 @@ def _model_manifest(
     source_model_eligibility: dict[str, Any],
     sell_before_close_p_up_disagreement_diagnostic: dict[str, Any],
     sell_before_close_exit_reliability: dict[str, Any],
+    sell_before_close_guard_threshold_sweep: dict[str, Any],
 ) -> dict[str, Any]:
     split_fields = {
         field_name: dataset_profile[field_name]
@@ -1584,10 +2048,34 @@ def _model_manifest(
                 "exit_reliability_guard_candidate_summary"
             )
         ),
+        "sell_before_close_exit_reliability_p_up_aligned_summary": (
+            sell_before_close_exit_reliability.get(
+                "exit_reliability_p_up_aligned_candidate_summary"
+            )
+        ),
         "sell_before_close_i_vs_j_replay_comparison": (
             sell_before_close_exit_reliability.get(
                 "i_vs_j_replay_comparison",
                 [],
+            )
+        ),
+        "sell_before_close_i_vs_j_vs_k_replay_comparison": (
+            sell_before_close_exit_reliability.get(
+                "i_vs_j_vs_k_replay_comparison",
+                [],
+            )
+        ),
+        "sell_before_close_guard_threshold_sweep_report_path": (
+            "sell_before_close_guard_threshold_sweep_report.json"
+        ),
+        "sell_before_close_guard_threshold_sweep_report_sha256": (
+            action_family_artifact_hashes[
+                "sell_before_close_guard_threshold_sweep_report_sha256"
+            ]
+        ),
+        "sell_before_close_guard_threshold_sweep_summary": (
+            _sell_before_close_guard_threshold_sweep_summary(
+                sell_before_close_guard_threshold_sweep
             )
         ),
         "candidate_scoped_source_model_eligibility_summary": (
