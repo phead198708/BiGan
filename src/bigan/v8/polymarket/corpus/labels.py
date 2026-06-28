@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from typing import Any
 
@@ -106,6 +107,9 @@ def build_sell_before_close_label_redesign_report(
         sell_rows=sell_rows,
         leakage_failures=leakage_failures,
     )
+    entry_notional = float(config.sell_before_close_entry_notional)
+    min_exit_notional = float(config.sell_before_close_min_exit_notional)
+    near_miss_threshold = 0.95 * min_exit_notional
     report = {
         "schema_version": POLYMARKET_SELL_BEFORE_CLOSE_LABEL_REDESIGN_REPORT_SCHEMA_VERSION,
         "sell_before_close_label_schema_version": (
@@ -140,7 +144,22 @@ def build_sell_before_close_label_redesign_report(
         "average_execution_gap_return": _mean(
             [row.execution_gap_return for row in sell_rows]
         ),
-        "min_exit_notional": float(config.sell_before_close_min_exit_notional),
+        "sell_before_close_entry_notional": entry_notional,
+        "sell_before_close_min_exit_notional": min_exit_notional,
+        "min_exit_notional_source": _min_exit_notional_source(
+            entry_notional=entry_notional,
+            min_exit_notional=min_exit_notional,
+        ),
+        "min_exit_notional_to_entry_notional_ratio": (
+            min_exit_notional / entry_notional
+        ),
+        "near_miss_theoretical_count": _near_miss_theoretical_count(
+            theoretical_rows=theoretical_rows,
+            near_miss_threshold=near_miss_threshold,
+            min_exit_notional=min_exit_notional,
+        ),
+        "near_miss_threshold": near_miss_threshold,
+        "min_exit_notional": min_exit_notional,
         "min_queue_fill_probability": float(
             config.sell_before_close_min_queue_fill_probability
         ),
@@ -176,6 +195,18 @@ def sell_before_close_label_redesign_markdown(report: dict[str, Any]) -> str:
         f"`{str(report['uses_intraround_exit_opportunity_model']).lower()}`",
         "- uses_queue_fill_probability_model: "
         f"`{str(report['uses_queue_fill_probability_model']).lower()}`",
+        "- sell_before_close_entry_notional: "
+        f"`{report['sell_before_close_entry_notional']}`",
+        "- sell_before_close_min_exit_notional: "
+        f"`{report['sell_before_close_min_exit_notional']}`",
+        "- min_exit_notional_source: "
+        f"`{report['min_exit_notional_source']}`",
+        "- min_exit_notional_to_entry_notional_ratio: "
+        f"`{report['min_exit_notional_to_entry_notional_ratio']}`",
+        "- near_miss_theoretical_count: "
+        f"`{report['near_miss_theoretical_count']}`",
+        "- near_miss_threshold: "
+        f"`{report['near_miss_threshold']}`",
         "",
         "## Execution Classes",
         "",
@@ -627,6 +658,33 @@ def _non_executable_exit_path_reason_codes(
     ):
         reason_codes.append("queue_fill_probability_below_threshold")
     return tuple(reason_codes)
+
+
+def _min_exit_notional_source(
+    *,
+    entry_notional: float,
+    min_exit_notional: float,
+) -> str:
+    if math.isclose(min_exit_notional, 1.0) and math.isclose(entry_notional, 1.0):
+        return "fixed_1_notional"
+    if math.isclose(min_exit_notional, entry_notional):
+        return "paper_notional"
+    return "config"
+
+
+def _near_miss_theoretical_count(
+    *,
+    theoretical_rows: list[PolymarketCorpusLabelRow],
+    near_miss_threshold: float,
+    min_exit_notional: float,
+) -> int:
+    return sum(
+        1
+        for row in theoretical_rows
+        if near_miss_threshold
+        <= float(row.executable_liquidity_notional)
+        < min_exit_notional
+    )
 
 
 def _exit_path_reason_codes(exit_path: dict[str, Any]) -> tuple[str, ...]:
