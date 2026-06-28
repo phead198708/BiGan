@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +34,9 @@ from bigan.v8.polymarket.training.model_ranking_diagnostics import (
 )
 from bigan.v8.polymarket.training.sell_before_close_diagnostics import (
     build_sell_before_close_p_up_disagreement_diagnostic_report,
+)
+from bigan.v8.polymarket.training.sell_before_close_exit_reliability import (
+    build_sell_before_close_exit_reliability_report,
 )
 
 
@@ -194,6 +198,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "source_model_eligibility_summary",
         "sell_before_close_p_up_disagreement_diagnostic_report",
         "sell_before_close_p_up_disagreement_diagnostic_summary",
+        "sell_before_close_exit_reliability_report",
+        "sell_before_close_exit_reliability_summary",
         "action_family_eligibility_report",
         "action_family_eligibility_summary",
         "hold_to_settlement_longshot_guard_report",
@@ -453,14 +459,30 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert "sell_before_close_replay_settlement_pnl" in manifest
     assert "sell_before_close_replay_total_polymarket_pnl" in manifest
     assert "sell_before_close_replay_residual_settlement_drag" in manifest
+    assert "sell_before_close_positions_opened_count" in manifest
     assert (
-        "sell_before_close_replay_positions_opened_but_not_closed_before_settlement"
+        "sell_before_close_positions_opened_but_not_closed_before_settlement"
         in manifest
     )
     assert (
         "sell_before_close_settlement_drag_attribution_interpretation"
         in manifest
     )
+    assert manifest["sell_before_close_exit_reliability_report_path"] == (
+        "sell_before_close_exit_reliability_report.json"
+    )
+    assert looks_like_sha256(
+        manifest["sell_before_close_exit_reliability_report_sha256"]
+    )
+    assert "sell_before_close_exit_failure_interpretation" in manifest
+    assert "sell_before_close_positions_opened_count" in manifest
+    assert "sell_before_close_positions_closed_before_settlement_count" in manifest
+    assert (
+        "sell_before_close_positions_opened_but_not_closed_before_settlement"
+        in manifest
+    )
+    assert "sell_before_close_best_diagnostic_exit_variant" in manifest
+    assert "sell_before_close_best_diagnostic_exit_variant_total_pnl" in manifest
     assert manifest["sell_before_close_p_up_disagreement_diagnostic_summary"] == (
         source_eligibility["sell_before_close_p_up_disagreement_diagnostic_summary"]
     )
@@ -480,11 +502,30 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "settlement_drag_attribution_interpretation",
     ):
         assert field_name in embedded_summary
+    exit_reliability = _read_json(
+        result.artifact_paths["sell_before_close_exit_reliability_report"]
+    )
+    assert exit_reliability["schema_version"] == (
+        "bigan-v8-polymarket-sell-before-close-exit-reliability-v1"
+    )
+    assert exit_reliability["candidate_name"] == (
+        "I_sell_before_close_only_source_candidate"
+    )
+    assert exit_reliability["diagnostic_only"] is True
+    assert exit_reliability["promotion_evidence_eligible"] is False
+    assert exit_reliability["paper_run_resume_allowed"] is False
+    assert exit_reliability["diagnostic_counterfactual"] is True
+    assert manifest["sell_before_close_exit_reliability_summary"] == (
+        source_eligibility["sell_before_close_exit_reliability_summary"]
+    )
     assert candidate_comparison[
         "sell_before_close_p_up_disagreement_diagnostic_summary"
     ] == source_eligibility[
         "sell_before_close_p_up_disagreement_diagnostic_summary"
     ]
+    assert candidate_comparison[
+        "sell_before_close_exit_reliability_summary"
+    ] == source_eligibility["sell_before_close_exit_reliability_summary"]
     counterfactual_replay = _read_json(
         result.artifact_paths["action_family_counterfactual_replay_report"]
     )
@@ -493,6 +534,9 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     ] == source_eligibility[
         "sell_before_close_p_up_disagreement_diagnostic_summary"
     ]
+    assert counterfactual_replay[
+        "sell_before_close_exit_reliability_summary"
+    ] == source_eligibility["sell_before_close_exit_reliability_summary"]
     assert candidate_comparison["candidate_artifact_count"] >= 2
     exported_names = {
         artifact["candidate_name"]
@@ -1370,6 +1414,46 @@ def test_sell_before_close_p_up_disagreement_diagnostic_is_candidate_scoped() ->
     ] == 3
 
 
+def test_sell_before_close_exit_reliability_counts_residuals_and_variants() -> None:
+    dataset, replays = _sell_before_close_exit_reliability_inputs()
+
+    report = build_sell_before_close_exit_reliability_report(
+        dataset=dataset,
+        action_family_counterfactual_replays=replays,
+    )
+
+    summary = report["summary"]
+    assert report["candidate_name"] == "I_sell_before_close_only_source_candidate"
+    assert report["diagnostic_only"] is True
+    assert report["promotion_evidence_eligible"] is False
+    assert report["paper_run_resume_allowed"] is False
+    assert report["diagnostic_counterfactual"] is True
+    assert summary["entry_decision_count"] == 2
+    assert summary["sell_decision_count"] == 1
+    assert summary["positions_opened_count"] == 2
+    assert summary["positions_closed_before_settlement_count"] == 1
+    assert summary["positions_opened_but_not_closed_before_settlement"] == 1
+    assert summary["replay_residual_settlement_drag"] == pytest.approx(-0.20)
+    assert summary["sell_before_close_exit_failure_interpretation"] in {
+        "mixed_exit_reliability_failure",
+        "policy_does_not_enforce_planned_exit",
+    }
+    assert {
+        row["exit_lifecycle_class"] for row in report["position_lifecycle_rows"]
+    } == {"closed_before_settlement", "no_exit_signal_generated"}
+    for variant in report["diagnostic_exit_variants"]:
+        assert variant["diagnostic_counterfactual"] is True
+        assert variant["promotion_evidence_eligible"] is False
+        assert variant["paper_run_resume_allowed"] is False
+    forced = next(
+        variant
+        for variant in report["diagnostic_exit_variants"]
+        if variant["variant"] == "forced_preclose_exit_if_executable"
+    )
+    assert forced["exit_count"] >= 1
+    assert "source_model_candidate_eligible" not in report
+
+
 def _sell_before_close_diagnostic_inputs() -> tuple[
     tuple[PolymarketPolicyExample, ...],
     dict,
@@ -1438,6 +1522,158 @@ def _sell_before_close_diagnostic_inputs() -> tuple[
             },
         ),
     )
+
+
+def _sell_before_close_exit_reliability_inputs() -> tuple[SimpleNamespace, tuple[dict, ...]]:
+    decisions = [
+        _exit_reliability_decision(
+            market_id="market-closed",
+            slug="btc-updown-5m-closed",
+            decision_ts=1_000,
+            action="BUY_UP",
+            selected_outcome="UP",
+            execution_price=0.50,
+            paper_notional=0.20,
+            planned_exit_before_ts=2_000,
+            entry_policy_action="BUY_UP_SELL_BEFORE_CLOSE",
+            reason_codes=("policy_buy_up_sell_before_close",),
+        ),
+        _exit_reliability_decision(
+            market_id="market-residual",
+            slug="btc-updown-5m-residual",
+            decision_ts=1_000,
+            action="BUY_DOWN",
+            selected_outcome="DOWN",
+            execution_price=0.50,
+            paper_notional=0.20,
+            planned_exit_before_ts=2_000,
+            entry_policy_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+            reason_codes=("policy_buy_down_sell_before_close",),
+        ),
+        _exit_reliability_decision(
+            market_id="market-closed",
+            slug="btc-updown-5m-closed",
+            decision_ts=2_500,
+            action="SELL_UP",
+            selected_outcome="UP",
+            execution_price=0.56,
+            paper_notional=0.224,
+            planned_exit_before_ts=2_000,
+            entry_policy_action="BUY_UP_SELL_BEFORE_CLOSE",
+            reason_codes=("sell_up_ev_deteriorated", "bid_price_execution"),
+        ),
+    ]
+    predictions = [
+        _exit_reliability_prediction("market-closed", "btc-updown-5m-closed", 1_000),
+        _exit_reliability_prediction(
+            "market-closed",
+            "btc-updown-5m-closed",
+            2_500,
+            up_bid=0.56,
+            up_liquidity=0.25,
+        ),
+        _exit_reliability_prediction(
+            "market-residual",
+            "btc-updown-5m-residual",
+            1_000,
+            down_bid=0.50,
+        ),
+        _exit_reliability_prediction(
+            "market-residual",
+            "btc-updown-5m-residual",
+            1_500,
+            down_bid=0.60,
+            down_liquidity=0.25,
+        ),
+    ]
+    dataset = SimpleNamespace(
+        market_metadata={
+            "market-closed": {"market_end_ts": 4_000},
+            "market-residual": {"market_end_ts": 4_000},
+        },
+        resolution_events={
+            "market-closed": {"payout_up": 1.0, "payout_down": 0.0},
+            "market-residual": {"payout_up": 1.0, "payout_down": 0.0},
+        },
+    )
+    replay = {
+        "variant": "I_sell_before_close_only_source_candidate",
+        "decisions": decisions,
+        "predictions": predictions,
+        "replay_report": {"planned_sell_before_close_exit_count": 0},
+        "summary": {
+            "entry_decision_count": 2,
+            "action_counts": {"BUY_UP": 1, "BUY_DOWN": 1, "SELL_UP": 1},
+            "reason_counts": {"hold_threshold_not_met": 1},
+            "realized_trade_pnl": 0.024,
+            "settlement_pnl": -0.20,
+            "total_polymarket_pnl": -0.176,
+        },
+    }
+    return dataset, (replay,)
+
+
+def _exit_reliability_decision(
+    *,
+    market_id: str,
+    slug: str,
+    decision_ts: int,
+    action: str,
+    selected_outcome: str,
+    execution_price: float,
+    paper_notional: float,
+    planned_exit_before_ts: int,
+    entry_policy_action: str,
+    reason_codes: tuple[str, ...],
+) -> dict:
+    return {
+        "market_id": market_id,
+        "slug": slug,
+        "decision_ts": decision_ts,
+        "action": action,
+        "selected_outcome": selected_outcome,
+        "execution_price": execution_price,
+        "paper_notional": paper_notional,
+        "intended_exit_policy": "sell_before_close",
+        "planned_exit_before_ts": planned_exit_before_ts,
+        "entry_policy_action": entry_policy_action,
+        "expected_return_by_action": {
+            "NO_TRADE": 0.0,
+            "BUY_UP_HOLD_TO_SETTLEMENT": -0.1,
+            "BUY_DOWN_HOLD_TO_SETTLEMENT": -0.1,
+            "BUY_UP_SELL_BEFORE_CLOSE": 0.2,
+            "BUY_DOWN_SELL_BEFORE_CLOSE": 0.2,
+        },
+        "reason_codes": list(reason_codes),
+    }
+
+
+def _exit_reliability_prediction(
+    market_id: str,
+    slug: str,
+    decision_ts: int,
+    *,
+    up_bid: float = 0.55,
+    down_bid: float = 0.55,
+    up_liquidity: float = 0.25,
+    down_liquidity: float = 0.25,
+) -> dict:
+    return {
+        "market_id": market_id,
+        "slug": slug,
+        "decision_ts": decision_ts,
+        "features": {
+            "up_bid": up_bid,
+            "up_ask": 0.50,
+            "down_bid": down_bid,
+            "down_ask": 0.50,
+            "up_queue_fill_probability_proxy": 0.90,
+            "down_queue_fill_probability_proxy": 0.90,
+            "up_executable_bid_notional": up_liquidity,
+            "down_executable_bid_notional": down_liquidity,
+            "time_to_close_seconds": max(0.0, (4_000 - decision_ts) / 1000.0),
+        },
+    }
 
 
 def _with_sell_before_close_diagnostic_targets(

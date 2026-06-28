@@ -71,6 +71,11 @@ from bigan.v8.polymarket.training.sell_before_close_diagnostics import (
     sell_before_close_p_up_disagreement_diagnostic_markdown,
     sell_before_close_p_up_disagreement_summary,
 )
+from bigan.v8.polymarket.training.sell_before_close_exit_reliability import (
+    build_sell_before_close_exit_reliability_report,
+    sell_before_close_exit_reliability_markdown,
+    sell_before_close_exit_reliability_summary,
+)
 
 ACTION_VALUE_CONCENTRATION_WARN_THRESHOLD = 0.80
 ACTION_VALUE_CONCENTRATION_FAIL_THRESHOLD = 0.95
@@ -241,6 +246,12 @@ def run_polymarket_policy_training(
             pnl_notional=float(config.max_paper_notional),
         )
     )
+    sell_before_close_exit_reliability = (
+        build_sell_before_close_exit_reliability_report(
+            dataset=dataset,
+            action_family_counterfactual_replays=action_family_counterfactual_replays,
+        )
+    )
     artifact_paths = _write_artifacts(
         run_dir=run_dir,
         config=config,
@@ -271,6 +282,7 @@ def run_polymarket_policy_training(
         sell_before_close_p_up_disagreement_diagnostic=(
             sell_before_close_p_up_disagreement_diagnostic
         ),
+        sell_before_close_exit_reliability=sell_before_close_exit_reliability,
     )
     model_sha256 = _sha256_file(artifact_paths["model"])
     action_value_calibration_sha256 = _sha256_file(
@@ -307,6 +319,9 @@ def run_polymarket_policy_training(
         "sell_before_close_p_up_disagreement_diagnostic_sha256": _sha256_file(
             artifact_paths["sell_before_close_p_up_disagreement_diagnostic_report"]
         ),
+        "sell_before_close_exit_reliability_report_sha256": _sha256_file(
+            artifact_paths["sell_before_close_exit_reliability_report"]
+        ),
     }
     model_manifest = _model_manifest(
         config=config,
@@ -325,6 +340,7 @@ def run_polymarket_policy_training(
         sell_before_close_p_up_disagreement_diagnostic=(
             sell_before_close_p_up_disagreement_diagnostic
         ),
+        sell_before_close_exit_reliability=sell_before_close_exit_reliability,
     )
     _write_json(artifact_paths["model_manifest"], model_manifest)
     artifact_hashes = {
@@ -361,6 +377,9 @@ def run_polymarket_policy_training(
         source_model_eligibility_report=source_model_eligibility,
         sell_before_close_p_up_disagreement_diagnostic_report=(
             sell_before_close_p_up_disagreement_diagnostic
+        ),
+        sell_before_close_exit_reliability_report=(
+            sell_before_close_exit_reliability
         ),
     )
 
@@ -542,6 +561,7 @@ def _write_artifacts(
     ranking_overlay_zero_entry_diagnostic: dict[str, Any],
     source_model_eligibility: dict[str, Any],
     sell_before_close_p_up_disagreement_diagnostic: dict[str, Any],
+    sell_before_close_exit_reliability: dict[str, Any],
 ) -> dict[str, Path]:
     paths = {
         "training_config": run_dir / "polymarket_policy_training_config.json",
@@ -615,6 +635,12 @@ def _write_artifacts(
         "sell_before_close_p_up_disagreement_diagnostic_summary": (
             run_dir / "sell_before_close_p_up_disagreement_diagnostic_report.md"
         ),
+        "sell_before_close_exit_reliability_report": (
+            run_dir / "sell_before_close_exit_reliability_report.json"
+        ),
+        "sell_before_close_exit_reliability_summary": (
+            run_dir / "sell_before_close_exit_reliability_report.md"
+        ),
         "all_predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "train_predictions": run_dir / "polymarket_policy_train_predictions.jsonl",
@@ -635,12 +661,28 @@ def _write_artifacts(
     diagnostic_summary = sell_before_close_p_up_disagreement_summary(
         sell_before_close_p_up_disagreement_diagnostic
     )
+    exit_reliability_summary = sell_before_close_exit_reliability_summary(
+        sell_before_close_exit_reliability
+    )
+    sell_before_close_p_up_disagreement_diagnostic[
+        "sell_before_close_exit_reliability_summary"
+    ] = exit_reliability_summary
+    _refresh_report_id(
+        sell_before_close_p_up_disagreement_diagnostic,
+        "sell_before_close_p_up_disagreement_diagnostic_report_id",
+    )
     model_ranking_candidate_comparison[
         "sell_before_close_p_up_disagreement_diagnostic_summary"
     ] = diagnostic_summary
+    model_ranking_candidate_comparison[
+        "sell_before_close_exit_reliability_summary"
+    ] = exit_reliability_summary
     source_model_eligibility[
         "sell_before_close_p_up_disagreement_diagnostic_summary"
     ] = diagnostic_summary
+    source_model_eligibility[
+        "sell_before_close_exit_reliability_summary"
+    ] = exit_reliability_summary
     _write_candidate_artifacts(
         run_dir=run_dir,
         model_ranking_candidate_comparison=model_ranking_candidate_comparison,
@@ -672,6 +714,10 @@ def _write_artifacts(
         paths["sell_before_close_p_up_disagreement_diagnostic_report"],
         sell_before_close_p_up_disagreement_diagnostic,
     )
+    _write_json(
+        paths["sell_before_close_exit_reliability_report"],
+        sell_before_close_exit_reliability,
+    )
     _write_json(paths["action_family_eligibility_report"], action_family_eligibility)
     _write_json(
         paths["hold_to_settlement_longshot_guard_report"],
@@ -685,6 +731,7 @@ def _write_artifacts(
         sell_before_close_p_up_disagreement_diagnostic=(
             sell_before_close_p_up_disagreement_diagnostic
         ),
+        sell_before_close_exit_reliability=sell_before_close_exit_reliability,
     )
     _write_json(
         paths["action_family_counterfactual_replay_report"],
@@ -735,6 +782,12 @@ def _write_artifacts(
     paths["sell_before_close_p_up_disagreement_diagnostic_summary"].write_text(
         sell_before_close_p_up_disagreement_diagnostic_markdown(
             sell_before_close_p_up_disagreement_diagnostic
+        ),
+        encoding="utf-8",
+    )
+    paths["sell_before_close_exit_reliability_summary"].write_text(
+        sell_before_close_exit_reliability_markdown(
+            sell_before_close_exit_reliability
         ),
         encoding="utf-8",
     )
@@ -841,6 +894,7 @@ def _write_counterfactual_replay_artifacts(
     counterfactual_replays: tuple[dict[str, Any], ...],
     source_model_eligibility: dict[str, Any],
     sell_before_close_p_up_disagreement_diagnostic: dict[str, Any],
+    sell_before_close_exit_reliability: dict[str, Any],
 ) -> dict[str, Any]:
     root = run_dir / "action_family_counterfactual_replays"
     root.mkdir(parents=True, exist_ok=True)
@@ -850,6 +904,9 @@ def _write_counterfactual_replay_artifacts(
     )
     diagnostic_summary = sell_before_close_p_up_disagreement_summary(
         sell_before_close_p_up_disagreement_diagnostic
+    )
+    exit_reliability_summary = sell_before_close_exit_reliability_summary(
+        sell_before_close_exit_reliability
     )
     for replay in counterfactual_replays:
         variant_dir = root / replay["variant"]
@@ -862,6 +919,9 @@ def _write_counterfactual_replay_artifacts(
             summary[
                 "sell_before_close_p_up_disagreement_diagnostic_summary"
             ] = diagnostic_summary
+            summary[
+                "sell_before_close_exit_reliability_summary"
+            ] = exit_reliability_summary
         ledger_pnl_report = dict(replay["ledger_pnl_report"])
         ledger_pnl_report["source_model_candidate_eligible"] = (
             source_model_candidate_eligible
@@ -916,6 +976,7 @@ def _write_counterfactual_replay_artifacts(
         "sell_before_close_p_up_disagreement_diagnostic_summary": (
             diagnostic_summary
         ),
+        "sell_before_close_exit_reliability_summary": exit_reliability_summary,
         "variant_count": len(variant_summaries),
         "variants": variant_summaries,
         **compact_safety_fields(),
@@ -961,6 +1022,7 @@ def _model_manifest(
     action_family_artifact_hashes: dict[str, str],
     source_model_eligibility: dict[str, Any],
     sell_before_close_p_up_disagreement_diagnostic: dict[str, Any],
+    sell_before_close_exit_reliability: dict[str, Any],
 ) -> dict[str, Any]:
     split_fields = {
         field_name: dataset_profile[field_name]
@@ -1173,31 +1235,6 @@ def _model_manifest(
                 "label_row_sell_before_close_residual_settlement_drag"
             ]
         ),
-        "sell_before_close_replay_realized_trade_pnl": (
-            sell_before_close_p_up_disagreement_diagnostic["summary"][
-                "replay_realized_trade_pnl"
-            ]
-        ),
-        "sell_before_close_replay_settlement_pnl": (
-            sell_before_close_p_up_disagreement_diagnostic["summary"][
-                "replay_settlement_pnl"
-            ]
-        ),
-        "sell_before_close_replay_total_polymarket_pnl": (
-            sell_before_close_p_up_disagreement_diagnostic["summary"][
-                "replay_total_polymarket_pnl"
-            ]
-        ),
-        "sell_before_close_replay_residual_settlement_drag": (
-            sell_before_close_p_up_disagreement_diagnostic["summary"][
-                "replay_residual_settlement_drag"
-            ]
-        ),
-        "sell_before_close_replay_positions_opened_but_not_closed_before_settlement": (
-            sell_before_close_p_up_disagreement_diagnostic["summary"][
-                "replay_positions_opened_but_not_closed_before_settlement"
-            ]
-        ),
         "sell_before_close_settlement_drag_attribution_interpretation": (
             sell_before_close_p_up_disagreement_diagnostic["summary"][
                 "settlement_drag_attribution_interpretation"
@@ -1206,6 +1243,63 @@ def _model_manifest(
         "sell_before_close_p_up_disagreement_diagnostic_summary": (
             sell_before_close_p_up_disagreement_summary(
                 sell_before_close_p_up_disagreement_diagnostic
+            )
+        ),
+        "sell_before_close_exit_reliability_report_path": (
+            "sell_before_close_exit_reliability_report.json"
+        ),
+        "sell_before_close_exit_reliability_report_sha256": (
+            action_family_artifact_hashes[
+                "sell_before_close_exit_reliability_report_sha256"
+            ]
+        ),
+        "sell_before_close_exit_failure_interpretation": (
+            sell_before_close_exit_reliability["summary"][
+                "sell_before_close_exit_failure_interpretation"
+            ]
+        ),
+        "sell_before_close_positions_opened_count": (
+            sell_before_close_exit_reliability["summary"][
+                "positions_opened_count"
+            ]
+        ),
+        "sell_before_close_positions_closed_before_settlement_count": (
+            sell_before_close_exit_reliability["summary"][
+                "positions_closed_before_settlement_count"
+            ]
+        ),
+        "sell_before_close_positions_opened_but_not_closed_before_settlement": (
+            sell_before_close_exit_reliability["summary"][
+                "positions_opened_but_not_closed_before_settlement"
+            ]
+        ),
+        "sell_before_close_replay_realized_trade_pnl": (
+            sell_before_close_exit_reliability["summary"]["realized_trade_pnl"]
+        ),
+        "sell_before_close_replay_settlement_pnl": (
+            sell_before_close_exit_reliability["summary"]["settlement_pnl"]
+        ),
+        "sell_before_close_replay_total_polymarket_pnl": (
+            sell_before_close_exit_reliability["summary"]["total_polymarket_pnl"]
+        ),
+        "sell_before_close_replay_residual_settlement_drag": (
+            sell_before_close_exit_reliability["summary"][
+                "replay_residual_settlement_drag"
+            ]
+        ),
+        "sell_before_close_best_diagnostic_exit_variant": (
+            sell_before_close_exit_reliability["summary"][
+                "sell_before_close_best_diagnostic_exit_variant"
+            ]
+        ),
+        "sell_before_close_best_diagnostic_exit_variant_total_pnl": (
+            sell_before_close_exit_reliability["summary"][
+                "sell_before_close_best_diagnostic_exit_variant_total_pnl"
+            ]
+        ),
+        "sell_before_close_exit_reliability_summary": (
+            sell_before_close_exit_reliability_summary(
+                sell_before_close_exit_reliability
             )
         ),
         "candidate_scoped_source_model_eligibility_summary": (
