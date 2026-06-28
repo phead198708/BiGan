@@ -98,6 +98,8 @@ from bigan.v8.polymarket.training.sell_before_close_support_aware_thresholds imp
     sell_before_close_support_aware_threshold_failure_attribution_summary,
     sell_before_close_support_aware_threshold_selection_markdown,
     sell_before_close_support_aware_threshold_selection_summary,
+    sell_before_close_validation_failure_drilldown_markdown,
+    sell_before_close_validation_failure_drilldown_summary,
 )
 
 ACTION_VALUE_CONCENTRATION_WARN_THRESHOLD = 0.80
@@ -237,6 +239,11 @@ def run_polymarket_policy_training(
     sell_before_close_support_aware_threshold_failure_attribution = (
         sell_before_close_support_aware_threshold_selection[
             "failure_attribution_report"
+        ]
+    )
+    sell_before_close_validation_failure_drilldown = (
+        sell_before_close_support_aware_threshold_selection[
+            "validation_failure_drilldown_report"
         ]
     )
     counterfactual_prediction_sets = build_action_family_counterfactual_prediction_sets(
@@ -389,6 +396,9 @@ def run_polymarket_policy_training(
         sell_before_close_support_aware_threshold_failure_attribution=(
             sell_before_close_support_aware_threshold_failure_attribution
         ),
+        sell_before_close_validation_failure_drilldown=(
+            sell_before_close_validation_failure_drilldown
+        ),
         sell_before_close_guard_threshold_sweep=(
             sell_before_close_guard_threshold_sweep
         ),
@@ -451,6 +461,13 @@ def run_polymarket_policy_training(
                 ]
             )
         ),
+        "sell_before_close_validation_failure_drilldown_report_sha256": (
+            _sha256_file(
+                artifact_paths[
+                    "sell_before_close_validation_failure_drilldown_report"
+                ]
+            )
+        ),
     }
     model_manifest = _model_manifest(
         config=config,
@@ -478,6 +495,9 @@ def run_polymarket_policy_training(
         ),
         sell_before_close_support_aware_threshold_failure_attribution=(
             sell_before_close_support_aware_threshold_failure_attribution
+        ),
+        sell_before_close_validation_failure_drilldown=(
+            sell_before_close_validation_failure_drilldown
         ),
         sell_before_close_guard_threshold_sweep=(
             sell_before_close_guard_threshold_sweep
@@ -530,6 +550,9 @@ def run_polymarket_policy_training(
         ),
         sell_before_close_support_aware_threshold_failure_attribution_report=(
             sell_before_close_support_aware_threshold_failure_attribution
+        ),
+        sell_before_close_validation_failure_drilldown_report=(
+            sell_before_close_validation_failure_drilldown
         ),
         sell_before_close_guard_threshold_sweep_report=(
             sell_before_close_guard_threshold_sweep
@@ -1663,6 +1686,7 @@ def _write_artifacts(
     sell_before_close_promotion_support_gate: dict[str, Any],
     sell_before_close_support_aware_threshold_selection: dict[str, Any],
     sell_before_close_support_aware_threshold_failure_attribution: dict[str, Any],
+    sell_before_close_validation_failure_drilldown: dict[str, Any],
     sell_before_close_guard_threshold_sweep: dict[str, Any],
 ) -> dict[str, Path]:
     paths = {
@@ -1765,6 +1789,12 @@ def _write_artifacts(
             run_dir
             / "sell_before_close_support_aware_threshold_failure_attribution_report.md"
         ),
+        "sell_before_close_validation_failure_drilldown_report": (
+            run_dir / "sell_before_close_validation_failure_drilldown_report.json"
+        ),
+        "sell_before_close_validation_failure_drilldown_summary": (
+            run_dir / "sell_before_close_validation_failure_drilldown_report.md"
+        ),
         "sell_before_close_guard_threshold_sweep_report": (
             run_dir / "sell_before_close_guard_threshold_sweep_report.json"
         ),
@@ -1789,6 +1819,32 @@ def _write_artifacts(
     _write_json(paths["action_value_calibration"], action_value_calibration)
     _write_json(paths["action_value_signal_sanity_report"], signal_sanity)
     _write_json(
+        paths["sell_before_close_validation_failure_drilldown_report"],
+        sell_before_close_validation_failure_drilldown,
+    )
+    validation_failure_drilldown_report_sha256 = _sha256_file(
+        paths["sell_before_close_validation_failure_drilldown_report"]
+    )
+    validation_failure_drilldown_summary = (
+        sell_before_close_validation_failure_drilldown_summary(
+            sell_before_close_validation_failure_drilldown
+        )
+    )
+    drilldown_path = "sell_before_close_validation_failure_drilldown_report.json"
+    sell_before_close_support_aware_threshold_failure_attribution[
+        "validation_failure_drilldown_report_path"
+    ] = drilldown_path
+    sell_before_close_support_aware_threshold_failure_attribution[
+        "validation_failure_drilldown_report_sha256"
+    ] = validation_failure_drilldown_report_sha256
+    sell_before_close_support_aware_threshold_failure_attribution[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ] = validation_failure_drilldown_summary
+    _refresh_report_id(
+        sell_before_close_support_aware_threshold_failure_attribution,
+        "sell_before_close_support_aware_threshold_failure_attribution_report_id",
+    )
+    _write_json(
         paths["sell_before_close_support_aware_threshold_failure_attribution_report"],
         sell_before_close_support_aware_threshold_failure_attribution,
     )
@@ -1801,8 +1857,21 @@ def _write_artifacts(
     sell_before_close_support_aware_threshold_selection[
         "failure_attribution_report_sha256"
     ] = failure_attribution_report_sha256
+    sell_before_close_support_aware_threshold_selection[
+        "validation_failure_drilldown_report_path"
+    ] = drilldown_path
+    sell_before_close_support_aware_threshold_selection[
+        "validation_failure_drilldown_report_sha256"
+    ] = validation_failure_drilldown_report_sha256
+    sell_before_close_support_aware_threshold_selection[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ] = validation_failure_drilldown_summary
     sell_before_close_support_aware_threshold_selection.pop(
         "failure_attribution_report",
+        None,
+    )
+    sell_before_close_support_aware_threshold_selection.pop(
+        "validation_failure_drilldown_report",
         None,
     )
     _refresh_report_id(
@@ -1847,6 +1916,15 @@ def _write_artifacts(
     sell_before_close_promotion_support_gate["failure_attribution_report_sha256"] = (
         support_aware_threshold_selection_summary["failure_attribution_report_sha256"]
     )
+    sell_before_close_promotion_support_gate[
+        "validation_failure_drilldown_report_path"
+    ] = drilldown_path
+    sell_before_close_promotion_support_gate[
+        "validation_failure_drilldown_report_sha256"
+    ] = validation_failure_drilldown_report_sha256
+    sell_before_close_promotion_support_gate[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ] = validation_failure_drilldown_summary
     _refresh_report_id(
         sell_before_close_promotion_support_gate,
         "sell_before_close_promotion_support_gate_report_id",
@@ -1914,6 +1992,9 @@ def _write_artifacts(
         "sell_before_close_support_aware_threshold_failure_attribution_summary"
     ] = support_aware_failure_attribution_summary
     model_ranking_candidate_comparison[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ] = validation_failure_drilldown_summary
+    model_ranking_candidate_comparison[
         "sell_before_close_i_vs_j_vs_k_promotion_support_comparison"
     ] = sell_before_close_promotion_support_gate.get(
         "i_vs_j_vs_k_promotion_support_comparison",
@@ -1977,6 +2058,9 @@ def _write_artifacts(
     source_model_eligibility[
         "sell_before_close_support_aware_threshold_failure_attribution_summary"
     ] = support_aware_failure_attribution_summary
+    source_model_eligibility[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ] = validation_failure_drilldown_summary
     source_model_eligibility[
         "sell_before_close_i_vs_j_vs_k_promotion_support_comparison"
     ] = sell_before_close_promotion_support_gate.get(
@@ -2059,6 +2143,9 @@ def _write_artifacts(
         sell_before_close_support_aware_threshold_selection=(
             sell_before_close_support_aware_threshold_selection
         ),
+        sell_before_close_validation_failure_drilldown=(
+            sell_before_close_validation_failure_drilldown
+        ),
         sell_before_close_guard_threshold_sweep=(
             sell_before_close_guard_threshold_sweep
         ),
@@ -2138,6 +2225,12 @@ def _write_artifacts(
     ].write_text(
         sell_before_close_support_aware_threshold_failure_attribution_markdown(
             sell_before_close_support_aware_threshold_failure_attribution
+        ),
+        encoding="utf-8",
+    )
+    paths["sell_before_close_validation_failure_drilldown_summary"].write_text(
+        sell_before_close_validation_failure_drilldown_markdown(
+            sell_before_close_validation_failure_drilldown
         ),
         encoding="utf-8",
     )
@@ -2253,6 +2346,7 @@ def _write_counterfactual_replay_artifacts(
     sell_before_close_exit_reliability: dict[str, Any],
     sell_before_close_promotion_support_gate: dict[str, Any],
     sell_before_close_support_aware_threshold_selection: dict[str, Any],
+    sell_before_close_validation_failure_drilldown: dict[str, Any],
     sell_before_close_guard_threshold_sweep: dict[str, Any],
 ) -> dict[str, Any]:
     root = run_dir / "action_family_counterfactual_replays"
@@ -2284,6 +2378,11 @@ def _write_counterfactual_replay_artifacts(
     )
     threshold_selection_reasons = list(
         threshold_selection_summary["threshold_selection_failure_reason_codes"]
+    )
+    validation_failure_drilldown_summary = (
+        sell_before_close_validation_failure_drilldown_summary(
+            sell_before_close_validation_failure_drilldown
+        )
     )
     for replay in counterfactual_replays:
         variant_dir = root / replay["variant"]
@@ -2334,6 +2433,9 @@ def _write_counterfactual_replay_artifacts(
             summary[
                 "sell_before_close_support_aware_threshold_selection_summary"
             ] = threshold_selection_summary
+            summary[
+                "sell_before_close_validation_failure_drilldown_summary"
+            ] = validation_failure_drilldown_summary
             if (
                 summary["variant"]
                 == SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
@@ -2453,6 +2555,9 @@ def _write_counterfactual_replay_artifacts(
         ),
         "sell_before_close_support_aware_threshold_selection_summary": (
             threshold_selection_summary
+        ),
+        "sell_before_close_validation_failure_drilldown_summary": (
+            validation_failure_drilldown_summary
         ),
         "sell_before_close_i_vs_j_vs_k_promotion_support_comparison": (
             sell_before_close_promotion_support_gate.get(
@@ -2636,6 +2741,7 @@ def _model_manifest(
     sell_before_close_promotion_support_gate: dict[str, Any],
     sell_before_close_support_aware_threshold_selection: dict[str, Any],
     sell_before_close_support_aware_threshold_failure_attribution: dict[str, Any],
+    sell_before_close_validation_failure_drilldown: dict[str, Any],
     sell_before_close_guard_threshold_sweep: dict[str, Any],
 ) -> dict[str, Any]:
     split_fields = {
@@ -2659,6 +2765,11 @@ def _model_manifest(
     support_aware_failure_attribution_summary = (
         sell_before_close_support_aware_threshold_failure_attribution_summary(
             sell_before_close_support_aware_threshold_failure_attribution
+        )
+    )
+    validation_failure_drilldown_summary = (
+        sell_before_close_validation_failure_drilldown_summary(
+            sell_before_close_validation_failure_drilldown
         )
     )
     return {
@@ -3003,6 +3114,45 @@ def _model_manifest(
         ),
         "sell_before_close_support_aware_threshold_failure_attribution_summary": (
             support_aware_failure_attribution_summary
+        ),
+        "sell_before_close_validation_failure_drilldown_report_path": (
+            "sell_before_close_validation_failure_drilldown_report.json"
+        ),
+        "sell_before_close_validation_failure_drilldown_report_sha256": (
+            action_family_artifact_hashes[
+                "sell_before_close_validation_failure_drilldown_report_sha256"
+            ]
+        ),
+        "sell_before_close_validation_failure_drilldown_summary": (
+            validation_failure_drilldown_summary
+        ),
+        "sell_before_close_validation_failure_primary_interpretation": (
+            validation_failure_drilldown_summary["primary_failure_interpretation"]
+        ),
+        "sell_before_close_validation_failure_interpretations": (
+            validation_failure_drilldown_summary["failure_interpretations"]
+        ),
+        "sell_before_close_validation_failure_recommended_next_actions": (
+            validation_failure_drilldown_summary["recommended_next_actions"]
+        ),
+        "sell_before_close_validation_support_adequate_row_count": (
+            validation_failure_drilldown_summary["support_adequate_row_count"]
+        ),
+        "sell_before_close_validation_positive_pnl_row_count": (
+            validation_failure_drilldown_summary["positive_pnl_row_count"]
+        ),
+        "sell_before_close_validation_support_passed_pnl_failed_count": (
+            validation_failure_drilldown_summary[
+                "support_passed_pnl_failed_count"
+            ]
+        ),
+        "sell_before_close_validation_support_failed_pnl_passed_count": (
+            validation_failure_drilldown_summary[
+                "support_failed_pnl_passed_count"
+            ]
+        ),
+        "sell_before_close_validation_side_coverage_failure_rate": (
+            validation_failure_drilldown_summary["side_coverage_failure_rate"]
         ),
         "sell_before_close_support_aware_threshold_selection_passed": (
             support_aware_threshold_selection_summary["threshold_selection_passed"]

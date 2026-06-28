@@ -34,6 +34,9 @@ SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_SELECTION_SCHEMA_VERSION = (
 SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_FAILURE_ATTRIBUTION_SCHEMA_VERSION = (
     "bigan-v8-polymarket-sell-before-close-support-aware-threshold-failure-attribution-v1"
 )
+SELL_BEFORE_CLOSE_VALIDATION_FAILURE_DRILLDOWN_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-sell-before-close-validation-failure-drilldown-v1"
+)
 SELL_BEFORE_CLOSE_SUPPORT_AWARE_VALIDATION_GATES = {
     "min_entry_count": 10,
     "min_unique_market_count": 5,
@@ -55,6 +58,44 @@ VALIDATION_GATE_REASON_CODES = {
     "total_pnl_gate": "validation_total_pnl_not_positive",
     "mean_pnl_per_entry_gate": "validation_mean_pnl_per_entry_not_positive",
     "p_up_disagreement_gate": "validation_p_up_disagreement_excessive",
+}
+SUPPORT_VS_PNL_BUCKETS = (
+    "support_passed_pnl_passed",
+    "support_passed_pnl_failed",
+    "support_failed_pnl_passed",
+    "support_failed_pnl_failed",
+)
+ENTRY_QUALITY_THRESHOLD_PARAMETERS = (
+    "p_up_alignment_min",
+    "min_calibrated_action_score",
+    "min_best_action_margin",
+    "min_queue_fill_probability_proxy",
+    "min_seconds_to_close",
+    "max_entries_per_market",
+    "min_reentry_cooldown_seconds",
+)
+FAILURE_INTERPRETATIONS_ALLOWED = {
+    "support_too_sparse",
+    "one_sided_support",
+    "positive_pnl_only_at_low_support",
+    "support_adequate_pnl_negative",
+    "pnl_not_positive_under_support",
+    "p_up_alignment_over_filters",
+    "p_up_alignment_not_primary_blocker",
+    "exit_reliability_failure",
+    "action_value_ranking_failure_likely",
+    "collect_more_data_needed",
+    "insufficient_evidence",
+    "mixed_threshold_failure",
+}
+RECOMMENDED_NEXT_ACTIONS_ALLOWED = {
+    "collect_more_real_corpus",
+    "expand_validation_grid_without_shadow_fit",
+    "revise_action_value_ranking_model",
+    "revise_p_up_auxiliary_calibration",
+    "add_side_balancing_candidate",
+    "add_support_aware_ranking_candidate",
+    "keep_blocked",
 }
 
 
@@ -118,6 +159,20 @@ def build_sell_before_close_support_aware_threshold_selection_report(
             split_name=validation_split,
         )
     )
+    drilldown_report = build_sell_before_close_validation_failure_drilldown_report(
+        validation_rows=validation_rows,
+        selection_reason_codes=reason_codes,
+        split_name=validation_split,
+    )
+    drilldown_summary = sell_before_close_validation_failure_drilldown_summary(
+        drilldown_report
+    )
+    attribution_report["sell_before_close_validation_failure_drilldown_summary"] = (
+        drilldown_summary
+    )
+    attribution_report[
+        "sell_before_close_support_aware_threshold_failure_attribution_report_id"
+    ] = canonical_json_sha256(attribution_report)
     report = {
         "schema_version": SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_SELECTION_SCHEMA_VERSION,
         "candidate_name": SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
@@ -139,6 +194,10 @@ def build_sell_before_close_support_aware_threshold_selection_report(
         "threshold_selection_failure_reason_codes": reason_codes,
         "selection_reason_codes": reason_codes,
         "failure_attribution_report": attribution_report,
+        "validation_failure_drilldown_report": drilldown_report,
+        "sell_before_close_validation_failure_drilldown_summary": (
+            drilldown_summary
+        ),
         "threshold_selection_failure_interpretation": attribution_report[
             "threshold_selection_failure_interpretation"
         ],
@@ -263,6 +322,15 @@ def sell_before_close_support_aware_threshold_selection_summary(
         "failure_attribution_report_sha256": report.get(
             "failure_attribution_report_sha256"
         ),
+        "validation_failure_drilldown_report_path": report.get(
+            "validation_failure_drilldown_report_path"
+        ),
+        "validation_failure_drilldown_report_sha256": report.get(
+            "validation_failure_drilldown_report_sha256"
+        ),
+        "sell_before_close_validation_failure_drilldown_summary": report.get(
+            "sell_before_close_validation_failure_drilldown_summary",
+        ),
         "threshold_selection_failure_interpretation": report[
             "threshold_selection_failure_interpretation"
         ],
@@ -316,6 +384,10 @@ def sell_before_close_support_aware_threshold_selection_markdown(
         f"`{report.get('failure_attribution_report_path')}`",
         "- failure_attribution_report_sha256: "
         f"`{report.get('failure_attribution_report_sha256')}`",
+        "- validation_failure_drilldown_report_path: "
+        f"`{report.get('validation_failure_drilldown_report_path')}`",
+        "- validation_failure_drilldown_report_sha256: "
+        f"`{report.get('validation_failure_drilldown_report_sha256')}`",
         f"- promotion_evidence_eligible: `{str(report['promotion_evidence_eligible']).lower()}`",
         f"- paper_run_resume_allowed: `{str(report['paper_run_resume_allowed']).lower()}`",
         "",
@@ -478,6 +550,15 @@ def sell_before_close_support_aware_threshold_failure_attribution_summary(
             "threshold_selection_failure_interpretation"
         ],
         "recommended_next_action": report["recommended_next_action"],
+        "validation_failure_drilldown_report_path": report.get(
+            "validation_failure_drilldown_report_path"
+        ),
+        "validation_failure_drilldown_report_sha256": report.get(
+            "validation_failure_drilldown_report_sha256"
+        ),
+        "sell_before_close_validation_failure_drilldown_summary": report.get(
+            "sell_before_close_validation_failure_drilldown_summary",
+        ),
         "promotion_evidence_eligible": report["promotion_evidence_eligible"],
         "paper_run_resume_allowed": report["paper_run_resume_allowed"],
     }
@@ -502,6 +583,10 @@ def sell_before_close_support_aware_threshold_failure_attribution_markdown(
         "- threshold_selection_failure_interpretation: "
         f"`{report['threshold_selection_failure_interpretation']}`",
         f"- recommended_next_action: `{report['recommended_next_action']}`",
+        "- validation_failure_drilldown_report_path: "
+        f"`{report.get('validation_failure_drilldown_report_path')}`",
+        "- validation_failure_drilldown_report_sha256: "
+        f"`{report.get('validation_failure_drilldown_report_sha256')}`",
         f"- promotion_evidence_eligible: `{str(report['promotion_evidence_eligible']).lower()}`",
         f"- paper_run_resume_allowed: `{str(report['paper_run_resume_allowed']).lower()}`",
         "",
@@ -568,6 +653,879 @@ def sell_before_close_support_aware_threshold_failure_attribution_markdown(
         ]
     )
     return "\n".join(lines)
+
+
+def build_sell_before_close_validation_failure_drilldown_report(
+    *,
+    validation_rows: list[dict[str, Any]],
+    selection_reason_codes: list[str],
+    split_name: str,
+) -> dict[str, Any]:
+    """Build diagnostic drilldown for failed validation threshold selection."""
+
+    row_count = len(validation_rows)
+    quadrant = _support_vs_pnl_quadrants(validation_rows)
+    support_drilldown = _support_adequate_drilldown(validation_rows)
+    positive_pnl_drilldown = _positive_pnl_drilldown(validation_rows)
+    side_drilldown = _side_coverage_drilldown(validation_rows)
+    p_up_drilldown = _p_up_alignment_drilldown(validation_rows)
+    threshold_drilldown = _entry_quality_threshold_drilldown(validation_rows)
+    action_side_drilldown = _action_side_market_drilldown(validation_rows)
+    model_failure_clues = _model_failure_clues(validation_rows)
+    interpretations = _failure_interpretations(
+        row_count=row_count,
+        support_drilldown=support_drilldown,
+        positive_pnl_drilldown=positive_pnl_drilldown,
+        side_drilldown=side_drilldown,
+        p_up_drilldown=p_up_drilldown,
+        model_failure_clues=model_failure_clues,
+    )
+    primary_interpretation = _primary_failure_interpretation(interpretations)
+    recommendations = _recommended_next_actions(
+        interpretations=interpretations,
+        positive_pnl_only_at_low_support=positive_pnl_drilldown[
+            "positive_pnl_only_at_low_support"
+        ],
+        side_coverage_all_rows_failed=model_failure_clues[
+            "side_coverage_all_rows_failed"
+        ],
+        all_rows_total_pnl_failed=model_failure_clues["all_rows_total_pnl_failed"],
+        all_rows_mean_pnl_failed=model_failure_clues["all_rows_mean_pnl_failed"],
+    )
+    report = {
+        "schema_version": SELL_BEFORE_CLOSE_VALIDATION_FAILURE_DRILLDOWN_SCHEMA_VERSION,
+        "candidate_name": SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+        "split_name": split_name,
+        "diagnostic_only": True,
+        "uses_shadow_for_fit": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "selection_reason_codes": selection_reason_codes,
+        "validation_row_count": row_count,
+        "validation_passing_row_count": sum(
+            1 for row in validation_rows if row["validation_support_gate_passed"]
+        ),
+        "support_vs_pnl_quadrants": quadrant,
+        "support_adequate_drilldown": support_drilldown,
+        "positive_pnl_drilldown": positive_pnl_drilldown,
+        "side_coverage_drilldown": side_drilldown,
+        "p_up_alignment_drilldown": p_up_drilldown,
+        "entry_quality_threshold_drilldown": threshold_drilldown,
+        "action_side_market_drilldown": action_side_drilldown,
+        "model_ranking_failure_clues": model_failure_clues,
+        "primary_failure_interpretation": primary_interpretation,
+        "failure_interpretations": interpretations,
+        "recommended_next_actions": recommendations,
+        **compact_safety_fields(),
+    }
+    report["sell_before_close_validation_failure_drilldown_report_id"] = (
+        canonical_json_sha256(report)
+    )
+    return report
+
+
+def sell_before_close_validation_failure_drilldown_summary(
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    """Return compact validation failure drilldown evidence for embedding."""
+
+    quadrants = report["support_vs_pnl_quadrants"]
+    support = report["support_adequate_drilldown"]
+    positive = report["positive_pnl_drilldown"]
+    side = report["side_coverage_drilldown"]
+    return {
+        "schema_version": report["schema_version"],
+        "candidate_name": report["candidate_name"],
+        "split_name": report["split_name"],
+        "diagnostic_only": report["diagnostic_only"],
+        "uses_shadow_for_fit": report["uses_shadow_for_fit"],
+        "promotion_evidence_eligible": report["promotion_evidence_eligible"],
+        "paper_run_resume_allowed": report["paper_run_resume_allowed"],
+        "#146_start_allowed": report["#146_start_allowed"],
+        "#134_resume_allowed": report["#134_resume_allowed"],
+        "validation_row_count": report["validation_row_count"],
+        "validation_passing_row_count": report["validation_passing_row_count"],
+        "support_passed_pnl_passed_count": quadrants[
+            "support_passed_pnl_passed"
+        ]["row_count"],
+        "support_passed_pnl_failed_count": quadrants[
+            "support_passed_pnl_failed"
+        ]["row_count"],
+        "support_failed_pnl_passed_count": quadrants[
+            "support_failed_pnl_passed"
+        ]["row_count"],
+        "support_failed_pnl_failed_count": quadrants[
+            "support_failed_pnl_failed"
+        ]["row_count"],
+        "support_adequate_row_count": support["support_adequate_row_count"],
+        "support_adequate_positive_pnl_row_count": support[
+            "support_adequate_positive_pnl_row_count"
+        ],
+        "support_adequate_best_total_pnl": support[
+            "support_adequate_best_total_pnl"
+        ],
+        "positive_pnl_row_count": positive["positive_pnl_row_count"],
+        "positive_pnl_support_passed_count": positive[
+            "positive_pnl_support_passed_count"
+        ],
+        "positive_pnl_only_at_low_support": positive[
+            "positive_pnl_only_at_low_support"
+        ],
+        "side_coverage_failure_rate": side["side_coverage_failure_rate"],
+        "rows_with_both_sides": side["rows_with_both_sides"],
+        "positive_pnl_rows_with_both_sides": side[
+            "positive_pnl_rows_with_both_sides"
+        ],
+        "side_coverage_interpretation": side["side_coverage_interpretation"],
+        "primary_failure_interpretation": report[
+            "primary_failure_interpretation"
+        ],
+        "failure_interpretations": report["failure_interpretations"],
+        "recommended_next_actions": report["recommended_next_actions"],
+    }
+
+
+def sell_before_close_validation_failure_drilldown_markdown(
+    report: dict[str, Any],
+) -> str:
+    """Render validation failure drilldown report markdown."""
+
+    summary = sell_before_close_validation_failure_drilldown_summary(report)
+    lines = [
+        "# SELL_BEFORE_CLOSE Validation Failure Drilldown",
+        "",
+        f"- candidate_name: `{report['candidate_name']}`",
+        f"- split_name: `{report['split_name']}`",
+        f"- diagnostic_only: `{str(report['diagnostic_only']).lower()}`",
+        f"- uses_shadow_for_fit: `{str(report['uses_shadow_for_fit']).lower()}`",
+        f"- validation_row_count: `{report['validation_row_count']}`",
+        f"- validation_passing_row_count: `{report['validation_passing_row_count']}`",
+        "- primary_failure_interpretation: "
+        f"`{report['primary_failure_interpretation']}`",
+        "- failure_interpretations: "
+        f"`{json.dumps(report['failure_interpretations'])}`",
+        "- recommended_next_actions: "
+        f"`{json.dumps(report['recommended_next_actions'])}`",
+        f"- promotion_evidence_eligible: `{str(report['promotion_evidence_eligible']).lower()}`",
+        f"- paper_run_resume_allowed: `{str(report['paper_run_resume_allowed']).lower()}`",
+        "",
+        "## Support vs PnL Quadrants",
+        "",
+        "| bucket | rows | rate | best_total_pnl | best_mean_pnl | entries | markets | sides | reasons |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for bucket in SUPPORT_VS_PNL_BUCKETS:
+        row = report["support_vs_pnl_quadrants"][bucket]
+        lines.append(
+            "| {bucket} | {count} | {rate:.4f} | {total:.6f} | {mean:.6f} | "
+            "{entries} | {markets} | {sides} | {reasons} |".format(
+                bucket=bucket,
+                count=row["row_count"],
+                rate=row["row_rate"],
+                total=row["best_total_pnl"],
+                mean=row["best_mean_pnl_per_entry"],
+                entries=row["best_entry_count"],
+                markets=row["best_unique_market_count"],
+                sides=row["best_side_count"],
+                reasons=", ".join(row["dominant_failed_reason_codes"]) or "none",
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Drilldown Summary",
+            "",
+            f"- support_adequate_row_count: `{summary['support_adequate_row_count']}`",
+            "- support_adequate_positive_pnl_row_count: "
+            f"`{summary['support_adequate_positive_pnl_row_count']}`",
+            f"- positive_pnl_row_count: `{summary['positive_pnl_row_count']}`",
+            "- positive_pnl_support_passed_count: "
+            f"`{summary['positive_pnl_support_passed_count']}`",
+            "- side_coverage_failure_rate: "
+            f"`{summary['side_coverage_failure_rate']}`",
+            f"- rows_with_both_sides: `{summary['rows_with_both_sides']}`",
+            "- positive_pnl_rows_with_both_sides: "
+            f"`{summary['positive_pnl_rows_with_both_sides']}`",
+            "- side_coverage_interpretation: "
+            f"`{summary['side_coverage_interpretation']}`",
+            "",
+            "## Entry Quality Thresholds",
+            "",
+        ]
+    )
+    for parameter, rows in report["entry_quality_threshold_drilldown"].items():
+        lines.extend(
+            [
+                f"### `{parameter}`",
+                "",
+                "| value | rows | mean_entries | max_entries | mean_total_pnl | max_total_pnl | positive_pnl_rate | support_pass_rate | side_pass_rate |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for row in rows:
+            lines.append(
+                "| {value} | {count} | {mean_entries:.4f} | {max_entries} | "
+                "{mean_total:.6f} | {max_total:.6f} | {pos:.4f} | "
+                "{support:.4f} | {side:.4f} |".format(
+                    value=row["threshold_value"],
+                    count=row["row_count"],
+                    mean_entries=row["mean_entry_count"],
+                    max_entries=row["max_entry_count"],
+                    mean_total=row["mean_total_pnl"],
+                    max_total=row["max_total_pnl"],
+                    pos=row["positive_pnl_rate"],
+                    support=row["support_pass_rate"],
+                    side=row["side_coverage_pass_rate"],
+                )
+            )
+        lines.append("")
+    lines.extend(
+        [
+            "- paper_only: true",
+            "- capital_at_risk: false",
+            "- polymarket_write_enabled: false",
+            "- wallet_signing_enabled: false",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _support_vs_pnl_quadrants(
+    rows: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    grouped = {bucket: [] for bucket in SUPPORT_VS_PNL_BUCKETS}
+    for row in rows:
+        support = _support_gates_passed(row)
+        pnl = _pnl_gates_passed(row)
+        if support and pnl:
+            bucket = "support_passed_pnl_passed"
+        elif support:
+            bucket = "support_passed_pnl_failed"
+        elif pnl:
+            bucket = "support_failed_pnl_passed"
+        else:
+            bucket = "support_failed_pnl_failed"
+        grouped[bucket].append(row)
+    row_count = len(rows)
+    return {
+        bucket: _bucket_summary(bucket_rows, row_count)
+        for bucket, bucket_rows in grouped.items()
+    }
+
+
+def _bucket_summary(
+    rows: list[dict[str, Any]],
+    total_row_count: int,
+) -> dict[str, Any]:
+    best = _rank_rows(rows)[0] if rows else None
+    return {
+        "row_count": len(rows),
+        "row_rate": 0.0 if total_row_count == 0 else len(rows) / total_row_count,
+        "best_total_pnl": 0.0 if best is None else float(best["total_pnl"]),
+        "best_mean_pnl_per_entry": max(
+            (float(row["mean_pnl_per_entry"]) for row in rows),
+            default=0.0,
+        ),
+        "best_entry_count": 0 if best is None else int(best["entry_count"]),
+        "best_unique_market_count": 0
+        if best is None
+        else int(best["unique_market_count"]),
+        "best_side_count": 0 if best is None else int(best["side_count"]),
+        "best_thresholds": {} if best is None else best["thresholds"],
+        "dominant_failed_reason_codes": _dominant_reason_codes(rows),
+    }
+
+
+def _support_adequate_drilldown(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    support_rows = [row for row in rows if _support_gates_passed(row)]
+    positive_rows = [row for row in support_rows if float(row["total_pnl"]) > 0.0]
+    best = _rank_rows(support_rows)[0] if support_rows else None
+    return {
+        "support_adequate_row_count": len(support_rows),
+        "support_adequate_positive_pnl_row_count": len(positive_rows),
+        "support_adequate_best_total_pnl": 0.0
+        if best is None
+        else float(best["total_pnl"]),
+        "support_adequate_best_mean_pnl_per_entry": 0.0
+        if best is None
+        else float(best["mean_pnl_per_entry"]),
+        "support_adequate_best_thresholds": {} if best is None else best["thresholds"],
+        "support_adequate_failure_reason_codes": _dominant_reason_codes(
+            support_rows,
+        ),
+        "support_adequate_pnl_distribution": _distribution(
+            [float(row["total_pnl"]) for row in support_rows]
+        ),
+        "support_adequate_pnl_failure": bool(support_rows)
+        and not any(_pnl_gates_passed(row) for row in support_rows),
+    }
+
+
+def _positive_pnl_drilldown(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    positive_rows = [row for row in rows if float(row["total_pnl"]) > 0.0]
+    support_passed = [row for row in positive_rows if _support_gates_passed(row)]
+    best = _rank_rows(positive_rows)[0] if positive_rows else None
+    return {
+        "positive_pnl_row_count": len(positive_rows),
+        "positive_pnl_support_passed_count": len(support_passed),
+        "positive_pnl_best_entry_count": 0
+        if best is None
+        else int(best["entry_count"]),
+        "positive_pnl_best_unique_market_count": 0
+        if best is None
+        else int(best["unique_market_count"]),
+        "positive_pnl_best_side_count": 0 if best is None else int(best["side_count"]),
+        "positive_pnl_best_thresholds": {} if best is None else best["thresholds"],
+        "positive_pnl_dominant_failed_gates": _dominant_failed_gates(
+            positive_rows,
+        ),
+        "positive_pnl_only_at_low_support": bool(positive_rows)
+        and not support_passed,
+    }
+
+
+def _side_coverage_drilldown(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    row_count = len(rows)
+    side_failed = [
+        row
+        for row in rows
+        if not row["validation_gate_results"]["side_coverage_gate"]["passed"]
+    ]
+    best = _best_side_coverage_row(rows)
+    rows_with_up_only = [
+        row for row in rows if _up_entry_count(row) > 0 and _down_entry_count(row) == 0
+    ]
+    rows_with_down_only = [
+        row for row in rows if _down_entry_count(row) > 0 and _up_entry_count(row) == 0
+    ]
+    rows_with_both = [
+        row for row in rows if _up_entry_count(row) > 0 and _down_entry_count(row) > 0
+    ]
+    positive_with_both = [
+        row for row in rows_with_both if float(row["total_pnl"]) > 0.0
+    ]
+    support_with_both = [row for row in rows_with_both if _support_gates_passed(row)]
+    total_up = sum(_up_entry_count(row) for row in rows)
+    total_down = sum(_down_entry_count(row) for row in rows)
+    p_up_alignment_blocked = sum(
+        int(row.get("entry_filter_blocked_by_p_up_alignment_count", 0))
+        for row in rows
+    )
+    return {
+        "side_coverage_failure_rate": 0.0
+        if row_count == 0
+        else len(side_failed) / row_count,
+        "best_side_distribution": {}
+        if best is None
+        else dict(best["side_distribution"]),
+        "best_up_entry_count": 0 if best is None else _up_entry_count(best),
+        "best_down_entry_count": 0 if best is None else _down_entry_count(best),
+        "rows_with_up_only": len(rows_with_up_only),
+        "rows_with_down_only": len(rows_with_down_only),
+        "rows_with_both_sides": len(rows_with_both),
+        "positive_pnl_rows_with_both_sides": len(positive_with_both),
+        "support_adequate_rows_with_both_sides": len(support_with_both),
+        "aggregate_up_entry_count": total_up,
+        "aggregate_down_entry_count": total_down,
+        "side_coverage_interpretation": _side_coverage_interpretation(
+            row_count=row_count,
+            rows_with_both_count=len(rows_with_both),
+            total_up=total_up,
+            total_down=total_down,
+            p_up_alignment_blocked_count=p_up_alignment_blocked,
+        ),
+    }
+
+
+def _p_up_alignment_drilldown(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    zero_disagreement = [
+        row
+        for row in rows
+        if float(row["candidate_scoped_p_up_action_disagreement_rate"]) == 0.0
+    ]
+    blocked_distribution = _counter_distribution(
+        int(row.get("entry_filter_blocked_by_p_up_alignment_count", 0))
+        for row in rows
+    )
+    best_rows = _best_rows_by_objective(rows)
+    p_up_by_best = {
+        name: None if row is None else row["thresholds"].get("p_up_alignment_min")
+        for name, row in best_rows.items()
+    }
+    pass_rate = _gate_pass_rate(rows, "p_up_disagreement_gate")
+    blocked_positive = [
+        row
+        for row in rows
+        if int(row.get("entry_filter_blocked_by_p_up_alignment_count", 0)) > 0
+        and float(row["total_pnl"]) > 0.0
+    ]
+    return {
+        "p_up_alignment_blocked_count_distribution": blocked_distribution,
+        "rows_with_zero_p_up_disagreement": len(zero_disagreement),
+        "rows_with_zero_p_up_disagreement_and_positive_pnl": sum(
+            1 for row in zero_disagreement if float(row["total_pnl"]) > 0.0
+        ),
+        "rows_with_zero_p_up_disagreement_and_support_passed": sum(
+            1 for row in zero_disagreement if _support_gates_passed(row)
+        ),
+        "p_up_alignment_min_by_best_rows": p_up_by_best,
+        "p_up_alignment_min_failure_pattern": _threshold_grouping(
+            rows,
+            "p_up_alignment_min",
+        ),
+        "p_up_disagreement_gate_pass_rate": pass_rate,
+        "p_up_alignment_interpretation": _p_up_alignment_interpretation(
+            pass_rate=pass_rate,
+            blocked_positive_count=len(blocked_positive),
+            blocked_distribution=blocked_distribution,
+        ),
+    }
+
+
+def _entry_quality_threshold_drilldown(
+    rows: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    return {
+        parameter: _threshold_grouping(rows, parameter)
+        for parameter in ENTRY_QUALITY_THRESHOLD_PARAMETERS
+    }
+
+
+def _action_side_market_drilldown(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "row_level_replay_decisions_retained": False,
+        "compact_summary_from_threshold_rows": True,
+        "action_side_pnl_is_row_level_proxy": True,
+        "best_markets_by_total_pnl": [],
+        "worst_markets_by_total_pnl": [],
+        "market_count_distribution": _counter_distribution(
+            int(row["unique_market_count"]) for row in rows
+        ),
+        "side_distribution_by_threshold_family": (
+            _side_distribution_by_threshold_family(rows)
+        ),
+        "BUY_UP_SELL_BEFORE_CLOSE": _action_side_summary(rows, "UP"),
+        "BUY_DOWN_SELL_BEFORE_CLOSE": _action_side_summary(rows, "DOWN"),
+    }
+
+
+def _model_failure_clues(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    support_rows = [row for row in rows if _support_gates_passed(row)]
+    best_total = _rank_rows(rows)[0] if rows else None
+    return {
+        "all_rows_total_pnl_failed": bool(rows)
+        and all(float(row["total_pnl"]) <= 0.0 for row in rows),
+        "all_rows_mean_pnl_failed": bool(rows)
+        and all(float(row["mean_pnl_per_entry"]) <= 0.0 for row in rows),
+        "support_adequate_rows_negative_pnl": bool(support_rows)
+        and all(float(row["total_pnl"]) <= 0.0 for row in support_rows),
+        "best_total_pnl_row_support_failed": bool(best_total)
+        and not _support_gates_passed(best_total),
+        "side_coverage_all_rows_failed": bool(rows)
+        and all(
+            not row["validation_gate_results"]["side_coverage_gate"]["passed"]
+            for row in rows
+        ),
+        "p_up_disagreement_gate_pass_rate": _gate_pass_rate(
+            rows,
+            "p_up_disagreement_gate",
+        ),
+        "exit_reliability_gate_pass_rate": _exit_reliability_gate_pass_rate(rows),
+    }
+
+
+def _failure_interpretations(
+    *,
+    row_count: int,
+    support_drilldown: dict[str, Any],
+    positive_pnl_drilldown: dict[str, Any],
+    side_drilldown: dict[str, Any],
+    p_up_drilldown: dict[str, Any],
+    model_failure_clues: dict[str, Any],
+) -> list[str]:
+    if row_count == 0:
+        return ["insufficient_evidence"]
+    labels = []
+    if support_drilldown["support_adequate_row_count"] == 0:
+        labels.append("support_too_sparse")
+    if side_drilldown["side_coverage_failure_rate"] >= 1.0:
+        labels.append("one_sided_support")
+    if positive_pnl_drilldown["positive_pnl_only_at_low_support"]:
+        labels.append("positive_pnl_only_at_low_support")
+    if support_drilldown["support_adequate_pnl_failure"]:
+        labels.append("support_adequate_pnl_negative")
+    if (
+        model_failure_clues["all_rows_total_pnl_failed"]
+        or model_failure_clues["all_rows_mean_pnl_failed"]
+    ):
+        labels.append("pnl_not_positive_under_support")
+        labels.append("action_value_ranking_failure_likely")
+    if p_up_drilldown["p_up_alignment_interpretation"] == "p_up_alignment_over_filters":
+        labels.append("p_up_alignment_over_filters")
+    elif p_up_drilldown["p_up_alignment_interpretation"] == (
+        "p_up_alignment_not_primary_blocker"
+    ):
+        labels.append("p_up_alignment_not_primary_blocker")
+    if model_failure_clues["exit_reliability_gate_pass_rate"] < 0.5:
+        labels.append("exit_reliability_failure")
+    if "support_too_sparse" in labels or "one_sided_support" in labels:
+        labels.append("collect_more_data_needed")
+    if not labels:
+        labels.append("mixed_threshold_failure")
+    return _ordered_unique(
+        [label for label in labels if label in FAILURE_INTERPRETATIONS_ALLOWED]
+    )
+
+
+def _primary_failure_interpretation(interpretations: list[str]) -> str:
+    for label in (
+        "one_sided_support",
+        "action_value_ranking_failure_likely",
+        "support_too_sparse",
+        "support_adequate_pnl_negative",
+        "positive_pnl_only_at_low_support",
+        "p_up_alignment_over_filters",
+        "exit_reliability_failure",
+    ):
+        if label in interpretations:
+            return label
+    return interpretations[0] if interpretations else "insufficient_evidence"
+
+
+def _recommended_next_actions(
+    *,
+    interpretations: list[str],
+    positive_pnl_only_at_low_support: bool,
+    side_coverage_all_rows_failed: bool,
+    all_rows_total_pnl_failed: bool,
+    all_rows_mean_pnl_failed: bool,
+) -> list[str]:
+    actions = []
+    if side_coverage_all_rows_failed:
+        actions.append("add_side_balancing_candidate")
+    if all_rows_total_pnl_failed or all_rows_mean_pnl_failed:
+        actions.append("revise_action_value_ranking_model")
+    if positive_pnl_only_at_low_support or {
+        "support_too_sparse",
+        "one_sided_support",
+        "collect_more_data_needed",
+    }.intersection(interpretations):
+        actions.append("collect_more_real_corpus")
+    if "p_up_alignment_over_filters" in interpretations:
+        actions.append("revise_p_up_auxiliary_calibration")
+    if "mixed_threshold_failure" in interpretations:
+        actions.append("expand_validation_grid_without_shadow_fit")
+    actions.append("keep_blocked")
+    return _ordered_unique(
+        [action for action in actions if action in RECOMMENDED_NEXT_ACTIONS_ALLOWED]
+    )
+
+
+def _support_gates_passed(row: dict[str, Any]) -> bool:
+    gates = row["validation_gate_results"]
+    return all(
+        bool(gates[gate_name]["passed"])
+        for gate_name in (
+            "entry_support_gate",
+            "market_support_gate",
+            "side_coverage_gate",
+            "sell_support_gate",
+        )
+    )
+
+
+def _pnl_gates_passed(row: dict[str, Any]) -> bool:
+    return (
+        float(row["total_pnl"]) > 0.0
+        and float(row["mean_pnl_per_entry"]) > 0.0
+        and int(row["residual_count"]) == 0
+        and float(row["replay_residual_settlement_drag"]) >= 0.0
+    )
+
+
+def _dominant_reason_codes(
+    rows: list[dict[str, Any]],
+    limit: int = 5,
+) -> list[str]:
+    counts = Counter(reason for row in rows for reason in row["failed_reason_codes"])
+    return [
+        reason
+        for reason, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[
+            :limit
+        ]
+    ]
+
+
+def _dominant_failed_gates(
+    rows: list[dict[str, Any]],
+    limit: int = 5,
+) -> list[str]:
+    counts = Counter(gate for row in rows for gate in row["failed_gates"])
+    return [
+        gate
+        for gate, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[
+            :limit
+        ]
+    ]
+
+
+def _distribution(values: list[float]) -> dict[str, float | None]:
+    if not values:
+        return {
+            "min": None,
+            "p25": None,
+            "median": None,
+            "p75": None,
+            "max": None,
+            "mean": None,
+        }
+    ordered = sorted(values)
+    return {
+        "min": ordered[0],
+        "p25": _quantile(ordered, 0.25),
+        "median": _quantile(ordered, 0.50),
+        "p75": _quantile(ordered, 0.75),
+        "max": ordered[-1],
+        "mean": sum(ordered) / len(ordered),
+    }
+
+
+def _quantile(ordered: list[float], q: float) -> float:
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * q
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _best_side_coverage_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return sorted(
+        rows,
+        key=lambda row: (
+            -int(row["side_count"]),
+            -int(row["entry_count"]),
+            -float(row["total_pnl"]),
+            tuple(sorted(row["thresholds"].items())),
+        ),
+    )[0]
+
+
+def _up_entry_count(row: dict[str, Any]) -> int:
+    return int(row.get("side_distribution", {}).get("UP", 0))
+
+
+def _down_entry_count(row: dict[str, Any]) -> int:
+    return int(row.get("side_distribution", {}).get("DOWN", 0))
+
+
+def _side_coverage_interpretation(
+    *,
+    row_count: int,
+    rows_with_both_count: int,
+    total_up: int,
+    total_down: int,
+    p_up_alignment_blocked_count: int,
+) -> str:
+    if row_count == 0:
+        return "insufficient_two_sided_opportunities"
+    if rows_with_both_count > 0:
+        return "insufficient_two_sided_opportunities"
+    if p_up_alignment_blocked_count > 0 and (total_up == 0 or total_down == 0):
+        return "p_up_alignment_blocks_one_side"
+    if total_up == 0 or total_down == 0:
+        return "one_sided_model_selection"
+    return "insufficient_two_sided_opportunities"
+
+
+def _counter_distribution(values: Any) -> dict[str, int]:
+    counts = Counter(values)
+    return {
+        str(value): count
+        for value, count in sorted(counts.items(), key=lambda item: (item[0], item[1]))
+    }
+
+
+def _gate_pass_rate(rows: list[dict[str, Any]], gate_name: str) -> float:
+    if not rows:
+        return 0.0
+    return sum(
+        1 for row in rows if row["validation_gate_results"][gate_name]["passed"]
+    ) / len(rows)
+
+
+def _threshold_grouping(
+    rows: list[dict[str, Any]],
+    parameter: str,
+) -> list[dict[str, Any]]:
+    grouped: dict[float, list[dict[str, Any]]] = {}
+    for row in rows:
+        value = float(row["thresholds"].get(parameter, 0.0))
+        grouped.setdefault(value, []).append(row)
+    payloads = []
+    for value, group_rows in grouped.items():
+        best = _rank_rows(group_rows)[0]
+        payloads.append(
+            {
+                "threshold_parameter": parameter,
+                "threshold_value": value,
+                "row_count": len(group_rows),
+                "mean_entry_count": sum(
+                    int(row["entry_count"]) for row in group_rows
+                )
+                / len(group_rows),
+                "max_entry_count": max(int(row["entry_count"]) for row in group_rows),
+                "mean_total_pnl": sum(
+                    float(row["total_pnl"]) for row in group_rows
+                )
+                / len(group_rows),
+                "max_total_pnl": max(float(row["total_pnl"]) for row in group_rows),
+                "positive_pnl_rate": sum(
+                    1 for row in group_rows if float(row["total_pnl"]) > 0.0
+                )
+                / len(group_rows),
+                "support_pass_rate": sum(
+                    1 for row in group_rows if _support_gates_passed(row)
+                )
+                / len(group_rows),
+                "side_coverage_pass_rate": sum(
+                    1
+                    for row in group_rows
+                    if row["validation_gate_results"]["side_coverage_gate"][
+                        "passed"
+                    ]
+                )
+                / len(group_rows),
+                "best_thresholds_for_value": best["thresholds"],
+            }
+        )
+    return sorted(payloads, key=lambda row: float(row["threshold_value"]))
+
+
+def _p_up_alignment_interpretation(
+    *,
+    pass_rate: float,
+    blocked_positive_count: int,
+    blocked_distribution: dict[str, int],
+) -> str:
+    blocked_rows = sum(
+        count for value, count in blocked_distribution.items() if int(value) > 0
+    )
+    total_rows = sum(blocked_distribution.values())
+    blocked_rate = 0.0 if total_rows == 0 else blocked_rows / total_rows
+    if pass_rate >= 0.95 and blocked_rate < 0.50:
+        return "p_up_alignment_not_primary_blocker"
+    if blocked_rate >= 0.50 and blocked_positive_count > 0:
+        return "p_up_alignment_over_filters"
+    if pass_rate >= 0.95:
+        return "p_up_alignment_helpful"
+    if total_rows == 0:
+        return "insufficient_evidence"
+    return "p_up_alignment_not_primary_blocker"
+
+
+def _side_distribution_by_threshold_family(
+    rows: list[dict[str, Any]],
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[float, float, float], list[dict[str, Any]]] = {}
+    for row in rows:
+        thresholds = row["thresholds"]
+        key = (
+            float(thresholds.get("p_up_alignment_min", 0.0)),
+            float(thresholds.get("min_calibrated_action_score", 0.0)),
+            float(thresholds.get("min_best_action_margin", 0.0)),
+        )
+        grouped.setdefault(key, []).append(row)
+    payloads = []
+    for key, group_rows in grouped.items():
+        total_up = sum(_up_entry_count(row) for row in group_rows)
+        total_down = sum(_down_entry_count(row) for row in group_rows)
+        payloads.append(
+            {
+                "p_up_alignment_min": key[0],
+                "min_calibrated_action_score": key[1],
+                "min_best_action_margin": key[2],
+                "row_count": len(group_rows),
+                "up_entry_count": total_up,
+                "down_entry_count": total_down,
+                "rows_with_both_sides": sum(
+                    1
+                    for row in group_rows
+                    if _up_entry_count(row) > 0 and _down_entry_count(row) > 0
+                ),
+                "mean_total_pnl": sum(
+                    float(row["total_pnl"]) for row in group_rows
+                )
+                / len(group_rows),
+                "max_total_pnl": max(float(row["total_pnl"]) for row in group_rows),
+            }
+        )
+    return sorted(
+        payloads,
+        key=lambda row: (
+            -int(row["row_count"]),
+            -float(row["max_total_pnl"]),
+            float(row["p_up_alignment_min"]),
+            float(row["min_calibrated_action_score"]),
+            float(row["min_best_action_margin"]),
+        ),
+    )[:limit]
+
+
+def _action_side_summary(
+    rows: list[dict[str, Any]],
+    side: str,
+) -> dict[str, Any]:
+    count_fn = _up_entry_count if side == "UP" else _down_entry_count
+    rows_with_action = [row for row in rows if count_fn(row) > 0]
+    return {
+        "row_count_with_action": len(rows_with_action),
+        "entry_count": sum(count_fn(row) for row in rows),
+        "row_level_proxy_total_pnl_sum": sum(
+            float(row["total_pnl"]) for row in rows_with_action
+        ),
+        "row_level_proxy_mean_pnl": 0.0
+        if not rows_with_action
+        else sum(float(row["total_pnl"]) for row in rows_with_action)
+        / len(rows_with_action),
+        "row_level_proxy_max_pnl": max(
+            (float(row["total_pnl"]) for row in rows_with_action),
+            default=0.0,
+        ),
+        "positive_pnl_row_count": sum(
+            1 for row in rows_with_action if float(row["total_pnl"]) > 0.0
+        ),
+    }
+
+
+def _exit_reliability_gate_pass_rate(rows: list[dict[str, Any]]) -> float:
+    if not rows:
+        return 0.0
+    passed = sum(
+        1
+        for row in rows
+        if row["validation_gate_results"]["residual_count_gate"]["passed"]
+        and row["validation_gate_results"]["residual_settlement_drag_gate"]["passed"]
+    )
+    return passed / len(rows)
+
+
+def _ordered_unique(values: list[str]) -> list[str]:
+    seen = set()
+    ordered = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
 
 
 def _gate_level_attribution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

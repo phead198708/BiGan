@@ -531,6 +531,7 @@ class PolymarketPolicyTrainingResult:
         str,
         Any,
     ]
+    sell_before_close_validation_failure_drilldown_report: dict[str, Any]
     sell_before_close_guard_threshold_sweep_report: dict[str, Any]
 
 

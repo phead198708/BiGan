@@ -50,6 +50,7 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
 from bigan.v8.polymarket.training.sell_before_close_support_aware_thresholds import (
     SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_FAILURE_ATTRIBUTION_SCHEMA_VERSION,
     SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_SELECTION_SCHEMA_VERSION,
+    SELL_BEFORE_CLOSE_VALIDATION_FAILURE_DRILLDOWN_SCHEMA_VERSION,
 )
 
 
@@ -219,6 +220,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "sell_before_close_support_aware_threshold_selection_summary",
         "sell_before_close_support_aware_threshold_failure_attribution_report",
         "sell_before_close_support_aware_threshold_failure_attribution_summary",
+        "sell_before_close_validation_failure_drilldown_report",
+        "sell_before_close_validation_failure_drilldown_summary",
         "sell_before_close_guard_threshold_sweep_report",
         "sell_before_close_guard_threshold_sweep_summary",
         "action_family_eligibility_report",
@@ -742,6 +745,15 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "sell_before_close_support_aware_threshold_failure_attribution_report.json"
     )
     assert looks_like_sha256(threshold_selection["failure_attribution_report_sha256"])
+    assert threshold_selection["validation_failure_drilldown_report_path"] == (
+        "sell_before_close_validation_failure_drilldown_report.json"
+    )
+    assert looks_like_sha256(
+        threshold_selection["validation_failure_drilldown_report_sha256"]
+    )
+    assert threshold_selection[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ] == manifest["sell_before_close_validation_failure_drilldown_summary"]
     assert threshold_selection["threshold_selection_failure_interpretation"] in {
         "support_too_sparse",
         "one_sided_support",
@@ -807,6 +819,90 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         )
         for row in failure_attribution["validation_threshold_rows"]
     )
+    drilldown = _read_json(
+        result.artifact_paths["sell_before_close_validation_failure_drilldown_report"]
+    )
+    assert drilldown["schema_version"] == (
+        SELL_BEFORE_CLOSE_VALIDATION_FAILURE_DRILLDOWN_SCHEMA_VERSION
+    )
+    assert drilldown["candidate_name"] == (
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+    )
+    assert drilldown["split_name"] == "validation"
+    assert drilldown["diagnostic_only"] is True
+    assert drilldown["uses_shadow_for_fit"] is False
+    assert drilldown["promotion_evidence_eligible"] is False
+    assert drilldown["paper_run_resume_allowed"] is False
+    assert drilldown["#146_start_allowed"] is False
+    assert drilldown["#134_resume_allowed"] is False
+    assert drilldown["paper_only"] is True
+    assert drilldown["capital_at_risk"] is False
+    assert drilldown["polymarket_write_enabled"] is False
+    assert drilldown["wallet_signing_enabled"] is False
+    assert drilldown["validation_row_count"] == 9600
+    assert drilldown["validation_passing_row_count"] == 0
+    quadrant_total = sum(
+        row["row_count"] for row in drilldown["support_vs_pnl_quadrants"].values()
+    )
+    assert quadrant_total == drilldown["validation_row_count"]
+    assert set(drilldown["support_vs_pnl_quadrants"]) == {
+        "support_passed_pnl_passed",
+        "support_passed_pnl_failed",
+        "support_failed_pnl_passed",
+        "support_failed_pnl_failed",
+    }
+    assert drilldown["support_vs_pnl_quadrants"][
+        "support_passed_pnl_passed"
+    ]["row_count"] == 0
+    assert drilldown["support_vs_pnl_quadrants"][
+        "support_failed_pnl_failed"
+    ]["row_count"] == 9600
+    assert drilldown["support_adequate_drilldown"][
+        "support_adequate_row_count"
+    ] == 0
+    assert drilldown["positive_pnl_drilldown"]["positive_pnl_row_count"] == 0
+    assert drilldown["positive_pnl_drilldown"][
+        "positive_pnl_support_passed_count"
+    ] == 0
+    assert drilldown["side_coverage_drilldown"][
+        "side_coverage_failure_rate"
+    ] == 1.0
+    assert drilldown["side_coverage_drilldown"]["rows_with_both_sides"] == 0
+    assert drilldown["side_coverage_drilldown"][
+        "positive_pnl_rows_with_both_sides"
+    ] == 0
+    assert "one_sided_support" in drilldown["failure_interpretations"]
+    assert (
+        "pnl_not_positive_under_support"
+        in drilldown["failure_interpretations"]
+        or "action_value_ranking_failure_likely"
+        in drilldown["failure_interpretations"]
+    )
+    assert "keep_blocked" in drilldown["recommended_next_actions"]
+    assert drilldown["model_ranking_failure_clues"][
+        "all_rows_total_pnl_failed"
+    ] is True
+    assert drilldown["model_ranking_failure_clues"][
+        "all_rows_mean_pnl_failed"
+    ] is True
+    assert drilldown["model_ranking_failure_clues"][
+        "side_coverage_all_rows_failed"
+    ] is True
+    assert drilldown["action_side_market_drilldown"][
+        "row_level_replay_decisions_retained"
+    ] is False
+    assert drilldown["action_side_market_drilldown"][
+        "compact_summary_from_threshold_rows"
+    ] is True
+    assert failure_attribution[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ]["validation_row_count"] == 9600
+    assert failure_attribution["validation_failure_drilldown_report_path"] == (
+        "sell_before_close_validation_failure_drilldown_report.json"
+    )
+    assert looks_like_sha256(
+        failure_attribution["validation_failure_drilldown_report_sha256"]
+    )
     assert manifest[
         "sell_before_close_support_aware_threshold_failure_attribution_report_path"
     ] == "sell_before_close_support_aware_threshold_failure_attribution_report.json"
@@ -825,6 +921,38 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     ] == source_eligibility[
         "sell_before_close_support_aware_threshold_failure_attribution_summary"
     ]
+    assert manifest["sell_before_close_validation_failure_drilldown_report_path"] == (
+        "sell_before_close_validation_failure_drilldown_report.json"
+    )
+    assert looks_like_sha256(
+        manifest["sell_before_close_validation_failure_drilldown_report_sha256"]
+    )
+    assert manifest["sell_before_close_validation_failure_drilldown_summary"] == (
+        source_eligibility["sell_before_close_validation_failure_drilldown_summary"]
+    )
+    assert candidate_comparison[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ] == source_eligibility[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ]
+    assert manifest[
+        "sell_before_close_validation_failure_primary_interpretation"
+    ] == drilldown["primary_failure_interpretation"]
+    assert manifest["sell_before_close_validation_failure_interpretations"] == (
+        drilldown["failure_interpretations"]
+    )
+    assert manifest[
+        "sell_before_close_validation_failure_recommended_next_actions"
+    ] == drilldown["recommended_next_actions"]
+    assert manifest["sell_before_close_validation_support_adequate_row_count"] == 0
+    assert manifest["sell_before_close_validation_positive_pnl_row_count"] == 0
+    assert manifest[
+        "sell_before_close_validation_support_passed_pnl_failed_count"
+    ] == 0
+    assert manifest[
+        "sell_before_close_validation_support_failed_pnl_passed_count"
+    ] == 0
+    assert manifest["sell_before_close_validation_side_coverage_failure_rate"] == 1.0
     assert manifest[
         "sell_before_close_support_aware_threshold_selection_failed"
     ] is True
@@ -857,6 +985,17 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert support_gate["failure_attribution_report_sha256"] == (
         threshold_selection["failure_attribution_report_sha256"]
     )
+    assert support_gate["validation_failure_drilldown_report_path"] == (
+        "sell_before_close_validation_failure_drilldown_report.json"
+    )
+    assert support_gate["validation_failure_drilldown_report_sha256"] == (
+        manifest["sell_before_close_validation_failure_drilldown_report_sha256"]
+    )
+    assert support_gate[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ] == manifest[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ]
     assert support_gate["promotion_evidence_eligible"] is False
     assert support_gate["paper_run_resume_allowed"] is False
     assert "promotion_replay_entry_support_insufficient" in support_gate[
@@ -1271,6 +1410,9 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert "support_aware_threshold_selection_failed" in counterfactual_replay[
         "promotion_evidence_ineligible_reasons"
     ]
+    assert counterfactual_replay[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ] == manifest["sell_before_close_validation_failure_drilldown_summary"]
     assert [variant["variant"] for variant in counterfactual_replay["variants"]] == [
         "A_baseline_current_policy_with_runtime_guards",
         "B_hold_to_settlement_disabled_reranked",
@@ -1341,6 +1483,10 @@ def test_training_runner_writes_required_artifacts_and_manifest(
                 "promotion_evidence_ineligible_reasons"
             ]
             assert "sell_before_close_support_aware_threshold_selection_summary" in variant
+            assert "sell_before_close_validation_failure_drilldown_summary" in variant
+            assert variant[
+                "sell_before_close_validation_failure_drilldown_summary"
+            ] == manifest["sell_before_close_validation_failure_drilldown_summary"]
     assert manifest["action_family_counterfactual_replay_report_path"] == (
         "action_family_counterfactual_replay_report.json"
     )

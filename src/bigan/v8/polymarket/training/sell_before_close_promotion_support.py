@@ -243,6 +243,9 @@ def sell_before_close_promotion_support_gate_summary(
         "recommended_next_action",
         "failure_attribution_report_path",
         "failure_attribution_report_sha256",
+        "validation_failure_drilldown_report_path",
+        "validation_failure_drilldown_report_sha256",
+        "sell_before_close_validation_failure_drilldown_summary",
         "promotion_support_eligible",
         "promotion_evidence_eligible",
         "paper_run_resume_allowed",
@@ -275,6 +278,10 @@ def sell_before_close_promotion_support_gate_markdown(
         f"`{report.get('failure_attribution_report_path')}`",
         "- failure_attribution_report_sha256: "
         f"`{report.get('failure_attribution_report_sha256')}`",
+        "- validation_failure_drilldown_report_path: "
+        f"`{report.get('validation_failure_drilldown_report_path')}`",
+        "- validation_failure_drilldown_report_sha256: "
+        f"`{report.get('validation_failure_drilldown_report_sha256')}`",
         "- promotion_evidence_eligible: "
         f"`{str(report['promotion_evidence_eligible']).lower()}`",
         f"- paper_run_resume_allowed: `{str(report['paper_run_resume_allowed']).lower()}`",
