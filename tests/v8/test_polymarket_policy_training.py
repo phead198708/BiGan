@@ -570,6 +570,44 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert source_support_aware_summary[
         "support_aware_threshold_selection_failed"
     ] is True
+    side_balanced_report = _read_json(
+        result.artifact_paths["sell_before_close_side_balanced_candidate_report"]
+    )
+    assert side_balanced_report["schema_version"] == (
+        "bigan-v8-polymarket-sell-before-close-side-balanced-candidate-v1"
+    )
+    attrition = side_balanced_report["selected_entry_guard_attrition_report"]
+    attrition_summary = side_balanced_report[
+        "selected_entry_guard_attrition_summary"
+    ]
+    assert attrition["schema_version"] == (
+        "bigan-v8-polymarket-m-selected-entry-guard-attrition-v1"
+    )
+    assert attrition_summary["selected_entry_count"] == attrition[
+        "selected_entry_count"
+    ]
+    assert attrition_summary["replay_entry_count"] == attrition[
+        "replay_entry_count"
+    ]
+    assert attrition_summary[
+        "selected_entries_filtered_count"
+    ] == attrition["selected_entries_filtered_count"]
+    assert len(attrition["selected_entry_rows"]) == attrition[
+        "selected_entry_count"
+    ]
+    assert sum(attrition["attrition_counts_by_stage"].values()) == attrition[
+        "selected_entry_count"
+    ]
+    assert attrition["guard_transition_counts"][0]["stage"] == (
+        "side_quota_selection"
+    )
+    assert attrition["guard_transition_counts"][-1]["stage"] == "replay_entry"
+    assert attrition["guard_transition_counts"][-1]["passed_count"] == attrition[
+        "replay_entry_count"
+    ]
+    assert source_eligibility[
+        "sell_before_close_side_balanced_candidate_summary"
+    ]["selected_entry_guard_attrition_summary"] == attrition_summary
     assert manifest["candidate_scoped_source_model_eligibility_summary"] == (
         source_eligibility["candidate_scoped_eligibility_summary"]
     )
@@ -1452,13 +1490,19 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         )
         assert variant["prediction_count"] == len(result.dataset.shadow_examples)
         assert variant["decision_count"] == len(result.dataset.shadow_examples)
-        assert set(variant["artifact_paths"]) == {
+        expected_artifact_paths = {
             "decisions",
             "ev_threshold_report",
             "ledger_pnl_report",
             "policy_replay_report",
             "predictions",
         }
+        if (
+            variant["variant"]
+            == "M_sell_before_close_side_balanced_ranking_candidate"
+        ):
+            expected_artifact_paths.add("side_balance_candidate_entries")
+        assert set(variant["artifact_paths"]) == expected_artifact_paths
         for artifact_path in variant["artifact_paths"].values():
             assert (result.run_dir / artifact_path).exists()
         for artifact_hash in variant["artifact_hashes"].values():
@@ -1507,6 +1551,17 @@ def test_training_runner_writes_required_artifacts_and_manifest(
             assert variant[
                 "sell_before_close_validation_failure_drilldown_summary"
             ] == manifest["sell_before_close_validation_failure_drilldown_summary"]
+        if (
+            variant["variant"]
+            == "M_sell_before_close_side_balanced_ranking_candidate"
+        ):
+            assert variant["side_balance_selection_summary"][
+                "selected_entry_count"
+            ] >= 0
+            assert (
+                result.run_dir
+                / variant["artifact_paths"]["side_balance_candidate_entries"]
+            ).exists()
     assert manifest["action_family_counterfactual_replay_report_path"] == (
         "action_family_counterfactual_replay_report.json"
     )

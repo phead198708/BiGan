@@ -652,6 +652,10 @@ def _build_action_family_counterfactual_replays(
                 "side_balance_selection_summary": dict(
                     prediction_set.get("side_balance_selection_summary", {})
                 ),
+                "side_balance_candidate_entries": [
+                    dict(row)
+                    for row in prediction_set.get("side_balance_candidate_entries", [])
+                ],
                 "predictions": [prediction.to_dict() for prediction in predictions],
                 "decisions": [decision.to_dict() for decision in decisions],
                 "ev_report": ev_report,
@@ -1777,12 +1781,227 @@ def _best_candidate_report(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     )[0]
 
 
+_BUSINESS_GUARD_REASON_EXCLUSIONS = {
+    "trained_model_used",
+    "paper_only_guard",
+}
+
+
+def _build_selected_entry_guard_attrition_report(
+    *,
+    replay: dict[str, Any],
+    side_balance_summary: dict[str, Any],
+) -> dict[str, Any]:
+    candidate_entries = [
+        dict(row)
+        for row in replay.get("side_balance_candidate_entries", [])
+        if bool(row.get("side_quota_selected", False))
+    ]
+    decisions_by_key = {
+        (str(row.get("market_id")), int(row.get("decision_ts", 0))): row
+        for row in replay.get("decisions", [])
+    }
+    stage_counts: Counter[str] = Counter()
+    reason_counts: Counter[str] = Counter()
+    row_reports = []
+    for entry in sorted(
+        candidate_entries,
+        key=lambda row: (
+            str(row.get("selected_side", "")),
+            int(row.get("side_quota_rank") or 999_999),
+            int(row.get("decision_ts", 0)),
+            str(row.get("market_id", "")),
+        ),
+    ):
+        key = (str(entry.get("market_id")), int(entry.get("decision_ts", 0)))
+        decision = decisions_by_key.get(key)
+        reason_codes = list((decision or {}).get("reason_codes", []))
+        business_reasons = [
+            reason
+            for reason in reason_codes
+            if reason not in _BUSINESS_GUARD_REASON_EXCLUSIONS
+        ]
+        stage = _selected_entry_blocking_stage(decision=decision)
+        stage_counts[stage] += 1
+        reason_counts.update(business_reasons)
+        row_reports.append(
+            {
+                "market_id": entry.get("market_id"),
+                "slug": (decision or {}).get("slug"),
+                "decision_ts": int(entry.get("decision_ts", 0)),
+                "selected_side": entry.get("selected_side"),
+                "selected_action": entry.get("action"),
+                "side_quota_rank": entry.get("side_quota_rank"),
+                "candidate_rank_score": entry.get("candidate_rank_score"),
+                "raw_calibrated_action_score": entry.get(
+                    "raw_calibrated_action_score"
+                ),
+                "best_action_margin": entry.get("best_action_margin"),
+                "p_up": entry.get("p_up"),
+                "guard_decision_action": (decision or {}).get("action"),
+                "entry_policy_action": (decision or {}).get("entry_policy_action"),
+                "blocked_stage": stage,
+                "business_reason_codes": business_reasons,
+                "reason_codes": reason_codes,
+            }
+        )
+
+    guard_summary = dict(replay.get("exit_reliability_guard_summary") or {})
+    selected_entry_count = len(candidate_entries)
+    replay_entry_count = int(stage_counts.get("entry_emitted_to_replay", 0))
+    transition_counts = _selected_entry_guard_transition_counts(
+        selected_entry_count=selected_entry_count,
+        guard_summary=guard_summary,
+    )
+    attrition_summary = {
+        "selected_entry_count": selected_entry_count,
+        "replay_entry_count": replay_entry_count,
+        "selected_entries_filtered_count": selected_entry_count - replay_entry_count,
+        "all_selected_entries_filtered_before_replay": (
+            selected_entry_count > 0 and replay_entry_count == 0
+        ),
+        "attrition_counts_by_stage": dict(sorted(stage_counts.items())),
+        "business_reason_counts": dict(sorted(reason_counts.items())),
+        "guard_transition_counts": transition_counts,
+        "primary_attrition_answer": _selected_entry_primary_attrition_answer(
+            stage_counts=stage_counts,
+            selected_entry_count=selected_entry_count,
+            replay_entry_count=replay_entry_count,
+        ),
+    }
+    return {
+        "schema_version": (
+            "bigan-v8-polymarket-m-selected-entry-guard-attrition-v1"
+        ),
+        "candidate_name": SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+        "diagnostic_only": True,
+        "question_answered": (
+            "which guard stage filtered the side-quota selected M entries before replay"
+        ),
+        "side_balance_selection_summary": dict(side_balance_summary),
+        "exit_reliability_guard_summary": guard_summary,
+        **attrition_summary,
+        "selected_entry_rows": row_reports,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        **compact_safety_fields(),
+    }
+
+
+def _selected_entry_blocking_stage(*, decision: dict[str, Any] | None) -> str:
+    if not decision:
+        return "missing_guard_decision"
+    action = str(decision.get("action", ""))
+    if action in {"BUY_UP", "BUY_DOWN"}:
+        return "entry_emitted_to_replay"
+    reasons = set(decision.get("reason_codes", []))
+    if {
+        "entry_blocked_p_up_action_disagreement",
+        "entry_blocked_p_up_side_alignment_failed",
+    } & reasons:
+        return "p_up_side_alignment_guard"
+    if {
+        "entry_blocked_turnover_guard",
+        "entry_blocked_max_entries_per_market",
+        "entry_blocked_reentry_cooldown",
+    } & reasons:
+        return "turnover_guard"
+    if any(
+        reason.startswith("entry_blocked_")
+        for reason in reasons
+        if reason not in {
+            "entry_blocked_p_up_action_disagreement",
+            "entry_blocked_p_up_side_alignment_failed",
+            "entry_blocked_turnover_guard",
+            "entry_blocked_max_entries_per_market",
+            "entry_blocked_reentry_cooldown",
+        }
+    ):
+        return "exit_reliability_quality_guard"
+    if "action_value_no_sell_before_close_entry_selected" in reasons:
+        return "not_selected_after_side_quota"
+    return "other_guard"
+
+
+def _selected_entry_guard_transition_counts(
+    *,
+    selected_entry_count: int,
+    guard_summary: dict[str, Any],
+) -> list[dict[str, Any]]:
+    before = int(
+        guard_summary.get("entry_decision_count_before_guard", selected_entry_count)
+    )
+    after_quality = int(guard_summary.get("entry_decision_count_after_exit_guard", 0))
+    after_p_up = int(
+        guard_summary.get("entry_decision_count_after_p_up_alignment", 0)
+    )
+    after_turnover = int(guard_summary.get("entry_decision_count_after_guard", 0))
+    return [
+        {
+            "stage": "side_quota_selection",
+            "input_count": selected_entry_count,
+            "passed_count": selected_entry_count,
+            "blocked_count": 0,
+        },
+        {
+            "stage": "exit_reliability_quality_guard",
+            "input_count": before,
+            "passed_count": after_quality,
+            "blocked_count": max(0, before - after_quality),
+        },
+        {
+            "stage": "p_up_side_alignment_guard",
+            "input_count": after_quality,
+            "passed_count": after_p_up,
+            "blocked_count": max(0, after_quality - after_p_up),
+        },
+        {
+            "stage": "turnover_guard",
+            "input_count": after_p_up,
+            "passed_count": after_turnover,
+            "blocked_count": max(0, after_p_up - after_turnover),
+        },
+        {
+            "stage": "replay_entry",
+            "input_count": after_turnover,
+            "passed_count": after_turnover,
+            "blocked_count": 0,
+        },
+    ]
+
+
+def _selected_entry_primary_attrition_answer(
+    *,
+    stage_counts: Counter[str],
+    selected_entry_count: int,
+    replay_entry_count: int,
+) -> str:
+    if selected_entry_count == 0:
+        return "no side-quota selected entries"
+    if replay_entry_count > 0:
+        return "some side-quota selected entries reached replay entries"
+    blocking_counts = {
+        stage: count
+        for stage, count in stage_counts.items()
+        if stage != "entry_emitted_to_replay"
+    }
+    if len(blocking_counts) == 1:
+        stage, count = next(iter(blocking_counts.items()))
+        return f"all {count} side-quota selected entries were filtered by {stage}"
+    parts = ", ".join(
+        f"{count} by {stage}" for stage, count in sorted(blocking_counts.items())
+    )
+    return f"all side-quota selected entries were filtered before replay entry: {parts}"
+
+
 def _build_sell_before_close_side_balanced_candidate_report(
     *,
     model_ranking_candidate_comparison: dict[str, Any],
     source_model_eligibility: dict[str, Any],
     sell_before_close_exit_reliability: dict[str, Any],
     sell_before_close_promotion_support_gate: dict[str, Any],
+    action_family_counterfactual_replays: tuple[dict[str, Any], ...],
 ) -> dict[str, Any]:
     candidate = next(
         (
@@ -1835,6 +2054,19 @@ def _build_sell_before_close_side_balanced_candidate_report(
         or replay_row.get("side_balance_selection_summary")
         or {}
     )
+    counterfactual_replay = next(
+        (
+            row
+            for row in action_family_counterfactual_replays
+            if row["variant"]
+            == SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME
+        ),
+        {},
+    )
+    selected_entry_attrition = _build_selected_entry_guard_attrition_report(
+        replay=counterfactual_replay,
+        side_balance_summary=side_balance_summary,
+    )
     ineligible_reasons = sorted(
         set(candidate.get("ineligible_reason_codes", []))
         | set(support_row.get("support_gate_reason_codes", []))
@@ -1884,6 +2116,33 @@ def _build_sell_before_close_side_balanced_candidate_report(
             or {}
         ),
         "side_balance_selection_summary": side_balance_summary,
+        "selected_entry_guard_attrition_report": selected_entry_attrition,
+        "selected_entry_guard_attrition_summary": {
+            "selected_entry_count": selected_entry_attrition[
+                "selected_entry_count"
+            ],
+            "replay_entry_count": selected_entry_attrition["replay_entry_count"],
+            "selected_entries_filtered_count": selected_entry_attrition[
+                "selected_entries_filtered_count"
+            ],
+            "all_selected_entries_filtered_before_replay": (
+                selected_entry_attrition[
+                    "all_selected_entries_filtered_before_replay"
+                ]
+            ),
+            "attrition_counts_by_stage": selected_entry_attrition[
+                "attrition_counts_by_stage"
+            ],
+            "business_reason_counts": selected_entry_attrition[
+                "business_reason_counts"
+            ],
+            "guard_transition_counts": selected_entry_attrition[
+                "guard_transition_counts"
+            ],
+            "primary_attrition_answer": selected_entry_attrition[
+                "primary_attrition_answer"
+            ],
+        },
         "entry_count": support_row.get("entry_decision_count"),
         "up_entry_count": support_row.get("up_entry_count"),
         "down_entry_count": support_row.get("down_entry_count"),
@@ -1941,6 +2200,7 @@ def _sell_before_close_side_balanced_candidate_summary(
         "side_balance_gate_passed",
         "side_balance_thresholds",
         "side_balance_selection_summary",
+        "selected_entry_guard_attrition_summary",
         "entry_count",
         "up_entry_count",
         "down_entry_count",
@@ -1977,6 +2237,8 @@ def _sell_before_close_side_balanced_candidate_markdown(
         f"- source_model_candidate_eligible: `{str(report['source_model_candidate_eligible']).lower()}`",
         f"- promotion_evidence_eligible: `{str(report['promotion_evidence_eligible']).lower()}`",
         f"- paper_run_resume_allowed: `{str(report['paper_run_resume_allowed']).lower()}`",
+        "- selected_entry_guard_attrition: "
+        f"`{report['selected_entry_guard_attrition_summary']['primary_attrition_answer']}`",
         "- ineligible_reason_codes: "
         f"`{json.dumps(report['ineligible_reason_codes'])}`",
         "",
@@ -1992,6 +2254,49 @@ def _sell_before_close_side_balanced_candidate_markdown(
             pnl=report.get("replay_total_pnl"),
             p_up=report.get("candidate_scoped_p_up_action_disagreement_rate"),
         ),
+        "",
+        "## Selected-Entry Guard Attrition",
+        "",
+        "| stage | input | passed | blocked |",
+        "|---|---:|---:|---:|",
+        *[
+            "| {stage} | {input_count} | {passed_count} | {blocked_count} |".format(
+                **row
+            )
+            for row in report["selected_entry_guard_attrition_summary"][
+                "guard_transition_counts"
+            ]
+        ],
+        "",
+        "### Business Reason Counts",
+        "",
+        "| reason | count |",
+        "|---|---:|",
+        *[
+            f"| `{reason}` | {count} |"
+            for reason, count in report[
+                "selected_entry_guard_attrition_summary"
+            ]["business_reason_counts"].items()
+        ],
+        "",
+        "### Selected Rows",
+        "",
+        "| rank | side | action | stage | market_id | decision_ts | reasons |",
+        "|---:|---|---|---|---|---:|---|",
+        *[
+            "| {rank} | {side} | `{action}` | `{stage}` | `{market}` | {ts} | `{reasons}` |".format(
+                rank=row.get("side_quota_rank"),
+                side=row.get("selected_side"),
+                action=row.get("selected_action"),
+                stage=row.get("blocked_stage"),
+                market=row.get("market_id"),
+                ts=row.get("decision_ts"),
+                reasons=json.dumps(row.get("business_reason_codes", [])),
+            )
+            for row in report["selected_entry_guard_attrition_report"][
+                "selected_entry_rows"
+            ]
+        ],
         "",
         "- paper_only: true",
         "- capital_at_risk: false",
@@ -2477,6 +2782,9 @@ def _write_artifacts(
             sell_before_close_promotion_support_gate=(
                 sell_before_close_promotion_support_gate
             ),
+            action_family_counterfactual_replays=(
+                action_family_counterfactual_replays
+            ),
         )
     )
     _write_json(
@@ -2943,8 +3251,24 @@ def _write_counterfactual_replay_artifacts(
             "policy_replay_report": variant_dir / "policy_replay_report.json",
             "ledger_pnl_report": variant_dir / "ledger_pnl_report.json",
         }
+        side_balance_candidate_entries = list(
+            replay.get("side_balance_candidate_entries", [])
+        )
+        write_side_balance_candidate_entries = (
+            replay["variant"] == SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME
+            or bool(side_balance_candidate_entries)
+        )
+        if write_side_balance_candidate_entries:
+            files["side_balance_candidate_entries"] = (
+                variant_dir / "side_balance_candidate_entries.jsonl"
+            )
         _write_jsonl(files["predictions"], replay["predictions"])
         _write_jsonl(files["decisions"], replay["decisions"])
+        if write_side_balance_candidate_entries:
+            _write_jsonl(
+                files["side_balance_candidate_entries"],
+                side_balance_candidate_entries,
+            )
         _write_json(files["ev_threshold_report"], replay["ev_report"])
         _write_json(files["policy_replay_report"], replay["replay_report"])
         _write_json(files["ledger_pnl_report"], ledger_pnl_report)
