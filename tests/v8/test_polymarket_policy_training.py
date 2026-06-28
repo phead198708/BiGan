@@ -27,6 +27,7 @@ from bigan.v8.polymarket import (
 from bigan.v8.polymarket.contracts import canonical_json_sha256, looks_like_sha256
 from bigan.v8.polymarket.training.action_family_eligibility import (
     build_action_family_counterfactual_prediction_sets,
+    build_sell_before_close_side_balanced_prediction_set,
 )
 from bigan.v8.polymarket.training.dataset import _split_examples
 from bigan.v8.polymarket.training.model_ranking_diagnostics import (
@@ -2026,6 +2027,72 @@ def test_side_balanced_sell_before_close_candidate_fails_closed_on_one_side(
     assert "side_balance_required_gate_failed" in candidate[
         "ineligible_reason_codes"
     ]
+
+
+def test_side_balanced_selection_uses_guard_compatible_rows_before_quota(
+    tmp_path: Path,
+) -> None:
+    bad_up = _guard_prediction(
+        market_id="bad-up",
+        decision_ts=1_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.30,
+    )
+    good_up = _guard_prediction(
+        market_id="good-up",
+        decision_ts=2_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    good_down = _guard_prediction(
+        market_id="good-down",
+        decision_ts=3_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.30,
+    )
+
+    prediction_set = build_sell_before_close_side_balanced_prediction_set(
+        predictions=(bad_up, good_up, good_down),
+        execution_buffer=0.015,
+        side_balance_thresholds={
+            "side_quota_per_side": 1.0,
+            "min_per_side_entry_count": 1.0,
+            "min_per_side_market_count": 1.0,
+        },
+    )
+
+    rows = prediction_set["side_balance_candidate_entries"]
+    selected_rows = [row for row in rows if row["side_quota_selected"]]
+    bad_up_row = next(row for row in rows if row["market_id"] == "bad-up")
+    summary = prediction_set["side_balance_selection_summary"]
+
+    assert summary["selection_pool"] == "guard_compatible_rows"
+    assert summary["candidate_count"] == 3
+    assert summary["guard_compatible_candidate_count"] == 2
+    assert summary["guard_compatible_two_sided_entry_set_exists"] is True
+    assert summary["guard_compatible_side_balance_gate_passed"] is True
+    assert summary["side_balance_gate_passed"] is True
+    assert summary["selected_entry_count"] == 2
+    assert {row["market_id"] for row in selected_rows} == {"good-up", "good-down"}
+    assert all(row["side_balance_guard_compatible_entry"] for row in selected_rows)
+    assert bad_up_row["side_balance_guard_compatible_entry"] is False
+    assert bad_up_row["side_quota_selected"] is False
+    assert "entry_blocked_side_balance_guard_compatibility_failed" in bad_up_row[
+        "side_balance_reason_codes"
+    ]
+    assert "entry_blocked_p_up_action_disagreement" in bad_up_row[
+        "side_balance_reason_codes"
+    ]
+    replay_actions = {
+        prediction.market_id: prediction.calibrated_best_policy_action
+        for prediction in prediction_set["predictions"]
+    }
+    assert replay_actions["bad-up"] == "NO_TRADE"
+    assert replay_actions["good-up"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert replay_actions["good-down"] == "BUY_DOWN_SELL_BEFORE_CLOSE"
 
 
 def test_sell_before_close_candidate_does_not_resume_without_promotion_replay(

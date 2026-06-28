@@ -602,9 +602,13 @@ def build_sell_before_close_side_balanced_prediction_set(
     candidate_rows = _side_balance_candidate_rows(
         predictions=tuple(reranked),
         execution_buffer=execution_buffer,
+        guard_thresholds=dict(SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS),
     )
+    selection_pool_rows = [
+        row for row in candidate_rows if bool(row["side_balance_guard_compatible_entry"])
+    ]
     selected_keys = _side_quota_selected_keys(
-        rows=candidate_rows,
+        rows=selection_pool_rows,
         thresholds=thresholds,
     )
     replay_predictions = tuple(
@@ -658,6 +662,7 @@ def _side_balance_candidate_rows(
     *,
     predictions: tuple[PolymarketPolicyPrediction, ...],
     execution_buffer: float,
+    guard_thresholds: dict[str, float],
 ) -> list[dict[str, Any]]:
     rows = []
     for prediction in predictions:
@@ -674,6 +679,12 @@ def _side_balance_candidate_rows(
         margin = float(prediction.calibrated_action_margin or 0.0)
         p_up = _p_up(prediction)
         rank_score = score + margin * 0.1
+        guard = _side_balance_guard_compatibility(
+            prediction=prediction,
+            action=action,
+            execution_buffer=execution_buffer,
+            thresholds=guard_thresholds,
+        )
         rows.append(
             {
                 "market_id": prediction.market_id,
@@ -685,12 +696,133 @@ def _side_balance_candidate_rows(
                 "raw_calibrated_action_score": score,
                 "best_action_margin": margin,
                 "p_up": p_up,
+                "side_balance_guard_compatible_entry": guard["passed"],
+                "exit_reliability_guard_passed": guard[
+                    "exit_reliability_guard_passed"
+                ],
+                "p_up_side_alignment_passed": guard["p_up_side_alignment_passed"],
+                "side_balance_guard_reason_codes": guard["reason_codes"],
                 "side_quota_rank": None,
                 "side_quota_selected": False,
                 "side_balance_reason_codes": [],
             }
         )
     return rows
+
+
+def _side_balance_guard_compatibility(
+    *,
+    prediction: PolymarketPolicyPrediction,
+    action: str,
+    execution_buffer: float,
+    thresholds: dict[str, float],
+) -> dict[str, Any]:
+    side = "UP" if action.startswith("BUY_UP") else "DOWN"
+    features = prediction.features
+    time_to_close = float(features.get("time_to_close_seconds", 0.0))
+    executable_bid_notional = _side_balance_side_feature(
+        features,
+        side,
+        "executable_bid_notional",
+    )
+    queue_fill = _side_balance_side_feature(
+        features,
+        side,
+        "queue_fill_probability_proxy",
+    )
+    spread = _side_balance_side_feature(features, side, "spread_bps")
+    staleness = _side_balance_side_feature(features, side, "book_staleness_ms")
+    if staleness is None:
+        staleness = _side_balance_side_feature(
+            features,
+            side,
+            "book_update_lag_ms",
+        )
+    recent_updates = _side_balance_side_feature(
+        features,
+        side,
+        "recent_book_update_count_1m",
+    )
+    best_margin = float(prediction.calibrated_action_margin or 0.0)
+    best_score = float(prediction.calibrated_expected_pnl_per_notional or 0.0)
+    exit_reasons = []
+    if time_to_close < float(thresholds["min_seconds_to_close"]):
+        exit_reasons.append("entry_blocked_too_close_to_close")
+    if (
+        executable_bid_notional is None
+        or executable_bid_notional < float(thresholds["min_executable_bid_notional"])
+    ):
+        exit_reasons.append("entry_blocked_insufficient_executable_bid_notional")
+    if (
+        queue_fill is None
+        or queue_fill < float(thresholds["min_queue_fill_probability_proxy"])
+    ):
+        exit_reasons.append("entry_blocked_low_queue_fill_probability")
+    if spread is None or spread > float(thresholds["max_spread"]):
+        exit_reasons.append("entry_blocked_spread_too_wide")
+    if staleness is None or staleness > float(thresholds["max_book_staleness_ms"]):
+        exit_reasons.append("entry_blocked_stale_book")
+    if (
+        recent_updates is None
+        or recent_updates < float(thresholds["min_recent_book_update_count_1m"])
+    ):
+        exit_reasons.append("entry_blocked_stale_book")
+    if best_margin < float(thresholds["min_best_action_margin"]):
+        exit_reasons.append("entry_blocked_exit_reliability_guard")
+    min_score = max(
+        float(thresholds["min_calibrated_action_score"]),
+        float(execution_buffer),
+    )
+    if best_score < min_score:
+        exit_reasons.append("entry_blocked_exit_reliability_guard")
+    exit_passed = not exit_reasons
+    p_up_alignment_min = float(thresholds.get("p_up_alignment_min", 0.55))
+    p_up = _p_up(prediction)
+    if action.startswith("BUY_UP"):
+        p_up_passed = p_up >= p_up_alignment_min
+    elif action.startswith("BUY_DOWN"):
+        p_up_passed = p_up <= 1.0 - p_up_alignment_min
+    else:
+        p_up_passed = True
+    p_up_reasons = (
+        ("p_up_side_alignment_passed",)
+        if p_up_passed
+        else (
+            "entry_blocked_p_up_action_disagreement",
+            "entry_blocked_p_up_side_alignment_failed",
+        )
+    )
+    exit_reason_codes = (
+        ("exit_reliability_guard_thresholds_passed",)
+        if exit_passed
+        else tuple(dict.fromkeys(("entry_blocked_exit_reliability_guard", *exit_reasons)))
+    )
+    passed = exit_passed and p_up_passed
+    reason_codes = (
+        (
+            "side_balance_guard_compatible_entry",
+            *exit_reason_codes,
+            *p_up_reasons,
+        )
+        if passed
+        else tuple(dict.fromkeys((*exit_reason_codes, *p_up_reasons)))
+    )
+    return {
+        "passed": passed,
+        "exit_reliability_guard_passed": exit_passed,
+        "p_up_side_alignment_passed": p_up_passed,
+        "reason_codes": tuple(reason_codes),
+    }
+
+
+def _side_balance_side_feature(
+    features: dict[str, Any],
+    side: str,
+    field: str,
+) -> float | None:
+    prefix = "up" if side == "UP" else "down"
+    value = features.get(f"{prefix}_{field}")
+    return None if value is None else float(value)
 
 
 def _side_quota_selected_keys(
@@ -771,11 +903,19 @@ def _side_balance_ranked_rows(
         selected = key in selected_keys
         reason_codes = ["side_balance_candidate_selected"] if selected else []
         if not selected:
-            reason_codes.append("entry_blocked_side_quota_full")
+            if bool(row.get("side_balance_guard_compatible_entry", False)):
+                reason_codes.append("entry_blocked_side_quota_full")
+            else:
+                reason_codes.append(
+                    "entry_blocked_side_balance_guard_compatibility_failed"
+                )
+                reason_codes.extend(row.get("side_balance_guard_reason_codes", ()))
         if selected and total_selected > 0:
             ratio = side_counts[row["selected_side"]] / total_selected
             if ratio > max_ratio:
                 reason_codes.append("entry_blocked_side_ratio_limit")
+        if selected:
+            reason_codes.append("side_balance_guard_compatible_entry")
         payloads.append(
             {
                 **row,
@@ -800,15 +940,62 @@ def _side_balance_selection_summary(
     thresholds: dict[str, Any],
 ) -> dict[str, Any]:
     selected = [row for row in rows if row["side_quota_selected"]]
+    guard_compatible = [
+        row for row in rows if bool(row.get("side_balance_guard_compatible_entry", False))
+    ]
     side_distribution = Counter(row["selected_side"] for row in selected)
+    guard_side_distribution = Counter(row["selected_side"] for row in guard_compatible)
     market_by_side: dict[str, set[str]] = defaultdict(set)
     for row in selected:
         market_by_side[row["selected_side"]].add(str(row["market_id"]))
+    guard_market_by_side: dict[str, set[str]] = defaultdict(set)
+    for row in guard_compatible:
+        guard_market_by_side[row["selected_side"]].add(str(row["market_id"]))
     total = len(selected)
     max_side = max(side_distribution.values(), default=0)
     ratio = 0.0 if total == 0 else max_side / total
+    guard_total = len(guard_compatible)
+    guard_max_side = max(guard_side_distribution.values(), default=0)
+    guard_ratio = 0.0 if guard_total == 0 else guard_max_side / guard_total
     return {
         "candidate_count": len(rows),
+        "pre_guard_candidate_count": len(rows),
+        "selection_pool": "guard_compatible_rows",
+        "guard_compatible_candidate_count": guard_total,
+        "guard_compatible_up_entry_count": int(guard_side_distribution.get("UP", 0)),
+        "guard_compatible_down_entry_count": int(
+            guard_side_distribution.get("DOWN", 0)
+        ),
+        "guard_compatible_up_market_count": len(
+            guard_market_by_side.get("UP", set())
+        ),
+        "guard_compatible_down_market_count": len(
+            guard_market_by_side.get("DOWN", set())
+        ),
+        "guard_compatible_side_count": len(guard_side_distribution),
+        "guard_compatible_side_entry_ratio": guard_ratio,
+        "guard_compatible_two_sided_entry_set_exists": (
+            len(guard_side_distribution) >= 2
+        ),
+        "guard_compatible_side_balance_gate_passed": _side_balance_gate_passed(
+            up_count=int(guard_side_distribution.get("UP", 0)),
+            down_count=int(guard_side_distribution.get("DOWN", 0)),
+            up_market_count=len(guard_market_by_side.get("UP", set())),
+            down_market_count=len(guard_market_by_side.get("DOWN", set())),
+            side_count=len(guard_side_distribution),
+            side_entry_ratio=guard_ratio,
+            thresholds=thresholds,
+        ),
+        "guard_compatibility_reason_counts": dict(
+            sorted(
+                Counter(
+                    reason
+                    for row in rows
+                    if not bool(row.get("side_balance_guard_compatible_entry", False))
+                    for reason in row.get("side_balance_guard_reason_codes", ())
+                ).items()
+            )
+        ),
         "selected_entry_count": total,
         "up_entry_count": int(side_distribution.get("UP", 0)),
         "down_entry_count": int(side_distribution.get("DOWN", 0)),
