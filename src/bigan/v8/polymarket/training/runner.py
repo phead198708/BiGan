@@ -369,6 +369,11 @@ def run_polymarket_policy_training(
         action_family_eligibility=action_family_eligibility,
         model_ranking_candidate_comparison=model_ranking_candidate_comparison,
     )
+    _attach_guard_compatible_coverage_summary_to_operator_reports(
+        model_ranking_candidate_comparison=model_ranking_candidate_comparison,
+        source_model_eligibility=source_model_eligibility,
+        guard_compatible_coverage_reports=guard_compatible_coverage_reports,
+    )
     artifact_paths = _write_artifacts(
         run_dir=run_dir,
         config=config,
@@ -502,6 +507,9 @@ def run_polymarket_policy_training(
         ),
         "liquidity_spread_staleness_regime_report_sha256": _sha256_file(
             artifact_paths["liquidity_spread_staleness_regime_report"]
+        ),
+        "round_guard_coverage_report_sha256": _sha256_file(
+            artifact_paths["round_guard_coverage_report"]
         ),
     }
     model_manifest = _model_manifest(
@@ -2524,6 +2532,8 @@ def _write_artifacts(
         "liquidity_spread_staleness_regime_summary": (
             run_dir / "liquidity_spread_staleness_regime_report.md"
         ),
+        "round_guard_coverage_report": run_dir / "round_guard_coverage_report.json",
+        "round_guard_coverage_summary": run_dir / "round_guard_coverage_report.md",
         "all_predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "train_predictions": run_dir / "polymarket_policy_train_predictions.jsonl",
@@ -3145,6 +3155,29 @@ def _write_candidate_artifacts(
 def _refresh_report_id(payload: dict[str, Any], id_field: str) -> None:
     payload.pop(id_field, None)
     payload[id_field] = canonical_json_sha256(payload)
+
+
+def _attach_guard_compatible_coverage_summary_to_operator_reports(
+    *,
+    model_ranking_candidate_comparison: dict[str, Any],
+    source_model_eligibility: dict[str, Any],
+    guard_compatible_coverage_reports: dict[str, dict[str, Any]],
+) -> None:
+    coverage_report = guard_compatible_coverage_reports[
+        "guard_compatible_candidate_coverage_report"
+    ]
+    coverage_summary = guard_compatible_coverage_summary(coverage_report)
+    for report in (model_ranking_candidate_comparison, source_model_eligibility):
+        report["guard_compatible_candidate_coverage_summary"] = coverage_summary
+        report["guard_compatible_coverage_targets_passed"] = coverage_summary[
+            "coverage_targets_passed"
+        ]
+        report["guard_compatible_coverage_target_failed_reason_codes"] = (
+            coverage_summary["coverage_target_failed_reason_codes"]
+        )
+        report["#145_ready_for_rerun"] = coverage_summary["#145_ready_for_rerun"]
+        report["#146_start_allowed"] = False
+        report["#134_resume_allowed"] = False
 
 
 def _safe_artifact_name(value: str) -> str:
@@ -4209,6 +4242,10 @@ def _model_manifest(
                 "liquidity_spread_staleness_regime_report_sha256"
             ]
         ),
+        "round_guard_coverage_report_path": "round_guard_coverage_report.json",
+        "round_guard_coverage_report_sha256": action_family_artifact_hashes[
+            "round_guard_coverage_report_sha256"
+        ],
         "guard_compatible_candidate_coverage_summary": (
             coverage_summary
         ),

@@ -58,10 +58,24 @@ def build_guard_compatible_coverage_reports(
         "validation": (dataset.validation_examples, validation_predictions),
         "shadow": (dataset.shadow_examples, shadow_predictions),
     }
+    all_predictions = (
+        *train_predictions,
+        *validation_predictions,
+        *shadow_predictions,
+    )
+    prediction_alignment = _prediction_alignment_diagnostics(
+        examples=dataset.examples,
+        predictions=all_predictions,
+        split_name="overall",
+    )
+    if not prediction_alignment["prediction_alignment_passed"]:
+        raise ValueError(
+            "overall prediction alignment failed: "
+            f"{json.dumps(prediction_alignment, sort_keys=True)}"
+        )
     prediction_by_key = {
         (prediction.market_id, int(prediction.decision_ts)): prediction
-        for predictions in (train_predictions, validation_predictions, shadow_predictions)
-        for prediction in predictions
+        for prediction in all_predictions
     }
     overall_predictions = tuple(
         prediction_by_key[(example.market_id, int(example.decision_ts))]
@@ -104,6 +118,7 @@ def build_guard_compatible_coverage_reports(
         "corpus_market_count": int(dataset.corpus_manifest.get("market_count", 0)),
         "dataset_hash": dataset.dataset_hash,
         "training_corpus_hash": dataset.training_corpus_hash,
+        "prediction_alignment": prediction_alignment,
         "overall": overall,
         "by_split": by_split,
         **compact_safety_fields(),
@@ -172,6 +187,7 @@ def build_guard_compatible_coverage_reports(
                 "regime_rows",
             ),
         ),
+        "round_guard_coverage_report": _round_guard_coverage_report(base_report),
     }
     for report_name, report in reports.items():
         if report is base_report:
@@ -193,13 +209,32 @@ def guard_compatible_coverage_markdown(report: dict[str, Any]) -> str:
         f"- #145_ready_for_rerun: `{str(report['#145_ready_for_rerun']).lower()}`",
         "- coverage_target_failed_reason_codes: "
         f"`{json.dumps(report['coverage_target_failed_reason_codes'])}`",
+        f"- prediction_alignment_passed: "
+        f"`{str(report.get('prediction_alignment', {}).get('prediction_alignment_passed', True)).lower()}`",
         "",
-        "| split | pre_guard | guard_compatible | up | down | up_markets | down_markets | two_sided | side_ratio |",
-        "|---|---:|---:|---:|---:|---:|---:|---|---:|",
-        _coverage_markdown_row("overall", overall),
     ]
-    for split_name in ("train", "validation", "shadow"):
-        lines.append(_coverage_markdown_row(split_name, report["by_split"][split_name]))
+    if report["report_type"] == "round_guard_coverage":
+        lines.extend(
+            [
+                "| split | zero_pre_guard | pre_guard_zero_compatible | one_sided | two_sided |",
+                "|---|---:|---:|---:|---:|",
+                _round_markdown_row("overall", overall),
+            ]
+        )
+        for split_name in ("train", "validation", "shadow"):
+            lines.append(_round_markdown_row(split_name, report["by_split"][split_name]))
+    else:
+        lines.extend(
+            [
+                "| split | pre_guard | guard_compatible | up | down | up_markets | down_markets | two_sided | side_ratio |",
+                "|---|---:|---:|---:|---:|---:|---:|---|---:|",
+                _coverage_markdown_row("overall", overall),
+            ]
+        )
+        for split_name in ("train", "validation", "shadow"):
+            lines.append(
+                _coverage_markdown_row(split_name, report["by_split"][split_name])
+            )
     if report["report_type"] == "liquidity_spread_staleness_regime":
         lines.extend(
             [
@@ -293,6 +328,16 @@ def _split_coverage(
     predictions: tuple[PolymarketPolicyPrediction, ...],
     execution_buffer: float,
 ) -> dict[str, Any]:
+    prediction_alignment = _prediction_alignment_diagnostics(
+        examples=examples,
+        predictions=predictions,
+        split_name=split_name,
+    )
+    if not prediction_alignment["prediction_alignment_passed"]:
+        raise ValueError(
+            f"{split_name} prediction alignment failed: "
+            f"{json.dumps(prediction_alignment, sort_keys=True)}"
+        )
     _validate_aligned(examples=examples, predictions=predictions, split_name=split_name)
     prediction_set = build_sell_before_close_side_balanced_prediction_set(
         predictions=predictions,
@@ -392,19 +437,26 @@ def _split_coverage(
         "two_sided_guard_compatible_market_count": sum(
             1 for sides in market_sides.values() if {"UP", "DOWN"} <= sides
         ),
-        "positive_replay_candidate_count_by_side": _side_counter_payload(
+        "positive_negative_counts_source": "action_return_targets",
+        "positive_label_candidate_count_by_side": _side_counter_payload(
             positive_by_side
         ),
-        "negative_replay_candidate_count_by_side": _side_counter_payload(
+        "negative_label_candidate_count_by_side": _side_counter_payload(
             negative_by_side
         ),
-        "positive_guard_compatible_candidate_count_by_side": _side_counter_payload(
-            positive_guard_by_side
+        "positive_guard_compatible_label_candidate_count_by_side": (
+            _side_counter_payload(positive_guard_by_side)
         ),
-        "negative_guard_compatible_candidate_count_by_side": _side_counter_payload(
-            negative_guard_by_side
+        "negative_guard_compatible_label_candidate_count_by_side": (
+            _side_counter_payload(negative_guard_by_side)
         ),
         "regime_rows": _regime_rows(split_name=split_name, regime_counts=regime_counts),
+        "round_guard_coverage_rows": _round_guard_coverage_rows(
+            split_name=split_name,
+            examples=examples,
+            candidate_rows=rows,
+        ),
+        "prediction_alignment": prediction_alignment,
     }
     for field_name, counter in pass_counts.items():
         report[field_name] = _side_counter_payload(counter)
@@ -424,6 +476,93 @@ def _split_coverage(
         )
     )
     return report
+
+
+def _prediction_alignment_diagnostics(
+    *,
+    examples: tuple[PolymarketPolicyExample, ...],
+    predictions: tuple[PolymarketPolicyPrediction, ...],
+    split_name: str,
+) -> dict[str, Any]:
+    expected_keys = [_example_key(example) for example in examples]
+    expected_key_set = set(expected_keys)
+    prediction_keys = [_prediction_key(prediction) for prediction in predictions]
+    prediction_key_counts = Counter(prediction_keys)
+    prediction_key_set = set(prediction_keys)
+    missing = sorted(expected_key_set - prediction_key_set)
+    unexpected = sorted(prediction_key_set - expected_key_set)
+    duplicates = sorted(
+        key for key, count in prediction_key_counts.items() if count > 1
+    )
+    return {
+        "split_name": split_name,
+        "expected_prediction_count": len(expected_keys),
+        "actual_prediction_count": len(prediction_keys),
+        "missing_prediction_key_count": len(missing),
+        "duplicate_prediction_key_count": len(duplicates),
+        "unexpected_prediction_key_count": len(unexpected),
+        "missing_prediction_keys": [_key_payload(key) for key in missing[:50]],
+        "duplicate_prediction_keys": [_key_payload(key) for key in duplicates[:50]],
+        "unexpected_prediction_keys": [_key_payload(key) for key in unexpected[:50]],
+        "prediction_alignment_passed": not missing and not duplicates and not unexpected,
+    }
+
+
+def _round_guard_coverage_rows(
+    *,
+    split_name: str,
+    examples: tuple[PolymarketPolicyExample, ...],
+    candidate_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    slug_by_market_id: dict[str, str] = {}
+    rows_by_market_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for example in examples:
+        slug_by_market_id.setdefault(example.market_id, example.slug)
+    for row in candidate_rows:
+        rows_by_market_id[str(row["market_id"])].append(row)
+    round_rows = []
+    for market_id in sorted(slug_by_market_id):
+        rows = rows_by_market_id.get(market_id, [])
+        guard_rows = [
+            row
+            for row in rows
+            if bool(row.get("side_balance_guard_compatible_entry", False))
+        ]
+        sides = sorted({str(row["selected_side"]) for row in guard_rows})
+        reason_counts = Counter(
+            reason
+            for row in rows
+            for reason in row.get("side_balance_guard_reason_codes", ())
+        )
+        pre_guard_count = len(rows)
+        guard_count = len(guard_rows)
+        if pre_guard_count == 0:
+            coverage_class = "zero_pre_guard_candidates"
+        elif guard_count == 0:
+            coverage_class = "pre_guard_but_zero_guard_compatible"
+        elif len(sides) == 1:
+            coverage_class = "one_sided_guard_compatible"
+        else:
+            coverage_class = "two_sided_guard_compatible"
+        round_rows.append(
+            {
+                "split_name": split_name,
+                "market_id": market_id,
+                "slug": slug_by_market_id[market_id],
+                "pre_guard_candidate_count": pre_guard_count,
+                "guard_compatible_candidate_count": guard_count,
+                "guard_compatible_sides": sides,
+                "guard_compatible_up_entry_count": sum(
+                    1 for row in guard_rows if row["selected_side"] == "UP"
+                ),
+                "guard_compatible_down_entry_count": sum(
+                    1 for row in guard_rows if row["selected_side"] == "DOWN"
+                ),
+                "coverage_class": coverage_class,
+                "top_failure_reason_counts": dict(reason_counts.most_common(10)),
+            }
+        )
+    return round_rows
 
 
 def _coverage_target_results(
@@ -542,6 +681,58 @@ def _coverage_view_report(
     }
 
 
+def _round_guard_coverage_report(base_report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": GUARD_COMPATIBLE_CANDIDATE_COVERAGE_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": base_report["candidate_name"],
+        "diagnostic_only": True,
+        "report_type": "round_guard_coverage",
+        "selection_pool": base_report["selection_pool"],
+        "execution_buffer": base_report["execution_buffer"],
+        "coverage_targets_passed": base_report["coverage_targets_passed"],
+        "coverage_target_failed_reason_codes": base_report[
+            "coverage_target_failed_reason_codes"
+        ],
+        "#145_ready_for_rerun": base_report["#145_ready_for_rerun"],
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "prediction_alignment": base_report["prediction_alignment"],
+        "overall": _round_summary(base_report["overall"]),
+        "by_split": {
+            split_name: _round_summary(split_report)
+            for split_name, split_report in base_report["by_split"].items()
+        },
+        **compact_safety_fields(),
+    }
+
+
+def _round_summary(report: dict[str, Any]) -> dict[str, Any]:
+    rows = report["round_guard_coverage_rows"]
+    class_counts = Counter(row["coverage_class"] for row in rows)
+    reason_counts = Counter()
+    for row in rows:
+        reason_counts.update(row["top_failure_reason_counts"])
+    return {
+        "split_name": report["split_name"],
+        "round_count": len(rows),
+        "rounds_with_zero_pre_guard_candidates": int(
+            class_counts.get("zero_pre_guard_candidates", 0)
+        ),
+        "rounds_with_pre_guard_but_zero_guard_compatible": int(
+            class_counts.get("pre_guard_but_zero_guard_compatible", 0)
+        ),
+        "rounds_with_one_sided_guard_compatible": int(
+            class_counts.get("one_sided_guard_compatible", 0)
+        ),
+        "rounds_with_two_sided_guard_compatible": int(
+            class_counts.get("two_sided_guard_compatible", 0)
+        ),
+        "top_round_failure_reason_counts": dict(reason_counts.most_common(20)),
+        "round_guard_coverage_rows": rows,
+    }
+
+
 def _select_fields(report: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
     return {
         "split_name": report["split_name"],
@@ -563,6 +754,18 @@ def _coverage_markdown_row(split_name: str, report: dict[str, Any]) -> str:
         down_markets=report["guard_compatible_down_market_count"],
         two_sided=str(report["guard_compatible_two_sided_entry_set_exists"]).lower(),
         ratio=report["guard_compatible_side_entry_ratio"],
+    )
+
+
+def _round_markdown_row(split_name: str, report: dict[str, Any]) -> str:
+    return (
+        "| {split} | {zero} | {zero_guard} | {one_sided} | {two_sided} |"
+    ).format(
+        split=split_name,
+        zero=report["rounds_with_zero_pre_guard_candidates"],
+        zero_guard=report["rounds_with_pre_guard_but_zero_guard_compatible"],
+        one_sided=report["rounds_with_one_sided_guard_compatible"],
+        two_sided=report["rounds_with_two_sided_guard_compatible"],
     )
 
 
@@ -703,3 +906,15 @@ def _attach_report_id(report: dict[str, Any], field_name: str) -> None:
     payload = dict(report)
     payload.pop(field_name, None)
     report[field_name] = canonical_json_sha256(payload)
+
+
+def _example_key(example: PolymarketPolicyExample) -> tuple[str, int]:
+    return (example.market_id, int(example.decision_ts))
+
+
+def _prediction_key(prediction: PolymarketPolicyPrediction) -> tuple[str, int]:
+    return (prediction.market_id, int(prediction.decision_ts))
+
+
+def _key_payload(key: tuple[str, int]) -> dict[str, Any]:
+    return {"market_id": key[0], "decision_ts": key[1]}

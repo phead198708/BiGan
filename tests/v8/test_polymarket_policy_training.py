@@ -30,6 +30,9 @@ from bigan.v8.polymarket.training.action_family_eligibility import (
     build_sell_before_close_side_balanced_prediction_set,
 )
 from bigan.v8.polymarket.training.dataset import _split_examples
+from bigan.v8.polymarket.training.guard_compatible_coverage import (
+    build_guard_compatible_coverage_reports,
+)
 from bigan.v8.polymarket.training.model_ranking_diagnostics import (
     build_model_ranking_candidate_comparison,
 )
@@ -240,6 +243,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "p_up_alignment_pass_rate_by_side_summary",
         "liquidity_spread_staleness_regime_report",
         "liquidity_spread_staleness_regime_summary",
+        "round_guard_coverage_report",
+        "round_guard_coverage_summary",
         "action_family_eligibility_report",
         "action_family_eligibility_summary",
         "hold_to_settlement_longshot_guard_report",
@@ -631,6 +636,9 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert coverage["selection_pool"] == "guard_compatible_rows"
     assert coverage["#146_start_allowed"] is False
     assert coverage["#134_resume_allowed"] is False
+    assert coverage["prediction_alignment"]["prediction_alignment_passed"] is True
+    assert coverage["prediction_alignment"]["missing_prediction_keys"] == []
+    assert coverage["prediction_alignment"]["duplicate_prediction_keys"] == []
     assert set(coverage["by_split"]) == {"train", "validation", "shadow"}
     for split_name in ("overall", "train", "validation", "shadow"):
         split = coverage["overall"] if split_name == "overall" else coverage["by_split"][split_name]
@@ -644,8 +652,12 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         assert "spread_guard_pass_count_by_side" in split
         assert "staleness_guard_pass_count_by_side" in split
         assert "queue_fill_guard_pass_count_by_side" in split
-        assert "positive_replay_candidate_count_by_side" in split
-        assert "negative_replay_candidate_count_by_side" in split
+        assert split["positive_negative_counts_source"] == "action_return_targets"
+        assert "positive_label_candidate_count_by_side" in split
+        assert "negative_label_candidate_count_by_side" in split
+        assert "positive_replay_candidate_count_by_side" not in split
+        assert "negative_replay_candidate_count_by_side" not in split
+        assert "round_guard_coverage_rows" in split
     assert coverage["coverage_target_results"]
     assert isinstance(coverage["coverage_targets_passed"], bool)
     assert coverage["guard_compatible_candidate_coverage_report_id"]
@@ -655,6 +667,7 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "exit_reliability_pass_rate_by_side_report",
         "p_up_alignment_pass_rate_by_side_report",
         "liquidity_spread_staleness_regime_report",
+        "round_guard_coverage_report",
     ):
         report = _read_json(result.artifact_paths[report_name])
         assert report["diagnostic_only"] is True
@@ -662,6 +675,11 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         assert report["#134_resume_allowed"] is False
         assert set(report["by_split"]) == {"train", "validation", "shadow"}
         assert looks_like_sha256(report[f"{report_name}_id"])
+    round_guard = _read_json(result.artifact_paths["round_guard_coverage_report"])
+    assert "rounds_with_zero_pre_guard_candidates" in round_guard["overall"]
+    assert "rounds_with_pre_guard_but_zero_guard_compatible" in round_guard["overall"]
+    assert "rounds_with_one_sided_guard_compatible" in round_guard["overall"]
+    assert "rounds_with_two_sided_guard_compatible" in round_guard["overall"]
     assert manifest["guard_compatible_candidate_coverage_report_path"] == (
         "guard_compatible_candidate_coverage_report.json"
     )
@@ -682,9 +700,28 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert looks_like_sha256(
         manifest["liquidity_spread_staleness_regime_report_sha256"]
     )
+    assert manifest["round_guard_coverage_report_path"] == (
+        "round_guard_coverage_report.json"
+    )
+    assert looks_like_sha256(manifest["round_guard_coverage_report_sha256"])
     assert manifest["guard_compatible_candidate_coverage_summary"][
         "coverage_targets_passed"
     ] == coverage["coverage_targets_passed"]
+    for operator_report in (candidate_comparison, source_eligibility):
+        assert operator_report["guard_compatible_candidate_coverage_summary"][
+            "coverage_targets_passed"
+        ] == coverage["coverage_targets_passed"]
+        assert operator_report["guard_compatible_coverage_targets_passed"] == (
+            coverage["coverage_targets_passed"]
+        )
+        assert operator_report[
+            "guard_compatible_coverage_target_failed_reason_codes"
+        ] == coverage["coverage_target_failed_reason_codes"]
+        assert operator_report["#145_ready_for_rerun"] == coverage[
+            "#145_ready_for_rerun"
+        ]
+        assert operator_report["#146_start_allowed"] is False
+        assert operator_report["#134_resume_allowed"] is False
     assert manifest["#146_start_allowed"] is False
     assert manifest["#134_resume_allowed"] is False
     assert manifest["candidate_scoped_source_model_eligibility_summary"] == (
@@ -1701,6 +1738,46 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert manifest["synthetic_fixture_signal_used"] is False
     assert manifest["paper_replay_used_phase1_settlement_engine"] is True
     _assert_safe(manifest)
+
+
+def test_guard_compatible_coverage_reports_prediction_alignment_errors(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = _build_corpus(tmp_path)
+    dataset = load_polymarket_policy_dataset(
+        PolymarketPolicyTrainingConfig(
+            corpus_dir=corpus_dir,
+            output_dir=tmp_path / "policy",
+        )
+    )
+    train_predictions = tuple(
+        _alignment_prediction(example, dataset) for example in dataset.train_examples
+    )
+    validation_predictions = tuple(
+        _alignment_prediction(example, dataset)
+        for example in dataset.validation_examples
+    )
+    shadow_predictions = tuple(
+        _alignment_prediction(example, dataset) for example in dataset.shadow_examples
+    )
+
+    bad_train_predictions = (
+        train_predictions[0],
+        train_predictions[0],
+        *train_predictions[2:],
+    )
+    with pytest.raises(ValueError) as exc:
+        build_guard_compatible_coverage_reports(
+            dataset=dataset,
+            train_predictions=bad_train_predictions,
+            validation_predictions=validation_predictions,
+            shadow_predictions=shadow_predictions,
+            execution_buffer=0.015,
+        )
+    message = str(exc.value)
+    assert "overall prediction alignment failed" in message
+    assert "missing_prediction_keys" in message
+    assert "duplicate_prediction_keys" in message
 
 
 def test_feature_conditioned_action_returns_vary_by_state_within_family(
@@ -2888,6 +2965,44 @@ def _sell_before_close_exit_reliability_inputs() -> tuple[SimpleNamespace, tuple
         },
     }
     return dataset, (replay,)
+
+
+def _alignment_prediction(
+    example: PolymarketPolicyExample,
+    dataset,
+) -> PolymarketPolicyPrediction:
+    return PolymarketPolicyPrediction(
+        market_id=example.market_id,
+        condition_id=example.condition_id,
+        slug=example.slug,
+        market_family=example.market_family,
+        horizon_ms=example.horizon_ms,
+        decision_ts=example.decision_ts,
+        estimated_up_probability=example.target_up_probability,
+        confidence=0.50,
+        score=0.0,
+        calibration_bucket="alignment-test",
+        model_version="alignment-test",
+        feature_schema_hash=dataset.feature_schema_hash,
+        training_corpus_hash=dataset.training_corpus_hash,
+        features=dict(example.features),
+        target_up_probability=example.target_up_probability,
+        p_up_auxiliary=example.target_up_probability,
+        expected_return_by_action=dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, 0.0),
+        expected_return_no_trade=0.0,
+        expected_return_buy_up_hold_to_settlement=0.0,
+        expected_return_buy_down_hold_to_settlement=0.0,
+        expected_return_buy_up_sell_before_close=0.0,
+        expected_return_buy_down_sell_before_close=0.0,
+        best_policy_action="NO_TRADE",
+        best_action_expected_return=0.0,
+        second_best_action_expected_return=0.0,
+        best_action_margin=0.0,
+        action_value_head_enabled=True,
+        outcome_probability_head_enabled=True,
+        action_value_model_family="alignment_test_action_value",
+        feature_conditioned_action_value_model_enabled=True,
+    )
 
 
 def _exit_reliability_decision(
