@@ -157,8 +157,12 @@ def _build_post_freeze_holdout_report(
     frozen_model_path = frozen_model_dir / "polymarket_policy_model.json"
     frozen_calibration_path = frozen_model_dir / "polymarket_action_value_calibration.json"
     frozen_training_config_path = frozen_model_dir / "polymarket_policy_training_config.json"
+    frozen_corpus_manifest_path = frozen_corpus_dir / "polymarket_corpus_manifest.json"
+    frozen_split_path = frozen_corpus_dir / "polymarket_train_shadow_split.json"
     frozen_manifest = _read_json(frozen_manifest_path)
+    frozen_model_payload = _read_json(frozen_model_path)
     frozen_training_config = _read_json(frozen_training_config_path)
+    frozen_split = _read_json(frozen_split_path) if frozen_split_path.exists() else {}
     frozen_dataset = load_polymarket_policy_dataset(
         _dataset_config(
             corpus_dir=frozen_corpus_dir,
@@ -178,6 +182,51 @@ def _build_post_freeze_holdout_report(
     frozen_max_decision_ts = max(example.decision_ts for example in frozen_dataset.examples)
     holdout_min_decision_ts = min(example.decision_ts for example in holdout_dataset.examples)
     overlapping_market_ids = sorted(frozen_market_ids & holdout_market_ids)
+    frozen_model_sha256 = _sha256_file(frozen_model_path)
+    frozen_manifest_model_sha256 = frozen_manifest.get("model_sha256")
+    frozen_corpus_manifest_sha256 = _sha256_file(frozen_corpus_manifest_path)
+    frozen_model_training_corpus_hash = frozen_model_payload.get("training_corpus_hash")
+    frozen_manifest_training_corpus_hash = frozen_manifest.get("training_corpus_hash")
+    frozen_manifest_phase2_corpus_manifest_sha256 = frozen_manifest.get(
+        "phase2_corpus_manifest_sha256"
+    )
+    frozen_manifest_policy_dataset_hash = frozen_manifest.get("policy_dataset_hash")
+    frozen_manifest_split_hash = frozen_manifest.get("split_hash")
+    frozen_split_hash = frozen_split.get("split_hash")
+    frozen_model_sha256_matches_manifest = (
+        frozen_model_sha256 == frozen_manifest_model_sha256
+    )
+    frozen_dataset_hash_matches_manifest = (
+        frozen_dataset.dataset_hash == frozen_manifest_policy_dataset_hash
+    )
+    frozen_split_hash_matches_manifest = (
+        True
+        if frozen_manifest_split_hash is None
+        else frozen_split_hash == frozen_manifest_split_hash
+    )
+    frozen_corpus_lineage_checks = {
+        "corpus_manifest_matches_model_training_corpus_hash": (
+            frozen_corpus_manifest_sha256 == frozen_model_training_corpus_hash
+        ),
+        "corpus_manifest_matches_manifest_training_corpus_hash": (
+            True
+            if frozen_manifest_training_corpus_hash is None
+            else frozen_corpus_manifest_sha256 == frozen_manifest_training_corpus_hash
+        ),
+        "corpus_manifest_matches_manifest_phase2_corpus_manifest_sha256": (
+            True
+            if frozen_manifest_phase2_corpus_manifest_sha256 is None
+            else frozen_corpus_manifest_sha256
+            == frozen_manifest_phase2_corpus_manifest_sha256
+        ),
+        "dataset_hash_matches_manifest_policy_dataset_hash": (
+            frozen_dataset_hash_matches_manifest
+        ),
+        "split_hash_matches_manifest_split_hash": frozen_split_hash_matches_manifest,
+    }
+    frozen_corpus_dir_matches_frozen_training_lineage = all(
+        frozen_corpus_lineage_checks.values()
+    )
     provenance = {
         "frozen_model_dir": str(frozen_model_dir),
         "frozen_corpus_dir": str(frozen_corpus_dir),
@@ -185,16 +234,35 @@ def _build_post_freeze_holdout_report(
         "frozen_model_manifest_path": str(frozen_manifest_path),
         "frozen_model_path": str(frozen_model_path),
         "frozen_action_value_calibration_path": str(frozen_calibration_path),
+        "frozen_corpus_manifest_path": str(frozen_corpus_manifest_path),
+        "frozen_split_path": str(frozen_split_path),
         "frozen_model_manifest_sha256": _sha256_file(frozen_manifest_path),
-        "frozen_model_sha256": _sha256_file(frozen_model_path),
+        "frozen_model_sha256": frozen_model_sha256,
         "frozen_action_value_calibration_sha256": _sha256_file(
             frozen_calibration_path
         ),
-        "frozen_manifest_model_sha256": frozen_manifest.get("model_sha256"),
-        "frozen_manifest_policy_dataset_hash": frozen_manifest.get(
-            "policy_dataset_hash",
+        "frozen_corpus_manifest_sha256": frozen_corpus_manifest_sha256,
+        "frozen_model_training_corpus_hash": frozen_model_training_corpus_hash,
+        "frozen_manifest_training_corpus_hash": frozen_manifest_training_corpus_hash,
+        "frozen_manifest_phase2_corpus_manifest_sha256": (
+            frozen_manifest_phase2_corpus_manifest_sha256
         ),
-        "frozen_manifest_split_hash": frozen_manifest.get("split_hash"),
+        "frozen_manifest_model_sha256": frozen_manifest_model_sha256,
+        "frozen_model_sha256_matches_manifest": (
+            frozen_model_sha256_matches_manifest
+        ),
+        "frozen_manifest_policy_dataset_hash": frozen_manifest_policy_dataset_hash,
+        "frozen_dataset_hash_matches_manifest": (
+            frozen_dataset_hash_matches_manifest
+        ),
+        "frozen_manifest_split_hash": frozen_manifest_split_hash,
+        "frozen_split_hash": frozen_split_hash,
+        "frozen_split_hash_available": frozen_split_hash is not None,
+        "frozen_split_hash_matches_manifest": frozen_split_hash_matches_manifest,
+        "frozen_corpus_lineage_checks": frozen_corpus_lineage_checks,
+        "frozen_corpus_dir_matches_frozen_training_lineage": (
+            frozen_corpus_dir_matches_frozen_training_lineage
+        ),
         "frozen_dataset_hash": frozen_dataset.dataset_hash,
         "holdout_dataset_hash": holdout_dataset.dataset_hash,
         "frozen_training_corpus_hash": frozen_dataset.training_corpus_hash,
@@ -482,6 +550,14 @@ def _dataset_config(
 
 def _provenance_reason_codes(provenance: dict[str, Any]) -> list[str]:
     reason_codes = []
+    if not bool(provenance["frozen_model_sha256_matches_manifest"]):
+        reason_codes.append("frozen_model_sha256_mismatch_manifest")
+    if not bool(provenance["frozen_dataset_hash_matches_manifest"]):
+        reason_codes.append("frozen_dataset_hash_mismatch_manifest")
+    if not bool(provenance["frozen_split_hash_matches_manifest"]):
+        reason_codes.append("frozen_split_hash_mismatch_manifest")
+    if not bool(provenance["frozen_corpus_dir_matches_frozen_training_lineage"]):
+        reason_codes.append("frozen_corpus_dir_not_frozen_training_lineage")
     if not bool(provenance["holdout_strictly_after_frozen"]):
         reason_codes.append("holdout_not_strictly_after_frozen_training_window")
     if not bool(provenance["market_id_disjoint"]):
