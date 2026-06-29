@@ -385,6 +385,7 @@ def run_polymarket_policy_training(
             prediction.to_dict() for prediction in validation_predictions
         ],
         shadow_predictions=[prediction.to_dict() for prediction in shadow_predictions],
+        shadow_examples=[example.to_dict() for example in dataset.shadow_examples],
         decisions=[decision.to_dict() for decision in decisions],
         calibration=calibration,
         validation=validation,
@@ -489,6 +490,13 @@ def run_polymarket_policy_training(
         ),
         "sell_before_close_side_balanced_candidate_report_sha256": _sha256_file(
             artifact_paths["sell_before_close_side_balanced_candidate_report"]
+        ),
+        "sell_before_close_side_balanced_promotion_replay_attribution_report_sha256": (
+            _sha256_file(
+                artifact_paths[
+                    "sell_before_close_side_balanced_promotion_replay_attribution_report"
+                ]
+            )
         ),
         "guard_compatible_candidate_coverage_report_sha256": _sha256_file(
             artifact_paths["guard_compatible_candidate_coverage_report"]
@@ -1871,6 +1879,21 @@ _BUSINESS_GUARD_REASON_EXCLUSIONS = {
     "trained_model_used",
     "paper_only_guard",
 }
+_M_PROMOTION_REPLAY_ATTRIBUTION_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-m-promotion-replay-attribution-v1"
+)
+_M_PROMOTION_REPLAY_STAGES = (
+    "pre_guard_candidate",
+    "guard_compatible_candidate",
+    "side_quota_selected",
+    "replay_decision_created",
+    "entry_order_opened",
+    "exit_order_attempted",
+    "closed_before_settlement",
+    "settlement_residual",
+    "final_pnl",
+)
+_M_ATTRIBUTION_SIDES = ("UP", "DOWN")
 
 
 def _build_selected_entry_guard_attrition_report(
@@ -2079,6 +2102,733 @@ def _selected_entry_primary_attrition_answer(
         f"{count} by {stage}" for stage, count in sorted(blocking_counts.items())
     )
     return f"all side-quota selected entries were filtered before replay entry: {parts}"
+
+
+def _build_sell_before_close_side_balanced_promotion_replay_attribution_report(
+    *,
+    shadow_examples: list[dict[str, Any]],
+    source_model_eligibility: dict[str, Any],
+    model_ranking_candidate_comparison: dict[str, Any],
+    sell_before_close_promotion_support_gate: dict[str, Any],
+    action_family_counterfactual_replays: tuple[dict[str, Any], ...],
+    paper_notional: float,
+) -> dict[str, Any]:
+    replay = next(
+        (
+            row
+            for row in action_family_counterfactual_replays
+            if row["variant"]
+            == SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME
+        ),
+        {},
+    )
+    candidate = next(
+        (
+            row
+            for row in model_ranking_candidate_comparison.get("candidates", [])
+            if row["candidate_name"]
+            == SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME
+        ),
+        {},
+    )
+    support_row = next(
+        (
+            row
+            for row in sell_before_close_promotion_support_gate.get(
+                "candidate_rows",
+                [],
+            )
+            if row["candidate_name"]
+            == SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME
+        ),
+        {},
+    )
+    examples_by_key = {
+        (str(example.get("market_id")), int(example.get("decision_ts", 0))): example
+        for example in shadow_examples
+    }
+    decisions = [dict(row) for row in replay.get("decisions", [])]
+    decisions_by_key = {
+        (str(row.get("market_id")), int(row.get("decision_ts", 0))): row
+        for row in decisions
+    }
+    decisions_by_market: dict[str, list[dict[str, Any]]] = {}
+    for decision in decisions:
+        decisions_by_market.setdefault(str(decision.get("market_id")), []).append(
+            decision
+        )
+    for market_decisions in decisions_by_market.values():
+        market_decisions.sort(key=lambda row: int(row.get("decision_ts", 0)))
+    entry_contexts = _m_replay_entry_contexts(
+        decisions=decisions,
+        decisions_by_market=decisions_by_market,
+        examples_by_key=examples_by_key,
+        replay_report=dict(replay.get("replay_report", {})),
+    )
+    rows = []
+    for entry in replay.get("side_balance_candidate_entries", []):
+        row = _m_promotion_attribution_row(
+            candidate_entry=dict(entry),
+            decision=decisions_by_key.get(
+                (str(entry.get("market_id")), int(entry.get("decision_ts", 0)))
+            ),
+            entry_context=entry_contexts.get(
+                (str(entry.get("market_id")), int(entry.get("decision_ts", 0)))
+            ),
+            decisions_by_market=decisions_by_market,
+            example=examples_by_key.get(
+                (str(entry.get("market_id")), int(entry.get("decision_ts", 0)))
+            ),
+            paper_notional=paper_notional,
+        )
+        rows.append(row)
+    rows.sort(
+        key=lambda row: (
+            str(row["selected_side"]),
+            not bool(row["side_quota_selected"]),
+            int(row["side_quota_rank"] or 999_999),
+            int(row["decision_ts"]),
+            str(row["market_id"]),
+        )
+    )
+    summary = _m_promotion_attribution_summary(
+        rows=rows,
+        replay_report=dict(replay.get("replay_report", {})),
+    )
+    report = {
+        "schema_version": _M_PROMOTION_REPLAY_ATTRIBUTION_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+        "diagnostic_only": True,
+        "report_type": "side_balanced_promotion_replay_attribution",
+        "question_answered": (
+            "why M has positive guard-compatible label return but negative "
+            "promotion replay PnL"
+        ),
+        "stage_order": list(_M_PROMOTION_REPLAY_STAGES),
+        "uses_shadow_for_fit": False,
+        "out_of_sample_replay": True,
+        "p_up_side_alignment_filter_enabled": bool(
+            candidate.get("p_up_side_alignment_filter_enabled", False)
+        ),
+        "p_up_side_alignment_diagnostic_enabled": bool(
+            candidate.get("p_up_side_alignment_diagnostic_enabled", False)
+        ),
+        "source_model_candidate_eligible": bool(
+            candidate.get("source_model_candidate_eligible", False)
+        ),
+        "promotion_evidence_eligible": False,
+        "promotion_support_eligible": bool(
+            support_row.get("promotion_support_eligible", False)
+        ),
+        "promotion_support_reason_codes": list(
+            support_row.get("support_gate_reason_codes", [])
+        ),
+        "source_model_eligibility_summary": {
+            "source_model_candidate_eligible": bool(
+                source_model_eligibility.get("source_model_candidate_eligible", False)
+            ),
+            "eligible_candidate_count": int(
+                source_model_eligibility.get("eligible_candidate_count", 0)
+            ),
+            "best_candidate_name": source_model_eligibility.get(
+                "best_candidate_name"
+            ),
+            "paper_run_resume_allowed": bool(
+                source_model_eligibility.get("paper_run_resume_allowed", False)
+            ),
+        },
+        "summary": summary,
+        "rows": rows,
+        "top_negative_selected_entries": _m_top_negative_selected_entries(rows),
+        "top_positive_unselected_guard_compatible_entries": (
+            _m_top_positive_unselected_guard_compatible_entries(rows)
+        ),
+        "rank_score_miss_examples": _m_rank_score_miss_examples(rows),
+        "side_quota_attrition_reasons": _m_reason_counts(
+            row
+            for row in rows
+            if bool(row["guard_compatible_candidate"])
+            and not bool(row["side_quota_selected"])
+        ),
+        "selected_side_quota_attrition_reasons": _m_reason_counts(
+            row
+            for row in rows
+            if bool(row["side_quota_selected"])
+            and not bool(row["entry_order_opened"])
+        ),
+        "replay_attrition_reasons": _m_reason_counts(
+            row
+            for row in rows
+            if bool(row["side_quota_selected"])
+            and (
+                not bool(row["entry_order_opened"])
+                or bool(row["settlement_residual"])
+                or float(row["total_polymarket_pnl"]) < 0.0
+            )
+        ),
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        **compact_safety_fields(),
+    }
+    report[
+        "sell_before_close_side_balanced_promotion_replay_attribution_report_id"
+    ] = canonical_json_sha256(report)
+    return report
+
+
+def _m_replay_entry_contexts(
+    *,
+    decisions: list[dict[str, Any]],
+    decisions_by_market: dict[str, list[dict[str, Any]]],
+    examples_by_key: dict[tuple[str, int], dict[str, Any]],
+    replay_report: dict[str, Any],
+) -> dict[tuple[str, int], dict[str, Any]]:
+    raw_contexts = []
+    for decision in decisions:
+        action = str(decision.get("action"))
+        if action not in {"BUY_UP", "BUY_DOWN"}:
+            continue
+        side = str(decision.get("selected_outcome"))
+        sell_action = f"SELL_{side}"
+        market_id = str(decision.get("market_id"))
+        decision_ts = int(decision.get("decision_ts", 0))
+        exit_decisions = [
+            row
+            for row in decisions_by_market.get(market_id, [])
+            if str(row.get("selected_outcome")) == side
+            and str(row.get("action")) == sell_action
+            and int(row.get("decision_ts", 0)) >= decision_ts
+        ]
+        entry_notional = float(decision.get("paper_notional") or 0.0)
+        exit_notional = sum(
+            float(row.get("paper_notional") or 0.0) for row in exit_decisions
+        )
+        realized_trade_pnl = exit_notional - entry_notional
+        example = examples_by_key.get((market_id, decision_ts), {})
+        settlement_pnl = (
+            0.0
+            if exit_decisions
+            else _m_residual_settlement_pnl(
+                entry_decision=decision,
+                example=example,
+            )
+        )
+        raw_contexts.append(
+            {
+                "key": (market_id, decision_ts),
+                "entry_decision": decision,
+                "exit_decisions": exit_decisions,
+                "realized_trade_pnl": realized_trade_pnl,
+                "settlement_pnl": settlement_pnl,
+                "trade_notional_weight": entry_notional + exit_notional,
+            }
+        )
+    gross_total = sum(
+        float(row["realized_trade_pnl"]) + float(row["settlement_pnl"])
+        for row in raw_contexts
+    )
+    replay_total = float(replay_report.get("total_polymarket_pnl", gross_total))
+    replay_cost = replay_total - gross_total
+    total_weight = sum(float(row["trade_notional_weight"]) for row in raw_contexts)
+    contexts = {}
+    for row in raw_contexts:
+        if total_weight > 0.0:
+            allocated_cost = (
+                replay_cost * float(row["trade_notional_weight"]) / total_weight
+            )
+        elif raw_contexts:
+            allocated_cost = replay_cost / len(raw_contexts)
+        else:
+            allocated_cost = 0.0
+        total_pnl = (
+            float(row["realized_trade_pnl"])
+            + float(row["settlement_pnl"])
+            + allocated_cost
+        )
+        contexts[row["key"]] = {
+            **row,
+            "allocated_replay_cost": allocated_cost,
+            "total_polymarket_pnl": total_pnl,
+        }
+    return contexts
+
+
+def _m_residual_settlement_pnl(
+    *,
+    entry_decision: dict[str, Any],
+    example: dict[str, Any],
+) -> float:
+    entry_notional = float(entry_decision.get("paper_notional") or 0.0)
+    execution_price = float(entry_decision.get("execution_price") or 0.0)
+    if entry_notional <= 0.0 or execution_price <= 0.0:
+        return 0.0
+    shares = entry_notional / execution_price
+    selected_outcome = str(entry_decision.get("selected_outcome"))
+    resolved_outcome = str(example.get("resolved_outcome", ""))
+    payout = shares if selected_outcome == resolved_outcome else 0.0
+    return payout - entry_notional
+
+
+def _m_promotion_attribution_row(
+    *,
+    candidate_entry: dict[str, Any],
+    decision: dict[str, Any] | None,
+    entry_context: dict[str, Any] | None,
+    decisions_by_market: dict[str, list[dict[str, Any]]],
+    example: dict[str, Any] | None,
+    paper_notional: float,
+) -> dict[str, Any]:
+    market_id = str(candidate_entry.get("market_id"))
+    decision_ts = int(candidate_entry.get("decision_ts", 0))
+    side = str(candidate_entry.get("selected_side"))
+    action = str(candidate_entry.get("action"))
+    action_return_target = _m_action_return_target(
+        example=example,
+        action=action,
+    )
+    label_pnl_target = (
+        None if action_return_target is None else action_return_target * paper_notional
+    )
+    replay_action = None if decision is None else str(decision.get("action"))
+    entry_order_opened = entry_context is not None
+    same_timestamp_exit = replay_action == f"SELL_{side}"
+    exit_decisions = list((entry_context or {}).get("exit_decisions", []))
+    if same_timestamp_exit and decision is not None:
+        exit_decisions = [decision]
+    exit_order_attempted = bool(exit_decisions)
+    closed_before_settlement = entry_order_opened and exit_order_attempted
+    settlement_residual = entry_order_opened and not exit_order_attempted
+    realized_trade_pnl = float((entry_context or {}).get("realized_trade_pnl", 0.0))
+    settlement_pnl = float((entry_context or {}).get("settlement_pnl", 0.0))
+    allocated_replay_cost = float((entry_context or {}).get("allocated_replay_cost", 0.0))
+    total_polymarket_pnl = float(
+        (entry_context or {}).get("total_polymarket_pnl", 0.0)
+    )
+    replay_reason_codes = list((decision or {}).get("reason_codes", []))
+    exit_reason_codes = [
+        reason
+        for exit_decision in exit_decisions
+        for reason in exit_decision.get("reason_codes", [])
+    ]
+    attrition_stage, attrition_reason_codes = _m_attrition_stage_and_reasons(
+        candidate_entry=candidate_entry,
+        decision=decision,
+        entry_order_opened=entry_order_opened,
+        same_timestamp_exit=same_timestamp_exit,
+        exit_order_attempted=exit_order_attempted,
+        closed_before_settlement=closed_before_settlement,
+        settlement_residual=settlement_residual,
+        total_polymarket_pnl=total_polymarket_pnl,
+    )
+    stage_flags = {
+        "pre_guard_candidate": True,
+        "guard_compatible_candidate": bool(
+            candidate_entry.get("side_balance_guard_compatible_entry", False)
+        ),
+        "side_quota_selected": bool(candidate_entry.get("side_quota_selected", False)),
+        "replay_decision_created": decision is not None,
+        "entry_order_opened": entry_order_opened,
+        "exit_order_attempted": exit_order_attempted,
+        "closed_before_settlement": closed_before_settlement,
+        "settlement_residual": settlement_residual,
+        "final_pnl": entry_order_opened,
+    }
+    return {
+        "market_id": market_id,
+        "slug": (decision or example or {}).get("slug"),
+        "decision_ts": decision_ts,
+        "selected_side": side,
+        "action": action,
+        "p_up": candidate_entry.get("p_up"),
+        "p_up_side_alignment_passed": bool(
+            candidate_entry.get("p_up_side_alignment_passed", False)
+        ),
+        "p_up_side_alignment_diagnostic_only": bool(
+            candidate_entry.get("p_up_side_alignment_diagnostic_only", False)
+        ),
+        "raw_calibrated_action_score": candidate_entry.get(
+            "raw_calibrated_action_score"
+        ),
+        "best_action_margin": candidate_entry.get("best_action_margin"),
+        "candidate_rank_score": candidate_entry.get("candidate_rank_score"),
+        "side_quota_rank": candidate_entry.get("side_quota_rank"),
+        "side_quota_selected": bool(candidate_entry.get("side_quota_selected", False)),
+        "action_return_target": action_return_target,
+        "label_pnl_target": label_pnl_target,
+        "replay_action": replay_action,
+        "entry_order_opened": entry_order_opened,
+        "exit_order_attempted": exit_order_attempted,
+        "closed_before_settlement": closed_before_settlement,
+        "settlement_residual": settlement_residual,
+        "realized_trade_pnl": realized_trade_pnl,
+        "settlement_pnl": settlement_pnl,
+        "allocated_replay_cost": allocated_replay_cost,
+        "total_polymarket_pnl": total_polymarket_pnl,
+        "exit_reason_codes": list(dict.fromkeys(exit_reason_codes)),
+        "replay_reason_codes": replay_reason_codes,
+        "attrition_stage": attrition_stage,
+        "attrition_reason_codes": attrition_reason_codes,
+        "stage_flags": stage_flags,
+        "pre_guard_candidate": stage_flags["pre_guard_candidate"],
+        "guard_compatible_candidate": stage_flags["guard_compatible_candidate"],
+        "replay_decision_created": stage_flags["replay_decision_created"],
+        "final_pnl": stage_flags["final_pnl"],
+        "final_pnl_stage_reached": stage_flags["final_pnl"],
+        "side_balance_guard_reason_codes": list(
+            candidate_entry.get("side_balance_guard_reason_codes", [])
+        ),
+        "side_balance_reason_codes": list(
+            candidate_entry.get("side_balance_reason_codes", [])
+        ),
+        "same_market_decision_count": len(decisions_by_market.get(market_id, [])),
+    }
+
+
+def _m_action_return_target(
+    *,
+    example: dict[str, Any] | None,
+    action: str,
+) -> float | None:
+    if example is None:
+        return None
+    targets = example.get("action_return_targets") or {}
+    if action not in targets:
+        return None
+    return float(targets[action])
+
+
+def _m_attrition_stage_and_reasons(
+    *,
+    candidate_entry: dict[str, Any],
+    decision: dict[str, Any] | None,
+    entry_order_opened: bool,
+    same_timestamp_exit: bool,
+    exit_order_attempted: bool,
+    closed_before_settlement: bool,
+    settlement_residual: bool,
+    total_polymarket_pnl: float,
+) -> tuple[str, list[str]]:
+    if not bool(candidate_entry.get("side_balance_guard_compatible_entry", False)):
+        return (
+            "pre_guard_candidate",
+            list(candidate_entry.get("side_balance_guard_reason_codes", [])),
+        )
+    if not bool(candidate_entry.get("side_quota_selected", False)):
+        return (
+            "side_quota_selected",
+            list(candidate_entry.get("side_balance_reason_codes", [])),
+        )
+    if decision is None:
+        return ("replay_decision_created", ["replay_decision_missing"])
+    if same_timestamp_exit:
+        return (
+            "entry_order_opened",
+            [
+                "selected_side_quota_row_resolved_to_exit_order_for_existing_position",
+                *list(decision.get("reason_codes", [])),
+            ],
+        )
+    if not entry_order_opened:
+        return (
+            "entry_order_opened",
+            list(decision.get("reason_codes", [])) or ["entry_order_not_opened"],
+        )
+    if settlement_residual:
+        return ("settlement_residual", ["entry_not_closed_before_settlement"])
+    if closed_before_settlement and total_polymarket_pnl < 0.0:
+        return ("final_pnl", ["closed_before_settlement_with_negative_replay_pnl"])
+    if closed_before_settlement:
+        return ("final_pnl", ["closed_before_settlement_with_nonnegative_replay_pnl"])
+    if exit_order_attempted:
+        return ("closed_before_settlement", ["exit_attempted_without_close"])
+    return ("entry_order_opened", ["entry_opened_without_exit_attempt"])
+
+
+def _m_promotion_attribution_summary(
+    *,
+    rows: list[dict[str, Any]],
+    replay_report: dict[str, Any],
+) -> dict[str, Any]:
+    guard_by_side = Counter(
+        row["selected_side"] for row in rows if row["guard_compatible_candidate"]
+    )
+    selected_by_side = Counter(
+        row["selected_side"] for row in rows if row["side_quota_selected"]
+    )
+    replay_entry_by_side = Counter(
+        row["selected_side"] for row in rows if row["entry_order_opened"]
+    )
+    selected_label_return_by_side = _m_side_float_sums(
+        rows,
+        value_field="action_return_target",
+        predicate=lambda row: bool(row["side_quota_selected"]),
+    )
+    selected_label_pnl_by_side = _m_side_float_sums(
+        rows,
+        value_field="label_pnl_target",
+        predicate=lambda row: bool(row["side_quota_selected"]),
+    )
+    replay_total_pnl_by_side = _m_side_float_sums(
+        rows,
+        value_field="total_polymarket_pnl",
+        predicate=lambda row: bool(row["entry_order_opened"]),
+    )
+    selected_positive_label = Counter(
+        row["selected_side"]
+        for row in rows
+        if row["side_quota_selected"]
+        and row["action_return_target"] is not None
+        and float(row["action_return_target"]) > 0.0
+    )
+    selected_negative_label = Counter(
+        row["selected_side"]
+        for row in rows
+        if row["side_quota_selected"]
+        and row["action_return_target"] is not None
+        and float(row["action_return_target"]) <= 0.0
+    )
+    replay_positive_pnl = Counter(
+        row["selected_side"]
+        for row in rows
+        if row["entry_order_opened"] and float(row["total_polymarket_pnl"]) > 0.0
+    )
+    replay_negative_pnl = Counter(
+        row["selected_side"]
+        for row in rows
+        if row["entry_order_opened"] and float(row["total_polymarket_pnl"]) <= 0.0
+    )
+    selected_count = sum(1 for row in rows if row["side_quota_selected"])
+    replay_entry_count = sum(1 for row in rows if row["entry_order_opened"])
+    selected_without_entry = selected_count - replay_entry_count
+    selected_exit_decision_count = sum(
+        1
+        for row in rows
+        if row["side_quota_selected"]
+        and row["replay_action"] in {"SELL_UP", "SELL_DOWN"}
+        and not row["entry_order_opened"]
+    )
+    label_vs_replay_gap = {
+        side: selected_label_pnl_by_side[side] - replay_total_pnl_by_side[side]
+        for side in _M_ATTRIBUTION_SIDES
+    }
+    return {
+        "candidate_row_count": len(rows),
+        "pre_guard_candidate_count": len(rows),
+        "guard_compatible_candidate_count_by_side": _m_side_int_payload(guard_by_side),
+        "selected_entry_count_by_side": _m_side_int_payload(selected_by_side),
+        "replay_entry_count_by_side": _m_side_int_payload(replay_entry_by_side),
+        "selected_label_return_sum_by_side": selected_label_return_by_side,
+        "selected_label_pnl_sum_by_side": selected_label_pnl_by_side,
+        "replay_total_pnl_by_side": replay_total_pnl_by_side,
+        "label_vs_replay_pnl_gap_by_side": label_vs_replay_gap,
+        "selected_positive_label_count_by_side": _m_side_int_payload(
+            selected_positive_label
+        ),
+        "selected_negative_label_count_by_side": _m_side_int_payload(
+            selected_negative_label
+        ),
+        "replay_positive_pnl_count_by_side": _m_side_int_payload(
+            replay_positive_pnl
+        ),
+        "replay_negative_pnl_count_by_side": _m_side_int_payload(
+            replay_negative_pnl
+        ),
+        "selected_entry_count": selected_count,
+        "replay_entry_count": replay_entry_count,
+        "selected_without_replay_entry_count": selected_without_entry,
+        "selected_exit_decision_count": selected_exit_decision_count,
+        "replay_entry_reconciliation": {
+            "selected_entry_count": selected_count,
+            "replay_entry_count": replay_entry_count,
+            "selected_without_replay_entry_count": selected_without_entry,
+            "selected_exit_decision_count": selected_exit_decision_count,
+            "reconciled": selected_count - selected_without_entry == replay_entry_count,
+        },
+        "selected_label_return_sum": sum(selected_label_return_by_side.values()),
+        "selected_label_pnl_sum": sum(selected_label_pnl_by_side.values()),
+        "replay_total_pnl_sum": sum(replay_total_pnl_by_side.values()),
+        "replay_report_total_polymarket_pnl": float(
+            replay_report.get("total_polymarket_pnl", 0.0)
+        ),
+        "replay_report_realized_trade_pnl": float(
+            replay_report.get("realized_trade_pnl", 0.0)
+        ),
+        "replay_report_settlement_pnl": float(
+            replay_report.get("settlement_pnl", 0.0)
+        ),
+        "label_vs_replay_pnl_gap": sum(label_vs_replay_gap.values()),
+        "primary_gap_explanation": _m_primary_gap_explanation(
+            selected_without_entry=selected_without_entry,
+            selected_exit_decision_count=selected_exit_decision_count,
+            replay_total_pnl=sum(replay_total_pnl_by_side.values()),
+        ),
+    }
+
+
+def _m_side_float_sums(
+    rows: list[dict[str, Any]],
+    *,
+    value_field: str,
+    predicate: Any,
+) -> dict[str, float]:
+    values = dict.fromkeys(_M_ATTRIBUTION_SIDES, 0.0)
+    for row in rows:
+        value = row.get(value_field)
+        if value is None or not predicate(row):
+            continue
+        values[str(row["selected_side"])] += float(value)
+    return values
+
+
+def _m_side_int_payload(counter: Counter[str]) -> dict[str, int]:
+    return {side: int(counter.get(side, 0)) for side in _M_ATTRIBUTION_SIDES}
+
+
+def _m_primary_gap_explanation(
+    *,
+    selected_without_entry: int,
+    selected_exit_decision_count: int,
+    replay_total_pnl: float,
+) -> str:
+    if replay_total_pnl < 0.0 and selected_exit_decision_count > 0:
+        return (
+            "positive side-quota label return did not transfer to replay because "
+            "some selected rows became exit decisions for existing positions and "
+            "the opened entries had negative realized exit PnL"
+        )
+    if replay_total_pnl < 0.0:
+        return "selected entries opened but realized negative replay PnL"
+    if selected_without_entry > 0:
+        return "some selected side-quota rows did not become replay entries"
+    return "label and replay evidence are directionally aligned"
+
+
+def _m_reason_counts(rows: Any) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for row in rows:
+        counts.update(row.get("attrition_reason_codes", []))
+        if not row.get("attrition_reason_codes"):
+            counts.update(row.get("side_balance_reason_codes", []))
+    return dict(sorted(counts.items()))
+
+
+def _m_top_negative_selected_entries(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected = [
+        row
+        for row in rows
+        if bool(row["side_quota_selected"]) and bool(row["entry_order_opened"])
+    ]
+    return [
+        _m_compact_attribution_row(row)
+        for row in sorted(
+            selected,
+            key=lambda row: (
+                float(row["total_polymarket_pnl"]),
+                int(row["decision_ts"]),
+            ),
+        )[:20]
+    ]
+
+
+def _m_top_positive_unselected_guard_compatible_entries(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates = [
+        row
+        for row in rows
+        if bool(row["guard_compatible_candidate"])
+        and not bool(row["side_quota_selected"])
+        and row["action_return_target"] is not None
+    ]
+    return [
+        _m_compact_attribution_row(row)
+        for row in sorted(
+            candidates,
+            key=lambda row: (
+                -float(row["action_return_target"]),
+                -float(row["candidate_rank_score"] or 0.0),
+                int(row["decision_ts"]),
+            ),
+        )[:20]
+    ]
+
+
+def _m_rank_score_miss_examples(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unselected_by_side = {
+        side: [
+            row
+            for row in rows
+            if row["selected_side"] == side
+            and bool(row["guard_compatible_candidate"])
+            and not bool(row["side_quota_selected"])
+            and row["action_return_target"] is not None
+        ]
+        for side in _M_ATTRIBUTION_SIDES
+    }
+    examples = []
+    for selected in rows:
+        if not bool(selected["side_quota_selected"]):
+            continue
+        if not bool(selected["entry_order_opened"]):
+            continue
+        if float(selected["total_polymarket_pnl"]) >= 0.0:
+            continue
+        selected_label = selected.get("action_return_target")
+        if selected_label is None:
+            continue
+        better = [
+            row
+            for row in unselected_by_side[str(selected["selected_side"])]
+            if float(row["action_return_target"]) > float(selected_label)
+        ]
+        if not better:
+            continue
+        missed = sorted(
+            better,
+            key=lambda row: (
+                -float(row["action_return_target"]),
+                -float(row["candidate_rank_score"] or 0.0),
+                int(row["decision_ts"]),
+            ),
+        )[0]
+        examples.append(
+            {
+                "selected_entry": _m_compact_attribution_row(selected),
+                "missed_unselected_candidate": _m_compact_attribution_row(missed),
+                "label_return_delta": (
+                    float(missed["action_return_target"]) - float(selected_label)
+                ),
+                "rank_score_delta": (
+                    float(selected["candidate_rank_score"] or 0.0)
+                    - float(missed["candidate_rank_score"] or 0.0)
+                ),
+            }
+        )
+    return examples[:20]
+
+
+def _m_compact_attribution_row(row: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "market_id",
+        "decision_ts",
+        "selected_side",
+        "action",
+        "side_quota_rank",
+        "candidate_rank_score",
+        "raw_calibrated_action_score",
+        "action_return_target",
+        "label_pnl_target",
+        "replay_action",
+        "realized_trade_pnl",
+        "settlement_pnl",
+        "allocated_replay_cost",
+        "total_polymarket_pnl",
+        "attrition_stage",
+        "attrition_reason_codes",
+    )
+    return {field: row.get(field) for field in fields}
 
 
 def _build_sell_before_close_side_balanced_candidate_report(
@@ -2422,6 +3172,182 @@ def _sell_before_close_side_balanced_candidate_markdown(
     return "\n".join(lines)
 
 
+def _sell_before_close_side_balanced_promotion_replay_attribution_summary(
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    summary = report["summary"]
+    return {
+        "schema_version": report["schema_version"],
+        "candidate_name": report["candidate_name"],
+        "diagnostic_only": report["diagnostic_only"],
+        "uses_shadow_for_fit": report["uses_shadow_for_fit"],
+        "p_up_side_alignment_filter_enabled": report[
+            "p_up_side_alignment_filter_enabled"
+        ],
+        "p_up_side_alignment_diagnostic_enabled": report[
+            "p_up_side_alignment_diagnostic_enabled"
+        ],
+        "candidate_row_count": summary["candidate_row_count"],
+        "selected_entry_count": summary["selected_entry_count"],
+        "replay_entry_count": summary["replay_entry_count"],
+        "selected_without_replay_entry_count": summary[
+            "selected_without_replay_entry_count"
+        ],
+        "selected_exit_decision_count": summary["selected_exit_decision_count"],
+        "replay_entry_reconciliation": summary["replay_entry_reconciliation"],
+        "selected_label_return_sum_by_side": summary[
+            "selected_label_return_sum_by_side"
+        ],
+        "selected_label_pnl_sum_by_side": summary["selected_label_pnl_sum_by_side"],
+        "replay_total_pnl_by_side": summary["replay_total_pnl_by_side"],
+        "label_vs_replay_pnl_gap_by_side": summary[
+            "label_vs_replay_pnl_gap_by_side"
+        ],
+        "selected_label_return_sum": summary["selected_label_return_sum"],
+        "selected_label_pnl_sum": summary["selected_label_pnl_sum"],
+        "replay_total_pnl_sum": summary["replay_total_pnl_sum"],
+        "label_vs_replay_pnl_gap": summary["label_vs_replay_pnl_gap"],
+        "primary_gap_explanation": summary["primary_gap_explanation"],
+        "source_model_candidate_eligible": report["source_model_candidate_eligible"],
+        "promotion_evidence_eligible": report["promotion_evidence_eligible"],
+        "paper_run_resume_allowed": report["paper_run_resume_allowed"],
+        "#146_start_allowed": report["#146_start_allowed"],
+        "#134_resume_allowed": report["#134_resume_allowed"],
+    }
+
+
+def _sell_before_close_side_balanced_promotion_replay_attribution_markdown(
+    report: dict[str, Any],
+) -> str:
+    summary = report["summary"]
+    lines = [
+        "# M Promotion Replay Attribution",
+        "",
+        f"- candidate_name: `{report['candidate_name']}`",
+        f"- diagnostic_only: `{str(report['diagnostic_only']).lower()}`",
+        f"- uses_shadow_for_fit: `{str(report['uses_shadow_for_fit']).lower()}`",
+        "- p_up_side_alignment_filter_enabled: "
+        f"`{str(report['p_up_side_alignment_filter_enabled']).lower()}`",
+        "- p_up_side_alignment_diagnostic_enabled: "
+        f"`{str(report['p_up_side_alignment_diagnostic_enabled']).lower()}`",
+        "- source_model_candidate_eligible: "
+        f"`{str(report['source_model_candidate_eligible']).lower()}`",
+        "- promotion_evidence_eligible: "
+        f"`{str(report['promotion_evidence_eligible']).lower()}`",
+        f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+        f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+        "- primary_gap_explanation: "
+        f"`{summary['primary_gap_explanation']}`",
+        "",
+        "## Reconciliation",
+        "",
+        "| selected | replay_entries | selected_without_entry | selected_exit_decisions | reconciled |",
+        "|---:|---:|---:|---:|---|",
+        "| {selected} | {entries} | {missing} | {exits} | {reconciled} |".format(
+            selected=summary["selected_entry_count"],
+            entries=summary["replay_entry_count"],
+            missing=summary["selected_without_replay_entry_count"],
+            exits=summary["selected_exit_decision_count"],
+            reconciled=str(
+                summary["replay_entry_reconciliation"]["reconciled"]
+            ).lower(),
+        ),
+        "",
+        "## Side Gap",
+        "",
+        "| side | guard_compatible | selected | replay_entries | label_return | label_pnl | replay_pnl | gap |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for side in _M_ATTRIBUTION_SIDES:
+        lines.append(
+            "| {side} | {guard} | {selected} | {entries} | {label_return:.6f} | "
+            "{label_pnl:.6f} | {replay_pnl:.6f} | {gap:.6f} |".format(
+                side=side,
+                guard=summary["guard_compatible_candidate_count_by_side"][side],
+                selected=summary["selected_entry_count_by_side"][side],
+                entries=summary["replay_entry_count_by_side"][side],
+                label_return=summary["selected_label_return_sum_by_side"][side],
+                label_pnl=summary["selected_label_pnl_sum_by_side"][side],
+                replay_pnl=summary["replay_total_pnl_by_side"][side],
+                gap=summary["label_vs_replay_pnl_gap_by_side"][side],
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Attrition Reasons",
+            "",
+            "| source | reason | count |",
+            "|---|---|---:|",
+        ]
+    )
+    for source_name, reasons in (
+        ("side_quota", report["side_quota_attrition_reasons"]),
+        ("selected", report["selected_side_quota_attrition_reasons"]),
+        ("replay", report["replay_attrition_reasons"]),
+    ):
+        for reason, count in reasons.items():
+            lines.append(f"| {source_name} | `{reason}` | {count} |")
+    lines.extend(
+        [
+            "",
+            "## Top Negative Selected Entries",
+            "",
+            "| side | rank | action | label_pnl | replay_pnl | market_id | decision_ts | stage |",
+            "|---|---:|---|---:|---:|---|---:|---|",
+        ]
+    )
+    for row in report["top_negative_selected_entries"][:10]:
+        lines.append(
+            "| {side} | {rank} | `{action}` | {label_pnl:.6f} | {replay_pnl:.6f} | "
+            "`{market}` | {ts} | `{stage}` |".format(
+                side=row["selected_side"],
+                rank=row["side_quota_rank"],
+                action=row["action"],
+                label_pnl=float(row["label_pnl_target"] or 0.0),
+                replay_pnl=float(row["total_polymarket_pnl"] or 0.0),
+                market=row["market_id"],
+                ts=row["decision_ts"],
+                stage=row["attrition_stage"],
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Rank-Score Miss Examples",
+            "",
+            "| side | selected_rank | selected_replay_pnl | selected_label | missed_label | label_delta | rank_score_delta |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for example in report["rank_score_miss_examples"][:10]:
+        selected = example["selected_entry"]
+        missed = example["missed_unselected_candidate"]
+        lines.append(
+            "| {side} | {rank} | {replay_pnl:.6f} | {selected_label:.6f} | "
+            "{missed_label:.6f} | {label_delta:.6f} | {rank_delta:.6f} |".format(
+                side=selected["selected_side"],
+                rank=selected["side_quota_rank"],
+                replay_pnl=float(selected["total_polymarket_pnl"] or 0.0),
+                selected_label=float(selected["action_return_target"] or 0.0),
+                missed_label=float(missed["action_return_target"] or 0.0),
+                label_delta=float(example["label_return_delta"]),
+                rank_delta=float(example["rank_score_delta"]),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "- paper_only: true",
+            "- capital_at_risk: false",
+            "- polymarket_write_enabled: false",
+            "- wallet_signing_enabled: false",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _write_artifacts(
     *,
     run_dir: Path,
@@ -2432,6 +3358,7 @@ def _write_artifacts(
     train_predictions: list[dict[str, Any]],
     validation_predictions: list[dict[str, Any]],
     shadow_predictions: list[dict[str, Any]],
+    shadow_examples: list[dict[str, Any]],
     decisions: list[dict[str, Any]],
     calibration: dict[str, Any],
     validation: dict[str, Any],
@@ -2568,6 +3495,14 @@ def _write_artifacts(
         ),
         "sell_before_close_side_balanced_candidate_summary": (
             run_dir / "sell_before_close_side_balanced_candidate_report.md"
+        ),
+        "sell_before_close_side_balanced_promotion_replay_attribution_report": (
+            run_dir
+            / "sell_before_close_side_balanced_promotion_replay_attribution_report.json"
+        ),
+        "sell_before_close_side_balanced_promotion_replay_attribution_summary": (
+            run_dir
+            / "sell_before_close_side_balanced_promotion_replay_attribution_report.md"
         ),
         "sell_before_close_guard_threshold_sweep_report": (
             run_dir / "sell_before_close_guard_threshold_sweep_report.json"
@@ -2960,12 +3895,50 @@ def _write_artifacts(
         ),
         encoding="utf-8",
     )
+    sell_before_close_side_balanced_promotion_replay_attribution = (
+        _build_sell_before_close_side_balanced_promotion_replay_attribution_report(
+            shadow_examples=shadow_examples,
+            source_model_eligibility=source_model_eligibility,
+            model_ranking_candidate_comparison=model_ranking_candidate_comparison,
+            sell_before_close_promotion_support_gate=(
+                sell_before_close_promotion_support_gate
+            ),
+            action_family_counterfactual_replays=(
+                action_family_counterfactual_replays
+            ),
+            paper_notional=float(config.max_paper_notional),
+        )
+    )
+    _write_json(
+        paths[
+            "sell_before_close_side_balanced_promotion_replay_attribution_report"
+        ],
+        sell_before_close_side_balanced_promotion_replay_attribution,
+    )
+    paths[
+        "sell_before_close_side_balanced_promotion_replay_attribution_summary"
+    ].write_text(
+        _sell_before_close_side_balanced_promotion_replay_attribution_markdown(
+            sell_before_close_side_balanced_promotion_replay_attribution
+        ),
+        encoding="utf-8",
+    )
     side_balanced_candidate_sha256 = _sha256_file(
         paths["sell_before_close_side_balanced_candidate_report"]
+    )
+    side_balanced_promotion_replay_attribution_sha256 = _sha256_file(
+        paths[
+            "sell_before_close_side_balanced_promotion_replay_attribution_report"
+        ]
     )
     side_balanced_candidate_summary = (
         _sell_before_close_side_balanced_candidate_summary(
             sell_before_close_side_balanced_candidate
+        )
+    )
+    side_balanced_promotion_replay_attribution_summary = (
+        _sell_before_close_side_balanced_promotion_replay_attribution_summary(
+            sell_before_close_side_balanced_promotion_replay_attribution
         )
     )
     for report in (
@@ -2981,6 +3954,17 @@ def _write_artifacts(
         report["sell_before_close_side_balanced_candidate_summary"] = (
             side_balanced_candidate_summary
         )
+        report[
+            "sell_before_close_side_balanced_promotion_replay_attribution_report_path"
+        ] = (
+            "sell_before_close_side_balanced_promotion_replay_attribution_report.json"
+        )
+        report[
+            "sell_before_close_side_balanced_promotion_replay_attribution_report_sha256"
+        ] = side_balanced_promotion_replay_attribution_sha256
+        report[
+            "sell_before_close_side_balanced_promotion_replay_attribution_summary"
+        ] = side_balanced_promotion_replay_attribution_summary
     _write_candidate_artifacts(
         run_dir=run_dir,
         model_ranking_candidate_comparison=model_ranking_candidate_comparison,
@@ -4157,6 +5141,20 @@ def _model_manifest(
         "sell_before_close_side_balanced_candidate_summary": (
             source_model_eligibility.get(
                 "sell_before_close_side_balanced_candidate_summary",
+                {},
+            )
+        ),
+        "sell_before_close_side_balanced_promotion_replay_attribution_report_path": (
+            "sell_before_close_side_balanced_promotion_replay_attribution_report.json"
+        ),
+        "sell_before_close_side_balanced_promotion_replay_attribution_report_sha256": (
+            action_family_artifact_hashes[
+                "sell_before_close_side_balanced_promotion_replay_attribution_report_sha256"
+            ]
+        ),
+        "sell_before_close_side_balanced_promotion_replay_attribution_summary": (
+            source_model_eligibility.get(
+                "sell_before_close_side_balanced_promotion_replay_attribution_summary",
                 {},
             )
         ),

@@ -229,6 +229,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "sell_before_close_validation_failure_drilldown_summary",
         "sell_before_close_side_balanced_candidate_report",
         "sell_before_close_side_balanced_candidate_summary",
+        "sell_before_close_side_balanced_promotion_replay_attribution_report",
+        "sell_before_close_side_balanced_promotion_replay_attribution_summary",
         "sell_before_close_guard_threshold_sweep_report",
         "sell_before_close_guard_threshold_sweep_summary",
         "guard_compatible_candidate_coverage_report",
@@ -628,6 +630,101 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     assert source_eligibility[
         "sell_before_close_side_balanced_candidate_summary"
     ]["selected_entry_guard_attrition_summary"] == attrition_summary
+    attribution = _read_json(
+        result.artifact_paths[
+            "sell_before_close_side_balanced_promotion_replay_attribution_report"
+        ]
+    )
+    attribution_summary = attribution["summary"]
+    attribution_rows = attribution["rows"]
+    selected_attribution_rows = [
+        row for row in attribution_rows if row["side_quota_selected"]
+    ]
+    replay_entry_rows = [
+        row for row in selected_attribution_rows if row["entry_order_opened"]
+    ]
+    required_attribution_fields = {
+        "market_id",
+        "decision_ts",
+        "selected_side",
+        "action",
+        "p_up",
+        "p_up_side_alignment_passed",
+        "p_up_side_alignment_diagnostic_only",
+        "raw_calibrated_action_score",
+        "best_action_margin",
+        "candidate_rank_score",
+        "side_quota_rank",
+        "side_quota_selected",
+        "action_return_target",
+        "realized_trade_pnl",
+        "settlement_pnl",
+        "total_polymarket_pnl",
+        "exit_reason_codes",
+        "replay_reason_codes",
+        "attrition_stage",
+        "attrition_reason_codes",
+        "final_pnl",
+    }
+    assert attribution["schema_version"] == (
+        "bigan-v8-polymarket-m-promotion-replay-attribution-v1"
+    )
+    assert attribution["diagnostic_only"] is True
+    assert attribution["uses_shadow_for_fit"] is False
+    assert attribution["p_up_side_alignment_filter_enabled"] is False
+    assert attribution["p_up_side_alignment_diagnostic_enabled"] is True
+    assert attribution["promotion_evidence_eligible"] is False
+    assert attribution["paper_run_resume_allowed"] is False
+    assert attribution["#146_start_allowed"] is False
+    assert attribution["#134_resume_allowed"] is False
+    assert attribution["paper_only"] is True
+    assert attribution["capital_at_risk"] is False
+    assert attribution_summary["selected_entry_count"] == attrition[
+        "selected_entry_count"
+    ]
+    assert len(selected_attribution_rows) == attribution_summary[
+        "selected_entry_count"
+    ]
+    assert len(replay_entry_rows) == attribution_summary["replay_entry_count"]
+    assert attribution_summary["replay_entry_reconciliation"]["reconciled"] is True
+    assert attribution_summary["replay_entry_reconciliation"][
+        "selected_entry_count"
+    ] == attribution_summary["selected_entry_count"]
+    assert attribution_summary["replay_entry_reconciliation"][
+        "replay_entry_count"
+    ] == attribution_summary["replay_entry_count"]
+    assert set(attribution_summary["label_vs_replay_pnl_gap_by_side"]) == {
+        "UP",
+        "DOWN",
+    }
+    assert attribution_summary["label_vs_replay_pnl_gap"] == pytest.approx(
+        attribution_summary["selected_label_pnl_sum"]
+        - attribution_summary["replay_total_pnl_sum"]
+    )
+    assert all(required_attribution_fields <= set(row) for row in attribution_rows)
+    assert all(
+        row["p_up_side_alignment_diagnostic_only"] is True
+        for row in attribution_rows
+    )
+    assert all(row["attrition_stage"] in attribution["stage_order"] for row in attribution_rows)
+    assert source_eligibility[
+        "sell_before_close_side_balanced_promotion_replay_attribution_summary"
+    ]["label_vs_replay_pnl_gap"] == pytest.approx(
+        attribution_summary["label_vs_replay_pnl_gap"]
+    )
+    assert manifest[
+        "sell_before_close_side_balanced_promotion_replay_attribution_report_path"
+    ] == "sell_before_close_side_balanced_promotion_replay_attribution_report.json"
+    assert looks_like_sha256(
+        manifest[
+            "sell_before_close_side_balanced_promotion_replay_attribution_report_sha256"
+        ]
+    )
+    assert manifest[
+        "sell_before_close_side_balanced_promotion_replay_attribution_summary"
+    ]["#134_resume_allowed"] is False
+    if attribution_summary["replay_total_pnl_sum"] < 0.0:
+        assert attribution["source_model_candidate_eligible"] is False
     coverage = _read_json(
         result.artifact_paths["guard_compatible_candidate_coverage_report"]
     )
