@@ -38,7 +38,9 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
+    SELL_BEFORE_CLOSE_P_UP_DIAGNOSTIC_ALIGNMENT_MIN,
     SELL_BEFORE_CLOSE_SIDE_BALANCE_THRESHOLDS,
+    SELL_BEFORE_CLOSE_SIDE_BALANCED_ENTRY_GUARD_THRESHOLDS,
     SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
 )
@@ -462,6 +464,8 @@ def _source_candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         "disabled_actions",
         "exit_reliability_guard_enabled",
         "p_up_side_alignment_filter_enabled",
+        "p_up_side_alignment_diagnostic_enabled",
+        "p_up_side_alignment_diagnostic_threshold",
         "exit_policy",
         "entry_filter_thresholds",
         "threshold_selection_method",
@@ -511,6 +515,8 @@ def _source_candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         "promotion_replay_mean_pnl_per_entry",
         "candidate_scoped_p_up_action_disagreement_rate",
         "candidate_scoped_p_up_action_disagreement_within_limit",
+        "candidate_scoped_p_up_action_disagreement_blocking_enabled",
+        "candidate_scoped_p_up_action_disagreement_gate_passed",
         "candidate_scoped_action_family_gate_results",
         "candidate_scoped_high_score_support_count",
         "candidate_scoped_high_score_realized_return_mean",
@@ -1115,10 +1121,14 @@ def _candidate_specs(
             "enabled_actions": SELL_BEFORE_CLOSE_ONLY_SOURCE_CANDIDATE_ACTIONS,
             "disabled_actions": SELL_BEFORE_CLOSE_DISABLED_SOURCE_CANDIDATE_ACTIONS,
             "exit_reliability_guard_enabled": True,
-            "p_up_side_alignment_filter_enabled": True,
+            "p_up_side_alignment_filter_enabled": False,
+            "p_up_side_alignment_diagnostic_enabled": True,
+            "p_up_side_alignment_diagnostic_threshold": (
+                SELL_BEFORE_CLOSE_P_UP_DIAGNOSTIC_ALIGNMENT_MIN
+            ),
             "exit_policy": SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
             "entry_filter_thresholds": dict(
-                SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS
+                SELL_BEFORE_CLOSE_SIDE_BALANCED_ENTRY_GUARD_THRESHOLDS
             ),
             "side_balance_required": True,
             "side_balance_thresholds": dict(SELL_BEFORE_CLOSE_SIDE_BALANCE_THRESHOLDS),
@@ -1130,7 +1140,8 @@ def _candidate_specs(
             "execution_buffer": execution_buffer,
             "notes": [
                 "source eligibility candidate scoped to SELL_BEFORE_CLOSE actions",
-                "inherits exit-reliability and p_up side-alignment gates",
+                "inherits exit-reliability, liquidity, spread, staleness, and queue-fill gates",
+                "keeps p_up side-alignment as diagnostic-only legacy evidence",
                 "applies deterministic per-side score quota before replay",
                 "HOLD_TO_SETTLEMENT is disabled and remains diagnostic-only",
             ],
@@ -1239,6 +1250,13 @@ def _candidate_report(
         else disagreement_count / len(candidate_scoped_disagreement_rows)
     )
     disagreement_passed = disagreement_rate <= P_UP_ACTION_DISAGREEMENT_FAIL_THRESHOLD
+    p_up_side_alignment_filter_enabled = bool(
+        spec.get("p_up_side_alignment_filter_enabled", False)
+    )
+    p_up_disagreement_blocks_candidate = p_up_side_alignment_filter_enabled
+    p_up_disagreement_gate_passed = (
+        disagreement_passed or not p_up_disagreement_blocks_candidate
+    )
     ineligible_reasons = set()
     if not calibration_support_passed:
         ineligible_reasons.add("action_value_calibration_support_insufficient")
@@ -1246,7 +1264,7 @@ def _candidate_report(
         ineligible_reasons.add("action_value_calibration_quality_failed")
     if not concentration_passed:
         ineligible_reasons.add("action_value_policy_collapse")
-    if not disagreement_passed:
+    if not p_up_disagreement_gate_passed:
         ineligible_reasons.add("p_up_action_disagreement_excessive")
     if not family_report["action_family_paper_decision_eligible"]:
         ineligible_reasons.update(
@@ -1264,7 +1282,7 @@ def _candidate_report(
         and calibration_quality_passed
         and bool(family_report["action_family_paper_decision_eligible"])
         and concentration_passed
-        and disagreement_passed
+        and p_up_disagreement_gate_passed
         and high_score_sum_positive
         and side_balance_gate_passed
     )
@@ -1279,8 +1297,18 @@ def _candidate_report(
         "exit_reliability_guard_enabled": bool(
             spec.get("exit_reliability_guard_enabled", False)
         ),
-        "p_up_side_alignment_filter_enabled": bool(
-            spec.get("p_up_side_alignment_filter_enabled", False)
+        "p_up_side_alignment_filter_enabled": p_up_side_alignment_filter_enabled,
+        "p_up_side_alignment_diagnostic_enabled": bool(
+            spec.get("p_up_side_alignment_diagnostic_enabled", False)
+        ),
+        "p_up_side_alignment_diagnostic_threshold": spec.get(
+            "p_up_side_alignment_diagnostic_threshold"
+        ),
+        "candidate_scoped_p_up_action_disagreement_blocking_enabled": (
+            p_up_disagreement_blocks_candidate
+        ),
+        "candidate_scoped_p_up_action_disagreement_gate_passed": (
+            p_up_disagreement_gate_passed
         ),
         "exit_policy": spec.get("exit_policy"),
         "entry_filter_thresholds": dict(spec.get("entry_filter_thresholds", {})),
@@ -1430,6 +1458,10 @@ def _candidate_report(
         "best_action_max_action": max_action or None,
         "best_action_max_ratio": max_action_ratio,
         "p_up_action_disagreement_within_limit": disagreement_passed,
+        "p_up_action_disagreement_blocking_enabled": (
+            p_up_disagreement_blocks_candidate
+        ),
+        "p_up_action_disagreement_gate_passed": p_up_disagreement_gate_passed,
         "p_up_action_disagreement_rate": disagreement_rate,
         "source_model_eligible": source_model_eligible,
         "source_model_candidate_eligible": source_model_eligible,

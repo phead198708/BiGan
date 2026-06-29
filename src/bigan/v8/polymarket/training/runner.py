@@ -685,6 +685,12 @@ def _build_action_family_counterfactual_replays(
                 "p_up_side_alignment_filter_enabled": bool(
                     prediction_set.get("p_up_side_alignment_filter_enabled", False)
                 ),
+                "p_up_side_alignment_diagnostic_enabled": bool(
+                    prediction_set.get("p_up_side_alignment_diagnostic_enabled", False)
+                ),
+                "p_up_side_alignment_diagnostic_threshold": prediction_set.get(
+                    "p_up_side_alignment_diagnostic_threshold"
+                ),
                 "exit_policy": prediction_set.get("exit_policy"),
                 "entry_filter_thresholds": dict(
                     prediction_set.get("entry_filter_thresholds", {})
@@ -937,6 +943,12 @@ def _counterfactual_ledger_pnl_report(
         "p_up_side_alignment_filter_enabled": bool(
             prediction_set.get("p_up_side_alignment_filter_enabled", False)
         ),
+        "p_up_side_alignment_diagnostic_enabled": bool(
+            prediction_set.get("p_up_side_alignment_diagnostic_enabled", False)
+        ),
+        "p_up_side_alignment_diagnostic_threshold": prediction_set.get(
+            "p_up_side_alignment_diagnostic_threshold"
+        ),
         "exit_policy": prediction_set.get("exit_policy"),
         "entry_filter_thresholds": dict(
             prediction_set.get("entry_filter_thresholds", {})
@@ -1021,6 +1033,12 @@ def _counterfactual_variant_summary(
         "p_up_side_alignment_filter_enabled": bool(
             prediction_set.get("p_up_side_alignment_filter_enabled", False)
         ),
+        "p_up_side_alignment_diagnostic_enabled": bool(
+            prediction_set.get("p_up_side_alignment_diagnostic_enabled", False)
+        ),
+        "p_up_side_alignment_diagnostic_threshold": prediction_set.get(
+            "p_up_side_alignment_diagnostic_threshold"
+        ),
         "exit_policy": prediction_set.get("exit_policy"),
         "entry_filter_thresholds": dict(
             prediction_set.get("entry_filter_thresholds", {})
@@ -1067,6 +1085,8 @@ def _counterfactual_variant_summary(
         "settlement_event_count": ledger_pnl_report["settlement_event_count"],
         "promotion_evidence_eligible": False,
         "promotion_evidence_ineligible_reasons": sorted(set(blocked_reasons)),
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
         "blocked": True,
         "blocked_reasons": sorted(set(blocked_reasons)),
         **compact_safety_fields(),
@@ -1358,7 +1378,23 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
             )
         reasons = set(candidate["ineligible_reason_codes"])
         reasons.discard("p_up_action_disagreement_excessive")
-        if not candidate["candidate_scoped_p_up_action_disagreement_within_limit"]:
+        p_up_disagreement_blocks_candidate = bool(
+            candidate.get(
+                "candidate_scoped_p_up_action_disagreement_blocking_enabled",
+                candidate.get("p_up_side_alignment_filter_enabled", False),
+            )
+        )
+        p_up_disagreement_gate_passed = (
+            bool(candidate["candidate_scoped_p_up_action_disagreement_within_limit"])
+            or not p_up_disagreement_blocks_candidate
+        )
+        candidate["candidate_scoped_p_up_action_disagreement_gate_passed"] = (
+            p_up_disagreement_gate_passed
+        )
+        candidate["p_up_action_disagreement_gate_passed"] = (
+            p_up_disagreement_gate_passed
+        )
+        if not p_up_disagreement_gate_passed:
             reasons.add("p_up_action_disagreement_excessive")
         if float(candidate["replay_total_polymarket_pnl"]) <= 0.0:
             reasons.add("exit_reliability_guard_replay_pnl_not_positive")
@@ -1393,6 +1429,13 @@ def _apply_exit_reliability_guard_to_candidate_comparison(
             manifest["p_up_side_alignment_filter_enabled"] = candidate[
                 "p_up_side_alignment_filter_enabled"
             ]
+            manifest["p_up_side_alignment_diagnostic_enabled"] = candidate.get(
+                "p_up_side_alignment_diagnostic_enabled",
+                False,
+            )
+            manifest["candidate_scoped_p_up_action_disagreement_gate_passed"] = (
+                candidate["candidate_scoped_p_up_action_disagreement_gate_passed"]
+            )
             manifest["exit_policy"] = candidate["exit_policy"]
             manifest["entry_filter_thresholds"] = candidate[
                 "entry_filter_thresholds"
@@ -2192,11 +2235,35 @@ def _build_sell_before_close_side_balanced_candidate_report(
         "up_market_count": support_row.get("up_market_count"),
         "down_market_count": support_row.get("down_market_count"),
         "side_entry_ratio": support_row.get("side_entry_ratio"),
+        "p_up_side_alignment_filter_enabled": bool(
+            candidate.get(
+                "p_up_side_alignment_filter_enabled",
+                scoped.get("p_up_side_alignment_filter_enabled", False),
+            )
+        ),
+        "p_up_side_alignment_diagnostic_enabled": bool(
+            candidate.get(
+                "p_up_side_alignment_diagnostic_enabled",
+                scoped.get("p_up_side_alignment_diagnostic_enabled", False),
+            )
+        ),
+        "p_up_side_alignment_diagnostic_threshold": candidate.get(
+            "p_up_side_alignment_diagnostic_threshold",
+            scoped.get("p_up_side_alignment_diagnostic_threshold"),
+        ),
         "candidate_scoped_p_up_action_disagreement_rate": candidate.get(
             "candidate_scoped_p_up_action_disagreement_rate"
         ),
         "candidate_scoped_p_up_action_disagreement_within_limit": candidate.get(
             "candidate_scoped_p_up_action_disagreement_within_limit"
+        ),
+        "candidate_scoped_p_up_action_disagreement_blocking_enabled": candidate.get(
+            "candidate_scoped_p_up_action_disagreement_blocking_enabled",
+            scoped.get("candidate_scoped_p_up_action_disagreement_blocking_enabled"),
+        ),
+        "candidate_scoped_p_up_action_disagreement_gate_passed": candidate.get(
+            "candidate_scoped_p_up_action_disagreement_gate_passed",
+            scoped.get("candidate_scoped_p_up_action_disagreement_gate_passed"),
         ),
         "candidate_scoped_high_score_support_count": candidate.get(
             "candidate_scoped_high_score_support_count"
@@ -2250,8 +2317,13 @@ def _sell_before_close_side_balanced_candidate_summary(
         "up_market_count",
         "down_market_count",
         "side_entry_ratio",
+        "p_up_side_alignment_filter_enabled",
+        "p_up_side_alignment_diagnostic_enabled",
+        "p_up_side_alignment_diagnostic_threshold",
         "candidate_scoped_p_up_action_disagreement_rate",
         "candidate_scoped_p_up_action_disagreement_within_limit",
+        "candidate_scoped_p_up_action_disagreement_blocking_enabled",
+        "candidate_scoped_p_up_action_disagreement_gate_passed",
         "candidate_scoped_high_score_support_count",
         "candidate_scoped_high_score_realized_return_mean",
         "candidate_scoped_high_score_realized_return_sum",
@@ -3783,6 +3855,12 @@ def _model_manifest(
         "p_up_action_disagreement_within_limit": signal_sanity[
             "p_up_action_disagreement_within_limit"
         ],
+        "p_up_action_disagreement_blocking_enabled": signal_sanity[
+            "p_up_action_disagreement_blocking_enabled"
+        ],
+        "p_up_action_disagreement_gate_passed": signal_sanity[
+            "p_up_action_disagreement_gate_passed"
+        ],
         "action_value_paper_decision_eligible": signal_sanity[
             "action_value_paper_decision_eligible"
         ],
@@ -4404,6 +4482,11 @@ def _action_value_signal_sanity_report(
     p_up_action_disagreement_within_limit = (
         disagreement_rate <= P_UP_ACTION_DISAGREEMENT_FAIL_THRESHOLD
     )
+    p_up_action_disagreement_blocking_enabled = False
+    p_up_action_disagreement_gate_passed = (
+        p_up_action_disagreement_within_limit
+        or not p_up_action_disagreement_blocking_enabled
+    )
     calibration_support_passed = bool(
         action_value_calibration["calibration_support_passed"]
     )
@@ -4417,8 +4500,6 @@ def _action_value_signal_sanity_report(
         ineligible_reasons.add("action_value_calibration_quality_failed")
     if not best_action_concentration_passed:
         ineligible_reasons.add("action_value_policy_collapse")
-    if not p_up_action_disagreement_within_limit:
-        ineligible_reasons.add("p_up_action_disagreement_excessive")
     if not action_family_eligibility["action_family_paper_decision_eligible"]:
         ineligible_reasons.update(
             action_family_eligibility[
@@ -4429,7 +4510,7 @@ def _action_value_signal_sanity_report(
         calibration_support_passed
         and calibration_quality_passed
         and best_action_concentration_passed
-        and p_up_action_disagreement_within_limit
+        and p_up_action_disagreement_gate_passed
         and action_family_eligibility["action_family_paper_decision_eligible"]
     )
     return {
@@ -4508,6 +4589,10 @@ def _action_value_signal_sanity_report(
         "p_up_action_disagreement_within_limit": (
             p_up_action_disagreement_within_limit
         ),
+        "p_up_action_disagreement_blocking_enabled": (
+            p_up_action_disagreement_blocking_enabled
+        ),
+        "p_up_action_disagreement_gate_passed": p_up_action_disagreement_gate_passed,
         "p_up_action_disagreement_examples": disagreement_examples[:20],
         "action_family_paper_decision_eligible": action_family_eligibility[
             "action_family_paper_decision_eligible"
@@ -4642,6 +4727,10 @@ def _signal_sanity_markdown(report: dict[str, Any]) -> str:
             f"{report['p_up_action_disagreement_rate']}",
             "- p_up_action_disagreement_within_limit: "
             f"{str(report['p_up_action_disagreement_within_limit']).lower()}",
+            "- p_up_action_disagreement_blocking_enabled: "
+            f"{str(report['p_up_action_disagreement_blocking_enabled']).lower()}",
+            "- p_up_action_disagreement_gate_passed: "
+            f"{str(report['p_up_action_disagreement_gate_passed']).lower()}",
             "- action_family_paper_decision_eligible: "
             f"{str(report['action_family_paper_decision_eligible']).lower()}",
             "- action_family_paper_decision_ineligible_reasons: "

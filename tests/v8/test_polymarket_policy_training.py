@@ -1707,6 +1707,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
             variant["variant"]
             == "M_sell_before_close_side_balanced_ranking_candidate"
         ):
+            assert variant["p_up_side_alignment_filter_enabled"] is False
+            assert variant["p_up_side_alignment_diagnostic_enabled"] is True
             assert variant["side_balance_selection_summary"][
                 "selected_entry_count"
             ] >= 0
@@ -2220,11 +2222,11 @@ def test_side_balanced_sell_before_close_candidate_fails_closed_on_one_side(
     ]
 
 
-def test_side_balanced_selection_uses_guard_compatible_rows_before_quota(
+def test_side_balanced_selection_keeps_p_up_disagreement_diagnostic_only(
     tmp_path: Path,
 ) -> None:
-    bad_up = _guard_prediction(
-        market_id="bad-up",
+    disagreed_up = _guard_prediction(
+        market_id="disagreed-up",
         decision_ts=1_000,
         time_to_close_seconds=180.0,
         selected_action="BUY_UP_SELL_BEFORE_CLOSE",
@@ -2246,7 +2248,7 @@ def test_side_balanced_selection_uses_guard_compatible_rows_before_quota(
     )
 
     prediction_set = build_sell_before_close_side_balanced_prediction_set(
-        predictions=(bad_up, good_up, good_down),
+        predictions=(disagreed_up, good_up, good_down),
         execution_buffer=0.015,
         side_balance_thresholds={
             "side_quota_per_side": 1.0,
@@ -2257,33 +2259,98 @@ def test_side_balanced_selection_uses_guard_compatible_rows_before_quota(
 
     rows = prediction_set["side_balance_candidate_entries"]
     selected_rows = [row for row in rows if row["side_quota_selected"]]
-    bad_up_row = next(row for row in rows if row["market_id"] == "bad-up")
+    disagreed_up_row = next(
+        row for row in rows if row["market_id"] == "disagreed-up"
+    )
     summary = prediction_set["side_balance_selection_summary"]
 
+    assert prediction_set["p_up_side_alignment_filter_enabled"] is False
+    assert prediction_set["p_up_side_alignment_diagnostic_enabled"] is True
     assert summary["selection_pool"] == "guard_compatible_rows"
     assert summary["candidate_count"] == 3
-    assert summary["guard_compatible_candidate_count"] == 2
+    assert summary["guard_compatible_candidate_count"] == 3
     assert summary["guard_compatible_two_sided_entry_set_exists"] is True
     assert summary["guard_compatible_side_balance_gate_passed"] is True
     assert summary["side_balance_gate_passed"] is True
     assert summary["selected_entry_count"] == 2
-    assert {row["market_id"] for row in selected_rows} == {"good-up", "good-down"}
+    assert {row["market_id"] for row in selected_rows} == {
+        "disagreed-up",
+        "good-down",
+    }
     assert all(row["side_balance_guard_compatible_entry"] for row in selected_rows)
-    assert bad_up_row["side_balance_guard_compatible_entry"] is False
-    assert bad_up_row["side_quota_selected"] is False
-    assert "entry_blocked_side_balance_guard_compatibility_failed" in bad_up_row[
-        "side_balance_reason_codes"
+    assert disagreed_up_row["side_balance_guard_compatible_entry"] is True
+    assert disagreed_up_row["p_up_side_alignment_passed"] is False
+    assert disagreed_up_row["p_up_side_alignment_diagnostic_only"] is True
+    assert disagreed_up_row["side_quota_selected"] is True
+    assert "p_up_side_alignment_disagreed_diagnostic" in disagreed_up_row[
+        "side_balance_guard_reason_codes"
     ]
-    assert "entry_blocked_p_up_action_disagreement" in bad_up_row[
-        "side_balance_reason_codes"
+    assert "entry_blocked_p_up_action_disagreement" not in disagreed_up_row[
+        "side_balance_guard_reason_codes"
     ]
     replay_actions = {
         prediction.market_id: prediction.calibrated_best_policy_action
         for prediction in prediction_set["predictions"]
     }
-    assert replay_actions["bad-up"] == "NO_TRADE"
-    assert replay_actions["good-up"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert replay_actions["disagreed-up"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert replay_actions["good-up"] == "NO_TRADE"
     assert replay_actions["good-down"] == "BUY_DOWN_SELL_BEFORE_CLOSE"
+
+
+def test_side_balanced_selection_allows_absent_p_up_auxiliary(
+    tmp_path: Path,
+) -> None:
+    missing_aux_up = _guard_prediction(
+        market_id="missing-aux-up",
+        decision_ts=1_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=None,
+        estimated_up_probability=0.30,
+    )
+    disagreed_up = _guard_prediction(
+        market_id="disagreed-up",
+        decision_ts=2_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.30,
+    )
+    good_down = _guard_prediction(
+        market_id="good-down",
+        decision_ts=3_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.30,
+    )
+
+    prediction_set = build_sell_before_close_side_balanced_prediction_set(
+        predictions=(missing_aux_up, disagreed_up, good_down),
+        execution_buffer=0.015,
+        side_balance_thresholds={
+            "side_quota_per_side": 2.0,
+            "min_per_side_entry_count": 1.0,
+            "min_per_side_market_count": 1.0,
+        },
+    )
+
+    rows = prediction_set["side_balance_candidate_entries"]
+    summary = prediction_set["side_balance_selection_summary"]
+    missing_aux_row = next(row for row in rows if row["market_id"] == "missing-aux-up")
+
+    assert summary["guard_compatible_candidate_count"] == 3
+    assert summary["side_balance_gate_passed"] is True
+    assert summary["selected_entry_count"] == 3
+    assert missing_aux_row["side_balance_guard_compatible_entry"] is True
+    assert missing_aux_row["p_up_side_alignment_passed"] is False
+    assert missing_aux_row["p_up_side_alignment_diagnostic_only"] is True
+    assert {
+        prediction.market_id: prediction.calibrated_best_policy_action
+        for prediction in prediction_set["predictions"]
+    } == {
+        "missing-aux-up": "BUY_UP_SELL_BEFORE_CLOSE",
+        "disagreed-up": "BUY_UP_SELL_BEFORE_CLOSE",
+        "good-down": "BUY_DOWN_SELL_BEFORE_CLOSE",
+    }
 
 
 def test_sell_before_close_candidate_does_not_resume_without_promotion_replay(
@@ -3110,7 +3177,8 @@ def _guard_prediction(
     decision_ts: int,
     time_to_close_seconds: float,
     selected_action: str = "BUY_UP_SELL_BEFORE_CLOSE",
-    p_up_auxiliary: float = 0.70,
+    p_up_auxiliary: float | None = 0.70,
+    estimated_up_probability: float | None = None,
     up_bid: float = 0.52,
     up_ask: float = 0.54,
     down_bid: float = 0.45,
@@ -3122,6 +3190,11 @@ def _guard_prediction(
     up_spread_bps: float = 100.0,
     down_spread_bps: float = 100.0,
 ) -> PolymarketPolicyPrediction:
+    estimated_up_probability_value = (
+        float(estimated_up_probability)
+        if estimated_up_probability is not None
+        else float(p_up_auxiliary if p_up_auxiliary is not None else 0.50)
+    )
     buy_up_sell_return = 0.08 if selected_action == "BUY_UP_SELL_BEFORE_CLOSE" else -0.10
     buy_down_sell_return = 0.08 if selected_action == "BUY_DOWN_SELL_BEFORE_CLOSE" else -0.10
     action_returns = {
@@ -3142,7 +3215,7 @@ def _guard_prediction(
         market_family="btc_updown_5m",
         horizon_ms=300_000,
         decision_ts=decision_ts,
-        estimated_up_probability=p_up_auxiliary,
+        estimated_up_probability=estimated_up_probability_value,
         confidence=0.90,
         score=float(action_returns[selected_action]),
         calibration_bucket="guard-test",

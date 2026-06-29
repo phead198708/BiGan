@@ -52,6 +52,19 @@ SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS = {
     "max_entries_per_market": 1.0,
     "min_reentry_cooldown_seconds": 60.0,
 }
+SELL_BEFORE_CLOSE_P_UP_DIAGNOSTIC_ALIGNMENT_MIN = 0.55
+SELL_BEFORE_CLOSE_SIDE_BALANCED_ENTRY_GUARD_THRESHOLDS = {
+    "min_seconds_to_close": 90.0,
+    "min_executable_bid_notional": 0.20,
+    "min_queue_fill_probability_proxy": 0.65,
+    "max_spread": 900.0,
+    "max_book_staleness_ms": 10_000.0,
+    "min_recent_book_update_count_1m": 1.0,
+    "min_best_action_margin": 0.01,
+    "min_calibrated_action_score": 0.03,
+    "max_entries_per_market": 1.0,
+    "min_reentry_cooldown_seconds": 60.0,
+}
 SELL_BEFORE_CLOSE_GUARD_THRESHOLD_SWEEP_GRID = {
     "p_up_alignment_min": (0.50, 0.55, 0.60, 0.65),
     "min_calibrated_action_score": (0.015, 0.03, 0.05),

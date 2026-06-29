@@ -19,6 +19,7 @@ from bigan.v8.polymarket.training.contracts import (
 )
 from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
+    SELL_BEFORE_CLOSE_SIDE_BALANCED_ENTRY_GUARD_THRESHOLDS,
     SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
 )
 
@@ -46,46 +47,58 @@ GUARD_ABLATION_VARIANTS = (
     {
         "variant_name": "baseline_current_guard",
         "threshold_overrides": {},
-        "description": "Current p_up aligned exit-quality guard.",
+        "enforce_p_up_alignment": False,
+        "description": (
+            "Current side-balanced exit-quality guard; p_up side-alignment is "
+            "diagnostic-only."
+        ),
     },
     {
         "variant_name": "without_p_up_alignment",
-        "threshold_overrides": {"p_up_alignment_min": 0.0},
+        "threshold_overrides": {},
+        "enforce_p_up_alignment": False,
         "description": "Exit-quality guard with p_up side-alignment disabled.",
     },
     {
         "variant_name": "p_up_alignment_min_0_50",
         "threshold_overrides": {"p_up_alignment_min": 0.50},
-        "description": "Current guard with p_up side-alignment minimum set to 0.50.",
+        "enforce_p_up_alignment": True,
+        "description": "Legacy hard p_up side-alignment minimum set to 0.50.",
     },
     {
         "variant_name": "p_up_alignment_min_0_52",
         "threshold_overrides": {"p_up_alignment_min": 0.52},
-        "description": "Current guard with p_up side-alignment minimum set to 0.52.",
+        "enforce_p_up_alignment": True,
+        "description": "Legacy hard p_up side-alignment minimum set to 0.52.",
     },
     {
         "variant_name": "p_up_alignment_min_0_55",
         "threshold_overrides": {"p_up_alignment_min": 0.55},
-        "description": "Current guard with p_up side-alignment minimum set to 0.55.",
+        "enforce_p_up_alignment": True,
+        "description": "Legacy hard p_up side-alignment minimum set to 0.55.",
     },
     {
         "variant_name": "p_up_alignment_min_0_58",
         "threshold_overrides": {"p_up_alignment_min": 0.58},
-        "description": "Current guard with p_up side-alignment minimum set to 0.58.",
+        "enforce_p_up_alignment": True,
+        "description": "Legacy hard p_up side-alignment minimum set to 0.58.",
     },
     {
         "variant_name": "relaxed_spread_1200",
         "threshold_overrides": {"max_spread": 1200.0},
+        "enforce_p_up_alignment": False,
         "description": "Current guard with max spread relaxed to 1200 bps.",
     },
     {
         "variant_name": "relaxed_queue_fill_0_50",
         "threshold_overrides": {"min_queue_fill_probability_proxy": 0.50},
+        "enforce_p_up_alignment": False,
         "description": "Current guard with queue-fill proxy minimum relaxed to 0.50.",
     },
     {
         "variant_name": "relaxed_time_to_close_60",
         "threshold_overrides": {"min_seconds_to_close": 60.0},
+        "enforce_p_up_alignment": False,
         "description": "Current guard with minimum time-to-close relaxed to 60 seconds.",
     },
 )
@@ -166,6 +179,8 @@ def build_guard_compatible_coverage_reports(
         "corpus_market_count": int(dataset.corpus_manifest.get("market_count", 0)),
         "dataset_hash": dataset.dataset_hash,
         "training_corpus_hash": dataset.training_corpus_hash,
+        "p_up_side_alignment_filter_enabled": False,
+        "p_up_side_alignment_diagnostic_enabled": True,
         "prediction_alignment": prediction_alignment,
         "overall": overall,
         "by_split": by_split,
@@ -386,6 +401,7 @@ def _split_coverage(
     predictions: tuple[PolymarketPolicyPrediction, ...],
     execution_buffer: float,
     guard_thresholds: dict[str, float] | None = None,
+    enforce_p_up_alignment: bool = False,
 ) -> dict[str, Any]:
     prediction_alignment = _prediction_alignment_diagnostics(
         examples=examples,
@@ -402,6 +418,7 @@ def _split_coverage(
         predictions=predictions,
         execution_buffer=execution_buffer,
         guard_thresholds=guard_thresholds,
+        enforce_p_up_alignment=enforce_p_up_alignment,
     )
     rows = [dict(row) for row in prediction_set["side_balance_candidate_entries"]]
     example_by_key = {
@@ -509,6 +526,12 @@ def _split_coverage(
     report = {
         "split_name": split_name,
         "row_count": len(examples),
+        "p_up_side_alignment_filter_enabled": bool(
+            prediction_set.get("p_up_side_alignment_filter_enabled", False)
+        ),
+        "p_up_side_alignment_diagnostic_enabled": bool(
+            prediction_set.get("p_up_side_alignment_diagnostic_enabled", False)
+        ),
         "pre_guard_candidate_count": len(rows),
         "candidate_count_by_side": candidate_count_by_side,
         "guard_compatible_candidate_count": total_guard,
@@ -864,7 +887,11 @@ def _guard_ablation_coverage_report(
 ) -> dict[str, Any]:
     variants = []
     for spec in GUARD_ABLATION_VARIANTS:
-        thresholds = dict(SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS)
+        thresholds = (
+            dict(SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS)
+            if bool(spec.get("enforce_p_up_alignment", False))
+            else dict(SELL_BEFORE_CLOSE_SIDE_BALANCED_ENTRY_GUARD_THRESHOLDS)
+        )
         thresholds.update(spec["threshold_overrides"])
         by_split = {
             split_name: _split_coverage(
@@ -873,6 +900,9 @@ def _guard_ablation_coverage_report(
                 predictions=predictions,
                 execution_buffer=execution_buffer,
                 guard_thresholds=thresholds,
+                enforce_p_up_alignment=bool(
+                    spec.get("enforce_p_up_alignment", False)
+                ),
             )
             for split_name, (examples, predictions) in split_inputs.items()
         }
@@ -882,6 +912,7 @@ def _guard_ablation_coverage_report(
             predictions=overall_predictions,
             execution_buffer=execution_buffer,
             guard_thresholds=thresholds,
+            enforce_p_up_alignment=bool(spec.get("enforce_p_up_alignment", False)),
         )
         target_results = _coverage_target_results(overall=overall, by_split=by_split)
         variants.append(
@@ -902,7 +933,8 @@ def _guard_ablation_coverage_report(
         "selection_pool": "guard_compatible_rows",
         "execution_buffer": float(execution_buffer),
         "coverage_targets": dict(COVERAGE_TARGETS),
-        "baseline_thresholds": dict(SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS),
+        "baseline_thresholds": dict(SELL_BEFORE_CLOSE_SIDE_BALANCED_ENTRY_GUARD_THRESHOLDS),
+        "baseline_p_up_side_alignment_filter_enabled": False,
         "prediction_alignment": prediction_alignment,
         "variant_count": len(variants),
         "variants": variants,
@@ -943,6 +975,10 @@ def _guard_ablation_variant_summary(
         "description": spec["description"],
         "threshold_overrides": dict(spec["threshold_overrides"]),
         "effective_thresholds": dict(thresholds),
+        "p_up_side_alignment_filter_enabled": bool(
+            spec.get("enforce_p_up_alignment", False)
+        ),
+        "p_up_side_alignment_diagnostic_enabled": True,
         "guard_compatible_candidate_count": overall[
             "guard_compatible_candidate_count"
         ],
@@ -1040,15 +1076,18 @@ def _guard_ablation_markdown(report: dict[str, Any]) -> str:
         f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
         f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
         "",
-        "| variant | guard_compatible | up | down | val_up | val_down | shadow_up | shadow_down | label_return | p_up_disagreement | targets_passed | exit_quality | p_up_only |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|",
+        "| variant | p_up_filter | guard_compatible | up | down | val_up | val_down | shadow_up | shadow_down | label_return | p_up_disagreement | targets_passed | exit_quality | p_up_only |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|",
     ]
     for variant in report["variants"]:
         lines.append(
-            "| {name} | {compatible} | {up} | {down} | {val_up} | {val_down} | "
+            "| {name} | {p_up_filter} | {compatible} | {up} | {down} | {val_up} | {val_down} | "
             "{shadow_up} | {shadow_down} | {label_return:.6f} | {p_up_rate:.6f} | "
             "{targets} | {exit_quality} | {p_up_only} |".format(
                 name=variant["variant_name"],
+                p_up_filter=str(
+                    variant["p_up_side_alignment_filter_enabled"]
+                ).lower(),
                 compatible=variant["guard_compatible_candidate_count"],
                 up=variant["guard_compatible_up_entry_count"],
                 down=variant["guard_compatible_down_entry_count"],

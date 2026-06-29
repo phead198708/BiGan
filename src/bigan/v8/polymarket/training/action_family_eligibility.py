@@ -41,7 +41,9 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_THRESHOLDS,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
+    SELL_BEFORE_CLOSE_P_UP_DIAGNOSTIC_ALIGNMENT_MIN,
     SELL_BEFORE_CLOSE_SIDE_BALANCE_THRESHOLDS,
+    SELL_BEFORE_CLOSE_SIDE_BALANCED_ENTRY_GUARD_THRESHOLDS,
     SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
 )
@@ -585,13 +587,14 @@ def build_sell_before_close_side_balanced_prediction_set(
     execution_buffer: float,
     side_balance_thresholds: dict[str, Any] | None = None,
     guard_thresholds: dict[str, float] | None = None,
+    enforce_p_up_alignment: bool = False,
 ) -> dict[str, Any]:
     """Build the M side-balanced SELL_BEFORE_CLOSE ranking prediction set."""
 
     thresholds = dict(SELL_BEFORE_CLOSE_SIDE_BALANCE_THRESHOLDS)
     if side_balance_thresholds:
         thresholds.update(side_balance_thresholds)
-    entry_filter_thresholds = dict(SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS)
+    entry_filter_thresholds = dict(SELL_BEFORE_CLOSE_SIDE_BALANCED_ENTRY_GUARD_THRESHOLDS)
     if guard_thresholds:
         entry_filter_thresholds.update(guard_thresholds)
     reranked = [
@@ -607,6 +610,7 @@ def build_sell_before_close_side_balanced_prediction_set(
         predictions=tuple(reranked),
         execution_buffer=execution_buffer,
         guard_thresholds=entry_filter_thresholds,
+        enforce_p_up_alignment=enforce_p_up_alignment,
     )
     selection_pool_rows = [
         row for row in candidate_rows if bool(row["side_balance_guard_compatible_entry"])
@@ -645,7 +649,11 @@ def build_sell_before_close_side_balanced_prediction_set(
         "prediction_count": len(replay_predictions),
         "predictions": replay_predictions,
         "exit_reliability_guard_enabled": True,
-        "p_up_side_alignment_filter_enabled": True,
+        "p_up_side_alignment_filter_enabled": bool(enforce_p_up_alignment),
+        "p_up_side_alignment_diagnostic_enabled": True,
+        "p_up_side_alignment_diagnostic_threshold": (
+            SELL_BEFORE_CLOSE_P_UP_DIAGNOSTIC_ALIGNMENT_MIN
+        ),
         "exit_policy": SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
         "entry_filter_thresholds": dict(entry_filter_thresholds),
         "side_balance_required": True,
@@ -665,6 +673,7 @@ def _side_balance_candidate_rows(
     predictions: tuple[PolymarketPolicyPrediction, ...],
     execution_buffer: float,
     guard_thresholds: dict[str, float],
+    enforce_p_up_alignment: bool,
 ) -> list[dict[str, Any]]:
     rows = []
     for prediction in predictions:
@@ -686,6 +695,7 @@ def _side_balance_candidate_rows(
             action=action,
             execution_buffer=execution_buffer,
             thresholds=guard_thresholds,
+            enforce_p_up_alignment=enforce_p_up_alignment,
         )
         rows.append(
             {
@@ -703,6 +713,12 @@ def _side_balance_candidate_rows(
                     "exit_reliability_guard_passed"
                 ],
                 "p_up_side_alignment_passed": guard["p_up_side_alignment_passed"],
+                "p_up_side_alignment_filter_enabled": guard[
+                    "p_up_side_alignment_filter_enabled"
+                ],
+                "p_up_side_alignment_diagnostic_only": guard[
+                    "p_up_side_alignment_diagnostic_only"
+                ],
                 "side_balance_guard_reason_codes": guard["reason_codes"],
                 "side_quota_rank": None,
                 "side_quota_selected": False,
@@ -718,6 +734,7 @@ def evaluate_sell_before_close_guard_compatibility(
     action: str,
     execution_buffer: float,
     thresholds: dict[str, float],
+    enforce_p_up_alignment: bool = True,
 ) -> dict[str, Any]:
     side = "UP" if action.startswith("BUY_UP") else "DOWN"
     features = prediction.features
@@ -778,7 +795,12 @@ def evaluate_sell_before_close_guard_compatibility(
     if best_score < min_score:
         exit_reasons.append("entry_blocked_exit_reliability_guard")
     exit_passed = not exit_reasons
-    p_up_alignment_min = float(thresholds.get("p_up_alignment_min", 0.55))
+    p_up_alignment_min = float(
+        thresholds.get(
+            "p_up_alignment_min",
+            SELL_BEFORE_CLOSE_P_UP_DIAGNOSTIC_ALIGNMENT_MIN,
+        )
+    )
     p_up = _p_up(prediction)
     if action.startswith("BUY_UP"):
         p_up_passed = p_up >= p_up_alignment_min
@@ -786,20 +808,21 @@ def evaluate_sell_before_close_guard_compatibility(
         p_up_passed = p_up <= 1.0 - p_up_alignment_min
     else:
         p_up_passed = True
-    p_up_reasons = (
-        ("p_up_side_alignment_passed",)
-        if p_up_passed
-        else (
+    if p_up_passed:
+        p_up_reasons = ("p_up_side_alignment_passed",)
+    elif enforce_p_up_alignment:
+        p_up_reasons = (
             "entry_blocked_p_up_action_disagreement",
             "entry_blocked_p_up_side_alignment_failed",
         )
-    )
+    else:
+        p_up_reasons = ("p_up_side_alignment_disagreed_diagnostic",)
     exit_reason_codes = (
         ("exit_reliability_guard_thresholds_passed",)
         if exit_passed
         else tuple(dict.fromkeys(("entry_blocked_exit_reliability_guard", *exit_reasons)))
     )
-    passed = exit_passed and p_up_passed
+    passed = exit_passed and (p_up_passed or not enforce_p_up_alignment)
     reason_codes = (
         (
             "side_balance_guard_compatible_entry",
@@ -813,6 +836,8 @@ def evaluate_sell_before_close_guard_compatibility(
         "passed": passed,
         "exit_reliability_guard_passed": exit_passed,
         "p_up_side_alignment_passed": p_up_passed,
+        "p_up_side_alignment_filter_enabled": bool(enforce_p_up_alignment),
+        "p_up_side_alignment_diagnostic_only": not enforce_p_up_alignment,
         "reason_codes": tuple(reason_codes),
     }
 
