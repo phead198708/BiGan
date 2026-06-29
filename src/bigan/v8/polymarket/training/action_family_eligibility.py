@@ -62,6 +62,7 @@ ACTION_FAMILY_COUNTERFACTUAL_REPLAY_SCHEMA_VERSION = (
 )
 ACTION_FAMILY_MIN_HIGH_SCORE_SUPPORT = ACTION_VALUE_HIGH_SCORE_MIN_SUPPORT
 P_UP_MATERIAL_DISAGREEMENT_THRESHOLD = 0.55
+M_POSITION_STATE_MAX_PAPER_NOTIONAL = 0.20
 
 
 def build_action_family_eligibility_report(
@@ -612,8 +613,16 @@ def build_sell_before_close_side_balanced_prediction_set(
         guard_thresholds=entry_filter_thresholds,
         enforce_p_up_alignment=enforce_p_up_alignment,
     )
+    _annotate_position_state_fresh_entry_candidates(
+        rows=candidate_rows,
+        predictions=tuple(reranked),
+        guard_thresholds=entry_filter_thresholds,
+    )
     selection_pool_rows = [
-        row for row in candidate_rows if bool(row["side_balance_guard_compatible_entry"])
+        row
+        for row in candidate_rows
+        if bool(row["side_balance_guard_compatible_entry"])
+        and bool(row["position_state_fresh_entry_compatible"])
     ]
     selected_keys = _side_quota_selected_keys(
         rows=selection_pool_rows,
@@ -639,7 +648,7 @@ def build_sell_before_close_side_balanced_prediction_set(
         "variant": SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
         "description": (
             "side-balanced SELL_BEFORE_CLOSE source candidate with deterministic "
-            "validation-style side quota ranking and causal guarded exits"
+            "position-state-aware side quota ranking and causal guarded exits"
         ),
         "counterfactual_replay_mode": "re_ranked_counterfactual_policy_replay",
         "allowed_mode": "sell_before_close_side_balanced_ranking",
@@ -656,6 +665,11 @@ def build_sell_before_close_side_balanced_prediction_set(
         ),
         "exit_policy": SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
         "entry_filter_thresholds": dict(entry_filter_thresholds),
+        "position_state_aware_selection_enabled": True,
+        "rank_score_components": (
+            "calibrated_action_score + 0.1*best_action_margin + "
+            "entry_exit_quality_score"
+        ),
         "side_balance_required": True,
         "side_balance_thresholds": thresholds,
         "side_balance_candidate_entries": ranked_rows,
@@ -689,7 +703,12 @@ def _side_balance_candidate_rows(
         side = "UP" if action.startswith("BUY_UP_") else "DOWN"
         margin = float(prediction.calibrated_action_margin or 0.0)
         p_up = _p_up(prediction)
-        rank_score = score + margin * 0.1
+        entry_exit_quality = _side_balance_entry_exit_quality_score(
+            prediction=prediction,
+            side=side,
+            guard_thresholds=guard_thresholds,
+        )
+        rank_score = score + margin * 0.1 + entry_exit_quality["entry_exit_quality_score"]
         guard = evaluate_sell_before_close_guard_compatibility(
             prediction=prediction,
             action=action,
@@ -707,6 +726,7 @@ def _side_balance_candidate_rows(
                 "candidate_rank_score": rank_score,
                 "raw_calibrated_action_score": score,
                 "best_action_margin": margin,
+                **entry_exit_quality,
                 "p_up": p_up,
                 "side_balance_guard_compatible_entry": guard["passed"],
                 "exit_reliability_guard_passed": guard[
@@ -720,12 +740,85 @@ def _side_balance_candidate_rows(
                     "p_up_side_alignment_diagnostic_only"
                 ],
                 "side_balance_guard_reason_codes": guard["reason_codes"],
+                "position_state_aware_selection_enabled": True,
+                "position_state_selection_evaluated": False,
+                "position_state_fresh_entry_compatible": False,
+                "position_state_replay_action_if_selected": None,
+                "position_state_open_side_before_decision": None,
+                "position_state_reason_codes": [],
                 "side_quota_rank": None,
                 "side_quota_selected": False,
                 "side_balance_reason_codes": [],
             }
         )
     return rows
+
+
+def _side_balance_entry_exit_quality_score(
+    *,
+    prediction: PolymarketPolicyPrediction,
+    side: str,
+    guard_thresholds: dict[str, float],
+) -> dict[str, Any]:
+    features = prediction.features
+    bid = _side_balance_side_feature(features, side, "bid")
+    ask = _side_balance_side_feature(features, side, "ask")
+    liquidity = _side_balance_side_feature(
+        features,
+        side,
+        "executable_bid_notional",
+    )
+    queue_fill = _side_balance_side_feature(
+        features,
+        side,
+        "queue_fill_probability_proxy",
+    )
+    spread = _side_balance_side_feature(features, side, "spread_bps")
+    staleness = _side_balance_side_feature(features, side, "book_staleness_ms")
+    if staleness is None:
+        staleness = _side_balance_side_feature(features, side, "book_update_lag_ms")
+    time_to_close = float(features.get("time_to_close_seconds", 0.0))
+    max_notional = float(
+        guard_thresholds.get(
+            "min_executable_bid_notional",
+            M_POSITION_STATE_MAX_PAPER_NOTIONAL,
+        )
+    )
+    exit_edge = 0.0 if bid is None or ask is None else float(bid) - float(ask)
+    liquidity_ratio = 0.0 if liquidity is None else min(2.0, float(liquidity) / max_notional)
+    queue_component = 0.0 if queue_fill is None else max(0.0, min(1.0, queue_fill)) * 0.05
+    liquidity_component = liquidity_ratio * 0.02
+    spread_penalty = 0.0 if spread is None else min(0.05, max(0.0, spread) / 10_000.0)
+    staleness_penalty = (
+        0.0
+        if staleness is None
+        else min(
+            0.05,
+            max(0.0, staleness)
+            / max(1.0, float(guard_thresholds["max_book_staleness_ms"]))
+            * 0.01,
+        )
+    )
+    time_component = min(0.02, max(0.0, time_to_close) / 300.0 * 0.01)
+    quality_score = (
+        exit_edge * 0.25
+        + queue_component
+        + liquidity_component
+        + time_component
+        - spread_penalty
+        - staleness_penalty
+    )
+    return {
+        "entry_exit_quality_score": quality_score,
+        "exit_quality_bid": bid,
+        "entry_quality_ask": ask,
+        "entry_exit_quality_edge": exit_edge,
+        "entry_exit_quality_liquidity_ratio": liquidity_ratio,
+        "entry_exit_quality_queue_fill": queue_fill,
+        "entry_exit_quality_spread_bps": spread,
+        "entry_exit_quality_book_staleness_ms": staleness,
+        "entry_exit_quality_time_to_close_seconds": time_to_close,
+    }
 
 
 def evaluate_sell_before_close_guard_compatibility(
@@ -877,6 +970,186 @@ def _side_quota_selected_keys(
     return selected
 
 
+def _annotate_position_state_fresh_entry_candidates(
+    *,
+    rows: list[dict[str, Any]],
+    predictions: tuple[PolymarketPolicyPrediction, ...],
+    guard_thresholds: dict[str, float],
+) -> None:
+    rows_by_key = {
+        (str(row["market_id"]), int(row["decision_ts"])): row for row in rows
+    }
+    positions: dict[str, dict[str, Any]] = {}
+    for prediction in sorted(
+        predictions,
+        key=lambda row: (int(row.decision_ts), str(row.market_id)),
+    ):
+        key = (str(prediction.market_id), int(prediction.decision_ts))
+        row = rows_by_key.get(key)
+        position = positions.setdefault(
+            str(prediction.market_id),
+            _empty_m_position_state(),
+        )
+        open_side = _open_m_position_side(position)
+        if open_side is not None:
+            exit_assessment = _m_position_exit_assessment(
+                prediction=prediction,
+                position=position,
+                side=open_side,
+            )
+            if row is not None:
+                row.update(
+                    {
+                        "position_state_selection_evaluated": True,
+                        "position_state_fresh_entry_compatible": False,
+                        "position_state_replay_action_if_selected": (
+                            f"SELL_{open_side}"
+                            if exit_assessment["executable"]
+                            else "HOLD"
+                        ),
+                        "position_state_open_side_before_decision": open_side,
+                        "position_state_reason_codes": list(
+                            dict.fromkeys(
+                                (
+                                    "entry_blocked_position_state_not_fresh_entry",
+                                    "entry_blocked_existing_position_would_take_precedence",
+                                    *exit_assessment["reason_codes"],
+                                )
+                            )
+                        ),
+                    }
+                )
+            if exit_assessment["executable"]:
+                positions[str(prediction.market_id)] = _empty_m_position_state()
+            continue
+        if row is None or not bool(row.get("side_balance_guard_compatible_entry", False)):
+            continue
+        action = str(prediction.calibrated_best_policy_action)
+        if action not in {
+            "BUY_UP_SELL_BEFORE_CLOSE",
+            "BUY_DOWN_SELL_BEFORE_CLOSE",
+        }:
+            continue
+        side = "UP" if action.startswith("BUY_UP") else "DOWN"
+        row.update(
+            {
+                "position_state_selection_evaluated": True,
+                "position_state_fresh_entry_compatible": True,
+                "position_state_replay_action_if_selected": _m_entry_action(prediction),
+                "position_state_open_side_before_decision": None,
+                "position_state_reason_codes": ["position_state_fresh_entry_passed"],
+            }
+        )
+        _open_m_position_state(
+            position=position,
+            prediction=prediction,
+            side=side,
+            guard_thresholds=guard_thresholds,
+        )
+    for row in rows:
+        if not bool(row.get("position_state_selection_evaluated", False)):
+            row.update(
+                {
+                    "position_state_selection_evaluated": True,
+                    "position_state_fresh_entry_compatible": False,
+                    "position_state_replay_action_if_selected": None,
+                    "position_state_open_side_before_decision": None,
+                    "position_state_reason_codes": [
+                        "entry_blocked_position_state_not_guard_compatible"
+                    ],
+                }
+            )
+
+
+def _empty_m_position_state() -> dict[str, Any]:
+    return {
+        "side": None,
+        "entry_notional": 0.0,
+        "entry_qty": 0.0,
+    }
+
+
+def _open_m_position_side(position: dict[str, Any]) -> str | None:
+    side = position.get("side")
+    if side in {"UP", "DOWN"} and float(position.get("entry_qty", 0.0)) > 0.0:
+        return str(side)
+    return None
+
+
+def _open_m_position_state(
+    *,
+    position: dict[str, Any],
+    prediction: PolymarketPolicyPrediction,
+    side: str,
+    guard_thresholds: dict[str, float],
+) -> None:
+    ask = _side_balance_side_feature(prediction.features, side, "ask") or 0.0
+    score = float(prediction.calibrated_expected_pnl_per_notional or 0.0)
+    notional = _m_position_state_paper_notional(
+        score=score,
+        guard_thresholds=guard_thresholds,
+    )
+    position["side"] = side
+    position["entry_notional"] = notional
+    position["entry_qty"] = 0.0 if ask <= 0.0 else notional / ask
+
+
+def _m_position_state_paper_notional(
+    *,
+    score: float,
+    guard_thresholds: dict[str, float],
+) -> float:
+    max_notional = float(
+        guard_thresholds.get(
+            "min_executable_bid_notional",
+            M_POSITION_STATE_MAX_PAPER_NOTIONAL,
+        )
+    )
+    return min(max_notional, max(0.01, score * max_notional * 5.0))
+
+
+def _m_position_exit_assessment(
+    *,
+    prediction: PolymarketPolicyPrediction,
+    position: dict[str, Any],
+    side: str,
+) -> dict[str, Any]:
+    bid = _side_balance_side_feature(prediction.features, side, "bid") or 0.0
+    liquidity = _side_balance_side_feature(
+        prediction.features,
+        side,
+        "executable_bid_notional",
+    )
+    entry_notional = float(position.get("entry_notional", 0.0))
+    executable = (
+        bid > 0.0
+        and liquidity is not None
+        and float(liquidity) + 1e-12 >= entry_notional
+    )
+    if executable:
+        reason_codes = [
+            "position_state_existing_position_would_exit",
+            "position_state_exit_liquidity_available",
+        ]
+    else:
+        reason_codes = [
+            "position_state_existing_position_would_hold",
+            "position_state_exit_liquidity_unavailable",
+        ]
+    return {
+        "executable": executable,
+        "bid": bid,
+        "liquidity": liquidity,
+        "entry_notional": entry_notional,
+        "reason_codes": reason_codes,
+    }
+
+
+def _m_entry_action(prediction: PolymarketPolicyPrediction) -> str:
+    action = str(prediction.calibrated_best_policy_action)
+    return "BUY_UP" if action.startswith("BUY_UP") else "BUY_DOWN"
+
+
 def _side_balance_prediction(
     *,
     prediction: PolymarketPolicyPrediction,
@@ -931,7 +1204,12 @@ def _side_balance_ranked_rows(
         reason_codes = ["side_balance_candidate_selected"] if selected else []
         if not selected:
             if bool(row.get("side_balance_guard_compatible_entry", False)):
-                reason_codes.append("entry_blocked_side_quota_full")
+                if bool(row.get("position_state_selection_evaluated", False)) and not bool(
+                    row.get("position_state_fresh_entry_compatible", False)
+                ):
+                    reason_codes.extend(row.get("position_state_reason_codes", ()))
+                else:
+                    reason_codes.append("entry_blocked_side_quota_full")
             else:
                 reason_codes.append(
                     "entry_blocked_side_balance_guard_compatibility_failed"
@@ -970,14 +1248,25 @@ def _side_balance_selection_summary(
     guard_compatible = [
         row for row in rows if bool(row.get("side_balance_guard_compatible_entry", False))
     ]
+    fresh_entry_compatible = [
+        row
+        for row in guard_compatible
+        if bool(row.get("position_state_fresh_entry_compatible", False))
+    ]
     side_distribution = Counter(row["selected_side"] for row in selected)
     guard_side_distribution = Counter(row["selected_side"] for row in guard_compatible)
+    fresh_side_distribution = Counter(
+        row["selected_side"] for row in fresh_entry_compatible
+    )
     market_by_side: dict[str, set[str]] = defaultdict(set)
     for row in selected:
         market_by_side[row["selected_side"]].add(str(row["market_id"]))
     guard_market_by_side: dict[str, set[str]] = defaultdict(set)
     for row in guard_compatible:
         guard_market_by_side[row["selected_side"]].add(str(row["market_id"]))
+    fresh_market_by_side: dict[str, set[str]] = defaultdict(set)
+    for row in fresh_entry_compatible:
+        fresh_market_by_side[row["selected_side"]].add(str(row["market_id"]))
     total = len(selected)
     max_side = max(side_distribution.values(), default=0)
     ratio = 0.0 if total == 0 else max_side / total
@@ -987,7 +1276,8 @@ def _side_balance_selection_summary(
     return {
         "candidate_count": len(rows),
         "pre_guard_candidate_count": len(rows),
-        "selection_pool": "guard_compatible_rows",
+        "selection_pool": "position_state_aware_guard_compatible_fresh_entry_rows",
+        "position_state_aware_selection_enabled": True,
         "guard_compatible_candidate_count": guard_total,
         "guard_compatible_up_entry_count": int(guard_side_distribution.get("UP", 0)),
         "guard_compatible_down_entry_count": int(
@@ -1003,6 +1293,36 @@ def _side_balance_selection_summary(
         "guard_compatible_side_entry_ratio": guard_ratio,
         "guard_compatible_two_sided_entry_set_exists": (
             len(guard_side_distribution) >= 2
+        ),
+        "position_state_fresh_entry_candidate_count": len(fresh_entry_compatible),
+        "position_state_fresh_up_entry_count": int(
+            fresh_side_distribution.get("UP", 0)
+        ),
+        "position_state_fresh_down_entry_count": int(
+            fresh_side_distribution.get("DOWN", 0)
+        ),
+        "position_state_fresh_up_market_count": len(
+            fresh_market_by_side.get("UP", set())
+        ),
+        "position_state_fresh_down_market_count": len(
+            fresh_market_by_side.get("DOWN", set())
+        ),
+        "position_state_blocked_count": sum(
+            1
+            for row in guard_compatible
+            if bool(row.get("position_state_selection_evaluated", False))
+            and not bool(row.get("position_state_fresh_entry_compatible", False))
+        ),
+        "position_state_blocked_reason_counts": dict(
+            sorted(
+                Counter(
+                    reason
+                    for row in guard_compatible
+                    if bool(row.get("position_state_selection_evaluated", False))
+                    and not bool(row.get("position_state_fresh_entry_compatible", False))
+                    for reason in row.get("position_state_reason_codes", ())
+                ).items()
+            )
         ),
         "guard_compatible_side_balance_gate_passed": _side_balance_gate_passed(
             up_count=int(guard_side_distribution.get("UP", 0)),

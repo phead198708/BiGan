@@ -1133,7 +1133,9 @@ def _candidate_specs(
             "side_balance_required": True,
             "side_balance_thresholds": dict(SELL_BEFORE_CLOSE_SIDE_BALANCE_THRESHOLDS),
             "side_balance_ranking_enabled": True,
-            "side_balance_selection_method": "score_ranked_per_side_quota",
+            "side_balance_selection_method": (
+                "position_state_aware_score_ranked_per_side_quota"
+            ),
             "side_balance_selection_fit_split": "validation",
             "side_balance_selection_evaluation_split": "shadow",
             "uses_shadow_for_fit": False,
@@ -1142,7 +1144,8 @@ def _candidate_specs(
                 "source eligibility candidate scoped to SELL_BEFORE_CLOSE actions",
                 "inherits exit-reliability, liquidity, spread, staleness, and queue-fill gates",
                 "keeps p_up side-alignment as diagnostic-only legacy evidence",
-                "applies deterministic per-side score quota before replay",
+                "applies deterministic position-state-aware per-side score quota before replay",
+                "excludes rows that would resolve to existing-position exits from fresh-entry quota",
                 "HOLD_TO_SETTLEMENT is disabled and remains diagnostic-only",
             ],
         },
@@ -1228,8 +1231,23 @@ def _candidate_report(
     )
     side_balance_required = bool(spec.get("side_balance_required", False))
     side_balance_thresholds = dict(spec.get("side_balance_thresholds", {}))
+    side_balance_prediction_set = (
+        build_sell_before_close_side_balanced_prediction_set(
+            predictions=shadow_predictions,
+            execution_buffer=float(spec.get("execution_buffer", execution_buffer)),
+            side_balance_thresholds=side_balance_thresholds,
+            guard_thresholds=dict(spec.get("entry_filter_thresholds", {})),
+            enforce_p_up_alignment=bool(
+                spec.get("p_up_side_alignment_filter_enabled", False)
+            ),
+        )
+        if side_balance_required and bool(spec.get("side_balance_ranking_enabled", False))
+        else None
+    )
     side_balance_selection_summary = (
-        _side_balance_selection_summary_for_predictions(
+        dict(side_balance_prediction_set["side_balance_selection_summary"])
+        if side_balance_prediction_set is not None
+        else _side_balance_selection_summary_for_predictions(
             predictions=shadow_predictions,
             thresholds=side_balance_thresholds,
         )
@@ -1334,6 +1352,24 @@ def _candidate_report(
         "side_balance_thresholds": side_balance_thresholds,
         "side_balance_selection_summary": side_balance_selection_summary,
         "side_balance_selection_method": spec.get("side_balance_selection_method"),
+        "position_state_aware_selection_enabled": bool(
+            side_balance_selection_summary.get(
+                "position_state_aware_selection_enabled",
+                False,
+            )
+        ),
+        "position_state_fresh_entry_candidate_count": (
+            side_balance_selection_summary.get(
+                "position_state_fresh_entry_candidate_count"
+            )
+        ),
+        "position_state_blocked_count": side_balance_selection_summary.get(
+            "position_state_blocked_count"
+        ),
+        "position_state_blocked_reason_counts": side_balance_selection_summary.get(
+            "position_state_blocked_reason_counts",
+            {},
+        ),
         "side_balance_selection_fit_split": spec.get(
             "side_balance_selection_fit_split"
         ),

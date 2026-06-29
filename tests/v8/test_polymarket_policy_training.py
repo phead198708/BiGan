@@ -475,6 +475,10 @@ def test_training_runner_writes_required_artifacts_and_manifest(
             "side_balance_gate_passed",
             "side_balance_thresholds",
             "side_balance_selection_summary",
+            "position_state_aware_selection_enabled",
+            "position_state_fresh_entry_candidate_count",
+            "position_state_blocked_count",
+            "position_state_blocked_reason_counts",
             ):
                 assert field_name in candidate
     sell_only_candidate = _candidate_by_name(
@@ -2363,9 +2367,13 @@ def test_side_balanced_selection_keeps_p_up_disagreement_diagnostic_only(
 
     assert prediction_set["p_up_side_alignment_filter_enabled"] is False
     assert prediction_set["p_up_side_alignment_diagnostic_enabled"] is True
-    assert summary["selection_pool"] == "guard_compatible_rows"
+    assert summary["selection_pool"] == (
+        "position_state_aware_guard_compatible_fresh_entry_rows"
+    )
+    assert summary["position_state_aware_selection_enabled"] is True
     assert summary["candidate_count"] == 3
     assert summary["guard_compatible_candidate_count"] == 3
+    assert summary["position_state_fresh_entry_candidate_count"] == 3
     assert summary["guard_compatible_two_sided_entry_set_exists"] is True
     assert summary["guard_compatible_side_balance_gate_passed"] is True
     assert summary["side_balance_gate_passed"] is True
@@ -2375,6 +2383,7 @@ def test_side_balanced_selection_keeps_p_up_disagreement_diagnostic_only(
         "good-down",
     }
     assert all(row["side_balance_guard_compatible_entry"] for row in selected_rows)
+    assert all(row["position_state_fresh_entry_compatible"] for row in selected_rows)
     assert disagreed_up_row["side_balance_guard_compatible_entry"] is True
     assert disagreed_up_row["p_up_side_alignment_passed"] is False
     assert disagreed_up_row["p_up_side_alignment_diagnostic_only"] is True
@@ -2392,6 +2401,95 @@ def test_side_balanced_selection_keeps_p_up_disagreement_diagnostic_only(
     assert replay_actions["disagreed-up"] == "BUY_UP_SELL_BEFORE_CLOSE"
     assert replay_actions["good-up"] == "NO_TRADE"
     assert replay_actions["good-down"] == "BUY_DOWN_SELL_BEFORE_CLOSE"
+
+
+def test_side_balanced_selection_excludes_position_state_exit_rows_before_quota(
+    tmp_path: Path,
+) -> None:
+    first_up_entry = _guard_prediction(
+        market_id="same-market",
+        decision_ts=1_000,
+        time_to_close_seconds=240.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    would_be_exit_row = _guard_prediction(
+        market_id="same-market",
+        decision_ts=2_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.72,
+    )
+    replacement_up_entry = _guard_prediction(
+        market_id="replacement-up",
+        decision_ts=3_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.74,
+    )
+    down_entry = _guard_prediction(
+        market_id="down-market",
+        decision_ts=4_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.30,
+    )
+
+    prediction_set = build_sell_before_close_side_balanced_prediction_set(
+        predictions=(
+            first_up_entry,
+            would_be_exit_row,
+            replacement_up_entry,
+            down_entry,
+        ),
+        execution_buffer=0.015,
+        side_balance_thresholds={
+            "side_quota_per_side": 2.0,
+            "min_per_side_entry_count": 1.0,
+            "min_per_side_market_count": 1.0,
+        },
+    )
+
+    rows = prediction_set["side_balance_candidate_entries"]
+    summary = prediction_set["side_balance_selection_summary"]
+    selected_rows = [row for row in rows if row["side_quota_selected"]]
+    same_market_exit_row = next(
+        row
+        for row in rows
+        if row["market_id"] == "same-market" and row["decision_ts"] == 2_000
+    )
+
+    assert summary["position_state_aware_selection_enabled"] is True
+    assert summary["guard_compatible_candidate_count"] == 4
+    assert summary["position_state_fresh_entry_candidate_count"] == 3
+    assert summary["position_state_blocked_count"] == 1
+    assert summary["position_state_blocked_reason_counts"][
+        "entry_blocked_position_state_not_fresh_entry"
+    ] == 1
+    assert same_market_exit_row["side_balance_guard_compatible_entry"] is True
+    assert same_market_exit_row["position_state_fresh_entry_compatible"] is False
+    assert same_market_exit_row["position_state_replay_action_if_selected"] == "SELL_UP"
+    assert "entry_blocked_existing_position_would_take_precedence" in (
+        same_market_exit_row["position_state_reason_codes"]
+    )
+    assert same_market_exit_row["side_quota_selected"] is False
+    assert {row["market_id"] for row in selected_rows} == {
+        "same-market",
+        "replacement-up",
+        "down-market",
+    }
+    assert all(row["position_state_fresh_entry_compatible"] for row in selected_rows)
+    assert {
+        (prediction.market_id, prediction.decision_ts): (
+            prediction.calibrated_best_policy_action
+        )
+        for prediction in prediction_set["predictions"]
+    } == {
+        ("same-market", 1_000): "BUY_UP_SELL_BEFORE_CLOSE",
+        ("same-market", 2_000): "NO_TRADE",
+        ("replacement-up", 3_000): "BUY_UP_SELL_BEFORE_CLOSE",
+        ("down-market", 4_000): "BUY_DOWN_SELL_BEFORE_CLOSE",
+    }
 
 
 def test_side_balanced_selection_allows_absent_p_up_auxiliary(
@@ -2438,6 +2536,7 @@ def test_side_balanced_selection_allows_absent_p_up_auxiliary(
     assert summary["side_balance_gate_passed"] is True
     assert summary["selected_entry_count"] == 3
     assert missing_aux_row["side_balance_guard_compatible_entry"] is True
+    assert missing_aux_row["position_state_fresh_entry_compatible"] is True
     assert missing_aux_row["p_up_side_alignment_passed"] is False
     assert missing_aux_row["p_up_side_alignment_diagnostic_only"] is True
     assert {
