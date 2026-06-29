@@ -475,6 +475,11 @@ def test_training_runner_writes_required_artifacts_and_manifest(
             "side_balance_gate_passed",
             "side_balance_thresholds",
             "side_balance_selection_summary",
+            "execution_pnl_aware_ranking_enabled",
+            "selected_execution_pnl_immediate_exit_pnl_sum",
+            "selected_execution_pnl_immediate_exit_return_mean",
+            "selected_execution_pnl_model_expected_pnl_sum",
+            "selected_execution_pnl_model_vs_immediate_exit_pnl_gap_estimate_sum",
             "position_state_aware_selection_enabled",
             "position_state_fresh_entry_candidate_count",
             "position_state_blocked_count",
@@ -2492,6 +2497,94 @@ def test_side_balanced_selection_excludes_position_state_exit_rows_before_quota(
     }
 
 
+def test_side_balanced_selection_uses_execution_pnl_aware_rank_score(
+    tmp_path: Path,
+) -> None:
+    high_model_bad_exit = _guard_prediction(
+        market_id="high-model-bad-exit-up",
+        decision_ts=1_000,
+        time_to_close_seconds=240.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.80,
+        up_bid=0.11,
+        up_ask=0.12,
+        up_spread_bps=869.0,
+        selected_action_return=0.20,
+    )
+    lower_model_better_exit = _guard_prediction(
+        market_id="lower-model-better-exit-up",
+        decision_ts=2_000,
+        time_to_close_seconds=240.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.78,
+        up_bid=0.51,
+        up_ask=0.52,
+        up_spread_bps=194.0,
+        selected_action_return=0.08,
+    )
+    down_entry = _guard_prediction(
+        market_id="balanced-down",
+        decision_ts=3_000,
+        time_to_close_seconds=240.0,
+        selected_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.20,
+        down_bid=0.51,
+        down_ask=0.52,
+        down_spread_bps=194.0,
+        selected_action_return=0.08,
+    )
+
+    prediction_set = build_sell_before_close_side_balanced_prediction_set(
+        predictions=(high_model_bad_exit, lower_model_better_exit, down_entry),
+        execution_buffer=0.015,
+        side_balance_thresholds={
+            "side_quota_per_side": 1.0,
+            "min_per_side_entry_count": 1.0,
+            "min_per_side_market_count": 1.0,
+        },
+    )
+
+    rows = prediction_set["side_balance_candidate_entries"]
+    summary = prediction_set["side_balance_selection_summary"]
+    bad_exit_row = next(row for row in rows if row["market_id"] == "high-model-bad-exit-up")
+    better_exit_row = next(
+        row for row in rows if row["market_id"] == "lower-model-better-exit-up"
+    )
+
+    assert prediction_set["execution_pnl_aware_ranking_enabled"] is True
+    assert summary["execution_pnl_aware_ranking_enabled"] is True
+    assert prediction_set["rank_score_components"] == (
+        "0.20*calibrated_action_score + 0.10*best_action_margin + "
+        "entry_exit_quality_score + 8.00*immediate_exit_return - "
+        "0.05*model_vs_immediate_exit_pnl_gap_estimate"
+    )
+    assert bad_exit_row["raw_calibrated_action_score"] > better_exit_row[
+        "raw_calibrated_action_score"
+    ]
+    assert bad_exit_row["execution_pnl_immediate_exit_return"] < better_exit_row[
+        "execution_pnl_immediate_exit_return"
+    ]
+    assert bad_exit_row["execution_pnl_aware_rank_score"] < better_exit_row[
+        "execution_pnl_aware_rank_score"
+    ]
+    assert bad_exit_row["side_quota_selected"] is False
+    assert better_exit_row["side_quota_selected"] is True
+    assert summary["selected_entry_count"] == 2
+    assert summary["selected_execution_pnl_immediate_exit_pnl_sum"] < 0.0
+    assert (
+        summary["selected_execution_pnl_model_vs_immediate_exit_pnl_gap_estimate_sum"]
+        > 0.0
+    )
+    assert {
+        prediction.market_id: prediction.calibrated_best_policy_action
+        for prediction in prediction_set["predictions"]
+    } == {
+        "high-model-bad-exit-up": "NO_TRADE",
+        "lower-model-better-exit-up": "BUY_UP_SELL_BEFORE_CLOSE",
+        "balanced-down": "BUY_DOWN_SELL_BEFORE_CLOSE",
+    }
+
+
 def test_side_balanced_selection_allows_absent_p_up_auxiliary(
     tmp_path: Path,
 ) -> None:
@@ -3385,14 +3478,24 @@ def _guard_prediction(
     down_queue_fill_probability_proxy: float = 0.90,
     up_spread_bps: float = 100.0,
     down_spread_bps: float = 100.0,
+    selected_action_return: float = 0.08,
+    unselected_sell_action_return: float = -0.10,
 ) -> PolymarketPolicyPrediction:
     estimated_up_probability_value = (
         float(estimated_up_probability)
         if estimated_up_probability is not None
         else float(p_up_auxiliary if p_up_auxiliary is not None else 0.50)
     )
-    buy_up_sell_return = 0.08 if selected_action == "BUY_UP_SELL_BEFORE_CLOSE" else -0.10
-    buy_down_sell_return = 0.08 if selected_action == "BUY_DOWN_SELL_BEFORE_CLOSE" else -0.10
+    buy_up_sell_return = (
+        selected_action_return
+        if selected_action == "BUY_UP_SELL_BEFORE_CLOSE"
+        else unselected_sell_action_return
+    )
+    buy_down_sell_return = (
+        selected_action_return
+        if selected_action == "BUY_DOWN_SELL_BEFORE_CLOSE"
+        else unselected_sell_action_return
+    )
     action_returns = {
         "NO_TRADE": 0.0,
         "BUY_UP_HOLD_TO_SETTLEMENT": -0.20,

@@ -1134,8 +1134,9 @@ def _candidate_specs(
             "side_balance_thresholds": dict(SELL_BEFORE_CLOSE_SIDE_BALANCE_THRESHOLDS),
             "side_balance_ranking_enabled": True,
             "side_balance_selection_method": (
-                "position_state_aware_score_ranked_per_side_quota"
+                "position_state_aware_execution_pnl_score_ranked_per_side_quota"
             ),
+            "execution_pnl_aware_ranking_enabled": True,
             "side_balance_selection_fit_split": "validation",
             "side_balance_selection_evaluation_split": "shadow",
             "uses_shadow_for_fit": False,
@@ -1145,6 +1146,7 @@ def _candidate_specs(
                 "inherits exit-reliability, liquidity, spread, staleness, and queue-fill gates",
                 "keeps p_up side-alignment as diagnostic-only legacy evidence",
                 "applies deterministic position-state-aware per-side score quota before replay",
+                "rank score includes causal execution-PnL-aware immediate-exit features",
                 "excludes rows that would resolve to existing-position exits from fresh-entry quota",
                 "HOLD_TO_SETTLEMENT is disabled and remains diagnostic-only",
             ],
@@ -1352,6 +1354,33 @@ def _candidate_report(
         "side_balance_thresholds": side_balance_thresholds,
         "side_balance_selection_summary": side_balance_selection_summary,
         "side_balance_selection_method": spec.get("side_balance_selection_method"),
+        "execution_pnl_aware_ranking_enabled": bool(
+            spec.get("execution_pnl_aware_ranking_enabled", False)
+            or side_balance_selection_summary.get(
+                "execution_pnl_aware_ranking_enabled",
+                False,
+            )
+        ),
+        "selected_execution_pnl_immediate_exit_pnl_sum": (
+            side_balance_selection_summary.get(
+                "selected_execution_pnl_immediate_exit_pnl_sum"
+            )
+        ),
+        "selected_execution_pnl_immediate_exit_return_mean": (
+            side_balance_selection_summary.get(
+                "selected_execution_pnl_immediate_exit_return_mean"
+            )
+        ),
+        "selected_execution_pnl_model_expected_pnl_sum": (
+            side_balance_selection_summary.get(
+                "selected_execution_pnl_model_expected_pnl_sum"
+            )
+        ),
+        "selected_execution_pnl_model_vs_immediate_exit_pnl_gap_estimate_sum": (
+            side_balance_selection_summary.get(
+                "selected_execution_pnl_model_vs_immediate_exit_pnl_gap_estimate_sum"
+            )
+        ),
         "position_state_aware_selection_enabled": bool(
             side_balance_selection_summary.get(
                 "position_state_aware_selection_enabled",
@@ -2469,6 +2498,11 @@ def _apply_candidate_spec(
         prediction_set = build_sell_before_close_side_balanced_prediction_set(
             predictions=calibrated_predictions,
             execution_buffer=float(spec.get("execution_buffer", 0.0)),
+            side_balance_thresholds=dict(spec.get("side_balance_thresholds", {})),
+            guard_thresholds=dict(spec.get("entry_filter_thresholds", {})),
+            enforce_p_up_alignment=bool(
+                spec.get("p_up_side_alignment_filter_enabled", False)
+            ),
         )
         return tuple(prediction_set["predictions"])
     return calibrated_predictions

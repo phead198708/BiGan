@@ -63,6 +63,11 @@ ACTION_FAMILY_COUNTERFACTUAL_REPLAY_SCHEMA_VERSION = (
 ACTION_FAMILY_MIN_HIGH_SCORE_SUPPORT = ACTION_VALUE_HIGH_SCORE_MIN_SUPPORT
 P_UP_MATERIAL_DISAGREEMENT_THRESHOLD = 0.55
 M_POSITION_STATE_MAX_PAPER_NOTIONAL = 0.20
+M_EXECUTION_PNL_AWARE_MODEL_SCORE_WEIGHT = 0.20
+M_EXECUTION_PNL_AWARE_IMMEDIATE_EXIT_RETURN_WEIGHT = 8.0
+M_EXECUTION_PNL_AWARE_MARGIN_WEIGHT = 0.10
+M_EXECUTION_PNL_AWARE_QUALITY_WEIGHT = 1.0
+M_EXECUTION_PNL_AWARE_GAP_PENALTY_WEIGHT = 0.05
 
 
 def build_action_family_eligibility_report(
@@ -666,9 +671,11 @@ def build_sell_before_close_side_balanced_prediction_set(
         "exit_policy": SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
         "entry_filter_thresholds": dict(entry_filter_thresholds),
         "position_state_aware_selection_enabled": True,
+        "execution_pnl_aware_ranking_enabled": True,
         "rank_score_components": (
-            "calibrated_action_score + 0.1*best_action_margin + "
-            "entry_exit_quality_score"
+            "0.20*calibrated_action_score + 0.10*best_action_margin + "
+            "entry_exit_quality_score + 8.00*immediate_exit_return - "
+            "0.05*model_vs_immediate_exit_pnl_gap_estimate"
         ),
         "side_balance_required": True,
         "side_balance_thresholds": thresholds,
@@ -707,8 +714,13 @@ def _side_balance_candidate_rows(
             prediction=prediction,
             side=side,
             guard_thresholds=guard_thresholds,
+            model_score=score,
         )
-        rank_score = score + margin * 0.1 + entry_exit_quality["entry_exit_quality_score"]
+        rank_components = _side_balance_execution_pnl_aware_rank_components(
+            model_score=score,
+            margin=margin,
+            entry_exit_quality=entry_exit_quality,
+        )
         guard = evaluate_sell_before_close_guard_compatibility(
             prediction=prediction,
             action=action,
@@ -723,10 +735,12 @@ def _side_balance_candidate_rows(
                 "action": action,
                 "selected_side": side,
                 "side_balance_bucket": side,
-                "candidate_rank_score": rank_score,
+                "candidate_rank_score": rank_components["candidate_rank_score"],
+                "execution_pnl_aware_ranking_enabled": True,
                 "raw_calibrated_action_score": score,
                 "best_action_margin": margin,
                 **entry_exit_quality,
+                **rank_components,
                 "p_up": p_up,
                 "side_balance_guard_compatible_entry": guard["passed"],
                 "exit_reliability_guard_passed": guard[
@@ -759,6 +773,7 @@ def _side_balance_entry_exit_quality_score(
     prediction: PolymarketPolicyPrediction,
     side: str,
     guard_thresholds: dict[str, float],
+    model_score: float,
 ) -> dict[str, Any]:
     features = prediction.features
     bid = _side_balance_side_feature(features, side, "bid")
@@ -808,6 +823,21 @@ def _side_balance_entry_exit_quality_score(
         - spread_penalty
         - staleness_penalty
     )
+    paper_notional = _m_position_state_paper_notional(
+        score=model_score,
+        guard_thresholds=guard_thresholds,
+    )
+    entry_shares = 0.0 if ask is None or ask <= 0.0 else paper_notional / float(ask)
+    immediate_exit_proceeds = entry_shares * float(bid or 0.0)
+    immediate_exit_pnl = immediate_exit_proceeds - paper_notional
+    immediate_exit_return = (
+        0.0 if paper_notional <= 0.0 else immediate_exit_pnl / paper_notional
+    )
+    model_expected_pnl = model_score * paper_notional
+    model_vs_immediate_exit_pnl_gap = max(
+        0.0,
+        model_expected_pnl - immediate_exit_pnl,
+    )
     return {
         "entry_exit_quality_score": quality_score,
         "exit_quality_bid": bid,
@@ -818,6 +848,57 @@ def _side_balance_entry_exit_quality_score(
         "entry_exit_quality_spread_bps": spread,
         "entry_exit_quality_book_staleness_ms": staleness,
         "entry_exit_quality_time_to_close_seconds": time_to_close,
+        "execution_pnl_entry_notional": paper_notional,
+        "execution_pnl_entry_share_qty": entry_shares,
+        "execution_pnl_immediate_exit_proceeds": immediate_exit_proceeds,
+        "execution_pnl_immediate_exit_pnl": immediate_exit_pnl,
+        "execution_pnl_immediate_exit_return": immediate_exit_return,
+        "execution_pnl_model_expected_pnl": model_expected_pnl,
+        "execution_pnl_model_vs_immediate_exit_pnl_gap_estimate": (
+            model_vs_immediate_exit_pnl_gap
+        ),
+    }
+
+
+def _side_balance_execution_pnl_aware_rank_components(
+    *,
+    model_score: float,
+    margin: float,
+    entry_exit_quality: dict[str, Any],
+) -> dict[str, float]:
+    model_score_component = model_score * M_EXECUTION_PNL_AWARE_MODEL_SCORE_WEIGHT
+    margin_component = margin * M_EXECUTION_PNL_AWARE_MARGIN_WEIGHT
+    entry_exit_quality_component = (
+        float(entry_exit_quality["entry_exit_quality_score"])
+        * M_EXECUTION_PNL_AWARE_QUALITY_WEIGHT
+    )
+    immediate_exit_component = (
+        float(entry_exit_quality["execution_pnl_immediate_exit_return"])
+        * M_EXECUTION_PNL_AWARE_IMMEDIATE_EXIT_RETURN_WEIGHT
+    )
+    gap_penalty = (
+        float(entry_exit_quality["execution_pnl_model_vs_immediate_exit_pnl_gap_estimate"])
+        * M_EXECUTION_PNL_AWARE_GAP_PENALTY_WEIGHT
+    )
+    rank_score = (
+        model_score_component
+        + margin_component
+        + entry_exit_quality_component
+        + immediate_exit_component
+        - gap_penalty
+    )
+    return {
+        "candidate_rank_score": rank_score,
+        "execution_pnl_aware_model_score_component": model_score_component,
+        "execution_pnl_aware_margin_component": margin_component,
+        "execution_pnl_aware_entry_exit_quality_component": (
+            entry_exit_quality_component
+        ),
+        "execution_pnl_aware_immediate_exit_return_component": (
+            immediate_exit_component
+        ),
+        "execution_pnl_aware_gap_penalty_component": gap_penalty,
+        "execution_pnl_aware_rank_score": rank_score,
     }
 
 
@@ -1278,6 +1359,7 @@ def _side_balance_selection_summary(
         "pre_guard_candidate_count": len(rows),
         "selection_pool": "position_state_aware_guard_compatible_fresh_entry_rows",
         "position_state_aware_selection_enabled": True,
+        "execution_pnl_aware_ranking_enabled": True,
         "guard_compatible_candidate_count": guard_total,
         "guard_compatible_up_entry_count": int(guard_side_distribution.get("UP", 0)),
         "guard_compatible_down_entry_count": int(
@@ -1344,6 +1426,24 @@ def _side_balance_selection_summary(
             )
         ),
         "selected_entry_count": total,
+        "selected_execution_pnl_immediate_exit_pnl_sum": _sum_row_float(
+            rows=selected,
+            field="execution_pnl_immediate_exit_pnl",
+        ),
+        "selected_execution_pnl_immediate_exit_return_mean": _mean_row_float(
+            rows=selected,
+            field="execution_pnl_immediate_exit_return",
+        ),
+        "selected_execution_pnl_model_expected_pnl_sum": _sum_row_float(
+            rows=selected,
+            field="execution_pnl_model_expected_pnl",
+        ),
+        "selected_execution_pnl_model_vs_immediate_exit_pnl_gap_estimate_sum": (
+            _sum_row_float(
+                rows=selected,
+                field="execution_pnl_model_vs_immediate_exit_pnl_gap_estimate",
+            )
+        ),
         "up_entry_count": int(side_distribution.get("UP", 0)),
         "down_entry_count": int(side_distribution.get("DOWN", 0)),
         "up_market_count": len(market_by_side.get("UP", set())),
@@ -1361,6 +1461,16 @@ def _side_balance_selection_summary(
             thresholds=thresholds,
         ),
     }
+
+
+def _sum_row_float(*, rows: list[dict[str, Any]], field: str) -> float:
+    return sum(float(row.get(field) or 0.0) for row in rows)
+
+
+def _mean_row_float(*, rows: list[dict[str, Any]], field: str) -> float | None:
+    if not rows:
+        return None
+    return _sum_row_float(rows=rows, field=field) / len(rows)
 
 
 def _side_balance_gate_passed(

@@ -2453,6 +2453,34 @@ def _m_promotion_attribution_row(
         ),
         "best_action_margin": candidate_entry.get("best_action_margin"),
         "candidate_rank_score": candidate_entry.get("candidate_rank_score"),
+        "execution_pnl_aware_ranking_enabled": bool(
+            candidate_entry.get("execution_pnl_aware_ranking_enabled", False)
+        ),
+        "execution_pnl_aware_rank_score": candidate_entry.get(
+            "execution_pnl_aware_rank_score"
+        ),
+        "execution_pnl_immediate_exit_return": candidate_entry.get(
+            "execution_pnl_immediate_exit_return"
+        ),
+        "execution_pnl_immediate_exit_pnl": candidate_entry.get(
+            "execution_pnl_immediate_exit_pnl"
+        ),
+        "execution_pnl_model_expected_pnl": candidate_entry.get(
+            "execution_pnl_model_expected_pnl"
+        ),
+        "execution_pnl_model_vs_immediate_exit_pnl_gap_estimate": (
+            candidate_entry.get(
+                "execution_pnl_model_vs_immediate_exit_pnl_gap_estimate"
+            )
+        ),
+        "entry_quality_ask": candidate_entry.get("entry_quality_ask"),
+        "exit_quality_bid": candidate_entry.get("exit_quality_bid"),
+        "entry_exit_quality_spread_bps": candidate_entry.get(
+            "entry_exit_quality_spread_bps"
+        ),
+        "entry_exit_quality_queue_fill": candidate_entry.get(
+            "entry_exit_quality_queue_fill"
+        ),
         "side_quota_rank": candidate_entry.get("side_quota_rank"),
         "side_quota_selected": bool(candidate_entry.get("side_quota_selected", False)),
         "action_return_target": action_return_target,
@@ -2817,6 +2845,14 @@ def _m_compact_attribution_row(row: dict[str, Any]) -> dict[str, Any]:
         "action",
         "side_quota_rank",
         "candidate_rank_score",
+        "execution_pnl_aware_rank_score",
+        "execution_pnl_immediate_exit_return",
+        "execution_pnl_immediate_exit_pnl",
+        "execution_pnl_model_vs_immediate_exit_pnl_gap_estimate",
+        "entry_quality_ask",
+        "exit_quality_bid",
+        "entry_exit_quality_spread_bps",
+        "entry_exit_quality_queue_fill",
         "raw_calibrated_action_score",
         "action_return_target",
         "label_pnl_target",
