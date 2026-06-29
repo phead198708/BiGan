@@ -231,6 +231,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "sell_before_close_side_balanced_candidate_summary",
         "sell_before_close_side_balanced_promotion_replay_attribution_report",
         "sell_before_close_side_balanced_promotion_replay_attribution_summary",
+        "m_frozen_selector_walk_forward_report",
+        "m_frozen_selector_walk_forward_summary",
         "sell_before_close_guard_threshold_sweep_report",
         "sell_before_close_guard_threshold_sweep_summary",
         "guard_compatible_candidate_coverage_report",
@@ -734,6 +736,93 @@ def test_training_runner_writes_required_artifacts_and_manifest(
     ]["#134_resume_allowed"] is False
     if attribution_summary["replay_total_pnl_sum"] < 0.0:
         assert attribution["source_model_candidate_eligible"] is False
+    walk_forward = _read_json(
+        result.artifact_paths["m_frozen_selector_walk_forward_report"]
+    )
+    walk_forward_summary = walk_forward[
+        "m_frozen_selector_walk_forward_report_id"
+    ]
+    walk_forward_payload = dict(walk_forward)
+    walk_forward_payload.pop("m_frozen_selector_walk_forward_report_id")
+    assert canonical_json_sha256(walk_forward_payload) == walk_forward_summary
+    assert walk_forward["schema_version"] == (
+        "bigan-v8-polymarket-m-frozen-selector-walk-forward-v1"
+    )
+    assert walk_forward["candidate_name"] == (
+        "M_sell_before_close_side_balanced_ranking_candidate"
+    )
+    assert walk_forward["diagnostic_only"] is True
+    assert walk_forward["baseline_selector_commit"] == (
+        "f35231014290b88e65970fab10193ec8acad0b49"
+    )
+    assert walk_forward["selector_method"] == (
+        "position_state_aware_execution_pnl_score_ranked_per_side_quota"
+    )
+    assert walk_forward["selector_weights_unchanged_from_baseline"] is True
+    assert walk_forward["rank_weight_tuning_allowed"] is False
+    assert walk_forward["rank_weight_tuning_performed"] is False
+    assert walk_forward["no_shadow_gate_feedback_used_for_tuning"] is True
+    assert walk_forward["uses_shadow_for_fit"] is False
+    assert walk_forward["walk_forward_window_source"] == (
+        "later_half_of_temporal_shadow_split"
+    )
+    assert walk_forward["rank_score_components"] == (
+        "0.20*calibrated_action_score + 0.10*best_action_margin + "
+        "entry_exit_quality_score + 8.00*immediate_exit_return - "
+        "0.05*model_vs_immediate_exit_pnl_gap_estimate"
+    )
+    assert walk_forward["frozen_rank_weights"] == {
+        "model_score_weight": 0.20,
+        "margin_weight": 0.10,
+        "entry_exit_quality_weight": 1.0,
+        "immediate_exit_return_weight": 8.0,
+        "gap_penalty_weight": 0.05,
+    }
+    assert walk_forward["p_up_side_alignment_filter_enabled"] is False
+    assert walk_forward["p_up_side_alignment_diagnostic_enabled"] is True
+    assert walk_forward["selected_entry_count"] == walk_forward[
+        "M_selected_entry_count"
+    ]
+    assert walk_forward["replay_entry_count"] == walk_forward[
+        "M_replay_entry_count"
+    ]
+    assert walk_forward["selected_exit_decision_count"] == 0
+    assert walk_forward["M_selected_exit_decision_count"] == 0
+    assert walk_forward["replay_entry_reconciliation"]["reconciled"] is True
+    assert walk_forward["M_replay_entry_reconciliation"] == walk_forward[
+        "replay_entry_reconciliation"
+    ]
+    assert set(walk_forward["replay_pnl_by_side"]) == {"UP", "DOWN"}
+    assert "rank_score_component_summary" in walk_forward
+    assert walk_forward["rank_score_component_summary"]["fields"][
+        "execution_pnl_aware_rank_score"
+    ]["selected_entries"]["count"] == walk_forward["selected_entry_count"]
+    assert isinstance(walk_forward["top_negative_replay_entries"], list)
+    assert walk_forward["source_model_candidate_eligible"] is False
+    assert walk_forward["promotion_evidence_eligible"] is False
+    assert walk_forward["paper_run_resume_allowed"] is False
+    assert walk_forward["#146_start_allowed"] is False
+    assert walk_forward["#134_resume_allowed"] is False
+    assert walk_forward["paper_only"] is True
+    assert walk_forward["capital_at_risk"] is False
+    assert "diagnostic_only_no_paper_live_unlock" in walk_forward[
+        "ineligible_reason_codes"
+    ]
+    assert source_eligibility["m_frozen_selector_walk_forward_summary"][
+        "selected_entry_count"
+    ] == walk_forward["selected_entry_count"]
+    assert manifest["m_frozen_selector_walk_forward_report_path"] == (
+        "m_frozen_selector_walk_forward_report.json"
+    )
+    assert looks_like_sha256(
+        manifest["m_frozen_selector_walk_forward_report_sha256"]
+    )
+    assert manifest["m_frozen_selector_walk_forward_summary"][
+        "selector_weights_unchanged_from_baseline"
+    ] is True
+    assert manifest["m_frozen_selector_walk_forward_summary"][
+        "#134_resume_allowed"
+    ] is False
     coverage = _read_json(
         result.artifact_paths["guard_compatible_candidate_coverage_report"]
     )

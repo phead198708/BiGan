@@ -18,12 +18,18 @@ from bigan.v8.polymarket.execution_ev import (
     run_polymarket_policy_replay,
 )
 from bigan.v8.polymarket.training.action_family_eligibility import (
+    M_EXECUTION_PNL_AWARE_GAP_PENALTY_WEIGHT,
+    M_EXECUTION_PNL_AWARE_IMMEDIATE_EXIT_RETURN_WEIGHT,
+    M_EXECUTION_PNL_AWARE_MARGIN_WEIGHT,
+    M_EXECUTION_PNL_AWARE_MODEL_SCORE_WEIGHT,
+    M_EXECUTION_PNL_AWARE_QUALITY_WEIGHT,
     action_family_eligibility_markdown,
     action_family_replay_variants_markdown,
     build_action_family_counterfactual_prediction_sets,
     build_action_family_eligibility_report,
     build_action_family_replay_variants_report,
     build_hold_to_settlement_longshot_guard_report,
+    build_sell_before_close_side_balanced_prediction_set,
     build_sell_before_close_support_aware_prediction_set,
     hold_to_settlement_longshot_guard_markdown,
 )
@@ -112,6 +118,11 @@ ACTION_VALUE_CONCENTRATION_WARN_THRESHOLD = 0.80
 ACTION_VALUE_CONCENTRATION_FAIL_THRESHOLD = 0.95
 P_UP_ACTION_DISAGREEMENT_FAIL_THRESHOLD = 0.50
 P_UP_MATERIAL_DISAGREEMENT_THRESHOLD = 0.55
+FROZEN_M_SELECTOR_BASELINE_COMMIT = "f35231014290b88e65970fab10193ec8acad0b49"
+FROZEN_M_SELECTOR_METHOD = "position_state_aware_execution_pnl_score_ranked_per_side_quota"
+M_FROZEN_SELECTOR_WALK_FORWARD_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-m-frozen-selector-walk-forward-v1"
+)
 
 
 def run_polymarket_policy_training(
@@ -374,6 +385,14 @@ def run_polymarket_policy_training(
         source_model_eligibility=source_model_eligibility,
         guard_compatible_coverage_reports=guard_compatible_coverage_reports,
     )
+    m_frozen_selector_walk_forward = _build_m_frozen_selector_walk_forward_report(
+        dataset=dataset,
+        shadow_predictions=shadow_predictions,
+        config=config,
+        calibration_error=float(calibration["calibration_error"]),
+        calibration_split=primary_calibration_split,
+        source_model_eligibility=source_model_eligibility,
+    )
     artifact_paths = _write_artifacts(
         run_dir=run_dir,
         config=config,
@@ -422,6 +441,7 @@ def run_polymarket_policy_training(
             sell_before_close_guard_threshold_sweep
         ),
         guard_compatible_coverage_reports=guard_compatible_coverage_reports,
+        m_frozen_selector_walk_forward=m_frozen_selector_walk_forward,
     )
     model_sha256 = _sha256_file(artifact_paths["model"])
     action_value_calibration_sha256 = _sha256_file(
@@ -498,6 +518,9 @@ def run_polymarket_policy_training(
                 ]
             )
         ),
+        "m_frozen_selector_walk_forward_report_sha256": _sha256_file(
+            artifact_paths["m_frozen_selector_walk_forward_report"]
+        ),
         "guard_compatible_candidate_coverage_report_sha256": _sha256_file(
             artifact_paths["guard_compatible_candidate_coverage_report"]
         ),
@@ -557,6 +580,7 @@ def run_polymarket_policy_training(
             sell_before_close_guard_threshold_sweep
         ),
         guard_compatible_coverage_reports=guard_compatible_coverage_reports,
+        m_frozen_selector_walk_forward_report=m_frozen_selector_walk_forward,
     )
     _write_json(artifact_paths["model_manifest"], model_manifest)
     artifact_hashes = {
@@ -612,6 +636,7 @@ def run_polymarket_policy_training(
         sell_before_close_guard_threshold_sweep_report=(
             sell_before_close_guard_threshold_sweep
         ),
+        m_frozen_selector_walk_forward_report=m_frozen_selector_walk_forward,
     )
 
 
@@ -3384,6 +3409,460 @@ def _sell_before_close_side_balanced_promotion_replay_attribution_markdown(
     return "\n".join(lines)
 
 
+def _build_m_frozen_selector_walk_forward_report(
+    *,
+    dataset: Any,
+    shadow_predictions: tuple[Any, ...],
+    config: PolymarketPolicyTrainingConfig,
+    calibration_error: float,
+    calibration_split: str,
+    source_model_eligibility: dict[str, Any],
+) -> dict[str, Any]:
+    walk_forward_predictions = _m_frozen_walk_forward_predictions(
+        shadow_predictions,
+    )
+    prediction_set = build_sell_before_close_side_balanced_prediction_set(
+        predictions=walk_forward_predictions,
+        execution_buffer=float(config.ev_threshold),
+    )
+    replay_config = replace(
+        config,
+        ev_threshold=float(prediction_set["ev_threshold"]),
+    )
+    decisions, guard_summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=tuple(prediction_set["predictions"]),
+        config=replay_config,
+        thresholds=prediction_set.get("entry_filter_thresholds"),
+        exit_policy=str(prediction_set["exit_policy"]),
+        candidate_name=str(prediction_set["variant"]),
+        p_up_side_alignment_filter_enabled=bool(
+            prediction_set.get("p_up_side_alignment_filter_enabled", False)
+        ),
+    )
+    replay_report = run_polymarket_policy_replay(
+        dataset=dataset,
+        decisions=decisions,
+        config=replay_config,
+        calibration_error=calibration_error,
+        calibration_split=calibration_split,
+        replay_split="shadow",
+        prediction_count=len(walk_forward_predictions),
+    )
+    examples_by_key = {
+        (str(example.market_id), int(example.decision_ts)): example.to_dict()
+        for example in dataset.shadow_examples
+    }
+    decision_rows = [decision.to_dict() for decision in decisions]
+    decisions_by_key = {
+        (str(row.get("market_id")), int(row.get("decision_ts", 0))): row
+        for row in decision_rows
+    }
+    decisions_by_market: dict[str, list[dict[str, Any]]] = {}
+    for decision in decision_rows:
+        decisions_by_market.setdefault(str(decision.get("market_id")), []).append(
+            decision
+        )
+    for market_decisions in decisions_by_market.values():
+        market_decisions.sort(key=lambda row: int(row.get("decision_ts", 0)))
+    entry_contexts = _m_replay_entry_contexts(
+        decisions=decision_rows,
+        decisions_by_market=decisions_by_market,
+        examples_by_key=examples_by_key,
+        replay_report=dict(replay_report),
+    )
+    rows = []
+    for entry in prediction_set.get("side_balance_candidate_entries", []):
+        key = (str(entry.get("market_id")), int(entry.get("decision_ts", 0)))
+        rows.append(
+            _m_promotion_attribution_row(
+                candidate_entry=dict(entry),
+                decision=decisions_by_key.get(key),
+                entry_context=entry_contexts.get(key),
+                decisions_by_market=decisions_by_market,
+                example=examples_by_key.get(key),
+                paper_notional=float(config.max_paper_notional),
+            )
+        )
+    rows.sort(
+        key=lambda row: (
+            str(row["selected_side"]),
+            not bool(row["side_quota_selected"]),
+            int(row["side_quota_rank"] or 999_999),
+            int(row["decision_ts"]),
+            str(row["market_id"]),
+        )
+    )
+    summary = _m_promotion_attribution_summary(
+        rows=rows,
+        replay_report=dict(replay_report),
+    )
+    selected_exit_decision_count = int(summary["selected_exit_decision_count"])
+    replay_total_pnl = float(summary["replay_total_pnl_sum"])
+    reconciliation = dict(summary["replay_entry_reconciliation"])
+    existing_source_candidate_eligible = bool(
+        source_model_eligibility.get("source_model_candidate_eligible", False)
+    )
+    walk_forward_gate_passed = (
+        bool(reconciliation.get("reconciled", False))
+        and selected_exit_decision_count == 0
+        and replay_total_pnl > 0.0
+    )
+    source_model_candidate_eligible = (
+        existing_source_candidate_eligible and walk_forward_gate_passed
+    )
+    ineligible_reason_codes = []
+    if not existing_source_candidate_eligible:
+        ineligible_reason_codes.append("existing_source_model_candidate_not_eligible")
+    if not bool(reconciliation.get("reconciled", False)):
+        ineligible_reason_codes.append("walk_forward_replay_entry_not_reconciled")
+    if selected_exit_decision_count != 0:
+        ineligible_reason_codes.append(
+            "walk_forward_selected_rows_resolved_to_exit_decisions"
+        )
+    if replay_total_pnl <= 0.0:
+        ineligible_reason_codes.append("walk_forward_replay_total_pnl_not_positive")
+    if not source_model_candidate_eligible:
+        ineligible_reason_codes.append("diagnostic_only_no_paper_live_unlock")
+    report = {
+        "schema_version": M_FROZEN_SELECTOR_WALK_FORWARD_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+        "report_type": "m_frozen_selector_walk_forward_validation",
+        "diagnostic_only": True,
+        "baseline_selector_commit": FROZEN_M_SELECTOR_BASELINE_COMMIT,
+        "selector_method": FROZEN_M_SELECTOR_METHOD,
+        "selector_weights_unchanged_from_baseline": True,
+        "rank_weight_tuning_allowed": False,
+        "rank_weight_tuning_performed": False,
+        "no_shadow_gate_feedback_used_for_tuning": True,
+        "uses_shadow_for_fit": False,
+        "out_of_sample_replay": True,
+        "walk_forward_window_source": "later_half_of_temporal_shadow_split",
+        "walk_forward_window_selection_rule": (
+            "sort shadow predictions by decision_ts and market_id, then evaluate "
+            "the later half without fitting or threshold tuning"
+        ),
+        "shadow_prediction_count": len(shadow_predictions),
+        "walk_forward_prediction_count": len(walk_forward_predictions),
+        "walk_forward_window": _m_frozen_walk_forward_window_payload(
+            walk_forward_predictions
+        ),
+        "rank_score_components": prediction_set.get("rank_score_components"),
+        "frozen_rank_weights": _m_frozen_selector_rank_weights(),
+        "rank_score_component_summary": _m_rank_score_component_summary(
+            prediction_set.get("side_balance_candidate_entries", [])
+        ),
+        "p_up_side_alignment_filter_enabled": bool(
+            prediction_set.get("p_up_side_alignment_filter_enabled", False)
+        ),
+        "p_up_side_alignment_diagnostic_enabled": bool(
+            prediction_set.get("p_up_side_alignment_diagnostic_enabled", False)
+        ),
+        "side_balance_selection_summary": dict(
+            prediction_set.get("side_balance_selection_summary", {})
+        ),
+        "exit_reliability_guard_summary": dict(guard_summary),
+        "selected_entry_count": int(summary["selected_entry_count"]),
+        "replay_entry_count": int(summary["replay_entry_count"]),
+        "selected_exit_decision_count": selected_exit_decision_count,
+        "M_selected_entry_count": int(summary["selected_entry_count"]),
+        "M_replay_entry_count": int(summary["replay_entry_count"]),
+        "M_selected_exit_decision_count": selected_exit_decision_count,
+        "replay_entry_reconciliation": reconciliation,
+        "M_replay_entry_reconciliation": reconciliation,
+        "replay_total_pnl_sum": replay_total_pnl,
+        "label_vs_replay_pnl_gap": float(summary["label_vs_replay_pnl_gap"]),
+        "replay_pnl_by_side": dict(summary["replay_total_pnl_by_side"]),
+        "selected_label_pnl_sum_by_side": dict(
+            summary["selected_label_pnl_sum_by_side"]
+        ),
+        "label_vs_replay_pnl_gap_by_side": dict(
+            summary["label_vs_replay_pnl_gap_by_side"]
+        ),
+        "selected_positive_label_count_by_side": dict(
+            summary["selected_positive_label_count_by_side"]
+        ),
+        "selected_negative_label_count_by_side": dict(
+            summary["selected_negative_label_count_by_side"]
+        ),
+        "replay_positive_pnl_count_by_side": dict(
+            summary["replay_positive_pnl_count_by_side"]
+        ),
+        "replay_negative_pnl_count_by_side": dict(
+            summary["replay_negative_pnl_count_by_side"]
+        ),
+        "walk_forward_replay_pnl_positive": replay_total_pnl > 0.0,
+        "walk_forward_replay_gate_passed": walk_forward_gate_passed,
+        "walk_forward_replay_pnl_interpretation": (
+            "unseen walk-forward replay PnL is positive"
+            if replay_total_pnl > 0.0
+            else "unseen walk-forward replay PnL is not positive"
+        ),
+        "source_model_candidate_eligible": source_model_candidate_eligible,
+        "existing_source_model_candidate_eligible": existing_source_candidate_eligible,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "top_negative_replay_entries": _m_top_negative_selected_entries(rows),
+        "rows": rows,
+        "ineligible_reason_codes": sorted(set(ineligible_reason_codes)),
+        **compact_safety_fields(),
+    }
+    report["m_frozen_selector_walk_forward_report_id"] = canonical_json_sha256(
+        report
+    )
+    return report
+
+
+def _m_frozen_walk_forward_predictions(
+    shadow_predictions: tuple[Any, ...],
+) -> tuple[Any, ...]:
+    ordered = tuple(
+        sorted(
+            shadow_predictions,
+            key=lambda row: (int(row.decision_ts), str(row.market_id)),
+        )
+    )
+    if not ordered:
+        return ()
+    start_index = len(ordered) // 2
+    return ordered[start_index:] or ordered
+
+
+def _m_frozen_walk_forward_window_payload(
+    predictions: tuple[Any, ...],
+) -> dict[str, Any]:
+    if not predictions:
+        return {
+            "start_decision_ts": None,
+            "end_decision_ts": None,
+            "market_count": 0,
+        }
+    decision_ts_values = [int(row.decision_ts) for row in predictions]
+    return {
+        "start_decision_ts": min(decision_ts_values),
+        "end_decision_ts": max(decision_ts_values),
+        "market_count": len({str(row.market_id) for row in predictions}),
+    }
+
+
+def _m_frozen_selector_rank_weights() -> dict[str, float]:
+    return {
+        "model_score_weight": M_EXECUTION_PNL_AWARE_MODEL_SCORE_WEIGHT,
+        "margin_weight": M_EXECUTION_PNL_AWARE_MARGIN_WEIGHT,
+        "entry_exit_quality_weight": M_EXECUTION_PNL_AWARE_QUALITY_WEIGHT,
+        "immediate_exit_return_weight": (
+            M_EXECUTION_PNL_AWARE_IMMEDIATE_EXIT_RETURN_WEIGHT
+        ),
+        "gap_penalty_weight": M_EXECUTION_PNL_AWARE_GAP_PENALTY_WEIGHT,
+    }
+
+
+def _m_rank_score_component_summary(
+    rows: Any,
+) -> dict[str, Any]:
+    all_rows = [dict(row) for row in rows]
+    selected_rows = [row for row in all_rows if bool(row.get("side_quota_selected"))]
+    fields = (
+        "raw_calibrated_action_score",
+        "best_action_margin",
+        "entry_exit_quality_score",
+        "execution_pnl_immediate_exit_return",
+        "execution_pnl_immediate_exit_pnl",
+        "execution_pnl_model_expected_pnl",
+        "execution_pnl_model_vs_immediate_exit_pnl_gap_estimate",
+        "execution_pnl_aware_model_score_component",
+        "execution_pnl_aware_margin_component",
+        "execution_pnl_aware_entry_exit_quality_component",
+        "execution_pnl_aware_immediate_exit_return_component",
+        "execution_pnl_aware_gap_penalty_component",
+        "execution_pnl_aware_rank_score",
+        "candidate_rank_score",
+    )
+    return {
+        "candidate_row_count": len(all_rows),
+        "selected_entry_count": len(selected_rows),
+        "fields": {
+            field: {
+                "all_candidates": _m_component_stats(all_rows, field),
+                "selected_entries": _m_component_stats(selected_rows, field),
+            }
+            for field in fields
+        },
+    }
+
+
+def _m_component_stats(
+    rows: list[dict[str, Any]],
+    field: str,
+) -> dict[str, Any]:
+    values = [
+        float(row[field])
+        for row in rows
+        if row.get(field) is not None
+    ]
+    if not values:
+        return {
+            "count": 0,
+            "sum": 0.0,
+            "mean": None,
+            "min": None,
+            "max": None,
+        }
+    return {
+        "count": len(values),
+        "sum": sum(values),
+        "mean": sum(values) / len(values),
+        "min": min(values),
+        "max": max(values),
+    }
+
+
+def _m_frozen_selector_walk_forward_summary(
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    fields = (
+        "schema_version",
+        "candidate_name",
+        "diagnostic_only",
+        "baseline_selector_commit",
+        "selector_method",
+        "selector_weights_unchanged_from_baseline",
+        "rank_weight_tuning_allowed",
+        "rank_weight_tuning_performed",
+        "no_shadow_gate_feedback_used_for_tuning",
+        "uses_shadow_for_fit",
+        "walk_forward_window_source",
+        "walk_forward_prediction_count",
+        "rank_score_components",
+        "frozen_rank_weights",
+        "p_up_side_alignment_filter_enabled",
+        "p_up_side_alignment_diagnostic_enabled",
+        "selected_entry_count",
+        "replay_entry_count",
+        "selected_exit_decision_count",
+        "replay_entry_reconciliation",
+        "replay_total_pnl_sum",
+        "label_vs_replay_pnl_gap",
+        "replay_pnl_by_side",
+        "walk_forward_replay_pnl_positive",
+        "walk_forward_replay_gate_passed",
+        "walk_forward_replay_pnl_interpretation",
+        "source_model_candidate_eligible",
+        "promotion_evidence_eligible",
+        "paper_run_resume_allowed",
+        "#146_start_allowed",
+        "#134_resume_allowed",
+        "ineligible_reason_codes",
+    )
+    return {field: report.get(field) for field in fields}
+
+
+def _m_frozen_selector_walk_forward_markdown(
+    report: dict[str, Any],
+) -> str:
+    summary = _m_frozen_selector_walk_forward_summary(report)
+    lines = [
+        "# M Frozen Selector Walk-Forward Validation",
+        "",
+        f"- candidate_name: `{report['candidate_name']}`",
+        f"- baseline_selector_commit: `{report['baseline_selector_commit']}`",
+        f"- selector_method: `{report['selector_method']}`",
+        "- selector_weights_unchanged_from_baseline: "
+        f"`{str(report['selector_weights_unchanged_from_baseline']).lower()}`",
+        f"- uses_shadow_for_fit: `{str(report['uses_shadow_for_fit']).lower()}`",
+        "- no_shadow_gate_feedback_used_for_tuning: "
+        f"`{str(report['no_shadow_gate_feedback_used_for_tuning']).lower()}`",
+        "- walk_forward_replay_pnl_interpretation: "
+        f"`{report['walk_forward_replay_pnl_interpretation']}`",
+        "- source_model_candidate_eligible: "
+        f"`{str(report['source_model_candidate_eligible']).lower()}`",
+        f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+        f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+        "",
+        "## Required Metrics",
+        "",
+        "| selected | replay_entries | selected_exit_decisions | reconciled | replay_pnl | label_vs_replay_gap |",
+        "|---:|---:|---:|---|---:|---:|",
+        "| {selected} | {entries} | {exits} | {reconciled} | {pnl:.6f} | {gap:.6f} |".format(
+            selected=summary["selected_entry_count"],
+            entries=summary["replay_entry_count"],
+            exits=summary["selected_exit_decision_count"],
+            reconciled=str(
+                summary["replay_entry_reconciliation"]["reconciled"]
+            ).lower(),
+            pnl=float(summary["replay_total_pnl_sum"]),
+            gap=float(summary["label_vs_replay_pnl_gap"]),
+        ),
+        "",
+        "## PnL By Side",
+        "",
+        "| side | replay_pnl | label_pnl | gap |",
+        "|---|---:|---:|---:|",
+    ]
+    for side in _M_ATTRIBUTION_SIDES:
+        lines.append(
+            "| {side} | {replay:.6f} | {label:.6f} | {gap:.6f} |".format(
+                side=side,
+                replay=float(report["replay_pnl_by_side"][side]),
+                label=float(report["selected_label_pnl_sum_by_side"][side]),
+                gap=float(report["label_vs_replay_pnl_gap_by_side"][side]),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Rank Weights",
+            "",
+            "| component | weight |",
+            "|---|---:|",
+        ]
+    )
+    for name, value in report["frozen_rank_weights"].items():
+        lines.append(f"| `{name}` | {float(value):.6f} |")
+    lines.extend(
+        [
+            "",
+            "## Top Negative Replay Entries",
+            "",
+            "| side | rank | action | replay_pnl | label_pnl | market_id | decision_ts |",
+            "|---|---:|---|---:|---:|---|---:|",
+        ]
+    )
+    for row in report["top_negative_replay_entries"][:10]:
+        lines.append(
+            "| {side} | {rank} | `{action}` | {replay_pnl:.6f} | {label_pnl:.6f} | "
+            "`{market}` | {ts} |".format(
+                side=row["selected_side"],
+                rank=row["side_quota_rank"],
+                action=row["action"],
+                replay_pnl=float(row["total_polymarket_pnl"] or 0.0),
+                label_pnl=float(row["label_pnl_target"] or 0.0),
+                market=row["market_id"],
+                ts=row["decision_ts"],
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Ineligible Reasons",
+            "",
+            *[
+                f"- `{reason}`"
+                for reason in report.get("ineligible_reason_codes", [])
+            ],
+            "",
+            "- paper_only: true",
+            "- capital_at_risk: false",
+            "- polymarket_write_enabled: false",
+            "- wallet_signing_enabled: false",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _write_artifacts(
     *,
     run_dir: Path,
@@ -3419,6 +3898,7 @@ def _write_artifacts(
     sell_before_close_validation_failure_drilldown: dict[str, Any],
     sell_before_close_guard_threshold_sweep: dict[str, Any],
     guard_compatible_coverage_reports: dict[str, dict[str, Any]],
+    m_frozen_selector_walk_forward: dict[str, Any],
 ) -> dict[str, Path]:
     paths = {
         "training_config": run_dir / "polymarket_policy_training_config.json",
@@ -3545,6 +4025,12 @@ def _write_artifacts(
         ),
         "sell_before_close_guard_threshold_sweep_summary": (
             run_dir / "sell_before_close_guard_threshold_sweep_report.md"
+        ),
+        "m_frozen_selector_walk_forward_report": (
+            run_dir / "m_frozen_selector_walk_forward_report.json"
+        ),
+        "m_frozen_selector_walk_forward_summary": (
+            run_dir / "m_frozen_selector_walk_forward_report.md"
         ),
         "guard_compatible_candidate_coverage_report": (
             run_dir / "guard_compatible_candidate_coverage_report.json"
@@ -3959,6 +4445,14 @@ def _write_artifacts(
         ),
         encoding="utf-8",
     )
+    _write_json(
+        paths["m_frozen_selector_walk_forward_report"],
+        m_frozen_selector_walk_forward,
+    )
+    paths["m_frozen_selector_walk_forward_summary"].write_text(
+        _m_frozen_selector_walk_forward_markdown(m_frozen_selector_walk_forward),
+        encoding="utf-8",
+    )
     side_balanced_candidate_sha256 = _sha256_file(
         paths["sell_before_close_side_balanced_candidate_report"]
     )
@@ -3966,6 +4460,9 @@ def _write_artifacts(
         paths[
             "sell_before_close_side_balanced_promotion_replay_attribution_report"
         ]
+    )
+    m_frozen_selector_walk_forward_sha256 = _sha256_file(
+        paths["m_frozen_selector_walk_forward_report"]
     )
     side_balanced_candidate_summary = (
         _sell_before_close_side_balanced_candidate_summary(
@@ -3976,6 +4473,9 @@ def _write_artifacts(
         _sell_before_close_side_balanced_promotion_replay_attribution_summary(
             sell_before_close_side_balanced_promotion_replay_attribution
         )
+    )
+    m_frozen_selector_walk_forward_summary = (
+        _m_frozen_selector_walk_forward_summary(m_frozen_selector_walk_forward)
     )
     for report in (
         model_ranking_candidate_comparison,
@@ -4001,6 +4501,15 @@ def _write_artifacts(
         report[
             "sell_before_close_side_balanced_promotion_replay_attribution_summary"
         ] = side_balanced_promotion_replay_attribution_summary
+        report["m_frozen_selector_walk_forward_report_path"] = (
+            "m_frozen_selector_walk_forward_report.json"
+        )
+        report["m_frozen_selector_walk_forward_report_sha256"] = (
+            m_frozen_selector_walk_forward_sha256
+        )
+        report["m_frozen_selector_walk_forward_summary"] = (
+            m_frozen_selector_walk_forward_summary
+        )
     _write_candidate_artifacts(
         run_dir=run_dir,
         model_ranking_candidate_comparison=model_ranking_candidate_comparison,
@@ -4758,6 +5267,7 @@ def _model_manifest(
     sell_before_close_validation_failure_drilldown: dict[str, Any],
     sell_before_close_guard_threshold_sweep: dict[str, Any],
     guard_compatible_coverage_reports: dict[str, dict[str, Any]],
+    m_frozen_selector_walk_forward_report: dict[str, Any],
 ) -> dict[str, Any]:
     split_fields = {
         field_name: dataset_profile[field_name]
@@ -5192,6 +5702,19 @@ def _model_manifest(
             source_model_eligibility.get(
                 "sell_before_close_side_balanced_promotion_replay_attribution_summary",
                 {},
+            )
+        ),
+        "m_frozen_selector_walk_forward_report_path": (
+            "m_frozen_selector_walk_forward_report.json"
+        ),
+        "m_frozen_selector_walk_forward_report_sha256": (
+            action_family_artifact_hashes[
+                "m_frozen_selector_walk_forward_report_sha256"
+            ]
+        ),
+        "m_frozen_selector_walk_forward_summary": (
+            _m_frozen_selector_walk_forward_summary(
+                m_frozen_selector_walk_forward_report
             )
         ),
         "sell_before_close_validation_failure_primary_interpretation": (

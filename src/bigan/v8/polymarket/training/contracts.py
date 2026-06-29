@@ -533,6 +533,7 @@ class PolymarketPolicyTrainingResult:
     ]
     sell_before_close_validation_failure_drilldown_report: dict[str, Any]
     sell_before_close_guard_threshold_sweep_report: dict[str, Any]
+    m_frozen_selector_walk_forward_report: dict[str, Any]
 
 
 def safety_fields() -> dict[str, bool]:
