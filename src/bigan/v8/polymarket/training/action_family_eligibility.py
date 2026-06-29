@@ -584,12 +584,16 @@ def build_sell_before_close_side_balanced_prediction_set(
     predictions: tuple[PolymarketPolicyPrediction, ...],
     execution_buffer: float,
     side_balance_thresholds: dict[str, Any] | None = None,
+    guard_thresholds: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Build the M side-balanced SELL_BEFORE_CLOSE ranking prediction set."""
 
     thresholds = dict(SELL_BEFORE_CLOSE_SIDE_BALANCE_THRESHOLDS)
     if side_balance_thresholds:
         thresholds.update(side_balance_thresholds)
+    entry_filter_thresholds = dict(SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS)
+    if guard_thresholds:
+        entry_filter_thresholds.update(guard_thresholds)
     reranked = [
         _rerank_counterfactual_prediction(
             prediction=prediction,
@@ -602,7 +606,7 @@ def build_sell_before_close_side_balanced_prediction_set(
     candidate_rows = _side_balance_candidate_rows(
         predictions=tuple(reranked),
         execution_buffer=execution_buffer,
-        guard_thresholds=dict(SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS),
+        guard_thresholds=entry_filter_thresholds,
     )
     selection_pool_rows = [
         row for row in candidate_rows if bool(row["side_balance_guard_compatible_entry"])
@@ -643,9 +647,7 @@ def build_sell_before_close_side_balanced_prediction_set(
         "exit_reliability_guard_enabled": True,
         "p_up_side_alignment_filter_enabled": True,
         "exit_policy": SELL_BEFORE_CLOSE_EXIT_RELIABILITY_GUARD_EXIT_POLICY,
-        "entry_filter_thresholds": dict(
-            SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS
-        ),
+        "entry_filter_thresholds": dict(entry_filter_thresholds),
         "side_balance_required": True,
         "side_balance_thresholds": thresholds,
         "side_balance_candidate_entries": ranked_rows,

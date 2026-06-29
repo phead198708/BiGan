@@ -511,6 +511,9 @@ def run_polymarket_policy_training(
         "round_guard_coverage_report_sha256": _sha256_file(
             artifact_paths["round_guard_coverage_report"]
         ),
+        "guard_ablation_coverage_report_sha256": _sha256_file(
+            artifact_paths["guard_ablation_coverage_report"]
+        ),
     }
     model_manifest = _model_manifest(
         config=config,
@@ -2534,6 +2537,12 @@ def _write_artifacts(
         ),
         "round_guard_coverage_report": run_dir / "round_guard_coverage_report.json",
         "round_guard_coverage_summary": run_dir / "round_guard_coverage_report.md",
+        "guard_ablation_coverage_report": (
+            run_dir / "guard_ablation_coverage_report.json"
+        ),
+        "guard_ablation_coverage_summary": (
+            run_dir / "guard_ablation_coverage_report.md"
+        ),
         "all_predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "predictions": run_dir / "polymarket_policy_predictions.jsonl",
         "train_predictions": run_dir / "polymarket_policy_train_predictions.jsonl",
@@ -4245,6 +4254,12 @@ def _model_manifest(
         "round_guard_coverage_report_path": "round_guard_coverage_report.json",
         "round_guard_coverage_report_sha256": action_family_artifact_hashes[
             "round_guard_coverage_report_sha256"
+        ],
+        "guard_ablation_coverage_report_path": (
+            "guard_ablation_coverage_report.json"
+        ),
+        "guard_ablation_coverage_report_sha256": action_family_artifact_hashes[
+            "guard_ablation_coverage_report_sha256"
         ],
         "guard_compatible_candidate_coverage_summary": (
             coverage_summary

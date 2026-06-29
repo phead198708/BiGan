@@ -245,6 +245,8 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "liquidity_spread_staleness_regime_summary",
         "round_guard_coverage_report",
         "round_guard_coverage_summary",
+        "guard_ablation_coverage_report",
+        "guard_ablation_coverage_summary",
         "action_family_eligibility_report",
         "action_family_eligibility_summary",
         "hold_to_settlement_longshot_guard_report",
@@ -675,6 +677,36 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         assert report["#134_resume_allowed"] is False
         assert set(report["by_split"]) == {"train", "validation", "shadow"}
         assert looks_like_sha256(report[f"{report_name}_id"])
+    ablation = _read_json(result.artifact_paths["guard_ablation_coverage_report"])
+    assert ablation["report_type"] == "guard_ablation_coverage"
+    assert ablation["diagnostic_only"] is True
+    assert ablation["#146_start_allowed"] is False
+    assert ablation["#134_resume_allowed"] is False
+    assert [row["variant_name"] for row in ablation["variants"]] == [
+        "baseline_current_guard",
+        "without_p_up_alignment",
+        "p_up_alignment_min_0_50",
+        "p_up_alignment_min_0_52",
+        "p_up_alignment_min_0_55",
+        "p_up_alignment_min_0_58",
+        "relaxed_spread_1200",
+        "relaxed_queue_fill_0_50",
+        "relaxed_time_to_close_60",
+    ]
+    for variant in ablation["variants"]:
+        assert "guard_compatible_candidate_count" in variant
+        assert "guard_compatible_up_entry_count" in variant
+        assert "guard_compatible_down_entry_count" in variant
+        assert "validation_guard_compatible_up_entry_count" in variant
+        assert "shadow_guard_compatible_down_entry_count" in variant
+        assert "positive_label_candidate_count_by_side" in variant
+        assert "negative_label_candidate_count_by_side" in variant
+        assert "estimated_total_label_return" in variant
+        assert "p_up_disagreement_rate" in variant
+        assert "coverage_targets_passed" in variant
+        assert "exit_quality_only" in variant
+        assert "p_up_alignment_only" in variant
+    assert looks_like_sha256(ablation["guard_ablation_coverage_report_id"])
     round_guard = _read_json(result.artifact_paths["round_guard_coverage_report"])
     assert "rounds_with_zero_pre_guard_candidates" in round_guard["overall"]
     assert "rounds_with_pre_guard_but_zero_guard_compatible" in round_guard["overall"]
@@ -704,6 +736,10 @@ def test_training_runner_writes_required_artifacts_and_manifest(
         "round_guard_coverage_report.json"
     )
     assert looks_like_sha256(manifest["round_guard_coverage_report_sha256"])
+    assert manifest["guard_ablation_coverage_report_path"] == (
+        "guard_ablation_coverage_report.json"
+    )
+    assert looks_like_sha256(manifest["guard_ablation_coverage_report_sha256"])
     assert manifest["guard_compatible_candidate_coverage_summary"][
         "coverage_targets_passed"
     ] == coverage["coverage_targets_passed"]

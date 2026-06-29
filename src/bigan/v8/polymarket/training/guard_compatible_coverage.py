@@ -18,6 +18,7 @@ from bigan.v8.polymarket.training.contracts import (
     compact_safety_fields,
 )
 from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
+    SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS,
     SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
 )
 
@@ -41,6 +42,53 @@ COVERAGE_TARGETS = {
     "shadow_guard_compatible_up_entry_count": 10,
     "shadow_guard_compatible_down_entry_count": 10,
 }
+GUARD_ABLATION_VARIANTS = (
+    {
+        "variant_name": "baseline_current_guard",
+        "threshold_overrides": {},
+        "description": "Current p_up aligned exit-quality guard.",
+    },
+    {
+        "variant_name": "without_p_up_alignment",
+        "threshold_overrides": {"p_up_alignment_min": 0.0},
+        "description": "Exit-quality guard with p_up side-alignment disabled.",
+    },
+    {
+        "variant_name": "p_up_alignment_min_0_50",
+        "threshold_overrides": {"p_up_alignment_min": 0.50},
+        "description": "Current guard with p_up side-alignment minimum set to 0.50.",
+    },
+    {
+        "variant_name": "p_up_alignment_min_0_52",
+        "threshold_overrides": {"p_up_alignment_min": 0.52},
+        "description": "Current guard with p_up side-alignment minimum set to 0.52.",
+    },
+    {
+        "variant_name": "p_up_alignment_min_0_55",
+        "threshold_overrides": {"p_up_alignment_min": 0.55},
+        "description": "Current guard with p_up side-alignment minimum set to 0.55.",
+    },
+    {
+        "variant_name": "p_up_alignment_min_0_58",
+        "threshold_overrides": {"p_up_alignment_min": 0.58},
+        "description": "Current guard with p_up side-alignment minimum set to 0.58.",
+    },
+    {
+        "variant_name": "relaxed_spread_1200",
+        "threshold_overrides": {"max_spread": 1200.0},
+        "description": "Current guard with max spread relaxed to 1200 bps.",
+    },
+    {
+        "variant_name": "relaxed_queue_fill_0_50",
+        "threshold_overrides": {"min_queue_fill_probability_proxy": 0.50},
+        "description": "Current guard with queue-fill proxy minimum relaxed to 0.50.",
+    },
+    {
+        "variant_name": "relaxed_time_to_close_60",
+        "threshold_overrides": {"min_seconds_to_close": 60.0},
+        "description": "Current guard with minimum time-to-close relaxed to 60 seconds.",
+    },
+)
 
 
 def build_guard_compatible_coverage_reports(
@@ -188,6 +236,13 @@ def build_guard_compatible_coverage_reports(
             ),
         ),
         "round_guard_coverage_report": _round_guard_coverage_report(base_report),
+        "guard_ablation_coverage_report": _guard_ablation_coverage_report(
+            dataset=dataset,
+            split_inputs=split_inputs,
+            overall_predictions=overall_predictions,
+            execution_buffer=execution_buffer,
+            prediction_alignment=prediction_alignment,
+        ),
     }
     for report_name, report in reports.items():
         if report is base_report:
@@ -198,6 +253,9 @@ def build_guard_compatible_coverage_reports(
 
 def guard_compatible_coverage_markdown(report: dict[str, Any]) -> str:
     """Render a compact markdown view for any #149 coverage report."""
+
+    if report["report_type"] == "guard_ablation_coverage":
+        return _guard_ablation_markdown(report)
 
     overall = report["overall"]
     lines = [
@@ -327,6 +385,7 @@ def _split_coverage(
     examples: tuple[PolymarketPolicyExample, ...],
     predictions: tuple[PolymarketPolicyPrediction, ...],
     execution_buffer: float,
+    guard_thresholds: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     prediction_alignment = _prediction_alignment_diagnostics(
         examples=examples,
@@ -342,6 +401,7 @@ def _split_coverage(
     prediction_set = build_sell_before_close_side_balanced_prediction_set(
         predictions=predictions,
         execution_buffer=execution_buffer,
+        guard_thresholds=guard_thresholds,
     )
     rows = [dict(row) for row in prediction_set["side_balance_candidate_entries"]]
     example_by_key = {
@@ -367,6 +427,13 @@ def _split_coverage(
     negative_by_side = Counter()
     positive_guard_by_side = Counter()
     negative_guard_by_side = Counter()
+    guard_return_by_side: defaultdict[str, float] = defaultdict(float)
+    exit_quality_return_by_side: defaultdict[str, float] = defaultdict(float)
+    p_up_alignment_return_by_side: defaultdict[str, float] = defaultdict(float)
+    exit_quality_positive_by_side = Counter()
+    exit_quality_negative_by_side = Counter()
+    p_up_alignment_positive_by_side = Counter()
+    p_up_alignment_negative_by_side = Counter()
     pass_counts = {
         "exit_reliability_guard_pass_count_by_side": Counter(),
         "p_up_side_alignment_pass_count_by_side": Counter(),
@@ -390,14 +457,25 @@ def _split_coverage(
         else:
             negative_by_side[side] += 1
         if bool(row.get("side_balance_guard_compatible_entry", False)):
+            guard_return_by_side[side] += realized
             if realized > 0.0:
                 positive_guard_by_side[side] += 1
             else:
                 negative_guard_by_side[side] += 1
         if bool(row.get("exit_reliability_guard_passed", False)):
             pass_counts["exit_reliability_guard_pass_count_by_side"][side] += 1
+            exit_quality_return_by_side[side] += realized
+            if realized > 0.0:
+                exit_quality_positive_by_side[side] += 1
+            else:
+                exit_quality_negative_by_side[side] += 1
         if bool(row.get("p_up_side_alignment_passed", False)):
             pass_counts["p_up_side_alignment_pass_count_by_side"][side] += 1
+            p_up_alignment_return_by_side[side] += realized
+            if realized > 0.0:
+                p_up_alignment_positive_by_side[side] += 1
+            else:
+                p_up_alignment_negative_by_side[side] += 1
         reason_codes = set(row.get("side_balance_guard_reason_codes", ()))
         if "entry_blocked_insufficient_executable_bid_notional" not in reason_codes:
             pass_counts["liquidity_guard_pass_count_by_side"][side] += 1
@@ -416,6 +494,18 @@ def _split_coverage(
     max_guard_side = max(guard_by_side.values(), default=0)
     side_ratio = 0.0 if total_guard == 0 else max_guard_side / total_guard
     candidate_count_by_side = _side_counter_payload(candidates_by_side)
+    p_up_alignment_pass_by_side = pass_counts[
+        "p_up_side_alignment_pass_count_by_side"
+    ]
+    p_up_disagreement_by_side = Counter(
+        {
+            side: int(candidates_by_side.get(side, 0))
+            - int(p_up_alignment_pass_by_side.get(side, 0))
+            for side in SIDES
+        }
+    )
+    total_candidates = sum(candidates_by_side.values())
+    p_up_disagreement_count = sum(p_up_disagreement_by_side.values())
     report = {
         "split_name": split_name,
         "row_count": len(examples),
@@ -437,6 +527,21 @@ def _split_coverage(
         "two_sided_guard_compatible_market_count": sum(
             1 for sides in market_sides.values() if {"UP", "DOWN"} <= sides
         ),
+        "estimated_total_label_return": float(sum(guard_return_by_side.values())),
+        "estimated_total_label_return_by_side": _side_float_payload(
+            guard_return_by_side
+        ),
+        "p_up_disagreement_count": int(p_up_disagreement_count),
+        "p_up_disagreement_count_by_side": _side_counter_payload(
+            p_up_disagreement_by_side
+        ),
+        "p_up_disagreement_rate": (
+            0.0 if total_candidates == 0 else p_up_disagreement_count / total_candidates
+        ),
+        "p_up_disagreement_rate_by_side": _side_rate_payload(
+            p_up_disagreement_by_side,
+            candidates_by_side,
+        ),
         "positive_negative_counts_source": "action_return_targets",
         "positive_label_candidate_count_by_side": _side_counter_payload(
             positive_by_side
@@ -449,6 +554,18 @@ def _split_coverage(
         ),
         "negative_guard_compatible_label_candidate_count_by_side": (
             _side_counter_payload(negative_guard_by_side)
+        ),
+        "exit_quality_only": _subguard_summary(
+            pass_counter=pass_counts["exit_reliability_guard_pass_count_by_side"],
+            positive_counter=exit_quality_positive_by_side,
+            negative_counter=exit_quality_negative_by_side,
+            return_by_side=exit_quality_return_by_side,
+        ),
+        "p_up_alignment_only": _subguard_summary(
+            pass_counter=pass_counts["p_up_side_alignment_pass_count_by_side"],
+            positive_counter=p_up_alignment_positive_by_side,
+            negative_counter=p_up_alignment_negative_by_side,
+            return_by_side=p_up_alignment_return_by_side,
         ),
         "regime_rows": _regime_rows(split_name=split_name, regime_counts=regime_counts),
         "round_guard_coverage_rows": _round_guard_coverage_rows(
@@ -563,6 +680,30 @@ def _round_guard_coverage_rows(
             }
         )
     return round_rows
+
+
+def _subguard_summary(
+    *,
+    pass_counter: Counter[str],
+    positive_counter: Counter[str],
+    negative_counter: Counter[str],
+    return_by_side: defaultdict[str, float],
+) -> dict[str, Any]:
+    count_by_side = _side_counter_payload(pass_counter)
+    return {
+        "candidate_count": int(sum(count_by_side.values())),
+        "candidate_count_by_side": count_by_side,
+        "up_entry_count": count_by_side["UP"],
+        "down_entry_count": count_by_side["DOWN"],
+        "positive_label_candidate_count_by_side": _side_counter_payload(
+            positive_counter
+        ),
+        "negative_label_candidate_count_by_side": _side_counter_payload(
+            negative_counter
+        ),
+        "estimated_total_label_return": float(sum(return_by_side.values())),
+        "estimated_total_label_return_by_side": _side_float_payload(return_by_side),
+    }
 
 
 def _coverage_target_results(
@@ -705,6 +846,234 @@ def _round_guard_coverage_report(base_report: dict[str, Any]) -> dict[str, Any]:
         },
         **compact_safety_fields(),
     }
+
+
+def _guard_ablation_coverage_report(
+    *,
+    dataset: PolymarketPolicyDataset,
+    split_inputs: dict[
+        str,
+        tuple[
+            tuple[PolymarketPolicyExample, ...],
+            tuple[PolymarketPolicyPrediction, ...],
+        ],
+    ],
+    overall_predictions: tuple[PolymarketPolicyPrediction, ...],
+    execution_buffer: float,
+    prediction_alignment: dict[str, Any],
+) -> dict[str, Any]:
+    variants = []
+    for spec in GUARD_ABLATION_VARIANTS:
+        thresholds = dict(SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS)
+        thresholds.update(spec["threshold_overrides"])
+        by_split = {
+            split_name: _split_coverage(
+                split_name=split_name,
+                examples=examples,
+                predictions=predictions,
+                execution_buffer=execution_buffer,
+                guard_thresholds=thresholds,
+            )
+            for split_name, (examples, predictions) in split_inputs.items()
+        }
+        overall = _split_coverage(
+            split_name="overall",
+            examples=dataset.examples,
+            predictions=overall_predictions,
+            execution_buffer=execution_buffer,
+            guard_thresholds=thresholds,
+        )
+        target_results = _coverage_target_results(overall=overall, by_split=by_split)
+        variants.append(
+            _guard_ablation_variant_summary(
+                spec=spec,
+                thresholds=thresholds,
+                overall=overall,
+                by_split=by_split,
+                target_results=target_results,
+            )
+        )
+    report = {
+        "schema_version": GUARD_COMPATIBLE_CANDIDATE_COVERAGE_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+        "diagnostic_only": True,
+        "report_type": "guard_ablation_coverage",
+        "selection_pool": "guard_compatible_rows",
+        "execution_buffer": float(execution_buffer),
+        "coverage_targets": dict(COVERAGE_TARGETS),
+        "baseline_thresholds": dict(SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_THRESHOLDS),
+        "prediction_alignment": prediction_alignment,
+        "variant_count": len(variants),
+        "variants": variants,
+        "#145_ready_for_rerun": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "interpretation_rules": {
+            "p_up_relaxation_adds_profitable_up_candidates": (
+                "p_up guard may be too strict or p_up calibration may need review"
+            ),
+            "p_up_relaxation_adds_unprofitable_up_candidates": (
+                "p_up guard is likely protecting the policy from weak ranking"
+            ),
+            "microstructure_relaxation_adds_candidates": (
+                "spread, queue-fill, time-to-close, or liquidity coverage needs review"
+            ),
+            "no_variant_adds_two_sided_support": "primary blocker is data coverage",
+        },
+        **compact_safety_fields(),
+    }
+    _attach_report_id(report, "guard_ablation_coverage_report_id")
+    return report
+
+
+def _guard_ablation_variant_summary(
+    *,
+    spec: dict[str, Any],
+    thresholds: dict[str, float],
+    overall: dict[str, Any],
+    by_split: dict[str, dict[str, Any]],
+    target_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    coverage_targets_passed = all(row["passed"] for row in target_results)
+    validation = by_split["validation"]
+    shadow = by_split["shadow"]
+    return {
+        "variant_name": spec["variant_name"],
+        "description": spec["description"],
+        "threshold_overrides": dict(spec["threshold_overrides"]),
+        "effective_thresholds": dict(thresholds),
+        "guard_compatible_candidate_count": overall[
+            "guard_compatible_candidate_count"
+        ],
+        "guard_compatible_up_entry_count": overall[
+            "guard_compatible_up_entry_count"
+        ],
+        "guard_compatible_down_entry_count": overall[
+            "guard_compatible_down_entry_count"
+        ],
+        "validation_guard_compatible_up_entry_count": validation[
+            "guard_compatible_up_entry_count"
+        ],
+        "validation_guard_compatible_down_entry_count": validation[
+            "guard_compatible_down_entry_count"
+        ],
+        "shadow_guard_compatible_up_entry_count": shadow[
+            "guard_compatible_up_entry_count"
+        ],
+        "shadow_guard_compatible_down_entry_count": shadow[
+            "guard_compatible_down_entry_count"
+        ],
+        "positive_label_candidate_count_by_side": overall[
+            "positive_label_candidate_count_by_side"
+        ],
+        "negative_label_candidate_count_by_side": overall[
+            "negative_label_candidate_count_by_side"
+        ],
+        "positive_guard_compatible_label_candidate_count_by_side": overall[
+            "positive_guard_compatible_label_candidate_count_by_side"
+        ],
+        "negative_guard_compatible_label_candidate_count_by_side": overall[
+            "negative_guard_compatible_label_candidate_count_by_side"
+        ],
+        "estimated_total_label_return": overall["estimated_total_label_return"],
+        "estimated_total_label_return_by_side": overall[
+            "estimated_total_label_return_by_side"
+        ],
+        "p_up_disagreement_count": overall["p_up_disagreement_count"],
+        "p_up_disagreement_count_by_side": overall[
+            "p_up_disagreement_count_by_side"
+        ],
+        "p_up_disagreement_rate": overall["p_up_disagreement_rate"],
+        "p_up_disagreement_rate_by_side": overall[
+            "p_up_disagreement_rate_by_side"
+        ],
+        "coverage_targets_passed": coverage_targets_passed,
+        "coverage_target_failed_reason_codes": [
+            row["reason_code"] for row in target_results if not row["passed"]
+        ],
+        "coverage_target_results": target_results,
+        "exit_quality_only": overall["exit_quality_only"],
+        "p_up_alignment_only": overall["p_up_alignment_only"],
+        "by_split": {
+            split_name: _guard_ablation_split_summary(split_report)
+            for split_name, split_report in by_split.items()
+        },
+    }
+
+
+def _guard_ablation_split_summary(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "split_name": report["split_name"],
+        "guard_compatible_candidate_count": report[
+            "guard_compatible_candidate_count"
+        ],
+        "guard_compatible_up_entry_count": report[
+            "guard_compatible_up_entry_count"
+        ],
+        "guard_compatible_down_entry_count": report[
+            "guard_compatible_down_entry_count"
+        ],
+        "positive_label_candidate_count_by_side": report[
+            "positive_label_candidate_count_by_side"
+        ],
+        "negative_label_candidate_count_by_side": report[
+            "negative_label_candidate_count_by_side"
+        ],
+        "estimated_total_label_return": report["estimated_total_label_return"],
+        "estimated_total_label_return_by_side": report[
+            "estimated_total_label_return_by_side"
+        ],
+        "p_up_disagreement_rate": report["p_up_disagreement_rate"],
+        "exit_quality_only": report["exit_quality_only"],
+        "p_up_alignment_only": report["p_up_alignment_only"],
+    }
+
+
+def _guard_ablation_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Guard Ablation Coverage",
+        "",
+        f"- diagnostic_only: `{str(report['diagnostic_only']).lower()}`",
+        f"- variant_count: `{report['variant_count']}`",
+        f"- #145_ready_for_rerun: `{str(report['#145_ready_for_rerun']).lower()}`",
+        f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+        f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+        "",
+        "| variant | guard_compatible | up | down | val_up | val_down | shadow_up | shadow_down | label_return | p_up_disagreement | targets_passed | exit_quality | p_up_only |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|",
+    ]
+    for variant in report["variants"]:
+        lines.append(
+            "| {name} | {compatible} | {up} | {down} | {val_up} | {val_down} | "
+            "{shadow_up} | {shadow_down} | {label_return:.6f} | {p_up_rate:.6f} | "
+            "{targets} | {exit_quality} | {p_up_only} |".format(
+                name=variant["variant_name"],
+                compatible=variant["guard_compatible_candidate_count"],
+                up=variant["guard_compatible_up_entry_count"],
+                down=variant["guard_compatible_down_entry_count"],
+                val_up=variant["validation_guard_compatible_up_entry_count"],
+                val_down=variant["validation_guard_compatible_down_entry_count"],
+                shadow_up=variant["shadow_guard_compatible_up_entry_count"],
+                shadow_down=variant["shadow_guard_compatible_down_entry_count"],
+                label_return=variant["estimated_total_label_return"],
+                p_up_rate=variant["p_up_disagreement_rate"],
+                targets=str(variant["coverage_targets_passed"]).lower(),
+                exit_quality=variant["exit_quality_only"]["candidate_count"],
+                p_up_only=variant["p_up_alignment_only"]["candidate_count"],
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "- paper_only: true",
+            "- capital_at_risk: false",
+            "- polymarket_write_enabled: false",
+            "- wallet_signing_enabled: false",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _round_summary(report: dict[str, Any]) -> dict[str, Any]:
@@ -872,6 +1241,10 @@ def _bucket_staleness(value: float | None) -> str:
 
 def _side_counter_payload(counter: Counter[str]) -> dict[str, int]:
     return {side: int(counter.get(side, 0)) for side in SIDES}
+
+
+def _side_float_payload(counter: defaultdict[str, float]) -> dict[str, float]:
+    return {side: float(counter.get(side, 0.0)) for side in SIDES}
 
 
 def _side_rate_payload(
