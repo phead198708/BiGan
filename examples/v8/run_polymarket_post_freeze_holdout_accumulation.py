@@ -53,6 +53,7 @@ def run_polymarket_post_freeze_holdout_accumulation_cli(
         "mean_pnl_per_entry": report["mean_pnl_per_entry"],
         "label_vs_replay_pnl_gap": report["label_vs_replay_pnl_gap"],
         "failed_provenance_run_count": report["failed_provenance_run_count"],
+        "duplicate_excluded_run_count": report["duplicate_excluded_run_count"],
         "support_gate_passed": report["support_gate_passed"],
         "support_gate_reason_codes": report["support_gate_reason_codes"],
         "source_model_candidate_eligible": report["source_model_candidate_eligible"],

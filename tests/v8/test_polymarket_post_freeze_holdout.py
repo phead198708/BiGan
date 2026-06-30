@@ -250,6 +250,7 @@ def test_post_freeze_holdout_accumulation_counts_only_true_completed_runs(
     assert report["schema_version"] == M_POST_FREEZE_HOLDOUT_ACCUMULATION_SCHEMA_VERSION
     assert report["loaded_report_count"] == 3
     assert report["holdout_run_count"] == 2
+    assert report["duplicate_excluded_run_count"] == 0
     assert report["unique_market_count"] == 2
     assert report["failed_provenance_run_count"] == 1
     assert report["selected_entry_count"] == 2
@@ -312,6 +313,68 @@ def test_post_freeze_holdout_accumulation_support_gate_requires_markets_and_side
     assert result.report["source_model_candidate_eligible"] is False
     assert result.report["#146_start_allowed"] is False
     assert result.report["#134_resume_allowed"] is False
+
+
+def test_post_freeze_holdout_accumulation_dedupes_same_report_before_support(
+    tmp_path: Path,
+) -> None:
+    true_both_sides = _write_holdout_report(
+        tmp_path / "true_both_sides",
+        _holdout_validation_report(
+            run_id="true-both-sides",
+            market_ids=("market-both",),
+            replay_rows=[
+                _replay_row(
+                    market_id="market-both",
+                    decision_ts=10,
+                    side="UP",
+                    pnl=0.10,
+                ),
+                _replay_row(
+                    market_id="market-both",
+                    decision_ts=20,
+                    side="DOWN",
+                    pnl=0.10,
+                ),
+            ],
+            replay_pnl_by_side={"UP": 0.10, "DOWN": 0.10},
+        ),
+    )
+
+    result = run_polymarket_m_post_freeze_holdout_accumulation(
+        PolymarketPostFreezeHoldoutAccumulationConfig(
+            holdout_report_paths=(true_both_sides, true_both_sides),
+            output_dir=tmp_path / "accumulation",
+            min_replay_entry_support=4,
+            min_unique_market_support=1,
+        )
+    )
+
+    report = result.report
+    assert report["loaded_report_count"] == 2
+    assert report["holdout_run_count"] == 1
+    assert report["duplicate_excluded_run_count"] == 1
+    assert report["selected_entry_count"] == 2
+    assert report["replay_entry_count"] == 2
+    assert report["unique_market_count"] == 1
+    assert report["replay_entry_count_by_side"] == {"UP": 1, "DOWN": 1}
+    assert report["replay_total_pnl_sum"] == 0.20
+    assert report["support_gate_passed"] is False
+    assert report["support_gate_reason_codes"] == [
+        "insufficient_replay_entry_support"
+    ]
+    duplicate = report["duplicate_excluded_runs"][0]
+    assert "duplicate_report_sha256" in duplicate["duplicate_reason_codes"]
+    assert "duplicate_report_id" in duplicate["duplicate_reason_codes"]
+    assert "duplicate_run_id" in duplicate["duplicate_reason_codes"]
+    assert "duplicate_holdout_corpus_window_market_ids" in duplicate[
+        "duplicate_reason_codes"
+    ]
+    assert duplicate["dedupe_identity"]["market_ids"] == ("market-both",)
+    assert report["promotion_evidence_eligible"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["#146_start_allowed"] is False
+    assert report["#134_resume_allowed"] is False
 
 
 def test_post_freeze_holdout_accumulation_support_ready_still_does_not_unlock(
@@ -502,6 +565,9 @@ def _holdout_validation_report(
             "holdout_dataset_hash": canonical_json_sha256(
                 {"run_id": run_id, "kind": "dataset"}
             ),
+            "holdout_corpus_manifest_sha256": canonical_json_sha256(
+                {"run_id": run_id, "kind": "corpus"}
+            ),
             "holdout_training_corpus_hash": canonical_json_sha256(
                 {"run_id": run_id, "kind": "corpus"}
             ),
@@ -540,6 +606,9 @@ def _holdout_validation_report(
     }
     report["provenance"]["holdout_market_count"] = len(market_ids)
     report["provenance"]["holdout_market_ids"] = list(market_ids)
+    report["m_post_freeze_holdout_validation_report_id"] = canonical_json_sha256(
+        report
+    )
     return report
 
 
@@ -548,7 +617,7 @@ def _blocked_holdout_report(
     reason_codes: tuple[str, ...],
     replay_total_pnl_sum: float = 0.0,
 ) -> dict[str, Any]:
-    return {
+    report = {
         "schema_version": M_POST_FREEZE_HOLDOUT_SCHEMA_VERSION,
         "validation_status": "blocked_fail_closed",
         "true_post_freeze_holdout": False,
@@ -579,6 +648,10 @@ def _blocked_holdout_report(
         "polymarket_write_enabled": False,
         "wallet_signing_enabled": False,
     }
+    report["m_post_freeze_holdout_validation_report_id"] = canonical_json_sha256(
+        report
+    )
+    return report
 
 
 def _replay_row(

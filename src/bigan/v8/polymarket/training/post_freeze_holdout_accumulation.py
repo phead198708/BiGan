@@ -138,6 +138,7 @@ def _build_accumulation_report(
     included = [
         item for item in loaded_reports if _counts_toward_promotion_evidence(item["report"])
     ]
+    included, duplicate_excluded = _dedupe_included_reports(included)
     excluded = [
         _excluded_run_summary(item)
         for item in loaded_reports
@@ -206,6 +207,7 @@ def _build_accumulation_report(
         "loaded_report_count": len(loaded_reports),
         "holdout_run_count": len(included_reports),
         "excluded_run_count": len(excluded),
+        "duplicate_excluded_run_count": len(duplicate_excluded),
         "failed_provenance_run_count": len(blocked),
         "unique_market_count": len(market_ids),
         "selected_entry_count": selected_entry_count,
@@ -246,9 +248,11 @@ def _build_accumulation_report(
         "rank_weight_tuning_performed": False,
         "holdout_feedback_used_for_tuning": False,
         "only_true_post_freeze_holdout_runs_counted": True,
+        "duplicate_holdout_runs_excluded_from_pnl": True,
         "blocked_provenance_runs_excluded_from_pnl": True,
         "included_runs": [_included_run_summary(item) for item in included],
         "excluded_runs": excluded,
+        "duplicate_excluded_runs": duplicate_excluded,
         "blocked_provenance_runs": blocked,
         "top_negative_replay_entries": _top_negative_entries(replay_entry_rows),
         **compact_safety_fields(),
@@ -286,12 +290,118 @@ def _counts_toward_promotion_evidence(report: dict[str, Any]) -> bool:
     )
 
 
+def _dedupe_included_reports(
+    items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    unique: list[dict[str, Any]] = []
+    duplicates: list[dict[str, Any]] = []
+    for item in items:
+        duplicate_of = _find_duplicate(item, unique)
+        if duplicate_of is None:
+            unique.append(item)
+            continue
+        duplicates.append(_duplicate_run_summary(item, duplicate_of))
+    return unique, duplicates
+
+
+def _find_duplicate(
+    item: dict[str, Any],
+    unique_items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    for existing in unique_items:
+        if _duplicate_reason_codes(item, existing):
+            return existing
+    return None
+
+
+def _duplicate_reason_codes(
+    item: dict[str, Any],
+    existing: dict[str, Any],
+) -> list[str]:
+    identity = _dedupe_identity(item)
+    existing_identity = _dedupe_identity(existing)
+    reason_codes = []
+    if (
+        identity["report_sha256"]
+        and identity["report_sha256"] == existing_identity["report_sha256"]
+    ):
+        reason_codes.append("duplicate_report_sha256")
+    if (
+        identity["report_id"]
+        and identity["report_id"] == existing_identity["report_id"]
+    ):
+        reason_codes.append("duplicate_report_id")
+    if identity["run_id"] and identity["run_id"] == existing_identity["run_id"]:
+        reason_codes.append("duplicate_run_id")
+    if (
+        identity["holdout_corpus_manifest_sha256"]
+        and identity["holdout_corpus_manifest_sha256"]
+        == existing_identity["holdout_corpus_manifest_sha256"]
+        and identity["holdout_window"] == existing_identity["holdout_window"]
+        and identity["market_ids"] == existing_identity["market_ids"]
+    ):
+        reason_codes.append("duplicate_holdout_corpus_window_market_ids")
+    return reason_codes
+
+
+def _dedupe_identity(item: dict[str, Any]) -> dict[str, Any]:
+    report = item["report"]
+    provenance = dict(report.get("provenance", {}))
+    return {
+        "report_sha256": item["path_sha256"],
+        "report_id": str(
+            report.get("m_post_freeze_holdout_validation_report_id") or ""
+        ),
+        "run_id": str(report.get("run_id") or ""),
+        "holdout_corpus_manifest_sha256": str(
+            provenance.get("holdout_corpus_manifest_sha256")
+            or provenance.get("holdout_phase2_corpus_manifest_sha256")
+            or provenance.get("holdout_training_corpus_hash")
+            or ""
+        ),
+        "holdout_window": (
+            provenance.get("holdout_min_decision_ts"),
+            provenance.get("holdout_max_decision_ts"),
+        ),
+        "market_ids": _holdout_market_ids(report),
+    }
+
+
+def _holdout_market_ids(report: dict[str, Any]) -> tuple[str, ...]:
+    provenance = dict(report.get("provenance", {}))
+    market_ids = provenance.get("holdout_market_ids")
+    if isinstance(market_ids, list):
+        return tuple(sorted(str(market_id) for market_id in market_ids))
+    row_market_ids = {
+        str(row.get("market_id"))
+        for row in report.get("rows", [])
+        if row.get("market_id")
+    }
+    return tuple(sorted(row_market_ids))
+
+
+def _duplicate_run_summary(
+    item: dict[str, Any],
+    duplicate_of: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "report_path": item["path"],
+        "report_sha256": item["path_sha256"],
+        "duplicate_of_report_path": duplicate_of["path"],
+        "duplicate_of_report_sha256": duplicate_of["path_sha256"],
+        "duplicate_reason_codes": _duplicate_reason_codes(item, duplicate_of),
+        "dedupe_identity": _dedupe_identity(item),
+        "duplicate_of_dedupe_identity": _dedupe_identity(duplicate_of),
+    }
+
+
 def _included_run_summary(item: dict[str, Any]) -> dict[str, Any]:
     report = item["report"]
     provenance = dict(report.get("provenance", {}))
     return {
         "report_path": item["path"],
         "report_sha256": item["path_sha256"],
+        "dedupe_identity": _dedupe_identity(item),
         "validation_status": report.get("validation_status"),
         "true_post_freeze_holdout": report.get("true_post_freeze_holdout"),
         "prediction_attempted": report.get("prediction_attempted"),
@@ -434,6 +544,7 @@ def _accumulation_markdown(report: dict[str, Any]) -> str:
         "",
         f"- loaded_report_count: `{report['loaded_report_count']}`",
         f"- holdout_run_count: `{report['holdout_run_count']}`",
+        f"- duplicate_excluded_run_count: `{report['duplicate_excluded_run_count']}`",
         f"- unique_market_count: `{report['unique_market_count']}`",
         f"- selected_entry_count: `{report['selected_entry_count']}`",
         f"- replay_entry_count: `{report['replay_entry_count']}`",
@@ -466,6 +577,30 @@ def _accumulation_markdown(report: dict[str, Any]) -> str:
             "## Support Gate Reason Codes",
             "",
             *[f"- `{reason}`" for reason in support_reasons],
+            "",
+            "## Duplicate Excluded Runs",
+            "",
+        ]
+    )
+    if report["duplicate_excluded_runs"]:
+        lines.extend(
+            [
+                "| report | duplicate_of | reason_codes |",
+                "|---|---|---|",
+                *[
+                    "| {report_path} | {duplicate_of} | {reasons} |".format(
+                        report_path=Path(row["report_path"]).name,
+                        duplicate_of=Path(row["duplicate_of_report_path"]).name,
+                        reasons=", ".join(row.get("duplicate_reason_codes", [])),
+                    )
+                    for row in report["duplicate_excluded_runs"]
+                ],
+            ]
+        )
+    else:
+        lines.append("- none")
+    lines.extend(
+        [
             "",
             "## Excluded Runs",
             "",
