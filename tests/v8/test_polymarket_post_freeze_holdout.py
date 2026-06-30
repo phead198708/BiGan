@@ -2161,6 +2161,50 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert correction_config["large_regret_reversal_penalty_source"] == (
         "shadow_candidate_search_largest_regret_reversal_grid"
     )
+    assert correction_config["hts_p_up_reliability_guard_enabled"] is True
+    assert correction_config["hts_p_up_reliability_guard_source"] == (
+        "shadow_split_only_hts_p_up_side_bucket_regret"
+    )
+    assert correction_config["hts_p_up_reliability_guard_applies_to"] == (
+        "hold_to_settlement_actions_matching_p_up_implied_side_in_"
+        "high_shadow_regret_side_confidence_or_microstructure_bucket"
+    )
+    assert set(correction_config["hts_p_up_reliability_bucket_thresholds"]) == {
+        "p_up_confidence",
+        "queue",
+        "spread",
+        "staleness",
+        "threshold_source",
+        "time_to_close",
+    }
+    assert correction_config["hts_p_up_reliability_bucket_thresholds"][
+        "threshold_source"
+    ] == "shadow_split_decision_group_feature_quantiles"
+    assert isinstance(correction_config["hts_p_up_reliability_regime_priors"], dict)
+    assert set(correction_config["hts_p_up_reliability_bucket_diagnostics"]) == {
+        "by_p_up_confidence_bucket",
+        "by_queue_bucket",
+        "by_selected_vs_oracle_side",
+        "by_spread_bucket",
+        "by_staleness_bucket",
+        "by_time_to_close_bucket",
+    }
+    assert correction_config["hts_p_up_reliability_regret_threshold_source"] == (
+        "shadow_hts_p_up_positive_regret_q25"
+    )
+    assert correction_config["hts_p_up_reliability_min_support_source"] == (
+        "max(1, floor(sqrt(shadow_hts_group_count) / 2))"
+    )
+    assert correction_config["hts_p_up_reliability_penalty_source"] == (
+        "shadow_p_up_edge_quantile_grid"
+    )
+    assert correction_config["hts_p_up_reliability_no_trade_buffer_enabled"] is True
+    assert correction_config["hts_p_up_reliability_no_trade_buffer_source"] == (
+        "shadow_p_up_edge_q25"
+    )
+    assert correction_config["hts_p_up_reliability_no_trade_buffer"] == (
+        correction_config["p_up_edge_quantiles"]["q25"]
+    )
     assert correction_config["p_up_safety_target_disagreement_rate"] == 0.25
     assert correction_config["p_up_safety_target_source"] == (
         "config_hashed_stricter_than_hard_gate_target"
@@ -2219,6 +2263,30 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         raw_diagnostics["large_regret_reversal_guard_selection_metric_source"]
         == "shadow_split_only"
     )
+    assert raw_diagnostics["hts_p_up_reliability_guard_candidate_source"] == (
+        "shadow_p_up_edge_quantile_grid"
+    )
+    assert (
+        raw_diagnostics["hts_p_up_reliability_guard_selection_metric_source"]
+        == "shadow_split_only"
+    )
+    assert (
+        raw_diagnostics[
+            "hts_p_up_reliability_no_trade_buffer_excluded_from_raw_weight_search"
+        ]
+        is True
+    )
+    assert raw_diagnostics[
+        "hts_p_up_reliability_no_trade_buffer_application_stage"
+    ] == "post_shadow_raw_weight_selection_safety_buffer"
+    assert (
+        raw_diagnostics["hts_p_up_reliability_bucket_thresholds"]
+        == correction_config["hts_p_up_reliability_bucket_thresholds"]
+    )
+    assert (
+        raw_diagnostics["hts_p_up_reliability_bucket_diagnostics"]
+        == correction_config["hts_p_up_reliability_bucket_diagnostics"]
+    )
     assert (
         raw_diagnostics["large_regret_reversal_pair_regret_priors"]
         == correction_config["large_regret_reversal_pair_regret_priors"]
@@ -2237,6 +2305,12 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "selected_raw_weight_candidate"
     ]
     assert "shadow_hold_to_settlement_up_down_reversal_regret" in raw_diagnostics[
+        "selected_raw_weight_candidate"
+    ]
+    assert "candidate_hts_p_up_reliability_penalty" in raw_diagnostics[
+        "selected_raw_weight_candidate"
+    ]
+    assert "shadow_hts_p_up_reliability_regret_summary" in raw_diagnostics[
         "selected_raw_weight_candidate"
     ]
     assert "shadow_no_trade_missed_opportunity" in raw_diagnostics[
@@ -2296,6 +2370,7 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "ranking_confusion_matrix",
         "action_pair_regret_summary",
         "hold_to_settlement_up_down_reversal_regret",
+        "hts_p_up_reliability_regret_summary",
     }
     assert (
         ranking["train_shadow_metrics"]["decision_group_count"]
@@ -2350,6 +2425,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
             "group_normalized_raw_model_component",
             "p_up_misalignment_penalty_component",
             "large_regret_reversal_guard_component",
+            "hts_p_up_reliability_guard_component",
+            "hts_p_up_reliability_no_trade_buffer_component",
             "shadow_action_family_prior_component",
             "microstructure_quality_component",
         }

@@ -996,6 +996,14 @@ def _learn_o_shadow_ranking_correction(
     large_regret_reversal_priors = _derive_shadow_large_regret_reversal_priors(
         train_rows
     )
+    hts_reliability_thresholds = _derive_shadow_hts_p_up_reliability_thresholds(
+        train_rows,
+        p_edge_quantiles,
+    )
+    hts_reliability_priors = _derive_shadow_hts_p_up_reliability_priors(
+        train_rows,
+        hts_reliability_thresholds,
+    )
     probe_score_config = _derive_shadow_probe_score_config(
         p_edge_quantiles=p_edge_quantiles,
         global_mean=global_mean,
@@ -1083,6 +1091,43 @@ def _learn_o_shadow_ranking_correction(
         "large_regret_reversal_penalty_source": (
             "shadow_candidate_search_largest_regret_reversal_grid"
         ),
+        "hts_p_up_reliability_guard_enabled": True,
+        "hts_p_up_reliability_guard_source": (
+            "shadow_split_only_hts_p_up_side_bucket_regret"
+        ),
+        "hts_p_up_reliability_guard_applies_to": (
+            "hold_to_settlement_actions_matching_p_up_implied_side_in_"
+            "high_shadow_regret_side_confidence_or_microstructure_bucket"
+        ),
+        "hts_p_up_reliability_bucket_thresholds": hts_reliability_thresholds,
+        "hts_p_up_reliability_regime_priors": hts_reliability_priors[
+            "regime_priors"
+        ],
+        "hts_p_up_reliability_bucket_diagnostics": hts_reliability_priors[
+            "bucket_diagnostics"
+        ],
+        "hts_p_up_reliability_regret_threshold": hts_reliability_priors[
+            "regret_threshold"
+        ],
+        "hts_p_up_reliability_regret_threshold_source": hts_reliability_priors[
+            "regret_threshold_source"
+        ],
+        "hts_p_up_reliability_min_support": hts_reliability_priors[
+            "min_support"
+        ],
+        "hts_p_up_reliability_min_support_source": hts_reliability_priors[
+            "min_support_source"
+        ],
+        "hts_p_up_reliability_penalty": p_edge_quantiles["q75"],
+        "hts_p_up_reliability_penalty_source": (
+            "shadow_p_up_edge_q75"
+        ),
+        "hts_p_up_reliability_no_trade_buffer_enabled": True,
+        "hts_p_up_reliability_no_trade_buffer": p_edge_quantiles["q25"],
+        "hts_p_up_reliability_no_trade_buffer_source": "shadow_p_up_edge_q25",
+        "hts_p_up_reliability_no_trade_buffer_applies_to": (
+            "NO_TRADE weak-opportunity fallback for HTS side-confidence risk"
+        ),
         "p_up_safety_target_disagreement_rate": 0.25,
         "p_up_safety_target_source": "config_hashed_stricter_than_hard_gate_target",
         "shadow_p_up_selection_max_disagreement_rate": max(
@@ -1133,6 +1178,12 @@ def _learn_o_shadow_ranking_correction(
     config["large_regret_reversal_penalty"] = raw_diagnostics[
         "selected_raw_weight_candidate"
     ]["candidate_large_regret_reversal_penalty"]
+    config["hts_p_up_reliability_penalty"] = raw_diagnostics[
+        "selected_raw_weight_candidate"
+    ]["candidate_hts_p_up_reliability_penalty"]
+    config["hts_p_up_reliability_penalty_source"] = raw_diagnostics[
+        "selected_raw_weight_candidate"
+    ]["candidate_hts_p_up_reliability_penalty_source"]
     _apply_large_regret_adjusted_high_score_calibration(config)
     config["shadow_component_diagnostics"]["raw_model"] = raw_diagnostics
     config["correction_config_hash"] = canonical_json_sha256(config)
@@ -1231,6 +1282,9 @@ def _derive_shadow_raw_model_weight(
     candidate_reversal_penalties = _shadow_large_regret_reversal_penalty_candidates(
         base_ranking_correction["p_up_edge_quantiles"]
     )
+    candidate_hts_reliability_penalties = _shadow_hts_p_up_reliability_penalty_candidates(
+        base_ranking_correction["p_up_edge_quantiles"]
+    )
     max_shadow_p_up_disagreement_rate = float(
         base_ranking_correction["shadow_p_up_selection_max_disagreement_rate"]
     )
@@ -1239,126 +1293,142 @@ def _derive_shadow_raw_model_weight(
         for penalty in candidate_penalties:
             for reversal_threshold in candidate_reversal_thresholds:
                 for reversal_penalty in candidate_reversal_penalties:
-                    candidate_config = {
-                        **base_ranking_correction,
-                        "group_normalized_raw_model_weight": weight,
-                        "p_up_misalignment_raw_positive_penalty": penalty,
-                        "large_regret_reversal_alignment_threshold": (
-                            reversal_threshold
-                        ),
-                        "large_regret_reversal_penalty": reversal_penalty,
-                    }
-                    _apply_large_regret_adjusted_high_score_calibration(
-                        candidate_config
-                    )
-                    ranking_rows = _ranking_rows(
-                        _apply_o_shadow_ranking_correction(
-                            rows=train_rows,
-                            deployable_available=True,
-                            ranking_correction=candidate_config,
-                        )
-                    )
-                    metrics = _split_metric_views(
-                        ranking_rows,
-                        O_MODEL_PREDICTED_VARIANT,
-                        float(
-                            candidate_config["high_score_calibration"][
-                                "high_score_threshold"
-                            ]
-                        ),
-                    )["train_shadow"]
-                    p_up_summary = _p_up_action_disagreement_summary(
-                        rows=ranking_rows,
-                        variant=O_MODEL_PREDICTED_VARIANT,
-                        split="shadow",
-                    )
-                    high_score_profitable = (
-                        int(metrics["high_score_support_count"])
-                        >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
-                        and float(metrics["high_score_realized_return_mean"]) > 0.0
-                        and float(metrics["high_score_realized_return_sum"]) > 0.0
-                    )
-                    p_up_safety_passed = (
-                        int(
-                            p_up_summary[
-                                "candidate_scoped_p_up_action_comparable_count"
-                            ]
-                        )
-                        > 0
-                        and float(
-                            p_up_summary[
-                                "candidate_scoped_p_up_action_disagreement_rate"
-                            ]
-                        )
-                        <= max_shadow_p_up_disagreement_rate
-                    )
-                    selected_return_sum = float(
-                        metrics["selected_action_realized_replay_return_sum"]
-                    )
-                    largest_regret_case = metrics["largest_regret_case"]
-                    largest_regret = float(largest_regret_case.get("regret") or 0.0)
-                    eligible = (
-                        high_score_profitable
-                        and p_up_safety_passed
-                        and selected_return_sum > 0.0
-                    )
-                    candidate_rows.append(
-                        {
-                            "candidate_weight": weight,
-                            "candidate_weight_source": (
-                                "shadow_p_up_edge_quantile_grid"
-                            ),
-                            "candidate_p_up_misalignment_penalty": penalty,
-                            "candidate_p_up_misalignment_penalty_source": (
-                                "shadow_p_up_edge_quantile_grid"
-                            ),
-                            "candidate_large_regret_reversal_alignment_threshold": (
+                    for hts_reliability_penalty in candidate_hts_reliability_penalties:
+                        candidate_config = {
+                            **base_ranking_correction,
+                            "group_normalized_raw_model_weight": weight,
+                            "p_up_misalignment_raw_positive_penalty": penalty,
+                            "large_regret_reversal_alignment_threshold": (
                                 reversal_threshold
                             ),
-                            "candidate_large_regret_reversal_alignment_threshold_source": (
-                                "shadow_p_up_edge_quantile_grid"
+                            "large_regret_reversal_penalty": reversal_penalty,
+                            "hts_p_up_reliability_penalty": (
+                                hts_reliability_penalty
                             ),
-                            "candidate_large_regret_reversal_penalty": (
-                                reversal_penalty
-                            ),
-                            "candidate_large_regret_reversal_penalty_source": (
-                                "shadow_largest_regret_reversal_grid"
-                            ),
-                            "shadow_candidate_eligible": eligible,
-                            "shadow_high_score_profitable": high_score_profitable,
-                            "shadow_p_up_safety_passed": p_up_safety_passed,
-                            "shadow_selected_return_sum": selected_return_sum,
-                            "shadow_mean_regret": metrics["mean_regret"],
-                            "shadow_largest_regret_value": largest_regret,
-                            "shadow_largest_regret_case": largest_regret_case,
-                            "shadow_action_family_level_regret": metrics[
-                                "action_family_level_regret"
-                            ],
-                            "shadow_action_pair_regret_summary": metrics[
-                                "action_pair_regret_summary"
-                            ],
-                            "shadow_hold_to_settlement_up_down_reversal_regret": (
-                                metrics[
-                                    "hold_to_settlement_up_down_reversal_regret"
+                            "hts_p_up_reliability_no_trade_buffer_enabled": False,
+                        }
+                        _apply_large_regret_adjusted_high_score_calibration(
+                            candidate_config
+                        )
+                        ranking_rows = _ranking_rows(
+                            _apply_o_shadow_ranking_correction(
+                                rows=train_rows,
+                                deployable_available=True,
+                                ranking_correction=candidate_config,
+                            )
+                        )
+                        metrics = _split_metric_views(
+                            ranking_rows,
+                            O_MODEL_PREDICTED_VARIANT,
+                            float(
+                                candidate_config["high_score_calibration"][
+                                    "high_score_threshold"
                                 ]
                             ),
-                            "shadow_no_trade_missed_opportunity": metrics[
-                                "no_trade_missed_opportunity"
-                            ],
-                            "shadow_high_score_support_count": metrics[
-                                "high_score_support_count"
-                            ],
-                            "shadow_high_score_realized_return_mean": metrics[
-                                "high_score_realized_return_mean"
-                            ],
-                            "shadow_high_score_realized_return_sum": metrics[
-                                "high_score_realized_return_sum"
-                            ],
-                            "shadow_p_up_action_disagreement_rate": p_up_summary[
-                                "candidate_scoped_p_up_action_disagreement_rate"
-                            ],
-                        }
-                    )
+                        )["train_shadow"]
+                        p_up_summary = _p_up_action_disagreement_summary(
+                            rows=ranking_rows,
+                            variant=O_MODEL_PREDICTED_VARIANT,
+                            split="shadow",
+                        )
+                        high_score_profitable = (
+                            int(metrics["high_score_support_count"])
+                            >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
+                            and float(metrics["high_score_realized_return_mean"]) > 0.0
+                            and float(metrics["high_score_realized_return_sum"]) > 0.0
+                        )
+                        p_up_safety_passed = (
+                            int(
+                                p_up_summary[
+                                    "candidate_scoped_p_up_action_comparable_count"
+                                ]
+                            )
+                            > 0
+                            and float(
+                                p_up_summary[
+                                    "candidate_scoped_p_up_action_disagreement_rate"
+                                ]
+                            )
+                            <= max_shadow_p_up_disagreement_rate
+                        )
+                        selected_return_sum = float(
+                            metrics["selected_action_realized_replay_return_sum"]
+                        )
+                        largest_regret_case = metrics["largest_regret_case"]
+                        largest_regret = float(
+                            largest_regret_case.get("regret") or 0.0
+                        )
+                        eligible = (
+                            high_score_profitable
+                            and p_up_safety_passed
+                            and selected_return_sum > 0.0
+                        )
+                        candidate_rows.append(
+                            {
+                                "candidate_weight": weight,
+                                "candidate_weight_source": (
+                                    "shadow_p_up_edge_quantile_grid"
+                                ),
+                                "candidate_p_up_misalignment_penalty": penalty,
+                                "candidate_p_up_misalignment_penalty_source": (
+                                    "shadow_p_up_edge_quantile_grid"
+                                ),
+                                "candidate_large_regret_reversal_alignment_threshold": (
+                                    reversal_threshold
+                                ),
+                                "candidate_large_regret_reversal_alignment_threshold_source": (
+                                    "shadow_p_up_edge_quantile_grid"
+                                ),
+                                "candidate_large_regret_reversal_penalty": (
+                                    reversal_penalty
+                                ),
+                                "candidate_large_regret_reversal_penalty_source": (
+                                    "shadow_largest_regret_reversal_grid"
+                                ),
+                                "candidate_hts_p_up_reliability_penalty": (
+                                    hts_reliability_penalty
+                                ),
+                                "candidate_hts_p_up_reliability_penalty_source": (
+                                    "shadow_p_up_edge_quantile_grid"
+                                ),
+                                "shadow_candidate_eligible": eligible,
+                                "shadow_high_score_profitable": high_score_profitable,
+                                "shadow_p_up_safety_passed": p_up_safety_passed,
+                                "shadow_selected_return_sum": selected_return_sum,
+                                "shadow_mean_regret": metrics["mean_regret"],
+                                "shadow_largest_regret_value": largest_regret,
+                                "shadow_largest_regret_case": largest_regret_case,
+                                "shadow_action_family_level_regret": metrics[
+                                    "action_family_level_regret"
+                                ],
+                                "shadow_action_pair_regret_summary": metrics[
+                                    "action_pair_regret_summary"
+                                ],
+                                "shadow_hts_p_up_reliability_regret_summary": metrics[
+                                    "hts_p_up_reliability_regret_summary"
+                                ],
+                                "shadow_hold_to_settlement_up_down_reversal_regret": (
+                                    metrics[
+                                        "hold_to_settlement_up_down_reversal_regret"
+                                    ]
+                                ),
+                                "shadow_no_trade_missed_opportunity": metrics[
+                                    "no_trade_missed_opportunity"
+                                ],
+                                "shadow_high_score_support_count": metrics[
+                                    "high_score_support_count"
+                                ],
+                                "shadow_high_score_realized_return_mean": metrics[
+                                    "high_score_realized_return_mean"
+                                ],
+                                "shadow_high_score_realized_return_sum": metrics[
+                                    "high_score_realized_return_sum"
+                                ],
+                                "shadow_p_up_action_disagreement_rate": p_up_summary[
+                                    "candidate_scoped_p_up_action_disagreement_rate"
+                                ],
+                            }
+                        )
     eligible_candidates = [
         row for row in candidate_rows if bool(row["shadow_candidate_eligible"])
     ]
@@ -1369,9 +1439,11 @@ def _derive_shadow_raw_model_weight(
                 float(row["shadow_selected_return_sum"]),
                 -float(row["shadow_mean_regret"]),
                 -float(row["shadow_largest_regret_value"]),
+                float(row["candidate_hts_p_up_reliability_penalty"]),
                 float(row["candidate_large_regret_reversal_penalty"]),
                 float(row["shadow_high_score_realized_return_sum"]),
                 int(row["shadow_high_score_support_count"]),
+                -float(row["shadow_p_up_action_disagreement_rate"]),
                 -float(row["candidate_p_up_misalignment_penalty"]),
             ),
         )
@@ -1395,6 +1467,29 @@ def _derive_shadow_raw_model_weight(
             "shadow_largest_regret_reversal_grid"
         ),
         "large_regret_reversal_guard_selection_metric_source": "shadow_split_only",
+        "hts_p_up_reliability_guard_candidate_source": (
+            "shadow_p_up_edge_quantile_grid"
+        ),
+        "hts_p_up_reliability_guard_selection_metric_source": "shadow_split_only",
+        "hts_p_up_reliability_no_trade_buffer_excluded_from_raw_weight_search": True,
+        "hts_p_up_reliability_no_trade_buffer_application_stage": (
+            "post_shadow_raw_weight_selection_safety_buffer"
+        ),
+        "hts_p_up_reliability_bucket_thresholds": base_ranking_correction[
+            "hts_p_up_reliability_bucket_thresholds"
+        ],
+        "hts_p_up_reliability_regime_priors": base_ranking_correction[
+            "hts_p_up_reliability_regime_priors"
+        ],
+        "hts_p_up_reliability_bucket_diagnostics": base_ranking_correction[
+            "hts_p_up_reliability_bucket_diagnostics"
+        ],
+        "hts_p_up_reliability_regret_threshold": base_ranking_correction[
+            "hts_p_up_reliability_regret_threshold"
+        ],
+        "hts_p_up_reliability_regret_threshold_source": base_ranking_correction[
+            "hts_p_up_reliability_regret_threshold_source"
+        ],
         "large_regret_reversal_pair_regret_priors": base_ranking_correction[
             "large_regret_reversal_pair_regret_priors"
         ],
@@ -1508,6 +1603,18 @@ def _shadow_large_regret_reversal_penalty_candidates(
     return sorted(_bounded(value, 0.0, 1.5) for value in candidates)
 
 
+def _shadow_hts_p_up_reliability_penalty_candidates(
+    p_edge_quantiles: dict[str, float],
+) -> list[float]:
+    q75 = float(p_edge_quantiles["q75"])
+    candidates = {
+        0.0,
+        q75,
+        2.0 * q75,
+    }
+    return sorted(_bounded(value, 0.0, 1.0) for value in candidates)
+
+
 def _derive_shadow_large_regret_reversal_priors(
     train_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -1557,6 +1664,196 @@ def _derive_shadow_large_regret_reversal_priors(
             for key, values in sorted(priors.items())
         },
     }
+
+
+def _derive_shadow_hts_p_up_reliability_thresholds(
+    train_rows: list[dict[str, Any]],
+    p_edge_quantiles: dict[str, float],
+) -> dict[str, Any]:
+    representative_rows = _representative_decision_rows(train_rows)
+    return {
+        "threshold_source": "shadow_split_decision_group_feature_quantiles",
+        "p_up_confidence": p_edge_quantiles,
+        "time_to_close": _p_edge_quantiles(
+            [_normalized_time_to_close(row) for row in representative_rows]
+        ),
+        "spread": _p_edge_quantiles(
+            [_normalized_spread(row) for row in representative_rows]
+        ),
+        "queue": _p_edge_quantiles(
+            [
+                _bounded(
+                    float(row.get("entry_exit_quality_queue_fill") or 0.0),
+                    0.0,
+                    1.0,
+                )
+                for row in representative_rows
+            ]
+        ),
+        "staleness": _p_edge_quantiles(
+            [_normalized_staleness(row) for row in representative_rows]
+        ),
+    }
+
+
+def _representative_decision_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    representatives = []
+    seen_groups = set()
+    for row in rows:
+        group_id = row["decision_group_id"]
+        if group_id in seen_groups:
+            continue
+        seen_groups.add(group_id)
+        representatives.append(row)
+    return representatives
+
+
+def _derive_shadow_hts_p_up_reliability_priors(
+    train_rows: list[dict[str, Any]],
+    bucket_thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    grouped: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for row in train_rows:
+        grouped[row["decision_group_id"]][str(row.get("action") or "")] = row
+    cases = []
+    for group_rows in grouped.values():
+        up = group_rows.get("BUY_UP_HOLD_TO_SETTLEMENT")
+        down = group_rows.get("BUY_DOWN_HOLD_TO_SETTLEMENT")
+        if up is None or down is None:
+            continue
+        reference = up
+        implied_side = _p_up_implied_side(reference)
+        selected = up if implied_side == "UP" else down
+        oracle = max(
+            (up, down),
+            key=lambda row: float(row["replay_aligned_executable_label_target"]),
+        )
+        selected_return = float(selected["replay_aligned_executable_label_target"])
+        oracle_return = float(oracle["replay_aligned_executable_label_target"])
+        context = _hts_p_up_reliability_bucket_context(
+            selected,
+            bucket_thresholds,
+        )
+        cases.append(
+            {
+                **context,
+                "decision_group_id": selected["decision_group_id"],
+                "market_id": selected.get("market_id"),
+                "decision_ts": selected.get("decision_ts"),
+                "selected_action": selected.get("action"),
+                "oracle_action": oracle.get("action"),
+                "selected_side": implied_side,
+                "oracle_side": _side_from_action(str(oracle.get("action") or "")),
+                "selected_return": selected_return,
+                "oracle_return": oracle_return,
+                "regret": oracle_return - selected_return,
+                "p_up_confidently_wrong": implied_side
+                != _side_from_action(str(oracle.get("action") or "")),
+            }
+        )
+    positive_regrets = [float(case["regret"]) for case in cases if case["regret"] > 0.0]
+    regret_quantiles = _p_edge_quantiles(positive_regrets)
+    regret_threshold = regret_quantiles["q25"] if positive_regrets else 0.0
+    min_support = max(1, int((len(cases) ** 0.5) / 2.0))
+    regime_priors = _hts_reliability_case_summary(
+        cases,
+        key_fn=lambda case: case["hts_p_up_reliability_regime_key"],
+        regret_threshold=regret_threshold,
+        min_support=min_support,
+    )
+    return {
+        "decision_group_count": len(cases),
+        "regret_threshold": regret_threshold,
+        "regret_threshold_source": "shadow_hts_p_up_positive_regret_q25",
+        "min_support": min_support,
+        "min_support_source": "max(1, floor(sqrt(shadow_hts_group_count) / 2))",
+        "regime_priors": regime_priors,
+        "bucket_diagnostics": {
+            "by_p_up_confidence_bucket": _hts_reliability_case_summary(
+                cases,
+                key_fn=lambda case: case["p_up_confidence_bucket"],
+                regret_threshold=regret_threshold,
+                min_support=min_support,
+            ),
+            "by_time_to_close_bucket": _hts_reliability_case_summary(
+                cases,
+                key_fn=lambda case: case["time_to_close_bucket"],
+                regret_threshold=regret_threshold,
+                min_support=min_support,
+            ),
+            "by_spread_bucket": _hts_reliability_case_summary(
+                cases,
+                key_fn=lambda case: case["spread_bucket"],
+                regret_threshold=regret_threshold,
+                min_support=min_support,
+            ),
+            "by_queue_bucket": _hts_reliability_case_summary(
+                cases,
+                key_fn=lambda case: case["queue_bucket"],
+                regret_threshold=regret_threshold,
+                min_support=min_support,
+            ),
+            "by_staleness_bucket": _hts_reliability_case_summary(
+                cases,
+                key_fn=lambda case: case["staleness_bucket"],
+                regret_threshold=regret_threshold,
+                min_support=min_support,
+            ),
+            "by_selected_vs_oracle_side": _hts_reliability_case_summary(
+                cases,
+                key_fn=lambda case: (
+                    f"{case['selected_side']}->{case['oracle_side']}"
+                ),
+                regret_threshold=regret_threshold,
+                min_support=min_support,
+            ),
+        },
+        "top_confidently_wrong_shadow_cases": sorted(
+            (case for case in cases if bool(case["p_up_confidently_wrong"])),
+            key=lambda case: (-float(case["regret"]), str(case["decision_group_id"])),
+        )[:10],
+    }
+
+
+def _hts_reliability_case_summary(
+    cases: list[dict[str, Any]],
+    *,
+    key_fn: Any,
+    regret_threshold: float,
+    min_support: int,
+) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for case in cases:
+        grouped[str(key_fn(case))].append(case)
+    summary = {}
+    for key, bucket_cases in sorted(grouped.items()):
+        regrets = [float(case["regret"]) for case in bucket_cases]
+        positive_regrets = [value for value in regrets if value > 0.0]
+        wrong_count = sum(1 for case in bucket_cases if case["p_up_confidently_wrong"])
+        support = len(bucket_cases)
+        positive_regret_mean = (
+            statistics.mean(positive_regrets) if positive_regrets else 0.0
+        )
+        high_shadow_regret = (
+            support >= min_support
+            and positive_regret_mean >= regret_threshold
+            and wrong_count > 0
+        )
+        summary[key] = {
+            "support_count": support,
+            "p_up_confidently_wrong_count": wrong_count,
+            "p_up_confidently_wrong_rate": wrong_count / support if support else 0.0,
+            "regret_mean": statistics.mean(regrets) if regrets else 0.0,
+            "regret_sum": sum(regrets),
+            "regret_max": max(regrets, default=0.0),
+            "positive_regret_count": len(positive_regrets),
+            "positive_regret_mean": positive_regret_mean,
+            "high_shadow_regret": high_shadow_regret,
+            "guard_reason_codes": ["shadow_hts_p_up_confidently_wrong_regime"]
+            if high_shadow_regret
+            else [],
+        }
+    return summary
 
 
 def _derive_shadow_prior_weight(
@@ -1709,6 +2006,17 @@ def _apply_o_shadow_ranking_correction(
                 "o_model_score_source": "model_predicted_score",
                 "o_group_normalized_raw_model_score": raw_z,
                 "o_model_score_components": components,
+                "hts_p_up_reliability_buckets": (
+                    _hts_p_up_reliability_bucket_context(
+                        row,
+                        ranking_correction[
+                            "hts_p_up_reliability_bucket_thresholds"
+                        ],
+                    )
+                    if _action_family(str(row.get("action") or ""))
+                    == "HOLD_TO_SETTLEMENT"
+                    else {}
+                ),
                 "deployable_model_score_available": deployable_available,
                 "ranking_score_source_by_variant": {
                     "current_source_baseline": "observed_source_score",
@@ -1779,6 +2087,18 @@ def _o_model_score_components(
         large_regret_reversal_guard = -float(
             ranking_correction.get("large_regret_reversal_penalty", 0.0)
         )
+    hts_p_up_reliability_guard = 0.0
+    if _hts_p_up_reliability_guard_applies(row, ranking_correction):
+        hts_p_up_reliability_guard = -float(
+            ranking_correction.get("hts_p_up_reliability_penalty", 0.0)
+        )
+    hts_p_up_reliability_no_trade_buffer = 0.0
+    if family == "NO_TRADE" and bool(
+        ranking_correction.get("hts_p_up_reliability_no_trade_buffer_enabled", False)
+    ):
+        hts_p_up_reliability_no_trade_buffer = float(
+            ranking_correction.get("hts_p_up_reliability_no_trade_buffer", 0.0)
+        )
     return {
         "base_score": base_score,
         "p_up_side_alignment_component": side_alignment_component,
@@ -1786,6 +2106,10 @@ def _o_model_score_components(
         "group_normalized_raw_model_component": raw_component,
         "p_up_misalignment_penalty_component": p_up_misalignment_penalty,
         "large_regret_reversal_guard_component": large_regret_reversal_guard,
+        "hts_p_up_reliability_guard_component": hts_p_up_reliability_guard,
+        "hts_p_up_reliability_no_trade_buffer_component": (
+            hts_p_up_reliability_no_trade_buffer
+        ),
         "shadow_action_family_prior_component": (
             float(ranking_correction["shadow_action_family_prior_weight"]) * prior
         ),
@@ -1794,6 +2118,58 @@ def _o_model_score_components(
             * _microstructure_quality_proxy(row)
         ),
     }
+
+
+def _hts_p_up_reliability_guard_applies(
+    row: dict[str, Any],
+    ranking_correction: dict[str, Any],
+) -> bool:
+    if not bool(ranking_correction.get("hts_p_up_reliability_guard_enabled", False)):
+        return False
+    action = str(row.get("action") or "")
+    if _action_family(action) != "HOLD_TO_SETTLEMENT":
+        return False
+    if _side_from_action(action) != _p_up_implied_side(row):
+        return False
+    context = _hts_p_up_reliability_bucket_context(
+        row,
+        ranking_correction["hts_p_up_reliability_bucket_thresholds"],
+    )
+    return _hts_p_up_reliability_context_has_high_shadow_regret(
+        context,
+        ranking_correction,
+    )
+
+
+def _hts_p_up_reliability_context_has_high_shadow_regret(
+    context: dict[str, Any],
+    ranking_correction: dict[str, Any],
+) -> bool:
+    regime = ranking_correction.get("hts_p_up_reliability_regime_priors", {}).get(
+        context["hts_p_up_reliability_regime_key"],
+        {},
+    )
+    if bool(regime.get("high_shadow_regret", False)):
+        return True
+    bucket_diagnostics = ranking_correction.get(
+        "hts_p_up_reliability_bucket_diagnostics",
+        {},
+    )
+    bucket_lookup = {
+        "by_p_up_confidence_bucket": "p_up_confidence_bucket",
+        "by_time_to_close_bucket": "time_to_close_bucket",
+        "by_spread_bucket": "spread_bucket",
+        "by_queue_bucket": "queue_bucket",
+        "by_staleness_bucket": "staleness_bucket",
+    }
+    for diagnostic_key, context_key in bucket_lookup.items():
+        bucket = bucket_diagnostics.get(diagnostic_key, {}).get(
+            context.get(context_key),
+            {},
+        )
+        if bool(bucket.get("high_shadow_regret", False)):
+            return True
+    return False
 
 
 def _large_regret_reversal_guard_applies(
@@ -1837,6 +2213,72 @@ def _large_regret_reversal_guard_applies(
     return float(pair_prior.get("positive_regret_mean") or 0.0) >= float(
         ranking_correction.get("large_regret_reversal_pair_regret_threshold", 0.0)
     )
+
+
+def _hts_p_up_reliability_bucket_context(
+    row: dict[str, Any],
+    bucket_thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    p_up = _bounded(float(row.get("p_up") or 0.5), 0.0, 1.0)
+    p_down = 1.0 - p_up
+    p_edge = abs(p_up - 0.5)
+    implied_side = _p_up_implied_side(row)
+    p_up_confidence_bucket = _quantile_bucket(
+        p_edge,
+        bucket_thresholds["p_up_confidence"],
+        labels=("weak", "moderate", "strong", "very_strong"),
+    )
+    context = {
+        "p_up": p_up,
+        "p_down": p_down,
+        "p_up_edge": p_edge,
+        "p_up_implied_side": implied_side,
+        "p_up_confidence_bucket": p_up_confidence_bucket,
+        "time_to_close_bucket": _quantile_bucket(
+            _normalized_time_to_close(row),
+            bucket_thresholds["time_to_close"],
+            labels=("near", "mid", "far", "very_far"),
+        ),
+        "spread_bucket": _quantile_bucket(
+            _normalized_spread(row),
+            bucket_thresholds["spread"],
+            labels=("tight", "moderate", "wide", "very_wide"),
+        ),
+        "queue_bucket": _quantile_bucket(
+            _bounded(float(row.get("entry_exit_quality_queue_fill") or 0.0), 0.0, 1.0),
+            bucket_thresholds["queue"],
+            labels=("low", "medium", "high", "very_high"),
+        ),
+        "staleness_bucket": _quantile_bucket(
+            _normalized_staleness(row),
+            bucket_thresholds["staleness"],
+            labels=("fresh", "normal", "stale", "very_stale"),
+        ),
+    }
+    context["hts_p_up_reliability_regime_key"] = (
+        f"side={implied_side}|p_up_confidence={p_up_confidence_bucket}"
+    )
+    return context
+
+
+def _quantile_bucket(
+    value: float,
+    quantiles: dict[str, float],
+    *,
+    labels: tuple[str, str, str, str],
+) -> str:
+    if value <= float(quantiles["q25"]):
+        return labels[0]
+    if value <= float(quantiles["median"]):
+        return labels[1]
+    if value <= float(quantiles["q75"]):
+        return labels[2]
+    return labels[3]
+
+
+def _p_up_implied_side(row: dict[str, Any]) -> str:
+    p_up = _bounded(float(row.get("p_up") or 0.5), 0.0, 1.0)
+    return "UP" if p_up >= 0.5 else "DOWN"
 
 
 def _opposite_hold_to_settlement_action(action: str) -> str | None:
@@ -2787,6 +3229,7 @@ def _ranking_metrics(
     action_pair_regret_cases: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(
         list
     )
+    hts_p_up_reliability_cases = []
     high_score_returns = []
     split_rows: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
     no_trade_selection_count = 0
@@ -2846,10 +3289,24 @@ def _ranking_metrics(
                 selected_components.get("large_regret_reversal_guard_component")
                 or 0.0
             ),
+            "hts_p_up_reliability_guard_component": float(
+                selected_components.get("hts_p_up_reliability_guard_component")
+                or 0.0
+            ),
         }
         action_pair_regret_cases[(selected_action, oracle_action)].append(
             action_pair_case
         )
+        if selected.get("action_family") == "HOLD_TO_SETTLEMENT":
+            hts_p_up_reliability_cases.append(
+                {
+                    **action_pair_case,
+                    **(selected.get("hts_p_up_reliability_buckets") or {}),
+                    "selected_side_matches_oracle_side": (
+                        selected.get("selected_side") == oracle.get("selected_side")
+                    ),
+                }
+            )
         regrets.append(regret)
         if largest_regret_case is None or regret > float(largest_regret_case["regret"]):
             largest_regret_case = {
@@ -2874,6 +3331,9 @@ def _ranking_metrics(
                 ],
                 "large_regret_reversal_guard_component": action_pair_case[
                     "large_regret_reversal_guard_component"
+                ],
+                "hts_p_up_reliability_guard_component": action_pair_case[
+                    "hts_p_up_reliability_guard_component"
                 ],
                 "action_pair_key": f"{selected_action}->{oracle_action}",
             }
@@ -2982,6 +3442,9 @@ def _ranking_metrics(
         "hold_to_settlement_up_down_reversal_regret": (
             _hold_to_settlement_reversal_regret_summary(action_pair_regret_cases)
         ),
+        "hts_p_up_reliability_regret_summary": (
+            _hts_p_up_reliability_regret_summary(hts_p_up_reliability_cases)
+        ),
         "high_score_support_count": len(high_score_returns),
         "high_score_realized_return_mean": statistics.mean(high_score_returns)
         if high_score_returns
@@ -3059,6 +3522,9 @@ def _eligibility_metric_view(metrics: dict[str, Any]) -> dict[str, Any]:
         "action_pair_regret_summary": metrics["action_pair_regret_summary"],
         "hold_to_settlement_up_down_reversal_regret": metrics[
             "hold_to_settlement_up_down_reversal_regret"
+        ],
+        "hts_p_up_reliability_regret_summary": metrics[
+            "hts_p_up_reliability_regret_summary"
         ],
     }
 
@@ -3141,6 +3607,85 @@ def _hold_to_settlement_reversal_regret_summary(
             default={},
         ),
     }
+
+
+def _hts_p_up_reliability_regret_summary(
+    cases: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not cases:
+        return {
+            "selected_hts_case_count": 0,
+            "p_up_confidently_wrong_count": 0,
+            "p_up_confidently_wrong_rate": 0.0,
+            "by_p_up_confidence_bucket": {},
+            "by_time_to_close_bucket": {},
+            "by_spread_bucket": {},
+            "by_queue_bucket": {},
+            "by_staleness_bucket": {},
+            "by_selected_vs_oracle_side": {},
+            "top_confidently_wrong_cases": [],
+        }
+    wrong_cases = [
+        case
+        for case in cases
+        if str(case.get("selected_side")) != str(case.get("oracle_side"))
+    ]
+    return {
+        "selected_hts_case_count": len(cases),
+        "p_up_confidently_wrong_count": len(wrong_cases),
+        "p_up_confidently_wrong_rate": len(wrong_cases) / len(cases),
+        "by_p_up_confidence_bucket": _hts_reliability_case_summary(
+            _metric_hts_cases(cases),
+            key_fn=lambda case: case["p_up_confidence_bucket"],
+            regret_threshold=0.0,
+            min_support=1,
+        ),
+        "by_time_to_close_bucket": _hts_reliability_case_summary(
+            _metric_hts_cases(cases),
+            key_fn=lambda case: case["time_to_close_bucket"],
+            regret_threshold=0.0,
+            min_support=1,
+        ),
+        "by_spread_bucket": _hts_reliability_case_summary(
+            _metric_hts_cases(cases),
+            key_fn=lambda case: case["spread_bucket"],
+            regret_threshold=0.0,
+            min_support=1,
+        ),
+        "by_queue_bucket": _hts_reliability_case_summary(
+            _metric_hts_cases(cases),
+            key_fn=lambda case: case["queue_bucket"],
+            regret_threshold=0.0,
+            min_support=1,
+        ),
+        "by_staleness_bucket": _hts_reliability_case_summary(
+            _metric_hts_cases(cases),
+            key_fn=lambda case: case["staleness_bucket"],
+            regret_threshold=0.0,
+            min_support=1,
+        ),
+        "by_selected_vs_oracle_side": _hts_reliability_case_summary(
+            _metric_hts_cases(cases),
+            key_fn=lambda case: f"{case['selected_side']}->{case['oracle_side']}",
+            regret_threshold=0.0,
+            min_support=1,
+        ),
+        "top_confidently_wrong_cases": sorted(
+            wrong_cases,
+            key=lambda case: (-float(case["regret"]), str(case["decision_group_id"])),
+        )[:10],
+    }
+
+
+def _metric_hts_cases(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            **case,
+            "p_up_confidently_wrong": str(case.get("selected_side"))
+            != str(case.get("oracle_side")),
+        }
+        for case in cases
+    ]
 
 
 def _selected_return_breakdown(
@@ -3421,6 +3966,7 @@ def _compact_ranking_row(row: dict[str, Any], variant: str) -> dict[str, Any]:
         ),
         "o_model_predicted_score": row.get("o_model_predicted_score"),
         "o_model_score_components": row.get("o_model_score_components"),
+        "hts_p_up_reliability_buckets": row.get("hts_p_up_reliability_buckets"),
         "deployable_model_score_available": row.get("deployable_model_score_available"),
         "ranking_score_source": _ranking_score_source(variant),
         "variant_score": row["variant_scores"][variant],
