@@ -57,6 +57,12 @@ from bigan.v8.polymarket.training.post_freeze_up_diagnostics import (
     PolymarketUpSellBeforeCloseDiagnosticsConfig,
     run_polymarket_up_sell_before_close_diagnostics,
 )
+from bigan.v8.polymarket.training.post_freeze_up_full_candidate_pool import (
+    UP_FULL_CANDIDATE_POOL_DIAGNOSTIC_SCHEMA_VERSION,
+    UP_FULL_CANDIDATE_POOL_FEATURE_PROXY_SCHEMA_VERSION,
+    PolymarketUpFullCandidatePoolConfig,
+    run_polymarket_up_full_candidate_pool_diagnostics,
+)
 from bigan.v8.polymarket.training.post_freeze_weak_evidence_drilldown import (
     M_POST_FREEZE_WEAK_EVIDENCE_DRILLDOWN_SCHEMA_VERSION,
     PolymarketPostFreezeWeakEvidenceDrilldownConfig,
@@ -1558,6 +1564,234 @@ def test_n2_non_leaky_up_feature_proxy_blocks_without_future_fields(
     assert overlay["#134_resume_allowed"] is False
     assert result.artifact_paths["candidate_report"].exists()
     assert result.artifact_paths["score_overlay_report"].exists()
+
+
+def test_up_full_candidate_pool_diagnostic_segments_selected_and_non_selected(
+    tmp_path: Path,
+) -> None:
+    selected_up = _replay_row(
+        market_id="pool-selected-up",
+        decision_ts=10,
+        side="UP",
+        pnl=0.10,
+    )
+    selected_up.update(
+        {
+            "action_return_target": 0.08,
+            "raw_calibrated_action_score": 0.50,
+            "best_action_margin": 0.02,
+            "execution_pnl_immediate_exit_pnl": 0.03,
+            "entry_quality_ask": 0.40,
+            "exit_quality_bid": 0.43,
+            "entry_exit_quality_spread_bps": 300.0,
+            "entry_exit_quality_queue_fill": 0.90,
+            "entry_exit_quality_book_staleness_ms": 500.0,
+            "entry_exit_quality_time_to_close_seconds": 180.0,
+            "up_recent_book_update_count_1m": 5.0,
+            "guard_compatible_candidate": True,
+            "pre_guard_candidate": True,
+        }
+    )
+    non_selected_viable = _replay_row(
+        market_id="pool-non-selected-viable",
+        decision_ts=20,
+        side="UP",
+        pnl=0.12,
+        side_quota_selected=False,
+        entry_order_opened=False,
+    )
+    non_selected_viable.update(
+        {
+            "action_return_target": 0.10,
+            "raw_calibrated_action_score": 0.55,
+            "best_action_margin": 0.02,
+            "execution_pnl_immediate_exit_pnl": 0.04,
+            "entry_quality_ask": 0.40,
+            "exit_quality_bid": 0.44,
+            "entry_exit_quality_spread_bps": 280.0,
+            "entry_exit_quality_queue_fill": 0.92,
+            "entry_exit_quality_book_staleness_ms": 400.0,
+            "entry_exit_quality_time_to_close_seconds": 210.0,
+            "up_recent_book_update_count_1m": 5.0,
+            "guard_compatible_candidate": True,
+            "pre_guard_candidate": True,
+        }
+    )
+    non_selected_future_winner_bad_proxy = _replay_row(
+        market_id="pool-non-selected-future-winner-bad-proxy",
+        decision_ts=30,
+        side="UP",
+        pnl=1.00,
+        side_quota_selected=False,
+        entry_order_opened=False,
+    )
+    non_selected_future_winner_bad_proxy.update(
+        {
+            "action_return_target": 1.00,
+            "raw_calibrated_action_score": 0.95,
+            "best_action_margin": 0.03,
+            "execution_pnl_immediate_exit_pnl": -0.05,
+            "entry_quality_ask": 0.60,
+            "exit_quality_bid": 0.55,
+            "entry_exit_quality_spread_bps": 1200.0,
+            "entry_exit_quality_queue_fill": 0.50,
+            "entry_exit_quality_book_staleness_ms": 500.0,
+            "entry_exit_quality_time_to_close_seconds": 180.0,
+            "up_recent_book_update_count_1m": 5.0,
+            "guard_compatible_candidate": True,
+            "pre_guard_candidate": True,
+        }
+    )
+    guard_incompatible_up = _replay_row(
+        market_id="pool-guard-incompatible-up",
+        decision_ts=40,
+        side="UP",
+        pnl=0.50,
+        side_quota_selected=False,
+        entry_order_opened=False,
+    )
+    guard_incompatible_up.update(
+        {
+            "action_return_target": 0.50,
+            "raw_calibrated_action_score": 0.70,
+            "best_action_margin": 0.02,
+            "execution_pnl_immediate_exit_pnl": 0.04,
+            "entry_quality_ask": 0.40,
+            "exit_quality_bid": 0.44,
+            "entry_exit_quality_spread_bps": 300.0,
+            "entry_exit_quality_queue_fill": 0.90,
+            "entry_exit_quality_book_staleness_ms": 500.0,
+            "entry_exit_quality_time_to_close_seconds": 180.0,
+            "up_recent_book_update_count_1m": 5.0,
+            "guard_compatible_candidate": False,
+            "pre_guard_candidate": True,
+        }
+    )
+    down_reference = _replay_row(
+        market_id="pool-down-reference",
+        decision_ts=50,
+        side="DOWN",
+        pnl=0.30,
+    )
+    down_reference.update({"guard_compatible_candidate": True})
+    source_report = _write_holdout_report(
+        tmp_path / "pool_source",
+        _holdout_validation_report(
+            run_id="up-full-pool-source",
+            market_ids=(
+                "pool-selected-up",
+                "pool-non-selected-viable",
+                "pool-non-selected-future-winner-bad-proxy",
+                "pool-guard-incompatible-up",
+                "pool-down-reference",
+            ),
+            replay_rows=[
+                selected_up,
+                non_selected_viable,
+                non_selected_future_winner_bad_proxy,
+                guard_incompatible_up,
+                down_reference,
+            ],
+            replay_pnl_by_side={"UP": 1.72, "DOWN": 0.30},
+        ),
+    )
+    source_payload = _read_json(source_report)
+    source_payload["m_post_freeze_holdout_validation_report_id"] = canonical_json_sha256(
+        source_payload
+    )
+    source_report.write_text(
+        json.dumps(source_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    selected_payload = dict(selected_up)
+    selected_payload["source_report_path"] = str(source_report)
+    selected_payload["m2_side_quota_selected"] = True
+    selected_payload["m2_reason_codes"] = ["m2_stateful_replay_parity_selected"]
+    m2_report = {
+        "schema_version": M2_REPLAY_PARITY_SCHEMA_VERSION,
+        "candidate_name": SELL_BEFORE_CLOSE_M2_REPLAY_PARITY_CANDIDATE_NAME,
+        "baseline_candidate_name": SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+        "diagnostic_only": True,
+        "current_frozen_m_promotion_status": "reject_promotion_for_now",
+        "current_frozen_m_evidence_status": "weak_mixed_structural",
+        "current_frozen_m_evidence_reused_for_m2_promotion": False,
+        "m2_selected_rows": [selected_payload],
+        "m2_blocked_rows": [],
+        "source_model_candidate_eligible": False,
+        "promotion_evidence_eligible": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    m2_report["m2_stateful_replay_parity_candidate_report_id"] = canonical_json_sha256(
+        m2_report
+    )
+    m2_report_path = tmp_path / "m2_stateful_replay_parity_candidate_report.json"
+    m2_report_path.write_text(
+        json.dumps(m2_report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    original_m2_bytes = m2_report_path.read_bytes()
+
+    result = run_polymarket_up_full_candidate_pool_diagnostics(
+        PolymarketUpFullCandidatePoolConfig(
+            m2_candidate_report_path=m2_report_path,
+            output_dir=tmp_path / "up_full_pool",
+        )
+    )
+
+    assert m2_report_path.read_bytes() == original_m2_bytes
+    pool = result.candidate_pool_report
+    pool_payload = dict(pool)
+    pool_id = pool_payload.pop("up_full_candidate_pool_diagnostic_report_id")
+    assert canonical_json_sha256(pool_payload) == pool_id
+    assert pool["schema_version"] == UP_FULL_CANDIDATE_POOL_DIAGNOSTIC_SCHEMA_VERSION
+    assert pool["total_up_candidate_pool_size"] == 4
+    assert pool["guard_compatible_up_pool_size"] == 3
+    assert pool["m2_selected_up_count"] == 1
+    assert pool["m2_non_selected_guard_compatible_up_count"] == 2
+    assert pool["non_selected_up_rows_viable_under_non_leaky_proxy_count"] == 1
+    assert pool["up_path_should_remain_fully_blocked"] is False
+    assert pool["pool_segment_metrics"]["m2_selected"]["row_count"] == 1
+    assert pool["pool_segment_metrics"]["m2_non_selected"]["row_count"] == 2
+    viable = pool["non_selected_up_rows_viable_under_non_leaky_proxy"][0]
+    assert viable["market_id"] == "pool-non-selected-viable"
+    rows_by_market = {row["market_id"]: row for row in pool["rows"]}
+    bad_future = rows_by_market["pool-non-selected-future-winner-bad-proxy"]
+    assert bad_future["realized_replay_pnl"] == 1.0
+    assert bad_future["n2_would_select"] is False
+    assert "n2_blocked_nonpositive_immediate_exit_proxy" in bad_future[
+        "n2_decision_reason_codes"
+    ]
+    for row in pool["rows"]:
+        assert not set(row["n2_decision_input_fields_used"]).intersection(
+            N2_FORBIDDEN_SELECTION_FIELDS
+        )
+        assert row["n2_forbidden_fields_used_for_selection"] == []
+    assert pool["source_model_candidate_eligible"] is False
+    assert pool["promotion_evidence_eligible"] is False
+    assert pool["#146_start_allowed"] is False
+    assert pool["#134_resume_allowed"] is False
+    assert pool["paper_only"] is True
+    assert pool["capital_at_risk"] is False
+
+    proxy = result.feature_proxy_report
+    proxy_payload = dict(proxy)
+    proxy_id = proxy_payload.pop("up_full_candidate_pool_feature_proxy_report_id")
+    assert canonical_json_sha256(proxy_payload) == proxy_id
+    assert proxy["schema_version"] == UP_FULL_CANDIDATE_POOL_FEATURE_PROXY_SCHEMA_VERSION
+    assert proxy["selection_uses_only_allowed_fields"] is True
+    assert proxy["n2_would_selected_full_pool_count"] == 2
+    assert proxy["n2_would_selected_non_selected_pool_count"] == 1
+    assert proxy["source_model_candidate_eligible"] is False
+    assert proxy["promotion_evidence_eligible"] is False
+    assert proxy["#146_start_allowed"] is False
+    assert proxy["#134_resume_allowed"] is False
+    assert result.artifact_paths["candidate_pool_report"].exists()
+    assert result.artifact_paths["feature_proxy_report"].exists()
 
 
 def _build_corpus(root: Path) -> Path:
