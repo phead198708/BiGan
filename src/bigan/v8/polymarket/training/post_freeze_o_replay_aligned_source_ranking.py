@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import statistics
 from collections import Counter, defaultdict
@@ -48,20 +49,6 @@ O_FEATURE_AND_LABEL_LEAKAGE_AUDIT_SCHEMA_VERSION = (
 O_SOURCE_CANDIDATE_COMPARISON_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-source-candidate-comparison-v1"
 )
-O_MODEL_INPUT_FIELDS = (
-    "raw_calibrated_action_score",
-    "best_action_margin",
-    "entry_quality_ask",
-    "exit_quality_bid",
-    "execution_pnl_immediate_exit_pnl",
-    "execution_pnl_immediate_exit_return",
-    "entry_exit_quality_spread_bps",
-    "entry_exit_quality_queue_fill",
-    "entry_exit_quality_book_staleness_ms",
-    "entry_exit_quality_time_to_close_seconds",
-    "up_recent_book_update_count_1m",
-    "down_recent_book_update_count_1m",
-)
 O_TRAINING_LABEL_FIELDS = (
     "action_return_target",
     "label_pnl_target",
@@ -80,8 +67,16 @@ O_FORBIDDEN_MODEL_INPUT_FIELDS = (
     "post_entry_close_state",
     "post_settlement_values",
 )
+O_MODEL_PREDICTED_VARIANT = "o_model_predicted_decision_time_source_model"
 O_VARIANTS = (
     "current_source_baseline",
+    O_MODEL_PREDICTED_VARIANT,
+    "o_replay_aligned_labels_only",
+    "o_replay_aligned_labels_family_priors",
+    "o_replay_aligned_pairwise_listwise_correction",
+    "o_replay_aligned_stronger_no_trade_prior",
+)
+O_LABEL_DIAGNOSTIC_VARIANTS = (
     "o_replay_aligned_labels_only",
     "o_replay_aligned_labels_family_priors",
     "o_replay_aligned_pairwise_listwise_correction",
@@ -96,6 +91,27 @@ O_REQUIRED_DECISION_ACTION_FAMILIES = (
 )
 O_FULL_DECISION_GROUP_SCOPE = "full_decision_group"
 O_PARTIAL_DECISION_GROUP_SCOPE = "partial_decision_group_diagnostic"
+O_DEPLOYABLE_MODEL_FEATURE_NAMES = (
+    "bias",
+    "action_buy_up_sell_before_close",
+    "action_buy_down_sell_before_close",
+    "action_buy_up_hold_to_settlement",
+    "action_buy_down_hold_to_settlement",
+    "action_no_trade",
+    "side_up",
+    "side_down",
+    "side_none",
+    "family_sell_before_close",
+    "family_hold_to_settlement",
+    "family_no_trade",
+    "p_up",
+    "p_down_proxy",
+    "entry_ask",
+    "spread_bps_scaled",
+    "queue_fill",
+    "book_staleness_seconds",
+    "time_to_close_minutes",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,7 +244,10 @@ def _build_reports(
     )
     grouped = _groups_with_required_actions(action_rows)
     labeled_rows = _construct_replay_aligned_labels(grouped)
-    ranking_rows = _ranking_rows(labeled_rows)
+    scored_rows, model_training_summary = _train_o_model_predicted_scores(
+        labeled_rows
+    )
+    ranking_rows = _ranking_rows(scored_rows)
     label_report = _label_report(
         config=config,
         m2_report_path=m2_report_path,
@@ -241,18 +260,21 @@ def _build_reports(
         m2_report_path=m2_report_path,
         m2_report=m2_report,
         rows=ranking_rows,
+        model_training_summary=model_training_summary,
     )
     leakage_report = _leakage_report(
         config=config,
         m2_report_path=m2_report_path,
         m2_report=m2_report,
-        rows=labeled_rows,
+        rows=scored_rows,
+        model_training_summary=model_training_summary,
     )
     comparison_report = _comparison_report(
         config=config,
         m2_report_path=m2_report_path,
         m2_report=m2_report,
         rows=ranking_rows,
+        model_training_summary=model_training_summary,
     )
     return label_report, ranking_report, leakage_report, comparison_report
 
@@ -340,8 +362,6 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _read_json_line(line: str) -> dict[str, Any]:
-    import json
-
     return json.loads(line)
 
 
@@ -647,6 +667,213 @@ def _label_component_field_classes() -> dict[str, str]:
     }
 
 
+def _train_o_model_predicted_scores(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    train_rows = [
+        row
+        for row in rows
+        if row.get("split") == "shadow"
+        and bool(row.get("label_candidate_available", True))
+    ]
+    if len({row["decision_group_id"] for row in train_rows}) < 2:
+        train_rows = [
+            row for row in rows if bool(row.get("label_candidate_available", True))
+        ]
+        training_split_source = "all_rows_fallback_insufficient_shadow_groups"
+    else:
+        training_split_source = "shadow_split_only"
+    deployable_available = bool(train_rows) and _full_grid_available(rows)
+    if deployable_available:
+        model = _fit_ridge_regression(
+            [_deployable_model_features(row) for row in train_rows],
+            [
+                float(row["replay_aligned_executable_label_target"])
+                for row in train_rows
+            ],
+        )
+        predictions = [
+            _dot(model["coefficients"], _deployable_model_features(row))
+            for row in rows
+        ]
+        fit_reason_codes: list[str] = []
+    else:
+        model = {
+            "coefficients": [0.0 for _ in O_DEPLOYABLE_MODEL_FEATURE_NAMES],
+            "ridge_lambda": 1.0e-6,
+        }
+        predictions = [0.0 for _ in rows]
+        fit_reason_codes = ["insufficient_complete_action_grid_for_model_training"]
+    scored_rows = []
+    for row, prediction in zip(rows, predictions, strict=True):
+        scored_rows.append(
+            {
+                **row,
+                "o_model_predicted_score": prediction,
+                "deployable_model_score_available": deployable_available,
+                "ranking_score_source_by_variant": {
+                    "current_source_baseline": "observed_source_score",
+                    O_MODEL_PREDICTED_VARIANT: "model_predicted_score",
+                    **dict.fromkeys(
+                        O_LABEL_DIAGNOSTIC_VARIANTS,
+                        "label_diagnostic_score",
+                    ),
+                },
+            }
+        )
+    summary = {
+        "model_candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "ranking_score_source": "model_predicted_score",
+        "deployable_model_score_available": deployable_available,
+        "model_family": "deterministic_ridge_action_value_regressor",
+        "feature_names": list(O_DEPLOYABLE_MODEL_FEATURE_NAMES),
+        "model_input_fields_decision_time_only": list(
+            O_DEPLOYABLE_MODEL_FEATURE_NAMES
+        ),
+        "training_target": "replay_aligned_executable_label_target",
+        "training_label_fields_may_use_future_replay_or_settlement": list(
+            O_TRAINING_LABEL_FIELDS
+        ),
+        "training_row_count": len(train_rows),
+        "training_decision_group_count": len(
+            {row["decision_group_id"] for row in train_rows}
+        ),
+        "scored_row_count": len(scored_rows),
+        "scored_decision_group_count": len(
+            {row["decision_group_id"] for row in scored_rows}
+        ),
+        "training_split_source": training_split_source,
+        "ridge_lambda": model["ridge_lambda"],
+        "coefficients_by_feature": dict(
+            zip(
+                O_DEPLOYABLE_MODEL_FEATURE_NAMES,
+                model["coefficients"],
+                strict=True,
+            )
+        ),
+        "fit_reason_codes": fit_reason_codes,
+        "label_diagnostic_variants": list(O_LABEL_DIAGNOSTIC_VARIANTS),
+        "label_diagnostic_variants_deployable": False,
+        "current_source_baseline_counterfactual_scores_complete": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+    }
+    return scored_rows, summary
+
+
+def _full_grid_available(rows: list[dict[str, Any]]) -> bool:
+    summary = _decision_group_completeness_summary(rows)
+    construction = _action_candidate_construction_summary(rows)
+    return bool(summary["all_decision_groups_complete"]) and bool(
+        construction["complete_action_candidate_grid"]
+    )
+
+
+def _deployable_model_features(row: dict[str, Any]) -> list[float]:
+    action = str(row.get("action") or "")
+    family = _action_family(action)
+    side = _side_from_action(action)
+    p_up = _bounded(float(row.get("p_up") or 0.5), 0.0, 1.0)
+    return [
+        1.0,
+        _flag(action == "BUY_UP_SELL_BEFORE_CLOSE"),
+        _flag(action == "BUY_DOWN_SELL_BEFORE_CLOSE"),
+        _flag(action == "BUY_UP_HOLD_TO_SETTLEMENT"),
+        _flag(action == "BUY_DOWN_HOLD_TO_SETTLEMENT"),
+        _flag(action == "NO_TRADE"),
+        _flag(side == "UP"),
+        _flag(side == "DOWN"),
+        _flag(side == "NONE"),
+        _flag(family == "SELL_BEFORE_CLOSE"),
+        _flag(family == "HOLD_TO_SETTLEMENT"),
+        _flag(family == "NO_TRADE"),
+        p_up,
+        1.0 - p_up,
+        _bounded(float(row.get("entry_quality_ask") or 0.0), 0.0, 1.0),
+        _bounded(
+            float(row.get("entry_exit_quality_spread_bps") or 0.0) / 10_000.0,
+            0.0,
+            1.0,
+        ),
+        _bounded(float(row.get("entry_exit_quality_queue_fill") or 0.0), 0.0, 1.0),
+        _bounded(
+            float(row.get("entry_exit_quality_book_staleness_ms") or 0.0) / 1000.0,
+            0.0,
+            60.0,
+        ),
+        _bounded(
+            float(row.get("entry_exit_quality_time_to_close_seconds") or 0.0) / 60.0,
+            0.0,
+            15.0,
+        ),
+    ]
+
+
+def _fit_ridge_regression(
+    features: list[list[float]],
+    targets: list[float],
+    *,
+    ridge_lambda: float = 1.0e-6,
+) -> dict[str, Any]:
+    width = len(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
+    xtx = [[0.0 for _ in range(width)] for _ in range(width)]
+    xty = [0.0 for _ in range(width)]
+    for vector, target in zip(features, targets, strict=True):
+        for i in range(width):
+            xty[i] += vector[i] * target
+            for j in range(width):
+                xtx[i][j] += vector[i] * vector[j]
+    for i in range(1, width):
+        xtx[i][i] += ridge_lambda
+    return {
+        "coefficients": _solve_linear_system(xtx, xty),
+        "ridge_lambda": ridge_lambda,
+    }
+
+
+def _solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float]:
+    size = len(vector)
+    augmented = [list(row) + [value] for row, value in zip(matrix, vector, strict=True)]
+    for pivot_index in range(size):
+        best = max(
+            range(pivot_index, size),
+            key=lambda row_index: abs(augmented[row_index][pivot_index]),
+        )
+        if abs(augmented[best][pivot_index]) < 1.0e-12:
+            augmented[best][pivot_index] = 1.0e-12
+        if best != pivot_index:
+            augmented[pivot_index], augmented[best] = (
+                augmented[best],
+                augmented[pivot_index],
+            )
+        pivot = augmented[pivot_index][pivot_index]
+        for col in range(pivot_index, size + 1):
+            augmented[pivot_index][col] /= pivot
+        for row_index in range(size):
+            if row_index == pivot_index:
+                continue
+            factor = augmented[row_index][pivot_index]
+            if factor == 0.0:
+                continue
+            for col in range(pivot_index, size + 1):
+                augmented[row_index][col] -= factor * augmented[pivot_index][col]
+    return [augmented[row_index][size] for row_index in range(size)]
+
+
+def _dot(left: list[float], right: list[float]) -> float:
+    return sum(a * b for a, b in zip(left, right, strict=True))
+
+
+def _flag(value: bool) -> float:
+    return 1.0 if value else 0.0
+
+
+def _bounded(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
 def _ranking_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -682,6 +909,7 @@ def _variant_scores(row: dict[str, Any], group_rows: list[dict[str, Any]]) -> di
     family_prior = 0.02 if row["action_family"] == "NO_TRADE" else -0.01
     return {
         "current_source_baseline": float(row["baseline_source_score"]),
+        O_MODEL_PREDICTED_VARIANT: float(row.get("o_model_predicted_score") or 0.0),
         "o_replay_aligned_labels_only": label,
         "o_replay_aligned_labels_family_priors": label + family_prior,
         "o_replay_aligned_pairwise_listwise_correction": label - group_mean,
@@ -761,6 +989,7 @@ def _ranking_report(
     m2_report_path: Path,
     m2_report: dict[str, Any],
     rows: list[dict[str, Any]],
+    model_training_summary: dict[str, Any],
 ) -> dict[str, Any]:
     variant_metrics = {
         variant: _ranking_metrics(rows, variant, config.high_score_threshold)
@@ -779,33 +1008,39 @@ def _ranking_report(
             "m2_stateful_replay_parity_candidate_report_id"
         ),
         "ranking_metric_by_variant": variant_metrics,
-        "primary_variant_name": "o_replay_aligned_labels_family_priors",
-        "ranking_metric_scope": variant_metrics[
-            "o_replay_aligned_labels_family_priors"
-        ]["ranking_metric_scope"],
+        "primary_variant_name": O_MODEL_PREDICTED_VARIANT,
+        "primary_ranking_score_source": "model_predicted_score",
+        "model_predicted_candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "deployable_model_score_available": model_training_summary[
+            "deployable_model_score_available"
+        ],
+        "o_model_training_summary": model_training_summary,
+        "label_diagnostic_variants": list(O_LABEL_DIAGNOSTIC_VARIANTS),
+        "label_diagnostic_variants_deployable": False,
+        "ranking_metric_scope": variant_metrics[O_MODEL_PREDICTED_VARIANT][
+            "ranking_metric_scope"
+        ],
         "decision_group_completeness_summary": variant_metrics[
-            "o_replay_aligned_labels_family_priors"
+            O_MODEL_PREDICTED_VARIANT
         ]["decision_group_completeness_summary"],
         "action_candidate_construction_summary": _action_candidate_construction_summary(
             rows
         ),
         "full_source_model_ranking_quality_claimed": variant_metrics[
-            "o_replay_aligned_labels_family_priors"
+            O_MODEL_PREDICTED_VARIANT
         ]["full_source_model_ranking_quality_claimed"],
         "top1_realized_best_action_hit_rate": variant_metrics[
-            "o_replay_aligned_labels_family_priors"
+            O_MODEL_PREDICTED_VARIANT
         ]["top1_realized_best_action_hit_rate"],
         "top2_realized_best_action_hit_rate": variant_metrics[
-            "o_replay_aligned_labels_family_priors"
+            O_MODEL_PREDICTED_VARIANT
         ]["top2_realized_best_action_hit_rate"],
         "top3_realized_best_action_hit_rate": variant_metrics[
-            "o_replay_aligned_labels_family_priors"
+            O_MODEL_PREDICTED_VARIANT
         ]["top3_realized_best_action_hit_rate"],
-        "mean_regret": variant_metrics["o_replay_aligned_labels_family_priors"][
-            "mean_regret"
-        ],
+        "mean_regret": variant_metrics[O_MODEL_PREDICTED_VARIANT]["mean_regret"],
         "ranking_rows": [
-            _compact_ranking_row(row, "o_replay_aligned_labels_family_priors")
+            _compact_ranking_row(row, O_MODEL_PREDICTED_VARIANT)
             for row in rows
         ],
         **_fail_closed_fields(),
@@ -821,10 +1056,11 @@ def _leakage_report(
     m2_report_path: Path,
     m2_report: dict[str, Any],
     rows: list[dict[str, Any]],
+    model_training_summary: dict[str, Any],
 ) -> dict[str, Any]:
     del config
     model_overlap = sorted(
-        set(O_MODEL_INPUT_FIELDS).intersection(O_FORBIDDEN_MODEL_INPUT_FIELDS)
+        set(O_DEPLOYABLE_MODEL_FEATURE_NAMES).intersection(O_FORBIDDEN_MODEL_INPUT_FIELDS)
     )
     label_overlap = sorted(
         set(O_TRAINING_LABEL_FIELDS).intersection(O_FORBIDDEN_MODEL_INPUT_FIELDS)
@@ -841,7 +1077,21 @@ def _leakage_report(
         "m2_candidate_report_id": m2_report.get(
             "m2_stateful_replay_parity_candidate_report_id"
         ),
-        "model_input_fields_decision_time_only": list(O_MODEL_INPUT_FIELDS),
+        "ranking_score_source": "model_predicted_score",
+        "deployable_model_score_available": model_training_summary[
+            "deployable_model_score_available"
+        ],
+        "model_input_fields_decision_time_only": list(
+            O_DEPLOYABLE_MODEL_FEATURE_NAMES
+        ),
+        "model_training_summary": model_training_summary,
+        "label_diagnostic_score_fields": [
+            "replay_aligned_executable_label_target",
+            "label_family_prior",
+            "label_group_mean",
+        ],
+        "label_diagnostic_variants": list(O_LABEL_DIAGNOSTIC_VARIANTS),
+        "label_diagnostic_variants_deployable": False,
         "training_label_fields_may_use_future_replay_or_settlement": list(
             O_TRAINING_LABEL_FIELDS
         ),
@@ -869,6 +1119,7 @@ def _comparison_report(
     m2_report_path: Path,
     m2_report: dict[str, Any],
     rows: list[dict[str, Any]],
+    model_training_summary: dict[str, Any],
 ) -> dict[str, Any]:
     candidate_rows = []
     for variant in O_VARIANTS:
@@ -886,6 +1137,15 @@ def _comparison_report(
                 "source_lineage": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME
                 if variant != "current_source_baseline"
                 else "current_source_baseline",
+                "ranking_score_source": metrics["ranking_score_source"],
+                "deployable_model_score_available": metrics[
+                    "deployable_model_score_available"
+                ],
+                "label_diagnostic_score": metrics["ranking_score_source"]
+                == "label_diagnostic_score",
+                "model_training_summary": model_training_summary
+                if variant == O_MODEL_PREDICTED_VARIANT
+                else None,
                 "shadow_raw_mae": metrics["split_metrics"]["shadow"]["raw_mae"],
                 "shadow_calibrated_mae": metrics["split_metrics"]["shadow"][
                     "calibrated_mae"
@@ -919,8 +1179,10 @@ def _comparison_report(
                 ],
                 "action_family_eligibility_gates": {
                     "SELL_BEFORE_CLOSE": False,
+                    "HOLD_TO_SETTLEMENT": False,
                     "NO_TRADE": False,
                 },
+                "action_family_gate_metrics": metrics["action_family_gate_metrics"],
                 "source_model_candidate_eligible": False,
                 "ineligible_reason_codes": reasons,
             }
@@ -937,6 +1199,9 @@ def _comparison_report(
         "m2_candidate_report_id": m2_report.get(
             "m2_stateful_replay_parity_candidate_report_id"
         ),
+        "model_predicted_candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "model_training_summary": model_training_summary,
+        "label_diagnostic_variants": list(O_LABEL_DIAGNOSTIC_VARIANTS),
         "candidate_rows": candidate_rows,
         "eligible_candidate_count": 0,
         **_fail_closed_fields(),
@@ -960,14 +1225,21 @@ def _ranking_metrics(
     oracle_returns = []
     family_regret: dict[str, list[float]] = defaultdict(list)
     side_regret: dict[str, list[float]] = defaultdict(list)
+    selected_returns_by_family: dict[str, list[float]] = defaultdict(list)
     confusion: Counter[tuple[str, str]] = Counter()
     high_score_returns = []
     split_rows: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
     completeness_summary = _decision_group_completeness_summary(rows)
     source_score_summary = _source_score_completeness_summary(rows)
     source_scores_complete_for_variant = (
-        variant != "current_source_baseline"
-        or source_score_summary["source_score_complete"]
+        (
+            variant == O_MODEL_PREDICTED_VARIANT
+            and _deployable_model_score_available(rows, variant)
+        )
+        or (
+            variant == "current_source_baseline"
+            and source_score_summary["source_score_complete"]
+        )
     )
     for group_rows in groups.values():
         predicted = sorted(
@@ -985,6 +1257,7 @@ def _ranking_metrics(
         oracle_returns.append(oracle_return)
         confusion[(selected["action_family"], oracle["action_family"])] += 1
         family_regret[selected["action_family"]].append(regret)
+        selected_returns_by_family[selected["action_family"]].append(selected_return)
         side_regret[str(selected.get("selected_side") or "NONE")].append(regret)
         for k in (1, 2, 3):
             if oracle["action"] in {row["action"] for row in predicted[:k]}:
@@ -1001,6 +1274,11 @@ def _ranking_metrics(
     group_count = len(groups)
     return {
         "decision_group_count": group_count,
+        "ranking_score_source": _ranking_score_source(variant),
+        "deployable_model_score_available": _deployable_model_score_available(
+            rows,
+            variant,
+        ),
         "ranking_metric_scope": completeness_summary["ranking_metric_scope"],
         "decision_group_completeness_summary": completeness_summary,
         "source_score_completeness_summary": source_score_summary,
@@ -1028,6 +1306,9 @@ def _ranking_metrics(
         "action_family_level_regret": {
             family: statistics.mean(values) for family, values in family_regret.items()
         },
+        "action_family_gate_metrics": _action_family_gate_metrics(
+            selected_returns_by_family
+        ),
         "side_level_regret": {
             side: statistics.mean(values) for side, values in side_regret.items()
         },
@@ -1048,6 +1329,40 @@ def _ranking_metrics(
             split: _split_metrics(split_rows.get(split, []))
             for split in ("shadow", "validation")
         },
+    }
+
+
+def _ranking_score_source(variant: str) -> str:
+    if variant == O_MODEL_PREDICTED_VARIANT:
+        return "model_predicted_score"
+    if variant == "current_source_baseline":
+        return "observed_source_score"
+    return "label_diagnostic_score"
+
+
+def _deployable_model_score_available(rows: list[dict[str, Any]], variant: str) -> bool:
+    return variant == O_MODEL_PREDICTED_VARIANT and all(
+        bool(row.get("deployable_model_score_available")) for row in rows
+    )
+
+
+def _action_family_gate_metrics(
+    returns_by_family: dict[str, list[float]],
+) -> dict[str, dict[str, Any]]:
+    families = ("SELL_BEFORE_CLOSE", "HOLD_TO_SETTLEMENT", "NO_TRADE")
+    return {
+        family: {
+            "support_count": len(values),
+            "realized_return_mean": statistics.mean(values) if values else 0.0,
+            "realized_return_sum": sum(values),
+            "paper_decision_eligible": False,
+            "reason_codes": [
+                "diagnostic_only_no_paper_live_unlock",
+                "future_unseen_o_holdout_required",
+            ],
+        }
+        for family in families
+        for values in (returns_by_family.get(family, []),)
     }
 
 
@@ -1250,6 +1565,9 @@ def _compact_ranking_row(row: dict[str, Any], variant: str) -> dict[str, Any]:
         "missing_action_families": row["missing_action_families"],
         "ranking_metric_scope": row["ranking_metric_scope"],
         "selected_side": row.get("selected_side"),
+        "o_model_predicted_score": row.get("o_model_predicted_score"),
+        "deployable_model_score_available": row.get("deployable_model_score_available"),
+        "ranking_score_source": _ranking_score_source(variant),
         "variant_score": row["variant_scores"][variant],
         "realized_replay_return": row["realized_replay_return"],
         "oracle_executable_best_action": row["oracle_executable_best_action"],

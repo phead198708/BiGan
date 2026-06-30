@@ -47,8 +47,11 @@ from bigan.v8.polymarket.training.post_freeze_n_up_replay_aligned import (
     run_polymarket_n_up_replay_aligned_candidate,
 )
 from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking import (
+    O_DEPLOYABLE_MODEL_FEATURE_NAMES,
     O_FEATURE_AND_LABEL_LEAKAGE_AUDIT_SCHEMA_VERSION,
     O_LABEL_CONSTRUCTION_SCHEMA_VERSION,
+    O_LABEL_DIAGNOSTIC_VARIANTS,
+    O_MODEL_PREDICTED_VARIANT,
     O_SOURCE_CANDIDATE_COMPARISON_SCHEMA_VERSION,
     O_SOURCE_RANKING_OBJECTIVE_SCHEMA_VERSION,
     PolymarketOReplayAlignedSourceRankingConfig,
@@ -2040,11 +2043,30 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     ranking_id = ranking_payload.pop("o_source_ranking_objective_report_id")
     assert canonical_json_sha256(ranking_payload) == ranking_id
     assert ranking["schema_version"] == O_SOURCE_RANKING_OBJECTIVE_SCHEMA_VERSION
+    assert ranking["primary_variant_name"] == O_MODEL_PREDICTED_VARIANT
+    assert ranking["primary_ranking_score_source"] == "model_predicted_score"
+    assert ranking["model_predicted_candidate_name"] == O_MODEL_PREDICTED_VARIANT
+    assert ranking["deployable_model_score_available"] is True
+    assert ranking["label_diagnostic_variants"] == list(O_LABEL_DIAGNOSTIC_VARIANTS)
+    assert ranking["label_diagnostic_variants_deployable"] is False
     assert "o_replay_aligned_labels_family_priors" in ranking[
         "ranking_metric_by_variant"
     ]
+    assert O_MODEL_PREDICTED_VARIANT in ranking["ranking_metric_by_variant"]
     assert ranking["ranking_metric_scope"] == "full_decision_group"
     assert ranking["full_source_model_ranking_quality_claimed"] is True
+    assert ranking["o_model_training_summary"]["ranking_score_source"] == (
+        "model_predicted_score"
+    )
+    assert ranking["o_model_training_summary"][
+        "deployable_model_score_available"
+    ] is True
+    assert ranking["o_model_training_summary"][
+        "model_input_fields_decision_time_only"
+    ] == list(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
+    assert ranking["o_model_training_summary"][
+        "training_target"
+    ] == "replay_aligned_executable_label_target"
     assert ranking["decision_group_completeness_summary"][
         "partial_decision_group_count"
     ] == 0
@@ -2054,18 +2076,43 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         row["oracle_executable_best_action"] == "NO_TRADE"
         for row in ranking["ranking_rows"]
     )
+    assert all(
+        row["ranking_score_source"] == "model_predicted_score"
+        for row in ranking["ranking_rows"]
+    )
+    assert all(
+        row["deployable_model_score_available"] is True
+        for row in ranking["ranking_rows"]
+    )
+    assert all(
+        row["o_model_predicted_score"] is not None
+        for row in ranking["ranking_rows"]
+    )
     assert ranking["source_model_candidate_eligible"] is False
+    assert ranking["#146_start_allowed"] is False
+    assert ranking["#134_resume_allowed"] is False
 
     leakage = result.leakage_audit_report
     leakage_payload = dict(leakage)
     leakage_id = leakage_payload.pop("o_feature_and_label_leakage_audit_report_id")
     assert canonical_json_sha256(leakage_payload) == leakage_id
     assert leakage["schema_version"] == O_FEATURE_AND_LABEL_LEAKAGE_AUDIT_SCHEMA_VERSION
+    assert leakage["ranking_score_source"] == "model_predicted_score"
+    assert leakage["deployable_model_score_available"] is True
     assert leakage["leakage_audit_passed"] is True
     assert leakage["model_input_forbidden_field_overlap"] == []
     assert "total_polymarket_pnl" not in leakage["model_input_fields_decision_time_only"]
+    assert "action_return_target" not in leakage["model_input_fields_decision_time_only"]
+    assert "label_pnl_target" not in leakage["model_input_fields_decision_time_only"]
+    assert "realized_trade_pnl" not in leakage["model_input_fields_decision_time_only"]
+    assert leakage["model_input_fields_decision_time_only"] == list(
+        O_DEPLOYABLE_MODEL_FEATURE_NAMES
+    )
     assert leakage["future_replay_outcomes_used_as_model_inputs"] is False
+    assert leakage["future_replay_outcomes_used_as_training_labels"] is True
     assert leakage["source_model_candidate_eligible"] is False
+    assert leakage["#146_start_allowed"] is False
+    assert leakage["#134_resume_allowed"] is False
 
     comparison = result.candidate_comparison_report
     comparison_payload = dict(comparison)
@@ -2077,6 +2124,11 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     )
     assert len(comparison["candidate_rows"]) >= 5
     assert comparison["eligible_candidate_count"] == 0
+    assert comparison["model_predicted_candidate_name"] == O_MODEL_PREDICTED_VARIANT
+    assert comparison["model_training_summary"]["model_candidate_name"] == (
+        O_MODEL_PREDICTED_VARIANT
+    )
+    assert comparison["label_diagnostic_variants"] == list(O_LABEL_DIAGNOSTIC_VARIANTS)
     assert all(
         row["source_model_candidate_eligible"] is False
         for row in comparison["candidate_rows"]
@@ -2088,19 +2140,49 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     comparison_by_name = {
         row["candidate_name"]: row for row in comparison["candidate_rows"]
     }
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "ranking_score_source"
+    ] == "model_predicted_score"
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "deployable_model_score_available"
+    ] is True
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "full_source_model_ranking_quality_claimed"
+    ] is True
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "model_training_summary"
+    ]["feature_names"] == list(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
     assert comparison_by_name["current_source_baseline"][
         "full_source_model_ranking_quality_claimed"
+    ] is False
+    assert comparison_by_name["current_source_baseline"][
+        "ranking_score_source"
+    ] == "observed_source_score"
+    assert comparison_by_name["current_source_baseline"][
+        "deployable_model_score_available"
     ] is False
     assert comparison_by_name["current_source_baseline"][
         "source_score_completeness_summary"
     ]["source_score_complete"] is False
     assert all(
-        row["full_source_model_ranking_quality_claimed"] is True
+        row["ranking_score_source"] == "label_diagnostic_score"
+        and row["deployable_model_score_available"] is False
+        and row["label_diagnostic_score"] is True
+        and row["full_source_model_ranking_quality_claimed"] is False
         for row in comparison["candidate_rows"]
-        if row["candidate_name"] != "current_source_baseline"
+        if row["candidate_name"] in O_LABEL_DIAGNOSTIC_VARIANTS
+    )
+    assert all(
+        row["action_family_gate_metrics"]["HOLD_TO_SETTLEMENT"][
+            "paper_decision_eligible"
+        ]
+        is False
+        for row in comparison["candidate_rows"]
     )
     assert comparison["#146_start_allowed"] is False
     assert comparison["#134_resume_allowed"] is False
+    assert comparison["paper_only"] is True
+    assert comparison["capital_at_risk"] is False
     assert result.artifact_paths["label_construction_report"].exists()
     assert result.artifact_paths["ranking_objective_report"].exists()
     assert result.artifact_paths["leakage_audit_report"].exists()
