@@ -33,6 +33,12 @@ from bigan.v8.polymarket.training.post_freeze_m2_replay_parity import (
     PolymarketM2ReplayParityConfig,
     run_polymarket_m2_replay_parity_diagnostics,
 )
+from bigan.v8.polymarket.training.post_freeze_n_up_replay_aligned import (
+    N_UP_REPLAY_ALIGNED_CANDIDATE_SCHEMA_VERSION,
+    N_UP_REPLAY_ALIGNED_SCORE_OVERLAY_SCHEMA_VERSION,
+    PolymarketNUpReplayAlignedConfig,
+    run_polymarket_n_up_replay_aligned_candidate,
+)
 from bigan.v8.polymarket.training.post_freeze_promotion_readiness_audit import (
     M_POST_FREEZE_PROMOTION_READINESS_AUDIT_SCHEMA_VERSION,
     PolymarketPostFreezePromotionReadinessAuditConfig,
@@ -51,6 +57,7 @@ from bigan.v8.polymarket.training.post_freeze_weak_evidence_drilldown import (
 )
 from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_M2_REPLAY_PARITY_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_N_UP_REPLAY_ALIGNED_ACTION_VALUE_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
 )
 
@@ -1115,6 +1122,181 @@ def test_up_sell_before_close_diagnostics_explain_label_and_score_weakness(
     assert calibration["#134_resume_allowed"] is False
     assert result.artifact_paths["label_replay_report"].exists()
     assert result.artifact_paths["calibration_report"].exists()
+
+
+def test_n_up_replay_aligned_candidate_flags_up_false_positives_fail_closed(
+    tmp_path: Path,
+) -> None:
+    up_negative_label = _replay_row(
+        market_id="n-up-negative-label",
+        decision_ts=10,
+        side="UP",
+        pnl=-0.12,
+    )
+    up_negative_label.update(
+        {
+            "action_return_target": -0.05,
+            "raw_calibrated_action_score": 0.92,
+            "candidate_rank_score": 0.10,
+        }
+    )
+    up_positive_label_negative_replay = _replay_row(
+        market_id="n-up-positive-label-negative-replay",
+        decision_ts=20,
+        side="UP",
+        pnl=-0.08,
+    )
+    up_positive_label_negative_replay.update(
+        {
+            "action_return_target": 0.20,
+            "raw_calibrated_action_score": 0.85,
+            "candidate_rank_score": 0.20,
+        }
+    )
+    up_positive_replay = _replay_row(
+        market_id="n-up-positive-replay",
+        decision_ts=30,
+        side="UP",
+        pnl=0.15,
+    )
+    up_positive_replay.update(
+        {
+            "action_return_target": 0.10,
+            "raw_calibrated_action_score": 0.30,
+            "candidate_rank_score": -0.10,
+        }
+    )
+    down_reference = _replay_row(
+        market_id="n-down-reference",
+        decision_ts=40,
+        side="DOWN",
+        pnl=0.30,
+    )
+    source_report = _write_holdout_report(
+        tmp_path / "n_source",
+        _holdout_validation_report(
+            run_id="n-up-replay-aligned-source",
+            market_ids=(
+                "n-up-negative-label",
+                "n-up-positive-label-negative-replay",
+                "n-up-positive-replay",
+                "n-down-reference",
+            ),
+            replay_rows=[
+                up_negative_label,
+                up_positive_label_negative_replay,
+                up_positive_replay,
+                down_reference,
+            ],
+            replay_pnl_by_side={"UP": -0.05, "DOWN": 0.30},
+        ),
+    )
+    source_payload = _read_json(source_report)
+    source_payload["m_post_freeze_holdout_validation_report_id"] = canonical_json_sha256(
+        source_payload
+    )
+    source_report.write_text(
+        json.dumps(source_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    selected_rows = []
+    for row in source_payload["rows"]:
+        row = dict(row)
+        row["source_report_path"] = str(source_report)
+        row["m2_side_quota_selected"] = True
+        row["m2_reason_codes"] = ["m2_stateful_replay_parity_selected"]
+        selected_rows.append(row)
+    m2_report = {
+        "schema_version": M2_REPLAY_PARITY_SCHEMA_VERSION,
+        "candidate_name": SELL_BEFORE_CLOSE_M2_REPLAY_PARITY_CANDIDATE_NAME,
+        "baseline_candidate_name": SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+        "diagnostic_only": True,
+        "current_frozen_m_promotion_status": "reject_promotion_for_now",
+        "current_frozen_m_evidence_status": "weak_mixed_structural",
+        "current_frozen_m_evidence_reused_for_m2_promotion": False,
+        "m2_selected_rows": selected_rows,
+        "source_model_candidate_eligible": False,
+        "promotion_evidence_eligible": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    m2_report["m2_stateful_replay_parity_candidate_report_id"] = canonical_json_sha256(
+        m2_report
+    )
+    m2_report_path = tmp_path / "m2_stateful_replay_parity_candidate_report.json"
+    m2_report_path.write_text(
+        json.dumps(m2_report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    original_m2_bytes = m2_report_path.read_bytes()
+
+    result = run_polymarket_n_up_replay_aligned_candidate(
+        PolymarketNUpReplayAlignedConfig(
+            m2_candidate_report_path=m2_report_path,
+            output_dir=tmp_path / "n_up_replay_aligned",
+        )
+    )
+
+    assert m2_report_path.read_bytes() == original_m2_bytes
+    candidate = result.candidate_report
+    candidate_payload = dict(candidate)
+    candidate_id = candidate_payload.pop("n_up_replay_aligned_candidate_report_id")
+    assert canonical_json_sha256(candidate_payload) == candidate_id
+    assert candidate["schema_version"] == N_UP_REPLAY_ALIGNED_CANDIDATE_SCHEMA_VERSION
+    assert (
+        candidate["candidate_name"]
+        == SELL_BEFORE_CLOSE_N_UP_REPLAY_ALIGNED_ACTION_VALUE_CANDIDATE_NAME
+    )
+    assert candidate["m2_up_selected_count"] == 3
+    assert candidate["n_would_selected_up_count"] == 1
+    assert candidate["n_would_blocked_up_count"] == 2
+    assert candidate["n_would_selected_up_replay_pnl_sum"] == 0.15
+    assert candidate["n_blocked_up_false_positive_count"] == 1
+    assert (
+        candidate["m2_up_label_vs_replay_gap"]
+        > candidate["n_label_vs_replay_gap_after_correction"]
+    )
+    blocked_by_market = {
+        row["market_id"]: row for row in candidate["n_would_blocked_rows"]
+    }
+    high_score_row = blocked_by_market["n-up-positive-label-negative-replay"]
+    assert high_score_row["high_score_negative_replay_guard_triggered"] is True
+    assert high_score_row["positive_label_replay_negative_flagged"] is True
+    assert "n_blocked_high_score_negative_replay" in high_score_row[
+        "n_decision_reason_codes"
+    ]
+    negative_label_row = blocked_by_market["n-up-negative-label"]
+    assert negative_label_row["negative_label_selected_flagged"] is True
+    assert "n_flagged_negative_label_selected" in negative_label_row[
+        "n_decision_reason_codes"
+    ]
+    assert candidate["source_model_candidate_eligible"] is False
+    assert candidate["promotion_evidence_eligible"] is False
+    assert candidate["#146_start_allowed"] is False
+    assert candidate["#134_resume_allowed"] is False
+    assert candidate["paper_only"] is True
+    assert candidate["capital_at_risk"] is False
+
+    overlay = result.score_overlay_report
+    overlay_payload = dict(overlay)
+    overlay_id = overlay_payload.pop("n_up_replay_aligned_score_overlay_report_id")
+    assert canonical_json_sha256(overlay_payload) == overlay_id
+    assert overlay["schema_version"] == N_UP_REPLAY_ALIGNED_SCORE_OVERLAY_SCHEMA_VERSION
+    assert overlay["original_score_vs_replay_correlation"] < 0.0
+    assert (
+        overlay["replay_aligned_score_proxy_vs_replay_correlation"]
+        > overlay["original_score_vs_replay_correlation"]
+    )
+    assert overlay["source_model_candidate_eligible"] is False
+    assert overlay["promotion_evidence_eligible"] is False
+    assert overlay["#146_start_allowed"] is False
+    assert overlay["#134_resume_allowed"] is False
+    assert result.artifact_paths["candidate_report"].exists()
+    assert result.artifact_paths["score_overlay_report"].exists()
 
 
 def _build_corpus(root: Path) -> Path:
