@@ -46,6 +46,14 @@ from bigan.v8.polymarket.training.post_freeze_n_up_replay_aligned import (
     PolymarketNUpReplayAlignedConfig,
     run_polymarket_n_up_replay_aligned_candidate,
 )
+from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking import (
+    O_FEATURE_AND_LABEL_LEAKAGE_AUDIT_SCHEMA_VERSION,
+    O_LABEL_CONSTRUCTION_SCHEMA_VERSION,
+    O_SOURCE_CANDIDATE_COMPARISON_SCHEMA_VERSION,
+    O_SOURCE_RANKING_OBJECTIVE_SCHEMA_VERSION,
+    PolymarketOReplayAlignedSourceRankingConfig,
+    run_polymarket_o_replay_aligned_source_ranking,
+)
 from bigan.v8.polymarket.training.post_freeze_promotion_readiness_audit import (
     M_POST_FREEZE_PROMOTION_READINESS_AUDIT_SCHEMA_VERSION,
     PolymarketPostFreezePromotionReadinessAuditConfig,
@@ -69,6 +77,7 @@ from bigan.v8.polymarket.training.post_freeze_weak_evidence_drilldown import (
     run_polymarket_m_post_freeze_weak_evidence_drilldown,
 )
 from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
+    REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_M2_REPLAY_PARITY_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_N2_NON_LEAKY_UP_REPLAY_ALIGNED_FEATURE_PROXY_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_N_UP_REPLAY_ALIGNED_ACTION_VALUE_CANDIDATE_NAME,
@@ -1792,6 +1801,195 @@ def test_up_full_candidate_pool_diagnostic_segments_selected_and_non_selected(
     assert proxy["#134_resume_allowed"] is False
     assert result.artifact_paths["candidate_pool_report"].exists()
     assert result.artifact_paths["feature_proxy_report"].exists()
+
+
+def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
+    tmp_path: Path,
+) -> None:
+    weak_up = _replay_row(
+        market_id="o-market-a",
+        decision_ts=10,
+        side="UP",
+        pnl=-0.10,
+    )
+    weak_up.update(
+        {
+            "action_return_target": 0.50,
+            "raw_calibrated_action_score": 0.95,
+            "best_action_margin": 0.10,
+            "execution_pnl_immediate_exit_pnl": -0.02,
+            "entry_quality_ask": 0.60,
+            "exit_quality_bid": 0.58,
+            "entry_exit_quality_spread_bps": 700.0,
+            "entry_exit_quality_queue_fill": 0.70,
+            "entry_exit_quality_book_staleness_ms": 500.0,
+            "entry_exit_quality_time_to_close_seconds": 180.0,
+        }
+    )
+    better_down = _replay_row(
+        market_id="o-market-a",
+        decision_ts=20,
+        side="DOWN",
+        pnl=0.12,
+    )
+    better_down.update(
+        {
+            "action_return_target": 0.12,
+            "raw_calibrated_action_score": 0.30,
+            "best_action_margin": 0.03,
+            "execution_pnl_immediate_exit_pnl": 0.04,
+            "entry_quality_ask": 0.40,
+            "exit_quality_bid": 0.44,
+            "entry_exit_quality_spread_bps": 250.0,
+            "entry_exit_quality_queue_fill": 0.92,
+            "entry_exit_quality_book_staleness_ms": 500.0,
+            "entry_exit_quality_time_to_close_seconds": 180.0,
+        }
+    )
+    weak_down = _replay_row(
+        market_id="o-market-b",
+        decision_ts=30,
+        side="DOWN",
+        pnl=-0.08,
+    )
+    weak_down.update(
+        {
+            "action_return_target": 0.20,
+            "raw_calibrated_action_score": 0.80,
+            "best_action_margin": 0.06,
+            "execution_pnl_immediate_exit_pnl": -0.03,
+            "entry_quality_ask": 0.55,
+            "exit_quality_bid": 0.52,
+            "entry_exit_quality_spread_bps": 600.0,
+            "entry_exit_quality_queue_fill": 0.75,
+            "entry_exit_quality_book_staleness_ms": 500.0,
+            "entry_exit_quality_time_to_close_seconds": 180.0,
+        }
+    )
+    source_report = _write_holdout_report(
+        tmp_path / "o_source",
+        _holdout_validation_report(
+            run_id="o-replay-aligned-source",
+            market_ids=("o-market-a", "o-market-b"),
+            replay_rows=[weak_up, better_down, weak_down],
+            replay_pnl_by_side={"UP": -0.10, "DOWN": 0.04},
+        ),
+    )
+    source_payload = _read_json(source_report)
+    source_payload["m_post_freeze_holdout_validation_report_id"] = canonical_json_sha256(
+        source_payload
+    )
+    source_report.write_text(
+        json.dumps(source_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    selected_payload = dict(weak_up)
+    selected_payload["source_report_path"] = str(source_report)
+    selected_payload["m2_side_quota_selected"] = True
+    selected_payload["m2_reason_codes"] = ["m2_stateful_replay_parity_selected"]
+    m2_report = {
+        "schema_version": M2_REPLAY_PARITY_SCHEMA_VERSION,
+        "candidate_name": SELL_BEFORE_CLOSE_M2_REPLAY_PARITY_CANDIDATE_NAME,
+        "baseline_candidate_name": SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+        "diagnostic_only": True,
+        "current_frozen_m_promotion_status": "reject_promotion_for_now",
+        "current_frozen_m_evidence_status": "weak_mixed_structural",
+        "current_frozen_m_evidence_reused_for_m2_promotion": False,
+        "m2_selected_rows": [selected_payload],
+        "m2_blocked_rows": [],
+        "source_model_candidate_eligible": False,
+        "promotion_evidence_eligible": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    m2_report["m2_stateful_replay_parity_candidate_report_id"] = canonical_json_sha256(
+        m2_report
+    )
+    m2_report_path = tmp_path / "m2_stateful_replay_parity_candidate_report.json"
+    m2_report_path.write_text(
+        json.dumps(m2_report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    original_m2_bytes = m2_report_path.read_bytes()
+
+    result = run_polymarket_o_replay_aligned_source_ranking(
+        PolymarketOReplayAlignedSourceRankingConfig(
+            m2_candidate_report_path=m2_report_path,
+            output_dir=tmp_path / "o_replay_aligned",
+        )
+    )
+
+    assert m2_report_path.read_bytes() == original_m2_bytes
+    labels = result.label_construction_report
+    label_payload = dict(labels)
+    label_id = label_payload.pop("o_replay_aligned_label_construction_report_id")
+    assert canonical_json_sha256(label_payload) == label_id
+    assert labels["schema_version"] == O_LABEL_CONSTRUCTION_SCHEMA_VERSION
+    assert labels["candidate_name"] == REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME
+    assert labels["row_count"] == 5
+    assert labels["label_gap_delta"] != 0.0
+    assert any(row["action"] == "NO_TRADE" for row in labels["label_rows"])
+    assert (
+        labels["label_component_field_classes"][
+            "first_executable_exit_bid_after_entry"
+        ]
+        == "replay_derived_label_only"
+    )
+    assert labels["source_model_candidate_eligible"] is False
+    assert labels["#146_start_allowed"] is False
+    assert labels["#134_resume_allowed"] is False
+
+    ranking = result.ranking_objective_report
+    ranking_payload = dict(ranking)
+    ranking_id = ranking_payload.pop("o_source_ranking_objective_report_id")
+    assert canonical_json_sha256(ranking_payload) == ranking_id
+    assert ranking["schema_version"] == O_SOURCE_RANKING_OBJECTIVE_SCHEMA_VERSION
+    assert "o_replay_aligned_labels_family_priors" in ranking[
+        "ranking_metric_by_variant"
+    ]
+    assert 0.0 <= ranking["top1_realized_best_action_hit_rate"] <= 1.0
+    assert ranking["mean_regret"] >= 0.0
+    assert any(
+        row["oracle_executable_best_action"] == "NO_TRADE"
+        for row in ranking["ranking_rows"]
+    )
+    assert ranking["source_model_candidate_eligible"] is False
+
+    leakage = result.leakage_audit_report
+    leakage_payload = dict(leakage)
+    leakage_id = leakage_payload.pop("o_feature_and_label_leakage_audit_report_id")
+    assert canonical_json_sha256(leakage_payload) == leakage_id
+    assert leakage["schema_version"] == O_FEATURE_AND_LABEL_LEAKAGE_AUDIT_SCHEMA_VERSION
+    assert leakage["leakage_audit_passed"] is True
+    assert leakage["model_input_forbidden_field_overlap"] == []
+    assert "total_polymarket_pnl" not in leakage["model_input_fields_decision_time_only"]
+    assert leakage["future_replay_outcomes_used_as_model_inputs"] is False
+    assert leakage["source_model_candidate_eligible"] is False
+
+    comparison = result.candidate_comparison_report
+    comparison_payload = dict(comparison)
+    comparison_id = comparison_payload.pop("o_source_candidate_comparison_report_id")
+    assert canonical_json_sha256(comparison_payload) == comparison_id
+    assert (
+        comparison["schema_version"]
+        == O_SOURCE_CANDIDATE_COMPARISON_SCHEMA_VERSION
+    )
+    assert len(comparison["candidate_rows"]) >= 5
+    assert comparison["eligible_candidate_count"] == 0
+    assert all(
+        row["source_model_candidate_eligible"] is False
+        for row in comparison["candidate_rows"]
+    )
+    assert comparison["#146_start_allowed"] is False
+    assert comparison["#134_resume_allowed"] is False
+    assert result.artifact_paths["label_construction_report"].exists()
+    assert result.artifact_paths["ranking_objective_report"].exists()
+    assert result.artifact_paths["leakage_audit_report"].exists()
+    assert result.artifact_paths["candidate_comparison_report"].exists()
 
 
 def _build_corpus(root: Path) -> Path:

@@ -1,0 +1,1102 @@
+"""Diagnostic O replay-aligned source-ranking reports."""
+
+from __future__ import annotations
+
+import shutil
+import statistics
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.training.contracts import (
+    POLYMARKET_POLICY_TRAINING_PHASE,
+    compact_safety_fields,
+)
+from bigan.v8.polymarket.training.post_freeze_m2_replay_parity import (
+    M2_REPLAY_PARITY_SCHEMA_VERSION,
+)
+from bigan.v8.polymarket.training.post_freeze_n2_up_feature_proxy import (
+    N2_FORBIDDEN_SELECTION_FIELDS,
+)
+from bigan.v8.polymarket.training.post_freeze_up_diagnostics import (
+    _label,
+    _pnl,
+    _read_json,
+    _score,
+    _sha256_file,
+    _write_json,
+)
+from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
+    REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_M2_REPLAY_PARITY_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_N2_NON_LEAKY_UP_REPLAY_ALIGNED_FEATURE_PROXY_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_N_UP_REPLAY_ALIGNED_ACTION_VALUE_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+)
+
+O_LABEL_CONSTRUCTION_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-replay-aligned-label-construction-v1"
+)
+O_SOURCE_RANKING_OBJECTIVE_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-source-ranking-objective-v1"
+)
+O_FEATURE_AND_LABEL_LEAKAGE_AUDIT_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-feature-and-label-leakage-audit-v1"
+)
+O_SOURCE_CANDIDATE_COMPARISON_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-source-candidate-comparison-v1"
+)
+O_MODEL_INPUT_FIELDS = (
+    "raw_calibrated_action_score",
+    "best_action_margin",
+    "entry_quality_ask",
+    "exit_quality_bid",
+    "execution_pnl_immediate_exit_pnl",
+    "execution_pnl_immediate_exit_return",
+    "entry_exit_quality_spread_bps",
+    "entry_exit_quality_queue_fill",
+    "entry_exit_quality_book_staleness_ms",
+    "entry_exit_quality_time_to_close_seconds",
+    "up_recent_book_update_count_1m",
+    "down_recent_book_update_count_1m",
+)
+O_TRAINING_LABEL_FIELDS = (
+    "action_return_target",
+    "label_pnl_target",
+    "exit_quality_bid",
+    "execution_pnl_immediate_exit_pnl",
+    "execution_pnl_immediate_exit_return",
+)
+O_REPORT_ONLY_EVALUATION_FIELDS = (
+    "realized_trade_pnl",
+    "settlement_pnl",
+    "total_polymarket_pnl",
+)
+O_FORBIDDEN_MODEL_INPUT_FIELDS = (
+    *N2_FORBIDDEN_SELECTION_FIELDS,
+    "future_exit_reason_codes",
+    "post_entry_close_state",
+    "post_settlement_values",
+)
+O_VARIANTS = (
+    "current_source_baseline",
+    "o_replay_aligned_labels_only",
+    "o_replay_aligned_labels_family_priors",
+    "o_replay_aligned_pairwise_listwise_correction",
+    "o_replay_aligned_stronger_no_trade_prior",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PolymarketOReplayAlignedSourceRankingConfig:
+    """Configuration for diagnostic-only O replay-aligned source ranking."""
+
+    m2_candidate_report_path: Path | str
+    output_dir: Path | str
+    run_id: str = "polymarket_o_replay_aligned_source_ranking"
+    overwrite_existing: bool = False
+    high_score_threshold: float = 0.75
+    paper_only: bool = True
+    capital_at_risk: bool = False
+    polymarket_write_enabled: bool = False
+    wallet_signing_enabled: bool = False
+
+    def __post_init__(self) -> None:
+        for field_name in ("m2_candidate_report_path", "output_dir"):
+            value = getattr(self, field_name)
+            if not isinstance(value, Path):
+                object.__setattr__(self, field_name, Path(value))
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        for field_name, expected in compact_safety_fields().items():
+            if getattr(self, field_name) is not expected:
+                raise ValueError(f"{field_name} must be {expected}")
+
+    @property
+    def run_dir(self) -> Path:
+        return self.output_dir.expanduser().resolve() / self.run_id
+
+
+@dataclass(frozen=True, slots=True)
+class PolymarketOReplayAlignedSourceRankingResult:
+    run_dir: Path
+    label_construction_report: dict[str, Any]
+    ranking_objective_report: dict[str, Any]
+    leakage_audit_report: dict[str, Any]
+    candidate_comparison_report: dict[str, Any]
+    artifact_paths: dict[str, Path]
+
+
+def run_polymarket_o_replay_aligned_source_ranking(
+    config: PolymarketOReplayAlignedSourceRankingConfig,
+) -> PolymarketOReplayAlignedSourceRankingResult:
+    """Build diagnostic-only O source-ranking reports."""
+
+    run_dir = config.run_dir
+    if run_dir.exists():
+        if not config.overwrite_existing:
+            raise FileExistsError(f"run_dir already exists: {run_dir}")
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    artifact_paths = {
+        "label_construction_report": run_dir
+        / "o_replay_aligned_label_construction_report.json",
+        "label_construction_summary": run_dir
+        / "o_replay_aligned_label_construction_report.md",
+        "ranking_objective_report": run_dir
+        / "o_source_ranking_objective_report.json",
+        "ranking_objective_summary": run_dir
+        / "o_source_ranking_objective_report.md",
+        "leakage_audit_report": run_dir / "o_feature_and_label_leakage_audit.json",
+        "leakage_audit_summary": run_dir / "o_feature_and_label_leakage_audit.md",
+        "candidate_comparison_report": run_dir
+        / "o_source_candidate_comparison_report.json",
+        "candidate_comparison_summary": run_dir
+        / "o_source_candidate_comparison_report.md",
+        "manifest": run_dir / "o_replay_aligned_source_ranking_manifest.json",
+    }
+    reports = _build_reports(config=config)
+    _write_json(artifact_paths["label_construction_report"], reports[0])
+    artifact_paths["label_construction_summary"].write_text(
+        _label_markdown(reports[0]),
+        encoding="utf-8",
+    )
+    _write_json(artifact_paths["ranking_objective_report"], reports[1])
+    artifact_paths["ranking_objective_summary"].write_text(
+        _ranking_markdown(reports[1]),
+        encoding="utf-8",
+    )
+    _write_json(artifact_paths["leakage_audit_report"], reports[2])
+    artifact_paths["leakage_audit_summary"].write_text(
+        _leakage_markdown(reports[2]),
+        encoding="utf-8",
+    )
+    _write_json(artifact_paths["candidate_comparison_report"], reports[3])
+    artifact_paths["candidate_comparison_summary"].write_text(
+        _comparison_markdown(reports[3]),
+        encoding="utf-8",
+    )
+    manifest = {
+        "schema_version": "bigan-v8-polymarket-o-replay-aligned-source-ranking-artifacts-v1",
+        "run_id": config.run_id,
+        "artifact_paths": {
+            name: str(path.relative_to(run_dir))
+            for name, path in sorted(artifact_paths.items())
+        },
+        "artifact_hashes": {
+            name: _sha256_file(path)
+            for name, path in sorted(artifact_paths.items())
+            if name != "manifest"
+        },
+        **compact_safety_fields(),
+    }
+    manifest["artifact_hashes"]["manifest"] = canonical_json_sha256(manifest)
+    _write_json(artifact_paths["manifest"], manifest)
+    return PolymarketOReplayAlignedSourceRankingResult(
+        run_dir=run_dir,
+        label_construction_report=reports[0],
+        ranking_objective_report=reports[1],
+        leakage_audit_report=reports[2],
+        candidate_comparison_report=reports[3],
+        artifact_paths=artifact_paths,
+    )
+
+
+def _build_reports(
+    *,
+    config: PolymarketOReplayAlignedSourceRankingConfig,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    m2_report_path = config.m2_candidate_report_path.expanduser().resolve()
+    m2_report = _read_json(m2_report_path)
+    if m2_report.get("schema_version") != M2_REPLAY_PARITY_SCHEMA_VERSION:
+        raise ValueError("not an M2 replay-parity candidate report")
+    rows, source_reports = _load_source_rows(m2_report)
+    action_rows = [
+        _normalize_action_row(row)
+        for row in rows
+        if str(row.get("action") or "").endswith("SELL_BEFORE_CLOSE")
+    ]
+    grouped = _groups_with_no_trade(action_rows)
+    labeled_rows = _construct_replay_aligned_labels(grouped)
+    ranking_rows = _ranking_rows(labeled_rows)
+    label_report = _label_report(
+        config=config,
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        source_reports=source_reports,
+        rows=labeled_rows,
+    )
+    ranking_report = _ranking_report(
+        config=config,
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        rows=ranking_rows,
+    )
+    leakage_report = _leakage_report(
+        config=config,
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        rows=labeled_rows,
+    )
+    comparison_report = _comparison_report(
+        config=config,
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        rows=ranking_rows,
+    )
+    return label_report, ranking_report, leakage_report, comparison_report
+
+
+def _load_source_rows(
+    m2_report: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    paths = sorted(
+        {
+            str(row.get("source_report_path") or "")
+            for row in [
+                *m2_report.get("m2_selected_rows", []),
+                *m2_report.get("m2_blocked_rows", []),
+            ]
+            if row.get("source_report_path")
+        }
+    )
+    rows: list[dict[str, Any]] = []
+    source_reports = []
+    seen: set[tuple[str, str, int, str]] = set()
+    for path_text in paths:
+        path = Path(path_text).expanduser().resolve()
+        report = _read_json(path)
+        source_reports.append(
+            {
+                "source_report_path": str(path),
+                "source_report_sha256": _sha256_file(path),
+                "run_id": report.get("run_id"),
+                "row_count": len(report.get("rows", [])),
+            }
+        )
+        for row in report.get("rows", []):
+            payload = dict(row)
+            payload["source_report_path"] = str(path)
+            key = (
+                str(payload.get("source_report_path") or ""),
+                str(payload.get("market_id") or ""),
+                int(payload.get("decision_ts") or 0),
+                str(payload.get("action") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(payload)
+    return rows, source_reports
+
+
+def _normalize_action_row(row: dict[str, Any]) -> dict[str, Any]:
+    action = str(row.get("action") or "")
+    side = str(row.get("selected_side") or _side_from_action(action))
+    return {
+        **row,
+        "action": action,
+        "action_family": _action_family(action),
+        "selected_side": side,
+        "decision_group_id": "|".join(
+            (
+                str(row.get("source_report_path") or ""),
+                str(row.get("market_id") or ""),
+            )
+        ),
+        "original_label_target": _label(row),
+        "realized_replay_return": _pnl(row),
+        "baseline_source_score": _score(row),
+    }
+
+
+def _groups_with_no_trade(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[row["decision_group_id"]].append(row)
+    for group_id, group_rows in list(groups.items()):
+        template = group_rows[0]
+        groups[group_id].append(
+            {
+                "source_report_path": template.get("source_report_path"),
+                "market_id": template.get("market_id"),
+                "slug": template.get("slug"),
+                "decision_ts": min(int(row.get("decision_ts") or 0) for row in group_rows),
+                "selected_side": "NONE",
+                "action": "NO_TRADE",
+                "action_family": "NO_TRADE",
+                "decision_group_id": group_id,
+                "original_label_target": 0.0,
+                "realized_replay_return": 0.0,
+                "baseline_source_score": 0.0,
+                "synthetic_no_trade_action": True,
+            }
+        )
+    return groups
+
+
+def _construct_replay_aligned_labels(
+    grouped: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    labeled = []
+    for group_id, rows in sorted(grouped.items()):
+        base_labels = [_base_replay_label(row) for row in rows]
+        best_base = max(base_labels) if base_labels else 0.0
+        for row, base_label in zip(rows, base_labels, strict=True):
+            opportunity_cost = max(0.0, best_base - base_label) * 0.10
+            components = _label_components(row, base_label, opportunity_cost)
+            replay_label = base_label - opportunity_cost
+            labeled.append(
+                {
+                    **row,
+                    "decision_group_id": group_id,
+                    "replay_aligned_executable_label_target": replay_label,
+                    "label_delta": replay_label - float(row["original_label_target"]),
+                    "label_vs_realized_replay_gap_before": (
+                        float(row["original_label_target"])
+                        - float(row["realized_replay_return"])
+                    ),
+                    "label_vs_realized_replay_gap_after": (
+                        replay_label - float(row["realized_replay_return"])
+                    ),
+                    "label_components": components,
+                    "label_component_field_classes": _label_component_field_classes(),
+                    "split": _split_for_group(group_id),
+                    "time_to_close_bucket": _time_to_close_bucket(row),
+                    "spread_bucket": _spread_bucket(row),
+                    "queue_bucket": _queue_bucket(row),
+                    "staleness_bucket": _staleness_bucket(row),
+                }
+            )
+    return labeled
+
+
+def _base_replay_label(row: dict[str, Any]) -> float:
+    if row.get("action") == "NO_TRADE":
+        return 0.0
+    original = float(row.get("original_label_target") or 0.0)
+    immediate = _immediate_exit_pnl(row)
+    spread_penalty = _spread_penalty(row)
+    queue_penalty = _queue_penalty(row)
+    staleness_penalty = _staleness_penalty(row)
+    time_penalty = _time_penalty(row)
+    no_trade_baseline = 0.0
+    executable_exit_label = min(original, immediate) if immediate is not None else original
+    return (
+        executable_exit_label
+        - spread_penalty
+        - queue_penalty
+        - staleness_penalty
+        - time_penalty
+        - no_trade_baseline
+    )
+
+
+def _label_components(
+    row: dict[str, Any],
+    base_label: float,
+    opportunity_cost: float,
+) -> dict[str, Any]:
+    return {
+        "entry_ask": _optional_float(row.get("entry_quality_ask")),
+        "executable_entry_cost": _optional_float(row.get("entry_quality_ask")),
+        "first_executable_exit_bid_after_entry": _optional_float(
+            row.get("exit_quality_bid")
+        ),
+        "immediate_exit_downside_proxy": _immediate_exit_pnl(row),
+        "spread_penalty": _spread_penalty(row),
+        "queue_fill_penalty": _queue_penalty(row),
+        "book_staleness_penalty": _staleness_penalty(row),
+        "time_to_close_penalty": _time_penalty(row),
+        "no_trade_baseline": 0.0,
+        "action_family_opportunity_cost": opportunity_cost,
+        "base_replay_aligned_label": base_label,
+    }
+
+
+def _label_component_field_classes() -> dict[str, str]:
+    return {
+        "entry_ask": "decision_time_available",
+        "executable_entry_cost": "decision_time_available",
+        "first_executable_exit_bid_after_entry": "replay_derived_label_only",
+        "immediate_exit_downside_proxy": "decision_time_available",
+        "spread_penalty": "decision_time_available",
+        "queue_fill_penalty": "decision_time_available",
+        "book_staleness_penalty": "decision_time_available",
+        "time_to_close_penalty": "decision_time_available",
+        "no_trade_baseline": "decision_time_available",
+        "action_family_opportunity_cost": "replay_derived_label_only",
+    }
+
+
+def _ranking_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[row["decision_group_id"]].append(row)
+    ranking = []
+    for group_rows in grouped.values():
+        oracle = max(group_rows, key=lambda row: float(row["realized_replay_return"]))
+        for row in group_rows:
+            scores = _variant_scores(row, group_rows)
+            ranking.append(
+                {
+                    **row,
+                    "oracle_executable_best_action": oracle["action"],
+                    "oracle_executable_best_action_family": oracle["action_family"],
+                    "oracle_executable_best_action_return": float(
+                        oracle["realized_replay_return"]
+                    ),
+                    "no_trade_opportunity_cost": max(
+                        0.0,
+                        float(oracle["realized_replay_return"]),
+                    ),
+                    "variant_scores": scores,
+                }
+            )
+    return ranking
+
+
+def _variant_scores(row: dict[str, Any], group_rows: list[dict[str, Any]]) -> dict[str, float]:
+    label = float(row["replay_aligned_executable_label_target"])
+    group_mean = statistics.mean(
+        float(item["replay_aligned_executable_label_target"]) for item in group_rows
+    )
+    family_prior = 0.02 if row["action_family"] == "NO_TRADE" else -0.01
+    return {
+        "current_source_baseline": float(row["baseline_source_score"]),
+        "o_replay_aligned_labels_only": label,
+        "o_replay_aligned_labels_family_priors": label + family_prior,
+        "o_replay_aligned_pairwise_listwise_correction": label - group_mean,
+        "o_replay_aligned_stronger_no_trade_prior": (
+            label + 0.08 if row["action_family"] == "NO_TRADE" else label - 0.03
+        ),
+    }
+
+
+def _label_report(
+    *,
+    config: PolymarketOReplayAlignedSourceRankingConfig,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    source_reports: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    report = {
+        "schema_version": O_LABEL_CONSTRUCTION_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "baseline_candidate_names": _baseline_names(),
+        "report_type": "o_replay_aligned_label_construction",
+        "diagnostic_only": True,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "source_reports": source_reports,
+        "row_count": len(rows),
+        "label_rows": [_compact_label_row(row) for row in rows],
+        "label_component_field_classes": _label_component_field_classes(),
+        "label_gap_before": sum(
+            float(row["label_vs_realized_replay_gap_before"]) for row in rows
+        ),
+        "label_gap_after": sum(
+            float(row["label_vs_realized_replay_gap_after"]) for row in rows
+        ),
+        "label_gap_delta": sum(
+            float(row["label_vs_realized_replay_gap_before"])
+            - float(row["label_vs_realized_replay_gap_after"])
+            for row in rows
+        ),
+        "breakdown_by_action_family": _group_label_breakdown(rows, "action_family"),
+        "breakdown_by_side": _group_label_breakdown(rows, "selected_side"),
+        "breakdown_by_time_to_close_bucket": _group_label_breakdown(
+            rows,
+            "time_to_close_bucket",
+        ),
+        "breakdown_by_spread_bucket": _group_label_breakdown(rows, "spread_bucket"),
+        "breakdown_by_queue_bucket": _group_label_breakdown(rows, "queue_bucket"),
+        "breakdown_by_staleness_bucket": _group_label_breakdown(
+            rows,
+            "staleness_bucket",
+        ),
+        **_fail_closed_fields(),
+        **compact_safety_fields(),
+    }
+    del config
+    report["o_replay_aligned_label_construction_report_id"] = canonical_json_sha256(
+        report
+    )
+    return report
+
+
+def _ranking_report(
+    *,
+    config: PolymarketOReplayAlignedSourceRankingConfig,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    variant_metrics = {
+        variant: _ranking_metrics(rows, variant, config.high_score_threshold)
+        for variant in O_VARIANTS
+    }
+    report = {
+        "schema_version": O_SOURCE_RANKING_OBJECTIVE_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "baseline_candidate_names": _baseline_names(),
+        "report_type": "o_source_ranking_objective",
+        "diagnostic_only": True,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "ranking_metric_by_variant": variant_metrics,
+        "primary_variant_name": "o_replay_aligned_labels_family_priors",
+        "top1_realized_best_action_hit_rate": variant_metrics[
+            "o_replay_aligned_labels_family_priors"
+        ]["top1_realized_best_action_hit_rate"],
+        "top2_realized_best_action_hit_rate": variant_metrics[
+            "o_replay_aligned_labels_family_priors"
+        ]["top2_realized_best_action_hit_rate"],
+        "top3_realized_best_action_hit_rate": variant_metrics[
+            "o_replay_aligned_labels_family_priors"
+        ]["top3_realized_best_action_hit_rate"],
+        "mean_regret": variant_metrics["o_replay_aligned_labels_family_priors"][
+            "mean_regret"
+        ],
+        "ranking_rows": [
+            _compact_ranking_row(row, "o_replay_aligned_labels_family_priors")
+            for row in rows
+        ],
+        **_fail_closed_fields(),
+        **compact_safety_fields(),
+    }
+    report["o_source_ranking_objective_report_id"] = canonical_json_sha256(report)
+    return report
+
+
+def _leakage_report(
+    *,
+    config: PolymarketOReplayAlignedSourceRankingConfig,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    del config
+    model_overlap = sorted(
+        set(O_MODEL_INPUT_FIELDS).intersection(O_FORBIDDEN_MODEL_INPUT_FIELDS)
+    )
+    label_overlap = sorted(
+        set(O_TRAINING_LABEL_FIELDS).intersection(O_FORBIDDEN_MODEL_INPUT_FIELDS)
+    )
+    report = {
+        "schema_version": O_FEATURE_AND_LABEL_LEAKAGE_AUDIT_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "baseline_candidate_names": _baseline_names(),
+        "report_type": "o_feature_and_label_leakage_audit",
+        "diagnostic_only": True,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "model_input_fields_decision_time_only": list(O_MODEL_INPUT_FIELDS),
+        "training_label_fields_may_use_future_replay_or_settlement": list(
+            O_TRAINING_LABEL_FIELDS
+        ),
+        "report_only_evaluation_fields": list(O_REPORT_ONLY_EVALUATION_FIELDS),
+        "forbidden_model_input_fields": list(O_FORBIDDEN_MODEL_INPUT_FIELDS),
+        "model_input_forbidden_field_overlap": model_overlap,
+        "training_label_forbidden_field_overlap": label_overlap,
+        "leakage_audit_passed": not model_overlap,
+        "future_replay_outcomes_used_as_model_inputs": False,
+        "future_replay_outcomes_used_as_training_labels": True,
+        "future_replay_outcomes_used_as_report_only_evaluation": True,
+        "row_count": len(rows),
+        **_fail_closed_fields(),
+        **compact_safety_fields(),
+    }
+    report["o_feature_and_label_leakage_audit_report_id"] = canonical_json_sha256(
+        report
+    )
+    return report
+
+
+def _comparison_report(
+    *,
+    config: PolymarketOReplayAlignedSourceRankingConfig,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    candidate_rows = []
+    for variant in O_VARIANTS:
+        metrics = _ranking_metrics(rows, variant, config.high_score_threshold)
+        reasons = [
+            "diagnostic_only_no_paper_live_unlock",
+            "current_m_m2_n_n2_evidence_not_o_promotion_evidence",
+            "future_unseen_o_holdout_required",
+        ]
+        if metrics["high_score_realized_return_mean"] <= 0.0:
+            reasons.append("high_score_realized_return_mean_not_positive")
+        candidate_rows.append(
+            {
+                "candidate_name": variant,
+                "source_lineage": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME
+                if variant != "current_source_baseline"
+                else "current_source_baseline",
+                "shadow_raw_mae": metrics["split_metrics"]["shadow"]["raw_mae"],
+                "shadow_calibrated_mae": metrics["split_metrics"]["shadow"][
+                    "calibrated_mae"
+                ],
+                "top1_realized_best_action_hit_rate": metrics[
+                    "top1_realized_best_action_hit_rate"
+                ],
+                "top2_realized_best_action_hit_rate": metrics[
+                    "top2_realized_best_action_hit_rate"
+                ],
+                "top3_realized_best_action_hit_rate": metrics[
+                    "top3_realized_best_action_hit_rate"
+                ],
+                "mean_regret": metrics["mean_regret"],
+                "high_score_support_count": metrics["high_score_support_count"],
+                "high_score_realized_return_mean": metrics[
+                    "high_score_realized_return_mean"
+                ],
+                "high_score_realized_return_sum": metrics[
+                    "high_score_realized_return_sum"
+                ],
+                "action_family_eligibility_gates": {
+                    "SELL_BEFORE_CLOSE": False,
+                    "NO_TRADE": False,
+                },
+                "source_model_candidate_eligible": False,
+                "ineligible_reason_codes": reasons,
+            }
+        )
+    report = {
+        "schema_version": O_SOURCE_CANDIDATE_COMPARISON_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "baseline_candidate_names": _baseline_names(),
+        "report_type": "o_source_candidate_comparison",
+        "diagnostic_only": True,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "candidate_rows": candidate_rows,
+        "eligible_candidate_count": 0,
+        **_fail_closed_fields(),
+        **compact_safety_fields(),
+    }
+    report["o_source_candidate_comparison_report_id"] = canonical_json_sha256(report)
+    return report
+
+
+def _ranking_metrics(
+    rows: list[dict[str, Any]],
+    variant: str,
+    high_score_threshold: float,
+) -> dict[str, Any]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[row["decision_group_id"]].append(row)
+    top_hits = Counter()
+    regrets = []
+    selected_returns = []
+    oracle_returns = []
+    family_regret: dict[str, list[float]] = defaultdict(list)
+    side_regret: dict[str, list[float]] = defaultdict(list)
+    confusion: Counter[tuple[str, str]] = Counter()
+    high_score_returns = []
+    split_rows: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
+    for group_rows in groups.values():
+        predicted = sorted(
+            group_rows,
+            key=lambda row: float(row["variant_scores"][variant]),
+            reverse=True,
+        )
+        oracle = max(group_rows, key=lambda row: float(row["realized_replay_return"]))
+        selected = predicted[0]
+        oracle_return = float(oracle["realized_replay_return"])
+        selected_return = float(selected["realized_replay_return"])
+        regret = oracle_return - selected_return
+        regrets.append(regret)
+        selected_returns.append(selected_return)
+        oracle_returns.append(oracle_return)
+        confusion[(selected["action_family"], oracle["action_family"])] += 1
+        family_regret[selected["action_family"]].append(regret)
+        side_regret[str(selected.get("selected_side") or "NONE")].append(regret)
+        for k in (1, 2, 3):
+            if oracle["action"] in {row["action"] for row in predicted[:k]}:
+                top_hits[k] += 1
+        if float(selected["variant_scores"][variant]) >= high_score_threshold:
+            high_score_returns.append(selected_return)
+        split_rows[selected["split"]].append(
+            (
+                float(selected["baseline_source_score"]),
+                float(selected["variant_scores"][variant]),
+                selected_return,
+            )
+        )
+    group_count = len(groups)
+    return {
+        "decision_group_count": group_count,
+        "top1_realized_best_action_hit_rate": top_hits[1] / group_count
+        if group_count
+        else 0.0,
+        "top2_realized_best_action_hit_rate": top_hits[2] / group_count
+        if group_count
+        else 0.0,
+        "top3_realized_best_action_hit_rate": top_hits[3] / group_count
+        if group_count
+        else 0.0,
+        "selected_action_realized_replay_return_sum": sum(selected_returns),
+        "oracle_executable_best_action_return_sum": sum(oracle_returns),
+        "mean_regret": statistics.mean(regrets) if regrets else 0.0,
+        "no_trade_opportunity_cost_mean": statistics.mean(
+            max(0.0, item) for item in oracle_returns
+        )
+        if oracle_returns
+        else 0.0,
+        "action_family_level_regret": {
+            family: statistics.mean(values) for family, values in family_regret.items()
+        },
+        "side_level_regret": {
+            side: statistics.mean(values) for side, values in side_regret.items()
+        },
+        "ranking_confusion_matrix": [
+            {
+                "predicted_top_action_family": predicted,
+                "realized_best_action_family": realized,
+                "count": count,
+            }
+            for (predicted, realized), count in sorted(confusion.items())
+        ],
+        "high_score_support_count": len(high_score_returns),
+        "high_score_realized_return_mean": statistics.mean(high_score_returns)
+        if high_score_returns
+        else 0.0,
+        "high_score_realized_return_sum": sum(high_score_returns),
+        "split_metrics": {
+            split: _split_metrics(split_rows.get(split, []))
+            for split in ("shadow", "validation")
+        },
+    }
+
+
+def _split_metrics(values: list[tuple[float, float, float]]) -> dict[str, float]:
+    if not values:
+        return {"raw_mae": 0.0, "calibrated_mae": 0.0}
+    return {
+        "raw_mae": statistics.mean(abs(raw - realized) for raw, _, realized in values),
+        "calibrated_mae": statistics.mean(
+            abs(calibrated - realized) for _, calibrated, realized in values
+        ),
+    }
+
+
+def _group_label_breakdown(rows: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[str(row.get(field, "unknown"))].append(row)
+    return [
+        {
+            field: key,
+            "row_count": len(group_rows),
+            "original_label_target_sum": sum(
+                float(row["original_label_target"]) for row in group_rows
+            ),
+            "replay_aligned_label_target_sum": sum(
+                float(row["replay_aligned_executable_label_target"])
+                for row in group_rows
+            ),
+            "label_delta_sum": sum(float(row["label_delta"]) for row in group_rows),
+            "label_vs_realized_replay_gap_before": sum(
+                float(row["label_vs_realized_replay_gap_before"])
+                for row in group_rows
+            ),
+            "label_vs_realized_replay_gap_after": sum(
+                float(row["label_vs_realized_replay_gap_after"])
+                for row in group_rows
+            ),
+        }
+        for key, group_rows in sorted(groups.items())
+    ]
+
+
+def _fail_closed_fields() -> dict[str, Any]:
+    return {
+        "source_model_candidate_eligible": False,
+        "calibration_support_passed": False,
+        "calibration_quality_passed": False,
+        "action_family_paper_decision_eligible": False,
+        "best_action_concentration_passed": False,
+        "p_up_action_disagreement_within_limit": False,
+        "action_value_paper_decision_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "promotion_evidence_eligible": False,
+    }
+
+
+def _baseline_names() -> list[str]:
+    return [
+        SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_M2_REPLAY_PARITY_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_N_UP_REPLAY_ALIGNED_ACTION_VALUE_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_N2_NON_LEAKY_UP_REPLAY_ALIGNED_FEATURE_PROXY_CANDIDATE_NAME,
+    ]
+
+
+def _compact_label_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "decision_group_id": row["decision_group_id"],
+        "market_id": row.get("market_id"),
+        "decision_ts": row.get("decision_ts"),
+        "action": row.get("action"),
+        "action_family": row.get("action_family"),
+        "selected_side": row.get("selected_side"),
+        "original_label_target": row["original_label_target"],
+        "replay_aligned_executable_label_target": row[
+            "replay_aligned_executable_label_target"
+        ],
+        "label_delta": row["label_delta"],
+        "realized_replay_return": row["realized_replay_return"],
+        "label_vs_realized_replay_gap_before": row[
+            "label_vs_realized_replay_gap_before"
+        ],
+        "label_vs_realized_replay_gap_after": row[
+            "label_vs_realized_replay_gap_after"
+        ],
+        "label_components": row["label_components"],
+        "split": row["split"],
+    }
+
+
+def _compact_ranking_row(row: dict[str, Any], variant: str) -> dict[str, Any]:
+    return {
+        "decision_group_id": row["decision_group_id"],
+        "market_id": row.get("market_id"),
+        "action": row.get("action"),
+        "action_family": row.get("action_family"),
+        "selected_side": row.get("selected_side"),
+        "variant_score": row["variant_scores"][variant],
+        "realized_replay_return": row["realized_replay_return"],
+        "oracle_executable_best_action": row["oracle_executable_best_action"],
+        "oracle_executable_best_action_family": row[
+            "oracle_executable_best_action_family"
+        ],
+        "oracle_executable_best_action_return": row[
+            "oracle_executable_best_action_return"
+        ],
+        "regret": row["oracle_executable_best_action_return"]
+        - row["realized_replay_return"],
+        "no_trade_opportunity_cost": row["no_trade_opportunity_cost"],
+        "split": row["split"],
+    }
+
+
+def _side_from_action(action: str) -> str:
+    if "BUY_UP" in action:
+        return "UP"
+    if "BUY_DOWN" in action:
+        return "DOWN"
+    return "NONE"
+
+
+def _action_family(action: str) -> str:
+    if action == "NO_TRADE":
+        return "NO_TRADE"
+    if action.endswith("SELL_BEFORE_CLOSE"):
+        return "SELL_BEFORE_CLOSE"
+    if action.endswith("HOLD_TO_SETTLEMENT"):
+        return "HOLD_TO_SETTLEMENT"
+    return action or "UNKNOWN"
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _immediate_exit_pnl(row: dict[str, Any]) -> float | None:
+    for field in ("execution_pnl_immediate_exit_pnl", "realized_trade_pnl"):
+        if row.get(field) is not None:
+            return float(row[field])
+    ask = row.get("entry_quality_ask")
+    bid = row.get("exit_quality_bid")
+    if ask is not None and bid is not None:
+        return float(bid) - float(ask)
+    return None
+
+
+def _spread_penalty(row: dict[str, Any]) -> float:
+    spread = row.get("entry_exit_quality_spread_bps")
+    if spread is None:
+        return 0.0
+    return max(0.0, float(spread) - 300.0) / 10_000.0
+
+
+def _queue_penalty(row: dict[str, Any]) -> float:
+    queue = row.get("entry_exit_quality_queue_fill")
+    if queue is None:
+        return 0.0
+    return max(0.0, 0.80 - float(queue)) * 0.05
+
+
+def _staleness_penalty(row: dict[str, Any]) -> float:
+    staleness = row.get("entry_exit_quality_book_staleness_ms")
+    if staleness is None:
+        return 0.0
+    return max(0.0, float(staleness) - 10_000.0) / 1_000_000.0
+
+
+def _time_penalty(row: dict[str, Any]) -> float:
+    seconds = row.get("entry_exit_quality_time_to_close_seconds")
+    if seconds is None:
+        return 0.0
+    return max(0.0, 90.0 - float(seconds)) / 10_000.0
+
+
+def _split_for_group(group_id: str) -> str:
+    return "shadow" if canonical_json_sha256({"group_id": group_id})[-1] in "02468ace" else "validation"
+
+
+def _time_to_close_bucket(row: dict[str, Any]) -> str:
+    value = row.get("entry_exit_quality_time_to_close_seconds")
+    if value is None:
+        return "unknown"
+    seconds = float(value)
+    if seconds < 90:
+        return "<90s"
+    if seconds < 180:
+        return "90-180s"
+    if seconds < 300:
+        return "180-300s"
+    return ">=300s"
+
+
+def _spread_bucket(row: dict[str, Any]) -> str:
+    value = row.get("entry_exit_quality_spread_bps")
+    if value is None:
+        return "unknown"
+    spread = float(value)
+    if spread < 300:
+        return "<300bps"
+    if spread < 600:
+        return "300-600bps"
+    if spread < 900:
+        return "600-900bps"
+    return ">=900bps"
+
+
+def _queue_bucket(row: dict[str, Any]) -> str:
+    value = row.get("entry_exit_quality_queue_fill")
+    if value is None:
+        return "unknown"
+    queue = float(value)
+    if queue < 0.50:
+        return "<0.50"
+    if queue < 0.65:
+        return "0.50-0.65"
+    if queue < 0.80:
+        return "0.65-0.80"
+    return ">=0.80"
+
+
+def _staleness_bucket(row: dict[str, Any]) -> str:
+    value = row.get("entry_exit_quality_book_staleness_ms")
+    if value is None:
+        return "unknown"
+    staleness = float(value)
+    if staleness < 1000:
+        return "<1s"
+    if staleness < 5000:
+        return "1-5s"
+    if staleness < 10000:
+        return "5-10s"
+    return ">=10s"
+
+
+def _label_markdown(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O Replay-Aligned Label Construction",
+            "",
+            f"- candidate_name: `{report['candidate_name']}`",
+            f"- row_count: `{report['row_count']}`",
+            f"- label_gap_before: `{report['label_gap_before']}`",
+            f"- label_gap_after: `{report['label_gap_after']}`",
+            f"- label_gap_delta: `{report['label_gap_delta']}`",
+            f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+            f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+            "",
+        ]
+    )
+
+
+def _ranking_markdown(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O Source Ranking Objective",
+            "",
+            f"- primary_variant_name: `{report['primary_variant_name']}`",
+            f"- top1_hit_rate: `{report['top1_realized_best_action_hit_rate']}`",
+            f"- top2_hit_rate: `{report['top2_realized_best_action_hit_rate']}`",
+            f"- top3_hit_rate: `{report['top3_realized_best_action_hit_rate']}`",
+            f"- mean_regret: `{report['mean_regret']}`",
+            f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+            f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+            "",
+        ]
+    )
+
+
+def _leakage_markdown(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O Feature And Label Leakage Audit",
+            "",
+            f"- leakage_audit_passed: `{str(report['leakage_audit_passed']).lower()}`",
+            "- model_input_forbidden_field_overlap: "
+            f"`{report['model_input_forbidden_field_overlap']}`",
+            f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+            f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+            "",
+        ]
+    )
+
+
+def _comparison_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# O Source Candidate Comparison",
+        "",
+        f"- eligible_candidate_count: `{report['eligible_candidate_count']}`",
+        f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+        f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+        "",
+        "| candidate | top1 | mean_regret | eligible |",
+        "|---|---:|---:|---|",
+    ]
+    for row in report["candidate_rows"]:
+        lines.append(
+            "| {name} | {top1:.4f} | {regret:.6f} | {eligible} |".format(
+                name=row["candidate_name"],
+                top1=float(row["top1_realized_best_action_hit_rate"]),
+                regret=float(row["mean_regret"]),
+                eligible=str(row["source_model_candidate_eligible"]).lower(),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
