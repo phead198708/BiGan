@@ -2133,6 +2133,34 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert correction_config["p_up_misalignment_penalty_applies_to"] == (
         "buy_actions_with_negative_p_up_alignment_and_positive_raw_component"
     )
+    assert correction_config["large_regret_reversal_guard_enabled"] is True
+    assert correction_config["large_regret_reversal_guard_source"] == (
+        "shadow_split_only_hold_to_settlement_action_pair_regret_priors"
+    )
+    assert correction_config["large_regret_reversal_guard_modes"] == (
+        "raw_p_up_opposition_confidence_veto",
+        "hold_to_settlement_high_reversal_exposure_veto",
+    )
+    assert correction_config["large_regret_reversal_guard_applies_to"] == (
+        "hold_to_settlement_buy_actions_with_positive_raw_component_"
+        "and_opposite_p_up_alignment_or_high_reversal_exposure"
+    )
+    assert correction_config[
+        "large_regret_reversal_confidence_edge_ceiling_source"
+    ] == "shadow_p_up_edge_q25_plus_q75"
+    assert correction_config[
+        "large_regret_reversal_pair_regret_threshold_source"
+    ] == "shadow_hold_to_settlement_up_down_positive_reversal_regret_median"
+    assert set(correction_config["large_regret_reversal_pair_regret_priors"]) == {
+        "BUY_DOWN_HOLD_TO_SETTLEMENT->BUY_UP_HOLD_TO_SETTLEMENT",
+        "BUY_UP_HOLD_TO_SETTLEMENT->BUY_DOWN_HOLD_TO_SETTLEMENT",
+    }
+    assert correction_config["large_regret_reversal_alignment_threshold_source"] == (
+        "shadow_candidate_search_p_up_edge_quantile_grid"
+    )
+    assert correction_config["large_regret_reversal_penalty_source"] == (
+        "shadow_candidate_search_largest_regret_reversal_grid"
+    )
     assert correction_config["p_up_safety_target_disagreement_rate"] == 0.25
     assert correction_config["p_up_safety_target_source"] == (
         "config_hashed_stricter_than_hard_gate_target"
@@ -2184,6 +2212,17 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert raw_diagnostics["p_up_misalignment_penalty_candidate_source"] == (
         "shadow_p_up_edge_quantile_grid"
     )
+    assert raw_diagnostics["large_regret_reversal_guard_candidate_source"] == (
+        "shadow_largest_regret_reversal_grid"
+    )
+    assert (
+        raw_diagnostics["large_regret_reversal_guard_selection_metric_source"]
+        == "shadow_split_only"
+    )
+    assert (
+        raw_diagnostics["large_regret_reversal_pair_regret_priors"]
+        == correction_config["large_regret_reversal_pair_regret_priors"]
+    )
     assert raw_diagnostics["raw_weight_max_shadow_p_up_disagreement_rate"] == (
         correction_config["shadow_p_up_selection_max_disagreement_rate"]
     )
@@ -2192,6 +2231,12 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "selected_raw_weight_candidate"
     ]
     assert "shadow_action_family_level_regret" in raw_diagnostics[
+        "selected_raw_weight_candidate"
+    ]
+    assert "shadow_action_pair_regret_summary" in raw_diagnostics[
+        "selected_raw_weight_candidate"
+    ]
+    assert "shadow_hold_to_settlement_up_down_reversal_regret" in raw_diagnostics[
         "selected_raw_weight_candidate"
     ]
     assert "shadow_no_trade_missed_opportunity" in raw_diagnostics[
@@ -2249,6 +2294,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "no_trade_missed_opportunity",
         "no_trade_opportunity_cost_mean",
         "ranking_confusion_matrix",
+        "action_pair_regret_summary",
+        "hold_to_settlement_up_down_reversal_regret",
     }
     assert (
         ranking["train_shadow_metrics"]["decision_group_count"]
@@ -2278,10 +2325,16 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     )
     assert correction_config["high_score_calibration"][
         "high_score_threshold"
-    ] > 0.75
+    ] >= 0.75
     assert correction_config["high_score_calibration"][
         "high_score_threshold_source"
-    ] == "0.75 + shadow_p_up_edge_q25"
+    ] == (
+        "0.75 + max(0, shadow_p_up_edge_q25 - "
+        "selected_large_regret_reversal_penalty)"
+    )
+    assert "large_regret_reversal_penalty_adjusted" in correction_config[
+        "high_score_calibration"
+    ]
     assert (
         ranking["high_score_threshold"]
         == correction_config["high_score_calibration"]["high_score_threshold"]
@@ -2296,6 +2349,7 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
             "confidence_or_weak_opportunity_component",
             "group_normalized_raw_model_component",
             "p_up_misalignment_penalty_component",
+            "large_regret_reversal_guard_component",
             "shadow_action_family_prior_component",
             "microstructure_quality_component",
         }
@@ -2445,7 +2499,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert gate["probe_config_hash_verified"] is True
     assert gate["high_score_threshold"] == ranking["high_score_threshold"]
     assert gate["high_score_threshold_source"] == (
-        "0.75 + shadow_p_up_edge_q25"
+        "0.75 + max(0, shadow_p_up_edge_q25 - "
+        "selected_large_regret_reversal_penalty)"
     )
     assert gate["eligible_for_source_model_gate"] is True
     assert gate["validation_metrics_only_for_eligibility"] is True
@@ -2478,6 +2533,10 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert "p_up_safety_target_met" in gate
     assert "largest_regret_case" in gate["validation_metrics"]
     assert "action_family_level_regret" in gate["validation_metrics"]
+    assert "action_pair_regret_summary" in gate["validation_metrics"]
+    assert "hold_to_settlement_up_down_reversal_regret" in gate[
+        "validation_metrics"
+    ]
     assert "no_trade_missed_opportunity" in gate["validation_metrics"]
     assert 0.0 <= gate["validation_metrics"]["NO_TRADE_selection_rate"] <= 1.0
     assert "future_unseen_holdout_required" in gate["ineligible_reason_codes"]
