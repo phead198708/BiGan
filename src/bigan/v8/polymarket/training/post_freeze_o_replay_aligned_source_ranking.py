@@ -797,7 +797,13 @@ def _train_o_model_predicted_scores(
         }
         for row, prediction in zip(rows, predictions, strict=True)
     ]
-    ranking_correction = _learn_o_shadow_ranking_correction(train_rows)
+    raw_train_rows = [
+        row
+        for row in raw_scored_rows
+        if row.get("split") == "shadow"
+        and bool(row.get("label_candidate_available", True))
+    ]
+    ranking_correction = _learn_o_shadow_ranking_correction(raw_train_rows)
     scored_rows = _apply_o_shadow_ranking_correction(
         rows=raw_scored_rows,
         deployable_available=deployable_available,
@@ -814,6 +820,10 @@ def _train_o_model_predicted_scores(
         "post_model_ranking_correction_enabled": True,
         "ranking_correction_source": "shadow_split_only",
         "ranking_correction_config": ranking_correction,
+        "correction_constants_source": ranking_correction[
+            "correction_constants_source"
+        ],
+        "correction_config_hash": ranking_correction["correction_config_hash"],
         "feature_names": list(O_DEPLOYABLE_MODEL_FEATURE_NAMES),
         "model_input_fields_decision_time_only": list(
             O_DEPLOYABLE_MODEL_FEATURE_NAMES
@@ -979,26 +989,60 @@ def _learn_o_shadow_ranking_correction(
             continue
         seen_groups.add(row["decision_group_id"])
         p_edges_by_group.append(abs(float(row.get("p_up") or 0.5) - 0.5))
-    weak_cutoff = _lower_quartile(p_edges_by_group)
-    return {
+    p_edge_quantiles = _p_edge_quantiles(p_edges_by_group)
+    weak_cutoff = p_edge_quantiles["q25"]
+    raw_weight, raw_diagnostics = _derive_shadow_raw_model_weight(train_rows)
+    prior_weight, prior_diagnostics = _derive_shadow_prior_weight(
+        train_rows,
+        action_priors,
+    )
+    micro_weight, micro_diagnostics = _derive_shadow_microstructure_weight(
+        train_rows,
+        p_edge_quantiles,
+    )
+    config = {
         "correction_name": "shadow_only_p_up_aligned_weak_opportunity_ranker",
         "ranking_objective_proxy": "pairwise_group_margin_and_regret_aware_proxy",
         "uses_validation_labels_for_tuning": False,
+        "correction_constants_source": "shadow_split_only",
+        "correction_constants_are_shadow_derived": True,
+        "p_up_edge_quantiles": p_edge_quantiles,
         "weak_opportunity_p_edge_cutoff": weak_cutoff,
         "weak_opportunity_cutoff_source": "shadow_p_up_edge_lower_quartile",
-        "trade_base_score": 0.62,
-        "sell_before_close_base_score": 0.54,
-        "no_trade_base_score": 0.59,
-        "confidence_bonus": 0.08,
-        "weak_opportunity_trade_penalty": -0.06,
-        "sell_before_close_confidence_bonus": 0.02,
-        "sell_before_close_weak_penalty": -0.04,
-        "group_normalized_raw_model_weight": 0.005,
-        "shadow_action_family_prior_weight": 0.02,
-        "microstructure_quality_weight": 0.50,
+        "trade_base_score": 0.5 + p_edge_quantiles["q75"],
+        "trade_base_score_source": "0.5 + shadow_p_up_edge_q75",
+        "sell_before_close_base_score": 0.5 + p_edge_quantiles["q25"] / 2.0,
+        "sell_before_close_base_score_source": "0.5 + shadow_p_up_edge_q25 / 2",
+        "no_trade_base_score": 0.5 + p_edge_quantiles["median"],
+        "no_trade_base_score_source": "0.5 + shadow_p_up_edge_median",
+        "confidence_bonus": p_edge_quantiles["median"],
+        "confidence_bonus_source": "shadow_p_up_edge_median",
+        "weak_opportunity_trade_penalty": -p_edge_quantiles["q25"],
+        "weak_opportunity_trade_penalty_source": "-shadow_p_up_edge_q25",
+        "sell_before_close_confidence_bonus": p_edge_quantiles["q25"] / 3.0,
+        "sell_before_close_confidence_bonus_source": "shadow_p_up_edge_q25 / 3",
+        "sell_before_close_weak_penalty": -p_edge_quantiles["q25"] * 0.6,
+        "sell_before_close_weak_penalty_source": "-shadow_p_up_edge_q25 * 0.6",
+        "group_normalized_raw_model_weight": raw_weight,
+        "group_normalized_raw_model_weight_source": (
+            "shadow_raw_model_reliability_vs_shadow_derived_ranker"
+        ),
+        "shadow_action_family_prior_weight": prior_weight,
+        "shadow_action_family_prior_weight_source": (
+            "shadow_prior_concentration_guard"
+        ),
+        "microstructure_quality_weight": micro_weight,
+        "microstructure_quality_weight_source": (
+            "shadow_microstructure_target_correlation_scaled_by_p_edge_q25"
+        ),
         "action_shadow_priors": action_priors,
         "action_family_shadow_priors": family_priors,
         "shadow_global_target_mean": global_mean,
+        "shadow_component_diagnostics": {
+            "raw_model": raw_diagnostics,
+            "prior": prior_diagnostics,
+            "microstructure": micro_diagnostics,
+        },
         "high_score_calibration": {
             "method": "fixed_threshold_rank_score_calibration",
             "high_score_threshold": 0.75,
@@ -1009,6 +1053,8 @@ def _learn_o_shadow_ranking_correction(
             "weak_opportunity_feature": "max(0, weak_opportunity_p_edge_cutoff - abs(p_up - 0.5))",
         },
     }
+    config["correction_config_hash"] = canonical_json_sha256(config)
+    return config
 
 
 def _shadow_shrunk_mean(
@@ -1022,12 +1068,153 @@ def _shadow_shrunk_mean(
     return (sum(values) + shrinkage * global_mean) / (len(values) + shrinkage)
 
 
-def _lower_quartile(values: list[float]) -> float:
+def _p_edge_quantiles(values: list[float]) -> dict[str, float]:
     if not values:
-        return 0.0
+        return {"q25": 0.0, "median": 0.0, "q75": 0.0}
     if len(values) < 4:
-        return min(values)
-    return statistics.quantiles(values, n=4)[0]
+        value = statistics.median(values)
+        return {"q25": min(values), "median": value, "q75": max(values)}
+    quartiles = statistics.quantiles(values, n=4)
+    return {
+        "q25": quartiles[0],
+        "median": statistics.median(values),
+        "q75": quartiles[2],
+    }
+
+
+def _derive_shadow_raw_model_weight(
+    train_rows: list[dict[str, Any]],
+) -> tuple[float, dict[str, Any]]:
+    raw_metrics = _shadow_ranker_metrics(
+        train_rows,
+        lambda row: float(row.get("o_raw_ridge_model_score") or 0.0),
+    )
+    derived_metrics = _shadow_ranker_metrics(
+        train_rows,
+        _shadow_derived_ranker_probe_score,
+    )
+    top1_advantage = (
+        raw_metrics["top1_realized_best_action_hit_rate"]
+        - derived_metrics["top1_realized_best_action_hit_rate"]
+    )
+    weight = max(0.0, top1_advantage * 0.01)
+    return weight, {
+        "raw_model_shadow_metrics": raw_metrics,
+        "derived_ranker_shadow_metrics": derived_metrics,
+        "raw_model_top1_advantage": top1_advantage,
+        "weight_enabled": weight > 0.0,
+    }
+
+
+def _derive_shadow_prior_weight(
+    train_rows: list[dict[str, Any]],
+    action_priors: dict[str, float],
+) -> tuple[float, dict[str, Any]]:
+    prior_metrics = _shadow_ranker_metrics(
+        train_rows,
+        lambda row: action_priors.get(str(row.get("action") or ""), 0.0),
+    )
+    max_action_share = max(
+        (
+            count / prior_metrics["decision_group_count"]
+            for count in prior_metrics["selected_action_counts"].values()
+        ),
+        default=1.0,
+    )
+    weight = 0.0 if max_action_share > 0.80 else 0.02 * (1.0 - max_action_share)
+    return weight, {
+        "prior_shadow_metrics": prior_metrics,
+        "max_selected_action_share": max_action_share,
+        "concentration_guard_triggered": max_action_share > 0.80,
+        "weight_enabled": weight > 0.0,
+    }
+
+
+def _derive_shadow_microstructure_weight(
+    train_rows: list[dict[str, Any]],
+    p_edge_quantiles: dict[str, float],
+) -> tuple[float, dict[str, Any]]:
+    correlation = _shadow_feature_target_correlation(
+        [_microstructure_quality_proxy(row) for row in train_rows],
+        [
+            float(row["replay_aligned_executable_label_target"])
+            for row in train_rows
+        ],
+    )
+    weight = max(0.0, correlation) * p_edge_quantiles["q25"]
+    return weight, {
+        "shadow_microstructure_target_correlation": correlation,
+        "weight_enabled": weight > 0.0,
+    }
+
+
+def _shadow_ranker_metrics(
+    rows: list[dict[str, Any]],
+    score_fn: Any,
+) -> dict[str, Any]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[row["decision_group_id"]].append(row)
+    selected_action_counts: Counter[str] = Counter()
+    top_hits = 0
+    selected_returns = []
+    regrets = []
+    for group_rows in grouped.values():
+        selected = max(group_rows, key=score_fn)
+        oracle = max(
+            group_rows,
+            key=lambda row: float(row["realized_replay_return"]),
+        )
+        selected_action_counts[str(selected.get("action") or "")] += 1
+        if selected["action"] == oracle["action"]:
+            top_hits += 1
+        selected_return = float(selected["realized_replay_return"])
+        selected_returns.append(selected_return)
+        regrets.append(float(oracle["realized_replay_return"]) - selected_return)
+    group_count = len(grouped)
+    return {
+        "decision_group_count": group_count,
+        "top1_realized_best_action_hit_rate": top_hits / group_count
+        if group_count
+        else 0.0,
+        "selected_action_realized_replay_return_sum": sum(selected_returns),
+        "mean_regret": statistics.mean(regrets) if regrets else 0.0,
+        "selected_action_counts": dict(sorted(selected_action_counts.items())),
+    }
+
+
+def _shadow_derived_ranker_probe_score(row: dict[str, Any]) -> float:
+    p_edge = abs(float(row.get("p_up") or 0.5) - 0.5)
+    action_family = _action_family(str(row.get("action") or ""))
+    alignment = _p_up_side_alignment_score(row)
+    if action_family == "NO_TRADE":
+        return 0.5 + max(0.0, 0.10 - p_edge)
+    if action_family == "HOLD_TO_SETTLEMENT":
+        return 0.5 + alignment
+    return 0.45 + 0.5 * alignment
+
+
+def _shadow_feature_target_correlation(
+    feature_values: list[float],
+    target_values: list[float],
+) -> float:
+    if not feature_values or len(feature_values) != len(target_values):
+        return 0.0
+    feature_std = statistics.pstdev(feature_values)
+    target_std = statistics.pstdev(target_values)
+    if feature_std == 0.0 or target_std == 0.0:
+        return 0.0
+    feature_mean = statistics.mean(feature_values)
+    target_mean = statistics.mean(target_values)
+    covariance = statistics.mean(
+        (feature - feature_mean) * (target - target_mean)
+        for feature, target in zip(feature_values, target_values, strict=True)
+    )
+    return covariance / (feature_std * target_std)
+
+
+def _without_key(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    return {name: value for name, value in payload.items() if name != key}
 
 
 def _apply_o_shadow_ranking_correction(
@@ -1365,6 +1552,10 @@ def _ranking_report(
             "deployable_model_score_available"
         ],
         "o_model_training_summary": model_training_summary,
+        "correction_constants_source": model_training_summary[
+            "correction_constants_source"
+        ],
+        "correction_config_hash": model_training_summary["correction_config_hash"],
         "label_diagnostic_variants": list(O_LABEL_DIAGNOSTIC_VARIANTS),
         "label_diagnostic_variants_deployable": False,
         "ranking_metric_scope": variant_metrics[O_MODEL_PREDICTED_VARIANT][
@@ -1503,6 +1694,16 @@ def _comparison_report(
                 "eligible_for_source_model_gate": eligible_for_source_model_gate,
                 "excluded_from_eligibility_reason": excluded_reason,
                 "model_training_summary": model_training_summary
+                if variant == O_MODEL_PREDICTED_VARIANT
+                else None,
+                "correction_constants_source": model_training_summary[
+                    "correction_constants_source"
+                ]
+                if variant == O_MODEL_PREDICTED_VARIANT
+                else None,
+                "correction_config_hash": model_training_summary[
+                    "correction_config_hash"
+                ]
                 if variant == O_MODEL_PREDICTED_VARIANT
                 else None,
                 "train_shadow_metrics": split_metrics["train_shadow"],
@@ -1667,6 +1868,19 @@ def _source_model_eligibility_gate_report(
         ),
         "ranking_score_source": "model_predicted_score",
         "deployable_model_score_available": deployable,
+        "correction_constants_source": model_training_summary[
+            "correction_constants_source"
+        ],
+        "correction_config_hash": model_training_summary["correction_config_hash"],
+        "correction_config_hash_verified": (
+            canonical_json_sha256(
+                _without_key(
+                    model_training_summary["ranking_correction_config"],
+                    "correction_config_hash",
+                )
+            )
+            == model_training_summary["correction_config_hash"]
+        ),
         "eligible_for_source_model_gate": True,
         "validation_metrics_only_for_eligibility": True,
         "train_shadow_metrics": _split_metric_views(
@@ -1795,6 +2009,10 @@ def _freeze_readiness_report(
         ),
         "freeze_ready": freeze_ready,
         "ranking_score_source": "model_predicted_score",
+        "correction_constants_source": model_training_summary[
+            "correction_constants_source"
+        ],
+        "correction_config_hash": model_training_summary["correction_config_hash"],
         "model_sha256": canonical_json_sha256(model_training_summary),
         "model_manifest_sha256": canonical_json_sha256(model_manifest),
         "training_data_hash": canonical_json_sha256(

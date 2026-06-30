@@ -1871,7 +1871,7 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
             "entry_exit_quality_queue_fill": 0.75,
             "entry_exit_quality_book_staleness_ms": 500.0,
             "entry_exit_quality_time_to_close_seconds": 180.0,
-            "p_up": 0.50,
+            "p_up": 0.30,
         }
     )
     source_report = _write_holdout_report(
@@ -2063,6 +2063,21 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert ranking["o_model_training_summary"]["ranking_score_source"] == (
         "model_predicted_score"
     )
+    assert (
+        ranking["o_model_training_summary"]["correction_constants_source"]
+        == "shadow_split_only"
+    )
+    assert looks_like_sha256(
+        ranking["o_model_training_summary"]["correction_config_hash"]
+    )
+    assert (
+        ranking["correction_constants_source"]
+        == ranking["o_model_training_summary"]["correction_constants_source"]
+    )
+    assert (
+        ranking["correction_config_hash"]
+        == ranking["o_model_training_summary"]["correction_config_hash"]
+    )
     assert ranking["o_model_training_summary"][
         "deployable_model_score_available"
     ] is True
@@ -2076,6 +2091,34 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert ranking["o_model_training_summary"]["ranking_correction_config"][
         "uses_validation_labels_for_tuning"
     ] is False
+    correction_config = ranking["o_model_training_summary"][
+        "ranking_correction_config"
+    ]
+    assert correction_config["correction_constants_source"] == "shadow_split_only"
+    assert correction_config["correction_constants_are_shadow_derived"] is True
+    assert correction_config["trade_base_score_source"] == "0.5 + shadow_p_up_edge_q75"
+    assert (
+        correction_config["sell_before_close_base_score_source"]
+        == "0.5 + shadow_p_up_edge_q25 / 2"
+    )
+    assert correction_config["no_trade_base_score_source"] == (
+        "0.5 + shadow_p_up_edge_median"
+    )
+    assert correction_config["confidence_bonus_source"] == "shadow_p_up_edge_median"
+    assert (
+        correction_config["weak_opportunity_trade_penalty_source"]
+        == "-shadow_p_up_edge_q25"
+    )
+    assert correction_config["microstructure_quality_weight_source"] == (
+        "shadow_microstructure_target_correlation_scaled_by_p_edge_q25"
+    )
+    assert looks_like_sha256(correction_config["correction_config_hash"])
+    assert set(correction_config["p_up_edge_quantiles"]) == {"median", "q25", "q75"}
+    assert set(correction_config["shadow_component_diagnostics"]) == {
+        "microstructure",
+        "prior",
+        "raw_model",
+    }
     assert ranking["o_model_training_summary"]["ranking_correction_config"][
         "NO_TRADE_prior"
     ]["enabled"] is True
@@ -2230,6 +2273,13 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "model_training_summary"
     ]["feature_names"] == list(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
     assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "correction_constants_source"
+    ] == "shadow_split_only"
+    assert (
+        comparison_by_name[O_MODEL_PREDICTED_VARIANT]["correction_config_hash"]
+        == ranking["o_model_training_summary"]["correction_config_hash"]
+    )
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
         "eligible_for_source_model_gate"
     ] is True
     assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
@@ -2281,6 +2331,12 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert gate["candidate_name"] == O_MODEL_PREDICTED_VARIANT
     assert gate["ranking_score_source"] == "model_predicted_score"
     assert gate["deployable_model_score_available"] is True
+    assert gate["correction_constants_source"] == "shadow_split_only"
+    assert (
+        gate["correction_config_hash"]
+        == ranking["o_model_training_summary"]["correction_config_hash"]
+    )
+    assert gate["correction_config_hash_verified"] is True
     assert gate["eligible_for_source_model_gate"] is True
     assert gate["validation_metrics_only_for_eligibility"] is True
     assert gate["validation_metrics"] == ranking["validation_metrics"]
@@ -2319,6 +2375,11 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert freeze["schema_version"] == O_FREEZE_READINESS_SCHEMA_VERSION
     assert freeze["candidate_name"] == O_MODEL_PREDICTED_VARIANT
     assert freeze["ranking_score_source"] == "model_predicted_score"
+    assert freeze["correction_constants_source"] == "shadow_split_only"
+    assert (
+        freeze["correction_config_hash"]
+        == ranking["o_model_training_summary"]["correction_config_hash"]
+    )
     assert freeze["freeze_ready"] is False
     assert freeze["source_model_candidate_eligible"] is False
     assert "source_model_validation_gates_not_passed" in freeze[
