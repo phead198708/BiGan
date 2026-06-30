@@ -1829,6 +1829,7 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
             "entry_exit_quality_queue_fill": 0.70,
             "entry_exit_quality_book_staleness_ms": 500.0,
             "entry_exit_quality_time_to_close_seconds": 180.0,
+            "p_up": 0.30,
         }
     )
     better_down = _replay_row(
@@ -1849,6 +1850,7 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
             "entry_exit_quality_queue_fill": 0.92,
             "entry_exit_quality_book_staleness_ms": 500.0,
             "entry_exit_quality_time_to_close_seconds": 180.0,
+            "p_up": 0.30,
         }
     )
     weak_down = _replay_row(
@@ -1869,6 +1871,7 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
             "entry_exit_quality_queue_fill": 0.75,
             "entry_exit_quality_book_staleness_ms": 500.0,
             "entry_exit_quality_time_to_close_seconds": 180.0,
+            "p_up": 0.50,
         }
     )
     source_report = _write_holdout_report(
@@ -2066,6 +2069,40 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert ranking["o_model_training_summary"][
         "model_input_fields_decision_time_only"
     ] == list(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
+    assert ranking["o_model_training_summary"]["post_model_ranking_correction_enabled"] is True
+    assert ranking["o_model_training_summary"][
+        "ranking_correction_source"
+    ] == "shadow_split_only"
+    assert ranking["o_model_training_summary"]["ranking_correction_config"][
+        "uses_validation_labels_for_tuning"
+    ] is False
+    assert ranking["o_model_training_summary"]["ranking_correction_config"][
+        "NO_TRADE_prior"
+    ]["enabled"] is True
+    assert "buy_up_hold_to_settlement_x_p_up" in ranking[
+        "o_model_training_summary"
+    ]["feature_names"]
+    assert "buy_down_hold_to_settlement_x_p_down" in ranking[
+        "o_model_training_summary"
+    ]["feature_names"]
+    assert "buy_up_sell_before_close_x_time_to_close" in ranking[
+        "o_model_training_summary"
+    ]["feature_names"]
+    assert "buy_down_sell_before_close_x_spread" in ranking[
+        "o_model_training_summary"
+    ]["feature_names"]
+    assert "buy_down_hold_to_settlement_x_queue" in ranking[
+        "o_model_training_summary"
+    ]["feature_names"]
+    assert "buy_up_hold_to_settlement_x_staleness" in ranking[
+        "o_model_training_summary"
+    ]["feature_names"]
+    assert "buy_down_hold_to_settlement_x_entry_ask" in ranking[
+        "o_model_training_summary"
+    ]["feature_names"]
+    assert "buy_down_hold_to_settlement_x_exit_bid_proxy" in ranking[
+        "o_model_training_summary"
+    ]["feature_names"]
     assert ranking["o_model_training_summary"][
         "training_target"
     ] == "replay_aligned_executable_label_target"
@@ -2110,6 +2147,22 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     )
     assert all(
         row["o_model_predicted_score"] is not None
+        for row in ranking["ranking_rows"]
+    )
+    assert any(
+        row["variant_score"] >= 0.75
+        for row in ranking["ranking_rows"]
+        if row["ranking_score_source"] == "model_predicted_score"
+    )
+    assert all(
+        set(row["o_model_score_components"]) >= {
+            "base_score",
+            "p_up_side_alignment_component",
+            "confidence_or_weak_opportunity_component",
+            "group_normalized_raw_model_component",
+            "shadow_action_family_prior_component",
+            "microstructure_quality_component",
+        }
         for row in ranking["ranking_rows"]
     )
     assert ranking["source_model_candidate_eligible"] is False
@@ -2236,6 +2289,7 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert gate["high_score_support_count"] == gate["validation_metrics"][
         "high_score_support_count"
     ]
+    assert gate["all_metrics"]["high_score_support_count"] > 0
     assert gate["mean_regret"] == gate["validation_metrics"]["mean_regret"]
     assert gate["NO_TRADE_selection_rate"] == gate["validation_metrics"][
         "NO_TRADE_selection_rate"
@@ -2246,6 +2300,12 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert gate["promotion_blocking_reason_codes"] == [
         "future_unseen_holdout_required"
     ]
+    assert gate["p_up_action_disagreement_summary"][
+        "candidate_scoped_p_up_action_disagreement_rate"
+    ] <= gate["p_up_action_disagreement_summary"][
+        "max_allowed_disagreement_rate"
+    ]
+    assert 0.0 <= gate["validation_metrics"]["NO_TRADE_selection_rate"] <= 1.0
     assert "future_unseen_holdout_required" in gate["ineligible_reason_codes"]
     assert gate["#146_start_allowed"] is False
     assert gate["#134_resume_allowed"] is False

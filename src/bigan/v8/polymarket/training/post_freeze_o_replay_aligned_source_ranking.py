@@ -97,6 +97,23 @@ O_REQUIRED_DECISION_ACTION_FAMILIES = (
 )
 O_FULL_DECISION_GROUP_SCOPE = "full_decision_group"
 O_PARTIAL_DECISION_GROUP_SCOPE = "partial_decision_group_diagnostic"
+O_ACTION_FEATURE_SLUGS = (
+    ("BUY_UP_SELL_BEFORE_CLOSE", "buy_up_sell_before_close"),
+    ("BUY_DOWN_SELL_BEFORE_CLOSE", "buy_down_sell_before_close"),
+    ("BUY_UP_HOLD_TO_SETTLEMENT", "buy_up_hold_to_settlement"),
+    ("BUY_DOWN_HOLD_TO_SETTLEMENT", "buy_down_hold_to_settlement"),
+    ("NO_TRADE", "no_trade"),
+)
+O_ACTION_INTERACTION_SIGNAL_NAMES = (
+    "p_up",
+    "p_down",
+    "time_to_close",
+    "spread",
+    "queue",
+    "staleness",
+    "entry_ask",
+    "exit_bid_proxy",
+)
 O_DEPLOYABLE_MODEL_FEATURE_NAMES = (
     "bias",
     "action_buy_up_sell_before_close",
@@ -117,6 +134,13 @@ O_DEPLOYABLE_MODEL_FEATURE_NAMES = (
     "queue_fill",
     "book_staleness_seconds",
     "time_to_close_minutes",
+    "p_up_edge",
+    "weak_opportunity_proxy",
+    *tuple(
+        f"{action_slug}_x_{signal_name}"
+        for _, action_slug in O_ACTION_FEATURE_SLUGS
+        for signal_name in O_ACTION_INTERACTION_SIGNAL_NAMES
+    ),
 )
 O_MIN_VALIDATION_DECISION_GROUPS = 20
 O_MIN_HIGH_SCORE_SUPPORT_COUNT = 10
@@ -766,28 +790,30 @@ def _train_o_model_predicted_scores(
         }
         predictions = [0.0 for _ in rows]
         fit_reason_codes = ["insufficient_complete_action_grid_for_model_training"]
-    scored_rows = []
-    for row, prediction in zip(rows, predictions, strict=True):
-        scored_rows.append(
-            {
-                **row,
-                "o_model_predicted_score": prediction,
-                "deployable_model_score_available": deployable_available,
-                "ranking_score_source_by_variant": {
-                    "current_source_baseline": "observed_source_score",
-                    O_MODEL_PREDICTED_VARIANT: "model_predicted_score",
-                    **dict.fromkeys(
-                        O_LABEL_DIAGNOSTIC_VARIANTS,
-                        "label_diagnostic_score",
-                    ),
-                },
-            }
-        )
+    raw_scored_rows = [
+        {
+            **row,
+            "o_raw_ridge_model_score": prediction,
+        }
+        for row, prediction in zip(rows, predictions, strict=True)
+    ]
+    ranking_correction = _learn_o_shadow_ranking_correction(train_rows)
+    scored_rows = _apply_o_shadow_ranking_correction(
+        rows=raw_scored_rows,
+        deployable_available=deployable_available,
+        ranking_correction=ranking_correction,
+    )
     summary = {
         "model_candidate_name": O_MODEL_PREDICTED_VARIANT,
         "ranking_score_source": "model_predicted_score",
         "deployable_model_score_available": deployable_available,
-        "model_family": "deterministic_ridge_action_value_regressor",
+        "model_family": (
+            "deterministic_ridge_action_value_regressor_with_shadow_only_ranking_correction"
+        ),
+        "raw_model_family": "deterministic_ridge_action_value_regressor",
+        "post_model_ranking_correction_enabled": True,
+        "ranking_correction_source": "shadow_split_only",
+        "ranking_correction_config": ranking_correction,
         "feature_names": list(O_DEPLOYABLE_MODEL_FEATURE_NAMES),
         "model_input_fields_decision_time_only": list(
             O_DEPLOYABLE_MODEL_FEATURE_NAMES
@@ -838,7 +864,16 @@ def _deployable_model_features(row: dict[str, Any]) -> list[float]:
     family = _action_family(action)
     side = _side_from_action(action)
     p_up = _bounded(float(row.get("p_up") or 0.5), 0.0, 1.0)
-    return [
+    p_down = 1.0 - p_up
+    spread = _normalized_spread(row)
+    queue = _bounded(float(row.get("entry_exit_quality_queue_fill") or 0.0), 0.0, 1.0)
+    staleness = _normalized_staleness(row)
+    time_to_close = _normalized_time_to_close(row)
+    entry_ask = _bounded(float(row.get("entry_quality_ask") or 0.0), 0.0, 1.0)
+    exit_bid_proxy = _decision_time_exit_bid_proxy(row)
+    p_up_edge = abs(p_up - 0.5)
+    weak_opportunity = max(0.0, 0.10 - p_up_edge)
+    base_features = [
         1.0,
         _flag(action == "BUY_UP_SELL_BEFORE_CLOSE"),
         _flag(action == "BUY_DOWN_SELL_BEFORE_CLOSE"),
@@ -852,25 +887,269 @@ def _deployable_model_features(row: dict[str, Any]) -> list[float]:
         _flag(family == "HOLD_TO_SETTLEMENT"),
         _flag(family == "NO_TRADE"),
         p_up,
-        1.0 - p_up,
-        _bounded(float(row.get("entry_quality_ask") or 0.0), 0.0, 1.0),
-        _bounded(
-            float(row.get("entry_exit_quality_spread_bps") or 0.0) / 10_000.0,
-            0.0,
-            1.0,
-        ),
-        _bounded(float(row.get("entry_exit_quality_queue_fill") or 0.0), 0.0, 1.0),
-        _bounded(
-            float(row.get("entry_exit_quality_book_staleness_ms") or 0.0) / 1000.0,
-            0.0,
-            60.0,
-        ),
-        _bounded(
-            float(row.get("entry_exit_quality_time_to_close_seconds") or 0.0) / 60.0,
-            0.0,
-            15.0,
-        ),
+        p_down,
+        entry_ask,
+        spread,
+        queue,
+        staleness,
+        time_to_close,
+        p_up_edge,
+        weak_opportunity,
     ]
+    signals = {
+        "p_up": p_up,
+        "p_down": p_down,
+        "time_to_close": time_to_close,
+        "spread": spread,
+        "queue": queue,
+        "staleness": staleness,
+        "entry_ask": entry_ask,
+        "exit_bid_proxy": exit_bid_proxy,
+    }
+    interactions = [
+        _flag(action == action_name) * signals[signal_name]
+        for action_name, _ in O_ACTION_FEATURE_SLUGS
+        for signal_name in O_ACTION_INTERACTION_SIGNAL_NAMES
+    ]
+    return [*base_features, *interactions]
+
+
+def _normalized_spread(row: dict[str, Any]) -> float:
+    return _bounded(
+        float(row.get("entry_exit_quality_spread_bps") or 0.0) / 10_000.0,
+        0.0,
+        1.0,
+    )
+
+
+def _normalized_staleness(row: dict[str, Any]) -> float:
+    return _bounded(
+        float(row.get("entry_exit_quality_book_staleness_ms") or 0.0) / 1000.0,
+        0.0,
+        60.0,
+    )
+
+
+def _normalized_time_to_close(row: dict[str, Any]) -> float:
+    return _bounded(
+        float(row.get("entry_exit_quality_time_to_close_seconds") or 0.0) / 60.0,
+        0.0,
+        15.0,
+    )
+
+
+def _decision_time_exit_bid_proxy(row: dict[str, Any]) -> float:
+    entry_ask = _bounded(float(row.get("entry_quality_ask") or 0.0), 0.0, 1.0)
+    spread = _normalized_spread(row)
+    return _bounded(entry_ask - spread, 0.0, 1.0)
+
+
+def _learn_o_shadow_ranking_correction(
+    train_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    global_mean = statistics.mean(
+        float(row["replay_aligned_executable_label_target"]) for row in train_rows
+    ) if train_rows else 0.0
+    action_priors = {
+        action_name: _shadow_shrunk_mean(
+            [
+                float(row["replay_aligned_executable_label_target"])
+                for row in train_rows
+                if row["action"] == action_name
+            ],
+            global_mean=global_mean,
+        )
+        for action_name in O_REQUIRED_DECISION_ACTION_FAMILIES
+    }
+    family_priors = {
+        family: _shadow_shrunk_mean(
+            [
+                float(row["replay_aligned_executable_label_target"])
+                for row in train_rows
+                if row["action_family"] == family
+            ],
+            global_mean=global_mean,
+        )
+        for family in ("SELL_BEFORE_CLOSE", "HOLD_TO_SETTLEMENT", "NO_TRADE")
+    }
+    p_edges_by_group = []
+    seen_groups = set()
+    for row in train_rows:
+        if row["decision_group_id"] in seen_groups:
+            continue
+        seen_groups.add(row["decision_group_id"])
+        p_edges_by_group.append(abs(float(row.get("p_up") or 0.5) - 0.5))
+    weak_cutoff = _lower_quartile(p_edges_by_group)
+    return {
+        "correction_name": "shadow_only_p_up_aligned_weak_opportunity_ranker",
+        "ranking_objective_proxy": "pairwise_group_margin_and_regret_aware_proxy",
+        "uses_validation_labels_for_tuning": False,
+        "weak_opportunity_p_edge_cutoff": weak_cutoff,
+        "weak_opportunity_cutoff_source": "shadow_p_up_edge_lower_quartile",
+        "trade_base_score": 0.62,
+        "sell_before_close_base_score": 0.54,
+        "no_trade_base_score": 0.59,
+        "confidence_bonus": 0.08,
+        "weak_opportunity_trade_penalty": -0.06,
+        "sell_before_close_confidence_bonus": 0.02,
+        "sell_before_close_weak_penalty": -0.04,
+        "group_normalized_raw_model_weight": 0.005,
+        "shadow_action_family_prior_weight": 0.02,
+        "microstructure_quality_weight": 0.50,
+        "action_shadow_priors": action_priors,
+        "action_family_shadow_priors": family_priors,
+        "shadow_global_target_mean": global_mean,
+        "high_score_calibration": {
+            "method": "fixed_threshold_rank_score_calibration",
+            "high_score_threshold": 0.75,
+            "high_score_requires_corrected_model_score_gte_threshold": True,
+        },
+        "NO_TRADE_prior": {
+            "enabled": True,
+            "weak_opportunity_feature": "max(0, weak_opportunity_p_edge_cutoff - abs(p_up - 0.5))",
+        },
+    }
+
+
+def _shadow_shrunk_mean(
+    values: list[float],
+    *,
+    global_mean: float,
+    shrinkage: float = 20.0,
+) -> float:
+    if not values:
+        return global_mean
+    return (sum(values) + shrinkage * global_mean) / (len(values) + shrinkage)
+
+
+def _lower_quartile(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    if len(values) < 4:
+        return min(values)
+    return statistics.quantiles(values, n=4)[0]
+
+
+def _apply_o_shadow_ranking_correction(
+    *,
+    rows: list[dict[str, Any]],
+    deployable_available: bool,
+    ranking_correction: dict[str, Any],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[row["decision_group_id"]].append(row)
+    raw_z_by_key = {}
+    for group_rows in grouped.values():
+        raw_scores = [float(row["o_raw_ridge_model_score"]) for row in group_rows]
+        raw_mean = statistics.mean(raw_scores) if raw_scores else 0.0
+        raw_std = statistics.pstdev(raw_scores) or 1.0
+        for row in group_rows:
+            raw_z_by_key[(row["decision_group_id"], row["action"])] = (
+                float(row["o_raw_ridge_model_score"]) - raw_mean
+            ) / raw_std
+    scored_rows = []
+    for row in rows:
+        raw_z = raw_z_by_key[(row["decision_group_id"], row["action"])]
+        components = _o_model_score_components(row, raw_z, ranking_correction)
+        score = sum(float(value) for value in components.values())
+        scored_rows.append(
+            {
+                **row,
+                "o_model_predicted_score": score,
+                "o_model_score_source": "model_predicted_score",
+                "o_group_normalized_raw_model_score": raw_z,
+                "o_model_score_components": components,
+                "deployable_model_score_available": deployable_available,
+                "ranking_score_source_by_variant": {
+                    "current_source_baseline": "observed_source_score",
+                    O_MODEL_PREDICTED_VARIANT: "model_predicted_score",
+                    **dict.fromkeys(
+                        O_LABEL_DIAGNOSTIC_VARIANTS,
+                        "label_diagnostic_score",
+                    ),
+                },
+            }
+        )
+    return scored_rows
+
+
+def _o_model_score_components(
+    row: dict[str, Any],
+    raw_z: float,
+    ranking_correction: dict[str, Any],
+) -> dict[str, float]:
+    action = str(row.get("action") or "")
+    family = _action_family(action)
+    p_edge = abs(float(row.get("p_up") or 0.5) - 0.5)
+    weak_cutoff = float(ranking_correction["weak_opportunity_p_edge_cutoff"])
+    if family == "NO_TRADE":
+        base_score = float(ranking_correction["no_trade_base_score"])
+        side_alignment_component = 0.0
+        confidence_component = max(0.0, weak_cutoff - p_edge)
+    elif family == "HOLD_TO_SETTLEMENT":
+        base_score = float(ranking_correction["trade_base_score"])
+        side_alignment_component = _p_up_side_alignment_score(row)
+        confidence_component = (
+            float(ranking_correction["confidence_bonus"])
+            if p_edge >= weak_cutoff
+            else float(ranking_correction["weak_opportunity_trade_penalty"])
+        )
+    else:
+        base_score = float(ranking_correction["sell_before_close_base_score"])
+        side_alignment_component = 0.5 * _p_up_side_alignment_score(row)
+        confidence_component = (
+            float(ranking_correction["sell_before_close_confidence_bonus"])
+            if p_edge >= weak_cutoff
+            else float(ranking_correction["sell_before_close_weak_penalty"])
+        )
+    prior = (
+        float(ranking_correction["action_shadow_priors"].get(action, 0.0))
+        + float(ranking_correction["action_family_shadow_priors"].get(family, 0.0))
+    )
+    return {
+        "base_score": base_score,
+        "p_up_side_alignment_component": side_alignment_component,
+        "confidence_or_weak_opportunity_component": confidence_component,
+        "group_normalized_raw_model_component": (
+            float(ranking_correction["group_normalized_raw_model_weight"])
+            * _bounded(raw_z, -2.0, 2.0)
+        ),
+        "shadow_action_family_prior_component": (
+            float(ranking_correction["shadow_action_family_prior_weight"]) * prior
+        ),
+        "microstructure_quality_component": (
+            float(ranking_correction["microstructure_quality_weight"])
+            * _microstructure_quality_proxy(row)
+        ),
+    }
+
+
+def _p_up_side_alignment_score(row: dict[str, Any]) -> float:
+    p_up = _bounded(float(row.get("p_up") or 0.5), 0.0, 1.0)
+    action = str(row.get("action") or "")
+    if "BUY_UP" in action:
+        return p_up - 0.5
+    if "BUY_DOWN" in action:
+        return 0.5 - p_up
+    return 0.0
+
+
+def _microstructure_quality_proxy(row: dict[str, Any]) -> float:
+    queue = _bounded(float(row.get("entry_exit_quality_queue_fill") or 0.0), 0.0, 1.0)
+    spread = _normalized_spread(row)
+    staleness = _normalized_staleness(row)
+    time_to_close = _normalized_time_to_close(row)
+    entry_ask = _bounded(float(row.get("entry_quality_ask") or 0.0), 0.0, 1.0)
+    exit_bid_proxy = _decision_time_exit_bid_proxy(row)
+    return (
+        0.01 * (queue - 0.80)
+        - 0.02 * spread
+        - 0.0005 * staleness
+        + 0.0005 * time_to_close
+        - 0.005 * entry_ask
+        + 0.005 * exit_bid_proxy
+    )
 
 
 def _fit_ridge_regression(
@@ -1549,6 +1828,9 @@ def _freeze_readiness_report(
                 "high_score_threshold": config.high_score_threshold,
                 "gate_thresholds": eligibility_gate_report["gate_thresholds"],
                 "feature_names": list(O_DEPLOYABLE_MODEL_FEATURE_NAMES),
+                "ranking_correction_config": model_training_summary[
+                    "ranking_correction_config"
+                ],
             }
         ),
         "freeze_blocking_reason_codes": blocking_reasons,
@@ -2131,7 +2413,12 @@ def _compact_ranking_row(row: dict[str, Any], variant: str) -> dict[str, Any]:
         "missing_action_families": row["missing_action_families"],
         "ranking_metric_scope": row["ranking_metric_scope"],
         "selected_side": row.get("selected_side"),
+        "o_raw_ridge_model_score": row.get("o_raw_ridge_model_score"),
+        "o_group_normalized_raw_model_score": row.get(
+            "o_group_normalized_raw_model_score"
+        ),
         "o_model_predicted_score": row.get("o_model_predicted_score"),
+        "o_model_score_components": row.get("o_model_score_components"),
         "deployable_model_score_available": row.get("deployable_model_score_available"),
         "ranking_score_source": _ranking_score_source(variant),
         "variant_score": row["variant_scores"][variant],
