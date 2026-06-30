@@ -27,6 +27,11 @@ from bigan.v8.polymarket.training.post_freeze_holdout_accumulation import (
     PolymarketPostFreezeHoldoutAccumulationConfig,
     run_polymarket_m_post_freeze_holdout_accumulation,
 )
+from bigan.v8.polymarket.training.post_freeze_promotion_readiness_audit import (
+    M_POST_FREEZE_PROMOTION_READINESS_AUDIT_SCHEMA_VERSION,
+    PolymarketPostFreezePromotionReadinessAuditConfig,
+    run_polymarket_m_post_freeze_promotion_readiness_audit,
+)
 
 
 def test_post_freeze_holdout_blocks_same_lineage_before_prediction(
@@ -503,6 +508,103 @@ def test_post_freeze_holdout_accumulation_support_ready_still_does_not_unlock(
     assert report["#146_start_allowed"] is False
     assert report["#134_resume_allowed"] is False
     assert report["paper_run_resume_allowed"] is False
+
+
+def test_post_freeze_promotion_readiness_audit_explains_weak_evidence(
+    tmp_path: Path,
+) -> None:
+    up_failed = _write_holdout_report(
+        tmp_path / "up_failed",
+        _holdout_validation_report(
+            run_id="up-failed",
+            market_ids=("up-failed-market",),
+            replay_rows=[
+                _replay_row(
+                    market_id="up-failed-market",
+                    decision_ts=10,
+                    side="UP",
+                    pnl=-0.05,
+                )
+            ],
+            replay_pnl_by_side={"UP": -0.05, "DOWN": 0.0},
+        ),
+    )
+    down_passed = _write_holdout_report(
+        tmp_path / "down_passed",
+        _holdout_validation_report(
+            run_id="down-passed",
+            market_ids=("down-passed-market",),
+            replay_rows=[
+                _replay_row(
+                    market_id="down-passed-market",
+                    decision_ts=20,
+                    side="DOWN",
+                    pnl=0.20,
+                )
+            ],
+            replay_pnl_by_side={"UP": 0.0, "DOWN": 0.20},
+        ),
+    )
+    accumulation = run_polymarket_m_post_freeze_holdout_accumulation(
+        PolymarketPostFreezeHoldoutAccumulationConfig(
+            holdout_report_paths=(up_failed, down_passed),
+            output_dir=tmp_path / "accumulation",
+            min_replay_entry_support=2,
+            min_unique_market_support=2,
+        )
+    )
+
+    result = run_polymarket_m_post_freeze_promotion_readiness_audit(
+        PolymarketPostFreezePromotionReadinessAuditConfig(
+            accumulation_report_path=accumulation.artifact_paths["report"],
+            output_dir=tmp_path / "audit",
+        )
+    )
+
+    report = result.report
+    payload = dict(report)
+    report_id = payload.pop("m_post_freeze_promotion_readiness_audit_id")
+    assert canonical_json_sha256(payload) == report_id
+    assert report["schema_version"] == M_POST_FREEZE_PROMOTION_READINESS_AUDIT_SCHEMA_VERSION
+    assert report["support_gate_passed"] is True
+    assert report["promotion_evidence_eligible"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["promotion_readiness"] == "weak"
+    assert report["promotion_gate_reason_codes"] == [
+        "included_holdout_validation_not_passed"
+    ]
+    assert "included_holdout_validation_not_passed" in report[
+        "source_model_candidate_ineligible_reason_codes"
+    ]
+    assert report["included_holdout_validation_failed_count"] == 1
+    assert report["included_runs_with_holdout_validation_passed_false"][0][
+        "replay_total_pnl_sum"
+    ] == -0.05
+    assert report["up_vs_down_pnl_imbalance"]["up_pnl"] == -0.05
+    assert report["up_vs_down_pnl_imbalance"]["down_pnl"] == 0.20
+    assert report["up_side_negative_pnl_should_block_promotion_discussion"] is True
+    assert report["pnl_per_replay_entry_stats"]["minimum"] == -0.05
+    assert report["pnl_per_replay_entry_stats"]["median"] == 0.07500000000000001
+    assert report["pnl_per_replay_entry_stats"]["mean"] == 0.07500000000000001
+    assert abs(report["largest_positive_entry_removed_total_pnl"] - -0.05) < 1e-12
+    assert (
+        report["total_pnl_remains_positive_if_largest_positive_entry_removed"]
+        is False
+    )
+    assert (
+        abs(
+            report["leave_one_out_replay_pnl_sensitivity"][
+                "minimum_leave_one_out_total_pnl"
+            ]
+            - -0.05
+        )
+        < 1e-12
+    )
+    assert report["top_negative_replay_entries"][0]["market_id"] == "up-failed-market"
+    assert report["#146_start_allowed"] is False
+    assert report["#134_resume_allowed"] is False
+    assert result.artifact_paths["report"].exists()
+    assert result.artifact_paths["summary"].exists()
 
 
 def _build_corpus(root: Path) -> Path:
