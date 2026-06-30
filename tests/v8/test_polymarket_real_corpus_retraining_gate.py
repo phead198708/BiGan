@@ -98,6 +98,29 @@ def test_real_corpus_retraining_gate_runs_training_for_real_eligible_bundle(
     assert model_manifest["action_value_model_family"] == "feature_conditioned_action_return_model"
     assert model_manifest["feature_conditioned_action_value_model_enabled"] is True
     assert model_manifest["direct_pnl_optimization"] is False
+    assert model_manifest["action_value_calibration_artifact_used"] is True
+    assert model_manifest["execution_uses_calibrated_action_value"] is True
+    assert model_manifest["calibration_support_passed"] is True
+    assert isinstance(model_manifest["calibration_quality_passed"], bool)
+    if (
+        model_manifest["calibration_quality_passed"]
+        and model_manifest["action_family_paper_decision_eligible"]
+    ):
+        assert model_manifest["action_value_paper_decision_eligible"] is True
+        assert model_manifest["action_value_paper_decision_ineligible_reasons"] == []
+    else:
+        assert model_manifest["action_value_paper_decision_eligible"] is False
+        if not model_manifest["calibration_quality_passed"]:
+            assert "action_value_calibration_quality_failed" in model_manifest[
+                "action_value_paper_decision_ineligible_reasons"
+            ]
+        if not model_manifest["action_family_paper_decision_eligible"]:
+            for reason in model_manifest[
+                "action_family_paper_decision_ineligible_reasons"
+            ]:
+                assert reason in model_manifest[
+                    "action_value_paper_decision_ineligible_reasons"
+                ]
     assert model_manifest["training_corpus_hash"] == recorder.report[
         "phase2_corpus_manifest_sha256"
     ]
@@ -105,6 +128,33 @@ def test_real_corpus_retraining_gate_runs_training_for_real_eligible_bundle(
         "phase2_corpus_manifest_sha256"
     ]
     assert model_manifest["policy_dataset_hash"] == model_manifest["dataset_hash"]
+    coverage_summary = model_manifest["guard_compatible_candidate_coverage_summary"]
+    assert coverage_summary["schema_version"] == (
+        "bigan-v8-polymarket-guard-compatible-candidate-coverage-v1"
+    )
+    assert result.report["pre_guard_candidate_count"] == coverage_summary[
+        "pre_guard_candidate_count"
+    ]
+    assert result.report["guard_compatible_candidate_count"] == coverage_summary[
+        "guard_compatible_candidate_count"
+    ]
+    assert result.report["guard_compatible_up_entry_count"] == coverage_summary[
+        "guard_compatible_up_entry_count"
+    ]
+    assert result.report["guard_compatible_down_entry_count"] == coverage_summary[
+        "guard_compatible_down_entry_count"
+    ]
+    assert result.report["coverage_targets_passed"] == coverage_summary[
+        "coverage_targets_passed"
+    ]
+    assert result.report["#145_ready_for_rerun"] == coverage_summary[
+        "#145_ready_for_rerun"
+    ]
+    assert result.report["#146_start_allowed"] is False
+    assert result.report["#134_resume_allowed"] is False
+    assert result.artifact_paths[
+        "policy_guard_compatible_candidate_coverage_report"
+    ].exists()
     for field_name in (
         "model_sha256",
         "model_manifest_sha256",

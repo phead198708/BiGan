@@ -8,7 +8,10 @@ import math
 from pathlib import Path
 from typing import Any
 
-from bigan.v8.polymarket.corpus import BTC_UPDOWN_MARKET_HORIZONS_MS
+from bigan.v8.polymarket.corpus import (
+    BTC_UPDOWN_MARKET_HORIZONS_MS,
+    POLYMARKET_SELL_BEFORE_CLOSE_LABEL_SCHEMA_VERSION,
+)
 from bigan.v8.polymarket.training.contracts import (
     ACTION_VALUE_LABEL_ACTIONS,
     AUXILIARY_OUTCOME_TARGET,
@@ -27,6 +30,14 @@ LABEL_SCHEMA = {
     "auxiliary_target": AUXILIARY_OUTCOME_TARGET,
     "action_value_target_field": ACTION_VALUE_TARGET_FIELD,
     "fixed_notional_target_used": True,
+    "sell_before_close_label_schema_version": (
+        POLYMARKET_SELL_BEFORE_CLOSE_LABEL_SCHEMA_VERSION
+    ),
+    "sell_before_close_fixed_terminal_bid_only_labels_allowed": False,
+    "sell_before_close_target_field": (
+        "realized_executable_sell_before_close_return"
+    ),
+    "sell_before_close_theoretical_gap_field": "execution_gap_return",
     "action_labels": list(ACTION_VALUE_LABEL_ACTIONS),
     "source_actions": list(ACTION_VALUE_LABEL_ACTIONS),
     "outcome_probability_mapping": {
@@ -89,6 +100,56 @@ def load_polymarket_policy_dataset(
             action: float(labels[action]["settlement_return"])
             for action in ACTION_VALUE_LABEL_ACTIONS
         }
+        sell_before_close_execution_class_targets = {
+            action: str(labels[action].get("sell_before_close_execution_class"))
+            for action in ACTION_VALUE_LABEL_ACTIONS
+            if action.endswith("SELL_BEFORE_CLOSE")
+        }
+        sell_before_close_theoretical_return_targets = {
+            action: float(labels[action].get("theoretical_terminal_bid_return", 0.0))
+            for action in ACTION_VALUE_LABEL_ACTIONS
+            if action.endswith("SELL_BEFORE_CLOSE")
+        }
+        sell_before_close_executable_return_targets = {
+            action: float(
+                labels[action].get(
+                    "realized_executable_sell_before_close_return",
+                    0.0,
+                )
+            )
+            for action in ACTION_VALUE_LABEL_ACTIONS
+            if action.endswith("SELL_BEFORE_CLOSE")
+        }
+        sell_before_close_execution_gap_targets = {
+            action: float(labels[action].get("execution_gap_return", 0.0))
+            for action in ACTION_VALUE_LABEL_ACTIONS
+            if action.endswith("SELL_BEFORE_CLOSE")
+        }
+        sell_before_close_queue_fill_probability_targets = {
+            action: float(labels[action].get("queue_fill_probability_estimate", 0.0))
+            for action in ACTION_VALUE_LABEL_ACTIONS
+            if action.endswith("SELL_BEFORE_CLOSE")
+        }
+        sell_before_close_exit_bid_targets = {
+            action: float(labels[action].get("exit_bid", 0.0))
+            for action in ACTION_VALUE_LABEL_ACTIONS
+            if action.endswith("SELL_BEFORE_CLOSE")
+        }
+        sell_before_close_executable_liquidity_notional_targets = {
+            action: float(labels[action].get("executable_liquidity_notional", 0.0))
+            for action in ACTION_VALUE_LABEL_ACTIONS
+            if action.endswith("SELL_BEFORE_CLOSE")
+        }
+        sell_before_close_exit_path_targets = {
+            action: dict(labels[action].get("sell_before_close_exit_path") or {})
+            for action in ACTION_VALUE_LABEL_ACTIONS
+            if action.endswith("SELL_BEFORE_CLOSE")
+        }
+        sell_before_close_label_uses_executable_exit_path_targets = {
+            action: bool(labels[action].get("label_uses_executable_exit_path", False))
+            for action in ACTION_VALUE_LABEL_ACTIONS
+            if action.endswith("SELL_BEFORE_CLOSE")
+        }
         action_is_positive_targets = {
             action: bool(labels[action]["is_positive"])
             for action in ACTION_VALUE_LABEL_ACTIONS
@@ -114,6 +175,33 @@ def load_polymarket_policy_dataset(
                 realized_trade_return_targets=realized_trade_return_targets,
                 settlement_return_targets=settlement_return_targets,
                 action_is_positive_targets=action_is_positive_targets,
+                sell_before_close_execution_class_targets=(
+                    sell_before_close_execution_class_targets
+                ),
+                sell_before_close_theoretical_return_targets=(
+                    sell_before_close_theoretical_return_targets
+                ),
+                sell_before_close_executable_return_targets=(
+                    sell_before_close_executable_return_targets
+                ),
+                sell_before_close_execution_gap_targets=(
+                    sell_before_close_execution_gap_targets
+                ),
+                sell_before_close_queue_fill_probability_targets=(
+                    sell_before_close_queue_fill_probability_targets
+                ),
+                sell_before_close_exit_bid_targets=(
+                    sell_before_close_exit_bid_targets
+                ),
+                sell_before_close_executable_liquidity_notional_targets=(
+                    sell_before_close_executable_liquidity_notional_targets
+                ),
+                sell_before_close_exit_path_targets=(
+                    sell_before_close_exit_path_targets
+                ),
+                sell_before_close_label_uses_executable_exit_path_targets=(
+                    sell_before_close_label_uses_executable_exit_path_targets
+                ),
                 best_policy_action=best_action,
                 best_action_expected_return=best_return,
                 second_best_action_expected_return=second_best_return,
@@ -178,6 +266,17 @@ def dataset_profile(dataset: PolymarketPolicyDataset) -> dict[str, Any]:
         "outcome_probability_head_enabled": True,
         "action_label_coverage_by_action": _action_label_coverage(dataset.examples),
         "best_policy_action_counts": _best_policy_action_counts(dataset.examples),
+        "sell_before_close_label_schema_version": dataset.corpus_manifest.get(
+            "sell_before_close_label_schema_version"
+        ),
+        "sell_before_close_fixed_terminal_bid_only_labels_allowed": False,
+        "sell_before_close_label_gate_passed": dataset.corpus_manifest.get(
+            "sell_before_close_label_gate_passed"
+        ),
+        "sell_before_close_execution_class_counts": dataset.corpus_manifest.get(
+            "sell_before_close_execution_class_counts",
+            {},
+        ),
         "feature_columns": list(dataset.feature_columns),
         "feature_schema_hash": dataset.feature_schema_hash,
         "label_schema_hash": dataset.label_schema_hash,
@@ -219,6 +318,7 @@ def _labels_by_decision_state(path: Path) -> dict[tuple[str, int], dict[str, dic
         action = str(row["action"])
         if action not in ACTION_VALUE_LABEL_ACTIONS:
             continue
+        _assert_sell_before_close_label_redesign(row)
         key = (str(row["market_id"]), int(row["decision_ts"]))
         if action in grouped.setdefault(key, {}):
             raise ValueError(
@@ -248,6 +348,44 @@ def _assert_action_value_target_fields(
             f"at decision_ts={decision_ts}: "
             + ", ".join(missing)
         )
+
+
+def _assert_sell_before_close_label_redesign(row: dict[str, Any]) -> None:
+    action = str(row.get("action") or "")
+    if not action.endswith("SELL_BEFORE_CLOSE"):
+        return
+    if row.get("sell_before_close_label_schema_version") != (
+        POLYMARKET_SELL_BEFORE_CLOSE_LABEL_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "sell-before-close label missing executable exit schema version"
+        )
+    execution_class = str(row.get("sell_before_close_execution_class") or "")
+    if execution_class not in {
+        "realizable_sell_before_close",
+        "theoretical_sell_before_close",
+        "sparse_theoretical_sell_before_close",
+        "non_executable_sell_before_close",
+    }:
+        raise ValueError("sell-before-close label missing execution class")
+    exit_path = row.get("sell_before_close_exit_path")
+    if not isinstance(exit_path, dict):
+        raise ValueError("sell-before-close label missing exit path")
+    if exit_path.get("label_source") == "fixed_terminal_bid_only":
+        raise ValueError("fixed terminal bid-only sell-before-close label rejected")
+    if "queue_fill_probability_estimate" not in row:
+        raise ValueError("sell-before-close label missing queue/fill probability")
+    if (
+        execution_class == "realizable_sell_before_close"
+        and row.get("label_uses_executable_exit_path") is not True
+    ):
+        raise ValueError("realizable sell-before-close label must use executable path")
+    if (
+        float(row.get("theoretical_terminal_bid_return", 0.0)) > 0.0
+        and execution_class != "realizable_sell_before_close"
+        and row.get("label_uses_executable_exit_path") is True
+    ):
+        raise ValueError("theoretical sell-before-close label cannot use fake exit")
 
 
 def _best_action(action_returns: dict[str, float]) -> tuple[str, float, float, float]:

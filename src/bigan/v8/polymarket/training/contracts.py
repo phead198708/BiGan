@@ -131,6 +131,23 @@ class PolymarketPolicyExample:
     realized_trade_return_targets: dict[str, float] = field(default_factory=dict)
     settlement_return_targets: dict[str, float] = field(default_factory=dict)
     action_is_positive_targets: dict[str, bool] = field(default_factory=dict)
+    sell_before_close_execution_class_targets: dict[str, str] = field(default_factory=dict)
+    sell_before_close_theoretical_return_targets: dict[str, float] = field(default_factory=dict)
+    sell_before_close_executable_return_targets: dict[str, float] = field(default_factory=dict)
+    sell_before_close_execution_gap_targets: dict[str, float] = field(default_factory=dict)
+    sell_before_close_queue_fill_probability_targets: dict[str, float] = field(
+        default_factory=dict
+    )
+    sell_before_close_exit_bid_targets: dict[str, float] = field(default_factory=dict)
+    sell_before_close_executable_liquidity_notional_targets: dict[str, float] = field(
+        default_factory=dict
+    )
+    sell_before_close_exit_path_targets: dict[str, dict[str, Any]] = field(
+        default_factory=dict
+    )
+    sell_before_close_label_uses_executable_exit_path_targets: dict[str, bool] = field(
+        default_factory=dict
+    )
     best_policy_action: str = "NO_TRADE"
     best_action_expected_return: float = 0.0
     second_best_action_expected_return: float = 0.0
@@ -173,6 +190,48 @@ class PolymarketPolicyExample:
                     "action_is_positive_targets contains unsupported actions: "
                     + ", ".join(sorted(unsupported))
                 )
+        for mapping, field_name in (
+            (
+                self.sell_before_close_theoretical_return_targets,
+                "sell_before_close_theoretical_return_targets",
+            ),
+            (
+                self.sell_before_close_executable_return_targets,
+                "sell_before_close_executable_return_targets",
+            ),
+            (
+                self.sell_before_close_execution_gap_targets,
+                "sell_before_close_execution_gap_targets",
+            ),
+            (
+                self.sell_before_close_queue_fill_probability_targets,
+                "sell_before_close_queue_fill_probability_targets",
+            ),
+            (
+                self.sell_before_close_exit_bid_targets,
+                "sell_before_close_exit_bid_targets",
+            ),
+            (
+                self.sell_before_close_executable_liquidity_notional_targets,
+                "sell_before_close_executable_liquidity_notional_targets",
+            ),
+        ):
+            _validate_numeric_target_mapping(
+                mapping,
+                allow_empty=True,
+                field_name=field_name,
+            )
+        for action in self.sell_before_close_execution_class_targets:
+            if action not in ACTION_VALUE_LABEL_ACTIONS:
+                raise ValueError("unsupported sell-before-close execution class action")
+        for action, exit_path in self.sell_before_close_exit_path_targets.items():
+            if action not in ACTION_VALUE_LABEL_ACTIONS:
+                raise ValueError("unsupported sell-before-close exit path action")
+            if not isinstance(exit_path, dict):
+                raise ValueError("sell-before-close exit path targets must be dicts")
+        for action in self.sell_before_close_label_uses_executable_exit_path_targets:
+            if action not in ACTION_VALUE_LABEL_ACTIONS:
+                raise ValueError("unsupported sell-before-close executable path action")
         if self.best_policy_action not in ACTION_VALUE_LABEL_ACTIONS:
             raise ValueError("best_policy_action must be a supported label action")
         for field_name in (
@@ -269,6 +328,17 @@ class PolymarketPolicyPrediction:
     best_action_expected_return: float | None = None
     second_best_action_expected_return: float | None = None
     best_action_margin: float | None = None
+    calibrated_expected_pnl_per_notional_by_action: dict[str, float] = field(
+        default_factory=dict
+    )
+    calibrated_best_policy_action: str | None = None
+    calibrated_expected_pnl_per_notional: float | None = None
+    calibrated_second_best_expected_pnl_per_notional: float | None = None
+    calibrated_action_margin: float | None = None
+    action_value_calibration_applied: bool = False
+    action_value_calibration_id: str | None = None
+    calibration_support_count: int | None = None
+    calibration_bucket_count: int | None = None
     policy_confidence: float | None = None
     action_value_head_enabled: bool = False
     outcome_probability_head_enabled: bool = True
@@ -312,6 +382,27 @@ class PolymarketPolicyPrediction:
                 value = getattr(self, field_name)
                 if value is None or not math.isfinite(float(value)):
                     raise ValueError(f"{field_name} must be finite for action-value output")
+        if self.action_value_calibration_applied:
+            _validate_action_return_targets(
+                self.calibrated_expected_pnl_per_notional_by_action,
+                allow_empty=False,
+            )
+            if self.calibrated_best_policy_action not in ACTION_VALUE_LABEL_ACTIONS:
+                raise ValueError(
+                    "calibrated_best_policy_action must be present for calibrated output"
+                )
+            for field_name in (
+                "calibrated_expected_pnl_per_notional",
+                "calibrated_second_best_expected_pnl_per_notional",
+                "calibrated_action_margin",
+                "calibration_support_count",
+                "calibration_bucket_count",
+            ):
+                value = getattr(self, field_name)
+                if value is None or not math.isfinite(float(value)):
+                    raise ValueError(f"{field_name} must be finite for calibrated output")
+            if self.calibrated_action_margin is not None and self.calibrated_action_margin < -1e-12:
+                raise ValueError("calibrated_action_margin must be non-negative")
         if not looks_like_sha256(self.feature_schema_hash):
             raise ValueError("feature_schema_hash must be SHA-256")
         if not looks_like_sha256(self.training_corpus_hash):
@@ -422,6 +513,27 @@ class PolymarketPolicyTrainingResult:
     validation_report: dict[str, Any]
     ev_threshold_report: dict[str, Any]
     replay_report: dict[str, Any]
+    action_value_signal_sanity_report: dict[str, Any]
+    action_family_eligibility_report: dict[str, Any]
+    hold_to_settlement_longshot_guard_report: dict[str, Any]
+    action_family_replay_variants_report: dict[str, Any]
+    action_family_counterfactual_replay_report: dict[str, Any]
+    model_ranking_error_report: dict[str, Any]
+    model_ranking_candidate_comparison_report: dict[str, Any]
+    action_representation_diagnostic_report: dict[str, Any]
+    ranking_overlay_zero_entry_diagnostic_report: dict[str, Any]
+    source_model_eligibility_report: dict[str, Any]
+    sell_before_close_p_up_disagreement_diagnostic_report: dict[str, Any]
+    sell_before_close_exit_reliability_report: dict[str, Any]
+    sell_before_close_promotion_support_gate_report: dict[str, Any]
+    sell_before_close_support_aware_threshold_selection_report: dict[str, Any]
+    sell_before_close_support_aware_threshold_failure_attribution_report: dict[
+        str,
+        Any,
+    ]
+    sell_before_close_validation_failure_drilldown_report: dict[str, Any]
+    sell_before_close_guard_threshold_sweep_report: dict[str, Any]
+    m_frozen_selector_walk_forward_report: dict[str, Any]
 
 
 def safety_fields() -> dict[str, bool]:

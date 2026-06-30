@@ -7,6 +7,12 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from bigan.v8.polymarket.action_value_guards import (
+    ACTION_FAMILY_INELIGIBLE,
+    HOLD_TO_SETTLEMENT_LONGSHOT_GUARD,
+    action_value_intended_exit_policy,
+    hold_to_settlement_longshot_guard_applies,
+)
 from bigan.v8.polymarket.ledger import PolymarketPositionLedger
 from bigan.v8.polymarket.rules import (
     build_btc_updown_resolution_rule,
@@ -51,6 +57,15 @@ class PolymarketEVDecision:
     best_action_expected_return: float | None = None
     second_best_action_expected_return: float | None = None
     best_action_margin: float | None = None
+    calibrated_expected_pnl_per_notional_by_action: dict[str, float] | None = None
+    calibrated_best_policy_action: str | None = None
+    calibrated_expected_pnl_per_notional: float | None = None
+    calibrated_second_best_expected_pnl_per_notional: float | None = None
+    calibrated_action_margin: float | None = None
+    action_value_calibration_used: bool = False
+    action_value_calibration_id: str | None = None
+    calibration_support_count: int | None = None
+    calibration_bucket_count: int | None = None
     policy_confidence: float | None = None
     entry_policy_action: str | None = None
     intended_exit_policy: str = "none"
@@ -105,6 +120,30 @@ class PolymarketEVDecision:
                 value = getattr(self, field_name)
                 if value is None or not math.isfinite(float(value)):
                     raise ValueError(f"{field_name} must be finite for action-value decisions")
+            if self.action.startswith(("BUY", "SELL")) and not self.action_value_calibration_used:
+                raise ValueError("action-value trade decisions must use calibrated edge")
+        if self.action_value_calibration_used:
+            if not self.calibrated_expected_pnl_per_notional_by_action:
+                raise ValueError("calibrated action-value returns are required")
+            missing = set(ACTION_VALUE_LABEL_ACTIONS) - set(
+                self.calibrated_expected_pnl_per_notional_by_action
+            )
+            if missing:
+                raise ValueError(
+                    "calibrated returns missing actions: " + ", ".join(sorted(missing))
+                )
+            if self.calibrated_best_policy_action not in ACTION_VALUE_LABEL_ACTIONS:
+                raise ValueError("calibrated_best_policy_action is required")
+            for field_name in (
+                "calibrated_expected_pnl_per_notional",
+                "calibrated_second_best_expected_pnl_per_notional",
+                "calibrated_action_margin",
+                "calibration_support_count",
+                "calibration_bucket_count",
+            ):
+                value = getattr(self, field_name)
+                if value is None or not math.isfinite(float(value)):
+                    raise ValueError(f"{field_name} must be finite for calibrated decisions")
         if self.intended_exit_policy not in ("none", "hold_to_settlement", "sell_before_close"):
             raise ValueError("unsupported intended_exit_policy")
         if self.entry_policy_action is not None and self.entry_policy_action not in ACTION_VALUE_LABEL_ACTIONS:
@@ -428,6 +467,12 @@ def ev_threshold_report(
         "action_value_decision_count": sum(
             decision.action_value_head_used for decision in decisions
         ),
+        "action_value_calibration_used_count": sum(
+            decision.action_value_calibration_used for decision in decisions
+        ),
+        "execution_uses_calibrated_action_value": any(
+            decision.action_value_calibration_used for decision in decisions
+        ),
         "probability_ev_fallback_decision_count": sum(
             decision.probability_ev_fallback_used for decision in decisions
         ),
@@ -726,6 +771,23 @@ def _decision(
         best_action_expected_return=prediction.best_action_expected_return,
         second_best_action_expected_return=prediction.second_best_action_expected_return,
         best_action_margin=prediction.best_action_margin,
+        calibrated_expected_pnl_per_notional_by_action=dict(
+            prediction.calibrated_expected_pnl_per_notional_by_action
+        ),
+        calibrated_best_policy_action=prediction.calibrated_best_policy_action,
+        calibrated_expected_pnl_per_notional=(
+            prediction.calibrated_expected_pnl_per_notional
+        ),
+        calibrated_second_best_expected_pnl_per_notional=(
+            prediction.calibrated_second_best_expected_pnl_per_notional
+        ),
+        calibrated_action_margin=prediction.calibrated_action_margin,
+        action_value_calibration_used=(
+            prediction.action_value_calibration_applied and action_value_head_used
+        ),
+        action_value_calibration_id=prediction.action_value_calibration_id,
+        calibration_support_count=prediction.calibration_support_count,
+        calibration_bucket_count=prediction.calibration_bucket_count,
         policy_confidence=prediction.policy_confidence,
         entry_policy_action=entry_policy_action,
         intended_exit_policy=intended_exit_policy,
@@ -756,7 +818,25 @@ def _action_value_decision(
         else prediction.confidence
     )
     best_action = str(prediction.best_policy_action)
-    best_return = float(prediction.best_action_expected_return or 0.0)
+    if (
+        not prediction.action_value_calibration_applied
+        or not prediction.calibrated_expected_pnl_per_notional_by_action
+    ):
+        return _decision(
+            prediction=prediction,
+            action="NO_TRADE",
+            selected_outcome="NO_TRADE",
+            ev_buy_up=ev_buy_up,
+            ev_buy_down=ev_buy_down,
+            execution_price=0.0,
+            used_price_side="none",
+            paper_notional=0.0,
+            reason_codes=("action_value_calibration_missing", "action_value_head_used"),
+            action_value_head_used=True,
+            probability_ev_fallback_used=False,
+        )
+    best_action = str(prediction.calibrated_best_policy_action)
+    best_return = float(prediction.calibrated_expected_pnl_per_notional or 0.0)
     if confidence < config.min_confidence:
         return _decision(
             prediction=prediction,
@@ -799,6 +879,32 @@ def _action_value_decision(
             action_value_head_used=True,
             probability_ev_fallback_used=False,
         )
+    raw_best_return = float(prediction.expected_return_by_action[best_action])
+    if hold_to_settlement_longshot_guard_applies(
+        action=best_action,
+        features=prediction.features,
+        raw_score=raw_best_return,
+    ):
+        return _decision(
+            prediction=prediction,
+            action="NO_TRADE",
+            selected_outcome="NO_TRADE",
+            ev_buy_up=ev_buy_up,
+            ev_buy_down=ev_buy_down,
+            execution_price=0.0,
+            used_price_side="none",
+            paper_notional=0.0,
+            reason_codes=(
+                HOLD_TO_SETTLEMENT_LONGSHOT_GUARD,
+                ACTION_FAMILY_INELIGIBLE,
+                "action_value_head_used",
+            ),
+            entry_policy_action=best_action,
+            intended_exit_policy="hold_to_settlement",
+            policy_exit_reason=HOLD_TO_SETTLEMENT_LONGSHOT_GUARD,
+            action_value_head_used=True,
+            probability_ev_fallback_used=False,
+        )
     if best_action.startswith("BUY_UP_"):
         intended_exit_policy = _intended_exit_policy(best_action)
         return _decision(
@@ -812,6 +918,7 @@ def _action_value_decision(
             paper_notional=_paper_notional(best_return, config),
             reason_codes=(
                 "positive_action_value_buy_up",
+                "calibrated_action_value_used",
                 _policy_reason(best_action),
                 "ask_price_execution",
                 "action_value_head_used",
@@ -840,6 +947,7 @@ def _action_value_decision(
             paper_notional=_paper_notional(best_return, config),
             reason_codes=(
                 "positive_action_value_buy_down",
+                "calibrated_action_value_used",
                 _policy_reason(best_action),
                 "ask_price_execution",
                 "action_value_head_used",
@@ -863,11 +971,7 @@ def _policy_reason(best_action: str) -> str:
 
 
 def _intended_exit_policy(best_action: str) -> str:
-    if best_action.endswith("_SELL_BEFORE_CLOSE"):
-        return "sell_before_close"
-    if best_action.endswith("_HOLD_TO_SETTLEMENT"):
-        return "hold_to_settlement"
-    return "none"
+    return action_value_intended_exit_policy(best_action)
 
 
 def _planned_exit_before_ts(
@@ -964,20 +1068,47 @@ def _action_value_policy_metrics(
         for decision in action_value_decisions
         if decision.best_action_expected_return is not None
     ]
+    calibrated_returns = [
+        float(decision.calibrated_expected_pnl_per_notional)
+        for decision in action_value_decisions
+        if decision.calibrated_expected_pnl_per_notional is not None
+    ]
     margins = [
         float(decision.best_action_margin)
         for decision in action_value_decisions
         if decision.best_action_margin is not None
+    ]
+    calibrated_margins = [
+        float(decision.calibrated_action_margin)
+        for decision in action_value_decisions
+        if decision.calibrated_action_margin is not None
     ]
     return {
         "schema_version": "bigan-v8-polymarket-action-value-policy-metrics-v1",
         "primary_policy_target": PRIMARY_POLICY_TARGET_ACTION_VALUE,
         "sample_count": len(action_value_decisions),
         "action_value_head_used_count": len(action_value_decisions),
+        "action_value_calibration_used_count": sum(
+            decision.action_value_calibration_used for decision in action_value_decisions
+        ),
+        "execution_uses_calibrated_action_value": any(
+            decision.action_value_calibration_used for decision in action_value_decisions
+        ),
         "mean_best_action_expected_return": _mean(best_returns),
         "mean_best_action_margin": _mean(margins),
+        "mean_calibrated_expected_pnl_per_notional": _mean(calibrated_returns),
+        "mean_calibrated_action_margin": _mean(calibrated_margins),
         "best_policy_action_counts": dict(
             sorted(Counter(decision.best_policy_action for decision in action_value_decisions).items())
+        ),
+        "calibrated_best_policy_action_counts": dict(
+            sorted(
+                Counter(
+                    decision.calibrated_best_policy_action
+                    for decision in action_value_decisions
+                    if decision.calibrated_best_policy_action is not None
+                ).items()
+            )
         ),
         "action_value_model_family": _action_value_model_family(decisions),
         "feature_conditioned_action_value_model_used": any(

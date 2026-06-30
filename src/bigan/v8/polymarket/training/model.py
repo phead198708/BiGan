@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from typing import Literal
 
 from bigan.v8.polymarket.training.contracts import (
     ACTION_VALUE_LABEL_ACTIONS,
@@ -18,6 +19,7 @@ from bigan.v8.polymarket.training.contracts import (
 EPSILON = 1e-6
 ACTION_RETURN_RIDGE = 1e-9
 ACTION_RETURN_COEFFICIENT_LIMIT = 5.0
+ActionValueMissingFeatureMode = Literal["strict", "train_mean_impute"]
 
 
 def train_polymarket_action_value_model(
@@ -119,15 +121,24 @@ def train_polymarket_probability_model(
 def predict_polymarket_policy_examples(
     model: PolymarketPolicyModel,
     examples: tuple[PolymarketPolicyExample, ...],
+    *,
+    missing_feature_mode: ActionValueMissingFeatureMode = "strict",
 ) -> tuple[PolymarketPolicyPrediction, ...]:
     """Score examples with the trained action-value policy model."""
 
-    return tuple(_prediction(model, example) for example in examples)
+    if missing_feature_mode not in ("strict", "train_mean_impute"):
+        raise ValueError("missing_feature_mode must be strict or train_mean_impute")
+    return tuple(
+        _prediction(model, example, missing_feature_mode=missing_feature_mode)
+        for example in examples
+    )
 
 
 def _prediction(
     model: PolymarketPolicyModel,
     example: PolymarketPolicyExample,
+    *,
+    missing_feature_mode: ActionValueMissingFeatureMode,
 ) -> PolymarketPolicyPrediction:
     up_mid = float(example.features.get("up_mid", model.global_probability))
     if example.market_family in model.market_family_probabilities:
@@ -141,7 +152,11 @@ def _prediction(
     else:
         probability = _clamp(up_mid, EPSILON, 1.0 - EPSILON)
     confidence = _clamp(abs(probability - 0.5) * 2.0, 0.0, 1.0)
-    expected_return_by_action = _expected_action_returns(model, example)
+    expected_return_by_action = _expected_action_returns(
+        model,
+        example,
+        missing_feature_mode=missing_feature_mode,
+    )
     best_action, best_return, second_best_return, best_margin = _rank_actions(
         expected_return_by_action
     )
@@ -221,6 +236,8 @@ def _required_action_returns(example: PolymarketPolicyExample) -> dict[str, floa
 def _expected_action_returns(
     model: PolymarketPolicyModel,
     example: PolymarketPolicyExample,
+    *,
+    missing_feature_mode: ActionValueMissingFeatureMode,
 ) -> dict[str, float]:
     if model.action_value_head_enabled:
         base = model.market_family_action_returns.get(
@@ -228,6 +245,11 @@ def _expected_action_returns(
             model.global_action_returns,
         )
         if base:
+            _validate_action_value_features(
+                model=model,
+                example=example,
+                missing_feature_mode=missing_feature_mode,
+            )
             expected = {action: float(base[action]) for action in ACTION_VALUE_LABEL_ACTIONS}
             if model.feature_conditioned_action_value_model_enabled:
                 for action in ACTION_VALUE_LABEL_ACTIONS:
@@ -236,9 +258,34 @@ def _expected_action_returns(
                         coefficients=model.action_return_feature_coefficients.get(action, {}),
                         feature_means=model.action_return_feature_means,
                         example=example,
+                        missing_feature_mode=missing_feature_mode,
                     )
             return expected
     return dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, 0.0)
+
+
+def _validate_action_value_features(
+    *,
+    model: PolymarketPolicyModel,
+    example: PolymarketPolicyExample,
+    missing_feature_mode: ActionValueMissingFeatureMode,
+) -> None:
+    if not model.feature_conditioned_action_value_model_enabled:
+        return
+    if missing_feature_mode == "train_mean_impute":
+        return
+    missing_features = [
+        feature_name
+        for feature_name in model.action_value_feature_columns
+        if feature_name not in example.features
+    ]
+    if missing_features:
+        raise ValueError(
+            "action_value_feature_missing: "
+            f"market_id={example.market_id} decision_ts={example.decision_ts} "
+            "missing_features="
+            + ",".join(sorted(missing_features))
+        )
 
 
 def _feature_conditioned_return(
@@ -247,12 +294,27 @@ def _feature_conditioned_return(
     coefficients: dict[str, float],
     feature_means: dict[str, float],
     example: PolymarketPolicyExample,
+    missing_feature_mode: ActionValueMissingFeatureMode,
 ) -> float:
     value = float(baseline)
+    missing_features = []
     for feature_name, coefficient in coefficients.items():
+        if feature_name in example.features:
+            feature_value = float(example.features[feature_name])
+        elif missing_feature_mode == "train_mean_impute":
+            feature_value = float(feature_means.get(feature_name, 0.0))
+        else:
+            missing_features.append(feature_name)
+            continue
         value += float(coefficient) * (
-            float(example.features.get(feature_name, 0.0))
-            - float(feature_means.get(feature_name, 0.0))
+            feature_value - float(feature_means.get(feature_name, 0.0))
+        )
+    if missing_features:
+        raise ValueError(
+            "action_value_feature_missing: "
+            f"market_id={example.market_id} decision_ts={example.decision_ts} "
+            "missing_features="
+            + ",".join(sorted(missing_features))
         )
     return _clamp(value, -10.0, 10.0)
 

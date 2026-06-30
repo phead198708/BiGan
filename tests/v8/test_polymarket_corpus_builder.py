@@ -11,6 +11,8 @@ from bigan.v8.polymarket.contracts import looks_like_sha256
 from bigan.v8.polymarket.corpus import (
     BTC_UPDOWN_MARKET_HORIZONS_MS,
     NORMALIZED_CORPUS_FILENAMES,
+    POLYMARKET_SELL_BEFORE_CLOSE_LABEL_REDESIGN_REPORT_SCHEMA_VERSION,
+    POLYMARKET_SELL_BEFORE_CLOSE_LABEL_SCHEMA_VERSION,
     RAW_CORPUS_FILENAMES,
     PolymarketCorpusBuildConfig,
     build_polymarket_btc_corpus,
@@ -36,6 +38,7 @@ def test_builder_accepts_fixture_files_and_writes_required_outputs(tmp_path: Pat
 
     manifest = _read_json(output_dir / "polymarket_corpus_manifest.json")
     summary = _read_json(output_dir / "polymarket_corpus_summary.json")
+    label_redesign = _read_json(output_dir / "sell_before_close_label_redesign_report.json")
 
     assert manifest["market_count"] == 3
     assert manifest["feature_row_count"] == 12
@@ -55,6 +58,26 @@ def test_builder_accepts_fixture_files_and_writes_required_outputs(tmp_path: Pat
     assert manifest["capital_at_risk"] is False
     assert manifest["polymarket_write_enabled"] is False
     assert manifest["wallet_signing_enabled"] is False
+    assert manifest["sell_before_close_label_schema_version"] == (
+        POLYMARKET_SELL_BEFORE_CLOSE_LABEL_SCHEMA_VERSION
+    )
+    assert manifest["sell_before_close_fixed_terminal_bid_only_labels_allowed"] is False
+    assert manifest["sell_before_close_label_gate_passed"] is True
+    assert summary["sell_before_close_label_gate_passed"] is True
+    assert label_redesign["schema_version"] == (
+        POLYMARKET_SELL_BEFORE_CLOSE_LABEL_REDESIGN_REPORT_SCHEMA_VERSION
+    )
+    assert label_redesign["fixed_terminal_bid_only_labels_allowed"] is False
+    assert label_redesign["uses_intraround_exit_opportunity_model"] is True
+    assert label_redesign["uses_queue_fill_probability_model"] is True
+    assert label_redesign["sell_before_close_entry_notional"] == pytest.approx(1.0)
+    assert label_redesign["sell_before_close_min_exit_notional"] == pytest.approx(1.0)
+    assert label_redesign["min_exit_notional_source"] == "fixed_1_notional"
+    assert label_redesign["min_exit_notional_to_entry_notional_ratio"] == pytest.approx(
+        1.0
+    )
+    assert label_redesign["near_miss_threshold"] == pytest.approx(0.95)
+    assert label_redesign["near_miss_theoretical_count"] == 0
 
     assert set(manifest["raw_artifact_hashes"]) == set(RAW_CORPUS_FILENAMES)
     for digest in manifest["raw_artifact_hashes"].values():
@@ -90,10 +113,6 @@ def test_labels_use_ask_for_entries_and_bid_for_sell_before_close(
     result = _build_fixture_corpus(tmp_path)
     labels = _read_jsonl(result.output_dir / "polymarket_label_rows.jsonl")
     snapshots = _read_jsonl(result.output_dir / "polymarket_token_book_snapshots.jsonl")
-    markets = {
-        row["market_id"]: row
-        for row in _read_jsonl(result.output_dir / "polymarket_market_metadata.jsonl")
-    }
 
     assert {row["action"] for row in labels} == EXPECTED_ACTIONS
     for label in labels:
@@ -115,19 +134,39 @@ def test_labels_use_ask_for_entries_and_bid_for_sell_before_close(
         assert label["entry_mid"] == pytest.approx(entry_snapshot["mid_price"])
 
         if label["action"].endswith("SELL_BEFORE_CLOSE"):
-            exit_snapshot = _last_snapshot(
-                snapshots=snapshots,
-                market_id=label["market_id"],
-                outcome=label["outcome"],
-                decision_ts=markets[label["market_id"]]["market_end_ts"] - 1,
+            exit_path = label["sell_before_close_exit_path"]
+            assert exit_path["label_source"] == "intraround_executable_exit_path"
+            assert exit_path["candidate_exit_snapshot_count"] >= 0
+            assert isinstance(exit_path["exit_path_reason_codes"], list)
+            assert label["sell_before_close_label_schema_version"] == (
+                POLYMARKET_SELL_BEFORE_CLOSE_LABEL_SCHEMA_VERSION
             )
-            assert label["exit_bid"] == pytest.approx(exit_snapshot["bid_price"])
-            assert label["exit_ask"] == pytest.approx(exit_snapshot["ask_price"])
-            assert label["realized_trade_return"] == pytest.approx(
-                label["exit_bid"] / label["entry_ask"] - 1.0
-            )
+            assert label["sell_before_close_execution_class"] in {
+                "realizable_sell_before_close",
+                "theoretical_sell_before_close",
+                "sparse_theoretical_sell_before_close",
+                "non_executable_sell_before_close",
+            }
+            if label["label_uses_executable_exit_path"]:
+                assert label["exit_bid"] == pytest.approx(
+                    exit_path["best_executable_exit_price"]
+                )
+                assert label["exit_ask"] == pytest.approx(
+                    exit_path["best_executable_exit_ask"]
+                )
+                assert label["realized_trade_return"] == pytest.approx(
+                    label["exit_bid"] / label["entry_ask"] - 1.0
+                )
+            else:
+                assert label["exit_bid"] == 0.0
+                assert label["exit_ask"] == 0.0
+                assert label["realized_trade_return"] == -1.0
             assert label["settlement_return"] == 0.0
-            gross_pnl_per_notional = label["exit_bid"] - label["entry_ask"]
+            gross_pnl_per_notional = (
+                label["exit_bid"] - label["entry_ask"]
+                if label["label_uses_executable_exit_path"]
+                else -label["entry_ask"]
+            )
         else:
             assert label["exit_bid"] == 0.0
             assert label["exit_ask"] == 0.0
@@ -154,6 +193,278 @@ def test_labels_use_ask_for_entries_and_bid_for_sell_before_close(
             expected_pnl_per_notional
         )
         assert label["is_positive"] is (label["total_net_return"] > 0.0)
+
+
+def test_sell_before_close_label_uses_best_executable_intraround_exit(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    orderbooks_path = raw_dir / "raw_polymarket_orderbooks.jsonl"
+    rows = _read_jsonl(orderbooks_path)
+    for row in rows:
+        if row["market_id"] != "btc5m-up" or row["outcome"] != "UP":
+            continue
+        if row["ts"] == 1_780_100_060_000:
+            row["bid_price"] = 0.88
+            row["ask_price"] = 0.90
+            row["mid_price"] = 0.89
+            row["bid_size"] = 1000.0
+            row["liquidity_depth"] = 2000.0
+        if row["ts"] == 1_780_100_240_000:
+            row["bid_price"] = 0.52
+            row["ask_price"] = 0.54
+            row["mid_price"] = 0.53
+            row["bid_size"] = 1000.0
+            row["liquidity_depth"] = 2000.0
+    _write_jsonl(orderbooks_path, rows)
+
+    result = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus",
+        )
+    )
+    labels = _read_jsonl(result.output_dir / "polymarket_label_rows.jsonl")
+    label = next(
+        row
+        for row in labels
+        if row["market_id"] == "btc5m-up"
+        and row["decision_ts"] == 1_780_100_000_000
+        and row["action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+
+    assert label["sell_before_close_execution_class"] == "realizable_sell_before_close"
+    assert label["label_uses_executable_exit_path"] is True
+    assert label["exit_bid"] == pytest.approx(0.88)
+    assert label["sell_before_close_exit_path"]["best_executable_exit_ts"] == (
+        1_780_100_060_000
+    )
+    assert label["theoretical_terminal_bid_return"] == pytest.approx(
+        0.52 / label["entry_ask"] - 1.0
+    )
+
+
+def test_theoretical_terminal_bid_without_executable_liquidity_fails_label_gate(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    orderbooks_path = raw_dir / "raw_polymarket_orderbooks.jsonl"
+    rows = _read_jsonl(orderbooks_path)
+    for row in rows:
+        if row["market_id"] == "btc5m-up" and row["outcome"] == "UP":
+            if row["ts"] == 1_780_100_000_000:
+                row["bid_price"] = 0.30
+                row["ask_price"] = 0.32
+                row["mid_price"] = 0.31
+            else:
+                row["bid_price"] = 0.90
+                row["ask_price"] = 0.92
+                row["mid_price"] = 0.91
+            row["bid_size"] = 0.01
+            row["liquidity_depth"] = 0.01
+    _write_jsonl(orderbooks_path, rows)
+
+    result = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus",
+        )
+    )
+    labels = _read_jsonl(result.output_dir / "polymarket_label_rows.jsonl")
+    report = _read_json(result.output_dir / "sell_before_close_label_redesign_report.json")
+    label = next(
+        row
+        for row in labels
+        if row["market_id"] == "btc5m-up"
+        and row["decision_ts"] == 1_780_100_000_000
+        and row["action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+
+    assert label["sell_before_close_execution_class"] == "theoretical_sell_before_close"
+    assert label["label_uses_executable_exit_path"] is False
+    assert label["exit_bid"] == 0.0
+    assert label["realized_trade_return"] == -1.0
+    assert label["theoretical_terminal_bid_return"] > 0.0
+    exit_path = label["sell_before_close_exit_path"]
+    assert exit_path["exit_path_reason_codes"] == [
+        "terminal_bid_positive_but_not_executable",
+        "min_exit_notional_not_met",
+        "queue_fill_probability_below_threshold",
+    ]
+    assert exit_path["terminal_bid"] == pytest.approx(0.90)
+    assert exit_path["best_candidate_bid"] == pytest.approx(0.90)
+    assert report["label_gate_passed"] is False
+    assert "positive_theoretical_return_without_executable_exit" in report[
+        "label_gate_reason_codes"
+    ]
+    diagnostic = next(
+        row
+        for row in report["theoretical_sell_before_close_rows"]
+        if row["market_id"] == "btc5m-up"
+        and row["decision_ts"] == 1_780_100_000_000
+        and row["action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+    assert diagnostic["slug"] == label["slug"]
+    assert diagnostic["outcome"] == "UP"
+    assert diagnostic["entry_ask"] == pytest.approx(label["entry_ask"])
+    assert diagnostic["terminal_bid"] == pytest.approx(0.90)
+    assert diagnostic["theoretical_terminal_bid_return"] == pytest.approx(
+        label["theoretical_terminal_bid_return"]
+    )
+    assert diagnostic["best_candidate_bid"] == pytest.approx(0.90)
+    assert diagnostic["queue_fill_probability_estimate"] == pytest.approx(
+        label["queue_fill_probability_estimate"]
+    )
+    assert diagnostic["executable_liquidity_notional"] == pytest.approx(
+        label["executable_liquidity_notional"]
+    )
+    assert diagnostic["min_exit_notional_met"] is False
+    assert diagnostic["exit_path_reason_code"] == (
+        "terminal_bid_positive_but_not_executable"
+    )
+    assert diagnostic["exit_path_reason_codes"] == exit_path["exit_path_reason_codes"]
+
+
+def test_sell_before_close_sizing_policy_can_follow_paper_notional(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+
+    result = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus",
+            sell_before_close_entry_notional=0.20,
+            sell_before_close_min_exit_notional=0.20,
+        )
+    )
+    report = _read_json(result.output_dir / "sell_before_close_label_redesign_report.json")
+
+    assert report["sell_before_close_entry_notional"] == pytest.approx(0.20)
+    assert report["sell_before_close_min_exit_notional"] == pytest.approx(0.20)
+    assert report["min_exit_notional_source"] == "paper_notional"
+    assert report["min_exit_notional_to_entry_notional_ratio"] == pytest.approx(1.0)
+    assert report["near_miss_threshold"] == pytest.approx(0.19)
+
+
+def test_near_miss_theoretical_sell_before_close_count_is_reported(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    orderbooks_path = raw_dir / "raw_polymarket_orderbooks.jsonl"
+    rows = _read_jsonl(orderbooks_path)
+    for row in rows:
+        if row["market_id"] == "btc5m-up" and row["outcome"] == "UP":
+            if row["ts"] == 1_780_100_000_000:
+                row["bid_price"] = 0.30
+                row["ask_price"] = 0.32
+                row["mid_price"] = 0.31
+            else:
+                row["bid_price"] = 0.90
+                row["ask_price"] = 0.92
+                row["mid_price"] = 0.91
+            row["bid_size"] = 1.06
+            row["liquidity_depth"] = 0.01
+    _write_jsonl(orderbooks_path, rows)
+
+    result = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus",
+        )
+    )
+    report = _read_json(result.output_dir / "sell_before_close_label_redesign_report.json")
+    diagnostic = next(
+        row
+        for row in report["theoretical_sell_before_close_rows"]
+        if row["market_id"] == "btc5m-up"
+        and row["decision_ts"] == 1_780_100_000_000
+        and row["action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+
+    assert report["near_miss_threshold"] == pytest.approx(0.95)
+    assert report["near_miss_theoretical_count"] >= 1
+    assert diagnostic["executable_liquidity_notional"] == pytest.approx(0.954)
+    assert diagnostic["min_exit_notional_met"] is False
+    assert diagnostic["min_queue_fill_probability_met"] is True
+    assert diagnostic["exit_path_reason_codes"] == [
+        "terminal_bid_positive_but_not_executable",
+        "min_exit_notional_not_met",
+    ]
+
+
+def test_sparse_single_snapshot_theoretical_sell_before_close_is_explicit(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    orderbooks_path = raw_dir / "raw_polymarket_orderbooks.jsonl"
+    rows = _read_jsonl(orderbooks_path)
+    sparse_rows = []
+    for row in rows:
+        if row["market_id"] == "btc5m-up" and row["outcome"] == "UP":
+            if row["ts"] not in {1_780_100_000_000, 1_780_100_060_000}:
+                continue
+            if row["ts"] == 1_780_100_000_000:
+                row["bid_price"] = 0.30
+                row["ask_price"] = 0.32
+                row["mid_price"] = 0.31
+                row["bid_size"] = 10.0
+                row["liquidity_depth"] = 20.0
+            else:
+                row["bid_price"] = 0.90
+                row["ask_price"] = 0.92
+                row["mid_price"] = 0.91
+                row["bid_size"] = 0.01
+                row["liquidity_depth"] = 0.01
+        sparse_rows.append(row)
+    _write_jsonl(orderbooks_path, sparse_rows)
+
+    result = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus",
+        )
+    )
+    labels = _read_jsonl(result.output_dir / "polymarket_label_rows.jsonl")
+    report = _read_json(result.output_dir / "sell_before_close_label_redesign_report.json")
+    label = next(
+        row
+        for row in labels
+        if row["market_id"] == "btc5m-up"
+        and row["decision_ts"] == 1_780_100_000_000
+        and row["action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+
+    assert label["sell_before_close_execution_class"] == (
+        "sparse_theoretical_sell_before_close"
+    )
+    assert label["sell_before_close_exit_path"]["candidate_exit_snapshot_count"] == 1
+    assert label["sell_before_close_exit_path"]["exit_path_reason_codes"] == [
+        "terminal_bid_positive_but_not_executable",
+        "sparse_exit_snapshot_sampling",
+        "min_exit_notional_not_met",
+        "queue_fill_probability_below_threshold",
+    ]
+    assert report["theoretical_sell_before_close_count"] >= 1
+    assert report["sparse_theoretical_sell_before_close_count"] >= 1
+    assert report["sell_before_close_execution_class_counts"][
+        "sparse_theoretical_sell_before_close"
+    ] >= 1
+    diagnostic = next(
+        row
+        for row in report["theoretical_sell_before_close_rows"]
+        if row["market_id"] == "btc5m-up"
+        and row["decision_ts"] == 1_780_100_000_000
+        and row["action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+    assert diagnostic["exit_path_reason_codes"] == (
+        label["sell_before_close_exit_path"]["exit_path_reason_codes"]
+    )
 
 
 def test_rebuilding_from_identical_fixtures_produces_identical_hashes(

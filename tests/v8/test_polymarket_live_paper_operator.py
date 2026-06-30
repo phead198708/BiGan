@@ -235,6 +235,383 @@ def test_real_history_manual_evidence_rejects_probability_only_model(
     assert result.operator_manifest["live_deployment_allowed"] is False
 
 
+def test_real_history_action_value_requires_paper_decision_eligibility(
+    tmp_path: Path,
+) -> None:
+    manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(tmp_path)
+    manifest = _read_json(manifest_path)
+    manifest.update(
+        {
+            "real_historical_corpus_used": True,
+            "manual_live_evidence_eligible": True,
+            "policy_dataset_hash": "a" * 64,
+            "split_hash": "b" * 64,
+            "action_value_calibration_artifact_used": False,
+            "execution_uses_calibrated_action_value": False,
+            "calibration_support_passed": False,
+            "best_action_concentration_passed": True,
+            "p_up_action_disagreement_within_limit": True,
+            "action_value_paper_decision_eligible": False,
+            "action_value_paper_decision_ineligible_reasons": [
+                "action_value_calibration_missing"
+            ],
+        }
+    )
+    _write_json(manifest_path, manifest)
+
+    result = run_polymarket_live_paper(
+        PolymarketLivePaperConfig(
+            run_id="reject-uncalibrated-action-value",
+            output_dir=tmp_path,
+            model_manifest=manifest_path,
+            model_path=model_path,
+            stream_observability=True,
+            status_interval_seconds=1,
+            heartbeat_interval_seconds=1,
+            overwrite_existing=True,
+        )
+    )
+
+    assert result.operator_manifest["operator_status"] == "blocked_fail_closed"
+    assert result.operator_manifest["operator_recommendation"] == "blocked_fail_closed"
+    assert "action_value_calibration_missing" in result.operator_manifest[
+        "critical_reason_codes"
+    ]
+    assert result.operator_manifest["prediction_count"] == 0
+    assert result.operator_manifest["decision_count"] == 0
+    assert result.operator_manifest["trade_count"] == 0
+    assert result.operator_manifest["action_value_paper_decision_eligible"] is False
+    assert result.operator_manifest["capital_deployment_allowed"] is False
+    assert result.operator_manifest["live_deployment_allowed"] is False
+    assert _read_jsonl(result.artifact_paths["polymarket_model_predictions"]) == []
+    assert _read_jsonl(result.artifact_paths["polymarket_ev_decisions"]) == []
+
+
+def test_real_history_action_value_feature_column_drift_fails_closed(
+    tmp_path: Path,
+) -> None:
+    manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(
+        tmp_path,
+        feature_columns=("up_mid",),
+    )
+    manifest = _read_json(manifest_path)
+    manifest.update(
+        {
+            "real_historical_corpus_used": True,
+            "manual_live_evidence_eligible": True,
+            "policy_dataset_hash": "a" * 64,
+            "split_hash": "b" * 64,
+            "required_action_value_feature_columns": ["down_mid"],
+            "action_value_calibration_artifact_used": True,
+            "execution_uses_calibrated_action_value": True,
+            "calibration_support_passed": True,
+            "best_action_concentration_passed": True,
+            "p_up_action_disagreement_within_limit": True,
+            **_valid_action_family_manifest_fields(tmp_path),
+            "action_value_paper_decision_eligible": True,
+            "action_value_paper_decision_ineligible_reasons": [],
+        }
+    )
+    _write_json(manifest_path, manifest)
+
+    result = run_polymarket_live_paper(
+        PolymarketLivePaperConfig(
+            run_id="reject-feature-column-drift",
+            output_dir=tmp_path,
+            model_manifest=manifest_path,
+            model_path=model_path,
+            overwrite_existing=True,
+        )
+    )
+
+    assert result.operator_manifest["operator_status"] == "blocked_fail_closed"
+    assert "action_value_feature_columns_mismatch" in result.operator_manifest[
+        "critical_reason_codes"
+    ]
+    assert result.operator_manifest["prediction_count"] == 0
+    assert result.operator_manifest["decision_count"] == 0
+
+
+def test_live_eligible_action_value_model_uses_calibration_artifact(
+    tmp_path: Path,
+) -> None:
+    manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(
+        tmp_path,
+        feature_columns=("up_mid",),
+    )
+    calibration_path = _write_action_value_calibration_artifact(tmp_path)
+    manifest = _read_json(manifest_path)
+    manifest.update(
+        {
+            "real_historical_corpus_used": True,
+            "manual_live_evidence_eligible": True,
+            "policy_dataset_hash": "a" * 64,
+            "split_hash": "b" * 64,
+            "action_value_calibration_artifact_path": calibration_path.name,
+            "action_value_calibration_sha256": _sha256(calibration_path),
+            "action_value_calibration_id": "c" * 64,
+            "action_value_calibration_artifact_used": True,
+            "execution_uses_calibrated_action_value": True,
+            "calibration_support_passed": True,
+            "calibration_quality_passed": True,
+            "best_action_concentration_passed": True,
+            "p_up_action_disagreement_within_limit": True,
+            **_valid_action_family_manifest_fields(tmp_path),
+            "action_value_paper_decision_eligible": True,
+            "action_value_paper_decision_ineligible_reasons": [],
+        }
+    )
+    _write_json(manifest_path, manifest)
+
+    result = run_polymarket_live_paper(
+        PolymarketLivePaperConfig(
+            run_id="live-eligible-calibrated-action-value",
+            output_dir=tmp_path,
+            model_manifest=manifest_path,
+            model_path=model_path,
+            overwrite_existing=True,
+        )
+    )
+
+    assert result.operator_manifest["operator_status"] == "completed"
+    assert result.operator_manifest["critical_reason_codes"] == []
+    predictions = _read_jsonl(result.artifact_paths["polymarket_model_predictions"])
+    decisions = _read_jsonl(result.artifact_paths["polymarket_ev_decisions"])
+    assert predictions
+    assert decisions
+    assert all(row["action_value_calibration_applied"] for row in predictions)
+    assert any(row["action_value_calibration_used"] for row in decisions)
+    assert all(
+        row["calibrated_expected_pnl_per_notional_by_action"] for row in predictions
+    )
+
+
+def test_live_eligible_real_history_action_value_requires_action_family_artifacts(
+    tmp_path: Path,
+) -> None:
+    manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(
+        tmp_path,
+        feature_columns=("up_mid",),
+    )
+    calibration_path = _write_action_value_calibration_artifact(tmp_path)
+    manifest = _read_json(manifest_path)
+    manifest.update(
+        {
+            "real_historical_corpus_used": True,
+            "manual_live_evidence_eligible": True,
+            "policy_dataset_hash": "a" * 64,
+            "split_hash": "b" * 64,
+            "action_value_calibration_artifact_path": calibration_path.name,
+            "action_value_calibration_sha256": _sha256(calibration_path),
+            "action_value_calibration_id": "c" * 64,
+            "action_value_calibration_artifact_used": True,
+            "execution_uses_calibrated_action_value": True,
+            "calibration_support_passed": True,
+            "calibration_quality_passed": True,
+            "best_action_concentration_passed": True,
+            "p_up_action_disagreement_within_limit": True,
+            "action_family_paper_decision_eligible": True,
+            "action_family_paper_decision_ineligible_reasons": [],
+            "action_value_paper_decision_eligible": True,
+            "action_value_paper_decision_ineligible_reasons": [],
+        }
+    )
+    _write_json(manifest_path, manifest)
+
+    result = run_polymarket_live_paper(
+        PolymarketLivePaperConfig(
+            run_id="reject-missing-action-family-artifacts",
+            output_dir=tmp_path,
+            model_manifest=manifest_path,
+            model_path=model_path,
+            overwrite_existing=True,
+        )
+    )
+
+    assert result.operator_manifest["operator_status"] == "blocked_fail_closed"
+    assert "action_family_artifact_missing" in result.operator_manifest[
+        "critical_reason_codes"
+    ]
+    assert result.operator_manifest["prediction_count"] == 0
+    assert result.operator_manifest["decision_count"] == 0
+
+
+def test_live_action_value_rejects_action_family_artifact_hash_mismatch(
+    tmp_path: Path,
+) -> None:
+    manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(
+        tmp_path,
+        feature_columns=("up_mid",),
+    )
+    calibration_path = _write_action_value_calibration_artifact(tmp_path)
+    action_family_path, longshot_guard_path = _write_action_family_guard_artifacts(tmp_path)
+    manifest = _read_json(manifest_path)
+    manifest.update(
+        {
+            "real_historical_corpus_used": True,
+            "manual_live_evidence_eligible": True,
+            "policy_dataset_hash": "a" * 64,
+            "split_hash": "b" * 64,
+            "action_value_calibration_artifact_path": calibration_path.name,
+            "action_value_calibration_sha256": _sha256(calibration_path),
+            "action_value_calibration_id": "c" * 64,
+            "action_value_calibration_artifact_used": True,
+            "execution_uses_calibrated_action_value": True,
+            "calibration_support_passed": True,
+            "calibration_quality_passed": True,
+            "best_action_concentration_passed": True,
+            "p_up_action_disagreement_within_limit": True,
+            "action_family_eligibility_report_path": action_family_path.name,
+            "action_family_eligibility_sha256": "d" * 64,
+            "action_family_paper_decision_eligible": True,
+            "action_family_paper_decision_ineligible_reasons": [],
+            "hold_to_settlement_longshot_guard_report_path": longshot_guard_path.name,
+            "hold_to_settlement_longshot_guard_sha256": _sha256(longshot_guard_path),
+            "hold_to_settlement_longshot_guard_enabled": True,
+            "hold_to_settlement_longshot_guard_reason_codes": [
+                "hold_to_settlement_longshot_guard",
+                "action_family_ineligible",
+            ],
+            "action_value_paper_decision_eligible": True,
+            "action_value_paper_decision_ineligible_reasons": [],
+        }
+    )
+    _write_json(manifest_path, manifest)
+
+    result = run_polymarket_live_paper(
+        PolymarketLivePaperConfig(
+            run_id="reject-action-family-artifact-hash",
+            output_dir=tmp_path,
+            model_manifest=manifest_path,
+            model_path=model_path,
+            overwrite_existing=True,
+        )
+    )
+
+    assert result.operator_manifest["operator_status"] == "blocked_fail_closed"
+    assert "action_family_artifact_mismatch" in result.operator_manifest[
+        "critical_reason_codes"
+    ]
+    assert result.operator_manifest["prediction_count"] == 0
+    assert result.operator_manifest["decision_count"] == 0
+
+
+def test_live_action_value_rejects_invalid_calibration_artifact_content(
+    tmp_path: Path,
+) -> None:
+    manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(
+        tmp_path,
+        feature_columns=("up_mid",),
+    )
+    calibration_path = _write_action_value_calibration_artifact(tmp_path)
+    artifact = _read_json(calibration_path)
+    artifact["calibration_uses_training_split"] = True
+    _write_json(calibration_path, artifact)
+    manifest = _read_json(manifest_path)
+    manifest.update(
+        {
+            "real_historical_corpus_used": True,
+            "manual_live_evidence_eligible": True,
+            "policy_dataset_hash": "a" * 64,
+            "split_hash": "b" * 64,
+            "action_value_calibration_artifact_path": calibration_path.name,
+            "action_value_calibration_sha256": _sha256(calibration_path),
+            "action_value_calibration_id": "c" * 64,
+            "action_value_calibration_artifact_used": True,
+            "execution_uses_calibrated_action_value": True,
+            "calibration_support_passed": True,
+            "calibration_quality_passed": True,
+            "best_action_concentration_passed": True,
+            "p_up_action_disagreement_within_limit": True,
+            **_valid_action_family_manifest_fields(tmp_path),
+            "action_value_paper_decision_eligible": True,
+            "action_value_paper_decision_ineligible_reasons": [],
+        }
+    )
+    _write_json(manifest_path, manifest)
+
+    result = run_polymarket_live_paper(
+        PolymarketLivePaperConfig(
+            run_id="reject-invalid-calibration-content",
+            output_dir=tmp_path,
+            model_manifest=manifest_path,
+            model_path=model_path,
+            overwrite_existing=True,
+        )
+    )
+
+    assert result.operator_manifest["operator_status"] == "blocked_fail_closed"
+    assert "action_value_calibration_uses_training_split" in result.operator_manifest[
+        "critical_reason_codes"
+    ]
+    assert result.operator_manifest["prediction_count"] == 0
+    assert result.operator_manifest["decision_count"] == 0
+
+
+def test_live_action_value_rejects_high_score_bucket_without_support_or_buffer(
+    tmp_path: Path,
+) -> None:
+    manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(
+        tmp_path,
+        feature_columns=("up_mid",),
+    )
+    calibration_path = _write_action_value_calibration_artifact(tmp_path)
+    artifact = _read_json(calibration_path)
+    artifact["calibration_quality_passed"] = True
+    artifact["calibration_quality_gates"][
+        "high_score_bucket_min_support_passed"
+    ] = False
+    artifact["calibration_quality_gates"][
+        "high_score_bucket_realized_return_exceeds_buffer"
+    ] = False
+    artifact["shadow_high_score_bucket"]["support_count"] = 9
+    artifact["shadow_high_score_bucket"]["support_passed"] = False
+    artifact["shadow_high_score_bucket"]["realized_return_mean"] = 0.015
+    artifact["shadow_high_score_bucket"][
+        "realized_return_exceeds_execution_buffer"
+    ] = False
+    _write_json(calibration_path, artifact)
+    manifest = _read_json(manifest_path)
+    manifest.update(
+        {
+            "real_historical_corpus_used": True,
+            "manual_live_evidence_eligible": True,
+            "policy_dataset_hash": "a" * 64,
+            "split_hash": "b" * 64,
+            "action_value_calibration_artifact_path": calibration_path.name,
+            "action_value_calibration_sha256": _sha256(calibration_path),
+            "action_value_calibration_id": "c" * 64,
+            "action_value_calibration_artifact_used": True,
+            "execution_uses_calibrated_action_value": True,
+            "calibration_support_passed": True,
+            "calibration_quality_passed": True,
+            "best_action_concentration_passed": True,
+            "p_up_action_disagreement_within_limit": True,
+            **_valid_action_family_manifest_fields(tmp_path),
+            "action_value_paper_decision_eligible": True,
+            "action_value_paper_decision_ineligible_reasons": [],
+        }
+    )
+    _write_json(manifest_path, manifest)
+
+    result = run_polymarket_live_paper(
+        PolymarketLivePaperConfig(
+            run_id="reject-high-score-calibration-gates",
+            output_dir=tmp_path,
+            model_manifest=manifest_path,
+            model_path=model_path,
+            overwrite_existing=True,
+        )
+    )
+
+    assert result.operator_manifest["operator_status"] == "blocked_fail_closed"
+    assert live_operator.ACTION_VALUE_CALIBRATION_QUALITY_FAILED in (
+        result.operator_manifest["critical_reason_codes"]
+    )
+    assert result.operator_manifest["prediction_count"] == 0
+    assert result.operator_manifest["decision_count"] == 0
+
+
 def test_action_value_feature_schema_mismatch_fails_closed(tmp_path: Path) -> None:
     manifest_path, model_path = _write_action_value_model_requiring_btc_mid_price(tmp_path)
 
@@ -406,11 +783,14 @@ def _write_json(path: Path, payload: dict) -> None:
     )
 
 
-def _write_action_value_model_requiring_btc_mid_price(tmp_path: Path) -> tuple[Path, Path]:
+def _write_action_value_model_requiring_btc_mid_price(
+    tmp_path: Path,
+    *,
+    feature_columns: tuple[str, ...] = ("btc_mid_price",),
+) -> tuple[Path, Path]:
     action_returns = dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, -0.05)
     action_returns["NO_TRADE"] = 0.0
     action_returns["BUY_UP_HOLD_TO_SETTLEMENT"] = 0.04
-    feature_columns = ("btc_mid_price",)
     feature_schema_hash = canonical_json_sha256({"feature_columns": list(feature_columns)})
     label_schema_hash = canonical_json_sha256(
         {
@@ -439,7 +819,7 @@ def _write_action_value_model_requiring_btc_mid_price(tmp_path: Path) -> tuple[P
         fallback_action_value_model_family="market_family_mean_baseline",
         feature_conditioned_action_value_model_enabled=True,
         action_value_feature_columns=feature_columns,
-        action_return_feature_means={"btc_mid_price": 50000.0},
+        action_return_feature_means=dict.fromkeys(feature_columns, 0.5),
         action_return_feature_coefficients={action: {} for action in ACTION_VALUE_LABEL_ACTIONS},
         global_action_returns=action_returns,
         market_family_action_returns={"btc_updown_5m": action_returns},
@@ -481,6 +861,137 @@ def _write_action_value_model_requiring_btc_mid_price(tmp_path: Path) -> tuple[P
     return manifest_path, model_path
 
 
+def _write_action_value_calibration_artifact(tmp_path: Path) -> Path:
+    artifact = {
+        "schema_version": "bigan-v8-polymarket-action-value-calibration-v1",
+        "phase": "polymarket_policy_training",
+        "calibration_method": "validation_bucketed_action_bias_correction_v1",
+        "calibration_fit_split": "validation",
+        "calibration_evaluation_split": "shadow",
+        "calibration_uses_training_split": False,
+        "bucket_shrinkage_enabled": True,
+        "bucket_shrinkage_prior": 10.0,
+        "high_score_min_support": 10,
+        "high_score_execution_buffer": 0.015,
+        "calibration_support_passed": True,
+        "calibration_quality_passed": True,
+        "calibration_quality_gates": {
+            "shadow_calibrated_mae_not_worse": True,
+            "shadow_raw_mae": 0.12,
+            "shadow_action_level_calibrated_mae": 0.09,
+            "shadow_bucketed_calibrated_mae": 0.08,
+            "mae_tolerance": 1e-12,
+            "high_score_bucket_min_support_passed": True,
+            "high_score_bucket_realized_return_exceeds_buffer": True,
+            "high_score_bucket_realized_return_positive": True,
+            "high_score_threshold": 0.0,
+            "high_score_min_support": 10,
+            "high_score_execution_buffer": 0.015,
+        },
+        "shadow_mae_comparison": {
+            "sample_count": 10,
+            "action_value_point_count": 50,
+            "raw_mae": 0.12,
+            "action_level_calibrated_mae": 0.09,
+            "bucketed_calibrated_mae": 0.08,
+            "action_level_delta_vs_raw_mae": -0.03,
+            "bucketed_delta_vs_raw_mae": -0.04,
+        },
+        "shadow_high_score_bucket": {
+            "bucket_name": "shadow_calibrated_best_score_ge_threshold",
+            "score_threshold": 0.0,
+            "min_support": 10,
+            "execution_buffer": 0.015,
+            "support_count": 10,
+            "support_passed": True,
+            "realized_return_mean": 0.03,
+            "calibrated_score_mean": 0.04,
+            "realized_return_positive": True,
+            "realized_return_exceeds_execution_buffer": True,
+            "best_action_counts": {"BUY_UP_HOLD_TO_SETTLEMENT": 10},
+        },
+        "calibration_support_count": 3,
+        "calibration_bucket_count": len(ACTION_VALUE_LABEL_ACTIONS),
+        "action_corrections": dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, 0.0),
+        "calibration_buckets": {
+            f"action={action}|price=none|time=0-30s|raw=0.00-0.05": {
+                "bucket_key": f"action={action}|price=none|time=0-30s|raw=0.00-0.05",
+                "support_count": 1,
+                "unshrunk_correction": 0.0,
+                "shrinkage_prior": 10.0,
+                "shrinkage_weight": 1.0 / 11.0,
+                "correction": 0.0,
+            }
+            for action in ACTION_VALUE_LABEL_ACTIONS
+        },
+        "action_value_calibration_id": "c" * 64,
+        **compact_safety_fields(),
+    }
+    path = tmp_path / "polymarket_action_value_calibration.json"
+    _write_json(path, artifact)
+    return path
+
+
+def _write_action_family_guard_artifacts(tmp_path: Path) -> tuple[Path, Path]:
+    action_family = {
+        "schema_version": "bigan-v8-polymarket-action-family-eligibility-v1",
+        "phase": "polymarket_policy_training",
+        "replay_split": "shadow",
+        "out_of_sample_replay": True,
+        "action_family_paper_decision_eligible": True,
+        "action_family_paper_decision_ineligible_reasons": [],
+        "action_family_gate_results": {
+            "SELL_BEFORE_CLOSE": {
+                "support_count": 10,
+                "min_support": 10,
+                "support_passed": True,
+                "realized_return_mean": 0.03,
+                "realized_return_sum": 0.3,
+                "realized_return_mean_exceeds_execution_buffer": True,
+                "realized_return_sum_positive": True,
+                "execution_buffer": 0.015,
+                "gate_passed": True,
+            }
+        },
+        **compact_safety_fields(),
+    }
+    longshot_guard = {
+        "schema_version": "bigan-v8-polymarket-hold-to-settlement-longshot-guard-v1",
+        "phase": "polymarket_policy_training",
+        "replay_split": "shadow",
+        "out_of_sample_replay": True,
+        "guard_enabled": True,
+        "guard_mode": "block_to_no_trade",
+        "guard_reason_codes": [
+            "hold_to_settlement_longshot_guard",
+            "action_family_ineligible",
+        ],
+        **compact_safety_fields(),
+    }
+    action_family_path = tmp_path / "action_family_eligibility_report.json"
+    longshot_guard_path = tmp_path / "hold_to_settlement_longshot_guard_report.json"
+    _write_json(action_family_path, action_family)
+    _write_json(longshot_guard_path, longshot_guard)
+    return action_family_path, longshot_guard_path
+
+
+def _valid_action_family_manifest_fields(tmp_path: Path) -> dict[str, Any]:
+    action_family_path, longshot_guard_path = _write_action_family_guard_artifacts(tmp_path)
+    return {
+        "action_family_eligibility_report_path": action_family_path.name,
+        "action_family_eligibility_sha256": _sha256(action_family_path),
+        "action_family_paper_decision_eligible": True,
+        "action_family_paper_decision_ineligible_reasons": [],
+        "hold_to_settlement_longshot_guard_report_path": longshot_guard_path.name,
+        "hold_to_settlement_longshot_guard_sha256": _sha256(longshot_guard_path),
+        "hold_to_settlement_longshot_guard_enabled": True,
+        "hold_to_settlement_longshot_guard_reason_codes": [
+            "hold_to_settlement_longshot_guard",
+            "action_family_ineligible",
+        ],
+    }
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -508,6 +1019,15 @@ def _assert_training_raw_is_model_output_free(training_raw_dir: Path) -> None:
         "best_action_expected_return",
         "second_best_action_expected_return",
         "best_action_margin",
+        "calibrated_expected_pnl_per_notional_by_action",
+        "calibrated_best_policy_action",
+        "calibrated_expected_pnl_per_notional",
+        "calibrated_second_best_expected_pnl_per_notional",
+        "calibrated_action_margin",
+        "action_value_calibration_applied",
+        "action_value_calibration_id",
+        "calibration_support_count",
+        "calibration_bucket_count",
         "policy_confidence",
         "action_value_model_family",
         "feature_conditioned_action_value_model_enabled",

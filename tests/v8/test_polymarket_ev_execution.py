@@ -113,6 +113,13 @@ def test_action_value_output_is_preferred_over_probability_ev(tmp_path: Path) ->
         action_value_model_family="feature_conditioned_action_return_model",
         feature_conditioned_action_value_model_enabled=True,
     )
+    prediction = _with_calibrated_action_value(
+        prediction,
+        action_returns=action_returns,
+        best_action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+        best_return=0.08,
+        second_best_return=0.0,
+    )
 
     decision = decide_polymarket_ev_action(prediction=prediction, config=config)
 
@@ -122,9 +129,119 @@ def test_action_value_output_is_preferred_over_probability_ev(tmp_path: Path) ->
     assert decision.used_price_side == "ask"
     assert decision.best_policy_action == "BUY_DOWN_HOLD_TO_SETTLEMENT"
     assert decision.best_action_expected_return == 0.08
+    assert decision.calibrated_best_policy_action == "BUY_DOWN_HOLD_TO_SETTLEMENT"
+    assert decision.calibrated_expected_pnl_per_notional == 0.08
+    assert decision.action_value_calibration_used is True
     assert decision.action_value_head_used is True
     assert decision.probability_ev_fallback_used is False
     assert "action_value_head_used" in decision.reason_codes
+    assert "calibrated_action_value_used" in decision.reason_codes
+
+
+def test_action_value_trade_requires_calibrated_edge(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    action_returns = dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, -0.05)
+    action_returns["NO_TRADE"] = 0.0
+    action_returns["BUY_DOWN_HOLD_TO_SETTLEMENT"] = 0.08
+    prediction = replace(
+        _prediction(probability=0.95, confidence=0.90),
+        p_up_auxiliary=0.95,
+        expected_return_by_action=action_returns,
+        expected_return_no_trade=action_returns["NO_TRADE"],
+        expected_return_buy_up_hold_to_settlement=action_returns[
+            "BUY_UP_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_down_hold_to_settlement=action_returns[
+            "BUY_DOWN_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_up_sell_before_close=action_returns[
+            "BUY_UP_SELL_BEFORE_CLOSE"
+        ],
+        expected_return_buy_down_sell_before_close=action_returns[
+            "BUY_DOWN_SELL_BEFORE_CLOSE"
+        ],
+        best_policy_action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+        best_action_expected_return=0.08,
+        second_best_action_expected_return=0.0,
+        best_action_margin=0.08,
+        policy_confidence=0.70,
+        action_value_head_enabled=True,
+        outcome_probability_head_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        feature_conditioned_action_value_model_enabled=True,
+    )
+
+    decision = decide_polymarket_ev_action(prediction=prediction, config=config)
+
+    assert decision.action == "NO_TRADE"
+    assert decision.action_value_head_used is True
+    assert decision.action_value_calibration_used is False
+    assert "action_value_calibration_missing" in decision.reason_codes
+
+
+def test_hold_to_settlement_longshot_guard_blocks_action_value_buy(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    features = dict(_prediction(probability=0.80, confidence=0.90).features)
+    features.update(
+        {
+            "up_ask": 0.30,
+            "up_bid": 0.28,
+            "up_mid": 0.29,
+            "time_to_close_seconds": 240.0,
+        }
+    )
+    action_returns = dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, -0.05)
+    action_returns["NO_TRADE"] = 0.0
+    action_returns["BUY_UP_HOLD_TO_SETTLEMENT"] = 0.20
+    prediction = replace(
+        _prediction(probability=0.80, confidence=0.90),
+        features=features,
+        p_up_auxiliary=0.80,
+        expected_return_by_action=action_returns,
+        expected_return_no_trade=action_returns["NO_TRADE"],
+        expected_return_buy_up_hold_to_settlement=action_returns[
+            "BUY_UP_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_down_hold_to_settlement=action_returns[
+            "BUY_DOWN_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_up_sell_before_close=action_returns[
+            "BUY_UP_SELL_BEFORE_CLOSE"
+        ],
+        expected_return_buy_down_sell_before_close=action_returns[
+            "BUY_DOWN_SELL_BEFORE_CLOSE"
+        ],
+        best_policy_action="BUY_UP_HOLD_TO_SETTLEMENT",
+        best_action_expected_return=0.20,
+        second_best_action_expected_return=0.0,
+        best_action_margin=0.20,
+        policy_confidence=0.80,
+        action_value_head_enabled=True,
+        outcome_probability_head_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        feature_conditioned_action_value_model_enabled=True,
+    )
+    prediction = _with_calibrated_action_value(
+        prediction,
+        action_returns=action_returns,
+        best_action="BUY_UP_HOLD_TO_SETTLEMENT",
+        best_return=0.20,
+        second_best_return=0.0,
+    )
+
+    decision = decide_polymarket_ev_action(prediction=prediction, config=config)
+
+    assert decision.action == "NO_TRADE"
+    assert decision.selected_outcome == "NO_TRADE"
+    assert decision.paper_notional == 0.0
+    assert decision.entry_policy_action == "BUY_UP_HOLD_TO_SETTLEMENT"
+    assert decision.intended_exit_policy == "hold_to_settlement"
+    assert decision.policy_exit_reason == "hold_to_settlement_longshot_guard"
+    assert decision.action_value_calibration_used is True
+    assert "hold_to_settlement_longshot_guard" in decision.reason_codes
+    assert "action_family_ineligible" in decision.reason_codes
 
 
 def test_sell_before_close_intent_triggers_planned_exit(tmp_path: Path) -> None:
@@ -163,6 +280,13 @@ def test_sell_before_close_intent_triggers_planned_exit(tmp_path: Path) -> None:
         action_value_model_family="feature_conditioned_action_return_model",
         feature_conditioned_action_value_model_enabled=True,
     )
+    first = _with_calibrated_action_value(
+        first,
+        action_returns=action_returns,
+        best_action="BUY_UP_SELL_BEFORE_CLOSE",
+        best_return=0.08,
+        second_best_return=-0.05,
+    )
     second_features = dict(first.features)
     second_features["time_to_close_seconds"] = 25.0
     second = replace(
@@ -174,6 +298,13 @@ def test_sell_before_close_intent_triggers_planned_exit(tmp_path: Path) -> None:
         best_action_expected_return=0.0,
         second_best_action_expected_return=0.0,
         best_action_margin=0.0,
+    )
+    second = _with_calibrated_action_value(
+        second,
+        action_returns=dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, 0.0),
+        best_action="NO_TRADE",
+        best_return=0.0,
+        second_best_return=0.0,
     )
 
     decisions = build_polymarket_ev_decisions(predictions=(first, second), config=config)
@@ -227,6 +358,13 @@ def test_stateful_decision_engine_matches_batch_replay_lifecycle(
         outcome_probability_head_enabled=True,
         action_value_model_family="feature_conditioned_action_return_model",
         feature_conditioned_action_value_model_enabled=True,
+    )
+    first = _with_calibrated_action_value(
+        first,
+        action_returns=action_returns,
+        best_action="BUY_UP_SELL_BEFORE_CLOSE",
+        best_return=0.08,
+        second_best_return=-0.05,
     )
     second = replace(first, decision_ts=80_000)
     third = replace(first, decision_ts=95_000)
@@ -407,6 +545,28 @@ def _prediction(*, probability: float, confidence: float) -> PolymarketPolicyPre
         training_corpus_hash="b" * 64,
         features=features,
         target_up_probability=1.0,
+    )
+
+
+def _with_calibrated_action_value(
+    prediction: PolymarketPolicyPrediction,
+    *,
+    action_returns: dict[str, float],
+    best_action: str,
+    best_return: float,
+    second_best_return: float,
+) -> PolymarketPolicyPrediction:
+    return replace(
+        prediction,
+        calibrated_expected_pnl_per_notional_by_action=action_returns,
+        calibrated_best_policy_action=best_action,
+        calibrated_expected_pnl_per_notional=best_return,
+        calibrated_second_best_expected_pnl_per_notional=second_best_return,
+        calibrated_action_margin=best_return - second_best_return,
+        action_value_calibration_applied=True,
+        action_value_calibration_id="c" * 64,
+        calibration_support_count=3,
+        calibration_bucket_count=len(ACTION_VALUE_LABEL_ACTIONS),
     )
 
 
