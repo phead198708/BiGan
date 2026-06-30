@@ -33,6 +33,13 @@ from bigan.v8.polymarket.training.post_freeze_m2_replay_parity import (
     PolymarketM2ReplayParityConfig,
     run_polymarket_m2_replay_parity_diagnostics,
 )
+from bigan.v8.polymarket.training.post_freeze_n2_up_feature_proxy import (
+    N2_FORBIDDEN_SELECTION_FIELDS,
+    N2_NON_LEAKY_UP_FEATURE_PROXY_CANDIDATE_SCHEMA_VERSION,
+    N2_NON_LEAKY_UP_FEATURE_PROXY_SCORE_OVERLAY_SCHEMA_VERSION,
+    PolymarketN2UpFeatureProxyConfig,
+    run_polymarket_n2_up_feature_proxy_candidate,
+)
 from bigan.v8.polymarket.training.post_freeze_n_up_replay_aligned import (
     N_UP_REPLAY_ALIGNED_CANDIDATE_SCHEMA_VERSION,
     N_UP_REPLAY_ALIGNED_SCORE_OVERLAY_SCHEMA_VERSION,
@@ -57,6 +64,7 @@ from bigan.v8.polymarket.training.post_freeze_weak_evidence_drilldown import (
 )
 from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_M2_REPLAY_PARITY_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_N2_NON_LEAKY_UP_REPLAY_ALIGNED_FEATURE_PROXY_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_N_UP_REPLAY_ALIGNED_ACTION_VALUE_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
 )
@@ -1291,6 +1299,259 @@ def test_n_up_replay_aligned_candidate_flags_up_false_positives_fail_closed(
         overlay["replay_aligned_score_proxy_vs_replay_correlation"]
         > overlay["original_score_vs_replay_correlation"]
     )
+    assert overlay["source_model_candidate_eligible"] is False
+    assert overlay["promotion_evidence_eligible"] is False
+    assert overlay["#146_start_allowed"] is False
+    assert overlay["#134_resume_allowed"] is False
+    assert result.artifact_paths["candidate_report"].exists()
+    assert result.artifact_paths["score_overlay_report"].exists()
+
+
+def test_n2_non_leaky_up_feature_proxy_blocks_without_future_fields(
+    tmp_path: Path,
+) -> None:
+    up_bad_proxy_positive_future = _replay_row(
+        market_id="n2-bad-proxy-positive-future",
+        decision_ts=10,
+        side="UP",
+        pnl=1.00,
+    )
+    up_bad_proxy_positive_future.update(
+        {
+            "action_return_target": 1.00,
+            "raw_calibrated_action_score": 0.95,
+            "best_action_margin": 0.03,
+            "execution_pnl_immediate_exit_pnl": -0.05,
+            "entry_quality_ask": 0.60,
+            "exit_quality_bid": 0.55,
+            "entry_exit_quality_spread_bps": 1200.0,
+            "entry_exit_quality_queue_fill": 0.50,
+            "entry_exit_quality_book_staleness_ms": 500.0,
+            "entry_exit_quality_time_to_close_seconds": 180.0,
+            "up_recent_book_update_count_1m": 5.0,
+        }
+    )
+    up_positive_label_negative_replay = _replay_row(
+        market_id="n2-positive-label-negative-replay",
+        decision_ts=20,
+        side="UP",
+        pnl=-0.08,
+    )
+    up_positive_label_negative_replay.update(
+        {
+            "action_return_target": 0.20,
+            "raw_calibrated_action_score": 0.90,
+            "best_action_margin": 0.02,
+            "execution_pnl_immediate_exit_pnl": -0.03,
+            "entry_quality_ask": 0.50,
+            "exit_quality_bid": 0.47,
+            "entry_exit_quality_spread_bps": 700.0,
+            "entry_exit_quality_queue_fill": 0.70,
+            "entry_exit_quality_book_staleness_ms": 700.0,
+            "entry_exit_quality_time_to_close_seconds": 180.0,
+            "up_recent_book_update_count_1m": 5.0,
+        }
+    )
+    up_good_proxy_positive = _replay_row(
+        market_id="n2-good-proxy-positive",
+        decision_ts=30,
+        side="UP",
+        pnl=0.15,
+    )
+    up_good_proxy_positive.update(
+        {
+            "action_return_target": 0.10,
+            "raw_calibrated_action_score": 0.55,
+            "best_action_margin": 0.02,
+            "execution_pnl_immediate_exit_pnl": 0.04,
+            "entry_quality_ask": 0.40,
+            "exit_quality_bid": 0.44,
+            "entry_exit_quality_spread_bps": 300.0,
+            "entry_exit_quality_queue_fill": 0.90,
+            "entry_exit_quality_book_staleness_ms": 500.0,
+            "entry_exit_quality_time_to_close_seconds": 180.0,
+            "up_recent_book_update_count_1m": 5.0,
+        }
+    )
+    up_negative_label_good_proxy = _replay_row(
+        market_id="n2-negative-label-good-proxy",
+        decision_ts=40,
+        side="UP",
+        pnl=0.05,
+    )
+    up_negative_label_good_proxy.update(
+        {
+            "action_return_target": -0.05,
+            "raw_calibrated_action_score": 0.50,
+            "best_action_margin": 0.02,
+            "execution_pnl_immediate_exit_pnl": 0.04,
+            "entry_quality_ask": 0.40,
+            "exit_quality_bid": 0.44,
+            "entry_exit_quality_spread_bps": 300.0,
+            "entry_exit_quality_queue_fill": 0.90,
+            "entry_exit_quality_book_staleness_ms": 500.0,
+            "entry_exit_quality_time_to_close_seconds": 180.0,
+            "up_recent_book_update_count_1m": 5.0,
+        }
+    )
+    down_reference = _replay_row(
+        market_id="n2-down-reference",
+        decision_ts=50,
+        side="DOWN",
+        pnl=0.30,
+    )
+    source_report = _write_holdout_report(
+        tmp_path / "n2_source",
+        _holdout_validation_report(
+            run_id="n2-non-leaky-source",
+            market_ids=(
+                "n2-bad-proxy-positive-future",
+                "n2-positive-label-negative-replay",
+                "n2-good-proxy-positive",
+                "n2-negative-label-good-proxy",
+                "n2-down-reference",
+            ),
+            replay_rows=[
+                up_bad_proxy_positive_future,
+                up_positive_label_negative_replay,
+                up_good_proxy_positive,
+                up_negative_label_good_proxy,
+                down_reference,
+            ],
+            replay_pnl_by_side={"UP": 1.12, "DOWN": 0.30},
+        ),
+    )
+    source_payload = _read_json(source_report)
+    source_payload["m_post_freeze_holdout_validation_report_id"] = canonical_json_sha256(
+        source_payload
+    )
+    source_report.write_text(
+        json.dumps(source_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    selected_rows = []
+    for row in source_payload["rows"]:
+        row = dict(row)
+        row["source_report_path"] = str(source_report)
+        row["m2_side_quota_selected"] = True
+        row["m2_reason_codes"] = ["m2_stateful_replay_parity_selected"]
+        selected_rows.append(row)
+    m2_report = {
+        "schema_version": M2_REPLAY_PARITY_SCHEMA_VERSION,
+        "candidate_name": SELL_BEFORE_CLOSE_M2_REPLAY_PARITY_CANDIDATE_NAME,
+        "baseline_candidate_name": SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+        "diagnostic_only": True,
+        "current_frozen_m_promotion_status": "reject_promotion_for_now",
+        "current_frozen_m_evidence_status": "weak_mixed_structural",
+        "current_frozen_m_evidence_reused_for_m2_promotion": False,
+        "m2_selected_rows": selected_rows,
+        "source_model_candidate_eligible": False,
+        "promotion_evidence_eligible": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    m2_report["m2_stateful_replay_parity_candidate_report_id"] = canonical_json_sha256(
+        m2_report
+    )
+    m2_report_path = tmp_path / "m2_stateful_replay_parity_candidate_report.json"
+    m2_report_path.write_text(
+        json.dumps(m2_report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    n_result = run_polymarket_n_up_replay_aligned_candidate(
+        PolymarketNUpReplayAlignedConfig(
+            m2_candidate_report_path=m2_report_path,
+            output_dir=tmp_path / "n_up_replay_aligned",
+        )
+    )
+    n_report_path = n_result.artifact_paths["candidate_report"]
+    original_m2_bytes = m2_report_path.read_bytes()
+    original_n_bytes = n_report_path.read_bytes()
+
+    result = run_polymarket_n2_up_feature_proxy_candidate(
+        PolymarketN2UpFeatureProxyConfig(
+            m2_candidate_report_path=m2_report_path,
+            n_candidate_report_path=n_report_path,
+            output_dir=tmp_path / "n2_up_feature_proxy",
+        )
+    )
+
+    assert m2_report_path.read_bytes() == original_m2_bytes
+    assert n_report_path.read_bytes() == original_n_bytes
+    candidate = result.candidate_report
+    candidate_payload = dict(candidate)
+    candidate_id = candidate_payload.pop(
+        "n2_non_leaky_up_feature_proxy_candidate_report_id"
+    )
+    assert canonical_json_sha256(candidate_payload) == candidate_id
+    assert (
+        candidate["schema_version"]
+        == N2_NON_LEAKY_UP_FEATURE_PROXY_CANDIDATE_SCHEMA_VERSION
+    )
+    assert (
+        candidate["candidate_name"]
+        == SELL_BEFORE_CLOSE_N2_NON_LEAKY_UP_REPLAY_ALIGNED_FEATURE_PROXY_CANDIDATE_NAME
+    )
+    assert candidate["n2_selection_uses_only_allowed_fields"] is True
+    assert candidate["n_reference_report"]["provided"] is True
+    assert candidate["n2_would_selected_up_count"] == 2
+    assert candidate["n2_would_blocked_up_count"] == 2
+    assert candidate["n2_blocked_up_false_positive_count"] == 1
+    assert candidate["n2_would_selected_up_replay_pnl_sum"] == 0.20
+    blocked_by_market = {
+        row["market_id"]: row for row in candidate["n2_would_blocked_rows"]
+    }
+    positive_future = blocked_by_market["n2-bad-proxy-positive-future"]
+    assert positive_future["realized_replay_pnl"] == 1.0
+    assert "n2_blocked_nonpositive_immediate_exit_proxy" in positive_future[
+        "n2_decision_reason_codes"
+    ]
+    assert "n2_blocked_spread_too_wide" in positive_future[
+        "n2_decision_reason_codes"
+    ]
+    false_positive = blocked_by_market["n2-positive-label-negative-replay"]
+    assert (
+        false_positive["positive_label_replay_negative_flagged_for_evaluation"]
+        is True
+    )
+    assert "n2_blocked_nonpositive_immediate_exit_proxy" in false_positive[
+        "n2_decision_reason_codes"
+    ]
+    selected_by_market = {
+        row["market_id"]: row for row in candidate["n2_would_selected_rows"]
+    }
+    negative_label = selected_by_market["n2-negative-label-good-proxy"]
+    assert negative_label["negative_label_selected_flagged_for_evaluation"] is True
+    assert negative_label["n2_decision_reason_codes"] == [
+        "n2_non_leaky_feature_proxy_would_select"
+    ]
+    for row in candidate["original_up_selected_rows"]:
+        assert not set(row["n2_decision_input_fields_used"]).intersection(
+            N2_FORBIDDEN_SELECTION_FIELDS
+        )
+        assert row["n2_forbidden_fields_used_for_selection"] == []
+    assert candidate["source_model_candidate_eligible"] is False
+    assert candidate["promotion_evidence_eligible"] is False
+    assert candidate["#146_start_allowed"] is False
+    assert candidate["#134_resume_allowed"] is False
+    assert candidate["paper_only"] is True
+    assert candidate["capital_at_risk"] is False
+
+    overlay = result.score_overlay_report
+    overlay_payload = dict(overlay)
+    overlay_id = overlay_payload.pop(
+        "n2_non_leaky_up_feature_proxy_score_overlay_report_id"
+    )
+    assert canonical_json_sha256(overlay_payload) == overlay_id
+    assert (
+        overlay["schema_version"]
+        == N2_NON_LEAKY_UP_FEATURE_PROXY_SCORE_OVERLAY_SCHEMA_VERSION
+    )
+    assert overlay["n2_selection_uses_only_allowed_fields"] is True
     assert overlay["source_model_candidate_eligible"] is False
     assert overlay["promotion_evidence_eligible"] is False
     assert overlay["#146_start_allowed"] is False
