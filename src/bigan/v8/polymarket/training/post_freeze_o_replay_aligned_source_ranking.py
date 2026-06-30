@@ -87,6 +87,13 @@ O_VARIANTS = (
     "o_replay_aligned_pairwise_listwise_correction",
     "o_replay_aligned_stronger_no_trade_prior",
 )
+O_REQUIRED_DECISION_ACTION_FAMILIES = (
+    "BUY_UP_SELL_BEFORE_CLOSE",
+    "BUY_DOWN_SELL_BEFORE_CLOSE",
+    "NO_TRADE",
+)
+O_FULL_DECISION_GROUP_SCOPE = "full_decision_group"
+O_PARTIAL_DECISION_GROUP_SCOPE = "partial_decision_group_diagnostic"
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +311,7 @@ def _normalize_action_row(row: dict[str, Any]) -> dict[str, Any]:
             (
                 str(row.get("source_report_path") or ""),
                 str(row.get("market_id") or ""),
+                str(int(row.get("decision_ts") or 0)),
             )
         ),
         "original_label_target": _label(row),
@@ -323,7 +331,7 @@ def _groups_with_no_trade(rows: list[dict[str, Any]]) -> dict[str, list[dict[str
                 "source_report_path": template.get("source_report_path"),
                 "market_id": template.get("market_id"),
                 "slug": template.get("slug"),
-                "decision_ts": min(int(row.get("decision_ts") or 0) for row in group_rows),
+                "decision_ts": int(template.get("decision_ts") or 0),
                 "selected_side": "NONE",
                 "action": "NO_TRADE",
                 "action_family": "NO_TRADE",
@@ -334,7 +342,24 @@ def _groups_with_no_trade(rows: list[dict[str, Any]]) -> dict[str, list[dict[str
                 "synthetic_no_trade_action": True,
             }
         )
+        _annotate_decision_group_completeness(groups[group_id])
     return groups
+
+
+def _annotate_decision_group_completeness(group_rows: list[dict[str, Any]]) -> None:
+    available = sorted({_decision_action_family(row) for row in group_rows})
+    missing = sorted(set(O_REQUIRED_DECISION_ACTION_FAMILIES).difference(available))
+    complete = not missing
+    scope = (
+        O_FULL_DECISION_GROUP_SCOPE
+        if complete
+        else O_PARTIAL_DECISION_GROUP_SCOPE
+    )
+    for row in group_rows:
+        row["decision_group_completeness"] = complete
+        row["available_action_families"] = available
+        row["missing_action_families"] = missing
+        row["ranking_metric_scope"] = scope
 
 
 def _construct_replay_aligned_labels(
@@ -497,6 +522,10 @@ def _label_report(
         ),
         "source_reports": source_reports,
         "row_count": len(rows),
+        "decision_group_count": len({row["decision_group_id"] for row in rows}),
+        "decision_group_completeness_summary": _decision_group_completeness_summary(
+            rows
+        ),
         "label_rows": [_compact_label_row(row) for row in rows],
         "label_component_field_classes": _label_component_field_classes(),
         "label_gap_before": sum(
@@ -557,6 +586,15 @@ def _ranking_report(
         ),
         "ranking_metric_by_variant": variant_metrics,
         "primary_variant_name": "o_replay_aligned_labels_family_priors",
+        "ranking_metric_scope": variant_metrics[
+            "o_replay_aligned_labels_family_priors"
+        ]["ranking_metric_scope"],
+        "decision_group_completeness_summary": variant_metrics[
+            "o_replay_aligned_labels_family_priors"
+        ]["decision_group_completeness_summary"],
+        "full_source_model_ranking_quality_claimed": variant_metrics[
+            "o_replay_aligned_labels_family_priors"
+        ]["full_source_model_ranking_quality_claimed"],
         "top1_realized_best_action_hit_rate": variant_metrics[
             "o_replay_aligned_labels_family_priors"
         ]["top1_realized_best_action_hit_rate"],
@@ -665,6 +703,13 @@ def _comparison_report(
                     "top3_realized_best_action_hit_rate"
                 ],
                 "mean_regret": metrics["mean_regret"],
+                "ranking_metric_scope": metrics["ranking_metric_scope"],
+                "decision_group_completeness_summary": metrics[
+                    "decision_group_completeness_summary"
+                ],
+                "full_source_model_ranking_quality_claimed": metrics[
+                    "full_source_model_ranking_quality_claimed"
+                ],
                 "high_score_support_count": metrics["high_score_support_count"],
                 "high_score_realized_return_mean": metrics[
                     "high_score_realized_return_mean"
@@ -718,6 +763,7 @@ def _ranking_metrics(
     confusion: Counter[tuple[str, str]] = Counter()
     high_score_returns = []
     split_rows: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
+    completeness_summary = _decision_group_completeness_summary(rows)
     for group_rows in groups.values():
         predicted = sorted(
             group_rows,
@@ -750,6 +796,11 @@ def _ranking_metrics(
     group_count = len(groups)
     return {
         "decision_group_count": group_count,
+        "ranking_metric_scope": completeness_summary["ranking_metric_scope"],
+        "decision_group_completeness_summary": completeness_summary,
+        "full_source_model_ranking_quality_claimed": completeness_summary[
+            "all_decision_groups_complete"
+        ],
         "top1_realized_best_action_hit_rate": top_hits[1] / group_count
         if group_count
         else 0.0,
@@ -790,6 +841,50 @@ def _ranking_metrics(
             split: _split_metrics(split_rows.get(split, []))
             for split in ("shadow", "validation")
         },
+    }
+
+
+def _decision_group_completeness_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[row["decision_group_id"]].append(row)
+    partial_groups = []
+    complete_count = 0
+    for group_id, group_rows in sorted(groups.items()):
+        first = group_rows[0]
+        complete = bool(first.get("decision_group_completeness"))
+        if complete:
+            complete_count += 1
+            continue
+        partial_groups.append(
+            {
+                "decision_group_id": group_id,
+                "source_report_path": first.get("source_report_path"),
+                "market_id": first.get("market_id"),
+                "decision_ts": first.get("decision_ts"),
+                "available_action_families": first.get(
+                    "available_action_families",
+                    [],
+                ),
+                "missing_action_families": first.get(
+                    "missing_action_families",
+                    [],
+                ),
+            }
+        )
+    group_count = len(groups)
+    all_complete = group_count > 0 and complete_count == group_count
+    return {
+        "required_action_families": list(O_REQUIRED_DECISION_ACTION_FAMILIES),
+        "decision_group_count": group_count,
+        "complete_decision_group_count": complete_count,
+        "partial_decision_group_count": group_count - complete_count,
+        "all_decision_groups_complete": all_complete,
+        "ranking_metric_scope": O_FULL_DECISION_GROUP_SCOPE
+        if all_complete
+        else O_PARTIAL_DECISION_GROUP_SCOPE,
+        "partial_decision_groups": partial_groups[:50],
+        "partial_decision_group_overflow_count": max(0, len(partial_groups) - 50),
     }
 
 
@@ -865,6 +960,10 @@ def _compact_label_row(row: dict[str, Any]) -> dict[str, Any]:
         "decision_ts": row.get("decision_ts"),
         "action": row.get("action"),
         "action_family": row.get("action_family"),
+        "decision_group_completeness": row["decision_group_completeness"],
+        "available_action_families": row["available_action_families"],
+        "missing_action_families": row["missing_action_families"],
+        "ranking_metric_scope": row["ranking_metric_scope"],
         "selected_side": row.get("selected_side"),
         "original_label_target": row["original_label_target"],
         "replay_aligned_executable_label_target": row[
@@ -887,8 +986,13 @@ def _compact_ranking_row(row: dict[str, Any], variant: str) -> dict[str, Any]:
     return {
         "decision_group_id": row["decision_group_id"],
         "market_id": row.get("market_id"),
+        "decision_ts": row.get("decision_ts"),
         "action": row.get("action"),
         "action_family": row.get("action_family"),
+        "decision_group_completeness": row["decision_group_completeness"],
+        "available_action_families": row["available_action_families"],
+        "missing_action_families": row["missing_action_families"],
+        "ranking_metric_scope": row["ranking_metric_scope"],
         "selected_side": row.get("selected_side"),
         "variant_score": row["variant_scores"][variant],
         "realized_replay_return": row["realized_replay_return"],
@@ -922,6 +1026,13 @@ def _action_family(action: str) -> str:
     if action.endswith("HOLD_TO_SETTLEMENT"):
         return "HOLD_TO_SETTLEMENT"
     return action or "UNKNOWN"
+
+
+def _decision_action_family(row: dict[str, Any]) -> str:
+    action = str(row.get("action") or "")
+    if action in O_REQUIRED_DECISION_ACTION_FAMILIES:
+        return action
+    return str(row.get("action_family") or _action_family(action))
 
 
 def _optional_float(value: Any) -> float | None:
@@ -1036,6 +1147,11 @@ def _label_markdown(report: dict[str, Any]) -> str:
             "",
             f"- candidate_name: `{report['candidate_name']}`",
             f"- row_count: `{report['row_count']}`",
+            f"- decision_group_count: `{report['decision_group_count']}`",
+            "- partial_decision_group_count: "
+            f"`{report['decision_group_completeness_summary']['partial_decision_group_count']}`",
+            "- ranking_metric_scope: "
+            f"`{report['decision_group_completeness_summary']['ranking_metric_scope']}`",
             f"- label_gap_before: `{report['label_gap_before']}`",
             f"- label_gap_after: `{report['label_gap_after']}`",
             f"- label_gap_delta: `{report['label_gap_delta']}`",
@@ -1052,6 +1168,11 @@ def _ranking_markdown(report: dict[str, Any]) -> str:
             "# O Source Ranking Objective",
             "",
             f"- primary_variant_name: `{report['primary_variant_name']}`",
+            f"- ranking_metric_scope: `{report['ranking_metric_scope']}`",
+            "- full_source_model_ranking_quality_claimed: "
+            f"`{str(report['full_source_model_ranking_quality_claimed']).lower()}`",
+            "- partial_decision_group_count: "
+            f"`{report['decision_group_completeness_summary']['partial_decision_group_count']}`",
             f"- top1_hit_rate: `{report['top1_realized_best_action_hit_rate']}`",
             f"- top2_hit_rate: `{report['top2_realized_best_action_hit_rate']}`",
             f"- top3_hit_rate: `{report['top3_realized_best_action_hit_rate']}`",
@@ -1086,13 +1207,14 @@ def _comparison_markdown(report: dict[str, Any]) -> str:
         f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
         f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
         "",
-        "| candidate | top1 | mean_regret | eligible |",
-        "|---|---:|---:|---|",
+        "| candidate | scope | top1 | mean_regret | eligible |",
+        "|---|---|---:|---:|---|",
     ]
     for row in report["candidate_rows"]:
         lines.append(
-            "| {name} | {top1:.4f} | {regret:.6f} | {eligible} |".format(
+            "| {name} | {scope} | {top1:.4f} | {regret:.6f} | {eligible} |".format(
                 name=row["candidate_name"],
+                scope=row["ranking_metric_scope"],
                 top1=float(row["top1_realized_best_action_hit_rate"]),
                 regret=float(row["mean_regret"]),
                 eligible=str(row["source_model_candidate_eligible"]).lower(),

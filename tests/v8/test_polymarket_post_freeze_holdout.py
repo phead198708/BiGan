@@ -1930,9 +1930,35 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert canonical_json_sha256(label_payload) == label_id
     assert labels["schema_version"] == O_LABEL_CONSTRUCTION_SCHEMA_VERSION
     assert labels["candidate_name"] == REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME
-    assert labels["row_count"] == 5
+    assert labels["row_count"] == 6
+    assert labels["decision_group_count"] == 3
+    market_a_groups = {
+        row["decision_group_id"]
+        for row in labels["label_rows"]
+        if row["market_id"] == "o-market-a"
+    }
+    assert len(market_a_groups) == 2
+    assert all(
+        group_id.endswith("|10") or group_id.endswith("|20")
+        for group_id in market_a_groups
+    )
+    assert labels["decision_group_completeness_summary"][
+        "partial_decision_group_count"
+    ] == 3
+    assert labels["decision_group_completeness_summary"][
+        "ranking_metric_scope"
+    ] == "partial_decision_group_diagnostic"
     assert labels["label_gap_delta"] != 0.0
     assert any(row["action"] == "NO_TRADE" for row in labels["label_rows"])
+    assert all(
+        row["ranking_metric_scope"] == "partial_decision_group_diagnostic"
+        for row in labels["label_rows"]
+    )
+    assert any(
+        "BUY_DOWN_SELL_BEFORE_CLOSE" in row["missing_action_families"]
+        for row in labels["label_rows"]
+        if row["market_id"] == "o-market-a" and row["decision_ts"] == 10
+    )
     assert (
         labels["label_component_field_classes"][
             "first_executable_exit_bid_after_entry"
@@ -1951,6 +1977,11 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert "o_replay_aligned_labels_family_priors" in ranking[
         "ranking_metric_by_variant"
     ]
+    assert ranking["ranking_metric_scope"] == "partial_decision_group_diagnostic"
+    assert ranking["full_source_model_ranking_quality_claimed"] is False
+    assert ranking["decision_group_completeness_summary"][
+        "partial_decision_group_count"
+    ] == 3
     assert 0.0 <= ranking["top1_realized_best_action_hit_rate"] <= 1.0
     assert ranking["mean_regret"] >= 0.0
     assert any(
@@ -1982,6 +2013,14 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert comparison["eligible_candidate_count"] == 0
     assert all(
         row["source_model_candidate_eligible"] is False
+        for row in comparison["candidate_rows"]
+    )
+    assert all(
+        row["ranking_metric_scope"] == "partial_decision_group_diagnostic"
+        for row in comparison["candidate_rows"]
+    )
+    assert all(
+        row["full_source_model_ranking_quality_claimed"] is False
         for row in comparison["candidate_rows"]
     )
     assert comparison["#146_start_allowed"] is False
