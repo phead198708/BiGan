@@ -38,6 +38,12 @@ from bigan.v8.polymarket.training.post_freeze_promotion_readiness_audit import (
     PolymarketPostFreezePromotionReadinessAuditConfig,
     run_polymarket_m_post_freeze_promotion_readiness_audit,
 )
+from bigan.v8.polymarket.training.post_freeze_up_diagnostics import (
+    UP_ACTION_VALUE_CALIBRATION_SCHEMA_VERSION,
+    UP_LABEL_REPLAY_ALIGNMENT_SCHEMA_VERSION,
+    PolymarketUpSellBeforeCloseDiagnosticsConfig,
+    run_polymarket_up_sell_before_close_diagnostics,
+)
 from bigan.v8.polymarket.training.post_freeze_weak_evidence_drilldown import (
     M_POST_FREEZE_WEAK_EVIDENCE_DRILLDOWN_SCHEMA_VERSION,
     PolymarketPostFreezeWeakEvidenceDrilldownConfig,
@@ -914,6 +920,201 @@ def test_m2_replay_parity_blocks_same_market_second_entry_and_reports_up_diagnos
     assert up["#134_resume_allowed"] is False
     assert result.artifact_paths["candidate_report"].exists()
     assert result.artifact_paths["up_alignment_report"].exists()
+
+
+def test_up_sell_before_close_diagnostics_explain_label_and_score_weakness(
+    tmp_path: Path,
+) -> None:
+    up_negative_label = _replay_row(
+        market_id="up-negative-label",
+        decision_ts=10,
+        side="UP",
+        pnl=-0.12,
+    )
+    up_negative_label.update(
+        {
+            "action_return_target": -0.05,
+            "raw_calibrated_action_score": 0.92,
+            "candidate_rank_score": 0.10,
+            "entry_quality_ask": 0.55,
+            "exit_quality_bid": 0.48,
+            "entry_exit_quality_spread_bps": 700.0,
+            "entry_exit_quality_queue_fill": 0.70,
+            "closed_before_settlement": True,
+            "attrition_reason_codes": [
+                "closed_before_settlement_with_negative_replay_pnl"
+            ],
+        }
+    )
+    up_positive_label_negative_replay = _replay_row(
+        market_id="up-positive-label-negative-replay",
+        decision_ts=20,
+        side="UP",
+        pnl=-0.08,
+    )
+    up_positive_label_negative_replay.update(
+        {
+            "action_return_target": 0.20,
+            "raw_calibrated_action_score": 0.85,
+            "candidate_rank_score": 0.20,
+            "entry_quality_ask": 0.60,
+            "exit_quality_bid": 0.50,
+            "entry_exit_quality_spread_bps": 800.0,
+            "entry_exit_quality_queue_fill": 0.60,
+            "closed_before_settlement": True,
+            "attrition_reason_codes": [
+                "closed_before_settlement_with_negative_replay_pnl"
+            ],
+        }
+    )
+    up_low_score_positive = _replay_row(
+        market_id="up-low-score-positive",
+        decision_ts=30,
+        side="UP",
+        pnl=0.15,
+    )
+    up_low_score_positive.update(
+        {
+            "action_return_target": 0.10,
+            "raw_calibrated_action_score": 0.30,
+            "candidate_rank_score": -0.10,
+            "entry_quality_ask": 0.40,
+            "exit_quality_bid": 0.47,
+            "entry_exit_quality_spread_bps": 500.0,
+            "entry_exit_quality_queue_fill": 0.80,
+        }
+    )
+    down_positive = _replay_row(
+        market_id="down-positive",
+        decision_ts=40,
+        side="DOWN",
+        pnl=0.30,
+    )
+    down_positive.update(
+        {
+            "action_return_target": 0.20,
+            "raw_calibrated_action_score": 0.60,
+            "candidate_rank_score": 0.15,
+            "entry_quality_ask": 0.50,
+            "exit_quality_bid": 0.60,
+            "entry_exit_quality_spread_bps": 300.0,
+            "entry_exit_quality_queue_fill": 0.90,
+        }
+    )
+    source_report = _write_holdout_report(
+        tmp_path / "source",
+        _holdout_validation_report(
+            run_id="up-diagnostic-source",
+            market_ids=(
+                "up-negative-label",
+                "up-positive-label-negative-replay",
+                "up-low-score-positive",
+                "down-positive",
+            ),
+            replay_rows=[
+                up_negative_label,
+                up_positive_label_negative_replay,
+                up_low_score_positive,
+                down_positive,
+            ],
+            replay_pnl_by_side={"UP": -0.05, "DOWN": 0.30},
+        ),
+    )
+    source_payload = _read_json(source_report)
+    source_payload["m_post_freeze_holdout_validation_report_id"] = canonical_json_sha256(
+        source_payload
+    )
+    source_report.write_text(
+        json.dumps(source_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    selected_rows = []
+    for row in source_payload["rows"]:
+        row = dict(row)
+        row["source_report_path"] = str(source_report)
+        row["m2_side_quota_selected"] = True
+        row["m2_reason_codes"] = ["m2_stateful_replay_parity_selected"]
+        selected_rows.append(row)
+    m2_report = {
+        "schema_version": M2_REPLAY_PARITY_SCHEMA_VERSION,
+        "candidate_name": SELL_BEFORE_CLOSE_M2_REPLAY_PARITY_CANDIDATE_NAME,
+        "baseline_candidate_name": SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+        "diagnostic_only": True,
+        "current_frozen_m_promotion_status": "reject_promotion_for_now",
+        "current_frozen_m_evidence_status": "weak_mixed_structural",
+        "current_frozen_m_evidence_reused_for_m2_promotion": False,
+        "m2_selected_rows": selected_rows,
+        "source_model_candidate_eligible": False,
+        "promotion_evidence_eligible": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    m2_report["m2_stateful_replay_parity_candidate_report_id"] = canonical_json_sha256(
+        m2_report
+    )
+    m2_report_path = tmp_path / "m2_stateful_replay_parity_candidate_report.json"
+    m2_report_path.write_text(
+        json.dumps(m2_report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_polymarket_up_sell_before_close_diagnostics(
+        PolymarketUpSellBeforeCloseDiagnosticsConfig(
+            m2_candidate_report_path=m2_report_path,
+            output_dir=tmp_path / "up_diagnostics",
+        )
+    )
+
+    label = result.label_replay_report
+    label_payload = dict(label)
+    label_id = label_payload.pop(
+        "up_sell_before_close_label_replay_alignment_report_id"
+    )
+    assert canonical_json_sha256(label_payload) == label_id
+    assert label["schema_version"] == UP_LABEL_REPLAY_ALIGNMENT_SCHEMA_VERSION
+    assert label["up_negative_label_selected_count"] == 1
+    assert label["up_positive_label_replay_negative_count"] == 1
+    assert label["first_executable_exit_negative_count"] == 2
+    assert label["up_top_false_positives"][0]["market_id"] == "up-negative-label"
+    assert "up_label_target_optimistic" in label["root_cause_codes"]
+    assert "up_executable_exit_path_mismatch" in label["root_cause_codes"]
+    assert label["root_cause_classification"] == "mixed"
+    assert "introduce_up_executable_exit_label_correction" in label[
+        "recommended_next_actions"
+    ]
+    assert label["#146_start_allowed"] is False
+    assert label["#134_resume_allowed"] is False
+
+    calibration = result.calibration_report
+    calibration_payload = dict(calibration)
+    calibration_id = calibration_payload.pop(
+        "up_sell_before_close_action_value_calibration_diagnostic_id"
+    )
+    assert canonical_json_sha256(calibration_payload) == calibration_id
+    assert (
+        calibration["schema_version"]
+        == UP_ACTION_VALUE_CALIBRATION_SCHEMA_VERSION
+    )
+    assert (
+        calibration[
+            "calibrated_action_score_vs_realized_up_replay_pnl_correlation"
+        ]
+        < 0.0
+    )
+    assert calibration["high_score_negative_replay_up_count"] == 2
+    assert calibration["low_score_positive_replay_up_count"] == 1
+    assert "up_action_value_overcalibrated" in calibration["root_cause_codes"]
+    assert "up_rank_score_false_positive_bias" in calibration["root_cause_codes"]
+    assert calibration["source_model_candidate_eligible"] is False
+    assert calibration["promotion_evidence_eligible"] is False
+    assert calibration["#146_start_allowed"] is False
+    assert calibration["#134_resume_allowed"] is False
+    assert result.artifact_paths["label_replay_report"].exists()
+    assert result.artifact_paths["calibration_report"].exists()
 
 
 def _build_corpus(root: Path) -> Path:
