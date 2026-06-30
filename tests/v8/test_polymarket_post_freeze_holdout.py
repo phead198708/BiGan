@@ -27,6 +27,12 @@ from bigan.v8.polymarket.training.post_freeze_holdout_accumulation import (
     PolymarketPostFreezeHoldoutAccumulationConfig,
     run_polymarket_m_post_freeze_holdout_accumulation,
 )
+from bigan.v8.polymarket.training.post_freeze_m2_replay_parity import (
+    M2_REPLAY_PARITY_SCHEMA_VERSION,
+    M2_UP_ALIGNMENT_SCHEMA_VERSION,
+    PolymarketM2ReplayParityConfig,
+    run_polymarket_m2_replay_parity_diagnostics,
+)
 from bigan.v8.polymarket.training.post_freeze_promotion_readiness_audit import (
     M_POST_FREEZE_PROMOTION_READINESS_AUDIT_SCHEMA_VERSION,
     PolymarketPostFreezePromotionReadinessAuditConfig,
@@ -36,6 +42,10 @@ from bigan.v8.polymarket.training.post_freeze_weak_evidence_drilldown import (
     M_POST_FREEZE_WEAK_EVIDENCE_DRILLDOWN_SCHEMA_VERSION,
     PolymarketPostFreezeWeakEvidenceDrilldownConfig,
     run_polymarket_m_post_freeze_weak_evidence_drilldown,
+)
+from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
+    SELL_BEFORE_CLOSE_M2_REPLAY_PARITY_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
 )
 
 
@@ -747,6 +757,163 @@ def test_post_freeze_weak_evidence_drilldown_explains_root_causes(
     assert report["#134_resume_allowed"] is False
     assert result.artifact_paths["report"].exists()
     assert result.artifact_paths["summary"].exists()
+
+
+def test_m2_replay_parity_blocks_same_market_second_entry_and_reports_up_diagnostics(
+    tmp_path: Path,
+) -> None:
+    same_market_second = _replay_row(
+        market_id="market-a",
+        decision_ts=20,
+        side="UP",
+        pnl=0.0,
+        side_quota_selected=True,
+        entry_order_opened=False,
+    )
+    same_market_second["action_return_target"] = -0.10
+    same_market_second["replay_reason_codes"] = [
+        "entry_blocked_turnover_guard",
+        "entry_blocked_max_entries_per_market",
+    ]
+    same_market_second["attrition_reason_codes"] = [
+        "entry_blocked_turnover_guard",
+        "entry_blocked_max_entries_per_market",
+    ]
+    replacement = _replay_row(
+        market_id="market-b",
+        decision_ts=30,
+        side="UP",
+        pnl=0.0,
+        side_quota_selected=False,
+        entry_order_opened=False,
+    )
+    replacement["action_return_target"] = 0.15
+    report_path = _write_holdout_report(
+        tmp_path / "m2_source",
+        _holdout_validation_report(
+            run_id="m2-source",
+            market_ids=("market-a", "market-b", "market-c", "market-d"),
+            replay_rows=[
+                _replay_row(
+                    market_id="market-a",
+                    decision_ts=10,
+                    side="UP",
+                    pnl=-0.05,
+                ),
+                _replay_row(
+                    market_id="market-c",
+                    decision_ts=40,
+                    side="UP",
+                    pnl=-0.02,
+                ),
+                _replay_row(
+                    market_id="market-d",
+                    decision_ts=50,
+                    side="DOWN",
+                    pnl=0.30,
+                ),
+            ],
+            replay_pnl_by_side={"UP": -0.07, "DOWN": 0.30},
+            extra_rows=[same_market_second, replacement],
+        ),
+    )
+    payload = _read_json(report_path)
+    for row in payload["rows"]:
+        if row["market_id"] == "market-a" and row["decision_ts"] == 10:
+            row["action_return_target"] = 0.20
+            row["raw_calibrated_action_score"] = 0.90
+            row["attrition_reason_codes"] = [
+                "closed_before_settlement_with_negative_replay_pnl"
+            ]
+        if row["market_id"] == "market-c":
+            row["action_return_target"] = -0.20
+            row["raw_calibrated_action_score"] = 0.80
+            row["attrition_reason_codes"] = [
+                "closed_before_settlement_with_negative_replay_pnl"
+            ]
+    payload["m_post_freeze_holdout_validation_report_id"] = canonical_json_sha256(
+        payload
+    )
+    report_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    accumulation = run_polymarket_m_post_freeze_holdout_accumulation(
+        PolymarketPostFreezeHoldoutAccumulationConfig(
+            holdout_report_paths=(report_path,),
+            output_dir=tmp_path / "accumulation",
+            min_replay_entry_support=3,
+            min_unique_market_support=3,
+        )
+    )
+    audit = run_polymarket_m_post_freeze_promotion_readiness_audit(
+        PolymarketPostFreezePromotionReadinessAuditConfig(
+            accumulation_report_path=accumulation.artifact_paths["report"],
+            output_dir=tmp_path / "audit",
+        )
+    )
+    drilldown = run_polymarket_m_post_freeze_weak_evidence_drilldown(
+        PolymarketPostFreezeWeakEvidenceDrilldownConfig(
+            promotion_readiness_audit_path=audit.artifact_paths["report"],
+            accumulation_report_path=accumulation.artifact_paths["report"],
+            output_dir=tmp_path / "drilldown",
+        )
+    )
+
+    result = run_polymarket_m2_replay_parity_diagnostics(
+        PolymarketM2ReplayParityConfig(
+            weak_evidence_drilldown_report_path=drilldown.artifact_paths["report"],
+            accumulation_report_path=accumulation.artifact_paths["report"],
+            output_dir=tmp_path / "m2",
+        )
+    )
+
+    candidate = result.candidate_report
+    up = result.up_alignment_report
+    payload = dict(candidate)
+    report_id = payload.pop("m2_stateful_replay_parity_candidate_report_id")
+    assert canonical_json_sha256(payload) == report_id
+    assert candidate["schema_version"] == M2_REPLAY_PARITY_SCHEMA_VERSION
+    assert candidate["candidate_name"] == SELL_BEFORE_CLOSE_M2_REPLAY_PARITY_CANDIDATE_NAME
+    assert candidate["baseline_candidate_name"] == (
+        SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME
+    )
+    assert candidate["current_frozen_m_promotion_status"] == "reject_promotion_for_now"
+    assert candidate["current_frozen_m_evidence_status"] == "weak_mixed_structural"
+    assert candidate["m2_turnover_or_max_entry_attrition_count"] == 0
+    assert candidate["turnover_or_max_entry_attrition_reduced_to_zero"] is True
+    assert candidate["m2_selected_without_replay_count"] == 1
+    assert candidate["m2_replay_entry_reconciliation"]["reconciled"] is False
+    assert candidate["m2_replay_entry_reconciliation"]["failure_reason_codes"] == [
+        "m2_selected_rows_missing_replay_evidence"
+    ]
+    assert any(
+        row["market_id"] == "market-a"
+        and row["decision_ts"] == 20
+        and "m2_entry_blocked_max_entries_per_market" in row["m2_reason_codes"]
+        for row in candidate["m2_blocked_rows"]
+    )
+    assert any(
+        row["market_id"] == "market-b"
+        and row["m2_side_quota_selected"] is True
+        for row in candidate["m2_selected_rows"]
+    )
+    up_payload = dict(up)
+    up_report_id = up_payload.pop("m2_up_label_replay_alignment_diagnostic_id")
+    assert canonical_json_sha256(up_payload) == up_report_id
+    assert up["schema_version"] == M2_UP_ALIGNMENT_SCHEMA_VERSION
+    assert up["m2_up_negative_label_selected_count"] >= 1
+    assert up["m2_up_positive_label_replay_negative_count"] == 1
+    assert up["m2_up_first_executable_exit_negative_count"] == 2
+    assert up["m2_top_up_false_positives"][0]["market_id"] == "market-a"
+    assert candidate["source_model_candidate_eligible"] is False
+    assert candidate["promotion_evidence_eligible"] is False
+    assert candidate["#146_start_allowed"] is False
+    assert candidate["#134_resume_allowed"] is False
+    assert up["#146_start_allowed"] is False
+    assert up["#134_resume_allowed"] is False
+    assert result.artifact_paths["candidate_report"].exists()
+    assert result.artifact_paths["up_alignment_report"].exists()
 
 
 def _build_corpus(root: Path) -> Path:
