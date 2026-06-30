@@ -251,6 +251,9 @@ def test_post_freeze_holdout_accumulation_counts_only_true_completed_runs(
     assert report["loaded_report_count"] == 3
     assert report["holdout_run_count"] == 2
     assert report["duplicate_excluded_run_count"] == 0
+    assert report["candidate_market_count"] == 2
+    assert report["selected_market_count"] == 2
+    assert report["replay_unique_market_count"] == 2
     assert report["unique_market_count"] == 2
     assert report["failed_provenance_run_count"] == 1
     assert report["selected_entry_count"] == 2
@@ -307,6 +310,9 @@ def test_post_freeze_holdout_accumulation_support_gate_requires_markets_and_side
 
     reason_codes = result.report["support_gate_reason_codes"]
     assert result.report["support_gate_passed"] is False
+    assert result.report["candidate_market_count"] == 1
+    assert result.report["selected_market_count"] == 1
+    assert result.report["replay_unique_market_count"] == 1
     assert "insufficient_unique_market_support" in reason_codes
     assert "missing_down_replay_entry_support" in reason_codes
     assert "missing_up_replay_entry_support" not in reason_codes
@@ -354,6 +360,9 @@ def test_post_freeze_holdout_accumulation_dedupes_same_report_before_support(
     assert report["loaded_report_count"] == 2
     assert report["holdout_run_count"] == 1
     assert report["duplicate_excluded_run_count"] == 1
+    assert report["candidate_market_count"] == 1
+    assert report["selected_market_count"] == 1
+    assert report["replay_unique_market_count"] == 1
     assert report["selected_entry_count"] == 2
     assert report["replay_entry_count"] == 2
     assert report["unique_market_count"] == 1
@@ -371,6 +380,74 @@ def test_post_freeze_holdout_accumulation_dedupes_same_report_before_support(
         "duplicate_reason_codes"
     ]
     assert duplicate["dedupe_identity"]["market_ids"] == ("market-both",)
+    assert report["promotion_evidence_eligible"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["#146_start_allowed"] is False
+    assert report["#134_resume_allowed"] is False
+
+
+def test_post_freeze_holdout_accumulation_market_support_uses_replay_entries_only(
+    tmp_path: Path,
+) -> None:
+    replay_rows = []
+    pnl_by_side = {"UP": 0.0, "DOWN": 0.0}
+    for index in range(20):
+        side = "UP" if index % 2 == 0 else "DOWN"
+        replay_rows.append(
+            _replay_row(
+                market_id="single-replay-market",
+                decision_ts=10_000 + index,
+                side=side,
+                pnl=0.01,
+            )
+        )
+        pnl_by_side[side] += 0.01
+    candidate_only_rows = [
+        _replay_row(
+            market_id=f"candidate-only-market-{index:02d}",
+            decision_ts=20_000 + index,
+            side="UP" if index % 2 == 0 else "DOWN",
+            pnl=0.0,
+            side_quota_selected=False,
+            entry_order_opened=False,
+        )
+        for index in range(12)
+    ]
+    report_path = _write_holdout_report(
+        tmp_path / "inflated_candidate_markets",
+        _holdout_validation_report(
+            run_id="inflated-candidate-markets",
+            market_ids=tuple(
+                ["single-replay-market"]
+                + [f"candidate-only-market-{index:02d}" for index in range(12)]
+            ),
+            replay_rows=replay_rows,
+            replay_pnl_by_side=pnl_by_side,
+            extra_rows=candidate_only_rows,
+        ),
+    )
+
+    result = run_polymarket_m_post_freeze_holdout_accumulation(
+        PolymarketPostFreezeHoldoutAccumulationConfig(
+            holdout_report_paths=(report_path,),
+            output_dir=tmp_path / "accumulation",
+            min_replay_entry_support=20,
+            min_unique_market_support=10,
+        )
+    )
+
+    report = result.report
+    assert report["candidate_market_count"] == 13
+    assert report["selected_market_count"] == 1
+    assert report["replay_unique_market_count"] == 1
+    assert report["unique_market_count"] == 1
+    assert report["replay_entry_count"] == 20
+    assert report["replay_entry_count_by_side"] == {"UP": 10, "DOWN": 10}
+    assert report["replay_total_pnl_sum"] == 0.20
+    assert report["support_gate_passed"] is False
+    assert report["support_gate_reason_codes"] == [
+        "insufficient_unique_market_support"
+    ]
     assert report["promotion_evidence_eligible"] is False
     assert report["source_model_candidate_eligible"] is False
     assert report["#146_start_allowed"] is False
@@ -415,6 +492,9 @@ def test_post_freeze_holdout_accumulation_support_ready_still_does_not_unlock(
     report = result.report
     assert report["support_gate_passed"] is True
     assert report["support_gate_reason_codes"] == []
+    assert report["candidate_market_count"] == 10
+    assert report["selected_market_count"] == 10
+    assert report["replay_unique_market_count"] == 10
     assert report["promotion_evidence_eligible"] is True
     assert report["source_model_candidate_eligible"] is False
     assert report["source_model_candidate_ineligible_reason_codes"] == [
@@ -551,7 +631,9 @@ def _holdout_validation_report(
     replay_rows: list[dict[str, Any]],
     replay_pnl_by_side: dict[str, float],
     label_vs_replay_pnl_gap: float = 0.0,
+    extra_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    rows = [*replay_rows, *(extra_rows or [])]
     replay_total_pnl = sum(float(row["total_polymarket_pnl"]) for row in replay_rows)
     report = {
         "schema_version": M_POST_FREEZE_HOLDOUT_SCHEMA_VERSION,
@@ -572,14 +654,16 @@ def _holdout_validation_report(
                 {"run_id": run_id, "kind": "corpus"}
             ),
             "holdout_min_decision_ts": min(
-                int(row["decision_ts"]) for row in replay_rows
+                int(row["decision_ts"]) for row in rows
             ),
             "holdout_max_decision_ts": max(
-                int(row["decision_ts"]) for row in replay_rows
+                int(row["decision_ts"]) for row in rows
             ),
             "market_id_overlap_count": 0,
         },
-        "selected_entry_count": len(replay_rows),
+        "selected_entry_count": sum(
+            1 for row in rows if bool(row.get("side_quota_selected", False))
+        ),
         "replay_entry_count": len(replay_rows),
         "selected_exit_decision_count": 0,
         "replay_entry_reconciliation": {
@@ -592,7 +676,7 @@ def _holdout_validation_report(
         "replay_total_pnl_sum": replay_total_pnl,
         "replay_pnl_by_side": replay_pnl_by_side,
         "label_vs_replay_pnl_gap": label_vs_replay_pnl_gap,
-        "rows": replay_rows,
+        "rows": rows,
         "reason_codes": [],
         "ineligible_reason_codes": ["diagnostic_only_no_paper_live_unlock"],
         "source_model_candidate_eligible": False,
@@ -660,14 +744,16 @@ def _replay_row(
     decision_ts: int,
     side: str,
     pnl: float,
+    side_quota_selected: bool = True,
+    entry_order_opened: bool = True,
 ) -> dict[str, Any]:
     return {
         "market_id": market_id,
         "decision_ts": decision_ts,
         "selected_side": side,
         "action": f"BUY_{side}_SELL_BEFORE_CLOSE",
-        "side_quota_selected": True,
-        "entry_order_opened": True,
+        "side_quota_selected": side_quota_selected,
+        "entry_order_opened": entry_order_opened,
         "raw_calibrated_action_score": 0.10,
         "best_action_margin": 0.01,
         "candidate_rank_score": 0.50,

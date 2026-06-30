@@ -150,18 +150,24 @@ def _build_accumulation_report(
         if item["report"].get("validation_status") == "blocked_fail_closed"
     ]
     included_reports = [item["report"] for item in included]
-    replay_entry_rows = [
+    candidate_rows = [
         row
         for report in included_reports
         for row in report.get("rows", [])
+    ]
+    selected_rows = [
+        row
+        for row in candidate_rows
+        if bool(row.get("side_quota_selected", False))
+    ]
+    replay_entry_rows = [
+        row
+        for row in candidate_rows
         if bool(row.get("entry_order_opened", False))
     ]
-    market_ids = {
-        str(row.get("market_id"))
-        for report in included_reports
-        for row in report.get("rows", [])
-        if row.get("market_id")
-    }
+    candidate_market_ids = _row_market_ids(candidate_rows)
+    selected_market_ids = _row_market_ids(selected_rows)
+    replay_market_ids = _row_market_ids(replay_entry_rows)
     side_counts = _side_counts(replay_entry_rows)
     replay_pnl_by_side = _sum_side_maps(
         report.get("replay_pnl_by_side", {}) for report in included_reports
@@ -184,7 +190,7 @@ def _build_accumulation_report(
     )
     support_gate_reason_codes = _support_gate_reason_codes(
         holdout_run_count=len(included_reports),
-        unique_market_count=len(market_ids),
+        replay_unique_market_count=len(replay_market_ids),
         replay_entry_count=replay_entry_count,
         replay_entry_count_by_side=side_counts,
         config=config,
@@ -209,7 +215,10 @@ def _build_accumulation_report(
         "excluded_run_count": len(excluded),
         "duplicate_excluded_run_count": len(duplicate_excluded),
         "failed_provenance_run_count": len(blocked),
-        "unique_market_count": len(market_ids),
+        "candidate_market_count": len(candidate_market_ids),
+        "selected_market_count": len(selected_market_ids),
+        "replay_unique_market_count": len(replay_market_ids),
+        "unique_market_count": len(replay_market_ids),
         "selected_entry_count": selected_entry_count,
         "replay_entry_count": replay_entry_count,
         "replay_entry_count_by_side": side_counts,
@@ -398,6 +407,11 @@ def _duplicate_run_summary(
 def _included_run_summary(item: dict[str, Any]) -> dict[str, Any]:
     report = item["report"]
     provenance = dict(report.get("provenance", {}))
+    rows = list(report.get("rows", []))
+    replay_rows = [row for row in rows if bool(row.get("entry_order_opened", False))]
+    selected_rows = [
+        row for row in rows if bool(row.get("side_quota_selected", False))
+    ]
     return {
         "report_path": item["path"],
         "report_sha256": item["path_sha256"],
@@ -412,6 +426,9 @@ def _included_run_summary(item: dict[str, Any]) -> dict[str, Any]:
         "holdout_min_decision_ts": provenance.get("holdout_min_decision_ts"),
         "holdout_max_decision_ts": provenance.get("holdout_max_decision_ts"),
         "market_id_overlap_count": provenance.get("market_id_overlap_count"),
+        "candidate_market_count": len(_row_market_ids(rows)),
+        "selected_market_count": len(_row_market_ids(selected_rows)),
+        "replay_unique_market_count": len(_row_market_ids(replay_rows)),
         "selected_entry_count": int(report.get("selected_entry_count", 0)),
         "replay_entry_count": int(report.get("replay_entry_count", 0)),
         "selected_exit_decision_count": int(
@@ -469,7 +486,7 @@ def _excluded_reason_codes(report: dict[str, Any]) -> list[str]:
 def _support_gate_reason_codes(
     *,
     holdout_run_count: int,
-    unique_market_count: int,
+    replay_unique_market_count: int,
     replay_entry_count: int,
     replay_entry_count_by_side: dict[str, int],
     config: PolymarketPostFreezeHoldoutAccumulationConfig,
@@ -479,7 +496,7 @@ def _support_gate_reason_codes(
         reason_codes.append("no_true_post_freeze_holdout_runs")
     if replay_entry_count < config.min_replay_entry_support:
         reason_codes.append("insufficient_replay_entry_support")
-    if unique_market_count < config.min_unique_market_support:
+    if replay_unique_market_count < config.min_unique_market_support:
         reason_codes.append("insufficient_unique_market_support")
     if config.require_both_side_replay_entries:
         if replay_entry_count_by_side.get("UP", 0) <= 0:
@@ -496,6 +513,10 @@ def _dedupe(values: list[str]) -> list[str]:
 def _side_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
     counts = Counter(str(row.get("selected_side")) for row in rows)
     return {side: int(counts.get(side, 0)) for side in ("UP", "DOWN")}
+
+
+def _row_market_ids(rows: list[dict[str, Any]]) -> set[str]:
+    return {str(row.get("market_id")) for row in rows if row.get("market_id")}
 
 
 def _sum_side_maps(maps: Any) -> dict[str, float]:
@@ -545,7 +566,9 @@ def _accumulation_markdown(report: dict[str, Any]) -> str:
         f"- loaded_report_count: `{report['loaded_report_count']}`",
         f"- holdout_run_count: `{report['holdout_run_count']}`",
         f"- duplicate_excluded_run_count: `{report['duplicate_excluded_run_count']}`",
-        f"- unique_market_count: `{report['unique_market_count']}`",
+        f"- candidate_market_count: `{report['candidate_market_count']}`",
+        f"- selected_market_count: `{report['selected_market_count']}`",
+        f"- replay_unique_market_count: `{report['replay_unique_market_count']}`",
         f"- selected_entry_count: `{report['selected_entry_count']}`",
         f"- replay_entry_count: `{report['replay_entry_count']}`",
         f"- replay_total_pnl_sum: `{report['replay_total_pnl_sum']}`",
