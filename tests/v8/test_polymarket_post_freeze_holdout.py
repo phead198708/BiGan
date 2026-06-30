@@ -1850,7 +1850,7 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
             "entry_exit_quality_queue_fill": 0.92,
             "entry_exit_quality_book_staleness_ms": 500.0,
             "entry_exit_quality_time_to_close_seconds": 180.0,
-            "p_up": 0.30,
+            "p_up": 0.70,
         }
     )
     weak_down = _replay_row(
@@ -2127,6 +2127,19 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert correction_config["microstructure_quality_weight_source"] == (
         "shadow_microstructure_target_correlation_scaled_by_p_edge_q25"
     )
+    assert correction_config["p_up_misalignment_raw_positive_penalty_source"] == (
+        "shadow_candidate_search_p_up_edge_quantile_grid"
+    )
+    assert correction_config["p_up_misalignment_penalty_applies_to"] == (
+        "buy_actions_with_negative_p_up_alignment_and_positive_raw_component"
+    )
+    assert correction_config["p_up_safety_target_disagreement_rate"] == 0.25
+    assert correction_config["p_up_safety_target_source"] == (
+        "config_hashed_stricter_than_hard_gate_target"
+    )
+    assert correction_config["shadow_p_up_selection_max_disagreement_rate_source"] == (
+        "max_p_up_action_disagreement_rate_minus_shadow_p_up_edge_q75"
+    )
     assert looks_like_sha256(correction_config["correction_config_hash"])
     assert set(correction_config["p_up_edge_quantiles"]) == {"median", "q25", "q75"}
     assert set(correction_config["shadow_component_diagnostics"]) == {
@@ -2168,6 +2181,22 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         == "shadow_p_up_edge_quantile_grid"
     )
     assert raw_diagnostics["raw_weight_candidate_rows"]
+    assert raw_diagnostics["p_up_misalignment_penalty_candidate_source"] == (
+        "shadow_p_up_edge_quantile_grid"
+    )
+    assert raw_diagnostics["raw_weight_max_shadow_p_up_disagreement_rate"] == (
+        correction_config["shadow_p_up_selection_max_disagreement_rate"]
+    )
+    assert raw_diagnostics["raw_weight_p_up_safety_buffer"] >= 0.0
+    assert "shadow_largest_regret_case" in raw_diagnostics[
+        "selected_raw_weight_candidate"
+    ]
+    assert "shadow_action_family_level_regret" in raw_diagnostics[
+        "selected_raw_weight_candidate"
+    ]
+    assert "shadow_no_trade_missed_opportunity" in raw_diagnostics[
+        "selected_raw_weight_candidate"
+    ]
     assert ranking["o_model_training_summary"]["ranking_correction_config"][
         "NO_TRADE_prior"
     ]["enabled"] is True
@@ -2214,6 +2243,12 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "action_family_selected_return_breakdown",
         "side_selected_return_breakdown",
         "largest_winner_dependency",
+        "largest_regret_case",
+        "action_family_level_regret",
+        "side_level_regret",
+        "no_trade_missed_opportunity",
+        "no_trade_opportunity_cost_mean",
+        "ranking_confusion_matrix",
     }
     assert (
         ranking["train_shadow_metrics"]["decision_group_count"]
@@ -2243,7 +2278,14 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     )
     assert correction_config["high_score_calibration"][
         "high_score_threshold"
-    ] == 0.75
+    ] > 0.75
+    assert correction_config["high_score_calibration"][
+        "high_score_threshold_source"
+    ] == "0.75 + shadow_p_up_edge_q25"
+    assert (
+        ranking["high_score_threshold"]
+        == correction_config["high_score_calibration"]["high_score_threshold"]
+    )
     assert correction_config["high_score_calibration"][
         "high_score_requires_corrected_model_score_gte_threshold"
     ] is True
@@ -2253,6 +2295,7 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
             "p_up_side_alignment_component",
             "confidence_or_weak_opportunity_component",
             "group_normalized_raw_model_component",
+            "p_up_misalignment_penalty_component",
             "shadow_action_family_prior_component",
             "microstructure_quality_component",
         }
@@ -2400,6 +2443,10 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     )
     assert gate["correction_config_hash_verified"] is True
     assert gate["probe_config_hash_verified"] is True
+    assert gate["high_score_threshold"] == ranking["high_score_threshold"]
+    assert gate["high_score_threshold_source"] == (
+        "0.75 + shadow_p_up_edge_q25"
+    )
     assert gate["eligible_for_source_model_gate"] is True
     assert gate["validation_metrics_only_for_eligibility"] is True
     assert gate["validation_metrics"] == ranking["validation_metrics"]
@@ -2426,6 +2473,12 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     ] <= gate["p_up_action_disagreement_summary"][
         "max_allowed_disagreement_rate"
     ]
+    assert gate["gate_thresholds"]["p_up_safety_target_disagreement_rate"] == 0.25
+    assert gate["gate_thresholds"]["p_up_safety_target_is_hard_gate"] is False
+    assert "p_up_safety_target_met" in gate
+    assert "largest_regret_case" in gate["validation_metrics"]
+    assert "action_family_level_regret" in gate["validation_metrics"]
+    assert "no_trade_missed_opportunity" in gate["validation_metrics"]
     assert 0.0 <= gate["validation_metrics"]["NO_TRADE_selection_rate"] <= 1.0
     assert "future_unseen_holdout_required" in gate["ineligible_reason_codes"]
     assert gate["#146_start_allowed"] is False

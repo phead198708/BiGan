@@ -1006,6 +1006,7 @@ def _learn_o_shadow_ranking_correction(
         train_rows,
         p_edge_quantiles,
     )
+    high_score_threshold = 0.75 + p_edge_quantiles["q25"]
     config = {
         "correction_name": "shadow_only_p_up_aligned_weak_opportunity_ranker",
         "ranking_objective_proxy": "pairwise_group_margin_and_regret_aware_proxy",
@@ -1034,7 +1035,23 @@ def _learn_o_shadow_ranking_correction(
         "sell_before_close_weak_penalty_source": "-shadow_p_up_edge_q25 * 0.6",
         "group_normalized_raw_model_weight": 0.0,
         "group_normalized_raw_model_weight_source": (
-            "shadow_candidate_search_high_score_return_with_p_up_safety_margin"
+            "shadow_candidate_search_high_score_return_with_strict_p_up_safety"
+        ),
+        "p_up_misalignment_raw_positive_penalty": 0.0,
+        "p_up_misalignment_raw_positive_penalty_source": (
+            "shadow_candidate_search_p_up_edge_quantile_grid"
+        ),
+        "p_up_misalignment_penalty_applies_to": (
+            "buy_actions_with_negative_p_up_alignment_and_positive_raw_component"
+        ),
+        "p_up_safety_target_disagreement_rate": 0.25,
+        "p_up_safety_target_source": "config_hashed_stricter_than_hard_gate_target",
+        "shadow_p_up_selection_max_disagreement_rate": max(
+            0.0,
+            O_MAX_P_UP_ACTION_DISAGREEMENT_RATE - p_edge_quantiles["q75"],
+        ),
+        "shadow_p_up_selection_max_disagreement_rate_source": (
+            "max_p_up_action_disagreement_rate_minus_shadow_p_up_edge_q75"
         ),
         "shadow_action_family_prior_weight": prior_weight,
         "shadow_action_family_prior_weight_source": (
@@ -1052,8 +1069,10 @@ def _learn_o_shadow_ranking_correction(
             "microstructure": micro_diagnostics,
         },
         "high_score_calibration": {
-            "method": "fixed_threshold_rank_score_calibration",
-            "high_score_threshold": 0.75,
+            "method": "shadow_buffered_threshold_rank_score_calibration",
+            "high_score_threshold": high_score_threshold,
+            "high_score_threshold_source": "0.75 + shadow_p_up_edge_q25",
+            "previous_high_score_threshold": 0.75,
             "high_score_requires_corrected_model_score_gte_threshold": True,
         },
         "NO_TRADE_prior": {
@@ -1066,6 +1085,9 @@ def _learn_o_shadow_ranking_correction(
         base_ranking_correction=config,
     )
     config["group_normalized_raw_model_weight"] = raw_weight
+    config["p_up_misalignment_raw_positive_penalty"] = raw_diagnostics[
+        "selected_raw_weight_candidate"
+    ]["candidate_p_up_misalignment_penalty"]
     config["shadow_component_diagnostics"]["raw_model"] = raw_diagnostics
     config["correction_config_hash"] = canonical_json_sha256(config)
     return config
@@ -1154,78 +1176,98 @@ def _derive_shadow_raw_model_weight(
     candidate_weights = _shadow_raw_weight_candidates(
         base_ranking_correction["p_up_edge_quantiles"]
     )
-    p_up_safety_margin = 0.75
-    max_shadow_p_up_disagreement_rate = (
-        O_MAX_P_UP_ACTION_DISAGREEMENT_RATE * p_up_safety_margin
+    candidate_penalties = _shadow_p_up_misalignment_penalty_candidates(
+        base_ranking_correction["p_up_edge_quantiles"]
+    )
+    max_shadow_p_up_disagreement_rate = float(
+        base_ranking_correction["shadow_p_up_selection_max_disagreement_rate"]
     )
     candidate_rows = []
     for weight in candidate_weights:
-        candidate_config = {
-            **base_ranking_correction,
-            "group_normalized_raw_model_weight": weight,
-        }
-        ranking_rows = _ranking_rows(
-            _apply_o_shadow_ranking_correction(
-                rows=train_rows,
-                deployable_available=True,
-                ranking_correction=candidate_config,
-            )
-        )
-        metrics = _split_metric_views(
-            ranking_rows,
-            O_MODEL_PREDICTED_VARIANT,
-            float(candidate_config["high_score_calibration"]["high_score_threshold"]),
-        )["train_shadow"]
-        p_up_summary = _p_up_action_disagreement_summary(
-            rows=ranking_rows,
-            variant=O_MODEL_PREDICTED_VARIANT,
-            split="shadow",
-        )
-        high_score_profitable = (
-            int(metrics["high_score_support_count"]) >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
-            and float(metrics["high_score_realized_return_mean"]) > 0.0
-            and float(metrics["high_score_realized_return_sum"]) > 0.0
-        )
-        p_up_safety_passed = (
-            int(p_up_summary["candidate_scoped_p_up_action_comparable_count"]) > 0
-            and float(
-                p_up_summary[
-                    "candidate_scoped_p_up_action_disagreement_rate"
-                ]
-            )
-            <= max_shadow_p_up_disagreement_rate
-        )
-        selected_return_sum = float(
-            metrics["selected_action_realized_replay_return_sum"]
-        )
-        eligible = (
-            high_score_profitable
-            and p_up_safety_passed
-            and selected_return_sum > 0.0
-        )
-        candidate_rows.append(
-            {
-                "candidate_weight": weight,
-                "candidate_weight_source": "shadow_p_up_edge_quantile_grid",
-                "shadow_candidate_eligible": eligible,
-                "shadow_high_score_profitable": high_score_profitable,
-                "shadow_p_up_safety_passed": p_up_safety_passed,
-                "shadow_selected_return_sum": selected_return_sum,
-                "shadow_mean_regret": metrics["mean_regret"],
-                "shadow_high_score_support_count": metrics[
-                    "high_score_support_count"
-                ],
-                "shadow_high_score_realized_return_mean": metrics[
-                    "high_score_realized_return_mean"
-                ],
-                "shadow_high_score_realized_return_sum": metrics[
-                    "high_score_realized_return_sum"
-                ],
-                "shadow_p_up_action_disagreement_rate": p_up_summary[
-                    "candidate_scoped_p_up_action_disagreement_rate"
-                ],
+        for penalty in candidate_penalties:
+            candidate_config = {
+                **base_ranking_correction,
+                "group_normalized_raw_model_weight": weight,
+                "p_up_misalignment_raw_positive_penalty": penalty,
             }
-        )
+            ranking_rows = _ranking_rows(
+                _apply_o_shadow_ranking_correction(
+                    rows=train_rows,
+                    deployable_available=True,
+                    ranking_correction=candidate_config,
+                )
+            )
+            metrics = _split_metric_views(
+                ranking_rows,
+                O_MODEL_PREDICTED_VARIANT,
+                float(
+                    candidate_config["high_score_calibration"][
+                        "high_score_threshold"
+                    ]
+                ),
+            )["train_shadow"]
+            p_up_summary = _p_up_action_disagreement_summary(
+                rows=ranking_rows,
+                variant=O_MODEL_PREDICTED_VARIANT,
+                split="shadow",
+            )
+            high_score_profitable = (
+                int(metrics["high_score_support_count"])
+                >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
+                and float(metrics["high_score_realized_return_mean"]) > 0.0
+                and float(metrics["high_score_realized_return_sum"]) > 0.0
+            )
+            p_up_safety_passed = (
+                int(p_up_summary["candidate_scoped_p_up_action_comparable_count"]) > 0
+                and float(
+                    p_up_summary[
+                        "candidate_scoped_p_up_action_disagreement_rate"
+                    ]
+                )
+                <= max_shadow_p_up_disagreement_rate
+            )
+            selected_return_sum = float(
+                metrics["selected_action_realized_replay_return_sum"]
+            )
+            eligible = (
+                high_score_profitable
+                and p_up_safety_passed
+                and selected_return_sum > 0.0
+            )
+            candidate_rows.append(
+                {
+                    "candidate_weight": weight,
+                    "candidate_weight_source": "shadow_p_up_edge_quantile_grid",
+                    "candidate_p_up_misalignment_penalty": penalty,
+                    "candidate_p_up_misalignment_penalty_source": (
+                        "shadow_p_up_edge_quantile_grid"
+                    ),
+                    "shadow_candidate_eligible": eligible,
+                    "shadow_high_score_profitable": high_score_profitable,
+                    "shadow_p_up_safety_passed": p_up_safety_passed,
+                    "shadow_selected_return_sum": selected_return_sum,
+                    "shadow_mean_regret": metrics["mean_regret"],
+                    "shadow_largest_regret_case": metrics["largest_regret_case"],
+                    "shadow_action_family_level_regret": metrics[
+                        "action_family_level_regret"
+                    ],
+                    "shadow_no_trade_missed_opportunity": metrics[
+                        "no_trade_missed_opportunity"
+                    ],
+                    "shadow_high_score_support_count": metrics[
+                        "high_score_support_count"
+                    ],
+                    "shadow_high_score_realized_return_mean": metrics[
+                        "high_score_realized_return_mean"
+                    ],
+                    "shadow_high_score_realized_return_sum": metrics[
+                        "high_score_realized_return_sum"
+                    ],
+                    "shadow_p_up_action_disagreement_rate": p_up_summary[
+                        "candidate_scoped_p_up_action_disagreement_rate"
+                    ],
+                }
+            )
     eligible_candidates = [
         row for row in candidate_rows if bool(row["shadow_candidate_eligible"])
     ]
@@ -1237,6 +1279,7 @@ def _derive_shadow_raw_model_weight(
                 float(row["shadow_high_score_realized_return_sum"]),
                 float(row["shadow_selected_return_sum"]),
                 -float(row["shadow_mean_regret"]),
+                -float(row["candidate_p_up_misalignment_penalty"]),
             ),
         )
     else:
@@ -1252,14 +1295,20 @@ def _derive_shadow_raw_model_weight(
         "raw_model_shadow_metrics": raw_metrics,
         "probe_ranker_shadow_metrics": derived_metrics,
         "raw_weight_candidate_source": "shadow_p_up_edge_quantile_grid",
+        "p_up_misalignment_penalty_candidate_source": (
+            "shadow_p_up_edge_quantile_grid"
+        ),
         "raw_weight_selection_metric_source": "shadow_split_only",
         "raw_weight_selection_objective": (
-            "eligible candidates maximize high-score support, high-score return, "
-            "selected return, then minimize mean_regret"
+            "eligible candidates pass stricter p_up safety, then maximize "
+            "high-score support, high-score return, selected return, and minimize "
+            "mean_regret"
         ),
-        "raw_weight_shadow_p_up_safety_margin": p_up_safety_margin,
         "raw_weight_max_shadow_p_up_disagreement_rate": (
             max_shadow_p_up_disagreement_rate
+        ),
+        "raw_weight_p_up_safety_buffer": (
+            O_MAX_P_UP_ACTION_DISAGREEMENT_RATE - max_shadow_p_up_disagreement_rate
         ),
         "raw_weight_candidate_rows": candidate_rows,
         "selected_raw_weight_candidate": selected,
@@ -1282,6 +1331,25 @@ def _shadow_raw_weight_candidates(
         q25 + q75,
         median + q75,
         q25 + median + q75,
+        2.0 * q75,
+    }
+    return sorted(_bounded(value, 0.0, 1.0) for value in candidates)
+
+
+def _shadow_p_up_misalignment_penalty_candidates(
+    p_edge_quantiles: dict[str, float],
+) -> list[float]:
+    q25 = float(p_edge_quantiles["q25"])
+    median = float(p_edge_quantiles["median"])
+    q75 = float(p_edge_quantiles["q75"])
+    candidates = {
+        0.0,
+        q25,
+        median,
+        q75,
+        q25 + median,
+        q25 + q75,
+        median + q75,
         2.0 * q75,
     }
     return sorted(_bounded(value, 0.0, 1.0) for value in candidates)
@@ -1484,14 +1552,25 @@ def _o_model_score_components(
         float(ranking_correction["action_shadow_priors"].get(action, 0.0))
         + float(ranking_correction["action_family_shadow_priors"].get(family, 0.0))
     )
+    raw_component = (
+        float(ranking_correction["group_normalized_raw_model_weight"])
+        * _bounded(raw_z, -2.0, 2.0)
+    )
+    p_up_misalignment_penalty = 0.0
+    if (
+        ("BUY_UP" in action or "BUY_DOWN" in action)
+        and side_alignment_component < 0.0
+        and raw_component > 0.0
+    ):
+        p_up_misalignment_penalty = -float(
+            ranking_correction.get("p_up_misalignment_raw_positive_penalty", 0.0)
+        )
     return {
         "base_score": base_score,
         "p_up_side_alignment_component": side_alignment_component,
         "confidence_or_weak_opportunity_component": confidence_component,
-        "group_normalized_raw_model_component": (
-            float(ranking_correction["group_normalized_raw_model_weight"])
-            * _bounded(raw_z, -2.0, 2.0)
-        ),
+        "group_normalized_raw_model_component": raw_component,
+        "p_up_misalignment_penalty_component": p_up_misalignment_penalty,
         "shadow_action_family_prior_component": (
             float(ranking_correction["shadow_action_family_prior_weight"]) * prior
         ),
@@ -1709,14 +1788,15 @@ def _ranking_report(
     rows: list[dict[str, Any]],
     model_training_summary: dict[str, Any],
 ) -> dict[str, Any]:
+    high_score_threshold = _model_high_score_threshold(model_training_summary)
     variant_metrics = {
-        variant: _ranking_metrics(rows, variant, config.high_score_threshold)
+        variant: _ranking_metrics(rows, variant, high_score_threshold)
         for variant in O_VARIANTS
     }
     split_metrics = _split_metric_views(
         rows,
         O_MODEL_PREDICTED_VARIANT,
-        config.high_score_threshold,
+        high_score_threshold,
     )
     report = {
         "schema_version": O_SOURCE_RANKING_OBJECTIVE_SCHEMA_VERSION,
@@ -1748,6 +1828,10 @@ def _ranking_report(
         "correction_config_hash": model_training_summary["correction_config_hash"],
         "probe_constants_source": model_training_summary["probe_constants_source"],
         "probe_config_hash": model_training_summary["probe_config_hash"],
+        "high_score_threshold": high_score_threshold,
+        "high_score_threshold_source": model_training_summary[
+            "ranking_correction_config"
+        ]["high_score_calibration"]["high_score_threshold_source"],
         "label_diagnostic_variants": list(O_LABEL_DIAGNOSTIC_VARIANTS),
         "label_diagnostic_variants_deployable": False,
         "ranking_metric_scope": variant_metrics[O_MODEL_PREDICTED_VARIANT][
@@ -1855,9 +1939,10 @@ def _comparison_report(
     model_training_summary: dict[str, Any],
 ) -> dict[str, Any]:
     candidate_rows = []
+    high_score_threshold = _model_high_score_threshold(model_training_summary)
     for variant in O_VARIANTS:
-        metrics = _ranking_metrics(rows, variant, config.high_score_threshold)
-        split_metrics = _split_metric_views(rows, variant, config.high_score_threshold)
+        metrics = _ranking_metrics(rows, variant, high_score_threshold)
+        split_metrics = _split_metric_views(rows, variant, high_score_threshold)
         reasons = [
             "diagnostic_only_no_paper_live_unlock",
             "current_m_m2_n_n2_evidence_not_o_promotion_evidence",
@@ -1986,10 +2071,11 @@ def _source_model_eligibility_gate_report(
     model_training_summary: dict[str, Any],
     leakage_report: dict[str, Any],
 ) -> dict[str, Any]:
+    high_score_threshold = _model_high_score_threshold(model_training_summary)
     validation_metrics = _split_metric_views(
         rows,
         O_MODEL_PREDICTED_VARIANT,
-        config.high_score_threshold,
+        high_score_threshold,
     )["validation"]
     p_up_summary = _p_up_action_disagreement_summary(
         rows=rows,
@@ -2074,6 +2160,10 @@ def _source_model_eligibility_gate_report(
         "correction_config_hash": model_training_summary["correction_config_hash"],
         "probe_constants_source": model_training_summary["probe_constants_source"],
         "probe_config_hash": model_training_summary["probe_config_hash"],
+        "high_score_threshold": high_score_threshold,
+        "high_score_threshold_source": model_training_summary[
+            "ranking_correction_config"
+        ]["high_score_calibration"]["high_score_threshold_source"],
         "correction_config_hash_verified": (
             canonical_json_sha256(
                 _without_key(
@@ -2099,13 +2189,13 @@ def _source_model_eligibility_gate_report(
         "train_shadow_metrics": _split_metric_views(
             rows,
             O_MODEL_PREDICTED_VARIANT,
-            config.high_score_threshold,
+            high_score_threshold,
         )["train_shadow"],
         "validation_metrics": validation_metrics,
         "all_metrics": _split_metric_views(
             rows,
             O_MODEL_PREDICTED_VARIANT,
-            config.high_score_threshold,
+            high_score_threshold,
         )["all"],
         "gate_thresholds": {
             "min_validation_decision_group_count": O_MIN_VALIDATION_DECISION_GROUPS,
@@ -2118,6 +2208,14 @@ def _source_model_eligibility_gate_report(
             ),
             "high_score_realized_return_mean_must_be_positive": True,
             "high_score_realized_return_sum_must_be_positive": True,
+            "high_score_threshold": high_score_threshold,
+            "high_score_threshold_source": model_training_summary[
+                "ranking_correction_config"
+            ]["high_score_calibration"]["high_score_threshold_source"],
+            "p_up_safety_target_disagreement_rate": model_training_summary[
+                "ranking_correction_config"
+            ]["p_up_safety_target_disagreement_rate"],
+            "p_up_safety_target_is_hard_gate": False,
         },
         "source_model_candidate_eligible": source_model_candidate_eligible,
         "calibration_support_passed": calibration_support_passed,
@@ -2158,6 +2256,21 @@ def _source_model_eligibility_gate_report(
             "side_selected_return_breakdown"
         ],
         "p_up_action_disagreement_summary": p_up_summary,
+        "p_up_safety_target_met": (
+            float(
+                p_up_summary[
+                    "candidate_scoped_p_up_action_disagreement_rate"
+                ]
+            )
+            < float(
+                model_training_summary["ranking_correction_config"][
+                    "p_up_safety_target_disagreement_rate"
+                ]
+            )
+        ),
+        "p_up_safety_target_note": (
+            "diagnostic_target_not_hard_gate_shadow_selection_prioritizes_buffer"
+        ),
         "leakage_audit_passed": leakage_passed,
         "ineligible_reason_codes": reason_codes,
         "future_unseen_holdout_required": True,
@@ -2258,7 +2371,9 @@ def _freeze_readiness_report(
         "candidate_config_hash": canonical_json_sha256(
             {
                 "candidate_name": O_MODEL_PREDICTED_VARIANT,
-                "high_score_threshold": config.high_score_threshold,
+                "high_score_threshold": _model_high_score_threshold(
+                    model_training_summary
+                ),
                 "gate_thresholds": eligibility_gate_report["gate_thresholds"],
                 "feature_names": list(O_DEPLOYABLE_MODEL_FEATURE_NAMES),
                 "ranking_correction_config": model_training_summary[
@@ -2406,6 +2521,8 @@ def _ranking_metrics(
     high_score_returns = []
     split_rows: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
     no_trade_selection_count = 0
+    no_trade_missed_opportunities = []
+    largest_regret_case: dict[str, Any] | None = None
     completeness_summary = _decision_group_completeness_summary(rows)
     source_score_summary = _source_score_completeness_summary(rows)
     source_scores_complete_for_variant = (
@@ -2430,6 +2547,22 @@ def _ranking_metrics(
         selected_return = float(selected["realized_replay_return"])
         regret = oracle_return - selected_return
         regrets.append(regret)
+        if largest_regret_case is None or regret > float(largest_regret_case["regret"]):
+            largest_regret_case = {
+                "decision_group_id": selected["decision_group_id"],
+                "market_id": selected.get("market_id"),
+                "decision_ts": selected.get("decision_ts"),
+                "selected_action": selected.get("action"),
+                "selected_action_family": selected.get("action_family"),
+                "selected_side": selected.get("selected_side"),
+                "selected_return": selected_return,
+                "selected_score": float(selected["variant_scores"][variant]),
+                "oracle_action": oracle.get("action"),
+                "oracle_action_family": oracle.get("action_family"),
+                "oracle_side": oracle.get("selected_side"),
+                "oracle_return": oracle_return,
+                "regret": regret,
+            }
         selected_returns.append(selected_return)
         oracle_returns.append(oracle_return)
         confusion[(selected["action_family"], oracle["action_family"])] += 1
@@ -2440,6 +2573,7 @@ def _ranking_metrics(
         side_regret[selected_side].append(regret)
         if selected["action_family"] == "NO_TRADE":
             no_trade_selection_count += 1
+            no_trade_missed_opportunities.append(max(0.0, oracle_return))
         for k in (1, 2, 3):
             if oracle["action"] in {row["action"] for row in predicted[:k]}:
                 top_hits[k] += 1
@@ -2489,11 +2623,28 @@ def _ranking_metrics(
             selected_returns_by_side
         ),
         "largest_winner_dependency": _largest_winner_dependency(selected_returns),
+        "largest_regret_case": largest_regret_case or {},
         "no_trade_opportunity_cost_mean": statistics.mean(
             max(0.0, item) for item in oracle_returns
         )
         if oracle_returns
         else 0.0,
+        "no_trade_missed_opportunity": {
+            "selected_no_trade_count": no_trade_selection_count,
+            "missed_positive_opportunity_count": sum(
+                1 for value in no_trade_missed_opportunities if value > 0.0
+            ),
+            "missed_positive_opportunity_sum": sum(no_trade_missed_opportunities),
+            "missed_positive_opportunity_mean": statistics.mean(
+                no_trade_missed_opportunities
+            )
+            if no_trade_missed_opportunities
+            else 0.0,
+            "max_missed_positive_opportunity": max(
+                no_trade_missed_opportunities,
+                default=0.0,
+            ),
+        },
         "action_family_level_regret": {
             family: statistics.mean(values) for family, values in family_regret.items()
         },
@@ -2579,6 +2730,12 @@ def _eligibility_metric_view(metrics: dict[str, Any]) -> dict[str, Any]:
         ],
         "side_selected_return_breakdown": metrics["side_selected_return_breakdown"],
         "largest_winner_dependency": metrics["largest_winner_dependency"],
+        "largest_regret_case": metrics["largest_regret_case"],
+        "action_family_level_regret": metrics["action_family_level_regret"],
+        "side_level_regret": metrics["side_level_regret"],
+        "no_trade_missed_opportunity": metrics["no_trade_missed_opportunity"],
+        "no_trade_opportunity_cost_mean": metrics["no_trade_opportunity_cost_mean"],
+        "ranking_confusion_matrix": metrics["ranking_confusion_matrix"],
     }
 
 
@@ -2619,6 +2776,14 @@ def _ranking_score_source(variant: str) -> str:
     if variant == "current_source_baseline":
         return "observed_source_score"
     return "label_diagnostic_score"
+
+
+def _model_high_score_threshold(model_training_summary: dict[str, Any]) -> float:
+    return float(
+        model_training_summary["ranking_correction_config"][
+            "high_score_calibration"
+        ]["high_score_threshold"]
+    )
 
 
 def _deployable_model_score_available(rows: list[dict[str, Any]], variant: str) -> bool:
