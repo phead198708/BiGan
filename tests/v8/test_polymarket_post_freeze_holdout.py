@@ -32,6 +32,11 @@ from bigan.v8.polymarket.training.post_freeze_promotion_readiness_audit import (
     PolymarketPostFreezePromotionReadinessAuditConfig,
     run_polymarket_m_post_freeze_promotion_readiness_audit,
 )
+from bigan.v8.polymarket.training.post_freeze_weak_evidence_drilldown import (
+    M_POST_FREEZE_WEAK_EVIDENCE_DRILLDOWN_SCHEMA_VERSION,
+    PolymarketPostFreezeWeakEvidenceDrilldownConfig,
+    run_polymarket_m_post_freeze_weak_evidence_drilldown,
+)
 
 
 def test_post_freeze_holdout_blocks_same_lineage_before_prediction(
@@ -601,6 +606,143 @@ def test_post_freeze_promotion_readiness_audit_explains_weak_evidence(
         < 1e-12
     )
     assert report["top_negative_replay_entries"][0]["market_id"] == "up-failed-market"
+    assert report["#146_start_allowed"] is False
+    assert report["#134_resume_allowed"] is False
+    assert result.artifact_paths["report"].exists()
+    assert result.artifact_paths["summary"].exists()
+
+
+def test_post_freeze_weak_evidence_drilldown_explains_root_causes(
+    tmp_path: Path,
+) -> None:
+    up_failed_payload = _holdout_validation_report(
+        run_id="up-failed",
+        market_ids=("up-failed-market-a", "up-failed-market-b"),
+        replay_rows=[
+            _replay_row(
+                market_id="up-failed-market-a",
+                decision_ts=10,
+                side="UP",
+                pnl=-0.05,
+            ),
+            _replay_row(
+                market_id="up-failed-market-b",
+                decision_ts=20,
+                side="UP",
+                pnl=-0.02,
+            ),
+        ],
+        replay_pnl_by_side={"UP": -0.07, "DOWN": 0.0},
+    )
+    up_failed_payload["ineligible_reason_codes"] = [
+        "post_freeze_holdout_validation_not_passed",
+        "diagnostic_only_no_paper_live_unlock",
+    ]
+    up_failed_payload["m_post_freeze_holdout_validation_report_id"] = (
+        canonical_json_sha256(up_failed_payload)
+    )
+    up_failed = _write_holdout_report(tmp_path / "up_failed", up_failed_payload)
+
+    blocked_selected_row = _replay_row(
+        market_id="blocked-selected-market",
+        decision_ts=40,
+        side="DOWN",
+        pnl=0.0,
+        side_quota_selected=True,
+        entry_order_opened=False,
+    )
+    blocked_selected_row["replay_reason_codes"] = [
+        "turnover_guard_blocked",
+        "max_entry_guard_blocked",
+    ]
+    blocked_selected_row["attrition_reason_codes"] = [
+        "turnover_guard_blocked",
+        "max_entry_guard_blocked",
+    ]
+    down_passed = _write_holdout_report(
+        tmp_path / "down_passed",
+        _holdout_validation_report(
+            run_id="down-passed",
+            market_ids=("down-passed-market", "blocked-selected-market"),
+            replay_rows=[
+                _replay_row(
+                    market_id="down-passed-market",
+                    decision_ts=30,
+                    side="DOWN",
+                    pnl=0.20,
+                )
+            ],
+            replay_pnl_by_side={"UP": 0.0, "DOWN": 0.20},
+            extra_rows=[blocked_selected_row],
+        ),
+    )
+    accumulation = run_polymarket_m_post_freeze_holdout_accumulation(
+        PolymarketPostFreezeHoldoutAccumulationConfig(
+            holdout_report_paths=(up_failed, down_passed),
+            output_dir=tmp_path / "accumulation",
+            min_replay_entry_support=3,
+            min_unique_market_support=3,
+        )
+    )
+    audit = run_polymarket_m_post_freeze_promotion_readiness_audit(
+        PolymarketPostFreezePromotionReadinessAuditConfig(
+            accumulation_report_path=accumulation.artifact_paths["report"],
+            output_dir=tmp_path / "audit",
+        )
+    )
+
+    result = run_polymarket_m_post_freeze_weak_evidence_drilldown(
+        PolymarketPostFreezeWeakEvidenceDrilldownConfig(
+            promotion_readiness_audit_path=audit.artifact_paths["report"],
+            accumulation_report_path=accumulation.artifact_paths["report"],
+            output_dir=tmp_path / "drilldown",
+        )
+    )
+
+    report = result.report
+    payload = dict(report)
+    report_id = payload.pop("m_post_freeze_weak_evidence_drilldown_report_id")
+    assert canonical_json_sha256(payload) == report_id
+    assert report["schema_version"] == M_POST_FREEZE_WEAK_EVIDENCE_DRILLDOWN_SCHEMA_VERSION
+    assert report["support_gate_passed"] is True
+    assert report["promotion_evidence_eligible"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["root_cause_classification"] == "mixed"
+    assert report["weakness_type"] == "structural_or_mixed_not_sample_size_driven"
+    assert report["failed_included_holdout_run_count"] == 1
+    assert report["failed_run_ineligible_reason_code_counts"][
+        "post_freeze_holdout_validation_not_passed"
+    ] == 1
+    assert report["failed_runs_by_replay_pnl_sign"]["negative_count"] == 1
+    assert report["up_loss_entry_count"] == 2
+    assert report["down_loss_entry_count"] == 0
+    assert report["selected_without_replay_run_count"] == 1
+    assert report["selected_without_replay_row_count"] == 1
+    assert report["turnover_or_max_entry_blocked_selected_row_count"] == 1
+    assert report["root_cause_indicators"]["execution_attrition"] is True
+    assert report["root_cause_indicators"]["side_imbalance"] is True
+    assert report["root_cause_indicators"]["winner_concentration"] is True
+    assert report["root_cause_indicators"]["structural_weakness"] is True
+    assert report["largest_winner_dependency"][
+        "winner_concentration_detected"
+    ] is True
+    assert (
+        abs(
+            report["largest_winner_dependency"][
+                "total_pnl_after_largest_positive_entry_removed"
+            ]
+            - -0.07
+        )
+        < 1e-12
+    )
+    assert report["median_entry_pnl_weakness"]["median_entry_pnl_non_positive"] is True
+    assert report["median_entry_pnl_weakness"]["median_entry_pnl"] == -0.02
+    assert report["top_positive_replay_entries"][0]["market_id"] == "down-passed-market"
+    assert report["top_negative_replay_entries"][0]["market_id"] == "up-failed-market-a"
+    assert report["recommended_next_action"] == "keep_blocked"
+    assert "investigate_side_specific_weakness" in report["recommended_next_actions"]
+    assert "investigate_execution_attrition" in report["recommended_next_actions"]
+    assert "reject_promotion_for_now" in report["recommended_next_actions"]
     assert report["#146_start_allowed"] is False
     assert report["#134_resume_allowed"] is False
     assert result.artifact_paths["report"].exists()
