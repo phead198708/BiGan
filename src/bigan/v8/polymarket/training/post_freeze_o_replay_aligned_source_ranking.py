@@ -90,6 +90,8 @@ O_VARIANTS = (
 O_REQUIRED_DECISION_ACTION_FAMILIES = (
     "BUY_UP_SELL_BEFORE_CLOSE",
     "BUY_DOWN_SELL_BEFORE_CLOSE",
+    "BUY_UP_HOLD_TO_SETTLEMENT",
+    "BUY_DOWN_HOLD_TO_SETTLEMENT",
     "NO_TRADE",
 )
 O_FULL_DECISION_GROUP_SCOPE = "full_decision_group"
@@ -219,13 +221,12 @@ def _build_reports(
     m2_report = _read_json(m2_report_path)
     if m2_report.get("schema_version") != M2_REPLAY_PARITY_SCHEMA_VERSION:
         raise ValueError("not an M2 replay-parity candidate report")
-    rows, source_reports = _load_source_rows(m2_report)
-    action_rows = [
-        _normalize_action_row(row)
-        for row in rows
-        if str(row.get("action") or "").endswith("SELL_BEFORE_CLOSE")
-    ]
-    grouped = _groups_with_no_trade(action_rows)
+    rows, source_reports, label_lookup = _load_source_rows(m2_report)
+    action_rows = _build_complete_decision_action_rows(
+        rows=rows,
+        label_lookup=label_lookup,
+    )
+    grouped = _groups_with_required_actions(action_rows)
     labeled_rows = _construct_replay_aligned_labels(grouped)
     ranking_rows = _ranking_rows(labeled_rows)
     label_report = _label_report(
@@ -258,7 +259,11 @@ def _build_reports(
 
 def _load_source_rows(
     m2_report: dict[str, Any],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[tuple[str, str, int, str], dict[str, Any]],
+]:
     paths = sorted(
         {
             str(row.get("source_report_path") or "")
@@ -271,16 +276,33 @@ def _load_source_rows(
     )
     rows: list[dict[str, Any]] = []
     source_reports = []
+    label_lookup: dict[tuple[str, str, int, str], dict[str, Any]] = {}
     seen: set[tuple[str, str, int, str]] = set()
     for path_text in paths:
         path = Path(path_text).expanduser().resolve()
         report = _read_json(path)
+        source_label_rows, source_label_path = _load_source_label_rows(report)
+        for label_row in source_label_rows:
+            label_lookup[
+                (
+                    str(path),
+                    str(label_row.get("market_id") or ""),
+                    int(label_row.get("decision_ts") or 0),
+                    str(label_row.get("action") or ""),
+                )
+            ] = label_row
         source_reports.append(
             {
                 "source_report_path": str(path),
                 "source_report_sha256": _sha256_file(path),
                 "run_id": report.get("run_id"),
                 "row_count": len(report.get("rows", [])),
+                "holdout_corpus_dir": report.get("provenance", {}).get(
+                    "holdout_corpus_dir"
+                ),
+                "label_rows_path": str(source_label_path) if source_label_path else None,
+                "label_row_count": len(source_label_rows),
+                "full_action_label_rows_available": bool(source_label_rows),
             }
         )
         for row in report.get("rows", []):
@@ -296,7 +318,183 @@ def _load_source_rows(
                 continue
             seen.add(key)
             rows.append(payload)
-    return rows, source_reports
+    return rows, source_reports, label_lookup
+
+
+def _load_source_label_rows(report: dict[str, Any]) -> tuple[list[dict[str, Any]], Path | None]:
+    corpus_dir_text = str(report.get("provenance", {}).get("holdout_corpus_dir") or "")
+    if not corpus_dir_text:
+        return [], None
+    label_path = Path(corpus_dir_text).expanduser().resolve() / "polymarket_label_rows.jsonl"
+    if not label_path.exists():
+        return [], label_path
+    return _read_jsonl(label_path), label_path
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    return [
+        _read_json_line(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _read_json_line(line: str) -> dict[str, Any]:
+    import json
+
+    return json.loads(line)
+
+
+def _build_complete_decision_action_rows(
+    *,
+    rows: list[dict[str, Any]],
+    label_lookup: dict[tuple[str, str, int, str], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    contexts: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        contexts[
+            (
+                str(row.get("source_report_path") or ""),
+                str(row.get("market_id") or ""),
+                int(row.get("decision_ts") or 0),
+            )
+        ].append(row)
+    action_rows = []
+    for context_key, context_rows in sorted(contexts.items()):
+        source_report_path, market_id, decision_ts = context_key
+        template = _decision_template(context_rows)
+        observed_by_action = {
+            str(row.get("action") or ""): row
+            for row in context_rows
+            if row.get("action")
+        }
+        for action in O_REQUIRED_DECISION_ACTION_FAMILIES:
+            label_row = label_lookup.get(
+                (source_report_path, market_id, decision_ts, action)
+            )
+            observed_row = observed_by_action.get(action)
+            action_rows.append(
+                _normalize_action_row(
+                    _candidate_row_from_label_or_template(
+                        template=template,
+                        action=action,
+                        label_row=label_row,
+                        observed_row=observed_row,
+                    )
+                )
+            )
+    return action_rows
+
+
+def _decision_template(context_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return max(
+        context_rows,
+        key=lambda row: (
+            bool(row.get("side_quota_selected")),
+            bool(row.get("entry_order_opened")),
+            float(row.get("raw_calibrated_action_score") or 0.0),
+        ),
+    )
+
+
+def _candidate_row_from_label_or_template(
+    *,
+    template: dict[str, Any],
+    action: str,
+    label_row: dict[str, Any] | None,
+    observed_row: dict[str, Any] | None,
+) -> dict[str, Any]:
+    base = dict(template)
+    base["action"] = action
+    base["selected_side"] = _side_from_action(action)
+    base["candidate_observation_type"] = (
+        "observed_replay_action" if observed_row is not None else "counterfactual_action"
+    )
+    base["observed_replay_action"] = observed_row is not None
+    if observed_row is not None:
+        base["observed_total_polymarket_pnl"] = _pnl(observed_row)
+        base["observed_replay_reason_codes"] = observed_row.get("replay_reason_codes", [])
+    if label_row is None:
+        base["candidate_label_source"] = "synthetic_missing_label_fallback"
+        base["label_candidate_available"] = False
+        base["source_score_available"] = observed_row is not None
+        if observed_row is not None:
+            base.update(observed_row)
+            base["candidate_observation_type"] = "observed_replay_action"
+            base["observed_replay_action"] = True
+        else:
+            base["action_return_target"] = 0.0
+            base["label_pnl_target"] = 0.0
+            base["total_polymarket_pnl"] = 0.0
+            base["raw_calibrated_action_score"] = 0.0
+            base["best_action_margin"] = 0.0
+        return base
+    label_target = _label_target_from_corpus_label(label_row)
+    base.update(
+        {
+            "candidate_label_source": "holdout_corpus_label_rows",
+            "label_candidate_available": True,
+            "source_score_available": observed_row is not None,
+            "action_return_target": label_target,
+            "label_pnl_target": label_target,
+            "total_polymarket_pnl": label_target,
+            "realized_trade_pnl": float(label_row.get("realized_trade_return") or 0.0),
+            "settlement_pnl": float(label_row.get("settlement_return") or 0.0),
+            "entry_quality_ask": float(label_row.get("entry_ask") or 0.0),
+            "exit_quality_bid": float(label_row.get("exit_bid") or 0.0),
+            "execution_pnl_immediate_exit_pnl": label_target,
+            "execution_pnl_immediate_exit_return": float(
+                label_row.get("total_net_return") or label_target
+            ),
+            "sell_before_close_execution_class": label_row.get(
+                "sell_before_close_execution_class"
+            ),
+            "label_uses_executable_exit_path": bool(
+                label_row.get("label_uses_executable_exit_path")
+            ),
+            "queue_fill_probability_estimate": float(
+                label_row.get("queue_fill_probability_estimate") or 0.0
+            ),
+            "executable_liquidity_notional": float(
+                label_row.get("executable_liquidity_notional") or 0.0
+            ),
+            "theoretical_terminal_bid_return": float(
+                label_row.get("theoretical_terminal_bid_return") or 0.0
+            ),
+            "realized_executable_sell_before_close_return": float(
+                label_row.get("realized_executable_sell_before_close_return") or 0.0
+            ),
+            "execution_gap_return": float(label_row.get("execution_gap_return") or 0.0),
+        }
+    )
+    if observed_row is not None:
+        base["raw_calibrated_action_score"] = _score(observed_row)
+        base["best_action_margin"] = float(observed_row.get("best_action_margin") or 0.0)
+    else:
+        base["raw_calibrated_action_score"] = _counterfactual_source_score(
+            template=template,
+            action=action,
+        )
+        base["best_action_margin"] = 0.0
+    return base
+
+
+def _label_target_from_corpus_label(label_row: dict[str, Any]) -> float:
+    if label_row.get("total_net_pnl_per_notional") is not None:
+        return float(label_row["total_net_pnl_per_notional"])
+    if label_row.get("total_net_return") is not None:
+        return float(label_row["total_net_return"])
+    return 0.0
+
+
+def _counterfactual_source_score(
+    *,
+    template: dict[str, Any],
+    action: str,
+) -> float:
+    if action == str(template.get("action") or ""):
+        return _score(template)
+    return 0.0
 
 
 def _normalize_action_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -320,34 +518,25 @@ def _normalize_action_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _groups_with_no_trade(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _groups_with_required_actions(
+    rows: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         groups[row["decision_group_id"]].append(row)
-    for group_id, group_rows in list(groups.items()):
-        template = group_rows[0]
-        groups[group_id].append(
-            {
-                "source_report_path": template.get("source_report_path"),
-                "market_id": template.get("market_id"),
-                "slug": template.get("slug"),
-                "decision_ts": int(template.get("decision_ts") or 0),
-                "selected_side": "NONE",
-                "action": "NO_TRADE",
-                "action_family": "NO_TRADE",
-                "decision_group_id": group_id,
-                "original_label_target": 0.0,
-                "realized_replay_return": 0.0,
-                "baseline_source_score": 0.0,
-                "synthetic_no_trade_action": True,
-            }
-        )
-        _annotate_decision_group_completeness(groups[group_id])
+    for group_rows in groups.values():
+        _annotate_decision_group_completeness(group_rows)
     return groups
 
 
 def _annotate_decision_group_completeness(group_rows: list[dict[str, Any]]) -> None:
-    available = sorted({_decision_action_family(row) for row in group_rows})
+    available = sorted(
+        {
+            _decision_action_family(row)
+            for row in group_rows
+            if bool(row.get("label_candidate_available", True))
+        }
+    )
     missing = sorted(set(O_REQUIRED_DECISION_ACTION_FAMILIES).difference(available))
     complete = not missing
     scope = (
@@ -399,6 +588,8 @@ def _construct_replay_aligned_labels(
 
 
 def _base_replay_label(row: dict[str, Any]) -> float:
+    if row.get("candidate_label_source") == "holdout_corpus_label_rows":
+        return float(row.get("original_label_target") or 0.0)
     if row.get("action") == "NO_TRADE":
         return 0.0
     original = float(row.get("original_label_target") or 0.0)
@@ -526,6 +717,9 @@ def _label_report(
         "decision_group_completeness_summary": _decision_group_completeness_summary(
             rows
         ),
+        "action_candidate_construction_summary": _action_candidate_construction_summary(
+            rows
+        ),
         "label_rows": [_compact_label_row(row) for row in rows],
         "label_component_field_classes": _label_component_field_classes(),
         "label_gap_before": sum(
@@ -592,6 +786,9 @@ def _ranking_report(
         "decision_group_completeness_summary": variant_metrics[
             "o_replay_aligned_labels_family_priors"
         ]["decision_group_completeness_summary"],
+        "action_candidate_construction_summary": _action_candidate_construction_summary(
+            rows
+        ),
         "full_source_model_ranking_quality_claimed": variant_metrics[
             "o_replay_aligned_labels_family_priors"
         ]["full_source_model_ranking_quality_claimed"],
@@ -707,6 +904,9 @@ def _comparison_report(
                 "decision_group_completeness_summary": metrics[
                     "decision_group_completeness_summary"
                 ],
+                "source_score_completeness_summary": metrics[
+                    "source_score_completeness_summary"
+                ],
                 "full_source_model_ranking_quality_claimed": metrics[
                     "full_source_model_ranking_quality_claimed"
                 ],
@@ -764,6 +964,11 @@ def _ranking_metrics(
     high_score_returns = []
     split_rows: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
     completeness_summary = _decision_group_completeness_summary(rows)
+    source_score_summary = _source_score_completeness_summary(rows)
+    source_scores_complete_for_variant = (
+        variant != "current_source_baseline"
+        or source_score_summary["source_score_complete"]
+    )
     for group_rows in groups.values():
         predicted = sorted(
             group_rows,
@@ -798,9 +1003,11 @@ def _ranking_metrics(
         "decision_group_count": group_count,
         "ranking_metric_scope": completeness_summary["ranking_metric_scope"],
         "decision_group_completeness_summary": completeness_summary,
+        "source_score_completeness_summary": source_score_summary,
         "full_source_model_ranking_quality_claimed": completeness_summary[
             "all_decision_groups_complete"
-        ],
+        ]
+        and source_scores_complete_for_variant,
         "top1_realized_best_action_hit_rate": top_hits[1] / group_count
         if group_count
         else 0.0,
@@ -888,6 +1095,47 @@ def _decision_group_completeness_summary(rows: list[dict[str, Any]]) -> dict[str
     }
 
 
+def _action_candidate_construction_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    decision_groups = {row["decision_group_id"] for row in rows}
+    source_counts = Counter(str(row.get("candidate_label_source") or "unknown") for row in rows)
+    observation_counts = Counter(
+        str(row.get("candidate_observation_type") or "unknown") for row in rows
+    )
+    action_counts = Counter(str(row.get("action") or "UNKNOWN") for row in rows)
+    label_available_count = sum(1 for row in rows if row.get("label_candidate_available"))
+    source_score_available_count = sum(
+        1 for row in rows if row.get("source_score_available")
+    )
+    return {
+        "required_actions": list(O_REQUIRED_DECISION_ACTION_FAMILIES),
+        "decision_group_count": len(decision_groups),
+        "candidate_row_count": len(rows),
+        "expected_candidate_row_count": len(decision_groups)
+        * len(O_REQUIRED_DECISION_ACTION_FAMILIES),
+        "complete_action_candidate_grid": len(rows)
+        == len(decision_groups) * len(O_REQUIRED_DECISION_ACTION_FAMILIES),
+        "label_candidate_available_count": label_available_count,
+        "missing_label_candidate_count": len(rows) - label_available_count,
+        "source_score_available_count": source_score_available_count,
+        "missing_source_score_count": len(rows) - source_score_available_count,
+        "candidate_label_source_counts": dict(sorted(source_counts.items())),
+        "candidate_observation_type_counts": dict(sorted(observation_counts.items())),
+        "action_counts": dict(sorted(action_counts.items())),
+    }
+
+
+def _source_score_completeness_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    available_count = sum(1 for row in rows if row.get("source_score_available"))
+    return {
+        "source_score_available_count": available_count,
+        "missing_source_score_count": len(rows) - available_count,
+        "source_score_complete": available_count == len(rows),
+        "source_score_scope": "observed_replay_actions_only"
+        if available_count != len(rows)
+        else "all_action_candidates",
+    }
+
+
 def _split_metrics(values: list[tuple[float, float, float]]) -> dict[str, float]:
     if not values:
         return {"raw_mae": 0.0, "calibrated_mae": 0.0}
@@ -960,6 +1208,10 @@ def _compact_label_row(row: dict[str, Any]) -> dict[str, Any]:
         "decision_ts": row.get("decision_ts"),
         "action": row.get("action"),
         "action_family": row.get("action_family"),
+        "candidate_observation_type": row.get("candidate_observation_type"),
+        "candidate_label_source": row.get("candidate_label_source"),
+        "label_candidate_available": row.get("label_candidate_available"),
+        "source_score_available": row.get("source_score_available"),
         "decision_group_completeness": row["decision_group_completeness"],
         "available_action_families": row["available_action_families"],
         "missing_action_families": row["missing_action_families"],
@@ -989,6 +1241,10 @@ def _compact_ranking_row(row: dict[str, Any], variant: str) -> dict[str, Any]:
         "decision_ts": row.get("decision_ts"),
         "action": row.get("action"),
         "action_family": row.get("action_family"),
+        "candidate_observation_type": row.get("candidate_observation_type"),
+        "candidate_label_source": row.get("candidate_label_source"),
+        "label_candidate_available": row.get("label_candidate_available"),
+        "source_score_available": row.get("source_score_available"),
         "decision_group_completeness": row["decision_group_completeness"],
         "available_action_families": row["available_action_families"],
         "missing_action_families": row["missing_action_families"],

@@ -1876,6 +1876,58 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         ),
     )
     source_payload = _read_json(source_report)
+    label_rows = []
+    for market_id, decision_ts, targets in (
+        (
+            "o-market-a",
+            10,
+            {
+                "BUY_UP_SELL_BEFORE_CLOSE": -0.10,
+                "BUY_DOWN_SELL_BEFORE_CLOSE": 0.08,
+                "BUY_UP_HOLD_TO_SETTLEMENT": -0.20,
+                "BUY_DOWN_HOLD_TO_SETTLEMENT": 0.12,
+                "NO_TRADE": 0.0,
+            },
+        ),
+        (
+            "o-market-a",
+            20,
+            {
+                "BUY_UP_SELL_BEFORE_CLOSE": -0.05,
+                "BUY_DOWN_SELL_BEFORE_CLOSE": 0.12,
+                "BUY_UP_HOLD_TO_SETTLEMENT": -0.30,
+                "BUY_DOWN_HOLD_TO_SETTLEMENT": 0.20,
+                "NO_TRADE": 0.0,
+            },
+        ),
+        (
+            "o-market-b",
+            30,
+            {
+                "BUY_UP_SELL_BEFORE_CLOSE": -0.03,
+                "BUY_DOWN_SELL_BEFORE_CLOSE": -0.08,
+                "BUY_UP_HOLD_TO_SETTLEMENT": -0.10,
+                "BUY_DOWN_HOLD_TO_SETTLEMENT": -0.20,
+                "NO_TRADE": 0.0,
+            },
+        ),
+    ):
+        for action, target in targets.items():
+            label_rows.append(
+                _o_label_row(
+                    market_id=market_id,
+                    decision_ts=decision_ts,
+                    action=action,
+                    target=target,
+                )
+            )
+    holdout_corpus_dir = tmp_path / "o_holdout_corpus"
+    holdout_corpus_dir.mkdir()
+    (holdout_corpus_dir / "polymarket_label_rows.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in label_rows) + "\n",
+        encoding="utf-8",
+    )
+    source_payload["provenance"] = {"holdout_corpus_dir": str(holdout_corpus_dir)}
     source_payload["m_post_freeze_holdout_validation_report_id"] = canonical_json_sha256(
         source_payload
     )
@@ -1930,7 +1982,7 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert canonical_json_sha256(label_payload) == label_id
     assert labels["schema_version"] == O_LABEL_CONSTRUCTION_SCHEMA_VERSION
     assert labels["candidate_name"] == REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME
-    assert labels["row_count"] == 6
+    assert labels["row_count"] == 15
     assert labels["decision_group_count"] == 3
     market_a_groups = {
         row["decision_group_id"]
@@ -1944,20 +1996,34 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     )
     assert labels["decision_group_completeness_summary"][
         "partial_decision_group_count"
+    ] == 0
+    assert labels["decision_group_completeness_summary"][
+        "complete_decision_group_count"
     ] == 3
     assert labels["decision_group_completeness_summary"][
         "ranking_metric_scope"
-    ] == "partial_decision_group_diagnostic"
-    assert labels["label_gap_delta"] != 0.0
+    ] == "full_decision_group"
+    assert labels["action_candidate_construction_summary"][
+        "complete_action_candidate_grid"
+    ] is True
+    assert labels["action_candidate_construction_summary"]["action_counts"] == {
+        "BUY_DOWN_HOLD_TO_SETTLEMENT": 3,
+        "BUY_DOWN_SELL_BEFORE_CLOSE": 3,
+        "BUY_UP_HOLD_TO_SETTLEMENT": 3,
+        "BUY_UP_SELL_BEFORE_CLOSE": 3,
+        "NO_TRADE": 3,
+    }
+    assert labels["action_candidate_construction_summary"][
+        "candidate_label_source_counts"
+    ] == {"holdout_corpus_label_rows": 15}
     assert any(row["action"] == "NO_TRADE" for row in labels["label_rows"])
     assert all(
-        row["ranking_metric_scope"] == "partial_decision_group_diagnostic"
+        row["ranking_metric_scope"] == "full_decision_group"
         for row in labels["label_rows"]
     )
     assert any(
-        "BUY_DOWN_SELL_BEFORE_CLOSE" in row["missing_action_families"]
+        row["action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
         for row in labels["label_rows"]
-        if row["market_id"] == "o-market-a" and row["decision_ts"] == 10
     )
     assert (
         labels["label_component_field_classes"][
@@ -1977,11 +2043,11 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert "o_replay_aligned_labels_family_priors" in ranking[
         "ranking_metric_by_variant"
     ]
-    assert ranking["ranking_metric_scope"] == "partial_decision_group_diagnostic"
-    assert ranking["full_source_model_ranking_quality_claimed"] is False
+    assert ranking["ranking_metric_scope"] == "full_decision_group"
+    assert ranking["full_source_model_ranking_quality_claimed"] is True
     assert ranking["decision_group_completeness_summary"][
         "partial_decision_group_count"
-    ] == 3
+    ] == 0
     assert 0.0 <= ranking["top1_realized_best_action_hit_rate"] <= 1.0
     assert ranking["mean_regret"] >= 0.0
     assert any(
@@ -2016,12 +2082,22 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         for row in comparison["candidate_rows"]
     )
     assert all(
-        row["ranking_metric_scope"] == "partial_decision_group_diagnostic"
+        row["ranking_metric_scope"] == "full_decision_group"
         for row in comparison["candidate_rows"]
     )
+    comparison_by_name = {
+        row["candidate_name"]: row for row in comparison["candidate_rows"]
+    }
+    assert comparison_by_name["current_source_baseline"][
+        "full_source_model_ranking_quality_claimed"
+    ] is False
+    assert comparison_by_name["current_source_baseline"][
+        "source_score_completeness_summary"
+    ]["source_score_complete"] is False
     assert all(
-        row["full_source_model_ranking_quality_claimed"] is False
+        row["full_source_model_ranking_quality_claimed"] is True
         for row in comparison["candidate_rows"]
+        if row["candidate_name"] != "current_source_baseline"
     )
     assert comparison["#146_start_allowed"] is False
     assert comparison["#134_resume_allowed"] is False
@@ -2292,3 +2368,46 @@ def _replay_row(
         "attrition_stage": "final_pnl",
         "attrition_reason_codes": [],
     }
+
+
+def _o_label_row(
+    *,
+    market_id: str,
+    decision_ts: int,
+    action: str,
+    target: float,
+) -> dict[str, Any]:
+    sell_before_close = action.endswith("SELL_BEFORE_CLOSE")
+    hold_to_settlement = action.endswith("HOLD_TO_SETTLEMENT")
+    no_trade = action == "NO_TRADE"
+    return {
+        "market_id": market_id,
+        "decision_ts": decision_ts,
+        "action": action,
+        "outcome": _side_from_o_action(action),
+        "entry_ask": 0.50 if not no_trade else 0.0,
+        "exit_bid": 0.55 if sell_before_close else 0.0,
+        "realized_trade_return": target if sell_before_close else 0.0,
+        "settlement_return": target if hold_to_settlement else 0.0,
+        "total_net_return": target,
+        "total_net_pnl_per_notional": target,
+        "sell_before_close_execution_class": (
+            "realizable_sell_before_close" if sell_before_close else "not_applicable"
+        ),
+        "label_uses_executable_exit_path": sell_before_close,
+        "queue_fill_probability_estimate": 0.95 if sell_before_close else 0.0,
+        "executable_liquidity_notional": 10.0 if sell_before_close else 0.0,
+        "theoretical_terminal_bid_return": target if sell_before_close else 0.0,
+        "realized_executable_sell_before_close_return": (
+            target if sell_before_close else 0.0
+        ),
+        "execution_gap_return": 0.0,
+    }
+
+
+def _side_from_o_action(action: str) -> str:
+    if "_UP_" in action:
+        return "UP"
+    if "_DOWN_" in action:
+        return "DOWN"
+    return "NONE"
