@@ -37,6 +37,8 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
     ranking = result.ranking_objective_report
     leakage = result.leakage_audit_report
     comparison = result.candidate_comparison_report
+    gate = result.source_model_eligibility_gate_report
+    freeze = result.freeze_readiness_report
     return {
         "run_id": run_id,
         "run_dir": str(result.run_dir),
@@ -50,6 +52,11 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         "top2_hit_rate": ranking["top2_realized_best_action_hit_rate"],
         "top3_hit_rate": ranking["top3_realized_best_action_hit_rate"],
         "mean_regret": ranking["mean_regret"],
+        "validation_top1_hit_rate": gate["top1_realized_best_action_hit_rate"],
+        "validation_mean_regret": gate["mean_regret"],
+        "validation_high_score_support_count": gate["high_score_support_count"],
+        "source_model_candidate_eligible": gate["source_model_candidate_eligible"],
+        "freeze_ready": freeze["freeze_ready"],
         "leakage_audit_passed": leakage["leakage_audit_passed"],
         "eligible_candidate_count": comparison["eligible_candidate_count"],
         "#146_start_allowed": labels["#146_start_allowed"],
@@ -63,6 +70,12 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         "leakage_audit_report_path": str(result.artifact_paths["leakage_audit_report"]),
         "candidate_comparison_report_path": str(
             result.artifact_paths["candidate_comparison_report"]
+        ),
+        "source_model_eligibility_gate_report_path": str(
+            result.artifact_paths["source_model_eligibility_gate_report"]
+        ),
+        "freeze_readiness_report_path": str(
+            result.artifact_paths["freeze_readiness_report"]
         ),
         "manifest_path": str(result.artifact_paths["manifest"]),
     }

@@ -49,10 +49,12 @@ from bigan.v8.polymarket.training.post_freeze_n_up_replay_aligned import (
 from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking import (
     O_DEPLOYABLE_MODEL_FEATURE_NAMES,
     O_FEATURE_AND_LABEL_LEAKAGE_AUDIT_SCHEMA_VERSION,
+    O_FREEZE_READINESS_SCHEMA_VERSION,
     O_LABEL_CONSTRUCTION_SCHEMA_VERSION,
     O_LABEL_DIAGNOSTIC_VARIANTS,
     O_MODEL_PREDICTED_VARIANT,
     O_SOURCE_CANDIDATE_COMPARISON_SCHEMA_VERSION,
+    O_SOURCE_MODEL_ELIGIBILITY_GATE_SCHEMA_VERSION,
     O_SOURCE_RANKING_OBJECTIVE_SCHEMA_VERSION,
     PolymarketOReplayAlignedSourceRankingConfig,
     run_polymarket_o_replay_aligned_source_ranking,
@@ -2067,6 +2069,28 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert ranking["o_model_training_summary"][
         "training_target"
     ] == "replay_aligned_executable_label_target"
+    assert ranking["eligibility_metric_source"] == "validation_metrics_only"
+    assert set(ranking["train_shadow_metrics"]) >= {
+        "decision_group_count",
+        "top1_realized_best_action_hit_rate",
+        "top2_realized_best_action_hit_rate",
+        "top3_realized_best_action_hit_rate",
+        "selected_action_realized_replay_return_sum",
+        "oracle_executable_best_action_return_sum",
+        "mean_regret",
+        "high_score_support_count",
+        "high_score_realized_return_mean",
+        "high_score_realized_return_sum",
+        "NO_TRADE_selection_rate",
+        "action_family_selected_return_breakdown",
+        "side_selected_return_breakdown",
+        "largest_winner_dependency",
+    }
+    assert (
+        ranking["train_shadow_metrics"]["decision_group_count"]
+        + ranking["validation_metrics"]["decision_group_count"]
+        == ranking["all_metrics"]["decision_group_count"]
+    )
     assert ranking["decision_group_completeness_summary"][
         "partial_decision_group_count"
     ] == 0
@@ -2152,6 +2176,15 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
         "model_training_summary"
     ]["feature_names"] == list(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "eligible_for_source_model_gate"
+    ] is True
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "excluded_from_eligibility_reason"
+    ] is None
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "eligibility_metric_source"
+    ] == "validation_metrics_only"
     assert comparison_by_name["current_source_baseline"][
         "full_source_model_ranking_quality_claimed"
     ] is False
@@ -2168,6 +2201,9 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         row["ranking_score_source"] == "label_diagnostic_score"
         and row["deployable_model_score_available"] is False
         and row["label_diagnostic_score"] is True
+        and row["eligible_for_source_model_gate"] is False
+        and row["excluded_from_eligibility_reason"]
+        == "label_diagnostic_score_not_model_predicted"
         and row["full_source_model_ranking_quality_claimed"] is False
         for row in comparison["candidate_rows"]
         if row["candidate_name"] in O_LABEL_DIAGNOSTIC_VARIANTS
@@ -2183,10 +2219,72 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert comparison["#134_resume_allowed"] is False
     assert comparison["paper_only"] is True
     assert comparison["capital_at_risk"] is False
+
+    gate = result.source_model_eligibility_gate_report
+    gate_payload = dict(gate)
+    gate_id = gate_payload.pop("o_source_model_eligibility_gate_report_id")
+    assert canonical_json_sha256(gate_payload) == gate_id
+    assert gate["schema_version"] == O_SOURCE_MODEL_ELIGIBILITY_GATE_SCHEMA_VERSION
+    assert gate["candidate_name"] == O_MODEL_PREDICTED_VARIANT
+    assert gate["ranking_score_source"] == "model_predicted_score"
+    assert gate["deployable_model_score_available"] is True
+    assert gate["eligible_for_source_model_gate"] is True
+    assert gate["validation_metrics_only_for_eligibility"] is True
+    assert gate["validation_metrics"] == ranking["validation_metrics"]
+    assert gate["train_shadow_metrics"] == ranking["train_shadow_metrics"]
+    assert gate["all_metrics"] == ranking["all_metrics"]
+    assert gate["high_score_support_count"] == gate["validation_metrics"][
+        "high_score_support_count"
+    ]
+    assert gate["mean_regret"] == gate["validation_metrics"]["mean_regret"]
+    assert gate["NO_TRADE_selection_rate"] == gate["validation_metrics"][
+        "NO_TRADE_selection_rate"
+    ]
+    assert gate["source_model_candidate_eligible"] is False
+    assert gate["promotion_evidence_eligible"] is False
+    assert gate["future_unseen_holdout_required"] is True
+    assert gate["promotion_blocking_reason_codes"] == [
+        "future_unseen_holdout_required"
+    ]
+    assert "future_unseen_holdout_required" in gate["ineligible_reason_codes"]
+    assert gate["#146_start_allowed"] is False
+    assert gate["#134_resume_allowed"] is False
+    assert gate["paper_only"] is True
+    assert gate["capital_at_risk"] is False
+
+    freeze = result.freeze_readiness_report
+    freeze_payload = dict(freeze)
+    freeze_id = freeze_payload.pop("o_freeze_readiness_report_id")
+    assert canonical_json_sha256(freeze_payload) == freeze_id
+    assert freeze["schema_version"] == O_FREEZE_READINESS_SCHEMA_VERSION
+    assert freeze["candidate_name"] == O_MODEL_PREDICTED_VARIANT
+    assert freeze["ranking_score_source"] == "model_predicted_score"
+    assert freeze["freeze_ready"] is False
+    assert freeze["source_model_candidate_eligible"] is False
+    assert "source_model_validation_gates_not_passed" in freeze[
+        "freeze_blocking_reason_codes"
+    ]
+    for field in (
+        "model_sha256",
+        "model_manifest_sha256",
+        "training_data_hash",
+        "label_grid_hash",
+        "feature_schema_hash",
+        "split_hash",
+        "candidate_config_hash",
+    ):
+        assert looks_like_sha256(freeze[field])
+    assert freeze["future_unseen_holdout_required"] is True
+    assert freeze["promotion_evidence_eligible"] is False
+    assert freeze["#146_start_allowed"] is False
+    assert freeze["#134_resume_allowed"] is False
+
     assert result.artifact_paths["label_construction_report"].exists()
     assert result.artifact_paths["ranking_objective_report"].exists()
     assert result.artifact_paths["leakage_audit_report"].exists()
     assert result.artifact_paths["candidate_comparison_report"].exists()
+    assert result.artifact_paths["source_model_eligibility_gate_report"].exists()
+    assert result.artifact_paths["freeze_readiness_report"].exists()
 
 
 def _build_corpus(root: Path) -> Path:
