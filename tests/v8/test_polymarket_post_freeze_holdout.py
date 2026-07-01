@@ -55,15 +55,18 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_JOINT_FEATURE_CORRECTION_SELECTION_SCHEMA_VERSION,
     O_LABEL_CONSTRUCTION_SCHEMA_VERSION,
     O_LABEL_DIAGNOSTIC_VARIANTS,
+    O_MAX_MEAN_REGRET,
     O_MAX_P_UP_ACTION_DISAGREEMENT_RATE,
     O_MIN_HIGH_SCORE_SUPPORT_COUNT,
     O_MIN_TOP1_HIT_RATE,
     O_MODEL_PREDICTED_VARIANT,
+    O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET,
     O_SHADOW_P_UP_SELECTION_BUFFER_TARGET,
     O_SOURCE_CANDIDATE_COMPARISON_SCHEMA_VERSION,
     O_SOURCE_MODEL_ELIGIBILITY_GATE_SCHEMA_VERSION,
     O_SOURCE_RANKING_OBJECTIVE_SCHEMA_VERSION,
     PolymarketOReplayAlignedSourceRankingConfig,
+    _o_relaxed_diagnostic_gate_status,
     run_polymarket_o_replay_aligned_source_ranking,
 )
 from bigan.v8.polymarket.training.post_freeze_promotion_readiness_audit import (
@@ -1815,6 +1818,41 @@ def test_up_full_candidate_pool_diagnostic_segments_selected_and_non_selected(
     assert result.artifact_paths["feature_proxy_report"].exists()
 
 
+def test_o_relaxed_diagnostic_gate_passes_without_strict_source_unlock() -> None:
+    assert O_MAX_MEAN_REGRET == 0.15
+    assert O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET == 0.25
+
+    status = _o_relaxed_diagnostic_gate_status(
+        validation_metrics={
+            "mean_regret": 0.22495588235294117,
+            "top1_realized_best_action_hit_rate": 0.38235294117647056,
+        },
+        p_up_action_disagreement_within_limit=True,
+        calibration_support_passed=True,
+        action_family_paper_decision_eligible=True,
+        best_action_concentration_passed=True,
+        high_score_return_positive=True,
+        leakage_passed=True,
+    )
+
+    summary = status["strict_vs_relaxed_gate_summary"]
+    assert summary["strict_max_mean_regret"] == O_MAX_MEAN_REGRET
+    assert summary["relaxed_diagnostic_max_mean_regret"] == (
+        O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET
+    )
+    assert summary["strict_mean_regret_passed"] is False
+    assert summary["relaxed_diagnostic_mean_regret_passed"] is True
+    assert status["strict_calibration_quality_passed"] is False
+    assert status["relaxed_diagnostic_calibration_quality_passed"] is True
+    assert status["relaxed_diagnostic_source_candidate"] is True
+    assert "strict_source_gate_remains_authoritative" in status[
+        "relaxed_diagnostic_reason_codes"
+    ]
+    assert "diagnostic_only_no_paper_live_unlock" in status[
+        "relaxed_diagnostic_reason_codes"
+    ]
+
+
 def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     tmp_path: Path,
 ) -> None:
@@ -2946,6 +2984,21 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
         "eligible_for_source_model_gate"
     ] is True
+    assert "strict_calibration_quality_passed" in comparison_by_name[
+        O_MODEL_PREDICTED_VARIANT
+    ]
+    assert "relaxed_diagnostic_calibration_quality_passed" in comparison_by_name[
+        O_MODEL_PREDICTED_VARIANT
+    ]
+    assert "relaxed_diagnostic_source_candidate" in comparison_by_name[
+        O_MODEL_PREDICTED_VARIANT
+    ]
+    assert "relaxed_diagnostic_reason_codes" in comparison_by_name[
+        O_MODEL_PREDICTED_VARIANT
+    ]
+    assert "strict_vs_relaxed_gate_summary" in comparison_by_name[
+        O_MODEL_PREDICTED_VARIANT
+    ]
     assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
         "excluded_from_eligibility_reason"
     ] is None
@@ -2982,6 +3035,9 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         is False
         for row in comparison["candidate_rows"]
     )
+    assert comparison["relaxed_diagnostic_no_paper_live_unlock"] is True
+    assert "strict_vs_relaxed_gate_summary" in comparison
+    assert "relaxed_diagnostic_source_candidate" in comparison
     assert comparison["#146_start_allowed"] is False
     assert comparison["#134_resume_allowed"] is False
     assert comparison["paper_only"] is True
@@ -3048,9 +3104,66 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert gate["gate_thresholds"][
         "min_top1_realized_best_action_hit_rate"
     ] == O_MIN_TOP1_HIT_RATE
+    assert O_MAX_MEAN_REGRET == 0.15
+    assert O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET == 0.25
+    assert gate["gate_thresholds"]["max_mean_regret"] == O_MAX_MEAN_REGRET
+    assert gate["gate_thresholds"]["relaxed_diagnostic_max_mean_regret"] == (
+        O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET
+    )
     assert gate["gate_thresholds"][
         "min_high_score_support_count"
     ] == O_MIN_HIGH_SCORE_SUPPORT_COUNT
+    strict_quality_from_metrics = (
+        gate["top1_realized_best_action_hit_rate"] >= O_MIN_TOP1_HIT_RATE
+        and gate["mean_regret"] <= O_MAX_MEAN_REGRET
+    )
+    relaxed_quality_from_metrics = (
+        gate["top1_realized_best_action_hit_rate"] >= O_MIN_TOP1_HIT_RATE
+        and gate["mean_regret"] <= O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET
+    )
+    assert gate["strict_calibration_quality_passed"] == (
+        strict_quality_from_metrics
+    )
+    assert gate["calibration_quality_passed"] == strict_quality_from_metrics
+    assert gate["relaxed_diagnostic_calibration_quality_passed"] == (
+        relaxed_quality_from_metrics
+    )
+    relaxed_summary = gate["strict_vs_relaxed_gate_summary"]
+    assert relaxed_summary["strict_source_gate_remains_authoritative"] is True
+    assert relaxed_summary["relaxed_diagnostic_gate_is_diagnostic_only"] is True
+    assert relaxed_summary["relaxed_diagnostic_no_paper_live_unlock"] is True
+    assert relaxed_summary["future_unseen_holdout_required"] is True
+    assert relaxed_summary["strict_max_mean_regret"] == O_MAX_MEAN_REGRET
+    assert relaxed_summary["relaxed_diagnostic_max_mean_regret"] == (
+        O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET
+    )
+    assert relaxed_summary["strict_calibration_quality_passed"] == (
+        gate["strict_calibration_quality_passed"]
+    )
+    assert relaxed_summary[
+        "relaxed_diagnostic_calibration_quality_passed"
+    ] == gate["relaxed_diagnostic_calibration_quality_passed"]
+    assert relaxed_summary["relaxed_diagnostic_source_candidate"] == gate[
+        "relaxed_diagnostic_source_candidate"
+    ]
+    assert "strict_source_gate_remains_authoritative" in gate[
+        "relaxed_diagnostic_reason_codes"
+    ]
+    assert "diagnostic_only_no_paper_live_unlock" in gate[
+        "relaxed_diagnostic_reason_codes"
+    ]
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "strict_calibration_quality_passed"
+    ] == gate["strict_calibration_quality_passed"]
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "relaxed_diagnostic_calibration_quality_passed"
+    ] == gate["relaxed_diagnostic_calibration_quality_passed"]
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "relaxed_diagnostic_source_candidate"
+    ] == gate["relaxed_diagnostic_source_candidate"]
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "strict_vs_relaxed_gate_summary"
+    ] == gate["strict_vs_relaxed_gate_summary"]
     assert gate["top1_miss_diagnostics"] == gate["validation_metrics"][
         "top1_miss_diagnostics"
     ]
@@ -3102,6 +3215,23 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     )
     assert freeze["freeze_ready"] is False
     assert freeze["source_model_candidate_eligible"] is False
+    assert freeze["strict_calibration_quality_passed"] == gate[
+        "strict_calibration_quality_passed"
+    ]
+    assert freeze["relaxed_diagnostic_calibration_quality_passed"] == gate[
+        "relaxed_diagnostic_calibration_quality_passed"
+    ]
+    assert freeze["relaxed_diagnostic_source_candidate"] == gate[
+        "relaxed_diagnostic_source_candidate"
+    ]
+    assert freeze["relaxed_diagnostic_reason_codes"] == gate[
+        "relaxed_diagnostic_reason_codes"
+    ]
+    assert freeze["strict_vs_relaxed_gate_summary"] == gate[
+        "strict_vs_relaxed_gate_summary"
+    ]
+    assert freeze["relaxed_diagnostic_no_freeze_unlock"] is True
+    assert freeze["relaxed_diagnostic_no_paper_live_unlock"] is True
     assert "source_model_validation_gates_not_passed" in freeze[
         "freeze_blocking_reason_codes"
     ]
@@ -3234,6 +3364,19 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert "hts_p_up_confidently_wrong_feature_diagnostic_summary" in manifest[
         "artifact_hashes"
     ]
+    assert manifest["strict_calibration_quality_passed"] == gate[
+        "strict_calibration_quality_passed"
+    ]
+    assert manifest["relaxed_diagnostic_calibration_quality_passed"] == gate[
+        "relaxed_diagnostic_calibration_quality_passed"
+    ]
+    assert manifest["relaxed_diagnostic_source_candidate"] == gate[
+        "relaxed_diagnostic_source_candidate"
+    ]
+    assert manifest["strict_vs_relaxed_gate_summary"] == gate[
+        "strict_vs_relaxed_gate_summary"
+    ]
+    assert manifest["relaxed_diagnostic_no_paper_live_unlock"] is True
 
 
 def _build_corpus(root: Path) -> Path:

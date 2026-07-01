@@ -217,6 +217,7 @@ O_MIN_HIGH_SCORE_SUPPORT_COUNT = 10
 O_FEATURE_SET_SELECTION_MIN_HIGH_SCORE_SUPPORT_COUNT = 5
 O_MIN_TOP1_HIT_RATE = 0.35
 O_MAX_MEAN_REGRET = 0.15
+O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET = 0.25
 O_MAX_NO_TRADE_SELECTION_RATE = 0.80
 O_MAX_P_UP_ACTION_DISAGREEMENT_RATE = 0.35
 O_SHADOW_P_UP_SELECTION_BUFFER_TARGET = 0.25
@@ -376,6 +377,22 @@ def run_polymarket_o_replay_aligned_source_ranking(
             for name, path in sorted(artifact_paths.items())
             if name != "manifest"
         },
+        "strict_vs_relaxed_gate_summary": reports[4][
+            "strict_vs_relaxed_gate_summary"
+        ],
+        "strict_calibration_quality_passed": reports[4][
+            "strict_calibration_quality_passed"
+        ],
+        "relaxed_diagnostic_calibration_quality_passed": reports[4][
+            "relaxed_diagnostic_calibration_quality_passed"
+        ],
+        "relaxed_diagnostic_source_candidate": reports[4][
+            "relaxed_diagnostic_source_candidate"
+        ],
+        "relaxed_diagnostic_no_paper_live_unlock": True,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "promotion_evidence_eligible": False,
         **compact_safety_fields(),
     }
     manifest["artifact_hashes"]["manifest"] = canonical_json_sha256(manifest)
@@ -5836,9 +5853,11 @@ def _comparison_report(
 ) -> dict[str, Any]:
     candidate_rows = []
     high_score_threshold = _model_high_score_threshold(model_training_summary)
+    model_predicted_relaxed_diagnostic_status: dict[str, Any] | None = None
     for variant in O_VARIANTS:
         metrics = _ranking_metrics(rows, variant, high_score_threshold)
         split_metrics = _split_metric_views(rows, variant, high_score_threshold)
+        relaxed_diagnostic_status: dict[str, Any] | None = None
         reasons = [
             "diagnostic_only_no_paper_live_unlock",
             "current_m_m2_n_n2_evidence_not_o_promotion_evidence",
@@ -5852,6 +5871,50 @@ def _comparison_report(
             excluded_reason = "label_diagnostic_score_not_model_predicted"
         elif variant == "current_source_baseline":
             excluded_reason = "observed_source_score_incomplete_counterfactuals"
+        if variant == O_MODEL_PREDICTED_VARIANT:
+            validation_metrics = split_metrics["validation"]
+            p_up_summary = _p_up_action_disagreement_summary(
+                rows=rows,
+                variant=O_MODEL_PREDICTED_VARIANT,
+                split="validation",
+            )
+            leakage_passed = True
+            relaxed_diagnostic_status = _o_relaxed_diagnostic_gate_status(
+                validation_metrics=validation_metrics,
+                p_up_action_disagreement_within_limit=bool(
+                    p_up_summary[
+                        "candidate_scoped_p_up_action_disagreement_within_limit"
+                    ]
+                ),
+                calibration_support_passed=(
+                    int(validation_metrics["decision_group_count"])
+                    >= O_MIN_VALIDATION_DECISION_GROUPS
+                    and int(validation_metrics["high_score_support_count"])
+                    >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
+                ),
+                action_family_paper_decision_eligible=(
+                    _validation_action_family_gate_passed(validation_metrics)
+                ),
+                best_action_concentration_passed=(
+                    float(validation_metrics["NO_TRADE_selection_rate"])
+                    <= O_MAX_NO_TRADE_SELECTION_RATE
+                    and not bool(
+                        validation_metrics["largest_winner_dependency"][
+                            "total_return_positive_only_because_of_largest_winner"
+                        ]
+                    )
+                ),
+                high_score_return_positive=(
+                    int(validation_metrics["high_score_support_count"])
+                    >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
+                    and float(validation_metrics["high_score_realized_return_mean"])
+                    > 0.0
+                    and float(validation_metrics["high_score_realized_return_sum"])
+                    > 0.0
+                ),
+                leakage_passed=leakage_passed,
+            )
+            model_predicted_relaxed_diagnostic_status = relaxed_diagnostic_status
         candidate_rows.append(
             {
                 "candidate_name": variant,
@@ -5932,6 +5995,48 @@ def _comparison_report(
                     "NO_TRADE": False,
                 },
                 "action_family_gate_metrics": metrics["action_family_gate_metrics"],
+                "strict_calibration_quality_passed": (
+                    (
+                        float(split_metrics["validation"][
+                            "top1_realized_best_action_hit_rate"
+                        ])
+                        >= O_MIN_TOP1_HIT_RATE
+                    )
+                    and (
+                        float(split_metrics["validation"]["mean_regret"])
+                        <= O_MAX_MEAN_REGRET
+                    )
+                )
+                if variant == O_MODEL_PREDICTED_VARIANT
+                else False,
+                "relaxed_diagnostic_calibration_quality_passed": (
+                    bool(
+                        relaxed_diagnostic_status[
+                            "relaxed_diagnostic_calibration_quality_passed"
+                        ]
+                    )
+                    if relaxed_diagnostic_status is not None
+                    else False
+                ),
+                "relaxed_diagnostic_source_candidate": (
+                    bool(
+                        relaxed_diagnostic_status[
+                            "relaxed_diagnostic_source_candidate"
+                        ]
+                    )
+                    if relaxed_diagnostic_status is not None
+                    else False
+                ),
+                "relaxed_diagnostic_reason_codes": (
+                    relaxed_diagnostic_status["relaxed_diagnostic_reason_codes"]
+                    if relaxed_diagnostic_status is not None
+                    else ["not_o_model_predicted_candidate"]
+                ),
+                "strict_vs_relaxed_gate_summary": (
+                    relaxed_diagnostic_status["strict_vs_relaxed_gate_summary"]
+                    if relaxed_diagnostic_status is not None
+                    else None
+                ),
                 "source_model_candidate_eligible": False,
                 "ineligible_reason_codes": reasons,
             }
@@ -5954,6 +6059,23 @@ def _comparison_report(
         ),
         "label_diagnostic_variants": list(O_LABEL_DIAGNOSTIC_VARIANTS),
         "candidate_rows": candidate_rows,
+        "strict_vs_relaxed_gate_summary": (
+            model_predicted_relaxed_diagnostic_status[
+                "strict_vs_relaxed_gate_summary"
+            ]
+            if model_predicted_relaxed_diagnostic_status is not None
+            else None
+        ),
+        "relaxed_diagnostic_source_candidate": (
+            bool(
+                model_predicted_relaxed_diagnostic_status[
+                    "relaxed_diagnostic_source_candidate"
+                ]
+            )
+            if model_predicted_relaxed_diagnostic_status is not None
+            else False
+        ),
+        "relaxed_diagnostic_no_paper_live_unlock": True,
         "eligible_candidate_count": 0,
         **_fail_closed_fields(),
         **compact_safety_fields(),
@@ -5995,6 +6117,7 @@ def _source_model_eligibility_gate_report(
         >= O_MIN_TOP1_HIT_RATE
         and float(validation_metrics["mean_regret"]) <= O_MAX_MEAN_REGRET
     )
+    strict_calibration_quality_passed = calibration_quality_passed
     action_family_paper_decision_eligible = _validation_action_family_gate_passed(
         validation_metrics
     )
@@ -6016,6 +6139,17 @@ def _source_model_eligibility_gate_report(
         >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
         and float(validation_metrics["high_score_realized_return_mean"]) > 0.0
         and float(validation_metrics["high_score_realized_return_sum"]) > 0.0
+    )
+    relaxed_diagnostic_status = _o_relaxed_diagnostic_gate_status(
+        validation_metrics=validation_metrics,
+        p_up_action_disagreement_within_limit=p_up_action_disagreement_within_limit,
+        calibration_support_passed=calibration_support_passed,
+        action_family_paper_decision_eligible=(
+            action_family_paper_decision_eligible
+        ),
+        best_action_concentration_passed=best_action_concentration_passed,
+        high_score_return_positive=high_score_return_positive,
+        leakage_passed=leakage_passed,
     )
     action_value_paper_decision_eligible = all(
         (
@@ -6112,6 +6246,9 @@ def _source_model_eligibility_gate_report(
             "min_high_score_support_count": O_MIN_HIGH_SCORE_SUPPORT_COUNT,
             "min_top1_realized_best_action_hit_rate": O_MIN_TOP1_HIT_RATE,
             "max_mean_regret": O_MAX_MEAN_REGRET,
+            "relaxed_diagnostic_max_mean_regret": (
+                O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET
+            ),
             "max_NO_TRADE_selection_rate": O_MAX_NO_TRADE_SELECTION_RATE,
             "max_p_up_action_disagreement_rate": (
                 O_MAX_P_UP_ACTION_DISAGREEMENT_RATE
@@ -6130,6 +6267,22 @@ def _source_model_eligibility_gate_report(
         "source_model_candidate_eligible": source_model_candidate_eligible,
         "calibration_support_passed": calibration_support_passed,
         "calibration_quality_passed": calibration_quality_passed,
+        "strict_calibration_quality_passed": strict_calibration_quality_passed,
+        "relaxed_diagnostic_calibration_quality_passed": (
+            relaxed_diagnostic_status[
+                "relaxed_diagnostic_calibration_quality_passed"
+            ]
+        ),
+        "relaxed_diagnostic_source_candidate": (
+            relaxed_diagnostic_status["relaxed_diagnostic_source_candidate"]
+        ),
+        "relaxed_diagnostic_reason_codes": (
+            relaxed_diagnostic_status["relaxed_diagnostic_reason_codes"]
+        ),
+        "strict_vs_relaxed_gate_summary": (
+            relaxed_diagnostic_status["strict_vs_relaxed_gate_summary"]
+        ),
+        "relaxed_diagnostic_no_paper_live_unlock": True,
         "action_family_paper_decision_eligible": (
             action_family_paper_decision_eligible
         ),
@@ -6314,6 +6467,23 @@ def _freeze_readiness_report(
         ),
         "freeze_blocking_reason_codes": blocking_reasons,
         "source_model_candidate_eligible": source_model_candidate_eligible,
+        "strict_calibration_quality_passed": eligibility_gate_report[
+            "strict_calibration_quality_passed"
+        ],
+        "relaxed_diagnostic_calibration_quality_passed": eligibility_gate_report[
+            "relaxed_diagnostic_calibration_quality_passed"
+        ],
+        "relaxed_diagnostic_source_candidate": eligibility_gate_report[
+            "relaxed_diagnostic_source_candidate"
+        ],
+        "relaxed_diagnostic_reason_codes": eligibility_gate_report[
+            "relaxed_diagnostic_reason_codes"
+        ],
+        "strict_vs_relaxed_gate_summary": eligibility_gate_report[
+            "strict_vs_relaxed_gate_summary"
+        ],
+        "relaxed_diagnostic_no_freeze_unlock": True,
+        "relaxed_diagnostic_no_paper_live_unlock": True,
         "future_unseen_holdout_required": True,
         "promotion_evidence_eligible": False,
         "promotion_blocking_reason_codes": ["future_unseen_holdout_required"],
@@ -6462,6 +6632,107 @@ def _hts_p_up_confidently_wrong_feature_diagnostic_report(
         "o_hts_p_up_confidently_wrong_feature_diagnostic_report_id"
     ] = canonical_json_sha256(report)
     return report
+
+
+def _o_relaxed_diagnostic_gate_status(
+    *,
+    validation_metrics: dict[str, Any],
+    p_up_action_disagreement_within_limit: bool,
+    calibration_support_passed: bool,
+    action_family_paper_decision_eligible: bool,
+    best_action_concentration_passed: bool,
+    high_score_return_positive: bool,
+    leakage_passed: bool,
+) -> dict[str, Any]:
+    top1_passed = (
+        float(validation_metrics["top1_realized_best_action_hit_rate"])
+        >= O_MIN_TOP1_HIT_RATE
+    )
+    strict_mean_regret_passed = (
+        float(validation_metrics["mean_regret"]) <= O_MAX_MEAN_REGRET
+    )
+    relaxed_mean_regret_passed = (
+        float(validation_metrics["mean_regret"])
+        <= O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET
+    )
+    strict_calibration_quality_passed = top1_passed and strict_mean_regret_passed
+    relaxed_diagnostic_calibration_quality_passed = (
+        top1_passed and relaxed_mean_regret_passed
+    )
+    required_checks = {
+        "relaxed_diagnostic_calibration_quality_passed": (
+            relaxed_diagnostic_calibration_quality_passed
+        ),
+        "calibration_support_passed": calibration_support_passed,
+        "p_up_action_disagreement_within_limit": (
+            p_up_action_disagreement_within_limit
+        ),
+        "high_score_return_positive": high_score_return_positive,
+        "action_family_paper_decision_eligible": (
+            action_family_paper_decision_eligible
+        ),
+        "best_action_concentration_passed": best_action_concentration_passed,
+        "leakage_audit_passed": leakage_passed,
+    }
+    reason_codes = [
+        "diagnostic_only_no_paper_live_unlock",
+        "future_unseen_holdout_required",
+        "strict_source_gate_remains_authoritative",
+    ]
+    if not top1_passed:
+        reason_codes.append("relaxed_diagnostic_top1_gate_failed")
+    if not relaxed_mean_regret_passed:
+        reason_codes.append("relaxed_diagnostic_mean_regret_gate_failed")
+    if not calibration_support_passed:
+        reason_codes.append("relaxed_diagnostic_calibration_support_failed")
+    if not p_up_action_disagreement_within_limit:
+        reason_codes.append("relaxed_diagnostic_p_up_gate_failed")
+    if not high_score_return_positive:
+        reason_codes.append("relaxed_diagnostic_high_score_return_failed")
+    if not action_family_paper_decision_eligible:
+        reason_codes.append("relaxed_diagnostic_action_family_gate_failed")
+    if not best_action_concentration_passed:
+        reason_codes.append("relaxed_diagnostic_best_action_concentration_failed")
+    if not leakage_passed:
+        reason_codes.append("relaxed_diagnostic_leakage_audit_failed")
+    relaxed_diagnostic_source_candidate = all(required_checks.values())
+    return {
+        "strict_calibration_quality_passed": strict_calibration_quality_passed,
+        "relaxed_diagnostic_calibration_quality_passed": (
+            relaxed_diagnostic_calibration_quality_passed
+        ),
+        "relaxed_diagnostic_source_candidate": (
+            relaxed_diagnostic_source_candidate
+        ),
+        "relaxed_diagnostic_reason_codes": sorted(set(reason_codes)),
+        "strict_vs_relaxed_gate_summary": {
+            "strict_source_gate_remains_authoritative": True,
+            "relaxed_diagnostic_gate_is_diagnostic_only": True,
+            "relaxed_diagnostic_no_paper_live_unlock": True,
+            "future_unseen_holdout_required": True,
+            "strict_max_mean_regret": O_MAX_MEAN_REGRET,
+            "relaxed_diagnostic_max_mean_regret": (
+                O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET
+            ),
+            "validation_mean_regret": validation_metrics["mean_regret"],
+            "validation_top1_realized_best_action_hit_rate": validation_metrics[
+                "top1_realized_best_action_hit_rate"
+            ],
+            "strict_mean_regret_passed": strict_mean_regret_passed,
+            "relaxed_diagnostic_mean_regret_passed": relaxed_mean_regret_passed,
+            "top1_gate_passed": top1_passed,
+            "strict_calibration_quality_passed": (
+                strict_calibration_quality_passed
+            ),
+            "relaxed_diagnostic_calibration_quality_passed": (
+                relaxed_diagnostic_calibration_quality_passed
+            ),
+            "relaxed_diagnostic_required_checks": required_checks,
+            "relaxed_diagnostic_source_candidate": (
+                relaxed_diagnostic_source_candidate
+            ),
+        },
+    }
 
 
 def _o_gate_reason_codes(
@@ -8588,20 +8859,26 @@ def _comparison_markdown(report: dict[str, Any]) -> str:
         "# O Source Candidate Comparison",
         "",
         f"- eligible_candidate_count: `{report['eligible_candidate_count']}`",
+        "- relaxed_diagnostic_source_candidate: "
+        f"`{str(report['relaxed_diagnostic_source_candidate']).lower()}`",
+        "- relaxed_diagnostic_no_paper_live_unlock: "
+        f"`{str(report['relaxed_diagnostic_no_paper_live_unlock']).lower()}`",
         f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
         f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
         "",
-        "| candidate | score_source | scope | top1 | mean_regret | eligible | excluded_reason |",
-        "|---|---|---|---:|---:|---|---|",
+        "| candidate | score_source | scope | top1 | mean_regret | strict_calibration | relaxed_diagnostic | eligible | excluded_reason |",
+        "|---|---|---|---:|---:|---|---|---|---|",
     ]
     for row in report["candidate_rows"]:
         lines.append(
-            "| {name} | {source} | {scope} | {top1:.4f} | {regret:.6f} | {eligible} | {reason} |".format(
+            "| {name} | {source} | {scope} | {top1:.4f} | {regret:.6f} | {strict} | {relaxed} | {eligible} | {reason} |".format(
                 name=row["candidate_name"],
                 source=row["ranking_score_source"],
                 scope=row["ranking_metric_scope"],
                 top1=float(row["top1_realized_best_action_hit_rate"]),
                 regret=float(row["mean_regret"]),
+                strict=str(row["strict_calibration_quality_passed"]).lower(),
+                relaxed=str(row["relaxed_diagnostic_source_candidate"]).lower(),
                 eligible=str(row["source_model_candidate_eligible"]).lower(),
                 reason=row["excluded_from_eligibility_reason"] or "",
             )
@@ -8627,6 +8904,14 @@ def _eligibility_gate_markdown(report: dict[str, Any]) -> str:
             f"`{str(report['calibration_support_passed']).lower()}`",
             "- calibration_quality_passed: "
             f"`{str(report['calibration_quality_passed']).lower()}`",
+            "- strict_calibration_quality_passed: "
+            f"`{str(report['strict_calibration_quality_passed']).lower()}`",
+            "- relaxed_diagnostic_calibration_quality_passed: "
+            f"`{str(report['relaxed_diagnostic_calibration_quality_passed']).lower()}`",
+            "- relaxed_diagnostic_source_candidate: "
+            f"`{str(report['relaxed_diagnostic_source_candidate']).lower()}`",
+            "- relaxed_diagnostic_no_paper_live_unlock: "
+            f"`{str(report['relaxed_diagnostic_no_paper_live_unlock']).lower()}`",
             "- action_family_paper_decision_eligible: "
             f"`{str(report['action_family_paper_decision_eligible']).lower()}`",
             "- best_action_concentration_passed: "
@@ -8649,7 +8934,11 @@ def _eligibility_gate_markdown(report: dict[str, Any]) -> str:
             f"`{str(report['gate_reason_code_consistency_passed']).lower()}`",
             "- NO_TRADE_selection_rate: "
             f"`{report['NO_TRADE_selection_rate']}`",
+            "- strict_vs_relaxed_gate_summary: "
+            f"`{report['strict_vs_relaxed_gate_summary']}`",
             f"- ineligible_reason_codes: `{report['ineligible_reason_codes']}`",
+            "- relaxed_diagnostic_reason_codes: "
+            f"`{report['relaxed_diagnostic_reason_codes']}`",
             "- future_unseen_holdout_required: "
             f"`{str(report['future_unseen_holdout_required']).lower()}`",
             f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
@@ -8669,6 +8958,14 @@ def _freeze_readiness_markdown(report: dict[str, Any]) -> str:
             f"- freeze_ready: `{str(report['freeze_ready']).lower()}`",
             "- source_model_candidate_eligible: "
             f"`{str(report['source_model_candidate_eligible']).lower()}`",
+            "- relaxed_diagnostic_source_candidate: "
+            f"`{str(report['relaxed_diagnostic_source_candidate']).lower()}`",
+            "- relaxed_diagnostic_no_freeze_unlock: "
+            f"`{str(report['relaxed_diagnostic_no_freeze_unlock']).lower()}`",
+            "- strict_calibration_quality_passed: "
+            f"`{str(report['strict_calibration_quality_passed']).lower()}`",
+            "- relaxed_diagnostic_calibration_quality_passed: "
+            f"`{str(report['relaxed_diagnostic_calibration_quality_passed']).lower()}`",
             f"- model_sha256: `{report['model_sha256']}`",
             f"- model_manifest_sha256: `{report['model_manifest_sha256']}`",
             f"- training_data_hash: `{report['training_data_hash']}`",
