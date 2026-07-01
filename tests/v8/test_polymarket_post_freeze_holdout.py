@@ -52,6 +52,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_FEATURE_SET_SELECTION_SCHEMA_VERSION,
     O_FREEZE_READINESS_SCHEMA_VERSION,
     O_HTS_P_UP_CONFIDENTLY_WRONG_FEATURE_DIAGNOSTIC_SCHEMA_VERSION,
+    O_JOINT_FEATURE_CORRECTION_SELECTION_SCHEMA_VERSION,
     O_LABEL_CONSTRUCTION_SCHEMA_VERSION,
     O_LABEL_DIAGNOSTIC_VARIANTS,
     O_MODEL_PREDICTED_VARIANT,
@@ -2167,8 +2168,19 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert ranking["selected_feature_set_name"] == ranking[
         "o_model_training_summary"
     ]["selected_feature_set_name"]
+    assert ranking["selected_correction_policy_name"] == ranking[
+        "o_model_training_summary"
+    ]["selected_correction_policy_name"]
+    assert ranking["selected_joint_candidate_name"] == ranking[
+        "o_model_training_summary"
+    ]["selected_joint_candidate_name"]
     assert looks_like_sha256(
         ranking["o_model_training_summary"]["selected_feature_set_config_hash"]
+    )
+    assert looks_like_sha256(
+        ranking["o_model_training_summary"][
+            "joint_feature_correction_selection_config_hash"
+        ]
     )
     assert ranking["o_model_training_summary"]["post_model_ranking_correction_enabled"] is True
     assert ranking["o_model_training_summary"][
@@ -2268,14 +2280,15 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert correction_config["hts_p_up_reliability_min_support_source"] == (
         "max(1, floor(sqrt(shadow_hts_group_count) / 2))"
     )
-    assert correction_config["hts_p_up_reliability_penalty_source"] == (
-        "shadow_p_up_edge_quantile_grid"
-    )
+    assert correction_config["hts_p_up_reliability_penalty_source"] in {
+        "shadow_p_up_edge_quantile_grid",
+        "shadow_p_up_edge_q75_lightweight_feature_set_selection",
+    }
     assert correction_config["hts_p_up_reliability_no_trade_buffer_enabled"] is True
     assert correction_config["hts_p_up_reliability_no_trade_buffer_source"] == (
         "shadow_p_up_edge_q25"
     )
-    assert correction_config["hts_p_up_reliability_no_trade_buffer"] == (
+    assert correction_config["hts_p_up_reliability_no_trade_buffer"] >= (
         correction_config["p_up_edge_quantiles"]["q25"]
     )
     assert correction_config["p_up_safety_target_disagreement_rate"] == 0.25
@@ -2312,10 +2325,10 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "0.5 + shadow_p_up_edge_q25 + positive_shadow_global_target_mean"
     )
     raw_diagnostics = correction_config["shadow_component_diagnostics"]["raw_model"]
-    assert (
-        raw_diagnostics["raw_weight_selection_metric_source"]
-        == "shadow_split_only"
-    )
+    assert raw_diagnostics["raw_weight_selection_metric_source"] in {
+        "shadow_split_only",
+        "shadow_split_only_lightweight_feature_set_selection",
+    }
     assert "shadow_candidate_eligible" in raw_diagnostics[
         "selected_raw_weight_candidate"
     ]
@@ -2323,25 +2336,37 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         raw_diagnostics["selected_raw_weight_candidate"][
             "candidate_weight_source"
         ]
-        == "shadow_p_up_edge_quantile_grid"
+        in {
+            "shadow_p_up_edge_quantile_grid",
+            "shadow_p_up_edge_q75_lightweight_feature_set_selection",
+        }
     )
     assert raw_diagnostics["raw_weight_candidate_rows"]
-    assert raw_diagnostics["p_up_misalignment_penalty_candidate_source"] == (
-        "shadow_p_up_edge_quantile_grid"
-    )
-    assert raw_diagnostics["large_regret_reversal_guard_candidate_source"] == (
-        "shadow_largest_regret_reversal_grid"
-    )
+    assert raw_diagnostics["p_up_misalignment_penalty_candidate_source"] in {
+        "shadow_p_up_edge_quantile_grid",
+        "shadow_p_up_edge_q25_lightweight_feature_set_selection",
+    }
+    assert raw_diagnostics["large_regret_reversal_guard_candidate_source"] in {
+        "shadow_largest_regret_reversal_grid",
+        "shadow_p_up_edge_q75_lightweight_feature_set_selection",
+    }
     assert (
         raw_diagnostics["large_regret_reversal_guard_selection_metric_source"]
-        == "shadow_split_only"
+        in {
+            "shadow_split_only",
+            "shadow_split_only_lightweight_feature_set_selection",
+        }
     )
-    assert raw_diagnostics["hts_p_up_reliability_guard_candidate_source"] == (
-        "shadow_p_up_edge_quantile_grid"
-    )
+    assert raw_diagnostics["hts_p_up_reliability_guard_candidate_source"] in {
+        "shadow_p_up_edge_quantile_grid",
+        "shadow_p_up_edge_q75_lightweight_feature_set_selection",
+    }
     assert (
         raw_diagnostics["hts_p_up_reliability_guard_selection_metric_source"]
-        == "shadow_split_only"
+        in {
+            "shadow_split_only",
+            "shadow_split_only_lightweight_feature_set_selection",
+        }
     )
     assert (
         raw_diagnostics[
@@ -2351,7 +2376,10 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     )
     assert raw_diagnostics[
         "hts_p_up_reliability_no_trade_buffer_application_stage"
-    ] == "post_shadow_raw_weight_selection_safety_buffer"
+    ] in {
+        "post_shadow_raw_weight_selection_safety_buffer",
+        "post_lightweight_feature_set_selection_safety_buffer",
+    }
     assert (
         raw_diagnostics["hts_p_up_reliability_bucket_thresholds"]
         == correction_config["hts_p_up_reliability_bucket_thresholds"]
@@ -2474,6 +2502,13 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert feature_selection["selection_metric_source"] == "shadow_split_only"
     assert feature_selection["feature_set_selection_min_high_score_support_count"] == 5
     assert feature_selection["source_model_gate_min_high_score_support_count"] == 10
+    assert feature_selection["feature_set_selection_derived_from_joint_selection"] is True
+    assert feature_selection["selected_correction_policy_name"] == ranking[
+        "selected_correction_policy_name"
+    ]
+    assert feature_selection["selected_joint_candidate_name"] == ranking[
+        "selected_joint_candidate_name"
+    ]
     assert {row["feature_set_name"] for row in feature_selection["candidate_feature_sets"]} == {
         "old_features_only",
         "book_pressure_features",
@@ -2491,6 +2526,38 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert feature_selection["#146_start_allowed"] is False
     assert feature_selection["#134_resume_allowed"] is False
     assert "feature_set_selection_report" in result.artifact_paths
+    joint_selection = result.joint_feature_correction_selection_report
+    assert (
+        joint_selection["schema_version"]
+        == O_JOINT_FEATURE_CORRECTION_SELECTION_SCHEMA_VERSION
+    )
+    assert joint_selection["uses_validation_labels_for_tuning"] is False
+    assert joint_selection["selection_metric_source"] == "shadow_split_only"
+    assert joint_selection["selected_feature_set_name"] == ranking[
+        "selected_feature_set_name"
+    ]
+    assert joint_selection["selected_correction_policy_name"] == ranking[
+        "selected_correction_policy_name"
+    ]
+    assert joint_selection["selected_joint_candidate_name"] == ranking[
+        "selected_joint_candidate_name"
+    ]
+    assert {
+        row["correction_policy_name"] for row in joint_selection["candidate_rows"]
+    } == {
+        "balanced_hts_sbc",
+        "conservative_hts",
+        "high_score_profitability_preserving",
+        "no_trade_tail_risk_buffer",
+        "sbc_preferred_when_hts_reliability_weak",
+    }
+    assert joint_selection["candidate_count"] == 25
+    assert looks_like_sha256(
+        joint_selection["joint_feature_correction_selection_config_hash"]
+    )
+    assert joint_selection["#146_start_allowed"] is False
+    assert joint_selection["#134_resume_allowed"] is False
+    assert "joint_feature_correction_selection_report" in result.artifact_paths
     residual = ranking["o_model_training_summary"][
         "p_up_bucket_calibration_residual_summary"
     ]
