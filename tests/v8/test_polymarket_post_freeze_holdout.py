@@ -50,6 +50,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_DEPLOYABLE_MODEL_FEATURE_NAMES,
     O_FEATURE_AND_LABEL_LEAKAGE_AUDIT_SCHEMA_VERSION,
     O_FREEZE_READINESS_SCHEMA_VERSION,
+    O_HTS_P_UP_CONFIDENTLY_WRONG_FEATURE_DIAGNOSTIC_SCHEMA_VERSION,
     O_LABEL_CONSTRUCTION_SCHEMA_VERSION,
     O_LABEL_DIAGNOSTIC_VARIANTS,
     O_MODEL_PREDICTED_VARIANT,
@@ -2659,12 +2660,107 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert freeze["#146_start_allowed"] is False
     assert freeze["#134_resume_allowed"] is False
 
+    hts_diagnostic = (
+        result.hts_p_up_confidently_wrong_feature_diagnostic_report
+    )
+    hts_payload = dict(hts_diagnostic)
+    hts_id = hts_payload.pop(
+        "o_hts_p_up_confidently_wrong_feature_diagnostic_report_id"
+    )
+    assert canonical_json_sha256(hts_payload) == hts_id
+    assert hts_diagnostic["schema_version"] == (
+        O_HTS_P_UP_CONFIDENTLY_WRONG_FEATURE_DIAGNOSTIC_SCHEMA_VERSION
+    )
+    assert hts_diagnostic["candidate_name"] == O_MODEL_PREDICTED_VARIANT
+    assert hts_diagnostic["ranking_score_source"] == "model_predicted_score"
+    assert hts_diagnostic["diagnostic_only"] is True
+    assert hts_diagnostic["uses_validation_labels_for_tuning"] is False
+    assert (
+        hts_diagnostic["report_uses_replay_outcomes_for_evaluation_only"]
+        is True
+    )
+    assert hts_diagnostic["selection_or_gate_mutation"] is False
+    assert hts_diagnostic["eligibility_remains_validation_only"] is True
+    assert hts_diagnostic["model_input_fields_decision_time_only"] == list(
+        O_DEPLOYABLE_MODEL_FEATURE_NAMES
+    )
+    assert hts_diagnostic["forbidden_fields_used_for_selection"] == []
+    assert hts_diagnostic["case_count"] >= 0
+    assert hts_diagnostic["validation_case_count"] >= 0
+    assert set(hts_diagnostic["split_summaries"]) == {
+        "all",
+        "shadow",
+        "validation",
+    }
+    assert "complete_decision_time_feature_case_count" in hts_diagnostic[
+        "feature_coverage_summary"
+    ]
+    assert "existing_features_insufficient" in hts_diagnostic[
+        "feature_coverage_summary"
+    ]
+    assert "reference_price_to_beat_distance_at_decision" in {
+        row["feature"]
+        for row in hts_diagnostic["missing_or_weak_decision_time_feature_candidates"]
+    }
+    assert "opposite_hts_side" in hts_diagnostic[
+        "alternative_comparison_summary"
+    ]
+    assert "best_sell_before_close_by_return" in hts_diagnostic[
+        "alternative_comparison_summary"
+    ]
+    if hts_diagnostic["top_confidently_wrong_cases"]:
+        top_case = hts_diagnostic["top_confidently_wrong_cases"][0]
+        assert top_case["p_up_confidently_wrong"] is True
+        assert top_case["selected_action"].endswith("HOLD_TO_SETTLEMENT")
+        assert top_case["selected_side"] != top_case["oracle_side"]
+        assert "p_up_confidence_bucket" in top_case
+        assert "time_to_close_seconds" in top_case["feature_snapshot"]
+        assert "spread_bps" in top_case["feature_snapshot"]
+        assert "queue_fill" in top_case["feature_snapshot"]
+        assert "book_staleness_ms" in top_case["feature_snapshot"]
+        assert "entry_ask" in top_case["feature_snapshot"]
+        assert "exit_bid_proxy" in top_case["feature_snapshot"]
+        assert "group_normalized_raw_model_component" in top_case[
+            "score_components"
+        ]
+        assert "NO_TRADE" in top_case["alternative_actions"]
+        assert "opposite_hts_side" in top_case["alternative_actions"]
+    assert hts_diagnostic["recommended_next_action"] in {
+        "add_new_decision_time_reference_and_book_pressure_features_before_"
+        "further_hts_priority_changes",
+        "lower_hts_side_bet_priority_when_reliability_is_weak",
+        "continue_monitoring",
+    }
+    assert hts_diagnostic["gate_status_snapshot"][
+        "source_model_candidate_eligible"
+    ] is False
+    assert hts_diagnostic["source_model_candidate_eligible"] is False
+    assert hts_diagnostic["promotion_evidence_eligible"] is False
+    assert hts_diagnostic["#146_start_allowed"] is False
+    assert hts_diagnostic["#134_resume_allowed"] is False
+    assert hts_diagnostic["paper_only"] is True
+    assert hts_diagnostic["capital_at_risk"] is False
+
     assert result.artifact_paths["label_construction_report"].exists()
     assert result.artifact_paths["ranking_objective_report"].exists()
     assert result.artifact_paths["leakage_audit_report"].exists()
     assert result.artifact_paths["candidate_comparison_report"].exists()
     assert result.artifact_paths["source_model_eligibility_gate_report"].exists()
     assert result.artifact_paths["freeze_readiness_report"].exists()
+    assert result.artifact_paths[
+        "hts_p_up_confidently_wrong_feature_diagnostic_report"
+    ].exists()
+    assert result.artifact_paths[
+        "hts_p_up_confidently_wrong_feature_diagnostic_summary"
+    ].exists()
+
+    manifest = _read_json(result.artifact_paths["manifest"])
+    assert "hts_p_up_confidently_wrong_feature_diagnostic_report" in manifest[
+        "artifact_hashes"
+    ]
+    assert "hts_p_up_confidently_wrong_feature_diagnostic_summary" in manifest[
+        "artifact_hashes"
+    ]
 
 
 def _build_corpus(root: Path) -> Path:

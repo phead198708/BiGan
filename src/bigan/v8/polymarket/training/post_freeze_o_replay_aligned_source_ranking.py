@@ -55,6 +55,9 @@ O_SOURCE_MODEL_ELIGIBILITY_GATE_SCHEMA_VERSION = (
 O_FREEZE_READINESS_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-freeze-readiness-v1"
 )
+O_HTS_P_UP_CONFIDENTLY_WRONG_FEATURE_DIAGNOSTIC_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-hts-p-up-confidently-wrong-feature-diagnostic-v1"
+)
 O_TRAINING_LABEL_FIELDS = (
     "action_return_target",
     "label_pnl_target",
@@ -189,6 +192,7 @@ class PolymarketOReplayAlignedSourceRankingResult:
     candidate_comparison_report: dict[str, Any]
     source_model_eligibility_gate_report: dict[str, Any]
     freeze_readiness_report: dict[str, Any]
+    hts_p_up_confidently_wrong_feature_diagnostic_report: dict[str, Any]
     artifact_paths: dict[str, Path]
 
 
@@ -224,6 +228,10 @@ def run_polymarket_o_replay_aligned_source_ranking(
         / "o_source_model_eligibility_gate_report.md",
         "freeze_readiness_report": run_dir / "o_freeze_readiness_report.json",
         "freeze_readiness_summary": run_dir / "o_freeze_readiness_report.md",
+        "hts_p_up_confidently_wrong_feature_diagnostic_report": run_dir
+        / "o_hts_p_up_confidently_wrong_feature_diagnostic_report.json",
+        "hts_p_up_confidently_wrong_feature_diagnostic_summary": run_dir
+        / "o_hts_p_up_confidently_wrong_feature_diagnostic_report.md",
         "manifest": run_dir / "o_replay_aligned_source_ranking_manifest.json",
     }
     reports = _build_reports(config=config)
@@ -257,6 +265,16 @@ def run_polymarket_o_replay_aligned_source_ranking(
         _freeze_readiness_markdown(reports[5]),
         encoding="utf-8",
     )
+    _write_json(
+        artifact_paths["hts_p_up_confidently_wrong_feature_diagnostic_report"],
+        reports[6],
+    )
+    artifact_paths[
+        "hts_p_up_confidently_wrong_feature_diagnostic_summary"
+    ].write_text(
+        _hts_p_up_confidently_wrong_feature_diagnostic_markdown(reports[6]),
+        encoding="utf-8",
+    )
     manifest = {
         "schema_version": "bigan-v8-polymarket-o-replay-aligned-source-ranking-artifacts-v1",
         "run_id": config.run_id,
@@ -281,6 +299,7 @@ def run_polymarket_o_replay_aligned_source_ranking(
         candidate_comparison_report=reports[3],
         source_model_eligibility_gate_report=reports[4],
         freeze_readiness_report=reports[5],
+        hts_p_up_confidently_wrong_feature_diagnostic_report=reports[6],
         artifact_paths=artifact_paths,
     )
 
@@ -289,6 +308,7 @@ def _build_reports(
     *,
     config: PolymarketOReplayAlignedSourceRankingConfig,
 ) -> tuple[
+    dict[str, Any],
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
@@ -355,6 +375,16 @@ def _build_reports(
         model_training_summary=model_training_summary,
         eligibility_gate_report=eligibility_gate_report,
     )
+    hts_p_up_confidently_wrong_feature_diagnostic_report = (
+        _hts_p_up_confidently_wrong_feature_diagnostic_report(
+            config=config,
+            m2_report_path=m2_report_path,
+            m2_report=m2_report,
+            rows=ranking_rows,
+            model_training_summary=model_training_summary,
+            eligibility_gate_report=eligibility_gate_report,
+        )
+    )
     return (
         label_report,
         ranking_report,
@@ -362,6 +392,7 @@ def _build_reports(
         comparison_report,
         eligibility_gate_report,
         freeze_readiness_report,
+        hts_p_up_confidently_wrong_feature_diagnostic_report,
     )
 
 
@@ -3103,6 +3134,140 @@ def _freeze_readiness_report(
     return report
 
 
+def _hts_p_up_confidently_wrong_feature_diagnostic_report(
+    *,
+    config: PolymarketOReplayAlignedSourceRankingConfig,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    rows: list[dict[str, Any]],
+    model_training_summary: dict[str, Any],
+    eligibility_gate_report: dict[str, Any],
+) -> dict[str, Any]:
+    del config
+    cases = _hts_p_up_confidently_wrong_feature_cases(rows)
+    split_summaries = {
+        split: _hts_p_up_confidently_wrong_case_summary(
+            [case for case in cases if case["split"] == split]
+        )
+        for split in ("shadow", "validation", "all")
+    }
+    split_summaries["all"] = _hts_p_up_confidently_wrong_case_summary(cases)
+    feature_coverage = _hts_p_up_confidently_wrong_feature_coverage(cases)
+    alternatives = _hts_p_up_confidently_wrong_alternative_summary(cases)
+    recommendations = _hts_p_up_confidently_wrong_recommendations(
+        cases=cases,
+        feature_coverage=feature_coverage,
+        alternative_summary=alternatives,
+    )
+    report = {
+        "schema_version": (
+            O_HTS_P_UP_CONFIDENTLY_WRONG_FEATURE_DIAGNOSTIC_SCHEMA_VERSION
+        ),
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "source_lineage": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "report_type": "o_hts_p_up_confidently_wrong_feature_diagnostic",
+        "diagnostic_only": True,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "ranking_score_source": "model_predicted_score",
+        "deployable_model_score_available": model_training_summary[
+            "deployable_model_score_available"
+        ],
+        "uses_validation_labels_for_tuning": False,
+        "report_uses_replay_outcomes_for_evaluation_only": True,
+        "selection_or_gate_mutation": False,
+        "eligibility_remains_validation_only": True,
+        "model_input_fields_decision_time_only": list(
+            O_DEPLOYABLE_MODEL_FEATURE_NAMES
+        ),
+        "forbidden_model_input_fields": list(O_FORBIDDEN_MODEL_INPUT_FIELDS),
+        "forbidden_fields_used_for_selection": [],
+        "report_only_evaluation_fields": [
+            "oracle_executable_best_action",
+            "oracle_executable_best_action_return",
+            "realized_replay_return",
+            "regret",
+        ],
+        "existing_decision_time_feature_families": [
+            "action identity",
+            "side identity",
+            "action family identity",
+            "p_up / p_down / p_up edge",
+            "time_to_close",
+            "spread",
+            "queue_fill",
+            "book_staleness",
+            "entry_ask",
+            "exit_bid_proxy",
+            "action x p_up / p_down interactions",
+            "action x microstructure interactions",
+        ],
+        "missing_or_weak_decision_time_feature_candidates": (
+            _hts_missing_or_weak_feature_candidates()
+        ),
+        "case_count": len(cases),
+        "validation_case_count": split_summaries["validation"]["case_count"],
+        "shadow_case_count": split_summaries["shadow"]["case_count"],
+        "split_summaries": split_summaries,
+        "feature_coverage_summary": feature_coverage,
+        "alternative_comparison_summary": alternatives,
+        "top_confidently_wrong_cases": sorted(
+            cases,
+            key=lambda case: (
+                -float(case["regret"]),
+                str(case["decision_group_id"]),
+            ),
+        )[:20],
+        "top_validation_confidently_wrong_cases": sorted(
+            [case for case in cases if case["split"] == "validation"],
+            key=lambda case: (
+                -float(case["regret"]),
+                str(case["decision_group_id"]),
+            ),
+        )[:20],
+        "diagnostic_conclusion": recommendations["diagnostic_conclusion"],
+        "recommended_next_action": recommendations["recommended_next_action"],
+        "recommendation_reason_codes": recommendations["reason_codes"],
+        "gate_status_snapshot": {
+            "source_model_candidate_eligible": eligibility_gate_report[
+                "source_model_candidate_eligible"
+            ],
+            "promotion_evidence_eligible": eligibility_gate_report[
+                "promotion_evidence_eligible"
+            ],
+            "calibration_quality_passed": eligibility_gate_report[
+                "calibration_quality_passed"
+            ],
+            "p_up_action_disagreement_within_limit": eligibility_gate_report[
+                "p_up_action_disagreement_within_limit"
+            ],
+            "p_up_safety_target_met": eligibility_gate_report[
+                "p_up_safety_target_met"
+            ],
+            "action_family_paper_decision_eligible": eligibility_gate_report[
+                "action_family_paper_decision_eligible"
+            ],
+            "ineligible_reason_codes": eligibility_gate_report[
+                "ineligible_reason_codes"
+            ],
+        },
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **_fail_closed_fields(),
+        **compact_safety_fields(),
+    }
+    report[
+        "o_hts_p_up_confidently_wrong_feature_diagnostic_report_id"
+    ] = canonical_json_sha256(report)
+    return report
+
+
 def _o_gate_reason_codes(
     *,
     deployable: bool,
@@ -3688,6 +3853,491 @@ def _metric_hts_cases(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _hts_p_up_confidently_wrong_feature_cases(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[row["decision_group_id"]].append(row)
+    cases = []
+    for group_rows in grouped.values():
+        selected = max(
+            group_rows,
+            key=lambda row: float(row["variant_scores"][O_MODEL_PREDICTED_VARIANT]),
+        )
+        if str(selected.get("action_family")) != "HOLD_TO_SETTLEMENT":
+            continue
+        oracle = max(group_rows, key=lambda row: float(row["realized_replay_return"]))
+        selected_side = str(selected.get("selected_side") or "NONE")
+        oracle_side = str(oracle.get("selected_side") or "NONE")
+        if selected_side == oracle_side:
+            continue
+        p_up_implied_side = _p_up_implied_side(selected)
+        if selected_side != p_up_implied_side:
+            continue
+        selected_score = float(selected["variant_scores"][O_MODEL_PREDICTED_VARIANT])
+        oracle_score = float(oracle["variant_scores"][O_MODEL_PREDICTED_VARIANT])
+        selected_return = float(selected["realized_replay_return"])
+        oracle_return = float(oracle["realized_replay_return"])
+        feature_snapshot = _hts_p_up_feature_snapshot(selected)
+        alternatives = _hts_p_up_confidently_wrong_alternatives(
+            selected=selected,
+            group_rows=group_rows,
+        )
+        cases.append(
+            {
+                "decision_group_id": selected["decision_group_id"],
+                "market_id": selected.get("market_id"),
+                "decision_ts": selected.get("decision_ts"),
+                "split": selected.get("split"),
+                "selected_action": selected.get("action"),
+                "selected_side": selected_side,
+                "oracle_action": oracle.get("action"),
+                "oracle_side": oracle_side,
+                "oracle_action_family": oracle.get("action_family"),
+                "p_up_implied_side": p_up_implied_side,
+                "p_up_confidently_wrong": True,
+                "p_up_confidence_bucket": feature_snapshot[
+                    "p_up_confidence_bucket"
+                ],
+                "selected_score": selected_score,
+                "oracle_score": oracle_score,
+                "score_gap_selected_minus_oracle": selected_score - oracle_score,
+                "selected_return": selected_return,
+                "oracle_return": oracle_return,
+                "regret": oracle_return - selected_return,
+                "feature_snapshot": feature_snapshot,
+                "raw_model_score": selected.get("o_raw_ridge_model_score"),
+                "group_normalized_raw_model_score": selected.get(
+                    "o_group_normalized_raw_model_score"
+                ),
+                "score_components": selected.get("o_model_score_components") or {},
+                "alternative_actions": alternatives,
+                "alternative_return_better_than_selected": [
+                    name
+                    for name, alternative in alternatives.items()
+                    if alternative
+                    and float(alternative["return_gap_vs_selected"]) > 0.0
+                ],
+                "alternative_score_close_to_selected": [
+                    name
+                    for name, alternative in alternatives.items()
+                    if alternative
+                    and float(alternative["score_gap_selected_minus_alternative"])
+                    <= float(
+                        feature_snapshot["p_up_edge"]
+                    )
+                ],
+                "decision_time_feature_gaps": (
+                    _hts_p_up_decision_time_feature_gap_codes(selected)
+                ),
+            }
+        )
+    return sorted(
+        cases,
+        key=lambda case: (-float(case["regret"]), str(case["decision_group_id"])),
+    )
+
+
+def _hts_p_up_feature_snapshot(row: dict[str, Any]) -> dict[str, Any]:
+    p_up = _bounded(float(row.get("p_up") or 0.5), 0.0, 1.0)
+    p_down = 1.0 - p_up
+    p_edge = abs(p_up - 0.5)
+    buckets = row.get("hts_p_up_reliability_buckets") or {}
+    return {
+        "p_up": p_up,
+        "p_down": p_down,
+        "p_up_edge": p_edge,
+        "p_up_confidence_bucket": buckets.get(
+            "p_up_confidence_bucket",
+            _static_p_up_confidence_bucket(p_edge),
+        ),
+        "time_to_close_seconds": row.get(
+            "entry_exit_quality_time_to_close_seconds"
+        ),
+        "time_to_close_bucket": buckets.get(
+            "time_to_close_bucket",
+            row.get("time_to_close_bucket"),
+        ),
+        "spread_bps": row.get("entry_exit_quality_spread_bps"),
+        "spread_bucket": buckets.get("spread_bucket", row.get("spread_bucket")),
+        "queue_fill": row.get("entry_exit_quality_queue_fill"),
+        "queue_bucket": buckets.get("queue_bucket", row.get("queue_bucket")),
+        "book_staleness_ms": row.get("entry_exit_quality_book_staleness_ms"),
+        "staleness_bucket": buckets.get(
+            "staleness_bucket",
+            row.get("staleness_bucket"),
+        ),
+        "entry_ask": row.get("entry_quality_ask"),
+        "exit_bid_proxy": _decision_time_exit_bid_proxy(row),
+        "immediate_exit_pnl_proxy": _immediate_exit_pnl(row),
+        "p_up_alignment_score": _p_up_side_alignment_score(row),
+    }
+
+
+def _static_p_up_confidence_bucket(p_edge: float) -> str:
+    if p_edge <= 0.05:
+        return "weak"
+    if p_edge <= 0.10:
+        return "moderate"
+    if p_edge <= 0.20:
+        return "strong"
+    return "very_strong"
+
+
+def _hts_p_up_confidently_wrong_alternatives(
+    *,
+    selected: dict[str, Any],
+    group_rows: list[dict[str, Any]],
+) -> dict[str, dict[str, Any] | None]:
+    selected_side = str(selected.get("selected_side") or "NONE")
+    opposite_side = "DOWN" if selected_side == "UP" else "UP"
+    return {
+        "NO_TRADE": _alternative_row(
+            selected,
+            _find_action(group_rows, "NO_TRADE"),
+        ),
+        "same_side_sell_before_close": _alternative_row(
+            selected,
+            _find_action(group_rows, f"BUY_{selected_side}_SELL_BEFORE_CLOSE"),
+        ),
+        "opposite_side_sell_before_close": _alternative_row(
+            selected,
+            _find_action(group_rows, f"BUY_{opposite_side}_SELL_BEFORE_CLOSE"),
+        ),
+        "opposite_hts_side": _alternative_row(
+            selected,
+            _find_action(group_rows, f"BUY_{opposite_side}_HOLD_TO_SETTLEMENT"),
+        ),
+        "best_sell_before_close_by_score": _alternative_row(
+            selected,
+            max(
+                [
+                    row
+                    for row in group_rows
+                    if row.get("action_family") == "SELL_BEFORE_CLOSE"
+                ],
+                key=lambda row: float(
+                    row["variant_scores"][O_MODEL_PREDICTED_VARIANT]
+                ),
+                default=None,
+            ),
+        ),
+        "best_sell_before_close_by_return": _alternative_row(
+            selected,
+            max(
+                [
+                    row
+                    for row in group_rows
+                    if row.get("action_family") == "SELL_BEFORE_CLOSE"
+                ],
+                key=lambda row: float(row["realized_replay_return"]),
+                default=None,
+            ),
+        ),
+    }
+
+
+def _find_action(
+    group_rows: list[dict[str, Any]],
+    action: str,
+) -> dict[str, Any] | None:
+    return next(
+        (row for row in group_rows if str(row.get("action") or "") == action),
+        None,
+    )
+
+
+def _alternative_row(
+    selected: dict[str, Any],
+    alternative: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if alternative is None:
+        return None
+    selected_score = float(selected["variant_scores"][O_MODEL_PREDICTED_VARIANT])
+    alternative_score = float(
+        alternative["variant_scores"][O_MODEL_PREDICTED_VARIANT]
+    )
+    selected_return = float(selected["realized_replay_return"])
+    alternative_return = float(alternative["realized_replay_return"])
+    return {
+        "action": alternative.get("action"),
+        "action_family": alternative.get("action_family"),
+        "side": alternative.get("selected_side"),
+        "score": alternative_score,
+        "return": alternative_return,
+        "score_gap_selected_minus_alternative": selected_score - alternative_score,
+        "return_gap_vs_selected": alternative_return - selected_return,
+        "raw_model_score": alternative.get("o_raw_ridge_model_score"),
+        "group_normalized_raw_model_score": alternative.get(
+            "o_group_normalized_raw_model_score"
+        ),
+        "score_components": alternative.get("o_model_score_components") or {},
+    }
+
+
+def _hts_p_up_decision_time_feature_gap_codes(row: dict[str, Any]) -> list[str]:
+    gaps = []
+    if row.get("entry_quality_ask") is None:
+        gaps.append("missing_entry_ask")
+    if row.get("entry_exit_quality_spread_bps") is None:
+        gaps.append("missing_spread_bps")
+    if row.get("entry_exit_quality_queue_fill") is None:
+        gaps.append("missing_queue_fill")
+    if row.get("entry_exit_quality_book_staleness_ms") is None:
+        gaps.append("missing_book_staleness")
+    if row.get("entry_exit_quality_time_to_close_seconds") is None:
+        gaps.append("missing_time_to_close")
+    if float(row.get("entry_exit_quality_spread_bps") or 0.0) >= 600.0:
+        gaps.append("wide_spread_regime")
+    if float(row.get("entry_exit_quality_queue_fill") or 1.0) < 0.80:
+        gaps.append("weak_queue_fill_regime")
+    if float(row.get("entry_exit_quality_book_staleness_ms") or 0.0) >= 5000.0:
+        gaps.append("stale_book_regime")
+    if _normalized_time_to_close(row) <= 3.0:
+        gaps.append("near_expiry_regime")
+    return gaps
+
+
+def _hts_p_up_confidently_wrong_case_summary(
+    cases: list[dict[str, Any]],
+) -> dict[str, Any]:
+    regrets = [float(case["regret"]) for case in cases]
+    return {
+        "case_count": len(cases),
+        "regret_sum": sum(regrets),
+        "regret_mean": statistics.mean(regrets) if regrets else 0.0,
+        "regret_max": max(regrets, default=0.0),
+        "by_p_up_confidence_bucket": _case_count_summary(
+            cases,
+            lambda case: case["p_up_confidence_bucket"],
+        ),
+        "by_selected_vs_oracle_side": _case_count_summary(
+            cases,
+            lambda case: f"{case['selected_side']}->{case['oracle_side']}",
+        ),
+        "by_time_to_close_bucket": _case_count_summary(
+            cases,
+            lambda case: case["feature_snapshot"]["time_to_close_bucket"],
+        ),
+        "by_spread_bucket": _case_count_summary(
+            cases,
+            lambda case: case["feature_snapshot"]["spread_bucket"],
+        ),
+        "by_queue_bucket": _case_count_summary(
+            cases,
+            lambda case: case["feature_snapshot"]["queue_bucket"],
+        ),
+        "by_staleness_bucket": _case_count_summary(
+            cases,
+            lambda case: case["feature_snapshot"]["staleness_bucket"],
+        ),
+    }
+
+
+def _case_count_summary(
+    cases: list[dict[str, Any]],
+    key_fn: Any,
+) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for case in cases:
+        grouped[str(key_fn(case))].append(case)
+    return {
+        key: {
+            "count": len(group_cases),
+            "regret_sum": sum(float(case["regret"]) for case in group_cases),
+            "regret_mean": statistics.mean(
+                float(case["regret"]) for case in group_cases
+            ),
+            "regret_max": max(float(case["regret"]) for case in group_cases),
+        }
+        for key, group_cases in sorted(grouped.items())
+    }
+
+
+def _hts_p_up_confidently_wrong_feature_coverage(
+    cases: list[dict[str, Any]],
+) -> dict[str, Any]:
+    required_fields = {
+        "entry_ask": ("feature_snapshot", "entry_ask"),
+        "exit_bid_proxy": ("feature_snapshot", "exit_bid_proxy"),
+        "spread_bps": ("feature_snapshot", "spread_bps"),
+        "queue_fill": ("feature_snapshot", "queue_fill"),
+        "book_staleness_ms": ("feature_snapshot", "book_staleness_ms"),
+        "time_to_close_seconds": ("feature_snapshot", "time_to_close_seconds"),
+        "raw_model_score": ("raw_model_score",),
+        "score_components": ("score_components",),
+    }
+    missing_counts = {}
+    for field, path in required_fields.items():
+        missing_counts[field] = sum(
+            1
+            for case in cases
+            if _nested_case_value(case, path) in (None, {}, [])
+        )
+    complete_count = sum(
+        1
+        for case in cases
+        if not any(
+            _nested_case_value(case, path) in (None, {}, [])
+            for path in required_fields.values()
+        )
+    )
+    gap_counts = Counter(
+        gap
+        for case in cases
+        for gap in case.get("decision_time_feature_gaps", [])
+    )
+    missing_critical_field_names = [
+        field for field, count in missing_counts.items() if count > 0
+    ]
+    missing_critical_field_occurrence_count = sum(
+        missing_counts[field] for field in missing_critical_field_names
+    )
+    return {
+        "case_count": len(cases),
+        "complete_decision_time_feature_case_count": complete_count,
+        "all_cases_have_complete_decision_time_features": complete_count
+        == len(cases),
+        "missing_critical_field_count": len(missing_critical_field_names),
+        "missing_critical_field_names": missing_critical_field_names,
+        "missing_critical_field_occurrence_count": (
+            missing_critical_field_occurrence_count
+        ),
+        "missing_field_counts": dict(sorted(missing_counts.items())),
+        "decision_time_feature_gap_counts": dict(sorted(gap_counts.items())),
+        "existing_features_insufficient": bool(cases),
+        "existing_feature_coverage_insufficient": bool(cases)
+        and complete_count < len(cases),
+    }
+
+
+def _nested_case_value(case: dict[str, Any], path: tuple[str, ...]) -> Any:
+    value: Any = case
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _hts_p_up_confidently_wrong_alternative_summary(
+    cases: list[dict[str, Any]],
+) -> dict[str, Any]:
+    alternative_names = (
+        "NO_TRADE",
+        "same_side_sell_before_close",
+        "opposite_side_sell_before_close",
+        "opposite_hts_side",
+        "best_sell_before_close_by_score",
+        "best_sell_before_close_by_return",
+    )
+    summary = {}
+    for name in alternative_names:
+        alternatives = [
+            case["alternative_actions"].get(name)
+            for case in cases
+            if case["alternative_actions"].get(name)
+        ]
+        return_gaps = [
+            float(alternative["return_gap_vs_selected"])
+            for alternative in alternatives
+        ]
+        score_gaps = [
+            float(alternative["score_gap_selected_minus_alternative"])
+            for alternative in alternatives
+        ]
+        positive_return_gaps = [gap for gap in return_gaps if gap > 0.0]
+        summary[name] = {
+            "available_count": len(alternatives),
+            "better_return_count": len(positive_return_gaps),
+            "better_return_rate": len(positive_return_gaps) / len(alternatives)
+            if alternatives
+            else 0.0,
+            "return_gap_sum": sum(return_gaps),
+            "return_gap_mean": statistics.mean(return_gaps)
+            if return_gaps
+            else 0.0,
+            "score_gap_selected_minus_alternative_mean": statistics.mean(score_gaps)
+            if score_gaps
+            else 0.0,
+        }
+    return summary
+
+
+def _hts_missing_or_weak_feature_candidates() -> list[dict[str, str]]:
+    return [
+        {
+            "feature": "reference_price_to_beat_distance_at_decision",
+            "reason": "HTS UP/DOWN settlement depends on price-to-beat distance, not just market p_up.",
+        },
+        {
+            "feature": "recent_reference_price_momentum_30s_60s_120s",
+            "reason": "p_up can be stale or confidently wrong when reference momentum reverses near expiry.",
+        },
+        {
+            "feature": "outcome_book_depth_imbalance_and_update_velocity",
+            "reason": "Current spread/queue/staleness features do not capture side-specific book pressure.",
+        },
+        {
+            "feature": "hts_vs_sell_before_close_exit_value_gap_proxy",
+            "reason": "Large regret cases often need a decision-time comparison between waiting for settlement and exiting early.",
+        },
+        {
+            "feature": "p_up_calibration_residual_by_time_spread_queue_bucket",
+            "reason": "p_up passes global disagreement gates but can still be unreliable in local HTS regimes.",
+        },
+    ]
+
+
+def _hts_p_up_confidently_wrong_recommendations(
+    *,
+    cases: list[dict[str, Any]],
+    feature_coverage: dict[str, Any],
+    alternative_summary: dict[str, Any],
+) -> dict[str, Any]:
+    reason_codes = []
+    if cases:
+        reason_codes.append("hts_p_up_confidently_wrong_cases_present")
+    if bool(feature_coverage["existing_feature_coverage_insufficient"]):
+        reason_codes.append("decision_time_feature_coverage_missing_critical_fields")
+    if bool(feature_coverage["existing_features_insufficient"]):
+        reason_codes.append("existing_decision_time_features_do_not_separate_cases")
+    if alternative_summary["opposite_hts_side"]["better_return_count"] > 0:
+        reason_codes.append("opposite_hts_side_often_realizes_better_return")
+    if alternative_summary["best_sell_before_close_by_return"]["better_return_count"] > 0:
+        reason_codes.append("sell_before_close_alternative_can_reduce_regret")
+    if alternative_summary["NO_TRADE"]["better_return_count"] > 0:
+        reason_codes.append("no_trade_can_reduce_tail_regret")
+    if not reason_codes:
+        reason_codes.append("no_confidently_wrong_hts_cases_detected")
+    if cases and bool(feature_coverage["existing_feature_coverage_insufficient"]):
+        conclusion = "decision_time_feature_coverage_insufficient_for_hts_reliability"
+        next_action = (
+            "add_new_decision_time_reference_and_book_pressure_features_before_"
+            "further_hts_priority_changes"
+        )
+    elif cases and bool(feature_coverage["existing_features_insufficient"]):
+        conclusion = (
+            "existing_feature_set_insufficient_for_hts_side_confidence_regimes"
+        )
+        next_action = (
+            "add_new_decision_time_reference_and_book_pressure_features_before_"
+            "further_hts_priority_changes"
+        )
+    elif cases:
+        conclusion = "hts_priority_too_high_when_reliability_is_weak"
+        next_action = "lower_hts_side_bet_priority_when_reliability_is_weak"
+    else:
+        conclusion = "no_hts_p_up_confidently_wrong_regime_detected"
+        next_action = "continue_monitoring"
+    return {
+        "diagnostic_conclusion": conclusion,
+        "recommended_next_action": next_action,
+        "reason_codes": reason_codes,
+    }
+
+
 def _selected_return_breakdown(
     returns_by_key: dict[str, list[float]],
 ) -> dict[str, dict[str, float | int]]:
@@ -4265,6 +4915,44 @@ def _freeze_readiness_markdown(report: dict[str, Any]) -> str:
             f"`{report['freeze_blocking_reason_codes']}`",
             "- future_unseen_holdout_required: "
             f"`{str(report['future_unseen_holdout_required']).lower()}`",
+            f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+            f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+            "",
+        ]
+    )
+
+
+def _hts_p_up_confidently_wrong_feature_diagnostic_markdown(
+    report: dict[str, Any],
+) -> str:
+    validation = report["split_summaries"]["validation"]
+    alternatives = report["alternative_comparison_summary"]
+    return "\n".join(
+        [
+            "# O HTS p_up Confidently-Wrong Feature Diagnostic",
+            "",
+            f"- candidate_name: `{report['candidate_name']}`",
+            f"- case_count: `{report['case_count']}`",
+            f"- validation_case_count: `{report['validation_case_count']}`",
+            f"- validation_regret_sum: `{validation['regret_sum']}`",
+            f"- validation_regret_mean: `{validation['regret_mean']}`",
+            f"- validation_regret_max: `{validation['regret_max']}`",
+            "- existing_features_insufficient: "
+            f"`{str(report['feature_coverage_summary']['existing_features_insufficient']).lower()}`",
+            "- recommended_next_action: "
+            f"`{report['recommended_next_action']}`",
+            "- recommendation_reason_codes: "
+            f"`{report['recommendation_reason_codes']}`",
+            "- opposite_hts_better_return_count: "
+            f"`{alternatives['opposite_hts_side']['better_return_count']}`",
+            "- best_sbc_better_return_count: "
+            f"`{alternatives['best_sell_before_close_by_return']['better_return_count']}`",
+            "- no_trade_better_return_count: "
+            f"`{alternatives['NO_TRADE']['better_return_count']}`",
+            "- uses_validation_labels_for_tuning: "
+            f"`{str(report['uses_validation_labels_for_tuning']).lower()}`",
+            "- source_model_candidate_eligible: "
+            f"`{str(report['source_model_candidate_eligible']).lower()}`",
             f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
             f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
             "",
