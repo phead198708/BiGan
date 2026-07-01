@@ -55,7 +55,11 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_JOINT_FEATURE_CORRECTION_SELECTION_SCHEMA_VERSION,
     O_LABEL_CONSTRUCTION_SCHEMA_VERSION,
     O_LABEL_DIAGNOSTIC_VARIANTS,
+    O_MAX_P_UP_ACTION_DISAGREEMENT_RATE,
+    O_MIN_HIGH_SCORE_SUPPORT_COUNT,
+    O_MIN_TOP1_HIT_RATE,
     O_MODEL_PREDICTED_VARIANT,
+    O_SHADOW_P_UP_SELECTION_BUFFER_TARGET,
     O_SOURCE_CANDIDATE_COMPARISON_SCHEMA_VERSION,
     O_SOURCE_MODEL_ELIGIBILITY_GATE_SCHEMA_VERSION,
     O_SOURCE_RANKING_OBJECTIVE_SCHEMA_VERSION,
@@ -2506,6 +2510,12 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert feature_selection["feature_set_selection_min_high_score_support_count"] == 5
     assert feature_selection["source_model_gate_min_high_score_support_count"] == 10
     assert feature_selection["feature_set_selection_derived_from_joint_selection"] is True
+    assert feature_selection["shadow_p_up_safety_constrained_selection_enabled"] is True
+    assert (
+        feature_selection["shadow_p_up_safety_target_rate"]
+        == O_SHADOW_P_UP_SELECTION_BUFFER_TARGET
+    )
+    assert feature_selection["shadow_top1_aware_selection_enabled"] is True
     assert feature_selection["selected_correction_policy_name"] == ranking[
         "selected_correction_policy_name"
     ]
@@ -2539,6 +2549,12 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     )
     assert joint_selection["uses_validation_labels_for_tuning"] is False
     assert joint_selection["selection_metric_source"] == "shadow_split_only"
+    assert joint_selection["shadow_p_up_safety_constrained_selection_enabled"] is True
+    assert (
+        joint_selection["shadow_p_up_safety_target_rate"]
+        == O_SHADOW_P_UP_SELECTION_BUFFER_TARGET
+    )
+    assert joint_selection["shadow_top1_aware_selection_enabled"] is True
     assert joint_selection["selected_feature_set_name"] == ranking[
         "selected_feature_set_name"
     ]
@@ -2579,6 +2595,13 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert joint_selection["selected_full_correction_rerun_diagnostics"][
         "full_correction_search_source"
     ] == "shadow_split_only"
+    assert joint_selection["selected_full_correction_rerun_diagnostics"][
+        "shadow_p_up_safety_target_rate"
+    ] == O_SHADOW_P_UP_SELECTION_BUFFER_TARGET
+    assert (
+        "shadow_top1_quality_acceptance_path"
+        in joint_selection["selected_full_correction_rerun_diagnostics"]
+    )
     assert joint_selection["selected_lightweight_preselection_candidate_row"][
         "joint_candidate_name"
     ] == joint_selection["selected_joint_candidate_name"]
@@ -2587,6 +2610,12 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     ] == joint_selection["selected_joint_candidate_name"]
     assert all(
         "shadow_high_score_support_deficit_to_source_gate" in row
+        for row in joint_selection["candidate_rows"]
+    )
+    assert all(
+        "shadow_p_up_safety_target_passed" in row
+        and "shadow_top1_quality_target_passed" in row
+        and "shadow_top1_miss_regret_sum" in row
         for row in joint_selection["candidate_rows"]
     )
     assert looks_like_sha256(
@@ -2620,6 +2649,7 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "side_selected_return_breakdown",
         "largest_winner_dependency",
         "largest_regret_case",
+        "top1_miss_diagnostics",
         "action_family_level_regret",
         "side_level_regret",
         "no_trade_missed_opportunity",
@@ -2639,6 +2669,15 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     ] == 0
     assert 0.0 <= ranking["top1_realized_best_action_hit_rate"] <= 1.0
     assert ranking["mean_regret"] >= 0.0
+    assert ranking["validation_metrics"]["top1_miss_diagnostics"][
+        "top1_miss_count"
+    ] >= 0
+    assert "action_pair_confusion" in ranking["validation_metrics"][
+        "top1_miss_diagnostics"
+    ]
+    assert "regret_contribution_by_miss_type" in ranking["validation_metrics"][
+        "top1_miss_diagnostics"
+    ]
     assert any(
         row["oracle_executable_best_action"] == "NO_TRADE"
         for row in ranking["ranking_rows"]
@@ -2897,9 +2936,37 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     ] <= gate["p_up_action_disagreement_summary"][
         "max_allowed_disagreement_rate"
     ]
+    assert gate["p_up_action_disagreement_summary"][
+        "max_allowed_disagreement_rate"
+    ] == O_MAX_P_UP_ACTION_DISAGREEMENT_RATE
     assert gate["gate_thresholds"]["p_up_safety_target_disagreement_rate"] == 0.25
     assert gate["gate_thresholds"]["p_up_safety_target_is_hard_gate"] is False
     assert "p_up_safety_target_met" in gate
+    assert gate["top1_realized_best_action_hit_rate"] >= 0.0
+    assert gate["gate_thresholds"][
+        "min_top1_realized_best_action_hit_rate"
+    ] == O_MIN_TOP1_HIT_RATE
+    assert gate["gate_thresholds"][
+        "min_high_score_support_count"
+    ] == O_MIN_HIGH_SCORE_SUPPORT_COUNT
+    assert gate["top1_miss_diagnostics"] == gate["validation_metrics"][
+        "top1_miss_diagnostics"
+    ]
+    assert gate["gate_reason_code_consistency_passed"] is True
+    assert gate["gate_reason_code_consistency"][
+        "gate_reason_code_consistency_passed"
+    ] is True
+    assert gate["gate_reason_code_consistency"]["unexpected_reason_codes"] == []
+    assert gate["gate_reason_code_consistency"]["missing_reason_codes"] == []
+    if (
+        gate["high_score_support_count"] >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
+        and gate["high_score_realized_return_mean"] > 0.0
+        and gate["high_score_realized_return_sum"] > 0.0
+    ):
+        assert (
+            "validation_high_score_return_gate_failed"
+            not in gate["ineligible_reason_codes"]
+        )
     assert "largest_regret_case" in gate["validation_metrics"]
     assert "action_family_level_regret" in gate["validation_metrics"]
     assert "action_pair_regret_summary" in gate["validation_metrics"]

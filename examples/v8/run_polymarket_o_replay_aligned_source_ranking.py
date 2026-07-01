@@ -63,6 +63,12 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         "validation_top1_hit_rate": gate["top1_realized_best_action_hit_rate"],
         "validation_mean_regret": gate["mean_regret"],
         "validation_high_score_support_count": gate["high_score_support_count"],
+        "validation_p_up_disagreement_rate": gate[
+            "p_up_action_disagreement_summary"
+        ]["candidate_scoped_p_up_action_disagreement_rate"],
+        "gate_reason_code_consistency_passed": gate[
+            "gate_reason_code_consistency_passed"
+        ],
         "source_model_candidate_eligible": gate["source_model_candidate_eligible"],
         "freeze_ready": freeze["freeze_ready"],
         "leakage_audit_passed": leakage["leakage_audit_passed"],

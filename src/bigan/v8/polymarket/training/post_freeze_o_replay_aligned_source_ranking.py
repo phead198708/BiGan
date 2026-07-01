@@ -219,6 +219,7 @@ O_MIN_TOP1_HIT_RATE = 0.35
 O_MAX_MEAN_REGRET = 0.15
 O_MAX_NO_TRADE_SELECTION_RATE = 0.80
 O_MAX_P_UP_ACTION_DISAGREEMENT_RATE = 0.35
+O_SHADOW_P_UP_SELECTION_BUFFER_TARGET = 0.25
 
 
 @dataclass(frozen=True, slots=True)
@@ -1799,13 +1800,18 @@ def _select_o_shadow_feature_set(
         "selection_metric_source": "shadow_split_only",
         "selection_criteria": [
             "shadow_high_score_support_reaches_source_gate_when_possible",
-            "prefer_combined_decision_time_feature_coverage_after_support_gates",
+            "shadow_p_up_safety_target_before_regret",
+            "shadow_top1_hit_rate_before_regret",
+            "shadow_top1_miss_regret_reduction",
             "positive_shadow_selected_return",
             "profitable_shadow_high_score_support",
             "shadow_largest_regret_not_worsened_vs_old_features",
             "shadow_action_family_selected_returns_not_negative",
             "lower_shadow_mean_regret_after_support_and_safety_gates",
         ],
+        "shadow_p_up_safety_constrained_selection_enabled": True,
+        "shadow_p_up_safety_target_rate": O_SHADOW_P_UP_SELECTION_BUFFER_TARGET,
+        "shadow_top1_aware_selection_enabled": True,
         "candidate_feature_set_names": list(feature_sets),
         "candidate_correction_policy_names": [
             profile["correction_policy_name"] for profile in correction_policies
@@ -1896,12 +1902,17 @@ def _select_o_shadow_feature_set(
         "selection_criteria": [
             "joint_feature_set_and_correction_policy_shadow_selection",
             "shadow_high_score_support_reaches_source_gate_when_possible",
-            "prefer_combined_decision_time_feature_coverage_after_support_gates",
+            "shadow_p_up_safety_target_before_regret",
+            "shadow_top1_hit_rate_before_regret",
+            "shadow_top1_miss_regret_reduction",
             "lower_shadow_mean_regret_after_support_and_safety_gates",
             "positive_shadow_selected_return",
             "profitable_shadow_high_score_support",
             "shadow_action_family_selected_returns_not_negative",
         ],
+        "shadow_p_up_safety_constrained_selection_enabled": True,
+        "shadow_p_up_safety_target_rate": O_SHADOW_P_UP_SELECTION_BUFFER_TARGET,
+        "shadow_top1_aware_selection_enabled": True,
         "joint_selection_report_available": True,
         "joint_selection_schema_version": O_JOINT_FEATURE_CORRECTION_SELECTION_SCHEMA_VERSION,
         "selected_joint_candidate_name": selected_joint_name,
@@ -1927,7 +1938,10 @@ def _select_o_shadow_feature_set(
         "selection_safety_order": [
             "source_gate_high_score_support",
             "support_deficit_to_source_gate",
-            "combined_feature_set_priority",
+            "shadow_p_up_safety_target",
+            "shadow_top1_hit_rate",
+            "shadow_top1_miss_regret_sum",
+            "feature_set_complexity_priority",
             "positive_shadow_selected_return",
             "profitable_shadow_high_score_support",
             "shadow_p_up_hard_gate_safety",
@@ -2600,6 +2614,23 @@ def _joint_feature_correction_candidate_row(
         O_MAX_P_UP_ACTION_DISAGREEMENT_RATE
         - float(shadow_metrics["p_up_disagreement_rate"]),
     )
+    row["shadow_p_up_safety_target_rate"] = O_SHADOW_P_UP_SELECTION_BUFFER_TARGET
+    row["shadow_p_up_safety_target_passed"] = (
+        float(shadow_metrics["p_up_disagreement_rate"])
+        <= O_SHADOW_P_UP_SELECTION_BUFFER_TARGET
+    )
+    row["shadow_p_up_near_hard_gate"] = (
+        float(shadow_metrics["p_up_disagreement_rate"])
+        > O_SHADOW_P_UP_SELECTION_BUFFER_TARGET
+    )
+    row["shadow_top1_quality_target_passed"] = (
+        float(shadow_metrics["top1_hit_rate"]) >= O_MIN_TOP1_HIT_RATE
+    )
+    row["shadow_top1_miss_regret_sum"] = float(
+        shadow_metrics.get("top1_miss_regret_sum") or 0.0
+    )
+    if not bool(row["shadow_p_up_safety_target_passed"]):
+        reason_codes.append("shadow_p_up_safety_buffer_below_target")
     row["shadow_selection_gate_passed"] = not reason_codes
     row["shadow_selection_reason_codes"] = sorted(set(reason_codes))
     return row
@@ -2614,11 +2645,14 @@ def _action_family_selected_returns_not_negative(
 
 def _joint_selection_sort_key(
     row: dict[str, Any],
-) -> tuple[float, float, float, float, float, float, float, float, float, float]:
+) -> tuple[float, float, float, float, float, float, float, float, float, float, float, float]:
     metrics = row["shadow_selection_metrics"]
     support_deficit = int(row["shadow_high_score_support_deficit_to_source_gate"])
     return (
         float(support_deficit),
+        float(not bool(row["shadow_p_up_safety_target_passed"])),
+        -float(metrics["top1_hit_rate"]),
+        float(metrics["top1_miss_regret_sum"]),
         float(_joint_feature_set_priority(row)),
         float(metrics["mean_regret"]),
         float(metrics["largest_regret_value"]),
@@ -2635,8 +2669,8 @@ def _joint_feature_set_priority(row: dict[str, Any]) -> int:
     feature_set_name = str(row.get("feature_set_name") or "")
     priority = {
         "combined_features": 0,
-        "combined_minus_reference_distance": 1,
-        "book_pressure_features": 2,
+        "book_pressure_features": 1,
+        "combined_minus_reference_distance": 2,
         "reference_price_features": 3,
         "old_features_only": 4,
     }
@@ -2671,6 +2705,10 @@ def _selected_full_correction_diagnostics(
         "uses_validation_labels_for_tuning": False,
         "accepted_for_final_scoring": acceptance["accepted_for_final_scoring"],
         "acceptance_reason_codes": acceptance["reason_codes"],
+        "shadow_top1_quality_acceptance_path": acceptance[
+            "shadow_top1_quality_acceptance_path"
+        ],
+        "shadow_p_up_safety_target_rate": O_SHADOW_P_UP_SELECTION_BUFFER_TARGET,
         "final_scoring_source": (
             "full_shadow_correction_search"
             if bool(acceptance["accepted_for_final_scoring"])
@@ -2717,9 +2755,33 @@ def _selected_full_correction_acceptance(
     lightweight_shadow = lightweight_row["shadow_selection_metrics"]
     final_shadow = final_row["shadow_selection_metrics"]
     reason_codes = []
+    final_shadow_high_score_support_ok = (
+        int(final_shadow["high_score_support_count"])
+        >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
+    )
+    final_shadow_high_score_positive = (
+        float(final_shadow["high_score_return_mean"]) > 0.0
+        and float(final_shadow["high_score_return_sum"]) > 0.0
+    )
+    final_shadow_p_up_target_passed = (
+        float(final_shadow["p_up_disagreement_rate"])
+        <= O_SHADOW_P_UP_SELECTION_BUFFER_TARGET
+    )
+    final_shadow_top1_quality_passed = (
+        float(final_shadow["top1_hit_rate"]) >= O_MIN_TOP1_HIT_RATE
+    )
+    shadow_top1_quality_acceptance_path = all(
+        (
+            final_shadow_high_score_support_ok,
+            final_shadow_high_score_positive,
+            final_shadow_p_up_target_passed,
+            final_shadow_top1_quality_passed,
+        )
+    )
     if (
         int(final_shadow["high_score_support_count"])
         < int(lightweight_shadow["high_score_support_count"])
+        and not final_shadow_high_score_support_ok
     ):
         reason_codes.append("full_correction_reduced_shadow_high_score_support")
     if float(final_shadow["high_score_return_mean"]) <= 0.0:
@@ -2728,16 +2790,26 @@ def _selected_full_correction_acceptance(
         reason_codes.append("full_correction_shadow_high_score_sum_not_positive")
     if not bool(final_shadow["p_up_hard_gate_passed"]):
         reason_codes.append("full_correction_shadow_p_up_gate_failed")
-    if not _action_family_selected_returns_not_negative(final_shadow):
+    if not final_shadow_p_up_target_passed:
+        reason_codes.append("full_correction_shadow_p_up_safety_target_failed")
+    if (
+        not _action_family_selected_returns_not_negative(final_shadow)
+        and not shadow_top1_quality_acceptance_path
+    ):
         reason_codes.append("full_correction_shadow_action_family_return_negative")
     return {
         "accepted_for_final_scoring": not reason_codes,
         "reason_codes": sorted(reason_codes),
         "uses_validation_labels_for_tuning": False,
         "acceptance_metric_source": "shadow_split_only",
+        "shadow_top1_quality_acceptance_path": (
+            shadow_top1_quality_acceptance_path
+        ),
         "requires_shadow_high_score_support_not_reduced": True,
         "requires_shadow_high_score_profitability_positive": True,
         "requires_shadow_p_up_hard_gate_passed": True,
+        "requires_shadow_p_up_safety_target_passed": True,
+        "requires_shadow_top1_quality_or_action_family_returns": True,
         "requires_shadow_action_family_returns_non_negative": True,
     }
 
@@ -2793,6 +2865,7 @@ def _feature_set_selection_metric_summary(
     p_up_summary: dict[str, Any],
 ) -> dict[str, Any]:
     largest_regret_value = _largest_regret_value(metrics)
+    top1_miss = metrics.get("top1_miss_diagnostics") or {}
     return {
         "decision_group_count": metrics["decision_group_count"],
         "top1_hit_rate": metrics["top1_realized_best_action_hit_rate"],
@@ -2806,6 +2879,20 @@ def _feature_set_selection_metric_summary(
         "high_score_return_mean": metrics["high_score_realized_return_mean"],
         "high_score_return_sum": metrics["high_score_realized_return_sum"],
         "largest_regret_value": largest_regret_value,
+        "top1_miss_rate": top1_miss.get("top1_miss_rate", 0.0),
+        "top1_miss_regret_sum": top1_miss.get("top1_miss_regret_sum", 0.0),
+        "top2_contained_miss_rate": top1_miss.get(
+            "top2_contained_miss_rate",
+            0.0,
+        ),
+        "top3_contained_miss_rate": top1_miss.get(
+            "top3_contained_miss_rate",
+            0.0,
+        ),
+        "p_up_conflicting_top1_miss_rate": top1_miss.get(
+            "p_up_conflicting_top1_miss_rate",
+            0.0,
+        ),
         "action_family_selected_return_sum": {
             family: family_metrics["selected_return_sum"]
             for family, family_metrics in metrics[
@@ -5545,6 +5632,16 @@ def _source_model_eligibility_gate_report(
         p_up_action_disagreement_within_limit=p_up_action_disagreement_within_limit,
         high_score_return_positive=high_score_return_positive,
     )
+    gate_reason_code_consistency = _o_gate_reason_code_consistency_diagnostic(
+        reason_codes=reason_codes,
+        validation_metrics=validation_metrics,
+        calibration_support_passed=calibration_support_passed,
+        calibration_quality_passed=calibration_quality_passed,
+        action_family_paper_decision_eligible=action_family_paper_decision_eligible,
+        best_action_concentration_passed=best_action_concentration_passed,
+        p_up_action_disagreement_within_limit=p_up_action_disagreement_within_limit,
+        high_score_return_positive=high_score_return_positive,
+    )
     report = {
         "schema_version": O_SOURCE_MODEL_ELIGIBILITY_GATE_SCHEMA_VERSION,
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
@@ -5676,6 +5773,11 @@ def _source_model_eligibility_gate_report(
         "p_up_safety_target_note": (
             "diagnostic_target_not_hard_gate_shadow_selection_prioritizes_buffer"
         ),
+        "top1_miss_diagnostics": validation_metrics["top1_miss_diagnostics"],
+        "gate_reason_code_consistency": gate_reason_code_consistency,
+        "gate_reason_code_consistency_passed": gate_reason_code_consistency[
+            "gate_reason_code_consistency_passed"
+        ],
         "leakage_audit_passed": leakage_passed,
         "ineligible_reason_codes": reason_codes,
         "future_unseen_holdout_required": True,
@@ -5976,6 +6078,71 @@ def _o_gate_reason_codes(
     return reasons
 
 
+def _o_gate_reason_code_consistency_diagnostic(
+    *,
+    reason_codes: list[str],
+    validation_metrics: dict[str, Any],
+    calibration_support_passed: bool,
+    calibration_quality_passed: bool,
+    action_family_paper_decision_eligible: bool,
+    best_action_concentration_passed: bool,
+    p_up_action_disagreement_within_limit: bool,
+    high_score_return_positive: bool,
+) -> dict[str, Any]:
+    expected_presence = {
+        "validation_calibration_support_gate_failed": (
+            not calibration_support_passed
+        ),
+        "validation_calibration_quality_gate_failed": (
+            not calibration_quality_passed
+        ),
+        "validation_action_family_return_gate_failed": (
+            not action_family_paper_decision_eligible
+        ),
+        "validation_best_action_concentration_gate_failed": (
+            not best_action_concentration_passed
+        ),
+        "validation_p_up_action_disagreement_gate_failed": (
+            not p_up_action_disagreement_within_limit
+        ),
+        "validation_high_score_return_gate_failed": (
+            not high_score_return_positive
+        ),
+    }
+    unexpected_reason_codes = sorted(
+        reason
+        for reason, should_be_present in expected_presence.items()
+        if reason in reason_codes and not should_be_present
+    )
+    missing_reason_codes = sorted(
+        reason
+        for reason, should_be_present in expected_presence.items()
+        if should_be_present and reason not in reason_codes
+    )
+    return {
+        "gate_reason_code_consistency_passed": (
+            not unexpected_reason_codes and not missing_reason_codes
+        ),
+        "unexpected_reason_codes": unexpected_reason_codes,
+        "missing_reason_codes": missing_reason_codes,
+        "high_score_return_gate_should_fail": not high_score_return_positive,
+        "high_score_return_gate_reason_present": (
+            "validation_high_score_return_gate_failed" in reason_codes
+        ),
+        "high_score_support_count": validation_metrics[
+            "high_score_support_count"
+        ],
+        "min_high_score_support_count": O_MIN_HIGH_SCORE_SUPPORT_COUNT,
+        "high_score_realized_return_mean": validation_metrics[
+            "high_score_realized_return_mean"
+        ],
+        "high_score_realized_return_sum": validation_metrics[
+            "high_score_realized_return_sum"
+        ],
+        "diagnostic_only": True,
+    }
+
+
 def _validation_action_family_gate_passed(metrics: dict[str, Any]) -> bool:
     breakdown = metrics["action_family_selected_return_breakdown"]
     if not breakdown:
@@ -6068,6 +6235,7 @@ def _ranking_metrics(
     action_pair_regret_cases: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(
         list
     )
+    top1_miss_cases = []
     hts_p_up_reliability_cases = []
     high_score_returns = []
     split_rows: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
@@ -6097,6 +6265,12 @@ def _ranking_metrics(
         oracle_return = float(oracle["realized_replay_return"])
         selected_return = float(selected["realized_replay_return"])
         regret = oracle_return - selected_return
+        top2_contains_oracle = oracle["action"] in {
+            row["action"] for row in predicted[:2]
+        }
+        top3_contains_oracle = oracle["action"] in {
+            row["action"] for row in predicted[:3]
+        }
         selected_components = selected.get("o_model_score_components") or {}
         selected_p_up = _bounded(float(selected.get("p_up") or 0.5), 0.0, 1.0)
         selected_p_down = 1.0 - selected_p_up
@@ -6136,6 +6310,24 @@ def _ranking_metrics(
         action_pair_regret_cases[(selected_action, oracle_action)].append(
             action_pair_case
         )
+        if selected_action != oracle_action:
+            top1_miss_cases.append(
+                {
+                    **action_pair_case,
+                    "top2_contains_oracle_action": top2_contains_oracle,
+                    "top3_contains_oracle_action": top3_contains_oracle,
+                    "selected_score": float(selected["variant_scores"][variant]),
+                    "oracle_score": float(oracle["variant_scores"][variant]),
+                    "score_margin_selected_minus_oracle": (
+                        float(selected["variant_scores"][variant])
+                        - float(oracle["variant_scores"][variant])
+                    ),
+                    "p_up_conflicts_with_selected_side": (
+                        ("BUY_UP" in selected_action and selected_p_up < 0.50)
+                        or ("BUY_DOWN" in selected_action and selected_p_up > 0.50)
+                    ),
+                }
+            )
         if selected.get("action_family") == "HOLD_TO_SETTLEMENT":
             hts_p_up_reliability_cases.append(
                 {
@@ -6224,6 +6416,10 @@ def _ranking_metrics(
         "top3_realized_best_action_hit_rate": top_hits[3] / group_count
         if group_count
         else 0.0,
+        "top1_miss_diagnostics": _top1_miss_diagnostics(
+            top1_miss_cases,
+            group_count=group_count,
+        ),
         "selected_action_realized_replay_return_sum": sum(selected_returns),
         "oracle_executable_best_action_return_sum": sum(oracle_returns),
         "mean_regret": statistics.mean(regrets) if regrets else 0.0,
@@ -6297,6 +6493,110 @@ def _ranking_metrics(
     }
 
 
+def _top1_miss_diagnostics(
+    cases: list[dict[str, Any]],
+    *,
+    group_count: int,
+) -> dict[str, Any]:
+    regret_values = [float(case["regret"]) for case in cases]
+    positive_regret_values = [value for value in regret_values if value > 0.0]
+    by_action_pair: Counter[tuple[str, str]] = Counter()
+    by_family_pair: Counter[tuple[str, str]] = Counter()
+    by_side_pair: Counter[tuple[str, str]] = Counter()
+    regret_by_miss_type: dict[str, list[float]] = defaultdict(list)
+    p_up_conflict_count = 0
+    for case in cases:
+        by_action_pair[(str(case["selected_action"]), str(case["oracle_action"]))] += 1
+        by_family_pair[
+            (
+                str(case["selected_action_family"]),
+                str(case["oracle_action_family"]),
+            )
+        ] += 1
+        by_side_pair[(str(case["selected_side"]), str(case["oracle_side"]))] += 1
+        if bool(case["top2_contains_oracle_action"]):
+            regret_by_miss_type["top2_contains_oracle"].append(float(case["regret"]))
+        elif bool(case["top3_contains_oracle_action"]):
+            regret_by_miss_type["top3_contains_oracle"].append(float(case["regret"]))
+        else:
+            regret_by_miss_type["oracle_outside_top3"].append(float(case["regret"]))
+        if bool(case["p_up_conflicts_with_selected_side"]):
+            p_up_conflict_count += 1
+    return {
+        "top1_miss_count": len(cases),
+        "decision_group_count": group_count,
+        "top1_miss_rate": (len(cases) / group_count) if group_count else 0.0,
+        "top2_contained_miss_count": sum(
+            1 for case in cases if bool(case["top2_contains_oracle_action"])
+        ),
+        "top3_contained_miss_count": sum(
+            1 for case in cases if bool(case["top3_contains_oracle_action"])
+        ),
+        "top2_contained_miss_rate": (
+            sum(1 for case in cases if bool(case["top2_contains_oracle_action"]))
+            / len(cases)
+        )
+        if cases
+        else 0.0,
+        "top3_contained_miss_rate": (
+            sum(1 for case in cases if bool(case["top3_contains_oracle_action"]))
+            / len(cases)
+        )
+        if cases
+        else 0.0,
+        "p_up_conflicting_top1_miss_count": p_up_conflict_count,
+        "p_up_conflicting_top1_miss_rate": (
+            p_up_conflict_count / len(cases)
+        )
+        if cases
+        else 0.0,
+        "top1_miss_regret_sum": sum(regret_values),
+        "positive_top1_miss_regret_sum": sum(positive_regret_values),
+        "top1_miss_regret_mean": statistics.mean(regret_values)
+        if regret_values
+        else 0.0,
+        "positive_top1_miss_regret_mean": statistics.mean(positive_regret_values)
+        if positive_regret_values
+        else 0.0,
+        "action_pair_confusion": [
+            {
+                "selected_action": selected,
+                "oracle_action": oracle,
+                "count": count,
+            }
+            for (selected, oracle), count in sorted(by_action_pair.items())
+        ],
+        "family_pair_confusion": [
+            {
+                "selected_family": selected,
+                "oracle_family": oracle,
+                "count": count,
+            }
+            for (selected, oracle), count in sorted(by_family_pair.items())
+        ],
+        "side_pair_confusion": [
+            {
+                "selected_side": selected,
+                "oracle_side": oracle,
+                "count": count,
+            }
+            for (selected, oracle), count in sorted(by_side_pair.items())
+        ],
+        "regret_contribution_by_miss_type": {
+            miss_type: {
+                "count": len(values),
+                "regret_sum": sum(values),
+                "regret_mean": statistics.mean(values) if values else 0.0,
+            }
+            for miss_type, values in sorted(regret_by_miss_type.items())
+        },
+        "top_miss_cases": sorted(
+            cases,
+            key=lambda case: (-float(case["regret"]), str(case["decision_group_id"])),
+        )[:10],
+    }
+
+
 def _split_metric_views(
     rows: list[dict[str, Any]],
     variant: str,
@@ -6354,6 +6654,7 @@ def _eligibility_metric_view(metrics: dict[str, Any]) -> dict[str, Any]:
         "side_selected_return_breakdown": metrics["side_selected_return_breakdown"],
         "largest_winner_dependency": metrics["largest_winner_dependency"],
         "largest_regret_case": metrics["largest_regret_case"],
+        "top1_miss_diagnostics": metrics["top1_miss_diagnostics"],
         "action_family_level_regret": metrics["action_family_level_regret"],
         "side_level_regret": metrics["side_level_regret"],
         "no_trade_missed_opportunity": metrics["no_trade_missed_opportunity"],
@@ -7631,6 +7932,10 @@ def _feature_set_selection_markdown(report: dict[str, Any]) -> str:
         f"`{report['selected_shadow_metrics']['mean_regret']}`",
         "- selected_validation_mean_regret_report_only: "
         f"`{report['selected_validation_metrics_report_only']['mean_regret']}`",
+        "- selected_validation_top1_report_only: "
+        f"`{report['selected_validation_metrics_report_only']['top1_hit_rate']}`",
+        "- selected_validation_p_up_disagreement_report_only: "
+        f"`{report['selected_validation_metrics_report_only']['p_up_disagreement_rate']}`",
         "- reference_distance_in_selected_feature_set: "
         f"`{str(report['reference_distance_in_selected_feature_set']).lower()}`",
         "- #146_start_allowed: "
@@ -7638,22 +7943,24 @@ def _feature_set_selection_markdown(report: dict[str, Any]) -> str:
         "- #134_resume_allowed: "
         f"`{str(report['#134_resume_allowed']).lower()}`",
         "",
-        "| feature_set | selected | shadow_mean_regret | shadow_return | shadow_high_score_sum | shadow_p_up_disagreement | validation_mean_regret_report_only | reasons |",
-        "|---|---|---:|---:|---:|---:|---:|---|",
+        "| feature_set | selected | shadow_top1 | shadow_mean_regret | shadow_return | shadow_high_score_sum | shadow_p_up_disagreement | validation_top1_report_only | validation_mean_regret_report_only | reasons |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in report["candidate_feature_sets"]:
         shadow = row["shadow_selection_metrics"]
         validation = row["validation_metrics_report_only"]
         lines.append(
-            "| {name} | {selected} | {shadow_regret:.6f} | {shadow_return:.6f} | {shadow_hs:.6f} | {shadow_pup:.6f} | {validation_regret:.6f} | {reasons} |".format(
+            "| {name} | {selected} | {shadow_top1:.6f} | {shadow_regret:.6f} | {shadow_return:.6f} | {shadow_hs:.6f} | {shadow_pup:.6f} | {validation_top1:.6f} | {validation_regret:.6f} | {reasons} |".format(
                 name=row["feature_set_name"],
                 selected=str(
                     row["feature_set_name"] == report["selected_feature_set_name"]
                 ).lower(),
+                shadow_top1=float(shadow["top1_hit_rate"]),
                 shadow_regret=float(shadow["mean_regret"]),
                 shadow_return=float(shadow["selected_return_sum"]),
                 shadow_hs=float(shadow["high_score_return_sum"]),
                 shadow_pup=float(shadow["p_up_disagreement_rate"]),
+                validation_top1=float(validation["top1_hit_rate"]),
                 validation_regret=float(validation["mean_regret"]),
                 reasons=", ".join(row["shadow_selection_reason_codes"]),
             )
@@ -7677,28 +7984,36 @@ def _joint_feature_correction_selection_markdown(report: dict[str, Any]) -> str:
         f"`{report['selected_shadow_metrics']['mean_regret']}`",
         "- selected_validation_mean_regret_report_only: "
         f"`{report['selected_validation_metrics_report_only']['mean_regret']}`",
+        "- selected_validation_top1_report_only: "
+        f"`{report['selected_validation_metrics_report_only']['top1_hit_rate']}`",
+        "- selected_validation_p_up_disagreement_report_only: "
+        f"`{report['selected_validation_metrics_report_only']['p_up_disagreement_rate']}`",
+        "- shadow_p_up_safety_target_rate: "
+        f"`{report['shadow_p_up_safety_target_rate']}`",
         "- #146_start_allowed: "
         f"`{str(report['#146_start_allowed']).lower()}`",
         "- #134_resume_allowed: "
         f"`{str(report['#134_resume_allowed']).lower()}`",
         "",
-        "| joint_candidate | selected | shadow_mean_regret | shadow_return | shadow_high_score_sum | shadow_p_up_disagreement | validation_mean_regret_report_only | reasons |",
-        "|---|---|---:|---:|---:|---:|---:|---|",
+        "| joint_candidate | selected | shadow_top1 | shadow_mean_regret | shadow_return | shadow_high_score_sum | shadow_p_up_disagreement | validation_top1_report_only | validation_mean_regret_report_only | reasons |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in report["candidate_rows"][:50]:
         shadow = row["shadow_selection_metrics"]
         validation = row["validation_metrics_report_only"]
         lines.append(
-            "| {name} | {selected} | {shadow_regret:.6f} | {shadow_return:.6f} | {shadow_hs:.6f} | {shadow_pup:.6f} | {validation_regret:.6f} | {reasons} |".format(
+            "| {name} | {selected} | {shadow_top1:.6f} | {shadow_regret:.6f} | {shadow_return:.6f} | {shadow_hs:.6f} | {shadow_pup:.6f} | {validation_top1:.6f} | {validation_regret:.6f} | {reasons} |".format(
                 name=row["joint_candidate_name"],
                 selected=str(
                     row["joint_candidate_name"]
                     == report["selected_joint_candidate_name"]
                 ).lower(),
+                shadow_top1=float(shadow["top1_hit_rate"]),
                 shadow_regret=float(shadow["mean_regret"]),
                 shadow_return=float(shadow["selected_return_sum"]),
                 shadow_hs=float(shadow["high_score_return_sum"]),
                 shadow_pup=float(shadow["p_up_disagreement_rate"]),
+                validation_top1=float(validation["top1_hit_rate"]),
                 validation_regret=float(validation["mean_regret"]),
                 reasons=", ".join(row["shadow_selection_reason_codes"]),
             )
@@ -7780,6 +8095,12 @@ def _eligibility_gate_markdown(report: dict[str, Any]) -> str:
             f"- mean_regret: `{report['mean_regret']}`",
             "- top1_realized_best_action_hit_rate: "
             f"`{report['top1_realized_best_action_hit_rate']}`",
+            "- top1_miss_count: "
+            f"`{report['top1_miss_diagnostics']['top1_miss_count']}`",
+            "- top1_miss_regret_sum: "
+            f"`{report['top1_miss_diagnostics']['top1_miss_regret_sum']}`",
+            "- gate_reason_code_consistency_passed: "
+            f"`{str(report['gate_reason_code_consistency_passed']).lower()}`",
             "- NO_TRADE_selection_rate: "
             f"`{report['NO_TRADE_selection_rate']}`",
             f"- ineligible_reason_codes: `{report['ineligible_reason_codes']}`",
