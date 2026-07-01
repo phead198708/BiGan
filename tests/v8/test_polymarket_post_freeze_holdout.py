@@ -49,6 +49,7 @@ from bigan.v8.polymarket.training.post_freeze_n_up_replay_aligned import (
 from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking import (
     O_DEPLOYABLE_MODEL_FEATURE_NAMES,
     O_FEATURE_AND_LABEL_LEAKAGE_AUDIT_SCHEMA_VERSION,
+    O_FEATURE_SET_SELECTION_SCHEMA_VERSION,
     O_FREEZE_READINESS_SCHEMA_VERSION,
     O_HTS_P_UP_CONFIDENTLY_WRONG_FEATURE_DIAGNOSTIC_SCHEMA_VERSION,
     O_LABEL_CONSTRUCTION_SCHEMA_VERSION,
@@ -2155,9 +2156,20 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert ranking["o_model_training_summary"][
         "deployable_model_score_available"
     ] is True
+    selected_feature_names = ranking["o_model_training_summary"]["feature_names"]
+    all_candidate_feature_names = ranking["o_model_training_summary"][
+        "all_candidate_feature_names"
+    ]
     assert ranking["o_model_training_summary"][
         "model_input_fields_decision_time_only"
-    ] == list(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
+    ] == selected_feature_names
+    assert all_candidate_feature_names == list(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
+    assert ranking["selected_feature_set_name"] == ranking[
+        "o_model_training_summary"
+    ]["selected_feature_set_name"]
+    assert looks_like_sha256(
+        ranking["o_model_training_summary"]["selected_feature_set_config_hash"]
+    )
     assert ranking["o_model_training_summary"]["post_model_ranking_correction_enabled"] is True
     assert ranking["o_model_training_summary"][
         "ranking_correction_source"
@@ -2404,24 +2416,12 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert "buy_down_hold_to_settlement_x_exit_bid_proxy" in ranking[
         "o_model_training_summary"
     ]["feature_names"]
-    assert "reference_price_to_beat_distance_scaled" in ranking[
-        "o_model_training_summary"
-    ]["feature_names"]
-    assert "recent_reference_price_momentum_30s_scaled" in ranking[
-        "o_model_training_summary"
-    ]["feature_names"]
-    assert "side_book_depth_imbalance" in ranking["o_model_training_summary"][
-        "feature_names"
-    ]
-    assert "side_book_update_velocity_scaled" in ranking[
-        "o_model_training_summary"
-    ]["feature_names"]
-    assert "hts_vs_sell_before_close_exit_value_gap_proxy" in ranking[
-        "o_model_training_summary"
-    ]["feature_names"]
-    assert "p_up_bucket_calibration_residual" in ranking[
-        "o_model_training_summary"
-    ]["feature_names"]
+    assert "reference_price_to_beat_distance_scaled" in all_candidate_feature_names
+    assert "recent_reference_price_momentum_30s_scaled" in all_candidate_feature_names
+    assert "side_book_depth_imbalance" in all_candidate_feature_names
+    assert "side_book_update_velocity_scaled" in all_candidate_feature_names
+    assert "hts_vs_sell_before_close_exit_value_gap_proxy" in all_candidate_feature_names
+    assert "p_up_bucket_calibration_residual" in all_candidate_feature_names
     coverage = ranking["o_model_training_summary"][
         "decision_time_feature_coverage"
     ]
@@ -2429,7 +2429,9 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert coverage["feature_provenance_violation_count"] == 0
     assert coverage["field_coverage"][
         "reference_price_to_beat_distance_at_decision"
-    ]["used_as_model_input"] is True
+    ]["used_as_model_input"] is (
+        "reference_price_to_beat_distance_scaled" in selected_feature_names
+    )
     assert coverage["field_coverage"][
         "reference_price_to_beat_distance_at_decision"
     ]["available_count"] == 15
@@ -2466,6 +2468,29 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         ablation["feature_sets"]["combined_feature_set"]["feature_count"]
         > ablation["feature_sets"]["old_features_only"]["feature_count"]
     )
+    feature_selection = result.feature_set_selection_report
+    assert feature_selection["schema_version"] == O_FEATURE_SET_SELECTION_SCHEMA_VERSION
+    assert feature_selection["uses_validation_labels_for_tuning"] is False
+    assert feature_selection["selection_metric_source"] == "shadow_split_only"
+    assert feature_selection["feature_set_selection_min_high_score_support_count"] == 5
+    assert feature_selection["source_model_gate_min_high_score_support_count"] == 10
+    assert {row["feature_set_name"] for row in feature_selection["candidate_feature_sets"]} == {
+        "old_features_only",
+        "book_pressure_features",
+        "reference_price_features",
+        "combined_features",
+        "combined_minus_reference_distance",
+    }
+    assert feature_selection["selected_feature_set_name"] == ranking[
+        "selected_feature_set_name"
+    ]
+    assert feature_selection["selected_feature_names"] == selected_feature_names
+    assert looks_like_sha256(
+        feature_selection["feature_set_selection_config_hash"]
+    )
+    assert feature_selection["#146_start_allowed"] is False
+    assert feature_selection["#134_resume_allowed"] is False
+    assert "feature_set_selection_report" in result.artifact_paths
     residual = ranking["o_model_training_summary"][
         "p_up_bucket_calibration_residual_summary"
     ]
@@ -2584,9 +2609,11 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert "action_return_target" not in leakage["model_input_fields_decision_time_only"]
     assert "label_pnl_target" not in leakage["model_input_fields_decision_time_only"]
     assert "realized_trade_pnl" not in leakage["model_input_fields_decision_time_only"]
-    assert leakage["model_input_fields_decision_time_only"] == list(
+    assert leakage["model_input_fields_decision_time_only"] == selected_feature_names
+    assert leakage["all_candidate_model_input_fields_decision_time_only"] == list(
         O_DEPLOYABLE_MODEL_FEATURE_NAMES
     )
+    assert leakage["selected_feature_set_name"] == ranking["selected_feature_set_name"]
     assert leakage["future_replay_outcomes_used_as_model_inputs"] is False
     assert leakage["future_replay_outcomes_used_as_training_labels"] is True
     assert leakage["source_model_candidate_eligible"] is False
@@ -2630,7 +2657,10 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     ] is True
     assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
         "model_training_summary"
-    ]["feature_names"] == list(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
+    ]["feature_names"] == selected_feature_names
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "model_training_summary"
+    ]["all_candidate_feature_names"] == list(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
     assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
         "correction_constants_source"
     ] == "shadow_split_only"

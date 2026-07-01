@@ -48,6 +48,7 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         "label_gap_after": labels["label_gap_after"],
         "label_gap_delta": labels["label_gap_delta"],
         "primary_variant_name": ranking["primary_variant_name"],
+        "selected_feature_set_name": ranking["selected_feature_set_name"],
         "top1_hit_rate": ranking["top1_realized_best_action_hit_rate"],
         "top2_hit_rate": ranking["top2_realized_best_action_hit_rate"],
         "top3_hit_rate": ranking["top3_realized_best_action_hit_rate"],
@@ -76,6 +77,9 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         ),
         "freeze_readiness_report_path": str(
             result.artifact_paths["freeze_readiness_report"]
+        ),
+        "feature_set_selection_report_path": str(
+            result.artifact_paths["feature_set_selection_report"]
         ),
         "manifest_path": str(result.artifact_paths["manifest"]),
     }

@@ -6,6 +6,7 @@ import json
 import shutil
 import statistics
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,9 @@ O_FREEZE_READINESS_SCHEMA_VERSION = (
 )
 O_HTS_P_UP_CONFIDENTLY_WRONG_FEATURE_DIAGNOSTIC_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-hts-p-up-confidently-wrong-feature-diagnostic-v1"
+)
+O_FEATURE_SET_SELECTION_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-feature-set-selection-v1"
 )
 O_TRAINING_LABEL_FIELDS = (
     "action_return_target",
@@ -207,6 +211,7 @@ O_DEPLOYABLE_MODEL_FEATURE_NAMES = (
 )
 O_MIN_VALIDATION_DECISION_GROUPS = 20
 O_MIN_HIGH_SCORE_SUPPORT_COUNT = 10
+O_FEATURE_SET_SELECTION_MIN_HIGH_SCORE_SUPPORT_COUNT = 5
 O_MIN_TOP1_HIT_RATE = 0.35
 O_MAX_MEAN_REGRET = 0.15
 O_MAX_NO_TRADE_SELECTION_RATE = 0.80
@@ -253,6 +258,7 @@ class PolymarketOReplayAlignedSourceRankingResult:
     source_model_eligibility_gate_report: dict[str, Any]
     freeze_readiness_report: dict[str, Any]
     hts_p_up_confidently_wrong_feature_diagnostic_report: dict[str, Any]
+    feature_set_selection_report: dict[str, Any]
     artifact_paths: dict[str, Path]
 
 
@@ -292,6 +298,10 @@ def run_polymarket_o_replay_aligned_source_ranking(
         / "o_hts_p_up_confidently_wrong_feature_diagnostic_report.json",
         "hts_p_up_confidently_wrong_feature_diagnostic_summary": run_dir
         / "o_hts_p_up_confidently_wrong_feature_diagnostic_report.md",
+        "feature_set_selection_report": run_dir
+        / "o_feature_set_selection_report.json",
+        "feature_set_selection_summary": run_dir
+        / "o_feature_set_selection_report.md",
         "manifest": run_dir / "o_replay_aligned_source_ranking_manifest.json",
     }
     reports = _build_reports(config=config)
@@ -335,6 +345,11 @@ def run_polymarket_o_replay_aligned_source_ranking(
         _hts_p_up_confidently_wrong_feature_diagnostic_markdown(reports[6]),
         encoding="utf-8",
     )
+    _write_json(artifact_paths["feature_set_selection_report"], reports[7])
+    artifact_paths["feature_set_selection_summary"].write_text(
+        _feature_set_selection_markdown(reports[7]),
+        encoding="utf-8",
+    )
     manifest = {
         "schema_version": "bigan-v8-polymarket-o-replay-aligned-source-ranking-artifacts-v1",
         "run_id": config.run_id,
@@ -360,6 +375,7 @@ def run_polymarket_o_replay_aligned_source_ranking(
         source_model_eligibility_gate_report=reports[4],
         freeze_readiness_report=reports[5],
         hts_p_up_confidently_wrong_feature_diagnostic_report=reports[6],
+        feature_set_selection_report=reports[7],
         artifact_paths=artifact_paths,
     )
 
@@ -368,6 +384,7 @@ def _build_reports(
     *,
     config: PolymarketOReplayAlignedSourceRankingConfig,
 ) -> tuple[
+    dict[str, Any],
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
@@ -446,6 +463,12 @@ def _build_reports(
             eligibility_gate_report=eligibility_gate_report,
         )
     )
+    feature_set_selection_report = _feature_set_selection_report(
+        config=config,
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        model_training_summary=model_training_summary,
+    )
     return (
         label_report,
         ranking_report,
@@ -454,6 +477,7 @@ def _build_reports(
         eligibility_gate_report,
         freeze_readiness_report,
         hts_p_up_confidently_wrong_feature_diagnostic_report,
+        feature_set_selection_report,
     )
 
 
@@ -1266,46 +1290,21 @@ def _train_o_model_predicted_scores(
     else:
         training_split_source = "shadow_split_only"
     deployable_available = bool(train_rows) and _full_grid_available(rows)
-    if deployable_available:
-        model = _fit_ridge_regression(
-            [_deployable_model_features(row) for row in train_rows],
-            [
-                float(row["replay_aligned_executable_label_target"])
-                for row in train_rows
-            ],
-        )
-        predictions = [
-            _dot(model["coefficients"], _deployable_model_features(row))
-            for row in rows
-        ]
-        fit_reason_codes: list[str] = []
-    else:
-        model = {
-            "coefficients": [0.0 for _ in O_DEPLOYABLE_MODEL_FEATURE_NAMES],
-            "ridge_lambda": 1.0e-6,
-        }
-        predictions = [0.0 for _ in rows]
-        fit_reason_codes = ["insufficient_complete_action_grid_for_model_training"]
-    raw_scored_rows = [
-        {
-            **row,
-            "o_raw_ridge_model_score": prediction,
-        }
-        for row, prediction in zip(rows, predictions, strict=True)
-    ]
-    raw_train_rows = [
-        row
-        for row in raw_scored_rows
-        if row.get("split") == "shadow"
-        and bool(row.get("label_candidate_available", True))
-    ]
-    ranking_correction = _learn_o_shadow_ranking_correction(raw_train_rows)
-    scored_rows = _apply_o_shadow_ranking_correction(
-        rows=raw_scored_rows,
+    feature_set_selection, selected_scoring = _select_o_shadow_feature_set(
+        rows=rows,
+        train_rows=train_rows,
         deployable_available=deployable_available,
-        ranking_correction=ranking_correction,
     )
-    feature_coverage = _decision_time_feature_coverage(rows)
+    selected_feature_names = tuple(selected_scoring["feature_names"])
+    selected_feature_set_name = str(feature_set_selection["selected_feature_set_name"])
+    model = selected_scoring["model"]
+    ranking_correction = selected_scoring["ranking_correction"]
+    scored_rows = selected_scoring["scored_rows"]
+    fit_reason_codes = list(selected_scoring["fit_reason_codes"])
+    feature_coverage = _decision_time_feature_coverage(
+        rows,
+        model_input_fields=selected_feature_names,
+    )
     feature_ablation = _o_feature_ablation_diagnostics(rows)
     summary = {
         "model_candidate_name": O_MODEL_PREDICTED_VARIANT,
@@ -1324,9 +1323,16 @@ def _train_o_model_predicted_scores(
         "correction_config_hash": ranking_correction["correction_config_hash"],
         "probe_constants_source": ranking_correction["probe_constants_source"],
         "probe_config_hash": ranking_correction["probe_config_hash"],
-        "feature_names": list(O_DEPLOYABLE_MODEL_FEATURE_NAMES),
+        "feature_names": list(selected_feature_names),
+        "selected_feature_set_name": selected_feature_set_name,
+        "selected_feature_set_config_hash": feature_set_selection[
+            "feature_set_selection_config_hash"
+        ],
+        "feature_set_selection": feature_set_selection,
+        "candidate_feature_set_names": list(_o_feature_set_selection_feature_sets()),
+        "all_candidate_feature_names": list(O_DEPLOYABLE_MODEL_FEATURE_NAMES),
         "model_input_fields_decision_time_only": list(
-            O_DEPLOYABLE_MODEL_FEATURE_NAMES
+            selected_feature_names
         ),
         "legacy_feature_names": list(O_LEGACY_DEPLOYABLE_MODEL_FEATURE_NAMES),
         "reference_price_feature_names": list(O_REFERENCE_PRICE_MODEL_FEATURE_NAMES),
@@ -1359,7 +1365,7 @@ def _train_o_model_predicted_scores(
         "ridge_lambda": model["ridge_lambda"],
         "coefficients_by_feature": dict(
             zip(
-                O_DEPLOYABLE_MODEL_FEATURE_NAMES,
+                selected_feature_names,
                 model["coefficients"],
                 strict=True,
             )
@@ -1482,8 +1488,15 @@ def _p_up_residual_bucket_key(
     )
 
 
-def _decision_time_feature_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _decision_time_feature_coverage(
+    rows: list[dict[str, Any]],
+    *,
+    model_input_fields: Iterable[str] | None = None,
+) -> dict[str, Any]:
     row_count = len(rows)
+    selected_model_inputs = (
+        set(model_input_fields) if model_input_fields is not None else None
+    )
     field_coverage = {}
     for field in O_EXPANDED_DECISION_TIME_FEATURE_FIELDS:
         available_count = sum(row.get(field) is not None for row in rows)
@@ -1492,7 +1505,10 @@ def _decision_time_feature_coverage(rows: list[dict[str, Any]]) -> dict[str, Any
             "missing_count": row_count - available_count,
             "availability_rate": available_count / row_count if row_count else 0.0,
             "decision_time_only": True,
-            "used_as_model_input": _expanded_field_used_as_model_input(field),
+            "used_as_model_input": _expanded_field_used_as_model_input(
+                field,
+                model_input_fields=selected_model_inputs,
+            ),
         }
     provenance_violations = [
         {
@@ -1543,7 +1559,11 @@ def _decision_time_feature_coverage(rows: list[dict[str, Any]]) -> dict[str, Any
     }
 
 
-def _expanded_field_used_as_model_input(field: str) -> bool:
+def _expanded_field_used_as_model_input(
+    field: str,
+    *,
+    model_input_fields: set[str] | None = None,
+) -> bool:
     model_input_fragments = {
         "reference_price_to_beat_distance_at_decision": (
             "reference_price_to_beat_distance_scaled"
@@ -1570,7 +1590,357 @@ def _expanded_field_used_as_model_input(field: str) -> bool:
             "p_up_bucket_calibration_residual"
         ),
     }
-    return model_input_fragments[field] in O_DEPLOYABLE_MODEL_FEATURE_NAMES
+    if model_input_fields is None:
+        model_input_fields = set(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
+    return model_input_fragments[field] in model_input_fields
+
+
+def _select_o_shadow_feature_set(
+    *,
+    rows: list[dict[str, Any]],
+    train_rows: list[dict[str, Any]],
+    deployable_available: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    scorings = {
+        name: _score_o_feature_set_candidate(
+            rows=rows,
+            train_rows=train_rows,
+            deployable_available=deployable_available,
+            feature_names=feature_names,
+            full_correction_search=False,
+        )
+        for name, feature_names in _o_feature_set_selection_feature_sets().items()
+    }
+    baseline_largest_regret = _largest_regret_value(
+        scorings["old_features_only"]["split_metrics"]["train_shadow"]
+    )
+    candidate_rows = [
+        _feature_set_selection_candidate_row(
+            name=name,
+            scoring=scoring,
+            baseline_largest_regret=baseline_largest_regret,
+        )
+        for name, scoring in scorings.items()
+    ]
+    eligible_rows = [
+        row for row in candidate_rows if bool(row["shadow_selection_gate_passed"])
+    ]
+    if eligible_rows:
+        selected_row = min(
+            eligible_rows,
+            key=lambda row: (
+                float(row["shadow_selection_metrics"]["mean_regret"]),
+                float(row["shadow_selection_metrics"]["largest_regret_value"]),
+                -float(row["shadow_selection_metrics"]["selected_return_sum"]),
+                -float(row["shadow_selection_metrics"]["high_score_return_sum"]),
+                float(row["shadow_selection_metrics"]["p_up_disagreement_rate"]),
+            ),
+        )
+        fallback_reason_codes: list[str] = []
+    else:
+        selected_row = min(
+            candidate_rows,
+            key=lambda row: (
+                not bool(row["shadow_selection_metrics"]["p_up_hard_gate_passed"]),
+                float(row["shadow_selection_metrics"]["mean_regret"]),
+                float(row["shadow_selection_metrics"]["largest_regret_value"]),
+                -float(row["shadow_selection_metrics"]["selected_return_sum"]),
+            ),
+        )
+        fallback_reason_codes = ["no_feature_set_passed_shadow_selection_gates"]
+    selected_name = str(selected_row["feature_set_name"])
+    selected_scoring = _score_o_feature_set_candidate(
+        rows=rows,
+        train_rows=train_rows,
+        deployable_available=deployable_available,
+        feature_names=scorings[selected_name]["feature_names"],
+        full_correction_search=True,
+    )
+    rejected_rows = []
+    for row in candidate_rows:
+        payload = dict(row)
+        payload["selected_feature_set"] = row["feature_set_name"] == selected_name
+        reason_codes = list(payload["shadow_selection_reason_codes"])
+        if row["feature_set_name"] != selected_name:
+            reason_codes.append("not_selected_by_shadow_feature_set_selection")
+        payload["shadow_selection_reason_codes"] = sorted(set(reason_codes))
+        if not payload["selected_feature_set"]:
+            rejected_rows.append(payload)
+    selected_feature_names = list(selected_scoring["feature_names"])
+    selected_includes_reference_distance = any(
+        _is_reference_distance_feature_name(name) for name in selected_feature_names
+    )
+    report = {
+        "schema_version": O_FEATURE_SET_SELECTION_SCHEMA_VERSION,
+        "report_type": "o_feature_set_selection",
+        "diagnostic_only": True,
+        "ranking_score_source": "model_predicted_score",
+        "uses_validation_labels_for_tuning": False,
+        "selection_metric_source": "shadow_split_only",
+        "selection_criteria": [
+            "lower_shadow_mean_regret",
+            "positive_shadow_selected_return",
+            "profitable_shadow_high_score_support",
+            "shadow_p_up_hard_gate_safety",
+            "shadow_largest_regret_not_worsened_vs_old_features",
+        ],
+        "feature_set_selection_min_high_score_support_count": (
+            O_FEATURE_SET_SELECTION_MIN_HIGH_SCORE_SUPPORT_COUNT
+        ),
+        "source_model_gate_min_high_score_support_count": (
+            O_MIN_HIGH_SCORE_SUPPORT_COUNT
+        ),
+        "selected_feature_set_name": selected_name,
+        "selected_feature_names": selected_feature_names,
+        "selected_feature_count": len(selected_feature_names),
+        "selected_shadow_metrics": selected_row["shadow_selection_metrics"],
+        "selected_validation_metrics_report_only": selected_row[
+            "validation_metrics_report_only"
+        ],
+        "selected_feature_set_shadow_gate_passed": selected_row[
+            "shadow_selection_gate_passed"
+        ],
+        "candidate_feature_set_scoring_mode": "lightweight_shadow_only_prefit_ranker",
+        "final_selected_feature_set_uses_full_shadow_correction_search": True,
+        "selection_fallback_reason_codes": fallback_reason_codes,
+        "reference_distance_in_selected_feature_set": (
+            selected_includes_reference_distance
+        ),
+        "reference_distance_covered_but_excluded_from_final_model": (
+            not selected_includes_reference_distance
+        ),
+        "candidate_feature_sets": candidate_rows,
+        "rejected_feature_sets": rejected_rows,
+        "feature_set_selection_config_hash": "",
+        **compact_safety_fields(),
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+    }
+    report["feature_set_selection_config_hash"] = canonical_json_sha256(
+        _without_key(report, "feature_set_selection_config_hash")
+    )
+    return report, selected_scoring
+
+
+def _score_o_feature_set_candidate(
+    *,
+    rows: list[dict[str, Any]],
+    train_rows: list[dict[str, Any]],
+    deployable_available: bool,
+    feature_names: tuple[str, ...],
+    full_correction_search: bool,
+) -> dict[str, Any]:
+    if deployable_available:
+        model = _fit_ridge_regression(
+            [_deployable_model_features(row, feature_names) for row in train_rows],
+            [
+                float(row["replay_aligned_executable_label_target"])
+                for row in train_rows
+            ],
+        )
+        predictions = [
+            _dot(model["coefficients"], _deployable_model_features(row, feature_names))
+            for row in rows
+        ]
+        fit_reason_codes: list[str] = []
+    else:
+        model = {
+            "coefficients": [0.0 for _ in feature_names],
+            "ridge_lambda": 1.0e-6,
+        }
+        predictions = [0.0 for _ in rows]
+        fit_reason_codes = ["insufficient_complete_action_grid_for_model_training"]
+    raw_scored_rows = [
+        {
+            **row,
+            "o_raw_ridge_model_score": prediction,
+        }
+        for row, prediction in zip(rows, predictions, strict=True)
+    ]
+    raw_train_rows = [
+        row
+        for row in raw_scored_rows
+        if row.get("split") == "shadow"
+        and bool(row.get("label_candidate_available", True))
+    ]
+    ranking_correction = _learn_o_shadow_ranking_correction(
+        raw_train_rows,
+        run_raw_weight_search=full_correction_search,
+    )
+    scored_rows = _apply_o_shadow_ranking_correction(
+        rows=raw_scored_rows,
+        deployable_available=deployable_available,
+        ranking_correction=ranking_correction,
+    )
+    ranking_rows = _ranking_rows(scored_rows)
+    high_score_threshold = float(
+        ranking_correction["high_score_calibration"]["high_score_threshold"]
+    )
+    return {
+        "feature_names": feature_names,
+        "model": model,
+        "ranking_correction": ranking_correction,
+        "scored_rows": scored_rows,
+        "ranking_rows": ranking_rows,
+        "fit_reason_codes": fit_reason_codes,
+        "split_metrics": _split_metric_views(
+            ranking_rows,
+            O_MODEL_PREDICTED_VARIANT,
+            high_score_threshold,
+        ),
+        "p_up_shadow_summary": _p_up_action_disagreement_summary(
+            rows=ranking_rows,
+            variant=O_MODEL_PREDICTED_VARIANT,
+            split="shadow",
+        ),
+        "p_up_validation_summary": _p_up_action_disagreement_summary(
+            rows=ranking_rows,
+            variant=O_MODEL_PREDICTED_VARIANT,
+            split="validation",
+        ),
+    }
+
+
+def _feature_set_selection_candidate_row(
+    *,
+    name: str,
+    scoring: dict[str, Any],
+    baseline_largest_regret: float,
+) -> dict[str, Any]:
+    shadow_metrics = scoring["split_metrics"]["train_shadow"]
+    validation_metrics = scoring["split_metrics"]["validation"]
+    shadow_p_up = scoring["p_up_shadow_summary"]
+    shadow_summary = _feature_set_selection_metric_summary(
+        metrics=shadow_metrics,
+        p_up_summary=shadow_p_up,
+    )
+    validation_summary = _feature_set_selection_metric_summary(
+        metrics=validation_metrics,
+        p_up_summary=scoring["p_up_validation_summary"],
+    )
+    reason_codes = []
+    if float(shadow_summary["selected_return_sum"]) <= 0.0:
+        reason_codes.append("shadow_selected_return_not_positive")
+    if (
+        int(shadow_summary["high_score_support_count"])
+        < O_FEATURE_SET_SELECTION_MIN_HIGH_SCORE_SUPPORT_COUNT
+    ):
+        reason_codes.append("shadow_high_score_support_insufficient")
+    if float(shadow_summary["high_score_return_mean"]) <= 0.0:
+        reason_codes.append("shadow_high_score_return_mean_not_positive")
+    if float(shadow_summary["high_score_return_sum"]) <= 0.0:
+        reason_codes.append("shadow_high_score_return_sum_not_positive")
+    if not bool(shadow_summary["p_up_hard_gate_passed"]):
+        reason_codes.append("shadow_p_up_hard_gate_failed")
+    if float(shadow_summary["largest_regret_value"]) > baseline_largest_regret + 1.0e-12:
+        reason_codes.append("shadow_largest_regret_worsened_vs_old_features")
+    return {
+        "feature_set_name": name,
+        "feature_names": list(scoring["feature_names"]),
+        "feature_count": len(scoring["feature_names"]),
+        "feature_schema_hash": canonical_json_sha256(list(scoring["feature_names"])),
+        "excluded_reference_distance_features": [
+            feature
+            for feature in O_DEPLOYABLE_MODEL_FEATURE_NAMES
+            if _is_reference_distance_feature_name(feature)
+            and feature not in scoring["feature_names"]
+        ],
+        "uses_validation_labels_for_tuning": False,
+        "shadow_selection_metrics": shadow_summary,
+        "validation_metrics_report_only": validation_summary,
+        "ranking_correction_config_hash": scoring["ranking_correction"][
+            "correction_config_hash"
+        ],
+        "probe_config_hash": scoring["ranking_correction"]["probe_config_hash"],
+        "shadow_selection_gate_passed": not reason_codes,
+        "shadow_selection_reason_codes": reason_codes,
+    }
+
+
+def _feature_set_selection_metric_summary(
+    *,
+    metrics: dict[str, Any],
+    p_up_summary: dict[str, Any],
+) -> dict[str, Any]:
+    largest_regret_value = _largest_regret_value(metrics)
+    return {
+        "decision_group_count": metrics["decision_group_count"],
+        "top1_hit_rate": metrics["top1_realized_best_action_hit_rate"],
+        "top2_hit_rate": metrics["top2_realized_best_action_hit_rate"],
+        "top3_hit_rate": metrics["top3_realized_best_action_hit_rate"],
+        "mean_regret": metrics["mean_regret"],
+        "selected_return_sum": metrics[
+            "selected_action_realized_replay_return_sum"
+        ],
+        "high_score_support_count": metrics["high_score_support_count"],
+        "high_score_return_mean": metrics["high_score_realized_return_mean"],
+        "high_score_return_sum": metrics["high_score_realized_return_sum"],
+        "largest_regret_value": largest_regret_value,
+        "p_up_comparable_count": p_up_summary[
+            "candidate_scoped_p_up_action_comparable_count"
+        ],
+        "p_up_disagreement_rate": p_up_summary[
+            "candidate_scoped_p_up_action_disagreement_rate"
+        ],
+        "p_up_hard_gate_passed": p_up_summary[
+            "candidate_scoped_p_up_action_disagreement_within_limit"
+        ],
+    }
+
+
+def _largest_regret_value(metrics: dict[str, Any]) -> float:
+    return float((metrics.get("largest_regret_case") or {}).get("regret") or 0.0)
+
+
+def _o_feature_set_selection_feature_sets() -> dict[str, tuple[str, ...]]:
+    reference_names = _o_reference_feature_names()
+    book_names = _o_book_pressure_feature_names()
+    return {
+        "old_features_only": O_LEGACY_DEPLOYABLE_MODEL_FEATURE_NAMES,
+        "book_pressure_features": tuple(
+            dict.fromkeys((*O_LEGACY_DEPLOYABLE_MODEL_FEATURE_NAMES, *book_names))
+        ),
+        "reference_price_features": tuple(
+            dict.fromkeys((*O_LEGACY_DEPLOYABLE_MODEL_FEATURE_NAMES, *reference_names))
+        ),
+        "combined_features": O_DEPLOYABLE_MODEL_FEATURE_NAMES,
+        "combined_minus_reference_distance": tuple(
+            feature
+            for feature in O_DEPLOYABLE_MODEL_FEATURE_NAMES
+            if not _is_reference_distance_feature_name(feature)
+        ),
+    }
+
+
+def _o_reference_feature_names() -> tuple[str, ...]:
+    return tuple(
+        name
+        for name in O_DEPLOYABLE_MODEL_FEATURE_NAMES
+        if name in O_REFERENCE_PRICE_MODEL_FEATURE_NAMES
+        or "reference_" in name
+    )
+
+
+def _o_book_pressure_feature_names() -> tuple[str, ...]:
+    return tuple(
+        name
+        for name in O_DEPLOYABLE_MODEL_FEATURE_NAMES
+        if name in O_BOOK_PRESSURE_MODEL_FEATURE_NAMES
+        or "book_" in name
+        or "side_book_" in name
+        or "side_queue" in name
+        or "side_spread" in name
+        or "hts_vs_sell_before_close" in name
+        or "p_up_bucket_calibration_residual" in name
+    )
+
+
+def _is_reference_distance_feature_name(name: str) -> bool:
+    return (
+        name == "reference_price_to_beat_distance_scaled"
+        or name.endswith("_x_reference_price_to_beat_distance")
+    )
 
 
 def _o_feature_ablation_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1665,23 +2035,8 @@ def _reference_price_feature_effect_summary(
 
 
 def _o_feature_ablation_feature_sets() -> dict[str, tuple[str, ...]]:
-    reference_names = tuple(
-        name
-        for name in O_DEPLOYABLE_MODEL_FEATURE_NAMES
-        if name in O_REFERENCE_PRICE_MODEL_FEATURE_NAMES
-        or "reference_" in name
-    )
-    book_names = tuple(
-        name
-        for name in O_DEPLOYABLE_MODEL_FEATURE_NAMES
-        if name in O_BOOK_PRESSURE_MODEL_FEATURE_NAMES
-        or "book_" in name
-        or "side_book_" in name
-        or "side_queue" in name
-        or "side_spread" in name
-        or "hts_vs_sell_before_close" in name
-        or "p_up_bucket_calibration_residual" in name
-    )
+    reference_names = _o_reference_feature_names()
+    book_names = _o_book_pressure_feature_names()
     return {
         "old_features_only": O_LEGACY_DEPLOYABLE_MODEL_FEATURE_NAMES,
         "new_reference_price_features": tuple(
@@ -1933,6 +2288,8 @@ def _decision_time_exit_bid_proxy(row: dict[str, Any]) -> float:
 
 def _learn_o_shadow_ranking_correction(
     train_rows: list[dict[str, Any]],
+    *,
+    run_raw_weight_search: bool = True,
 ) -> dict[str, Any]:
     global_mean = statistics.mean(
         float(row["replay_aligned_executable_label_target"]) for row in train_rows
@@ -2139,10 +2496,16 @@ def _learn_o_shadow_ranking_correction(
             "weak_opportunity_feature": "max(0, weak_opportunity_p_edge_cutoff - abs(p_up - 0.5))",
         },
     }
-    raw_weight, raw_diagnostics = _derive_shadow_raw_model_weight(
-        train_rows=train_rows,
-        base_ranking_correction=config,
-    )
+    if run_raw_weight_search:
+        raw_weight, raw_diagnostics = _derive_shadow_raw_model_weight(
+            train_rows=train_rows,
+            base_ranking_correction=config,
+        )
+    else:
+        raw_weight, raw_diagnostics = _lightweight_shadow_raw_model_weight(
+            train_rows=train_rows,
+            base_ranking_correction=config,
+        )
     config["group_normalized_raw_model_weight"] = raw_weight
     config["p_up_misalignment_raw_positive_penalty"] = raw_diagnostics[
         "selected_raw_weight_candidate"
@@ -2230,6 +2593,182 @@ def _derive_shadow_probe_score_config(
     }
     config["probe_config_hash"] = canonical_json_sha256(config)
     return config
+
+
+def _lightweight_shadow_raw_model_weight(
+    train_rows: list[dict[str, Any]],
+    base_ranking_correction: dict[str, Any],
+) -> tuple[float, dict[str, Any]]:
+    p_edge_quantiles = base_ranking_correction["p_up_edge_quantiles"]
+    selected = {
+        "candidate_weight": _bounded(float(p_edge_quantiles["q75"]), 0.0, 1.0),
+        "candidate_weight_source": "shadow_p_up_edge_q75_lightweight_feature_set_selection",
+        "candidate_p_up_misalignment_penalty": _bounded(
+            float(p_edge_quantiles["q25"]),
+            0.0,
+            1.0,
+        ),
+        "candidate_p_up_misalignment_penalty_source": (
+            "shadow_p_up_edge_q25_lightweight_feature_set_selection"
+        ),
+        "candidate_large_regret_reversal_alignment_threshold": _bounded(
+            float(p_edge_quantiles["q25"]),
+            0.0,
+            0.5,
+        ),
+        "candidate_large_regret_reversal_alignment_threshold_source": (
+            "shadow_p_up_edge_q25_lightweight_feature_set_selection"
+        ),
+        "candidate_large_regret_reversal_penalty": _bounded(
+            float(p_edge_quantiles["q75"]),
+            0.0,
+            1.5,
+        ),
+        "candidate_large_regret_reversal_penalty_source": (
+            "shadow_p_up_edge_q75_lightweight_feature_set_selection"
+        ),
+        "candidate_hts_p_up_reliability_penalty": _bounded(
+            float(p_edge_quantiles["q75"]),
+            0.0,
+            1.0,
+        ),
+        "candidate_hts_p_up_reliability_penalty_source": (
+            "shadow_p_up_edge_q75_lightweight_feature_set_selection"
+        ),
+    }
+    candidate_config = {
+        **base_ranking_correction,
+        "group_normalized_raw_model_weight": selected["candidate_weight"],
+        "p_up_misalignment_raw_positive_penalty": selected[
+            "candidate_p_up_misalignment_penalty"
+        ],
+        "large_regret_reversal_alignment_threshold": selected[
+            "candidate_large_regret_reversal_alignment_threshold"
+        ],
+        "large_regret_reversal_penalty": selected[
+            "candidate_large_regret_reversal_penalty"
+        ],
+        "hts_p_up_reliability_penalty": selected[
+            "candidate_hts_p_up_reliability_penalty"
+        ],
+    }
+    _apply_large_regret_adjusted_high_score_calibration(candidate_config)
+    ranking_rows = _ranking_rows(
+        _apply_o_shadow_ranking_correction(
+            rows=train_rows,
+            deployable_available=True,
+            ranking_correction=candidate_config,
+        )
+    )
+    metrics = _split_metric_views(
+        ranking_rows,
+        O_MODEL_PREDICTED_VARIANT,
+        float(candidate_config["high_score_calibration"]["high_score_threshold"]),
+    )["train_shadow"]
+    p_up_summary = _p_up_action_disagreement_summary(
+        rows=ranking_rows,
+        variant=O_MODEL_PREDICTED_VARIANT,
+        split="shadow",
+    )
+    selected.update(
+        {
+            "shadow_candidate_eligible": (
+                float(metrics["selected_action_realized_replay_return_sum"]) > 0.0
+                and int(metrics["high_score_support_count"])
+                >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
+                and float(metrics["high_score_realized_return_mean"]) > 0.0
+                and float(metrics["high_score_realized_return_sum"]) > 0.0
+                and bool(
+                    p_up_summary[
+                        "candidate_scoped_p_up_action_disagreement_within_limit"
+                    ]
+                )
+            ),
+            "shadow_high_score_profitable": (
+                float(metrics["high_score_realized_return_mean"]) > 0.0
+                and float(metrics["high_score_realized_return_sum"]) > 0.0
+            ),
+            "shadow_p_up_safety_passed": p_up_summary[
+                "candidate_scoped_p_up_action_disagreement_within_limit"
+            ],
+            "shadow_selected_return_sum": metrics[
+                "selected_action_realized_replay_return_sum"
+            ],
+            "shadow_mean_regret": metrics["mean_regret"],
+            "shadow_largest_regret_value": _largest_regret_value(metrics),
+            "shadow_largest_regret_case": metrics["largest_regret_case"],
+            "shadow_action_family_level_regret": metrics[
+                "action_family_level_regret"
+            ],
+            "shadow_action_pair_regret_summary": metrics[
+                "action_pair_regret_summary"
+            ],
+            "shadow_hts_p_up_reliability_regret_summary": metrics[
+                "hts_p_up_reliability_regret_summary"
+            ],
+            "shadow_hold_to_settlement_up_down_reversal_regret": metrics[
+                "hold_to_settlement_up_down_reversal_regret"
+            ],
+            "shadow_no_trade_missed_opportunity": metrics[
+                "no_trade_missed_opportunity"
+            ],
+            "shadow_high_score_support_count": metrics[
+                "high_score_support_count"
+            ],
+            "shadow_high_score_realized_return_mean": metrics[
+                "high_score_realized_return_mean"
+            ],
+            "shadow_high_score_realized_return_sum": metrics[
+                "high_score_realized_return_sum"
+            ],
+            "shadow_p_up_action_disagreement_rate": p_up_summary[
+                "candidate_scoped_p_up_action_disagreement_rate"
+            ],
+        }
+    )
+    return float(selected["candidate_weight"]), {
+        "raw_weight_selection_metric_source": "shadow_split_only_lightweight_feature_set_selection",
+        "selected_raw_weight_candidate": selected,
+        "raw_weight_candidate_rows": [selected],
+        "p_up_misalignment_penalty_candidate_source": (
+            "shadow_p_up_edge_q25_lightweight_feature_set_selection"
+        ),
+        "large_regret_reversal_guard_candidate_source": (
+            "shadow_p_up_edge_q75_lightweight_feature_set_selection"
+        ),
+        "large_regret_reversal_guard_selection_metric_source": (
+            "shadow_split_only_lightweight_feature_set_selection"
+        ),
+        "hts_p_up_reliability_guard_candidate_source": (
+            "shadow_p_up_edge_q75_lightweight_feature_set_selection"
+        ),
+        "hts_p_up_reliability_guard_selection_metric_source": (
+            "shadow_split_only_lightweight_feature_set_selection"
+        ),
+        "hts_p_up_reliability_no_trade_buffer_excluded_from_raw_weight_search": True,
+        "hts_p_up_reliability_no_trade_buffer_application_stage": (
+            "post_lightweight_feature_set_selection_safety_buffer"
+        ),
+        "hts_p_up_reliability_bucket_thresholds": base_ranking_correction[
+            "hts_p_up_reliability_bucket_thresholds"
+        ],
+        "hts_p_up_reliability_bucket_diagnostics": base_ranking_correction[
+            "hts_p_up_reliability_bucket_diagnostics"
+        ],
+        "large_regret_reversal_pair_regret_priors": base_ranking_correction[
+            "large_regret_reversal_pair_regret_priors"
+        ],
+        "raw_weight_max_shadow_p_up_disagreement_rate": (
+            base_ranking_correction["shadow_p_up_selection_max_disagreement_rate"]
+        ),
+        "raw_weight_p_up_safety_buffer": max(
+            0.0,
+            float(
+                base_ranking_correction["shadow_p_up_selection_max_disagreement_rate"]
+            )
+            - float(selected["shadow_p_up_action_disagreement_rate"]),
+        ),
+    }
 
 
 def _derive_shadow_raw_model_weight(
@@ -3505,6 +4044,12 @@ def _ranking_report(
             "deployable_model_score_available"
         ],
         "o_model_training_summary": model_training_summary,
+        "selected_feature_set_name": model_training_summary[
+            "selected_feature_set_name"
+        ],
+        "selected_feature_set_config_hash": model_training_summary[
+            "selected_feature_set_config_hash"
+        ],
         "correction_constants_source": model_training_summary[
             "correction_constants_source"
         ],
@@ -3559,13 +4104,17 @@ def _leakage_report(
     model_training_summary: dict[str, Any],
 ) -> dict[str, Any]:
     del config
+    selected_model_inputs = tuple(model_training_summary["feature_names"])
     model_overlap = sorted(
-        set(O_DEPLOYABLE_MODEL_FEATURE_NAMES).intersection(O_FORBIDDEN_MODEL_INPUT_FIELDS)
+        set(selected_model_inputs).intersection(O_FORBIDDEN_MODEL_INPUT_FIELDS)
     )
     label_overlap = sorted(
         set(O_TRAINING_LABEL_FIELDS).intersection(O_FORBIDDEN_MODEL_INPUT_FIELDS)
     )
-    feature_coverage = _decision_time_feature_coverage(rows)
+    feature_coverage = _decision_time_feature_coverage(
+        rows,
+        model_input_fields=selected_model_inputs,
+    )
     feature_provenance_passed = (
         int(feature_coverage["feature_provenance_violation_count"]) == 0
     )
@@ -3585,9 +4134,16 @@ def _leakage_report(
         "deployable_model_score_available": model_training_summary[
             "deployable_model_score_available"
         ],
-        "model_input_fields_decision_time_only": list(
+        "model_input_fields_decision_time_only": list(selected_model_inputs),
+        "all_candidate_model_input_fields_decision_time_only": list(
             O_DEPLOYABLE_MODEL_FEATURE_NAMES
         ),
+        "selected_feature_set_name": model_training_summary[
+            "selected_feature_set_name"
+        ],
+        "selected_feature_set_config_hash": model_training_summary[
+            "selected_feature_set_config_hash"
+        ],
         "legacy_model_input_fields": list(O_LEGACY_DEPLOYABLE_MODEL_FEATURE_NAMES),
         "expanded_decision_time_feature_fields": list(
             O_EXPANDED_DECISION_TIME_FEATURE_FIELDS
@@ -3599,7 +4155,9 @@ def _leakage_report(
             O_BOOK_PRESSURE_MODEL_FEATURE_NAMES
         ),
         "expanded_feature_coverage": feature_coverage,
-        "model_training_summary": model_training_summary,
+        "model_training_summary": _compact_o_model_training_summary(
+            model_training_summary
+        ),
         "label_diagnostic_score_fields": [
             "replay_aligned_executable_label_target",
             "label_family_prior",
@@ -3629,6 +4187,85 @@ def _leakage_report(
         report
     )
     return report
+
+
+def _feature_set_selection_report(
+    *,
+    config: PolymarketOReplayAlignedSourceRankingConfig,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    model_training_summary: dict[str, Any],
+) -> dict[str, Any]:
+    del config
+    selection = dict(model_training_summary["feature_set_selection"])
+    report = {
+        **selection,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "source_lineage": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "final_model_feature_names": model_training_summary["feature_names"],
+        "final_model_feature_schema_hash": canonical_json_sha256(
+            model_training_summary["feature_names"]
+        ),
+        "final_model_correction_config_hash": model_training_summary[
+            "correction_config_hash"
+        ],
+        "final_model_probe_config_hash": model_training_summary["probe_config_hash"],
+        "source_model_candidate_eligible": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    report["o_feature_set_selection_report_id"] = canonical_json_sha256(report)
+    return report
+
+
+def _compact_o_model_training_summary(
+    model_training_summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep repeated reports small; full training evidence lives in ranking report."""
+    correction_config = model_training_summary["ranking_correction_config"]
+    return {
+        "model_candidate_name": model_training_summary["model_candidate_name"],
+        "ranking_score_source": model_training_summary["ranking_score_source"],
+        "deployable_model_score_available": model_training_summary[
+            "deployable_model_score_available"
+        ],
+        "selected_feature_set_name": model_training_summary[
+            "selected_feature_set_name"
+        ],
+        "selected_feature_set_config_hash": model_training_summary[
+            "selected_feature_set_config_hash"
+        ],
+        "feature_names": model_training_summary["feature_names"],
+        "all_candidate_feature_names": model_training_summary[
+            "all_candidate_feature_names"
+        ],
+        "model_input_fields_decision_time_only": model_training_summary[
+            "model_input_fields_decision_time_only"
+        ],
+        "uses_validation_labels_for_tuning": bool(
+            correction_config.get("uses_validation_labels_for_tuning", False)
+        ),
+        "training_target": model_training_summary["training_target"],
+        "correction_constants_source": model_training_summary[
+            "correction_constants_source"
+        ],
+        "correction_config_hash": model_training_summary["correction_config_hash"],
+        "probe_constants_source": model_training_summary["probe_constants_source"],
+        "probe_config_hash": model_training_summary["probe_config_hash"],
+        "high_score_threshold": correction_config["high_score_calibration"][
+            "high_score_threshold"
+        ],
+        "feature_set_selection_report_available": True,
+        "full_training_summary_report_path": "o_source_ranking_objective_report.json",
+    }
 
 
 def _comparison_report(
@@ -3671,9 +4308,11 @@ def _comparison_report(
                 == "label_diagnostic_score",
                 "eligible_for_source_model_gate": eligible_for_source_model_gate,
                 "excluded_from_eligibility_reason": excluded_reason,
-                "model_training_summary": model_training_summary
-                if variant == O_MODEL_PREDICTED_VARIANT
-                else None,
+                "model_training_summary": (
+                    _compact_o_model_training_summary(model_training_summary)
+                    if variant == O_MODEL_PREDICTED_VARIANT
+                    else None
+                ),
                 "correction_constants_source": model_training_summary[
                     "correction_constants_source"
                 ]
@@ -3752,7 +4391,9 @@ def _comparison_report(
             "m2_stateful_replay_parity_candidate_report_id"
         ),
         "model_predicted_candidate_name": O_MODEL_PREDICTED_VARIANT,
-        "model_training_summary": model_training_summary,
+        "model_training_summary": _compact_o_model_training_summary(
+            model_training_summary
+        ),
         "label_diagnostic_variants": list(O_LABEL_DIAGNOSTIC_VARIANTS),
         "candidate_rows": candidate_rows,
         "eligible_candidate_count": 0,
@@ -3997,6 +4638,7 @@ def _freeze_readiness_report(
     model_training_summary: dict[str, Any],
     eligibility_gate_report: dict[str, Any],
 ) -> dict[str, Any]:
+    selected_feature_names = tuple(model_training_summary["feature_names"])
     label_grid_payload = [
         {
             "decision_group_id": row["decision_group_id"],
@@ -4050,7 +4692,10 @@ def _freeze_readiness_report(
                     "decision_group_id": row["decision_group_id"],
                     "action": row["action"],
                     "split": row["split"],
-                    "features": _deployable_model_features(row),
+                    "features": _deployable_model_features(
+                        row,
+                        selected_feature_names,
+                    ),
                     "target": row["replay_aligned_executable_label_target"],
                 }
                 for row in rows
@@ -4059,7 +4704,7 @@ def _freeze_readiness_report(
         ),
         "label_grid_hash": canonical_json_sha256(label_grid_payload),
         "feature_schema_hash": canonical_json_sha256(
-            list(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
+            list(selected_feature_names)
         ),
         "split_hash": canonical_json_sha256(
             sorted(
@@ -5891,6 +6536,7 @@ def _ranking_markdown(report: dict[str, Any]) -> str:
             "# O Source Ranking Objective",
             "",
             f"- primary_variant_name: `{report['primary_variant_name']}`",
+            f"- selected_feature_set_name: `{report['selected_feature_set_name']}`",
             f"- ranking_metric_scope: `{report['ranking_metric_scope']}`",
             "- full_source_model_ranking_quality_claimed: "
             f"`{str(report['full_source_model_ranking_quality_claimed']).lower()}`",
@@ -5905,6 +6551,50 @@ def _ranking_markdown(report: dict[str, Any]) -> str:
             "",
         ]
     )
+
+
+def _feature_set_selection_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# O Feature Set Selection",
+        "",
+        f"- selected_feature_set_name: `{report['selected_feature_set_name']}`",
+        "- uses_validation_labels_for_tuning: "
+        f"`{str(report['uses_validation_labels_for_tuning']).lower()}`",
+        "- selection_metric_source: "
+        f"`{report['selection_metric_source']}`",
+        "- selected_shadow_mean_regret: "
+        f"`{report['selected_shadow_metrics']['mean_regret']}`",
+        "- selected_validation_mean_regret_report_only: "
+        f"`{report['selected_validation_metrics_report_only']['mean_regret']}`",
+        "- reference_distance_in_selected_feature_set: "
+        f"`{str(report['reference_distance_in_selected_feature_set']).lower()}`",
+        "- #146_start_allowed: "
+        f"`{str(report['#146_start_allowed']).lower()}`",
+        "- #134_resume_allowed: "
+        f"`{str(report['#134_resume_allowed']).lower()}`",
+        "",
+        "| feature_set | selected | shadow_mean_regret | shadow_return | shadow_high_score_sum | shadow_p_up_disagreement | validation_mean_regret_report_only | reasons |",
+        "|---|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in report["candidate_feature_sets"]:
+        shadow = row["shadow_selection_metrics"]
+        validation = row["validation_metrics_report_only"]
+        lines.append(
+            "| {name} | {selected} | {shadow_regret:.6f} | {shadow_return:.6f} | {shadow_hs:.6f} | {shadow_pup:.6f} | {validation_regret:.6f} | {reasons} |".format(
+                name=row["feature_set_name"],
+                selected=str(
+                    row["feature_set_name"] == report["selected_feature_set_name"]
+                ).lower(),
+                shadow_regret=float(shadow["mean_regret"]),
+                shadow_return=float(shadow["selected_return_sum"]),
+                shadow_hs=float(shadow["high_score_return_sum"]),
+                shadow_pup=float(shadow["p_up_disagreement_rate"]),
+                validation_regret=float(validation["mean_regret"]),
+                reasons=", ".join(row["shadow_selection_reason_codes"]),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _leakage_markdown(report: dict[str, Any]) -> str:
