@@ -1970,11 +1970,29 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         encoding="utf-8",
     )
     market_metadata_rows = [
-        {"market_id": "o-market-a", "reference_price_start": 100.0},
-        {"market_id": "o-market-b", "reference_price_start": 100.0},
+        {"market_id": "o-market-a", "market_start_ts": 0},
+        {"market_id": "o-market-b", "market_start_ts": 0},
     ]
     (holdout_corpus_dir / "polymarket_market_metadata.jsonl").write_text(
         "\n".join(json.dumps(row, sort_keys=True) for row in market_metadata_rows)
+        + "\n",
+        encoding="utf-8",
+    )
+    btc_reference_rows = [
+        {
+            "ts": 0,
+            "available_at_ts": 60_000,
+            "open_price": 100.0,
+            "high_price": 100.0,
+            "low_price": 100.0,
+            "close_price": 100.0,
+            "volume": 1.0,
+            "timeframe_ms": 60_000,
+            "source": "test_reference_feed",
+        }
+    ]
+    (holdout_corpus_dir / "polymarket_btc_reference_candles.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in btc_reference_rows)
         + "\n",
         encoding="utf-8",
     )
@@ -2412,6 +2430,24 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert coverage["field_coverage"][
         "reference_price_to_beat_distance_at_decision"
     ]["used_as_model_input"] is True
+    assert coverage["field_coverage"][
+        "reference_price_to_beat_distance_at_decision"
+    ]["available_count"] == 15
+    reference_effect = ranking["o_model_training_summary"][
+        "reference_price_feature_effect_summary"
+    ]
+    assert reference_effect["diagnostic_only"] is True
+    assert reference_effect["uses_validation_labels_for_tuning"] is False
+    assert (
+        reference_effect[
+            "reference_price_to_beat_distance_available_count"
+        ]
+        == 15
+    )
+    assert (
+        reference_effect["final_shadow_corrected_gate_remains_fail_closed"]
+        is True
+    )
     assert coverage["field_coverage"]["side_book_depth_imbalance"][
         "available_count"
     ] == 12

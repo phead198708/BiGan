@@ -93,6 +93,27 @@ def test_current_kline_close_is_not_used_before_candle_is_available(
     assert open_feature["features"]["btc_mid_price"] != pytest.approx(
         sentinel["current_close"]
     )
+    reference_price = open_feature["features"]["reference_price_to_beat"]
+    assert reference_price == pytest.approx(65_000.0)
+    assert open_feature["features"][
+        "reference_price_to_beat_distance_at_decision"
+    ] == pytest.approx((sentinel["previous_close"] - reference_price) / reference_price)
+    assert open_feature["features"][
+        "reference_price_to_beat_distance_at_decision"
+    ] != pytest.approx((sentinel["current_close"] - reference_price) / reference_price)
+    reference_distance_provenance = open_feature["feature_provenance"][
+        "reference_price_to_beat_distance_at_decision"
+    ]
+    assert reference_distance_provenance["decision_ts"] == open_feature["decision_ts"]
+    assert reference_distance_provenance["max_input_ts"] <= open_feature["decision_ts"]
+    assert (
+        reference_distance_provenance["available_at_ts"]
+        <= open_feature["decision_ts"]
+    )
+    assert reference_distance_provenance["provenance_valid"] is True
+    assert "open_price_at_market_start" in reference_distance_provenance[
+        "source_fields_used"
+    ]
 
     closed_feature = _feature_at(
         features=features,

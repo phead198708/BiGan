@@ -89,6 +89,16 @@ def test_feature_rows_are_v8_compatible_and_causal() -> None:
     assert first.horizon_ms == POLYMARKET_BTC15M_HORIZON_MS
     assert first.v8_feature.instrument_id == market.slug
     assert "btc_mid_price" in first.features
+    assert "reference_price_to_beat_distance_at_decision" in first.features
+    assert first.features["reference_price_to_beat"] == pytest.approx(
+        market.reference_price_at_start
+    )
+    assert first.features["reference_price_to_beat_distance_at_decision"] == (
+        pytest.approx(
+            (first.features["btc_mid_price"] - market.reference_price_at_start)
+            / market.reference_price_at_start
+        )
+    )
     assert "up_token_mid_price" in first.features
     assert first.feature_cutoff_ts <= first.decision_ts
     assert first.max_input_ts <= first.decision_ts

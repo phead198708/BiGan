@@ -75,6 +75,21 @@ def _feature_row(
     candles: tuple[BinanceBTCCandle, ...],
     current_candle: BinanceBTCCandle,
 ) -> PolymarketCorpusFeatureRow:
+    reference_context = _reference_price_to_beat_context(
+        market=market,
+        candles=candles,
+        decision_ts=decision_ts,
+    )
+    reference_price_to_beat = (
+        float(reference_context["reference_price_to_beat"])
+        if reference_context is not None
+        else None
+    )
+    reference_distance = (
+        (current_candle.close_price - reference_price_to_beat) / reference_price_to_beat
+        if reference_price_to_beat is not None and reference_price_to_beat > 0.0
+        else None
+    )
     recent_up_volume = _recent_trade_volume(
         trades=market_trades,
         outcome="UP",
@@ -100,6 +115,8 @@ def _feature_row(
         "time_to_close_seconds": (market.market_end_ts - decision_ts) / 1000.0,
         "market_age_seconds": (decision_ts - market.market_start_ts) / 1000.0,
         "btc_mid_price": current_candle.close_price,
+        "reference_price_to_beat": reference_price_to_beat,
+        "reference_price_to_beat_distance_at_decision": reference_distance,
         "btc_return_10s": _return(candles, decision_ts=decision_ts, lookback_ms=10_000),
         "btc_return_30s": _return(candles, decision_ts=decision_ts, lookback_ms=30_000),
         "btc_return_1m": _return(candles, decision_ts=decision_ts, lookback_ms=60_000),
@@ -197,12 +214,14 @@ def _feature_row(
         up_snapshot.ts,
         down_snapshot.ts,
         current_candle.ts,
+        int(reference_context["max_input_ts"]) if reference_context else 0,
         max_trade_ts,
     )
     available_at_ts = max(
         up_snapshot.available_at_ts,
         down_snapshot.available_at_ts,
         current_candle.available_at_ts,
+        int(reference_context["available_at_ts"]) if reference_context else 0,
         max_trade_ts,
     )
     provenance = {
@@ -215,6 +234,49 @@ def _feature_row(
         }
         for name in features
     }
+    if reference_context is not None:
+        reference_provenance = {
+            "source": "polymarket_corpus",
+            "input_start_ts": int(reference_context["input_start_ts"]),
+            "input_end_ts": max(
+                int(reference_context["input_end_ts"]),
+                current_candle.ts,
+            ),
+            "available_at_ts": max(
+                int(reference_context["available_at_ts"]),
+                current_candle.available_at_ts,
+            ),
+            "lookback_ms": max(0, decision_ts - int(reference_context["input_start_ts"])),
+            "source_fields_used": "|".join(
+                (
+                    str(reference_context["source_fields_used"]),
+                    "polymarket_btc_reference_candles.close_price_at_decision",
+                )
+            ),
+            "max_input_ts": max(
+                int(reference_context["max_input_ts"]),
+                current_candle.ts,
+            ),
+            "decision_ts": decision_ts,
+            "provenance_valid": (
+                max(
+                    int(reference_context["available_at_ts"]),
+                    current_candle.available_at_ts,
+                )
+                <= decision_ts
+            ),
+            "reference_price_to_beat_source": str(reference_context["source_type"]),
+        }
+        provenance["reference_price_to_beat"] = {
+            **reference_provenance,
+            "source_fields_used": str(reference_context["source_fields_used"]),
+            "input_end_ts": int(reference_context["input_end_ts"]),
+            "available_at_ts": int(reference_context["available_at_ts"]),
+            "max_input_ts": int(reference_context["max_input_ts"]),
+        }
+        provenance["reference_price_to_beat_distance_at_decision"] = (
+            reference_provenance
+        )
     return PolymarketCorpusFeatureRow(
         market_id=market.market_id,
         condition_id=market.condition_id,
@@ -295,6 +357,65 @@ def _last_candle(
         if candle.ts <= decision_ts and candle.available_at_ts <= decision_ts
     ]
     return eligible[-1] if eligible else None
+
+
+def _reference_price_to_beat_context(
+    *,
+    market: PolymarketCorpusMarket,
+    candles: tuple[BinanceBTCCandle, ...],
+    decision_ts: int,
+) -> dict[str, float | int | str] | None:
+    if market.reference_price_start is not None:
+        return {
+            "reference_price_to_beat": market.reference_price_start,
+            "input_start_ts": market.market_start_ts,
+            "input_end_ts": market.market_start_ts,
+            "available_at_ts": market.market_start_ts,
+            "max_input_ts": market.market_start_ts,
+            "source_fields_used": "polymarket_market_metadata.reference_price_start",
+            "source_type": "market_metadata_reference_price_start",
+        }
+    start_open = _market_start_open_candle(candles, market.market_start_ts)
+    if start_open is not None and start_open.ts <= decision_ts:
+        return {
+            "reference_price_to_beat": start_open.open_price,
+            "input_start_ts": start_open.ts,
+            "input_end_ts": start_open.ts,
+            "available_at_ts": start_open.ts,
+            "max_input_ts": start_open.ts,
+            "source_fields_used": "polymarket_btc_reference_candles.open_price_at_market_start",
+            "source_type": "market_start_reference_candle_open_price",
+        }
+    eligible_prior = [
+        candle
+        for candle in candles
+        if candle.ts <= market.market_start_ts
+        and candle.available_at_ts <= decision_ts
+    ]
+    if not eligible_prior:
+        return None
+    prior = eligible_prior[-1]
+    return {
+        "reference_price_to_beat": prior.close_price,
+        "input_start_ts": prior.ts,
+        "input_end_ts": prior.ts,
+        "available_at_ts": prior.available_at_ts,
+        "max_input_ts": prior.ts,
+        "source_fields_used": "polymarket_btc_reference_candles.close_price_before_market_start",
+        "source_type": "prior_available_reference_candle_close_price",
+    }
+
+
+def _market_start_open_candle(
+    candles: tuple[BinanceBTCCandle, ...],
+    market_start_ts: int,
+) -> BinanceBTCCandle | None:
+    for candle in candles:
+        if candle.ts == market_start_ts and candle.open_price > 0.0:
+            return candle
+        if candle.ts > market_start_ts:
+            break
+    return None
 
 
 def _return(

@@ -111,8 +111,16 @@ def _features_for_ts(
         else 0.0
     )
     up_down_spread = up.spread_bps + down.spread_bps
+    reference_price_to_beat = market.reference_price_at_start
+    reference_distance = (
+        (btc_mid - reference_price_to_beat) / reference_price_to_beat
+        if reference_price_to_beat > 0.0
+        else None
+    )
     return {
         "btc_mid_price": btc_mid,
+        "reference_price_to_beat": reference_price_to_beat,
+        "reference_price_to_beat_distance_at_decision": reference_distance,
         "btc_return_1m": return_1m,
         "btc_return_5m": return_5m,
         "btc_return_15m": return_15m,

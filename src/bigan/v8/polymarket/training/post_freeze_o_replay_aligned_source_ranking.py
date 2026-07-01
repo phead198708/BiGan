@@ -558,13 +558,19 @@ def _load_source_feature_rows(
     if not feature_path.exists():
         return [], feature_path
     metadata_by_market = _load_market_metadata_by_market_id(corpus_dir)
+    btc_reference_rows = _load_btc_reference_rows(corpus_dir)
     feature_rows = []
     for row in _read_jsonl(feature_path):
         market_id = str(row.get("market_id") or "")
         metadata = metadata_by_market.get(market_id, {})
+        enriched_row = _enrich_feature_row_with_reference_price_distance(
+            row=row,
+            metadata=metadata,
+            btc_reference_rows=btc_reference_rows,
+        )
         feature_rows.append(
             {
-                **row,
+                **enriched_row,
                 "market_metadata": metadata,
                 "source_feature_rows_path": str(feature_path),
             }
@@ -580,6 +586,162 @@ def _load_market_metadata_by_market_id(corpus_dir: Path) -> dict[str, dict[str, 
         str(row.get("market_id") or ""): row
         for row in _read_jsonl(metadata_path)
         if row.get("market_id")
+    }
+
+
+def _load_btc_reference_rows(corpus_dir: Path) -> list[dict[str, Any]]:
+    btc_path = corpus_dir / "polymarket_btc_reference_candles.jsonl"
+    if not btc_path.exists():
+        return []
+    return sorted(_read_jsonl(btc_path), key=lambda row: int(row.get("ts") or 0))
+
+
+def _enrich_feature_row_with_reference_price_distance(
+    *,
+    row: dict[str, Any],
+    metadata: dict[str, Any],
+    btc_reference_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    features = dict(row.get("features") or {})
+    provenance = dict(row.get("feature_provenance") or {})
+    if features.get("reference_price_to_beat_distance_at_decision") is not None:
+        return row
+    decision_ts = _optional_int(row.get("decision_ts"))
+    btc_mid = _optional_float(features.get("btc_mid_price"))
+    if decision_ts is None or btc_mid is None:
+        return row
+    reference_context = _reference_price_to_beat_context_from_feature_sources(
+        metadata=metadata,
+        btc_reference_rows=btc_reference_rows,
+        decision_ts=decision_ts,
+    )
+    if reference_context is None:
+        return row
+    reference_price = float(reference_context["reference_price_to_beat"])
+    if reference_price <= 0.0:
+        return row
+    btc_mid_provenance = dict(provenance.get("btc_mid_price") or {})
+    btc_mid_input_ts = _optional_int(btc_mid_provenance.get("input_end_ts"))
+    btc_mid_available_at_ts = _optional_int(btc_mid_provenance.get("available_at_ts"))
+    current_input_ts = btc_mid_input_ts if btc_mid_input_ts is not None else decision_ts
+    current_available_at_ts = (
+        btc_mid_available_at_ts if btc_mid_available_at_ts is not None else decision_ts
+    )
+    max_input_ts = max(int(reference_context["max_input_ts"]), current_input_ts)
+    available_at_ts = max(
+        int(reference_context["available_at_ts"]),
+        current_available_at_ts,
+    )
+    enriched = dict(row)
+    features["reference_price_to_beat"] = reference_price
+    features["reference_price_to_beat_distance_at_decision"] = (
+        (btc_mid - reference_price) / reference_price
+    )
+    reference_source_fields = str(reference_context["source_fields_used"])
+    provenance["reference_price_to_beat"] = {
+        "source": "polymarket_feature_row_reference_distance_backfill",
+        "input_start_ts": int(reference_context["input_start_ts"]),
+        "input_end_ts": int(reference_context["input_end_ts"]),
+        "available_at_ts": int(reference_context["available_at_ts"]),
+        "lookback_ms": max(0, decision_ts - int(reference_context["input_start_ts"])),
+        "source_fields_used": reference_source_fields,
+        "max_input_ts": int(reference_context["max_input_ts"]),
+        "decision_ts": decision_ts,
+        "provenance_valid": int(reference_context["available_at_ts"]) <= decision_ts,
+        "reference_price_to_beat_source": str(reference_context["source_type"]),
+    }
+    provenance["reference_price_to_beat_distance_at_decision"] = {
+        "source": "polymarket_feature_row_reference_distance_backfill",
+        "input_start_ts": int(reference_context["input_start_ts"]),
+        "input_end_ts": max_input_ts,
+        "available_at_ts": available_at_ts,
+        "lookback_ms": max(0, decision_ts - int(reference_context["input_start_ts"])),
+        "source_fields_used": (
+            f"{reference_source_fields}|polymarket_feature_rows.features.btc_mid_price"
+        ),
+        "max_input_ts": max_input_ts,
+        "decision_ts": decision_ts,
+        "provenance_valid": available_at_ts <= decision_ts,
+        "reference_price_to_beat_source": str(reference_context["source_type"]),
+    }
+    enriched["features"] = features
+    enriched["feature_provenance"] = provenance
+    enriched["max_input_ts"] = max(int(row.get("max_input_ts") or 0), max_input_ts)
+    enriched["available_at_ts"] = max(
+        int(row.get("available_at_ts") or 0),
+        available_at_ts,
+    )
+    return enriched
+
+
+def _reference_price_to_beat_context_from_feature_sources(
+    *,
+    metadata: dict[str, Any],
+    btc_reference_rows: list[dict[str, Any]],
+    decision_ts: int,
+) -> dict[str, float | int | str] | None:
+    market_start_ts = _optional_int(metadata.get("market_start_ts"))
+    explicit_reference = _optional_float(
+        metadata.get("reference_price_start")
+        if metadata.get("reference_price_start") is not None
+        else metadata.get("reference_price_at_start")
+    )
+    if explicit_reference is not None and explicit_reference > 0.0:
+        input_ts = market_start_ts if market_start_ts is not None else decision_ts
+        return {
+            "reference_price_to_beat": explicit_reference,
+            "input_start_ts": input_ts,
+            "input_end_ts": input_ts,
+            "available_at_ts": input_ts,
+            "max_input_ts": input_ts,
+            "source_fields_used": "polymarket_market_metadata.reference_price_start",
+            "source_type": "market_metadata_reference_price_start",
+        }
+    if market_start_ts is None:
+        return None
+    for candle in btc_reference_rows:
+        candle_ts = _optional_int(candle.get("ts"))
+        open_price = _optional_float(candle.get("open_price"))
+        if candle_ts == market_start_ts and open_price is not None and open_price > 0.0:
+            return {
+                "reference_price_to_beat": open_price,
+                "input_start_ts": candle_ts,
+                "input_end_ts": candle_ts,
+                "available_at_ts": candle_ts,
+                "max_input_ts": candle_ts,
+                "source_fields_used": (
+                    "polymarket_btc_reference_candles.open_price_at_market_start"
+                ),
+                "source_type": "market_start_reference_candle_open_price",
+            }
+        if candle_ts is not None and candle_ts > market_start_ts:
+            break
+    eligible_prior = [
+        candle
+        for candle in btc_reference_rows
+        if _optional_int(candle.get("ts")) is not None
+        and int(candle["ts"]) <= market_start_ts
+        and _optional_int(candle.get("available_at_ts")) is not None
+        and int(candle["available_at_ts"]) <= decision_ts
+    ]
+    if not eligible_prior:
+        return None
+    prior = eligible_prior[-1]
+    prior_ts = int(prior["ts"])
+    prior_available_at = int(prior["available_at_ts"])
+    prior_close = _optional_float(prior.get("close_price"))
+    if prior_close is None or prior_close <= 0.0:
+        return None
+    return {
+        "reference_price_to_beat": prior_close,
+        "input_start_ts": prior_ts,
+        "input_end_ts": prior_ts,
+        "available_at_ts": prior_available_at,
+        "max_input_ts": prior_ts,
+        "source_fields_used": (
+            "polymarket_btc_reference_candles.close_price_before_market_start"
+        ),
+        "source_type": "prior_available_reference_candle_close_price",
     }
 
 
@@ -770,8 +932,14 @@ def _attach_decision_time_feature_fields(
 
     reference_start = _optional_float(metadata.get("reference_price_start"))
     btc_mid = _optional_float(features.get("btc_mid_price"))
-    reference_distance = None
-    if reference_start and btc_mid is not None:
+    reference_distance = _optional_float(
+        features.get("reference_price_to_beat_distance_at_decision")
+    )
+    if reference_distance is not None:
+        reference_start = _optional_float(
+            features.get("reference_price_to_beat", reference_start)
+        )
+    elif reference_start and btc_mid is not None:
         reference_distance = (btc_mid - reference_start) / reference_start
     else:
         missing_reasons.append("reference_price_to_beat_distance_unavailable")
@@ -1137,6 +1305,8 @@ def _train_o_model_predicted_scores(
         deployable_available=deployable_available,
         ranking_correction=ranking_correction,
     )
+    feature_coverage = _decision_time_feature_coverage(rows)
+    feature_ablation = _o_feature_ablation_diagnostics(rows)
     summary = {
         "model_candidate_name": O_MODEL_PREDICTED_VARIANT,
         "ranking_score_source": "model_predicted_score",
@@ -1164,8 +1334,14 @@ def _train_o_model_predicted_scores(
         "expanded_decision_time_feature_fields": list(
             O_EXPANDED_DECISION_TIME_FEATURE_FIELDS
         ),
-        "decision_time_feature_coverage": _decision_time_feature_coverage(rows),
-        "feature_ablation_diagnostics": _o_feature_ablation_diagnostics(rows),
+        "decision_time_feature_coverage": feature_coverage,
+        "feature_ablation_diagnostics": feature_ablation,
+        "reference_price_feature_effect_summary": (
+            _reference_price_feature_effect_summary(
+                feature_coverage=feature_coverage,
+                feature_ablation=feature_ablation,
+            )
+        ),
         "p_up_bucket_calibration_residual_summary": p_up_residual_summary,
         "training_target": "replay_aligned_executable_label_target",
         "training_label_fields_may_use_future_replay_or_settlement": list(
@@ -1418,6 +1594,72 @@ def _o_feature_ablation_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any
         "validation_selected_return_delta_combined_vs_old": (
             float(combined["selected_action_realized_replay_return_sum"])
             - float(old["selected_action_realized_replay_return_sum"])
+        ),
+    }
+
+
+def _reference_price_feature_effect_summary(
+    *,
+    feature_coverage: dict[str, Any],
+    feature_ablation: dict[str, Any],
+) -> dict[str, Any]:
+    field = feature_coverage["field_coverage"][
+        "reference_price_to_beat_distance_at_decision"
+    ]
+    feature_sets = feature_ablation["feature_sets"]
+    old_validation = feature_sets["old_features_only"]["validation_metrics"]
+    reference_validation = feature_sets["new_reference_price_features"][
+        "validation_metrics"
+    ]
+    combined_validation = feature_sets["combined_feature_set"]["validation_metrics"]
+    reference_mean_regret_delta = float(old_validation["mean_regret"]) - float(
+        reference_validation["mean_regret"]
+    )
+    combined_mean_regret_delta = float(old_validation["mean_regret"]) - float(
+        combined_validation["mean_regret"]
+    )
+    return {
+        "diagnostic_only": True,
+        "uses_validation_labels_for_tuning": False,
+        "reference_price_to_beat_distance_available_count": field["available_count"],
+        "reference_price_to_beat_distance_missing_count": field["missing_count"],
+        "reference_price_to_beat_distance_availability_rate": field[
+            "availability_rate"
+        ],
+        "reference_price_to_beat_distance_used_as_model_input": field[
+            "used_as_model_input"
+        ],
+        "reference_feature_validation_mean_regret_delta_vs_old_features": (
+            reference_mean_regret_delta
+        ),
+        "combined_feature_validation_mean_regret_delta_vs_old_features": (
+            combined_mean_regret_delta
+        ),
+        "reference_feature_validation_selected_return_delta_vs_old_features": (
+            float(reference_validation["selected_action_realized_replay_return_sum"])
+            - float(old_validation["selected_action_realized_replay_return_sum"])
+        ),
+        "combined_feature_validation_selected_return_delta_vs_old_features": (
+            float(combined_validation["selected_action_realized_replay_return_sum"])
+            - float(old_validation["selected_action_realized_replay_return_sum"])
+        ),
+        "reference_distance_has_raw_model_signal": (
+            reference_mean_regret_delta > 0.0
+            or float(
+                reference_validation["selected_action_realized_replay_return_sum"]
+            )
+            > float(old_validation["selected_action_realized_replay_return_sum"])
+        ),
+        "combined_expanded_features_have_raw_model_signal": (
+            combined_mean_regret_delta > 0.0
+            or float(combined_validation["selected_action_realized_replay_return_sum"])
+            > float(old_validation["selected_action_realized_replay_return_sum"])
+        ),
+        "final_shadow_corrected_gate_remains_fail_closed": True,
+        "final_shadow_corrected_blocker_interpretation": (
+            "reference distance is now decision-time covered; remaining O blocker is "
+            "validation calibration quality under the shadow-derived corrected ranker, "
+            "not missing reference-distance coverage"
         ),
     }
 
@@ -5514,6 +5756,12 @@ def _optional_float(value: Any) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
 
 
 def _immediate_exit_pnl(row: dict[str, Any]) -> float | None:
