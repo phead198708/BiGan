@@ -1936,6 +1936,48 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "\n".join(json.dumps(row, sort_keys=True) for row in label_rows) + "\n",
         encoding="utf-8",
     )
+    feature_rows = [
+        _o_feature_row(
+            market_id="o-market-a",
+            decision_ts=10,
+            btc_mid_price=101.0,
+            up_depth=150.0,
+            down_depth=90.0,
+            up_update_count=8,
+            down_update_count=3,
+        ),
+        _o_feature_row(
+            market_id="o-market-a",
+            decision_ts=20,
+            btc_mid_price=99.0,
+            up_depth=80.0,
+            down_depth=180.0,
+            up_update_count=2,
+            down_update_count=9,
+        ),
+        _o_feature_row(
+            market_id="o-market-b",
+            decision_ts=30,
+            btc_mid_price=100.4,
+            up_depth=110.0,
+            down_depth=100.0,
+            up_update_count=4,
+            down_update_count=4,
+        ),
+    ]
+    (holdout_corpus_dir / "polymarket_feature_rows.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in feature_rows) + "\n",
+        encoding="utf-8",
+    )
+    market_metadata_rows = [
+        {"market_id": "o-market-a", "reference_price_start": 100.0},
+        {"market_id": "o-market-b", "reference_price_start": 100.0},
+    ]
+    (holdout_corpus_dir / "polymarket_market_metadata.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in market_metadata_rows)
+        + "\n",
+        encoding="utf-8",
+    )
     source_payload["provenance"] = {"holdout_corpus_dir": str(holdout_corpus_dir)}
     source_payload["m_post_freeze_holdout_validation_report_id"] = canonical_json_sha256(
         source_payload
@@ -2344,6 +2386,55 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert "buy_down_hold_to_settlement_x_exit_bid_proxy" in ranking[
         "o_model_training_summary"
     ]["feature_names"]
+    assert "reference_price_to_beat_distance_scaled" in ranking[
+        "o_model_training_summary"
+    ]["feature_names"]
+    assert "recent_reference_price_momentum_30s_scaled" in ranking[
+        "o_model_training_summary"
+    ]["feature_names"]
+    assert "side_book_depth_imbalance" in ranking["o_model_training_summary"][
+        "feature_names"
+    ]
+    assert "side_book_update_velocity_scaled" in ranking[
+        "o_model_training_summary"
+    ]["feature_names"]
+    assert "hts_vs_sell_before_close_exit_value_gap_proxy" in ranking[
+        "o_model_training_summary"
+    ]["feature_names"]
+    assert "p_up_bucket_calibration_residual" in ranking[
+        "o_model_training_summary"
+    ]["feature_names"]
+    coverage = ranking["o_model_training_summary"][
+        "decision_time_feature_coverage"
+    ]
+    assert coverage["feature_row_available_count"] == 15
+    assert coverage["feature_provenance_violation_count"] == 0
+    assert coverage["field_coverage"][
+        "reference_price_to_beat_distance_at_decision"
+    ]["used_as_model_input"] is True
+    assert coverage["field_coverage"]["side_book_depth_imbalance"][
+        "available_count"
+    ] == 12
+    assert coverage["field_coverage"]["recent_reference_price_momentum_120s"][
+        "missing_count"
+    ] == 15
+    ablation = ranking["o_model_training_summary"]["feature_ablation_diagnostics"]
+    assert ablation["uses_validation_labels_for_tuning"] is False
+    assert set(ablation["feature_sets"]) == {
+        "old_features_only",
+        "new_reference_price_features",
+        "new_book_pressure_features",
+        "combined_feature_set",
+    }
+    assert (
+        ablation["feature_sets"]["combined_feature_set"]["feature_count"]
+        > ablation["feature_sets"]["old_features_only"]["feature_count"]
+    )
+    residual = ranking["o_model_training_summary"][
+        "p_up_bucket_calibration_residual_summary"
+    ]
+    assert residual["residual_source"] == "shadow_split_only"
+    assert residual["uses_validation_labels_for_tuning"] is False
     assert ranking["o_model_training_summary"][
         "training_target"
     ] == "replay_aligned_executable_label_target"
@@ -2446,6 +2537,13 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert leakage["deployable_model_score_available"] is True
     assert leakage["leakage_audit_passed"] is True
     assert leakage["model_input_forbidden_field_overlap"] == []
+    assert leakage["expanded_decision_time_feature_provenance_passed"] is True
+    assert leakage["expanded_feature_coverage"][
+        "feature_provenance_violation_count"
+    ] == 0
+    assert "reference_price_to_beat_distance_at_decision" in leakage[
+        "expanded_decision_time_feature_fields"
+    ]
     assert "total_polymarket_pnl" not in leakage["model_input_fields_decision_time_only"]
     assert "action_return_target" not in leakage["model_input_fields_decision_time_only"]
     assert "label_pnl_target" not in leakage["model_input_fields_decision_time_only"]
@@ -2720,6 +2818,17 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         assert "book_staleness_ms" in top_case["feature_snapshot"]
         assert "entry_ask" in top_case["feature_snapshot"]
         assert "exit_bid_proxy" in top_case["feature_snapshot"]
+        assert "reference_price_to_beat_distance_at_decision" in top_case[
+            "feature_snapshot"
+        ]
+        assert "side_book_depth_imbalance" in top_case["feature_snapshot"]
+        assert "side_book_update_velocity" in top_case["feature_snapshot"]
+        assert "hts_vs_sell_before_close_exit_value_gap_proxy" in top_case[
+            "feature_snapshot"
+        ]
+        assert "p_up_calibration_residual_by_time_spread_queue_bucket" in top_case[
+            "feature_snapshot"
+        ]
         assert "group_normalized_raw_model_component" in top_case[
             "score_components"
         ]
@@ -2728,6 +2837,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert hts_diagnostic["recommended_next_action"] in {
         "add_new_decision_time_reference_and_book_pressure_features_before_"
         "further_hts_priority_changes",
+        "collect_reference_price_to_beat_distance_before_further_hts_priority_"
+        "changes",
         "lower_hts_side_bet_priority_when_reliability_is_weak",
         "continue_monitoring",
     }
@@ -3058,6 +3169,61 @@ def _o_label_row(
             target if sell_before_close else 0.0
         ),
         "execution_gap_return": 0.0,
+    }
+
+
+def _o_feature_row(
+    *,
+    market_id: str,
+    decision_ts: int,
+    btc_mid_price: float,
+    up_depth: float,
+    down_depth: float,
+    up_update_count: int,
+    down_update_count: int,
+) -> dict[str, Any]:
+    features = {
+        "btc_mid_price": btc_mid_price,
+        "btc_return_30s": 0.002,
+        "btc_return_1m": 0.003,
+        "time_to_close_seconds": 180.0,
+        "up_ask": 0.41,
+        "up_bid": 0.40,
+        "down_ask": 0.61,
+        "down_bid": 0.60,
+        "up_liquidity_depth": up_depth,
+        "down_liquidity_depth": down_depth,
+        "up_recent_book_update_count_1m": up_update_count,
+        "down_recent_book_update_count_1m": down_update_count,
+        "up_book_staleness_ms": 250.0,
+        "down_book_staleness_ms": 300.0,
+        "up_spread_bps": 250.0,
+        "down_spread_bps": 300.0,
+        "combined_spread_bps": 275.0,
+        "up_queue_fill_probability_proxy": 0.91,
+        "down_queue_fill_probability_proxy": 0.88,
+    }
+    return {
+        "market_id": market_id,
+        "decision_ts": decision_ts,
+        "available_at_ts": decision_ts,
+        "feature_cutoff_ts": decision_ts,
+        "max_input_ts": decision_ts,
+        "features": features,
+        "feature_provenance": {
+            key: {
+                "available_at_ts": decision_ts,
+                "input_end_ts": decision_ts,
+                "input_start_ts": decision_ts - 60_000,
+                "lookback_ms": 60_000,
+                "source": "test_polymarket_corpus",
+            }
+            for key in features
+        },
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
     }
 
 

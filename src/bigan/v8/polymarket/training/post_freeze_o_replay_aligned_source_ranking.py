@@ -116,8 +116,15 @@ O_ACTION_INTERACTION_SIGNAL_NAMES = (
     "staleness",
     "entry_ask",
     "exit_bid_proxy",
+    "reference_price_to_beat_distance",
+    "reference_momentum_30s",
+    "reference_momentum_60s",
+    "side_book_depth_imbalance",
+    "side_book_update_velocity",
+    "hts_vs_sell_before_close_exit_value_gap_proxy",
+    "p_up_bucket_calibration_residual",
 )
-O_DEPLOYABLE_MODEL_FEATURE_NAMES = (
+O_LEGACY_DEPLOYABLE_MODEL_FEATURE_NAMES = (
     "bias",
     "action_buy_up_sell_before_close",
     "action_buy_down_sell_before_close",
@@ -142,7 +149,60 @@ O_DEPLOYABLE_MODEL_FEATURE_NAMES = (
     *tuple(
         f"{action_slug}_x_{signal_name}"
         for _, action_slug in O_ACTION_FEATURE_SLUGS
+        for signal_name in (
+            "p_up",
+            "p_down",
+            "time_to_close",
+            "spread",
+            "queue",
+            "staleness",
+            "entry_ask",
+            "exit_bid_proxy",
+        )
+    ),
+)
+O_REFERENCE_PRICE_MODEL_FEATURE_NAMES = (
+    "reference_price_to_beat_distance_scaled",
+    "recent_reference_price_momentum_30s_scaled",
+    "recent_reference_price_momentum_60s_scaled",
+    "recent_reference_price_momentum_120s_scaled",
+    "reference_price_feature_available",
+)
+O_BOOK_PRESSURE_MODEL_FEATURE_NAMES = (
+    "side_book_depth_imbalance",
+    "side_book_update_velocity_scaled",
+    "side_book_staleness_seconds",
+    "opposite_book_staleness_seconds",
+    "side_spread_bps_scaled",
+    "side_queue_fill_proxy",
+    "hts_vs_sell_before_close_exit_value_gap_proxy",
+    "p_up_bucket_calibration_residual",
+    "book_pressure_feature_available",
+)
+O_EXPANDED_DECISION_TIME_FEATURE_FIELDS = (
+    "reference_price_to_beat_distance_at_decision",
+    "recent_reference_price_momentum_30s",
+    "recent_reference_price_momentum_60s",
+    "recent_reference_price_momentum_120s",
+    "side_book_depth_imbalance",
+    "side_book_update_velocity",
+    "side_book_staleness_ms",
+    "opposite_book_staleness_ms",
+    "side_spread_bps",
+    "side_queue_fill_proxy",
+    "hts_vs_sell_before_close_exit_value_gap_proxy",
+    "p_up_calibration_residual_by_time_spread_queue_bucket",
+)
+O_DEPLOYABLE_MODEL_FEATURE_NAMES = (
+    *O_LEGACY_DEPLOYABLE_MODEL_FEATURE_NAMES,
+    *O_REFERENCE_PRICE_MODEL_FEATURE_NAMES,
+    *O_BOOK_PRESSURE_MODEL_FEATURE_NAMES,
+    *tuple(
+        f"{action_slug}_x_{signal_name}"
+        for _, action_slug in O_ACTION_FEATURE_SLUGS
         for signal_name in O_ACTION_INTERACTION_SIGNAL_NAMES
+        if f"{action_slug}_x_{signal_name}"
+        not in O_LEGACY_DEPLOYABLE_MODEL_FEATURE_NAMES
     ),
 )
 O_MIN_VALIDATION_DECISION_GROUPS = 20
@@ -320,10 +380,11 @@ def _build_reports(
     m2_report = _read_json(m2_report_path)
     if m2_report.get("schema_version") != M2_REPLAY_PARITY_SCHEMA_VERSION:
         raise ValueError("not an M2 replay-parity candidate report")
-    rows, source_reports, label_lookup = _load_source_rows(m2_report)
+    rows, source_reports, label_lookup, feature_lookup = _load_source_rows(m2_report)
     action_rows = _build_complete_decision_action_rows(
         rows=rows,
         label_lookup=label_lookup,
+        feature_lookup=feature_lookup,
     )
     grouped = _groups_with_required_actions(action_rows)
     labeled_rows = _construct_replay_aligned_labels(grouped)
@@ -402,6 +463,7 @@ def _load_source_rows(
     list[dict[str, Any]],
     list[dict[str, Any]],
     dict[tuple[str, str, int, str], dict[str, Any]],
+    dict[tuple[str, str, int], dict[str, Any]],
 ]:
     paths = sorted(
         {
@@ -416,11 +478,13 @@ def _load_source_rows(
     rows: list[dict[str, Any]] = []
     source_reports = []
     label_lookup: dict[tuple[str, str, int, str], dict[str, Any]] = {}
+    feature_lookup: dict[tuple[str, str, int], dict[str, Any]] = {}
     seen: set[tuple[str, str, int, str]] = set()
     for path_text in paths:
         path = Path(path_text).expanduser().resolve()
         report = _read_json(path)
         source_label_rows, source_label_path = _load_source_label_rows(report)
+        source_feature_rows, source_feature_path = _load_source_feature_rows(report)
         for label_row in source_label_rows:
             label_lookup[
                 (
@@ -430,6 +494,14 @@ def _load_source_rows(
                     str(label_row.get("action") or ""),
                 )
             ] = label_row
+        for feature_row in source_feature_rows:
+            feature_lookup[
+                (
+                    str(path),
+                    str(feature_row.get("market_id") or ""),
+                    int(feature_row.get("decision_ts") or 0),
+                )
+            ] = feature_row
         source_reports.append(
             {
                 "source_report_path": str(path),
@@ -442,6 +514,11 @@ def _load_source_rows(
                 "label_rows_path": str(source_label_path) if source_label_path else None,
                 "label_row_count": len(source_label_rows),
                 "full_action_label_rows_available": bool(source_label_rows),
+                "feature_rows_path": str(source_feature_path)
+                if source_feature_path
+                else None,
+                "feature_row_count": len(source_feature_rows),
+                "decision_time_feature_rows_available": bool(source_feature_rows),
             }
         )
         for row in report.get("rows", []):
@@ -457,7 +534,7 @@ def _load_source_rows(
                 continue
             seen.add(key)
             rows.append(payload)
-    return rows, source_reports, label_lookup
+    return rows, source_reports, label_lookup, feature_lookup
 
 
 def _load_source_label_rows(report: dict[str, Any]) -> tuple[list[dict[str, Any]], Path | None]:
@@ -468,6 +545,42 @@ def _load_source_label_rows(report: dict[str, Any]) -> tuple[list[dict[str, Any]
     if not label_path.exists():
         return [], label_path
     return _read_jsonl(label_path), label_path
+
+
+def _load_source_feature_rows(
+    report: dict[str, Any],
+) -> tuple[list[dict[str, Any]], Path | None]:
+    corpus_dir_text = str(report.get("provenance", {}).get("holdout_corpus_dir") or "")
+    if not corpus_dir_text:
+        return [], None
+    corpus_dir = Path(corpus_dir_text).expanduser().resolve()
+    feature_path = corpus_dir / "polymarket_feature_rows.jsonl"
+    if not feature_path.exists():
+        return [], feature_path
+    metadata_by_market = _load_market_metadata_by_market_id(corpus_dir)
+    feature_rows = []
+    for row in _read_jsonl(feature_path):
+        market_id = str(row.get("market_id") or "")
+        metadata = metadata_by_market.get(market_id, {})
+        feature_rows.append(
+            {
+                **row,
+                "market_metadata": metadata,
+                "source_feature_rows_path": str(feature_path),
+            }
+        )
+    return feature_rows, feature_path
+
+
+def _load_market_metadata_by_market_id(corpus_dir: Path) -> dict[str, dict[str, Any]]:
+    metadata_path = corpus_dir / "polymarket_market_metadata.jsonl"
+    if not metadata_path.exists():
+        return {}
+    return {
+        str(row.get("market_id") or ""): row
+        for row in _read_jsonl(metadata_path)
+        if row.get("market_id")
+    }
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -486,6 +599,7 @@ def _build_complete_decision_action_rows(
     *,
     rows: list[dict[str, Any]],
     label_lookup: dict[tuple[str, str, int, str], dict[str, Any]],
+    feature_lookup: dict[tuple[str, str, int], dict[str, Any]],
 ) -> list[dict[str, Any]]:
     contexts: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -509,6 +623,9 @@ def _build_complete_decision_action_rows(
             label_row = label_lookup.get(
                 (source_report_path, market_id, decision_ts, action)
             )
+            feature_row = feature_lookup.get(
+                (source_report_path, market_id, decision_ts)
+            )
             observed_row = observed_by_action.get(action)
             action_rows.append(
                 _normalize_action_row(
@@ -516,6 +633,7 @@ def _build_complete_decision_action_rows(
                         template=template,
                         action=action,
                         label_row=label_row,
+                        feature_row=feature_row,
                         observed_row=observed_row,
                     )
                 )
@@ -539,6 +657,7 @@ def _candidate_row_from_label_or_template(
     template: dict[str, Any],
     action: str,
     label_row: dict[str, Any] | None,
+    feature_row: dict[str, Any] | None,
     observed_row: dict[str, Any] | None,
 ) -> dict[str, Any]:
     base = dict(template)
@@ -565,7 +684,7 @@ def _candidate_row_from_label_or_template(
             base["total_polymarket_pnl"] = 0.0
             base["raw_calibrated_action_score"] = 0.0
             base["best_action_margin"] = 0.0
-        return base
+        return _attach_decision_time_feature_fields(base, feature_row)
     label_target = _label_target_from_corpus_label(label_row)
     base.update(
         {
@@ -613,7 +732,7 @@ def _candidate_row_from_label_or_template(
             action=action,
         )
         base["best_action_margin"] = 0.0
-    return base
+    return _attach_decision_time_feature_fields(base, feature_row)
 
 
 def _label_target_from_corpus_label(label_row: dict[str, Any]) -> float:
@@ -622,6 +741,183 @@ def _label_target_from_corpus_label(label_row: dict[str, Any]) -> float:
     if label_row.get("total_net_return") is not None:
         return float(label_row["total_net_return"])
     return 0.0
+
+
+def _attach_decision_time_feature_fields(
+    row: dict[str, Any],
+    feature_row: dict[str, Any] | None,
+) -> dict[str, Any]:
+    action = str(row.get("action") or "")
+    side = _side_from_action(action)
+    enriched = dict(row)
+    features = dict(feature_row.get("features") or {}) if feature_row else {}
+    metadata = dict(feature_row.get("market_metadata") or {}) if feature_row else {}
+    provenance = dict(feature_row.get("feature_provenance") or {}) if feature_row else {}
+    feature_max_input_ts = _optional_float(
+        feature_row.get("max_input_ts") if feature_row else None
+    )
+    decision_ts = _optional_float(enriched.get("decision_ts"))
+    provenance_valid = (
+        feature_max_input_ts is None
+        or decision_ts is None
+        or feature_max_input_ts <= decision_ts
+    )
+    missing_reasons: list[str] = []
+    if feature_row is None:
+        missing_reasons.append("missing_polymarket_feature_row")
+    if not provenance_valid:
+        missing_reasons.append("feature_row_max_input_ts_after_decision_ts")
+
+    reference_start = _optional_float(metadata.get("reference_price_start"))
+    btc_mid = _optional_float(features.get("btc_mid_price"))
+    reference_distance = None
+    if reference_start and btc_mid is not None:
+        reference_distance = (btc_mid - reference_start) / reference_start
+    else:
+        missing_reasons.append("reference_price_to_beat_distance_unavailable")
+
+    momentum_30s = _optional_float(features.get("btc_return_30s"))
+    momentum_60s = _optional_float(features.get("btc_return_1m"))
+    momentum_120s = _optional_float(
+        features.get("btc_return_120s", features.get("btc_return_2m"))
+    )
+    if momentum_30s is None:
+        missing_reasons.append("recent_reference_price_momentum_30s_unavailable")
+    if momentum_60s is None:
+        missing_reasons.append("recent_reference_price_momentum_60s_unavailable")
+    if momentum_120s is None:
+        missing_reasons.append("recent_reference_price_momentum_120s_unavailable")
+
+    side_prefix = side.lower() if side in {"UP", "DOWN"} else ""
+    opposite_prefix = "down" if side == "UP" else "up" if side == "DOWN" else ""
+    side_depth = _optional_float(features.get(f"{side_prefix}_liquidity_depth"))
+    opposite_depth = _optional_float(
+        features.get(f"{opposite_prefix}_liquidity_depth")
+    )
+    depth_total = (side_depth or 0.0) + (opposite_depth or 0.0)
+    depth_imbalance = (
+        ((side_depth or 0.0) - (opposite_depth or 0.0)) / depth_total
+        if side_prefix and depth_total > 0.0
+        else None
+    )
+    side_update_count = _optional_float(
+        features.get(f"{side_prefix}_recent_book_update_count_1m")
+    )
+    side_update_velocity = (
+        side_update_count / 60.0 if side_update_count is not None else None
+    )
+    side_staleness = _optional_float(features.get(f"{side_prefix}_book_staleness_ms"))
+    opposite_staleness = _optional_float(
+        features.get(f"{opposite_prefix}_book_staleness_ms")
+    )
+    side_spread = _optional_float(
+        features.get(f"{side_prefix}_spread_bps", features.get("combined_spread_bps"))
+    )
+    side_queue = _optional_float(
+        features.get(f"{side_prefix}_queue_fill_probability_proxy")
+    )
+    side_ask = _optional_float(features.get(f"{side_prefix}_ask"))
+    side_bid = _optional_float(features.get(f"{side_prefix}_bid"))
+    hts_vs_sbc_gap = None
+    if side == "UP":
+        hts_vs_sbc_gap = _bounded(float(enriched.get("p_up") or 0.5), 0.0, 1.0) - (
+            side_bid or 0.0
+        )
+    elif side == "DOWN":
+        hts_vs_sbc_gap = (
+            1.0 - _bounded(float(enriched.get("p_up") or 0.5), 0.0, 1.0)
+        ) - (side_bid or 0.0)
+
+    if depth_imbalance is None:
+        missing_reasons.append("side_specific_book_depth_imbalance_unavailable")
+    if side_update_velocity is None:
+        missing_reasons.append("side_specific_book_update_velocity_unavailable")
+    if side_staleness is None:
+        missing_reasons.append("side_specific_book_staleness_unavailable")
+    if side_spread is None:
+        missing_reasons.append("side_specific_spread_unavailable")
+    if side_queue is None:
+        missing_reasons.append("side_specific_queue_fill_unavailable")
+    if hts_vs_sbc_gap is None:
+        missing_reasons.append("hts_vs_sell_before_close_exit_gap_unavailable")
+
+    reference_available = reference_distance is not None and momentum_30s is not None
+    book_available = (
+        depth_imbalance is not None
+        and side_update_velocity is not None
+        and side_staleness is not None
+        and side_spread is not None
+        and side_queue is not None
+    )
+    enriched.update(
+        {
+            "decision_time_feature_row_available": feature_row is not None,
+            "decision_time_feature_source_path": feature_row.get(
+                "source_feature_rows_path"
+            )
+            if feature_row
+            else None,
+            "decision_time_feature_max_input_ts": feature_max_input_ts,
+            "decision_time_feature_provenance_valid": provenance_valid,
+            "decision_time_feature_provenance": provenance,
+            "decision_time_feature_missing_reason_codes": sorted(
+                set(missing_reasons)
+            ),
+            "reference_price_to_beat_distance_at_decision": reference_distance,
+            "recent_reference_price_momentum_30s": momentum_30s,
+            "recent_reference_price_momentum_60s": momentum_60s,
+            "recent_reference_price_momentum_120s": momentum_120s,
+            "reference_price_feature_available": reference_available,
+            "side_book_depth_imbalance": depth_imbalance,
+            "side_book_update_velocity": side_update_velocity,
+            "side_book_staleness_ms": side_staleness,
+            "opposite_book_staleness_ms": opposite_staleness,
+            "side_spread_bps": side_spread,
+            "side_queue_fill_proxy": side_queue,
+            "hts_vs_sell_before_close_exit_value_gap_proxy": hts_vs_sbc_gap,
+            "book_pressure_feature_available": book_available,
+        }
+    )
+    if enriched.get("entry_quality_ask") is None and side_ask is not None:
+        enriched["entry_quality_ask"] = side_ask
+    if enriched.get("exit_quality_bid") is None and side_bid is not None:
+        enriched["exit_quality_bid"] = side_bid
+    if enriched.get("entry_exit_quality_spread_bps") is None and side_spread is not None:
+        enriched["entry_exit_quality_spread_bps"] = side_spread
+    if enriched.get("entry_exit_quality_queue_fill") is None and side_queue is not None:
+        enriched["entry_exit_quality_queue_fill"] = side_queue
+    if (
+        enriched.get("entry_exit_quality_book_staleness_ms") is None
+        and side_staleness is not None
+    ):
+        enriched["entry_exit_quality_book_staleness_ms"] = side_staleness
+    if enriched.get("entry_exit_quality_time_to_close_seconds") is None:
+        time_to_close = _optional_float(features.get("time_to_close_seconds"))
+        if time_to_close is not None:
+            enriched["entry_exit_quality_time_to_close_seconds"] = time_to_close
+        elif decision_ts is not None:
+            enriched["entry_exit_quality_time_to_close_seconds"] = (
+                _derive_time_to_close_seconds_from_slug(
+                    slug=str(enriched.get("slug") or ""),
+                    decision_ts=int(decision_ts),
+                )
+            )
+    return enriched
+
+
+def _derive_time_to_close_seconds_from_slug(*, slug: str, decision_ts: int) -> float | None:
+    parts = slug.rsplit("-", 1)
+    if len(parts) != 2:
+        return None
+    try:
+        start_seconds = int(parts[-1])
+    except ValueError:
+        return None
+    horizon_seconds = 300 if "5m" in slug else 900 if "15m" in slug else None
+    if horizon_seconds is None:
+        return None
+    end_ms = (start_seconds + horizon_seconds) * 1000
+    return max(0.0, (end_ms - decision_ts) / 1000.0)
 
 
 def _counterfactual_source_score(
@@ -787,6 +1083,7 @@ def _label_component_field_classes() -> dict[str, str]:
 def _train_o_model_predicted_scores(
     rows: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows, p_up_residual_summary = _attach_shadow_p_up_bucket_residuals(rows)
     train_rows = [
         row
         for row in rows
@@ -861,6 +1158,15 @@ def _train_o_model_predicted_scores(
         "model_input_fields_decision_time_only": list(
             O_DEPLOYABLE_MODEL_FEATURE_NAMES
         ),
+        "legacy_feature_names": list(O_LEGACY_DEPLOYABLE_MODEL_FEATURE_NAMES),
+        "reference_price_feature_names": list(O_REFERENCE_PRICE_MODEL_FEATURE_NAMES),
+        "book_pressure_feature_names": list(O_BOOK_PRESSURE_MODEL_FEATURE_NAMES),
+        "expanded_decision_time_feature_fields": list(
+            O_EXPANDED_DECISION_TIME_FEATURE_FIELDS
+        ),
+        "decision_time_feature_coverage": _decision_time_feature_coverage(rows),
+        "feature_ablation_diagnostics": _o_feature_ablation_diagnostics(rows),
+        "p_up_bucket_calibration_residual_summary": p_up_residual_summary,
         "training_target": "replay_aligned_executable_label_target",
         "training_label_fields_may_use_future_replay_or_settlement": list(
             O_TRAINING_LABEL_FIELDS
@@ -902,7 +1208,308 @@ def _full_grid_available(rows: list[dict[str, Any]]) -> bool:
     )
 
 
-def _deployable_model_features(row: dict[str, Any]) -> list[float]:
+def _attach_shadow_p_up_bucket_residuals(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    shadow_rows = [
+        row
+        for row in rows
+        if row.get("split") == "shadow"
+        and bool(row.get("label_candidate_available", True))
+    ]
+    p_edges = []
+    seen_groups = set()
+    for row in shadow_rows:
+        group_id = row["decision_group_id"]
+        if group_id in seen_groups:
+            continue
+        seen_groups.add(group_id)
+        p_edges.append(abs(float(row.get("p_up") or 0.5) - 0.5))
+    thresholds = _derive_shadow_hts_p_up_reliability_thresholds(
+        shadow_rows,
+        _p_edge_quantiles(p_edges),
+    )
+    grouped: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for row in shadow_rows:
+        grouped[row["decision_group_id"]][str(row.get("action") or "")] = row
+    residuals_by_key: dict[str, list[float]] = defaultdict(list)
+    for group_rows in grouped.values():
+        up = group_rows.get("BUY_UP_HOLD_TO_SETTLEMENT")
+        down = group_rows.get("BUY_DOWN_HOLD_TO_SETTLEMENT")
+        if up is None or down is None:
+            continue
+        up_target = float(up["replay_aligned_executable_label_target"])
+        down_target = float(down["replay_aligned_executable_label_target"])
+        realized_up_probability = 0.5
+        if up_target > down_target:
+            realized_up_probability = 1.0
+        elif down_target > up_target:
+            realized_up_probability = 0.0
+        key = _p_up_residual_bucket_key(up, thresholds)
+        residuals_by_key[key].append(
+            realized_up_probability - _bounded(float(up.get("p_up") or 0.5), 0.0, 1.0)
+        )
+    residual_map = {
+        key: statistics.mean(values)
+        for key, values in sorted(residuals_by_key.items())
+        if values
+    }
+    enriched_rows = []
+    for row in rows:
+        key = _p_up_residual_bucket_key(row, thresholds)
+        residual = residual_map.get(key)
+        enriched_rows.append(
+            {
+                **row,
+                "p_up_calibration_residual_bucket_key": key,
+                "p_up_calibration_residual_by_time_spread_queue_bucket": (
+                    residual if residual is not None else 0.0
+                ),
+                "p_up_calibration_residual_available": residual is not None,
+                "p_up_calibration_residual_source": "shadow_split_only"
+                if residual is not None
+                else "unavailable_bucket_default_zero",
+            }
+        )
+    return enriched_rows, {
+        "residual_source": "shadow_split_only",
+        "uses_validation_labels_for_tuning": False,
+        "bucket_key_fields": ["time_to_close_bucket", "spread_bucket", "queue_bucket"],
+        "bucket_thresholds": thresholds,
+        "shadow_bucket_count": len(residual_map),
+        "shadow_group_count": len(grouped),
+        "residual_map": residual_map,
+        "rows_with_residual_count": sum(
+            1
+            for row in enriched_rows
+            if bool(row.get("p_up_calibration_residual_available"))
+        ),
+        "rows_without_residual_count": sum(
+            1
+            for row in enriched_rows
+            if not bool(row.get("p_up_calibration_residual_available"))
+        ),
+    }
+
+
+def _p_up_residual_bucket_key(
+    row: dict[str, Any],
+    thresholds: dict[str, Any],
+) -> str:
+    context = _hts_p_up_reliability_bucket_context(row, thresholds)
+    return "|".join(
+        (
+            f"time={context['time_to_close_bucket']}",
+            f"spread={context['spread_bucket']}",
+            f"queue={context['queue_bucket']}",
+        )
+    )
+
+
+def _decision_time_feature_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    row_count = len(rows)
+    field_coverage = {}
+    for field in O_EXPANDED_DECISION_TIME_FEATURE_FIELDS:
+        available_count = sum(row.get(field) is not None for row in rows)
+        field_coverage[field] = {
+            "available_count": available_count,
+            "missing_count": row_count - available_count,
+            "availability_rate": available_count / row_count if row_count else 0.0,
+            "decision_time_only": True,
+            "used_as_model_input": _expanded_field_used_as_model_input(field),
+        }
+    provenance_violations = [
+        {
+            "decision_group_id": row.get("decision_group_id"),
+            "market_id": row.get("market_id"),
+            "decision_ts": row.get("decision_ts"),
+            "decision_time_feature_max_input_ts": row.get(
+                "decision_time_feature_max_input_ts"
+            ),
+        }
+        for row in rows
+        if row.get("decision_time_feature_provenance_valid") is False
+    ]
+    return {
+        "row_count": row_count,
+        "decision_group_count": len({row["decision_group_id"] for row in rows}),
+        "feature_row_available_count": sum(
+            bool(row.get("decision_time_feature_row_available")) for row in rows
+        ),
+        "feature_row_missing_count": sum(
+            not bool(row.get("decision_time_feature_row_available")) for row in rows
+        ),
+        "reference_price_feature_available_count": sum(
+            bool(row.get("reference_price_feature_available")) for row in rows
+        ),
+        "book_pressure_feature_available_count": sum(
+            bool(row.get("book_pressure_feature_available")) for row in rows
+        ),
+        "p_up_residual_available_count": sum(
+            bool(row.get("p_up_calibration_residual_available")) for row in rows
+        ),
+        "field_coverage": field_coverage,
+        "missing_reason_code_counts": dict(
+            sorted(
+                Counter(
+                    reason
+                    for row in rows
+                    for reason in row.get(
+                        "decision_time_feature_missing_reason_codes",
+                        [],
+                    )
+                ).items()
+            )
+        ),
+        "feature_provenance_violation_count": len(provenance_violations),
+        "feature_provenance_violations": provenance_violations[:20],
+        "fail_closed_on_provenance_violation": True,
+    }
+
+
+def _expanded_field_used_as_model_input(field: str) -> bool:
+    model_input_fragments = {
+        "reference_price_to_beat_distance_at_decision": (
+            "reference_price_to_beat_distance_scaled"
+        ),
+        "recent_reference_price_momentum_30s": (
+            "recent_reference_price_momentum_30s_scaled"
+        ),
+        "recent_reference_price_momentum_60s": (
+            "recent_reference_price_momentum_60s_scaled"
+        ),
+        "recent_reference_price_momentum_120s": (
+            "recent_reference_price_momentum_120s_scaled"
+        ),
+        "side_book_depth_imbalance": "side_book_depth_imbalance",
+        "side_book_update_velocity": "side_book_update_velocity_scaled",
+        "side_book_staleness_ms": "side_book_staleness_seconds",
+        "opposite_book_staleness_ms": "opposite_book_staleness_seconds",
+        "side_spread_bps": "side_spread_bps_scaled",
+        "side_queue_fill_proxy": "side_queue_fill_proxy",
+        "hts_vs_sell_before_close_exit_value_gap_proxy": (
+            "hts_vs_sell_before_close_exit_value_gap_proxy"
+        ),
+        "p_up_calibration_residual_by_time_spread_queue_bucket": (
+            "p_up_bucket_calibration_residual"
+        ),
+    }
+    return model_input_fragments[field] in O_DEPLOYABLE_MODEL_FEATURE_NAMES
+
+
+def _o_feature_ablation_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    feature_sets = _o_feature_ablation_feature_sets()
+    diagnostics = {}
+    for name, feature_names in feature_sets.items():
+        diagnostics[name] = _raw_model_feature_set_diagnostic(
+            rows=rows,
+            feature_names=feature_names,
+        )
+    combined = diagnostics["combined_feature_set"]["validation_metrics"]
+    old = diagnostics["old_features_only"]["validation_metrics"]
+    return {
+        "diagnostic_only": True,
+        "uses_validation_labels_for_tuning": False,
+        "ablation_score_source": "raw_ridge_model_score_by_feature_subset",
+        "feature_sets": diagnostics,
+        "validation_mean_regret_delta_combined_vs_old": (
+            float(old["mean_regret"]) - float(combined["mean_regret"])
+        ),
+        "validation_selected_return_delta_combined_vs_old": (
+            float(combined["selected_action_realized_replay_return_sum"])
+            - float(old["selected_action_realized_replay_return_sum"])
+        ),
+    }
+
+
+def _o_feature_ablation_feature_sets() -> dict[str, tuple[str, ...]]:
+    reference_names = tuple(
+        name
+        for name in O_DEPLOYABLE_MODEL_FEATURE_NAMES
+        if name in O_REFERENCE_PRICE_MODEL_FEATURE_NAMES
+        or "reference_" in name
+    )
+    book_names = tuple(
+        name
+        for name in O_DEPLOYABLE_MODEL_FEATURE_NAMES
+        if name in O_BOOK_PRESSURE_MODEL_FEATURE_NAMES
+        or "book_" in name
+        or "side_book_" in name
+        or "side_queue" in name
+        or "side_spread" in name
+        or "hts_vs_sell_before_close" in name
+        or "p_up_bucket_calibration_residual" in name
+    )
+    return {
+        "old_features_only": O_LEGACY_DEPLOYABLE_MODEL_FEATURE_NAMES,
+        "new_reference_price_features": tuple(
+            dict.fromkeys((*O_LEGACY_DEPLOYABLE_MODEL_FEATURE_NAMES, *reference_names))
+        ),
+        "new_book_pressure_features": tuple(
+            dict.fromkeys((*O_LEGACY_DEPLOYABLE_MODEL_FEATURE_NAMES, *book_names))
+        ),
+        "combined_feature_set": O_DEPLOYABLE_MODEL_FEATURE_NAMES,
+    }
+
+
+def _raw_model_feature_set_diagnostic(
+    *,
+    rows: list[dict[str, Any]],
+    feature_names: tuple[str, ...],
+) -> dict[str, Any]:
+    train_rows = [
+        row
+        for row in rows
+        if row.get("split") == "shadow"
+        and bool(row.get("label_candidate_available", True))
+    ]
+    deployable = bool(train_rows) and _full_grid_available(rows)
+    if deployable:
+        model = _fit_ridge_regression(
+            [_deployable_model_features(row, feature_names) for row in train_rows],
+            [
+                float(row["replay_aligned_executable_label_target"])
+                for row in train_rows
+            ],
+        )
+        predictions = [
+            _dot(model["coefficients"], _deployable_model_features(row, feature_names))
+            for row in rows
+        ]
+    else:
+        predictions = [0.0 for _ in rows]
+    scored_rows = [
+        {**row, "o_model_predicted_score": score}
+        for row, score in zip(rows, predictions, strict=True)
+    ]
+    ranking_rows = _ranking_rows(scored_rows)
+    split_metrics = _split_metric_views(
+        ranking_rows,
+        O_MODEL_PREDICTED_VARIANT,
+        high_score_threshold=0.75,
+    )
+    return {
+        "feature_count": len(feature_names),
+        "feature_names": list(feature_names),
+        "deployable_model_score_available": deployable,
+        "training_split_source": "shadow_split_only",
+        "uses_validation_labels_for_tuning": False,
+        "ranking_correction_applied": False,
+        "train_shadow_metrics": split_metrics["train_shadow"],
+        "validation_metrics": split_metrics["validation"],
+        "all_metrics": split_metrics["all"],
+    }
+
+
+def _deployable_model_features(
+    row: dict[str, Any],
+    feature_names: tuple[str, ...] = O_DEPLOYABLE_MODEL_FEATURE_NAMES,
+) -> list[float]:
+    feature_map = _deployable_model_feature_map(row)
+    return [float(feature_map.get(name, 0.0)) for name in feature_names]
+
+
+def _deployable_model_feature_map(row: dict[str, Any]) -> dict[str, float]:
     action = str(row.get("action") or "")
     family = _action_family(action)
     side = _side_from_action(action)
@@ -916,29 +1523,99 @@ def _deployable_model_features(row: dict[str, Any]) -> list[float]:
     exit_bid_proxy = _decision_time_exit_bid_proxy(row)
     p_up_edge = abs(p_up - 0.5)
     weak_opportunity = max(0.0, 0.10 - p_up_edge)
-    base_features = [
+    reference_distance = _scaled_reference_distance(row)
+    momentum_30s = _scaled_return(row.get("recent_reference_price_momentum_30s"))
+    momentum_60s = _scaled_return(row.get("recent_reference_price_momentum_60s"))
+    momentum_120s = _scaled_return(row.get("recent_reference_price_momentum_120s"))
+    depth_imbalance = _bounded(
+        float(row.get("side_book_depth_imbalance") or 0.0),
+        -1.0,
         1.0,
-        _flag(action == "BUY_UP_SELL_BEFORE_CLOSE"),
-        _flag(action == "BUY_DOWN_SELL_BEFORE_CLOSE"),
-        _flag(action == "BUY_UP_HOLD_TO_SETTLEMENT"),
-        _flag(action == "BUY_DOWN_HOLD_TO_SETTLEMENT"),
-        _flag(action == "NO_TRADE"),
-        _flag(side == "UP"),
-        _flag(side == "DOWN"),
-        _flag(side == "NONE"),
-        _flag(family == "SELL_BEFORE_CLOSE"),
-        _flag(family == "HOLD_TO_SETTLEMENT"),
-        _flag(family == "NO_TRADE"),
-        p_up,
-        p_down,
-        entry_ask,
-        spread,
-        queue,
-        staleness,
-        time_to_close,
-        p_up_edge,
-        weak_opportunity,
-    ]
+    )
+    update_velocity = _bounded(
+        float(row.get("side_book_update_velocity") or 0.0),
+        0.0,
+        2.0,
+    )
+    side_staleness = _bounded(
+        float(row.get("side_book_staleness_ms") or 0.0) / 1000.0,
+        0.0,
+        60.0,
+    )
+    opposite_staleness = _bounded(
+        float(row.get("opposite_book_staleness_ms") or 0.0) / 1000.0,
+        0.0,
+        60.0,
+    )
+    side_spread = _bounded(
+        float(row.get("side_spread_bps") or 0.0) / 10_000.0,
+        0.0,
+        1.0,
+    )
+    side_queue = _bounded(
+        float(row.get("side_queue_fill_proxy") or 0.0),
+        0.0,
+        1.0,
+    )
+    hts_sbc_gap = _bounded(
+        float(row.get("hts_vs_sell_before_close_exit_value_gap_proxy") or 0.0),
+        -1.0,
+        1.0,
+    )
+    p_up_bucket_residual = _bounded(
+        float(row.get("p_up_calibration_residual_by_time_spread_queue_bucket") or 0.0),
+        -1.0,
+        1.0,
+    )
+    feature_map = {
+        "bias": 1.0,
+        "action_buy_up_sell_before_close": _flag(
+            action == "BUY_UP_SELL_BEFORE_CLOSE"
+        ),
+        "action_buy_down_sell_before_close": _flag(
+            action == "BUY_DOWN_SELL_BEFORE_CLOSE"
+        ),
+        "action_buy_up_hold_to_settlement": _flag(
+            action == "BUY_UP_HOLD_TO_SETTLEMENT"
+        ),
+        "action_buy_down_hold_to_settlement": _flag(
+            action == "BUY_DOWN_HOLD_TO_SETTLEMENT"
+        ),
+        "action_no_trade": _flag(action == "NO_TRADE"),
+        "side_up": _flag(side == "UP"),
+        "side_down": _flag(side == "DOWN"),
+        "side_none": _flag(side == "NONE"),
+        "family_sell_before_close": _flag(family == "SELL_BEFORE_CLOSE"),
+        "family_hold_to_settlement": _flag(family == "HOLD_TO_SETTLEMENT"),
+        "family_no_trade": _flag(family == "NO_TRADE"),
+        "p_up": p_up,
+        "p_down_proxy": p_down,
+        "entry_ask": entry_ask,
+        "spread_bps_scaled": spread,
+        "queue_fill": queue,
+        "book_staleness_seconds": staleness,
+        "time_to_close_minutes": time_to_close,
+        "p_up_edge": p_up_edge,
+        "weak_opportunity_proxy": weak_opportunity,
+        "reference_price_to_beat_distance_scaled": reference_distance,
+        "recent_reference_price_momentum_30s_scaled": momentum_30s,
+        "recent_reference_price_momentum_60s_scaled": momentum_60s,
+        "recent_reference_price_momentum_120s_scaled": momentum_120s,
+        "reference_price_feature_available": _flag(
+            bool(row.get("reference_price_feature_available"))
+        ),
+        "side_book_depth_imbalance": depth_imbalance,
+        "side_book_update_velocity_scaled": update_velocity,
+        "side_book_staleness_seconds": side_staleness,
+        "opposite_book_staleness_seconds": opposite_staleness,
+        "side_spread_bps_scaled": side_spread,
+        "side_queue_fill_proxy": side_queue,
+        "hts_vs_sell_before_close_exit_value_gap_proxy": hts_sbc_gap,
+        "p_up_bucket_calibration_residual": p_up_bucket_residual,
+        "book_pressure_feature_available": _flag(
+            bool(row.get("book_pressure_feature_available"))
+        ),
+    }
     signals = {
         "p_up": p_up,
         "p_down": p_down,
@@ -948,13 +1625,38 @@ def _deployable_model_features(row: dict[str, Any]) -> list[float]:
         "staleness": staleness,
         "entry_ask": entry_ask,
         "exit_bid_proxy": exit_bid_proxy,
+        "reference_price_to_beat_distance": reference_distance,
+        "reference_momentum_30s": momentum_30s,
+        "reference_momentum_60s": momentum_60s,
+        "side_book_depth_imbalance": depth_imbalance,
+        "side_book_update_velocity": update_velocity,
+        "hts_vs_sell_before_close_exit_value_gap_proxy": hts_sbc_gap,
+        "p_up_bucket_calibration_residual": p_up_bucket_residual,
     }
-    interactions = [
-        _flag(action == action_name) * signals[signal_name]
-        for action_name, _ in O_ACTION_FEATURE_SLUGS
-        for signal_name in O_ACTION_INTERACTION_SIGNAL_NAMES
-    ]
-    return [*base_features, *interactions]
+    feature_map.update(
+        {
+            f"{action_slug}_x_{signal_name}": (
+                _flag(action == action_name) * signals[signal_name]
+            )
+            for action_name, action_slug in O_ACTION_FEATURE_SLUGS
+            for signal_name in O_ACTION_INTERACTION_SIGNAL_NAMES
+        }
+    )
+    return feature_map
+
+
+def _scaled_reference_distance(row: dict[str, Any]) -> float:
+    value = _optional_float(row.get("reference_price_to_beat_distance_at_decision"))
+    if value is None:
+        return 0.0
+    return _bounded(value * 100.0, -1.0, 1.0)
+
+
+def _scaled_return(value: Any) -> float:
+    numeric = _optional_float(value)
+    if numeric is None:
+        return 0.0
+    return _bounded(numeric * 100.0, -1.0, 1.0)
 
 
 def _normalized_spread(row: dict[str, Any]) -> float:
@@ -2353,7 +3055,7 @@ def _fit_ridge_regression(
     *,
     ridge_lambda: float = 1.0e-6,
 ) -> dict[str, Any]:
-    width = len(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
+    width = len(features[0]) if features else len(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
     xtx = [[0.0 for _ in range(width)] for _ in range(width)]
     xty = [0.0 for _ in range(width)]
     for vector, target in zip(features, targets, strict=True):
@@ -2621,6 +3323,10 @@ def _leakage_report(
     label_overlap = sorted(
         set(O_TRAINING_LABEL_FIELDS).intersection(O_FORBIDDEN_MODEL_INPUT_FIELDS)
     )
+    feature_coverage = _decision_time_feature_coverage(rows)
+    feature_provenance_passed = (
+        int(feature_coverage["feature_provenance_violation_count"]) == 0
+    )
     report = {
         "schema_version": O_FEATURE_AND_LABEL_LEAKAGE_AUDIT_SCHEMA_VERSION,
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
@@ -2640,6 +3346,17 @@ def _leakage_report(
         "model_input_fields_decision_time_only": list(
             O_DEPLOYABLE_MODEL_FEATURE_NAMES
         ),
+        "legacy_model_input_fields": list(O_LEGACY_DEPLOYABLE_MODEL_FEATURE_NAMES),
+        "expanded_decision_time_feature_fields": list(
+            O_EXPANDED_DECISION_TIME_FEATURE_FIELDS
+        ),
+        "reference_price_model_input_fields": list(
+            O_REFERENCE_PRICE_MODEL_FEATURE_NAMES
+        ),
+        "book_pressure_model_input_fields": list(
+            O_BOOK_PRESSURE_MODEL_FEATURE_NAMES
+        ),
+        "expanded_feature_coverage": feature_coverage,
         "model_training_summary": model_training_summary,
         "label_diagnostic_score_fields": [
             "replay_aligned_executable_label_target",
@@ -2655,7 +3372,10 @@ def _leakage_report(
         "forbidden_model_input_fields": list(O_FORBIDDEN_MODEL_INPUT_FIELDS),
         "model_input_forbidden_field_overlap": model_overlap,
         "training_label_forbidden_field_overlap": label_overlap,
-        "leakage_audit_passed": not model_overlap,
+        "expanded_decision_time_feature_provenance_passed": (
+            feature_provenance_passed
+        ),
+        "leakage_audit_passed": not model_overlap and feature_provenance_passed,
         "future_replay_outcomes_used_as_model_inputs": False,
         "future_replay_outcomes_used_as_training_labels": True,
         "future_replay_outcomes_used_as_report_only_evaluation": True,
@@ -3205,6 +3925,10 @@ def _hts_p_up_confidently_wrong_feature_diagnostic_report(
             "exit_bid_proxy",
             "action x p_up / p_down interactions",
             "action x microstructure interactions",
+            "reference price distance and recent momentum",
+            "side-specific book depth and update pressure",
+            "HTS vs sell-before-close exit-value gap proxy",
+            "shadow-only p_up bucket calibration residual",
         ],
         "missing_or_weak_decision_time_feature_candidates": (
             _hts_missing_or_weak_feature_candidates()
@@ -3466,6 +4190,7 @@ def _ranking_metrics(
             hts_p_up_reliability_cases.append(
                 {
                     **action_pair_case,
+                    **_static_hts_reliability_buckets(selected),
                     **(selected.get("hts_p_up_reliability_buckets") or {}),
                     "selected_side_matches_oracle_side": (
                         selected.get("selected_side") == oracle.get("selected_side")
@@ -3853,6 +4578,17 @@ def _metric_hts_cases(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _static_hts_reliability_buckets(row: dict[str, Any]) -> dict[str, Any]:
+    p_edge = abs(_bounded(float(row.get("p_up") or 0.5), 0.0, 1.0) - 0.5)
+    return {
+        "p_up_confidence_bucket": _static_p_up_confidence_bucket(p_edge),
+        "time_to_close_bucket": _time_to_close_bucket(row),
+        "spread_bucket": _spread_bucket(row),
+        "queue_bucket": _queue_bucket(row),
+        "staleness_bucket": _staleness_bucket(row),
+    }
+
+
 def _hts_p_up_confidently_wrong_feature_cases(
     rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -3972,6 +4708,34 @@ def _hts_p_up_feature_snapshot(row: dict[str, Any]) -> dict[str, Any]:
         "exit_bid_proxy": _decision_time_exit_bid_proxy(row),
         "immediate_exit_pnl_proxy": _immediate_exit_pnl(row),
         "p_up_alignment_score": _p_up_side_alignment_score(row),
+        "reference_price_to_beat_distance_at_decision": row.get(
+            "reference_price_to_beat_distance_at_decision"
+        ),
+        "recent_reference_price_momentum_30s": row.get(
+            "recent_reference_price_momentum_30s"
+        ),
+        "recent_reference_price_momentum_60s": row.get(
+            "recent_reference_price_momentum_60s"
+        ),
+        "recent_reference_price_momentum_120s": row.get(
+            "recent_reference_price_momentum_120s"
+        ),
+        "side_book_depth_imbalance": row.get("side_book_depth_imbalance"),
+        "side_book_update_velocity": row.get("side_book_update_velocity"),
+        "side_book_staleness_ms": row.get("side_book_staleness_ms"),
+        "opposite_book_staleness_ms": row.get("opposite_book_staleness_ms"),
+        "side_spread_bps": row.get("side_spread_bps"),
+        "side_queue_fill_proxy": row.get("side_queue_fill_proxy"),
+        "hts_vs_sell_before_close_exit_value_gap_proxy": row.get(
+            "hts_vs_sell_before_close_exit_value_gap_proxy"
+        ),
+        "p_up_calibration_residual_by_time_spread_queue_bucket": row.get(
+            "p_up_calibration_residual_by_time_spread_queue_bucket"
+        ),
+        "decision_time_feature_missing_reason_codes": row.get(
+            "decision_time_feature_missing_reason_codes",
+            [],
+        ),
     }
 
 
@@ -4088,6 +4852,16 @@ def _hts_p_up_decision_time_feature_gap_codes(row: dict[str, Any]) -> list[str]:
         gaps.append("missing_book_staleness")
     if row.get("entry_exit_quality_time_to_close_seconds") is None:
         gaps.append("missing_time_to_close")
+    if row.get("reference_price_to_beat_distance_at_decision") is None:
+        gaps.append("missing_reference_price_to_beat_distance")
+    if row.get("recent_reference_price_momentum_120s") is None:
+        gaps.append("missing_reference_price_momentum_120s")
+    if row.get("side_book_depth_imbalance") is None:
+        gaps.append("missing_side_book_depth_imbalance")
+    if row.get("side_book_update_velocity") is None:
+        gaps.append("missing_side_book_update_velocity")
+    if row.get("hts_vs_sell_before_close_exit_value_gap_proxy") is None:
+        gaps.append("missing_hts_vs_sell_before_close_exit_value_gap")
     if float(row.get("entry_exit_quality_spread_bps") or 0.0) >= 600.0:
         gaps.append("wide_spread_regime")
     if float(row.get("entry_exit_quality_queue_fill") or 1.0) < 0.80:
@@ -4167,6 +4941,34 @@ def _hts_p_up_confidently_wrong_feature_coverage(
         "time_to_close_seconds": ("feature_snapshot", "time_to_close_seconds"),
         "raw_model_score": ("raw_model_score",),
         "score_components": ("score_components",),
+        "reference_price_to_beat_distance_at_decision": (
+            "feature_snapshot",
+            "reference_price_to_beat_distance_at_decision",
+        ),
+        "recent_reference_price_momentum_30s": (
+            "feature_snapshot",
+            "recent_reference_price_momentum_30s",
+        ),
+        "recent_reference_price_momentum_60s": (
+            "feature_snapshot",
+            "recent_reference_price_momentum_60s",
+        ),
+        "side_book_depth_imbalance": (
+            "feature_snapshot",
+            "side_book_depth_imbalance",
+        ),
+        "side_book_update_velocity": (
+            "feature_snapshot",
+            "side_book_update_velocity",
+        ),
+        "hts_vs_sell_before_close_exit_value_gap_proxy": (
+            "feature_snapshot",
+            "hts_vs_sell_before_close_exit_value_gap_proxy",
+        ),
+        "p_up_calibration_residual_by_time_spread_queue_bucket": (
+            "feature_snapshot",
+            "p_up_calibration_residual_by_time_spread_queue_bucket",
+        ),
     }
     missing_counts = {}
     for field, path in required_fields.items():
@@ -4311,7 +5113,18 @@ def _hts_p_up_confidently_wrong_recommendations(
         reason_codes.append("no_trade_can_reduce_tail_regret")
     if not reason_codes:
         reason_codes.append("no_confidently_wrong_hts_cases_detected")
-    if cases and bool(feature_coverage["existing_feature_coverage_insufficient"]):
+    missing_fields = set(feature_coverage.get("missing_critical_field_names", []))
+    if (
+        cases
+        and bool(feature_coverage["existing_feature_coverage_insufficient"])
+        and missing_fields == {"reference_price_to_beat_distance_at_decision"}
+    ):
+        conclusion = "reference_price_to_beat_distance_unavailable_for_hts_reliability"
+        next_action = (
+            "collect_reference_price_to_beat_distance_before_further_hts_priority_"
+            "changes"
+        )
+    elif cases and bool(feature_coverage["existing_feature_coverage_insufficient"]):
         conclusion = "decision_time_feature_coverage_insufficient_for_hts_reliability"
         next_action = (
             "add_new_decision_time_reference_and_book_pressure_features_before_"
@@ -4590,6 +5403,13 @@ def _compact_label_row(row: dict[str, Any]) -> dict[str, Any]:
             "label_vs_realized_replay_gap_after"
         ],
         "label_components": row["label_components"],
+        "decision_time_feature_row_available": row.get(
+            "decision_time_feature_row_available"
+        ),
+        "decision_time_feature_missing_reason_codes": row.get(
+            "decision_time_feature_missing_reason_codes",
+            [],
+        ),
         "split": row["split"],
     }
 
@@ -4617,6 +5437,36 @@ def _compact_ranking_row(row: dict[str, Any], variant: str) -> dict[str, Any]:
         "o_model_predicted_score": row.get("o_model_predicted_score"),
         "o_model_score_components": row.get("o_model_score_components"),
         "hts_p_up_reliability_buckets": row.get("hts_p_up_reliability_buckets"),
+        "decision_time_feature_row_available": row.get(
+            "decision_time_feature_row_available"
+        ),
+        "reference_price_to_beat_distance_at_decision": row.get(
+            "reference_price_to_beat_distance_at_decision"
+        ),
+        "recent_reference_price_momentum_30s": row.get(
+            "recent_reference_price_momentum_30s"
+        ),
+        "recent_reference_price_momentum_60s": row.get(
+            "recent_reference_price_momentum_60s"
+        ),
+        "recent_reference_price_momentum_120s": row.get(
+            "recent_reference_price_momentum_120s"
+        ),
+        "side_book_depth_imbalance": row.get("side_book_depth_imbalance"),
+        "side_book_update_velocity": row.get("side_book_update_velocity"),
+        "side_book_staleness_ms": row.get("side_book_staleness_ms"),
+        "side_spread_bps": row.get("side_spread_bps"),
+        "side_queue_fill_proxy": row.get("side_queue_fill_proxy"),
+        "hts_vs_sell_before_close_exit_value_gap_proxy": row.get(
+            "hts_vs_sell_before_close_exit_value_gap_proxy"
+        ),
+        "p_up_calibration_residual_by_time_spread_queue_bucket": row.get(
+            "p_up_calibration_residual_by_time_spread_queue_bucket"
+        ),
+        "decision_time_feature_missing_reason_codes": row.get(
+            "decision_time_feature_missing_reason_codes",
+            [],
+        ),
         "deployable_model_score_available": row.get("deployable_model_score_available"),
         "ranking_score_source": _ranking_score_source(variant),
         "variant_score": row["variant_scores"][variant],
