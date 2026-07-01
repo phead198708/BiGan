@@ -2295,9 +2295,14 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert correction_config["hts_p_up_reliability_no_trade_buffer_source"] == (
         "shadow_p_up_edge_q25"
     )
-    assert correction_config["hts_p_up_reliability_no_trade_buffer"] >= (
+    assert correction_config["hts_p_up_reliability_no_trade_buffer"] >= 0.0
+    assert correction_config["hts_p_up_reliability_no_trade_buffer"] == (
         correction_config["p_up_edge_quantiles"]["q25"]
+        * correction_config["hts_p_up_reliability_no_trade_buffer_multiplier"]
     )
+    assert correction_config[
+        "hts_p_up_reliability_no_trade_buffer_multiplier_source"
+    ] == "shadow_split_only_config_hashed_correction_policy_profile"
     assert correction_config["p_up_safety_target_disagreement_rate"] == 0.25
     assert correction_config["p_up_safety_target_source"] == (
         "config_hashed_stricter_than_hard_gate_target"
@@ -2572,9 +2577,14 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     } == {
         "balanced_hts_sbc",
         "conservative_hts",
+        "hts_sbc_regret_balancing",
         "high_score_profitability_preserving",
+        "largest_regret_dampening",
+        "no_trade_missed_opportunity_recovery",
         "no_trade_tail_risk_buffer",
+        "p_up_safe_regret_reduction",
         "sbc_preferred_when_hts_reliability_weak",
+        "top1_miss_regret_minimizing",
     }
     assert {
         row["high_score_threshold_profile_name"]
@@ -2585,7 +2595,27 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "slightly_lower_shadow_derived_threshold",
         "support_preserving_threshold",
     }
-    assert joint_selection["candidate_count"] == 100
+    assert joint_selection["candidate_count"] == 200
+    assert looks_like_sha256(
+        joint_selection["regret_reduction_selection_config_hash"]
+    )
+    regret_config = joint_selection["regret_reduction_selection_config"]
+    assert regret_config["uses_validation_labels_for_tuning"] is False
+    assert regret_config["selection_metric_source"] == "shadow_split_only"
+    assert regret_config["p_up_safety_target_rate"] == (
+        O_SHADOW_P_UP_SELECTION_BUFFER_TARGET
+    )
+    assert regret_config["min_top1_hit_rate"] == O_MIN_TOP1_HIT_RATE
+    assert regret_config["min_high_score_support_count"] == (
+        O_MIN_HIGH_SCORE_SUPPORT_COUNT
+    )
+    assert set(regret_config["selection_terms"]) == {
+        "shadow_largest_regret_value",
+        "shadow_mean_regret",
+        "shadow_no_trade_missed_positive_opportunity_sum",
+        "shadow_positive_regret_sum",
+        "shadow_top1_miss_regret_sum",
+    }
     assert joint_selection["selected_high_score_threshold_profile"][
         "uses_validation_labels_for_tuning"
     ] is False
@@ -2616,7 +2646,78 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "shadow_p_up_safety_target_passed" in row
         and "shadow_top1_quality_target_passed" in row
         and "shadow_top1_miss_regret_sum" in row
+        and "shadow_positive_regret_sum" in row
+        and "shadow_no_trade_missed_positive_opportunity_sum" in row
         for row in joint_selection["candidate_rows"]
+    )
+    assert set(joint_selection["mean_regret_reduction_diagnostics"]) == {
+        "shadow",
+        "validation_report_only",
+    }
+    assert joint_selection["mean_regret_reduction_diagnostics"]["shadow"] == (
+        ranking["train_shadow_metrics"]["mean_regret_reduction_diagnostics"]
+    )
+    assert joint_selection["mean_regret_reduction_diagnostics"][
+        "validation_report_only"
+    ] == ranking["validation_metrics"]["mean_regret_reduction_diagnostics"]
+    assert joint_selection["largest_regret_case_diagnostics"][
+        "validation_report_only"
+    ] == ranking["validation_metrics"]["largest_regret_case"]
+    assert joint_selection["top1_miss_regret_diagnostics"][
+        "validation_report_only"
+    ] == ranking["validation_metrics"]["top1_miss_diagnostics"]
+    assert joint_selection["action_pair_regret_reduction_diagnostics"][
+        "validation_report_only"
+    ] == ranking["validation_metrics"]["action_pair_regret_summary"]
+    assert joint_selection["no_trade_missed_opportunity_diagnostics"][
+        "validation_report_only"
+    ] == ranking["validation_metrics"]["no_trade_missed_opportunity"]
+    assert joint_selection["gate_preservation_diagnostics"][
+        "selection_metric_source"
+    ] == "shadow_split_only"
+    assert joint_selection["gate_preservation_diagnostics"][
+        "validation_metrics_report_only"
+    ] is True
+    assert joint_selection["gate_preservation_diagnostics"][
+        "validation_report_only"
+    ]["p_up_disagreement_within_hard_gate"] == (
+        joint_selection["selected_validation_metrics_report_only"][
+            "p_up_disagreement_rate"
+        ]
+        <= O_MAX_P_UP_ACTION_DISAGREEMENT_RATE
+    )
+    tradeoff = joint_selection["mean_regret_gate_tradeoff_diagnostics"]
+    assert tradeoff["uses_validation_labels_for_tuning"] is False
+    assert tradeoff["selection_metric_source"] == "shadow_split_only"
+    assert tradeoff["validation_metrics_report_only"] is True
+    assert tradeoff["selected_joint_candidate_name"] == (
+        joint_selection["selected_joint_candidate_name"]
+    )
+    assert tradeoff["selected_shadow_mean_regret"] == (
+        joint_selection["selected_shadow_metrics"]["mean_regret"]
+    )
+    assert tradeoff["selected_validation_mean_regret_report_only"] == (
+        joint_selection["selected_validation_metrics_report_only"]["mean_regret"]
+    )
+    assert tradeoff["tradeoff_conclusion"] in {
+        "lower_shadow_mean_regret_candidates_break_shadow_gates",
+        "no_gate_preserving_lower_mean_regret_candidate_found",
+        "shadow_gate_passing_lower_mean_regret_candidates_exist",
+        (
+            "validation_report_only_lower_mean_regret_candidates_exist_but_not_"
+            "shadow_selected"
+        ),
+    }
+    assert isinstance(tradeoff["lower_shadow_blocker_reason_counts"], dict)
+    assert feature_selection["mean_regret_gate_tradeoff_diagnostics"] == tradeoff
+    assert feature_selection["regret_reduction_selection_config_hash"] == (
+        joint_selection["regret_reduction_selection_config_hash"]
+    )
+    assert feature_selection["mean_regret_reduction_diagnostics"] == (
+        joint_selection["mean_regret_reduction_diagnostics"]
+    )
+    assert feature_selection["gate_preservation_diagnostics"] == (
+        joint_selection["gate_preservation_diagnostics"]
     )
     assert looks_like_sha256(
         joint_selection["joint_feature_correction_selection_config_hash"]
@@ -2658,6 +2759,7 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "action_pair_regret_summary",
         "hold_to_settlement_up_down_reversal_regret",
         "hts_p_up_reliability_regret_summary",
+        "mean_regret_reduction_diagnostics",
     }
     assert (
         ranking["train_shadow_metrics"]["decision_group_count"]

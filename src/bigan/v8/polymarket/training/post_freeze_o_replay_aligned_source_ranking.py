@@ -1791,6 +1791,41 @@ def _select_o_shadow_feature_set(
     selected_includes_reference_distance = any(
         _is_reference_distance_feature_name(name) for name in selected_feature_names
     )
+    selected_shadow_full_metrics = selected_scoring["split_metrics"]["train_shadow"]
+    selected_validation_full_metrics = selected_scoring["split_metrics"]["validation"]
+    regret_reduction_selection_config = {
+        "selection_metric_source": "shadow_split_only",
+        "uses_validation_labels_for_tuning": False,
+        "p_up_safety_target_rate": O_SHADOW_P_UP_SELECTION_BUFFER_TARGET,
+        "min_top1_hit_rate": O_MIN_TOP1_HIT_RATE,
+        "min_high_score_support_count": O_MIN_HIGH_SCORE_SUPPORT_COUNT,
+        "selection_terms": [
+            "shadow_mean_regret",
+            "shadow_top1_miss_regret_sum",
+            "shadow_largest_regret_value",
+            "shadow_positive_regret_sum",
+            "shadow_no_trade_missed_positive_opportunity_sum",
+        ],
+    }
+    regret_reduction_selection_config_hash = canonical_json_sha256(
+        regret_reduction_selection_config
+    )
+    gate_preservation_diagnostics = {
+        "shadow": _gate_preservation_diagnostics_from_summary(
+            selected_effective_row["shadow_selection_metrics"]
+        ),
+        "validation_report_only": _gate_preservation_diagnostics_from_summary(
+            selected_effective_row["validation_metrics_report_only"]
+        ),
+        "selection_metric_source": "shadow_split_only",
+        "validation_metrics_report_only": True,
+    }
+    mean_regret_gate_tradeoff_diagnostics = (
+        _mean_regret_gate_tradeoff_diagnostics(
+            candidate_rows=joint_candidate_rows,
+            selected_effective_row=selected_effective_row,
+        )
+    )
     joint_selection = {
         "schema_version": O_JOINT_FEATURE_CORRECTION_SELECTION_SCHEMA_VERSION,
         "report_type": "o_joint_feature_correction_selection",
@@ -1812,6 +1847,10 @@ def _select_o_shadow_feature_set(
         "shadow_p_up_safety_constrained_selection_enabled": True,
         "shadow_p_up_safety_target_rate": O_SHADOW_P_UP_SELECTION_BUFFER_TARGET,
         "shadow_top1_aware_selection_enabled": True,
+        "regret_reduction_selection_config_hash": (
+            regret_reduction_selection_config_hash
+        ),
+        "regret_reduction_selection_config": regret_reduction_selection_config,
         "candidate_feature_set_names": list(feature_sets),
         "candidate_correction_policy_names": [
             profile["correction_policy_name"] for profile in correction_policies
@@ -1858,6 +1897,44 @@ def _select_o_shadow_feature_set(
         "selected_final_full_correction_candidate_row": selected_final_row,
         "selected_full_correction_rerun_diagnostics": (
             selected_full_correction_diagnostics
+        ),
+        "mean_regret_reduction_diagnostics": {
+            "shadow": selected_shadow_full_metrics[
+                "mean_regret_reduction_diagnostics"
+            ],
+            "validation_report_only": selected_validation_full_metrics[
+                "mean_regret_reduction_diagnostics"
+            ],
+        },
+        "largest_regret_case_diagnostics": {
+            "shadow": selected_shadow_full_metrics["largest_regret_case"],
+            "validation_report_only": selected_validation_full_metrics[
+                "largest_regret_case"
+            ],
+        },
+        "top1_miss_regret_diagnostics": {
+            "shadow": selected_shadow_full_metrics["top1_miss_diagnostics"],
+            "validation_report_only": selected_validation_full_metrics[
+                "top1_miss_diagnostics"
+            ],
+        },
+        "action_pair_regret_reduction_diagnostics": {
+            "shadow": selected_shadow_full_metrics["action_pair_regret_summary"],
+            "validation_report_only": selected_validation_full_metrics[
+                "action_pair_regret_summary"
+            ],
+        },
+        "no_trade_missed_opportunity_diagnostics": {
+            "shadow": selected_shadow_full_metrics[
+                "no_trade_missed_opportunity"
+            ],
+            "validation_report_only": selected_validation_full_metrics[
+                "no_trade_missed_opportunity"
+            ],
+        },
+        "gate_preservation_diagnostics": gate_preservation_diagnostics,
+        "mean_regret_gate_tradeoff_diagnostics": (
+            mean_regret_gate_tradeoff_diagnostics
         ),
         "selected_joint_shadow_gate_passed": selected_effective_row[
             "shadow_selection_gate_passed"
@@ -1975,6 +2052,47 @@ def _select_o_shadow_feature_set(
         ],
         "selected_full_correction_rerun_diagnostics": (
             selected_full_correction_diagnostics
+        ),
+        "mean_regret_reduction_diagnostics": {
+            "shadow": selected_shadow_full_metrics[
+                "mean_regret_reduction_diagnostics"
+            ],
+            "validation_report_only": selected_validation_full_metrics[
+                "mean_regret_reduction_diagnostics"
+            ],
+        },
+        "largest_regret_case_diagnostics": {
+            "shadow": selected_shadow_full_metrics["largest_regret_case"],
+            "validation_report_only": selected_validation_full_metrics[
+                "largest_regret_case"
+            ],
+        },
+        "top1_miss_regret_diagnostics": {
+            "shadow": selected_shadow_full_metrics["top1_miss_diagnostics"],
+            "validation_report_only": selected_validation_full_metrics[
+                "top1_miss_diagnostics"
+            ],
+        },
+        "action_pair_regret_reduction_diagnostics": {
+            "shadow": selected_shadow_full_metrics["action_pair_regret_summary"],
+            "validation_report_only": selected_validation_full_metrics[
+                "action_pair_regret_summary"
+            ],
+        },
+        "no_trade_missed_opportunity_diagnostics": {
+            "shadow": selected_shadow_full_metrics[
+                "no_trade_missed_opportunity"
+            ],
+            "validation_report_only": selected_validation_full_metrics[
+                "no_trade_missed_opportunity"
+            ],
+        },
+        "gate_preservation_diagnostics": gate_preservation_diagnostics,
+        "mean_regret_gate_tradeoff_diagnostics": (
+            mean_regret_gate_tradeoff_diagnostics
+        ),
+        "regret_reduction_selection_config_hash": (
+            regret_reduction_selection_config_hash
         ),
         "selected_feature_set_shadow_gate_passed": selected_effective_row[
             "shadow_selection_gate_passed"
@@ -2235,6 +2353,76 @@ def _o_correction_policy_profiles() -> list[dict[str, Any]]:
             "hts_reliability_penalty_multiplier": 2.0,
             "no_trade_tail_buffer_multiplier": 1.0,
             "hts_vs_sell_before_close_priority_profile": "high_score_profitability",
+        },
+        {
+            "correction_policy_name": "largest_regret_dampening",
+            "correction_policy_family": "regret_reduction",
+            "description": "Dampen historically large-regret HTS reversals while preserving p_up safety.",
+            "trade_base_delta": -0.06,
+            "sell_before_close_base_delta": 0.03,
+            "no_trade_base_delta": 0.02,
+            "raw_weight_multiplier": 0.90,
+            "p_up_misalignment_penalty_multiplier": 3.0,
+            "large_regret_reversal_penalty_multiplier": 5.0,
+            "hts_reliability_penalty_multiplier": 3.0,
+            "no_trade_tail_buffer_multiplier": 1.5,
+            "hts_vs_sell_before_close_priority_profile": "largest_regret_dampening",
+        },
+        {
+            "correction_policy_name": "no_trade_missed_opportunity_recovery",
+            "correction_policy_family": "regret_reduction",
+            "description": "Recover shadow NO_TRADE missed opportunities without using validation labels.",
+            "trade_base_delta": 0.02,
+            "sell_before_close_base_delta": 0.04,
+            "no_trade_base_delta": -0.06,
+            "raw_weight_multiplier": 1.0,
+            "p_up_misalignment_penalty_multiplier": 2.0,
+            "large_regret_reversal_penalty_multiplier": 2.0,
+            "hts_reliability_penalty_multiplier": 2.0,
+            "no_trade_tail_buffer_multiplier": 0.5,
+            "hts_vs_sell_before_close_priority_profile": "no_trade_missed_opportunity_recovery",
+        },
+        {
+            "correction_policy_name": "hts_sbc_regret_balancing",
+            "correction_policy_family": "regret_reduction",
+            "description": "Balance HTS/SBC action-family regret using shadow-only family priors.",
+            "trade_base_delta": -0.03,
+            "sell_before_close_base_delta": 0.04,
+            "no_trade_base_delta": 0.0,
+            "raw_weight_multiplier": 1.05,
+            "p_up_misalignment_penalty_multiplier": 2.5,
+            "large_regret_reversal_penalty_multiplier": 3.5,
+            "hts_reliability_penalty_multiplier": 3.0,
+            "no_trade_tail_buffer_multiplier": 1.0,
+            "hts_vs_sell_before_close_priority_profile": "hts_sbc_regret_balancing",
+        },
+        {
+            "correction_policy_name": "top1_miss_regret_minimizing",
+            "correction_policy_family": "regret_reduction",
+            "description": "Reduce shadow top1 miss regret concentration while preserving support.",
+            "trade_base_delta": -0.02,
+            "sell_before_close_base_delta": 0.02,
+            "no_trade_base_delta": 0.02,
+            "raw_weight_multiplier": 0.75,
+            "p_up_misalignment_penalty_multiplier": 3.5,
+            "large_regret_reversal_penalty_multiplier": 4.5,
+            "hts_reliability_penalty_multiplier": 4.0,
+            "no_trade_tail_buffer_multiplier": 1.2,
+            "hts_vs_sell_before_close_priority_profile": "top1_miss_regret_minimizing",
+        },
+        {
+            "correction_policy_name": "p_up_safe_regret_reduction",
+            "correction_policy_family": "regret_reduction",
+            "description": "Favor lower shadow regret only inside a strict p_up-safe selection envelope.",
+            "trade_base_delta": -0.04,
+            "sell_before_close_base_delta": 0.03,
+            "no_trade_base_delta": 0.01,
+            "raw_weight_multiplier": 0.85,
+            "p_up_misalignment_penalty_multiplier": 5.0,
+            "large_regret_reversal_penalty_multiplier": 4.0,
+            "hts_reliability_penalty_multiplier": 4.0,
+            "no_trade_tail_buffer_multiplier": 1.5,
+            "hts_vs_sell_before_close_priority_profile": "p_up_safe_regret_reduction",
         },
     ]
 
@@ -2526,6 +2714,12 @@ def _apply_o_correction_policy_profile(
             float(config["hts_p_up_reliability_no_trade_buffer"])
             * float(profile["no_trade_tail_buffer_multiplier"])
         )
+        config["hts_p_up_reliability_no_trade_buffer_multiplier"] = float(
+            profile["no_trade_tail_buffer_multiplier"]
+        )
+        config["hts_p_up_reliability_no_trade_buffer_multiplier_source"] = (
+            "shadow_split_only_config_hashed_correction_policy_profile"
+        )
     config["joint_correction_policy_name"] = profile["correction_policy_name"]
     config["joint_correction_policy_family"] = profile["correction_policy_family"]
     config["joint_correction_policy_profile"] = dict(profile)
@@ -2629,6 +2823,12 @@ def _joint_feature_correction_candidate_row(
     row["shadow_top1_miss_regret_sum"] = float(
         shadow_metrics.get("top1_miss_regret_sum") or 0.0
     )
+    row["shadow_positive_regret_sum"] = float(
+        shadow_metrics.get("positive_regret_sum") or 0.0
+    )
+    row["shadow_no_trade_missed_positive_opportunity_sum"] = float(
+        shadow_metrics.get("no_trade_missed_positive_opportunity_sum") or 0.0
+    )
     if not bool(row["shadow_p_up_safety_target_passed"]):
         reason_codes.append("shadow_p_up_safety_buffer_below_target")
     row["shadow_selection_gate_passed"] = not reason_codes
@@ -2645,17 +2845,19 @@ def _action_family_selected_returns_not_negative(
 
 def _joint_selection_sort_key(
     row: dict[str, Any],
-) -> tuple[float, float, float, float, float, float, float, float, float, float, float, float]:
+) -> tuple[float, ...]:
     metrics = row["shadow_selection_metrics"]
     support_deficit = int(row["shadow_high_score_support_deficit_to_source_gate"])
     return (
         float(support_deficit),
         float(not bool(row["shadow_p_up_safety_target_passed"])),
         -float(metrics["top1_hit_rate"]),
-        float(metrics["top1_miss_regret_sum"]),
-        float(_joint_feature_set_priority(row)),
         float(metrics["mean_regret"]),
+        float(metrics["top1_miss_regret_sum"]),
         float(metrics["largest_regret_value"]),
+        float(metrics["positive_regret_sum"]),
+        float(metrics["no_trade_missed_positive_opportunity_sum"]),
+        float(_joint_feature_set_priority(row)),
         -float(metrics["selected_return_sum"]),
         -float(metrics["high_score_return_mean"]),
         -float(metrics["high_score_return_sum"]),
@@ -2866,6 +3068,11 @@ def _feature_set_selection_metric_summary(
 ) -> dict[str, Any]:
     largest_regret_value = _largest_regret_value(metrics)
     top1_miss = metrics.get("top1_miss_diagnostics") or {}
+    regret_diagnostics = metrics.get("mean_regret_reduction_diagnostics") or {}
+    no_trade_contribution = regret_diagnostics.get(
+        "no_trade_missed_opportunity_contribution",
+        {},
+    )
     return {
         "decision_group_count": metrics["decision_group_count"],
         "top1_hit_rate": metrics["top1_realized_best_action_hit_rate"],
@@ -2893,6 +3100,14 @@ def _feature_set_selection_metric_summary(
             "p_up_conflicting_top1_miss_rate",
             0.0,
         ),
+        "positive_regret_sum": regret_diagnostics.get(
+            "positive_regret_sum",
+            0.0,
+        ),
+        "no_trade_missed_positive_opportunity_sum": no_trade_contribution.get(
+            "missed_positive_opportunity_sum",
+            0.0,
+        ),
         "action_family_selected_return_sum": {
             family: family_metrics["selected_return_sum"]
             for family, family_metrics in metrics[
@@ -2908,6 +3123,199 @@ def _feature_set_selection_metric_summary(
         "p_up_hard_gate_passed": p_up_summary[
             "candidate_scoped_p_up_action_disagreement_within_limit"
         ],
+    }
+
+
+def _gate_preservation_diagnostics_from_summary(
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    action_family_returns = summary.get("action_family_selected_return_sum", {})
+    return {
+        "p_up_disagreement_within_hard_gate": (
+            float(summary["p_up_disagreement_rate"])
+            <= O_MAX_P_UP_ACTION_DISAGREEMENT_RATE
+        ),
+        "top1_hit_rate_gate_passed": (
+            float(summary["top1_hit_rate"]) >= O_MIN_TOP1_HIT_RATE
+        ),
+        "high_score_support_gate_passed": (
+            int(summary["high_score_support_count"])
+            >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
+        ),
+        "high_score_return_mean_positive": (
+            float(summary["high_score_return_mean"]) > 0.0
+        ),
+        "high_score_return_sum_positive": (
+            float(summary["high_score_return_sum"]) > 0.0
+        ),
+        "selected_return_sum_positive": (
+            float(summary["selected_return_sum"]) > 0.0
+        ),
+        "action_family_returns_non_negative": all(
+            float(value) >= 0.0 for value in action_family_returns.values()
+        ),
+        "all_currently_passing_gates_preserved": all(
+            (
+                float(summary["p_up_disagreement_rate"])
+                <= O_MAX_P_UP_ACTION_DISAGREEMENT_RATE,
+                float(summary["top1_hit_rate"]) >= O_MIN_TOP1_HIT_RATE,
+                int(summary["high_score_support_count"])
+                >= O_MIN_HIGH_SCORE_SUPPORT_COUNT,
+                float(summary["high_score_return_mean"]) > 0.0,
+                float(summary["high_score_return_sum"]) > 0.0,
+                float(summary["selected_return_sum"]) > 0.0,
+                all(float(value) >= 0.0 for value in action_family_returns.values()),
+            )
+        ),
+        "diagnostic_only": True,
+    }
+
+
+def _mean_regret_gate_tradeoff_diagnostics(
+    *,
+    candidate_rows: list[dict[str, Any]],
+    selected_effective_row: dict[str, Any],
+) -> dict[str, Any]:
+    selected_shadow = selected_effective_row["shadow_selection_metrics"]
+    selected_validation = selected_effective_row["validation_metrics_report_only"]
+    selected_shadow_mean_regret = float(selected_shadow["mean_regret"])
+    selected_validation_mean_regret = float(selected_validation["mean_regret"])
+    lower_shadow_rows = [
+        row
+        for row in candidate_rows
+        if float(row["shadow_selection_metrics"]["mean_regret"])
+        < selected_shadow_mean_regret
+    ]
+    lower_shadow_gate_passing_rows = [
+        row for row in lower_shadow_rows if bool(row["shadow_selection_gate_passed"])
+    ]
+    lower_shadow_blocker_counts: Counter[str] = Counter()
+    for row in lower_shadow_rows:
+        if bool(row["shadow_selection_gate_passed"]):
+            continue
+        reason_codes = row.get("shadow_selection_reason_codes") or []
+        if not reason_codes:
+            lower_shadow_blocker_counts["shadow_gate_failed_without_reason"] += 1
+        else:
+            lower_shadow_blocker_counts.update(str(reason) for reason in reason_codes)
+
+    lower_validation_rows = [
+        row
+        for row in candidate_rows
+        if float(row["validation_metrics_report_only"]["mean_regret"])
+        < selected_validation_mean_regret
+    ]
+    lower_validation_gate_preserving_rows = [
+        row
+        for row in lower_validation_rows
+        if _validation_summary_preserves_current_o_gates(
+            row["validation_metrics_report_only"]
+        )
+    ]
+    if lower_shadow_gate_passing_rows:
+        conclusion = "shadow_gate_passing_lower_mean_regret_candidates_exist"
+    elif lower_shadow_rows:
+        conclusion = "lower_shadow_mean_regret_candidates_break_shadow_gates"
+    elif lower_validation_gate_preserving_rows:
+        conclusion = (
+            "validation_report_only_lower_mean_regret_candidates_exist_but_not_"
+            "shadow_selected"
+        )
+    else:
+        conclusion = "no_gate_preserving_lower_mean_regret_candidate_found"
+    return {
+        "diagnostic_only": True,
+        "selection_metric_source": "shadow_split_only",
+        "uses_validation_labels_for_tuning": False,
+        "validation_metrics_report_only": True,
+        "selected_joint_candidate_name": selected_effective_row["joint_candidate_name"],
+        "selected_shadow_mean_regret": selected_shadow_mean_regret,
+        "selected_validation_mean_regret_report_only": selected_validation_mean_regret,
+        "lower_shadow_mean_regret_candidate_count": len(lower_shadow_rows),
+        "lower_shadow_gate_passing_candidate_count": len(
+            lower_shadow_gate_passing_rows
+        ),
+        "lower_shadow_blocker_reason_counts": dict(
+            sorted(lower_shadow_blocker_counts.items())
+        ),
+        "best_lower_shadow_mean_regret_candidates": [
+            _mean_regret_tradeoff_candidate_summary(row)
+            for row in sorted(
+                lower_shadow_rows,
+                key=lambda row: float(row["shadow_selection_metrics"]["mean_regret"]),
+            )[:5]
+        ],
+        "lower_validation_mean_regret_report_only_candidate_count": len(
+            lower_validation_rows
+        ),
+        "lower_validation_gate_preserving_report_only_candidate_count": len(
+            lower_validation_gate_preserving_rows
+        ),
+        "best_lower_validation_mean_regret_report_only_candidates": [
+            _mean_regret_tradeoff_candidate_summary(row)
+            for row in sorted(
+                lower_validation_rows,
+                key=lambda row: float(
+                    row["validation_metrics_report_only"]["mean_regret"]
+                ),
+            )[:5]
+        ],
+        "mean_regret_not_improved_without_breaking_shadow_gate": (
+            len(lower_shadow_gate_passing_rows) == 0
+        ),
+        "tradeoff_conclusion": conclusion,
+    }
+
+
+def _validation_summary_preserves_current_o_gates(summary: dict[str, Any]) -> bool:
+    action_family_returns = summary.get("action_family_selected_return_sum", {})
+    return all(
+        (
+            float(summary["p_up_disagreement_rate"])
+            <= O_MAX_P_UP_ACTION_DISAGREEMENT_RATE,
+            float(summary["top1_hit_rate"]) >= O_MIN_TOP1_HIT_RATE,
+            int(summary["high_score_support_count"])
+            >= O_MIN_HIGH_SCORE_SUPPORT_COUNT,
+            float(summary["high_score_return_mean"]) > 0.0,
+            float(summary["high_score_return_sum"]) > 0.0,
+            float(summary["selected_return_sum"]) > 0.0,
+            all(float(value) >= 0.0 for value in action_family_returns.values()),
+        )
+    )
+
+
+def _mean_regret_tradeoff_candidate_summary(row: dict[str, Any]) -> dict[str, Any]:
+    shadow = row["shadow_selection_metrics"]
+    validation = row["validation_metrics_report_only"]
+    return {
+        "joint_candidate_name": row["joint_candidate_name"],
+        "feature_set_name": row["feature_set_name"],
+        "correction_policy_name": row["correction_policy_name"],
+        "high_score_threshold_profile_name": row[
+            "high_score_threshold_profile_name"
+        ],
+        "shadow_mean_regret": shadow["mean_regret"],
+        "shadow_top1_hit_rate": shadow["top1_hit_rate"],
+        "shadow_p_up_disagreement_rate": shadow["p_up_disagreement_rate"],
+        "shadow_high_score_support_count": shadow["high_score_support_count"],
+        "shadow_high_score_return_sum": shadow["high_score_return_sum"],
+        "shadow_selected_return_sum": shadow["selected_return_sum"],
+        "validation_mean_regret_report_only": validation["mean_regret"],
+        "validation_top1_hit_rate_report_only": validation["top1_hit_rate"],
+        "validation_p_up_disagreement_rate_report_only": validation[
+            "p_up_disagreement_rate"
+        ],
+        "validation_high_score_support_count_report_only": validation[
+            "high_score_support_count"
+        ],
+        "validation_high_score_return_sum_report_only": validation[
+            "high_score_return_sum"
+        ],
+        "validation_selected_return_sum_report_only": validation[
+            "selected_return_sum"
+        ],
+        "shadow_selection_gate_passed": row["shadow_selection_gate_passed"],
+        "shadow_selection_reason_codes": row["shadow_selection_reason_codes"],
     }
 
 
@@ -5774,6 +6182,18 @@ def _source_model_eligibility_gate_report(
             "diagnostic_target_not_hard_gate_shadow_selection_prioritizes_buffer"
         ),
         "top1_miss_diagnostics": validation_metrics["top1_miss_diagnostics"],
+        "mean_regret_reduction_diagnostics": validation_metrics[
+            "mean_regret_reduction_diagnostics"
+        ],
+        "largest_regret_case_diagnostics": validation_metrics[
+            "largest_regret_case"
+        ],
+        "action_pair_regret_reduction_diagnostics": validation_metrics[
+            "action_pair_regret_summary"
+        ],
+        "no_trade_missed_opportunity_diagnostics": validation_metrics[
+            "no_trade_missed_opportunity"
+        ],
         "gate_reason_code_consistency": gate_reason_code_consistency,
         "gate_reason_code_consistency_passed": gate_reason_code_consistency[
             "gate_reason_code_consistency_passed"
@@ -6235,6 +6655,7 @@ def _ranking_metrics(
     action_pair_regret_cases: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(
         list
     )
+    all_action_pair_cases = []
     top1_miss_cases = []
     hts_p_up_reliability_cases = []
     high_score_returns = []
@@ -6276,6 +6697,12 @@ def _ranking_metrics(
         selected_p_down = 1.0 - selected_p_up
         selected_action = str(selected.get("action") or "")
         oracle_action = str(oracle.get("action") or "")
+        selected_score = float(selected["variant_scores"][variant])
+        oracle_score = float(oracle["variant_scores"][variant])
+        p_up_conflicts_with_selected_side = (
+            ("BUY_UP" in selected_action and selected_p_up < 0.50)
+            or ("BUY_DOWN" in selected_action and selected_p_up > 0.50)
+        )
         action_pair_case = {
             "decision_group_id": selected["decision_group_id"],
             "market_id": selected.get("market_id"),
@@ -6289,8 +6716,13 @@ def _ranking_metrics(
             "selected_return": selected_return,
             "oracle_return": oracle_return,
             "regret": regret,
+            "selected_score": selected_score,
+            "oracle_score": oracle_score,
+            "score_margin_selected_minus_oracle": selected_score - oracle_score,
+            "selected_is_high_score": selected_score >= high_score_threshold,
             "p_up": selected_p_up,
             "p_down": selected_p_down,
+            "p_up_conflicts_with_selected_side": p_up_conflicts_with_selected_side,
             "raw_score_component": float(
                 selected_components.get("group_normalized_raw_model_component")
                 or 0.0
@@ -6310,22 +6742,13 @@ def _ranking_metrics(
         action_pair_regret_cases[(selected_action, oracle_action)].append(
             action_pair_case
         )
+        all_action_pair_cases.append(action_pair_case)
         if selected_action != oracle_action:
             top1_miss_cases.append(
                 {
                     **action_pair_case,
                     "top2_contains_oracle_action": top2_contains_oracle,
                     "top3_contains_oracle_action": top3_contains_oracle,
-                    "selected_score": float(selected["variant_scores"][variant]),
-                    "oracle_score": float(oracle["variant_scores"][variant]),
-                    "score_margin_selected_minus_oracle": (
-                        float(selected["variant_scores"][variant])
-                        - float(oracle["variant_scores"][variant])
-                    ),
-                    "p_up_conflicts_with_selected_side": (
-                        ("BUY_UP" in selected_action and selected_p_up < 0.50)
-                        or ("BUY_DOWN" in selected_action and selected_p_up > 0.50)
-                    ),
                 }
             )
         if selected.get("action_family") == "HOLD_TO_SETTLEMENT":
@@ -6434,6 +6857,12 @@ def _ranking_metrics(
         ),
         "largest_winner_dependency": _largest_winner_dependency(selected_returns),
         "largest_regret_case": largest_regret_case or {},
+        "mean_regret_reduction_diagnostics": (
+            _mean_regret_reduction_diagnostics(
+                all_action_pair_cases,
+                no_trade_missed_opportunities=no_trade_missed_opportunities,
+            )
+        ),
         "no_trade_opportunity_cost_mean": statistics.mean(
             max(0.0, item) for item in oracle_returns
         )
@@ -6597,6 +7026,112 @@ def _top1_miss_diagnostics(
     }
 
 
+def _mean_regret_reduction_diagnostics(
+    cases: list[dict[str, Any]],
+    *,
+    no_trade_missed_opportunities: list[float],
+) -> dict[str, Any]:
+    regrets = [float(case["regret"]) for case in cases]
+    positive_regrets = [value for value in regrets if value > 0.0]
+    by_action_pair: dict[str, list[float]] = defaultdict(list)
+    by_family_pair: dict[str, list[float]] = defaultdict(list)
+    by_side_pair: dict[str, list[float]] = defaultdict(list)
+    by_p_up_alignment: dict[str, list[float]] = defaultdict(list)
+    by_high_score: dict[str, list[float]] = defaultdict(list)
+    by_hts_sbc: dict[str, list[float]] = defaultdict(list)
+    for case in cases:
+        action_key = f"{case['selected_action']}->{case['oracle_action']}"
+        family_key = (
+            f"{case['selected_action_family']}->{case['oracle_action_family']}"
+        )
+        side_key = f"{case['selected_side']}->{case['oracle_side']}"
+        by_action_pair[action_key].append(float(case["regret"]))
+        by_family_pair[family_key].append(float(case["regret"]))
+        by_side_pair[side_key].append(float(case["regret"]))
+        alignment_key = (
+            "p_up_disagreement"
+            if bool(case["p_up_conflicts_with_selected_side"])
+            else "p_up_agreement_or_not_applicable"
+        )
+        by_p_up_alignment[alignment_key].append(float(case["regret"]))
+        high_score_key = (
+            "high_score_selected"
+            if bool(case["selected_is_high_score"])
+            else "non_high_score_selected"
+        )
+        by_high_score[high_score_key].append(float(case["regret"]))
+        selected_family = str(case["selected_action_family"])
+        oracle_family = str(case["oracle_action_family"])
+        if {
+            selected_family,
+            oracle_family,
+        } <= {"HOLD_TO_SETTLEMENT", "SELL_BEFORE_CLOSE"}:
+            by_hts_sbc[f"{selected_family}->{oracle_family}"].append(
+                float(case["regret"])
+            )
+    no_trade_positive = [
+        float(value) for value in no_trade_missed_opportunities if float(value) > 0.0
+    ]
+    return {
+        "case_count": len(cases),
+        "mean_regret": statistics.mean(regrets) if regrets else 0.0,
+        "positive_regret_sum": sum(positive_regrets),
+        "positive_regret_mean": statistics.mean(positive_regrets)
+        if positive_regrets
+        else 0.0,
+        "largest_regret_cases": sorted(
+            cases,
+            key=lambda case: (-float(case["regret"]), str(case["decision_group_id"])),
+        )[:10],
+        "regret_by_selected_action_vs_oracle_action": _regret_bucket_rows(
+            by_action_pair
+        ),
+        "regret_by_selected_family_vs_oracle_family": _regret_bucket_rows(
+            by_family_pair
+        ),
+        "regret_by_selected_side_vs_oracle_side": _regret_bucket_rows(by_side_pair),
+        "regret_by_p_up_agreement": _regret_bucket_rows(by_p_up_alignment),
+        "regret_by_high_score_selected": _regret_bucket_rows(by_high_score),
+        "hts_vs_sbc_regret_contribution": _regret_bucket_rows(by_hts_sbc),
+        "no_trade_missed_opportunity_contribution": {
+            "missed_positive_opportunity_count": len(no_trade_positive),
+            "missed_positive_opportunity_sum": sum(no_trade_positive),
+            "missed_positive_opportunity_mean": statistics.mean(no_trade_positive)
+            if no_trade_positive
+            else 0.0,
+            "max_missed_positive_opportunity": max(no_trade_positive, default=0.0),
+        },
+        "diagnostic_only": True,
+    }
+
+
+def _regret_bucket_rows(values_by_key: dict[str, list[float]]) -> list[dict[str, Any]]:
+    rows = []
+    for key, values in values_by_key.items():
+        positive_values = [value for value in values if value > 0.0]
+        rows.append(
+            {
+                "bucket": key,
+                "count": len(values),
+                "regret_sum": sum(values),
+                "regret_mean": statistics.mean(values) if values else 0.0,
+                "positive_regret_sum": sum(positive_values),
+                "positive_regret_mean": statistics.mean(positive_values)
+                if positive_values
+                else 0.0,
+                "regret_max": max(values, default=0.0),
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            -float(row["positive_regret_sum"]),
+            -float(row["regret_max"]),
+            str(row["bucket"]),
+        ),
+    )
+
+
 def _split_metric_views(
     rows: list[dict[str, Any]],
     variant: str,
@@ -6655,6 +7190,9 @@ def _eligibility_metric_view(metrics: dict[str, Any]) -> dict[str, Any]:
         "largest_winner_dependency": metrics["largest_winner_dependency"],
         "largest_regret_case": metrics["largest_regret_case"],
         "top1_miss_diagnostics": metrics["top1_miss_diagnostics"],
+        "mean_regret_reduction_diagnostics": metrics[
+            "mean_regret_reduction_diagnostics"
+        ],
         "action_family_level_regret": metrics["action_family_level_regret"],
         "side_level_regret": metrics["side_level_regret"],
         "no_trade_missed_opportunity": metrics["no_trade_missed_opportunity"],
@@ -7936,6 +8474,8 @@ def _feature_set_selection_markdown(report: dict[str, Any]) -> str:
         f"`{report['selected_validation_metrics_report_only']['top1_hit_rate']}`",
         "- selected_validation_p_up_disagreement_report_only: "
         f"`{report['selected_validation_metrics_report_only']['p_up_disagreement_rate']}`",
+        "- mean_regret_tradeoff_conclusion: "
+        f"`{report['mean_regret_gate_tradeoff_diagnostics']['tradeoff_conclusion']}`",
         "- reference_distance_in_selected_feature_set: "
         f"`{str(report['reference_distance_in_selected_feature_set']).lower()}`",
         "- #146_start_allowed: "
@@ -7990,6 +8530,12 @@ def _joint_feature_correction_selection_markdown(report: dict[str, Any]) -> str:
         f"`{report['selected_validation_metrics_report_only']['p_up_disagreement_rate']}`",
         "- shadow_p_up_safety_target_rate: "
         f"`{report['shadow_p_up_safety_target_rate']}`",
+        "- mean_regret_tradeoff_conclusion: "
+        f"`{report['mean_regret_gate_tradeoff_diagnostics']['tradeoff_conclusion']}`",
+        "- lower_shadow_mean_regret_candidate_count: "
+        f"`{report['mean_regret_gate_tradeoff_diagnostics']['lower_shadow_mean_regret_candidate_count']}`",
+        "- lower_shadow_gate_passing_candidate_count: "
+        f"`{report['mean_regret_gate_tradeoff_diagnostics']['lower_shadow_gate_passing_candidate_count']}`",
         "- #146_start_allowed: "
         f"`{str(report['#146_start_allowed']).lower()}`",
         "- #134_resume_allowed: "
