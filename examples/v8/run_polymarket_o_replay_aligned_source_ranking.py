@@ -52,6 +52,9 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         "selected_correction_policy_name": ranking[
             "selected_correction_policy_name"
         ],
+        "selected_high_score_threshold_profile_name": ranking[
+            "selected_high_score_threshold_profile_name"
+        ],
         "selected_joint_candidate_name": ranking["selected_joint_candidate_name"],
         "top1_hit_rate": ranking["top1_realized_best_action_hit_rate"],
         "top2_hit_rate": ranking["top2_realized_best_action_hit_rate"],

@@ -2171,6 +2171,9 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert ranking["selected_correction_policy_name"] == ranking[
         "o_model_training_summary"
     ]["selected_correction_policy_name"]
+    assert ranking["selected_high_score_threshold_profile_name"] == ranking[
+        "o_model_training_summary"
+    ]["selected_high_score_threshold_profile_name"]
     assert ranking["selected_joint_candidate_name"] == ranking[
         "o_model_training_summary"
     ]["selected_joint_candidate_name"]
@@ -2506,6 +2509,9 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert feature_selection["selected_correction_policy_name"] == ranking[
         "selected_correction_policy_name"
     ]
+    assert feature_selection["selected_high_score_threshold_profile_name"] == ranking[
+        "selected_high_score_threshold_profile_name"
+    ]
     assert feature_selection["selected_joint_candidate_name"] == ranking[
         "selected_joint_candidate_name"
     ]
@@ -2539,6 +2545,9 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert joint_selection["selected_correction_policy_name"] == ranking[
         "selected_correction_policy_name"
     ]
+    assert joint_selection["selected_high_score_threshold_profile_name"] == ranking[
+        "selected_high_score_threshold_profile_name"
+    ]
     assert joint_selection["selected_joint_candidate_name"] == ranking[
         "selected_joint_candidate_name"
     ]
@@ -2551,7 +2560,35 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "no_trade_tail_risk_buffer",
         "sbc_preferred_when_hts_reliability_weak",
     }
-    assert joint_selection["candidate_count"] == 25
+    assert {
+        row["high_score_threshold_profile_name"]
+        for row in joint_selection["candidate_rows"]
+    } == {
+        "current_threshold",
+        "high_score_profitability_threshold",
+        "slightly_lower_shadow_derived_threshold",
+        "support_preserving_threshold",
+    }
+    assert joint_selection["candidate_count"] == 100
+    assert joint_selection["selected_high_score_threshold_profile"][
+        "uses_validation_labels_for_tuning"
+    ] is False
+    assert joint_selection["selected_full_correction_rerun_diagnostics"][
+        "full_correction_rerun_enabled"
+    ] is True
+    assert joint_selection["selected_full_correction_rerun_diagnostics"][
+        "full_correction_search_source"
+    ] == "shadow_split_only"
+    assert joint_selection["selected_lightweight_preselection_candidate_row"][
+        "joint_candidate_name"
+    ] == joint_selection["selected_joint_candidate_name"]
+    assert joint_selection["selected_final_full_correction_candidate_row"][
+        "joint_candidate_name"
+    ] == joint_selection["selected_joint_candidate_name"]
+    assert all(
+        "shadow_high_score_support_deficit_to_source_gate" in row
+        for row in joint_selection["candidate_rows"]
+    )
     assert looks_like_sha256(
         joint_selection["joint_feature_correction_selection_config_hash"]
     )
@@ -2618,15 +2655,38 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         row["o_model_predicted_score"] is not None
         for row in ranking["ranking_rows"]
     )
+    assert isinstance(
+        correction_config["high_score_calibration"]["high_score_threshold"],
+        float,
+    )
     assert correction_config["high_score_calibration"][
-        "high_score_threshold"
-    ] >= 0.75
+        "high_score_threshold_profile_source"
+    ] == "shadow_split_only"
+    assert correction_config["high_score_calibration"][
+        "uses_validation_labels_for_threshold_tuning"
+    ] is False
+    assert correction_config["high_score_calibration"][
+        "selected_high_score_threshold_profile_name"
+    ] == ranking["selected_high_score_threshold_profile_name"]
     assert correction_config["high_score_calibration"][
         "high_score_threshold_source"
-    ] == (
-        "0.75 + max(0, shadow_p_up_edge_q25 - "
-        "selected_large_regret_reversal_penalty)"
+    ].endswith("_shadow_split_only")
+    assert looks_like_sha256(
+        correction_config["high_score_calibration"][
+            "high_score_threshold_profile_config_hash"
+        ]
     )
+    assert {
+        row["profile_name"]
+        for row in correction_config["high_score_calibration"][
+            "high_score_threshold_profile_candidates"
+        ]
+    } == {
+        "current_threshold",
+        "high_score_profitability_threshold",
+        "slightly_lower_shadow_derived_threshold",
+        "support_preserving_threshold",
+    }
     assert "large_regret_reversal_penalty_adjusted" in correction_config[
         "high_score_calibration"
     ]
@@ -2807,10 +2867,10 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert gate["correction_config_hash_verified"] is True
     assert gate["probe_config_hash_verified"] is True
     assert gate["high_score_threshold"] == ranking["high_score_threshold"]
-    assert gate["high_score_threshold_source"] == (
-        "0.75 + max(0, shadow_p_up_edge_q25 - "
-        "selected_large_regret_reversal_penalty)"
-    )
+    assert gate["high_score_threshold_source"] == correction_config[
+        "high_score_calibration"
+    ]["high_score_threshold_source"]
+    assert gate["high_score_threshold_source"].endswith("_shadow_split_only")
     assert gate["eligible_for_source_model_gate"] is True
     assert gate["validation_metrics_only_for_eligibility"] is True
     assert gate["validation_metrics"] == ranking["validation_metrics"]

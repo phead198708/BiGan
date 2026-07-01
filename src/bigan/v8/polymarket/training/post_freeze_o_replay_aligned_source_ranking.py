@@ -1324,6 +1324,9 @@ def _train_o_model_predicted_scores(
     selected_correction_policy_name = str(
         feature_set_selection["selected_correction_policy_name"]
     )
+    selected_high_score_threshold_profile_name = str(
+        feature_set_selection["selected_high_score_threshold_profile_name"]
+    )
     model = selected_scoring["model"]
     ranking_correction = selected_scoring["ranking_correction"]
     scored_rows = selected_scoring["scored_rows"]
@@ -1353,6 +1356,12 @@ def _train_o_model_predicted_scores(
         "feature_names": list(selected_feature_names),
         "selected_feature_set_name": selected_feature_set_name,
         "selected_correction_policy_name": selected_correction_policy_name,
+        "selected_high_score_threshold_profile_name": (
+            selected_high_score_threshold_profile_name
+        ),
+        "selected_high_score_threshold_profile": feature_set_selection[
+            "selected_high_score_threshold_profile"
+        ],
         "selected_joint_candidate_name": feature_set_selection[
             "selected_joint_candidate_name"
         ],
@@ -1371,6 +1380,9 @@ def _train_o_model_predicted_scores(
             profile["correction_policy_name"]
             for profile in _o_correction_policy_profiles()
         ],
+        "candidate_high_score_threshold_profile_names": list(
+            _o_high_score_threshold_profile_names()
+        ),
         "all_candidate_feature_names": list(O_DEPLOYABLE_MODEL_FEATURE_NAMES),
         "model_input_fields_decision_time_only": list(
             selected_feature_names
@@ -1644,6 +1656,7 @@ def _select_o_shadow_feature_set(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     feature_sets = _o_feature_set_selection_feature_sets()
     correction_policies = _o_correction_policy_profiles()
+    high_score_threshold_profiles = _o_high_score_threshold_profile_names()
     baseline_scoring = _score_o_feature_set_candidate(
         rows=rows,
         train_rows=train_rows,
@@ -1653,6 +1666,7 @@ def _select_o_shadow_feature_set(
         correction_policy_profile=_o_correction_policy_profile_by_name(
             "balanced_hts_sbc"
         ),
+        high_score_threshold_profile_name="current_threshold",
     )
     baseline_largest_regret = _largest_regret_value(
         baseline_scoring["split_metrics"]["train_shadow"]
@@ -1661,24 +1675,31 @@ def _select_o_shadow_feature_set(
     joint_candidate_rows: list[dict[str, Any]] = []
     for feature_set_name, feature_names in feature_sets.items():
         for policy in correction_policies:
-            scoring = _score_o_feature_set_candidate(
-                rows=rows,
-                train_rows=train_rows,
-                deployable_available=deployable_available,
-                feature_names=feature_names,
-                full_correction_search=False,
-                correction_policy_profile=policy,
-            )
-            joint_name = _joint_candidate_name(feature_set_name, policy)
-            scorings[joint_name] = scoring
-            joint_candidate_rows.append(
-                _joint_feature_correction_candidate_row(
-                    feature_set_name=feature_set_name,
+            for threshold_profile_name in high_score_threshold_profiles:
+                scoring = _score_o_feature_set_candidate(
+                    rows=rows,
+                    train_rows=train_rows,
+                    deployable_available=deployable_available,
+                    feature_names=feature_names,
+                    full_correction_search=False,
                     correction_policy_profile=policy,
-                    scoring=scoring,
-                    baseline_largest_regret=baseline_largest_regret,
+                    high_score_threshold_profile_name=threshold_profile_name,
                 )
-            )
+                joint_name = _joint_candidate_name(
+                    feature_set_name,
+                    policy,
+                    threshold_profile_name,
+                )
+                scorings[joint_name] = scoring
+                joint_candidate_rows.append(
+                    _joint_feature_correction_candidate_row(
+                        feature_set_name=feature_set_name,
+                        correction_policy_profile=policy,
+                        high_score_threshold_profile_name=threshold_profile_name,
+                        scoring=scoring,
+                        baseline_largest_regret=baseline_largest_regret,
+                    )
+                )
     eligible_rows = [
         row
         for row in joint_candidate_rows
@@ -1695,6 +1716,7 @@ def _select_o_shadow_feature_set(
             joint_candidate_rows,
             key=lambda row: (
                 not bool(row["shadow_selection_metrics"]["p_up_hard_gate_passed"]),
+                int(row["shadow_high_score_support_deficit_to_source_gate"]),
                 float(row["shadow_selection_metrics"]["p_up_disagreement_rate"]),
                 float(row["shadow_selection_metrics"]["mean_regret"]),
                 float(row["shadow_selection_metrics"]["largest_regret_value"]),
@@ -1704,7 +1726,49 @@ def _select_o_shadow_feature_set(
         fallback_reason_codes = ["no_joint_feature_correction_candidate_passed_shadow_gates"]
     selected_name = str(selected_row["feature_set_name"])
     selected_joint_name = str(selected_row["joint_candidate_name"])
-    selected_scoring = scorings[selected_joint_name]
+    selected_threshold_profile_name = str(
+        selected_row["high_score_threshold_profile_name"]
+    )
+    selected_policy = _o_correction_policy_profile_by_name(
+        str(selected_row["correction_policy_name"])
+    )
+    selected_lightweight_scoring = scorings[selected_joint_name]
+    selected_full_scoring = _score_o_feature_set_candidate(
+        rows=rows,
+        train_rows=train_rows,
+        deployable_available=deployable_available,
+        feature_names=feature_sets[selected_name],
+        full_correction_search=True,
+        correction_policy_profile=selected_policy,
+        high_score_threshold_profile_name=selected_threshold_profile_name,
+    )
+    selected_final_row = _joint_feature_correction_candidate_row(
+        feature_set_name=selected_name,
+        correction_policy_profile=selected_policy,
+        high_score_threshold_profile_name=selected_threshold_profile_name,
+        scoring=selected_full_scoring,
+        baseline_largest_regret=baseline_largest_regret,
+    )
+    selected_final_row["joint_candidate_name"] = selected_joint_name
+    selected_full_correction_acceptance = _selected_full_correction_acceptance(
+        lightweight_row=selected_row,
+        final_row=selected_final_row,
+    )
+    selected_full_correction_diagnostics = _selected_full_correction_diagnostics(
+        lightweight_row=selected_row,
+        final_row=selected_final_row,
+        acceptance=selected_full_correction_acceptance,
+    )
+    selected_scoring = (
+        selected_full_scoring
+        if bool(selected_full_correction_acceptance["accepted_for_final_scoring"])
+        else selected_lightweight_scoring
+    )
+    selected_effective_row = (
+        selected_final_row
+        if bool(selected_full_correction_acceptance["accepted_for_final_scoring"])
+        else selected_row
+    )
     rejected_rows = []
     for row in joint_candidate_rows:
         payload = dict(row)
@@ -1734,30 +1798,62 @@ def _select_o_shadow_feature_set(
         "uses_validation_labels_for_tuning": False,
         "selection_metric_source": "shadow_split_only",
         "selection_criteria": [
-            "shadow_p_up_safety_buffer_first",
+            "shadow_high_score_support_reaches_source_gate_when_possible",
+            "prefer_combined_decision_time_feature_coverage_after_support_gates",
             "positive_shadow_selected_return",
             "profitable_shadow_high_score_support",
             "shadow_largest_regret_not_worsened_vs_old_features",
             "shadow_action_family_selected_returns_not_negative",
-            "lower_shadow_mean_regret_after_safety_gates",
+            "lower_shadow_mean_regret_after_support_and_safety_gates",
         ],
         "candidate_feature_set_names": list(feature_sets),
         "candidate_correction_policy_names": [
             profile["correction_policy_name"] for profile in correction_policies
         ],
+        "candidate_high_score_threshold_profile_names": list(
+            high_score_threshold_profiles
+        ),
         "selected_joint_candidate_name": selected_joint_name,
         "selected_feature_set_name": selected_name,
         "selected_correction_policy_name": selected_row["correction_policy_name"],
         "selected_correction_policy_profile": selected_row[
             "correction_policy_profile"
         ],
+        "selected_high_score_threshold_profile_name": (
+            selected_threshold_profile_name
+        ),
+        "selected_high_score_threshold_profile": selected_final_row[
+            "high_score_threshold_profile"
+        ],
         "selected_feature_names": selected_feature_names,
         "selected_feature_count": len(selected_feature_names),
-        "selected_shadow_metrics": selected_row["shadow_selection_metrics"],
-        "selected_validation_metrics_report_only": selected_row[
+        "selected_effective_scoring_source": (
+            "full_shadow_correction_search"
+            if bool(selected_full_correction_acceptance["accepted_for_final_scoring"])
+            else "lightweight_preselection_shadow_ranker"
+        ),
+        "selected_shadow_metrics": selected_effective_row["shadow_selection_metrics"],
+        "selected_validation_metrics_report_only": selected_effective_row[
             "validation_metrics_report_only"
         ],
-        "selected_joint_shadow_gate_passed": selected_row[
+        "selected_lightweight_preselection_shadow_metrics": selected_row[
+            "shadow_selection_metrics"
+        ],
+        "selected_lightweight_preselection_validation_metrics_report_only": selected_row[
+            "validation_metrics_report_only"
+        ],
+        "selected_final_full_correction_shadow_metrics": selected_final_row[
+            "shadow_selection_metrics"
+        ],
+        "selected_final_full_correction_validation_metrics_report_only": selected_final_row[
+            "validation_metrics_report_only"
+        ],
+        "selected_lightweight_preselection_candidate_row": selected_row,
+        "selected_final_full_correction_candidate_row": selected_final_row,
+        "selected_full_correction_rerun_diagnostics": (
+            selected_full_correction_diagnostics
+        ),
+        "selected_joint_shadow_gate_passed": selected_effective_row[
             "shadow_selection_gate_passed"
         ],
         "selection_fallback_reason_codes": fallback_reason_codes,
@@ -1769,6 +1865,11 @@ def _select_o_shadow_feature_set(
         ),
         "candidate_count": len(joint_candidate_rows),
         "eligible_candidate_count": len(eligible_rows),
+        "eligible_source_support_candidate_count": sum(
+            1
+            for row in joint_candidate_rows
+            if bool(row["shadow_source_gate_high_score_support_passed"])
+        ),
         "candidate_rows": joint_candidate_rows,
         "rejected_candidates": rejected_rows,
         "joint_feature_correction_selection_config_hash": "",
@@ -1794,8 +1895,9 @@ def _select_o_shadow_feature_set(
         "selection_metric_source": "shadow_split_only",
         "selection_criteria": [
             "joint_feature_set_and_correction_policy_shadow_selection",
-            "shadow_p_up_safety_buffer_first",
-            "lower_shadow_mean_regret_after_safety_gates",
+            "shadow_high_score_support_reaches_source_gate_when_possible",
+            "prefer_combined_decision_time_feature_coverage_after_support_gates",
+            "lower_shadow_mean_regret_after_support_and_safety_gates",
             "positive_shadow_selected_return",
             "profitable_shadow_high_score_support",
             "shadow_action_family_selected_returns_not_negative",
@@ -1807,14 +1909,25 @@ def _select_o_shadow_feature_set(
         "selected_correction_policy_profile": selected_row[
             "correction_policy_profile"
         ],
+        "selected_high_score_threshold_profile_name": (
+            selected_threshold_profile_name
+        ),
+        "selected_high_score_threshold_profile": selected_final_row[
+            "high_score_threshold_profile"
+        ],
         "candidate_correction_policy_names": [
             profile["correction_policy_name"] for profile in correction_policies
         ],
+        "candidate_high_score_threshold_profile_names": list(
+            high_score_threshold_profiles
+        ),
         "feature_set_selection_derived_from_joint_selection": True,
         "feature_set_selection_aggregation": "best_shadow_gate_candidate_per_feature_set",
         "joint_feature_correction_selection": joint_selection,
         "selection_safety_order": [
-            "p_up_safety_buffer",
+            "source_gate_high_score_support",
+            "support_deficit_to_source_gate",
+            "combined_feature_set_priority",
             "positive_shadow_selected_return",
             "profitable_shadow_high_score_support",
             "shadow_p_up_hard_gate_safety",
@@ -1831,16 +1944,34 @@ def _select_o_shadow_feature_set(
         "selected_feature_set_name": selected_name,
         "selected_feature_names": selected_feature_names,
         "selected_feature_count": len(selected_feature_names),
-        "selected_shadow_metrics": selected_row["shadow_selection_metrics"],
-        "selected_validation_metrics_report_only": selected_row[
+        "selected_effective_scoring_source": (
+            "full_shadow_correction_search"
+            if bool(selected_full_correction_acceptance["accepted_for_final_scoring"])
+            else "lightweight_preselection_shadow_ranker"
+        ),
+        "selected_shadow_metrics": selected_effective_row["shadow_selection_metrics"],
+        "selected_validation_metrics_report_only": selected_effective_row[
             "validation_metrics_report_only"
         ],
-        "selected_feature_set_shadow_gate_passed": selected_row[
+        "selected_lightweight_preselection_shadow_metrics": selected_row[
+            "shadow_selection_metrics"
+        ],
+        "selected_final_full_correction_shadow_metrics": selected_final_row[
+            "shadow_selection_metrics"
+        ],
+        "selected_full_correction_rerun_diagnostics": (
+            selected_full_correction_diagnostics
+        ),
+        "selected_feature_set_shadow_gate_passed": selected_effective_row[
             "shadow_selection_gate_passed"
         ],
         "candidate_feature_set_scoring_mode": "joint_shadow_only_prefit_ranker",
-        "final_selected_feature_set_uses_full_shadow_correction_search": False,
+        "full_shadow_correction_search_evaluated": True,
+        "final_selected_feature_set_uses_full_shadow_correction_search": bool(
+            selected_full_correction_acceptance["accepted_for_final_scoring"]
+        ),
         "final_selected_correction_policy_uses_shadow_only_profile": True,
+        "final_selected_high_score_threshold_profile_uses_shadow_only": True,
         "selection_fallback_reason_codes": fallback_reason_codes,
         "reference_distance_in_selected_feature_set": (
             selected_includes_reference_distance
@@ -1877,6 +2008,7 @@ def _score_o_feature_set_candidate(
     feature_names: tuple[str, ...],
     full_correction_search: bool,
     correction_policy_profile: dict[str, Any] | None = None,
+    high_score_threshold_profile_name: str = "current_threshold",
 ) -> dict[str, Any]:
     if deployable_available:
         model = _fit_ridge_regression(
@@ -1926,12 +2058,19 @@ def _score_o_feature_set_candidate(
         ranking_correction=ranking_correction,
     )
     ranking_rows = _ranking_rows(scored_rows)
+    high_score_threshold_profile = _apply_o_high_score_threshold_profile(
+        ranking_correction=ranking_correction,
+        ranking_rows=ranking_rows,
+        profile_name=high_score_threshold_profile_name,
+    )
     high_score_threshold = float(
         ranking_correction["high_score_calibration"]["high_score_threshold"]
     )
     return {
         "feature_names": feature_names,
         "correction_policy_profile": correction_policy_profile,
+        "high_score_threshold_profile_name": high_score_threshold_profile_name,
+        "high_score_threshold_profile": high_score_threshold_profile,
         "model": model,
         "ranking_correction": ranking_correction,
         "scored_rows": scored_rows,
@@ -2093,6 +2232,246 @@ def _o_correction_policy_profile_by_name(name: str) -> dict[str, Any]:
     raise KeyError(name)
 
 
+def _o_high_score_threshold_profile_names() -> tuple[str, ...]:
+    return (
+        "current_threshold",
+        "slightly_lower_shadow_derived_threshold",
+        "support_preserving_threshold",
+        "high_score_profitability_threshold",
+    )
+
+
+def _apply_o_high_score_threshold_profile(
+    *,
+    ranking_correction: dict[str, Any],
+    ranking_rows: list[dict[str, Any]],
+    profile_name: str,
+) -> dict[str, Any]:
+    if profile_name not in _o_high_score_threshold_profile_names():
+        raise KeyError(profile_name)
+    current_threshold = float(
+        ranking_correction["high_score_calibration"]["high_score_threshold"]
+    )
+    shadow_selected_rows = _selected_score_return_rows(
+        ranking_rows,
+        variant=O_MODEL_PREDICTED_VARIANT,
+        split="shadow",
+    )
+    p_edge_q25 = float(ranking_correction["p_up_edge_quantiles"]["q25"])
+    slightly_lower_threshold = _shadow_slightly_lower_high_score_threshold(
+        current_threshold=current_threshold,
+        shadow_selected_rows=shadow_selected_rows,
+        p_edge_q25=p_edge_q25,
+    )
+    support_threshold = _shadow_support_preserving_high_score_threshold(
+        current_threshold=current_threshold,
+        shadow_selected_rows=shadow_selected_rows,
+    )
+    profitability_threshold = _shadow_high_score_profitability_threshold(
+        ranking_rows=ranking_rows,
+        current_threshold=current_threshold,
+        fallback_threshold=support_threshold,
+        extra_thresholds=(slightly_lower_threshold, support_threshold),
+    )
+    threshold_by_name = {
+        "current_threshold": current_threshold,
+        "slightly_lower_shadow_derived_threshold": slightly_lower_threshold,
+        "support_preserving_threshold": support_threshold,
+        "high_score_profitability_threshold": profitability_threshold,
+    }
+    candidate_rows = [
+        _high_score_threshold_profile_candidate_row(
+            ranking_rows=ranking_rows,
+            profile_name=name,
+            threshold=threshold_by_name[name],
+        )
+        for name in _o_high_score_threshold_profile_names()
+    ]
+    selected = next(row for row in candidate_rows if row["profile_name"] == profile_name)
+    calibration = ranking_correction["high_score_calibration"]
+    calibration["selected_high_score_threshold_profile_name"] = profile_name
+    calibration["selected_high_score_threshold_profile"] = selected
+    calibration["high_score_threshold_profile_source"] = "shadow_split_only"
+    calibration["uses_validation_labels_for_threshold_tuning"] = False
+    calibration["source_model_gate_min_high_score_support_count"] = (
+        O_MIN_HIGH_SCORE_SUPPORT_COUNT
+    )
+    calibration["high_score_threshold_profile_candidates"] = candidate_rows
+    calibration["previous_high_score_threshold_before_profile"] = current_threshold
+    calibration["high_score_threshold"] = float(selected["threshold"])
+    calibration["high_score_threshold_source"] = selected["threshold_source"]
+    calibration["high_score_threshold_profile_config_hash"] = canonical_json_sha256(
+        {
+            "profile_name": profile_name,
+            "current_threshold": current_threshold,
+            "candidate_rows": candidate_rows,
+            "source_model_gate_min_high_score_support_count": (
+                O_MIN_HIGH_SCORE_SUPPORT_COUNT
+            ),
+            "uses_validation_labels_for_threshold_tuning": False,
+        }
+    )
+    ranking_correction["correction_config_hash"] = canonical_json_sha256(
+        _without_key(ranking_correction, "correction_config_hash")
+    )
+    return selected
+
+
+def _selected_score_return_rows(
+    rows: list[dict[str, Any]],
+    *,
+    variant: str,
+    split: str,
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row.get("split") == split:
+            groups[str(row["decision_group_id"])].append(row)
+    selected_rows = []
+    for group_rows in groups.values():
+        selected = max(
+            group_rows,
+            key=lambda row: float(row["variant_scores"][variant]),
+        )
+        selected_rows.append(
+            {
+                "decision_group_id": selected["decision_group_id"],
+                "market_id": selected.get("market_id"),
+                "decision_ts": selected.get("decision_ts"),
+                "action": selected.get("action"),
+                "score": float(selected["variant_scores"][variant]),
+                "realized_return": float(selected["realized_replay_return"]),
+            }
+        )
+    return selected_rows
+
+
+def _shadow_slightly_lower_high_score_threshold(
+    *,
+    current_threshold: float,
+    shadow_selected_rows: list[dict[str, Any]],
+    p_edge_q25: float,
+) -> float:
+    if not shadow_selected_rows:
+        return current_threshold
+    score_values = sorted(float(row["score"]) for row in shadow_selected_rows)
+    score_span = max(score_values) - min(score_values)
+    decrement = max(0.01, min(abs(p_edge_q25), score_span / 10.0))
+    return current_threshold - decrement
+
+
+def _shadow_support_preserving_high_score_threshold(
+    *,
+    current_threshold: float,
+    shadow_selected_rows: list[dict[str, Any]],
+) -> float:
+    if not shadow_selected_rows:
+        return current_threshold
+    current_support = sum(
+        1 for row in shadow_selected_rows if float(row["score"]) >= current_threshold
+    )
+    if current_support >= O_MIN_HIGH_SCORE_SUPPORT_COUNT:
+        return current_threshold
+    sorted_scores = sorted(
+        (float(row["score"]) for row in shadow_selected_rows),
+        reverse=True,
+    )
+    if len(sorted_scores) < O_MIN_HIGH_SCORE_SUPPORT_COUNT:
+        return min(sorted_scores)
+    return sorted_scores[O_MIN_HIGH_SCORE_SUPPORT_COUNT - 1]
+
+
+def _shadow_high_score_profitability_threshold(
+    *,
+    ranking_rows: list[dict[str, Any]],
+    current_threshold: float,
+    fallback_threshold: float,
+    extra_thresholds: tuple[float, ...],
+) -> float:
+    shadow_selected_rows = _selected_score_return_rows(
+        ranking_rows,
+        variant=O_MODEL_PREDICTED_VARIANT,
+        split="shadow",
+    )
+    candidate_thresholds = {
+        current_threshold,
+        fallback_threshold,
+        *extra_thresholds,
+        *(float(row["score"]) for row in shadow_selected_rows),
+    }
+    candidate_rows = [
+        _high_score_threshold_profile_candidate_row(
+            ranking_rows=ranking_rows,
+            profile_name="high_score_profitability_threshold_candidate",
+            threshold=threshold,
+        )
+        for threshold in candidate_thresholds
+    ]
+    eligible = [
+        row
+        for row in candidate_rows
+        if int(row["shadow_high_score_support_count"])
+        >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
+        and float(row["shadow_high_score_return_mean"]) > 0.0
+        and float(row["shadow_high_score_return_sum"]) > 0.0
+    ]
+    if not eligible:
+        return fallback_threshold
+    selected = max(
+        eligible,
+        key=lambda row: (
+            float(row["shadow_high_score_return_mean"]),
+            float(row["shadow_high_score_return_sum"]),
+            int(row["shadow_high_score_support_count"]),
+            float(row["threshold"]),
+        ),
+    )
+    return float(selected["threshold"])
+
+
+def _high_score_threshold_profile_candidate_row(
+    *,
+    ranking_rows: list[dict[str, Any]],
+    profile_name: str,
+    threshold: float,
+) -> dict[str, Any]:
+    metrics = _split_metric_views(
+        ranking_rows,
+        O_MODEL_PREDICTED_VARIANT,
+        float(threshold),
+    )["train_shadow"]
+    return {
+        "profile_name": profile_name,
+        "threshold": float(threshold),
+        "threshold_source": f"{profile_name}_shadow_split_only",
+        "uses_validation_labels_for_tuning": False,
+        "shadow_high_score_support_count": metrics["high_score_support_count"],
+        "shadow_high_score_support_deficit_to_source_gate": max(
+            0,
+            O_MIN_HIGH_SCORE_SUPPORT_COUNT
+            - int(metrics["high_score_support_count"]),
+        ),
+        "shadow_high_score_return_mean": metrics[
+            "high_score_realized_return_mean"
+        ],
+        "shadow_high_score_return_sum": metrics[
+            "high_score_realized_return_sum"
+        ],
+        "shadow_selected_return_sum": metrics[
+            "selected_action_realized_replay_return_sum"
+        ],
+        "shadow_mean_regret": metrics["mean_regret"],
+        "shadow_support_gate_passed": (
+            int(metrics["high_score_support_count"])
+            >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
+        ),
+        "shadow_high_score_return_positive": (
+            float(metrics["high_score_realized_return_mean"]) > 0.0
+            and float(metrics["high_score_realized_return_sum"]) > 0.0
+        ),
+    }
+
+
 def _apply_o_correction_policy_profile(
     ranking_correction: dict[str, Any],
     profile: dict[str, Any],
@@ -2148,10 +2527,12 @@ def _apply_o_correction_policy_profile(
 def _joint_candidate_name(
     feature_set_name: str,
     correction_policy_profile: dict[str, Any],
+    high_score_threshold_profile_name: str,
 ) -> str:
     return (
         f"{feature_set_name}__"
-        f"{correction_policy_profile['correction_policy_name']}"
+        f"{correction_policy_profile['correction_policy_name']}__"
+        f"{high_score_threshold_profile_name}"
     )
 
 
@@ -2159,6 +2540,7 @@ def _joint_feature_correction_candidate_row(
     *,
     feature_set_name: str,
     correction_policy_profile: dict[str, Any],
+    high_score_threshold_profile_name: str,
     scoring: dict[str, Any],
     baseline_largest_regret: float,
 ) -> dict[str, Any]:
@@ -2170,6 +2552,7 @@ def _joint_feature_correction_candidate_row(
     row["joint_candidate_name"] = _joint_candidate_name(
         feature_set_name,
         correction_policy_profile,
+        high_score_threshold_profile_name,
     )
     row["correction_policy_name"] = correction_policy_profile[
         "correction_policy_name"
@@ -2181,16 +2564,32 @@ def _joint_feature_correction_candidate_row(
     row["correction_policy_config_hash"] = scoring["ranking_correction"][
         "correction_config_hash"
     ]
+    row["high_score_threshold_profile_name"] = high_score_threshold_profile_name
+    row["high_score_threshold_profile"] = scoring["high_score_threshold_profile"]
+    row["high_score_threshold"] = scoring["high_score_threshold_profile"][
+        "threshold"
+    ]
     row["joint_candidate_config_hash"] = canonical_json_sha256(
         {
             "feature_set_name": feature_set_name,
             "feature_names": row["feature_names"],
             "correction_policy_profile": correction_policy_profile,
+            "high_score_threshold_profile_name": high_score_threshold_profile_name,
+            "high_score_threshold_profile": row["high_score_threshold_profile"],
             "correction_policy_config_hash": row["correction_policy_config_hash"],
         }
     )
     reason_codes = list(row["shadow_selection_reason_codes"])
     shadow_metrics = row["shadow_selection_metrics"]
+    support_deficit = max(
+        0,
+        O_MIN_HIGH_SCORE_SUPPORT_COUNT
+        - int(shadow_metrics["high_score_support_count"]),
+    )
+    row["shadow_source_gate_high_score_support_passed"] = support_deficit == 0
+    row["shadow_high_score_support_deficit_to_source_gate"] = support_deficit
+    if support_deficit:
+        reason_codes.append("shadow_high_score_support_below_source_gate_threshold")
     if not _action_family_selected_returns_not_negative(shadow_metrics):
         reason_codes.append("shadow_action_family_selected_return_negative")
     row["shadow_action_family_selected_returns_not_negative"] = (
@@ -2213,16 +2612,134 @@ def _action_family_selected_returns_not_negative(
     return all(float(value) >= 0.0 for value in family_returns.values())
 
 
-def _joint_selection_sort_key(row: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
+def _joint_selection_sort_key(
+    row: dict[str, Any],
+) -> tuple[float, float, float, float, float, float, float, float, float, float]:
     metrics = row["shadow_selection_metrics"]
+    support_deficit = int(row["shadow_high_score_support_deficit_to_source_gate"])
     return (
-        float(metrics["p_up_disagreement_rate"]),
+        float(support_deficit),
+        float(_joint_feature_set_priority(row)),
         float(metrics["mean_regret"]),
         float(metrics["largest_regret_value"]),
         -float(metrics["selected_return_sum"]),
+        -float(metrics["high_score_return_mean"]),
         -float(metrics["high_score_return_sum"]),
         -float(metrics["high_score_support_count"]),
+        float(metrics["p_up_disagreement_rate"]),
+        float(_joint_correction_policy_priority(row)),
     )
+
+
+def _joint_feature_set_priority(row: dict[str, Any]) -> int:
+    feature_set_name = str(row.get("feature_set_name") or "")
+    priority = {
+        "combined_features": 0,
+        "combined_minus_reference_distance": 1,
+        "book_pressure_features": 2,
+        "reference_price_features": 3,
+        "old_features_only": 4,
+    }
+    return priority.get(feature_set_name, 99)
+
+
+def _joint_correction_policy_priority(row: dict[str, Any]) -> int:
+    policy_name = str(row.get("correction_policy_name") or "")
+    priority = {
+        "sbc_preferred_when_hts_reliability_weak": 0,
+        "high_score_profitability_preserving": 1,
+        "balanced_hts_sbc": 2,
+        "no_trade_tail_risk_buffer": 3,
+        "conservative_hts": 4,
+    }
+    return priority.get(policy_name, 99)
+
+
+def _selected_full_correction_diagnostics(
+    *,
+    lightweight_row: dict[str, Any],
+    final_row: dict[str, Any],
+    acceptance: dict[str, Any],
+) -> dict[str, Any]:
+    lightweight_shadow = lightweight_row["shadow_selection_metrics"]
+    final_shadow = final_row["shadow_selection_metrics"]
+    lightweight_validation = lightweight_row["validation_metrics_report_only"]
+    final_validation = final_row["validation_metrics_report_only"]
+    return {
+        "full_correction_rerun_enabled": True,
+        "full_correction_search_source": "shadow_split_only",
+        "uses_validation_labels_for_tuning": False,
+        "accepted_for_final_scoring": acceptance["accepted_for_final_scoring"],
+        "acceptance_reason_codes": acceptance["reason_codes"],
+        "final_scoring_source": (
+            "full_shadow_correction_search"
+            if bool(acceptance["accepted_for_final_scoring"])
+            else "lightweight_preselection_shadow_ranker"
+        ),
+        "lightweight_preselection_joint_candidate_name": lightweight_row[
+            "joint_candidate_name"
+        ],
+        "final_full_correction_joint_candidate_name": final_row[
+            "joint_candidate_name"
+        ],
+        "shadow_mean_regret_delta_final_minus_lightweight": (
+            float(final_shadow["mean_regret"])
+            - float(lightweight_shadow["mean_regret"])
+        ),
+        "shadow_high_score_support_delta_final_minus_lightweight": (
+            int(final_shadow["high_score_support_count"])
+            - int(lightweight_shadow["high_score_support_count"])
+        ),
+        "shadow_high_score_return_sum_delta_final_minus_lightweight": (
+            float(final_shadow["high_score_return_sum"])
+            - float(lightweight_shadow["high_score_return_sum"])
+        ),
+        "validation_mean_regret_delta_final_minus_lightweight_report_only": (
+            float(final_validation["mean_regret"])
+            - float(lightweight_validation["mean_regret"])
+        ),
+        "validation_high_score_support_delta_final_minus_lightweight_report_only": (
+            int(final_validation["high_score_support_count"])
+            - int(lightweight_validation["high_score_support_count"])
+        ),
+        "validation_high_score_return_sum_delta_final_minus_lightweight_report_only": (
+            float(final_validation["high_score_return_sum"])
+            - float(lightweight_validation["high_score_return_sum"])
+        ),
+    }
+
+
+def _selected_full_correction_acceptance(
+    *,
+    lightweight_row: dict[str, Any],
+    final_row: dict[str, Any],
+) -> dict[str, Any]:
+    lightweight_shadow = lightweight_row["shadow_selection_metrics"]
+    final_shadow = final_row["shadow_selection_metrics"]
+    reason_codes = []
+    if (
+        int(final_shadow["high_score_support_count"])
+        < int(lightweight_shadow["high_score_support_count"])
+    ):
+        reason_codes.append("full_correction_reduced_shadow_high_score_support")
+    if float(final_shadow["high_score_return_mean"]) <= 0.0:
+        reason_codes.append("full_correction_shadow_high_score_mean_not_positive")
+    if float(final_shadow["high_score_return_sum"]) <= 0.0:
+        reason_codes.append("full_correction_shadow_high_score_sum_not_positive")
+    if not bool(final_shadow["p_up_hard_gate_passed"]):
+        reason_codes.append("full_correction_shadow_p_up_gate_failed")
+    if not _action_family_selected_returns_not_negative(final_shadow):
+        reason_codes.append("full_correction_shadow_action_family_return_negative")
+    return {
+        "accepted_for_final_scoring": not reason_codes,
+        "reason_codes": sorted(reason_codes),
+        "uses_validation_labels_for_tuning": False,
+        "acceptance_metric_source": "shadow_split_only",
+        "requires_shadow_high_score_support_not_reduced": True,
+        "requires_shadow_high_score_profitability_positive": True,
+        "requires_shadow_p_up_hard_gate_passed": True,
+        "requires_shadow_action_family_returns_non_negative": True,
+    }
 
 
 def _feature_set_candidate_summary_rows(
@@ -3220,6 +3737,9 @@ def _derive_shadow_raw_model_weight(
     max_shadow_p_up_disagreement_rate = float(
         base_ranking_correction["shadow_p_up_selection_max_disagreement_rate"]
     )
+    p_up_safety_target_disagreement_rate = float(
+        base_ranking_correction["p_up_safety_target_disagreement_rate"]
+    )
     candidate_rows = []
     for weight in candidate_weights:
         for penalty in candidate_penalties:
@@ -3281,7 +3801,21 @@ def _derive_shadow_raw_model_weight(
                                     "candidate_scoped_p_up_action_disagreement_rate"
                                 ]
                             )
-                            <= max_shadow_p_up_disagreement_rate
+                            <= O_MAX_P_UP_ACTION_DISAGREEMENT_RATE
+                        )
+                        p_up_safety_target_passed = (
+                            int(
+                                p_up_summary[
+                                    "candidate_scoped_p_up_action_comparable_count"
+                                ]
+                            )
+                            > 0
+                            and float(
+                                p_up_summary[
+                                    "candidate_scoped_p_up_action_disagreement_rate"
+                                ]
+                            )
+                            <= p_up_safety_target_disagreement_rate
                         )
                         selected_return_sum = float(
                             metrics["selected_action_realized_replay_return_sum"]
@@ -3326,6 +3860,9 @@ def _derive_shadow_raw_model_weight(
                                 "shadow_candidate_eligible": eligible,
                                 "shadow_high_score_profitable": high_score_profitable,
                                 "shadow_p_up_safety_passed": p_up_safety_passed,
+                                "shadow_p_up_safety_target_passed": (
+                                    p_up_safety_target_passed
+                                ),
                                 "shadow_selected_return_sum": selected_return_sum,
                                 "shadow_mean_regret": metrics["mean_regret"],
                                 "shadow_largest_regret_value": largest_regret,
@@ -3365,20 +3902,38 @@ def _derive_shadow_raw_model_weight(
         row for row in candidate_rows if bool(row["shadow_candidate_eligible"])
     ]
     if eligible_candidates:
-        selected = max(
-            eligible_candidates,
-            key=lambda row: (
-                float(row["shadow_selected_return_sum"]),
-                -float(row["shadow_mean_regret"]),
-                -float(row["shadow_largest_regret_value"]),
-                float(row["candidate_hts_p_up_reliability_penalty"]),
-                float(row["candidate_large_regret_reversal_penalty"]),
-                float(row["shadow_high_score_realized_return_sum"]),
-                int(row["shadow_high_score_support_count"]),
-                -float(row["shadow_p_up_action_disagreement_rate"]),
-                -float(row["candidate_p_up_misalignment_penalty"]),
-            ),
-        )
+        p_up_target_safe_candidates = [
+            row
+            for row in eligible_candidates
+            if bool(row["shadow_p_up_safety_target_passed"])
+        ]
+        if p_up_target_safe_candidates:
+            selected = max(
+                p_up_target_safe_candidates,
+                key=lambda row: (
+                    int(row["shadow_high_score_support_count"]),
+                    float(row["shadow_high_score_realized_return_sum"]),
+                    float(row["shadow_high_score_realized_return_mean"]),
+                    float(row["shadow_selected_return_sum"]),
+                    -float(row["shadow_mean_regret"]),
+                    -float(row["shadow_largest_regret_value"]),
+                    -float(row["shadow_p_up_action_disagreement_rate"]),
+                ),
+            )
+        else:
+            selected = min(
+                eligible_candidates,
+                key=lambda row: (
+                    float(row["shadow_p_up_action_disagreement_rate"]),
+                    float(row["shadow_mean_regret"]),
+                    -int(row["shadow_high_score_support_count"]),
+                    -float(row["shadow_high_score_realized_return_sum"]),
+                    -float(row["shadow_high_score_realized_return_mean"]),
+                    -float(row["shadow_selected_return_sum"]),
+                    float(row["shadow_largest_regret_value"]),
+                    -float(row["candidate_p_up_misalignment_penalty"]),
+                ),
+            )
     else:
         selected = max(
             candidate_rows,
@@ -3435,13 +3990,27 @@ def _derive_shadow_raw_model_weight(
         ),
         "raw_weight_selection_metric_source": "shadow_split_only",
         "raw_weight_selection_objective": (
-            "eligible candidates pass stricter p_up safety and positive high-score "
-            "return, then maximize shadow selected return while minimizing mean "
-            "regret and largest-regret action reversals"
+            "eligible candidates pass the hard p_up gate and positive high-score "
+            "return; when shadow candidates also pass the stricter p_up safety "
+            "target, the selector chooses lower shadow mean regret while preserving "
+            "source-gate high-score support; otherwise it chooses the lowest shadow "
+            "p_up disagreement candidate before regret and support"
         ),
+        "raw_weight_source_gate_high_score_support_threshold": (
+            O_MIN_HIGH_SCORE_SUPPORT_COUNT
+        ),
+        "raw_weight_p_up_safety_target_disagreement_rate": (
+            p_up_safety_target_disagreement_rate
+        ),
+        "raw_weight_prefers_p_up_safety_target_before_regret": True,
         "raw_weight_max_shadow_p_up_disagreement_rate": (
             max_shadow_p_up_disagreement_rate
         ),
+        "raw_weight_hard_gate_max_p_up_disagreement_rate": (
+            O_MAX_P_UP_ACTION_DISAGREEMENT_RATE
+        ),
+        "raw_weight_uses_hard_p_up_gate_for_candidate_eligibility": True,
+        "raw_weight_stricter_p_up_buffer_is_diagnostic": True,
         "raw_weight_p_up_safety_buffer": (
             O_MAX_P_UP_ACTION_DISAGREEMENT_RATE - max_shadow_p_up_disagreement_rate
         ),
@@ -4468,6 +5037,9 @@ def _ranking_report(
         "selected_correction_policy_name": model_training_summary[
             "selected_correction_policy_name"
         ],
+        "selected_high_score_threshold_profile_name": model_training_summary[
+            "selected_high_score_threshold_profile_name"
+        ],
         "selected_joint_candidate_name": model_training_summary[
             "selected_joint_candidate_name"
         ],
@@ -4570,6 +5142,9 @@ def _leakage_report(
         ],
         "selected_correction_policy_name": model_training_summary[
             "selected_correction_policy_name"
+        ],
+        "selected_high_score_threshold_profile_name": model_training_summary[
+            "selected_high_score_threshold_profile_name"
         ],
         "selected_joint_candidate_name": model_training_summary[
             "selected_joint_candidate_name"
@@ -4720,6 +5295,15 @@ def _compact_o_model_training_summary(
         ],
         "selected_feature_set_config_hash": model_training_summary[
             "selected_feature_set_config_hash"
+        ],
+        "selected_correction_policy_name": model_training_summary[
+            "selected_correction_policy_name"
+        ],
+        "selected_high_score_threshold_profile_name": model_training_summary[
+            "selected_high_score_threshold_profile_name"
+        ],
+        "selected_joint_candidate_name": model_training_summary[
+            "selected_joint_candidate_name"
         ],
         "feature_names": model_training_summary["feature_names"],
         "all_candidate_feature_names": model_training_summary[
