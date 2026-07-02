@@ -69,6 +69,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_V8_ACTION_RANK_HANDOFF_SCHEMA_VERSION,
     O_V8_EXECUTION_ALLOWED_ORDER_QUALITY_SCHEMA_VERSION,
     O_V8_EXECUTION_GUARD_BLOCK_ANALYSIS_SCHEMA_VERSION,
+    O_V8_EXECUTION_POLICY_READINESS_SCHEMA_VERSION,
     O_V8_EXECUTION_RISK_GUARD_SCHEMA_VERSION,
     O_V8_EXECUTION_RUNTIME_FIELD_COVERAGE_SCHEMA_VERSION,
     O_V8_EXECUTION_RUNTIME_STATE_SCHEMA_VERSION,
@@ -79,6 +80,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     _v8_execution_guard_block_analysis_report,
     _v8_execution_guard_config,
     _v8_execution_guard_decision,
+    _v8_execution_policy_readiness_report,
     _v8_execution_runtime_field_coverage_report,
     _v8_execution_simulated_runtime_reports,
     run_polymarket_o_replay_aligned_source_ranking,
@@ -3885,6 +3887,82 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert allowed_quality["paper_only"] is True
     assert allowed_quality["capital_at_risk"] is False
 
+    policy_readiness = result.v8_execution_policy_readiness_report
+    readiness_payload = dict(policy_readiness)
+    readiness_id = readiness_payload.pop(
+        "o_v8_execution_policy_readiness_report_id"
+    )
+    assert canonical_json_sha256(readiness_payload) == readiness_id
+    assert (
+        policy_readiness["schema_version"]
+        == O_V8_EXECUTION_POLICY_READINESS_SCHEMA_VERSION
+    )
+    assert (
+        policy_readiness["report_type"]
+        == "o_v8_execution_policy_readiness"
+    )
+    assert policy_readiness["diagnostic_only"] is True
+    assert policy_readiness["simulation_only"] is True
+    assert policy_readiness["uses_validation_outcomes_for_tuning"] is False
+    assert policy_readiness["thresholds_tuned"] is False
+    assert policy_readiness["mutates_o_model_predicted_score"] is False
+    assert policy_readiness["mutates_source_ranking_scores"] is False
+    assert policy_readiness["uses_realized_pnl_or_labels_for_analysis"] is False
+    assert policy_readiness["forbidden_outcome_fields_used"] == []
+    assert policy_readiness["simulated_order_replay_report_id"] == simulated_replay[
+        "o_v8_execution_simulated_order_replay_report_id"
+    ]
+    assert policy_readiness["allowed_order_quality_report_id"] == allowed_quality[
+        "o_v8_execution_allowed_order_quality_report_id"
+    ]
+    assert policy_readiness["allowed_order_count"] == allowed_quality[
+        "allowed_order_count"
+    ]
+    assert policy_readiness["blocked_decision_count"] == allowed_quality[
+        "blocked_decision_count"
+    ]
+    assert set(policy_readiness["execution_policy_readiness_required_checks"]) == {
+        "all_allowed_orders_original_or_safe_downgrade",
+        "all_allowed_orders_p_up_agreement",
+        "allowed_order_exposure_within_limits",
+        "allowed_order_microstructure_quality_passed",
+        "min_allowed_order_count",
+        "no_paper_live_write_or_capital_flags",
+        "zero_missing_runtime_fields",
+        "zero_provenance_violations",
+    }
+    assert all(
+        set(check) >= {"passed", "observed", "required", "reason_code"}
+        for check in policy_readiness[
+            "execution_policy_readiness_required_checks"
+        ].values()
+    )
+    expected_readiness_blockers = sorted(
+        check["reason_code"]
+        for check in policy_readiness[
+            "execution_policy_readiness_required_checks"
+        ].values()
+        if check["passed"] is not True
+    )
+    assert policy_readiness[
+        "execution_policy_readiness_blocking_reason_codes"
+    ] == expected_readiness_blockers
+    assert (
+        policy_readiness["execution_policy_readiness_diagnostic_passed"]
+        == (expected_readiness_blockers == [])
+    )
+    assert policy_readiness[
+        "future_explicit_execution_handoff_gate_required"
+    ] is True
+    assert policy_readiness["v8_execution_handoff_allowed"] is False
+    assert policy_readiness["source_model_candidate_eligible"] is False
+    assert policy_readiness["freeze_ready"] is False
+    assert policy_readiness["promotion_evidence_eligible"] is False
+    assert policy_readiness["#146_start_allowed"] is False
+    assert policy_readiness["#134_resume_allowed"] is False
+    assert policy_readiness["paper_only"] is True
+    assert policy_readiness["capital_at_risk"] is False
+
     block_analysis = result.v8_execution_guard_block_analysis_report
     block_payload = dict(block_analysis)
     block_id = block_payload.pop("o_v8_execution_guard_block_analysis_report_id")
@@ -4069,6 +4147,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     ].exists()
     assert result.artifact_paths["v8_execution_allowed_order_quality_report"].exists()
     assert result.artifact_paths["v8_execution_allowed_order_quality_summary"].exists()
+    assert result.artifact_paths["v8_execution_policy_readiness_report"].exists()
+    assert result.artifact_paths["v8_execution_policy_readiness_summary"].exists()
     assert result.artifact_paths["v8_execution_guard_block_analysis_report"].exists()
     assert result.artifact_paths["v8_execution_guard_block_analysis_summary"].exists()
     assert result.artifact_paths["v8_execution_runtime_field_coverage_report"].exists()
@@ -4099,6 +4179,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     )
     assert "v8_execution_allowed_order_quality_report" in manifest["artifact_hashes"]
     assert "v8_execution_allowed_order_quality_summary" in manifest["artifact_hashes"]
+    assert "v8_execution_policy_readiness_report" in manifest["artifact_hashes"]
+    assert "v8_execution_policy_readiness_summary" in manifest["artifact_hashes"]
     assert "v8_execution_guard_block_analysis_report" in manifest["artifact_hashes"]
     assert "v8_execution_guard_block_analysis_summary" in manifest["artifact_hashes"]
     assert "v8_execution_runtime_field_coverage_report" in manifest["artifact_hashes"]
@@ -4146,6 +4228,20 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert manifest["v8_execution_allowed_order_quality_recommendation_counts"] == (
         allowed_quality["deterministic_recommendation_counts"]
     )
+    assert manifest["v8_execution_policy_readiness_report_available"] is True
+    assert manifest["v8_execution_policy_readiness_report_id"] == (
+        policy_readiness["o_v8_execution_policy_readiness_report_id"]
+    )
+    assert manifest["v8_execution_policy_readiness_diagnostic_passed"] == (
+        policy_readiness["execution_policy_readiness_diagnostic_passed"]
+    )
+    assert manifest["v8_execution_policy_readiness_required_checks"] == (
+        policy_readiness["execution_policy_readiness_required_checks"]
+    )
+    assert manifest["v8_execution_policy_readiness_blocking_reason_codes"] == (
+        policy_readiness["execution_policy_readiness_blocking_reason_codes"]
+    )
+    assert manifest["future_explicit_execution_handoff_gate_required"] is True
     assert manifest["v8_execution_guard_block_analysis_report_available"] is True
     assert manifest["v8_execution_guard_block_analysis_report_id"] == block_analysis[
         "o_v8_execution_guard_block_analysis_report_id"
@@ -4966,6 +5062,211 @@ def test_o_v8_execution_allowed_order_quality_report_is_deterministic(
     assert report["#134_resume_allowed"] is False
     assert report["paper_only"] is True
     assert report["capital_at_risk"] is False
+
+
+def test_o_v8_execution_policy_readiness_passes_diagnostic_without_unlock(
+    tmp_path: Path,
+) -> None:
+    def _allowed_row(index: int) -> dict[str, Any]:
+        side = "UP" if index % 2 else "DOWN"
+        action = f"BUY_{side}_SELL_BEFORE_CLOSE"
+        post_total = index * 0.1
+        return {
+            "decision_group_id": f"source|market-{index}|{index}",
+            "market_id": f"market-{index}",
+            "decision_ts": index,
+            "source_selected_action": action,
+            "source_selected_family": "SELL_BEFORE_CLOSE",
+            "source_selected_side": side,
+            "source_model_score": 0.90,
+            "source_raw_model_score": 0.80,
+            "p_up": 0.70 if side == "UP" else 0.30,
+            "p_down": 0.30 if side == "UP" else 0.70,
+            "p_up_action_disagreement": False,
+            "microstructure_snapshot": {
+                "book_staleness_ms": 500.0,
+                "spread_bps": 200.0,
+                "queue_fill_proxy": 0.90,
+                "time_to_close_seconds": 180.0,
+            },
+            "runtime_field_backfill_provenance_violations": [],
+            "execution_guarded_action": action,
+            "execution_guarded_family": "SELL_BEFORE_CLOSE",
+            "execution_guarded_side": side,
+            "execution_guarded_score": 0.89,
+            "execution_score_penalties": {},
+            "order_allowed": True,
+            "proposed_order_size": 0.1,
+            "uncapped_proposed_order_size": 0.1,
+            "sizing_reason_codes": ["execution_base_size_applied"],
+            "exposure_reason_codes": ["execution_simulated_order_allowed"],
+            "execution_guard_reason_codes": [],
+            "execution_blocking_reason_codes": [],
+            "missing_runtime_field_codes": [],
+            "pre_decision_exposure_state": {
+                "current_total_exposure": post_total - 0.1,
+                "current_market_exposure_by_market_id": {},
+                "current_side_exposure_by_side": {"DOWN": 0.0, "UP": 0.0},
+                "executed_simulated_order_count": index - 1,
+                "blocked_simulated_order_count": 0,
+            },
+            "post_decision_exposure_state": {
+                "current_total_exposure": post_total,
+                "current_market_exposure_by_market_id": {f"market-{index}": 0.1},
+                "current_side_exposure_by_side": {"DOWN": 0.1, "UP": 0.1},
+                "executed_simulated_order_count": index,
+                "blocked_simulated_order_count": 0,
+            },
+            "exposure_delta": 0.1,
+            "simulated_order_id": f"sim-v8-o-{index:06d}",
+            "source_score_mutated": False,
+            "o_model_predicted_score_mutated": False,
+        }
+
+    m2_report_path = tmp_path / "m2.json"
+    m2_report = {"m2_stateful_replay_parity_candidate_report_id": "m2-test"}
+    m2_report_path.write_text(json.dumps(m2_report, sort_keys=True), encoding="utf-8")
+    replay_report = {
+        "o_v8_execution_simulated_order_replay_report_id": "replay-test",
+        "simulated_decision_rows": [_allowed_row(index) for index in range(1, 6)],
+    }
+    allowed_quality = _v8_execution_allowed_order_quality_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        simulated_order_replay_report=replay_report,
+    )
+
+    report = _v8_execution_policy_readiness_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        simulated_order_replay_report=replay_report,
+        allowed_order_quality_report=allowed_quality,
+    )
+
+    payload = dict(report)
+    report_id = payload.pop("o_v8_execution_policy_readiness_report_id")
+    assert canonical_json_sha256(payload) == report_id
+    assert report["schema_version"] == O_V8_EXECUTION_POLICY_READINESS_SCHEMA_VERSION
+    assert report["execution_policy_readiness_diagnostic_passed"] is True
+    assert report["execution_policy_readiness_blocking_reason_codes"] == []
+    assert all(
+        check["passed"] is True
+        for check in report["execution_policy_readiness_required_checks"].values()
+    )
+    assert report["future_explicit_execution_handoff_gate_required"] is True
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["freeze_ready"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["#146_start_allowed"] is False
+    assert report["#134_resume_allowed"] is False
+    assert report["paper_only"] is True
+    assert report["capital_at_risk"] is False
+
+
+def test_o_v8_execution_policy_readiness_fails_closed_on_quality_gaps(
+    tmp_path: Path,
+) -> None:
+    def _allowed_row(index: int) -> dict[str, Any]:
+        return {
+            "decision_group_id": f"source|market-{index}|{index}",
+            "market_id": f"market-{index}",
+            "decision_ts": index,
+            "source_selected_action": "BUY_UP_HOLD_TO_SETTLEMENT",
+            "source_selected_family": "HOLD_TO_SETTLEMENT",
+            "source_selected_side": "UP",
+            "source_model_score": 0.90,
+            "source_raw_model_score": 0.80,
+            "p_up": 0.30 if index == 1 else 0.70,
+            "p_down": 0.70 if index == 1 else 0.30,
+            "p_up_action_disagreement": index == 1,
+            "microstructure_snapshot": {
+                "book_staleness_ms": 2500.0 if index == 2 else 500.0,
+                "spread_bps": 1200.0 if index == 2 else 200.0,
+                "queue_fill_proxy": 0.40 if index == 2 else 0.90,
+                "time_to_close_seconds": 30.0 if index == 2 else 180.0,
+            },
+            "runtime_field_backfill_provenance_violations": [
+                {"field": "microstructure_snapshot.time_to_close_seconds"}
+            ]
+            if index == 3
+            else [],
+            "execution_guarded_action": "BUY_UP_HOLD_TO_SETTLEMENT",
+            "execution_guarded_family": "HOLD_TO_SETTLEMENT",
+            "execution_guarded_side": "UP",
+            "execution_guarded_score": 0.89,
+            "execution_score_penalties": {},
+            "order_allowed": True,
+            "proposed_order_size": 0.3 if index == 4 else 0.1,
+            "uncapped_proposed_order_size": 0.3 if index == 4 else 0.1,
+            "sizing_reason_codes": ["execution_base_size_applied"],
+            "exposure_reason_codes": ["execution_simulated_order_allowed"],
+            "execution_guard_reason_codes": [],
+            "execution_blocking_reason_codes": [],
+            "missing_runtime_field_codes": ["missing_selected_side"]
+            if index == 3
+            else [],
+            "pre_decision_exposure_state": {
+                "current_total_exposure": 0.0,
+                "current_market_exposure_by_market_id": {},
+                "current_side_exposure_by_side": {"UP": 0.0},
+                "executed_simulated_order_count": 0,
+                "blocked_simulated_order_count": 0,
+            },
+            "post_decision_exposure_state": {
+                "current_total_exposure": 1.2 if index == 4 else 0.1,
+                "current_market_exposure_by_market_id": {f"market-{index}": 0.3},
+                "current_side_exposure_by_side": {"UP": 1.2}
+                if index == 4
+                else {"UP": 0.1},
+                "executed_simulated_order_count": index,
+                "blocked_simulated_order_count": 0,
+            },
+            "exposure_delta": 0.3 if index == 4 else 0.1,
+            "simulated_order_id": f"sim-v8-o-{index:06d}",
+            "source_score_mutated": False,
+            "o_model_predicted_score_mutated": False,
+        }
+
+    m2_report_path = tmp_path / "m2.json"
+    m2_report = {"m2_stateful_replay_parity_candidate_report_id": "m2-test"}
+    m2_report_path.write_text(json.dumps(m2_report, sort_keys=True), encoding="utf-8")
+    replay_report = {
+        "o_v8_execution_simulated_order_replay_report_id": "replay-test",
+        "simulated_decision_rows": [_allowed_row(index) for index in range(1, 5)],
+    }
+    allowed_quality = _v8_execution_allowed_order_quality_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        simulated_order_replay_report=replay_report,
+    )
+
+    report = _v8_execution_policy_readiness_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        simulated_order_replay_report=replay_report,
+        allowed_order_quality_report=allowed_quality,
+    )
+
+    assert report["execution_policy_readiness_diagnostic_passed"] is False
+    assert set(report["execution_policy_readiness_blocking_reason_codes"]) >= {
+        "execution_policy_allowed_order_exposure_limit_failed",
+        "execution_policy_allowed_order_microstructure_quality_failed",
+        "execution_policy_allowed_order_p_up_disagreement_present",
+        "execution_policy_min_allowed_order_count_not_met",
+        "execution_policy_provenance_violations_present",
+        "execution_policy_runtime_missing_fields_present",
+    }
+    assert report["execution_policy_readiness_required_checks"][
+        "no_paper_live_write_or_capital_flags"
+    ]["passed"] is True
+    assert report["future_explicit_execution_handoff_gate_required"] is True
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["freeze_ready"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["#146_start_allowed"] is False
+    assert report["#134_resume_allowed"] is False
 
 
 def test_o_v8_execution_guard_block_analysis_classifies_safe_order_discovery(
