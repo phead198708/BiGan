@@ -77,6 +77,9 @@ O_V8_EXECUTION_RUNTIME_STATE_SCHEMA_VERSION = (
 O_V8_EXECUTION_SIMULATED_ORDER_REPLAY_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-execution-simulated-order-replay-v1"
 )
+O_V8_EXECUTION_GUARD_BLOCK_ANALYSIS_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-execution-guard-block-analysis-v1"
+)
 O_TRAINING_LABEL_FIELDS = (
     "action_return_target",
     "label_pnl_target",
@@ -292,6 +295,7 @@ class PolymarketOReplayAlignedSourceRankingResult:
     v8_execution_risk_guard_report: dict[str, Any]
     v8_execution_runtime_state_report: dict[str, Any]
     v8_execution_simulated_order_replay_report: dict[str, Any]
+    v8_execution_guard_block_analysis_report: dict[str, Any]
     artifact_paths: dict[str, Path]
 
 
@@ -355,6 +359,10 @@ def run_polymarket_o_replay_aligned_source_ranking(
         / "o_v8_execution_simulated_order_replay_report.json",
         "v8_execution_simulated_order_replay_summary": run_dir
         / "o_v8_execution_simulated_order_replay_report.md",
+        "v8_execution_guard_block_analysis_report": run_dir
+        / "o_v8_execution_guard_block_analysis_report.json",
+        "v8_execution_guard_block_analysis_summary": run_dir
+        / "o_v8_execution_guard_block_analysis_report.md",
         "manifest": run_dir / "o_replay_aligned_source_ranking_manifest.json",
     }
     reports = _build_reports(config=config)
@@ -431,6 +439,14 @@ def run_polymarket_o_replay_aligned_source_ranking(
         _v8_execution_simulated_order_replay_markdown(reports[12]),
         encoding="utf-8",
     )
+    _write_json(
+        artifact_paths["v8_execution_guard_block_analysis_report"],
+        reports[13],
+    )
+    artifact_paths["v8_execution_guard_block_analysis_summary"].write_text(
+        _v8_execution_guard_block_analysis_markdown(reports[13]),
+        encoding="utf-8",
+    )
     manifest = {
         "schema_version": "bigan-v8-polymarket-o-replay-aligned-source-ranking-artifacts-v1",
         "run_id": config.run_id,
@@ -484,6 +500,19 @@ def run_polymarket_o_replay_aligned_source_ranking(
         "v8_execution_simulated_runtime_risk_control_validation_passed": reports[12][
             "runtime_risk_control_validation_passed"
         ],
+        "v8_execution_guard_block_analysis_report_available": True,
+        "v8_execution_guard_block_analysis_report_id": reports[13][
+            "o_v8_execution_guard_block_analysis_report_id"
+        ],
+        "v8_execution_guard_block_analysis_safe_order_candidate_count": reports[13][
+            "safe_order_discovery_summary"
+        ]["safe_order_candidate_count"],
+        "v8_execution_guard_block_analysis_fundamentally_unsafe_count": reports[13][
+            "safe_order_discovery_summary"
+        ]["fundamentally_unsafe_count"],
+        "v8_execution_guard_block_analysis_primary_blocker_categories": reports[13][
+            "primary_blocker_categories"
+        ],
         "model_layer_regret_risk_selection_deferred_to_issue": "#158",
         "large_regret_risk_model_report_available": False,
         "selective_action_guard_report_available": False,
@@ -510,6 +539,8 @@ def run_polymarket_o_replay_aligned_source_ranking(
         "strict_source_gate_remains_failed": reports[9][
             "strict_source_gate_remains_failed"
         ],
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
         "#134_resume_allowed": False,
         "#146_start_allowed": False,
         "promotion_evidence_eligible": False,
@@ -532,6 +563,7 @@ def run_polymarket_o_replay_aligned_source_ranking(
         v8_execution_risk_guard_report=reports[10],
         v8_execution_runtime_state_report=reports[11],
         v8_execution_simulated_order_replay_report=reports[12],
+        v8_execution_guard_block_analysis_report=reports[13],
         artifact_paths=artifact_paths,
     )
 
@@ -663,6 +695,16 @@ def _build_reports(
         handoff_report=v8_action_rank_handoff_report,
         execution_guard_report=v8_execution_risk_guard_report,
     )
+    v8_execution_guard_block_analysis_report = (
+        _v8_execution_guard_block_analysis_report(
+            m2_report_path=m2_report_path,
+            m2_report=m2_report,
+            handoff_report=v8_action_rank_handoff_report,
+            execution_guard_report=v8_execution_risk_guard_report,
+            runtime_state_report=v8_execution_runtime_state_report,
+            simulated_order_replay_report=v8_execution_simulated_order_replay_report,
+        )
+    )
     return (
         label_report,
         ranking_report,
@@ -677,6 +719,7 @@ def _build_reports(
         v8_execution_risk_guard_report,
         v8_execution_runtime_state_report,
         v8_execution_simulated_order_replay_report,
+        v8_execution_guard_block_analysis_report,
     )
 
 
@@ -6442,6 +6485,14 @@ def _v8_execution_guard_decision(
         "source_model_score": source_score,
         "source_raw_model_score": row.get("raw_model_score"),
         "source_high_score_flag": bool(row.get("high_score_flag")),
+        "p_up": row.get("p_up"),
+        "p_down": row.get("p_down"),
+        "p_up_action_disagreement": row.get("p_up_action_disagreement"),
+        "microstructure_snapshot": microstructure,
+        "reference_price_feature_provenance": reference_provenance,
+        "decision_time_feature_max_input_ts": row.get(
+            "decision_time_feature_max_input_ts"
+        ),
         "top_k_action_ranking": [
             _v8_execution_top_k_action_entry(candidate)
             for candidate in full_ranking[:5]
@@ -6942,6 +6993,412 @@ def _v8_execution_simulated_order_replay_report(
         canonical_json_sha256(report)
     )
     return report
+
+
+def _v8_execution_guard_block_analysis_report(
+    *,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    handoff_report: dict[str, Any],
+    execution_guard_report: dict[str, Any],
+    runtime_state_report: dict[str, Any],
+    simulated_order_replay_report: dict[str, Any],
+) -> dict[str, Any]:
+    replay_rows = list(simulated_order_replay_report.get("simulated_decision_rows") or [])
+    blocked_rows = [row for row in replay_rows if row.get("order_allowed") is not True]
+    analysis_rows = [_v8_execution_block_analysis_row(row) for row in blocked_rows]
+    category_counts = Counter(
+        category
+        for row in analysis_rows
+        for category in row["minimal_blocking_set"]["blocker_categories"]
+    )
+    discovery_counts = Counter(
+        row["safe_order_discovery_classification"] for row in analysis_rows
+    )
+    safe_order_candidate_classifications = {
+        "blocked_only_by_missing_runtime_fields",
+        "blocked_only_by_configurable_thresholds",
+        "would_pass_if_sbc_fallback_selected",
+    }
+    safe_order_candidate_count = sum(
+        count
+        for classification, count in discovery_counts.items()
+        if classification in safe_order_candidate_classifications
+    )
+    fundamentally_unsafe_count = discovery_counts.get("fundamentally_unsafe", 0)
+    why_zero = []
+    if simulated_order_replay_report.get("simulated_allowed_order_count") == 0:
+        why_zero = [
+            "all_replay_decisions_blocked_by_execution_guard",
+            *[
+                f"primary_blocker_category:{category}"
+                for category, _ in category_counts.most_common(3)
+            ],
+        ]
+    report = {
+        "schema_version": O_V8_EXECUTION_GUARD_BLOCK_ANALYSIS_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "source_lineage": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "report_type": "o_v8_execution_guard_block_analysis",
+        "diagnostic_only": True,
+        "simulation_only": True,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "source_action_rank_signal_report_id": handoff_report[
+            "o_v8_action_rank_handoff_report_id"
+        ],
+        "execution_guard_report_id": execution_guard_report[
+            "o_v8_execution_risk_guard_report_id"
+        ],
+        "runtime_state_report_id": runtime_state_report[
+            "o_v8_execution_runtime_state_report_id"
+        ],
+        "simulated_order_replay_report_id": simulated_order_replay_report[
+            "o_v8_execution_simulated_order_replay_report_id"
+        ],
+        "analysis_source": "simulated_order_replay_rows_only",
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        "safe_order_discovery_uses_realized_pnl": False,
+        "execution_guard_config_hash": canonical_json_sha256(
+            _v8_execution_guard_config()
+        ),
+        "decision_count": len(replay_rows),
+        "blocked_decision_count": len(blocked_rows),
+        "allowed_decision_count": sum(
+            1 for row in replay_rows if row.get("order_allowed") is True
+        ),
+        "why_simulated_allowed_order_count_zero": why_zero,
+        "primary_blocker_categories": [
+            category for category, _ in category_counts.most_common(5)
+        ],
+        "block_reason_category_counts": dict(sorted(category_counts.items())),
+        "block_reason_summary_by_action": _v8_block_reason_summary_by(
+            analysis_rows,
+            "source_selected_action",
+        ),
+        "block_reason_summary_by_family": _v8_block_reason_summary_by(
+            analysis_rows,
+            "source_selected_family",
+        ),
+        "block_reason_summary_by_side": _v8_block_reason_summary_by(
+            analysis_rows,
+            "source_selected_side",
+        ),
+        "block_reason_summary_by_market": _v8_block_reason_summary_by(
+            analysis_rows,
+            "market_id",
+        ),
+        "block_reason_summary_by_time_to_close_bucket": _v8_block_reason_summary_by(
+            analysis_rows,
+            "time_to_close_bucket",
+        ),
+        "safe_order_discovery_summary": {
+            "safe_order_candidate_count": safe_order_candidate_count,
+            "blocked_only_by_missing_runtime_fields_count": discovery_counts.get(
+                "blocked_only_by_missing_runtime_fields",
+                0,
+            ),
+            "blocked_only_by_configurable_thresholds_count": discovery_counts.get(
+                "blocked_only_by_configurable_thresholds",
+                0,
+            ),
+            "would_pass_if_sbc_fallback_selected_count": discovery_counts.get(
+                "would_pass_if_sbc_fallback_selected",
+                0,
+            ),
+            "fundamentally_unsafe_count": fundamentally_unsafe_count,
+            "classification_counts": dict(sorted(discovery_counts.items())),
+        },
+        "blocked_decision_analysis_rows": analysis_rows,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "no_paper_live_unlock_from_block_analysis": True,
+        "no_source_freeze_unlock_from_block_analysis": True,
+        **compact_safety_fields(),
+    }
+    report["o_v8_execution_guard_block_analysis_report_id"] = (
+        canonical_json_sha256(report)
+    )
+    return report
+
+
+def _v8_execution_block_analysis_row(row: dict[str, Any]) -> dict[str, Any]:
+    minimal_blocking_set = _v8_minimal_blocking_set(row)
+    discovery = _v8_safe_order_discovery(row, minimal_blocking_set)
+    return {
+        "decision_group_id": row.get("decision_group_id"),
+        "market_id": row.get("market_id"),
+        "decision_ts": row.get("decision_ts"),
+        "source_selected_action": row.get("source_selected_action"),
+        "source_selected_family": row.get("source_selected_family"),
+        "source_selected_side": row.get("source_selected_side"),
+        "execution_guarded_action": row.get("execution_guarded_action"),
+        "execution_guarded_family": row.get("execution_guarded_family"),
+        "execution_guarded_side": row.get("execution_guarded_side"),
+        "source_model_score": row.get("source_model_score"),
+        "execution_guarded_score": row.get("execution_guarded_score"),
+        "order_allowed": bool(row.get("order_allowed")),
+        "proposed_order_size": row.get("proposed_order_size"),
+        "execution_blocking_reason_codes": list(
+            row.get("execution_blocking_reason_codes") or []
+        ),
+        "execution_guard_reason_codes": list(
+            row.get("execution_guard_reason_codes") or []
+        ),
+        "exposure_reason_codes": list(row.get("exposure_reason_codes") or []),
+        "missing_runtime_field_codes": list(
+            row.get("missing_runtime_field_codes") or []
+        ),
+        "time_to_close_seconds": _v8_row_time_to_close_seconds(row),
+        "time_to_close_bucket": _v8_time_to_close_bucket_from_decision(row),
+        "p_up_action_disagreement": bool(row.get("p_up_action_disagreement")),
+        "minimal_blocking_set": minimal_blocking_set,
+        "safe_order_discovery_classification": discovery["classification"],
+        "safe_order_discovery_reason_codes": discovery["reason_codes"],
+        "source_score_mutated": bool(row.get("source_score_mutated")),
+        "o_model_predicted_score_mutated": bool(
+            row.get("o_model_predicted_score_mutated")
+        ),
+    }
+
+
+def _v8_minimal_blocking_set(row: dict[str, Any]) -> dict[str, Any]:
+    blocking_reasons = sorted(set(row.get("execution_blocking_reason_codes") or []))
+    guard_reasons = sorted(set(row.get("execution_guard_reason_codes") or []))
+    exposure_reasons = sorted(set(row.get("exposure_reason_codes") or []))
+    missing_fields = sorted(set(row.get("missing_runtime_field_codes") or []))
+    categorized: dict[str, list[str]] = {
+        "missing_fields": missing_fields,
+        "p_up_disagreement": [],
+        "time_to_close": [],
+        "spread_staleness_queue": [],
+        "hts_guard_failure": [],
+        "exposure_limits": [],
+        "score_margin": [],
+        "no_trade": [],
+        "other": [],
+    }
+    for reason in [*blocking_reasons, *guard_reasons, *exposure_reasons]:
+        category = _v8_blocking_category(reason)
+        if category == "missing_runtime_fields":
+            categorized["missing_fields"].append(reason)
+        elif category == "p_up_disagreement":
+            categorized["p_up_disagreement"].append(reason)
+        elif category == "time_to_close":
+            categorized["time_to_close"].append(reason)
+        elif category in {"spread", "staleness", "liquidity"}:
+            categorized["spread_staleness_queue"].append(reason)
+        elif category == "hts_guard_failure":
+            categorized["hts_guard_failure"].append(reason)
+        elif category == "exposure_limits":
+            categorized["exposure_limits"].append(reason)
+        elif category == "score_margin":
+            categorized["score_margin"].append(reason)
+        elif category == "no_trade":
+            categorized["no_trade"].append(reason)
+        elif category not in {"allowed", "simulation"}:
+            categorized["other"].append(reason)
+    categorized = {
+        key: sorted(set(values))
+        for key, values in categorized.items()
+    }
+    blocker_categories = sorted(
+        {
+            key
+            for key, values in categorized.items()
+            if values
+            and key
+            not in {
+                "score_margin",
+                "no_trade",
+            }
+        }
+    )
+    return {
+        **categorized,
+        "blocker_categories": blocker_categories,
+        "blocking_reason_codes": blocking_reasons,
+        "guard_reason_codes": guard_reasons,
+        "exposure_reason_codes": exposure_reasons,
+    }
+
+
+def _v8_safe_order_discovery(
+    row: dict[str, Any],
+    minimal_blocking_set: dict[str, Any],
+) -> dict[str, Any]:
+    if row.get("source_selected_action") == "NO_TRADE":
+        return {
+            "classification": "no_trade_not_order_candidate",
+            "reason_codes": ["source_selected_no_trade_has_no_safe_order_path"],
+        }
+    categories = set(minimal_blocking_set.get("blocker_categories") or [])
+    root_categories = set(categories)
+    if "missing_fields" in root_categories:
+        root_categories.discard("hts_guard_failure")
+    if root_categories.intersection({"time_to_close", "spread_staleness_queue"}):
+        root_categories.discard("hts_guard_failure")
+    if not categories:
+        return {
+            "classification": "not_blocked_or_no_trade",
+            "reason_codes": ["no_minimal_blocking_categories"],
+        }
+    if root_categories == {"missing_fields"}:
+        return {
+            "classification": "blocked_only_by_missing_runtime_fields",
+            "reason_codes": ["safe_order_requires_runtime_field_backfill"],
+        }
+    threshold_categories = {"time_to_close", "spread_staleness_queue", "score_margin"}
+    if root_categories.issubset(threshold_categories):
+        return {
+            "classification": "blocked_only_by_configurable_thresholds",
+            "reason_codes": ["safe_order_requires_threshold_policy_review"],
+        }
+    if (
+        "hts_guard_failure" in categories
+        and "p_up_disagreement" not in categories
+        and "exposure_limits" not in categories
+        and "missing_fields" not in categories
+    ):
+        return {
+            "classification": "would_pass_if_sbc_fallback_selected",
+            "reason_codes": ["safe_order_requires_same_side_sbc_fallback_available"],
+        }
+    if categories.intersection({"p_up_disagreement", "exposure_limits"}):
+        return {
+            "classification": "fundamentally_unsafe",
+            "reason_codes": sorted(
+                {
+                    "unsafe_due_to_p_up_disagreement"
+                    if "p_up_disagreement" in categories
+                    else "",
+                    "unsafe_due_to_exposure_limit_or_position_conflict"
+                    if "exposure_limits" in categories
+                    else "",
+                }
+                - {""}
+            ),
+        }
+    return {
+        "classification": "mixed_blockers_require_data_and_policy_review",
+        "reason_codes": sorted(f"blocker_category:{category}" for category in categories),
+    }
+
+
+def _v8_blocking_category(reason: str) -> str:
+    if reason.startswith("missing_") or reason in {
+        "execution_required_runtime_fields_missing",
+        "execution_exposure_state_missing",
+    }:
+        return "missing_runtime_fields"
+    if reason == "execution_p_up_side_disagreement":
+        return "p_up_disagreement"
+    if reason == "execution_time_to_close_unsafe":
+        return "time_to_close"
+    if reason == "execution_spread_too_wide":
+        return "spread"
+    if reason == "execution_book_stale":
+        return "staleness"
+    if reason == "execution_liquidity_too_weak":
+        return "liquidity"
+    if reason.startswith("execution_hts_"):
+        return "hts_guard_failure"
+    if reason in {
+        "execution_duplicate_market_side_position",
+        "execution_opposite_side_conflict",
+        "execution_total_exposure_limit_reached",
+        "execution_market_exposure_limit_reached",
+        "execution_side_exposure_limit_reached",
+        "execution_cooldown_active",
+        "execution_order_size_capped_by_exposure_limit",
+        "execution_order_size_capped_by_max_order_size",
+    }:
+        return "exposure_limits"
+    if reason == "execution_score_margin_too_close":
+        return "score_margin"
+    if reason in {
+        "execution_no_trade_selected",
+        "execution_no_order_for_no_trade",
+        "execution_no_exposure_delta_for_no_trade",
+    }:
+        return "no_trade"
+    if reason in {
+        "execution_simulated_order_allowed",
+        "execution_simulated_runtime_state_valid",
+    }:
+        return "allowed"
+    if reason == "execution_simulated_order_blocked":
+        return "simulation"
+    return "other"
+
+
+def _v8_block_reason_summary_by(
+    rows: list[dict[str, Any]],
+    field_name: str,
+) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row.get(field_name) or "UNKNOWN")].append(row)
+    summary = {}
+    for value, group_rows in sorted(grouped.items()):
+        category_counts = Counter(
+            category
+            for row in group_rows
+            for category in row["minimal_blocking_set"]["blocker_categories"]
+        )
+        reason_counts = Counter(
+            reason
+            for row in group_rows
+            for reason in row["execution_blocking_reason_codes"]
+        )
+        summary[value] = {
+            "blocked_decision_count": len(group_rows),
+            "blocker_category_counts": dict(sorted(category_counts.items())),
+            "blocking_reason_counts": dict(sorted(reason_counts.items())),
+        }
+    return summary
+
+
+def _v8_row_time_to_close_seconds(row: dict[str, Any]) -> float | None:
+    runtime_limits = dict(row.get("runtime_limits") or {})
+    top_k = list(row.get("top_k_action_ranking") or [])
+    for candidate in top_k:
+        microstructure = dict(candidate.get("microstructure_snapshot") or {})
+        value = _optional_float(microstructure.get("time_to_close_seconds"))
+        if value is not None:
+            return value
+    microstructure = dict(row.get("microstructure_snapshot") or {})
+    value = _optional_float(microstructure.get("time_to_close_seconds"))
+    if value is not None:
+        return value
+    return _optional_float(runtime_limits.get("time_to_close_seconds"))
+
+
+def _v8_time_to_close_bucket_from_decision(row: dict[str, Any]) -> str:
+    value = _v8_row_time_to_close_seconds(row)
+    if value is None:
+        return "missing"
+    if value < 30:
+        return "lt_30s"
+    if value < 60:
+        return "30s_to_60s"
+    if value < 120:
+        return "60s_to_120s"
+    if value < 240:
+        return "120s_to_240s"
+    return "gte_240s"
 
 
 def _v8_runtime_order_summary(row: dict[str, Any]) -> dict[str, Any]:
@@ -10944,6 +11401,45 @@ def _v8_execution_simulated_order_replay_markdown(report: dict[str, Any]) -> str
             "- exposure_reason_distribution: "
             f"`{report['exposure_reason_distribution']}`",
             f"- deterministic_replay_hash: `{report['deterministic_replay_hash']}`",
+            f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+            f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+            "",
+        ]
+    )
+
+
+def _v8_execution_guard_block_analysis_markdown(report: dict[str, Any]) -> str:
+    discovery = report["safe_order_discovery_summary"]
+    return "\n".join(
+        [
+            "# O v8 Execution Guard Block Analysis",
+            "",
+            f"- diagnostic_only: `{str(report['diagnostic_only']).lower()}`",
+            f"- simulation_only: `{str(report['simulation_only']).lower()}`",
+            "- uses_validation_outcomes_for_tuning: "
+            f"`{str(report['uses_validation_outcomes_for_tuning']).lower()}`",
+            f"- thresholds_tuned: `{str(report['thresholds_tuned']).lower()}`",
+            "- mutates_o_model_predicted_score: "
+            f"`{str(report['mutates_o_model_predicted_score']).lower()}`",
+            f"- decision_count: `{report['decision_count']}`",
+            f"- blocked_decision_count: `{report['blocked_decision_count']}`",
+            f"- allowed_decision_count: `{report['allowed_decision_count']}`",
+            "- primary_blocker_categories: "
+            f"`{report['primary_blocker_categories']}`",
+            "- safe_order_candidate_count: "
+            f"`{discovery['safe_order_candidate_count']}`",
+            "- blocked_only_by_missing_runtime_fields_count: "
+            f"`{discovery['blocked_only_by_missing_runtime_fields_count']}`",
+            "- blocked_only_by_configurable_thresholds_count: "
+            f"`{discovery['blocked_only_by_configurable_thresholds_count']}`",
+            "- would_pass_if_sbc_fallback_selected_count: "
+            f"`{discovery['would_pass_if_sbc_fallback_selected_count']}`",
+            "- fundamentally_unsafe_count: "
+            f"`{discovery['fundamentally_unsafe_count']}`",
+            "- why_simulated_allowed_order_count_zero: "
+            f"`{report['why_simulated_allowed_order_count_zero']}`",
+            "- v8_execution_handoff_allowed: "
+            f"`{str(report['v8_execution_handoff_allowed']).lower()}`",
             f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
             f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
             "",

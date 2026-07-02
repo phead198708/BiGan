@@ -67,11 +67,13 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_SOURCE_MODEL_ELIGIBILITY_GATE_SCHEMA_VERSION,
     O_SOURCE_RANKING_OBJECTIVE_SCHEMA_VERSION,
     O_V8_ACTION_RANK_HANDOFF_SCHEMA_VERSION,
+    O_V8_EXECUTION_GUARD_BLOCK_ANALYSIS_SCHEMA_VERSION,
     O_V8_EXECUTION_RISK_GUARD_SCHEMA_VERSION,
     O_V8_EXECUTION_RUNTIME_STATE_SCHEMA_VERSION,
     O_V8_EXECUTION_SIMULATED_ORDER_REPLAY_SCHEMA_VERSION,
     PolymarketOReplayAlignedSourceRankingConfig,
     _o_relaxed_diagnostic_gate_status,
+    _v8_execution_guard_block_analysis_report,
     _v8_execution_guard_config,
     _v8_execution_guard_decision,
     _v8_execution_simulated_runtime_reports,
@@ -3766,6 +3768,66 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         else:
             assert row["simulated_order_id"] is None
             assert row["exposure_delta"] == 0.0
+
+    block_analysis = result.v8_execution_guard_block_analysis_report
+    block_payload = dict(block_analysis)
+    block_id = block_payload.pop("o_v8_execution_guard_block_analysis_report_id")
+    assert canonical_json_sha256(block_payload) == block_id
+    assert (
+        block_analysis["schema_version"]
+        == O_V8_EXECUTION_GUARD_BLOCK_ANALYSIS_SCHEMA_VERSION
+    )
+    assert block_analysis["report_type"] == "o_v8_execution_guard_block_analysis"
+    assert block_analysis["diagnostic_only"] is True
+    assert block_analysis["simulation_only"] is True
+    assert block_analysis["uses_validation_outcomes_for_tuning"] is False
+    assert block_analysis["thresholds_tuned"] is False
+    assert block_analysis["mutates_o_model_predicted_score"] is False
+    assert block_analysis["mutates_source_ranking_scores"] is False
+    assert block_analysis["safe_order_discovery_uses_realized_pnl"] is False
+    assert block_analysis["simulated_order_replay_report_id"] == simulated_replay[
+        "o_v8_execution_simulated_order_replay_report_id"
+    ]
+    assert block_analysis["decision_count"] == simulated_replay["decision_count"]
+    assert block_analysis["blocked_decision_count"] == simulated_replay[
+        "blocked_decision_count"
+    ]
+    assert block_analysis["allowed_decision_count"] == simulated_replay[
+        "simulated_allowed_order_count"
+    ]
+    assert len(block_analysis["blocked_decision_analysis_rows"]) == block_analysis[
+        "blocked_decision_count"
+    ]
+    assert isinstance(block_analysis["primary_blocker_categories"], list)
+    discovery_summary = block_analysis["safe_order_discovery_summary"]
+    assert discovery_summary["safe_order_candidate_count"] >= 0
+    assert discovery_summary["fundamentally_unsafe_count"] >= 0
+    assert block_analysis["v8_execution_handoff_allowed"] is False
+    assert block_analysis["source_model_candidate_eligible"] is False
+    assert block_analysis["freeze_ready"] is False
+    assert block_analysis["promotion_evidence_eligible"] is False
+    assert block_analysis["#146_start_allowed"] is False
+    assert block_analysis["#134_resume_allowed"] is False
+    assert block_analysis["paper_only"] is True
+    assert block_analysis["capital_at_risk"] is False
+    for row in block_analysis["blocked_decision_analysis_rows"]:
+        assert set(row) >= {
+            "decision_group_id",
+            "market_id",
+            "decision_ts",
+            "source_selected_action",
+            "source_selected_family",
+            "source_selected_side",
+            "execution_guarded_action",
+            "execution_guarded_family",
+            "execution_guarded_side",
+            "minimal_blocking_set",
+            "safe_order_discovery_classification",
+            "safe_order_discovery_reason_codes",
+            "time_to_close_bucket",
+        }
+        assert row["source_score_mutated"] is False
+        assert row["o_model_predicted_score_mutated"] is False
     assert result.artifact_paths["label_construction_report"].exists()
     assert result.artifact_paths["ranking_objective_report"].exists()
     assert result.artifact_paths["leakage_audit_report"].exists()
@@ -3794,6 +3856,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert result.artifact_paths[
         "v8_execution_simulated_order_replay_summary"
     ].exists()
+    assert result.artifact_paths["v8_execution_guard_block_analysis_report"].exists()
+    assert result.artifact_paths["v8_execution_guard_block_analysis_summary"].exists()
 
     manifest = _read_json(result.artifact_paths["manifest"])
     assert "hts_p_up_confidently_wrong_feature_diagnostic_report" in manifest[
@@ -3818,6 +3882,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert (
         "v8_execution_simulated_order_replay_summary" in manifest["artifact_hashes"]
     )
+    assert "v8_execution_guard_block_analysis_report" in manifest["artifact_hashes"]
+    assert "v8_execution_guard_block_analysis_summary" in manifest["artifact_hashes"]
     assert manifest["large_regret_risk_model_report_available"] is False
     assert manifest["selective_action_guard_report_available"] is False
     assert manifest["large_regret_risk_model_enabled"] is False
@@ -3848,6 +3914,22 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         manifest["v8_execution_simulated_runtime_risk_control_validation_passed"]
         is True
     )
+    assert manifest["v8_execution_guard_block_analysis_report_available"] is True
+    assert manifest["v8_execution_guard_block_analysis_report_id"] == block_analysis[
+        "o_v8_execution_guard_block_analysis_report_id"
+    ]
+    assert (
+        manifest["v8_execution_guard_block_analysis_safe_order_candidate_count"]
+        == discovery_summary["safe_order_candidate_count"]
+    )
+    assert (
+        manifest["v8_execution_guard_block_analysis_fundamentally_unsafe_count"]
+        == discovery_summary["fundamentally_unsafe_count"]
+    )
+    assert (
+        manifest["v8_execution_guard_block_analysis_primary_blocker_categories"]
+        == block_analysis["primary_blocker_categories"]
+    )
     assert manifest["strict_calibration_quality_passed"] == gate[
         "strict_calibration_quality_passed"
     ]
@@ -3865,6 +3947,9 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     ]
     assert manifest["v8_execution_risk_control_required"] is True
     assert manifest["v8_execution_handoff_allowed"] is False
+    assert manifest["source_model_candidate_eligible"] is False
+    assert manifest["freeze_ready"] is False
+    assert manifest["promotion_evidence_eligible"] is False
     assert manifest["strict_source_gate_remains_failed"] == gate[
         "strict_source_gate_remains_failed"
     ]
@@ -4142,6 +4227,130 @@ def test_o_v8_simulated_runtime_replay_updates_only_allowed_exposure(
     assert replay_report["#134_resume_allowed"] is False
     assert replay_report["paper_only"] is True
     assert replay_report["capital_at_risk"] is False
+
+
+def test_o_v8_execution_guard_block_analysis_classifies_safe_order_discovery(
+    tmp_path: Path,
+) -> None:
+    def _blocked_row(
+        *,
+        decision_id: str,
+        action: str,
+        blocking_reasons: list[str],
+        guard_reasons: list[str] | None = None,
+        exposure_reasons: list[str] | None = None,
+        missing_fields: list[str] | None = None,
+        time_to_close: float = 180.0,
+        p_up_disagreement: bool = False,
+    ) -> dict[str, Any]:
+        side = "UP" if "BUY_UP" in action else "DOWN"
+        return {
+            "decision_group_id": decision_id,
+            "market_id": f"market-{decision_id}",
+            "decision_ts": 100 + len(decision_id),
+            "source_selected_action": action,
+            "source_selected_side": side,
+            "source_selected_family": "SELL_BEFORE_CLOSE",
+            "source_model_score": 0.82,
+            "p_up_action_disagreement": p_up_disagreement,
+            "microstructure_snapshot": {
+                "book_staleness_ms": 500.0,
+                "spread_bps": 200.0,
+                "queue_fill_proxy": 0.90,
+                "time_to_close_seconds": time_to_close,
+            },
+            "execution_guarded_action": action,
+            "execution_guarded_side": side,
+            "execution_guarded_family": "SELL_BEFORE_CLOSE",
+            "execution_guarded_score": 0.80,
+            "order_allowed": False,
+            "proposed_order_size": 0.0,
+            "execution_blocking_reason_codes": blocking_reasons,
+            "execution_guard_reason_codes": guard_reasons or [],
+            "exposure_reason_codes": exposure_reasons
+            or ["execution_simulated_order_blocked"],
+            "missing_runtime_field_codes": missing_fields or [],
+            "simulated_order_id": None,
+            "source_score_mutated": False,
+            "o_model_predicted_score_mutated": False,
+        }
+
+    m2_report_path = tmp_path / "m2.json"
+    m2_report = {"m2_stateful_replay_parity_candidate_report_id": "m2-test"}
+    m2_report_path.write_text(json.dumps(m2_report, sort_keys=True), encoding="utf-8")
+    replay_report = {
+        "o_v8_execution_simulated_order_replay_report_id": "replay-test",
+        "decision_count": 3,
+        "blocked_decision_count": 3,
+        "simulated_allowed_order_count": 0,
+        "simulated_decision_rows": [
+            _blocked_row(
+                decision_id="missing",
+                action="BUY_UP_SELL_BEFORE_CLOSE",
+                blocking_reasons=[
+                    "execution_required_runtime_fields_missing",
+                    "execution_exposure_state_missing",
+                ],
+                missing_fields=["execution_exposure_state_missing"],
+            ),
+            _blocked_row(
+                decision_id="threshold",
+                action="BUY_DOWN_SELL_BEFORE_CLOSE",
+                blocking_reasons=["execution_time_to_close_unsafe"],
+                time_to_close=20.0,
+            ),
+            _blocked_row(
+                decision_id="pup",
+                action="BUY_UP_SELL_BEFORE_CLOSE",
+                blocking_reasons=["execution_p_up_side_disagreement"],
+                p_up_disagreement=True,
+            ),
+        ],
+    }
+
+    report = _v8_execution_guard_block_analysis_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        handoff_report={"o_v8_action_rank_handoff_report_id": "handoff-test"},
+        execution_guard_report={"o_v8_execution_risk_guard_report_id": "guard-test"},
+        runtime_state_report={"o_v8_execution_runtime_state_report_id": "state-test"},
+        simulated_order_replay_report=replay_report,
+    )
+
+    assert (
+        report["schema_version"]
+        == O_V8_EXECUTION_GUARD_BLOCK_ANALYSIS_SCHEMA_VERSION
+    )
+    assert report["decision_count"] == 3
+    assert report["blocked_decision_count"] == 3
+    assert report["allowed_decision_count"] == 0
+    by_id = {
+        row["decision_group_id"]: row
+        for row in report["blocked_decision_analysis_rows"]
+    }
+    assert by_id["missing"]["safe_order_discovery_classification"] == (
+        "blocked_only_by_missing_runtime_fields"
+    )
+    assert by_id["threshold"]["safe_order_discovery_classification"] == (
+        "blocked_only_by_configurable_thresholds"
+    )
+    assert by_id["pup"]["safe_order_discovery_classification"] == (
+        "fundamentally_unsafe"
+    )
+    summary = report["safe_order_discovery_summary"]
+    assert summary["safe_order_candidate_count"] == 2
+    assert summary["blocked_only_by_missing_runtime_fields_count"] == 1
+    assert summary["blocked_only_by_configurable_thresholds_count"] == 1
+    assert summary["fundamentally_unsafe_count"] == 1
+    assert report["why_simulated_allowed_order_count_zero"]
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["freeze_ready"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["#146_start_allowed"] is False
+    assert report["#134_resume_allowed"] is False
+    assert report["paper_only"] is True
+    assert report["capital_at_risk"] is False
 
 
 def _build_corpus(root: Path) -> Path:

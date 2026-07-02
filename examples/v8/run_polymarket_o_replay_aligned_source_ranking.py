@@ -43,6 +43,7 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
     execution_guard = result.v8_execution_risk_guard_report
     runtime_state = result.v8_execution_runtime_state_report
     simulated_replay = result.v8_execution_simulated_order_replay_report
+    block_analysis = result.v8_execution_guard_block_analysis_report
     return {
         "run_id": run_id,
         "run_dir": str(result.run_dir),
@@ -114,6 +115,19 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         "v8_execution_simulated_runtime_risk_control_validation_passed": (
             simulated_replay["runtime_risk_control_validation_passed"]
         ),
+        "v8_execution_block_analysis_safe_order_candidate_count": (
+            block_analysis["safe_order_discovery_summary"][
+                "safe_order_candidate_count"
+            ]
+        ),
+        "v8_execution_block_analysis_fundamentally_unsafe_count": (
+            block_analysis["safe_order_discovery_summary"][
+                "fundamentally_unsafe_count"
+            ]
+        ),
+        "v8_execution_block_analysis_primary_blocker_categories": block_analysis[
+            "primary_blocker_categories"
+        ],
         "source_model_candidate_eligible": gate["source_model_candidate_eligible"],
         "freeze_ready": freeze["freeze_ready"],
         "leakage_audit_passed": leakage["leakage_audit_passed"],
@@ -153,6 +167,9 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         ),
         "v8_execution_simulated_order_replay_report_path": str(
             result.artifact_paths["v8_execution_simulated_order_replay_report"]
+        ),
+        "v8_execution_guard_block_analysis_report_path": str(
+            result.artifact_paths["v8_execution_guard_block_analysis_report"]
         ),
         "manifest_path": str(result.artifact_paths["manifest"]),
     }
