@@ -75,6 +75,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_V8_EXECUTION_RUNTIME_FIELD_COVERAGE_SCHEMA_VERSION,
     O_V8_EXECUTION_RUNTIME_STATE_SCHEMA_VERSION,
     O_V8_EXECUTION_SIMULATED_ORDER_REPLAY_SCHEMA_VERSION,
+    O_V8_FUTURE_UNSEEN_HOLDOUT_COLLECTION_PLAN_SCHEMA_VERSION,
     O_V8_FUTURE_UNSEEN_HOLDOUT_PLAN_SCHEMA_VERSION,
     O_V8_PAPER_CANDIDATE_GATE_DESIGN_SCHEMA_VERSION,
     PolymarketOReplayAlignedSourceRankingConfig,
@@ -87,6 +88,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     _v8_execution_policy_readiness_report,
     _v8_execution_runtime_field_coverage_report,
     _v8_execution_simulated_runtime_reports,
+    _v8_future_unseen_holdout_collection_plan_report,
     _v8_future_unseen_holdout_plan_report,
     _v8_paper_candidate_gate_design_report,
     run_polymarket_o_replay_aligned_source_ranking,
@@ -4128,6 +4130,41 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert paper_gate["polymarket_write_enabled"] is False
     assert paper_gate["wallet_signing_enabled"] is False
 
+    collection_plan = result.v8_future_unseen_holdout_collection_plan_report
+    collection_payload = dict(collection_plan)
+    collection_id = collection_payload.pop(
+        "o_v8_future_unseen_holdout_collection_plan_report_id"
+    )
+    assert canonical_json_sha256(collection_payload) == collection_id
+    assert (
+        collection_plan["schema_version"]
+        == O_V8_FUTURE_UNSEEN_HOLDOUT_COLLECTION_PLAN_SCHEMA_VERSION
+    )
+    assert (
+        collection_plan["report_type"]
+        == "o_v8_future_unseen_holdout_collection_plan"
+    )
+    assert collection_plan["diagnostic_only"] is True
+    assert collection_plan["simulation_only"] is True
+    assert collection_plan["future_unseen_holdout_collection_plan_ready"] is True
+    assert collection_plan[
+        "future_unseen_holdout_collection_blocking_reason_codes"
+    ] == []
+    assert collection_plan["collection_status"] == "not_started"
+    assert collection_plan["future_outcome_evaluation_generated"] is False
+    assert collection_plan["future_outcome_evaluation_artifacts_generated"] == []
+    assert collection_plan["paper_candidate_allowed"] is False
+    assert collection_plan["v8_execution_handoff_allowed"] is False
+    assert collection_plan["source_model_candidate_eligible"] is False
+    assert collection_plan["freeze_ready"] is False
+    assert collection_plan["promotion_evidence_eligible"] is False
+    assert collection_plan["#146_start_allowed"] is False
+    assert collection_plan["#134_resume_allowed"] is False
+    assert collection_plan["paper_only"] is True
+    assert collection_plan["capital_at_risk"] is False
+    assert collection_plan["polymarket_write_enabled"] is False
+    assert collection_plan["wallet_signing_enabled"] is False
+
     block_analysis = result.v8_execution_guard_block_analysis_report
     block_payload = dict(block_analysis)
     block_id = block_payload.pop("o_v8_execution_guard_block_analysis_report_id")
@@ -4324,6 +4361,12 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert result.artifact_paths["v8_future_unseen_holdout_plan_summary"].exists()
     assert result.artifact_paths["v8_paper_candidate_gate_design_report"].exists()
     assert result.artifact_paths["v8_paper_candidate_gate_design_summary"].exists()
+    assert result.artifact_paths[
+        "v8_future_unseen_holdout_collection_plan_report"
+    ].exists()
+    assert result.artifact_paths[
+        "v8_future_unseen_holdout_collection_plan_summary"
+    ].exists()
 
     manifest = _read_json(result.artifact_paths["manifest"])
     assert "hts_p_up_confidently_wrong_feature_diagnostic_report" in manifest[
@@ -4362,6 +4405,14 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert "v8_future_unseen_holdout_plan_summary" in manifest["artifact_hashes"]
     assert "v8_paper_candidate_gate_design_report" in manifest["artifact_hashes"]
     assert "v8_paper_candidate_gate_design_summary" in manifest["artifact_hashes"]
+    assert (
+        "v8_future_unseen_holdout_collection_plan_report"
+        in manifest["artifact_hashes"]
+    )
+    assert (
+        "v8_future_unseen_holdout_collection_plan_summary"
+        in manifest["artifact_hashes"]
+    )
     assert manifest["large_regret_risk_model_report_available"] is False
     assert manifest["selective_action_guard_report_available"] is False
     assert manifest["large_regret_risk_model_enabled"] is False
@@ -4524,6 +4575,21 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         paper_gate["paper_candidate_gate_blocking_reason_codes"]
     )
     assert manifest["paper_candidate_allowed"] is False
+    assert (
+        manifest["v8_future_unseen_holdout_collection_plan_report_available"]
+        is True
+    )
+    assert manifest["v8_future_unseen_holdout_collection_plan_report_id"] == (
+        collection_plan["o_v8_future_unseen_holdout_collection_plan_report_id"]
+    )
+    assert manifest["future_unseen_holdout_collection_plan_ready"] == (
+        collection_plan["future_unseen_holdout_collection_plan_ready"]
+    )
+    assert manifest["future_unseen_holdout_collection_blocking_reason_codes"] == (
+        collection_plan[
+            "future_unseen_holdout_collection_blocking_reason_codes"
+        ]
+    )
     assert manifest["strict_calibration_quality_passed"] == gate[
         "strict_calibration_quality_passed"
     ]
@@ -5978,9 +6044,24 @@ def _build_v8_future_gate_design_fixture(
         guard_block_analysis_report=block_analysis,
         holdout_plan_report=holdout_plan,
     )
+    collection_plan = _v8_future_unseen_holdout_collection_plan_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        action_rank_handoff_report=action_rank_handoff,
+        execution_guard_report=execution_guard,
+        simulated_order_replay_report=replay_report,
+        allowed_order_quality_report=allowed_quality,
+        policy_readiness_report=policy_readiness,
+        handoff_gate_report=handoff_gate,
+        runtime_field_coverage_report=field_coverage,
+        guard_block_analysis_report=block_analysis,
+        holdout_plan_report=holdout_plan,
+        paper_candidate_gate_design_report=paper_gate,
+    )
     return {
         "holdout_plan": holdout_plan,
         "paper_gate": paper_gate,
+        "collection_plan": collection_plan,
     }
 
 
@@ -6067,6 +6148,83 @@ def test_o_v8_future_unseen_holdout_and_paper_gate_design_fail_closed_on_bad_inp
     assert paper_gate["promotion_evidence_eligible"] is False
     assert paper_gate["#146_start_allowed"] is False
     assert paper_gate["#134_resume_allowed"] is False
+
+
+def test_o_v8_future_unseen_holdout_collection_plan_ready_fail_closed(
+    tmp_path: Path,
+) -> None:
+    fixture = _build_v8_future_gate_design_fixture(tmp_path)
+    report = fixture["collection_plan"]
+
+    payload = dict(report)
+    report_id = payload.pop(
+        "o_v8_future_unseen_holdout_collection_plan_report_id"
+    )
+    assert canonical_json_sha256(payload) == report_id
+    assert (
+        report["schema_version"]
+        == O_V8_FUTURE_UNSEEN_HOLDOUT_COLLECTION_PLAN_SCHEMA_VERSION
+    )
+    assert report["report_type"] == "o_v8_future_unseen_holdout_collection_plan"
+    assert report["diagnostic_only"] is True
+    assert report["simulation_only"] is True
+    assert report["future_unseen_holdout_collection_plan_ready"] is True
+    assert report["future_unseen_holdout_collection_blocking_reason_codes"] == []
+    assert all(
+        check["passed"] is True
+        for check in report[
+            "future_unseen_holdout_collection_required_checks"
+        ].values()
+    )
+    assert set(report["frozen_current_v8_o_config_references"]) == {
+        "action_rank_config",
+        "execution_guard_config",
+        "runtime_field_cleanup_rules",
+        "simulated_ledger_rules",
+        "handoff_gate_design",
+        "future_holdout_and_paper_gate_design",
+    }
+    assert report["holdout_window_requirements"]["unseen_future_dates_only"] is True
+    assert report["holdout_window_requirements"][
+        "no_overlap_with_validation_shadow_or_replay_data"
+    ] is True
+    assert report["collection_status"] == "not_started"
+    assert report["future_outcome_evaluation_generated"] is False
+    assert report["future_outcome_evaluation_artifacts_generated"] == []
+    assert report["paper_candidate_allowed"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["freeze_ready"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["#146_start_allowed"] is False
+    assert report["#134_resume_allowed"] is False
+    assert report["paper_only"] is True
+    assert report["capital_at_risk"] is False
+    assert report["polymarket_write_enabled"] is False
+    assert report["wallet_signing_enabled"] is False
+
+
+def test_o_v8_future_unseen_holdout_collection_plan_fails_on_bad_inputs(
+    tmp_path: Path,
+) -> None:
+    fixture = _build_v8_future_gate_design_fixture(tmp_path, fail_closed=True)
+    report = fixture["collection_plan"]
+
+    assert report["future_unseen_holdout_collection_plan_ready"] is False
+    assert set(report["future_unseen_holdout_collection_blocking_reason_codes"]) >= {
+        "future_collection_action_rank_config_not_frozen",
+        "future_collection_execution_guard_config_not_frozen",
+        "future_collection_forbidden_outcome_usage_detected",
+    }
+    assert report["collection_status"] == "not_started"
+    assert report["future_outcome_evaluation_generated"] is False
+    assert report["paper_candidate_allowed"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["freeze_ready"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["#146_start_allowed"] is False
+    assert report["#134_resume_allowed"] is False
 
 
 def test_o_v8_execution_guard_block_analysis_classifies_safe_order_discovery(

@@ -50,6 +50,7 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
     handoff_gate = result.v8_execution_handoff_gate_report
     holdout_plan = result.v8_future_unseen_holdout_plan_report
     paper_candidate_gate = result.v8_paper_candidate_gate_design_report
+    collection_plan = result.v8_future_unseen_holdout_collection_plan_report
     return {
         "run_id": run_id,
         "run_dir": str(result.run_dir),
@@ -173,6 +174,18 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
             "paper_candidate_gate_blocking_reason_codes"
         ],
         "paper_candidate_allowed": paper_candidate_gate["paper_candidate_allowed"],
+        "future_unseen_holdout_collection_plan_ready": collection_plan[
+            "future_unseen_holdout_collection_plan_ready"
+        ],
+        "future_unseen_holdout_collection_blocking_reason_codes": collection_plan[
+            "future_unseen_holdout_collection_blocking_reason_codes"
+        ],
+        "future_unseen_holdout_collection_status": collection_plan[
+            "collection_status"
+        ],
+        "future_outcome_evaluation_generated": collection_plan[
+            "future_outcome_evaluation_generated"
+        ],
         "v8_execution_block_analysis_safe_order_candidate_count": (
             block_analysis["safe_order_discovery_summary"][
                 "safe_order_candidate_count"
@@ -284,6 +297,9 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         ),
         "v8_paper_candidate_gate_design_report_path": str(
             result.artifact_paths["v8_paper_candidate_gate_design_report"]
+        ),
+        "v8_future_unseen_holdout_collection_plan_report_path": str(
+            result.artifact_paths["v8_future_unseen_holdout_collection_plan_report"]
         ),
         "manifest_path": str(result.artifact_paths["manifest"]),
     }
