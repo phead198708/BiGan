@@ -71,6 +71,9 @@ O_LARGE_REGRET_RISK_MODEL_SCHEMA_VERSION = (
 O_SELECTIVE_ACTION_GUARD_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-selective-action-guard-v1"
 )
+O_V8_ACTION_RANK_HANDOFF_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-action-rank-handoff-v1"
+)
 O_TRAINING_LABEL_FIELDS = (
     "action_return_target",
     "label_pnl_target",
@@ -284,6 +287,7 @@ class PolymarketOReplayAlignedSourceRankingResult:
     joint_feature_correction_selection_report: dict[str, Any]
     large_regret_risk_model_report: dict[str, Any]
     selective_action_guard_report: dict[str, Any]
+    v8_action_rank_handoff_report: dict[str, Any]
     artifact_paths: dict[str, Path]
 
 
@@ -339,6 +343,10 @@ def run_polymarket_o_replay_aligned_source_ranking(
         / "o_selective_action_guard_report.json",
         "selective_action_guard_summary": run_dir
         / "o_selective_action_guard_report.md",
+        "v8_action_rank_handoff_report": run_dir
+        / "o_v8_action_rank_handoff_report.json",
+        "v8_action_rank_handoff_summary": run_dir
+        / "o_v8_action_rank_handoff_report.md",
         "manifest": run_dir / "o_replay_aligned_source_ranking_manifest.json",
     }
     reports = _build_reports(config=config)
@@ -402,6 +410,11 @@ def run_polymarket_o_replay_aligned_source_ranking(
         _selective_action_guard_markdown(reports[10]),
         encoding="utf-8",
     )
+    _write_json(artifact_paths["v8_action_rank_handoff_report"], reports[11])
+    artifact_paths["v8_action_rank_handoff_summary"].write_text(
+        _v8_action_rank_handoff_markdown(reports[11]),
+        encoding="utf-8",
+    )
     manifest = {
         "schema_version": "bigan-v8-polymarket-o-replay-aligned-source-ranking-artifacts-v1",
         "run_id": config.run_id,
@@ -442,6 +455,28 @@ def run_polymarket_o_replay_aligned_source_ranking(
         "risk_head_replaces_action_signal": reports[10][
             "risk_head_replaces_action_signal"
         ],
+        "v8_action_rank_handoff_report_available": True,
+        "v8_action_rank_quality_passed": reports[11][
+            "v8_action_rank_quality_passed"
+        ],
+        "v8_action_rank_candidate_eligible": reports[11][
+            "v8_action_rank_candidate_eligible"
+        ],
+        "v8_action_rank_reason_codes": reports[11][
+            "v8_action_rank_reason_codes"
+        ],
+        "v8_execution_risk_control_required": reports[11][
+            "v8_execution_risk_control_required"
+        ],
+        "v8_execution_handoff_allowed": reports[11][
+            "v8_execution_handoff_allowed"
+        ],
+        "v8_execution_handoff_blocking_reason_codes": reports[11][
+            "v8_execution_handoff_blocking_reason_codes"
+        ],
+        "strict_source_gate_remains_failed": reports[11][
+            "strict_source_gate_remains_failed"
+        ],
         "#134_resume_allowed": False,
         "#146_start_allowed": False,
         "promotion_evidence_eligible": False,
@@ -462,6 +497,7 @@ def run_polymarket_o_replay_aligned_source_ranking(
         joint_feature_correction_selection_report=reports[8],
         large_regret_risk_model_report=reports[9],
         selective_action_guard_report=reports[10],
+        v8_action_rank_handoff_report=reports[11],
         artifact_paths=artifact_paths,
     )
 
@@ -470,6 +506,7 @@ def _build_reports(
     *,
     config: PolymarketOReplayAlignedSourceRankingConfig,
 ) -> tuple[
+    dict[str, Any],
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
@@ -525,6 +562,7 @@ def _build_reports(
         m2_report=m2_report,
         rows=ranking_rows,
         model_training_summary=model_training_summary,
+        leakage_report=leakage_report,
     )
     eligibility_gate_report = _source_model_eligibility_gate_report(
         config=config,
@@ -578,6 +616,15 @@ def _build_reports(
         m2_report=m2_report,
         model_training_summary=model_training_summary,
     )
+    v8_action_rank_handoff_report = _v8_action_rank_handoff_report(
+        config=config,
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        rows=ranking_rows,
+        model_training_summary=model_training_summary,
+        leakage_report=leakage_report,
+        eligibility_gate_report=eligibility_gate_report,
+    )
     return (
         label_report,
         ranking_report,
@@ -590,6 +637,7 @@ def _build_reports(
         joint_feature_correction_selection_report,
         large_regret_risk_model_report,
         selective_action_guard_report,
+        v8_action_rank_handoff_report,
     )
 
 
@@ -6780,6 +6828,309 @@ def _selective_action_guard_report(
     return report
 
 
+def _v8_action_rank_handoff_report(
+    *,
+    config: PolymarketOReplayAlignedSourceRankingConfig,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    rows: list[dict[str, Any]],
+    model_training_summary: dict[str, Any],
+    leakage_report: dict[str, Any],
+    eligibility_gate_report: dict[str, Any],
+) -> dict[str, Any]:
+    del config
+    selected_rows = _v8_selected_action_rank_handoff_rows(
+        rows=rows,
+        model_training_summary=model_training_summary,
+        split="validation",
+    )
+    handoff_contract = {
+        "ranking_score_source": "model_predicted_score",
+        "final_scoring_source": model_training_summary["final_scoring_source"],
+        "required_fields": [
+            "decision_group_id",
+            "market_id",
+            "decision_ts",
+            "selected_action",
+            "selected_side",
+            "selected_action_family",
+            "full_5_action_ranking",
+            "corrected_model_score",
+            "raw_model_score",
+            "score_components",
+            "high_score_flag",
+            "p_up",
+            "p_down",
+            "p_up_action_disagreement",
+            "microstructure_snapshot",
+            "reference_price_to_beat_distance_at_decision",
+            "reference_price_feature_provenance",
+            "model_sha256",
+            "feature_schema_hash",
+            "split_hash",
+        ],
+        "execution_layer_required_runtime_constraints": [
+            "max_position_exposure",
+            "max_order_notional",
+            "spread_limit",
+            "book_staleness_limit",
+            "queue_fill_limit",
+            "time_to_close_limit",
+            "kill_switch",
+            "paper_only_until_separate_execution_gate_passes",
+        ],
+        "fail_closed_missing_field_policy": (
+            "missing_required_handoff_field_blocks_execution_layer_handoff"
+        ),
+    }
+    report = {
+        "schema_version": O_V8_ACTION_RANK_HANDOFF_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "source_lineage": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "report_type": "o_v8_action_rank_handoff",
+        "diagnostic_only": True,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "ranking_score_source": "model_predicted_score",
+        "deployable_model_score_available": model_training_summary[
+            "deployable_model_score_available"
+        ],
+        "strict_calibration_quality_passed": eligibility_gate_report[
+            "strict_calibration_quality_passed"
+        ],
+        "calibration_quality_passed": eligibility_gate_report[
+            "calibration_quality_passed"
+        ],
+        "relaxed_diagnostic_calibration_quality_passed": eligibility_gate_report[
+            "relaxed_diagnostic_calibration_quality_passed"
+        ],
+        "relaxed_diagnostic_source_candidate": eligibility_gate_report[
+            "relaxed_diagnostic_source_candidate"
+        ],
+        "v8_action_rank_quality_passed": eligibility_gate_report[
+            "v8_action_rank_quality_passed"
+        ],
+        "v8_action_rank_candidate_eligible": eligibility_gate_report[
+            "v8_action_rank_candidate_eligible"
+        ],
+        "v8_action_rank_reason_codes": eligibility_gate_report[
+            "v8_action_rank_reason_codes"
+        ],
+        "v8_action_rank_gate_summary": eligibility_gate_report[
+            "v8_action_rank_gate_summary"
+        ],
+        "v8_execution_risk_control_required": eligibility_gate_report[
+            "v8_execution_risk_control_required"
+        ],
+        "v8_execution_handoff_allowed": eligibility_gate_report[
+            "v8_execution_handoff_allowed"
+        ],
+        "v8_execution_handoff_blocking_reason_codes": eligibility_gate_report[
+            "v8_execution_handoff_blocking_reason_codes"
+        ],
+        "strict_source_gate_remains_failed": eligibility_gate_report[
+            "strict_source_gate_remains_failed"
+        ],
+        "strict_source_gate_failure_reason_codes": eligibility_gate_report[
+            "ineligible_reason_codes"
+        ],
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "future_unseen_holdout_required": True,
+        "execution_handoff_contract": handoff_contract,
+        "handoff_contract_hash": canonical_json_sha256(handoff_contract),
+        "selected_action_handoff_split": "validation",
+        "selected_action_handoff_row_count": len(selected_rows),
+        "selected_action_handoff_rows": selected_rows,
+        "selected_action_handoff_summary": _v8_action_rank_handoff_summary(
+            selected_rows
+        ),
+        "model_sha256": canonical_json_sha256(model_training_summary),
+        "feature_schema_hash": canonical_json_sha256(
+            model_training_summary["feature_names"]
+        ),
+        "split_hash": canonical_json_sha256(
+            sorted(
+                {
+                    row["decision_group_id"]: row["split"]
+                    for row in rows
+                }.items()
+            )
+        ),
+        "leakage_audit_passed": leakage_report["leakage_audit_passed"],
+        "expanded_decision_time_feature_provenance_passed": leakage_report[
+            "expanded_decision_time_feature_provenance_passed"
+        ],
+        "no_paper_live_unlock_from_v8_action_rank_gate": True,
+        "no_source_freeze_unlock_from_v8_action_rank_gate": True,
+        **compact_safety_fields(),
+    }
+    report["o_v8_action_rank_handoff_report_id"] = canonical_json_sha256(report)
+    return report
+
+
+def _v8_selected_action_rank_handoff_rows(
+    *,
+    rows: list[dict[str, Any]],
+    model_training_summary: dict[str, Any],
+    split: str,
+) -> list[dict[str, Any]]:
+    high_score_threshold = _model_high_score_threshold(model_training_summary)
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row.get("split") == split:
+            grouped[str(row["decision_group_id"])].append(row)
+    selected_rows = []
+    for decision_group_id, group_rows in sorted(grouped.items()):
+        ranked = sorted(
+            group_rows,
+            key=lambda row: float(row["variant_scores"][O_MODEL_PREDICTED_VARIANT]),
+            reverse=True,
+        )
+        selected = ranked[0]
+        selected_rows.append(
+            {
+                **_v8_action_rank_handoff_action_entry(
+                    selected,
+                    rank=1,
+                    high_score_threshold=high_score_threshold,
+                ),
+                "decision_group_id": decision_group_id,
+                "full_5_action_ranking": [
+                    _v8_action_rank_handoff_action_entry(
+                        row,
+                        rank=rank,
+                        high_score_threshold=high_score_threshold,
+                    )
+                    for rank, row in enumerate(ranked, start=1)
+                ],
+            }
+        )
+    return selected_rows
+
+
+def _v8_action_rank_handoff_action_entry(
+    row: dict[str, Any],
+    *,
+    rank: int,
+    high_score_threshold: float,
+) -> dict[str, Any]:
+    action = str(row.get("action") or "")
+    p_up = _optional_float(row.get("p_up"))
+    p_down = 1.0 - p_up if p_up is not None else None
+    score = float(row["variant_scores"][O_MODEL_PREDICTED_VARIANT])
+    feature_provenance = dict(row.get("decision_time_feature_provenance") or {})
+    reference_provenance = dict(
+        feature_provenance.get("reference_price_to_beat_distance_at_decision") or {}
+    )
+    return {
+        "rank": rank,
+        "source_report_path": row.get("source_report_path"),
+        "market_id": row.get("market_id"),
+        "decision_ts": row.get("decision_ts"),
+        "split": row.get("split"),
+        "selected_action": action,
+        "selected_side": _side_from_action(action),
+        "selected_action_family": _action_family(action),
+        "ranking_score_source": "model_predicted_score",
+        "corrected_model_score": score,
+        "raw_model_score": row.get("o_raw_ridge_model_score"),
+        "group_normalized_raw_model_score": row.get(
+            "o_group_normalized_raw_model_score"
+        ),
+        "base_model_predicted_score": row.get("o_base_model_predicted_score"),
+        "large_regret_risk_score": row.get("o_large_regret_risk_score"),
+        "selective_action_guard_mode": row.get("o_selective_action_guard_mode"),
+        "score_components": row.get("o_model_score_components") or {},
+        "high_score_flag": score >= high_score_threshold,
+        "high_score_threshold": high_score_threshold,
+        "p_up": p_up,
+        "p_down": p_down,
+        "p_up_action_disagreement": _p_up_action_disagreement_for_row(row),
+        "microstructure_snapshot": {
+            "book_staleness_ms": row.get("side_book_staleness_ms"),
+            "spread_bps": row.get("side_spread_bps"),
+            "queue_fill_proxy": row.get("side_queue_fill_proxy"),
+            "time_to_close_seconds": row.get("time_to_close_seconds"),
+            "entry_ask": row.get("entry_quality_ask"),
+            "executable_exit_bid_proxy": row.get("exit_quality_bid"),
+            "side_book_depth_imbalance": row.get("side_book_depth_imbalance"),
+            "side_book_update_velocity": row.get("side_book_update_velocity"),
+            "hts_vs_sell_before_close_exit_value_gap_proxy": row.get(
+                "hts_vs_sell_before_close_exit_value_gap_proxy"
+            ),
+        },
+        "reference_price_to_beat_distance_at_decision": row.get(
+            "reference_price_to_beat_distance_at_decision"
+        ),
+        "reference_price_feature_available": row.get(
+            "reference_price_feature_available"
+        ),
+        "reference_price_feature_provenance": {
+            "source_fields_used": reference_provenance.get("source_fields"),
+            "max_input_ts": reference_provenance.get("max_input_ts"),
+            "decision_ts": row.get("decision_ts"),
+            "provenance_valid": row.get("decision_time_feature_provenance_valid"),
+        },
+        "decision_time_feature_max_input_ts": row.get(
+            "decision_time_feature_max_input_ts"
+        ),
+        "decision_time_feature_missing_reason_codes": row.get(
+            "decision_time_feature_missing_reason_codes",
+            [],
+        ),
+        "oracle_executable_best_action": row.get("oracle_executable_best_action"),
+        "realized_replay_return_report_only": row.get("realized_replay_return"),
+        "regret_report_only": (
+            float(row.get("oracle_executable_best_action_return") or 0.0)
+            - float(row.get("realized_replay_return") or 0.0)
+        ),
+    }
+
+
+def _p_up_action_disagreement_for_row(row: dict[str, Any]) -> bool | None:
+    action = str(row.get("action") or "")
+    p_up = _optional_float(row.get("p_up"))
+    if p_up is None or ("BUY_UP" not in action and "BUY_DOWN" not in action):
+        return None
+    return ("BUY_UP" in action and p_up < 0.50) or (
+        "BUY_DOWN" in action and p_up > 0.50
+    )
+
+
+def _v8_action_rank_handoff_summary(
+    selected_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    by_action = Counter(str(row["selected_action"]) for row in selected_rows)
+    by_side = Counter(str(row["selected_side"]) for row in selected_rows)
+    high_score_count = sum(1 for row in selected_rows if row["high_score_flag"])
+    disagreement_count = sum(
+        1 for row in selected_rows if row["p_up_action_disagreement"] is True
+    )
+    comparable_count = sum(
+        1 for row in selected_rows if row["p_up_action_disagreement"] is not None
+    )
+    return {
+        "selected_action_count": len(selected_rows),
+        "selected_action_count_by_action": dict(sorted(by_action.items())),
+        "selected_action_count_by_side": dict(sorted(by_side.items())),
+        "high_score_selected_action_count": high_score_count,
+        "p_up_action_comparable_count": comparable_count,
+        "p_up_action_disagreement_count": disagreement_count,
+        "p_up_action_disagreement_rate": (
+            disagreement_count / comparable_count if comparable_count else 0.0
+        ),
+    }
+
+
 def _compact_o_model_training_summary(
     model_training_summary: dict[str, Any],
 ) -> dict[str, Any]:
@@ -6863,14 +7214,21 @@ def _comparison_report(
     m2_report: dict[str, Any],
     rows: list[dict[str, Any]],
     model_training_summary: dict[str, Any],
+    leakage_report: dict[str, Any],
 ) -> dict[str, Any]:
     candidate_rows = []
     high_score_threshold = _model_high_score_threshold(model_training_summary)
     model_predicted_relaxed_diagnostic_status: dict[str, Any] | None = None
+    model_predicted_v8_action_rank_status: dict[str, Any] | None = None
+    full_decision_grid_summary = _v8_decision_grid_summary(
+        rows,
+        split="validation",
+    )
     for variant in O_VARIANTS:
         metrics = _ranking_metrics(rows, variant, high_score_threshold)
         split_metrics = _split_metric_views(rows, variant, high_score_threshold)
         relaxed_diagnostic_status: dict[str, Any] | None = None
+        v8_action_rank_status: dict[str, Any] | None = None
         reasons = [
             "diagnostic_only_no_paper_live_unlock",
             "current_m_m2_n_n2_evidence_not_o_promotion_evidence",
@@ -6892,42 +7250,114 @@ def _comparison_report(
                 split="validation",
             )
             leakage_passed = True
+            calibration_support_passed = (
+                int(validation_metrics["decision_group_count"])
+                >= O_MIN_VALIDATION_DECISION_GROUPS
+                and int(validation_metrics["high_score_support_count"])
+                >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
+            )
+            action_family_paper_decision_eligible = (
+                _validation_action_family_gate_passed(validation_metrics)
+            )
+            best_action_concentration_passed = (
+                float(validation_metrics["NO_TRADE_selection_rate"])
+                <= O_MAX_NO_TRADE_SELECTION_RATE
+                and not bool(
+                    validation_metrics["largest_winner_dependency"][
+                        "total_return_positive_only_because_of_largest_winner"
+                    ]
+                )
+            )
+            p_up_action_disagreement_within_limit = bool(
+                p_up_summary[
+                    "candidate_scoped_p_up_action_disagreement_within_limit"
+                ]
+            )
+            high_score_return_positive = (
+                int(validation_metrics["high_score_support_count"])
+                >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
+                and float(validation_metrics["high_score_realized_return_mean"])
+                > 0.0
+                and float(validation_metrics["high_score_realized_return_sum"])
+                > 0.0
+            )
             relaxed_diagnostic_status = _o_relaxed_diagnostic_gate_status(
                 validation_metrics=validation_metrics,
-                p_up_action_disagreement_within_limit=bool(
-                    p_up_summary[
-                        "candidate_scoped_p_up_action_disagreement_within_limit"
-                    ]
+                p_up_action_disagreement_within_limit=(
+                    p_up_action_disagreement_within_limit
                 ),
-                calibration_support_passed=(
-                    int(validation_metrics["decision_group_count"])
-                    >= O_MIN_VALIDATION_DECISION_GROUPS
-                    and int(validation_metrics["high_score_support_count"])
-                    >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
-                ),
+                calibration_support_passed=calibration_support_passed,
                 action_family_paper_decision_eligible=(
-                    _validation_action_family_gate_passed(validation_metrics)
+                    action_family_paper_decision_eligible
                 ),
-                best_action_concentration_passed=(
-                    float(validation_metrics["NO_TRADE_selection_rate"])
-                    <= O_MAX_NO_TRADE_SELECTION_RATE
-                    and not bool(
-                        validation_metrics["largest_winner_dependency"][
-                            "total_return_positive_only_because_of_largest_winner"
-                        ]
-                    )
-                ),
-                high_score_return_positive=(
-                    int(validation_metrics["high_score_support_count"])
-                    >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
-                    and float(validation_metrics["high_score_realized_return_mean"])
-                    > 0.0
-                    and float(validation_metrics["high_score_realized_return_sum"])
-                    > 0.0
-                ),
+                best_action_concentration_passed=best_action_concentration_passed,
+                high_score_return_positive=high_score_return_positive,
                 leakage_passed=leakage_passed,
             )
             model_predicted_relaxed_diagnostic_status = relaxed_diagnostic_status
+            strict_calibration_quality_passed = (
+                float(validation_metrics["top1_realized_best_action_hit_rate"])
+                >= O_MIN_TOP1_HIT_RATE
+                and float(validation_metrics["mean_regret"]) <= O_MAX_MEAN_REGRET
+            )
+            gate_reason_codes = _o_gate_reason_codes(
+                deployable=bool(
+                    model_training_summary["deployable_model_score_available"]
+                ),
+                leakage_passed=bool(leakage_report["leakage_audit_passed"]),
+                calibration_support_passed=calibration_support_passed,
+                calibration_quality_passed=strict_calibration_quality_passed,
+                action_family_paper_decision_eligible=(
+                    action_family_paper_decision_eligible
+                ),
+                best_action_concentration_passed=best_action_concentration_passed,
+                p_up_action_disagreement_within_limit=(
+                    p_up_action_disagreement_within_limit
+                ),
+                high_score_return_positive=high_score_return_positive,
+            )
+            gate_reason_code_consistency = _o_gate_reason_code_consistency_diagnostic(
+                reason_codes=gate_reason_codes,
+                validation_metrics=validation_metrics,
+                calibration_support_passed=calibration_support_passed,
+                calibration_quality_passed=strict_calibration_quality_passed,
+                action_family_paper_decision_eligible=(
+                    action_family_paper_decision_eligible
+                ),
+                best_action_concentration_passed=best_action_concentration_passed,
+                p_up_action_disagreement_within_limit=(
+                    p_up_action_disagreement_within_limit
+                ),
+                high_score_return_positive=high_score_return_positive,
+            )
+            v8_action_rank_status = _o_v8_action_rank_gate_status(
+                validation_metrics=validation_metrics,
+                deployable_model_score_available=bool(
+                    model_training_summary["deployable_model_score_available"]
+                ),
+                calibration_support_passed=calibration_support_passed,
+                action_family_paper_decision_eligible=(
+                    action_family_paper_decision_eligible
+                ),
+                best_action_concentration_passed=best_action_concentration_passed,
+                p_up_action_disagreement_within_limit=(
+                    p_up_action_disagreement_within_limit
+                ),
+                high_score_return_positive=high_score_return_positive,
+                leakage_audit_passed=bool(leakage_report["leakage_audit_passed"]),
+                expanded_feature_provenance_passed=bool(
+                    leakage_report[
+                        "expanded_decision_time_feature_provenance_passed"
+                    ]
+                ),
+                gate_reason_code_consistency_passed=bool(
+                    gate_reason_code_consistency[
+                        "gate_reason_code_consistency_passed"
+                    ]
+                ),
+                full_decision_grid_summary=full_decision_grid_summary,
+            )
+            model_predicted_v8_action_rank_status = v8_action_rank_status
         candidate_rows.append(
             {
                 "candidate_name": variant,
@@ -7050,6 +7480,43 @@ def _comparison_report(
                     if relaxed_diagnostic_status is not None
                     else None
                 ),
+                "v8_action_rank_quality_passed": (
+                    bool(v8_action_rank_status["v8_action_rank_quality_passed"])
+                    if v8_action_rank_status is not None
+                    else False
+                ),
+                "v8_action_rank_candidate_eligible": (
+                    bool(v8_action_rank_status["v8_action_rank_candidate_eligible"])
+                    if v8_action_rank_status is not None
+                    else False
+                ),
+                "v8_action_rank_reason_codes": (
+                    v8_action_rank_status["v8_action_rank_reason_codes"]
+                    if v8_action_rank_status is not None
+                    else ["not_o_model_predicted_candidate"]
+                ),
+                "v8_execution_risk_control_required": (
+                    bool(
+                        v8_action_rank_status[
+                            "v8_execution_risk_control_required"
+                        ]
+                    )
+                    if v8_action_rank_status is not None
+                    else False
+                ),
+                "v8_execution_handoff_allowed": (
+                    bool(v8_action_rank_status["v8_execution_handoff_allowed"])
+                    if v8_action_rank_status is not None
+                    else False
+                ),
+                "v8_execution_handoff_blocking_reason_codes": (
+                    v8_action_rank_status[
+                        "v8_execution_handoff_blocking_reason_codes"
+                    ]
+                    if v8_action_rank_status is not None
+                    else ["not_o_model_predicted_candidate"]
+                ),
+                "strict_source_gate_remains_failed": True,
                 "source_model_candidate_eligible": False,
                 "ineligible_reason_codes": reasons,
             }
@@ -7089,6 +7556,47 @@ def _comparison_report(
             else False
         ),
         "relaxed_diagnostic_no_paper_live_unlock": True,
+        "v8_action_rank_quality_passed": (
+            bool(
+                model_predicted_v8_action_rank_status[
+                    "v8_action_rank_quality_passed"
+                ]
+            )
+            if model_predicted_v8_action_rank_status is not None
+            else False
+        ),
+        "v8_action_rank_candidate_eligible": (
+            bool(
+                model_predicted_v8_action_rank_status[
+                    "v8_action_rank_candidate_eligible"
+                ]
+            )
+            if model_predicted_v8_action_rank_status is not None
+            else False
+        ),
+        "v8_action_rank_reason_codes": (
+            model_predicted_v8_action_rank_status["v8_action_rank_reason_codes"]
+            if model_predicted_v8_action_rank_status is not None
+            else ["o_model_predicted_candidate_missing"]
+        ),
+        "v8_execution_risk_control_required": (
+            bool(
+                model_predicted_v8_action_rank_status[
+                    "v8_execution_risk_control_required"
+                ]
+            )
+            if model_predicted_v8_action_rank_status is not None
+            else True
+        ),
+        "v8_execution_handoff_allowed": False,
+        "v8_execution_handoff_blocking_reason_codes": (
+            model_predicted_v8_action_rank_status[
+                "v8_execution_handoff_blocking_reason_codes"
+            ]
+            if model_predicted_v8_action_rank_status is not None
+            else ["o_model_predicted_candidate_missing"]
+        ),
+        "strict_source_gate_remains_failed": True,
         "eligible_candidate_count": 0,
         **_fail_closed_fields(),
         **compact_safety_fields(),
@@ -7196,6 +7704,27 @@ def _source_model_eligibility_gate_report(
         best_action_concentration_passed=best_action_concentration_passed,
         p_up_action_disagreement_within_limit=p_up_action_disagreement_within_limit,
         high_score_return_positive=high_score_return_positive,
+    )
+    full_decision_grid_summary = _v8_decision_grid_summary(
+        rows,
+        split="validation",
+    )
+    v8_action_rank_status = _o_v8_action_rank_gate_status(
+        validation_metrics=validation_metrics,
+        deployable_model_score_available=deployable,
+        calibration_support_passed=calibration_support_passed,
+        action_family_paper_decision_eligible=action_family_paper_decision_eligible,
+        best_action_concentration_passed=best_action_concentration_passed,
+        p_up_action_disagreement_within_limit=p_up_action_disagreement_within_limit,
+        high_score_return_positive=high_score_return_positive,
+        leakage_audit_passed=leakage_passed,
+        expanded_feature_provenance_passed=bool(
+            leakage_report["expanded_decision_time_feature_provenance_passed"]
+        ),
+        gate_reason_code_consistency_passed=bool(
+            gate_reason_code_consistency["gate_reason_code_consistency_passed"]
+        ),
+        full_decision_grid_summary=full_decision_grid_summary,
     )
     report = {
         "schema_version": O_SOURCE_MODEL_ELIGIBILITY_GATE_SCHEMA_VERSION,
@@ -7386,6 +7915,29 @@ def _source_model_eligibility_gate_report(
         "gate_reason_code_consistency_passed": gate_reason_code_consistency[
             "gate_reason_code_consistency_passed"
         ],
+        "v8_full_decision_grid_summary": full_decision_grid_summary,
+        "v8_action_rank_quality_passed": v8_action_rank_status[
+            "v8_action_rank_quality_passed"
+        ],
+        "v8_action_rank_candidate_eligible": v8_action_rank_status[
+            "v8_action_rank_candidate_eligible"
+        ],
+        "v8_action_rank_reason_codes": v8_action_rank_status[
+            "v8_action_rank_reason_codes"
+        ],
+        "v8_action_rank_gate_summary": v8_action_rank_status[
+            "v8_action_rank_gate_summary"
+        ],
+        "v8_execution_risk_control_required": v8_action_rank_status[
+            "v8_execution_risk_control_required"
+        ],
+        "v8_execution_handoff_allowed": v8_action_rank_status[
+            "v8_execution_handoff_allowed"
+        ],
+        "v8_execution_handoff_blocking_reason_codes": v8_action_rank_status[
+            "v8_execution_handoff_blocking_reason_codes"
+        ],
+        "strict_source_gate_remains_failed": not source_model_candidate_eligible,
         "leakage_audit_passed": leakage_passed,
         "ineligible_reason_codes": reason_codes,
         "future_unseen_holdout_required": True,
@@ -7535,6 +8087,30 @@ def _freeze_readiness_report(
         ],
         "relaxed_diagnostic_no_freeze_unlock": True,
         "relaxed_diagnostic_no_paper_live_unlock": True,
+        "v8_action_rank_quality_passed": eligibility_gate_report[
+            "v8_action_rank_quality_passed"
+        ],
+        "v8_action_rank_candidate_eligible": eligibility_gate_report[
+            "v8_action_rank_candidate_eligible"
+        ],
+        "v8_action_rank_reason_codes": eligibility_gate_report[
+            "v8_action_rank_reason_codes"
+        ],
+        "v8_action_rank_gate_summary": eligibility_gate_report[
+            "v8_action_rank_gate_summary"
+        ],
+        "v8_execution_risk_control_required": eligibility_gate_report[
+            "v8_execution_risk_control_required"
+        ],
+        "v8_execution_handoff_allowed": eligibility_gate_report[
+            "v8_execution_handoff_allowed"
+        ],
+        "v8_execution_handoff_blocking_reason_codes": eligibility_gate_report[
+            "v8_execution_handoff_blocking_reason_codes"
+        ],
+        "strict_source_gate_remains_failed": eligibility_gate_report[
+            "strict_source_gate_remains_failed"
+        ],
         "future_unseen_holdout_required": True,
         "promotion_evidence_eligible": False,
         "promotion_blocking_reason_codes": ["future_unseen_holdout_required"],
@@ -7900,6 +8476,179 @@ def _validation_action_family_gate_passed(metrics: dict[str, Any]) -> bool:
         float(values["selected_return_sum"]) > 0.0
         for values in traded_families.values()
     )
+
+
+def _v8_decision_grid_summary(
+    rows: list[dict[str, Any]],
+    *,
+    split: str,
+) -> dict[str, Any]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row.get("split") == split:
+            grouped[str(row["decision_group_id"])].append(row)
+    missing_by_group = []
+    for decision_group_id, group_rows in sorted(grouped.items()):
+        actions = sorted({str(row.get("action") or "") for row in group_rows})
+        missing = sorted(set(O_REQUIRED_DECISION_ACTION_FAMILIES).difference(actions))
+        if missing:
+            missing_by_group.append(
+                {
+                    "decision_group_id": decision_group_id,
+                    "available_action_families": actions,
+                    "missing_action_families": missing,
+                    "ranking_metric_scope": O_PARTIAL_DECISION_GROUP_SCOPE,
+                }
+            )
+    return {
+        "split": split,
+        "decision_group_count": len(grouped),
+        "required_action_families": list(O_REQUIRED_DECISION_ACTION_FAMILIES),
+        "complete_decision_group_count": len(grouped) - len(missing_by_group),
+        "partial_decision_group_count": len(missing_by_group),
+        "complete_5_action_decision_grid": bool(grouped) and not missing_by_group,
+        "ranking_metric_scope": (
+            O_FULL_DECISION_GROUP_SCOPE
+            if grouped and not missing_by_group
+            else O_PARTIAL_DECISION_GROUP_SCOPE
+        ),
+        "incomplete_decision_group_examples": missing_by_group[:20],
+    }
+
+
+def _o_v8_action_rank_gate_status(
+    *,
+    validation_metrics: dict[str, Any],
+    deployable_model_score_available: bool,
+    calibration_support_passed: bool,
+    action_family_paper_decision_eligible: bool,
+    best_action_concentration_passed: bool,
+    p_up_action_disagreement_within_limit: bool,
+    high_score_return_positive: bool,
+    leakage_audit_passed: bool,
+    expanded_feature_provenance_passed: bool,
+    gate_reason_code_consistency_passed: bool,
+    full_decision_grid_summary: dict[str, Any],
+) -> dict[str, Any]:
+    top1_passed = (
+        float(validation_metrics["top1_realized_best_action_hit_rate"])
+        >= O_MIN_TOP1_HIT_RATE
+    )
+    strict_mean_regret_passed = (
+        float(validation_metrics["mean_regret"]) <= O_MAX_MEAN_REGRET
+    )
+    relaxed_mean_regret_passed = (
+        float(validation_metrics["mean_regret"])
+        <= O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET
+    )
+    selected_return_positive = (
+        float(validation_metrics["selected_action_realized_replay_return_sum"]) > 0.0
+    )
+    full_decision_grid_complete = bool(
+        full_decision_grid_summary["complete_5_action_decision_grid"]
+    )
+    required_checks = {
+        "deployable_model_score_available": deployable_model_score_available,
+        "top1_gate_passed": top1_passed,
+        "relaxed_mean_regret_gate_passed": relaxed_mean_regret_passed,
+        "calibration_support_passed": calibration_support_passed,
+        "p_up_action_disagreement_within_limit": (
+            p_up_action_disagreement_within_limit
+        ),
+        "high_score_return_positive": high_score_return_positive,
+        "selected_return_positive": selected_return_positive,
+        "action_family_paper_decision_eligible": (
+            action_family_paper_decision_eligible
+        ),
+        "best_action_concentration_passed": best_action_concentration_passed,
+        "leakage_audit_passed": leakage_audit_passed,
+        "expanded_feature_provenance_passed": expanded_feature_provenance_passed,
+        "gate_reason_code_consistency_passed": gate_reason_code_consistency_passed,
+        "full_5_action_decision_grid_complete": full_decision_grid_complete,
+    }
+    reason_codes = [
+        "diagnostic_only_no_paper_live_unlock",
+        "execution_layer_risk_control_required",
+        "future_unseen_holdout_required",
+        "strict_source_gate_remains_authoritative",
+    ]
+    if not deployable_model_score_available:
+        reason_codes.append("v8_action_rank_deployable_model_score_unavailable")
+    if not top1_passed:
+        reason_codes.append("v8_action_rank_top1_gate_failed")
+    if not relaxed_mean_regret_passed:
+        reason_codes.append("v8_action_rank_relaxed_mean_regret_gate_failed")
+    if not calibration_support_passed:
+        reason_codes.append("v8_action_rank_calibration_support_failed")
+    if not p_up_action_disagreement_within_limit:
+        reason_codes.append("v8_action_rank_p_up_gate_failed")
+    if not high_score_return_positive:
+        reason_codes.append("v8_action_rank_high_score_return_failed")
+    if not selected_return_positive:
+        reason_codes.append("v8_action_rank_selected_return_not_positive")
+    if not action_family_paper_decision_eligible:
+        reason_codes.append("v8_action_rank_action_family_gate_failed")
+    if not best_action_concentration_passed:
+        reason_codes.append("v8_action_rank_best_action_concentration_failed")
+    if not leakage_audit_passed:
+        reason_codes.append("v8_action_rank_leakage_audit_failed")
+    if not expanded_feature_provenance_passed:
+        reason_codes.append("v8_action_rank_feature_provenance_failed")
+    if not gate_reason_code_consistency_passed:
+        reason_codes.append("v8_action_rank_gate_reason_code_consistency_failed")
+    if not full_decision_grid_complete:
+        reason_codes.append("v8_action_rank_full_decision_grid_incomplete")
+    v8_action_rank_quality_passed = all(required_checks.values())
+    execution_blocking_reasons = [
+        "execution_layer_runtime_risk_control_not_validated",
+        "paper_live_unlock_prohibited",
+        "future_unseen_holdout_required",
+    ]
+    if not v8_action_rank_quality_passed:
+        execution_blocking_reasons.append("v8_action_rank_quality_not_passed")
+    return {
+        "v8_action_rank_quality_passed": v8_action_rank_quality_passed,
+        "v8_action_rank_candidate_eligible": v8_action_rank_quality_passed,
+        "v8_action_rank_reason_codes": sorted(set(reason_codes)),
+        "v8_action_rank_gate_summary": {
+            "gate_is_diagnostic_only": True,
+            "strict_source_gate_remains_authoritative": True,
+            "strict_max_mean_regret": O_MAX_MEAN_REGRET,
+            "relaxed_diagnostic_max_mean_regret": (
+                O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET
+            ),
+            "min_top1_realized_best_action_hit_rate": O_MIN_TOP1_HIT_RATE,
+            "min_high_score_support_count": O_MIN_HIGH_SCORE_SUPPORT_COUNT,
+            "max_p_up_action_disagreement_rate": (
+                O_MAX_P_UP_ACTION_DISAGREEMENT_RATE
+            ),
+            "validation_top1_realized_best_action_hit_rate": validation_metrics[
+                "top1_realized_best_action_hit_rate"
+            ],
+            "validation_mean_regret": validation_metrics["mean_regret"],
+            "validation_selected_return_sum": validation_metrics[
+                "selected_action_realized_replay_return_sum"
+            ],
+            "validation_high_score_support_count": validation_metrics[
+                "high_score_support_count"
+            ],
+            "validation_high_score_realized_return_mean": validation_metrics[
+                "high_score_realized_return_mean"
+            ],
+            "validation_high_score_realized_return_sum": validation_metrics[
+                "high_score_realized_return_sum"
+            ],
+            "strict_mean_regret_passed": strict_mean_regret_passed,
+            "relaxed_mean_regret_gate_passed": relaxed_mean_regret_passed,
+            "top1_gate_passed": top1_passed,
+            "required_checks": required_checks,
+        },
+        "v8_execution_risk_control_required": True,
+        "v8_execution_handoff_allowed": False,
+        "v8_execution_handoff_blocking_reason_codes": sorted(
+            set(execution_blocking_reasons)
+        ),
+    }
 
 
 def _p_up_action_disagreement_summary(
@@ -10002,6 +10751,45 @@ def _leakage_markdown(report: dict[str, Any]) -> str:
     )
 
 
+def _v8_action_rank_handoff_markdown(report: dict[str, Any]) -> str:
+    summary = report["selected_action_handoff_summary"]
+    return "\n".join(
+        [
+            "# O v8 Action-Rank Handoff",
+            "",
+            f"- candidate_name: `{report['candidate_name']}`",
+            "- strict_calibration_quality_passed: "
+            f"`{str(report['strict_calibration_quality_passed']).lower()}`",
+            "- relaxed_diagnostic_source_candidate: "
+            f"`{str(report['relaxed_diagnostic_source_candidate']).lower()}`",
+            "- v8_action_rank_quality_passed: "
+            f"`{str(report['v8_action_rank_quality_passed']).lower()}`",
+            "- v8_action_rank_candidate_eligible: "
+            f"`{str(report['v8_action_rank_candidate_eligible']).lower()}`",
+            "- v8_execution_risk_control_required: "
+            f"`{str(report['v8_execution_risk_control_required']).lower()}`",
+            "- v8_execution_handoff_allowed: "
+            f"`{str(report['v8_execution_handoff_allowed']).lower()}`",
+            "- strict_source_gate_remains_failed: "
+            f"`{str(report['strict_source_gate_remains_failed']).lower()}`",
+            "- selected_action_handoff_row_count: "
+            f"`{report['selected_action_handoff_row_count']}`",
+            "- high_score_selected_action_count: "
+            f"`{summary['high_score_selected_action_count']}`",
+            "- p_up_action_disagreement_rate: "
+            f"`{summary['p_up_action_disagreement_rate']}`",
+            f"- v8_action_rank_reason_codes: `{report['v8_action_rank_reason_codes']}`",
+            "- v8_execution_handoff_blocking_reason_codes: "
+            f"`{report['v8_execution_handoff_blocking_reason_codes']}`",
+            "- no_paper_live_unlock_from_v8_action_rank_gate: "
+            f"`{str(report['no_paper_live_unlock_from_v8_action_rank_gate']).lower()}`",
+            f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+            f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+            "",
+        ]
+    )
+
+
 def _comparison_markdown(report: dict[str, Any]) -> str:
     lines = [
         "# O Source Candidate Comparison",
@@ -10011,15 +10799,19 @@ def _comparison_markdown(report: dict[str, Any]) -> str:
         f"`{str(report['relaxed_diagnostic_source_candidate']).lower()}`",
         "- relaxed_diagnostic_no_paper_live_unlock: "
         f"`{str(report['relaxed_diagnostic_no_paper_live_unlock']).lower()}`",
+        "- v8_action_rank_candidate_eligible: "
+        f"`{str(report['v8_action_rank_candidate_eligible']).lower()}`",
+        "- v8_execution_handoff_allowed: "
+        f"`{str(report['v8_execution_handoff_allowed']).lower()}`",
         f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
         f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
         "",
-        "| candidate | score_source | scope | top1 | mean_regret | strict_calibration | relaxed_diagnostic | eligible | excluded_reason |",
-        "|---|---|---|---:|---:|---|---|---|---|",
+        "| candidate | score_source | scope | top1 | mean_regret | strict_calibration | relaxed_diagnostic | v8_action_rank | handoff_allowed | eligible | excluded_reason |",
+        "|---|---|---|---:|---:|---|---|---|---|---|---|",
     ]
     for row in report["candidate_rows"]:
         lines.append(
-            "| {name} | {source} | {scope} | {top1:.4f} | {regret:.6f} | {strict} | {relaxed} | {eligible} | {reason} |".format(
+            "| {name} | {source} | {scope} | {top1:.4f} | {regret:.6f} | {strict} | {relaxed} | {v8} | {handoff} | {eligible} | {reason} |".format(
                 name=row["candidate_name"],
                 source=row["ranking_score_source"],
                 scope=row["ranking_metric_scope"],
@@ -10027,6 +10819,8 @@ def _comparison_markdown(report: dict[str, Any]) -> str:
                 regret=float(row["mean_regret"]),
                 strict=str(row["strict_calibration_quality_passed"]).lower(),
                 relaxed=str(row["relaxed_diagnostic_source_candidate"]).lower(),
+                v8=str(row["v8_action_rank_candidate_eligible"]).lower(),
+                handoff=str(row["v8_execution_handoff_allowed"]).lower(),
                 eligible=str(row["source_model_candidate_eligible"]).lower(),
                 reason=row["excluded_from_eligibility_reason"] or "",
             )
@@ -10060,6 +10854,16 @@ def _eligibility_gate_markdown(report: dict[str, Any]) -> str:
             f"`{str(report['relaxed_diagnostic_source_candidate']).lower()}`",
             "- relaxed_diagnostic_no_paper_live_unlock: "
             f"`{str(report['relaxed_diagnostic_no_paper_live_unlock']).lower()}`",
+            "- v8_action_rank_quality_passed: "
+            f"`{str(report['v8_action_rank_quality_passed']).lower()}`",
+            "- v8_action_rank_candidate_eligible: "
+            f"`{str(report['v8_action_rank_candidate_eligible']).lower()}`",
+            "- v8_execution_risk_control_required: "
+            f"`{str(report['v8_execution_risk_control_required']).lower()}`",
+            "- v8_execution_handoff_allowed: "
+            f"`{str(report['v8_execution_handoff_allowed']).lower()}`",
+            "- strict_source_gate_remains_failed: "
+            f"`{str(report['strict_source_gate_remains_failed']).lower()}`",
             "- action_family_paper_decision_eligible: "
             f"`{str(report['action_family_paper_decision_eligible']).lower()}`",
             "- best_action_concentration_passed: "
@@ -10087,6 +10891,9 @@ def _eligibility_gate_markdown(report: dict[str, Any]) -> str:
             f"- ineligible_reason_codes: `{report['ineligible_reason_codes']}`",
             "- relaxed_diagnostic_reason_codes: "
             f"`{report['relaxed_diagnostic_reason_codes']}`",
+            f"- v8_action_rank_reason_codes: `{report['v8_action_rank_reason_codes']}`",
+            "- v8_execution_handoff_blocking_reason_codes: "
+            f"`{report['v8_execution_handoff_blocking_reason_codes']}`",
             "- future_unseen_holdout_required: "
             f"`{str(report['future_unseen_holdout_required']).lower()}`",
             f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
@@ -10110,6 +10917,12 @@ def _freeze_readiness_markdown(report: dict[str, Any]) -> str:
             f"`{str(report['relaxed_diagnostic_source_candidate']).lower()}`",
             "- relaxed_diagnostic_no_freeze_unlock: "
             f"`{str(report['relaxed_diagnostic_no_freeze_unlock']).lower()}`",
+            "- v8_action_rank_candidate_eligible: "
+            f"`{str(report['v8_action_rank_candidate_eligible']).lower()}`",
+            "- v8_execution_handoff_allowed: "
+            f"`{str(report['v8_execution_handoff_allowed']).lower()}`",
+            "- strict_source_gate_remains_failed: "
+            f"`{str(report['strict_source_gate_remains_failed']).lower()}`",
             "- strict_calibration_quality_passed: "
             f"`{str(report['strict_calibration_quality_passed']).lower()}`",
             "- relaxed_diagnostic_calibration_quality_passed: "
@@ -10123,6 +10936,9 @@ def _freeze_readiness_markdown(report: dict[str, Any]) -> str:
             f"- candidate_config_hash: `{report['candidate_config_hash']}`",
             "- freeze_blocking_reason_codes: "
             f"`{report['freeze_blocking_reason_codes']}`",
+            f"- v8_action_rank_reason_codes: `{report['v8_action_rank_reason_codes']}`",
+            "- v8_execution_handoff_blocking_reason_codes: "
+            f"`{report['v8_execution_handoff_blocking_reason_codes']}`",
             "- future_unseen_holdout_required: "
             f"`{str(report['future_unseen_holdout_required']).lower()}`",
             f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",

@@ -69,6 +69,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_SOURCE_CANDIDATE_COMPARISON_SCHEMA_VERSION,
     O_SOURCE_MODEL_ELIGIBILITY_GATE_SCHEMA_VERSION,
     O_SOURCE_RANKING_OBJECTIVE_SCHEMA_VERSION,
+    O_V8_ACTION_RANK_HANDOFF_SCHEMA_VERSION,
     PolymarketOReplayAlignedSourceRankingConfig,
     _o_relaxed_diagnostic_gate_status,
     run_polymarket_o_replay_aligned_source_ranking,
@@ -3247,6 +3248,26 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
         "strict_vs_relaxed_gate_summary"
     ] == gate["strict_vs_relaxed_gate_summary"]
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "v8_action_rank_quality_passed"
+    ] == gate["v8_action_rank_quality_passed"]
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "v8_action_rank_candidate_eligible"
+    ] == gate["v8_action_rank_candidate_eligible"]
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "v8_execution_risk_control_required"
+    ] is True
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "v8_execution_handoff_allowed"
+    ] is False
+    assert comparison_by_name[O_MODEL_PREDICTED_VARIANT][
+        "strict_source_gate_remains_failed"
+    ] is True
+    assert comparison["v8_action_rank_candidate_eligible"] == gate[
+        "v8_action_rank_candidate_eligible"
+    ]
+    assert comparison["v8_execution_handoff_allowed"] is False
+    assert comparison["strict_source_gate_remains_failed"] is True
     assert gate["top1_miss_diagnostics"] == gate["validation_metrics"][
         "top1_miss_diagnostics"
     ]
@@ -3256,6 +3277,38 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     ] is True
     assert gate["gate_reason_code_consistency"]["unexpected_reason_codes"] == []
     assert gate["gate_reason_code_consistency"]["missing_reason_codes"] == []
+    assert gate["v8_full_decision_grid_summary"][
+        "complete_5_action_decision_grid"
+    ] is True
+    assert gate["v8_full_decision_grid_summary"][
+        "required_action_families"
+    ] == list(O_ALLOWED_EXECUTABLE_ACTIONS)
+    assert gate["v8_action_rank_gate_summary"]["required_checks"][
+        "full_5_action_decision_grid_complete"
+    ] is True
+    assert gate["v8_action_rank_gate_summary"]["strict_max_mean_regret"] == (
+        O_MAX_MEAN_REGRET
+    )
+    assert gate["v8_action_rank_gate_summary"][
+        "relaxed_diagnostic_max_mean_regret"
+    ] == O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET
+    assert gate["v8_action_rank_quality_passed"] == all(
+        gate["v8_action_rank_gate_summary"]["required_checks"].values()
+    )
+    assert gate["v8_action_rank_candidate_eligible"] == gate[
+        "v8_action_rank_quality_passed"
+    ]
+    assert gate["v8_execution_risk_control_required"] is True
+    assert gate["v8_execution_handoff_allowed"] is False
+    assert "execution_layer_runtime_risk_control_not_validated" in gate[
+        "v8_execution_handoff_blocking_reason_codes"
+    ]
+    assert "paper_live_unlock_prohibited" in gate[
+        "v8_execution_handoff_blocking_reason_codes"
+    ]
+    assert gate["strict_source_gate_remains_failed"] == (
+        not gate["source_model_candidate_eligible"]
+    )
     if (
         gate["high_score_support_count"] >= O_MIN_HIGH_SCORE_SUPPORT_COUNT
         and gate["high_score_realized_return_mean"] > 0.0
@@ -3315,6 +3368,17 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     ]
     assert freeze["relaxed_diagnostic_no_freeze_unlock"] is True
     assert freeze["relaxed_diagnostic_no_paper_live_unlock"] is True
+    assert freeze["v8_action_rank_candidate_eligible"] == gate[
+        "v8_action_rank_candidate_eligible"
+    ]
+    assert freeze["v8_action_rank_quality_passed"] == gate[
+        "v8_action_rank_quality_passed"
+    ]
+    assert freeze["v8_execution_risk_control_required"] is True
+    assert freeze["v8_execution_handoff_allowed"] is False
+    assert freeze["strict_source_gate_remains_failed"] == gate[
+        "strict_source_gate_remains_failed"
+    ]
     assert "source_model_validation_gates_not_passed" in freeze[
         "freeze_blocking_reason_codes"
     ]
@@ -3476,6 +3540,93 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert guard_report["#146_start_allowed"] is False
     assert guard_report["#134_resume_allowed"] is False
 
+    handoff = result.v8_action_rank_handoff_report
+    handoff_payload = dict(handoff)
+    handoff_id = handoff_payload.pop("o_v8_action_rank_handoff_report_id")
+    assert canonical_json_sha256(handoff_payload) == handoff_id
+    assert handoff["schema_version"] == O_V8_ACTION_RANK_HANDOFF_SCHEMA_VERSION
+    assert handoff["candidate_name"] == O_MODEL_PREDICTED_VARIANT
+    assert handoff["ranking_score_source"] == "model_predicted_score"
+    assert handoff["diagnostic_only"] is True
+    assert handoff["strict_calibration_quality_passed"] == gate[
+        "strict_calibration_quality_passed"
+    ]
+    assert handoff["relaxed_diagnostic_source_candidate"] == gate[
+        "relaxed_diagnostic_source_candidate"
+    ]
+    assert handoff["v8_action_rank_quality_passed"] == gate[
+        "v8_action_rank_quality_passed"
+    ]
+    assert handoff["v8_action_rank_candidate_eligible"] == gate[
+        "v8_action_rank_candidate_eligible"
+    ]
+    assert handoff["v8_execution_risk_control_required"] is True
+    assert handoff["v8_execution_handoff_allowed"] is False
+    assert handoff["strict_source_gate_remains_failed"] == gate[
+        "strict_source_gate_remains_failed"
+    ]
+    assert handoff["source_model_candidate_eligible"] is False
+    assert handoff["freeze_ready"] is False
+    assert handoff["promotion_evidence_eligible"] is False
+    assert handoff["#146_start_allowed"] is False
+    assert handoff["#134_resume_allowed"] is False
+    assert handoff["paper_only"] is True
+    assert handoff["capital_at_risk"] is False
+    assert looks_like_sha256(handoff["handoff_contract_hash"])
+    assert looks_like_sha256(handoff["model_sha256"])
+    assert looks_like_sha256(handoff["feature_schema_hash"])
+    assert looks_like_sha256(handoff["split_hash"])
+    assert "full_5_action_ranking" in handoff["execution_handoff_contract"][
+        "required_fields"
+    ]
+    assert handoff["selected_action_handoff_row_count"] == gate[
+        "validation_metrics"
+    ]["decision_group_count"]
+    assert len(handoff["selected_action_handoff_rows"]) == handoff[
+        "selected_action_handoff_row_count"
+    ]
+    for row in handoff["selected_action_handoff_rows"]:
+        assert set(row) >= {
+            "decision_group_id",
+            "market_id",
+            "decision_ts",
+            "selected_action",
+            "selected_side",
+            "selected_action_family",
+            "corrected_model_score",
+            "raw_model_score",
+            "score_components",
+            "high_score_flag",
+            "p_up",
+            "p_down",
+            "p_up_action_disagreement",
+            "microstructure_snapshot",
+            "reference_price_to_beat_distance_at_decision",
+            "reference_price_feature_provenance",
+            "full_5_action_ranking",
+        }
+        assert len(row["full_5_action_ranking"]) == len(O_ALLOWED_EXECUTABLE_ACTIONS)
+        assert {
+            ranked["selected_action"]
+            for ranked in row["full_5_action_ranking"]
+        } == set(O_ALLOWED_EXECUTABLE_ACTIONS)
+        assert set(row["microstructure_snapshot"]) >= {
+            "book_staleness_ms",
+            "spread_bps",
+            "queue_fill_proxy",
+            "time_to_close_seconds",
+            "entry_ask",
+            "executable_exit_bid_proxy",
+        }
+        assert set(row["reference_price_feature_provenance"]) >= {
+            "source_fields_used",
+            "max_input_ts",
+            "decision_ts",
+            "provenance_valid",
+        }
+    assert handoff["no_paper_live_unlock_from_v8_action_rank_gate"] is True
+    assert handoff["no_source_freeze_unlock_from_v8_action_rank_gate"] is True
+
     assert result.artifact_paths["label_construction_report"].exists()
     assert result.artifact_paths["ranking_objective_report"].exists()
     assert result.artifact_paths["leakage_audit_report"].exists()
@@ -3492,6 +3643,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert result.artifact_paths["large_regret_risk_model_summary"].exists()
     assert result.artifact_paths["selective_action_guard_report"].exists()
     assert result.artifact_paths["selective_action_guard_summary"].exists()
+    assert result.artifact_paths["v8_action_rank_handoff_report"].exists()
+    assert result.artifact_paths["v8_action_rank_handoff_summary"].exists()
 
     manifest = _read_json(result.artifact_paths["manifest"])
     assert "hts_p_up_confidently_wrong_feature_diagnostic_report" in manifest[
@@ -3504,8 +3657,11 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert "large_regret_risk_model_summary" in manifest["artifact_hashes"]
     assert "selective_action_guard_report" in manifest["artifact_hashes"]
     assert "selective_action_guard_summary" in manifest["artifact_hashes"]
+    assert "v8_action_rank_handoff_report" in manifest["artifact_hashes"]
+    assert "v8_action_rank_handoff_summary" in manifest["artifact_hashes"]
     assert manifest["large_regret_risk_model_report_available"] is True
     assert manifest["selective_action_guard_report_available"] is True
+    assert manifest["v8_action_rank_handoff_report_available"] is True
     assert manifest["large_regret_risk_model_config_hash"] == risk_report[
         "risk_model_config_hash"
     ]
@@ -3523,6 +3679,17 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     ]
     assert manifest["relaxed_diagnostic_source_candidate"] == gate[
         "relaxed_diagnostic_source_candidate"
+    ]
+    assert manifest["v8_action_rank_quality_passed"] == gate[
+        "v8_action_rank_quality_passed"
+    ]
+    assert manifest["v8_action_rank_candidate_eligible"] == gate[
+        "v8_action_rank_candidate_eligible"
+    ]
+    assert manifest["v8_execution_risk_control_required"] is True
+    assert manifest["v8_execution_handoff_allowed"] is False
+    assert manifest["strict_source_gate_remains_failed"] == gate[
+        "strict_source_gate_remains_failed"
     ]
     assert manifest["strict_vs_relaxed_gate_summary"] == gate[
         "strict_vs_relaxed_gate_summary"
