@@ -41,6 +41,8 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
     freeze = result.freeze_readiness_report
     handoff = result.v8_action_rank_handoff_report
     execution_guard = result.v8_execution_risk_guard_report
+    runtime_state = result.v8_execution_runtime_state_report
+    simulated_replay = result.v8_execution_simulated_order_replay_report
     return {
         "run_id": run_id,
         "run_dir": str(result.run_dir),
@@ -97,6 +99,21 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         "v8_execution_guard_runtime_validation_passed": execution_guard[
             "runtime_risk_control_validation_passed"
         ],
+        "v8_execution_runtime_state_validation_passed": runtime_state[
+            "runtime_state_validation_passed"
+        ],
+        "v8_execution_simulated_allowed_order_count": simulated_replay[
+            "simulated_allowed_order_count"
+        ],
+        "v8_execution_simulated_blocked_decision_count": simulated_replay[
+            "blocked_decision_count"
+        ],
+        "v8_execution_simulated_total_proposed_notional": simulated_replay[
+            "total_proposed_notional"
+        ],
+        "v8_execution_simulated_runtime_risk_control_validation_passed": (
+            simulated_replay["runtime_risk_control_validation_passed"]
+        ),
         "source_model_candidate_eligible": gate["source_model_candidate_eligible"],
         "freeze_ready": freeze["freeze_ready"],
         "leakage_audit_passed": leakage["leakage_audit_passed"],
@@ -130,6 +147,12 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         ),
         "v8_execution_risk_guard_report_path": str(
             result.artifact_paths["v8_execution_risk_guard_report"]
+        ),
+        "v8_execution_runtime_state_report_path": str(
+            result.artifact_paths["v8_execution_runtime_state_report"]
+        ),
+        "v8_execution_simulated_order_replay_report_path": str(
+            result.artifact_paths["v8_execution_simulated_order_replay_report"]
         ),
         "manifest_path": str(result.artifact_paths["manifest"]),
     }

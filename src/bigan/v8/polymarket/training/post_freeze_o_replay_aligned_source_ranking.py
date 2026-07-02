@@ -71,6 +71,12 @@ O_V8_ACTION_RANK_HANDOFF_SCHEMA_VERSION = (
 O_V8_EXECUTION_RISK_GUARD_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-execution-risk-guard-v1"
 )
+O_V8_EXECUTION_RUNTIME_STATE_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-execution-runtime-state-v1"
+)
+O_V8_EXECUTION_SIMULATED_ORDER_REPLAY_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-execution-simulated-order-replay-v1"
+)
 O_TRAINING_LABEL_FIELDS = (
     "action_return_target",
     "label_pnl_target",
@@ -234,6 +240,10 @@ O_V8_EXECUTION_MIN_TIME_TO_CLOSE_SECONDS = 60.0
 O_V8_EXECUTION_MIN_HTS_TIME_TO_CLOSE_SECONDS = 120.0
 O_V8_EXECUTION_MIN_SCORE_MARGIN = 0.02
 O_V8_EXECUTION_BASE_ORDER_SIZE = 0.20
+O_V8_EXECUTION_INITIAL_CASH_BUDGET = 2.00
+O_V8_EXECUTION_MAX_TOTAL_EXPOSURE = 1.00
+O_V8_EXECUTION_MAX_MARKET_EXPOSURE = 0.20
+O_V8_EXECUTION_MAX_SIDE_EXPOSURE = 0.70
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +290,8 @@ class PolymarketOReplayAlignedSourceRankingResult:
     joint_feature_correction_selection_report: dict[str, Any]
     v8_action_rank_handoff_report: dict[str, Any]
     v8_execution_risk_guard_report: dict[str, Any]
+    v8_execution_runtime_state_report: dict[str, Any]
+    v8_execution_simulated_order_replay_report: dict[str, Any]
     artifact_paths: dict[str, Path]
 
 
@@ -335,6 +347,14 @@ def run_polymarket_o_replay_aligned_source_ranking(
         / "o_v8_execution_risk_guard_report.json",
         "v8_execution_risk_guard_summary": run_dir
         / "o_v8_execution_risk_guard_report.md",
+        "v8_execution_runtime_state_report": run_dir
+        / "o_v8_execution_runtime_state_report.json",
+        "v8_execution_runtime_state_summary": run_dir
+        / "o_v8_execution_runtime_state_report.md",
+        "v8_execution_simulated_order_replay_report": run_dir
+        / "o_v8_execution_simulated_order_replay_report.json",
+        "v8_execution_simulated_order_replay_summary": run_dir
+        / "o_v8_execution_simulated_order_replay_report.md",
         "manifest": run_dir / "o_replay_aligned_source_ranking_manifest.json",
     }
     reports = _build_reports(config=config)
@@ -398,6 +418,19 @@ def run_polymarket_o_replay_aligned_source_ranking(
         _v8_execution_risk_guard_markdown(reports[10]),
         encoding="utf-8",
     )
+    _write_json(artifact_paths["v8_execution_runtime_state_report"], reports[11])
+    artifact_paths["v8_execution_runtime_state_summary"].write_text(
+        _v8_execution_runtime_state_markdown(reports[11]),
+        encoding="utf-8",
+    )
+    _write_json(
+        artifact_paths["v8_execution_simulated_order_replay_report"],
+        reports[12],
+    )
+    artifact_paths["v8_execution_simulated_order_replay_summary"].write_text(
+        _v8_execution_simulated_order_replay_markdown(reports[12]),
+        encoding="utf-8",
+    )
     manifest = {
         "schema_version": "bigan-v8-polymarket-o-replay-aligned-source-ranking-artifacts-v1",
         "run_id": config.run_id,
@@ -429,6 +462,26 @@ def run_polymarket_o_replay_aligned_source_ranking(
             "o_v8_execution_risk_guard_report_id"
         ],
         "v8_execution_guard_runtime_validation_passed": reports[10][
+            "runtime_risk_control_validation_passed"
+        ],
+        "v8_execution_runtime_state_report_available": True,
+        "v8_execution_runtime_state_report_id": reports[11][
+            "o_v8_execution_runtime_state_report_id"
+        ],
+        "v8_execution_runtime_state_validation_passed": reports[11][
+            "runtime_state_validation_passed"
+        ],
+        "v8_execution_simulated_order_replay_report_available": True,
+        "v8_execution_simulated_order_replay_report_id": reports[12][
+            "o_v8_execution_simulated_order_replay_report_id"
+        ],
+        "v8_execution_simulated_allowed_order_count": reports[12][
+            "simulated_allowed_order_count"
+        ],
+        "v8_execution_simulated_blocked_decision_count": reports[12][
+            "blocked_decision_count"
+        ],
+        "v8_execution_simulated_runtime_risk_control_validation_passed": reports[12][
             "runtime_risk_control_validation_passed"
         ],
         "model_layer_regret_risk_selection_deferred_to_issue": "#158",
@@ -477,6 +530,8 @@ def run_polymarket_o_replay_aligned_source_ranking(
         joint_feature_correction_selection_report=reports[8],
         v8_action_rank_handoff_report=reports[9],
         v8_execution_risk_guard_report=reports[10],
+        v8_execution_runtime_state_report=reports[11],
+        v8_execution_simulated_order_replay_report=reports[12],
         artifact_paths=artifact_paths,
     )
 
@@ -485,6 +540,8 @@ def _build_reports(
     *,
     config: PolymarketOReplayAlignedSourceRankingConfig,
 ) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
@@ -597,6 +654,15 @@ def _build_reports(
         m2_report=m2_report,
         handoff_report=v8_action_rank_handoff_report,
     )
+    (
+        v8_execution_runtime_state_report,
+        v8_execution_simulated_order_replay_report,
+    ) = _v8_execution_simulated_runtime_reports(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        handoff_report=v8_action_rank_handoff_report,
+        execution_guard_report=v8_execution_risk_guard_report,
+    )
     return (
         label_report,
         ranking_report,
@@ -609,6 +675,8 @@ def _build_reports(
         joint_feature_correction_selection_report,
         v8_action_rank_handoff_report,
         v8_execution_risk_guard_report,
+        v8_execution_runtime_state_report,
+        v8_execution_simulated_order_replay_report,
     )
 
 
@@ -6153,6 +6221,13 @@ def _v8_execution_guard_config() -> dict[str, Any]:
         "min_score_margin": O_V8_EXECUTION_MIN_SCORE_MARGIN,
         "base_order_size": O_V8_EXECUTION_BASE_ORDER_SIZE,
         "max_order_size": O_V8_EXECUTION_BASE_ORDER_SIZE,
+        "initial_cash_budget": O_V8_EXECUTION_INITIAL_CASH_BUDGET,
+        "max_total_exposure": O_V8_EXECUTION_MAX_TOTAL_EXPOSURE,
+        "max_market_exposure": O_V8_EXECUTION_MAX_MARKET_EXPOSURE,
+        "max_side_exposure": O_V8_EXECUTION_MAX_SIDE_EXPOSURE,
+        "duplicate_market_side_position_policy": "block",
+        "opposite_side_conflict_policy": "block",
+        "cooldown_after_blocked_decision_count": 0,
         "missing_exposure_state_policy": "block_trade_fail_closed",
         "paper_live_unlock_policy": "always_blocked_until_runtime_validation_passes",
     }
@@ -6204,6 +6279,8 @@ def _v8_execution_guard_decision(
     row: dict[str, Any],
     *,
     guard_config: dict[str, Any],
+    runtime_state: dict[str, Any] | None = None,
+    runtime_mode: str = "fail_closed_no_runtime_state",
 ) -> dict[str, Any]:
     source_action = str(row.get("selected_action") or "")
     source_side = str(row.get("selected_side") or _side_from_action(source_action))
@@ -6220,15 +6297,22 @@ def _v8_execution_guard_decision(
     queue = _optional_float(microstructure.get("queue_fill_proxy"))
     time_to_close = _optional_float(microstructure.get("time_to_close_seconds"))
     margin = _top_score_margin(full_ranking)
+    runtime_state_available = (
+        runtime_mode == "simulated_runtime_state"
+        and runtime_state is not None
+        and runtime_state.get("runtime_state_validation_passed") is True
+    )
 
     guarded_action = source_action
     guarded_reason_codes: list[str] = []
     blocking_reason_codes: list[str] = []
+    exposure_reason_codes: list[str] = []
     missing_codes = _v8_execution_missing_runtime_field_codes(
         row=row,
         microstructure=microstructure,
         reference_provenance=reference_provenance,
         trade_action=source_action != "NO_TRADE",
+        runtime_state_available=runtime_state_available,
     )
     if missing_codes:
         blocking_reason_codes.append("execution_required_runtime_fields_missing")
@@ -6286,7 +6370,33 @@ def _v8_execution_guard_decision(
                 guarded_action = "NO_TRADE"
                 guarded_reason_codes.append("execution_hts_blocked_to_no_trade")
 
-        blocking_reason_codes.append("execution_exposure_state_missing")
+        if not runtime_state_available:
+            blocking_reason_codes.append("execution_exposure_state_missing")
+
+    guarded_family = _action_family(guarded_action)
+    guarded_side = _side_from_action(guarded_action)
+    initial_proposed_size = (
+        _v8_execution_order_size(
+            high_score=bool(row.get("high_score_flag")),
+            guard_reason_codes=guarded_reason_codes,
+            guard_config=guard_config,
+        )
+        if guarded_action != "NO_TRADE" and source_action != "NO_TRADE"
+        else 0.0
+    )
+    exposure_checked_size = initial_proposed_size
+    if runtime_state_available and source_action != "NO_TRADE":
+        exposure_check = _v8_execution_exposure_check(
+            market_id=str(row.get("market_id") or ""),
+            side=guarded_side,
+            guarded_action=guarded_action,
+            proposed_order_size=initial_proposed_size,
+            runtime_state=runtime_state or {},
+            guard_config=guard_config,
+        )
+        exposure_checked_size = float(exposure_check["capped_order_size"])
+        blocking_reason_codes.extend(exposure_check["blocking_reason_codes"])
+        exposure_reason_codes.extend(exposure_check["exposure_reason_codes"])
 
     penalties = _v8_execution_penalties(
         source_score=source_score,
@@ -6299,22 +6409,29 @@ def _v8_execution_guard_decision(
         guard_config=guard_config,
     )
     execution_score = source_score - sum(penalties.values())
-    guarded_family = _action_family(guarded_action)
-    guarded_side = _side_from_action(guarded_action)
     unique_blocking = sorted(set(blocking_reason_codes))
     unique_guard = sorted(set(guarded_reason_codes))
+    unique_exposure_reasons = sorted(set(exposure_reason_codes))
     trade_intent = guarded_action != "NO_TRADE" and source_action != "NO_TRADE"
     order_allowed = trade_intent and not unique_blocking
-    fail_closed = bool(unique_blocking) and source_action != "NO_TRADE"
-    proposed_size = (
-        _v8_execution_order_size(
-            high_score=bool(row.get("high_score_flag")),
-            guard_reason_codes=unique_guard,
-            guard_config=guard_config,
+    if runtime_state_available and source_action != "NO_TRADE":
+        final_exposure_reasons = [
+            reason
+            for reason in unique_exposure_reasons
+            if reason
+            not in {
+                "execution_simulated_order_allowed",
+                "execution_simulated_order_blocked",
+            }
+        ]
+        final_exposure_reasons.append(
+            "execution_simulated_order_allowed"
+            if order_allowed
+            else "execution_simulated_order_blocked"
         )
-        if order_allowed
-        else 0.0
-    )
+        unique_exposure_reasons = sorted(set(final_exposure_reasons))
+    fail_closed = bool(unique_blocking) and source_action != "NO_TRADE"
+    proposed_size = exposure_checked_size if order_allowed else 0.0
     return {
         "decision_group_id": row.get("decision_group_id"),
         "market_id": row.get("market_id"),
@@ -6341,22 +6458,30 @@ def _v8_execution_guard_decision(
         ),
         "order_allowed": order_allowed,
         "proposed_order_size": proposed_size,
+        "uncapped_proposed_order_size": initial_proposed_size,
         "sizing_reason_codes": _v8_execution_sizing_reason_codes(
             proposed_order_size=proposed_size,
             guard_reason_codes=unique_guard,
             blocking_reason_codes=unique_blocking,
             source_action=source_action,
         ),
+        "exposure_reason_codes": unique_exposure_reasons,
         "execution_guard_reason_codes": unique_guard,
         "execution_blocking_reason_codes": unique_blocking,
         "required_runtime_fields_present": not missing_codes,
         "missing_runtime_field_codes": missing_codes,
         "fail_closed": fail_closed,
         "simulation_only": True,
-        "runtime_exposure_state_available": False,
-        "runtime_exposure_state": None,
+        "runtime_mode": runtime_mode,
+        "runtime_exposure_state_available": runtime_state_available,
+        "runtime_exposure_state": _v8_compact_runtime_state(runtime_state)
+        if runtime_state_available
+        else None,
         "runtime_limits": {
             "max_order_size": guard_config["max_order_size"],
+            "max_total_exposure": guard_config["max_total_exposure"],
+            "max_market_exposure": guard_config["max_market_exposure"],
+            "max_side_exposure": guard_config["max_side_exposure"],
             "max_spread_bps": guard_config["max_spread_bps"],
             "max_book_staleness_ms": guard_config["max_book_staleness_ms"],
             "min_queue_fill": guard_config["min_queue_fill"],
@@ -6372,12 +6497,488 @@ def _v8_execution_guard_decision(
     }
 
 
+def _v8_execution_exposure_check(
+    *,
+    market_id: str,
+    side: str,
+    guarded_action: str,
+    proposed_order_size: float,
+    runtime_state: dict[str, Any],
+    guard_config: dict[str, Any],
+) -> dict[str, Any]:
+    if guarded_action == "NO_TRADE" or proposed_order_size <= 0.0:
+        return {
+            "capped_order_size": 0.0,
+            "blocking_reason_codes": [],
+            "exposure_reason_codes": ["execution_no_exposure_delta_for_no_trade"],
+        }
+    blocking_reasons: list[str] = []
+    exposure_reasons = ["execution_simulated_runtime_state_valid"]
+    market_exposure = dict(
+        runtime_state.get("current_market_exposure_by_market_id") or {}
+    )
+    side_exposure = dict(runtime_state.get("current_side_exposure_by_side") or {})
+    open_by_market = dict(runtime_state.get("open_position_by_market_id") or {})
+    open_by_market_side = dict(
+        runtime_state.get("open_position_by_market_side") or {}
+    )
+    cooldown_state = dict(runtime_state.get("cooldown_state") or {})
+
+    if cooldown_state.get(market_id):
+        blocking_reasons.append("execution_cooldown_active")
+    market_side_key = f"{market_id}|{side}"
+    if market_side_key in open_by_market_side:
+        blocking_reasons.append("execution_duplicate_market_side_position")
+    existing_market_position = open_by_market.get(market_id)
+    if (
+        isinstance(existing_market_position, dict)
+        and existing_market_position.get("side") not in (None, side)
+    ):
+        blocking_reasons.append("execution_opposite_side_conflict")
+
+    max_order_size = float(guard_config["max_order_size"])
+    capped_size = min(float(proposed_order_size), max_order_size)
+    if capped_size < float(proposed_order_size):
+        exposure_reasons.append("execution_order_size_capped_by_max_order_size")
+
+    total_exposure = float(runtime_state.get("current_total_exposure") or 0.0)
+    current_market_exposure = float(market_exposure.get(market_id) or 0.0)
+    current_side_exposure = float(side_exposure.get(side) or 0.0)
+    total_remaining = max(
+        0.0,
+        float(guard_config["max_total_exposure"]) - total_exposure,
+    )
+    market_remaining = max(
+        0.0,
+        float(guard_config["max_market_exposure"]) - current_market_exposure,
+    )
+    side_remaining = max(
+        0.0,
+        float(guard_config["max_side_exposure"]) - current_side_exposure,
+    )
+    capped_size = min(capped_size, total_remaining, market_remaining, side_remaining)
+    if capped_size <= 0.0:
+        if total_remaining <= 0.0:
+            blocking_reasons.append("execution_total_exposure_limit_reached")
+        if market_remaining <= 0.0:
+            blocking_reasons.append("execution_market_exposure_limit_reached")
+        if side_remaining <= 0.0:
+            blocking_reasons.append("execution_side_exposure_limit_reached")
+    elif capped_size < float(proposed_order_size):
+        exposure_reasons.append("execution_order_size_capped_by_exposure_limit")
+
+    if blocking_reasons:
+        exposure_reasons.append("execution_simulated_order_blocked")
+    else:
+        exposure_reasons.append("execution_simulated_order_allowed")
+    return {
+        "capped_order_size": capped_size if not blocking_reasons else 0.0,
+        "blocking_reason_codes": sorted(set(blocking_reasons)),
+        "exposure_reason_codes": sorted(set(exposure_reasons)),
+    }
+
+
+def _v8_execution_simulated_runtime_reports(
+    *,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    handoff_report: dict[str, Any],
+    execution_guard_report: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    runtime_config = _v8_execution_guard_config()
+    initial_state = _v8_initial_runtime_state(runtime_config)
+    state = _copy_jsonable(initial_state)
+    ordered_rows = sorted(
+        handoff_report["selected_action_handoff_rows"],
+        key=lambda row: (
+            int(row.get("decision_ts") or 0),
+            str(row.get("market_id") or ""),
+            str(row.get("decision_group_id") or ""),
+        ),
+    )
+    replay_rows = []
+    for index, row in enumerate(ordered_rows, start=1):
+        pre_state = _v8_compact_runtime_state(state)
+        decision = _v8_execution_guard_decision(
+            row,
+            guard_config=runtime_config,
+            runtime_state=state,
+            runtime_mode="simulated_runtime_state",
+        )
+        simulated_order_id = None
+        exposure_delta = 0.0
+        exposure_reason_codes = list(decision["exposure_reason_codes"])
+        if decision["order_allowed"]:
+            simulated_order_id = f"sim-v8-o-{index:06d}"
+            exposure_delta = float(decision["proposed_order_size"])
+            _v8_apply_simulated_order_to_state(
+                state=state,
+                decision=decision,
+                simulated_order_id=simulated_order_id,
+            )
+        else:
+            _v8_record_blocked_simulated_order(
+                state=state,
+                decision=decision,
+            )
+            exposure_reason_codes.append("execution_simulated_order_blocked")
+        post_state = _v8_compact_runtime_state(state)
+        replay_rows.append(
+            {
+                **decision,
+                "pre_decision_exposure_state": pre_state,
+                "post_decision_exposure_state": post_state,
+                "exposure_delta": exposure_delta,
+                "simulated_order_id": simulated_order_id,
+                "exposure_reason_codes": sorted(set(exposure_reason_codes)),
+            }
+        )
+    final_state = _v8_compact_runtime_state(state)
+    runtime_report = _v8_execution_runtime_state_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        handoff_report=handoff_report,
+        execution_guard_report=execution_guard_report,
+        runtime_config=runtime_config,
+        initial_state=_v8_compact_runtime_state(initial_state),
+        final_state=final_state,
+        replay_rows=replay_rows,
+    )
+    replay_report = _v8_execution_simulated_order_replay_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        handoff_report=handoff_report,
+        execution_guard_report=execution_guard_report,
+        runtime_state_report=runtime_report,
+        replay_rows=replay_rows,
+    )
+    return runtime_report, replay_report
+
+
+def _v8_initial_runtime_state(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "risk_state_source": "simulated_diagnostic_ledger",
+        "runtime_state_validation_passed": True,
+        "validation_reason_codes": ["execution_simulated_runtime_state_valid"],
+        "initial_cash_budget": float(config["initial_cash_budget"]),
+        "max_total_exposure": float(config["max_total_exposure"]),
+        "max_market_exposure": float(config["max_market_exposure"]),
+        "max_side_exposure": float(config["max_side_exposure"]),
+        "max_order_size": float(config["max_order_size"]),
+        "current_total_exposure": 0.0,
+        "current_market_exposure_by_market_id": {},
+        "current_side_exposure_by_side": {"DOWN": 0.0, "NONE": 0.0, "UP": 0.0},
+        "open_position_by_market_id": {},
+        "open_position_by_market_side": {},
+        "executed_simulated_orders": [],
+        "blocked_simulated_orders": [],
+        "cooldown_state": {},
+    }
+
+
+def _copy_jsonable(payload: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(json.dumps(payload, sort_keys=True))
+
+
+def _v8_compact_runtime_state(
+    state: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    return {
+        "risk_state_source": state.get("risk_state_source"),
+        "runtime_state_validation_passed": bool(
+            state.get("runtime_state_validation_passed")
+        ),
+        "current_total_exposure": float(state.get("current_total_exposure") or 0.0),
+        "current_market_exposure_by_market_id": dict(
+            sorted(
+                (state.get("current_market_exposure_by_market_id") or {}).items()
+            )
+        ),
+        "current_side_exposure_by_side": dict(
+            sorted((state.get("current_side_exposure_by_side") or {}).items())
+        ),
+        "open_position_by_market_id": dict(
+            sorted((state.get("open_position_by_market_id") or {}).items())
+        ),
+        "open_position_by_market_side": dict(
+            sorted((state.get("open_position_by_market_side") or {}).items())
+        ),
+        "executed_simulated_order_count": len(
+            state.get("executed_simulated_orders") or []
+        ),
+        "blocked_simulated_order_count": len(
+            state.get("blocked_simulated_orders") or []
+        ),
+        "cooldown_state": dict(sorted((state.get("cooldown_state") or {}).items())),
+    }
+
+
+def _v8_apply_simulated_order_to_state(
+    *,
+    state: dict[str, Any],
+    decision: dict[str, Any],
+    simulated_order_id: str,
+) -> None:
+    market_id = str(decision.get("market_id") or "")
+    side = str(decision.get("execution_guarded_side") or "")
+    action = str(decision.get("execution_guarded_action") or "")
+    size = float(decision.get("proposed_order_size") or 0.0)
+    state["current_total_exposure"] = (
+        float(state.get("current_total_exposure") or 0.0) + size
+    )
+    market_exposure = state.setdefault("current_market_exposure_by_market_id", {})
+    market_exposure[market_id] = float(market_exposure.get(market_id) or 0.0) + size
+    side_exposure = state.setdefault("current_side_exposure_by_side", {})
+    side_exposure[side] = float(side_exposure.get(side) or 0.0) + size
+    position = {
+        "market_id": market_id,
+        "side": side,
+        "action": action,
+        "notional": size,
+        "simulated_order_id": simulated_order_id,
+    }
+    state.setdefault("open_position_by_market_id", {})[market_id] = position
+    state.setdefault("open_position_by_market_side", {})[
+        f"{market_id}|{side}"
+    ] = position
+    state.setdefault("executed_simulated_orders", []).append(
+        {
+            "simulated_order_id": simulated_order_id,
+            "decision_group_id": decision.get("decision_group_id"),
+            "market_id": market_id,
+            "decision_ts": decision.get("decision_ts"),
+            "action": action,
+            "side": side,
+            "notional": size,
+            "execution_guarded_score": decision.get("execution_guarded_score"),
+        }
+    )
+
+
+def _v8_record_blocked_simulated_order(
+    *,
+    state: dict[str, Any],
+    decision: dict[str, Any],
+) -> None:
+    state.setdefault("blocked_simulated_orders", []).append(
+        {
+            "decision_group_id": decision.get("decision_group_id"),
+            "market_id": decision.get("market_id"),
+            "decision_ts": decision.get("decision_ts"),
+            "source_selected_action": decision.get("source_selected_action"),
+            "execution_guarded_action": decision.get("execution_guarded_action"),
+            "execution_blocking_reason_codes": decision.get(
+                "execution_blocking_reason_codes",
+                [],
+            ),
+        }
+    )
+
+
+def _v8_execution_runtime_state_report(
+    *,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    handoff_report: dict[str, Any],
+    execution_guard_report: dict[str, Any],
+    runtime_config: dict[str, Any],
+    initial_state: dict[str, Any],
+    final_state: dict[str, Any],
+    replay_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    executed_orders = [
+        row
+        for row in replay_rows
+        if row.get("simulated_order_id") and row.get("order_allowed") is True
+    ]
+    blocked_orders = [row for row in replay_rows if row.get("order_allowed") is False]
+    validation_passed = bool(final_state.get("runtime_state_validation_passed"))
+    report = {
+        "schema_version": O_V8_EXECUTION_RUNTIME_STATE_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "source_lineage": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "report_type": "o_v8_execution_runtime_state",
+        "diagnostic_only": True,
+        "simulation_only": True,
+        "risk_state_source": "simulated_diagnostic_ledger",
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "source_action_rank_signal_report_id": handoff_report[
+            "o_v8_action_rank_handoff_report_id"
+        ],
+        "execution_guard_report_id": execution_guard_report[
+            "o_v8_execution_risk_guard_report_id"
+        ],
+        "runtime_state_config": runtime_config,
+        "runtime_state_config_hash": canonical_json_sha256(runtime_config),
+        "initial_state": initial_state,
+        "final_state": final_state,
+        "current_total_exposure": final_state["current_total_exposure"],
+        "exposure_by_market": final_state["current_market_exposure_by_market_id"],
+        "exposure_by_side": final_state["current_side_exposure_by_side"],
+        "open_position_by_market_id": final_state["open_position_by_market_id"],
+        "open_position_by_market_side": final_state["open_position_by_market_side"],
+        "executed_simulated_orders": [
+            _v8_runtime_order_summary(row) for row in executed_orders
+        ],
+        "blocked_simulated_orders": [
+            _v8_runtime_blocked_order_summary(row) for row in blocked_orders
+        ],
+        "cooldown_state": final_state["cooldown_state"],
+        "runtime_state_validation_passed": validation_passed,
+        "validation_status": "passed_simulated_diagnostic"
+        if validation_passed
+        else "blocked_fail_closed",
+        "validation_reason_codes": ["execution_simulated_runtime_state_valid"]
+        if validation_passed
+        else ["execution_simulated_runtime_state_invalid"],
+        "runtime_risk_control_validation_passed": validation_passed,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    report["o_v8_execution_runtime_state_report_id"] = canonical_json_sha256(report)
+    return report
+
+
+def _v8_execution_simulated_order_replay_report(
+    *,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    handoff_report: dict[str, Any],
+    execution_guard_report: dict[str, Any],
+    runtime_state_report: dict[str, Any],
+    replay_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    allowed_rows = [row for row in replay_rows if row["order_allowed"]]
+    blocked_rows = [row for row in replay_rows if not row["order_allowed"]]
+    block_reason_counts = Counter(
+        reason
+        for row in replay_rows
+        for reason in row["execution_blocking_reason_codes"]
+    )
+    exposure_reason_counts = Counter(
+        reason for row in replay_rows for reason in row["exposure_reason_codes"]
+    )
+    action_counts = Counter(str(row["execution_guarded_action"]) for row in replay_rows)
+    family_counts = Counter(str(row["execution_guarded_family"]) for row in replay_rows)
+    side_counts = Counter(str(row["execution_guarded_side"]) for row in replay_rows)
+    replay_hash_payload = [
+        {
+            "decision_group_id": row["decision_group_id"],
+            "market_id": row["market_id"],
+            "decision_ts": row["decision_ts"],
+            "execution_guarded_action": row["execution_guarded_action"],
+            "order_allowed": row["order_allowed"],
+            "proposed_order_size": row["proposed_order_size"],
+            "simulated_order_id": row["simulated_order_id"],
+            "blocking_reason_codes": row["execution_blocking_reason_codes"],
+            "exposure_reason_codes": row["exposure_reason_codes"],
+        }
+        for row in replay_rows
+    ]
+    report = {
+        "schema_version": O_V8_EXECUTION_SIMULATED_ORDER_REPLAY_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "source_lineage": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "report_type": "o_v8_execution_simulated_order_replay",
+        "diagnostic_only": True,
+        "simulation_only": True,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "replay_source_report_id": handoff_report[
+            "o_v8_action_rank_handoff_report_id"
+        ],
+        "execution_guard_report_id": execution_guard_report[
+            "o_v8_execution_risk_guard_report_id"
+        ],
+        "runtime_state_report_id": runtime_state_report[
+            "o_v8_execution_runtime_state_report_id"
+        ],
+        "decision_count": len(replay_rows),
+        "simulated_allowed_order_count": len(allowed_rows),
+        "blocked_decision_count": len(blocked_rows),
+        "total_proposed_notional": sum(
+            float(row["proposed_order_size"]) for row in allowed_rows
+        ),
+        "final_exposure": runtime_state_report["final_state"],
+        "action_distribution": dict(sorted(action_counts.items())),
+        "family_distribution": dict(sorted(family_counts.items())),
+        "side_distribution": dict(sorted(side_counts.items())),
+        "block_reason_distribution": dict(sorted(block_reason_counts.items())),
+        "exposure_reason_distribution": dict(sorted(exposure_reason_counts.items())),
+        "deterministic_replay_hash": canonical_json_sha256(replay_hash_payload),
+        "runtime_risk_control_validation_passed": runtime_state_report[
+            "runtime_risk_control_validation_passed"
+        ],
+        "v8_execution_handoff_allowed": False,
+        "v8_execution_handoff_blocking_reason_codes": [
+            "future_explicit_execution_handoff_gate_required",
+            "paper_live_unlock_prohibited",
+        ],
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "simulated_decision_rows": replay_rows,
+        **compact_safety_fields(),
+    }
+    report["o_v8_execution_simulated_order_replay_report_id"] = (
+        canonical_json_sha256(report)
+    )
+    return report
+
+
+def _v8_runtime_order_summary(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "simulated_order_id": row.get("simulated_order_id"),
+        "decision_group_id": row.get("decision_group_id"),
+        "market_id": row.get("market_id"),
+        "decision_ts": row.get("decision_ts"),
+        "action": row.get("execution_guarded_action"),
+        "side": row.get("execution_guarded_side"),
+        "family": row.get("execution_guarded_family"),
+        "notional": row.get("proposed_order_size"),
+    }
+
+
+def _v8_runtime_blocked_order_summary(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "decision_group_id": row.get("decision_group_id"),
+        "market_id": row.get("market_id"),
+        "decision_ts": row.get("decision_ts"),
+        "source_selected_action": row.get("source_selected_action"),
+        "execution_guarded_action": row.get("execution_guarded_action"),
+        "execution_blocking_reason_codes": row.get(
+            "execution_blocking_reason_codes",
+            [],
+        ),
+        "exposure_reason_codes": row.get("exposure_reason_codes", []),
+    }
+
+
 def _v8_execution_missing_runtime_field_codes(
     *,
     row: dict[str, Any],
     microstructure: dict[str, Any],
     reference_provenance: dict[str, Any],
     trade_action: bool,
+    runtime_state_available: bool = False,
 ) -> list[str]:
     missing = []
     for field_name in (
@@ -6399,7 +7000,7 @@ def _v8_execution_missing_runtime_field_codes(
             missing.append(f"missing_microstructure_{field_name}")
     if reference_provenance.get("provenance_valid") is not True:
         missing.append("missing_valid_reference_price_provenance")
-    if trade_action:
+    if trade_action and not runtime_state_available:
         missing.append("execution_exposure_state_missing")
     return sorted(set(missing))
 
@@ -10291,6 +10892,58 @@ def _v8_execution_risk_guard_markdown(report: dict[str, Any]) -> str:
             f"`{str(report['no_paper_live_unlock_from_execution_guard']).lower()}`",
             "- no_source_freeze_unlock_from_execution_guard: "
             f"`{str(report['no_source_freeze_unlock_from_execution_guard']).lower()}`",
+            f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+            f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+            "",
+        ]
+    )
+
+
+def _v8_execution_runtime_state_markdown(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Execution Runtime State",
+            "",
+            f"- diagnostic_only: `{str(report['diagnostic_only']).lower()}`",
+            f"- simulation_only: `{str(report['simulation_only']).lower()}`",
+            f"- risk_state_source: `{report['risk_state_source']}`",
+            "- runtime_state_validation_passed: "
+            f"`{str(report['runtime_state_validation_passed']).lower()}`",
+            "- runtime_risk_control_validation_passed: "
+            f"`{str(report['runtime_risk_control_validation_passed']).lower()}`",
+            f"- current_total_exposure: `{report['current_total_exposure']}`",
+            f"- exposure_by_side: `{report['exposure_by_side']}`",
+            f"- executed_simulated_order_count: `{len(report['executed_simulated_orders'])}`",
+            f"- blocked_simulated_order_count: `{len(report['blocked_simulated_orders'])}`",
+            "- v8_execution_handoff_allowed: "
+            f"`{str(report['v8_execution_handoff_allowed']).lower()}`",
+            f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+            f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+            "",
+        ]
+    )
+
+
+def _v8_execution_simulated_order_replay_markdown(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Execution Simulated Order Replay",
+            "",
+            f"- diagnostic_only: `{str(report['diagnostic_only']).lower()}`",
+            f"- simulation_only: `{str(report['simulation_only']).lower()}`",
+            f"- decision_count: `{report['decision_count']}`",
+            "- simulated_allowed_order_count: "
+            f"`{report['simulated_allowed_order_count']}`",
+            f"- blocked_decision_count: `{report['blocked_decision_count']}`",
+            f"- total_proposed_notional: `{report['total_proposed_notional']}`",
+            "- runtime_risk_control_validation_passed: "
+            f"`{str(report['runtime_risk_control_validation_passed']).lower()}`",
+            "- v8_execution_handoff_allowed: "
+            f"`{str(report['v8_execution_handoff_allowed']).lower()}`",
+            f"- block_reason_distribution: `{report['block_reason_distribution']}`",
+            "- exposure_reason_distribution: "
+            f"`{report['exposure_reason_distribution']}`",
+            f"- deterministic_replay_hash: `{report['deterministic_replay_hash']}`",
             f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
             f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
             "",
