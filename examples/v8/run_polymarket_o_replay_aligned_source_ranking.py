@@ -40,6 +40,7 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
     gate = result.source_model_eligibility_gate_report
     freeze = result.freeze_readiness_report
     handoff = result.v8_action_rank_handoff_report
+    execution_guard = result.v8_execution_risk_guard_report
     return {
         "run_id": run_id,
         "run_dir": str(result.run_dir),
@@ -84,6 +85,18 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         "v8_selected_action_handoff_row_count": handoff[
             "selected_action_handoff_row_count"
         ],
+        "v8_execution_risk_guard_decision_count": execution_guard[
+            "execution_guard_decision_count"
+        ],
+        "v8_execution_guard_order_allowed_count": execution_guard[
+            "order_allowed_count"
+        ],
+        "v8_execution_guard_fail_closed_decision_count": execution_guard[
+            "fail_closed_decision_count"
+        ],
+        "v8_execution_guard_runtime_validation_passed": execution_guard[
+            "runtime_risk_control_validation_passed"
+        ],
         "source_model_candidate_eligible": gate["source_model_candidate_eligible"],
         "freeze_ready": freeze["freeze_ready"],
         "leakage_audit_passed": leakage["leakage_audit_passed"],
@@ -114,6 +127,9 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         ),
         "v8_action_rank_handoff_report_path": str(
             result.artifact_paths["v8_action_rank_handoff_report"]
+        ),
+        "v8_execution_risk_guard_report_path": str(
+            result.artifact_paths["v8_execution_risk_guard_report"]
         ),
         "manifest_path": str(result.artifact_paths["manifest"]),
     }
