@@ -44,6 +44,7 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
     runtime_state = result.v8_execution_runtime_state_report
     simulated_replay = result.v8_execution_simulated_order_replay_report
     block_analysis = result.v8_execution_guard_block_analysis_report
+    field_coverage = result.v8_execution_runtime_field_coverage_report
     return {
         "run_id": run_id,
         "run_dir": str(result.run_dir),
@@ -128,6 +129,32 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         "v8_execution_block_analysis_primary_blocker_categories": block_analysis[
             "primary_blocker_categories"
         ],
+        "v8_execution_runtime_field_missing_decision_count": field_coverage[
+            "missing_runtime_field_decision_count"
+        ],
+        "v8_execution_runtime_field_true_data_gap_count": field_coverage[
+            "classification_counts"
+        ]["true_data_coverage_gap"],
+        "v8_execution_runtime_field_safe_backfill_candidate_count": field_coverage[
+            "safe_backfill_candidate_count"
+        ],
+        "v8_execution_runtime_field_existing_handoff_backfill_candidate_count": (
+            field_coverage["existing_handoff_backfill_candidate_count"]
+        ),
+        "v8_execution_runtime_field_decision_time_data_join_backfill_candidate_count": (
+            field_coverage["decision_time_data_join_backfill_candidate_count"]
+        ),
+        "v8_execution_runtime_field_optional_for_no_trade_count": field_coverage[
+            "classification_counts"
+        ]["optional_for_no_trade"],
+        "v8_execution_runtime_field_simulation_policy_too_strict_count": (
+            field_coverage["classification_counts"][
+                "too_strict_for_simulation_only_mode"
+            ]
+        ),
+        "v8_execution_runtime_field_primary_missing_fields": field_coverage[
+            "primary_missing_runtime_fields"
+        ],
         "source_model_candidate_eligible": gate["source_model_candidate_eligible"],
         "freeze_ready": freeze["freeze_ready"],
         "leakage_audit_passed": leakage["leakage_audit_passed"],
@@ -170,6 +197,9 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         ),
         "v8_execution_guard_block_analysis_report_path": str(
             result.artifact_paths["v8_execution_guard_block_analysis_report"]
+        ),
+        "v8_execution_runtime_field_coverage_report_path": str(
+            result.artifact_paths["v8_execution_runtime_field_coverage_report"]
         ),
         "manifest_path": str(result.artifact_paths["manifest"]),
     }

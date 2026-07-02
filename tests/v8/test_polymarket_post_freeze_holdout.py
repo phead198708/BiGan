@@ -69,6 +69,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_V8_ACTION_RANK_HANDOFF_SCHEMA_VERSION,
     O_V8_EXECUTION_GUARD_BLOCK_ANALYSIS_SCHEMA_VERSION,
     O_V8_EXECUTION_RISK_GUARD_SCHEMA_VERSION,
+    O_V8_EXECUTION_RUNTIME_FIELD_COVERAGE_SCHEMA_VERSION,
     O_V8_EXECUTION_RUNTIME_STATE_SCHEMA_VERSION,
     O_V8_EXECUTION_SIMULATED_ORDER_REPLAY_SCHEMA_VERSION,
     PolymarketOReplayAlignedSourceRankingConfig,
@@ -76,6 +77,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     _v8_execution_guard_block_analysis_report,
     _v8_execution_guard_config,
     _v8_execution_guard_decision,
+    _v8_execution_runtime_field_coverage_report,
     _v8_execution_simulated_runtime_reports,
     run_polymarket_o_replay_aligned_source_ranking,
 )
@@ -3828,6 +3830,87 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         }
         assert row["source_score_mutated"] is False
         assert row["o_model_predicted_score_mutated"] is False
+
+    field_coverage = result.v8_execution_runtime_field_coverage_report
+    coverage_payload = dict(field_coverage)
+    coverage_id = coverage_payload.pop(
+        "o_v8_execution_runtime_field_coverage_report_id"
+    )
+    assert canonical_json_sha256(coverage_payload) == coverage_id
+    assert (
+        field_coverage["schema_version"]
+        == O_V8_EXECUTION_RUNTIME_FIELD_COVERAGE_SCHEMA_VERSION
+    )
+    assert field_coverage["report_type"] == "o_v8_execution_runtime_field_coverage"
+    assert field_coverage["diagnostic_only"] is True
+    assert field_coverage["simulation_only"] is True
+    assert field_coverage["uses_validation_outcomes_for_tuning"] is False
+    assert field_coverage["thresholds_tuned"] is False
+    assert field_coverage["backfill_rules_applied"] is False
+    assert field_coverage["proposed_backfill_rules_only"] is True
+    assert field_coverage["mutates_o_model_predicted_score"] is False
+    assert field_coverage["mutates_source_ranking_scores"] is False
+    assert field_coverage["simulated_order_replay_report_id"] == simulated_replay[
+        "o_v8_execution_simulated_order_replay_report_id"
+    ]
+    assert field_coverage["block_analysis_report_id"] == block_analysis[
+        "o_v8_execution_guard_block_analysis_report_id"
+    ]
+    assert field_coverage["decision_count"] == simulated_replay["decision_count"]
+    expected_missing_rows = [
+        row
+        for row in simulated_replay["simulated_decision_rows"]
+        if row["missing_runtime_field_codes"]
+    ]
+    assert field_coverage["missing_runtime_field_decision_count"] == len(
+        expected_missing_rows
+    )
+    assert len(field_coverage["runtime_field_coverage_decision_rows"]) == len(
+        expected_missing_rows
+    )
+    assert set(field_coverage["classification_counts"]) >= {
+        "true_data_coverage_gap",
+        "derived_backfill_from_existing_handoff_fields",
+        "optional_for_no_trade",
+        "too_strict_for_simulation_only_mode",
+    }
+    assert isinstance(field_coverage["primary_missing_runtime_fields"], list)
+    assert field_coverage["proposed_deterministic_backfill_rules"]
+    assert all(
+        rule["applied_now"] is False
+        for rule in field_coverage["proposed_deterministic_backfill_rules"]
+    )
+    for row in field_coverage["runtime_field_coverage_decision_rows"]:
+        assert set(row) >= {
+            "decision_group_id",
+            "market_id",
+            "decision_ts",
+            "source_selected_action",
+            "source_selected_family",
+            "source_selected_side",
+            "runtime_field_backfill_candidates",
+        }
+        for candidate in row["runtime_field_backfill_candidates"]:
+            assert set(candidate) >= {
+                "missing_field_code",
+                "runtime_field_name",
+                "field_gap_classification",
+                "proposed_rule_id",
+                "backfill_source_class",
+                "can_backfill_in_later_commit",
+                "requires_required_field_policy_change",
+                "backfill_rule_applied_now",
+                "existing_handoff_evidence",
+            }
+            assert candidate["backfill_rule_applied_now"] is False
+    assert field_coverage["v8_execution_handoff_allowed"] is False
+    assert field_coverage["source_model_candidate_eligible"] is False
+    assert field_coverage["freeze_ready"] is False
+    assert field_coverage["promotion_evidence_eligible"] is False
+    assert field_coverage["#146_start_allowed"] is False
+    assert field_coverage["#134_resume_allowed"] is False
+    assert field_coverage["paper_only"] is True
+    assert field_coverage["capital_at_risk"] is False
     assert result.artifact_paths["label_construction_report"].exists()
     assert result.artifact_paths["ranking_objective_report"].exists()
     assert result.artifact_paths["leakage_audit_report"].exists()
@@ -3858,6 +3941,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     ].exists()
     assert result.artifact_paths["v8_execution_guard_block_analysis_report"].exists()
     assert result.artifact_paths["v8_execution_guard_block_analysis_summary"].exists()
+    assert result.artifact_paths["v8_execution_runtime_field_coverage_report"].exists()
+    assert result.artifact_paths["v8_execution_runtime_field_coverage_summary"].exists()
 
     manifest = _read_json(result.artifact_paths["manifest"])
     assert "hts_p_up_confidently_wrong_feature_diagnostic_report" in manifest[
@@ -3884,6 +3969,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     )
     assert "v8_execution_guard_block_analysis_report" in manifest["artifact_hashes"]
     assert "v8_execution_guard_block_analysis_summary" in manifest["artifact_hashes"]
+    assert "v8_execution_runtime_field_coverage_report" in manifest["artifact_hashes"]
+    assert "v8_execution_runtime_field_coverage_summary" in manifest["artifact_hashes"]
     assert manifest["large_regret_risk_model_report_available"] is False
     assert manifest["selective_action_guard_report_available"] is False
     assert manifest["large_regret_risk_model_enabled"] is False
@@ -3929,6 +4016,44 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert (
         manifest["v8_execution_guard_block_analysis_primary_blocker_categories"]
         == block_analysis["primary_blocker_categories"]
+    )
+    assert manifest["v8_execution_runtime_field_coverage_report_available"] is True
+    assert manifest["v8_execution_runtime_field_coverage_report_id"] == field_coverage[
+        "o_v8_execution_runtime_field_coverage_report_id"
+    ]
+    assert manifest["v8_execution_runtime_field_missing_decision_count"] == (
+        field_coverage["missing_runtime_field_decision_count"]
+    )
+    assert manifest["v8_execution_runtime_field_true_data_gap_count"] == (
+        field_coverage["classification_counts"]["true_data_coverage_gap"]
+    )
+    assert (
+        manifest["v8_execution_runtime_field_safe_backfill_candidate_count"]
+        == field_coverage["safe_backfill_candidate_count"]
+    )
+    assert (
+        manifest[
+            "v8_execution_runtime_field_existing_handoff_backfill_candidate_count"
+        ]
+        == field_coverage["existing_handoff_backfill_candidate_count"]
+    )
+    assert (
+        manifest[
+            "v8_execution_runtime_field_decision_time_data_join_backfill_candidate_count"
+        ]
+        == field_coverage["decision_time_data_join_backfill_candidate_count"]
+    )
+    assert manifest["v8_execution_runtime_field_optional_for_no_trade_count"] == (
+        field_coverage["classification_counts"]["optional_for_no_trade"]
+    )
+    assert (
+        manifest["v8_execution_runtime_field_simulation_policy_too_strict_count"]
+        == field_coverage["classification_counts"][
+            "too_strict_for_simulation_only_mode"
+        ]
+    )
+    assert manifest["v8_execution_runtime_field_primary_missing_fields"] == (
+        field_coverage["primary_missing_runtime_fields"]
     )
     assert manifest["strict_calibration_quality_passed"] == gate[
         "strict_calibration_quality_passed"
@@ -4343,6 +4468,179 @@ def test_o_v8_execution_guard_block_analysis_classifies_safe_order_discovery(
     assert summary["blocked_only_by_configurable_thresholds_count"] == 1
     assert summary["fundamentally_unsafe_count"] == 1
     assert report["why_simulated_allowed_order_count_zero"]
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["freeze_ready"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["#146_start_allowed"] is False
+    assert report["#134_resume_allowed"] is False
+    assert report["paper_only"] is True
+    assert report["capital_at_risk"] is False
+
+
+def test_o_v8_execution_runtime_field_coverage_classifies_backfill_plan(
+    tmp_path: Path,
+) -> None:
+    def _row(
+        *,
+        decision_id: str,
+        action: str,
+        missing_code: str,
+        runtime_mode: str = "simulated_runtime_state",
+        runtime_available: bool = True,
+    ) -> dict[str, Any]:
+        side = "UP" if "BUY_UP" in action else "NONE"
+        family = "NO_TRADE" if action == "NO_TRADE" else "SELL_BEFORE_CLOSE"
+        return {
+            "decision_group_id": decision_id,
+            "market_id": f"market-{decision_id}",
+            "decision_ts": 200 + len(decision_id),
+            "source_selected_action": action,
+            "source_selected_side": side,
+            "source_selected_family": family,
+            "source_model_score": 0.81,
+            "source_high_score_flag": True,
+            "p_up": 0.70,
+            "p_down": 0.30,
+            "p_up_action_disagreement": False,
+            "microstructure_snapshot": {
+                "book_staleness_ms": 500.0,
+                "spread_bps": 200.0,
+                "queue_fill_proxy": 0.90,
+                "time_to_close_seconds": None
+                if "time_to_close" in missing_code
+                else 180.0,
+            },
+            "top_k_action_ranking": [
+                {"selected_action": candidate, "corrected_model_score": 0.50}
+                for candidate in O_REQUIRED_DECISION_ACTION_FAMILIES
+            ],
+            "reference_price_feature_provenance": {"provenance_valid": True},
+            "execution_guarded_action": action,
+            "execution_guarded_side": side,
+            "execution_guarded_family": family,
+            "execution_guarded_score": 0.80,
+            "order_allowed": False,
+            "proposed_order_size": 0.0,
+            "execution_blocking_reason_codes": [
+                "execution_required_runtime_fields_missing"
+            ],
+            "execution_guard_reason_codes": [],
+            "exposure_reason_codes": ["execution_simulated_order_blocked"],
+            "missing_runtime_field_codes": [missing_code],
+            "runtime_mode": runtime_mode,
+            "runtime_exposure_state_available": runtime_available,
+            "pre_decision_exposure_state": {"current_total_exposure": 0.0},
+            "post_decision_exposure_state": {"current_total_exposure": 0.0},
+            "simulated_order_id": None,
+            "source_score_mutated": False,
+            "o_model_predicted_score_mutated": False,
+        }
+
+    m2_report_path = tmp_path / "m2.json"
+    m2_report = {"m2_stateful_replay_parity_candidate_report_id": "m2-test"}
+    m2_report_path.write_text(json.dumps(m2_report, sort_keys=True), encoding="utf-8")
+    replay_rows = [
+        _row(
+            decision_id="derived",
+            action="BUY_UP_SELL_BEFORE_CLOSE",
+            missing_code="missing_selected_side",
+        ),
+        _row(
+            decision_id="notrade",
+            action="NO_TRADE",
+            missing_code="missing_microstructure_time_to_close_seconds",
+        ),
+        _row(
+            decision_id="gap",
+            action="BUY_UP_SELL_BEFORE_CLOSE",
+            missing_code="missing_microstructure_time_to_close_seconds",
+        ),
+        _row(
+            decision_id="simulation",
+            action="BUY_UP_SELL_BEFORE_CLOSE",
+            missing_code="execution_exposure_state_missing",
+        ),
+    ]
+    replay_report = {
+        "o_v8_execution_simulated_order_replay_report_id": "replay-test",
+        "decision_count": len(replay_rows),
+        "blocked_decision_count": len(replay_rows),
+        "simulated_allowed_order_count": 0,
+        "simulated_decision_rows": replay_rows,
+    }
+    block_analysis_report = {
+        "o_v8_execution_guard_block_analysis_report_id": "block-test",
+    }
+
+    report = _v8_execution_runtime_field_coverage_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        handoff_report={"o_v8_action_rank_handoff_report_id": "handoff-test"},
+        execution_guard_report={"o_v8_execution_risk_guard_report_id": "guard-test"},
+        runtime_state_report={"o_v8_execution_runtime_state_report_id": "state-test"},
+        simulated_order_replay_report=replay_report,
+        block_analysis_report=block_analysis_report,
+    )
+
+    assert (
+        report["schema_version"]
+        == O_V8_EXECUTION_RUNTIME_FIELD_COVERAGE_SCHEMA_VERSION
+    )
+    assert report["decision_count"] == 4
+    assert report["missing_runtime_field_decision_count"] == 4
+    assert report["missing_runtime_field_occurrence_count"] == 4
+    assert report["classification_counts"][
+        "derived_backfill_from_existing_handoff_fields"
+    ] == 1
+    assert report["classification_counts"]["optional_for_no_trade"] == 1
+    assert report["classification_counts"]["true_data_coverage_gap"] == 1
+    assert report["classification_counts"][
+        "too_strict_for_simulation_only_mode"
+    ] == 1
+    assert report["safe_backfill_candidate_count"] == 2
+    assert report["existing_handoff_backfill_candidate_count"] == 1
+    assert report["decision_time_data_join_backfill_candidate_count"] == 1
+    assert report["required_field_policy_relaxation_candidate_count"] == 2
+    by_id = {
+        row["decision_group_id"]: row
+        for row in report["runtime_field_coverage_decision_rows"]
+    }
+    assert by_id["derived"]["runtime_field_backfill_candidates"][0][
+        "proposed_rule_id"
+    ] == "derive_selected_side_from_action"
+    assert by_id["derived"]["runtime_field_backfill_candidates"][0][
+        "backfill_source_class"
+    ] == "existing_handoff_fields"
+    assert by_id["derived"]["runtime_field_backfill_candidates"][0][
+        "can_backfill_in_later_commit"
+    ] is True
+    assert by_id["notrade"]["runtime_field_backfill_candidates"][0][
+        "field_gap_classification"
+    ] == "optional_for_no_trade"
+    assert by_id["notrade"]["runtime_field_backfill_candidates"][0][
+        "requires_required_field_policy_change"
+    ] is True
+    assert by_id["gap"]["runtime_field_backfill_candidates"][0][
+        "field_gap_classification"
+    ] == "true_data_coverage_gap"
+    assert by_id["gap"]["runtime_field_backfill_candidates"][0][
+        "backfill_source_class"
+    ] == "decision_time_data_join_required"
+    assert by_id["gap"]["runtime_field_backfill_candidates"][0][
+        "can_backfill_in_later_commit"
+    ] is True
+    assert by_id["simulation"]["runtime_field_backfill_candidates"][0][
+        "field_gap_classification"
+    ] == "too_strict_for_simulation_only_mode"
+    assert by_id["simulation"]["runtime_field_backfill_candidates"][0][
+        "requires_required_field_policy_change"
+    ] is True
+    assert all(
+        rule["applied_now"] is False
+        for rule in report["proposed_deterministic_backfill_rules"]
+    )
+    assert report["backfill_rules_applied"] is False
     assert report["v8_execution_handoff_allowed"] is False
     assert report["source_model_candidate_eligible"] is False
     assert report["freeze_ready"] is False

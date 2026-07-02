@@ -80,6 +80,9 @@ O_V8_EXECUTION_SIMULATED_ORDER_REPLAY_SCHEMA_VERSION = (
 O_V8_EXECUTION_GUARD_BLOCK_ANALYSIS_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-execution-guard-block-analysis-v1"
 )
+O_V8_EXECUTION_RUNTIME_FIELD_COVERAGE_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-execution-runtime-field-coverage-v1"
+)
 O_TRAINING_LABEL_FIELDS = (
     "action_return_target",
     "label_pnl_target",
@@ -296,6 +299,7 @@ class PolymarketOReplayAlignedSourceRankingResult:
     v8_execution_runtime_state_report: dict[str, Any]
     v8_execution_simulated_order_replay_report: dict[str, Any]
     v8_execution_guard_block_analysis_report: dict[str, Any]
+    v8_execution_runtime_field_coverage_report: dict[str, Any]
     artifact_paths: dict[str, Path]
 
 
@@ -363,6 +367,10 @@ def run_polymarket_o_replay_aligned_source_ranking(
         / "o_v8_execution_guard_block_analysis_report.json",
         "v8_execution_guard_block_analysis_summary": run_dir
         / "o_v8_execution_guard_block_analysis_report.md",
+        "v8_execution_runtime_field_coverage_report": run_dir
+        / "o_v8_execution_runtime_field_coverage_report.json",
+        "v8_execution_runtime_field_coverage_summary": run_dir
+        / "o_v8_execution_runtime_field_coverage_report.md",
         "manifest": run_dir / "o_replay_aligned_source_ranking_manifest.json",
     }
     reports = _build_reports(config=config)
@@ -447,6 +455,14 @@ def run_polymarket_o_replay_aligned_source_ranking(
         _v8_execution_guard_block_analysis_markdown(reports[13]),
         encoding="utf-8",
     )
+    _write_json(
+        artifact_paths["v8_execution_runtime_field_coverage_report"],
+        reports[14],
+    )
+    artifact_paths["v8_execution_runtime_field_coverage_summary"].write_text(
+        _v8_execution_runtime_field_coverage_markdown(reports[14]),
+        encoding="utf-8",
+    )
     manifest = {
         "schema_version": "bigan-v8-polymarket-o-replay-aligned-source-ranking-artifacts-v1",
         "run_id": config.run_id,
@@ -513,6 +529,34 @@ def run_polymarket_o_replay_aligned_source_ranking(
         "v8_execution_guard_block_analysis_primary_blocker_categories": reports[13][
             "primary_blocker_categories"
         ],
+        "v8_execution_runtime_field_coverage_report_available": True,
+        "v8_execution_runtime_field_coverage_report_id": reports[14][
+            "o_v8_execution_runtime_field_coverage_report_id"
+        ],
+        "v8_execution_runtime_field_missing_decision_count": reports[14][
+            "missing_runtime_field_decision_count"
+        ],
+        "v8_execution_runtime_field_true_data_gap_count": reports[14][
+            "classification_counts"
+        ]["true_data_coverage_gap"],
+        "v8_execution_runtime_field_safe_backfill_candidate_count": reports[14][
+            "safe_backfill_candidate_count"
+        ],
+        "v8_execution_runtime_field_existing_handoff_backfill_candidate_count": (
+            reports[14]["existing_handoff_backfill_candidate_count"]
+        ),
+        "v8_execution_runtime_field_decision_time_data_join_backfill_candidate_count": (
+            reports[14]["decision_time_data_join_backfill_candidate_count"]
+        ),
+        "v8_execution_runtime_field_optional_for_no_trade_count": reports[14][
+            "classification_counts"
+        ]["optional_for_no_trade"],
+        "v8_execution_runtime_field_simulation_policy_too_strict_count": reports[14][
+            "classification_counts"
+        ]["too_strict_for_simulation_only_mode"],
+        "v8_execution_runtime_field_primary_missing_fields": reports[14][
+            "primary_missing_runtime_fields"
+        ],
         "model_layer_regret_risk_selection_deferred_to_issue": "#158",
         "large_regret_risk_model_report_available": False,
         "selective_action_guard_report_available": False,
@@ -564,6 +608,7 @@ def run_polymarket_o_replay_aligned_source_ranking(
         v8_execution_runtime_state_report=reports[11],
         v8_execution_simulated_order_replay_report=reports[12],
         v8_execution_guard_block_analysis_report=reports[13],
+        v8_execution_runtime_field_coverage_report=reports[14],
         artifact_paths=artifact_paths,
     )
 
@@ -705,6 +750,17 @@ def _build_reports(
             simulated_order_replay_report=v8_execution_simulated_order_replay_report,
         )
     )
+    v8_execution_runtime_field_coverage_report = (
+        _v8_execution_runtime_field_coverage_report(
+            m2_report_path=m2_report_path,
+            m2_report=m2_report,
+            handoff_report=v8_action_rank_handoff_report,
+            execution_guard_report=v8_execution_risk_guard_report,
+            runtime_state_report=v8_execution_runtime_state_report,
+            simulated_order_replay_report=v8_execution_simulated_order_replay_report,
+            block_analysis_report=v8_execution_guard_block_analysis_report,
+        )
+    )
     return (
         label_report,
         ranking_report,
@@ -720,6 +776,7 @@ def _build_reports(
         v8_execution_runtime_state_report,
         v8_execution_simulated_order_replay_report,
         v8_execution_guard_block_analysis_report,
+        v8_execution_runtime_field_coverage_report,
     )
 
 
@@ -7401,6 +7458,552 @@ def _v8_time_to_close_bucket_from_decision(row: dict[str, Any]) -> str:
     return "gte_240s"
 
 
+def _v8_execution_runtime_field_coverage_report(
+    *,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    handoff_report: dict[str, Any],
+    execution_guard_report: dict[str, Any],
+    runtime_state_report: dict[str, Any],
+    simulated_order_replay_report: dict[str, Any],
+    block_analysis_report: dict[str, Any],
+) -> dict[str, Any]:
+    replay_rows = list(simulated_order_replay_report.get("simulated_decision_rows") or [])
+    rows_with_missing = [
+        row for row in replay_rows if row.get("missing_runtime_field_codes")
+    ]
+    decision_rows = [
+        _v8_runtime_field_coverage_decision_row(row)
+        for row in rows_with_missing
+    ]
+    all_candidates = [
+        candidate
+        for row in decision_rows
+        for candidate in row["runtime_field_backfill_candidates"]
+    ]
+    field_counts = Counter(
+        str(candidate["runtime_field_name"]) for candidate in all_candidates
+    )
+    code_counts = Counter(str(candidate["missing_field_code"]) for candidate in all_candidates)
+    classification_counts = Counter(
+        str(candidate["field_gap_classification"]) for candidate in all_candidates
+    )
+    for classification in (
+        "true_data_coverage_gap",
+        "derived_backfill_from_existing_handoff_fields",
+        "optional_for_no_trade",
+        "too_strict_for_simulation_only_mode",
+    ):
+        classification_counts.setdefault(classification, 0)
+    report = {
+        "schema_version": O_V8_EXECUTION_RUNTIME_FIELD_COVERAGE_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "source_lineage": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "report_type": "o_v8_execution_runtime_field_coverage",
+        "diagnostic_only": True,
+        "simulation_only": True,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "source_action_rank_signal_report_id": handoff_report[
+            "o_v8_action_rank_handoff_report_id"
+        ],
+        "execution_guard_report_id": execution_guard_report[
+            "o_v8_execution_risk_guard_report_id"
+        ],
+        "runtime_state_report_id": runtime_state_report[
+            "o_v8_execution_runtime_state_report_id"
+        ],
+        "simulated_order_replay_report_id": simulated_order_replay_report[
+            "o_v8_execution_simulated_order_replay_report_id"
+        ],
+        "block_analysis_report_id": block_analysis_report[
+            "o_v8_execution_guard_block_analysis_report_id"
+        ],
+        "analysis_source": "simulated_order_replay_missing_runtime_field_codes",
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "backfill_rules_applied": False,
+        "proposed_backfill_rules_only": True,
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        "required_runtime_fields": _v8_execution_required_runtime_fields(),
+        "decision_count": len(replay_rows),
+        "missing_runtime_field_decision_count": len(rows_with_missing),
+        "missing_runtime_field_occurrence_count": len(all_candidates),
+        "missing_runtime_field_code_counts": dict(sorted(code_counts.items())),
+        "missing_runtime_field_name_counts": dict(sorted(field_counts.items())),
+        "primary_missing_runtime_fields": [
+            field for field, _ in field_counts.most_common(10)
+        ],
+        "classification_counts": dict(sorted(classification_counts.items())),
+        "safe_backfill_candidate_count": sum(
+            1
+            for candidate in all_candidates
+            if candidate["can_backfill_in_later_commit"]
+        ),
+        "existing_handoff_backfill_candidate_count": sum(
+            1
+            for candidate in all_candidates
+            if candidate["backfill_source_class"] == "existing_handoff_fields"
+        ),
+        "decision_time_data_join_backfill_candidate_count": sum(
+            1
+            for candidate in all_candidates
+            if candidate["backfill_source_class"] == "decision_time_data_join_required"
+        ),
+        "required_field_policy_relaxation_candidate_count": sum(
+            1
+            for candidate in all_candidates
+            if candidate["backfill_source_class"] == "required_field_policy_relaxation"
+        ),
+        "missing_field_summary_by_field": _v8_runtime_field_summary_by(
+            all_candidates,
+            "runtime_field_name",
+        ),
+        "missing_field_summary_by_action": _v8_runtime_field_summary_by(
+            all_candidates,
+            "source_selected_action",
+        ),
+        "missing_field_summary_by_family": _v8_runtime_field_summary_by(
+            all_candidates,
+            "source_selected_family",
+        ),
+        "missing_field_summary_by_side": _v8_runtime_field_summary_by(
+            all_candidates,
+            "source_selected_side",
+        ),
+        "missing_field_summary_by_market": _v8_runtime_field_summary_by(
+            all_candidates,
+            "market_id",
+        ),
+        "missing_field_summary_by_time_to_close_bucket": (
+            _v8_runtime_field_summary_by(
+                all_candidates,
+                "time_to_close_bucket",
+            )
+        ),
+        "runtime_field_coverage_decision_rows": decision_rows,
+        "proposed_deterministic_backfill_rules": (
+            _v8_runtime_field_proposed_backfill_rules()
+        ),
+        "runtime_field_policy_findings": (
+            _v8_runtime_field_policy_findings(
+                decision_rows,
+                all_candidates,
+                decision_count=len(replay_rows),
+            )
+        ),
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "no_paper_live_unlock_from_runtime_field_coverage": True,
+        "no_source_freeze_unlock_from_runtime_field_coverage": True,
+        **compact_safety_fields(),
+    }
+    report["o_v8_execution_runtime_field_coverage_report_id"] = (
+        canonical_json_sha256(report)
+    )
+    return report
+
+
+def _v8_runtime_field_coverage_decision_row(row: dict[str, Any]) -> dict[str, Any]:
+    candidates = [
+        _v8_runtime_field_backfill_candidate(row, missing_code)
+        for missing_code in sorted(set(row.get("missing_runtime_field_codes") or []))
+    ]
+    return {
+        "decision_group_id": row.get("decision_group_id"),
+        "market_id": row.get("market_id"),
+        "decision_ts": row.get("decision_ts"),
+        "source_selected_action": row.get("source_selected_action"),
+        "source_selected_family": row.get("source_selected_family"),
+        "source_selected_side": row.get("source_selected_side"),
+        "execution_guarded_action": row.get("execution_guarded_action"),
+        "execution_guarded_family": row.get("execution_guarded_family"),
+        "execution_guarded_side": row.get("execution_guarded_side"),
+        "runtime_mode": row.get("runtime_mode"),
+        "runtime_exposure_state_available": bool(
+            row.get("runtime_exposure_state_available")
+        ),
+        "time_to_close_seconds": _v8_row_time_to_close_seconds(row),
+        "time_to_close_bucket": _v8_time_to_close_bucket_from_decision(row),
+        "missing_runtime_field_codes": sorted(
+            set(row.get("missing_runtime_field_codes") or [])
+        ),
+        "runtime_field_backfill_candidates": candidates,
+        "has_true_data_coverage_gap": any(
+            candidate["field_gap_classification"] == "true_data_coverage_gap"
+            for candidate in candidates
+        ),
+        "has_safe_backfill_candidate": any(
+            candidate["field_gap_classification"]
+            == "derived_backfill_from_existing_handoff_fields"
+            for candidate in candidates
+        ),
+        "has_no_trade_optional_field": any(
+            candidate["field_gap_classification"] == "optional_for_no_trade"
+            for candidate in candidates
+        ),
+        "has_simulation_policy_too_strict_field": any(
+            candidate["field_gap_classification"]
+            == "too_strict_for_simulation_only_mode"
+            for candidate in candidates
+        ),
+    }
+
+
+def _v8_runtime_field_backfill_candidate(
+    row: dict[str, Any],
+    missing_code: str,
+) -> dict[str, Any]:
+    field_name = _v8_runtime_field_name_from_missing_code(missing_code)
+    source_action = str(row.get("source_selected_action") or "")
+    classification, rule_id, reason_codes = _v8_runtime_field_gap_classification(
+        row=row,
+        missing_code=missing_code,
+        runtime_field_name=field_name,
+    )
+    backfill_source_class = _v8_runtime_field_backfill_source_class(
+        classification,
+        rule_id,
+    )
+    return {
+        "decision_group_id": row.get("decision_group_id"),
+        "market_id": row.get("market_id"),
+        "decision_ts": row.get("decision_ts"),
+        "source_selected_action": source_action,
+        "source_selected_family": row.get("source_selected_family"),
+        "source_selected_side": row.get("source_selected_side"),
+        "time_to_close_bucket": _v8_time_to_close_bucket_from_decision(row),
+        "missing_field_code": missing_code,
+        "runtime_field_name": field_name,
+        "field_gap_classification": classification,
+        "proposed_rule_id": rule_id,
+        "backfill_source_class": backfill_source_class,
+        "can_backfill_in_later_commit": backfill_source_class
+        in {"existing_handoff_fields", "decision_time_data_join_required"},
+        "requires_required_field_policy_change": backfill_source_class
+        == "required_field_policy_relaxation",
+        "backfill_rule_applied_now": False,
+        "reason_codes": reason_codes,
+        "existing_handoff_evidence": _v8_runtime_field_existing_evidence(
+            row=row,
+            runtime_field_name=field_name,
+        ),
+    }
+
+
+def _v8_runtime_field_backfill_source_class(
+    classification: str,
+    rule_id: str,
+) -> str:
+    if classification == "derived_backfill_from_existing_handoff_fields":
+        return "existing_handoff_fields"
+    if rule_id.startswith("backfill_"):
+        return "decision_time_data_join_required"
+    if classification in {
+        "optional_for_no_trade",
+        "too_strict_for_simulation_only_mode",
+    }:
+        return "required_field_policy_relaxation"
+    return "not_backfillable"
+
+
+def _v8_runtime_field_name_from_missing_code(missing_code: str) -> str:
+    explicit = {
+        "execution_exposure_state_missing": "runtime_exposure_state",
+        "missing_valid_reference_price_provenance": (
+            "reference_price_feature_provenance.provenance_valid"
+        ),
+    }
+    if missing_code in explicit:
+        return explicit[missing_code]
+    prefix = "missing_microstructure_"
+    if missing_code.startswith(prefix):
+        return f"microstructure_snapshot.{missing_code.removeprefix(prefix)}"
+    if missing_code.startswith("missing_"):
+        return missing_code.removeprefix("missing_")
+    return missing_code
+
+
+def _v8_runtime_field_gap_classification(
+    *,
+    row: dict[str, Any],
+    missing_code: str,
+    runtime_field_name: str,
+) -> tuple[str, str, list[str]]:
+    source_action = str(row.get("source_selected_action") or "")
+    if source_action == "NO_TRADE" and runtime_field_name in {
+        "microstructure_snapshot.spread_bps",
+        "microstructure_snapshot.book_staleness_ms",
+        "microstructure_snapshot.queue_fill_proxy",
+        "microstructure_snapshot.time_to_close_seconds",
+        "reference_price_feature_provenance.provenance_valid",
+        "runtime_exposure_state",
+    }:
+        return (
+            "optional_for_no_trade",
+            "make_non_order_runtime_fields_optional_for_no_trade",
+            ["no_order_is_attempted_for_no_trade"],
+        )
+    if (
+        runtime_field_name == "runtime_exposure_state"
+        and row.get("runtime_mode") == "simulated_runtime_state"
+        and row.get("runtime_exposure_state_available") is True
+    ):
+        return (
+            "too_strict_for_simulation_only_mode",
+            "trust_deterministic_simulated_runtime_ledger",
+            ["simulated_runtime_state_is_available"],
+        )
+    derived_rules = {
+        "selected_action": (
+            row.get("source_selected_action"),
+            "copy_selected_action_from_source_handoff",
+        ),
+        "selected_side": (
+            row.get("source_selected_side") or _side_from_action(source_action),
+            "derive_selected_side_from_action",
+        ),
+        "selected_action_family": (
+            row.get("source_selected_family") or _action_family(source_action),
+            "derive_selected_action_family_from_action",
+        ),
+        "corrected_model_score": (
+            row.get("source_model_score"),
+            "copy_corrected_model_score_from_source_handoff",
+        ),
+        "high_score_flag": (
+            row.get("source_high_score_flag"),
+            "copy_high_score_flag_from_source_handoff",
+        ),
+        "full_5_action_ranking": (
+            row.get("top_k_action_ranking")
+            if len(row.get("top_k_action_ranking") or [])
+            >= len(O_REQUIRED_DECISION_ACTION_FAMILIES)
+            else None,
+            "copy_full_5_action_ranking_from_source_handoff",
+        ),
+        "p_down": (
+            row.get("p_down")
+            if row.get("p_down") is not None
+            else (
+                1.0 - float(row["p_up"])
+                if row.get("p_up") is not None
+                else None
+            ),
+            "derive_p_down_from_p_up",
+        ),
+    }
+    if runtime_field_name in derived_rules and derived_rules[runtime_field_name][0] not in (
+        None,
+        "",
+        [],
+    ):
+        return (
+            "derived_backfill_from_existing_handoff_fields",
+            derived_rules[runtime_field_name][1],
+            ["existing_handoff_field_available"],
+        )
+    if runtime_field_name == "runtime_exposure_state":
+        return (
+            "too_strict_for_simulation_only_mode",
+            "use_simulated_runtime_ledger_when_runtime_mode_is_simulated",
+            ["runtime_exposure_state_should_be_supplied_by_simulation_ledger"],
+        )
+    if runtime_field_name.startswith("microstructure_snapshot."):
+        return (
+            "true_data_coverage_gap",
+            "backfill_microstructure_snapshot_from_decision_time_book",
+            ["decision_time_microstructure_field_missing"],
+        )
+    if runtime_field_name.startswith("reference_price_feature_provenance."):
+        return (
+            "true_data_coverage_gap",
+            "backfill_reference_price_provenance_from_decision_time_reference_feed",
+            ["decision_time_reference_provenance_missing_or_invalid"],
+        )
+    return (
+        "true_data_coverage_gap",
+        "collect_missing_runtime_field_before_execution_guard",
+        [f"missing_runtime_field:{runtime_field_name}"],
+    )
+
+
+def _v8_runtime_field_existing_evidence(
+    *,
+    row: dict[str, Any],
+    runtime_field_name: str,
+) -> dict[str, Any]:
+    microstructure = dict(row.get("microstructure_snapshot") or {})
+    reference_provenance = dict(row.get("reference_price_feature_provenance") or {})
+    if runtime_field_name.startswith("microstructure_snapshot."):
+        key = runtime_field_name.split(".", 1)[1]
+        return {
+            "microstructure_snapshot_present": bool(microstructure),
+            "field_value_present": microstructure.get(key) is not None,
+            "field_value": microstructure.get(key),
+        }
+    if runtime_field_name.startswith("reference_price_feature_provenance."):
+        key = runtime_field_name.split(".", 1)[1]
+        return {
+            "reference_price_feature_provenance_present": bool(reference_provenance),
+            "field_value_present": reference_provenance.get(key) is not None,
+            "field_value": reference_provenance.get(key),
+        }
+    if runtime_field_name == "runtime_exposure_state":
+        return {
+            "runtime_mode": row.get("runtime_mode"),
+            "runtime_exposure_state_available": bool(
+                row.get("runtime_exposure_state_available")
+            ),
+            "pre_decision_exposure_state_present": bool(
+                row.get("pre_decision_exposure_state")
+            ),
+            "post_decision_exposure_state_present": bool(
+                row.get("post_decision_exposure_state")
+            ),
+        }
+    return {
+        "source_selected_action_present": bool(row.get("source_selected_action")),
+        "source_selected_side_present": bool(row.get("source_selected_side")),
+        "source_selected_family_present": bool(row.get("source_selected_family")),
+        "source_model_score_present": row.get("source_model_score") is not None,
+        "top_k_action_ranking_count": len(row.get("top_k_action_ranking") or []),
+        "p_up_present": row.get("p_up") is not None,
+        "p_down_present": row.get("p_down") is not None,
+    }
+
+
+def _v8_runtime_field_summary_by(
+    candidates: list[dict[str, Any]],
+    field_name: str,
+) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for candidate in candidates:
+        grouped[str(candidate.get(field_name) or "UNKNOWN")].append(candidate)
+    summary = {}
+    for value, rows in sorted(grouped.items()):
+        classification_counts = Counter(
+            str(row["field_gap_classification"]) for row in rows
+        )
+        field_counts = Counter(str(row["runtime_field_name"]) for row in rows)
+        code_counts = Counter(str(row["missing_field_code"]) for row in rows)
+        summary[value] = {
+            "missing_field_occurrence_count": len(rows),
+            "classification_counts": dict(sorted(classification_counts.items())),
+            "runtime_field_name_counts": dict(sorted(field_counts.items())),
+            "missing_field_code_counts": dict(sorted(code_counts.items())),
+        }
+    return summary
+
+
+def _v8_runtime_field_proposed_backfill_rules() -> list[dict[str, Any]]:
+    return [
+        {
+            "rule_id": "copy_selected_action_from_source_handoff",
+            "field": "selected_action",
+            "rule": "copy source_selected_action when selected_action is absent",
+            "decision_time_only": True,
+            "applied_now": False,
+        },
+        {
+            "rule_id": "derive_selected_side_from_action",
+            "field": "selected_side",
+            "rule": "derive UP/DOWN/NONE from selected_action",
+            "decision_time_only": True,
+            "applied_now": False,
+        },
+        {
+            "rule_id": "derive_selected_action_family_from_action",
+            "field": "selected_action_family",
+            "rule": "derive HOLD_TO_SETTLEMENT/SELL_BEFORE_CLOSE/NO_TRADE from action",
+            "decision_time_only": True,
+            "applied_now": False,
+        },
+        {
+            "rule_id": "copy_full_5_action_ranking_from_source_handoff",
+            "field": "full_5_action_ranking",
+            "rule": "copy complete five-action handoff ranking into runtime payload",
+            "decision_time_only": True,
+            "applied_now": False,
+        },
+        {
+            "rule_id": "derive_p_down_from_p_up",
+            "field": "p_down",
+            "rule": "derive p_down as 1 - p_up when p_up is decision-time available",
+            "decision_time_only": True,
+            "applied_now": False,
+        },
+        {
+            "rule_id": "make_non_order_runtime_fields_optional_for_no_trade",
+            "field": "NO_TRADE non-order fields",
+            "rule": "do not require microstructure/exposure fields when action is NO_TRADE",
+            "decision_time_only": True,
+            "applied_now": False,
+        },
+        {
+            "rule_id": "use_simulated_runtime_ledger_when_runtime_mode_is_simulated",
+            "field": "runtime_exposure_state",
+            "rule": "use deterministic simulated ledger for simulation-only replay",
+            "decision_time_only": True,
+            "applied_now": False,
+        },
+        {
+            "rule_id": "backfill_microstructure_snapshot_from_decision_time_book",
+            "field": "microstructure_snapshot.*",
+            "rule": (
+                "join spread/staleness/queue/time_to_close from decision-time "
+                "orderbook and market schedule only"
+            ),
+            "decision_time_only": True,
+            "applied_now": False,
+        },
+        {
+            "rule_id": (
+                "backfill_reference_price_provenance_from_decision_time_reference_feed"
+            ),
+            "field": "reference_price_feature_provenance.provenance_valid",
+            "rule": "join verified reference provenance with max_input_ts <= decision_ts",
+            "decision_time_only": True,
+            "applied_now": False,
+        },
+    ]
+
+
+def _v8_runtime_field_policy_findings(
+    decision_rows: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    *,
+    decision_count: int,
+) -> list[str]:
+    findings = []
+    classification_counts = Counter(
+        str(candidate["field_gap_classification"]) for candidate in candidates
+    )
+    if decision_rows and len(decision_rows) == decision_count:
+        findings.append("execution_required_runtime_fields_missing_fires_for_all_rows")
+    if classification_counts.get("true_data_coverage_gap", 0):
+        findings.append("trade_rows_have_true_decision_time_data_coverage_gaps")
+    if classification_counts.get("optional_for_no_trade", 0):
+        findings.append("no_trade_rows_require_fields_that_do_not_create_orders")
+    if classification_counts.get("derived_backfill_from_existing_handoff_fields", 0):
+        findings.append("some_missing_fields_can_be_derived_from_handoff_payload")
+    if classification_counts.get("too_strict_for_simulation_only_mode", 0):
+        findings.append("some_runtime_requirements_are_too_strict_for_simulation_only")
+    if not findings:
+        findings.append("no_missing_runtime_fields_detected")
+    return sorted(set(findings))
+
+
 def _v8_runtime_order_summary(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "simulated_order_id": row.get("simulated_order_id"),
@@ -11438,6 +12041,54 @@ def _v8_execution_guard_block_analysis_markdown(report: dict[str, Any]) -> str:
             f"`{discovery['fundamentally_unsafe_count']}`",
             "- why_simulated_allowed_order_count_zero: "
             f"`{report['why_simulated_allowed_order_count_zero']}`",
+            "- v8_execution_handoff_allowed: "
+            f"`{str(report['v8_execution_handoff_allowed']).lower()}`",
+            f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+            f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+            "",
+        ]
+    )
+
+
+def _v8_execution_runtime_field_coverage_markdown(report: dict[str, Any]) -> str:
+    classifications = report["classification_counts"]
+    return "\n".join(
+        [
+            "# O v8 Execution Runtime Field Coverage",
+            "",
+            f"- diagnostic_only: `{str(report['diagnostic_only']).lower()}`",
+            f"- simulation_only: `{str(report['simulation_only']).lower()}`",
+            "- uses_validation_outcomes_for_tuning: "
+            f"`{str(report['uses_validation_outcomes_for_tuning']).lower()}`",
+            f"- thresholds_tuned: `{str(report['thresholds_tuned']).lower()}`",
+            f"- backfill_rules_applied: `{str(report['backfill_rules_applied']).lower()}`",
+            "- mutates_o_model_predicted_score: "
+            f"`{str(report['mutates_o_model_predicted_score']).lower()}`",
+            f"- decision_count: `{report['decision_count']}`",
+            "- missing_runtime_field_decision_count: "
+            f"`{report['missing_runtime_field_decision_count']}`",
+            "- missing_runtime_field_occurrence_count: "
+            f"`{report['missing_runtime_field_occurrence_count']}`",
+            "- primary_missing_runtime_fields: "
+            f"`{report['primary_missing_runtime_fields']}`",
+            "- true_data_coverage_gap_count: "
+            f"`{classifications['true_data_coverage_gap']}`",
+            "- derived_backfill_from_existing_handoff_fields_count: "
+            f"`{classifications['derived_backfill_from_existing_handoff_fields']}`",
+            "- safe_backfill_candidate_count: "
+            f"`{report['safe_backfill_candidate_count']}`",
+            "- existing_handoff_backfill_candidate_count: "
+            f"`{report['existing_handoff_backfill_candidate_count']}`",
+            "- decision_time_data_join_backfill_candidate_count: "
+            f"`{report['decision_time_data_join_backfill_candidate_count']}`",
+            "- required_field_policy_relaxation_candidate_count: "
+            f"`{report['required_field_policy_relaxation_candidate_count']}`",
+            "- optional_for_no_trade_count: "
+            f"`{classifications['optional_for_no_trade']}`",
+            "- too_strict_for_simulation_only_mode_count: "
+            f"`{classifications['too_strict_for_simulation_only_mode']}`",
+            "- runtime_field_policy_findings: "
+            f"`{report['runtime_field_policy_findings']}`",
             "- v8_execution_handoff_allowed: "
             f"`{str(report['v8_execution_handoff_allowed']).lower()}`",
             f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
