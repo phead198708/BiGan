@@ -86,6 +86,12 @@ O_V8_EXECUTION_POLICY_READINESS_SCHEMA_VERSION = (
 O_V8_EXECUTION_HANDOFF_GATE_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-execution-handoff-gate-v1"
 )
+O_V8_FUTURE_UNSEEN_HOLDOUT_PLAN_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-future-unseen-holdout-plan-v1"
+)
+O_V8_PAPER_CANDIDATE_GATE_DESIGN_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-paper-candidate-gate-design-v1"
+)
 O_V8_EXECUTION_GUARD_BLOCK_ANALYSIS_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-execution-guard-block-analysis-v1"
 )
@@ -312,6 +318,8 @@ class PolymarketOReplayAlignedSourceRankingResult:
     v8_execution_guard_block_analysis_report: dict[str, Any]
     v8_execution_runtime_field_coverage_report: dict[str, Any]
     v8_execution_handoff_gate_report: dict[str, Any]
+    v8_future_unseen_holdout_plan_report: dict[str, Any]
+    v8_paper_candidate_gate_design_report: dict[str, Any]
     artifact_paths: dict[str, Path]
 
 
@@ -395,6 +403,14 @@ def run_polymarket_o_replay_aligned_source_ranking(
         / "o_v8_execution_handoff_gate_report.json",
         "v8_execution_handoff_gate_summary": run_dir
         / "o_v8_execution_handoff_gate_report.md",
+        "v8_future_unseen_holdout_plan_report": run_dir
+        / "o_v8_future_unseen_holdout_plan_report.json",
+        "v8_future_unseen_holdout_plan_summary": run_dir
+        / "o_v8_future_unseen_holdout_plan_report.md",
+        "v8_paper_candidate_gate_design_report": run_dir
+        / "o_v8_paper_candidate_gate_design_report.json",
+        "v8_paper_candidate_gate_design_summary": run_dir
+        / "o_v8_paper_candidate_gate_design_report.md",
         "manifest": run_dir / "o_replay_aligned_source_ranking_manifest.json",
     }
     reports = _build_reports(config=config)
@@ -509,6 +525,22 @@ def run_polymarket_o_replay_aligned_source_ranking(
     )
     artifact_paths["v8_execution_handoff_gate_summary"].write_text(
         _v8_execution_handoff_gate_markdown(reports[17]),
+        encoding="utf-8",
+    )
+    _write_json(
+        artifact_paths["v8_future_unseen_holdout_plan_report"],
+        reports[18],
+    )
+    artifact_paths["v8_future_unseen_holdout_plan_summary"].write_text(
+        _v8_future_unseen_holdout_plan_markdown(reports[18]),
+        encoding="utf-8",
+    )
+    _write_json(
+        artifact_paths["v8_paper_candidate_gate_design_report"],
+        reports[19],
+    )
+    artifact_paths["v8_paper_candidate_gate_design_summary"].write_text(
+        _v8_paper_candidate_gate_design_markdown(reports[19]),
         encoding="utf-8",
     )
     manifest = {
@@ -668,6 +700,27 @@ def run_polymarket_o_replay_aligned_source_ranking(
         "future_paper_candidate_gate_required": reports[17][
             "future_paper_candidate_gate_required"
         ],
+        "v8_future_unseen_holdout_plan_report_available": True,
+        "v8_future_unseen_holdout_plan_report_id": reports[18][
+            "o_v8_future_unseen_holdout_plan_report_id"
+        ],
+        "future_unseen_holdout_plan_ready": reports[18][
+            "future_unseen_holdout_plan_ready"
+        ],
+        "future_unseen_holdout_blocking_reason_codes": reports[18][
+            "future_unseen_holdout_blocking_reason_codes"
+        ],
+        "v8_paper_candidate_gate_design_report_available": True,
+        "v8_paper_candidate_gate_design_report_id": reports[19][
+            "o_v8_paper_candidate_gate_design_report_id"
+        ],
+        "paper_candidate_gate_design_ready": reports[19][
+            "paper_candidate_gate_design_ready"
+        ],
+        "paper_candidate_gate_blocking_reason_codes": reports[19][
+            "paper_candidate_gate_blocking_reason_codes"
+        ],
+        "paper_candidate_allowed": reports[19]["paper_candidate_allowed"],
         "model_layer_regret_risk_selection_deferred_to_issue": "#158",
         "large_regret_risk_model_report_available": False,
         "selective_action_guard_report_available": False,
@@ -723,6 +776,8 @@ def run_polymarket_o_replay_aligned_source_ranking(
         v8_execution_guard_block_analysis_report=reports[15],
         v8_execution_runtime_field_coverage_report=reports[16],
         v8_execution_handoff_gate_report=reports[17],
+        v8_future_unseen_holdout_plan_report=reports[18],
+        v8_paper_candidate_gate_design_report=reports[19],
         artifact_paths=artifact_paths,
     )
 
@@ -731,6 +786,8 @@ def _build_reports(
     *,
     config: PolymarketOReplayAlignedSourceRankingConfig,
 ) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
@@ -904,6 +961,35 @@ def _build_reports(
         runtime_field_coverage_report=v8_execution_runtime_field_coverage_report,
         guard_block_analysis_report=v8_execution_guard_block_analysis_report,
     )
+    v8_future_unseen_holdout_plan_report = (
+        _v8_future_unseen_holdout_plan_report(
+            m2_report_path=m2_report_path,
+            m2_report=m2_report,
+            action_rank_handoff_report=v8_action_rank_handoff_report,
+            execution_guard_report=v8_execution_risk_guard_report,
+            simulated_order_replay_report=v8_execution_simulated_order_replay_report,
+            allowed_order_quality_report=v8_execution_allowed_order_quality_report,
+            policy_readiness_report=v8_execution_policy_readiness_report,
+            handoff_gate_report=v8_execution_handoff_gate_report,
+            runtime_field_coverage_report=v8_execution_runtime_field_coverage_report,
+            guard_block_analysis_report=v8_execution_guard_block_analysis_report,
+        )
+    )
+    v8_paper_candidate_gate_design_report = (
+        _v8_paper_candidate_gate_design_report(
+            m2_report_path=m2_report_path,
+            m2_report=m2_report,
+            action_rank_handoff_report=v8_action_rank_handoff_report,
+            execution_guard_report=v8_execution_risk_guard_report,
+            simulated_order_replay_report=v8_execution_simulated_order_replay_report,
+            allowed_order_quality_report=v8_execution_allowed_order_quality_report,
+            policy_readiness_report=v8_execution_policy_readiness_report,
+            handoff_gate_report=v8_execution_handoff_gate_report,
+            runtime_field_coverage_report=v8_execution_runtime_field_coverage_report,
+            guard_block_analysis_report=v8_execution_guard_block_analysis_report,
+            holdout_plan_report=v8_future_unseen_holdout_plan_report,
+        )
+    )
     return (
         label_report,
         ranking_report,
@@ -923,6 +1009,8 @@ def _build_reports(
         v8_execution_guard_block_analysis_report,
         v8_execution_runtime_field_coverage_report,
         v8_execution_handoff_gate_report,
+        v8_future_unseen_holdout_plan_report,
+        v8_paper_candidate_gate_design_report,
     )
 
 
@@ -8723,6 +8811,763 @@ def _v8_reports_preserve_compact_safety_flags(
     )
 
 
+def _v8_future_unseen_holdout_plan_report(
+    *,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    action_rank_handoff_report: dict[str, Any],
+    execution_guard_report: dict[str, Any],
+    simulated_order_replay_report: dict[str, Any],
+    allowed_order_quality_report: dict[str, Any],
+    policy_readiness_report: dict[str, Any],
+    handoff_gate_report: dict[str, Any],
+    runtime_field_coverage_report: dict[str, Any],
+    guard_block_analysis_report: dict[str, Any],
+) -> dict[str, Any]:
+    reports = {
+        "action_rank_handoff": action_rank_handoff_report,
+        "execution_risk_guard": execution_guard_report,
+        "simulated_order_replay": simulated_order_replay_report,
+        "allowed_order_quality": allowed_order_quality_report,
+        "policy_readiness": policy_readiness_report,
+        "execution_handoff_gate": handoff_gate_report,
+        "runtime_field_coverage": runtime_field_coverage_report,
+        "guard_block_analysis": guard_block_analysis_report,
+    }
+    report_ids = _v8_existing_diagnostic_report_ids(reports)
+    policy_checks = dict(
+        policy_readiness_report.get("execution_policy_readiness_required_checks") or {}
+    )
+    handoff_checks = dict(
+        handoff_gate_report.get("explicit_execution_handoff_required_checks") or {}
+    )
+    guard_config_hash = execution_guard_report.get("execution_guard_config_hash")
+    block_guard_config_hash = guard_block_analysis_report.get(
+        "execution_guard_config_hash"
+    )
+    frozen_hashes_available = all(report_ids.values())
+    o_config_fields = {
+        "model_sha256": action_rank_handoff_report.get("model_sha256"),
+        "split_hash": action_rank_handoff_report.get("split_hash"),
+        "feature_schema_hash": action_rank_handoff_report.get("feature_schema_hash"),
+        "handoff_contract_hash": action_rank_handoff_report.get(
+            "handoff_contract_hash"
+        ),
+        "ranking_score_source": action_rank_handoff_report.get(
+            "ranking_score_source"
+        ),
+    }
+    cleanup_rule_counts = {
+        "runtime_field_coverage": runtime_field_coverage_report.get(
+            "applied_runtime_field_backfill_rule_counts"
+        ),
+        "simulated_order_replay": simulated_order_replay_report.get(
+            "applied_runtime_field_backfill_rule_counts"
+        ),
+    }
+    residual_blocker_summary = dict(
+        allowed_order_quality_report.get("residual_blocker_summary") or {}
+    )
+    safe_order_discovery = dict(
+        guard_block_analysis_report.get("safe_order_discovery_summary") or {}
+    )
+    input_outcome_safe = _v8_existing_diagnostic_reports_are_outcome_safe(
+        *reports.values()
+    )
+    required_checks = {
+        "unseen_date_window_definition": _v8_design_gate_check(
+            passed=True,
+            observed="future_holdout_run_must_declare_utc_start_end_and_market_family",
+            required="strictly_later_unseen_window_declared_before_evaluation",
+            reason_code="future_holdout_unseen_window_definition_missing",
+            source_report="future_holdout_plan_static_requirement",
+            current_evidence_satisfied=False,
+        ),
+        "no_overlap_with_shadow_validation_decisions": _v8_design_gate_check(
+            passed=True,
+            observed="future_holdout_must_hash_decision_group_ids_and_market_ids",
+            required="zero_overlap_with_shadow_validation_decision_ids_and_markets",
+            reason_code="future_holdout_overlap_rule_missing",
+            source_report="future_holdout_plan_static_requirement",
+            current_evidence_satisfied=False,
+        ),
+        "deterministic_report_hashes_frozen_before_holdout_evaluation": (
+            _v8_design_gate_check(
+                passed=frozen_hashes_available,
+                observed=report_ids,
+                required="all_input_diagnostic_report_ids_present_before_holdout",
+                reason_code="future_holdout_frozen_report_hashes_missing",
+                source_report="all_existing_v8_diagnostic_reports",
+                current_evidence_satisfied=frozen_hashes_available,
+            )
+        ),
+        "same_o_model_action_rank_config": _v8_design_gate_check(
+            passed=all(o_config_fields.values()),
+            observed=o_config_fields,
+            required="model_sha256_split_hash_feature_schema_and_handoff_contract_fixed",
+            reason_code="future_holdout_o_action_rank_config_not_frozen",
+            source_report="o_v8_action_rank_handoff_report",
+            current_evidence_satisfied=all(o_config_fields.values()),
+        ),
+        "same_execution_guard_config": _v8_design_gate_check(
+            passed=bool(guard_config_hash)
+            and bool(block_guard_config_hash)
+            and guard_config_hash == block_guard_config_hash,
+            observed={
+                "execution_guard_config_hash": guard_config_hash,
+                "block_analysis_execution_guard_config_hash": block_guard_config_hash,
+            },
+            required="same_execution_guard_config_hash_across_guard_and_block_analysis",
+            reason_code="future_holdout_execution_guard_config_not_frozen",
+            source_report="o_v8_execution_risk_guard_report",
+            current_evidence_satisfied=bool(guard_config_hash)
+            and guard_config_hash == block_guard_config_hash,
+        ),
+        "same_runtime_field_cleanup_backfill_rules": _v8_design_gate_check(
+            passed=all(isinstance(value, dict) for value in cleanup_rule_counts.values()),
+            observed=cleanup_rule_counts,
+            required="runtime_field_cleanup_and_backfill_rule_counts_frozen",
+            reason_code="future_holdout_runtime_field_cleanup_rules_not_frozen",
+            source_report="o_v8_execution_runtime_field_coverage_report",
+            current_evidence_satisfied=all(
+                isinstance(value, dict) for value in cleanup_rule_counts.values()
+            ),
+        ),
+        "same_simulated_ledger_rules": _v8_design_gate_check(
+            passed=bool(simulated_order_replay_report.get("deterministic_replay_hash"))
+            and simulated_order_replay_report.get(
+                "runtime_risk_control_validation_passed"
+            )
+            is True,
+            observed={
+                "deterministic_replay_hash": simulated_order_replay_report.get(
+                    "deterministic_replay_hash"
+                ),
+                "runtime_risk_control_validation_passed": (
+                    simulated_order_replay_report.get(
+                        "runtime_risk_control_validation_passed"
+                    )
+                ),
+            },
+            required="same_deterministic_replay_hash_inputs_and_runtime_ledger_rules",
+            reason_code="future_holdout_simulated_ledger_rules_not_frozen",
+            source_report="o_v8_execution_simulated_order_replay_report",
+            current_evidence_satisfied=bool(
+                simulated_order_replay_report.get("deterministic_replay_hash")
+            ),
+        ),
+        "allowed_order_count_threshold": _v8_design_gate_check(
+            passed=policy_readiness_report.get("min_allowed_order_count") is not None,
+            observed={
+                "current_allowed_order_count": allowed_order_quality_report.get(
+                    "allowed_order_count"
+                ),
+                "min_allowed_order_count": policy_readiness_report.get(
+                    "min_allowed_order_count"
+                ),
+            },
+            required="future_holdout_allowed_order_count >= min_allowed_order_count",
+            reason_code="future_holdout_allowed_order_count_threshold_not_defined",
+            source_report="o_v8_execution_policy_readiness_report",
+            current_evidence_satisfied=_v8_policy_check_passed(
+                policy_checks,
+                "min_allowed_order_count",
+            ),
+        ),
+        "missing_runtime_fields_threshold": _v8_design_gate_check(
+            passed=_v8_policy_check_passed(policy_checks, "zero_missing_runtime_fields")
+            and int(
+                runtime_field_coverage_report.get(
+                    "missing_runtime_field_decision_count",
+                    0,
+                )
+                or 0
+            )
+            == 0,
+            observed={
+                "missing_runtime_field_decision_count": runtime_field_coverage_report.get(
+                    "missing_runtime_field_decision_count"
+                ),
+            },
+            required="0 missing runtime fields",
+            reason_code="future_holdout_missing_runtime_field_threshold_not_defined",
+            source_report="o_v8_execution_runtime_field_coverage_report",
+            current_evidence_satisfied=True,
+        ),
+        "provenance_violation_threshold": _v8_design_gate_check(
+            passed=_v8_policy_check_passed(policy_checks, "zero_provenance_violations"),
+            observed=runtime_field_coverage_report.get(
+                "runtime_field_backfill_provenance_validity_summary"
+            ),
+            required="0 provenance violations",
+            reason_code="future_holdout_provenance_threshold_not_defined",
+            source_report="o_v8_execution_runtime_field_coverage_report",
+            current_evidence_satisfied=_v8_policy_check_passed(
+                policy_checks,
+                "zero_provenance_violations",
+            ),
+        ),
+        "p_up_agreement_requirement": _v8_design_gate_check(
+            passed=_v8_policy_check_passed(
+                policy_checks,
+                "all_allowed_orders_p_up_agreement",
+            )
+            and _v8_handoff_check_passed(
+                handoff_checks,
+                "all_allowed_orders_p_up_agreement",
+            ),
+            observed=allowed_order_quality_report.get(
+                "allowed_order_p_up_agreement_distribution"
+            ),
+            required="all future holdout allowed orders must p_up_agree",
+            reason_code="future_holdout_p_up_agreement_requirement_not_defined",
+            source_report="o_v8_execution_policy_readiness_report",
+            current_evidence_satisfied=True,
+        ),
+        "exposure_microstructure_pass_requirement": _v8_design_gate_check(
+            passed=_v8_policy_check_passed(
+                policy_checks,
+                "allowed_order_exposure_within_limits",
+            )
+            and _v8_policy_check_passed(
+                policy_checks,
+                "allowed_order_microstructure_quality_passed",
+            ),
+            observed={
+                "exposure_quality_summary": policy_readiness_report.get(
+                    "exposure_quality_summary"
+                ),
+                "microstructure_quality_summary": policy_readiness_report.get(
+                    "microstructure_quality_summary"
+                ),
+            },
+            required="future_holdout_allowed_orders_pass_exposure_and_microstructure",
+            reason_code=(
+                "future_holdout_exposure_microstructure_requirement_not_defined"
+            ),
+            source_report="o_v8_execution_policy_readiness_report",
+            current_evidence_satisfied=True,
+        ),
+        "allowed_order_origin_safety_requirement": _v8_design_gate_check(
+            passed=_v8_policy_check_passed(
+                policy_checks,
+                "all_allowed_orders_original_or_safe_downgrade",
+            ),
+            observed=allowed_order_quality_report.get(
+                "allowed_order_origin_distribution"
+            ),
+            required="future_holdout_allowed_orders_original_or_explicit_safe_downgrade",
+            reason_code="future_holdout_allowed_order_origin_requirement_not_defined",
+            source_report="o_v8_execution_policy_readiness_report",
+            current_evidence_satisfied=True,
+        ),
+        "residual_blocker_classification_requirement": _v8_design_gate_check(
+            passed=bool(residual_blocker_summary)
+            and "classification_counts" in safe_order_discovery,
+            observed={
+                "residual_blocker_summary": residual_blocker_summary,
+                "safe_order_discovery_summary": safe_order_discovery,
+            },
+            required="future_holdout_residual_blockers_classified_by_reason",
+            reason_code=(
+                "future_holdout_residual_blocker_classification_not_defined"
+            ),
+            source_report="o_v8_execution_guard_block_analysis_report",
+            current_evidence_satisfied="classification_counts" in safe_order_discovery,
+        ),
+        "input_reports_do_not_use_forbidden_outcomes": _v8_design_gate_check(
+            passed=input_outcome_safe,
+            observed=_v8_outcome_usage_summary(reports.values()),
+            required="no_realized_pnl_labels_or_oracle_outcomes_for_tuning",
+            reason_code="future_holdout_input_report_forbidden_outcome_usage_detected",
+            source_report="all_existing_v8_diagnostic_reports",
+            current_evidence_satisfied=input_outcome_safe,
+        ),
+    }
+    blocking_reason_codes = sorted(
+        check["reason_code"]
+        for check in required_checks.values()
+        if check["passed"] is not True
+    )
+    report = {
+        "schema_version": O_V8_FUTURE_UNSEEN_HOLDOUT_PLAN_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "source_lineage": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "report_type": "o_v8_future_unseen_holdout_plan",
+        "diagnostic_only": True,
+        "simulation_only": True,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "input_diagnostic_report_ids": report_ids,
+        "analysis_source": "existing_v8_diagnostic_reports_only",
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "uses_source_model_training_internals_for_gate_tuning": False,
+        "forbidden_outcome_fields_used": [],
+        "future_unseen_holdout_plan_ready": not blocking_reason_codes,
+        "future_unseen_holdout_required_checks": required_checks,
+        "future_unseen_holdout_blocking_reason_codes": blocking_reason_codes,
+        "future_unseen_holdout_required": True,
+        "future_holdout_current_status": "not_evaluated_future_requirement",
+        "future_holdout_current_unlock_blocking_reason_codes": [
+            "future_unseen_holdout_not_yet_evaluated",
+            "future_paper_candidate_gate_required",
+            "manual_approval_not_recorded",
+        ],
+        "future_holdout_required_evidence_summary": {
+            "strictly_later_unseen_window": True,
+            "market_and_decision_disjoint_from_shadow_validation": True,
+            "frozen_report_hashes_before_evaluation": True,
+            "same_o_model_action_rank_config": True,
+            "same_execution_guard_config": True,
+            "same_runtime_field_cleanup_backfill_rules": True,
+            "same_simulated_ledger_rules": True,
+            "allowed_order_count_threshold": policy_readiness_report.get(
+                "min_allowed_order_count"
+            ),
+            "missing_runtime_fields_threshold": 0,
+            "provenance_violation_threshold": 0,
+            "p_up_agreement_required": True,
+            "exposure_microstructure_pass_required": True,
+            "allowed_order_origin_safety_required": True,
+            "residual_blocker_classification_required": True,
+        },
+        "paper_candidate_allowed": False,
+        "v8_execution_handoff_allowed": False,
+        "v8_execution_handoff_blocking_reason_codes": [
+            "future_unseen_holdout_required",
+            "future_paper_candidate_gate_required",
+            "paper_live_unlock_prohibited",
+        ],
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "no_paper_live_unlock_from_future_holdout_plan": True,
+        "no_source_freeze_unlock_from_future_holdout_plan": True,
+        **compact_safety_fields(),
+    }
+    report["o_v8_future_unseen_holdout_plan_report_id"] = canonical_json_sha256(report)
+    return report
+
+
+def _v8_paper_candidate_gate_design_report(
+    *,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    action_rank_handoff_report: dict[str, Any],
+    execution_guard_report: dict[str, Any],
+    simulated_order_replay_report: dict[str, Any],
+    allowed_order_quality_report: dict[str, Any],
+    policy_readiness_report: dict[str, Any],
+    handoff_gate_report: dict[str, Any],
+    runtime_field_coverage_report: dict[str, Any],
+    guard_block_analysis_report: dict[str, Any],
+    holdout_plan_report: dict[str, Any],
+) -> dict[str, Any]:
+    reports = {
+        "action_rank_handoff": action_rank_handoff_report,
+        "execution_risk_guard": execution_guard_report,
+        "simulated_order_replay": simulated_order_replay_report,
+        "allowed_order_quality": allowed_order_quality_report,
+        "policy_readiness": policy_readiness_report,
+        "execution_handoff_gate": handoff_gate_report,
+        "runtime_field_coverage": runtime_field_coverage_report,
+        "guard_block_analysis": guard_block_analysis_report,
+        "future_unseen_holdout_plan": holdout_plan_report,
+    }
+    report_ids = _v8_existing_diagnostic_report_ids(reports)
+    replay_rows = list(simulated_order_replay_report.get("simulated_decision_rows") or [])
+    provenance_summary = dict(
+        runtime_field_coverage_report.get(
+            "runtime_field_backfill_provenance_validity_summary"
+        )
+        or {}
+    )
+    no_source_score_mutation = not any(
+        row.get("source_score_mutated") is True
+        or row.get("o_model_predicted_score_mutated") is True
+        for row in replay_rows
+    )
+    no_model_layer_risk = (
+        action_rank_handoff_report.get("model_layer_regret_risk_selection_enabled")
+        is False
+        and execution_guard_report.get("model_layer_regret_risk_selection_enabled")
+        is False
+        and execution_guard_report.get("trains_regret_model") is False
+        and execution_guard_report.get("trains_risk_head") is False
+    )
+    no_forbidden_outcomes = _v8_existing_diagnostic_reports_are_outcome_safe(
+        *reports.values()
+    )
+    safety_flags_preserved = _v8_reports_preserve_compact_safety_flags(
+        action_rank_handoff_report,
+        execution_guard_report,
+        simulated_order_replay_report,
+        allowed_order_quality_report,
+        policy_readiness_report,
+        handoff_gate_report,
+        runtime_field_coverage_report,
+        guard_block_analysis_report,
+        holdout_plan_report,
+    )
+    source_freeze_separate = (
+        holdout_plan_report.get("source_model_candidate_eligible") is False
+        and holdout_plan_report.get("freeze_ready") is False
+        and holdout_plan_report.get("promotion_evidence_eligible") is False
+        and action_rank_handoff_report.get("strict_source_gate_remains_failed") is True
+    )
+    required_checks = {
+        "future_unseen_holdout_passed": _v8_design_gate_check(
+            passed=holdout_plan_report.get("future_unseen_holdout_plan_ready") is True,
+            observed={
+                "future_unseen_holdout_plan_ready": holdout_plan_report.get(
+                    "future_unseen_holdout_plan_ready"
+                ),
+                "future_holdout_current_status": holdout_plan_report.get(
+                    "future_holdout_current_status"
+                ),
+            },
+            required="future_unseen_holdout_must_pass_before_paper_candidate",
+            reason_code="paper_candidate_future_unseen_holdout_plan_not_ready",
+            source_report="o_v8_future_unseen_holdout_plan_report",
+            current_evidence_satisfied=False,
+        ),
+        "explicit_execution_handoff_gate_passed_on_holdout": _v8_design_gate_check(
+            passed=bool(
+                handoff_gate_report.get("explicit_execution_handoff_required_checks")
+            )
+            and handoff_gate_report.get("explicit_execution_handoff_gate_mode")
+            == "diagnostic_only_fail_closed",
+            observed={
+                "current_explicit_execution_handoff_gate_passed": (
+                    handoff_gate_report.get("explicit_execution_handoff_gate_passed")
+                ),
+                "explicit_execution_handoff_gate_mode": handoff_gate_report.get(
+                    "explicit_execution_handoff_gate_mode"
+                ),
+            },
+            required="explicit_execution_handoff_gate_passed_on_future_holdout",
+            reason_code="paper_candidate_execution_handoff_gate_design_not_ready",
+            source_report="o_v8_execution_handoff_gate_report",
+            current_evidence_satisfied=handoff_gate_report.get(
+                "explicit_execution_handoff_gate_passed"
+            )
+            is True,
+        ),
+        "zero_source_score_mutation": _v8_design_gate_check(
+            passed=no_source_score_mutation,
+            observed={
+                "mutated_row_count": sum(
+                    1
+                    for row in replay_rows
+                    if row.get("source_score_mutated") is True
+                    or row.get("o_model_predicted_score_mutated") is True
+                )
+            },
+            required=0,
+            reason_code="paper_candidate_source_score_mutation_detected",
+            source_report="o_v8_execution_simulated_order_replay_report",
+            current_evidence_satisfied=no_source_score_mutation,
+        ),
+        "zero_forbidden_outcome_field_usage": _v8_design_gate_check(
+            passed=no_forbidden_outcomes,
+            observed=_v8_outcome_usage_summary(reports.values()),
+            required="no_realized_pnl_labels_or_oracle_fields_for_gate_tuning",
+            reason_code="paper_candidate_forbidden_outcome_usage_detected",
+            source_report="all_existing_v8_diagnostic_reports",
+            current_evidence_satisfied=no_forbidden_outcomes,
+        ),
+        "zero_provenance_violations": _v8_design_gate_check(
+            passed=int(provenance_summary.get("provenance_violation_count") or 0) == 0,
+            observed=provenance_summary,
+            required="0 provenance violations",
+            reason_code="paper_candidate_provenance_violations_present",
+            source_report="o_v8_execution_runtime_field_coverage_report",
+            current_evidence_satisfied=int(
+                provenance_summary.get("provenance_violation_count") or 0
+            )
+            == 0,
+        ),
+        "no_model_layer_regret_risk_selection_enabled": _v8_design_gate_check(
+            passed=no_model_layer_risk,
+            observed={
+                "action_rank_model_layer_regret_risk_selection_enabled": (
+                    action_rank_handoff_report.get(
+                        "model_layer_regret_risk_selection_enabled"
+                    )
+                ),
+                "execution_guard_model_layer_regret_risk_selection_enabled": (
+                    execution_guard_report.get(
+                        "model_layer_regret_risk_selection_enabled"
+                    )
+                ),
+                "trains_regret_model": execution_guard_report.get(
+                    "trains_regret_model"
+                ),
+                "trains_risk_head": execution_guard_report.get("trains_risk_head"),
+            },
+            required=False,
+            reason_code="paper_candidate_model_layer_regret_risk_selection_enabled",
+            source_report="o_v8_action_rank_handoff_report",
+            current_evidence_satisfied=no_model_layer_risk,
+        ),
+        "source_freeze_promotion_gates_remain_separate": _v8_design_gate_check(
+            passed=source_freeze_separate,
+            observed={
+                "strict_source_gate_remains_failed": action_rank_handoff_report.get(
+                    "strict_source_gate_remains_failed"
+                ),
+                "source_model_candidate_eligible": holdout_plan_report.get(
+                    "source_model_candidate_eligible"
+                ),
+                "freeze_ready": holdout_plan_report.get("freeze_ready"),
+                "promotion_evidence_eligible": holdout_plan_report.get(
+                    "promotion_evidence_eligible"
+                ),
+            },
+            required="paper_candidate_gate_does_not_change_source_freeze_promotion",
+            reason_code="paper_candidate_source_freeze_promotion_gate_not_separate",
+            source_report="o_v8_action_rank_handoff_report",
+            current_evidence_satisfied=source_freeze_separate,
+        ),
+        "paper_only_flags_enforced": _v8_design_gate_check(
+            passed=safety_flags_preserved
+            and holdout_plan_report.get("paper_only") is True,
+            observed=_v8_compact_safety_flag_summary(*reports.values()),
+            required={"paper_only": True},
+            reason_code="paper_candidate_paper_only_flag_not_enforced",
+            source_report="all_existing_v8_diagnostic_reports",
+            current_evidence_satisfied=safety_flags_preserved,
+        ),
+        "wallet_signing_disabled": _v8_design_gate_check(
+            passed=safety_flags_preserved
+            and all(report.get("wallet_signing_enabled") is False for report in reports.values()),
+            observed=_v8_compact_safety_flag_summary(*reports.values()),
+            required={"wallet_signing_enabled": False},
+            reason_code="paper_candidate_wallet_signing_enabled",
+            source_report="all_existing_v8_diagnostic_reports",
+            current_evidence_satisfied=safety_flags_preserved,
+        ),
+        "polymarket_writes_disabled": _v8_design_gate_check(
+            passed=safety_flags_preserved
+            and all(report.get("polymarket_write_enabled") is False for report in reports.values()),
+            observed=_v8_compact_safety_flag_summary(*reports.values()),
+            required={"polymarket_write_enabled": False},
+            reason_code="paper_candidate_polymarket_writes_enabled",
+            source_report="all_existing_v8_diagnostic_reports",
+            current_evidence_satisfied=safety_flags_preserved,
+        ),
+        "capital_at_risk_false": _v8_design_gate_check(
+            passed=safety_flags_preserved
+            and all(report.get("capital_at_risk") is False for report in reports.values()),
+            observed=_v8_compact_safety_flag_summary(*reports.values()),
+            required={"capital_at_risk": False},
+            reason_code="paper_candidate_capital_at_risk_enabled",
+            source_report="all_existing_v8_diagnostic_reports",
+            current_evidence_satisfied=safety_flags_preserved,
+        ),
+        "explicit_manual_approval_required": _v8_design_gate_check(
+            passed=True,
+            observed="manual_approval_not_recorded_for_current_diagnostic_run",
+            required="explicit_manual_approval_record_required_before_paper_candidate",
+            reason_code="paper_candidate_manual_approval_requirement_missing",
+            source_report="paper_candidate_gate_design_static_requirement",
+            current_evidence_satisfied=False,
+        ),
+        "input_report_hashes_available": _v8_design_gate_check(
+            passed=all(report_ids.values()),
+            observed=report_ids,
+            required="all_input_report_ids_available",
+            reason_code="paper_candidate_input_report_hashes_missing",
+            source_report="all_existing_v8_diagnostic_reports",
+            current_evidence_satisfied=all(report_ids.values()),
+        ),
+    }
+    blocking_reason_codes = sorted(
+        check["reason_code"]
+        for check in required_checks.values()
+        if check["passed"] is not True
+    )
+    report = {
+        "schema_version": O_V8_PAPER_CANDIDATE_GATE_DESIGN_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "source_lineage": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "report_type": "o_v8_paper_candidate_gate_design",
+        "diagnostic_only": True,
+        "simulation_only": True,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "input_diagnostic_report_ids": report_ids,
+        "future_unseen_holdout_plan_report_id": holdout_plan_report[
+            "o_v8_future_unseen_holdout_plan_report_id"
+        ],
+        "analysis_source": "existing_v8_diagnostic_reports_only",
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "uses_source_model_training_internals_for_gate_tuning": False,
+        "forbidden_outcome_fields_used": [],
+        "paper_candidate_gate_design_ready": not blocking_reason_codes,
+        "paper_candidate_required_checks": required_checks,
+        "paper_candidate_gate_blocking_reason_codes": blocking_reason_codes,
+        "future_unseen_holdout_required": True,
+        "future_paper_candidate_gate_required": True,
+        "paper_candidate_allowed": False,
+        "paper_candidate_current_unlock_blocking_reason_codes": [
+            "future_unseen_holdout_not_yet_evaluated",
+            "future_paper_candidate_gate_design_only",
+            "explicit_manual_approval_not_recorded",
+            "paper_live_unlock_prohibited",
+        ],
+        "future_paper_candidate_required_evidence_summary": {
+            "future_unseen_holdout_passed": True,
+            "explicit_execution_handoff_gate_passed_on_holdout": True,
+            "zero_source_score_mutation": True,
+            "zero_forbidden_outcome_field_usage": True,
+            "zero_provenance_violations": True,
+            "no_model_layer_regret_risk_selection_enabled": True,
+            "source_freeze_promotion_gates_remain_separate": True,
+            "paper_only_flags_enforced": True,
+            "wallet_signing_disabled": True,
+            "polymarket_writes_disabled": True,
+            "capital_at_risk_false": True,
+            "explicit_manual_approval_required": True,
+        },
+        "v8_execution_handoff_allowed": False,
+        "v8_execution_handoff_blocking_reason_codes": [
+            "future_unseen_holdout_required",
+            "future_paper_candidate_gate_required",
+            "paper_live_unlock_prohibited",
+        ],
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "no_paper_live_unlock_from_paper_candidate_gate_design": True,
+        "no_source_freeze_unlock_from_paper_candidate_gate_design": True,
+        **compact_safety_fields(),
+    }
+    report["o_v8_paper_candidate_gate_design_report_id"] = canonical_json_sha256(report)
+    return report
+
+
+def _v8_design_gate_check(
+    *,
+    passed: bool,
+    observed: Any,
+    required: Any,
+    reason_code: str,
+    source_report: str,
+    current_evidence_satisfied: bool,
+) -> dict[str, Any]:
+    return {
+        "passed": bool(passed),
+        "observed": observed,
+        "required": required,
+        "reason_code": reason_code,
+        "source_report": source_report,
+        "current_evidence_satisfied": bool(current_evidence_satisfied),
+    }
+
+
+def _v8_handoff_check_passed(
+    handoff_checks: dict[str, Any],
+    check_name: str,
+) -> bool:
+    check = handoff_checks.get(check_name)
+    if not isinstance(check, dict):
+        return False
+    return check.get("passed") is True
+
+
+def _v8_existing_diagnostic_report_ids(
+    reports: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    report_id_fields = {
+        "action_rank_handoff": "o_v8_action_rank_handoff_report_id",
+        "execution_risk_guard": "o_v8_execution_risk_guard_report_id",
+        "simulated_order_replay": "o_v8_execution_simulated_order_replay_report_id",
+        "allowed_order_quality": "o_v8_execution_allowed_order_quality_report_id",
+        "policy_readiness": "o_v8_execution_policy_readiness_report_id",
+        "execution_handoff_gate": "o_v8_execution_handoff_gate_report_id",
+        "runtime_field_coverage": "o_v8_execution_runtime_field_coverage_report_id",
+        "guard_block_analysis": "o_v8_execution_guard_block_analysis_report_id",
+        "future_unseen_holdout_plan": "o_v8_future_unseen_holdout_plan_report_id",
+    }
+    return {
+        name: report.get(report_id_fields[name])
+        for name, report in reports.items()
+        if name in report_id_fields
+    }
+
+
+def _v8_existing_diagnostic_reports_are_outcome_safe(
+    *reports: dict[str, Any],
+) -> bool:
+    return all(
+        report.get("uses_realized_pnl_or_labels_for_analysis") is not True
+        and report.get("uses_oracle_actions_for_analysis") is not True
+        and report.get("uses_validation_outcomes_for_tuning") is not True
+        and report.get("uses_validation_realized_outcomes_for_guard_tuning") is not True
+        and report.get("uses_replay_regret_labels_for_guard_tuning") is not True
+        and report.get("safe_order_discovery_uses_realized_pnl") is not True
+        and not report.get("forbidden_outcome_fields_used")
+        for report in reports
+    )
+
+
+def _v8_outcome_usage_summary(
+    reports: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    return {
+        str(report.get("report_type") or f"report_{index}"): {
+            "uses_realized_pnl_or_labels_for_analysis": report.get(
+                "uses_realized_pnl_or_labels_for_analysis"
+            ),
+            "uses_oracle_actions_for_analysis": report.get(
+                "uses_oracle_actions_for_analysis"
+            ),
+            "uses_validation_outcomes_for_tuning": report.get(
+                "uses_validation_outcomes_for_tuning"
+            ),
+            "uses_validation_realized_outcomes_for_guard_tuning": report.get(
+                "uses_validation_realized_outcomes_for_guard_tuning"
+            ),
+            "uses_replay_regret_labels_for_guard_tuning": report.get(
+                "uses_replay_regret_labels_for_guard_tuning"
+            ),
+            "safe_order_discovery_uses_realized_pnl": report.get(
+                "safe_order_discovery_uses_realized_pnl"
+            ),
+            "forbidden_outcome_fields_used": report.get(
+                "forbidden_outcome_fields_used",
+                [],
+            ),
+        }
+        for index, report in enumerate(reports)
+    }
+
+
 def _v8_execution_guard_block_analysis_report(
     *,
     m2_report_path: Path,
@@ -13999,6 +14844,82 @@ def _v8_execution_handoff_gate_markdown(report: dict[str, Any]) -> str:
             f"`{report['runtime_integrity_summary']}`",
             "- residual_blocker_summary: "
             f"`{report['residual_blocker_summary']}`",
+            "- v8_execution_handoff_allowed: "
+            f"`{str(report['v8_execution_handoff_allowed']).lower()}`",
+            f"- source_model_candidate_eligible: "
+            f"`{str(report['source_model_candidate_eligible']).lower()}`",
+            f"- freeze_ready: `{str(report['freeze_ready']).lower()}`",
+            "- promotion_evidence_eligible: "
+            f"`{str(report['promotion_evidence_eligible']).lower()}`",
+            f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+            f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+            "",
+        ]
+    )
+
+
+def _v8_future_unseen_holdout_plan_markdown(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Future Unseen Holdout Plan",
+            "",
+            f"- diagnostic_only: `{str(report['diagnostic_only']).lower()}`",
+            f"- simulation_only: `{str(report['simulation_only']).lower()}`",
+            "- future_unseen_holdout_plan_ready: "
+            f"`{str(report['future_unseen_holdout_plan_ready']).lower()}`",
+            "- future_unseen_holdout_blocking_reason_codes: "
+            f"`{report['future_unseen_holdout_blocking_reason_codes']}`",
+            "- future_unseen_holdout_required: "
+            f"`{str(report['future_unseen_holdout_required']).lower()}`",
+            "- future_holdout_current_status: "
+            f"`{report['future_holdout_current_status']}`",
+            "- uses_validation_outcomes_for_tuning: "
+            f"`{str(report['uses_validation_outcomes_for_tuning']).lower()}`",
+            f"- thresholds_tuned: `{str(report['thresholds_tuned']).lower()}`",
+            "- uses_realized_pnl_or_labels_for_analysis: "
+            f"`{str(report['uses_realized_pnl_or_labels_for_analysis']).lower()}`",
+            "- uses_oracle_actions_for_analysis: "
+            f"`{str(report['uses_oracle_actions_for_analysis']).lower()}`",
+            "- paper_candidate_allowed: "
+            f"`{str(report['paper_candidate_allowed']).lower()}`",
+            "- v8_execution_handoff_allowed: "
+            f"`{str(report['v8_execution_handoff_allowed']).lower()}`",
+            f"- source_model_candidate_eligible: "
+            f"`{str(report['source_model_candidate_eligible']).lower()}`",
+            f"- freeze_ready: `{str(report['freeze_ready']).lower()}`",
+            "- promotion_evidence_eligible: "
+            f"`{str(report['promotion_evidence_eligible']).lower()}`",
+            f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+            f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+            "",
+        ]
+    )
+
+
+def _v8_paper_candidate_gate_design_markdown(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Paper Candidate Gate Design",
+            "",
+            f"- diagnostic_only: `{str(report['diagnostic_only']).lower()}`",
+            f"- simulation_only: `{str(report['simulation_only']).lower()}`",
+            "- paper_candidate_gate_design_ready: "
+            f"`{str(report['paper_candidate_gate_design_ready']).lower()}`",
+            "- paper_candidate_gate_blocking_reason_codes: "
+            f"`{report['paper_candidate_gate_blocking_reason_codes']}`",
+            "- paper_candidate_allowed: "
+            f"`{str(report['paper_candidate_allowed']).lower()}`",
+            "- future_unseen_holdout_required: "
+            f"`{str(report['future_unseen_holdout_required']).lower()}`",
+            "- future_paper_candidate_gate_required: "
+            f"`{str(report['future_paper_candidate_gate_required']).lower()}`",
+            "- uses_validation_outcomes_for_tuning: "
+            f"`{str(report['uses_validation_outcomes_for_tuning']).lower()}`",
+            f"- thresholds_tuned: `{str(report['thresholds_tuned']).lower()}`",
+            "- uses_realized_pnl_or_labels_for_analysis: "
+            f"`{str(report['uses_realized_pnl_or_labels_for_analysis']).lower()}`",
+            "- uses_oracle_actions_for_analysis: "
+            f"`{str(report['uses_oracle_actions_for_analysis']).lower()}`",
             "- v8_execution_handoff_allowed: "
             f"`{str(report['v8_execution_handoff_allowed']).lower()}`",
             f"- source_model_candidate_eligible: "

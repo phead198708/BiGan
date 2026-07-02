@@ -48,6 +48,8 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
     block_analysis = result.v8_execution_guard_block_analysis_report
     field_coverage = result.v8_execution_runtime_field_coverage_report
     handoff_gate = result.v8_execution_handoff_gate_report
+    holdout_plan = result.v8_future_unseen_holdout_plan_report
+    paper_candidate_gate = result.v8_paper_candidate_gate_design_report
     return {
         "run_id": run_id,
         "run_dir": str(result.run_dir),
@@ -158,6 +160,19 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         "future_paper_candidate_gate_required": handoff_gate[
             "future_paper_candidate_gate_required"
         ],
+        "future_unseen_holdout_plan_ready": holdout_plan[
+            "future_unseen_holdout_plan_ready"
+        ],
+        "future_unseen_holdout_blocking_reason_codes": holdout_plan[
+            "future_unseen_holdout_blocking_reason_codes"
+        ],
+        "paper_candidate_gate_design_ready": paper_candidate_gate[
+            "paper_candidate_gate_design_ready"
+        ],
+        "paper_candidate_gate_blocking_reason_codes": paper_candidate_gate[
+            "paper_candidate_gate_blocking_reason_codes"
+        ],
+        "paper_candidate_allowed": paper_candidate_gate["paper_candidate_allowed"],
         "v8_execution_block_analysis_safe_order_candidate_count": (
             block_analysis["safe_order_discovery_summary"][
                 "safe_order_candidate_count"
@@ -263,6 +278,12 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         ),
         "v8_execution_handoff_gate_report_path": str(
             result.artifact_paths["v8_execution_handoff_gate_report"]
+        ),
+        "v8_future_unseen_holdout_plan_report_path": str(
+            result.artifact_paths["v8_future_unseen_holdout_plan_report"]
+        ),
+        "v8_paper_candidate_gate_design_report_path": str(
+            result.artifact_paths["v8_paper_candidate_gate_design_report"]
         ),
         "manifest_path": str(result.artifact_paths["manifest"]),
     }

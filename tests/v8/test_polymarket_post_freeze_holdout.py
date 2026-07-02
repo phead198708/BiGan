@@ -75,6 +75,8 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_V8_EXECUTION_RUNTIME_FIELD_COVERAGE_SCHEMA_VERSION,
     O_V8_EXECUTION_RUNTIME_STATE_SCHEMA_VERSION,
     O_V8_EXECUTION_SIMULATED_ORDER_REPLAY_SCHEMA_VERSION,
+    O_V8_FUTURE_UNSEEN_HOLDOUT_PLAN_SCHEMA_VERSION,
+    O_V8_PAPER_CANDIDATE_GATE_DESIGN_SCHEMA_VERSION,
     PolymarketOReplayAlignedSourceRankingConfig,
     _o_relaxed_diagnostic_gate_status,
     _v8_execution_allowed_order_quality_report,
@@ -85,6 +87,8 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     _v8_execution_policy_readiness_report,
     _v8_execution_runtime_field_coverage_report,
     _v8_execution_simulated_runtime_reports,
+    _v8_future_unseen_holdout_plan_report,
+    _v8_paper_candidate_gate_design_report,
     run_polymarket_o_replay_aligned_source_ranking,
 )
 from bigan.v8.polymarket.training.post_freeze_promotion_readiness_audit import (
@@ -4037,6 +4041,93 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert handoff_gate["polymarket_write_enabled"] is False
     assert handoff_gate["wallet_signing_enabled"] is False
 
+    holdout_plan = result.v8_future_unseen_holdout_plan_report
+    holdout_plan_payload = dict(holdout_plan)
+    holdout_plan_id = holdout_plan_payload.pop(
+        "o_v8_future_unseen_holdout_plan_report_id"
+    )
+    assert canonical_json_sha256(holdout_plan_payload) == holdout_plan_id
+    assert (
+        holdout_plan["schema_version"]
+        == O_V8_FUTURE_UNSEEN_HOLDOUT_PLAN_SCHEMA_VERSION
+    )
+    assert holdout_plan["report_type"] == "o_v8_future_unseen_holdout_plan"
+    assert holdout_plan["diagnostic_only"] is True
+    assert holdout_plan["simulation_only"] is True
+    assert holdout_plan["future_unseen_holdout_plan_ready"] is True
+    assert holdout_plan["future_unseen_holdout_blocking_reason_codes"] == []
+    assert set(holdout_plan["future_unseen_holdout_required_checks"]) >= {
+        "allowed_order_count_threshold",
+        "allowed_order_origin_safety_requirement",
+        "deterministic_report_hashes_frozen_before_holdout_evaluation",
+        "exposure_microstructure_pass_requirement",
+        "input_reports_do_not_use_forbidden_outcomes",
+        "missing_runtime_fields_threshold",
+        "no_overlap_with_shadow_validation_decisions",
+        "p_up_agreement_requirement",
+        "provenance_violation_threshold",
+        "residual_blocker_classification_requirement",
+        "same_execution_guard_config",
+        "same_o_model_action_rank_config",
+        "same_runtime_field_cleanup_backfill_rules",
+        "same_simulated_ledger_rules",
+        "unseen_date_window_definition",
+    }
+    assert holdout_plan["future_unseen_holdout_required"] is True
+    assert holdout_plan["paper_candidate_allowed"] is False
+    assert holdout_plan["v8_execution_handoff_allowed"] is False
+    assert holdout_plan["source_model_candidate_eligible"] is False
+    assert holdout_plan["freeze_ready"] is False
+    assert holdout_plan["promotion_evidence_eligible"] is False
+    assert holdout_plan["#146_start_allowed"] is False
+    assert holdout_plan["#134_resume_allowed"] is False
+    assert holdout_plan["paper_only"] is True
+    assert holdout_plan["capital_at_risk"] is False
+
+    paper_gate = result.v8_paper_candidate_gate_design_report
+    paper_gate_payload = dict(paper_gate)
+    paper_gate_id = paper_gate_payload.pop(
+        "o_v8_paper_candidate_gate_design_report_id"
+    )
+    assert canonical_json_sha256(paper_gate_payload) == paper_gate_id
+    assert (
+        paper_gate["schema_version"]
+        == O_V8_PAPER_CANDIDATE_GATE_DESIGN_SCHEMA_VERSION
+    )
+    assert paper_gate["report_type"] == "o_v8_paper_candidate_gate_design"
+    assert paper_gate["diagnostic_only"] is True
+    assert paper_gate["simulation_only"] is True
+    assert paper_gate["paper_candidate_gate_design_ready"] is True
+    assert paper_gate["paper_candidate_gate_blocking_reason_codes"] == []
+    assert set(paper_gate["paper_candidate_required_checks"]) >= {
+        "capital_at_risk_false",
+        "explicit_execution_handoff_gate_passed_on_holdout",
+        "explicit_manual_approval_required",
+        "future_unseen_holdout_passed",
+        "input_report_hashes_available",
+        "no_model_layer_regret_risk_selection_enabled",
+        "paper_only_flags_enforced",
+        "polymarket_writes_disabled",
+        "source_freeze_promotion_gates_remain_separate",
+        "wallet_signing_disabled",
+        "zero_forbidden_outcome_field_usage",
+        "zero_provenance_violations",
+        "zero_source_score_mutation",
+    }
+    assert paper_gate["paper_candidate_allowed"] is False
+    assert paper_gate["future_unseen_holdout_required"] is True
+    assert paper_gate["future_paper_candidate_gate_required"] is True
+    assert paper_gate["v8_execution_handoff_allowed"] is False
+    assert paper_gate["source_model_candidate_eligible"] is False
+    assert paper_gate["freeze_ready"] is False
+    assert paper_gate["promotion_evidence_eligible"] is False
+    assert paper_gate["#146_start_allowed"] is False
+    assert paper_gate["#134_resume_allowed"] is False
+    assert paper_gate["paper_only"] is True
+    assert paper_gate["capital_at_risk"] is False
+    assert paper_gate["polymarket_write_enabled"] is False
+    assert paper_gate["wallet_signing_enabled"] is False
+
     block_analysis = result.v8_execution_guard_block_analysis_report
     block_payload = dict(block_analysis)
     block_id = block_payload.pop("o_v8_execution_guard_block_analysis_report_id")
@@ -4229,6 +4320,10 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert result.artifact_paths["v8_execution_runtime_field_coverage_summary"].exists()
     assert result.artifact_paths["v8_execution_handoff_gate_report"].exists()
     assert result.artifact_paths["v8_execution_handoff_gate_summary"].exists()
+    assert result.artifact_paths["v8_future_unseen_holdout_plan_report"].exists()
+    assert result.artifact_paths["v8_future_unseen_holdout_plan_summary"].exists()
+    assert result.artifact_paths["v8_paper_candidate_gate_design_report"].exists()
+    assert result.artifact_paths["v8_paper_candidate_gate_design_summary"].exists()
 
     manifest = _read_json(result.artifact_paths["manifest"])
     assert "hts_p_up_confidently_wrong_feature_diagnostic_report" in manifest[
@@ -4263,6 +4358,10 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert "v8_execution_runtime_field_coverage_summary" in manifest["artifact_hashes"]
     assert "v8_execution_handoff_gate_report" in manifest["artifact_hashes"]
     assert "v8_execution_handoff_gate_summary" in manifest["artifact_hashes"]
+    assert "v8_future_unseen_holdout_plan_report" in manifest["artifact_hashes"]
+    assert "v8_future_unseen_holdout_plan_summary" in manifest["artifact_hashes"]
+    assert "v8_paper_candidate_gate_design_report" in manifest["artifact_hashes"]
+    assert "v8_paper_candidate_gate_design_summary" in manifest["artifact_hashes"]
     assert manifest["large_regret_risk_model_report_available"] is False
     assert manifest["selective_action_guard_report_available"] is False
     assert manifest["large_regret_risk_model_enabled"] is False
@@ -4404,6 +4503,27 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert manifest["explicit_execution_handoff_allowed"] is False
     assert manifest["future_unseen_holdout_required"] is True
     assert manifest["future_paper_candidate_gate_required"] is True
+    assert manifest["v8_future_unseen_holdout_plan_report_available"] is True
+    assert manifest["v8_future_unseen_holdout_plan_report_id"] == (
+        holdout_plan["o_v8_future_unseen_holdout_plan_report_id"]
+    )
+    assert manifest["future_unseen_holdout_plan_ready"] == (
+        holdout_plan["future_unseen_holdout_plan_ready"]
+    )
+    assert manifest["future_unseen_holdout_blocking_reason_codes"] == (
+        holdout_plan["future_unseen_holdout_blocking_reason_codes"]
+    )
+    assert manifest["v8_paper_candidate_gate_design_report_available"] is True
+    assert manifest["v8_paper_candidate_gate_design_report_id"] == (
+        paper_gate["o_v8_paper_candidate_gate_design_report_id"]
+    )
+    assert manifest["paper_candidate_gate_design_ready"] == (
+        paper_gate["paper_candidate_gate_design_ready"]
+    )
+    assert manifest["paper_candidate_gate_blocking_reason_codes"] == (
+        paper_gate["paper_candidate_gate_blocking_reason_codes"]
+    )
+    assert manifest["paper_candidate_allowed"] is False
     assert manifest["strict_calibration_quality_passed"] == gate[
         "strict_calibration_quality_passed"
     ]
@@ -5651,6 +5771,302 @@ def test_o_v8_execution_handoff_gate_fails_when_readiness_or_runtime_fails(
     assert report["promotion_evidence_eligible"] is False
     assert report["#146_start_allowed"] is False
     assert report["#134_resume_allowed"] is False
+
+
+def _build_v8_future_gate_design_fixture(
+    tmp_path: Path,
+    *,
+    fail_closed: bool = False,
+) -> dict[str, Any]:
+    def _row(index: int) -> dict[str, Any]:
+        side = "UP" if index % 2 else "DOWN"
+        action = f"BUY_{side}_SELL_BEFORE_CLOSE"
+        return {
+            "decision_group_id": f"source|market-{index}|{index}",
+            "market_id": f"market-{index}",
+            "decision_ts": index,
+            "source_selected_action": action,
+            "source_selected_family": "SELL_BEFORE_CLOSE",
+            "source_selected_side": side,
+            "source_model_score": 0.90,
+            "source_raw_model_score": 0.80,
+            "p_up": 0.70 if side == "UP" else 0.30,
+            "p_down": 0.30 if side == "UP" else 0.70,
+            "p_up_action_disagreement": False,
+            "microstructure_snapshot": {
+                "book_staleness_ms": 500.0,
+                "spread_bps": 200.0,
+                "queue_fill_proxy": 0.90,
+                "time_to_close_seconds": 180.0,
+            },
+            "runtime_field_backfill_provenance_violations": [],
+            "execution_guarded_action": action,
+            "execution_guarded_family": "SELL_BEFORE_CLOSE",
+            "execution_guarded_side": side,
+            "execution_guarded_score": 0.89,
+            "execution_score_penalties": {},
+            "order_allowed": True,
+            "proposed_order_size": 0.1,
+            "uncapped_proposed_order_size": 0.1,
+            "sizing_reason_codes": ["execution_base_size_applied"],
+            "exposure_reason_codes": ["execution_simulated_order_allowed"],
+            "execution_guard_reason_codes": [],
+            "execution_blocking_reason_codes": [],
+            "missing_runtime_field_codes": [],
+            "pre_decision_exposure_state": {
+                "current_total_exposure": (index - 1) * 0.1,
+                "current_market_exposure_by_market_id": {},
+                "current_side_exposure_by_side": {"DOWN": 0.0, "UP": 0.0},
+                "executed_simulated_order_count": index - 1,
+                "blocked_simulated_order_count": 0,
+            },
+            "post_decision_exposure_state": {
+                "current_total_exposure": index * 0.1,
+                "current_market_exposure_by_market_id": {f"market-{index}": 0.1},
+                "current_side_exposure_by_side": {"DOWN": 0.1, "UP": 0.1},
+                "executed_simulated_order_count": index,
+                "blocked_simulated_order_count": 0,
+            },
+            "exposure_delta": 0.1,
+            "runtime_field_applied_backfill_rows": [
+                {
+                    "runtime_field_name": "microstructure_snapshot.time_to_close_seconds",
+                    "deterministic_rule_id": (
+                        "backfill_time_to_close_from_decision_time_feature_or_market_schedule"
+                    ),
+                    "application_type": "decision_time_data_join_backfill",
+                    "provenance_valid": True,
+                }
+            ],
+            "runtime_field_backfill_rules_applied": True,
+            "runtime_field_backfill_rule_counts": {
+                "backfill_time_to_close_from_decision_time_feature_or_market_schedule": 1
+            },
+            "runtime_field_backfill_provenance_valid": True,
+            "simulated_order_id": f"sim-v8-o-{index:06d}",
+            "source_score_mutated": fail_closed and index == 5,
+            "o_model_predicted_score_mutated": False,
+        }
+
+    m2_report_path = tmp_path / "m2.json"
+    m2_report = {"m2_stateful_replay_parity_candidate_report_id": "m2-test"}
+    m2_report_path.write_text(json.dumps(m2_report, sort_keys=True), encoding="utf-8")
+    replay_report = {
+        "o_v8_execution_simulated_order_replay_report_id": "replay-test",
+        "report_type": "o_v8_execution_simulated_order_replay",
+        "simulated_decision_rows": [_row(index) for index in range(1, 6)],
+        "final_exposure": {"runtime_state_validation_passed": True},
+        "runtime_risk_control_validation_passed": True,
+        "deterministic_replay_hash": "replay-hash",
+        "applied_runtime_field_backfill_rule_counts": {
+            "backfill_time_to_close_from_decision_time_feature_or_market_schedule": 5
+        },
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    allowed_quality = _v8_execution_allowed_order_quality_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        simulated_order_replay_report=replay_report,
+    )
+    policy_readiness = _v8_execution_policy_readiness_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        simulated_order_replay_report=replay_report,
+        allowed_order_quality_report=allowed_quality,
+    )
+    block_analysis = _v8_execution_guard_block_analysis_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        handoff_report={"o_v8_action_rank_handoff_report_id": "handoff-test"},
+        execution_guard_report={"o_v8_execution_risk_guard_report_id": "guard-test"},
+        runtime_state_report={"o_v8_execution_runtime_state_report_id": "state-test"},
+        simulated_order_replay_report=replay_report,
+    )
+    field_coverage = _v8_execution_runtime_field_coverage_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        handoff_report={"o_v8_action_rank_handoff_report_id": "handoff-test"},
+        execution_guard_report={"o_v8_execution_risk_guard_report_id": "guard-test"},
+        runtime_state_report={"o_v8_execution_runtime_state_report_id": "state-test"},
+        simulated_order_replay_report=replay_report,
+        block_analysis_report=block_analysis,
+    )
+    handoff_gate = _v8_execution_handoff_gate_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        policy_readiness_report=policy_readiness,
+        allowed_order_quality_report=allowed_quality,
+        simulated_order_replay_report=replay_report,
+        runtime_field_coverage_report=field_coverage,
+        guard_block_analysis_report=block_analysis,
+    )
+    action_rank_handoff = {
+        "o_v8_action_rank_handoff_report_id": "action-rank-test",
+        "report_type": "o_v8_action_rank_handoff",
+        "model_sha256": None if fail_closed else "a" * 64,
+        "split_hash": "b" * 64,
+        "feature_schema_hash": "c" * 64,
+        "handoff_contract_hash": "d" * 64,
+        "ranking_score_source": "model_predicted_score",
+        "model_layer_regret_risk_selection_enabled": False,
+        "strict_source_gate_remains_failed": True,
+        "uses_validation_outcomes_for_tuning": False,
+        "forbidden_outcome_fields_used": [],
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    execution_guard = {
+        "o_v8_execution_risk_guard_report_id": "guard-test",
+        "report_type": "o_v8_execution_risk_guard",
+        "execution_guard_config_hash": "guard-config-hash",
+        "model_layer_regret_risk_selection_enabled": fail_closed,
+        "trains_regret_model": False,
+        "trains_risk_head": False,
+        "uses_validation_realized_outcomes_for_guard_tuning": fail_closed,
+        "uses_replay_regret_labels_for_guard_tuning": False,
+        "forbidden_outcome_fields_used": [],
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    block_analysis["execution_guard_config_hash"] = "other-guard-hash" if fail_closed else "guard-config-hash"
+    if fail_closed:
+        block_analysis["safe_order_discovery_uses_realized_pnl"] = True
+    holdout_plan = _v8_future_unseen_holdout_plan_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        action_rank_handoff_report=action_rank_handoff,
+        execution_guard_report=execution_guard,
+        simulated_order_replay_report=replay_report,
+        allowed_order_quality_report=allowed_quality,
+        policy_readiness_report=policy_readiness,
+        handoff_gate_report=handoff_gate,
+        runtime_field_coverage_report=field_coverage,
+        guard_block_analysis_report=block_analysis,
+    )
+    paper_gate = _v8_paper_candidate_gate_design_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        action_rank_handoff_report=action_rank_handoff,
+        execution_guard_report=execution_guard,
+        simulated_order_replay_report=replay_report,
+        allowed_order_quality_report=allowed_quality,
+        policy_readiness_report=policy_readiness,
+        handoff_gate_report=handoff_gate,
+        runtime_field_coverage_report=field_coverage,
+        guard_block_analysis_report=block_analysis,
+        holdout_plan_report=holdout_plan,
+    )
+    return {
+        "holdout_plan": holdout_plan,
+        "paper_gate": paper_gate,
+    }
+
+
+def test_o_v8_future_unseen_holdout_and_paper_gate_design_ready_fail_closed(
+    tmp_path: Path,
+) -> None:
+    fixture = _build_v8_future_gate_design_fixture(tmp_path)
+    holdout_plan = fixture["holdout_plan"]
+    paper_gate = fixture["paper_gate"]
+
+    holdout_payload = dict(holdout_plan)
+    holdout_id = holdout_payload.pop("o_v8_future_unseen_holdout_plan_report_id")
+    assert canonical_json_sha256(holdout_payload) == holdout_id
+    assert (
+        holdout_plan["schema_version"]
+        == O_V8_FUTURE_UNSEEN_HOLDOUT_PLAN_SCHEMA_VERSION
+    )
+    assert holdout_plan["future_unseen_holdout_plan_ready"] is True
+    assert holdout_plan["future_unseen_holdout_blocking_reason_codes"] == []
+    assert all(
+        check["passed"] is True
+        for check in holdout_plan["future_unseen_holdout_required_checks"].values()
+    )
+    assert holdout_plan["paper_candidate_allowed"] is False
+    assert holdout_plan["v8_execution_handoff_allowed"] is False
+    assert holdout_plan["#146_start_allowed"] is False
+    assert holdout_plan["#134_resume_allowed"] is False
+
+    paper_payload = dict(paper_gate)
+    paper_id = paper_payload.pop("o_v8_paper_candidate_gate_design_report_id")
+    assert canonical_json_sha256(paper_payload) == paper_id
+    assert (
+        paper_gate["schema_version"]
+        == O_V8_PAPER_CANDIDATE_GATE_DESIGN_SCHEMA_VERSION
+    )
+    assert paper_gate["paper_candidate_gate_design_ready"] is True
+    assert paper_gate["paper_candidate_gate_blocking_reason_codes"] == []
+    assert all(
+        check["passed"] is True
+        for check in paper_gate["paper_candidate_required_checks"].values()
+    )
+    assert paper_gate["paper_candidate_allowed"] is False
+    assert paper_gate["v8_execution_handoff_allowed"] is False
+    assert paper_gate["source_model_candidate_eligible"] is False
+    assert paper_gate["freeze_ready"] is False
+    assert paper_gate["promotion_evidence_eligible"] is False
+    assert paper_gate["#146_start_allowed"] is False
+    assert paper_gate["#134_resume_allowed"] is False
+    assert paper_gate["paper_only"] is True
+    assert paper_gate["capital_at_risk"] is False
+    assert paper_gate["polymarket_write_enabled"] is False
+    assert paper_gate["wallet_signing_enabled"] is False
+
+
+def test_o_v8_future_unseen_holdout_and_paper_gate_design_fail_closed_on_bad_inputs(
+    tmp_path: Path,
+) -> None:
+    fixture = _build_v8_future_gate_design_fixture(tmp_path, fail_closed=True)
+    holdout_plan = fixture["holdout_plan"]
+    paper_gate = fixture["paper_gate"]
+
+    assert holdout_plan["future_unseen_holdout_plan_ready"] is False
+    assert set(holdout_plan["future_unseen_holdout_blocking_reason_codes"]) >= {
+        "future_holdout_execution_guard_config_not_frozen",
+        "future_holdout_input_report_forbidden_outcome_usage_detected",
+        "future_holdout_o_action_rank_config_not_frozen",
+    }
+    assert holdout_plan["paper_candidate_allowed"] is False
+    assert holdout_plan["v8_execution_handoff_allowed"] is False
+    assert holdout_plan["#146_start_allowed"] is False
+    assert holdout_plan["#134_resume_allowed"] is False
+
+    assert paper_gate["paper_candidate_gate_design_ready"] is False
+    assert set(paper_gate["paper_candidate_gate_blocking_reason_codes"]) >= {
+        "paper_candidate_forbidden_outcome_usage_detected",
+        "paper_candidate_future_unseen_holdout_plan_not_ready",
+        "paper_candidate_model_layer_regret_risk_selection_enabled",
+        "paper_candidate_source_score_mutation_detected",
+    }
+    assert paper_gate["paper_candidate_allowed"] is False
+    assert paper_gate["v8_execution_handoff_allowed"] is False
+    assert paper_gate["source_model_candidate_eligible"] is False
+    assert paper_gate["freeze_ready"] is False
+    assert paper_gate["promotion_evidence_eligible"] is False
+    assert paper_gate["#146_start_allowed"] is False
+    assert paper_gate["#134_resume_allowed"] is False
 
 
 def test_o_v8_execution_guard_block_analysis_classifies_safe_order_discovery(
