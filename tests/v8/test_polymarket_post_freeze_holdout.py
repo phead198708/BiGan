@@ -67,6 +67,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_SOURCE_MODEL_ELIGIBILITY_GATE_SCHEMA_VERSION,
     O_SOURCE_RANKING_OBJECTIVE_SCHEMA_VERSION,
     O_V8_ACTION_RANK_HANDOFF_SCHEMA_VERSION,
+    O_V8_EXECUTION_ALLOWED_ORDER_QUALITY_SCHEMA_VERSION,
     O_V8_EXECUTION_GUARD_BLOCK_ANALYSIS_SCHEMA_VERSION,
     O_V8_EXECUTION_RISK_GUARD_SCHEMA_VERSION,
     O_V8_EXECUTION_RUNTIME_FIELD_COVERAGE_SCHEMA_VERSION,
@@ -74,6 +75,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_V8_EXECUTION_SIMULATED_ORDER_REPLAY_SCHEMA_VERSION,
     PolymarketOReplayAlignedSourceRankingConfig,
     _o_relaxed_diagnostic_gate_status,
+    _v8_execution_allowed_order_quality_report,
     _v8_execution_guard_block_analysis_report,
     _v8_execution_guard_config,
     _v8_execution_guard_decision,
@@ -3785,6 +3787,104 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
             assert row["simulated_order_id"] is None
             assert row["exposure_delta"] == 0.0
 
+    allowed_quality = result.v8_execution_allowed_order_quality_report
+    quality_payload = dict(allowed_quality)
+    quality_id = quality_payload.pop(
+        "o_v8_execution_allowed_order_quality_report_id"
+    )
+    assert canonical_json_sha256(quality_payload) == quality_id
+    assert (
+        allowed_quality["schema_version"]
+        == O_V8_EXECUTION_ALLOWED_ORDER_QUALITY_SCHEMA_VERSION
+    )
+    assert (
+        allowed_quality["report_type"]
+        == "o_v8_execution_allowed_order_quality"
+    )
+    assert allowed_quality["diagnostic_only"] is True
+    assert allowed_quality["simulation_only"] is True
+    assert allowed_quality["uses_validation_outcomes_for_tuning"] is False
+    assert allowed_quality["thresholds_tuned"] is False
+    assert allowed_quality["mutates_o_model_predicted_score"] is False
+    assert allowed_quality["mutates_source_ranking_scores"] is False
+    assert allowed_quality["uses_realized_pnl_or_labels_for_analysis"] is False
+    assert allowed_quality["forbidden_outcome_fields_used"] == []
+    assert allowed_quality["simulated_order_replay_report_id"] == simulated_replay[
+        "o_v8_execution_simulated_order_replay_report_id"
+    ]
+    assert allowed_quality["decision_count"] == simulated_replay["decision_count"]
+    assert allowed_quality["allowed_order_count"] == simulated_replay[
+        "simulated_allowed_order_count"
+    ]
+    assert allowed_quality["blocked_decision_count"] == simulated_replay[
+        "blocked_decision_count"
+    ]
+    assert len(allowed_quality["allowed_order_quality_rows"]) == allowed_quality[
+        "allowed_order_count"
+    ]
+    assert len(allowed_quality["residual_blocked_decision_rows"]) == allowed_quality[
+        "blocked_decision_count"
+    ]
+    for row in allowed_quality["allowed_order_quality_rows"]:
+        assert set(row) >= {
+            "decision_group_id",
+            "market_id",
+            "decision_ts",
+            "simulated_order_id",
+            "execution_guarded_action",
+            "execution_guarded_family",
+            "execution_guarded_side",
+            "order_origin",
+            "source_model_score",
+            "execution_guarded_score",
+            "spread_bps",
+            "book_staleness_ms",
+            "queue_fill_proxy",
+            "time_to_close_seconds",
+            "pre_decision_exposure",
+            "post_decision_exposure",
+            "proposed_order_size",
+            "sizing_reason_codes",
+            "p_up_agreement_status",
+        }
+        assert row["source_score_mutated"] is False
+        assert row["o_model_predicted_score_mutated"] is False
+    for row in allowed_quality["residual_blocked_decision_rows"]:
+        assert set(row) >= {
+            "decision_group_id",
+            "market_id",
+            "decision_ts",
+            "execution_blocking_reason_codes",
+            "minimal_blocking_set",
+            "deterministic_recommendation_codes",
+            "primary_deterministic_recommendation",
+            "recommendation_reason_codes",
+        }
+        assert row["source_score_mutated"] is False
+        assert row["o_model_predicted_score_mutated"] is False
+    assert set(allowed_quality["residual_blocker_summary"]) >= {
+        "exposure_limit_blocked_decision_count",
+        "p_up_disagreement_blocked_decision_count",
+        "duplicate_market_side_position_count",
+        "time_to_close_unsafe_count",
+    }
+    assert set(allowed_quality["deterministic_recommendation_counts"]).issubset(
+        {
+            "keep_blocked",
+            "needs_exposure_policy_review",
+            "needs_p_up_action_rank_review",
+            "needs_time_to_close_policy_review",
+        }
+    )
+    assert allowed_quality["v8_execution_handoff_allowed"] is False
+    assert allowed_quality["source_model_candidate_eligible"] is False
+    assert allowed_quality["freeze_ready"] is False
+    assert allowed_quality["promotion_evidence_eligible"] is False
+    assert allowed_quality["#146_start_allowed"] is False
+    assert allowed_quality["#134_resume_allowed"] is False
+    assert allowed_quality["paper_only"] is True
+    assert allowed_quality["capital_at_risk"] is False
+
     block_analysis = result.v8_execution_guard_block_analysis_report
     block_payload = dict(block_analysis)
     block_id = block_payload.pop("o_v8_execution_guard_block_analysis_report_id")
@@ -3967,6 +4067,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert result.artifact_paths[
         "v8_execution_simulated_order_replay_summary"
     ].exists()
+    assert result.artifact_paths["v8_execution_allowed_order_quality_report"].exists()
+    assert result.artifact_paths["v8_execution_allowed_order_quality_summary"].exists()
     assert result.artifact_paths["v8_execution_guard_block_analysis_report"].exists()
     assert result.artifact_paths["v8_execution_guard_block_analysis_summary"].exists()
     assert result.artifact_paths["v8_execution_runtime_field_coverage_report"].exists()
@@ -3995,6 +4097,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert (
         "v8_execution_simulated_order_replay_summary" in manifest["artifact_hashes"]
     )
+    assert "v8_execution_allowed_order_quality_report" in manifest["artifact_hashes"]
+    assert "v8_execution_allowed_order_quality_summary" in manifest["artifact_hashes"]
     assert "v8_execution_guard_block_analysis_report" in manifest["artifact_hashes"]
     assert "v8_execution_guard_block_analysis_summary" in manifest["artifact_hashes"]
     assert "v8_execution_runtime_field_coverage_report" in manifest["artifact_hashes"]
@@ -4028,6 +4132,19 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert (
         manifest["v8_execution_simulated_runtime_risk_control_validation_passed"]
         is True
+    )
+    assert manifest["v8_execution_allowed_order_quality_report_available"] is True
+    assert manifest["v8_execution_allowed_order_quality_report_id"] == (
+        allowed_quality["o_v8_execution_allowed_order_quality_report_id"]
+    )
+    assert manifest["v8_execution_allowed_order_quality_allowed_order_count"] == (
+        allowed_quality["allowed_order_count"]
+    )
+    assert manifest["v8_execution_allowed_order_quality_blocked_decision_count"] == (
+        allowed_quality["blocked_decision_count"]
+    )
+    assert manifest["v8_execution_allowed_order_quality_recommendation_counts"] == (
+        allowed_quality["deterministic_recommendation_counts"]
     )
     assert manifest["v8_execution_guard_block_analysis_report_available"] is True
     assert manifest["v8_execution_guard_block_analysis_report_id"] == block_analysis[
@@ -4653,6 +4770,202 @@ def test_o_v8_simulated_runtime_replay_updates_only_allowed_exposure(
     assert replay_report["#134_resume_allowed"] is False
     assert replay_report["paper_only"] is True
     assert replay_report["capital_at_risk"] is False
+
+
+def test_o_v8_execution_allowed_order_quality_report_is_deterministic(
+    tmp_path: Path,
+) -> None:
+    def _replay_row(
+        *,
+        decision_id: str,
+        action: str,
+        side: str,
+        order_allowed: bool,
+        blocking_reasons: list[str] | None = None,
+        guard_reasons: list[str] | None = None,
+        exposure_reasons: list[str] | None = None,
+        guarded_action: str | None = None,
+        score: float = 0.80,
+        time_to_close: float = 240.0,
+        p_up_disagreement: bool = False,
+        simulated_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        guarded_action = guarded_action or action
+        guarded_side = "UP" if "BUY_UP" in guarded_action else "DOWN"
+        guarded_family = (
+            "SELL_BEFORE_CLOSE"
+            if guarded_action.endswith("SELL_BEFORE_CLOSE")
+            else "HOLD_TO_SETTLEMENT"
+        )
+        exposure_delta = 0.2 if order_allowed else 0.0
+        return {
+            "decision_group_id": f"source|market-{decision_id}|{decision_id}",
+            "market_id": f"market-{decision_id}",
+            "decision_ts": int(decision_id),
+            "source_selected_action": action,
+            "source_selected_family": "SELL_BEFORE_CLOSE"
+            if action.endswith("SELL_BEFORE_CLOSE")
+            else "HOLD_TO_SETTLEMENT",
+            "source_selected_side": side,
+            "source_model_score": score,
+            "source_raw_model_score": score - 0.10,
+            "source_high_score_flag": True,
+            "p_up": 0.70 if side == "UP" else 0.30,
+            "p_down": 0.30 if side == "UP" else 0.70,
+            "p_up_action_disagreement": p_up_disagreement,
+            "microstructure_snapshot": {
+                "book_staleness_ms": 500.0,
+                "spread_bps": 200.0,
+                "queue_fill_proxy": 0.90,
+                "time_to_close_seconds": time_to_close,
+            },
+            "execution_guarded_action": guarded_action,
+            "execution_guarded_family": guarded_family,
+            "execution_guarded_side": guarded_side,
+            "execution_guarded_score": score - 0.01,
+            "execution_score_penalties": {"spread_penalty": 0.01},
+            "order_allowed": order_allowed,
+            "proposed_order_size": 0.2 if order_allowed else 0.0,
+            "uncapped_proposed_order_size": 0.2,
+            "sizing_reason_codes": ["execution_size_high_score_default"]
+            if order_allowed
+            else ["execution_blocked_size_zero"],
+            "exposure_reason_codes": exposure_reasons or [],
+            "execution_guard_reason_codes": guard_reasons or [],
+            "execution_blocking_reason_codes": blocking_reasons or [],
+            "missing_runtime_field_codes": [],
+            "pre_decision_exposure_state": {
+                "current_total_exposure": 0.0,
+                "current_market_exposure_by_market_id": {},
+                "current_side_exposure_by_side": {"DOWN": 0.0, "UP": 0.0},
+                "executed_simulated_order_count": 0,
+                "blocked_simulated_order_count": 0,
+            },
+            "post_decision_exposure_state": {
+                "current_total_exposure": exposure_delta,
+                "current_market_exposure_by_market_id": {
+                    f"market-{decision_id}": exposure_delta
+                }
+                if order_allowed
+                else {},
+                "current_side_exposure_by_side": {
+                    "DOWN": exposure_delta if guarded_side == "DOWN" else 0.0,
+                    "UP": exposure_delta if guarded_side == "UP" else 0.0,
+                },
+                "executed_simulated_order_count": 1 if order_allowed else 0,
+                "blocked_simulated_order_count": 0 if order_allowed else 1,
+            },
+            "exposure_delta": exposure_delta,
+            "simulated_order_id": simulated_order_id,
+            "source_score_mutated": False,
+            "o_model_predicted_score_mutated": False,
+        }
+
+    m2_report_path = tmp_path / "m2.json"
+    m2_report = {"m2_stateful_replay_parity_candidate_report_id": "m2-test"}
+    m2_report_path.write_text(json.dumps(m2_report, sort_keys=True), encoding="utf-8")
+    replay_report = {
+        "o_v8_execution_simulated_order_replay_report_id": "replay-test",
+        "simulated_decision_rows": [
+            _replay_row(
+                decision_id="1",
+                action="BUY_UP_SELL_BEFORE_CLOSE",
+                side="UP",
+                order_allowed=True,
+                exposure_reasons=["execution_simulated_order_allowed"],
+                simulated_order_id="sim-v8-o-000001",
+            ),
+            _replay_row(
+                decision_id="2",
+                action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+                guarded_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+                side="DOWN",
+                order_allowed=True,
+                guard_reasons=["execution_hts_downgraded_to_same_side_sbc"],
+                exposure_reasons=["execution_simulated_order_allowed"],
+                simulated_order_id="sim-v8-o-000002",
+            ),
+            _replay_row(
+                decision_id="3",
+                action="BUY_UP_SELL_BEFORE_CLOSE",
+                side="UP",
+                order_allowed=False,
+                blocking_reasons=["execution_p_up_side_disagreement"],
+                p_up_disagreement=True,
+            ),
+            _replay_row(
+                decision_id="4",
+                action="BUY_DOWN_SELL_BEFORE_CLOSE",
+                side="DOWN",
+                order_allowed=False,
+                blocking_reasons=["execution_duplicate_market_side_position"],
+                exposure_reasons=["execution_simulated_order_blocked"],
+            ),
+            _replay_row(
+                decision_id="5",
+                action="BUY_UP_HOLD_TO_SETTLEMENT",
+                side="UP",
+                order_allowed=False,
+                blocking_reasons=["execution_time_to_close_unsafe"],
+                guard_reasons=["execution_hts_guard_failed"],
+                time_to_close=20.0,
+            ),
+        ],
+    }
+
+    report = _v8_execution_allowed_order_quality_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        simulated_order_replay_report=replay_report,
+    )
+
+    payload = dict(report)
+    report_id = payload.pop("o_v8_execution_allowed_order_quality_report_id")
+    assert canonical_json_sha256(payload) == report_id
+    assert report["schema_version"] == O_V8_EXECUTION_ALLOWED_ORDER_QUALITY_SCHEMA_VERSION
+    assert report["report_type"] == "o_v8_execution_allowed_order_quality"
+    assert report["allowed_order_count"] == 2
+    assert report["blocked_decision_count"] == 3
+    assert report["allowed_order_origin_distribution"] == {
+        "hts_to_sbc_downgrade": 1,
+        "original_selected_action": 1,
+    }
+    assert report["allowed_order_side_distribution"] == {"DOWN": 1, "UP": 1}
+    assert report["allowed_order_p_up_agreement_distribution"] == {"p_up_agrees": 2}
+    assert report["allowed_order_metric_summary"]["proposed_order_size"][
+        "count"
+    ] == 2
+    assert report["residual_blocker_summary"] == {
+        "duplicate_market_side_position_count": 1,
+        "exposure_limit_blocked_decision_count": 1,
+        "hts_guard_failed_count": 1,
+        "p_up_disagreement_blocked_decision_count": 1,
+        "time_to_close_unsafe_count": 1,
+    }
+    assert report["deterministic_recommendation_counts"] == {
+        "keep_blocked": 1,
+        "needs_exposure_policy_review": 1,
+        "needs_p_up_action_rank_review": 1,
+        "needs_time_to_close_policy_review": 1,
+    }
+    assert report["primary_deterministic_recommendation_counts"] == {
+        "needs_exposure_policy_review": 1,
+        "needs_p_up_action_rank_review": 1,
+        "needs_time_to_close_policy_review": 1,
+    }
+    assert report["uses_validation_outcomes_for_tuning"] is False
+    assert report["thresholds_tuned"] is False
+    assert report["uses_realized_pnl_or_labels_for_analysis"] is False
+    assert report["mutates_o_model_predicted_score"] is False
+    assert report["mutates_source_ranking_scores"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["freeze_ready"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["#146_start_allowed"] is False
+    assert report["#134_resume_allowed"] is False
+    assert report["paper_only"] is True
+    assert report["capital_at_risk"] is False
 
 
 def test_o_v8_execution_guard_block_analysis_classifies_safe_order_discovery(
