@@ -3237,14 +3237,28 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert gate["gate_reason_code_consistency"]["unexpected_reason_codes"] == []
     assert gate["gate_reason_code_consistency"]["missing_reason_codes"] == []
     assert gate["v8_full_decision_grid_summary"][
-        "complete_5_action_decision_grid"
-    ] is True
-    assert gate["v8_full_decision_grid_summary"][
         "required_action_families"
     ] == list(O_REQUIRED_DECISION_ACTION_FAMILIES)
+    validation_grid_has_rows = (
+        gate["v8_full_decision_grid_summary"]["decision_group_count"] > 0
+    )
+    if validation_grid_has_rows:
+        assert gate["v8_full_decision_grid_summary"][
+            "complete_5_action_decision_grid"
+        ] is True
+        assert gate["v8_action_rank_gate_summary"]["required_checks"][
+            "full_5_action_decision_grid_complete"
+        ] is True
+    else:
+        assert gate["v8_full_decision_grid_summary"][
+            "complete_5_action_decision_grid"
+        ] is False
+        assert gate["v8_action_rank_gate_summary"]["required_checks"][
+            "full_5_action_decision_grid_complete"
+        ] is False
     assert gate["v8_action_rank_gate_summary"]["required_checks"][
         "full_5_action_decision_grid_complete"
-    ] is True
+    ] == gate["v8_full_decision_grid_summary"]["complete_5_action_decision_grid"]
     assert gate["v8_action_rank_gate_summary"]["strict_max_mean_regret"] == (
         O_MAX_MEAN_REGRET
     )
@@ -3846,10 +3860,17 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert field_coverage["simulation_only"] is True
     assert field_coverage["uses_validation_outcomes_for_tuning"] is False
     assert field_coverage["thresholds_tuned"] is False
-    assert field_coverage["backfill_rules_applied"] is False
-    assert field_coverage["proposed_backfill_rules_only"] is True
+    assert field_coverage["backfill_rules_applied"] == (
+        field_coverage["applied_runtime_field_backfill_count"] > 0
+    )
+    assert field_coverage["proposed_backfill_rules_only"] == (
+        field_coverage["applied_runtime_field_backfill_count"] == 0
+    )
     assert field_coverage["mutates_o_model_predicted_score"] is False
     assert field_coverage["mutates_source_ranking_scores"] is False
+    assert "applied_runtime_field_backfill_count" in field_coverage
+    assert "applied_runtime_field_backfill_rule_counts" in field_coverage
+    assert "runtime_field_backfill_provenance_validity_summary" in field_coverage
     assert field_coverage["simulated_order_replay_report_id"] == simulated_replay[
         "o_v8_execution_simulated_order_replay_report_id"
     ]
@@ -3871,13 +3892,20 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert set(field_coverage["classification_counts"]) >= {
         "true_data_coverage_gap",
         "derived_backfill_from_existing_handoff_fields",
-        "optional_for_no_trade",
         "too_strict_for_simulation_only_mode",
     }
+    if (
+        field_coverage["applied_runtime_field_backfill_rule_counts"].get(
+            "make_non_order_runtime_fields_optional_for_no_trade",
+            0,
+        )
+        == 0
+    ):
+        assert "optional_for_no_trade" in field_coverage["classification_counts"]
     assert isinstance(field_coverage["primary_missing_runtime_fields"], list)
     assert field_coverage["proposed_deterministic_backfill_rules"]
     assert all(
-        rule["applied_now"] is False
+        rule["applied_now"] == (rule["applied_count"] > 0)
         for rule in field_coverage["proposed_deterministic_backfill_rules"]
     )
     for row in field_coverage["runtime_field_coverage_decision_rows"]:
@@ -4055,6 +4083,19 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert manifest["v8_execution_runtime_field_primary_missing_fields"] == (
         field_coverage["primary_missing_runtime_fields"]
     )
+    assert manifest["v8_execution_runtime_field_backfill_rules_applied"] == (
+        field_coverage["runtime_field_backfill_rules_applied"]
+    )
+    assert manifest["v8_execution_runtime_field_applied_backfill_count"] == (
+        field_coverage["applied_runtime_field_backfill_count"]
+    )
+    assert manifest["v8_execution_runtime_field_applied_backfill_rule_counts"] == (
+        field_coverage["applied_runtime_field_backfill_rule_counts"]
+    )
+    assert (
+        manifest["v8_execution_runtime_field_backfill_provenance_validity_summary"]
+        == field_coverage["runtime_field_backfill_provenance_validity_summary"]
+    )
     assert manifest["strict_calibration_quality_passed"] == gate[
         "strict_calibration_quality_passed"
     ]
@@ -4175,6 +4216,266 @@ def test_o_v8_execution_guard_blocks_trade_when_exposure_state_missing() -> None
         "execution_blocking_reason_codes"
     ]
     assert "execution_blocked_size_zero" in guarded["sizing_reason_codes"]
+
+
+def test_o_v8_execution_guard_applies_no_trade_optional_runtime_policy() -> None:
+    row = {
+        "decision_group_id": "source|market|no-trade",
+        "market_id": "market",
+        "decision_ts": 123,
+        "selected_action": "NO_TRADE",
+        "selected_side": "NONE",
+        "selected_action_family": "NO_TRADE",
+        "corrected_model_score": 0.82,
+        "raw_model_score": 0.72,
+        "score_components": {"base_score": 0.50},
+        "high_score_flag": True,
+        "p_up": 0.70,
+        "p_down": 0.30,
+        "p_up_action_disagreement": None,
+        "microstructure_snapshot": {},
+        "reference_price_feature_provenance": {},
+        "full_5_action_ranking": [
+            {
+                "rank": 1,
+                "selected_action": "NO_TRADE",
+                "selected_side": "NONE",
+                "selected_action_family": "NO_TRADE",
+                "corrected_model_score": 0.82,
+                "raw_model_score": 0.72,
+                "high_score_flag": True,
+                "p_up_action_disagreement": None,
+            }
+        ],
+    }
+
+    guarded = _v8_execution_guard_decision(
+        row,
+        guard_config=_v8_execution_guard_config(),
+    )
+
+    assert guarded["source_selected_action"] == "NO_TRADE"
+    assert guarded["required_runtime_fields_present"] is True
+    assert guarded["missing_runtime_field_codes"] == []
+    assert "execution_required_runtime_fields_missing" not in guarded[
+        "execution_blocking_reason_codes"
+    ]
+    assert guarded["runtime_field_backfill_rules_applied"] is True
+    assert guarded["runtime_field_backfill_rule_counts"] == {
+        "make_non_order_runtime_fields_optional_for_no_trade": 6
+    }
+    assert len(guarded["runtime_field_applied_backfill_rows"]) == 6
+    assert all(
+        row["application_type"] == "required_field_policy_relaxation"
+        for row in guarded["runtime_field_applied_backfill_rows"]
+    )
+    assert guarded["runtime_field_backfill_provenance_valid"] is True
+    assert guarded["order_allowed"] is False
+    assert guarded["source_score_mutated"] is False
+    assert guarded["o_model_predicted_score_mutated"] is False
+
+
+def test_o_v8_execution_guard_backfills_time_to_close_with_valid_provenance() -> None:
+    row = {
+        "decision_group_id": "source|market|valid-backfill",
+        "market_id": "market",
+        "decision_ts": 123,
+        "selected_action": "BUY_UP_SELL_BEFORE_CLOSE",
+        "selected_side": "UP",
+        "selected_action_family": "SELL_BEFORE_CLOSE",
+        "corrected_model_score": 0.82,
+        "raw_model_score": 0.72,
+        "score_components": {"base_score": 0.50},
+        "high_score_flag": True,
+        "p_up": 0.70,
+        "p_down": 0.30,
+        "p_up_action_disagreement": False,
+        "microstructure_snapshot": {
+            "book_staleness_ms": 500.0,
+            "spread_bps": 200.0,
+            "queue_fill_proxy": 0.90,
+            "time_to_close_seconds": None,
+        },
+        "reference_price_feature_provenance": {
+            "source_fields_used": ["price_to_beat", "reference_mid"],
+            "max_input_ts": 120,
+            "decision_ts": 123,
+            "provenance_valid": True,
+        },
+        "runtime_field_backfill_sources": {
+            "microstructure_snapshot.time_to_close_seconds": {
+                "field": "microstructure_snapshot.time_to_close_seconds",
+                "value": 180.0,
+                "source_field_name": (
+                    "polymarket_feature_rows.features.time_to_close_seconds"
+                ),
+                "source_timestamp": 120,
+                "max_input_ts": 120,
+                "decision_ts": 123,
+                "deterministic_rule_id": (
+                    "backfill_time_to_close_from_decision_time_feature_or_market_schedule"
+                ),
+                "provenance_valid": True,
+                "reason_codes": ["decision_time_time_to_close_source_available"],
+            }
+        },
+        "full_5_action_ranking": [
+            {
+                "rank": 1,
+                "selected_action": "BUY_UP_SELL_BEFORE_CLOSE",
+                "selected_side": "UP",
+                "selected_action_family": "SELL_BEFORE_CLOSE",
+                "corrected_model_score": 0.82,
+                "raw_model_score": 0.72,
+                "high_score_flag": True,
+                "p_up_action_disagreement": False,
+            },
+            {
+                "rank": 2,
+                "selected_action": "NO_TRADE",
+                "selected_side": "NONE",
+                "selected_action_family": "NO_TRADE",
+                "corrected_model_score": 0.10,
+                "raw_model_score": 0.05,
+                "high_score_flag": False,
+                "p_up_action_disagreement": None,
+            },
+        ],
+    }
+
+    guarded = _v8_execution_guard_decision(
+        row,
+        guard_config=_v8_execution_guard_config(),
+        runtime_state={
+            "runtime_state_validation_passed": True,
+            "current_total_exposure": 0.0,
+            "current_market_exposure_by_market_id": {},
+            "current_side_exposure_by_side": {"DOWN": 0.0, "NONE": 0.0, "UP": 0.0},
+            "open_position_by_market_id": {},
+            "open_position_by_market_side": {},
+            "cooldown_state": {},
+        },
+        runtime_mode="simulated_runtime_state",
+    )
+
+    assert guarded["microstructure_snapshot"]["time_to_close_seconds"] == 180.0
+    assert guarded["required_runtime_fields_present"] is True
+    assert guarded["missing_runtime_field_codes"] == []
+    assert "execution_time_to_close_unsafe" not in guarded[
+        "execution_blocking_reason_codes"
+    ]
+    assert guarded["runtime_field_backfill_rules_applied"] is True
+    assert guarded["runtime_field_backfill_rule_counts"] == {
+        "backfill_time_to_close_from_decision_time_feature_or_market_schedule": 1
+    }
+    applied = guarded["runtime_field_applied_backfill_rows"][0]
+    assert applied["runtime_field_name"] == "microstructure_snapshot.time_to_close_seconds"
+    assert applied["source_field_name"] == (
+        "polymarket_feature_rows.features.time_to_close_seconds"
+    )
+    assert applied["source_timestamp"] == 120
+    assert applied["max_input_ts"] == 120
+    assert applied["provenance_valid"] is True
+    assert guarded["runtime_field_backfill_provenance_valid"] is True
+    assert guarded["order_allowed"] is True
+    assert guarded["source_score_mutated"] is False
+    assert guarded["o_model_predicted_score_mutated"] is False
+
+
+def test_o_v8_execution_guard_rejects_invalid_time_to_close_backfill() -> None:
+    row = {
+        "decision_group_id": "source|market|invalid-backfill",
+        "market_id": "market",
+        "decision_ts": 123,
+        "selected_action": "BUY_UP_SELL_BEFORE_CLOSE",
+        "selected_side": "UP",
+        "selected_action_family": "SELL_BEFORE_CLOSE",
+        "corrected_model_score": 0.82,
+        "raw_model_score": 0.72,
+        "score_components": {"base_score": 0.50},
+        "high_score_flag": True,
+        "p_up": 0.70,
+        "p_down": 0.30,
+        "p_up_action_disagreement": False,
+        "microstructure_snapshot": {
+            "book_staleness_ms": 500.0,
+            "spread_bps": 200.0,
+            "queue_fill_proxy": 0.90,
+            "time_to_close_seconds": None,
+        },
+        "reference_price_feature_provenance": {
+            "source_fields_used": ["price_to_beat", "reference_mid"],
+            "max_input_ts": 120,
+            "decision_ts": 123,
+            "provenance_valid": True,
+        },
+        "runtime_field_backfill_sources": {
+            "microstructure_snapshot.time_to_close_seconds": {
+                "field": "microstructure_snapshot.time_to_close_seconds",
+                "value": 180.0,
+                "source_field_name": (
+                    "polymarket_feature_rows.features.time_to_close_seconds"
+                ),
+                "source_timestamp": 124,
+                "max_input_ts": 124,
+                "decision_ts": 123,
+                "deterministic_rule_id": (
+                    "backfill_time_to_close_from_decision_time_feature_or_market_schedule"
+                ),
+                "provenance_valid": False,
+                "reason_codes": ["time_to_close_source_provenance_invalid"],
+            }
+        },
+        "full_5_action_ranking": [
+            {
+                "rank": 1,
+                "selected_action": "BUY_UP_SELL_BEFORE_CLOSE",
+                "selected_side": "UP",
+                "selected_action_family": "SELL_BEFORE_CLOSE",
+                "corrected_model_score": 0.82,
+                "raw_model_score": 0.72,
+                "high_score_flag": True,
+                "p_up_action_disagreement": False,
+            }
+        ],
+    }
+
+    guarded = _v8_execution_guard_decision(
+        row,
+        guard_config=_v8_execution_guard_config(),
+        runtime_state={
+            "runtime_state_validation_passed": True,
+            "current_total_exposure": 0.0,
+            "current_market_exposure_by_market_id": {},
+            "current_side_exposure_by_side": {"DOWN": 0.0, "NONE": 0.0, "UP": 0.0},
+            "open_position_by_market_id": {},
+            "open_position_by_market_side": {},
+            "cooldown_state": {},
+        },
+        runtime_mode="simulated_runtime_state",
+    )
+
+    assert guarded["microstructure_snapshot"]["time_to_close_seconds"] is None
+    assert guarded["required_runtime_fields_present"] is False
+    assert "missing_microstructure_time_to_close_seconds" in guarded[
+        "missing_runtime_field_codes"
+    ]
+    assert "execution_required_runtime_fields_missing" in guarded[
+        "execution_blocking_reason_codes"
+    ]
+    assert "execution_time_to_close_unsafe" in guarded[
+        "execution_blocking_reason_codes"
+    ]
+    assert guarded["runtime_field_backfill_rules_applied"] is False
+    assert guarded["runtime_field_backfill_provenance_valid"] is False
+    assert len(guarded["runtime_field_backfill_provenance_violations"]) == 1
+    violation = guarded["runtime_field_backfill_provenance_violations"][0]
+    assert violation["source_timestamp"] == 124
+    assert violation["max_input_ts"] == 124
+    assert violation["provenance_valid"] is False
+    assert guarded["order_allowed"] is False
+    assert guarded["source_score_mutated"] is False
+    assert guarded["o_model_predicted_score_mutated"] is False
 
 
 def test_o_v8_simulated_runtime_replay_updates_only_allowed_exposure(

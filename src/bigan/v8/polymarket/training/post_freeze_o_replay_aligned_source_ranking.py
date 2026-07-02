@@ -557,6 +557,18 @@ def run_polymarket_o_replay_aligned_source_ranking(
         "v8_execution_runtime_field_primary_missing_fields": reports[14][
             "primary_missing_runtime_fields"
         ],
+        "v8_execution_runtime_field_backfill_rules_applied": reports[14][
+            "runtime_field_backfill_rules_applied"
+        ],
+        "v8_execution_runtime_field_applied_backfill_count": reports[14][
+            "applied_runtime_field_backfill_count"
+        ],
+        "v8_execution_runtime_field_applied_backfill_rule_counts": reports[14][
+            "applied_runtime_field_backfill_rule_counts"
+        ],
+        "v8_execution_runtime_field_backfill_provenance_validity_summary": reports[14][
+            "runtime_field_backfill_provenance_validity_summary"
+        ],
         "model_layer_regret_risk_selection_deferred_to_issue": "#158",
         "large_regret_risk_model_report_available": False,
         "selective_action_guard_report_available": False,
@@ -6219,6 +6231,7 @@ def _v8_execution_risk_guard_report(
         for row in handoff_rows
     ]
     summary = _v8_execution_guard_summary(guard_rows)
+    backfill_summary = _v8_runtime_field_backfill_application_summary(guard_rows)
     blocking_reasons = sorted(
         {
             *handoff_report["v8_execution_handoff_blocking_reason_codes"],
@@ -6296,6 +6309,18 @@ def _v8_execution_risk_guard_report(
         "execution_guard_decision_count": len(guard_rows),
         "execution_guard_decision_rows": guard_rows,
         "execution_guard_summary": summary,
+        "runtime_field_backfill_rules_applied": backfill_summary[
+            "runtime_field_backfill_rules_applied"
+        ],
+        "applied_runtime_field_backfill_count": backfill_summary[
+            "applied_runtime_field_backfill_count"
+        ],
+        "applied_runtime_field_backfill_rule_counts": backfill_summary[
+            "applied_runtime_field_backfill_rule_counts"
+        ],
+        "runtime_field_backfill_provenance_validity_summary": backfill_summary[
+            "runtime_field_backfill_provenance_validity_summary"
+        ],
         "order_allowed_count": summary["order_allowed_count"],
         "blocked_decision_count": summary["blocked_decision_count"],
         "fail_closed_decision_count": summary["fail_closed_decision_count"],
@@ -6375,6 +6400,183 @@ def _v8_execution_required_runtime_fields() -> list[str]:
     ]
 
 
+def _v8_apply_runtime_field_policy_backfills(
+    row: dict[str, Any],
+    *,
+    runtime_state_available: bool,
+    runtime_mode: str,
+) -> dict[str, Any]:
+    cleaned = dict(row)
+    source_action = str(cleaned.get("selected_action") or "")
+    trade_action = source_action != "NO_TRADE"
+    microstructure = dict(cleaned.get("microstructure_snapshot") or {})
+    reference_provenance = dict(cleaned.get("reference_price_feature_provenance") or {})
+    applied_rows: list[dict[str, Any]] = []
+    provenance_violations: list[dict[str, Any]] = []
+
+    if not trade_action:
+        optional_fields = _v8_no_trade_optional_runtime_fields(
+            microstructure=microstructure,
+            reference_provenance=reference_provenance,
+            runtime_state_available=runtime_state_available,
+        )
+        for field_name in optional_fields:
+            applied_rows.append(
+                _v8_runtime_field_applied_row(
+                    row=cleaned,
+                    field_name=field_name,
+                    deterministic_rule_id=(
+                        "make_non_order_runtime_fields_optional_for_no_trade"
+                    ),
+                    value=None,
+                    source_field_name="runtime_required_field_policy",
+                    source_timestamp=cleaned.get("decision_ts"),
+                    max_input_ts=cleaned.get("decision_ts"),
+                    provenance_valid=True,
+                    reason_codes=["no_order_is_attempted_for_no_trade"],
+                    application_type="required_field_policy_relaxation",
+                )
+            )
+    else:
+        if _optional_float(microstructure.get("time_to_close_seconds")) is None:
+            source = dict(
+                (
+                    cleaned.get("runtime_field_backfill_sources")
+                    or {}
+                ).get("microstructure_snapshot.time_to_close_seconds")
+                or {}
+            )
+            provenance_valid = _v8_runtime_backfill_source_provenance_valid(source)
+            value = _optional_float(source.get("value"))
+            if provenance_valid and value is not None:
+                microstructure["time_to_close_seconds"] = value
+                applied_rows.append(
+                    _v8_runtime_field_applied_row(
+                        row=cleaned,
+                        field_name="microstructure_snapshot.time_to_close_seconds",
+                        deterministic_rule_id=str(
+                            source.get("deterministic_rule_id")
+                            or (
+                                "backfill_time_to_close_from_decision_time_feature_"
+                                "or_market_schedule"
+                            )
+                        ),
+                        value=value,
+                        source_field_name=source.get("source_field_name"),
+                        source_timestamp=source.get("source_timestamp"),
+                        max_input_ts=source.get("max_input_ts"),
+                        provenance_valid=True,
+                        reason_codes=list(source.get("reason_codes") or []),
+                        application_type="decision_time_data_join_backfill",
+                    )
+                )
+            elif source:
+                violation = _v8_runtime_field_applied_row(
+                    row=cleaned,
+                    field_name="microstructure_snapshot.time_to_close_seconds",
+                    deterministic_rule_id=str(
+                        source.get("deterministic_rule_id")
+                        or (
+                            "backfill_time_to_close_from_decision_time_feature_"
+                            "or_market_schedule"
+                        )
+                    ),
+                    value=value,
+                    source_field_name=source.get("source_field_name"),
+                    source_timestamp=source.get("source_timestamp"),
+                    max_input_ts=source.get("max_input_ts"),
+                    provenance_valid=False,
+                    reason_codes=list(source.get("reason_codes") or [])
+                    or ["time_to_close_source_provenance_invalid"],
+                    application_type="decision_time_data_join_backfill",
+                )
+                provenance_violations.append(violation)
+
+    cleaned["microstructure_snapshot"] = microstructure
+    cleaned["reference_price_feature_provenance"] = reference_provenance
+    rule_counts = Counter(row["deterministic_rule_id"] for row in applied_rows)
+    return {
+        "row": cleaned,
+        "runtime_field_backfill_rules_applied": bool(applied_rows),
+        "runtime_field_applied_backfill_rows": applied_rows,
+        "runtime_field_backfill_rule_counts": dict(sorted(rule_counts.items())),
+        "runtime_field_backfill_provenance_valid": not provenance_violations,
+        "runtime_field_backfill_provenance_violations": provenance_violations,
+        "runtime_field_backfill_runtime_mode": runtime_mode,
+    }
+
+
+def _v8_no_trade_optional_runtime_fields(
+    *,
+    microstructure: dict[str, Any],
+    reference_provenance: dict[str, Any],
+    runtime_state_available: bool,
+) -> list[str]:
+    optional_fields = []
+    for field_name in (
+        "spread_bps",
+        "book_staleness_ms",
+        "queue_fill_proxy",
+        "time_to_close_seconds",
+    ):
+        if microstructure.get(field_name) is None:
+            optional_fields.append(f"microstructure_snapshot.{field_name}")
+    if reference_provenance.get("provenance_valid") is not True:
+        optional_fields.append("reference_price_feature_provenance.provenance_valid")
+    if not runtime_state_available:
+        optional_fields.append("runtime_exposure_state")
+    return sorted(set(optional_fields))
+
+
+def _v8_runtime_backfill_source_provenance_valid(source: dict[str, Any]) -> bool:
+    decision_ts = _optional_int(source.get("decision_ts"))
+    source_timestamp = _optional_int(source.get("source_timestamp"))
+    max_input_ts = _optional_int(source.get("max_input_ts"))
+    return bool(
+        source.get("source_field_name")
+        and source.get("deterministic_rule_id")
+        and source.get("provenance_valid") is True
+        and decision_ts is not None
+        and source_timestamp is not None
+        and max_input_ts is not None
+        and source_timestamp <= decision_ts
+        and max_input_ts <= decision_ts
+    )
+
+
+def _v8_runtime_field_applied_row(
+    *,
+    row: dict[str, Any],
+    field_name: str,
+    deterministic_rule_id: str,
+    value: Any,
+    source_field_name: Any,
+    source_timestamp: Any,
+    max_input_ts: Any,
+    provenance_valid: bool,
+    reason_codes: list[str],
+    application_type: str,
+) -> dict[str, Any]:
+    return {
+        "decision_group_id": row.get("decision_group_id"),
+        "market_id": row.get("market_id"),
+        "decision_ts": row.get("decision_ts"),
+        "source_selected_action": row.get("selected_action"),
+        "source_selected_side": row.get("selected_side"),
+        "source_selected_family": row.get("selected_action_family"),
+        "runtime_field_name": field_name,
+        "applied_value": value,
+        "source_field_name": source_field_name,
+        "source_timestamp": source_timestamp,
+        "max_input_ts": max_input_ts,
+        "deterministic_rule_id": deterministic_rule_id,
+        "provenance_valid": provenance_valid,
+        "backfill_rule_applied_now": provenance_valid,
+        "application_type": application_type,
+        "reason_codes": sorted(set(reason_codes)),
+    }
+
+
 def _v8_execution_guard_decision(
     row: dict[str, Any],
     *,
@@ -6382,6 +6584,17 @@ def _v8_execution_guard_decision(
     runtime_state: dict[str, Any] | None = None,
     runtime_mode: str = "fail_closed_no_runtime_state",
 ) -> dict[str, Any]:
+    runtime_state_available = (
+        runtime_mode == "simulated_runtime_state"
+        and runtime_state is not None
+        and runtime_state.get("runtime_state_validation_passed") is True
+    )
+    cleanup = _v8_apply_runtime_field_policy_backfills(
+        row,
+        runtime_state_available=runtime_state_available,
+        runtime_mode=runtime_mode,
+    )
+    row = cleanup["row"]
     source_action = str(row.get("selected_action") or "")
     source_side = str(row.get("selected_side") or _side_from_action(source_action))
     source_family = str(
@@ -6397,11 +6610,6 @@ def _v8_execution_guard_decision(
     queue = _optional_float(microstructure.get("queue_fill_proxy"))
     time_to_close = _optional_float(microstructure.get("time_to_close_seconds"))
     margin = _top_score_margin(full_ranking)
-    runtime_state_available = (
-        runtime_mode == "simulated_runtime_state"
-        and runtime_state is not None
-        and runtime_state.get("runtime_state_validation_passed") is True
-    )
 
     guarded_action = source_action
     guarded_reason_codes: list[str] = []
@@ -6547,6 +6755,24 @@ def _v8_execution_guard_decision(
         "p_up_action_disagreement": row.get("p_up_action_disagreement"),
         "microstructure_snapshot": microstructure,
         "reference_price_feature_provenance": reference_provenance,
+        "runtime_field_backfill_rules_applied": cleanup[
+            "runtime_field_backfill_rules_applied"
+        ],
+        "runtime_field_applied_backfill_rows": cleanup[
+            "runtime_field_applied_backfill_rows"
+        ],
+        "runtime_field_backfill_rule_counts": cleanup[
+            "runtime_field_backfill_rule_counts"
+        ],
+        "runtime_field_backfill_provenance_valid": cleanup[
+            "runtime_field_backfill_provenance_valid"
+        ],
+        "runtime_field_backfill_provenance_violations": cleanup[
+            "runtime_field_backfill_provenance_violations"
+        ],
+        "runtime_field_backfill_runtime_mode": cleanup[
+            "runtime_field_backfill_runtime_mode"
+        ],
         "decision_time_feature_max_input_ts": row.get(
             "decision_time_feature_max_input_ts"
         ),
@@ -6981,6 +7207,7 @@ def _v8_execution_simulated_order_replay_report(
     action_counts = Counter(str(row["execution_guarded_action"]) for row in replay_rows)
     family_counts = Counter(str(row["execution_guarded_family"]) for row in replay_rows)
     side_counts = Counter(str(row["execution_guarded_side"]) for row in replay_rows)
+    backfill_summary = _v8_runtime_field_backfill_application_summary(replay_rows)
     replay_hash_payload = [
         {
             "decision_group_id": row["decision_group_id"],
@@ -7029,6 +7256,18 @@ def _v8_execution_simulated_order_replay_report(
         "side_distribution": dict(sorted(side_counts.items())),
         "block_reason_distribution": dict(sorted(block_reason_counts.items())),
         "exposure_reason_distribution": dict(sorted(exposure_reason_counts.items())),
+        "runtime_field_backfill_rules_applied": backfill_summary[
+            "runtime_field_backfill_rules_applied"
+        ],
+        "applied_runtime_field_backfill_count": backfill_summary[
+            "applied_runtime_field_backfill_count"
+        ],
+        "applied_runtime_field_backfill_rule_counts": backfill_summary[
+            "applied_runtime_field_backfill_rule_counts"
+        ],
+        "runtime_field_backfill_provenance_validity_summary": backfill_summary[
+            "runtime_field_backfill_provenance_validity_summary"
+        ],
         "deterministic_replay_hash": canonical_json_sha256(replay_hash_payload),
         "runtime_risk_control_validation_passed": runtime_state_report[
             "runtime_risk_control_validation_passed"
@@ -7082,6 +7321,7 @@ def _v8_execution_guard_block_analysis_report(
         for classification, count in discovery_counts.items()
         if classification in safe_order_candidate_classifications
     )
+    backfill_summary = _v8_runtime_field_backfill_application_summary(replay_rows)
     fundamentally_unsafe_count = discovery_counts.get("fundamentally_unsafe", 0)
     why_zero = []
     if simulated_order_replay_report.get("simulated_allowed_order_count") == 0:
@@ -7173,6 +7413,18 @@ def _v8_execution_guard_block_analysis_report(
             "fundamentally_unsafe_count": fundamentally_unsafe_count,
             "classification_counts": dict(sorted(discovery_counts.items())),
         },
+        "runtime_field_backfill_rules_applied": backfill_summary[
+            "runtime_field_backfill_rules_applied"
+        ],
+        "applied_runtime_field_backfill_count": backfill_summary[
+            "applied_runtime_field_backfill_count"
+        ],
+        "applied_runtime_field_backfill_rule_counts": backfill_summary[
+            "applied_runtime_field_backfill_rule_counts"
+        ],
+        "runtime_field_backfill_provenance_validity_summary": backfill_summary[
+            "runtime_field_backfill_provenance_validity_summary"
+        ],
         "blocked_decision_analysis_rows": analysis_rows,
         "v8_execution_handoff_allowed": False,
         "source_model_candidate_eligible": False,
@@ -7217,6 +7469,21 @@ def _v8_execution_block_analysis_row(row: dict[str, Any]) -> dict[str, Any]:
         "exposure_reason_codes": list(row.get("exposure_reason_codes") or []),
         "missing_runtime_field_codes": list(
             row.get("missing_runtime_field_codes") or []
+        ),
+        "runtime_field_backfill_rules_applied": bool(
+            row.get("runtime_field_backfill_rules_applied")
+        ),
+        "runtime_field_applied_backfill_rows": list(
+            row.get("runtime_field_applied_backfill_rows") or []
+        ),
+        "runtime_field_backfill_rule_counts": dict(
+            row.get("runtime_field_backfill_rule_counts") or {}
+        ),
+        "runtime_field_backfill_provenance_valid": bool(
+            row.get("runtime_field_backfill_provenance_valid")
+        ),
+        "runtime_field_backfill_provenance_violations": list(
+            row.get("runtime_field_backfill_provenance_violations") or []
         ),
         "time_to_close_seconds": _v8_row_time_to_close_seconds(row),
         "time_to_close_bucket": _v8_time_to_close_bucket_from_decision(row),
@@ -7458,6 +7725,53 @@ def _v8_time_to_close_bucket_from_decision(row: dict[str, Any]) -> str:
     return "gte_240s"
 
 
+def _v8_runtime_field_backfill_application_summary(
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    applied_rows = [
+        applied
+        for row in rows
+        for applied in row.get("runtime_field_applied_backfill_rows", [])
+    ]
+    violations = [
+        violation
+        for row in rows
+        for violation in row.get("runtime_field_backfill_provenance_violations", [])
+    ]
+    rule_counts = Counter(
+        str(row.get("deterministic_rule_id") or "UNKNOWN") for row in applied_rows
+    )
+    application_type_counts = Counter(
+        str(row.get("application_type") or "UNKNOWN") for row in applied_rows
+    )
+    field_counts = Counter(
+        str(row.get("runtime_field_name") or "UNKNOWN") for row in applied_rows
+    )
+    valid_count = sum(1 for row in applied_rows if row.get("provenance_valid") is True)
+    invalid_count = sum(
+        1 for row in [*applied_rows, *violations] if row.get("provenance_valid") is False
+    )
+    return {
+        "runtime_field_backfill_rules_applied": bool(applied_rows),
+        "applied_runtime_field_backfill_count": len(applied_rows),
+        "applied_runtime_field_backfill_rule_counts": dict(sorted(rule_counts.items())),
+        "applied_runtime_field_backfill_application_type_counts": dict(
+            sorted(application_type_counts.items())
+        ),
+        "applied_runtime_field_backfill_field_counts": dict(
+            sorted(field_counts.items())
+        ),
+        "runtime_field_backfill_provenance_validity_summary": {
+            "provenance_checked_count": len(applied_rows) + len(violations),
+            "provenance_valid_count": valid_count,
+            "provenance_invalid_count": invalid_count,
+            "provenance_violation_count": len(violations),
+            "provenance_valid": invalid_count == 0,
+        },
+        "runtime_field_backfill_provenance_violations": violations,
+    }
+
+
 def _v8_execution_runtime_field_coverage_report(
     *,
     m2_report_path: Path,
@@ -7469,6 +7783,7 @@ def _v8_execution_runtime_field_coverage_report(
     block_analysis_report: dict[str, Any],
 ) -> dict[str, Any]:
     replay_rows = list(simulated_order_replay_report.get("simulated_decision_rows") or [])
+    backfill_summary = _v8_runtime_field_backfill_application_summary(replay_rows)
     rows_with_missing = [
         row for row in replay_rows if row.get("missing_runtime_field_codes")
     ]
@@ -7526,8 +7841,33 @@ def _v8_execution_runtime_field_coverage_report(
         "analysis_source": "simulated_order_replay_missing_runtime_field_codes",
         "uses_validation_outcomes_for_tuning": False,
         "thresholds_tuned": False,
-        "backfill_rules_applied": False,
-        "proposed_backfill_rules_only": True,
+        "runtime_field_backfill_rules_applied": backfill_summary[
+            "runtime_field_backfill_rules_applied"
+        ],
+        "backfill_rules_applied": backfill_summary[
+            "runtime_field_backfill_rules_applied"
+        ],
+        "proposed_backfill_rules_only": not backfill_summary[
+            "runtime_field_backfill_rules_applied"
+        ],
+        "applied_runtime_field_backfill_count": backfill_summary[
+            "applied_runtime_field_backfill_count"
+        ],
+        "applied_runtime_field_backfill_rule_counts": backfill_summary[
+            "applied_runtime_field_backfill_rule_counts"
+        ],
+        "applied_runtime_field_backfill_application_type_counts": backfill_summary[
+            "applied_runtime_field_backfill_application_type_counts"
+        ],
+        "applied_runtime_field_backfill_field_counts": backfill_summary[
+            "applied_runtime_field_backfill_field_counts"
+        ],
+        "runtime_field_backfill_provenance_validity_summary": backfill_summary[
+            "runtime_field_backfill_provenance_validity_summary"
+        ],
+        "runtime_field_backfill_provenance_violations": backfill_summary[
+            "runtime_field_backfill_provenance_violations"
+        ],
         "mutates_o_model_predicted_score": False,
         "mutates_source_ranking_scores": False,
         "required_runtime_fields": _v8_execution_required_runtime_fields(),
@@ -7587,8 +7927,26 @@ def _v8_execution_runtime_field_coverage_report(
             )
         ),
         "runtime_field_coverage_decision_rows": decision_rows,
+        "per_decision_applied_runtime_field_backfill_rows": [
+            {
+                "decision_group_id": row.get("decision_group_id"),
+                "market_id": row.get("market_id"),
+                "decision_ts": row.get("decision_ts"),
+                "source_selected_action": row.get("source_selected_action"),
+                "source_selected_family": row.get("source_selected_family"),
+                "source_selected_side": row.get("source_selected_side"),
+                "runtime_field_applied_backfill_rows": row.get(
+                    "runtime_field_applied_backfill_rows",
+                    [],
+                ),
+            }
+            for row in replay_rows
+            if row.get("runtime_field_applied_backfill_rows")
+        ],
         "proposed_deterministic_backfill_rules": (
-            _v8_runtime_field_proposed_backfill_rules()
+            _v8_runtime_field_proposed_backfill_rules(
+                backfill_summary["applied_runtime_field_backfill_rule_counts"]
+            )
         ),
         "runtime_field_policy_findings": (
             _v8_runtime_field_policy_findings(
@@ -7906,56 +8264,52 @@ def _v8_runtime_field_summary_by(
     return summary
 
 
-def _v8_runtime_field_proposed_backfill_rules() -> list[dict[str, Any]]:
-    return [
+def _v8_runtime_field_proposed_backfill_rules(
+    applied_rule_counts: dict[str, int] | None = None,
+) -> list[dict[str, Any]]:
+    applied_rule_counts = dict(applied_rule_counts or {})
+    rules = [
         {
             "rule_id": "copy_selected_action_from_source_handoff",
             "field": "selected_action",
             "rule": "copy source_selected_action when selected_action is absent",
             "decision_time_only": True,
-            "applied_now": False,
         },
         {
             "rule_id": "derive_selected_side_from_action",
             "field": "selected_side",
             "rule": "derive UP/DOWN/NONE from selected_action",
             "decision_time_only": True,
-            "applied_now": False,
         },
         {
             "rule_id": "derive_selected_action_family_from_action",
             "field": "selected_action_family",
             "rule": "derive HOLD_TO_SETTLEMENT/SELL_BEFORE_CLOSE/NO_TRADE from action",
             "decision_time_only": True,
-            "applied_now": False,
         },
         {
             "rule_id": "copy_full_5_action_ranking_from_source_handoff",
             "field": "full_5_action_ranking",
             "rule": "copy complete five-action handoff ranking into runtime payload",
             "decision_time_only": True,
-            "applied_now": False,
         },
         {
             "rule_id": "derive_p_down_from_p_up",
             "field": "p_down",
             "rule": "derive p_down as 1 - p_up when p_up is decision-time available",
             "decision_time_only": True,
-            "applied_now": False,
         },
         {
             "rule_id": "make_non_order_runtime_fields_optional_for_no_trade",
             "field": "NO_TRADE non-order fields",
             "rule": "do not require microstructure/exposure fields when action is NO_TRADE",
             "decision_time_only": True,
-            "applied_now": False,
         },
         {
             "rule_id": "use_simulated_runtime_ledger_when_runtime_mode_is_simulated",
             "field": "runtime_exposure_state",
             "rule": "use deterministic simulated ledger for simulation-only replay",
             "decision_time_only": True,
-            "applied_now": False,
         },
         {
             "rule_id": "backfill_microstructure_snapshot_from_decision_time_book",
@@ -7965,7 +8319,17 @@ def _v8_runtime_field_proposed_backfill_rules() -> list[dict[str, Any]]:
                 "orderbook and market schedule only"
             ),
             "decision_time_only": True,
-            "applied_now": False,
+        },
+        {
+            "rule_id": (
+                "backfill_time_to_close_from_decision_time_feature_or_market_schedule"
+            ),
+            "field": "microstructure_snapshot.time_to_close_seconds",
+            "rule": (
+                "copy decision-time time-to-close from feature provenance or "
+                "market schedule when max_input_ts <= decision_ts"
+            ),
+            "decision_time_only": True,
         },
         {
             "rule_id": (
@@ -7974,9 +8338,13 @@ def _v8_runtime_field_proposed_backfill_rules() -> list[dict[str, Any]]:
             "field": "reference_price_feature_provenance.provenance_valid",
             "rule": "join verified reference provenance with max_input_ts <= decision_ts",
             "decision_time_only": True,
-            "applied_now": False,
         },
     ]
+    for rule in rules:
+        rule_id = str(rule["rule_id"])
+        rule["applied_now"] = applied_rule_counts.get(rule_id, 0) > 0
+        rule["applied_count"] = int(applied_rule_counts.get(rule_id, 0))
+    return rules
 
 
 def _v8_runtime_field_policy_findings(
@@ -8050,16 +8418,17 @@ def _v8_execution_missing_runtime_field_codes(
     ):
         if row.get(field_name) in (None, "", []):
             missing.append(f"missing_{field_name}")
-    for field_name in (
-        "spread_bps",
-        "book_staleness_ms",
-        "queue_fill_proxy",
-        "time_to_close_seconds",
-    ):
-        if microstructure.get(field_name) is None:
-            missing.append(f"missing_microstructure_{field_name}")
-    if reference_provenance.get("provenance_valid") is not True:
-        missing.append("missing_valid_reference_price_provenance")
+    if trade_action:
+        for field_name in (
+            "spread_bps",
+            "book_staleness_ms",
+            "queue_fill_proxy",
+            "time_to_close_seconds",
+        ):
+            if microstructure.get(field_name) is None:
+                missing.append(f"missing_microstructure_{field_name}")
+        if reference_provenance.get("provenance_valid") is not True:
+            missing.append("missing_valid_reference_price_provenance")
     if trade_action and not runtime_state_available:
         missing.append("execution_exposure_state_missing")
     return sorted(set(missing))
@@ -8299,6 +8668,10 @@ def _v8_action_rank_handoff_action_entry(
     reference_provenance = dict(
         feature_provenance.get("reference_price_to_beat_distance_at_decision") or {}
     )
+    time_to_close_backfill_source = _v8_time_to_close_runtime_backfill_source(
+        row=row,
+        feature_provenance=feature_provenance,
+    )
     return {
         "rank": rank,
         "source_report_path": row.get("source_report_path"),
@@ -8353,12 +8726,88 @@ def _v8_action_rank_handoff_action_entry(
             "decision_time_feature_missing_reason_codes",
             [],
         ),
+        "runtime_field_backfill_sources": {
+            "microstructure_snapshot.time_to_close_seconds": (
+                time_to_close_backfill_source
+            ),
+        },
         "oracle_executable_best_action": row.get("oracle_executable_best_action"),
         "realized_replay_return_report_only": row.get("realized_replay_return"),
         "regret_report_only": (
             float(row.get("oracle_executable_best_action_return") or 0.0)
             - float(row.get("realized_replay_return") or 0.0)
         ),
+    }
+
+
+def _v8_time_to_close_runtime_backfill_source(
+    *,
+    row: dict[str, Any],
+    feature_provenance: dict[str, Any],
+) -> dict[str, Any]:
+    decision_ts = _optional_int(row.get("decision_ts"))
+    value = _optional_float(row.get("time_to_close_seconds"))
+    source_field_name = "polymarket_feature_rows.features.time_to_close_seconds"
+    source_provenance = dict(feature_provenance.get("time_to_close_seconds") or {})
+    if value is None:
+        value = _optional_float(row.get("entry_exit_quality_time_to_close_seconds"))
+    if value is None:
+        return {
+            "field": "microstructure_snapshot.time_to_close_seconds",
+            "value": None,
+            "source_field_name": None,
+            "source_timestamp": None,
+            "max_input_ts": None,
+            "decision_ts": decision_ts,
+            "deterministic_rule_id": (
+                "backfill_time_to_close_from_decision_time_feature_or_market_schedule"
+            ),
+            "provenance_valid": False,
+            "reason_codes": ["time_to_close_source_value_missing"],
+        }
+    if source_provenance:
+        source_timestamp = _optional_int(
+            source_provenance.get("input_end_ts")
+            if source_provenance.get("input_end_ts") is not None
+            else source_provenance.get("available_at_ts")
+        )
+        max_input_ts = _optional_int(
+            source_provenance.get("max_input_ts")
+            if source_provenance.get("max_input_ts") is not None
+            else source_timestamp
+        )
+        source_field_name = str(
+            source_provenance.get("source_fields_used")
+            or source_provenance.get("source")
+            or source_field_name
+        )
+    else:
+        source_timestamp = decision_ts
+        max_input_ts = decision_ts
+        source_field_name = (
+            "polymarket_market_schedule.slug_or_market_metadata_time_to_close"
+        )
+    provenance_valid = (
+        decision_ts is not None
+        and source_timestamp is not None
+        and max_input_ts is not None
+        and source_timestamp <= decision_ts
+        and max_input_ts <= decision_ts
+    )
+    return {
+        "field": "microstructure_snapshot.time_to_close_seconds",
+        "value": value,
+        "source_field_name": source_field_name,
+        "source_timestamp": source_timestamp,
+        "max_input_ts": max_input_ts,
+        "decision_ts": decision_ts,
+        "deterministic_rule_id": (
+            "backfill_time_to_close_from_decision_time_feature_or_market_schedule"
+        ),
+        "provenance_valid": provenance_valid,
+        "reason_codes": ["decision_time_time_to_close_source_available"]
+        if provenance_valid
+        else ["time_to_close_source_provenance_invalid"],
     }
 
 
@@ -12062,6 +12511,12 @@ def _v8_execution_runtime_field_coverage_markdown(report: dict[str, Any]) -> str
             f"`{str(report['uses_validation_outcomes_for_tuning']).lower()}`",
             f"- thresholds_tuned: `{str(report['thresholds_tuned']).lower()}`",
             f"- backfill_rules_applied: `{str(report['backfill_rules_applied']).lower()}`",
+            "- applied_runtime_field_backfill_count: "
+            f"`{report['applied_runtime_field_backfill_count']}`",
+            "- applied_runtime_field_backfill_rule_counts: "
+            f"`{report['applied_runtime_field_backfill_rule_counts']}`",
+            "- runtime_field_backfill_provenance_validity_summary: "
+            f"`{report['runtime_field_backfill_provenance_validity_summary']}`",
             "- mutates_o_model_predicted_score: "
             f"`{str(report['mutates_o_model_predicted_score']).lower()}`",
             f"- decision_count: `{report['decision_count']}`",

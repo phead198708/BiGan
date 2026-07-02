@@ -155,6 +155,18 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         "v8_execution_runtime_field_primary_missing_fields": field_coverage[
             "primary_missing_runtime_fields"
         ],
+        "v8_execution_runtime_field_backfill_rules_applied": field_coverage[
+            "runtime_field_backfill_rules_applied"
+        ],
+        "v8_execution_runtime_field_applied_backfill_count": field_coverage[
+            "applied_runtime_field_backfill_count"
+        ],
+        "v8_execution_runtime_field_applied_backfill_rule_counts": field_coverage[
+            "applied_runtime_field_backfill_rule_counts"
+        ],
+        "v8_execution_runtime_field_backfill_provenance_validity_summary": (
+            field_coverage["runtime_field_backfill_provenance_validity_summary"]
+        ),
         "source_model_candidate_eligible": gate["source_model_candidate_eligible"],
         "freeze_ready": freeze["freeze_ready"],
         "leakage_audit_passed": leakage["leakage_audit_passed"],
