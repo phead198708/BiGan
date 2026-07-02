@@ -69,6 +69,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_V8_ACTION_RANK_HANDOFF_SCHEMA_VERSION,
     O_V8_EXECUTION_ALLOWED_ORDER_QUALITY_SCHEMA_VERSION,
     O_V8_EXECUTION_GUARD_BLOCK_ANALYSIS_SCHEMA_VERSION,
+    O_V8_EXECUTION_HANDOFF_GATE_SCHEMA_VERSION,
     O_V8_EXECUTION_POLICY_READINESS_SCHEMA_VERSION,
     O_V8_EXECUTION_RISK_GUARD_SCHEMA_VERSION,
     O_V8_EXECUTION_RUNTIME_FIELD_COVERAGE_SCHEMA_VERSION,
@@ -80,6 +81,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     _v8_execution_guard_block_analysis_report,
     _v8_execution_guard_config,
     _v8_execution_guard_decision,
+    _v8_execution_handoff_gate_report,
     _v8_execution_policy_readiness_report,
     _v8_execution_runtime_field_coverage_report,
     _v8_execution_simulated_runtime_reports,
@@ -3963,6 +3965,78 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert policy_readiness["paper_only"] is True
     assert policy_readiness["capital_at_risk"] is False
 
+    handoff_gate = result.v8_execution_handoff_gate_report
+    handoff_gate_payload = dict(handoff_gate)
+    handoff_gate_id = handoff_gate_payload.pop(
+        "o_v8_execution_handoff_gate_report_id"
+    )
+    assert canonical_json_sha256(handoff_gate_payload) == handoff_gate_id
+    assert handoff_gate["schema_version"] == O_V8_EXECUTION_HANDOFF_GATE_SCHEMA_VERSION
+    assert handoff_gate["report_type"] == "o_v8_execution_handoff_gate"
+    assert handoff_gate["diagnostic_only"] is True
+    assert handoff_gate["simulation_only"] is True
+    assert (
+        handoff_gate["explicit_execution_handoff_gate_mode"]
+        == "diagnostic_only_fail_closed"
+    )
+    assert handoff_gate["uses_validation_outcomes_for_tuning"] is False
+    assert handoff_gate["thresholds_tuned"] is False
+    assert handoff_gate["mutates_o_model_predicted_score"] is False
+    assert handoff_gate["mutates_source_ranking_scores"] is False
+    assert handoff_gate["uses_realized_pnl_or_labels_for_analysis"] is False
+    assert handoff_gate["uses_oracle_actions_for_analysis"] is False
+    assert handoff_gate["forbidden_outcome_fields_used"] == []
+    assert handoff_gate["policy_readiness_report_id"] == policy_readiness[
+        "o_v8_execution_policy_readiness_report_id"
+    ]
+    assert handoff_gate["allowed_order_quality_report_id"] == allowed_quality[
+        "o_v8_execution_allowed_order_quality_report_id"
+    ]
+    assert handoff_gate["simulated_order_replay_report_id"] == simulated_replay[
+        "o_v8_execution_simulated_order_replay_report_id"
+    ]
+    assert set(handoff_gate["explicit_execution_handoff_required_checks"]) == {
+        "allowed_order_exposure_within_limits",
+        "allowed_order_microstructure_quality_passed",
+        "allowed_orders_origin_safe",
+        "all_allowed_orders_p_up_agreement",
+        "future_unseen_holdout_required",
+        "min_allowed_order_count_met",
+        "no_model_layer_regret_risk_selection_enabled",
+        "no_paper_live_write_or_capital_flags",
+        "no_source_score_mutation",
+        "policy_readiness_diagnostic_passed",
+        "runtime_state_validation_passed",
+        "simulated_runtime_risk_control_validation_passed",
+        "source_freeze_promotion_remain_blocked",
+        "zero_missing_runtime_fields",
+        "zero_provenance_violations",
+    }
+    expected_handoff_blockers = sorted(
+        check["reason_code"]
+        for check in handoff_gate["explicit_execution_handoff_required_checks"].values()
+        if check["passed"] is not True
+    )
+    assert handoff_gate[
+        "explicit_execution_handoff_blocking_reason_codes"
+    ] == expected_handoff_blockers
+    assert (
+        handoff_gate["explicit_execution_handoff_gate_passed"]
+        == (expected_handoff_blockers == [])
+    )
+    assert handoff_gate["future_unseen_holdout_required"] is True
+    assert handoff_gate["future_paper_candidate_gate_required"] is True
+    assert handoff_gate["v8_execution_handoff_allowed"] is False
+    assert handoff_gate["source_model_candidate_eligible"] is False
+    assert handoff_gate["freeze_ready"] is False
+    assert handoff_gate["promotion_evidence_eligible"] is False
+    assert handoff_gate["#146_start_allowed"] is False
+    assert handoff_gate["#134_resume_allowed"] is False
+    assert handoff_gate["paper_only"] is True
+    assert handoff_gate["capital_at_risk"] is False
+    assert handoff_gate["polymarket_write_enabled"] is False
+    assert handoff_gate["wallet_signing_enabled"] is False
+
     block_analysis = result.v8_execution_guard_block_analysis_report
     block_payload = dict(block_analysis)
     block_id = block_payload.pop("o_v8_execution_guard_block_analysis_report_id")
@@ -4153,6 +4227,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert result.artifact_paths["v8_execution_guard_block_analysis_summary"].exists()
     assert result.artifact_paths["v8_execution_runtime_field_coverage_report"].exists()
     assert result.artifact_paths["v8_execution_runtime_field_coverage_summary"].exists()
+    assert result.artifact_paths["v8_execution_handoff_gate_report"].exists()
+    assert result.artifact_paths["v8_execution_handoff_gate_summary"].exists()
 
     manifest = _read_json(result.artifact_paths["manifest"])
     assert "hts_p_up_confidently_wrong_feature_diagnostic_report" in manifest[
@@ -4185,6 +4261,8 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert "v8_execution_guard_block_analysis_summary" in manifest["artifact_hashes"]
     assert "v8_execution_runtime_field_coverage_report" in manifest["artifact_hashes"]
     assert "v8_execution_runtime_field_coverage_summary" in manifest["artifact_hashes"]
+    assert "v8_execution_handoff_gate_report" in manifest["artifact_hashes"]
+    assert "v8_execution_handoff_gate_summary" in manifest["artifact_hashes"]
     assert manifest["large_regret_risk_model_report_available"] is False
     assert manifest["selective_action_guard_report_available"] is False
     assert manifest["large_regret_risk_model_enabled"] is False
@@ -4309,6 +4387,23 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         manifest["v8_execution_runtime_field_backfill_provenance_validity_summary"]
         == field_coverage["runtime_field_backfill_provenance_validity_summary"]
     )
+    assert manifest["v8_execution_handoff_gate_report_available"] is True
+    assert manifest["v8_execution_handoff_gate_report_id"] == (
+        handoff_gate["o_v8_execution_handoff_gate_report_id"]
+    )
+    assert manifest["explicit_execution_handoff_gate_passed"] == (
+        handoff_gate["explicit_execution_handoff_gate_passed"]
+    )
+    assert manifest["explicit_execution_handoff_blocking_reason_codes"] == (
+        handoff_gate["explicit_execution_handoff_blocking_reason_codes"]
+    )
+    assert (
+        manifest["explicit_execution_handoff_gate_mode"]
+        == "diagnostic_only_fail_closed"
+    )
+    assert manifest["explicit_execution_handoff_allowed"] is False
+    assert manifest["future_unseen_holdout_required"] is True
+    assert manifest["future_paper_candidate_gate_required"] is True
     assert manifest["strict_calibration_quality_passed"] == gate[
         "strict_calibration_quality_passed"
     ]
@@ -5261,6 +5356,295 @@ def test_o_v8_execution_policy_readiness_fails_closed_on_quality_gaps(
         "no_paper_live_write_or_capital_flags"
     ]["passed"] is True
     assert report["future_explicit_execution_handoff_gate_required"] is True
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["freeze_ready"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["#146_start_allowed"] is False
+    assert report["#134_resume_allowed"] is False
+
+
+def test_o_v8_execution_handoff_gate_passes_diagnostic_but_stays_closed(
+    tmp_path: Path,
+) -> None:
+    def _allowed_row(index: int) -> dict[str, Any]:
+        side = "UP" if index % 2 else "DOWN"
+        action = f"BUY_{side}_SELL_BEFORE_CLOSE"
+        return {
+            "decision_group_id": f"source|market-{index}|{index}",
+            "market_id": f"market-{index}",
+            "decision_ts": index,
+            "source_selected_action": action,
+            "source_selected_family": "SELL_BEFORE_CLOSE",
+            "source_selected_side": side,
+            "source_model_score": 0.90,
+            "source_raw_model_score": 0.80,
+            "p_up": 0.70 if side == "UP" else 0.30,
+            "p_down": 0.30 if side == "UP" else 0.70,
+            "p_up_action_disagreement": False,
+            "microstructure_snapshot": {
+                "book_staleness_ms": 500.0,
+                "spread_bps": 200.0,
+                "queue_fill_proxy": 0.90,
+                "time_to_close_seconds": 180.0,
+            },
+            "runtime_field_backfill_provenance_violations": [],
+            "execution_guarded_action": action,
+            "execution_guarded_family": "SELL_BEFORE_CLOSE",
+            "execution_guarded_side": side,
+            "execution_guarded_score": 0.89,
+            "execution_score_penalties": {},
+            "order_allowed": True,
+            "proposed_order_size": 0.1,
+            "uncapped_proposed_order_size": 0.1,
+            "sizing_reason_codes": ["execution_base_size_applied"],
+            "exposure_reason_codes": ["execution_simulated_order_allowed"],
+            "execution_guard_reason_codes": [],
+            "execution_blocking_reason_codes": [],
+            "missing_runtime_field_codes": [],
+            "pre_decision_exposure_state": {
+                "current_total_exposure": (index - 1) * 0.1,
+                "current_market_exposure_by_market_id": {},
+                "current_side_exposure_by_side": {"DOWN": 0.0, "UP": 0.0},
+                "executed_simulated_order_count": index - 1,
+                "blocked_simulated_order_count": 0,
+            },
+            "post_decision_exposure_state": {
+                "current_total_exposure": index * 0.1,
+                "current_market_exposure_by_market_id": {f"market-{index}": 0.1},
+                "current_side_exposure_by_side": {"DOWN": 0.1, "UP": 0.1},
+                "executed_simulated_order_count": index,
+                "blocked_simulated_order_count": 0,
+            },
+            "exposure_delta": 0.1,
+            "simulated_order_id": f"sim-v8-o-{index:06d}",
+            "source_score_mutated": False,
+            "o_model_predicted_score_mutated": False,
+        }
+
+    m2_report_path = tmp_path / "m2.json"
+    m2_report = {"m2_stateful_replay_parity_candidate_report_id": "m2-test"}
+    m2_report_path.write_text(json.dumps(m2_report, sort_keys=True), encoding="utf-8")
+    replay_report = {
+        "o_v8_execution_simulated_order_replay_report_id": "replay-test",
+        "simulated_decision_rows": [_allowed_row(index) for index in range(1, 6)],
+        "final_exposure": {"runtime_state_validation_passed": True},
+        "runtime_risk_control_validation_passed": True,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    allowed_quality = _v8_execution_allowed_order_quality_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        simulated_order_replay_report=replay_report,
+    )
+    policy_readiness = _v8_execution_policy_readiness_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        simulated_order_replay_report=replay_report,
+        allowed_order_quality_report=allowed_quality,
+    )
+    block_analysis = _v8_execution_guard_block_analysis_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        handoff_report={"o_v8_action_rank_handoff_report_id": "handoff-test"},
+        execution_guard_report={"o_v8_execution_risk_guard_report_id": "guard-test"},
+        runtime_state_report={"o_v8_execution_runtime_state_report_id": "state-test"},
+        simulated_order_replay_report=replay_report,
+    )
+    field_coverage = _v8_execution_runtime_field_coverage_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        handoff_report={"o_v8_action_rank_handoff_report_id": "handoff-test"},
+        execution_guard_report={"o_v8_execution_risk_guard_report_id": "guard-test"},
+        runtime_state_report={"o_v8_execution_runtime_state_report_id": "state-test"},
+        simulated_order_replay_report=replay_report,
+        block_analysis_report=block_analysis,
+    )
+
+    report = _v8_execution_handoff_gate_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        policy_readiness_report=policy_readiness,
+        allowed_order_quality_report=allowed_quality,
+        simulated_order_replay_report=replay_report,
+        runtime_field_coverage_report=field_coverage,
+        guard_block_analysis_report=block_analysis,
+    )
+
+    payload = dict(report)
+    report_id = payload.pop("o_v8_execution_handoff_gate_report_id")
+    assert canonical_json_sha256(payload) == report_id
+    assert report["schema_version"] == O_V8_EXECUTION_HANDOFF_GATE_SCHEMA_VERSION
+    assert report["explicit_execution_handoff_gate_passed"] is True
+    assert report["explicit_execution_handoff_blocking_reason_codes"] == []
+    assert all(
+        check["passed"] is True
+        for check in report["explicit_execution_handoff_required_checks"].values()
+    )
+    assert report["explicit_execution_handoff_gate_mode"] == (
+        "diagnostic_only_fail_closed"
+    )
+    assert report["future_unseen_holdout_required"] is True
+    assert report["future_paper_candidate_gate_required"] is True
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["freeze_ready"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["#146_start_allowed"] is False
+    assert report["#134_resume_allowed"] is False
+    assert report["paper_only"] is True
+    assert report["capital_at_risk"] is False
+    assert report["polymarket_write_enabled"] is False
+    assert report["wallet_signing_enabled"] is False
+
+
+def test_o_v8_execution_handoff_gate_fails_when_readiness_or_runtime_fails(
+    tmp_path: Path,
+) -> None:
+    def _row(index: int) -> dict[str, Any]:
+        return {
+            "decision_group_id": f"source|market-{index}|{index}",
+            "market_id": f"market-{index}",
+            "decision_ts": index,
+            "source_selected_action": "BUY_UP_HOLD_TO_SETTLEMENT",
+            "source_selected_family": "HOLD_TO_SETTLEMENT",
+            "source_selected_side": "UP",
+            "source_model_score": 0.90,
+            "source_raw_model_score": 0.80,
+            "p_up": 0.30 if index == 1 else 0.70,
+            "p_down": 0.70 if index == 1 else 0.30,
+            "p_up_action_disagreement": index == 1,
+            "microstructure_snapshot": {
+                "book_staleness_ms": 2500.0 if index == 2 else 500.0,
+                "spread_bps": 1200.0 if index == 2 else 200.0,
+                "queue_fill_proxy": 0.40 if index == 2 else 0.90,
+                "time_to_close_seconds": 30.0 if index == 2 else 180.0,
+            },
+            "runtime_field_backfill_provenance_violations": [
+                {"field": "microstructure_snapshot.time_to_close_seconds"}
+            ]
+            if index == 3
+            else [],
+            "execution_guarded_action": "BUY_UP_HOLD_TO_SETTLEMENT",
+            "execution_guarded_family": "HOLD_TO_SETTLEMENT",
+            "execution_guarded_side": "UP",
+            "execution_guarded_score": 0.89,
+            "execution_score_penalties": {},
+            "order_allowed": True,
+            "proposed_order_size": 0.3 if index == 4 else 0.1,
+            "uncapped_proposed_order_size": 0.3 if index == 4 else 0.1,
+            "sizing_reason_codes": ["execution_base_size_applied"],
+            "exposure_reason_codes": ["execution_simulated_order_allowed"],
+            "execution_guard_reason_codes": [],
+            "execution_blocking_reason_codes": [],
+            "missing_runtime_field_codes": ["missing_selected_side"]
+            if index == 3
+            else [],
+            "pre_decision_exposure_state": {
+                "current_total_exposure": 0.0,
+                "current_market_exposure_by_market_id": {},
+                "current_side_exposure_by_side": {"UP": 0.0},
+                "executed_simulated_order_count": 0,
+                "blocked_simulated_order_count": 0,
+            },
+            "post_decision_exposure_state": {
+                "current_total_exposure": 1.2 if index == 4 else 0.1,
+                "current_market_exposure_by_market_id": {f"market-{index}": 0.3},
+                "current_side_exposure_by_side": {"UP": 1.2}
+                if index == 4
+                else {"UP": 0.1},
+                "executed_simulated_order_count": index,
+                "blocked_simulated_order_count": 0,
+            },
+            "exposure_delta": 0.3 if index == 4 else 0.1,
+            "simulated_order_id": f"sim-v8-o-{index:06d}",
+            "source_score_mutated": index == 4,
+            "o_model_predicted_score_mutated": False,
+        }
+
+    m2_report_path = tmp_path / "m2.json"
+    m2_report = {"m2_stateful_replay_parity_candidate_report_id": "m2-test"}
+    m2_report_path.write_text(json.dumps(m2_report, sort_keys=True), encoding="utf-8")
+    replay_report = {
+        "o_v8_execution_simulated_order_replay_report_id": "replay-test",
+        "simulated_decision_rows": [_row(index) for index in range(1, 5)],
+        "final_exposure": {"runtime_state_validation_passed": False},
+        "runtime_risk_control_validation_passed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    allowed_quality = _v8_execution_allowed_order_quality_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        simulated_order_replay_report=replay_report,
+    )
+    policy_readiness = _v8_execution_policy_readiness_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        simulated_order_replay_report=replay_report,
+        allowed_order_quality_report=allowed_quality,
+    )
+    block_analysis = _v8_execution_guard_block_analysis_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        handoff_report={"o_v8_action_rank_handoff_report_id": "handoff-test"},
+        execution_guard_report={"o_v8_execution_risk_guard_report_id": "guard-test"},
+        runtime_state_report={"o_v8_execution_runtime_state_report_id": "state-test"},
+        simulated_order_replay_report=replay_report,
+    )
+    field_coverage = _v8_execution_runtime_field_coverage_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        handoff_report={"o_v8_action_rank_handoff_report_id": "handoff-test"},
+        execution_guard_report={"o_v8_execution_risk_guard_report_id": "guard-test"},
+        runtime_state_report={"o_v8_execution_runtime_state_report_id": "state-test"},
+        simulated_order_replay_report=replay_report,
+        block_analysis_report=block_analysis,
+    )
+
+    report = _v8_execution_handoff_gate_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        policy_readiness_report=policy_readiness,
+        allowed_order_quality_report=allowed_quality,
+        simulated_order_replay_report=replay_report,
+        runtime_field_coverage_report=field_coverage,
+        guard_block_analysis_report=block_analysis,
+    )
+
+    assert report["explicit_execution_handoff_gate_passed"] is False
+    assert set(report["explicit_execution_handoff_blocking_reason_codes"]) >= {
+        "execution_handoff_allowed_order_exposure_limit_failed",
+        "execution_handoff_allowed_order_microstructure_quality_failed",
+        "execution_handoff_allowed_order_p_up_disagreement_present",
+        "execution_handoff_min_allowed_order_count_not_met",
+        "execution_handoff_policy_readiness_not_passed",
+        "execution_handoff_provenance_violations_present",
+        "execution_handoff_runtime_missing_fields_present",
+        "execution_handoff_runtime_risk_control_validation_failed",
+        "execution_handoff_runtime_state_validation_failed",
+        "execution_handoff_source_score_mutation_detected",
+    }
+    assert report["explicit_execution_handoff_required_checks"][
+        "no_paper_live_write_or_capital_flags"
+    ]["passed"] is True
+    assert report["future_unseen_holdout_required"] is True
+    assert report["future_paper_candidate_gate_required"] is True
     assert report["v8_execution_handoff_allowed"] is False
     assert report["source_model_candidate_eligible"] is False
     assert report["freeze_ready"] is False

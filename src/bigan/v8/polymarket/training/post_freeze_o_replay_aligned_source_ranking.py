@@ -83,6 +83,9 @@ O_V8_EXECUTION_ALLOWED_ORDER_QUALITY_SCHEMA_VERSION = (
 O_V8_EXECUTION_POLICY_READINESS_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-execution-policy-readiness-v1"
 )
+O_V8_EXECUTION_HANDOFF_GATE_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-execution-handoff-gate-v1"
+)
 O_V8_EXECUTION_GUARD_BLOCK_ANALYSIS_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-execution-guard-block-analysis-v1"
 )
@@ -308,6 +311,7 @@ class PolymarketOReplayAlignedSourceRankingResult:
     v8_execution_policy_readiness_report: dict[str, Any]
     v8_execution_guard_block_analysis_report: dict[str, Any]
     v8_execution_runtime_field_coverage_report: dict[str, Any]
+    v8_execution_handoff_gate_report: dict[str, Any]
     artifact_paths: dict[str, Path]
 
 
@@ -387,6 +391,10 @@ def run_polymarket_o_replay_aligned_source_ranking(
         / "o_v8_execution_runtime_field_coverage_report.json",
         "v8_execution_runtime_field_coverage_summary": run_dir
         / "o_v8_execution_runtime_field_coverage_report.md",
+        "v8_execution_handoff_gate_report": run_dir
+        / "o_v8_execution_handoff_gate_report.json",
+        "v8_execution_handoff_gate_summary": run_dir
+        / "o_v8_execution_handoff_gate_report.md",
         "manifest": run_dir / "o_replay_aligned_source_ranking_manifest.json",
     }
     reports = _build_reports(config=config)
@@ -493,6 +501,14 @@ def run_polymarket_o_replay_aligned_source_ranking(
     )
     artifact_paths["v8_execution_runtime_field_coverage_summary"].write_text(
         _v8_execution_runtime_field_coverage_markdown(reports[16]),
+        encoding="utf-8",
+    )
+    _write_json(
+        artifact_paths["v8_execution_handoff_gate_report"],
+        reports[17],
+    )
+    artifact_paths["v8_execution_handoff_gate_summary"].write_text(
+        _v8_execution_handoff_gate_markdown(reports[17]),
         encoding="utf-8",
     )
     manifest = {
@@ -630,6 +646,28 @@ def run_polymarket_o_replay_aligned_source_ranking(
         "v8_execution_runtime_field_backfill_provenance_validity_summary": reports[16][
             "runtime_field_backfill_provenance_validity_summary"
         ],
+        "v8_execution_handoff_gate_report_available": True,
+        "v8_execution_handoff_gate_report_id": reports[17][
+            "o_v8_execution_handoff_gate_report_id"
+        ],
+        "explicit_execution_handoff_gate_passed": reports[17][
+            "explicit_execution_handoff_gate_passed"
+        ],
+        "explicit_execution_handoff_blocking_reason_codes": reports[17][
+            "explicit_execution_handoff_blocking_reason_codes"
+        ],
+        "explicit_execution_handoff_gate_mode": reports[17][
+            "explicit_execution_handoff_gate_mode"
+        ],
+        "explicit_execution_handoff_allowed": reports[17][
+            "v8_execution_handoff_allowed"
+        ],
+        "future_unseen_holdout_required": reports[17][
+            "future_unseen_holdout_required"
+        ],
+        "future_paper_candidate_gate_required": reports[17][
+            "future_paper_candidate_gate_required"
+        ],
         "model_layer_regret_risk_selection_deferred_to_issue": "#158",
         "large_regret_risk_model_report_available": False,
         "selective_action_guard_report_available": False,
@@ -684,6 +722,7 @@ def run_polymarket_o_replay_aligned_source_ranking(
         v8_execution_policy_readiness_report=reports[14],
         v8_execution_guard_block_analysis_report=reports[15],
         v8_execution_runtime_field_coverage_report=reports[16],
+        v8_execution_handoff_gate_report=reports[17],
         artifact_paths=artifact_paths,
     )
 
@@ -692,6 +731,7 @@ def _build_reports(
     *,
     config: PolymarketOReplayAlignedSourceRankingConfig,
 ) -> tuple[
+    dict[str, Any],
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
@@ -855,6 +895,15 @@ def _build_reports(
             block_analysis_report=v8_execution_guard_block_analysis_report,
         )
     )
+    v8_execution_handoff_gate_report = _v8_execution_handoff_gate_report(
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        policy_readiness_report=v8_execution_policy_readiness_report,
+        allowed_order_quality_report=v8_execution_allowed_order_quality_report,
+        simulated_order_replay_report=v8_execution_simulated_order_replay_report,
+        runtime_field_coverage_report=v8_execution_runtime_field_coverage_report,
+        guard_block_analysis_report=v8_execution_guard_block_analysis_report,
+    )
     return (
         label_report,
         ranking_report,
@@ -873,6 +922,7 @@ def _build_reports(
         v8_execution_policy_readiness_report,
         v8_execution_guard_block_analysis_report,
         v8_execution_runtime_field_coverage_report,
+        v8_execution_handoff_gate_report,
     )
 
 
@@ -8207,6 +8257,472 @@ def _v8_allowed_order_exposure_readiness(
     }
 
 
+def _v8_execution_handoff_gate_report(
+    *,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    policy_readiness_report: dict[str, Any],
+    allowed_order_quality_report: dict[str, Any],
+    simulated_order_replay_report: dict[str, Any],
+    runtime_field_coverage_report: dict[str, Any],
+    guard_block_analysis_report: dict[str, Any],
+) -> dict[str, Any]:
+    replay_rows = list(simulated_order_replay_report.get("simulated_decision_rows") or [])
+    allowed_rows = list(allowed_order_quality_report.get("allowed_order_quality_rows") or [])
+    policy_checks = dict(
+        policy_readiness_report.get("execution_policy_readiness_required_checks") or {}
+    )
+    runtime_integrity = dict(
+        policy_readiness_report.get("runtime_integrity_summary") or {}
+    )
+    final_exposure = dict(simulated_order_replay_report.get("final_exposure") or {})
+    provenance_summary = dict(
+        runtime_field_coverage_report.get(
+            "runtime_field_backfill_provenance_validity_summary"
+        )
+        or {}
+    )
+    no_source_score_mutation = not any(
+        row.get("source_score_mutated") is True
+        or row.get("o_model_predicted_score_mutated") is True
+        for row in replay_rows
+    )
+    no_paper_live_capital_flags = _v8_reports_preserve_compact_safety_flags(
+        policy_readiness_report,
+        allowed_order_quality_report,
+        simulated_order_replay_report,
+        runtime_field_coverage_report,
+        guard_block_analysis_report,
+    )
+    source_freeze_promotion_blocked = (
+        _v8_report_gate_flag(policy_readiness_report, "source_model_candidate_eligible")
+        is False
+        and _v8_report_gate_flag(policy_readiness_report, "freeze_ready") is False
+        and _v8_report_gate_flag(policy_readiness_report, "promotion_evidence_eligible")
+        is False
+        and _v8_report_gate_flag(policy_readiness_report, "#134_resume_allowed")
+        is False
+        and _v8_report_gate_flag(policy_readiness_report, "#146_start_allowed")
+        is False
+        and _v8_report_gate_flag(
+            simulated_order_replay_report,
+            "source_model_candidate_eligible",
+        )
+        is False
+        and _v8_report_gate_flag(simulated_order_replay_report, "freeze_ready") is False
+        and _v8_report_gate_flag(
+            simulated_order_replay_report,
+            "promotion_evidence_eligible",
+        )
+        is False
+        and _v8_report_gate_flag(simulated_order_replay_report, "#134_resume_allowed")
+        is False
+        and _v8_report_gate_flag(simulated_order_replay_report, "#146_start_allowed")
+        is False
+    )
+    required_checks = {
+        "policy_readiness_diagnostic_passed": _v8_execution_handoff_gate_check(
+            passed=bool(
+                policy_readiness_report.get(
+                    "execution_policy_readiness_diagnostic_passed"
+                )
+            ),
+            observed=policy_readiness_report.get(
+                "execution_policy_readiness_diagnostic_passed"
+            ),
+            required=True,
+            reason_code="execution_handoff_policy_readiness_not_passed",
+            source_report="o_v8_execution_policy_readiness_report",
+        ),
+        "min_allowed_order_count_met": _v8_execution_handoff_gate_check(
+            passed=_v8_policy_check_passed(policy_checks, "min_allowed_order_count"),
+            observed={
+                "allowed_order_count": allowed_order_quality_report.get(
+                    "allowed_order_count"
+                ),
+                "min_allowed_order_count": policy_readiness_report.get(
+                    "min_allowed_order_count"
+                ),
+            },
+            required="allowed_order_count >= min_allowed_order_count",
+            reason_code="execution_handoff_min_allowed_order_count_not_met",
+            source_report="o_v8_execution_policy_readiness_report",
+        ),
+        "zero_missing_runtime_fields": _v8_execution_handoff_gate_check(
+            passed=(
+                int(
+                    runtime_field_coverage_report.get(
+                        "missing_runtime_field_decision_count",
+                        0,
+                    )
+                    or 0
+                )
+                == 0
+                and int(runtime_integrity.get("missing_runtime_field_row_count") or 0)
+                == 0
+            ),
+            observed={
+                "missing_runtime_field_decision_count": int(
+                    runtime_field_coverage_report.get(
+                        "missing_runtime_field_decision_count",
+                        0,
+                    )
+                    or 0
+                ),
+                "missing_runtime_field_row_count": int(
+                    runtime_integrity.get("missing_runtime_field_row_count") or 0
+                ),
+            },
+            required="0 missing runtime fields",
+            reason_code="execution_handoff_runtime_missing_fields_present",
+            source_report="o_v8_execution_runtime_field_coverage_report",
+        ),
+        "zero_provenance_violations": _v8_execution_handoff_gate_check(
+            passed=(
+                int(provenance_summary.get("provenance_violation_count") or 0) == 0
+                and int(runtime_integrity.get("provenance_violation_count") or 0) == 0
+                and provenance_summary.get("provenance_valid") is not False
+            ),
+            observed={
+                "runtime_field_coverage_provenance_violation_count": int(
+                    provenance_summary.get("provenance_violation_count") or 0
+                ),
+                "policy_readiness_provenance_violation_count": int(
+                    runtime_integrity.get("provenance_violation_count") or 0
+                ),
+                "runtime_field_coverage_provenance_valid": provenance_summary.get(
+                    "provenance_valid"
+                ),
+            },
+            required="0 provenance violations and provenance_valid=true",
+            reason_code="execution_handoff_provenance_violations_present",
+            source_report="o_v8_execution_runtime_field_coverage_report",
+        ),
+        "all_allowed_orders_p_up_agreement": _v8_execution_handoff_gate_check(
+            passed=_v8_policy_check_passed(
+                policy_checks,
+                "all_allowed_orders_p_up_agreement",
+            ),
+            observed=allowed_order_quality_report.get(
+                "allowed_order_p_up_agreement_distribution"
+            ),
+            required="all allowed orders p_up_agrees",
+            reason_code="execution_handoff_allowed_order_p_up_disagreement_present",
+            source_report="o_v8_execution_policy_readiness_report",
+        ),
+        "allowed_orders_origin_safe": _v8_execution_handoff_gate_check(
+            passed=_v8_policy_check_passed(
+                policy_checks,
+                "all_allowed_orders_original_or_safe_downgrade",
+            ),
+            observed=allowed_order_quality_report.get(
+                "allowed_order_origin_distribution"
+            ),
+            required="original_selected_action or explicitly safe downgrade",
+            reason_code="execution_handoff_allowed_order_origin_not_safe",
+            source_report="o_v8_execution_policy_readiness_report",
+        ),
+        "allowed_order_microstructure_quality_passed": (
+            _v8_execution_handoff_gate_check(
+                passed=_v8_policy_check_passed(
+                    policy_checks,
+                    "allowed_order_microstructure_quality_passed",
+                ),
+                observed=policy_readiness_report.get(
+                    "microstructure_quality_summary",
+                    {},
+                ).get("failure_count"),
+                required=0,
+                reason_code=(
+                    "execution_handoff_allowed_order_microstructure_quality_failed"
+                ),
+                source_report="o_v8_execution_policy_readiness_report",
+            )
+        ),
+        "allowed_order_exposure_within_limits": _v8_execution_handoff_gate_check(
+            passed=_v8_policy_check_passed(
+                policy_checks,
+                "allowed_order_exposure_within_limits",
+            ),
+            observed=policy_readiness_report.get(
+                "exposure_quality_summary",
+                {},
+            ).get("failure_count"),
+            required=0,
+            reason_code="execution_handoff_allowed_order_exposure_limit_failed",
+            source_report="o_v8_execution_policy_readiness_report",
+        ),
+        "runtime_state_validation_passed": _v8_execution_handoff_gate_check(
+            passed=final_exposure.get("runtime_state_validation_passed") is True,
+            observed=final_exposure.get("runtime_state_validation_passed"),
+            required=True,
+            reason_code="execution_handoff_runtime_state_validation_failed",
+            source_report="o_v8_execution_simulated_order_replay_report",
+        ),
+        "simulated_runtime_risk_control_validation_passed": (
+            _v8_execution_handoff_gate_check(
+                passed=simulated_order_replay_report.get(
+                    "runtime_risk_control_validation_passed"
+                )
+                is True,
+                observed=simulated_order_replay_report.get(
+                    "runtime_risk_control_validation_passed"
+                ),
+                required=True,
+                reason_code=(
+                    "execution_handoff_runtime_risk_control_validation_failed"
+                ),
+                source_report="o_v8_execution_simulated_order_replay_report",
+            )
+        ),
+        "no_model_layer_regret_risk_selection_enabled": (
+            _v8_execution_handoff_gate_check(
+                passed=True,
+                observed=False,
+                required=False,
+                reason_code=(
+                    "execution_handoff_model_layer_regret_risk_selection_enabled"
+                ),
+                source_report="static_v8_execution_layer_design_constraint",
+            )
+        ),
+        "no_source_score_mutation": _v8_execution_handoff_gate_check(
+            passed=no_source_score_mutation,
+            observed={
+                "mutated_row_count": sum(
+                    1
+                    for row in replay_rows
+                    if row.get("source_score_mutated") is True
+                    or row.get("o_model_predicted_score_mutated") is True
+                ),
+                "allowed_order_count": len(allowed_rows),
+            },
+            required=0,
+            reason_code="execution_handoff_source_score_mutation_detected",
+            source_report="o_v8_execution_simulated_order_replay_report",
+        ),
+        "no_paper_live_write_or_capital_flags": _v8_execution_handoff_gate_check(
+            passed=no_paper_live_capital_flags,
+            observed=_v8_compact_safety_flag_summary(
+                policy_readiness_report,
+                allowed_order_quality_report,
+                simulated_order_replay_report,
+                runtime_field_coverage_report,
+                guard_block_analysis_report,
+            ),
+            required={
+                "paper_only": True,
+                "capital_at_risk": False,
+                "polymarket_write_enabled": False,
+                "wallet_signing_enabled": False,
+            },
+            reason_code="execution_handoff_paper_live_or_capital_flag_enabled",
+            source_report="all_execution_diagnostic_reports",
+        ),
+        "source_freeze_promotion_remain_blocked": _v8_execution_handoff_gate_check(
+            passed=source_freeze_promotion_blocked,
+            observed={
+                "source_model_candidate_eligible": policy_readiness_report.get(
+                    "source_model_candidate_eligible"
+                ),
+                "freeze_ready": policy_readiness_report.get("freeze_ready"),
+                "promotion_evidence_eligible": policy_readiness_report.get(
+                    "promotion_evidence_eligible"
+                ),
+                "#134_resume_allowed": policy_readiness_report.get(
+                    "#134_resume_allowed"
+                ),
+                "#146_start_allowed": policy_readiness_report.get(
+                    "#146_start_allowed"
+                ),
+            },
+            required={
+                "source_model_candidate_eligible": False,
+                "freeze_ready": False,
+                "promotion_evidence_eligible": False,
+                "#134_resume_allowed": False,
+                "#146_start_allowed": False,
+            },
+            reason_code="execution_handoff_source_freeze_or_promotion_unblocked",
+            source_report="all_execution_diagnostic_reports",
+        ),
+        "future_unseen_holdout_required": _v8_execution_handoff_gate_check(
+            passed=True,
+            observed=True,
+            required=True,
+            reason_code="execution_handoff_future_unseen_holdout_not_required",
+            source_report="static_v8_execution_layer_design_constraint",
+        ),
+    }
+    blocking_reason_codes = sorted(
+        check["reason_code"]
+        for check in required_checks.values()
+        if check["passed"] is not True
+    )
+    gate_passed = not blocking_reason_codes
+    report = {
+        "schema_version": O_V8_EXECUTION_HANDOFF_GATE_SCHEMA_VERSION,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "source_lineage": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "report_type": "o_v8_execution_handoff_gate",
+        "diagnostic_only": True,
+        "simulation_only": True,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "policy_readiness_report_id": policy_readiness_report[
+            "o_v8_execution_policy_readiness_report_id"
+        ],
+        "allowed_order_quality_report_id": allowed_order_quality_report[
+            "o_v8_execution_allowed_order_quality_report_id"
+        ],
+        "simulated_order_replay_report_id": simulated_order_replay_report[
+            "o_v8_execution_simulated_order_replay_report_id"
+        ],
+        "runtime_field_coverage_report_id": runtime_field_coverage_report[
+            "o_v8_execution_runtime_field_coverage_report_id"
+        ],
+        "guard_block_analysis_report_id": guard_block_analysis_report[
+            "o_v8_execution_guard_block_analysis_report_id"
+        ],
+        "analysis_source": (
+            "policy_readiness_allowed_quality_simulated_replay_runtime_coverage_"
+            "and_guard_block_analysis_reports_only"
+        ),
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "explicit_execution_handoff_gate_mode": "diagnostic_only_fail_closed",
+        "explicit_execution_handoff_gate_passed": gate_passed,
+        "explicit_execution_handoff_required_checks": required_checks,
+        "explicit_execution_handoff_blocking_reason_codes": blocking_reason_codes,
+        "future_unseen_holdout_required": True,
+        "future_paper_candidate_gate_required": True,
+        "future_paper_candidate_gate_reason_codes": [
+            "future_unseen_holdout_required_before_execution_handoff",
+            "paper_candidate_gate_not_implemented",
+        ],
+        "allowed_order_count": int(
+            allowed_order_quality_report.get("allowed_order_count") or 0
+        ),
+        "blocked_decision_count": int(
+            allowed_order_quality_report.get("blocked_decision_count") or 0
+        ),
+        "residual_blocker_summary": dict(
+            allowed_order_quality_report.get("residual_blocker_summary") or {}
+        ),
+        "safe_order_discovery_summary": dict(
+            guard_block_analysis_report.get("safe_order_discovery_summary") or {}
+        ),
+        "runtime_integrity_summary": {
+            "missing_runtime_field_decision_count": int(
+                runtime_field_coverage_report.get(
+                    "missing_runtime_field_decision_count",
+                    0,
+                )
+                or 0
+            ),
+            "provenance_violation_count": int(
+                provenance_summary.get("provenance_violation_count") or 0
+            ),
+            "provenance_valid": provenance_summary.get("provenance_valid"),
+            "runtime_state_validation_passed": final_exposure.get(
+                "runtime_state_validation_passed"
+            ),
+            "runtime_risk_control_validation_passed": (
+                simulated_order_replay_report.get(
+                    "runtime_risk_control_validation_passed"
+                )
+            ),
+        },
+        "handoff_design_notes": [
+            "explicit_gate_is_diagnostic_only_and_cannot_enable_execution_handoff",
+            "future_unseen_holdout_required_before_paper_or_live_execution",
+            "future_paper_candidate_gate_required_before_any_order_handoff",
+        ],
+        "v8_execution_handoff_allowed": False,
+        "v8_execution_handoff_blocking_reason_codes": [
+            "diagnostic_only_fail_closed",
+            "future_unseen_holdout_required",
+            "future_paper_candidate_gate_required",
+            "paper_live_unlock_prohibited",
+        ],
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "no_paper_live_unlock_from_execution_handoff_gate": True,
+        "no_source_freeze_unlock_from_execution_handoff_gate": True,
+        **compact_safety_fields(),
+    }
+    report["o_v8_execution_handoff_gate_report_id"] = canonical_json_sha256(report)
+    return report
+
+
+def _v8_execution_handoff_gate_check(
+    *,
+    passed: bool,
+    observed: Any,
+    required: Any,
+    reason_code: str,
+    source_report: str,
+) -> dict[str, Any]:
+    return {
+        "passed": bool(passed),
+        "observed": observed,
+        "required": required,
+        "reason_code": reason_code,
+        "source_report": source_report,
+    }
+
+
+def _v8_policy_check_passed(
+    policy_checks: dict[str, Any],
+    check_name: str,
+) -> bool:
+    check = policy_checks.get(check_name)
+    if not isinstance(check, dict):
+        return False
+    return check.get("passed") is True
+
+
+def _v8_report_gate_flag(report: dict[str, Any], field_name: str) -> Any:
+    return report.get(field_name)
+
+
+def _v8_compact_safety_flag_summary(
+    *reports: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    fields = compact_safety_fields()
+    return {
+        str(report.get("report_type") or f"report_{index}"): {
+            field_name: report.get(field_name)
+            for field_name in fields
+        }
+        for index, report in enumerate(reports)
+    }
+
+
+def _v8_reports_preserve_compact_safety_flags(
+    *reports: dict[str, Any],
+) -> bool:
+    expected = compact_safety_fields()
+    return all(
+        report.get(field_name) is expected_value
+        for report in reports
+        for field_name, expected_value in expected.items()
+    )
+
+
 def _v8_execution_guard_block_analysis_report(
     *,
     m2_report_path: Path,
@@ -13446,6 +13962,50 @@ def _v8_execution_policy_readiness_markdown(report: dict[str, Any]) -> str:
             f"`{report['runtime_integrity_summary']}`",
             "- v8_execution_handoff_allowed: "
             f"`{str(report['v8_execution_handoff_allowed']).lower()}`",
+            f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+            f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+            "",
+        ]
+    )
+
+
+def _v8_execution_handoff_gate_markdown(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Execution Handoff Gate",
+            "",
+            f"- diagnostic_only: `{str(report['diagnostic_only']).lower()}`",
+            f"- simulation_only: `{str(report['simulation_only']).lower()}`",
+            "- explicit_execution_handoff_gate_mode: "
+            f"`{report['explicit_execution_handoff_gate_mode']}`",
+            "- explicit_execution_handoff_gate_passed: "
+            f"`{str(report['explicit_execution_handoff_gate_passed']).lower()}`",
+            "- explicit_execution_handoff_blocking_reason_codes: "
+            f"`{report['explicit_execution_handoff_blocking_reason_codes']}`",
+            "- uses_validation_outcomes_for_tuning: "
+            f"`{str(report['uses_validation_outcomes_for_tuning']).lower()}`",
+            f"- thresholds_tuned: `{str(report['thresholds_tuned']).lower()}`",
+            "- uses_realized_pnl_or_labels_for_analysis: "
+            f"`{str(report['uses_realized_pnl_or_labels_for_analysis']).lower()}`",
+            "- uses_oracle_actions_for_analysis: "
+            f"`{str(report['uses_oracle_actions_for_analysis']).lower()}`",
+            "- future_unseen_holdout_required: "
+            f"`{str(report['future_unseen_holdout_required']).lower()}`",
+            "- future_paper_candidate_gate_required: "
+            f"`{str(report['future_paper_candidate_gate_required']).lower()}`",
+            f"- allowed_order_count: `{report['allowed_order_count']}`",
+            f"- blocked_decision_count: `{report['blocked_decision_count']}`",
+            "- runtime_integrity_summary: "
+            f"`{report['runtime_integrity_summary']}`",
+            "- residual_blocker_summary: "
+            f"`{report['residual_blocker_summary']}`",
+            "- v8_execution_handoff_allowed: "
+            f"`{str(report['v8_execution_handoff_allowed']).lower()}`",
+            f"- source_model_candidate_eligible: "
+            f"`{str(report['source_model_candidate_eligible']).lower()}`",
+            f"- freeze_ready: `{str(report['freeze_ready']).lower()}`",
+            "- promotion_evidence_eligible: "
+            f"`{str(report['promotion_evidence_eligible']).lower()}`",
             f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
             f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
             "",

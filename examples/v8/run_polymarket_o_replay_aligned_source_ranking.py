@@ -47,6 +47,7 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
     policy_readiness = result.v8_execution_policy_readiness_report
     block_analysis = result.v8_execution_guard_block_analysis_report
     field_coverage = result.v8_execution_runtime_field_coverage_report
+    handoff_gate = result.v8_execution_handoff_gate_report
     return {
         "run_id": run_id,
         "run_dir": str(result.run_dir),
@@ -141,6 +142,21 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         ],
         "future_explicit_execution_handoff_gate_required": policy_readiness[
             "future_explicit_execution_handoff_gate_required"
+        ],
+        "explicit_execution_handoff_gate_passed": handoff_gate[
+            "explicit_execution_handoff_gate_passed"
+        ],
+        "explicit_execution_handoff_gate_mode": handoff_gate[
+            "explicit_execution_handoff_gate_mode"
+        ],
+        "explicit_execution_handoff_blocking_reason_codes": handoff_gate[
+            "explicit_execution_handoff_blocking_reason_codes"
+        ],
+        "future_unseen_holdout_required": handoff_gate[
+            "future_unseen_holdout_required"
+        ],
+        "future_paper_candidate_gate_required": handoff_gate[
+            "future_paper_candidate_gate_required"
         ],
         "v8_execution_block_analysis_safe_order_candidate_count": (
             block_analysis["safe_order_discovery_summary"][
@@ -244,6 +260,9 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         ),
         "v8_execution_runtime_field_coverage_report_path": str(
             result.artifact_paths["v8_execution_runtime_field_coverage_report"]
+        ),
+        "v8_execution_handoff_gate_report_path": str(
+            result.artifact_paths["v8_execution_handoff_gate_report"]
         ),
         "manifest_path": str(result.artifact_paths["manifest"]),
     }
