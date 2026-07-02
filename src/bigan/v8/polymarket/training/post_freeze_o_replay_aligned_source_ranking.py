@@ -65,6 +65,12 @@ O_FEATURE_SET_SELECTION_SCHEMA_VERSION = (
 O_JOINT_FEATURE_CORRECTION_SELECTION_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-joint-feature-correction-selection-v1"
 )
+O_LARGE_REGRET_RISK_MODEL_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-large-regret-risk-model-v1"
+)
+O_SELECTIVE_ACTION_GUARD_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-selective-action-guard-v1"
+)
 O_TRAINING_LABEL_FIELDS = (
     "action_return_target",
     "label_pnl_target",
@@ -221,6 +227,17 @@ O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET = 0.25
 O_MAX_NO_TRADE_SELECTION_RATE = 0.80
 O_MAX_P_UP_ACTION_DISAGREEMENT_RATE = 0.35
 O_SHADOW_P_UP_SELECTION_BUFFER_TARGET = 0.25
+O_MAX_SHADOW_RAW_WEIGHT_SEARCH_CANDIDATES = 256
+O_MAX_SHADOW_HIGH_SCORE_THRESHOLD_CANDIDATES = 32
+O_LARGE_REGRET_RISK_TARGET_NAME = "large_regret_if_selected"
+O_SELECTIVE_ACTION_GUARD_MODES = (
+    "risk_score_penalty_only",
+    "high_risk_hts_to_sbc_downgrade",
+    "high_risk_trade_to_no_trade_when_edge_weak",
+    "top2_low_risk_close_margin_substitution",
+    "p_up_safe_large_regret_guard",
+)
+O_ALLOWED_EXECUTABLE_ACTIONS = O_REQUIRED_DECISION_ACTION_FAMILIES
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +282,8 @@ class PolymarketOReplayAlignedSourceRankingResult:
     hts_p_up_confidently_wrong_feature_diagnostic_report: dict[str, Any]
     feature_set_selection_report: dict[str, Any]
     joint_feature_correction_selection_report: dict[str, Any]
+    large_regret_risk_model_report: dict[str, Any]
+    selective_action_guard_report: dict[str, Any]
     artifact_paths: dict[str, Path]
 
 
@@ -312,6 +331,14 @@ def run_polymarket_o_replay_aligned_source_ranking(
         / "o_joint_feature_correction_selection_report.json",
         "joint_feature_correction_selection_summary": run_dir
         / "o_joint_feature_correction_selection_report.md",
+        "large_regret_risk_model_report": run_dir
+        / "o_large_regret_risk_model_report.json",
+        "large_regret_risk_model_summary": run_dir
+        / "o_large_regret_risk_model_report.md",
+        "selective_action_guard_report": run_dir
+        / "o_selective_action_guard_report.json",
+        "selective_action_guard_summary": run_dir
+        / "o_selective_action_guard_report.md",
         "manifest": run_dir / "o_replay_aligned_source_ranking_manifest.json",
     }
     reports = _build_reports(config=config)
@@ -365,6 +392,16 @@ def run_polymarket_o_replay_aligned_source_ranking(
         _joint_feature_correction_selection_markdown(reports[8]),
         encoding="utf-8",
     )
+    _write_json(artifact_paths["large_regret_risk_model_report"], reports[9])
+    artifact_paths["large_regret_risk_model_summary"].write_text(
+        _large_regret_risk_model_markdown(reports[9]),
+        encoding="utf-8",
+    )
+    _write_json(artifact_paths["selective_action_guard_report"], reports[10])
+    artifact_paths["selective_action_guard_summary"].write_text(
+        _selective_action_guard_markdown(reports[10]),
+        encoding="utf-8",
+    )
     manifest = {
         "schema_version": "bigan-v8-polymarket-o-replay-aligned-source-ranking-artifacts-v1",
         "run_id": config.run_id,
@@ -390,6 +427,21 @@ def run_polymarket_o_replay_aligned_source_ranking(
             "relaxed_diagnostic_source_candidate"
         ],
         "relaxed_diagnostic_no_paper_live_unlock": True,
+        "large_regret_risk_model_report_available": True,
+        "selective_action_guard_report_available": True,
+        "large_regret_risk_model_config_hash": reports[9][
+            "risk_model_config_hash"
+        ],
+        "selective_action_guard_selection_config_hash": reports[10][
+            "selection_config_hash"
+        ],
+        "selected_guard_mode": reports[10]["selected_guard_mode"],
+        "base_action_value_signal_preserved": reports[10][
+            "base_action_value_signal_preserved"
+        ],
+        "risk_head_replaces_action_signal": reports[10][
+            "risk_head_replaces_action_signal"
+        ],
         "#134_resume_allowed": False,
         "#146_start_allowed": False,
         "promotion_evidence_eligible": False,
@@ -408,6 +460,8 @@ def run_polymarket_o_replay_aligned_source_ranking(
         hts_p_up_confidently_wrong_feature_diagnostic_report=reports[6],
         feature_set_selection_report=reports[7],
         joint_feature_correction_selection_report=reports[8],
+        large_regret_risk_model_report=reports[9],
+        selective_action_guard_report=reports[10],
         artifact_paths=artifact_paths,
     )
 
@@ -416,6 +470,8 @@ def _build_reports(
     *,
     config: PolymarketOReplayAlignedSourceRankingConfig,
 ) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
@@ -510,6 +566,18 @@ def _build_reports(
             model_training_summary=model_training_summary,
         )
     )
+    large_regret_risk_model_report = _large_regret_risk_model_report(
+        config=config,
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        model_training_summary=model_training_summary,
+    )
+    selective_action_guard_report = _selective_action_guard_report(
+        config=config,
+        m2_report_path=m2_report_path,
+        m2_report=m2_report,
+        model_training_summary=model_training_summary,
+    )
     return (
         label_report,
         ranking_report,
@@ -520,6 +588,8 @@ def _build_reports(
         hts_p_up_confidently_wrong_feature_diagnostic_report,
         feature_set_selection_report,
         joint_feature_correction_selection_report,
+        large_regret_risk_model_report,
+        selective_action_guard_report,
     )
 
 
@@ -1347,7 +1417,25 @@ def _train_o_model_predicted_scores(
     )
     model = selected_scoring["model"]
     ranking_correction = selected_scoring["ranking_correction"]
-    scored_rows = selected_scoring["scored_rows"]
+    base_scored_rows = selected_scoring["scored_rows"]
+    base_ranking_rows = _ranking_rows(base_scored_rows)
+    risk_model_report, risk_scored_rows = _fit_o_large_regret_risk_head(
+        rows=base_scored_rows,
+        ranking_rows=base_ranking_rows,
+        train_rows=train_rows,
+        selected_feature_names=selected_feature_names,
+        deployable_available=deployable_available,
+        training_split_source=training_split_source,
+    )
+    high_score_threshold = float(
+        ranking_correction["high_score_calibration"]["high_score_threshold"]
+    )
+    selective_guard_report, scored_rows = _select_o_selective_action_guard(
+        rows=risk_scored_rows,
+        high_score_threshold=high_score_threshold,
+        base_validation_metrics=selected_scoring["split_metrics"]["validation"],
+        risk_model_report=risk_model_report,
+    )
     fit_reason_codes = list(selected_scoring["fit_reason_codes"])
     feature_coverage = _decision_time_feature_coverage(
         rows,
@@ -1364,6 +1452,18 @@ def _train_o_model_predicted_scores(
         "raw_model_family": "deterministic_ridge_action_value_regressor",
         "post_model_ranking_correction_enabled": True,
         "ranking_correction_source": "shadow_split_only",
+        "large_regret_risk_model_enabled": True,
+        "large_regret_risk_model_role": (
+            "auxiliary_selected_action_large_regret_risk_head_only"
+        ),
+        "large_regret_risk_target_name": O_LARGE_REGRET_RISK_TARGET_NAME,
+        "large_regret_risk_model_report": risk_model_report,
+        "selective_action_guard_enabled": True,
+        "selective_action_guard_report": selective_guard_report,
+        "base_action_value_signal_preserved": True,
+        "primary_signal_source": "model_predicted_action_value_score",
+        "final_scoring_source": "model_predicted_score_with_auxiliary_risk_guard",
+        "risk_head_replaces_action_signal": False,
         "ranking_correction_config": ranking_correction,
         "correction_constants_source": ranking_correction[
             "correction_constants_source"
@@ -1451,6 +1551,652 @@ def _train_o_model_predicted_scores(
         "#134_resume_allowed": False,
     }
     return scored_rows, summary
+
+
+def _fit_o_large_regret_risk_head(
+    *,
+    rows: list[dict[str, Any]],
+    ranking_rows: list[dict[str, Any]],
+    train_rows: list[dict[str, Any]],
+    selected_feature_names: tuple[str, ...],
+    deployable_available: bool,
+    training_split_source: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    risk_targets = {
+        (str(row["decision_group_id"]), str(row["action"])): max(
+            0.0,
+            float(row["oracle_executable_best_action_return"])
+            - float(row["realized_replay_return"]),
+        )
+        for row in ranking_rows
+    }
+    risk_train_rows = [
+        row
+        for row in train_rows
+        if row.get("split") == "shadow"
+        and bool(row.get("label_candidate_available", True))
+    ]
+    forbidden_overlap = sorted(
+        set(selected_feature_names).intersection(O_FORBIDDEN_MODEL_INPUT_FIELDS)
+    )
+    fit_reason_codes = []
+    if not deployable_available:
+        fit_reason_codes.append("deployable_base_model_score_unavailable")
+    if not risk_train_rows:
+        fit_reason_codes.append("insufficient_shadow_rows_for_large_regret_risk_head")
+    if forbidden_overlap:
+        fit_reason_codes.append("forbidden_field_overlap_in_risk_model_inputs")
+    if deployable_available and risk_train_rows and not forbidden_overlap:
+        model = _fit_ridge_regression(
+            [
+                _deployable_model_features(row, selected_feature_names)
+                for row in risk_train_rows
+            ],
+            [
+                risk_targets.get(
+                    (str(row["decision_group_id"]), str(row["action"])),
+                    0.0,
+                )
+                for row in risk_train_rows
+            ],
+        )
+    else:
+        model = {
+            "coefficients": [0.0 for _ in selected_feature_names],
+            "ridge_lambda": 1.0e-6,
+        }
+    enriched_rows = []
+    for row in rows:
+        features = _deployable_model_features(row, selected_feature_names)
+        risk_score = _bounded(_dot(model["coefficients"], features), 0.0, 5.0)
+        key = (str(row["decision_group_id"]), str(row["action"]))
+        target = risk_targets.get(key, 0.0)
+        enriched_rows.append(
+            {
+                **row,
+                "o_base_model_predicted_score": float(
+                    row.get("o_model_predicted_score") or 0.0
+                ),
+                "o_base_model_score_components": row.get(
+                    "o_model_score_components",
+                    {},
+                ),
+                "o_large_regret_risk_score": risk_score,
+                "o_large_regret_if_selected_target": target,
+                "o_large_regret_risk_score_source": (
+                    "shadow_only_auxiliary_large_regret_risk_head"
+                ),
+            }
+        )
+    target_values = list(risk_targets.values())
+    shadow_targets = [
+        risk_targets.get((str(row["decision_group_id"]), str(row["action"])), 0.0)
+        for row in risk_train_rows
+    ]
+    risk_score_by_split = _risk_score_summary_by_split(enriched_rows)
+    risk_config = {
+        "risk_target_name": O_LARGE_REGRET_RISK_TARGET_NAME,
+        "risk_target_definition": (
+            "max(0, oracle_executable_best_action_return - action_realized_replay_return)"
+        ),
+        "risk_model_family": "deterministic_ridge_large_regret_regressor",
+        "risk_training_split_source": "shadow_split_only",
+        "base_model_training_split_source": training_split_source,
+        "feature_names": list(selected_feature_names),
+        "forbidden_model_input_fields": list(O_FORBIDDEN_MODEL_INPUT_FIELDS),
+        "uses_validation_labels_for_fitting": False,
+        "uses_validation_outcomes_for_threshold_selection": False,
+    }
+    report = {
+        "schema_version": O_LARGE_REGRET_RISK_MODEL_SCHEMA_VERSION,
+        "report_type": "o_large_regret_risk_model",
+        "diagnostic_only": True,
+        "ranking_score_source": "model_predicted_score",
+        "primary_signal_source": "model_predicted_action_value_score",
+        "risk_head_role": "auxiliary_selected_action_guard_only",
+        "risk_head_replaces_action_signal": False,
+        "risk_target_name": O_LARGE_REGRET_RISK_TARGET_NAME,
+        "risk_target_definition": risk_config["risk_target_definition"],
+        "risk_target_uses_future_replay_or_oracle_for_training_label": True,
+        "risk_target_used_as_model_input": False,
+        "risk_training_split_source": "shadow_split_only",
+        "base_model_training_split_source": training_split_source,
+        "uses_validation_labels_for_fitting": False,
+        "uses_validation_outcomes_for_threshold_selection": False,
+        "model_input_fields_decision_time_only": list(selected_feature_names),
+        "forbidden_model_input_fields": list(O_FORBIDDEN_MODEL_INPUT_FIELDS),
+        "forbidden_fields_used_for_risk_model_inputs": forbidden_overlap,
+        "risk_model_available": deployable_available
+        and bool(risk_train_rows)
+        and not forbidden_overlap,
+        "shadow_training_row_count": len(risk_train_rows),
+        "shadow_training_decision_group_count": len(
+            {row["decision_group_id"] for row in risk_train_rows}
+        ),
+        "all_risk_labeled_row_count": len(ranking_rows),
+        "risk_label_summary": _risk_value_summary(target_values),
+        "shadow_risk_label_summary": _risk_value_summary(shadow_targets),
+        "risk_score_summary_by_split": risk_score_by_split,
+        "risk_model_coefficients_by_feature": dict(
+            zip(selected_feature_names, model["coefficients"], strict=True)
+        ),
+        "risk_model_ridge_lambda": model["ridge_lambda"],
+        "fit_reason_codes": sorted(set(fit_reason_codes)),
+        "risk_model_config": risk_config,
+        "risk_model_config_hash": canonical_json_sha256(risk_config),
+        "risk_model_input_schema_hash": canonical_json_sha256(
+            list(selected_feature_names)
+        ),
+        "paper_only": True,
+        "capital_at_risk": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+    }
+    return report, enriched_rows
+
+
+def _select_o_selective_action_guard(
+    *,
+    rows: list[dict[str, Any]],
+    high_score_threshold: float,
+    base_validation_metrics: dict[str, Any],
+    risk_model_report: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    base_ranking_rows = _ranking_rows(rows)
+    base_split_metrics = _split_metric_views(
+        base_ranking_rows,
+        O_MODEL_PREDICTED_VARIANT,
+        high_score_threshold,
+    )
+    base_shadow_p_up = _p_up_action_disagreement_summary(
+        rows=base_ranking_rows,
+        variant=O_MODEL_PREDICTED_VARIANT,
+        split="shadow",
+    )
+    base_validation_p_up = _p_up_action_disagreement_summary(
+        rows=base_ranking_rows,
+        variant=O_MODEL_PREDICTED_VARIANT,
+        split="validation",
+    )
+    risk_thresholds = _shadow_risk_threshold_candidates(base_ranking_rows)
+    guard_profiles = _o_selective_action_guard_profiles(risk_thresholds)
+    candidate_rows = []
+    guarded_by_name = {}
+    for profile in guard_profiles:
+        guarded_rows = _apply_o_selective_action_guard_profile(
+            rows,
+            profile=profile,
+        )
+        guarded_ranking_rows = _ranking_rows(guarded_rows)
+        metrics = _split_metric_views(
+            guarded_ranking_rows,
+            O_MODEL_PREDICTED_VARIANT,
+            high_score_threshold,
+        )
+        shadow_p_up = _p_up_action_disagreement_summary(
+            rows=guarded_ranking_rows,
+            variant=O_MODEL_PREDICTED_VARIANT,
+            split="shadow",
+        )
+        validation_p_up = _p_up_action_disagreement_summary(
+            rows=guarded_ranking_rows,
+            variant=O_MODEL_PREDICTED_VARIANT,
+            split="validation",
+        )
+        candidate_row = _selective_action_guard_candidate_row(
+            profile=profile,
+            metrics=metrics,
+            shadow_p_up=shadow_p_up,
+            validation_p_up=validation_p_up,
+            base_shadow_metrics=base_split_metrics["train_shadow"],
+        )
+        candidate_rows.append(candidate_row)
+        guarded_by_name[candidate_row["guard_candidate_name"]] = guarded_rows
+    eligible_rows = [
+        row for row in candidate_rows if bool(row["shadow_guard_selection_passed"])
+    ]
+    if eligible_rows:
+        selected_row = min(eligible_rows, key=_selective_guard_sort_key)
+        fallback_reason_codes: list[str] = []
+    else:
+        selected_row = min(candidate_rows, key=_selective_guard_fallback_sort_key)
+        fallback_reason_codes = [
+            "no_selective_guard_candidate_passed_shadow_preservation_gates"
+        ]
+    selected_guarded_rows = guarded_by_name[str(selected_row["guard_candidate_name"])]
+    selected_ranking_rows = _ranking_rows(selected_guarded_rows)
+    selected_shadow_p_up = _p_up_action_disagreement_summary(
+        rows=selected_ranking_rows,
+        variant=O_MODEL_PREDICTED_VARIANT,
+        split="shadow",
+    )
+    selected_validation_p_up = _p_up_action_disagreement_summary(
+        rows=selected_ranking_rows,
+        variant=O_MODEL_PREDICTED_VARIANT,
+        split="validation",
+    )
+    selection_config = {
+        "guard_modes": list(O_SELECTIVE_ACTION_GUARD_MODES),
+        "selection_metric_source": "shadow_split_only",
+        "uses_validation_labels_for_guard_selection": False,
+        "risk_threshold_candidates": risk_thresholds,
+        "high_score_threshold": high_score_threshold,
+        "min_top1_hit_rate": O_MIN_TOP1_HIT_RATE,
+        "max_p_up_action_disagreement_rate": O_MAX_P_UP_ACTION_DISAGREEMENT_RATE,
+        "min_high_score_support_count": O_MIN_HIGH_SCORE_SUPPORT_COUNT,
+    }
+    report = {
+        "schema_version": O_SELECTIVE_ACTION_GUARD_SCHEMA_VERSION,
+        "report_type": "o_selective_action_guard",
+        "diagnostic_only": True,
+        "ranking_score_source": "model_predicted_score",
+        "primary_signal_source": "model_predicted_action_value_score",
+        "base_action_value_signal_preserved": True,
+        "auxiliary_risk_head_role": "selected_action_large_regret_guard_only",
+        "risk_head_replaces_action_signal": False,
+        "guard_selection_source": "shadow_split_only",
+        "selection_metric_source": "shadow_split_only",
+        "uses_validation_labels_for_guard_selection": False,
+        "validation_metrics_report_only": True,
+        "allowed_final_actions": list(O_ALLOWED_EXECUTABLE_ACTIONS),
+        "guard_modes": list(O_SELECTIVE_ACTION_GUARD_MODES),
+        "selected_guard_mode": selected_row["guard_mode"],
+        "selected_guard_candidate_name": selected_row["guard_candidate_name"],
+        "selected_guard_profile": selected_row["guard_profile"],
+        "selected_shadow_metrics": selected_row["shadow_selection_metrics"],
+        "selected_validation_metrics_report_only": selected_row[
+            "validation_metrics_report_only"
+        ],
+        "selected_shadow_p_up_disagreement_summary": selected_shadow_p_up,
+        "selected_validation_p_up_disagreement_summary_report_only": (
+            selected_validation_p_up
+        ),
+        "base_shadow_metrics": _feature_set_selection_metric_summary(
+            metrics=base_split_metrics["train_shadow"],
+            p_up_summary=base_shadow_p_up,
+        ),
+        "base_validation_metrics_report_only": _feature_set_selection_metric_summary(
+            metrics=base_split_metrics["validation"],
+            p_up_summary=base_validation_p_up,
+        ),
+        "pre_guard_validation_metrics_from_joint_selection_report_only": (
+            base_validation_metrics
+        ),
+        "selected_guard_changes": _selective_guard_change_summary(
+            selected_guarded_rows
+        ),
+        "candidate_guard_rows": candidate_rows,
+        "rejected_guard_candidates": [
+            row
+            for row in candidate_rows
+            if row["guard_candidate_name"] != selected_row["guard_candidate_name"]
+        ],
+        "selection_fallback_reason_codes": fallback_reason_codes,
+        "selection_config": selection_config,
+        "selection_config_hash": canonical_json_sha256(selection_config),
+        "risk_model_config_hash": risk_model_report["risk_model_config_hash"],
+        "risk_model_input_schema_hash": risk_model_report[
+            "risk_model_input_schema_hash"
+        ],
+        "source_model_candidate_eligible": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    return report, selected_guarded_rows
+
+
+def _shadow_risk_threshold_candidates(
+    ranking_rows: list[dict[str, Any]],
+) -> list[float]:
+    shadow_scores = [
+        float(row.get("o_large_regret_risk_score") or 0.0)
+        for row in ranking_rows
+        if row.get("split") == "shadow"
+    ]
+    quantiles = _p_edge_quantiles(shadow_scores)
+    candidates = {
+        0.0,
+        float(quantiles["q25"]),
+        float(quantiles["median"]),
+        float(quantiles["q75"]),
+        max(shadow_scores, default=0.0),
+    }
+    return sorted(candidates)
+
+
+def _o_selective_action_guard_profiles(
+    risk_thresholds: list[float],
+) -> list[dict[str, Any]]:
+    profiles = []
+    for threshold in risk_thresholds:
+        profiles.append(
+            {
+                "guard_mode": "risk_score_penalty_only",
+                "risk_threshold": threshold,
+                "risk_penalty_weight": 0.0 if threshold == 0.0 else 0.25,
+                "close_margin": 0.02,
+                "edge_weak_margin": 0.02,
+                "min_risk_delta": 0.01,
+            }
+        )
+        for mode in O_SELECTIVE_ACTION_GUARD_MODES[1:]:
+            profiles.append(
+                {
+                    "guard_mode": mode,
+                    "risk_threshold": threshold,
+                    "risk_penalty_weight": 0.35,
+                    "close_margin": 0.04,
+                    "edge_weak_margin": 0.04,
+                    "min_risk_delta": 0.01,
+                }
+            )
+    return profiles
+
+
+def _apply_o_selective_action_guard_profile(
+    rows: list[dict[str, Any]],
+    *,
+    profile: dict[str, Any],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[row["decision_group_id"]].append(row)
+    guarded_rows = []
+    for group_id, group_rows in grouped.items():
+        ordered = sorted(
+            group_rows,
+            key=lambda row: float(row.get("o_base_model_predicted_score") or 0.0),
+            reverse=True,
+        )
+        base_selected = ordered[0]
+        second = ordered[1] if len(ordered) > 1 else ordered[0]
+        final_action, reason_codes = _select_guarded_action_for_group(
+            group_rows=group_rows,
+            base_selected=base_selected,
+            second=second,
+            profile=profile,
+        )
+        if profile["guard_mode"] == "risk_score_penalty_only":
+            penalized = [
+                (
+                    row,
+                    float(row.get("o_base_model_predicted_score") or 0.0)
+                    - float(profile["risk_penalty_weight"])
+                    * float(row.get("o_large_regret_risk_score") or 0.0),
+                )
+                for row in group_rows
+            ]
+            final_action = str(
+                max(penalized, key=lambda item: item[1])[0].get("action") or ""
+            )
+            if final_action != base_selected.get("action"):
+                reason_codes = [
+                    *reason_codes,
+                    "risk_penalty_changed_selected_action",
+                ]
+        base_top_score = float(base_selected.get("o_base_model_predicted_score") or 0.0)
+        for row in group_rows:
+            base_score = float(row.get("o_base_model_predicted_score") or 0.0)
+            risk_score = float(row.get("o_large_regret_risk_score") or 0.0)
+            final_score = base_score
+            if profile["guard_mode"] == "risk_score_penalty_only":
+                final_score = (
+                    base_score - float(profile["risk_penalty_weight"]) * risk_score
+                )
+            elif row.get("action") == final_action:
+                final_score = max(base_score, base_top_score + 1.0e-6)
+            guarded_rows.append(
+                {
+                    **row,
+                    "o_model_predicted_score": final_score,
+                    "o_selective_action_guard_mode": profile["guard_mode"],
+                    "o_selective_action_guard_profile": dict(profile),
+                    "o_selective_guard_pre_guard_selected_action": (
+                        base_selected.get("action")
+                    ),
+                    "o_selective_guard_final_selected_action": final_action,
+                    "o_selective_guard_final_action_for_row": (
+                        row.get("action") == final_action
+                    ),
+                    "o_selective_guard_changed_group_action": (
+                        final_action != base_selected.get("action")
+                    ),
+                    "o_selective_guard_reason_codes": reason_codes,
+                    "o_selective_guard_decision_group_id": group_id,
+                }
+            )
+    return guarded_rows
+
+
+def _select_guarded_action_for_group(
+    *,
+    group_rows: list[dict[str, Any]],
+    base_selected: dict[str, Any],
+    second: dict[str, Any],
+    profile: dict[str, Any],
+) -> tuple[str, list[str]]:
+    mode = str(profile["guard_mode"])
+    base_action = str(base_selected.get("action") or "")
+    base_risk = float(base_selected.get("o_large_regret_risk_score") or 0.0)
+    threshold = float(profile["risk_threshold"])
+    margin = float(base_selected.get("o_base_model_predicted_score") or 0.0) - float(
+        second.get("o_base_model_predicted_score") or 0.0
+    )
+    reason_codes = ["base_action_value_signal_evaluated_first"]
+    if mode == "risk_score_penalty_only":
+        reason_codes.append("risk_score_penalty_applied_to_scores")
+        return base_action, reason_codes
+    if base_risk < threshold:
+        reason_codes.append("base_selected_risk_below_guard_threshold")
+        return base_action, reason_codes
+    reason_codes.append("base_selected_large_regret_risk_above_threshold")
+    rows_by_action = {str(row.get("action") or ""): row for row in group_rows}
+    no_trade = rows_by_action.get("NO_TRADE")
+    if mode == "high_risk_hts_to_sbc_downgrade":
+        if _action_family(base_action) == "HOLD_TO_SETTLEMENT":
+            downgrade_action = f"BUY_{_side_from_action(base_action)}_SELL_BEFORE_CLOSE"
+            downgrade = rows_by_action.get(downgrade_action)
+            if downgrade is not None:
+                reason_codes.append("high_risk_hts_downgraded_to_same_side_sbc")
+                return downgrade_action, reason_codes
+    elif mode == "high_risk_trade_to_no_trade_when_edge_weak":
+        if no_trade is not None and margin <= float(profile["edge_weak_margin"]):
+            reason_codes.append("high_risk_weak_edge_trade_shifted_to_no_trade")
+            return "NO_TRADE", reason_codes
+    elif mode == "top2_low_risk_close_margin_substitution":
+        second_risk = float(second.get("o_large_regret_risk_score") or 0.0)
+        if (
+            margin <= float(profile["close_margin"])
+            and second_risk + float(profile["min_risk_delta"]) < base_risk
+        ):
+            reason_codes.append("top2_lower_risk_close_margin_substitution")
+            return str(second.get("action") or base_action), reason_codes
+    elif mode == "p_up_safe_large_regret_guard":
+        safe_rows = [
+            row
+            for row in group_rows
+            if not _p_up_disagrees_with_action(row)
+            and float(row.get("o_large_regret_risk_score") or 0.0) < base_risk
+        ]
+        if safe_rows:
+            selected = max(
+                safe_rows,
+                key=lambda row: float(row.get("o_base_model_predicted_score") or 0.0),
+            )
+            reason_codes.append("p_up_safe_lower_risk_substitution")
+            return str(selected.get("action") or base_action), reason_codes
+        if no_trade is not None:
+            reason_codes.append("p_up_safe_guard_fallback_to_no_trade")
+            return "NO_TRADE", reason_codes
+    reason_codes.append("no_guard_substitution_available")
+    return base_action, reason_codes
+
+
+def _p_up_disagrees_with_action(row: dict[str, Any]) -> bool:
+    action = str(row.get("action") or "")
+    p_up = _optional_float(row.get("p_up"))
+    if p_up is None:
+        return False
+    return ("BUY_UP" in action and p_up < 0.50) or (
+        "BUY_DOWN" in action and p_up > 0.50
+    )
+
+
+def _selective_action_guard_candidate_row(
+    *,
+    profile: dict[str, Any],
+    metrics: dict[str, dict[str, Any]],
+    shadow_p_up: dict[str, Any],
+    validation_p_up: dict[str, Any],
+    base_shadow_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    shadow_summary = _feature_set_selection_metric_summary(
+        metrics=metrics["train_shadow"],
+        p_up_summary=shadow_p_up,
+    )
+    validation_summary = _feature_set_selection_metric_summary(
+        metrics=metrics["validation"],
+        p_up_summary=validation_p_up,
+    )
+    reason_codes = []
+    if float(shadow_summary["selected_return_sum"]) <= 0.0:
+        reason_codes.append("shadow_selected_return_not_positive")
+    if int(shadow_summary["high_score_support_count"]) < O_MIN_HIGH_SCORE_SUPPORT_COUNT:
+        reason_codes.append("shadow_high_score_support_below_source_gate_threshold")
+    if float(shadow_summary["high_score_return_mean"]) <= 0.0:
+        reason_codes.append("shadow_high_score_return_mean_not_positive")
+    if float(shadow_summary["high_score_return_sum"]) <= 0.0:
+        reason_codes.append("shadow_high_score_return_sum_not_positive")
+    if (
+        float(shadow_summary["p_up_disagreement_rate"])
+        > O_MAX_P_UP_ACTION_DISAGREEMENT_RATE
+    ):
+        reason_codes.append("shadow_p_up_hard_gate_failed")
+    if float(shadow_summary["top1_hit_rate"]) < O_MIN_TOP1_HIT_RATE:
+        reason_codes.append("shadow_top1_quality_gate_failed")
+    if not _action_family_selected_returns_not_negative(metrics["train_shadow"]):
+        reason_codes.append("shadow_action_family_selected_return_negative")
+    guard_candidate_name = (
+        f"{profile['guard_mode']}__risk_{float(profile['risk_threshold']):.8f}"
+        f"__penalty_{float(profile['risk_penalty_weight']):.4f}"
+    )
+    return {
+        "guard_candidate_name": guard_candidate_name,
+        "guard_mode": profile["guard_mode"],
+        "guard_profile": dict(profile),
+        "uses_validation_labels_for_guard_selection": False,
+        "selection_metric_source": "shadow_split_only",
+        "shadow_selection_metrics": shadow_summary,
+        "validation_metrics_report_only": validation_summary,
+        "shadow_mean_regret_delta_vs_base": (
+            float(shadow_summary["mean_regret"])
+            - float(base_shadow_metrics["mean_regret"])
+        ),
+        "shadow_guard_selection_passed": not reason_codes,
+        "shadow_selection_reason_codes": sorted(set(reason_codes)),
+    }
+
+
+def _selective_guard_sort_key(row: dict[str, Any]) -> tuple[float, ...]:
+    metrics = row["shadow_selection_metrics"]
+    return (
+        float(metrics["mean_regret"]),
+        float(metrics["top1_miss_regret_sum"]),
+        float(metrics["largest_regret_value"]),
+        -float(metrics["selected_return_sum"]),
+        -float(metrics["high_score_return_sum"]),
+        float(metrics["p_up_disagreement_rate"]),
+    )
+
+
+def _selective_guard_fallback_sort_key(row: dict[str, Any]) -> tuple[float, ...]:
+    metrics = row["shadow_selection_metrics"]
+    support_deficit = max(
+        0,
+        O_MIN_HIGH_SCORE_SUPPORT_COUNT - int(metrics["high_score_support_count"]),
+    )
+    return (
+        float(support_deficit),
+        float(metrics["p_up_disagreement_rate"]),
+        float(metrics["mean_regret"]),
+        -float(metrics["selected_return_sum"]),
+        -float(metrics["high_score_return_sum"]),
+    )
+
+
+def _selective_guard_change_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    selected_rows = [
+        row for row in rows if bool(row.get("o_selective_guard_final_action_for_row"))
+    ]
+    changed_rows = [
+        row
+        for row in selected_rows
+        if bool(row.get("o_selective_guard_changed_group_action"))
+    ]
+    by_split = Counter(str(row.get("split") or "unknown") for row in changed_rows)
+    by_reason = Counter(
+        reason
+        for row in changed_rows
+        for reason in row.get("o_selective_guard_reason_codes", [])
+    )
+    return {
+        "selected_decision_count": len(selected_rows),
+        "changed_decision_count": len(changed_rows),
+        "changed_decision_count_by_split": dict(sorted(by_split.items())),
+        "changed_reason_code_counts": dict(sorted(by_reason.items())),
+        "changed_decision_examples": [
+            {
+                "decision_group_id": row.get("decision_group_id"),
+                "market_id": row.get("market_id"),
+                "decision_ts": row.get("decision_ts"),
+                "split": row.get("split"),
+                "pre_guard_selected_action": row.get(
+                    "o_selective_guard_pre_guard_selected_action"
+                ),
+                "final_selected_action": row.get(
+                    "o_selective_guard_final_selected_action"
+                ),
+                "risk_score": row.get("o_large_regret_risk_score"),
+                "reason_codes": row.get("o_selective_guard_reason_codes", []),
+            }
+            for row in changed_rows[:20]
+        ],
+    }
+
+
+def _risk_score_summary_by_split(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        split: _risk_value_summary(
+            [
+                float(row.get("o_large_regret_risk_score") or 0.0)
+                for row in rows
+                if row.get("split") == split
+            ]
+        )
+        for split in ("shadow", "validation")
+    } | {
+        "all": _risk_value_summary(
+            [float(row.get("o_large_regret_risk_score") or 0.0) for row in rows]
+        )
+    }
+
+
+def _risk_value_summary(values: list[float]) -> dict[str, Any]:
+    quantiles = _p_edge_quantiles(values)
+    return {
+        "count": len(values),
+        "mean": statistics.mean(values) if values else 0.0,
+        "min": min(values, default=0.0),
+        "max": max(values, default=0.0),
+        "q25": quantiles["q25"],
+        "median": quantiles["median"],
+        "q75": quantiles["q75"],
+        "positive_count": sum(1 for value in values if value > 0.0),
+    }
 
 
 def _full_grid_available(rows: list[dict[str, Any]]) -> bool:
@@ -2618,6 +3364,11 @@ def _shadow_high_score_profitability_threshold(
         *extra_thresholds,
         *(float(row["score"]) for row in shadow_selected_rows),
     }
+    candidate_thresholds = _bounded_shadow_high_score_threshold_candidates(
+        candidate_thresholds,
+        required_thresholds={current_threshold, fallback_threshold, *extra_thresholds},
+        max_count=O_MAX_SHADOW_HIGH_SCORE_THRESHOLD_CANDIDATES,
+    )
     candidate_rows = [
         _high_score_threshold_profile_candidate_row(
             ranking_rows=ranking_rows,
@@ -2648,17 +3399,40 @@ def _shadow_high_score_profitability_threshold(
     return float(selected["threshold"])
 
 
+def _bounded_shadow_high_score_threshold_candidates(
+    candidate_thresholds: set[float],
+    *,
+    required_thresholds: set[float],
+    max_count: int,
+) -> set[float]:
+    if len(candidate_thresholds) <= max_count:
+        return candidate_thresholds
+    selected = set(required_thresholds)
+    remaining = sorted(candidate_thresholds.difference(selected))
+    slots = max(0, max_count - len(selected))
+    if slots <= 0:
+        return set(sorted(selected)[:max_count])
+    if len(remaining) <= slots:
+        selected.update(remaining)
+        return selected
+    last_index = len(remaining) - 1
+    selected_indices = {
+        round(index * last_index / (slots - 1)) for index in range(slots)
+    } if slots > 1 else {last_index}
+    selected.update(remaining[index] for index in sorted(selected_indices))
+    return selected
+
+
 def _high_score_threshold_profile_candidate_row(
     *,
     ranking_rows: list[dict[str, Any]],
     profile_name: str,
     threshold: float,
 ) -> dict[str, Any]:
-    metrics = _split_metric_views(
+    metrics = _high_score_threshold_lightweight_metrics(
         ranking_rows,
-        O_MODEL_PREDICTED_VARIANT,
-        float(threshold),
-    )["train_shadow"]
+        threshold=float(threshold),
+    )
     return {
         "profile_name": profile_name,
         "threshold": float(threshold),
@@ -2688,6 +3462,49 @@ def _high_score_threshold_profile_candidate_row(
             float(metrics["high_score_realized_return_mean"]) > 0.0
             and float(metrics["high_score_realized_return_sum"]) > 0.0
         ),
+    }
+
+
+def _high_score_threshold_lightweight_metrics(
+    ranking_rows: list[dict[str, Any]],
+    *,
+    threshold: float,
+) -> dict[str, Any]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in ranking_rows:
+        if row.get("split") == "shadow":
+            groups[str(row["decision_group_id"])].append(row)
+    selected_returns = []
+    oracle_returns = []
+    high_score_returns = []
+    for group_rows in groups.values():
+        selected = max(
+            group_rows,
+            key=lambda row: float(row["variant_scores"][O_MODEL_PREDICTED_VARIANT]),
+        )
+        oracle = max(group_rows, key=lambda row: float(row["realized_replay_return"]))
+        selected_return = float(selected["realized_replay_return"])
+        selected_returns.append(selected_return)
+        oracle_returns.append(float(oracle["realized_replay_return"]))
+        if float(selected["variant_scores"][O_MODEL_PREDICTED_VARIANT]) >= threshold:
+            high_score_returns.append(selected_return)
+    regrets = [
+        oracle_return - selected_return
+        for oracle_return, selected_return in zip(
+            oracle_returns,
+            selected_returns,
+            strict=True,
+        )
+    ]
+    return {
+        "decision_group_count": len(groups),
+        "selected_action_realized_replay_return_sum": sum(selected_returns),
+        "mean_regret": statistics.mean(regrets) if regrets else 0.0,
+        "high_score_support_count": len(high_score_returns),
+        "high_score_realized_return_mean": statistics.mean(high_score_returns)
+        if high_score_returns
+        else 0.0,
+        "high_score_realized_return_sum": sum(high_score_returns),
     }
 
 
@@ -4208,6 +5025,13 @@ def _lightweight_shadow_raw_model_weight(
         "raw_weight_max_shadow_p_up_disagreement_rate": (
             base_ranking_correction["shadow_p_up_selection_max_disagreement_rate"]
         ),
+        "raw_weight_candidate_grid_total_count": 1,
+        "raw_weight_candidate_grid_evaluated_count": 1,
+        "raw_weight_candidate_grid_capped": False,
+        "raw_weight_candidate_grid_cap": O_MAX_SHADOW_RAW_WEIGHT_SEARCH_CANDIDATES,
+        "raw_weight_candidate_grid_cap_source": (
+            "deterministic_shadow_only_search_runtime_bound"
+        ),
         "raw_weight_p_up_safety_buffer": max(
             0.0,
             float(
@@ -4246,6 +5070,24 @@ def _derive_shadow_raw_model_weight(
     candidate_hts_reliability_penalties = _shadow_hts_p_up_reliability_penalty_candidates(
         base_ranking_correction["p_up_edge_quantiles"]
     )
+    raw_candidate_grid = [
+        (
+            weight,
+            penalty,
+            reversal_threshold,
+            reversal_penalty,
+            hts_reliability_penalty,
+        )
+        for weight in candidate_weights
+        for penalty in candidate_penalties
+        for reversal_threshold in candidate_reversal_thresholds
+        for reversal_penalty in candidate_reversal_penalties
+        for hts_reliability_penalty in candidate_hts_reliability_penalties
+    ]
+    bounded_raw_candidate_grid = _bounded_shadow_raw_weight_candidate_grid(
+        raw_candidate_grid,
+        max_count=O_MAX_SHADOW_RAW_WEIGHT_SEARCH_CANDIDATES,
+    )
     max_shadow_p_up_disagreement_rate = float(
         base_ranking_correction["shadow_p_up_selection_max_disagreement_rate"]
     )
@@ -4253,11 +5095,13 @@ def _derive_shadow_raw_model_weight(
         base_ranking_correction["p_up_safety_target_disagreement_rate"]
     )
     candidate_rows = []
-    for weight in candidate_weights:
-        for penalty in candidate_penalties:
-            for reversal_threshold in candidate_reversal_thresholds:
-                for reversal_penalty in candidate_reversal_penalties:
-                    for hts_reliability_penalty in candidate_hts_reliability_penalties:
+    for (
+        weight,
+        penalty,
+        reversal_threshold,
+        reversal_penalty,
+        hts_reliability_penalty,
+    ) in bounded_raw_candidate_grid:
                         candidate_config = {
                             **base_ranking_correction,
                             "group_normalized_raw_model_weight": weight,
@@ -4527,9 +5371,35 @@ def _derive_shadow_raw_model_weight(
             O_MAX_P_UP_ACTION_DISAGREEMENT_RATE - max_shadow_p_up_disagreement_rate
         ),
         "raw_weight_candidate_rows": candidate_rows,
+        "raw_weight_candidate_grid_total_count": len(raw_candidate_grid),
+        "raw_weight_candidate_grid_evaluated_count": len(
+            bounded_raw_candidate_grid
+        ),
+        "raw_weight_candidate_grid_capped": (
+            len(raw_candidate_grid) > len(bounded_raw_candidate_grid)
+        ),
+        "raw_weight_candidate_grid_cap": O_MAX_SHADOW_RAW_WEIGHT_SEARCH_CANDIDATES,
+        "raw_weight_candidate_grid_cap_source": (
+            "deterministic_shadow_only_search_runtime_bound"
+        ),
         "selected_raw_weight_candidate": selected,
         "weight_enabled": weight > 0.0,
     }
+
+
+def _bounded_shadow_raw_weight_candidate_grid(
+    candidate_grid: list[tuple[float, float, float, float, float]],
+    *,
+    max_count: int,
+) -> list[tuple[float, float, float, float, float]]:
+    if len(candidate_grid) <= max_count:
+        return candidate_grid
+    last_index = len(candidate_grid) - 1
+    selected_indices = {
+        round(index * last_index / (max_count - 1)) for index in range(max_count)
+    }
+    selected_indices.update({0, last_index})
+    return [candidate_grid[index] for index in sorted(selected_indices)]
 
 
 def _shadow_raw_weight_candidates(
@@ -5542,6 +6412,31 @@ def _ranking_report(
         "deployable_model_score_available": model_training_summary[
             "deployable_model_score_available"
         ],
+        "final_scoring_source": model_training_summary["final_scoring_source"],
+        "base_action_value_signal_preserved": model_training_summary[
+            "base_action_value_signal_preserved"
+        ],
+        "large_regret_risk_model_enabled": model_training_summary[
+            "large_regret_risk_model_enabled"
+        ],
+        "large_regret_risk_model_role": model_training_summary[
+            "large_regret_risk_model_role"
+        ],
+        "risk_head_replaces_action_signal": model_training_summary[
+            "risk_head_replaces_action_signal"
+        ],
+        "selective_action_guard_enabled": model_training_summary[
+            "selective_action_guard_enabled"
+        ],
+        "selected_guard_mode": model_training_summary[
+            "selective_action_guard_report"
+        ]["selected_guard_mode"],
+        "large_regret_risk_model_config_hash": model_training_summary[
+            "large_regret_risk_model_report"
+        ]["risk_model_config_hash"],
+        "selective_action_guard_selection_config_hash": model_training_summary[
+            "selective_action_guard_report"
+        ]["selection_config_hash"],
         "o_model_training_summary": model_training_summary,
         "selected_feature_set_name": model_training_summary[
             "selected_feature_set_name"
@@ -5619,6 +6514,13 @@ def _leakage_report(
     model_overlap = sorted(
         set(selected_model_inputs).intersection(O_FORBIDDEN_MODEL_INPUT_FIELDS)
     )
+    risk_overlap = sorted(
+        set(
+            model_training_summary["large_regret_risk_model_report"][
+                "model_input_fields_decision_time_only"
+            ]
+        ).intersection(O_FORBIDDEN_MODEL_INPUT_FIELDS)
+    )
     label_overlap = sorted(
         set(O_TRAINING_LABEL_FIELDS).intersection(O_FORBIDDEN_MODEL_INPUT_FIELDS)
     )
@@ -5681,6 +6583,31 @@ def _leakage_report(
         "model_training_summary": _compact_o_model_training_summary(
             model_training_summary
         ),
+        "large_regret_risk_model_input_fields_decision_time_only": (
+            model_training_summary["large_regret_risk_model_report"][
+                "model_input_fields_decision_time_only"
+            ]
+        ),
+        "large_regret_risk_model_forbidden_field_overlap": (
+            model_training_summary["large_regret_risk_model_report"][
+                "forbidden_fields_used_for_risk_model_inputs"
+            ]
+        ),
+        "large_regret_risk_model_uses_validation_labels_for_fitting": (
+            model_training_summary["large_regret_risk_model_report"][
+                "uses_validation_labels_for_fitting"
+            ]
+        ),
+        "selective_action_guard_uses_validation_labels_for_selection": (
+            model_training_summary["selective_action_guard_report"][
+                "uses_validation_labels_for_guard_selection"
+            ]
+        ),
+        "selective_action_guard_selection_source": (
+            model_training_summary["selective_action_guard_report"][
+                "guard_selection_source"
+            ]
+        ),
         "label_diagnostic_score_fields": [
             "replay_aligned_executable_label_target",
             "label_family_prior",
@@ -5698,7 +6625,9 @@ def _leakage_report(
         "expanded_decision_time_feature_provenance_passed": (
             feature_provenance_passed
         ),
-        "leakage_audit_passed": not model_overlap and feature_provenance_passed,
+        "leakage_audit_passed": (
+            not model_overlap and not risk_overlap and feature_provenance_passed
+        ),
         "future_replay_outcomes_used_as_model_inputs": False,
         "future_replay_outcomes_used_as_training_labels": True,
         "future_replay_outcomes_used_as_report_only_evaluation": True,
@@ -5791,14 +6720,77 @@ def _joint_feature_correction_selection_report(
     return report
 
 
+def _large_regret_risk_model_report(
+    *,
+    config: PolymarketOReplayAlignedSourceRankingConfig,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    model_training_summary: dict[str, Any],
+) -> dict[str, Any]:
+    del config
+    risk_report = dict(model_training_summary["large_regret_risk_model_report"])
+    report = {
+        **risk_report,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "source_lineage": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "source_model_candidate_eligible": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    report["o_large_regret_risk_model_report_id"] = canonical_json_sha256(report)
+    return report
+
+
+def _selective_action_guard_report(
+    *,
+    config: PolymarketOReplayAlignedSourceRankingConfig,
+    m2_report_path: Path,
+    m2_report: dict[str, Any],
+    model_training_summary: dict[str, Any],
+) -> dict[str, Any]:
+    del config
+    guard_report = dict(model_training_summary["selective_action_guard_report"])
+    report = {
+        **guard_report,
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "candidate_name": O_MODEL_PREDICTED_VARIANT,
+        "source_lineage": REPLAY_ALIGNED_SOURCE_RANKING_CANDIDATE_NAME,
+        "m2_candidate_report_path": str(m2_report_path),
+        "m2_candidate_report_sha256": _sha256_file(m2_report_path),
+        "m2_candidate_report_id": m2_report.get(
+            "m2_stateful_replay_parity_candidate_report_id"
+        ),
+        "source_model_candidate_eligible": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    report["o_selective_action_guard_report_id"] = canonical_json_sha256(report)
+    return report
+
+
 def _compact_o_model_training_summary(
     model_training_summary: dict[str, Any],
 ) -> dict[str, Any]:
     """Keep repeated reports small; full training evidence lives in ranking report."""
     correction_config = model_training_summary["ranking_correction_config"]
+    risk_report = model_training_summary["large_regret_risk_model_report"]
+    guard_report = model_training_summary["selective_action_guard_report"]
     return {
         "model_candidate_name": model_training_summary["model_candidate_name"],
         "ranking_score_source": model_training_summary["ranking_score_source"],
+        "final_scoring_source": model_training_summary["final_scoring_source"],
         "deployable_model_score_available": model_training_summary[
             "deployable_model_score_available"
         ],
@@ -5839,6 +6831,27 @@ def _compact_o_model_training_summary(
         ],
         "feature_set_selection_report_available": True,
         "joint_feature_correction_selection_report_available": True,
+        "large_regret_risk_model_report_available": True,
+        "selective_action_guard_report_available": True,
+        "large_regret_risk_model_config_hash": risk_report[
+            "risk_model_config_hash"
+        ],
+        "large_regret_risk_model_input_schema_hash": risk_report[
+            "risk_model_input_schema_hash"
+        ],
+        "selective_action_guard_selection_config_hash": guard_report[
+            "selection_config_hash"
+        ],
+        "selective_action_guard_selection_source": guard_report[
+            "guard_selection_source"
+        ],
+        "selected_guard_mode": guard_report["selected_guard_mode"],
+        "base_action_value_signal_preserved": model_training_summary[
+            "base_action_value_signal_preserved"
+        ],
+        "risk_head_replaces_action_signal": model_training_summary[
+            "risk_head_replaces_action_signal"
+        ],
         "full_training_summary_report_path": "o_source_ranking_objective_report.json",
     }
 
@@ -6198,6 +7211,28 @@ def _source_model_eligibility_gate_report(
         ),
         "ranking_score_source": "model_predicted_score",
         "deployable_model_score_available": deployable,
+        "final_scoring_source": model_training_summary["final_scoring_source"],
+        "large_regret_risk_model_enabled": model_training_summary[
+            "large_regret_risk_model_enabled"
+        ],
+        "large_regret_risk_model_config_hash": model_training_summary[
+            "large_regret_risk_model_report"
+        ]["risk_model_config_hash"],
+        "selective_action_guard_enabled": model_training_summary[
+            "selective_action_guard_enabled"
+        ],
+        "selected_guard_mode": model_training_summary[
+            "selective_action_guard_report"
+        ]["selected_guard_mode"],
+        "selective_action_guard_selection_config_hash": model_training_summary[
+            "selective_action_guard_report"
+        ]["selection_config_hash"],
+        "base_action_value_signal_preserved": model_training_summary[
+            "base_action_value_signal_preserved"
+        ],
+        "risk_head_replaces_action_signal": model_training_summary[
+            "risk_head_replaces_action_signal"
+        ],
         "correction_constants_source": model_training_summary[
             "correction_constants_source"
         ],
@@ -6416,6 +7451,22 @@ def _freeze_readiness_report(
         ),
         "freeze_ready": freeze_ready,
         "ranking_score_source": "model_predicted_score",
+        "final_scoring_source": model_training_summary["final_scoring_source"],
+        "large_regret_risk_model_config_hash": model_training_summary[
+            "large_regret_risk_model_report"
+        ]["risk_model_config_hash"],
+        "selective_action_guard_selection_config_hash": model_training_summary[
+            "selective_action_guard_report"
+        ]["selection_config_hash"],
+        "selected_guard_mode": model_training_summary[
+            "selective_action_guard_report"
+        ]["selected_guard_mode"],
+        "base_action_value_signal_preserved": model_training_summary[
+            "base_action_value_signal_preserved"
+        ],
+        "risk_head_replaces_action_signal": model_training_summary[
+            "risk_head_replaces_action_signal"
+        ],
         "correction_constants_source": model_training_summary[
             "correction_constants_source"
         ],
@@ -8495,6 +9546,28 @@ def _compact_ranking_row(row: dict[str, Any], variant: str) -> dict[str, Any]:
             "o_group_normalized_raw_model_score"
         ),
         "o_model_predicted_score": row.get("o_model_predicted_score"),
+        "o_base_model_predicted_score": row.get("o_base_model_predicted_score"),
+        "o_large_regret_risk_score": row.get("o_large_regret_risk_score"),
+        "o_large_regret_if_selected_target": row.get(
+            "o_large_regret_if_selected_target"
+        ),
+        "o_selective_action_guard_mode": row.get("o_selective_action_guard_mode"),
+        "o_selective_guard_pre_guard_selected_action": row.get(
+            "o_selective_guard_pre_guard_selected_action"
+        ),
+        "o_selective_guard_final_selected_action": row.get(
+            "o_selective_guard_final_selected_action"
+        ),
+        "o_selective_guard_final_action_for_row": row.get(
+            "o_selective_guard_final_action_for_row"
+        ),
+        "o_selective_guard_changed_group_action": row.get(
+            "o_selective_guard_changed_group_action"
+        ),
+        "o_selective_guard_reason_codes": row.get(
+            "o_selective_guard_reason_codes",
+            [],
+        ),
         "o_model_score_components": row.get("o_model_score_components"),
         "hts_p_up_reliability_buckets": row.get("hts_p_up_reliability_buckets"),
         "decision_time_feature_row_available": row.get(
@@ -8832,6 +9905,81 @@ def _joint_feature_correction_selection_markdown(report: dict[str, Any]) -> str:
                 shadow_pup=float(shadow["p_up_disagreement_rate"]),
                 validation_top1=float(validation["top1_hit_rate"]),
                 validation_regret=float(validation["mean_regret"]),
+                reasons=", ".join(row["shadow_selection_reason_codes"]),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _large_regret_risk_model_markdown(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O Large-Regret Risk Model",
+            "",
+            f"- risk_model_available: `{str(report['risk_model_available']).lower()}`",
+            "- risk_training_split_source: "
+            f"`{report['risk_training_split_source']}`",
+            "- uses_validation_labels_for_fitting: "
+            f"`{str(report['uses_validation_labels_for_fitting']).lower()}`",
+            "- risk_head_replaces_action_signal: "
+            f"`{str(report['risk_head_replaces_action_signal']).lower()}`",
+            "- shadow_training_row_count: "
+            f"`{report['shadow_training_row_count']}`",
+            "- risk_model_config_hash: "
+            f"`{report['risk_model_config_hash']}`",
+            "- #146_start_allowed: "
+            f"`{str(report['#146_start_allowed']).lower()}`",
+            "- #134_resume_allowed: "
+            f"`{str(report['#134_resume_allowed']).lower()}`",
+            "",
+        ]
+    )
+
+
+def _selective_action_guard_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# O Selective Action Guard",
+        "",
+        f"- selected_guard_mode: `{report['selected_guard_mode']}`",
+        "- guard_selection_source: "
+        f"`{report['guard_selection_source']}`",
+        "- uses_validation_labels_for_guard_selection: "
+        f"`{str(report['uses_validation_labels_for_guard_selection']).lower()}`",
+        "- base_action_value_signal_preserved: "
+        f"`{str(report['base_action_value_signal_preserved']).lower()}`",
+        "- risk_head_replaces_action_signal: "
+        f"`{str(report['risk_head_replaces_action_signal']).lower()}`",
+        "- selected_shadow_mean_regret: "
+        f"`{report['selected_shadow_metrics']['mean_regret']}`",
+        "- selected_validation_mean_regret_report_only: "
+        f"`{report['selected_validation_metrics_report_only']['mean_regret']}`",
+        "- changed_decision_count: "
+        f"`{report['selected_guard_changes']['changed_decision_count']}`",
+        "- #146_start_allowed: "
+        f"`{str(report['#146_start_allowed']).lower()}`",
+        "- #134_resume_allowed: "
+        f"`{str(report['#134_resume_allowed']).lower()}`",
+        "",
+        "| guard_candidate | selected | shadow_top1 | shadow_mean_regret | shadow_return | shadow_high_score_sum | shadow_p_up_disagreement | validation_mean_regret_report_only | reasons |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in report["candidate_guard_rows"][:50]:
+        shadow = row["shadow_selection_metrics"]
+        validation = row["validation_metrics_report_only"]
+        lines.append(
+            "| {name} | {selected} | {top1:.6f} | {regret:.6f} | {ret:.6f} | {hs:.6f} | {pup:.6f} | {val_regret:.6f} | {reasons} |".format(
+                name=row["guard_candidate_name"],
+                selected=str(
+                    row["guard_candidate_name"]
+                    == report["selected_guard_candidate_name"]
+                ).lower(),
+                top1=float(shadow["top1_hit_rate"]),
+                regret=float(shadow["mean_regret"]),
+                ret=float(shadow["selected_return_sum"]),
+                hs=float(shadow["high_score_return_sum"]),
+                pup=float(shadow["p_up_disagreement_rate"]),
+                val_regret=float(validation["mean_regret"]),
                 reasons=", ".join(row["shadow_selection_reason_codes"]),
             )
         )

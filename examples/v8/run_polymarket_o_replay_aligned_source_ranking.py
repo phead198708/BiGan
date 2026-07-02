@@ -39,6 +39,8 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
     comparison = result.candidate_comparison_report
     gate = result.source_model_eligibility_gate_report
     freeze = result.freeze_readiness_report
+    risk = result.large_regret_risk_model_report
+    guard = result.selective_action_guard_report
     return {
         "run_id": run_id,
         "run_dir": str(result.run_dir),
@@ -56,6 +58,12 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
             "selected_high_score_threshold_profile_name"
         ],
         "selected_joint_candidate_name": ranking["selected_joint_candidate_name"],
+        "final_scoring_source": ranking["final_scoring_source"],
+        "selected_guard_mode": guard["selected_guard_mode"],
+        "large_regret_risk_model_config_hash": risk["risk_model_config_hash"],
+        "selective_action_guard_selection_config_hash": guard[
+            "selection_config_hash"
+        ],
         "top1_hit_rate": ranking["top1_realized_best_action_hit_rate"],
         "top2_hit_rate": ranking["top2_realized_best_action_hit_rate"],
         "top3_hit_rate": ranking["top3_realized_best_action_hit_rate"],
@@ -96,6 +104,12 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         ),
         "joint_feature_correction_selection_report_path": str(
             result.artifact_paths["joint_feature_correction_selection_report"]
+        ),
+        "large_regret_risk_model_report_path": str(
+            result.artifact_paths["large_regret_risk_model_report"]
+        ),
+        "selective_action_guard_report_path": str(
+            result.artifact_paths["selective_action_guard_report"]
         ),
         "manifest_path": str(result.artifact_paths["manifest"]),
     }

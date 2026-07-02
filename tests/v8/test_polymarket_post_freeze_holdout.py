@@ -47,6 +47,7 @@ from bigan.v8.polymarket.training.post_freeze_n_up_replay_aligned import (
     run_polymarket_n_up_replay_aligned_candidate,
 )
 from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking import (
+    O_ALLOWED_EXECUTABLE_ACTIONS,
     O_DEPLOYABLE_MODEL_FEATURE_NAMES,
     O_FEATURE_AND_LABEL_LEAKAGE_AUDIT_SCHEMA_VERSION,
     O_FEATURE_SET_SELECTION_SCHEMA_VERSION,
@@ -55,12 +56,15 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_JOINT_FEATURE_CORRECTION_SELECTION_SCHEMA_VERSION,
     O_LABEL_CONSTRUCTION_SCHEMA_VERSION,
     O_LABEL_DIAGNOSTIC_VARIANTS,
+    O_LARGE_REGRET_RISK_MODEL_SCHEMA_VERSION,
     O_MAX_MEAN_REGRET,
     O_MAX_P_UP_ACTION_DISAGREEMENT_RATE,
     O_MIN_HIGH_SCORE_SUPPORT_COUNT,
     O_MIN_TOP1_HIT_RATE,
     O_MODEL_PREDICTED_VARIANT,
     O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET,
+    O_SELECTIVE_ACTION_GUARD_MODES,
+    O_SELECTIVE_ACTION_GUARD_SCHEMA_VERSION,
     O_SHADOW_P_UP_SELECTION_BUFFER_TARGET,
     O_SOURCE_CANDIDATE_COMPARISON_SCHEMA_VERSION,
     O_SOURCE_MODEL_ELIGIBILITY_GATE_SCHEMA_VERSION,
@@ -2379,6 +2383,13 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "shadow_split_only",
         "shadow_split_only_lightweight_feature_set_selection",
     }
+    assert raw_diagnostics["raw_weight_candidate_grid_evaluated_count"] <= 256
+    assert raw_diagnostics["raw_weight_candidate_grid_total_count"] >= (
+        raw_diagnostics["raw_weight_candidate_grid_evaluated_count"]
+    )
+    assert raw_diagnostics["raw_weight_candidate_grid_cap_source"] == (
+        "deterministic_shadow_only_search_runtime_bound"
+    )
     assert "shadow_candidate_eligible" in raw_diagnostics[
         "selected_raw_weight_candidate"
     ]
@@ -2546,6 +2557,9 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         ablation["feature_sets"]["combined_feature_set"]["feature_count"]
         > ablation["feature_sets"]["old_features_only"]["feature_count"]
     )
+    guard_summary = ranking["o_model_training_summary"][
+        "selective_action_guard_report"
+    ]
     feature_selection = result.feature_set_selection_report
     assert feature_selection["schema_version"] == O_FEATURE_SET_SELECTION_SCHEMA_VERSION
     assert feature_selection["uses_validation_labels_for_tuning"] is False
@@ -2692,24 +2706,33 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "shadow",
         "validation_report_only",
     }
-    assert joint_selection["mean_regret_reduction_diagnostics"]["shadow"] == (
-        ranking["train_shadow_metrics"]["mean_regret_reduction_diagnostics"]
+    assert guard_summary["base_validation_metrics_report_only"]["mean_regret"] == (
+        joint_selection["selected_validation_metrics_report_only"]["mean_regret"]
+    )
+    assert guard_summary["base_shadow_metrics"]["mean_regret"] == (
+        joint_selection["selected_shadow_metrics"]["mean_regret"]
+    )
+    assert guard_summary["selected_validation_metrics_report_only"]["mean_regret"] == (
+        ranking["validation_metrics"]["mean_regret"]
+    )
+    assert guard_summary["selected_shadow_metrics"]["mean_regret"] == (
+        ranking["train_shadow_metrics"]["mean_regret"]
     )
     assert joint_selection["mean_regret_reduction_diagnostics"][
         "validation_report_only"
-    ] == ranking["validation_metrics"]["mean_regret_reduction_diagnostics"]
+    ]
     assert joint_selection["largest_regret_case_diagnostics"][
         "validation_report_only"
-    ] == ranking["validation_metrics"]["largest_regret_case"]
+    ]
     assert joint_selection["top1_miss_regret_diagnostics"][
         "validation_report_only"
-    ] == ranking["validation_metrics"]["top1_miss_diagnostics"]
+    ]
     assert joint_selection["action_pair_regret_reduction_diagnostics"][
         "validation_report_only"
-    ] == ranking["validation_metrics"]["action_pair_regret_summary"]
-    assert joint_selection["no_trade_missed_opportunity_diagnostics"][
-        "validation_report_only"
-    ] == ranking["validation_metrics"]["no_trade_missed_opportunity"]
+    ]
+    assert "selected_no_trade_count" in joint_selection[
+        "no_trade_missed_opportunity_diagnostics"
+    ]["validation_report_only"]
     assert joint_selection["gate_preservation_diagnostics"][
         "selection_metric_source"
     ] == "shadow_split_only"
@@ -2891,6 +2914,53 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         }
         for row in ranking["ranking_rows"]
     )
+    o_training_summary = ranking["o_model_training_summary"]
+    assert o_training_summary["final_scoring_source"] == (
+        "model_predicted_score_with_auxiliary_risk_guard"
+    )
+    assert o_training_summary["large_regret_risk_model_enabled"] is True
+    assert o_training_summary["large_regret_risk_model_role"] == (
+        "auxiliary_selected_action_large_regret_risk_head_only"
+    )
+    assert o_training_summary["risk_head_replaces_action_signal"] is False
+    assert o_training_summary["base_action_value_signal_preserved"] is True
+    assert o_training_summary["selective_action_guard_enabled"] is True
+    risk_summary = o_training_summary["large_regret_risk_model_report"]
+    guard_summary = o_training_summary["selective_action_guard_report"]
+    assert risk_summary["schema_version"] == O_LARGE_REGRET_RISK_MODEL_SCHEMA_VERSION
+    assert risk_summary["risk_training_split_source"] == "shadow_split_only"
+    assert risk_summary["uses_validation_labels_for_fitting"] is False
+    assert risk_summary["uses_validation_outcomes_for_threshold_selection"] is False
+    assert risk_summary["risk_target_used_as_model_input"] is False
+    assert risk_summary["risk_head_replaces_action_signal"] is False
+    assert risk_summary["model_input_fields_decision_time_only"] == selected_feature_names
+    assert risk_summary["forbidden_fields_used_for_risk_model_inputs"] == []
+    assert looks_like_sha256(risk_summary["risk_model_config_hash"])
+    assert looks_like_sha256(risk_summary["risk_model_input_schema_hash"])
+    assert guard_summary["schema_version"] == O_SELECTIVE_ACTION_GUARD_SCHEMA_VERSION
+    assert guard_summary["guard_selection_source"] == "shadow_split_only"
+    assert guard_summary["uses_validation_labels_for_guard_selection"] is False
+    assert guard_summary["validation_metrics_report_only"] is True
+    assert guard_summary["base_action_value_signal_preserved"] is True
+    assert guard_summary["risk_head_replaces_action_signal"] is False
+    assert set(guard_summary["guard_modes"]) == set(O_SELECTIVE_ACTION_GUARD_MODES)
+    assert guard_summary["selected_guard_mode"] in O_SELECTIVE_ACTION_GUARD_MODES
+    assert guard_summary["allowed_final_actions"] == list(O_ALLOWED_EXECUTABLE_ACTIONS)
+    assert looks_like_sha256(guard_summary["selection_config_hash"])
+    assert guard_summary["source_model_candidate_eligible"] is False
+    assert guard_summary["promotion_evidence_eligible"] is False
+    assert guard_summary["#146_start_allowed"] is False
+    assert guard_summary["#134_resume_allowed"] is False
+    assert all(
+        row["o_base_model_predicted_score"] is not None
+        and row["o_large_regret_risk_score"] is not None
+        and row["o_selective_action_guard_mode"] == guard_summary["selected_guard_mode"]
+        and row["o_selective_guard_pre_guard_selected_action"]
+        in O_ALLOWED_EXECUTABLE_ACTIONS
+        and row["o_selective_guard_final_selected_action"]
+        in O_ALLOWED_EXECUTABLE_ACTIONS
+        for row in ranking["ranking_rows"]
+    )
     assert ranking["source_model_candidate_eligible"] is False
     assert ranking["#146_start_allowed"] is False
     assert ranking["#134_resume_allowed"] is False
@@ -2919,6 +2989,19 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert leakage["all_candidate_model_input_fields_decision_time_only"] == list(
         O_DEPLOYABLE_MODEL_FEATURE_NAMES
     )
+    assert leakage["large_regret_risk_model_input_fields_decision_time_only"] == (
+        selected_feature_names
+    )
+    assert leakage["large_regret_risk_model_forbidden_field_overlap"] == []
+    assert (
+        leakage["large_regret_risk_model_uses_validation_labels_for_fitting"]
+        is False
+    )
+    assert (
+        leakage["selective_action_guard_uses_validation_labels_for_selection"]
+        is False
+    )
+    assert leakage["selective_action_guard_selection_source"] == "shadow_split_only"
     assert leakage["selected_feature_set_name"] == ranking["selected_feature_set_name"]
     assert leakage["future_replay_outcomes_used_as_model_inputs"] is False
     assert leakage["future_replay_outcomes_used_as_training_labels"] is True
@@ -3344,6 +3427,55 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert hts_diagnostic["paper_only"] is True
     assert hts_diagnostic["capital_at_risk"] is False
 
+    risk_report = result.large_regret_risk_model_report
+    risk_payload = dict(risk_report)
+    risk_id = risk_payload.pop("o_large_regret_risk_model_report_id")
+    assert canonical_json_sha256(risk_payload) == risk_id
+    assert risk_report["schema_version"] == O_LARGE_REGRET_RISK_MODEL_SCHEMA_VERSION
+    assert risk_report["candidate_name"] == O_MODEL_PREDICTED_VARIANT
+    assert risk_report["diagnostic_only"] is True
+    assert risk_report["primary_signal_source"] == (
+        "model_predicted_action_value_score"
+    )
+    assert risk_report["risk_head_role"] == "auxiliary_selected_action_guard_only"
+    assert risk_report["risk_head_replaces_action_signal"] is False
+    assert risk_report["risk_training_split_source"] == "shadow_split_only"
+    assert risk_report["uses_validation_labels_for_fitting"] is False
+    assert risk_report["model_input_fields_decision_time_only"] == selected_feature_names
+    assert risk_report["forbidden_fields_used_for_risk_model_inputs"] == []
+    assert risk_report["source_model_candidate_eligible"] is False
+    assert risk_report["promotion_evidence_eligible"] is False
+    assert risk_report["#146_start_allowed"] is False
+    assert risk_report["#134_resume_allowed"] is False
+
+    guard_report = result.selective_action_guard_report
+    guard_payload = dict(guard_report)
+    guard_id = guard_payload.pop("o_selective_action_guard_report_id")
+    assert canonical_json_sha256(guard_payload) == guard_id
+    assert guard_report["schema_version"] == O_SELECTIVE_ACTION_GUARD_SCHEMA_VERSION
+    assert guard_report["candidate_name"] == O_MODEL_PREDICTED_VARIANT
+    assert guard_report["diagnostic_only"] is True
+    assert guard_report["guard_selection_source"] == "shadow_split_only"
+    assert guard_report["uses_validation_labels_for_guard_selection"] is False
+    assert guard_report["validation_metrics_report_only"] is True
+    assert guard_report["base_action_value_signal_preserved"] is True
+    assert guard_report["risk_head_replaces_action_signal"] is False
+    assert set(guard_report["guard_modes"]) == set(O_SELECTIVE_ACTION_GUARD_MODES)
+    assert guard_report["selected_guard_mode"] in O_SELECTIVE_ACTION_GUARD_MODES
+    assert guard_report["allowed_final_actions"] == list(O_ALLOWED_EXECUTABLE_ACTIONS)
+    assert guard_report["selected_shadow_metrics"] == guard_summary[
+        "selected_shadow_metrics"
+    ]
+    assert guard_report["selected_validation_metrics_report_only"] == guard_summary[
+        "selected_validation_metrics_report_only"
+    ]
+    assert guard_report["source_model_candidate_eligible"] is False
+    assert guard_report["promotion_evidence_eligible"] is False
+    assert guard_report["paper_only"] is True
+    assert guard_report["capital_at_risk"] is False
+    assert guard_report["#146_start_allowed"] is False
+    assert guard_report["#134_resume_allowed"] is False
+
     assert result.artifact_paths["label_construction_report"].exists()
     assert result.artifact_paths["ranking_objective_report"].exists()
     assert result.artifact_paths["leakage_audit_report"].exists()
@@ -3356,6 +3488,10 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert result.artifact_paths[
         "hts_p_up_confidently_wrong_feature_diagnostic_summary"
     ].exists()
+    assert result.artifact_paths["large_regret_risk_model_report"].exists()
+    assert result.artifact_paths["large_regret_risk_model_summary"].exists()
+    assert result.artifact_paths["selective_action_guard_report"].exists()
+    assert result.artifact_paths["selective_action_guard_summary"].exists()
 
     manifest = _read_json(result.artifact_paths["manifest"])
     assert "hts_p_up_confidently_wrong_feature_diagnostic_report" in manifest[
@@ -3364,6 +3500,21 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert "hts_p_up_confidently_wrong_feature_diagnostic_summary" in manifest[
         "artifact_hashes"
     ]
+    assert "large_regret_risk_model_report" in manifest["artifact_hashes"]
+    assert "large_regret_risk_model_summary" in manifest["artifact_hashes"]
+    assert "selective_action_guard_report" in manifest["artifact_hashes"]
+    assert "selective_action_guard_summary" in manifest["artifact_hashes"]
+    assert manifest["large_regret_risk_model_report_available"] is True
+    assert manifest["selective_action_guard_report_available"] is True
+    assert manifest["large_regret_risk_model_config_hash"] == risk_report[
+        "risk_model_config_hash"
+    ]
+    assert manifest["selective_action_guard_selection_config_hash"] == guard_report[
+        "selection_config_hash"
+    ]
+    assert manifest["selected_guard_mode"] == guard_report["selected_guard_mode"]
+    assert manifest["base_action_value_signal_preserved"] is True
+    assert manifest["risk_head_replaces_action_signal"] is False
     assert manifest["strict_calibration_quality_passed"] == gate[
         "strict_calibration_quality_passed"
     ]
