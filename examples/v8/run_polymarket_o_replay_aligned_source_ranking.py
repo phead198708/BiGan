@@ -24,6 +24,7 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
     output_dir: Path | str,
     run_id: str = "polymarket_o_replay_aligned_source_ranking",
     overwrite_existing: bool = False,
+    future_holdout_raw_manifest_path: Path | str | None = None,
 ) -> dict:
     result = run_polymarket_o_replay_aligned_source_ranking(
         PolymarketOReplayAlignedSourceRankingConfig(
@@ -31,6 +32,7 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
             output_dir=output_dir,
             run_id=run_id,
             overwrite_existing=overwrite_existing,
+            future_holdout_raw_manifest_path=future_holdout_raw_manifest_path,
         )
     )
     labels = result.label_construction_report
@@ -51,6 +53,13 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
     holdout_plan = result.v8_future_unseen_holdout_plan_report
     paper_candidate_gate = result.v8_paper_candidate_gate_design_report
     collection_plan = result.v8_future_unseen_holdout_collection_plan_report
+    future_raw = result.v8_future_unseen_holdout_raw_collection_manifest
+    future_freeze = result.v8_future_unseen_holdout_input_freeze_manifest
+    future_action_rank = result.v8_future_unseen_holdout_action_rank_report
+    future_execution = result.v8_future_unseen_holdout_execution_replay_report
+    future_policy = result.v8_future_unseen_holdout_policy_readiness_report
+    future_handoff = result.v8_future_unseen_holdout_handoff_gate_report
+    future_paper_gate = result.v8_future_unseen_holdout_paper_candidate_gate_report
     return {
         "run_id": run_id,
         "run_dir": str(result.run_dir),
@@ -186,6 +195,50 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         "future_outcome_evaluation_generated": collection_plan[
             "future_outcome_evaluation_generated"
         ],
+        "future_unseen_holdout_raw_collection_status": future_raw[
+            "collection_status"
+        ],
+        "future_unseen_holdout_raw_collection_ready": future_raw[
+            "future_unseen_holdout_raw_collection_ready"
+        ],
+        "future_unseen_holdout_raw_collection_blocking_reason_codes": future_raw[
+            "future_unseen_holdout_raw_collection_blocking_reason_codes"
+        ],
+        "future_unseen_holdout_input_freeze_ready": future_freeze[
+            "future_unseen_holdout_input_freeze_ready"
+        ],
+        "future_unseen_holdout_input_freeze_blocking_reason_codes": future_freeze[
+            "future_unseen_holdout_input_freeze_blocking_reason_codes"
+        ],
+        "future_unseen_holdout_action_rank_ready": future_action_rank[
+            "future_unseen_holdout_action_rank_ready"
+        ],
+        "future_unseen_holdout_prediction_attempted": future_action_rank[
+            "prediction_attempted"
+        ],
+        "future_unseen_holdout_execution_replay_ready": future_execution[
+            "future_unseen_holdout_execution_replay_ready"
+        ],
+        "future_unseen_holdout_execution_replay_attempted": future_execution[
+            "execution_replay_attempted"
+        ],
+        "future_unseen_holdout_simulated_allowed_order_count": future_execution[
+            "simulated_allowed_order_count"
+        ],
+        "future_unseen_holdout_policy_readiness_passed": future_policy[
+            "future_unseen_holdout_policy_readiness_passed"
+        ],
+        "future_unseen_holdout_handoff_gate_passed": future_handoff[
+            "future_unseen_holdout_handoff_gate_passed"
+        ],
+        "future_unseen_holdout_paper_candidate_gate_passed": future_paper_gate[
+            "future_unseen_holdout_paper_candidate_gate_passed"
+        ],
+        "future_unseen_holdout_paper_candidate_gate_blocking_reason_codes": (
+            future_paper_gate[
+                "future_unseen_holdout_paper_candidate_gate_blocking_reason_codes"
+            ]
+        ),
         "v8_execution_block_analysis_safe_order_candidate_count": (
             block_analysis["safe_order_discovery_summary"][
                 "safe_order_candidate_count"
@@ -301,6 +354,29 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         "v8_future_unseen_holdout_collection_plan_report_path": str(
             result.artifact_paths["v8_future_unseen_holdout_collection_plan_report"]
         ),
+        "v8_future_unseen_holdout_raw_collection_manifest_path": str(
+            result.artifact_paths["v8_future_unseen_holdout_raw_collection_manifest"]
+        ),
+        "v8_future_unseen_holdout_input_freeze_manifest_path": str(
+            result.artifact_paths["v8_future_unseen_holdout_input_freeze_manifest"]
+        ),
+        "v8_future_unseen_holdout_action_rank_report_path": str(
+            result.artifact_paths["v8_future_unseen_holdout_action_rank_report"]
+        ),
+        "v8_future_unseen_holdout_execution_replay_report_path": str(
+            result.artifact_paths["v8_future_unseen_holdout_execution_replay_report"]
+        ),
+        "v8_future_unseen_holdout_policy_readiness_report_path": str(
+            result.artifact_paths["v8_future_unseen_holdout_policy_readiness_report"]
+        ),
+        "v8_future_unseen_holdout_handoff_gate_report_path": str(
+            result.artifact_paths["v8_future_unseen_holdout_handoff_gate_report"]
+        ),
+        "v8_future_unseen_holdout_paper_candidate_gate_report_path": str(
+            result.artifact_paths[
+                "v8_future_unseen_holdout_paper_candidate_gate_report"
+            ]
+        ),
         "manifest_path": str(result.artifact_paths["manifest"]),
     }
 
@@ -314,12 +390,14 @@ def main(argv: list[str] | None = None) -> int:
         default="polymarket_o_replay_aligned_source_ranking",
     )
     parser.add_argument("--overwrite-existing", action="store_true")
+    parser.add_argument("--future-holdout-raw-manifest")
     args = parser.parse_args(argv)
     summary = run_polymarket_o_replay_aligned_source_ranking_cli(
         m2_candidate_report_path=args.m2_candidate_report,
         output_dir=args.output_dir,
         run_id=args.run_id,
         overwrite_existing=args.overwrite_existing,
+        future_holdout_raw_manifest_path=args.future_holdout_raw_manifest,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0

@@ -75,8 +75,15 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_V8_EXECUTION_RUNTIME_FIELD_COVERAGE_SCHEMA_VERSION,
     O_V8_EXECUTION_RUNTIME_STATE_SCHEMA_VERSION,
     O_V8_EXECUTION_SIMULATED_ORDER_REPLAY_SCHEMA_VERSION,
+    O_V8_FUTURE_UNSEEN_HOLDOUT_ACTION_RANK_SCHEMA_VERSION,
     O_V8_FUTURE_UNSEEN_HOLDOUT_COLLECTION_PLAN_SCHEMA_VERSION,
+    O_V8_FUTURE_UNSEEN_HOLDOUT_EXECUTION_REPLAY_SCHEMA_VERSION,
+    O_V8_FUTURE_UNSEEN_HOLDOUT_HANDOFF_GATE_SCHEMA_VERSION,
+    O_V8_FUTURE_UNSEEN_HOLDOUT_INPUT_FREEZE_MANIFEST_SCHEMA_VERSION,
+    O_V8_FUTURE_UNSEEN_HOLDOUT_PAPER_CANDIDATE_GATE_SCHEMA_VERSION,
     O_V8_FUTURE_UNSEEN_HOLDOUT_PLAN_SCHEMA_VERSION,
+    O_V8_FUTURE_UNSEEN_HOLDOUT_POLICY_READINESS_SCHEMA_VERSION,
+    O_V8_FUTURE_UNSEEN_HOLDOUT_RAW_COLLECTION_MANIFEST_SCHEMA_VERSION,
     O_V8_PAPER_CANDIDATE_GATE_DESIGN_SCHEMA_VERSION,
     PolymarketOReplayAlignedSourceRankingConfig,
     _o_relaxed_diagnostic_gate_status,
@@ -88,8 +95,15 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     _v8_execution_policy_readiness_report,
     _v8_execution_runtime_field_coverage_report,
     _v8_execution_simulated_runtime_reports,
+    _v8_future_unseen_holdout_action_rank_report,
     _v8_future_unseen_holdout_collection_plan_report,
+    _v8_future_unseen_holdout_execution_replay_report,
+    _v8_future_unseen_holdout_handoff_gate_report,
+    _v8_future_unseen_holdout_input_freeze_manifest,
+    _v8_future_unseen_holdout_paper_candidate_gate_report,
     _v8_future_unseen_holdout_plan_report,
+    _v8_future_unseen_holdout_policy_readiness_report,
+    _v8_future_unseen_holdout_raw_collection_manifest,
     _v8_paper_candidate_gate_design_report,
     run_polymarket_o_replay_aligned_source_ranking,
 )
@@ -4367,6 +4381,23 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
     assert result.artifact_paths[
         "v8_future_unseen_holdout_collection_plan_summary"
     ].exists()
+    for artifact_name in (
+        "v8_future_unseen_holdout_raw_collection_manifest",
+        "v8_future_unseen_holdout_raw_collection_summary",
+        "v8_future_unseen_holdout_input_freeze_manifest",
+        "v8_future_unseen_holdout_input_freeze_summary",
+        "v8_future_unseen_holdout_action_rank_report",
+        "v8_future_unseen_holdout_action_rank_summary",
+        "v8_future_unseen_holdout_execution_replay_report",
+        "v8_future_unseen_holdout_execution_replay_summary",
+        "v8_future_unseen_holdout_policy_readiness_report",
+        "v8_future_unseen_holdout_policy_readiness_summary",
+        "v8_future_unseen_holdout_handoff_gate_report",
+        "v8_future_unseen_holdout_handoff_gate_summary",
+        "v8_future_unseen_holdout_paper_candidate_gate_report",
+        "v8_future_unseen_holdout_paper_candidate_gate_summary",
+    ):
+        assert result.artifact_paths[artifact_name].exists()
 
     manifest = _read_json(result.artifact_paths["manifest"])
     assert "hts_p_up_confidently_wrong_feature_diagnostic_report" in manifest[
@@ -4413,6 +4444,23 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "v8_future_unseen_holdout_collection_plan_summary"
         in manifest["artifact_hashes"]
     )
+    for artifact_name in (
+        "v8_future_unseen_holdout_raw_collection_manifest",
+        "v8_future_unseen_holdout_raw_collection_summary",
+        "v8_future_unseen_holdout_input_freeze_manifest",
+        "v8_future_unseen_holdout_input_freeze_summary",
+        "v8_future_unseen_holdout_action_rank_report",
+        "v8_future_unseen_holdout_action_rank_summary",
+        "v8_future_unseen_holdout_execution_replay_report",
+        "v8_future_unseen_holdout_execution_replay_summary",
+        "v8_future_unseen_holdout_policy_readiness_report",
+        "v8_future_unseen_holdout_policy_readiness_summary",
+        "v8_future_unseen_holdout_handoff_gate_report",
+        "v8_future_unseen_holdout_handoff_gate_summary",
+        "v8_future_unseen_holdout_paper_candidate_gate_report",
+        "v8_future_unseen_holdout_paper_candidate_gate_summary",
+    ):
+        assert artifact_name in manifest["artifact_hashes"]
     assert manifest["large_regret_risk_model_report_available"] is False
     assert manifest["selective_action_guard_report_available"] is False
     assert manifest["large_regret_risk_model_enabled"] is False
@@ -4590,6 +4638,40 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
             "future_unseen_holdout_collection_blocking_reason_codes"
         ]
     )
+    assert (
+        manifest["v8_future_unseen_holdout_raw_collection_manifest_available"]
+        is True
+    )
+    assert manifest["future_unseen_holdout_raw_collection_ready"] is False
+    assert (
+        "future_holdout_raw_collection_manifest_missing"
+        in manifest["future_unseen_holdout_raw_collection_blocking_reason_codes"]
+    )
+    assert (
+        manifest["v8_future_unseen_holdout_input_freeze_manifest_available"]
+        is True
+    )
+    assert manifest["future_unseen_holdout_input_freeze_ready"] is False
+    assert manifest["v8_future_unseen_holdout_action_rank_report_available"] is True
+    assert manifest["future_unseen_holdout_action_rank_ready"] is False
+    assert (
+        manifest["v8_future_unseen_holdout_execution_replay_report_available"]
+        is True
+    )
+    assert manifest["future_unseen_holdout_execution_replay_ready"] is False
+    assert manifest["future_unseen_holdout_simulated_allowed_order_count"] == 0
+    assert (
+        manifest["v8_future_unseen_holdout_policy_readiness_report_available"]
+        is True
+    )
+    assert manifest["future_unseen_holdout_policy_readiness_passed"] is False
+    assert manifest["v8_future_unseen_holdout_handoff_gate_report_available"] is True
+    assert manifest["future_unseen_holdout_handoff_gate_passed"] is False
+    assert (
+        manifest["v8_future_unseen_holdout_paper_candidate_gate_report_available"]
+        is True
+    )
+    assert manifest["future_unseen_holdout_paper_candidate_gate_passed"] is False
     assert manifest["strict_calibration_quality_passed"] == gate[
         "strict_calibration_quality_passed"
     ]
@@ -6059,6 +6141,16 @@ def _build_v8_future_gate_design_fixture(
         paper_candidate_gate_design_report=paper_gate,
     )
     return {
+        "m2_report_path": m2_report_path,
+        "m2_report": m2_report,
+        "action_rank_handoff": action_rank_handoff,
+        "execution_guard": execution_guard,
+        "simulated_order_replay": replay_report,
+        "allowed_quality": allowed_quality,
+        "policy_readiness": policy_readiness,
+        "runtime_field_coverage": field_coverage,
+        "block_analysis": block_analysis,
+        "handoff_gate": handoff_gate,
         "holdout_plan": holdout_plan,
         "paper_gate": paper_gate,
         "collection_plan": collection_plan,
@@ -6225,6 +6317,306 @@ def test_o_v8_future_unseen_holdout_collection_plan_fails_on_bad_inputs(
     assert report["promotion_evidence_eligible"] is False
     assert report["#146_start_allowed"] is False
     assert report["#134_resume_allowed"] is False
+
+
+def _future_holdout_raw_row(index: int, *, decision_ts: int) -> dict[str, Any]:
+    side = "UP" if index % 2 else "DOWN"
+    action = f"BUY_{side}_SELL_BEFORE_CLOSE"
+    p_up = 0.70 if side == "UP" else 0.30
+    p_down = 0.30 if side == "UP" else 0.70
+    microstructure = {
+        "book_staleness_ms": 500.0,
+        "spread_bps": 200.0,
+        "queue_fill_proxy": 0.90,
+        "time_to_close_seconds": 180.0,
+    }
+    return {
+        "decision_group_id": f"future-source|future-market-{index}|{decision_ts}",
+        "market_id": f"future-market-{index}",
+        "decision_ts": decision_ts,
+        "selected_action": action,
+        "selected_side": side,
+        "selected_action_family": "SELL_BEFORE_CLOSE",
+        "full_5_action_ranking": [
+            {
+                "rank": 1,
+                "selected_action": action,
+                "selected_side": side,
+                "selected_action_family": "SELL_BEFORE_CLOSE",
+                "corrected_model_score": 0.90,
+                "raw_model_score": 0.85,
+                "high_score_flag": True,
+                "p_up_action_disagreement": False,
+                "microstructure_snapshot": microstructure,
+            },
+            {
+                "rank": 2,
+                "selected_action": "NO_TRADE",
+                "selected_side": "NONE",
+                "selected_action_family": "NO_TRADE",
+                "corrected_model_score": 0.70,
+                "raw_model_score": 0.70,
+                "high_score_flag": False,
+                "p_up_action_disagreement": False,
+                "microstructure_snapshot": microstructure,
+            },
+        ],
+        "corrected_model_score": 0.90,
+        "raw_model_score": 0.85,
+        "score_components": {"model_predicted_score": 0.90},
+        "high_score_flag": True,
+        "p_up": p_up,
+        "p_down": p_down,
+        "p_up_action_disagreement": False,
+        "microstructure_snapshot": microstructure,
+        "reference_price_to_beat_distance_at_decision": 12.5,
+        "reference_price_feature_provenance": {
+            "provenance_valid": True,
+            "decision_ts": decision_ts,
+            "max_input_ts": decision_ts - 1,
+            "source_field_name": "future_holdout_reference_mid",
+        },
+        "decision_time_feature_max_input_ts": decision_ts - 1,
+        "runtime_exposure_state": {},
+        "configured_execution_limits": {
+            "max_order_size": 0.20,
+            "max_total_exposure": 1.00,
+        },
+        "source_score_mutated": False,
+        "o_model_predicted_score_mutated": False,
+    }
+
+
+def _write_future_holdout_raw_manifest(
+    tmp_path: Path,
+    *,
+    rows: list[dict[str, Any]],
+    window_start_ts: int,
+) -> Path:
+    path = tmp_path / "future_holdout_raw_manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "test-future-holdout-raw-input-v1",
+                "market_family": "btc_updown_5m",
+                "window_start_ts": window_start_ts,
+                "window_end_ts": window_start_ts + 300_000,
+                "holdout_decision_rows": rows,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_o_v8_future_unseen_holdout_reports_pass_diagnostic_but_stay_closed(
+    tmp_path: Path,
+) -> None:
+    fixture = _build_v8_future_gate_design_fixture(tmp_path)
+    rows = [
+        _future_holdout_raw_row(index, decision_ts=10_000 + index)
+        for index in range(1, 6)
+    ]
+    raw_path = _write_future_holdout_raw_manifest(
+        tmp_path,
+        rows=rows,
+        window_start_ts=10_000,
+    )
+    config = PolymarketOReplayAlignedSourceRankingConfig(
+        m2_candidate_report_path=fixture["m2_report_path"],
+        output_dir=tmp_path,
+        future_holdout_raw_manifest_path=raw_path,
+    )
+    raw = _v8_future_unseen_holdout_raw_collection_manifest(
+        config=config,
+        m2_report_path=fixture["m2_report_path"],
+        m2_report=fixture["m2_report"],
+        action_rank_handoff_report=fixture["action_rank_handoff"],
+        simulated_order_replay_report=fixture["simulated_order_replay"],
+        collection_plan_report=fixture["collection_plan"],
+    )
+    payload = dict(raw)
+    raw_id = payload.pop("o_v8_future_unseen_holdout_raw_collection_manifest_id")
+    assert canonical_json_sha256(payload) == raw_id
+    assert (
+        raw["schema_version"]
+        == O_V8_FUTURE_UNSEEN_HOLDOUT_RAW_COLLECTION_MANIFEST_SCHEMA_VERSION
+    )
+    assert raw["future_unseen_holdout_raw_collection_ready"] is True
+    assert raw["future_unseen_holdout_raw_collection_blocking_reason_codes"] == []
+    assert raw["collection_status"] == "collected"
+    assert raw["holdout_decision_count"] == 5
+
+    freeze = _v8_future_unseen_holdout_input_freeze_manifest(
+        m2_report_path=fixture["m2_report_path"],
+        m2_report=fixture["m2_report"],
+        raw_collection_manifest=raw,
+        collection_plan_report=fixture["collection_plan"],
+        action_rank_handoff_report=fixture["action_rank_handoff"],
+        execution_guard_report=fixture["execution_guard"],
+        simulated_order_replay_report=fixture["simulated_order_replay"],
+        runtime_field_coverage_report=fixture["runtime_field_coverage"],
+        handoff_gate_report=fixture["handoff_gate"],
+        paper_candidate_gate_design_report=fixture["paper_gate"],
+    )
+    assert (
+        freeze["schema_version"]
+        == O_V8_FUTURE_UNSEEN_HOLDOUT_INPUT_FREEZE_MANIFEST_SCHEMA_VERSION
+    )
+    assert freeze["future_unseen_holdout_input_freeze_ready"] is True
+    assert looks_like_sha256(freeze["frozen_input_manifest_hash"])
+    assert looks_like_sha256(freeze["frozen_current_v8_o_config_hash"])
+
+    action_rank = _v8_future_unseen_holdout_action_rank_report(
+        m2_report_path=fixture["m2_report_path"],
+        m2_report=fixture["m2_report"],
+        raw_collection_manifest=raw,
+        input_freeze_manifest=freeze,
+        source_action_rank_handoff_report=fixture["action_rank_handoff"],
+    )
+    assert (
+        action_rank["schema_version"]
+        == O_V8_FUTURE_UNSEEN_HOLDOUT_ACTION_RANK_SCHEMA_VERSION
+    )
+    assert action_rank["future_unseen_holdout_action_rank_ready"] is True
+    assert action_rank["prediction_attempted"] is True
+    assert action_rank["selected_action_handoff_row_count"] == 5
+
+    execution = _v8_future_unseen_holdout_execution_replay_report(
+        config=config,
+        m2_report_path=fixture["m2_report_path"],
+        m2_report=fixture["m2_report"],
+        action_rank_report=action_rank,
+    )
+    assert (
+        execution["schema_version"]
+        == O_V8_FUTURE_UNSEEN_HOLDOUT_EXECUTION_REPLAY_SCHEMA_VERSION
+    )
+    assert execution["future_unseen_holdout_execution_replay_ready"] is True
+    assert execution["execution_replay_attempted"] is True
+    assert execution["simulated_allowed_order_count"] == 5
+    assert execution["zero_missing_runtime_fields"] is True
+    assert execution["zero_provenance_violations"] is True
+
+    policy = _v8_future_unseen_holdout_policy_readiness_report(
+        m2_report_path=fixture["m2_report_path"],
+        m2_report=fixture["m2_report"],
+        execution_replay_report=execution,
+    )
+    assert (
+        policy["schema_version"]
+        == O_V8_FUTURE_UNSEEN_HOLDOUT_POLICY_READINESS_SCHEMA_VERSION
+    )
+    assert policy["future_unseen_holdout_policy_readiness_passed"] is True
+
+    handoff = _v8_future_unseen_holdout_handoff_gate_report(
+        m2_report_path=fixture["m2_report_path"],
+        m2_report=fixture["m2_report"],
+        input_freeze_manifest=freeze,
+        action_rank_report=action_rank,
+        execution_replay_report=execution,
+        policy_readiness_report=policy,
+    )
+    assert (
+        handoff["schema_version"]
+        == O_V8_FUTURE_UNSEEN_HOLDOUT_HANDOFF_GATE_SCHEMA_VERSION
+    )
+    assert handoff["future_unseen_holdout_handoff_gate_passed"] is True
+    assert handoff["v8_execution_handoff_allowed"] is False
+
+    paper_gate = _v8_future_unseen_holdout_paper_candidate_gate_report(
+        m2_report_path=fixture["m2_report_path"],
+        m2_report=fixture["m2_report"],
+        input_freeze_manifest=freeze,
+        action_rank_report=action_rank,
+        execution_replay_report=execution,
+        policy_readiness_report=policy,
+        handoff_gate_report=handoff,
+    )
+    assert (
+        paper_gate["schema_version"]
+        == O_V8_FUTURE_UNSEEN_HOLDOUT_PAPER_CANDIDATE_GATE_SCHEMA_VERSION
+    )
+    assert paper_gate["future_unseen_holdout_paper_candidate_gate_passed"] is True
+    assert paper_gate["paper_candidate_allowed"] is False
+    assert paper_gate["v8_execution_handoff_allowed"] is False
+    assert paper_gate["paper_only"] is True
+    assert paper_gate["capital_at_risk"] is False
+    assert paper_gate["polymarket_write_enabled"] is False
+    assert paper_gate["wallet_signing_enabled"] is False
+    assert paper_gate["source_model_candidate_eligible"] is False
+    assert paper_gate["freeze_ready"] is False
+    assert paper_gate["promotion_evidence_eligible"] is False
+    assert paper_gate["#146_start_allowed"] is False
+    assert paper_gate["#134_resume_allowed"] is False
+
+
+def test_o_v8_future_unseen_holdout_raw_collection_fails_on_overlap_past_or_outcomes(
+    tmp_path: Path,
+) -> None:
+    fixture = _build_v8_future_gate_design_fixture(tmp_path)
+    bad_row = _future_holdout_raw_row(1, decision_ts=1)
+    bad_row["market_id"] = "market-1"
+    bad_row["decision_group_id"] = "source|market-1|1"
+    bad_row["realized_trade_pnl"] = 1.0
+    raw_path = _write_future_holdout_raw_manifest(
+        tmp_path,
+        rows=[bad_row],
+        window_start_ts=1,
+    )
+    config = PolymarketOReplayAlignedSourceRankingConfig(
+        m2_candidate_report_path=fixture["m2_report_path"],
+        output_dir=tmp_path,
+        future_holdout_raw_manifest_path=raw_path,
+    )
+    raw = _v8_future_unseen_holdout_raw_collection_manifest(
+        config=config,
+        m2_report_path=fixture["m2_report_path"],
+        m2_report=fixture["m2_report"],
+        action_rank_handoff_report=fixture["action_rank_handoff"],
+        simulated_order_replay_report=fixture["simulated_order_replay"],
+        collection_plan_report=fixture["collection_plan"],
+    )
+    assert raw["future_unseen_holdout_raw_collection_ready"] is False
+    assert set(raw["future_unseen_holdout_raw_collection_blocking_reason_codes"]) >= {
+        "future_holdout_window_not_future_unseen",
+        "future_holdout_overlap_with_prior_data",
+        "future_holdout_forbidden_outcome_fields_present",
+    }
+    assert raw["holdout_decision_rows"] == []
+    assert raw["paper_candidate_allowed"] is False
+    assert raw["v8_execution_handoff_allowed"] is False
+
+    freeze = _v8_future_unseen_holdout_input_freeze_manifest(
+        m2_report_path=fixture["m2_report_path"],
+        m2_report=fixture["m2_report"],
+        raw_collection_manifest=raw,
+        collection_plan_report=fixture["collection_plan"],
+        action_rank_handoff_report=fixture["action_rank_handoff"],
+        execution_guard_report=fixture["execution_guard"],
+        simulated_order_replay_report=fixture["simulated_order_replay"],
+        runtime_field_coverage_report=fixture["runtime_field_coverage"],
+        handoff_gate_report=fixture["handoff_gate"],
+        paper_candidate_gate_design_report=fixture["paper_gate"],
+    )
+    action_rank = _v8_future_unseen_holdout_action_rank_report(
+        m2_report_path=fixture["m2_report_path"],
+        m2_report=fixture["m2_report"],
+        raw_collection_manifest=raw,
+        input_freeze_manifest=freeze,
+        source_action_rank_handoff_report=fixture["action_rank_handoff"],
+    )
+    execution = _v8_future_unseen_holdout_execution_replay_report(
+        config=config,
+        m2_report_path=fixture["m2_report_path"],
+        m2_report=fixture["m2_report"],
+        action_rank_report=action_rank,
+    )
+    assert freeze["future_unseen_holdout_input_freeze_ready"] is False
+    assert action_rank["prediction_attempted"] is False
+    assert execution["execution_replay_attempted"] is False
+    assert execution["future_unseen_holdout_execution_replay_ready"] is False
 
 
 def test_o_v8_execution_guard_block_analysis_classifies_safe_order_discovery(
