@@ -25,6 +25,16 @@ from bigan.v8.polymarket.training.o_v8_paper_candidate_unlock import (
     PolymarketOV8PaperCandidateUnlockConfig,
     run_polymarket_o_v8_paper_candidate_unlock,
 )
+from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
+    O_V8_PAPER_FRESH_CUMULATIVE_MONITORING_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_FILL_SIMULATION_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_LOOP_MANIFEST_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_LOOP_RUN_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_MONITORING_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_RUNTIME_SAFETY_SCHEMA_VERSION,
+    PolymarketOV8PaperFreshLoopConfig,
+    run_polymarket_o_v8_paper_fresh_loop,
+)
 from bigan.v8.polymarket.training.post_freeze_holdout import (
     FROZEN_M_SELECTOR_BASELINE_COMMIT,
     FROZEN_M_SELECTOR_METHOD,
@@ -7466,6 +7476,337 @@ def test_o_v8_paper_candidate_unlock_fails_on_upstream_safety_flag(
     ]
     assert result.manifest["paper_candidate_allowed"] is False
     assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def test_o_v8_paper_fresh_loop_single_cycle_success(tmp_path: Path) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-single",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=(
+                (
+                    _paper_fresh_public_row(
+                        index=1,
+                        market_id="fresh-market-up",
+                        action="BUY_UP_HOLD_TO_SETTLEMENT",
+                        side="UP",
+                        p_up=0.82,
+                    ),
+                    _paper_fresh_public_row(
+                        index=2,
+                        market_id="fresh-market-down",
+                        action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+                        side="DOWN",
+                        p_up=0.22,
+                    ),
+                ),
+            ),
+        )
+    )
+
+    run_report = result.fresh_loop_run_report
+    run_payload = dict(run_report)
+    run_id = run_payload.pop("o_v8_paper_fresh_loop_run_report_id")
+    assert canonical_json_sha256(run_payload) == run_id
+    assert run_report["schema_version"] == O_V8_PAPER_FRESH_LOOP_RUN_SCHEMA_VERSION
+    assert run_report["paper_fresh_loop_enabled"] is True
+    assert run_report["paper_fresh_loop_mode"] == "single_cycle"
+    assert run_report["paper_fresh_loop_cycle_count"] == 1
+    assert run_report["candidate_decision_count"] == 2
+    assert run_report["guard_allowed_decision_count"] == 2
+    assert run_report["guard_blocked_decision_count"] == 0
+    assert run_report["paper_fresh_order_intent_count"] == 2
+    assert run_report["paper_fresh_fill_count"] == 2
+    assert run_report["paper_fresh_ledger_entry_count"] == 2
+    assert run_report["thresholds_tuned"] is False
+    assert run_report["forbidden_outcome_fields_used"] == []
+    assert run_report["v8_paper_internal_handoff_allowed"] is True
+    assert run_report["v8_execution_handoff_allowed"] is False
+    assert run_report["source_model_candidate_eligible"] is False
+    assert run_report["freeze_ready"] is False
+    assert run_report["promotion_evidence_eligible"] is False
+    assert run_report["#146_start_allowed"] is False
+    assert run_report["#134_resume_allowed"] is False
+
+    fill_report = result.fill_simulation_report
+    fill_payload = dict(fill_report)
+    fill_id = fill_payload.pop("o_v8_paper_fresh_fill_simulation_report_id")
+    assert canonical_json_sha256(fill_payload) == fill_id
+    assert (
+        fill_report["schema_version"]
+        == O_V8_PAPER_FRESH_FILL_SIMULATION_SCHEMA_VERSION
+    )
+    assert fill_report["paper_fresh_fill_count"] == 2
+    assert fill_report["outcome_pnl_used"] is False
+    assert fill_report["realized_pnl_used"] is False
+
+    safety = result.runtime_safety_report
+    safety_payload = dict(safety)
+    safety_id = safety_payload.pop("o_v8_paper_fresh_runtime_safety_report_id")
+    assert canonical_json_sha256(safety_payload) == safety_id
+    assert (
+        safety["schema_version"] == O_V8_PAPER_FRESH_RUNTIME_SAFETY_SCHEMA_VERSION
+    )
+    assert safety["paper_fresh_runtime_safety_passed"] is True
+    assert safety["v8_execution_handoff_allowed"] is False
+
+    monitoring = result.monitoring_report
+    monitoring_payload = dict(monitoring)
+    monitoring_id = monitoring_payload.pop("o_v8_paper_fresh_monitoring_report_id")
+    assert canonical_json_sha256(monitoring_payload) == monitoring_id
+    assert monitoring["schema_version"] == O_V8_PAPER_FRESH_MONITORING_SCHEMA_VERSION
+    assert monitoring["paper_fresh_monitoring_passed"] is True
+    assert monitoring["cycle_count"] == 1
+    assert monitoring["cycle_monitoring_reports"][0]["unique_market_count"] == 2
+
+    cumulative = result.cumulative_monitoring_report
+    cumulative_payload = dict(cumulative)
+    cumulative_id = cumulative_payload.pop(
+        "o_v8_paper_fresh_cumulative_monitoring_report_id"
+    )
+    assert canonical_json_sha256(cumulative_payload) == cumulative_id
+    assert (
+        cumulative["schema_version"]
+        == O_V8_PAPER_FRESH_CUMULATIVE_MONITORING_SCHEMA_VERSION
+    )
+    assert cumulative["total_cycles"] == 1
+    assert cumulative["total_paper_intents"] == 2
+    assert cumulative["total_paper_fills"] == 2
+    assert cumulative["ledger_updates_only_accepted_intents"] is True
+
+    manifest = result.manifest
+    manifest_payload = dict(manifest)
+    manifest_id = manifest_payload.pop("o_v8_paper_fresh_loop_manifest_id")
+    assert canonical_json_sha256(manifest_payload) == manifest_id
+    assert manifest["schema_version"] == O_V8_PAPER_FRESH_LOOP_MANIFEST_SCHEMA_VERSION
+    assert manifest["paper_fresh_loop_enabled"] is True
+    assert manifest["paper_fresh_monitoring_passed"] is True
+    assert manifest["v8_paper_internal_handoff_allowed"] is True
+    assert manifest["v8_execution_handoff_allowed"] is False
+    assert manifest["paper_only"] is True
+    assert manifest["capital_at_risk"] is False
+    assert manifest["polymarket_write_enabled"] is False
+    assert manifest["wallet_signing_enabled"] is False
+
+    intents = _read_jsonl(result.artifact_paths["fresh_order_intent_log"])
+    assert len(intents) == 2
+    assert {row["paper_fresh_order_intent_status"] for row in intents} == {
+        "accepted_for_fresh_paper_loop"
+    }
+    assert all(row["paper_only"] is True for row in intents)
+    assert all(row["capital_at_risk"] is False for row in intents)
+    assert all(row["polymarket_write_enabled"] is False for row in intents)
+    assert all(row["wallet_signing_enabled"] is False for row in intents)
+
+
+def test_o_v8_paper_fresh_loop_bounded_recurring_cumulative_monitoring(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-bounded",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            loop_mode="bounded_recurring",
+            max_cycles=2,
+            sleep_seconds=0.0,
+            public_data_cycles=(
+                (
+                    _paper_fresh_public_row(
+                        index=1,
+                        market_id="fresh-bounded-up",
+                        action="BUY_UP_HOLD_TO_SETTLEMENT",
+                        side="UP",
+                        p_up=0.83,
+                    ),
+                    _paper_fresh_public_row(
+                        index=2,
+                        market_id="fresh-bounded-down",
+                        action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+                        side="DOWN",
+                        p_up=0.24,
+                    ),
+                ),
+                (
+                    _paper_fresh_public_row(
+                        index=3,
+                        market_id="fresh-bounded-up-2",
+                        action="BUY_UP_HOLD_TO_SETTLEMENT",
+                        side="UP",
+                        p_up=0.81,
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert result.fresh_loop_run_report["paper_fresh_loop_mode"] == "bounded_recurring"
+    assert result.fresh_loop_run_report["paper_fresh_loop_cycle_count"] == 2
+    assert result.fresh_loop_run_report["paper_fresh_order_intent_count"] == 3
+    assert result.monitoring_report["cycle_count"] == 2
+    assert result.monitoring_report["cycle_failure_count"] == 0
+    assert len(result.monitoring_report["cycle_monitoring_reports"]) == 2
+    assert result.cumulative_monitoring_report["total_cycles"] == 2
+    assert result.cumulative_monitoring_report["total_paper_intents"] == 3
+    assert result.cumulative_monitoring_report["total_paper_fills"] == 3
+    assert result.cumulative_monitoring_report["safety_violation_count"] == 0
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["#146_start_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
+
+
+def test_o_v8_paper_fresh_loop_fails_closed_on_unlock_hash_mismatch(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, _unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-hash-mismatch",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256="0" * 64,
+            public_data_cycles=(
+                (
+                    _paper_fresh_public_row(
+                        index=1,
+                        market_id="fresh-market-up",
+                        action="BUY_UP_HOLD_TO_SETTLEMENT",
+                        side="UP",
+                        p_up=0.82,
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert result.fresh_loop_run_report["paper_fresh_loop_enabled"] is False
+    assert "paper_candidate_unlock_manifest_hash_mismatch" in result.fresh_loop_run_report[
+        "paper_fresh_loop_blocking_reason_codes"
+    ]
+    assert result.fresh_loop_run_report["paper_fresh_order_intent_count"] == 0
+    assert result.monitoring_report["paper_fresh_monitoring_passed"] is False
+    assert result.manifest["v8_paper_internal_handoff_allowed"] is False
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert _read_jsonl(result.artifact_paths["fresh_order_intent_log"]) == []
+
+
+def test_o_v8_paper_fresh_loop_records_failed_public_data_cycle_fail_closed(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    bad_row = _paper_fresh_public_row(
+        index=1,
+        market_id="fresh-bad-row",
+        action="BUY_UP_HOLD_TO_SETTLEMENT",
+        side="UP",
+        p_up=0.82,
+    )
+    bad_row["realized_pnl"] = 1.0
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-forbidden-field",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((bad_row,),),
+        )
+    )
+
+    assert result.fresh_loop_run_report["paper_fresh_loop_enabled"] is True
+    assert "paper_fresh_public_data_cycle_failed" in result.fresh_loop_run_report[
+        "paper_fresh_loop_blocking_reason_codes"
+    ]
+    assert result.fresh_loop_run_report["paper_fresh_order_intent_count"] == 0
+    assert result.monitoring_report["cycle_failure_count"] == 1
+    assert result.monitoring_report["cycle_monitoring_reports"][0][
+        "cycle_failure_reason_codes"
+    ] == ["fresh_public_data_forbidden_outcome_fields_present"]
+    assert result.cumulative_monitoring_report["safety_violation_count"] == 1
+    assert result.manifest["paper_fresh_monitoring_passed"] is False
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["source_model_candidate_eligible"] is False
+    assert result.manifest["freeze_ready"] is False
+    assert result.manifest["promotion_evidence_eligible"] is False
+
+
+def _build_issue160_unlock_fixture(tmp_path: Path) -> tuple[Path, str]:
+    issue159_dir, expected_hashes = _write_issue159_paper_unlock_fixture(
+        tmp_path / "issue159"
+    )
+    unlock = run_polymarket_o_v8_paper_candidate_unlock(
+        PolymarketOV8PaperCandidateUnlockConfig(
+            run_id="issue160-unlock-fixture",
+            output_dir=tmp_path / "issue160",
+            issue_159_eval_dir=issue159_dir,
+            expected_issue_159_hashes=expected_hashes,
+            manual_approval_approved=True,
+            manual_approval_id="manual-approval-test",
+            manual_approval_operator="pytest",
+        )
+    )
+    return unlock.output_dir, unlock.artifact_hashes["manifest"]
+
+
+def _paper_fresh_public_row(
+    *,
+    index: int,
+    market_id: str,
+    action: str,
+    side: str,
+    p_up: float,
+) -> dict[str, Any]:
+    decision_ts = 3_000_000 + index
+    score = 1.2 + index / 100.0
+    return {
+        "decision_group_id": f"fresh-public|{market_id}|{decision_ts}",
+        "market_id": market_id,
+        "decision_ts": decision_ts,
+        "selected_action": action,
+        "selected_side": side,
+        "selected_action_family": "HOLD_TO_SETTLEMENT",
+        "corrected_model_score": score,
+        "raw_model_score": 20.0 + index,
+        "high_score_flag": True,
+        "p_up": p_up,
+        "p_down": 1.0 - p_up,
+        "p_up_action_disagreement": False,
+        "microstructure_snapshot": {
+            "entry_ask": 0.42 if side == "UP" else 0.58,
+            "executable_exit_bid_proxy": 0.41 if side == "UP" else 0.57,
+            "spread_bps": 120.0,
+            "book_staleness_ms": 250.0,
+            "queue_fill_proxy": 0.92,
+            "time_to_close_seconds": 240.0,
+        },
+        "reference_price_feature_provenance": {
+            "provenance_valid": True,
+            "decision_ts": decision_ts,
+            "max_input_ts": decision_ts - 100,
+            "source_fields_used": ["test_public_read_only_provider"],
+        },
+        "decision_time_feature_max_input_ts": decision_ts - 100,
+        "full_5_action_ranking": [
+            {
+                "selected_action": candidate,
+                "corrected_model_score": score
+                if candidate == action
+                else score - 0.20 - 0.01 * candidate_index,
+                "raw_model_score": 20.0 + index,
+            }
+            for candidate_index, candidate in enumerate(
+                O_REQUIRED_DECISION_ACTION_FAMILIES
+            )
+        ],
+    }
 
 
 def _write_issue159_paper_unlock_fixture(
