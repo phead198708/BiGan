@@ -143,6 +143,7 @@ from examples.v8.generate_o_v8_future_unseen_holdout_raw_input import (
     _filter_runtime_quality_rows,
     _prepare_runtime_quality_action_entry,
     _runtime_input_quality_rule_counts,
+    _select_diversified_quality_rows,
 )
 
 
@@ -6558,6 +6559,55 @@ def test_o_v8_future_holdout_generator_filters_late_or_stale_rows() -> None:
     assert rejected_by_id[stale["decision_group_id"]][
         "runtime_input_quality_reason_codes"
     ] == ["runtime_quality_book_stale"]
+
+
+def test_o_v8_future_holdout_generator_selects_diversified_markets() -> None:
+    guard_config = _v8_execution_guard_config()
+    initial_state = _v8_initial_runtime_state(guard_config)
+
+    def _prepared(index: int, *, market_id: str, staleness: float) -> dict[str, Any]:
+        row = _future_holdout_raw_row(index, decision_ts=10_000 + index)
+        row["market_id"] = market_id
+        row["decision_group_id"] = f"future-source|{market_id}|{10_000 + index}"
+        row["microstructure_snapshot"]["book_staleness_ms"] = staleness
+        return _prepare_runtime_quality_action_entry(
+            row,
+            guard_config=guard_config,
+            initial_runtime_state=initial_state,
+        )
+
+    same_market_best = _prepared(1, market_id="market-a", staleness=50.0)
+    same_market_duplicate = _prepared(2, market_id="market-a", staleness=75.0)
+    same_market_opposite_side = _prepared(3, market_id="market-a", staleness=25.0)
+    same_market_opposite_side["selected_side"] = "DOWN"
+    same_market_opposite_side["selected_action"] = "BUY_DOWN_SELL_BEFORE_CLOSE"
+    independent_b = _prepared(4, market_id="market-b", staleness=100.0)
+    independent_c = _prepared(5, market_id="market-c", staleness=150.0)
+
+    selected = _select_diversified_quality_rows(
+        [
+            same_market_best,
+            same_market_duplicate,
+            same_market_opposite_side,
+            independent_b,
+            independent_c,
+        ],
+        target_unique_market_count=3,
+        max_rows_per_market=1,
+        max_rows_per_market_side=1,
+    )
+
+    assert [row["market_id"] for row in selected] == [
+        "market-a",
+        "market-b",
+        "market-c",
+    ]
+    assert len({row["market_id"] for row in selected}) == 3
+    assert all(row["runtime_input_quality_rules_applied"] is True for row in selected)
+    assert selected[0]["diversified_holdout_selection_rank"] == 1
+    assert "independent_market_window_preferred" in selected[0][
+        "diversified_holdout_selection_reason_codes"
+    ]
 
 
 def test_o_v8_future_unseen_holdout_reports_pass_diagnostic_but_stay_closed(

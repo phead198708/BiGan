@@ -92,6 +92,9 @@ def run_generate_o_v8_future_unseen_holdout_raw_input(
     max_selected_book_staleness_ms: float = O_V8_EXECUTION_MAX_BOOK_STALENESS_MS,
     max_collection_attempts: int = 12,
     collection_retry_sleep_seconds: float = 10.0,
+    target_unique_market_count: int = 5,
+    max_rows_per_market: int = 1,
+    max_rows_per_market_side: int = 1,
 ) -> dict[str, Any]:
     """Collect public decision-time rows and write an outcome-free #159 manifest."""
 
@@ -134,77 +137,74 @@ def run_generate_o_v8_future_unseen_holdout_raw_input(
     attempts: list[dict[str, Any]] = []
     public_collection_summary: dict[str, Any] = {}
     raw_manifest_created_ts = int(time.time() * 1000)
-    future_feature_rows: list[dict[str, Any]] = []
     holdout_decision_rows: list[dict[str, Any]] = []
+    all_scored_rows: list[dict[str, Any]] = []
+    all_quality_rows: list[dict[str, Any]] = []
+    all_rejected_rows: list[dict[str, Any]] = []
     attempt_count = max(1, int(max_collection_attempts))
     for attempt_index in range(1, attempt_count + 1):
-        provider = PolymarketPublicHTTPRealCorpusProvider(
-            max_markets=max_markets,
-            timeout_seconds=public_provider_timeout_seconds,
-            http_timeout_seconds=public_provider_http_timeout_seconds,
-            orderbook_snapshot_interval_seconds=orderbook_snapshot_interval_seconds,
-            clob_ws_url=clob_ws_url,
-            seed_rest_orderbooks_before_stream=True,
-        )
-        recorder_config = PolymarketRealCorpusRecorderConfig(
-            run_id=(
-                "o-v8-future-unseen-holdout-raw-input-generation-"
-                f"attempt-{attempt_index:02d}"
-            ),
-            output_dir=output_path.parent,
-            market_families=(market_family,),
-            build_phase2_corpus=False,
-            mock_public_data=False,
-        )
-        market_rows = provider.market_rows(recorder_config)
-        orderbook_rows = provider.orderbook_rows(market_rows, recorder_config)
-        trade_rows = provider.trade_rows(market_rows, recorder_config)
-        btc_candle_rows = provider.btc_feature_candle_rows(market_rows, recorder_config)
-
-        corpus_config = PolymarketCorpusBuildConfig(
-            input_dir=output_path.parent,
-            output_dir=output_path.parent / "_future_holdout_feature_build",
-            market_families=(market_family,),  # type: ignore[arg-type]
-            sample_interval_seconds={market_family: 1},
-            min_time_to_close_seconds=0,
-            overwrite_existing=True,
-        )
-        markets = _normalize_markets(market_rows, corpus_config)
-        book_snapshots = _normalize_book_snapshots(orderbook_rows, markets)
-        trades = _normalize_trades(trade_rows, markets)
-        candles = _normalize_candles(btc_candle_rows)
-        feature_rows = build_polymarket_corpus_feature_rows(
-            markets=markets,
-            book_snapshots=book_snapshots,
-            trades=trades,
-            btc_candles=candles,
-            config=corpus_config,
-        )
-        raw_manifest_created_ts = int(time.time() * 1000)
-        future_feature_rows = [
-            row.to_dict()
-            for row in feature_rows
-            if int(row.decision_ts) > max_prior_decision_ts
-            and int(row.decision_ts) > collection_plan_created_ts
-            and int(row.decision_ts) <= raw_manifest_created_ts
-            and int(row.available_at_ts) <= raw_manifest_created_ts
-            and row.market_id not in set(prior["prior_market_ids"])
-        ]
-        future_feature_rows.sort(
-            key=lambda row: (int(row["decision_ts"]), row["market_id"])
-        )
-        scored_rows = _score_future_feature_rows(
-            feature_rows=future_feature_rows,
-            feature_source_path=output_path,
-            model_training_summary=model_training_summary,
-            model_identity=model_identity,
-            guard_config=guard_config,
-            initial_runtime_state=initial_runtime_state,
-        )
-        quality_rows, rejected_rows = _filter_runtime_quality_rows(
-            scored_rows,
-            min_selected_time_to_close_seconds=min_selected_time_to_close_seconds,
-            max_selected_book_staleness_ms=max_selected_book_staleness_ms,
+        try:
+            (
+                market_rows,
+                orderbook_rows,
+                trade_rows,
+                btc_candle_rows,
+                feature_rows,
+                future_feature_rows,
+                scored_rows,
+                quality_rows,
+                rejected_rows,
+                raw_manifest_created_ts,
+            ) = _collect_and_score_attempt(
+                attempt_index=attempt_index,
+                output_path=output_path,
+                market_family=market_family,
+                max_markets=max_markets,
+                public_provider_timeout_seconds=public_provider_timeout_seconds,
+                public_provider_http_timeout_seconds=(
+                    public_provider_http_timeout_seconds
+                ),
+                orderbook_snapshot_interval_seconds=(
+                    orderbook_snapshot_interval_seconds
+                ),
+                clob_ws_url=clob_ws_url,
+                max_prior_decision_ts=max_prior_decision_ts,
+                collection_plan_created_ts=collection_plan_created_ts,
+                prior_market_ids=set(prior["prior_market_ids"]),
+                model_training_summary=model_training_summary,
+                model_identity=model_identity,
+                guard_config=guard_config,
+                initial_runtime_state=initial_runtime_state,
+                min_selected_time_to_close_seconds=(
+                    min_selected_time_to_close_seconds
+                ),
+                max_selected_book_staleness_ms=max_selected_book_staleness_ms,
+            )
+            attempt_error = None
+        except Exception as exc:  # fail closed and keep collecting later windows
+            market_rows = []
+            orderbook_rows = []
+            trade_rows = []
+            btc_candle_rows = []
+            feature_rows = []
+            future_feature_rows = []
+            scored_rows = []
+            quality_rows = []
+            rejected_rows = []
+            raw_manifest_created_ts = int(time.time() * 1000)
+            attempt_error = {
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "reason_codes": ["collection_attempt_failed_fail_closed"],
+            }
+        all_scored_rows.extend(scored_rows)
+        all_quality_rows.extend(quality_rows)
+        all_rejected_rows.extend(rejected_rows)
+        diversified_rows = _select_diversified_quality_rows(
+            all_quality_rows,
+            target_unique_market_count=target_unique_market_count,
+            max_rows_per_market=max_rows_per_market,
+            max_rows_per_market_side=max_rows_per_market_side,
         )
         attempt_summary = _collection_attempt_summary(
             attempt_index=attempt_index,
@@ -217,25 +217,40 @@ def run_generate_o_v8_future_unseen_holdout_raw_input(
             scored_rows=scored_rows,
             quality_rows=quality_rows,
             rejected_rows=rejected_rows,
+            cumulative_quality_rows=all_quality_rows,
+            diversified_rows=diversified_rows,
+            target_unique_market_count=target_unique_market_count,
+            attempt_error=attempt_error,
         )
         attempts.append(attempt_summary)
-        public_collection_summary = {
-            "market_row_count": len(market_rows),
-            "orderbook_row_count": len(orderbook_rows),
-            "trade_row_count": len(trade_rows),
-            "btc_candle_row_count": len(btc_candle_rows),
-            "feature_row_count": len(feature_rows),
-            "future_disjoint_feature_row_count": len(future_feature_rows),
-            "candidate_handoff_row_count": len(scored_rows),
-            "runtime_quality_selected_row_count": len(quality_rows),
-            "runtime_quality_rejected_row_count": len(rejected_rows),
-        }
-        if quality_rows:
-            holdout_decision_rows = quality_rows
+        public_collection_summary = _aggregate_collection_summary(
+            attempts=attempts,
+            scored_rows=all_scored_rows,
+            quality_rows=all_quality_rows,
+            rejected_rows=all_rejected_rows,
+            diversified_rows=diversified_rows,
+        )
+        if _unique_market_count(diversified_rows) >= target_unique_market_count:
+            holdout_decision_rows = diversified_rows
             break
-        holdout_decision_rows = rejected_rows if rejected_rows else scored_rows
+        holdout_decision_rows = (
+            diversified_rows
+            if diversified_rows
+            else all_rejected_rows
+            if all_rejected_rows
+            else all_scored_rows
+        )
         if attempt_index < attempt_count:
             time.sleep(max(0.0, float(collection_retry_sleep_seconds)))
+
+    holdout_decision_rows = sorted(
+        holdout_decision_rows,
+        key=lambda row: (
+            int(row.get("decision_ts") or 0),
+            str(row.get("market_id") or ""),
+            str(row.get("selected_side") or ""),
+        ),
+    )
 
     payload = {
         "schema_version": "bigan-v8-o-future-unseen-holdout-raw-input-v1",
@@ -269,12 +284,23 @@ def run_generate_o_v8_future_unseen_holdout_raw_input(
             "max_selected_book_staleness_ms": max_selected_book_staleness_ms,
             "max_collection_attempts": attempt_count,
             "collection_retry_sleep_seconds": collection_retry_sleep_seconds,
+            "target_unique_market_count": target_unique_market_count,
+            "max_rows_per_market": max_rows_per_market,
+            "max_rows_per_market_side": max_rows_per_market_side,
+            "prefer_one_high_quality_decision_row_per_market_side": True,
+            "prefer_independent_market_windows": True,
             "simulated_exposure_state_added": True,
             "time_to_close_written_to_microstructure_snapshot": True,
             "forbidden_field_list_aligned_with_evaluator": True,
             "outcome_fields_stripped_recursively": True,
         },
         "runtime_input_quality_collection_attempts": attempts,
+        "diversified_holdout_selection_summary": _diversified_selection_summary(
+            holdout_decision_rows=holdout_decision_rows,
+            quality_rows=all_quality_rows,
+            rejected_rows=all_rejected_rows,
+            target_unique_market_count=target_unique_market_count,
+        ),
         "runtime_field_input_quality_rules_applied": bool(holdout_decision_rows),
         "runtime_field_input_quality_rule_counts": _runtime_input_quality_rule_counts(
             holdout_decision_rows
@@ -402,8 +428,119 @@ def _score_future_feature_rows(
                     for rank, row in enumerate(ranked, start=1)
                 ],
             }
-        )
+    )
     return selected_rows
+
+
+def _collect_and_score_attempt(
+    *,
+    attempt_index: int,
+    output_path: Path,
+    market_family: str,
+    max_markets: int,
+    public_provider_timeout_seconds: float,
+    public_provider_http_timeout_seconds: float,
+    orderbook_snapshot_interval_seconds: float,
+    clob_ws_url: str,
+    max_prior_decision_ts: int,
+    collection_plan_created_ts: int,
+    prior_market_ids: set[str],
+    model_training_summary: dict[str, Any],
+    model_identity: dict[str, Any],
+    guard_config: dict[str, Any],
+    initial_runtime_state: dict[str, Any],
+    min_selected_time_to_close_seconds: float,
+    max_selected_book_staleness_ms: float,
+) -> tuple[
+    list[Any],
+    list[Any],
+    list[Any],
+    list[Any],
+    list[Any],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    int,
+]:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        max_markets=max_markets,
+        timeout_seconds=public_provider_timeout_seconds,
+        http_timeout_seconds=public_provider_http_timeout_seconds,
+        orderbook_snapshot_interval_seconds=orderbook_snapshot_interval_seconds,
+        clob_ws_url=clob_ws_url,
+        seed_rest_orderbooks_before_stream=True,
+    )
+    recorder_config = PolymarketRealCorpusRecorderConfig(
+        run_id=(
+            "o-v8-future-unseen-holdout-raw-input-generation-"
+            f"attempt-{attempt_index:02d}"
+        ),
+        output_dir=output_path.parent,
+        market_families=(market_family,),
+        build_phase2_corpus=False,
+        mock_public_data=False,
+    )
+    market_rows = provider.market_rows(recorder_config)
+    orderbook_rows = provider.orderbook_rows(market_rows, recorder_config)
+    trade_rows = provider.trade_rows(market_rows, recorder_config)
+    btc_candle_rows = provider.btc_feature_candle_rows(market_rows, recorder_config)
+
+    corpus_config = PolymarketCorpusBuildConfig(
+        input_dir=output_path.parent,
+        output_dir=output_path.parent / "_future_holdout_feature_build",
+        market_families=(market_family,),  # type: ignore[arg-type]
+        sample_interval_seconds={market_family: 1},
+        min_time_to_close_seconds=0,
+        overwrite_existing=True,
+    )
+    markets = _normalize_markets(market_rows, corpus_config)
+    book_snapshots = _normalize_book_snapshots(orderbook_rows, markets)
+    trades = _normalize_trades(trade_rows, markets)
+    candles = _normalize_candles(btc_candle_rows)
+    feature_rows = build_polymarket_corpus_feature_rows(
+        markets=markets,
+        book_snapshots=book_snapshots,
+        trades=trades,
+        btc_candles=candles,
+        config=corpus_config,
+    )
+    raw_manifest_created_ts = int(time.time() * 1000)
+    future_feature_rows = [
+        row.to_dict()
+        for row in feature_rows
+        if int(row.decision_ts) > max_prior_decision_ts
+        and int(row.decision_ts) > collection_plan_created_ts
+        and int(row.decision_ts) <= raw_manifest_created_ts
+        and int(row.available_at_ts) <= raw_manifest_created_ts
+        and row.market_id not in prior_market_ids
+    ]
+    future_feature_rows.sort(key=lambda row: (int(row["decision_ts"]), row["market_id"]))
+    scored_rows = _score_future_feature_rows(
+        feature_rows=future_feature_rows,
+        feature_source_path=output_path,
+        model_training_summary=model_training_summary,
+        model_identity=model_identity,
+        guard_config=guard_config,
+        initial_runtime_state=initial_runtime_state,
+    )
+    quality_rows, rejected_rows = _filter_runtime_quality_rows(
+        scored_rows,
+        min_selected_time_to_close_seconds=min_selected_time_to_close_seconds,
+        max_selected_book_staleness_ms=max_selected_book_staleness_ms,
+    )
+    return (
+        market_rows,
+        orderbook_rows,
+        trade_rows,
+        btc_candle_rows,
+        feature_rows,
+        future_feature_rows,
+        scored_rows,
+        quality_rows,
+        rejected_rows,
+        raw_manifest_created_ts,
+    )
 
 
 def _outcome_free_action_entry(
@@ -535,6 +672,68 @@ def _filter_runtime_quality_rows(
     return accepted, rejected
 
 
+def _select_diversified_quality_rows(
+    rows: list[dict[str, Any]],
+    *,
+    target_unique_market_count: int,
+    max_rows_per_market: int,
+    max_rows_per_market_side: int,
+) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    selected = []
+    market_counts: dict[str, int] = defaultdict(int)
+    market_side_counts: dict[tuple[str, str], int] = defaultdict(int)
+    for row in sorted(rows, key=_diversified_quality_sort_key):
+        market_id = str(row.get("market_id") or "")
+        side = str(row.get("selected_side") or "UNKNOWN")
+        market_side = (market_id, side)
+        if market_counts[market_id] >= max(1, int(max_rows_per_market)):
+            continue
+        if market_side_counts[market_side] >= max(
+            1,
+            int(max_rows_per_market_side),
+        ):
+            continue
+        selected.append(
+            {
+                **row,
+                "diversified_holdout_selection_rank": len(selected) + 1,
+                "diversified_holdout_selection_reason_codes": [
+                    "runtime_quality_passed",
+                    "independent_market_window_preferred",
+                    "market_side_quota_available",
+                ],
+            }
+        )
+        market_counts[market_id] += 1
+        market_side_counts[market_side] += 1
+        if _unique_market_count(selected) >= max(1, int(target_unique_market_count)):
+            break
+    return selected
+
+
+def _diversified_quality_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    microstructure = dict(row.get("microstructure_snapshot") or {})
+    selected_action = str(row.get("selected_action") or "")
+    time_to_close = _safe_optional_float(microstructure.get("time_to_close_seconds"))
+    staleness = _safe_optional_float(microstructure.get("book_staleness_ms"))
+    spread = _safe_optional_float(microstructure.get("spread_bps"))
+    queue = _safe_optional_float(microstructure.get("queue_fill_proxy"))
+    score = _safe_optional_float(row.get("corrected_model_score"))
+    return (
+        selected_action == "NO_TRADE",
+        staleness if staleness is not None else float("inf"),
+        spread if spread is not None else float("inf"),
+        -(queue if queue is not None else -1.0),
+        -(time_to_close if time_to_close is not None else -1.0),
+        -(score if score is not None else 0.0),
+        int(row.get("decision_ts") or 0),
+        str(row.get("market_id") or ""),
+        str(row.get("selected_side") or ""),
+    )
+
+
 def _runtime_quality_rejection_reasons(
     row: dict[str, Any],
     *,
@@ -579,6 +778,10 @@ def _collection_attempt_summary(
     scored_rows: list[dict[str, Any]],
     quality_rows: list[dict[str, Any]],
     rejected_rows: list[dict[str, Any]],
+    cumulative_quality_rows: list[dict[str, Any]],
+    diversified_rows: list[dict[str, Any]],
+    target_unique_market_count: int,
+    attempt_error: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rejected_reason_counts = defaultdict(int)
     for row in rejected_rows:
@@ -620,12 +823,115 @@ def _collection_attempt_summary(
         "runtime_quality_rejected_reason_counts": dict(
             sorted(rejected_reason_counts.items())
         ),
+        "cumulative_runtime_quality_candidate_count": len(cumulative_quality_rows),
+        "cumulative_unique_market_count": _unique_market_count(cumulative_quality_rows),
+        "diversified_selected_row_count": len(diversified_rows),
+        "diversified_unique_market_count": _unique_market_count(diversified_rows),
+        "target_unique_market_count": target_unique_market_count,
+        "target_unique_market_count_met": _unique_market_count(diversified_rows)
+        >= target_unique_market_count,
+        "attempt_failed": attempt_error is not None,
+        "attempt_error": attempt_error,
         "max_selected_time_to_close_seconds": max(
             selected_time_to_close_values,
             default=None,
         ),
         "min_selected_book_staleness_ms": min(selected_staleness_values, default=None),
     }
+
+
+def _aggregate_collection_summary(
+    *,
+    attempts: list[dict[str, Any]],
+    scored_rows: list[dict[str, Any]],
+    quality_rows: list[dict[str, Any]],
+    rejected_rows: list[dict[str, Any]],
+    diversified_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    summed_fields = (
+        "market_row_count",
+        "orderbook_row_count",
+        "trade_row_count",
+        "btc_candle_row_count",
+        "feature_row_count",
+        "future_disjoint_feature_row_count",
+    )
+    summary = {
+        field: sum(int(attempt.get(field) or 0) for attempt in attempts)
+        for field in summed_fields
+    }
+    summary.update(
+        {
+            "attempt_count": len(attempts),
+            "failed_attempt_count": sum(
+                1 for attempt in attempts if attempt.get("attempt_failed") is True
+            ),
+            "candidate_handoff_row_count": len(scored_rows),
+            "runtime_quality_candidate_count": len(quality_rows),
+            "runtime_quality_rejected_row_count": len(rejected_rows),
+            "runtime_quality_selected_row_count": len(diversified_rows),
+            "unique_candidate_market_count": _unique_market_count(scored_rows),
+            "unique_quality_market_count": _unique_market_count(quality_rows),
+            "unique_selected_market_count": _unique_market_count(diversified_rows),
+            "unique_selected_market_side_count": _unique_market_side_count(
+                diversified_rows
+            ),
+        }
+    )
+    return summary
+
+
+def _diversified_selection_summary(
+    *,
+    holdout_decision_rows: list[dict[str, Any]],
+    quality_rows: list[dict[str, Any]],
+    rejected_rows: list[dict[str, Any]],
+    target_unique_market_count: int,
+) -> dict[str, Any]:
+    return {
+        "selection_strategy": "deterministic_quality_ranked_one_row_per_market_side",
+        "target_unique_market_count": target_unique_market_count,
+        "target_unique_market_count_met": _unique_market_count(holdout_decision_rows)
+        >= target_unique_market_count,
+        "selected_row_count": len(holdout_decision_rows),
+        "selected_unique_market_count": _unique_market_count(holdout_decision_rows),
+        "selected_unique_market_side_count": _unique_market_side_count(
+            holdout_decision_rows
+        ),
+        "quality_candidate_count": len(quality_rows),
+        "quality_candidate_unique_market_count": _unique_market_count(quality_rows),
+        "rejected_candidate_count": len(rejected_rows),
+        "selected_market_side_counts": _market_side_counts(holdout_decision_rows),
+        "outcome_fields_used_for_selection": False,
+        "oracle_fields_used_for_selection": False,
+        "realized_pnl_fields_used_for_selection": False,
+    }
+
+
+def _unique_market_count(rows: list[dict[str, Any]]) -> int:
+    return len({str(row.get("market_id") or "") for row in rows if row.get("market_id")})
+
+
+def _unique_market_side_count(rows: list[dict[str, Any]]) -> int:
+    return len(
+        {
+            (
+                str(row.get("market_id") or ""),
+                str(row.get("selected_side") or "UNKNOWN"),
+            )
+            for row in rows
+            if row.get("market_id")
+        }
+    )
+
+
+def _market_side_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        market_id = str(row.get("market_id") or "UNKNOWN")
+        side = str(row.get("selected_side") or "UNKNOWN")
+        counts[f"{market_id}|{side}"] += 1
+    return dict(sorted(counts.items()))
 
 
 def _runtime_input_quality_rule_counts(
@@ -697,6 +1003,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-collection-attempts", type=int, default=12)
     parser.add_argument("--collection-retry-sleep-seconds", type=float, default=10.0)
+    parser.add_argument("--target-unique-market-count", type=int, default=5)
+    parser.add_argument("--max-rows-per-market", type=int, default=1)
+    parser.add_argument("--max-rows-per-market-side", type=int, default=1)
     args = parser.parse_args(argv)
     result = run_generate_o_v8_future_unseen_holdout_raw_input(
         m2_candidate_report_path=args.m2_candidate_report,
@@ -715,6 +1024,9 @@ def main(argv: list[str] | None = None) -> int:
         max_selected_book_staleness_ms=args.max_selected_book_staleness_ms,
         max_collection_attempts=args.max_collection_attempts,
         collection_retry_sleep_seconds=args.collection_retry_sleep_seconds,
+        target_unique_market_count=args.target_unique_market_count,
+        max_rows_per_market=args.max_rows_per_market,
+        max_rows_per_market_side=args.max_rows_per_market_side,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
