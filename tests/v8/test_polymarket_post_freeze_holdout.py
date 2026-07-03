@@ -27,12 +27,16 @@ from bigan.v8.polymarket.training.o_v8_paper_candidate_unlock import (
     run_polymarket_o_v8_paper_candidate_unlock,
 )
 from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
+    O_V8_PAPER_FRESH_CANONICAL_SCORER_ALIGNMENT_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_CUMULATIVE_MONITORING_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_FILL_SIMULATION_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_LOOP_MANIFEST_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_LOOP_RUN_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_MONITORING_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_NO_TRADE_DIAGNOSTIC_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_PROVIDER_FEATURE_COVERAGE_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_RUNTIME_SAFETY_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_SCORE_DECOMPOSITION_SCHEMA_VERSION,
     O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
     O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE,
     PolymarketOV8PaperFreshLoopConfig,
@@ -7589,6 +7593,66 @@ def test_o_v8_paper_fresh_loop_single_cycle_success(tmp_path: Path) -> None:
     assert cumulative["total_paper_fills"] == 2
     assert cumulative["ledger_updates_only_accepted_intents"] is True
 
+    no_trade = result.no_trade_diagnostic_report
+    no_trade_payload = dict(no_trade)
+    no_trade_id = no_trade_payload.pop(
+        "o_v8_paper_fresh_no_trade_diagnostic_report_id"
+    )
+    assert canonical_json_sha256(no_trade_payload) == no_trade_id
+    assert (
+        no_trade["schema_version"]
+        == O_V8_PAPER_FRESH_NO_TRADE_DIAGNOSTIC_SCHEMA_VERSION
+    )
+    assert no_trade["rank_blocked_by_no_trade_count"] == 0
+    assert no_trade["execution_guard_blocked_count"] == 0
+    assert no_trade["canonical_frozen_o_scorer_used"] is False
+    assert no_trade["scoring_rule_id"] == "fresh_provider_simplified_score"
+    assert no_trade["v8_execution_handoff_allowed"] is False
+
+    decomposition = result.score_decomposition_report
+    decomposition_payload = dict(decomposition)
+    decomposition_id = decomposition_payload.pop(
+        "o_v8_paper_fresh_score_decomposition_report_id"
+    )
+    assert canonical_json_sha256(decomposition_payload) == decomposition_id
+    assert (
+        decomposition["schema_version"]
+        == O_V8_PAPER_FRESH_SCORE_DECOMPOSITION_SCHEMA_VERSION
+    )
+    assert decomposition["score_decomposition_action_row_count"] == 10
+    assert decomposition["canonical_frozen_o_scorer_used"] is False
+    assert decomposition["mutates_source_ranking_scores"] is False
+
+    coverage = result.provider_feature_coverage_report
+    coverage_payload = dict(coverage)
+    coverage_id = coverage_payload.pop(
+        "o_v8_paper_fresh_provider_feature_coverage_report_id"
+    )
+    assert canonical_json_sha256(coverage_payload) == coverage_id
+    assert (
+        coverage["schema_version"]
+        == O_V8_PAPER_FRESH_PROVIDER_FEATURE_COVERAGE_SCHEMA_VERSION
+    )
+    assert coverage["public_feature_row_count"] == 2
+    assert coverage["missing_runtime_field_count"] == 0
+    assert coverage["provenance_invalid_count"] == 0
+
+    alignment = result.canonical_scorer_alignment_report
+    alignment_payload = dict(alignment)
+    alignment_id = alignment_payload.pop(
+        "o_v8_paper_fresh_canonical_scorer_alignment_report_id"
+    )
+    assert canonical_json_sha256(alignment_payload) == alignment_id
+    assert (
+        alignment["schema_version"]
+        == O_V8_PAPER_FRESH_CANONICAL_SCORER_ALIGNMENT_SCHEMA_VERSION
+    )
+    assert alignment["canonical_frozen_o_scorer_used"] is False
+    assert alignment["canonical_alignment_diagnostic_status"] == "blocked_fail_closed"
+    assert "missing_feature_backfill_mapping" in alignment[
+        "canonical_alignment_blocking_reason_codes"
+    ]
+
     manifest = result.manifest
     manifest_payload = dict(manifest)
     manifest_id = manifest_payload.pop("o_v8_paper_fresh_loop_manifest_id")
@@ -7602,6 +7666,10 @@ def test_o_v8_paper_fresh_loop_single_cycle_success(tmp_path: Path) -> None:
     )
     assert manifest["v8_paper_internal_handoff_allowed"] is True
     assert manifest["v8_execution_handoff_allowed"] is False
+    assert manifest["rank_blocked_by_no_trade_count"] == 0
+    assert manifest["canonical_frozen_o_scorer_used"] is False
+    assert manifest["canonical_alignment_diagnostic_status"] == "blocked_fail_closed"
+    assert manifest["sparse_provider_row_flag"] is True
     assert manifest["paper_only"] is True
     assert manifest["capital_at_risk"] is False
     assert manifest["polymarket_write_enabled"] is False
@@ -7616,6 +7684,200 @@ def test_o_v8_paper_fresh_loop_single_cycle_success(tmp_path: Path) -> None:
     assert all(row["capital_at_risk"] is False for row in intents)
     assert all(row["polymarket_write_enabled"] is False for row in intents)
     assert all(row["wallet_signing_enabled"] is False for row in intents)
+
+
+def test_o_v8_paper_fresh_no_trade_diagnostic_rank_blocked_zero_intent(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-no-trade-rank-blocked",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=(
+                (
+                    _paper_fresh_public_row(
+                        index=1,
+                        market_id="fresh-no-trade-market",
+                        action="NO_TRADE",
+                        side="NONE",
+                        p_up=0.50,
+                    ),
+                ),
+            ),
+        )
+    )
+
+    report = result.no_trade_diagnostic_report
+    assert report["candidate_decision_count"] == 1
+    assert report["rank_blocked_by_no_trade_count"] == 1
+    assert report["execution_guard_blocked_count"] == 0
+    assert report["paper_fresh_order_intent_count"] == 0
+    assert report["zero_intent_behavior_classification"] == (
+        "rank_blocked_by_no_trade_under_simplified_provider_score"
+    )
+    row = report["decision_rows"][0]
+    assert row["selected_action"] == "NO_TRADE"
+    assert row["rank_blocked_by_no_trade"] is True
+    assert row["execution_guard_blocked"] is False
+    assert row["missing_runtime_fields"] == []
+    assert row["provenance_violations"] == []
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["#146_start_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
+
+
+def test_o_v8_paper_fresh_distinguishes_guard_blocked_from_rank_blocked(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    row = _paper_fresh_public_row(
+        index=1,
+        market_id="fresh-p-up-disagreement",
+        action="BUY_UP_HOLD_TO_SETTLEMENT",
+        side="UP",
+        p_up=0.20,
+    )
+    row["p_up_action_disagreement"] = True
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-guard-blocked-not-rank-blocked",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((row,),),
+        )
+    )
+
+    report = result.no_trade_diagnostic_report
+    assert report["rank_blocked_by_no_trade_count"] == 0
+    assert report["execution_guard_blocked_count"] == 1
+    decision = report["decision_rows"][0]
+    assert decision["selected_action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+    assert decision["rank_blocked_by_no_trade"] is False
+    assert decision["execution_guard_blocked"] is True
+    assert "execution_p_up_side_disagreement" in decision[
+        "execution_guard_blocking_reasons"
+    ]
+    assert result.fresh_loop_run_report["paper_fresh_order_intent_count"] == 0
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def test_o_v8_paper_fresh_score_decomposition_provider_components(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-provider-score-decomposition",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_provider=_FakeFreshPublicProvider(),
+        )
+    )
+
+    report = result.score_decomposition_report
+    assert report["score_decomposition_action_row_count"] == 5
+    assert report["scoring_rule_id"] == "fresh_provider_simplified_score"
+    assert report["canonical_frozen_o_scorer_used"] is False
+    up_hts = next(
+        row
+        for row in report["score_decomposition_rows"]
+        if row["action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+    )
+    assert up_hts["p_side_contribution"] > 0.0
+    assert up_hts["p_up_contribution"] > 0.0
+    assert up_hts["ask_contribution"] < 0.0
+    assert up_hts["spread_penalty"] > 0.0
+    assert up_hts["queue_fill_term_used"] is False
+    assert up_hts["book_staleness_term_used"] is False
+    assert up_hts["time_to_close_term_used"] is False
+    assert up_hts["canonical_frozen_o_scorer_used"] is False
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def test_o_v8_paper_fresh_canonical_alignment_unavailable_fail_closed(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-canonical-alignment-unavailable",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_provider=_FakeFreshPublicProvider(),
+        )
+    )
+
+    report = result.canonical_scorer_alignment_report
+    assert report["canonical_frozen_o_scorer_invoked"] is False
+    assert report["canonical_frozen_o_scorer_used"] is False
+    assert report["canonical_alignment_diagnostic_status"] == "blocked_fail_closed"
+    assert "canonical_frozen_o_scorer_not_wired_for_fresh_provider_rows" in report[
+        "canonical_alignment_blocking_reason_codes"
+    ]
+    assert "unsupported_provider_feature_row_shape" in report[
+        "canonical_alignment_blocking_reason_codes"
+    ]
+    assert report["source_o_score_mutated"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["#146_start_allowed"] is False
+    assert report["#134_resume_allowed"] is False
+
+
+def test_o_v8_paper_fresh_provider_feature_coverage_sparse_flag(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-sparse-feature-coverage",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            loop_mode="bounded_recurring",
+            max_cycles=3,
+            sleep_seconds=0.0,
+            public_data_cycles=(
+                (
+                    _paper_fresh_public_row(
+                        index=1,
+                        market_id="fresh-sparse-market",
+                        action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+                        side="DOWN",
+                        p_up=0.20,
+                    ),
+                ),
+                (),
+                (),
+            ),
+        )
+    )
+
+    report = result.provider_feature_coverage_report
+    assert report["cycle_count"] == 3
+    assert report["cycles_with_rows"] == 1
+    assert report["idle_cycles"] == 2
+    assert report["rows_per_cycle"] == [1, 0, 0]
+    assert report["public_feature_row_count"] == 1
+    assert report["sparse_provider_row_flag"] is True
+    assert report["missing_runtime_field_count"] == 0
+    assert report["provenance_invalid_count"] == 0
+    assert "provider_feature_rows_below_minimum_diagnostic_density" in report[
+        "sparse_provider_row_reason_codes"
+    ]
+    assert result.manifest["sparse_provider_row_flag"] is True
+    assert result.manifest["v8_execution_handoff_allowed"] is False
 
 
 def test_o_v8_paper_fresh_loop_bounded_recurring_cumulative_monitoring(
@@ -8018,13 +8280,22 @@ def _paper_fresh_public_row(
 ) -> dict[str, Any]:
     decision_ts = 3_000_000 + index
     score = 1.2 + index / 100.0
+    family = (
+        "NO_TRADE"
+        if action == "NO_TRADE"
+        else (
+            "SELL_BEFORE_CLOSE"
+            if action.endswith("SELL_BEFORE_CLOSE")
+            else "HOLD_TO_SETTLEMENT"
+        )
+    )
     return {
         "decision_group_id": f"fresh-public|{market_id}|{decision_ts}",
         "market_id": market_id,
         "decision_ts": decision_ts,
         "selected_action": action,
         "selected_side": side,
-        "selected_action_family": "HOLD_TO_SETTLEMENT",
+        "selected_action_family": family,
         "corrected_model_score": score,
         "raw_model_score": 20.0 + index,
         "high_score_flag": True,
@@ -8049,6 +8320,18 @@ def _paper_fresh_public_row(
         "full_5_action_ranking": [
             {
                 "selected_action": candidate,
+                "selected_side": "NONE"
+                if candidate == "NO_TRADE"
+                else ("UP" if "BUY_UP" in candidate else "DOWN"),
+                "selected_action_family": (
+                    "NO_TRADE"
+                    if candidate == "NO_TRADE"
+                    else (
+                        "SELL_BEFORE_CLOSE"
+                        if candidate.endswith("SELL_BEFORE_CLOSE")
+                        else "HOLD_TO_SETTLEMENT"
+                    )
+                ),
                 "corrected_model_score": score
                 if candidate == action
                 else score - 0.20 - 0.01 * candidate_index,

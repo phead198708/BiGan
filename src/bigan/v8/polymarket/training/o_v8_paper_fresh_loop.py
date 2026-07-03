@@ -25,6 +25,7 @@ from bigan.v8.polymarket.training.o_v8_paper_candidate_unlock import (
     _sha256_file as _sha256_file_existing,
 )
 from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking import (
+    O_DEPLOYABLE_MODEL_FEATURE_NAMES,
     O_REQUIRED_DECISION_ACTION_FAMILIES,
     _action_family,
     _side_from_action,
@@ -50,6 +51,18 @@ O_V8_PAPER_FRESH_CUMULATIVE_MONITORING_SCHEMA_VERSION = (
 O_V8_PAPER_FRESH_LOOP_MANIFEST_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-paper-fresh-loop-manifest-v1"
 )
+O_V8_PAPER_FRESH_NO_TRADE_DIAGNOSTIC_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-paper-fresh-no-trade-diagnostic-v1"
+)
+O_V8_PAPER_FRESH_SCORE_DECOMPOSITION_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-paper-fresh-score-decomposition-v1"
+)
+O_V8_PAPER_FRESH_PROVIDER_FEATURE_COVERAGE_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-paper-fresh-provider-feature-coverage-v1"
+)
+O_V8_PAPER_FRESH_CANONICAL_SCORER_ALIGNMENT_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-paper-fresh-canonical-scorer-alignment-v1"
+)
 
 PINNED_ISSUE_160_RUN_ID = "o-v8-paper-candidate-unlock-20260703T073000Z"
 PINNED_ISSUE_160_MANIFEST_SHA256 = (
@@ -72,6 +85,11 @@ O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE = "snapshot_fixture"
 O_V8_PAPER_FRESH_PUBLIC_DATA_SOURCES = (
     O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
     O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE,
+)
+O_V8_PAPER_FRESH_COMPARISON_RUN_IDS = (
+    "o-v8-paper-fresh-loop-20260703T095844Z",
+    "o-v8-paper-fresh-loop-20260703T094653Z",
+    "o-v8-paper-fresh-loop-20260703T081500Z",
 )
 
 _FALSE_SAFETY_FIELDS = (
@@ -155,6 +173,10 @@ class PolymarketOV8PaperFreshLoopResult:
     runtime_safety_report: dict[str, Any]
     monitoring_report: dict[str, Any]
     cumulative_monitoring_report: dict[str, Any]
+    no_trade_diagnostic_report: dict[str, Any]
+    score_decomposition_report: dict[str, Any]
+    provider_feature_coverage_report: dict[str, Any]
+    canonical_scorer_alignment_report: dict[str, Any]
     manifest: dict[str, Any]
 
 
@@ -221,6 +243,29 @@ def run_polymarket_o_v8_paper_fresh_loop(
         fills=fills,
         ledger_rows=ledger_rows,
     )
+    no_trade_report = _fresh_no_trade_diagnostic_report(
+        config=config,
+        public_cycles=public_cycles,
+        public_data_collection_report=public_data_collection_report,
+        execution_result=execution_result,
+        run_report=run_report,
+    )
+    score_decomposition_report = _fresh_score_decomposition_report(
+        config=config,
+        public_cycles=public_cycles,
+        public_data_collection_report=public_data_collection_report,
+    )
+    provider_feature_coverage_report = _fresh_provider_feature_coverage_report(
+        config=config,
+        public_cycles=public_cycles,
+        public_data_collection_report=public_data_collection_report,
+        run_report=run_report,
+    )
+    canonical_scorer_alignment_report = _fresh_canonical_scorer_alignment_report(
+        config=config,
+        public_cycles=public_cycles,
+        public_data_collection_report=public_data_collection_report,
+    )
 
     artifact_paths = {
         "fresh_loop_run_report": output_dir / "o_v8_paper_fresh_loop_run_report.json",
@@ -243,6 +288,22 @@ def run_polymarket_o_v8_paper_fresh_loop(
         / "o_v8_paper_fresh_cumulative_monitoring_report.json",
         "fresh_cumulative_monitoring_summary": output_dir
         / "o_v8_paper_fresh_cumulative_monitoring_report.md",
+        "fresh_no_trade_diagnostic_report": output_dir
+        / "o_v8_paper_fresh_no_trade_diagnostic.json",
+        "fresh_no_trade_diagnostic_summary": output_dir
+        / "o_v8_paper_fresh_no_trade_diagnostic.md",
+        "fresh_score_decomposition_report": output_dir
+        / "o_v8_paper_fresh_score_decomposition_report.json",
+        "fresh_score_decomposition_summary": output_dir
+        / "o_v8_paper_fresh_score_decomposition_report.md",
+        "fresh_provider_feature_coverage_report": output_dir
+        / "o_v8_paper_fresh_provider_feature_coverage_report.json",
+        "fresh_provider_feature_coverage_summary": output_dir
+        / "o_v8_paper_fresh_provider_feature_coverage_report.md",
+        "fresh_canonical_scorer_alignment_report": output_dir
+        / "o_v8_paper_fresh_canonical_scorer_alignment_report.json",
+        "fresh_canonical_scorer_alignment_summary": output_dir
+        / "o_v8_paper_fresh_canonical_scorer_alignment_report.md",
         "manifest": output_dir / "o_v8_paper_fresh_loop_manifest.json",
     }
     _write_json(artifact_paths["fresh_loop_run_report"], run_report)
@@ -271,6 +332,35 @@ def run_polymarket_o_v8_paper_fresh_loop(
         artifact_paths["fresh_cumulative_monitoring_summary"],
         _fresh_cumulative_monitoring_md(cumulative_report),
     )
+    _write_json(artifact_paths["fresh_no_trade_diagnostic_report"], no_trade_report)
+    _write_text(
+        artifact_paths["fresh_no_trade_diagnostic_summary"],
+        _fresh_no_trade_diagnostic_md(no_trade_report),
+    )
+    _write_json(
+        artifact_paths["fresh_score_decomposition_report"],
+        score_decomposition_report,
+    )
+    _write_text(
+        artifact_paths["fresh_score_decomposition_summary"],
+        _fresh_score_decomposition_md(score_decomposition_report),
+    )
+    _write_json(
+        artifact_paths["fresh_provider_feature_coverage_report"],
+        provider_feature_coverage_report,
+    )
+    _write_text(
+        artifact_paths["fresh_provider_feature_coverage_summary"],
+        _fresh_provider_feature_coverage_md(provider_feature_coverage_report),
+    )
+    _write_json(
+        artifact_paths["fresh_canonical_scorer_alignment_report"],
+        canonical_scorer_alignment_report,
+    )
+    _write_text(
+        artifact_paths["fresh_canonical_scorer_alignment_summary"],
+        _fresh_canonical_scorer_alignment_md(canonical_scorer_alignment_report),
+    )
 
     artifact_hashes = {
         name: _sha256_file(path)
@@ -288,6 +378,10 @@ def run_polymarket_o_v8_paper_fresh_loop(
         safety_report=safety_report,
         monitoring_report=monitoring_report,
         cumulative_report=cumulative_report,
+        no_trade_report=no_trade_report,
+        score_decomposition_report=score_decomposition_report,
+        provider_feature_coverage_report=provider_feature_coverage_report,
+        canonical_scorer_alignment_report=canonical_scorer_alignment_report,
     )
     _write_json(artifact_paths["manifest"], manifest)
     artifact_hashes["manifest"] = _sha256_file(artifact_paths["manifest"])
@@ -301,6 +395,10 @@ def run_polymarket_o_v8_paper_fresh_loop(
         runtime_safety_report=safety_report,
         monitoring_report=monitoring_report,
         cumulative_monitoring_report=cumulative_report,
+        no_trade_diagnostic_report=no_trade_report,
+        score_decomposition_report=score_decomposition_report,
+        provider_feature_coverage_report=provider_feature_coverage_report,
+        canonical_scorer_alignment_report=canonical_scorer_alignment_report,
         manifest=manifest,
     )
 
@@ -458,7 +556,8 @@ def _collect_read_only_public_provider_cycles(
         "frozen_o_action_rank_reference_sha256": unlock_evidence[
             "observed_manifest_sha256"
         ],
-        "scoring_rule_id": "frozen_v8_o_public_provider_feature_score_v1",
+        "scoring_rule_id": "fresh_provider_simplified_score",
+        "canonical_frozen_o_scorer_used": False,
         "uses_paper_intent_logs_as_fresh_public_data": False,
         "uses_validation_outcomes_for_tuning": False,
         "uses_realized_pnl_or_labels_for_analysis": False,
@@ -728,7 +827,8 @@ def _fresh_public_row_from_provider_feature_context(
         "decision_time_feature_max_input_ts": max_input_ts,
         "full_5_action_ranking": ranking,
         "score_components": {
-            "scoring_rule_id": "frozen_v8_o_public_provider_feature_score_v1",
+            "scoring_rule_id": "fresh_provider_simplified_score",
+            "canonical_frozen_o_scorer_used": False,
             "p_up": p_up,
             "p_down": p_down,
             "btc_mid_price": _float(candle.get("close_price")),
@@ -758,18 +858,17 @@ def _provider_action_scores(
     up: dict[str, Any],
     down: dict[str, Any],
 ) -> dict[str, float]:
-    up_ask = _float(up.get("ask_price"))
-    down_ask = _float(down.get("ask_price"))
-    up_bid = _float(up.get("bid_price"))
-    down_bid = _float(down.get("bid_price"))
-    up_spread_penalty = _provider_spread_bps(up) / 10_000.0
-    down_spread_penalty = _provider_spread_bps(down) / 10_000.0
     return {
-        "BUY_UP_HOLD_TO_SETTLEMENT": p_up - up_ask - up_spread_penalty,
-        "BUY_DOWN_HOLD_TO_SETTLEMENT": p_down - down_ask - down_spread_penalty,
-        "BUY_UP_SELL_BEFORE_CLOSE": up_bid - up_ask - up_spread_penalty,
-        "BUY_DOWN_SELL_BEFORE_CLOSE": down_bid - down_ask - down_spread_penalty,
-        "NO_TRADE": 0.0,
+        action: _float(
+            _provider_score_decomposition(
+                action=action,
+                p_up=p_up,
+                p_down=p_down,
+                up=up,
+                down=down,
+            )["corrected_score"]
+        )
+        for action in O_REQUIRED_DECISION_ACTION_FAMILIES
     }
 
 
@@ -786,6 +885,13 @@ def _provider_full_action_ranking(
     for action in O_REQUIRED_DECISION_ACTION_FAMILIES:
         side = _side_from_action(action)
         score = _float(scores.get(action))
+        decomposition = _provider_score_decomposition(
+            action=action,
+            p_up=p_up,
+            p_down=1.0 - p_up,
+            up=up,
+            down=down,
+        )
         ranking.append(
             {
                 "selected_action": action,
@@ -793,6 +899,9 @@ def _provider_full_action_ranking(
                 "selected_action_family": _action_family(action),
                 "corrected_model_score": score,
                 "raw_model_score": score,
+                "score_decomposition": decomposition,
+                "scoring_rule_id": "fresh_provider_simplified_score",
+                "canonical_frozen_o_scorer_used": False,
                 "p_up_action_disagreement": _p_up_action_disagreement(
                     action=action,
                     p_up=p_up,
@@ -815,6 +924,76 @@ def _provider_full_action_ranking(
         ),
         reverse=True,
     )
+
+
+def _provider_score_decomposition(
+    *,
+    action: str,
+    p_up: float,
+    p_down: float,
+    up: dict[str, Any],
+    down: dict[str, Any],
+) -> dict[str, Any]:
+    if action == "NO_TRADE":
+        return {
+            "scoring_rule_id": "fresh_provider_simplified_score",
+            "canonical_frozen_o_scorer_used": False,
+            "p_side_contribution": 0.0,
+            "p_up_contribution": 0.0,
+            "p_down_contribution": 0.0,
+            "ask_contribution": 0.0,
+            "bid_contribution": 0.0,
+            "spread_penalty": 0.0,
+            "queue_fill_term": 0.0,
+            "book_staleness_term": 0.0,
+            "time_to_close_term": 0.0,
+            "queue_fill_term_used": False,
+            "book_staleness_term_used": False,
+            "time_to_close_term_used": False,
+            "raw_score": 0.0,
+            "corrected_score": 0.0,
+            "is_buy_action": False,
+            "is_sell_before_close": False,
+            "is_hold_to_settlement": False,
+            "is_no_trade": True,
+        }
+    side = _side_from_action(action)
+    book = up if side == "UP" else down
+    p_side = p_up if side == "UP" else p_down
+    ask = _float(book.get("ask_price"))
+    bid = _float(book.get("bid_price"))
+    spread_penalty = _provider_spread_bps(book) / 10_000.0
+    family = _action_family(action)
+    p_side_contribution = p_side if family == "HOLD_TO_SETTLEMENT" else 0.0
+    bid_contribution = bid if family == "SELL_BEFORE_CLOSE" else 0.0
+    ask_contribution = -ask
+    corrected = p_side_contribution + bid_contribution + ask_contribution - spread_penalty
+    return {
+        "scoring_rule_id": "fresh_provider_simplified_score",
+        "canonical_frozen_o_scorer_used": False,
+        "p_side_contribution": p_side_contribution,
+        "p_up_contribution": (
+            p_up if side == "UP" and family == "HOLD_TO_SETTLEMENT" else 0.0
+        ),
+        "p_down_contribution": p_down
+        if side == "DOWN" and family == "HOLD_TO_SETTLEMENT"
+        else 0.0,
+        "ask_contribution": ask_contribution,
+        "bid_contribution": bid_contribution,
+        "spread_penalty": spread_penalty,
+        "queue_fill_term": 0.0,
+        "book_staleness_term": 0.0,
+        "time_to_close_term": 0.0,
+        "queue_fill_term_used": False,
+        "book_staleness_term_used": False,
+        "time_to_close_term_used": False,
+        "raw_score": corrected,
+        "corrected_score": corrected,
+        "is_buy_action": True,
+        "is_sell_before_close": family == "SELL_BEFORE_CLOSE",
+        "is_hold_to_settlement": family == "HOLD_TO_SETTLEMENT",
+        "is_no_trade": False,
+    }
 
 
 def _provider_microstructure_for_action(
@@ -1366,6 +1545,434 @@ def _fresh_cumulative_monitoring_report(
     )
 
 
+def _fresh_no_trade_diagnostic_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    public_cycles: list[list[dict[str, Any]]],
+    public_data_collection_report: dict[str, Any],
+    execution_result: dict[str, Any],
+    run_report: dict[str, Any],
+) -> dict[str, Any]:
+    guard_rows = list(execution_result["guard_decision_rows"])
+    public_rows = _flatten_public_rows(public_cycles)
+    public_by_group = {
+        str(row.get("decision_group_id")): row for row in public_rows
+    }
+    decision_rows = []
+    for guard_row in guard_rows:
+        public_row = public_by_group.get(str(guard_row.get("decision_group_id")), {})
+        ranking = _ranking_from_public_or_guard(public_row=public_row, guard_row=guard_row)
+        no_trade = _ranking_action(ranking, "NO_TRADE")
+        buy_actions = [
+            row for row in ranking if str(row.get("selected_action")) != "NO_TRADE"
+        ]
+        best_buy = max(
+            buy_actions,
+            key=lambda row: _float(row.get("corrected_model_score")),
+            default={},
+        )
+        selected_action = str(guard_row.get("source_selected_action") or "")
+        selected_micro = dict(guard_row.get("microstructure_snapshot") or {})
+        execution_blocked = bool(guard_row.get("execution_blocking_reason_codes"))
+        decision_rows.append(
+            {
+                "decision_group_id": guard_row.get("decision_group_id"),
+                "market_id": guard_row.get("market_id"),
+                "decision_ts": guard_row.get("decision_ts"),
+                "selected_action": selected_action,
+                "selected_side": guard_row.get("source_selected_side"),
+                "selected_family": guard_row.get("source_selected_family"),
+                "execution_guarded_action": guard_row.get("execution_guarded_action"),
+                "execution_guarded_side": guard_row.get("execution_guarded_side"),
+                "execution_guarded_family": guard_row.get("execution_guarded_family"),
+                "full_5_action_ranking": ranking,
+                "no_trade_score": _float(no_trade.get("corrected_model_score")),
+                "best_buy_action": best_buy.get("selected_action"),
+                "best_buy_score": _float(best_buy.get("corrected_model_score")),
+                "no_trade_score_minus_best_buy_score": _float(
+                    no_trade.get("corrected_model_score")
+                )
+                - _float(best_buy.get("corrected_model_score")),
+                "top_action_margin": _top_action_margin(ranking),
+                "p_up": guard_row.get("p_up"),
+                "p_down": guard_row.get("p_down"),
+                "p_up_side_disagreement": guard_row.get("p_up_action_disagreement"),
+                "entry_ask": selected_micro.get("entry_ask"),
+                "exit_bid_proxy": selected_micro.get("executable_exit_bid_proxy"),
+                "spread_bps": selected_micro.get("spread_bps"),
+                "queue_fill_proxy": selected_micro.get("queue_fill_proxy"),
+                "book_staleness_ms": selected_micro.get("book_staleness_ms"),
+                "time_to_close_seconds": selected_micro.get("time_to_close_seconds"),
+                "high_score_flag": guard_row.get("source_high_score_flag"),
+                "rank_blocked_by_no_trade": selected_action == "NO_TRADE",
+                "execution_guard_blocked": execution_blocked,
+                "execution_guard_blocking_reasons": list(
+                    guard_row.get("execution_blocking_reason_codes") or []
+                ),
+                "execution_guard_reason_codes": list(
+                    guard_row.get("execution_guard_reason_codes") or []
+                ),
+                "missing_runtime_fields": list(
+                    guard_row.get("missing_runtime_field_codes") or []
+                ),
+                "provenance_violations": list(
+                    guard_row.get("runtime_field_backfill_provenance_violations")
+                    or []
+                ),
+            }
+        )
+    rank_blocked_count = sum(
+        1 for row in decision_rows if row["rank_blocked_by_no_trade"] is True
+    )
+    execution_blocked_count = sum(
+        1 for row in decision_rows if row["execution_guard_blocked"] is True
+    )
+    conclusion = _fresh_no_trade_conclusion(
+        run_report=run_report,
+        rank_blocked_count=rank_blocked_count,
+        execution_blocked_count=execution_blocked_count,
+        public_data_collection_report=public_data_collection_report,
+    )
+    report = {
+        "schema_version": O_V8_PAPER_FRESH_NO_TRADE_DIAGNOSTIC_SCHEMA_VERSION,
+        "report_type": "o_v8_paper_fresh_no_trade_diagnostic",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "public_data_source": public_data_collection_report["public_data_source"],
+        "scoring_rule_id": "fresh_provider_simplified_score",
+        "canonical_frozen_o_scorer_used": False,
+        "candidate_decision_count": len(decision_rows),
+        "rank_blocked_by_no_trade_count": rank_blocked_count,
+        "execution_guard_blocked_count": execution_blocked_count,
+        "paper_fresh_order_intent_count": run_report["paper_fresh_order_intent_count"],
+        "selected_action_distribution": _counter_from_rows(
+            decision_rows, "selected_action"
+        ),
+        "best_buy_action_distribution": _counter_from_rows(
+            decision_rows, "best_buy_action"
+        ),
+        "no_trade_gap_summary": _numeric_summary(
+            [
+                row["no_trade_score_minus_best_buy_score"]
+                for row in decision_rows
+            ]
+        ),
+        "decision_rows": decision_rows,
+        "historical_run_comparison_rows": _fresh_historical_run_comparison_rows(
+            current_run_report=run_report,
+            output_dir=Path(config.output_dir),
+        ),
+        "zero_intent_behavior_classification": conclusion,
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(report, "o_v8_paper_fresh_no_trade_diagnostic_report_id")
+
+
+def _fresh_score_decomposition_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    public_cycles: list[list[dict[str, Any]]],
+    public_data_collection_report: dict[str, Any],
+) -> dict[str, Any]:
+    action_rows = []
+    for public_row in _flatten_public_rows(public_cycles):
+        ranking = list(public_row.get("full_5_action_ranking") or [])
+        for rank, action_row in enumerate(ranking, start=1):
+            action = str(action_row.get("selected_action") or "")
+            decomposition = dict(action_row.get("score_decomposition") or {})
+            action_rows.append(
+                {
+                    "decision_group_id": public_row.get("decision_group_id"),
+                    "market_id": public_row.get("market_id"),
+                    "decision_ts": public_row.get("decision_ts"),
+                    "action": action,
+                    "side": action_row.get("selected_side") or _side_from_action(action),
+                    "family": action_row.get("selected_action_family")
+                    or _action_family(action),
+                    "rank": action_row.get("rank") or rank,
+                    "p_up": public_row.get("p_up"),
+                    "p_down": public_row.get("p_down"),
+                    "p_side_contribution": _float(
+                        decomposition.get("p_side_contribution")
+                    ),
+                    "p_up_contribution": _float(
+                        decomposition.get("p_up_contribution")
+                    ),
+                    "p_down_contribution": _float(
+                        decomposition.get("p_down_contribution")
+                    ),
+                    "ask_contribution": _float(
+                        decomposition.get("ask_contribution")
+                    ),
+                    "bid_contribution": _float(
+                        decomposition.get("bid_contribution")
+                    ),
+                    "spread_penalty": _float(decomposition.get("spread_penalty")),
+                    "queue_fill_term": _float(decomposition.get("queue_fill_term")),
+                    "book_staleness_term": _float(
+                        decomposition.get("book_staleness_term")
+                    ),
+                    "time_to_close_term": _float(
+                        decomposition.get("time_to_close_term")
+                    ),
+                    "queue_fill_term_used": bool(
+                        decomposition.get("queue_fill_term_used")
+                    ),
+                    "book_staleness_term_used": bool(
+                        decomposition.get("book_staleness_term_used")
+                    ),
+                    "time_to_close_term_used": bool(
+                        decomposition.get("time_to_close_term_used")
+                    ),
+                    "raw_score": _float(
+                        decomposition.get("raw_score")
+                        if decomposition
+                        else action_row.get("raw_model_score")
+                    ),
+                    "corrected_score": _float(
+                        decomposition.get("corrected_score")
+                        if decomposition
+                        else action_row.get("corrected_model_score")
+                    ),
+                    "is_buy_action": action != "NO_TRADE",
+                    "is_sell_before_close": _action_family(action)
+                    == "SELL_BEFORE_CLOSE",
+                    "is_hold_to_settlement": _action_family(action)
+                    == "HOLD_TO_SETTLEMENT",
+                    "is_no_trade": action == "NO_TRADE",
+                    "scoring_rule_id": decomposition.get("scoring_rule_id")
+                    or "fresh_provider_simplified_score",
+                    "canonical_frozen_o_scorer_used": bool(
+                        decomposition.get("canonical_frozen_o_scorer_used")
+                    ),
+                }
+            )
+    report = {
+        "schema_version": O_V8_PAPER_FRESH_SCORE_DECOMPOSITION_SCHEMA_VERSION,
+        "report_type": "o_v8_paper_fresh_score_decomposition",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "public_data_source": public_data_collection_report["public_data_source"],
+        "scoring_rule_id": "fresh_provider_simplified_score",
+        "canonical_frozen_o_scorer_used": False,
+        "score_decomposition_action_row_count": len(action_rows),
+        "score_decomposition_rows": action_rows,
+        "score_summary_by_action": _score_summary_by_action(action_rows),
+        "simplified_provider_score_terms": [
+            "p_side_contribution",
+            "ask_contribution",
+            "bid_contribution",
+            "spread_penalty",
+        ],
+        "unused_decision_time_quality_terms": [
+            "queue_fill_term",
+            "book_staleness_term",
+            "time_to_close_term",
+        ],
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        "v8_execution_handoff_allowed": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(
+        report, "o_v8_paper_fresh_score_decomposition_report_id"
+    )
+
+
+def _fresh_provider_feature_coverage_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    public_cycles: list[list[dict[str, Any]]],
+    public_data_collection_report: dict[str, Any],
+    run_report: dict[str, Any],
+) -> dict[str, Any]:
+    rows = _flatten_public_rows(public_cycles)
+    rows_per_cycle = [len(cycle) for cycle in public_cycles]
+    missing_micro = [
+        missing
+        for row in rows
+        for missing in _missing_required_microstructure_fields(row)
+    ]
+    invalid_provenance = [
+        row
+        for row in rows
+        if (row.get("reference_price_feature_provenance") or {}).get(
+            "provenance_valid"
+        )
+        is not True
+    ]
+    sparse = len(rows) < max(5, len(public_cycles))
+    report = {
+        "schema_version": O_V8_PAPER_FRESH_PROVIDER_FEATURE_COVERAGE_SCHEMA_VERSION,
+        "report_type": "o_v8_paper_fresh_provider_feature_coverage",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "public_data_source": public_data_collection_report["public_data_source"],
+        "public_market_count": public_data_collection_report["public_market_count"],
+        "public_feature_row_count": len(rows),
+        "unique_market_count": len({str(row.get("market_id")) for row in rows}),
+        "cycle_count": len(public_cycles),
+        "cycles_with_rows": sum(1 for count in rows_per_cycle if count > 0),
+        "idle_cycles": sum(1 for count in rows_per_cycle if count == 0),
+        "rows_per_cycle": rows_per_cycle,
+        "missing_book_side_count": sum(
+            1
+            for row in rows
+            if len(row.get("full_5_action_ranking") or [])
+            < len(O_REQUIRED_DECISION_ACTION_FAMILIES)
+        ),
+        "missing_btc_candle_count": 0
+        if rows
+        else int(
+            public_data_collection_report["public_btc_feature_candle_row_count"] == 0
+        ),
+        "missing_required_microstructure_field_count": len(missing_micro),
+        "missing_required_microstructure_field_distribution": dict(
+            sorted(Counter(missing_micro).items())
+        ),
+        "missing_runtime_field_count": run_report["runtime_field_missing_count"],
+        "provenance_invalid_count": len(invalid_provenance),
+        "provider_collection_failures": int(
+            public_data_collection_report["paper_fresh_provider_collection_failed"]
+        ),
+        "public_orderbook_row_count": public_data_collection_report[
+            "public_orderbook_row_count"
+        ],
+        "public_trade_row_count": public_data_collection_report[
+            "public_trade_row_count"
+        ],
+        "public_btc_feature_candle_row_count": public_data_collection_report[
+            "public_btc_feature_candle_row_count"
+        ],
+        "sparse_provider_row_flag": sparse,
+        "sparse_provider_row_reason_codes": [
+            "provider_feature_rows_below_minimum_diagnostic_density"
+        ]
+        if sparse
+        else [],
+        "historical_run_comparison_rows": _fresh_historical_run_comparison_rows(
+            current_run_report=run_report,
+            output_dir=Path(config.output_dir),
+        ),
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        "v8_execution_handoff_allowed": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(
+        report, "o_v8_paper_fresh_provider_feature_coverage_report_id"
+    )
+
+
+def _fresh_canonical_scorer_alignment_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    public_cycles: list[list[dict[str, Any]]],
+    public_data_collection_report: dict[str, Any],
+) -> dict[str, Any]:
+    rows = _flatten_public_rows(public_cycles)
+    provider_features = sorted(
+        {
+            key
+            for row in rows
+            for key in set(row.get("score_components") or {})
+            | set(row.get("microstructure_snapshot") or {})
+        }
+    )
+    missing_canonical_features = sorted(
+        set(O_DEPLOYABLE_MODEL_FEATURE_NAMES).difference(provider_features)
+    )
+    extra_provider_features = sorted(
+        set(provider_features).difference(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
+    )
+    alignment_rows = []
+    for row in rows:
+        alignment_rows.append(
+            {
+                "decision_group_id": row.get("decision_group_id"),
+                "market_id": row.get("market_id"),
+                "decision_ts": row.get("decision_ts"),
+                "current_provider_selected_action": row.get("selected_action"),
+                "canonical_selected_action": None,
+                "no_trade_selection_agrees": None,
+                "score_rank_differences_by_action": [],
+                "alignment_status": "blocked_fail_closed",
+                "alignment_reason_codes": [
+                    "canonical_frozen_o_scorer_not_invoked",
+                    "unsupported_provider_feature_row_shape",
+                    "missing_feature_backfill_mapping",
+                ],
+            }
+        )
+    report = {
+        "schema_version": O_V8_PAPER_FRESH_CANONICAL_SCORER_ALIGNMENT_SCHEMA_VERSION,
+        "report_type": "o_v8_paper_fresh_canonical_scorer_alignment",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "public_data_source": public_data_collection_report["public_data_source"],
+        "canonical_frozen_o_scorer_invoked": False,
+        "canonical_frozen_o_scorer_used": False,
+        "canonical_alignment_diagnostic_status": "blocked_fail_closed",
+        "canonical_alignment_blocking_reason_codes": [
+            "canonical_frozen_o_scorer_not_wired_for_fresh_provider_rows",
+            "missing_frozen_model_summary",
+            "missing_feature_schema",
+            "missing_feature_backfill_mapping",
+            "unsupported_provider_feature_row_shape",
+            "incomplete_action_row_normalization",
+        ],
+        "fresh_provider_scoring_rule_id": "fresh_provider_simplified_score",
+        "feature_schema_matches_canonical_scorer_requirements": False,
+        "provider_feature_names": provider_features,
+        "missing_canonical_feature_names": missing_canonical_features,
+        "extra_provider_only_feature_names": extra_provider_features,
+        "alignment_decision_rows": alignment_rows,
+        "source_o_score_mutated": False,
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(
+        report, "o_v8_paper_fresh_canonical_scorer_alignment_report_id"
+    )
+
+
 def _fresh_loop_manifest(
     *,
     config: PolymarketOV8PaperFreshLoopConfig,
@@ -1378,6 +1985,10 @@ def _fresh_loop_manifest(
     safety_report: dict[str, Any],
     monitoring_report: dict[str, Any],
     cumulative_report: dict[str, Any],
+    no_trade_report: dict[str, Any],
+    score_decomposition_report: dict[str, Any],
+    provider_feature_coverage_report: dict[str, Any],
+    canonical_scorer_alignment_report: dict[str, Any],
 ) -> dict[str, Any]:
     manifest = {
         "schema_version": O_V8_PAPER_FRESH_LOOP_MANIFEST_SCHEMA_VERSION,
@@ -1409,6 +2020,33 @@ def _fresh_loop_manifest(
         ],
         "fresh_cumulative_monitoring_report_id": cumulative_report[
             "o_v8_paper_fresh_cumulative_monitoring_report_id"
+        ],
+        "fresh_no_trade_diagnostic_report_id": no_trade_report[
+            "o_v8_paper_fresh_no_trade_diagnostic_report_id"
+        ],
+        "fresh_score_decomposition_report_id": score_decomposition_report[
+            "o_v8_paper_fresh_score_decomposition_report_id"
+        ],
+        "fresh_provider_feature_coverage_report_id": provider_feature_coverage_report[
+            "o_v8_paper_fresh_provider_feature_coverage_report_id"
+        ],
+        "fresh_canonical_scorer_alignment_report_id": canonical_scorer_alignment_report[
+            "o_v8_paper_fresh_canonical_scorer_alignment_report_id"
+        ],
+        "canonical_frozen_o_scorer_used": canonical_scorer_alignment_report[
+            "canonical_frozen_o_scorer_used"
+        ],
+        "canonical_alignment_diagnostic_status": canonical_scorer_alignment_report[
+            "canonical_alignment_diagnostic_status"
+        ],
+        "canonical_alignment_blocking_reason_codes": canonical_scorer_alignment_report[
+            "canonical_alignment_blocking_reason_codes"
+        ],
+        "rank_blocked_by_no_trade_count": no_trade_report[
+            "rank_blocked_by_no_trade_count"
+        ],
+        "sparse_provider_row_flag": provider_feature_coverage_report[
+            "sparse_provider_row_flag"
         ],
         "paper_fresh_loop_enabled": run_report["paper_fresh_loop_enabled"],
         "paper_fresh_loop_mode": run_report["paper_fresh_loop_mode"],
@@ -1806,6 +2444,191 @@ def _counter_from_rows(rows: list[dict[str, Any]], field_name: str) -> dict[str,
     return dict(sorted(counter.items()))
 
 
+def _flatten_public_rows(
+    public_cycles: list[list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    return [dict(row) for cycle in public_cycles for row in cycle]
+
+
+def _ranking_from_public_or_guard(
+    *,
+    public_row: dict[str, Any],
+    guard_row: dict[str, Any],
+) -> list[dict[str, Any]]:
+    ranking = list(public_row.get("full_5_action_ranking") or [])
+    if ranking:
+        return [dict(row) for row in ranking]
+    return [dict(row) for row in guard_row.get("top_k_action_ranking") or []]
+
+
+def _ranking_action(
+    ranking: list[dict[str, Any]],
+    action: str,
+) -> dict[str, Any]:
+    for row in ranking:
+        if row.get("selected_action") == action:
+            return dict(row)
+    return {}
+
+
+def _top_action_margin(ranking: list[dict[str, Any]]) -> float | None:
+    if len(ranking) < 2:
+        return None
+    scores = sorted(
+        [_float(row.get("corrected_model_score")) for row in ranking],
+        reverse=True,
+    )
+    return scores[0] - scores[1]
+
+
+def _numeric_summary(values: list[float]) -> dict[str, Any]:
+    clean = sorted(float(value) for value in values)
+    if not clean:
+        return {"count": 0, "min": None, "max": None, "mean": None, "median": None}
+    midpoint = len(clean) // 2
+    median = (
+        clean[midpoint]
+        if len(clean) % 2 == 1
+        else (clean[midpoint - 1] + clean[midpoint]) / 2.0
+    )
+    return {
+        "count": len(clean),
+        "min": clean[0],
+        "max": clean[-1],
+        "mean": sum(clean) / len(clean),
+        "median": median,
+    }
+
+
+def _score_summary_by_action(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    grouped: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row.get("action"))].append(_float(row.get("corrected_score")))
+    return {
+        action: _numeric_summary(values)
+        for action, values in sorted(grouped.items())
+    }
+
+
+def _missing_required_microstructure_fields(row: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for action_row in row.get("full_5_action_ranking") or []:
+        action = str(action_row.get("selected_action") or "")
+        if action == "NO_TRADE":
+            continue
+        micro = dict(action_row.get("microstructure_snapshot") or {})
+        for field_name in (
+            "entry_ask",
+            "executable_exit_bid_proxy",
+            "spread_bps",
+            "book_staleness_ms",
+            "queue_fill_proxy",
+            "time_to_close_seconds",
+        ):
+            if micro.get(field_name) is None:
+                missing.append(f"{action}.{field_name}")
+    return missing
+
+
+def _fresh_no_trade_conclusion(
+    *,
+    run_report: dict[str, Any],
+    rank_blocked_count: int,
+    execution_blocked_count: int,
+    public_data_collection_report: dict[str, Any],
+) -> str:
+    if public_data_collection_report["paper_fresh_provider_collection_failed"]:
+        return "provider_collection_failed"
+    if run_report["paper_fresh_order_intent_count"] == 0 and rank_blocked_count:
+        if execution_blocked_count == 0:
+            return "rank_blocked_by_no_trade_under_simplified_provider_score"
+        return "mixed_no_trade_rank_and_execution_guard_blocking"
+    if run_report["paper_fresh_order_intent_count"] == 0 and execution_blocked_count:
+        return "execution_guard_blocked_buy_actions"
+    if run_report["paper_fresh_order_intent_count"] > 0:
+        return "paper_intents_generated_when_buy_actions_rank_above_no_trade"
+    return "no_provider_decisions_available"
+
+
+def _fresh_historical_run_comparison_rows(
+    *,
+    current_run_report: dict[str, Any],
+    output_dir: Path,
+) -> list[dict[str, Any]]:
+    rows = [
+        _fresh_comparison_row_from_report(
+            run_id=str(current_run_report["run_id"]),
+            report=current_run_report,
+            report_path=None,
+            comparison_source="current_run",
+        )
+    ]
+    for run_id in O_V8_PAPER_FRESH_COMPARISON_RUN_IDS:
+        report_path = output_dir / run_id / "o_v8_paper_fresh_loop_run_report.json"
+        if not report_path.exists():
+            rows.append(
+                {
+                    "run_id": run_id,
+                    "comparison_source": "historical_run",
+                    "report_path": str(report_path),
+                    "report_available": False,
+                    "missing_reason_code": "historical_fresh_loop_report_missing",
+                }
+            )
+            continue
+        rows.append(
+            _fresh_comparison_row_from_report(
+                run_id=run_id,
+                report=_read_json(report_path),
+                report_path=report_path,
+                comparison_source="historical_run",
+            )
+        )
+    return rows
+
+
+def _fresh_comparison_row_from_report(
+    *,
+    run_id: str,
+    report: dict[str, Any],
+    report_path: Path | None,
+    comparison_source: str,
+) -> dict[str, Any]:
+    collection = dict(report.get("public_data_collection_report") or {})
+    return {
+        "run_id": run_id,
+        "comparison_source": comparison_source,
+        "report_path": str(report_path) if report_path is not None else None,
+        "report_available": True,
+        "provider_market_count": collection.get("public_market_count"),
+        "provider_feature_row_count": collection.get("public_feature_row_count"),
+        "candidate_decision_count": report.get("candidate_decision_count"),
+        "selected_action_distribution": report.get("action_distribution") or {},
+        "buy_action_score_distribution": (
+            report.get("buy_action_score_distribution")
+            or "unavailable_pre_162_score_diagnostic"
+        ),
+        "no_trade_gap_distribution": (
+            report.get("no_trade_gap_distribution")
+            or "unavailable_pre_162_score_diagnostic"
+        ),
+        "p_up_p_down_distribution": (
+            report.get("p_up_p_down_distribution")
+            or "unavailable_pre_162_score_diagnostic"
+        ),
+        "microstructure_summary": (
+            report.get("microstructure_summary")
+            or "unavailable_pre_162_score_diagnostic"
+        ),
+        "guard_block_reason_distribution": report.get("block_reason_distribution")
+        or {},
+        "paper_intent_count": report.get("paper_fresh_order_intent_count"),
+        "paper_fill_count": report.get("paper_fresh_fill_count"),
+        "runtime_missing_field_count": report.get("runtime_field_missing_count"),
+        "provenance_violation_count": report.get("provenance_violation_count"),
+    }
+
+
 def _check(
     *,
     passed: bool,
@@ -1938,8 +2761,135 @@ def _fresh_cumulative_monitoring_md(report: dict[str, Any]) -> str:
     )
 
 
+def _fresh_no_trade_diagnostic_md(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Paper Fresh NO_TRADE Diagnostic",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- public_data_source: `{report['public_data_source']}`",
+            f"- scoring_rule_id: `{report['scoring_rule_id']}`",
+            f"- canonical_frozen_o_scorer_used: `{str(report['canonical_frozen_o_scorer_used']).lower()}`",
+            f"- candidate_decision_count: `{report['candidate_decision_count']}`",
+            f"- rank_blocked_by_no_trade_count: `{report['rank_blocked_by_no_trade_count']}`",
+            f"- execution_guard_blocked_count: `{report['execution_guard_blocked_count']}`",
+            f"- paper_fresh_order_intent_count: `{report['paper_fresh_order_intent_count']}`",
+            f"- zero_intent_behavior_classification: `{report['zero_intent_behavior_classification']}`",
+            f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
+            f"- source_model_candidate_eligible: `{str(report['source_model_candidate_eligible']).lower()}`",
+            f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+            f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+            "",
+            "## Selected Action Distribution",
+            "",
+            *_markdown_dict(report["selected_action_distribution"]),
+            "",
+            "## Best Buy Action Distribution",
+            "",
+            *_markdown_dict(report["best_buy_action_distribution"]),
+            "",
+        ]
+    )
+
+
+def _fresh_score_decomposition_md(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Paper Fresh Score Decomposition",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- public_data_source: `{report['public_data_source']}`",
+            f"- scoring_rule_id: `{report['scoring_rule_id']}`",
+            f"- canonical_frozen_o_scorer_used: `{str(report['canonical_frozen_o_scorer_used']).lower()}`",
+            f"- score_decomposition_action_row_count: `{report['score_decomposition_action_row_count']}`",
+            f"- thresholds_tuned: `{str(report['thresholds_tuned']).lower()}`",
+            f"- uses_realized_pnl_or_labels_for_analysis: `{str(report['uses_realized_pnl_or_labels_for_analysis']).lower()}`",
+            f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
+            "",
+            "## Score Summary By Action",
+            "",
+            *_markdown_summary_dict(report["score_summary_by_action"]),
+            "",
+        ]
+    )
+
+
+def _fresh_provider_feature_coverage_md(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Paper Fresh Provider Feature Coverage",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- public_data_source: `{report['public_data_source']}`",
+            f"- public_market_count: `{report['public_market_count']}`",
+            f"- public_feature_row_count: `{report['public_feature_row_count']}`",
+            f"- unique_market_count: `{report['unique_market_count']}`",
+            f"- cycle_count: `{report['cycle_count']}`",
+            f"- cycles_with_rows: `{report['cycles_with_rows']}`",
+            f"- idle_cycles: `{report['idle_cycles']}`",
+            f"- missing_required_microstructure_field_count: `{report['missing_required_microstructure_field_count']}`",
+            f"- missing_runtime_field_count: `{report['missing_runtime_field_count']}`",
+            f"- provenance_invalid_count: `{report['provenance_invalid_count']}`",
+            f"- provider_collection_failures: `{report['provider_collection_failures']}`",
+            f"- sparse_provider_row_flag: `{str(report['sparse_provider_row_flag']).lower()}`",
+            f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
+            "",
+            "## Sparse Provider Row Reason Codes",
+            "",
+            *_markdown_list(report["sparse_provider_row_reason_codes"]),
+            "",
+            "## Missing Microstructure Fields",
+            "",
+            *_markdown_dict(
+                report["missing_required_microstructure_field_distribution"]
+            ),
+            "",
+        ]
+    )
+
+
+def _fresh_canonical_scorer_alignment_md(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Paper Fresh Canonical Scorer Alignment",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- public_data_source: `{report['public_data_source']}`",
+            f"- canonical_frozen_o_scorer_invoked: `{str(report['canonical_frozen_o_scorer_invoked']).lower()}`",
+            f"- canonical_frozen_o_scorer_used: `{str(report['canonical_frozen_o_scorer_used']).lower()}`",
+            f"- canonical_alignment_diagnostic_status: `{report['canonical_alignment_diagnostic_status']}`",
+            f"- fresh_provider_scoring_rule_id: `{report['fresh_provider_scoring_rule_id']}`",
+            f"- feature_schema_matches_canonical_scorer_requirements: `{str(report['feature_schema_matches_canonical_scorer_requirements']).lower()}`",
+            f"- source_o_score_mutated: `{str(report['source_o_score_mutated']).lower()}`",
+            f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
+            f"- #146_start_allowed: `{str(report['#146_start_allowed']).lower()}`",
+            f"- #134_resume_allowed: `{str(report['#134_resume_allowed']).lower()}`",
+            "",
+            "## Blocking Reason Codes",
+            "",
+            *_markdown_list(report["canonical_alignment_blocking_reason_codes"]),
+            "",
+        ]
+    )
+
+
 def _markdown_list(rows: list[str]) -> list[str]:
     return ["- none"] if not rows else [f"- `{row}`" for row in rows]
+
+
+def _markdown_dict(values: dict[str, Any]) -> list[str]:
+    if not values:
+        return ["- none"]
+    return [f"- `{key}`: `{value}`" for key, value in sorted(values.items())]
+
+
+def _markdown_summary_dict(values: dict[str, Any]) -> list[str]:
+    if not values:
+        return ["- none"]
+    return [
+        f"- `{key}`: count `{summary.get('count')}`, mean `{summary.get('mean')}`, min `{summary.get('min')}`, max `{summary.get('max')}`"
+        for key, summary in sorted(values.items())
+    ]
 
 
 def _read_json(path: Path) -> dict[str, Any]:
