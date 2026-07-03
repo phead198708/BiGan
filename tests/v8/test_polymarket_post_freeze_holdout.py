@@ -27,7 +27,9 @@ from bigan.v8.polymarket.training.o_v8_paper_candidate_unlock import (
     run_polymarket_o_v8_paper_candidate_unlock,
 )
 from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
+    O_V8_PAPER_FRESH_CANONICAL_FEATURE_MAPPING_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_CANONICAL_SCORER_ALIGNMENT_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_CANONICAL_SCORER_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_CUMULATIVE_MONITORING_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_FILL_SIMULATION_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_LOOP_MANIFEST_SCHEMA_VERSION,
@@ -37,6 +39,7 @@ from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
     O_V8_PAPER_FRESH_PROVIDER_FEATURE_COVERAGE_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_RUNTIME_SAFETY_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_SCORE_DECOMPOSITION_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_SCORER_COMPARISON_SCHEMA_VERSION,
     O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
     O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE,
     PolymarketOV8PaperFreshLoopConfig,
@@ -7649,7 +7652,7 @@ def test_o_v8_paper_fresh_loop_single_cycle_success(tmp_path: Path) -> None:
     )
     assert alignment["canonical_frozen_o_scorer_used"] is False
     assert alignment["canonical_alignment_diagnostic_status"] == "blocked_fail_closed"
-    assert "missing_feature_backfill_mapping" in alignment[
+    assert "missing_frozen_model_summary" in alignment[
         "canonical_alignment_blocking_reason_codes"
     ]
 
@@ -7821,10 +7824,10 @@ def test_o_v8_paper_fresh_canonical_alignment_unavailable_fail_closed(
     assert report["canonical_frozen_o_scorer_invoked"] is False
     assert report["canonical_frozen_o_scorer_used"] is False
     assert report["canonical_alignment_diagnostic_status"] == "blocked_fail_closed"
-    assert "canonical_frozen_o_scorer_not_wired_for_fresh_provider_rows" in report[
+    assert "missing_frozen_model_summary" in report[
         "canonical_alignment_blocking_reason_codes"
     ]
-    assert "unsupported_provider_feature_row_shape" in report[
+    assert "missing_feature_schema" in report[
         "canonical_alignment_blocking_reason_codes"
     ]
     assert report["source_o_score_mutated"] is False
@@ -7832,6 +7835,193 @@ def test_o_v8_paper_fresh_canonical_alignment_unavailable_fail_closed(
     assert report["source_model_candidate_eligible"] is False
     assert report["#146_start_allowed"] is False
     assert report["#134_resume_allowed"] is False
+
+
+def test_o_v8_paper_fresh_canonical_scorer_invoked_with_complete_mapping(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    canonical_manifest_path = _write_canonical_o_source_fixture(
+        tmp_path,
+        prefer_no_trade=False,
+    )
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-canonical-complete",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            canonical_o_source_manifest_path=canonical_manifest_path,
+            public_data_cycles=(
+                (
+                    _paper_fresh_public_row(
+                        index=1,
+                        market_id="fresh-canonical-market",
+                        action="NO_TRADE",
+                        side="NONE",
+                        p_up=0.82,
+                    ),
+                ),
+            ),
+        )
+    )
+
+    mapping = result.canonical_feature_mapping_report
+    assert (
+        mapping["schema_version"]
+        == O_V8_PAPER_FRESH_CANONICAL_FEATURE_MAPPING_SCHEMA_VERSION
+    )
+    assert mapping["canonical_feature_mapping_complete"] is True
+    assert mapping["canonical_action_row_count"] == len(O_REQUIRED_DECISION_ACTION_FAMILIES)
+    assert mapping["missing_canonical_feature_names"] == []
+    assert mapping["provenance_invalid_count"] == 0
+
+    action_rows = _read_jsonl(result.artifact_paths["fresh_canonical_action_rows"])
+    assert len(action_rows) == len(O_REQUIRED_DECISION_ACTION_FAMILIES)
+    assert {row["action"] for row in action_rows} == set(
+        O_REQUIRED_DECISION_ACTION_FAMILIES
+    )
+    assert all(
+        set(row["canonical_feature_values"]) == set(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
+        for row in action_rows
+    )
+
+    scorer = result.canonical_scorer_report
+    assert scorer["schema_version"] == O_V8_PAPER_FRESH_CANONICAL_SCORER_SCHEMA_VERSION
+    assert scorer["canonical_frozen_o_scorer_invoked"] is True
+    assert scorer["canonical_frozen_o_scorer_used"] is True
+    assert scorer["canonical_scored_action_row_count"] == len(
+        O_REQUIRED_DECISION_ACTION_FAMILIES
+    )
+    assert scorer["canonical_selected_decision_count"] == 1
+    assert scorer["canonical_selected_decision_rows"][0]["action"] == (
+        "BUY_UP_HOLD_TO_SETTLEMENT"
+    )
+
+    comparison = result.scorer_comparison_report
+    assert comparison["schema_version"] == O_V8_PAPER_FRESH_SCORER_COMPARISON_SCHEMA_VERSION
+    assert comparison["scorer_comparison_complete"] is True
+    assert comparison["selected_action_agreement_count"] == 0
+    assert comparison["no_trade_agreement_count"] == 0
+    row = comparison["comparison_decision_rows"][0]
+    assert row["simplified_provider_selected_action"] == "NO_TRADE"
+    assert row["canonical_selected_action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+    assert row["no_trade_selection_agrees"] is False
+
+    assert result.fresh_loop_run_report["canonical_frozen_o_scorer_used"] is True
+    assert result.fresh_loop_run_report["scoring_rule_id"] == (
+        "canonical_frozen_o_model_predicted_score_with_frozen_shadow_correction"
+    )
+    assert result.no_trade_diagnostic_report[
+        "canonical_frozen_o_scorer_used"
+    ] is True
+    assert result.no_trade_diagnostic_report["decision_rows"][0][
+        "selected_action"
+    ] == "BUY_UP_HOLD_TO_SETTLEMENT"
+    assert result.score_decomposition_report[
+        "canonical_frozen_o_scorer_used"
+    ] is True
+    alignment = result.canonical_scorer_alignment_report
+    assert alignment["canonical_alignment_diagnostic_status"] == "passed"
+    assert alignment["canonical_frozen_o_scorer_invoked"] is True
+    assert alignment["canonical_frozen_o_scorer_used"] is True
+    assert alignment["source_o_score_mutated"] is False
+    assert alignment["v8_execution_handoff_allowed"] is False
+    assert result.manifest["canonical_frozen_o_scorer_used"] is True
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["#146_start_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
+
+
+def test_o_v8_paper_fresh_canonical_scorer_no_trade_agreement(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    canonical_manifest_path = _write_canonical_o_source_fixture(
+        tmp_path,
+        prefer_no_trade=True,
+    )
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-canonical-no-trade",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            canonical_o_source_manifest_path=canonical_manifest_path,
+            public_data_cycles=(
+                (
+                    _paper_fresh_public_row(
+                        index=1,
+                        market_id="fresh-canonical-no-trade",
+                        action="NO_TRADE",
+                        side="NONE",
+                        p_up=0.51,
+                    ),
+                ),
+            ),
+        )
+    )
+
+    comparison = result.scorer_comparison_report
+    assert comparison["scorer_comparison_complete"] is True
+    assert comparison["selected_action_agreement_count"] == 1
+    assert comparison["no_trade_agreement_count"] == 1
+    assert comparison["comparison_decision_rows"][0]["canonical_selected_action"] == (
+        "NO_TRADE"
+    )
+    assert result.canonical_scorer_alignment_report[
+        "canonical_alignment_diagnostic_status"
+    ] == "passed"
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def test_o_v8_paper_fresh_canonical_mapping_invalid_provenance_fails_closed(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    canonical_manifest_path = _write_canonical_o_source_fixture(
+        tmp_path,
+        prefer_no_trade=False,
+    )
+    bad_row = _paper_fresh_public_row(
+        index=1,
+        market_id="fresh-canonical-bad-provenance",
+        action="BUY_UP_HOLD_TO_SETTLEMENT",
+        side="UP",
+        p_up=0.82,
+    )
+    bad_row["reference_price_feature_provenance"] = {
+        "provenance_valid": True,
+        "decision_ts": bad_row["decision_ts"],
+        "max_input_ts": bad_row["decision_ts"] + 1,
+        "source_fields_used": ["future_reference_field"],
+    }
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-canonical-invalid-provenance",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            canonical_o_source_manifest_path=canonical_manifest_path,
+            public_data_cycles=((bad_row,),),
+        )
+    )
+
+    mapping = result.canonical_feature_mapping_report
+    assert mapping["canonical_feature_mapping_complete"] is False
+    assert mapping["provenance_invalid_count"] == len(O_REQUIRED_DECISION_ACTION_FAMILIES)
+    assert "provenance_invalid_for_mapped_features" in mapping[
+        "canonical_feature_mapping_blocking_reason_codes"
+    ]
+    assert result.canonical_scorer_report["canonical_frozen_o_scorer_invoked"] is False
+    assert result.canonical_scorer_alignment_report[
+        "canonical_alignment_diagnostic_status"
+    ] == "blocked_fail_closed"
+    assert result.manifest["canonical_frozen_o_scorer_used"] is False
+    assert result.manifest["v8_execution_handoff_allowed"] is False
 
 
 def test_o_v8_paper_fresh_provider_feature_coverage_sparse_flag(
@@ -8341,6 +8531,115 @@ def _paper_fresh_public_row(
                 O_REQUIRED_DECISION_ACTION_FAMILIES
             )
         ],
+    }
+
+
+def _write_canonical_o_source_fixture(
+    tmp_path: Path,
+    *,
+    prefer_no_trade: bool,
+) -> Path:
+    source_dir = tmp_path / (
+        "canonical-o-no-trade" if prefer_no_trade else "canonical-o-buy-up"
+    )
+    source_dir.mkdir(parents=True, exist_ok=True)
+    feature_names = list(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
+    coefficients = dict.fromkeys(feature_names, 0.0)
+    if prefer_no_trade:
+        coefficients["action_no_trade"] = 3.0
+        coefficients["action_buy_up_hold_to_settlement"] = -1.0
+        coefficients["action_buy_down_hold_to_settlement"] = -1.0
+    else:
+        coefficients["action_buy_up_hold_to_settlement"] = 3.0
+        coefficients["action_buy_down_hold_to_settlement"] = 0.5
+        coefficients["action_no_trade"] = -1.0
+        coefficients["p_up"] = 0.25
+    ranking_correction_config = _canonical_o_source_fixture_correction_config(
+        prefer_no_trade=prefer_no_trade,
+    )
+    ranking_report = {
+        "o_model_training_summary": {
+            "feature_names": feature_names,
+            "coefficients_by_feature": coefficients,
+            "ranking_correction_config": ranking_correction_config,
+            "correction_config_hash": ranking_correction_config[
+                "correction_config_hash"
+            ],
+            "selected_feature_set_name": "pytest_canonical_feature_schema",
+            "selected_correction_policy_name": "pytest_frozen_correction",
+            "selected_high_score_threshold_profile_name": "pytest_threshold",
+            "deployable_model_score_available": True,
+        }
+    }
+    ranking_report_path = source_dir / "o_source_ranking_objective_report.json"
+    ranking_report_path.write_text(
+        json.dumps(ranking_report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    source_manifest = {
+        "run_id": "pytest-canonical-o-source",
+        "artifact_paths": {
+            "ranking_objective_report": ranking_report_path.name,
+        },
+        "artifact_hashes": {
+            "ranking_objective_report": _file_sha256_for_test(ranking_report_path),
+        },
+    }
+    source_manifest_path = source_dir / "o_replay_aligned_source_ranking_manifest.json"
+    source_manifest_path.write_text(
+        json.dumps(source_manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return source_manifest_path
+
+
+def _canonical_o_source_fixture_correction_config(
+    *,
+    prefer_no_trade: bool,
+) -> dict[str, Any]:
+    correction_config_hash = (
+        "pytest-no-trade-correction"
+        if prefer_no_trade
+        else "pytest-buy-up-correction"
+    )
+    no_trade_base = 3.0 if prefer_no_trade else -1.0
+    trade_base = -1.0 if prefer_no_trade else 0.0
+    return {
+        "correction_config_hash": correction_config_hash,
+        "correction_constants_source": "pytest_shadow_split_only",
+        "probe_constants_source": "pytest_shadow_split_only",
+        "weak_opportunity_p_edge_cutoff": 0.10,
+        "no_trade_base_score": no_trade_base,
+        "trade_base_score": trade_base,
+        "sell_before_close_base_score": -0.25,
+        "confidence_bonus": 0.0,
+        "weak_opportunity_trade_penalty": 0.0,
+        "sell_before_close_confidence_bonus": 0.0,
+        "sell_before_close_weak_penalty": 0.0,
+        "action_shadow_priors": dict.fromkeys(O_REQUIRED_DECISION_ACTION_FAMILIES, 0.0),
+        "action_family_shadow_priors": {
+            "HOLD_TO_SETTLEMENT": 0.0,
+            "SELL_BEFORE_CLOSE": 0.0,
+            "NO_TRADE": 0.0,
+        },
+        "group_normalized_raw_model_weight": 1.0,
+        "p_up_misalignment_raw_positive_penalty": 0.0,
+        "large_regret_reversal_guard_enabled": False,
+        "large_regret_reversal_penalty": 0.0,
+        "hts_p_up_reliability_guard_enabled": False,
+        "hts_p_up_reliability_penalty": 0.0,
+        "hts_p_up_reliability_no_trade_buffer_enabled": False,
+        "hts_p_up_reliability_no_trade_buffer": 0.0,
+        "shadow_action_family_prior_weight": 0.0,
+        "microstructure_quality_weight": 0.0,
+        "high_score_calibration": {"high_score_threshold": -999.0},
+        "hts_p_up_reliability_bucket_thresholds": {
+            "p_up_confidence": {"q25": 0.05, "median": 0.10, "q75": 0.20},
+            "time_to_close": {"q25": 1.0, "median": 3.0, "q75": 5.0},
+            "spread": {"q25": 0.01, "median": 0.05, "q75": 0.10},
+            "queue": {"q25": 0.25, "median": 0.50, "q75": 0.75},
+            "staleness": {"q25": 1.0, "median": 3.0, "q75": 5.0},
+        },
     }
 
 

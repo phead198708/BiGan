@@ -63,6 +63,14 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--canonical-o-source-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Optional frozen O source manifest override for canonical scorer wiring."
+        ),
+    )
+    parser.add_argument(
         "--overwrite-existing",
         action="store_true",
         help="Replace an existing run directory with the same run id.",
@@ -91,6 +99,7 @@ def main() -> None:
         sleep_seconds=args.sleep_seconds,
         public_data_cycles=public_cycles,
         public_data_source=public_data_source,
+        canonical_o_source_manifest_path=args.canonical_o_source_manifest,
         overwrite_existing=args.overwrite_existing,
     )
     result = run_polymarket_o_v8_paper_fresh_loop(config)

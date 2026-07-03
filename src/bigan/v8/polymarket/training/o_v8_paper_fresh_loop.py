@@ -28,6 +28,8 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_DEPLOYABLE_MODEL_FEATURE_NAMES,
     O_REQUIRED_DECISION_ACTION_FAMILIES,
     _action_family,
+    _apply_o_shadow_ranking_correction,
+    _deployable_model_feature_map,
     _side_from_action,
     _v8_execution_guard_config,
     _v8_execution_guard_decision,
@@ -62,6 +64,15 @@ O_V8_PAPER_FRESH_PROVIDER_FEATURE_COVERAGE_SCHEMA_VERSION = (
 )
 O_V8_PAPER_FRESH_CANONICAL_SCORER_ALIGNMENT_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-paper-fresh-canonical-scorer-alignment-v1"
+)
+O_V8_PAPER_FRESH_CANONICAL_FEATURE_MAPPING_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-paper-fresh-canonical-feature-mapping-v1"
+)
+O_V8_PAPER_FRESH_CANONICAL_SCORER_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-paper-fresh-canonical-scorer-v1"
+)
+O_V8_PAPER_FRESH_SCORER_COMPARISON_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-paper-fresh-scorer-comparison-v1"
 )
 
 PINNED_ISSUE_160_RUN_ID = "o-v8-paper-candidate-unlock-20260703T073000Z"
@@ -118,6 +129,7 @@ class PolymarketOV8PaperFreshLoopConfig:
     public_data_cycles: tuple[tuple[dict[str, Any], ...], ...] | None = None
     public_data_source: str = O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER
     public_provider: Any | None = None
+    canonical_o_source_manifest_path: Path | str | None = None
     expected_paper_candidate_unlock_manifest_sha256: str | None = (
         PINNED_ISSUE_160_MANIFEST_SHA256
     )
@@ -159,6 +171,15 @@ class PolymarketOV8PaperFreshLoopConfig:
         object.__setattr__(
             self, "paper_candidate_unlock_dir", Path(self.paper_candidate_unlock_dir)
         )
+        if self.canonical_o_source_manifest_path is not None and not isinstance(
+            self.canonical_o_source_manifest_path,
+            Path,
+        ):
+            object.__setattr__(
+                self,
+                "canonical_o_source_manifest_path",
+                Path(self.canonical_o_source_manifest_path),
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +197,10 @@ class PolymarketOV8PaperFreshLoopResult:
     no_trade_diagnostic_report: dict[str, Any]
     score_decomposition_report: dict[str, Any]
     provider_feature_coverage_report: dict[str, Any]
+    canonical_feature_mapping_report: dict[str, Any]
+    canonical_action_rows: list[dict[str, Any]]
+    canonical_scorer_report: dict[str, Any]
+    scorer_comparison_report: dict[str, Any]
     canonical_scorer_alignment_report: dict[str, Any]
     manifest: dict[str, Any]
 
@@ -199,9 +224,37 @@ def run_polymarket_o_v8_paper_fresh_loop(
     public_data = _resolve_public_data_cycles(config, unlock_evidence)
     public_cycles = public_data["public_data_cycles"]
     public_data_collection_report = public_data["public_data_collection_report"]
-    execution_result = _execute_fresh_public_cycles(
+    canonical_context = _fresh_canonical_scorer_context(
+        config=config,
+        unlock_evidence=unlock_evidence,
+    )
+    canonical_feature_mapping_report, canonical_action_rows = (
+        _fresh_canonical_feature_mapping_report(
+            config=config,
+            public_cycles=public_cycles,
+            public_data_collection_report=public_data_collection_report,
+            canonical_context=canonical_context,
+        )
+    )
+    canonical_scorer_report = _fresh_canonical_scorer_report(
+        config=config,
+        canonical_context=canonical_context,
+        canonical_feature_mapping_report=canonical_feature_mapping_report,
+        canonical_action_rows=canonical_action_rows,
+    )
+    scorer_comparison_report = _fresh_scorer_comparison_report(
         config=config,
         public_cycles=public_cycles,
+        public_data_collection_report=public_data_collection_report,
+        canonical_scorer_report=canonical_scorer_report,
+    )
+    execution_cycles = _fresh_execution_cycles_from_canonical_scorer(
+        public_cycles=public_cycles,
+        canonical_scorer_report=canonical_scorer_report,
+    )
+    execution_result = _execute_fresh_public_cycles(
+        config=config,
+        public_cycles=execution_cycles,
         public_data_source=public_data_collection_report["public_data_source"],
         unlock_verified=unlock_verified,
     )
@@ -213,7 +266,7 @@ def run_polymarket_o_v8_paper_fresh_loop(
         config=config,
         unlock_evidence=unlock_evidence,
         public_data_collection_report=public_data_collection_report,
-        public_cycles=public_cycles,
+        public_cycles=execution_cycles,
         execution_result=execution_result,
         intents=intents,
         fills=fills,
@@ -245,14 +298,14 @@ def run_polymarket_o_v8_paper_fresh_loop(
     )
     no_trade_report = _fresh_no_trade_diagnostic_report(
         config=config,
-        public_cycles=public_cycles,
+        public_cycles=execution_cycles,
         public_data_collection_report=public_data_collection_report,
         execution_result=execution_result,
         run_report=run_report,
     )
     score_decomposition_report = _fresh_score_decomposition_report(
         config=config,
-        public_cycles=public_cycles,
+        public_cycles=execution_cycles,
         public_data_collection_report=public_data_collection_report,
     )
     provider_feature_coverage_report = _fresh_provider_feature_coverage_report(
@@ -265,6 +318,10 @@ def run_polymarket_o_v8_paper_fresh_loop(
         config=config,
         public_cycles=public_cycles,
         public_data_collection_report=public_data_collection_report,
+        canonical_context=canonical_context,
+        canonical_feature_mapping_report=canonical_feature_mapping_report,
+        canonical_scorer_report=canonical_scorer_report,
+        scorer_comparison_report=scorer_comparison_report,
     )
 
     artifact_paths = {
@@ -300,6 +357,20 @@ def run_polymarket_o_v8_paper_fresh_loop(
         / "o_v8_paper_fresh_provider_feature_coverage_report.json",
         "fresh_provider_feature_coverage_summary": output_dir
         / "o_v8_paper_fresh_provider_feature_coverage_report.md",
+        "fresh_canonical_feature_mapping_report": output_dir
+        / "o_v8_paper_fresh_canonical_feature_mapping_report.json",
+        "fresh_canonical_feature_mapping_summary": output_dir
+        / "o_v8_paper_fresh_canonical_feature_mapping_report.md",
+        "fresh_canonical_action_rows": output_dir
+        / "o_v8_paper_fresh_canonical_action_rows.jsonl",
+        "fresh_canonical_scorer_report": output_dir
+        / "o_v8_paper_fresh_canonical_scorer_report.json",
+        "fresh_canonical_scorer_summary": output_dir
+        / "o_v8_paper_fresh_canonical_scorer_report.md",
+        "fresh_scorer_comparison_report": output_dir
+        / "o_v8_paper_fresh_scorer_comparison_report.json",
+        "fresh_scorer_comparison_summary": output_dir
+        / "o_v8_paper_fresh_scorer_comparison_report.md",
         "fresh_canonical_scorer_alignment_report": output_dir
         / "o_v8_paper_fresh_canonical_scorer_alignment_report.json",
         "fresh_canonical_scorer_alignment_summary": output_dir
@@ -354,6 +425,31 @@ def run_polymarket_o_v8_paper_fresh_loop(
         _fresh_provider_feature_coverage_md(provider_feature_coverage_report),
     )
     _write_json(
+        artifact_paths["fresh_canonical_feature_mapping_report"],
+        canonical_feature_mapping_report,
+    )
+    _write_text(
+        artifact_paths["fresh_canonical_feature_mapping_summary"],
+        _fresh_canonical_feature_mapping_md(canonical_feature_mapping_report),
+    )
+    _write_jsonl(artifact_paths["fresh_canonical_action_rows"], canonical_action_rows)
+    _write_json(
+        artifact_paths["fresh_canonical_scorer_report"],
+        canonical_scorer_report,
+    )
+    _write_text(
+        artifact_paths["fresh_canonical_scorer_summary"],
+        _fresh_canonical_scorer_md(canonical_scorer_report),
+    )
+    _write_json(
+        artifact_paths["fresh_scorer_comparison_report"],
+        scorer_comparison_report,
+    )
+    _write_text(
+        artifact_paths["fresh_scorer_comparison_summary"],
+        _fresh_scorer_comparison_md(scorer_comparison_report),
+    )
+    _write_json(
         artifact_paths["fresh_canonical_scorer_alignment_report"],
         canonical_scorer_alignment_report,
     )
@@ -381,6 +477,9 @@ def run_polymarket_o_v8_paper_fresh_loop(
         no_trade_report=no_trade_report,
         score_decomposition_report=score_decomposition_report,
         provider_feature_coverage_report=provider_feature_coverage_report,
+        canonical_feature_mapping_report=canonical_feature_mapping_report,
+        canonical_scorer_report=canonical_scorer_report,
+        scorer_comparison_report=scorer_comparison_report,
         canonical_scorer_alignment_report=canonical_scorer_alignment_report,
     )
     _write_json(artifact_paths["manifest"], manifest)
@@ -398,6 +497,10 @@ def run_polymarket_o_v8_paper_fresh_loop(
         no_trade_diagnostic_report=no_trade_report,
         score_decomposition_report=score_decomposition_report,
         provider_feature_coverage_report=provider_feature_coverage_report,
+        canonical_feature_mapping_report=canonical_feature_mapping_report,
+        canonical_action_rows=canonical_action_rows,
+        canonical_scorer_report=canonical_scorer_report,
+        scorer_comparison_report=scorer_comparison_report,
         canonical_scorer_alignment_report=canonical_scorer_alignment_report,
         manifest=manifest,
     )
@@ -1199,6 +1302,10 @@ def _fresh_loop_run_report(
 ) -> dict[str, Any]:
     guard_rows = execution_result["guard_decision_rows"]
     blockers = list(unlock_evidence["paper_candidate_unlock_blocking_reason_codes"])
+    canonical_scorer_used = any(
+        row.get("canonical_frozen_o_scorer_used") is True
+        for row in _flatten_public_rows(public_cycles)
+    )
     if execution_result["cycle_failure_count"]:
         blockers.append("paper_fresh_public_data_cycle_failed")
     if public_data_collection_report["paper_fresh_provider_collection_failed"]:
@@ -1226,6 +1333,12 @@ def _fresh_loop_run_report(
         "public_data_collection_reason_codes": public_data_collection_report[
             "public_data_collection_reason_codes"
         ],
+        "scoring_rule_id": (
+            "canonical_frozen_o_model_predicted_score_with_frozen_shadow_correction"
+            if canonical_scorer_used
+            else "fresh_provider_simplified_score"
+        ),
+        "canonical_frozen_o_scorer_used": canonical_scorer_used,
         "uses_paper_intent_logs_as_fresh_public_data": public_data_collection_report[
             "uses_paper_intent_logs_as_fresh_public_data"
         ],
@@ -1639,8 +1752,10 @@ def _fresh_no_trade_diagnostic_report(
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
         "run_id": config.run_id,
         "public_data_source": public_data_collection_report["public_data_source"],
-        "scoring_rule_id": "fresh_provider_simplified_score",
-        "canonical_frozen_o_scorer_used": False,
+        "scoring_rule_id": run_report["scoring_rule_id"],
+        "canonical_frozen_o_scorer_used": run_report[
+            "canonical_frozen_o_scorer_used"
+        ],
         "candidate_decision_count": len(decision_rows),
         "rank_blocked_by_no_trade_count": rank_blocked_count,
         "execution_guard_blocked_count": execution_blocked_count,
@@ -1761,14 +1876,21 @@ def _fresh_score_decomposition_report(
                     ),
                 }
             )
+    canonical_scorer_used = any(
+        row.get("canonical_frozen_o_scorer_used") is True for row in action_rows
+    )
     report = {
         "schema_version": O_V8_PAPER_FRESH_SCORE_DECOMPOSITION_SCHEMA_VERSION,
         "report_type": "o_v8_paper_fresh_score_decomposition",
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
         "run_id": config.run_id,
         "public_data_source": public_data_collection_report["public_data_source"],
-        "scoring_rule_id": "fresh_provider_simplified_score",
-        "canonical_frozen_o_scorer_used": False,
+        "scoring_rule_id": (
+            "canonical_frozen_o_model_predicted_score_with_frozen_shadow_correction"
+            if canonical_scorer_used
+            else "fresh_provider_simplified_score"
+        ),
+        "canonical_frozen_o_scorer_used": canonical_scorer_used,
         "score_decomposition_action_row_count": len(action_rows),
         "score_decomposition_rows": action_rows,
         "score_summary_by_action": _score_summary_by_action(action_rows),
@@ -1888,69 +2010,938 @@ def _fresh_provider_feature_coverage_report(
     )
 
 
+def _fresh_canonical_scorer_context(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    unlock_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    reason_codes: list[str] = []
+    source_manifest_path = _fresh_canonical_source_manifest_path(
+        config=config,
+        unlock_evidence=unlock_evidence,
+    )
+    ranking_objective_report_path: Path | None = None
+    model_summary: dict[str, Any] = {}
+    if source_manifest_path is None or not source_manifest_path.exists():
+        reason_codes.append("missing_frozen_model_summary")
+    else:
+        source_manifest = _read_json(source_manifest_path)
+        ranking_objective_report_path = _resolve_fresh_canonical_artifact_path(
+            source_manifest_path.parent,
+            str(
+                (source_manifest.get("artifact_paths") or {}).get(
+                    "ranking_objective_report"
+                )
+                or ""
+            ),
+        )
+        if ranking_objective_report_path is None or not ranking_objective_report_path.exists():
+            reason_codes.append("missing_frozen_model_summary")
+        else:
+            ranking_objective_report = _read_json(ranking_objective_report_path)
+            model_summary = dict(
+                ranking_objective_report.get("o_model_training_summary") or {}
+            )
+    feature_names = list(model_summary.get("feature_names") or [])
+    coefficients_by_feature = dict(model_summary.get("coefficients_by_feature") or {})
+    ranking_correction_config = dict(
+        model_summary.get("ranking_correction_config") or {}
+    )
+    if not feature_names:
+        reason_codes.append("missing_feature_schema")
+    if not coefficients_by_feature or any(
+        feature_name not in coefficients_by_feature for feature_name in feature_names
+    ):
+        reason_codes.append("missing_coefficients")
+    if not ranking_correction_config:
+        reason_codes.append("missing_ranking_correction_config")
+    correction_hash = str(ranking_correction_config.get("correction_config_hash") or "")
+    summary_hash = str(model_summary.get("correction_config_hash") or "")
+    correction_hash_verified = bool(correction_hash) and correction_hash == summary_hash
+    if ranking_correction_config and not correction_hash_verified:
+        reason_codes.append("ranking_correction_config_hash_mismatch")
+    return {
+        "source_manifest_path": str(source_manifest_path) if source_manifest_path else None,
+        "ranking_objective_report_path": (
+            str(ranking_objective_report_path)
+            if ranking_objective_report_path is not None
+            else None
+        ),
+        "source_manifest_sha256": _sha256_file(source_manifest_path)
+        if source_manifest_path is not None and source_manifest_path.exists()
+        else None,
+        "ranking_objective_report_sha256": _sha256_file(ranking_objective_report_path)
+        if ranking_objective_report_path is not None
+        and ranking_objective_report_path.exists()
+        else None,
+        "model_summary_available": bool(model_summary),
+        "feature_names": feature_names,
+        "feature_schema_hash": canonical_json_sha256(feature_names)
+        if feature_names
+        else None,
+        "coefficients_by_feature": coefficients_by_feature,
+        "coefficient_count": len(coefficients_by_feature),
+        "ranking_correction_config": ranking_correction_config,
+        "ranking_correction_config_hash": correction_hash or None,
+        "ranking_correction_config_hash_verified": correction_hash_verified,
+        "selected_feature_set_name": model_summary.get("selected_feature_set_name"),
+        "selected_correction_policy_name": model_summary.get(
+            "selected_correction_policy_name"
+        ),
+        "selected_high_score_threshold_profile_name": model_summary.get(
+            "selected_high_score_threshold_profile_name"
+        ),
+        "deployable_model_score_available": bool(
+            model_summary.get("deployable_model_score_available")
+        ),
+        "canonical_input_blocking_reason_codes": sorted(set(reason_codes)),
+        "canonical_inputs_available": not reason_codes,
+    }
+
+
+def _fresh_canonical_source_manifest_path(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    unlock_evidence: dict[str, Any],
+) -> Path | None:
+    if config.canonical_o_source_manifest_path is not None:
+        return Path(config.canonical_o_source_manifest_path)
+    unlock_manifest = dict(unlock_evidence.get("unlock_manifest") or {})
+    raw_path = (
+        (unlock_manifest.get("input_artifact_paths") or {}).get("source_manifest")
+        or (unlock_manifest.get("pinned_artifact_paths") or {}).get("source_manifest")
+    )
+    if not raw_path:
+        return None
+    return _resolve_fresh_canonical_artifact_path(
+        Path(unlock_evidence["paper_candidate_unlock_dir"]),
+        str(raw_path),
+    )
+
+
+def _resolve_fresh_canonical_artifact_path(
+    base_dir: Path,
+    raw_path: str,
+) -> Path | None:
+    if not raw_path:
+        return None
+    artifact_path = Path(raw_path)
+    if artifact_path.is_absolute() or artifact_path.exists():
+        return artifact_path
+    return base_dir / artifact_path
+
+
+def _fresh_canonical_feature_mapping_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    public_cycles: list[list[dict[str, Any]]],
+    public_data_collection_report: dict[str, Any],
+    canonical_context: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    rows = _flatten_public_rows(public_cycles)
+    feature_names = list(
+        canonical_context.get("feature_names") or O_DEPLOYABLE_MODEL_FEATURE_NAMES
+    )
+    canonical_action_rows: list[dict[str, Any]] = []
+    mapping_rows: list[dict[str, Any]] = []
+    reason_codes: list[str] = list(
+        canonical_context.get("canonical_input_blocking_reason_codes") or []
+    )
+    for row in rows:
+        ranking = list(row.get("full_5_action_ranking") or [])
+        available_actions = sorted(
+            str(action_row.get("selected_action") or "") for action_row in ranking
+        )
+        missing_actions = sorted(
+            set(O_REQUIRED_DECISION_ACTION_FAMILIES).difference(available_actions)
+        )
+        group_reason_codes = []
+        if missing_actions:
+            group_reason_codes.append("incomplete_action_row_normalization")
+            reason_codes.append("incomplete_action_row_normalization")
+        action_mapping_rows = []
+        for action in O_REQUIRED_DECISION_ACTION_FAMILIES:
+            action_row = _fresh_canonical_action_row(
+                public_row=row,
+                action=action,
+                feature_names=tuple(feature_names),
+            )
+            canonical_action_rows.append(action_row)
+            action_mapping_rows.append(
+                {
+                    "action": action,
+                    "canonical_action_row_hash": action_row[
+                        "canonical_action_row_hash"
+                    ],
+                    "mapped_feature_count": len(action_row["canonical_feature_values"]),
+                    "missing_canonical_features": action_row[
+                        "missing_canonical_features"
+                    ],
+                    "default_backfilled_features": action_row[
+                        "default_backfilled_features"
+                    ],
+                    "provenance_valid": action_row[
+                        "canonical_feature_mapping_provenance_valid"
+                    ],
+                    "provenance_violation_reason_codes": action_row[
+                        "canonical_feature_mapping_provenance_violation_reason_codes"
+                    ],
+                }
+            )
+            if action_row["missing_canonical_features"]:
+                reason_codes.append("missing_feature_backfill_mapping")
+            if not action_row["canonical_feature_mapping_provenance_valid"]:
+                reason_codes.append("provenance_invalid_for_mapped_features")
+        mapping_rows.append(
+            {
+                "decision_group_id": row.get("decision_group_id"),
+                "market_id": row.get("market_id"),
+                "decision_ts": row.get("decision_ts"),
+                "available_action_families": [
+                    _action_family(action) for action in available_actions if action
+                ],
+                "available_actions": available_actions,
+                "missing_action_families": [
+                    _action_family(action) for action in missing_actions
+                ],
+                "missing_actions": missing_actions,
+                "decision_group_action_row_normalization_complete": (
+                    not missing_actions
+                ),
+                "decision_group_mapping_reason_codes": group_reason_codes,
+                "canonical_action_mapping_rows": action_mapping_rows,
+            }
+        )
+    provider_features = _fresh_provider_feature_names(rows)
+    missing_canonical_features = sorted(
+        feature
+        for feature in feature_names
+        if not all(
+            feature in row["canonical_feature_values"]
+            for row in canonical_action_rows
+        )
+    )
+    if missing_canonical_features:
+        reason_codes.append("missing_feature_backfill_mapping")
+    provenance_invalid_count = sum(
+        1
+        for row in canonical_action_rows
+        if not row["canonical_feature_mapping_provenance_valid"]
+    )
+    complete = (
+        canonical_context.get("canonical_inputs_available") is True
+        and not missing_canonical_features
+        and provenance_invalid_count == 0
+        and len(canonical_action_rows)
+        == len(rows) * len(O_REQUIRED_DECISION_ACTION_FAMILIES)
+    )
+    if rows and not canonical_action_rows:
+        reason_codes.append("unsupported_fresh_provider_row_shape")
+    report = {
+        "schema_version": O_V8_PAPER_FRESH_CANONICAL_FEATURE_MAPPING_SCHEMA_VERSION,
+        "report_type": "o_v8_paper_fresh_canonical_feature_mapping",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "public_data_source": public_data_collection_report["public_data_source"],
+        "canonical_source_manifest_path": canonical_context.get(
+            "source_manifest_path"
+        ),
+        "canonical_ranking_objective_report_path": canonical_context.get(
+            "ranking_objective_report_path"
+        ),
+        "fresh_provider_scoring_rule_id": "fresh_provider_simplified_score",
+        "canonical_feature_mapping_complete": complete,
+        "canonical_feature_mapping_blocking_reason_codes": sorted(set(reason_codes)),
+        "provider_feature_names": provider_features,
+        "canonical_feature_names": feature_names,
+        "canonical_feature_count": len(feature_names),
+        "mapped_feature_count": len(feature_names) - len(missing_canonical_features),
+        "missing_canonical_feature_names": missing_canonical_features,
+        "default_backfilled_feature_distribution": dict(
+            sorted(
+                Counter(
+                    feature
+                    for action_row in canonical_action_rows
+                    for feature in action_row["default_backfilled_features"]
+                ).items()
+            )
+        ),
+        "provenance_invalid_count": provenance_invalid_count,
+        "decision_group_count": len(rows),
+        "canonical_action_row_count": len(canonical_action_rows),
+        "expected_canonical_action_row_count": len(rows)
+        * len(O_REQUIRED_DECISION_ACTION_FAMILIES),
+        "mapping_decision_rows": mapping_rows,
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        "v8_execution_handoff_allowed": False,
+        **compact_safety_fields(),
+    }
+    return (
+        _with_report_id(
+            report, "o_v8_paper_fresh_canonical_feature_mapping_report_id"
+        ),
+        canonical_action_rows,
+    )
+
+
+def _fresh_canonical_action_row(
+    *,
+    public_row: dict[str, Any],
+    action: str,
+    feature_names: tuple[str, ...],
+) -> dict[str, Any]:
+    decision_ts = int(public_row.get("decision_ts") or 0)
+    ranking = list(public_row.get("full_5_action_ranking") or [])
+    provider_action_row = _ranking_action(ranking, action)
+    micro = {
+        **dict(public_row.get("microstructure_snapshot") or {}),
+        **dict(provider_action_row.get("microstructure_snapshot") or {}),
+    }
+    side = _side_from_action(action)
+    family = _action_family(action)
+    score_components = dict(public_row.get("score_components") or {})
+    reference_distance, reference_backfilled = _fresh_reference_distance(public_row)
+    default_backfilled_features: list[str] = []
+    entry_ask = _fresh_feature_value(
+        micro.get("entry_ask"),
+        default=0.0,
+        feature_name="entry_quality_ask",
+        defaults=default_backfilled_features,
+    )
+    spread_bps = _fresh_feature_value(
+        micro.get("spread_bps"),
+        default=0.0,
+        feature_name="entry_exit_quality_spread_bps",
+        defaults=default_backfilled_features,
+    )
+    queue_fill = _fresh_feature_value(
+        micro.get("queue_fill_proxy"),
+        default=0.0,
+        feature_name="entry_exit_quality_queue_fill",
+        defaults=default_backfilled_features,
+    )
+    staleness_ms = _fresh_feature_value(
+        micro.get("book_staleness_ms"),
+        default=0.0,
+        feature_name="entry_exit_quality_book_staleness_ms",
+        defaults=default_backfilled_features,
+    )
+    time_to_close_seconds = _fresh_feature_value(
+        micro.get("time_to_close_seconds"),
+        default=0.0,
+        feature_name="entry_exit_quality_time_to_close_seconds",
+        defaults=default_backfilled_features,
+    )
+    if reference_backfilled:
+        default_backfilled_features.append(
+            "reference_price_to_beat_distance_at_decision"
+        )
+    default_backfilled_features.extend(
+        [
+            "recent_reference_price_momentum_30s",
+            "recent_reference_price_momentum_60s",
+            "recent_reference_price_momentum_120s",
+            "side_book_depth_imbalance",
+            "side_book_update_velocity",
+            "p_up_calibration_residual_by_time_spread_queue_bucket",
+        ]
+    )
+    reference_provenance = dict(
+        public_row.get("reference_price_feature_provenance") or {}
+    )
+    max_input_ts = int(
+        reference_provenance.get("max_input_ts")
+        or public_row.get("decision_time_feature_max_input_ts")
+        or decision_ts
+    )
+    provenance_valid = bool(
+        reference_provenance.get("provenance_valid", True)
+    ) and max_input_ts <= decision_ts
+    row = {
+        "decision_group_id": public_row.get("decision_group_id"),
+        "market_id": public_row.get("market_id"),
+        "decision_ts": decision_ts,
+        "action": action,
+        "selected_action": action,
+        "selected_side": side,
+        "action_family": family,
+        "selected_action_family": family,
+        "p_up": _float(public_row.get("p_up")),
+        "p_down": _float(public_row.get("p_down")),
+        "p_up_action_disagreement": _p_up_action_disagreement(
+            action=action,
+            p_up=_float(public_row.get("p_up")),
+        ),
+        "entry_quality_ask": entry_ask,
+        "entry_exit_quality_spread_bps": spread_bps,
+        "entry_exit_quality_queue_fill": queue_fill,
+        "entry_exit_quality_book_staleness_ms": staleness_ms,
+        "entry_exit_quality_time_to_close_seconds": time_to_close_seconds,
+        "reference_price_to_beat_distance_at_decision": reference_distance,
+        "recent_reference_price_momentum_30s": 0.0,
+        "recent_reference_price_momentum_60s": 0.0,
+        "recent_reference_price_momentum_120s": 0.0,
+        "reference_price_feature_available": reference_distance is not None,
+        "side_book_depth_imbalance": 0.0,
+        "side_book_update_velocity": 0.0,
+        "side_book_staleness_ms": staleness_ms,
+        "opposite_book_staleness_ms": _fresh_opposite_book_staleness(
+            ranking=ranking,
+            action=action,
+            default=staleness_ms,
+        ),
+        "side_spread_bps": spread_bps,
+        "side_queue_fill_proxy": queue_fill,
+        "hts_vs_sell_before_close_exit_value_gap_proxy": _fresh_hts_sbc_gap_proxy(
+            ranking=ranking,
+            action=action,
+        ),
+        "p_up_calibration_residual_by_time_spread_queue_bucket": 0.0,
+        "book_pressure_feature_available": bool(micro),
+        "canonical_feature_mapping_rule_id": (
+            "fresh_provider_row_to_frozen_o_deployable_features_v1"
+        ),
+        "canonical_feature_mapping_source_fields": [
+            "full_5_action_ranking.microstructure_snapshot",
+            "score_components.p_up",
+            "score_components.p_down",
+            "score_components.btc_mid_price",
+            "score_components.reference_price_to_beat",
+            "reference_price_feature_provenance",
+        ],
+        "canonical_feature_mapping_max_input_ts": max_input_ts,
+        "canonical_feature_mapping_provenance_valid": provenance_valid,
+        "canonical_feature_mapping_provenance_violation_reason_codes": []
+        if provenance_valid
+        else ["provenance_invalid_for_mapped_features"],
+        "canonical_feature_mapping_provenance": {
+            "decision_ts": decision_ts,
+            "max_input_ts": max_input_ts,
+            "source_timestamp": max_input_ts,
+            "source_field_name": "fresh_provider_decision_time_features",
+            "source_fields_used": [
+                "full_5_action_ranking",
+                "score_components",
+                "reference_price_feature_provenance",
+            ],
+            "deterministic_rule_id": (
+                "fresh_provider_row_to_frozen_o_deployable_features_v1"
+            ),
+            "provenance_valid": provenance_valid,
+        },
+        "score_components_from_simplified_provider": score_components,
+    }
+    feature_map = _deployable_model_feature_map(row)
+    row["canonical_feature_values"] = {
+        feature_name: float(feature_map.get(feature_name, 0.0))
+        for feature_name in feature_names
+        if feature_name in feature_map
+    }
+    row["canonical_feature_names"] = list(feature_names)
+    row["missing_canonical_features"] = [
+        feature_name for feature_name in feature_names if feature_name not in feature_map
+    ]
+    row["default_backfilled_features"] = sorted(set(default_backfilled_features))
+    row["canonical_action_row_hash"] = canonical_json_sha256(row)
+    return row
+
+
+def _fresh_canonical_scorer_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    canonical_context: dict[str, Any],
+    canonical_feature_mapping_report: dict[str, Any],
+    canonical_action_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    reason_codes = list(canonical_context.get("canonical_input_blocking_reason_codes") or [])
+    if canonical_feature_mapping_report["canonical_feature_mapping_complete"] is not True:
+        reason_codes.extend(
+            canonical_feature_mapping_report[
+                "canonical_feature_mapping_blocking_reason_codes"
+            ]
+        )
+    scored_rows: list[dict[str, Any]] = []
+    selected_rows: list[dict[str, Any]] = []
+    invoked = not reason_codes
+    if invoked:
+        feature_names = list(canonical_context["feature_names"])
+        coefficients = dict(canonical_context["coefficients_by_feature"])
+        raw_rows = []
+        for row in canonical_action_rows:
+            raw_score = sum(
+                float(coefficients.get(feature_name, 0.0))
+                * float(row["canonical_feature_values"].get(feature_name, 0.0))
+                for feature_name in feature_names
+            )
+            raw_rows.append({**row, "o_raw_ridge_model_score": raw_score})
+        scored_rows = _apply_o_shadow_ranking_correction(
+            rows=raw_rows,
+            deployable_available=True,
+            ranking_correction=dict(canonical_context["ranking_correction_config"]),
+        )
+        high_score_threshold = float(
+            canonical_context["ranking_correction_config"]["high_score_calibration"][
+                "high_score_threshold"
+            ]
+        )
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in scored_rows:
+            row["canonical_raw_model_score"] = row["o_raw_ridge_model_score"]
+            row["canonical_corrected_model_score"] = row["o_model_predicted_score"]
+            row["raw_model_score"] = row["o_raw_ridge_model_score"]
+            row["corrected_model_score"] = row["o_model_predicted_score"]
+            row["high_score_flag"] = (
+                float(row["o_model_predicted_score"]) >= high_score_threshold
+            )
+            row["ranking_score_source"] = "canonical_frozen_o_model_predicted_score"
+            row["canonical_frozen_o_scorer_used"] = True
+            row["canonical_scored_action_row_hash"] = canonical_json_sha256(row)
+            grouped[str(row["decision_group_id"])].append(row)
+        ranked_rows: list[dict[str, Any]] = []
+        for group_rows in grouped.values():
+            ordered = sorted(
+                group_rows,
+                key=lambda row: (
+                    float(row["canonical_corrected_model_score"]),
+                    1 if row["action"] != "NO_TRADE" else 0,
+                    str(row["action"]),
+                ),
+                reverse=True,
+            )
+            for rank, row in enumerate(ordered, start=1):
+                row["canonical_rank"] = rank
+                ranked_rows.append(row)
+            selected_rows.append(ordered[0])
+        scored_rows = sorted(
+            ranked_rows,
+            key=lambda row: (str(row["decision_group_id"]), int(row["canonical_rank"])),
+        )
+    report = {
+        "schema_version": O_V8_PAPER_FRESH_CANONICAL_SCORER_SCHEMA_VERSION,
+        "report_type": "o_v8_paper_fresh_canonical_scorer",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "canonical_frozen_o_scorer_invoked": invoked,
+        "canonical_frozen_o_scorer_used": invoked,
+        "canonical_scorer_diagnostic_status": "passed"
+        if invoked
+        else "blocked_fail_closed",
+        "canonical_scorer_blocking_reason_codes": sorted(set(reason_codes)),
+        "canonical_source_manifest_path": canonical_context.get(
+            "source_manifest_path"
+        ),
+        "canonical_ranking_objective_report_path": canonical_context.get(
+            "ranking_objective_report_path"
+        ),
+        "feature_names": canonical_context.get("feature_names") or [],
+        "feature_schema_hash": canonical_context.get("feature_schema_hash"),
+        "coefficient_count": canonical_context.get("coefficient_count"),
+        "ranking_correction_config_hash": canonical_context.get(
+            "ranking_correction_config_hash"
+        ),
+        "ranking_correction_config_hash_verified": canonical_context.get(
+            "ranking_correction_config_hash_verified"
+        ),
+        "selected_feature_set_name": canonical_context.get("selected_feature_set_name"),
+        "selected_correction_policy_name": canonical_context.get(
+            "selected_correction_policy_name"
+        ),
+        "selected_high_score_threshold_profile_name": canonical_context.get(
+            "selected_high_score_threshold_profile_name"
+        ),
+        "canonical_action_row_count": len(canonical_action_rows),
+        "canonical_scored_action_row_count": len(scored_rows),
+        "canonical_selected_decision_count": len(selected_rows),
+        "canonical_selected_action_distribution": _counter_from_rows(
+            selected_rows, "action"
+        ),
+        "canonical_scored_action_rows": scored_rows,
+        "canonical_selected_decision_rows": selected_rows,
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(report, "o_v8_paper_fresh_canonical_scorer_report_id")
+
+
+def _fresh_execution_cycles_from_canonical_scorer(
+    *,
+    public_cycles: list[list[dict[str, Any]]],
+    canonical_scorer_report: dict[str, Any],
+) -> list[list[dict[str, Any]]]:
+    if canonical_scorer_report.get("canonical_frozen_o_scorer_used") is not True:
+        return public_cycles
+    scored_by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in canonical_scorer_report.get("canonical_scored_action_rows", []):
+        scored_by_group[str(row.get("decision_group_id"))].append(dict(row))
+    selected_by_group = {
+        str(row.get("decision_group_id")): dict(row)
+        for row in canonical_scorer_report.get("canonical_selected_decision_rows", [])
+    }
+    execution_cycles: list[list[dict[str, Any]]] = []
+    for cycle in public_cycles:
+        execution_rows = []
+        for public_row in cycle:
+            group_id = str(public_row.get("decision_group_id"))
+            selected = selected_by_group.get(group_id)
+            group_rows = sorted(
+                scored_by_group.get(group_id, []),
+                key=lambda row: int(row.get("canonical_rank") or 999),
+            )
+            if selected is None or not group_rows:
+                execution_rows.append(dict(public_row))
+                continue
+            canonical_ranking = [
+                _fresh_public_ranking_row_from_canonical(row) for row in group_rows
+            ]
+            selected_ranking_row = _fresh_public_ranking_row_from_canonical(selected)
+            action = str(selected.get("action") or "")
+            execution_rows.append(
+                {
+                    **dict(public_row),
+                    "selected_action": action,
+                    "selected_side": selected.get("selected_side")
+                    or _side_from_action(action),
+                    "selected_action_family": selected.get("selected_action_family")
+                    or _action_family(action),
+                    "corrected_model_score": selected.get(
+                        "canonical_corrected_model_score"
+                    ),
+                    "raw_model_score": selected.get("canonical_raw_model_score"),
+                    "high_score_flag": bool(selected.get("high_score_flag")),
+                    "p_up_action_disagreement": bool(
+                        selected.get("p_up_action_disagreement")
+                    ),
+                    "microstructure_snapshot": selected_ranking_row[
+                        "microstructure_snapshot"
+                    ],
+                    "full_5_action_ranking": canonical_ranking,
+                    "canonical_frozen_o_scorer_used": True,
+                    "ranking_score_source": (
+                        "canonical_frozen_o_model_predicted_score"
+                    ),
+                    "fresh_provider_simplified_selected_action": public_row.get(
+                        "selected_action"
+                    ),
+                    "fresh_provider_simplified_corrected_model_score": public_row.get(
+                        "corrected_model_score"
+                    ),
+                }
+            )
+        execution_cycles.append(execution_rows)
+    return execution_cycles
+
+
+def _fresh_public_ranking_row_from_canonical(row: dict[str, Any]) -> dict[str, Any]:
+    action = str(row.get("action") or "")
+    score_components = dict(row.get("o_model_score_components") or {})
+    return {
+        "selected_action": action,
+        "selected_side": row.get("selected_side") or _side_from_action(action),
+        "selected_action_family": row.get("selected_action_family")
+        or _action_family(action),
+        "corrected_model_score": row.get("canonical_corrected_model_score"),
+        "raw_model_score": row.get("canonical_raw_model_score"),
+        "rank": row.get("canonical_rank"),
+        "high_score_flag": bool(row.get("high_score_flag")),
+        "microstructure_snapshot": {
+            "entry_ask": row.get("entry_quality_ask"),
+            "executable_exit_bid_proxy": row.get(
+                "hts_vs_sell_before_close_exit_value_gap_proxy"
+            ),
+            "spread_bps": row.get("entry_exit_quality_spread_bps"),
+            "book_staleness_ms": row.get(
+                "entry_exit_quality_book_staleness_ms"
+            ),
+            "queue_fill_proxy": row.get("entry_exit_quality_queue_fill"),
+            "time_to_close_seconds": row.get(
+                "entry_exit_quality_time_to_close_seconds"
+            ),
+        },
+        "score_decomposition": {
+            **score_components,
+            "raw_score": row.get("canonical_raw_model_score"),
+            "corrected_score": row.get("canonical_corrected_model_score"),
+            "scoring_rule_id": (
+                "canonical_frozen_o_model_predicted_score_with_frozen_shadow_correction"
+            ),
+            "canonical_frozen_o_scorer_used": True,
+        },
+        "canonical_rank": row.get("canonical_rank"),
+        "canonical_scored_action_row_hash": row.get(
+            "canonical_scored_action_row_hash"
+        ),
+    }
+
+
+def _fresh_scorer_comparison_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    public_cycles: list[list[dict[str, Any]]],
+    public_data_collection_report: dict[str, Any],
+    canonical_scorer_report: dict[str, Any],
+) -> dict[str, Any]:
+    public_rows = _flatten_public_rows(public_cycles)
+    canonical_by_group_action = {
+        (str(row.get("decision_group_id")), str(row.get("action"))): row
+        for row in canonical_scorer_report.get("canonical_scored_action_rows", [])
+    }
+    reason_codes = list(canonical_scorer_report["canonical_scorer_blocking_reason_codes"])
+    comparison_rows = []
+    for public_row in public_rows:
+        ranking = [dict(row) for row in public_row.get("full_5_action_ranking") or []]
+        simplified_rank_by_action = _rank_by_action(
+            ranking,
+            score_field="corrected_model_score",
+            action_field="selected_action",
+        )
+        simplified_selected = str(
+            public_row.get("selected_action")
+            or (ranking[0].get("selected_action") if ranking else "")
+        )
+        group_id = str(public_row.get("decision_group_id"))
+        canonical_group_rows = [
+            canonical_by_group_action[(group_id, action)]
+            for action in O_REQUIRED_DECISION_ACTION_FAMILIES
+            if (group_id, action) in canonical_by_group_action
+        ]
+        canonical_selected = (
+            sorted(
+                canonical_group_rows,
+                key=lambda row: int(row.get("canonical_rank") or 999),
+            )[0]
+            if canonical_group_rows
+            else {}
+        )
+        canonical_rank_by_action = {
+            str(row.get("action")): int(row.get("canonical_rank") or 999)
+            for row in canonical_group_rows
+        }
+        action_deltas = []
+        for action in O_REQUIRED_DECISION_ACTION_FAMILIES:
+            simplified_action_row = _ranking_action(ranking, action)
+            canonical_action_row = canonical_by_group_action.get((group_id, action), {})
+            action_deltas.append(
+                {
+                    "action": action,
+                    "simplified_score": _float(
+                        simplified_action_row.get("corrected_model_score")
+                    ),
+                    "canonical_raw_score": canonical_action_row.get(
+                        "canonical_raw_model_score"
+                    ),
+                    "canonical_corrected_score": canonical_action_row.get(
+                        "canonical_corrected_model_score"
+                    ),
+                    "simplified_rank": simplified_rank_by_action.get(action),
+                    "canonical_rank": canonical_rank_by_action.get(action),
+                    "rank_difference_simplified_minus_canonical": (
+                        simplified_rank_by_action[action]
+                        - canonical_rank_by_action[action]
+                        if action in simplified_rank_by_action
+                        and action in canonical_rank_by_action
+                        else None
+                    ),
+                }
+            )
+        canonical_selected_action = canonical_selected.get("action")
+        comparison_rows.append(
+            {
+                "decision_group_id": public_row.get("decision_group_id"),
+                "market_id": public_row.get("market_id"),
+                "decision_ts": public_row.get("decision_ts"),
+                "simplified_provider_selected_action": simplified_selected,
+                "canonical_selected_action": canonical_selected_action,
+                "selected_action_agrees": simplified_selected
+                == canonical_selected_action,
+                "no_trade_selection_agrees": (
+                    (simplified_selected == "NO_TRADE")
+                    == (canonical_selected_action == "NO_TRADE")
+                    if canonical_selected_action
+                    else None
+                ),
+                "simplified_top_action_margin": _top_action_margin(ranking),
+                "canonical_top_action_margin": _top_action_margin(
+                    [
+                        {
+                            "corrected_model_score": row.get(
+                                "canonical_corrected_model_score"
+                            ),
+                            "selected_action": row.get("action"),
+                        }
+                        for row in canonical_group_rows
+                    ]
+                ),
+                "score_rank_differences_by_action": action_deltas,
+                "comparison_status": "passed"
+                if canonical_selected_action
+                else "blocked_fail_closed",
+                "comparison_reason_codes": []
+                if canonical_selected_action
+                else ["canonical_frozen_o_scorer_not_invoked"],
+            }
+        )
+    comparison_complete = bool(public_rows) and all(
+        row["comparison_status"] == "passed" for row in comparison_rows
+    )
+    selected_action_agreement_count = sum(
+        1 for row in comparison_rows if row["selected_action_agrees"] is True
+    )
+    no_trade_agreement_count = sum(
+        1 for row in comparison_rows if row["no_trade_selection_agrees"] is True
+    )
+    report = {
+        "schema_version": O_V8_PAPER_FRESH_SCORER_COMPARISON_SCHEMA_VERSION,
+        "report_type": "o_v8_paper_fresh_scorer_comparison",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "public_data_source": public_data_collection_report["public_data_source"],
+        "fresh_provider_scoring_rule_id": "fresh_provider_simplified_score",
+        "canonical_scoring_rule_id": (
+            "canonical_frozen_o_model_predicted_score_with_frozen_shadow_correction"
+        ),
+        "scorer_comparison_complete": comparison_complete,
+        "scorer_comparison_blocking_reason_codes": sorted(set(reason_codes))
+        if not comparison_complete
+        else [],
+        "decision_group_count": len(public_rows),
+        "comparison_decision_rows": comparison_rows,
+        "selected_action_agreement_count": selected_action_agreement_count,
+        "selected_action_disagreement_count": len(comparison_rows)
+        - selected_action_agreement_count,
+        "no_trade_agreement_count": no_trade_agreement_count,
+        "no_trade_disagreement_count": len(comparison_rows) - no_trade_agreement_count,
+        "simplified_selected_action_distribution": _counter_from_rows(
+            comparison_rows, "simplified_provider_selected_action"
+        ),
+        "canonical_selected_action_distribution": _counter_from_rows(
+            comparison_rows, "canonical_selected_action"
+        ),
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(report, "o_v8_paper_fresh_scorer_comparison_report_id")
+
+
 def _fresh_canonical_scorer_alignment_report(
     *,
     config: PolymarketOV8PaperFreshLoopConfig,
     public_cycles: list[list[dict[str, Any]]],
     public_data_collection_report: dict[str, Any],
+    canonical_context: dict[str, Any],
+    canonical_feature_mapping_report: dict[str, Any],
+    canonical_scorer_report: dict[str, Any],
+    scorer_comparison_report: dict[str, Any],
 ) -> dict[str, Any]:
     rows = _flatten_public_rows(public_cycles)
-    provider_features = sorted(
-        {
-            key
-            for row in rows
-            for key in set(row.get("score_components") or {})
-            | set(row.get("microstructure_snapshot") or {})
-        }
+    provider_features = _fresh_provider_feature_names(rows)
+    feature_names = list(
+        canonical_context.get("feature_names") or O_DEPLOYABLE_MODEL_FEATURE_NAMES
     )
-    missing_canonical_features = sorted(
-        set(O_DEPLOYABLE_MODEL_FEATURE_NAMES).difference(provider_features)
+    reason_codes = []
+    reason_codes.extend(
+        canonical_context.get("canonical_input_blocking_reason_codes") or []
     )
-    extra_provider_features = sorted(
-        set(provider_features).difference(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
+    reason_codes.extend(
+        canonical_feature_mapping_report[
+            "canonical_feature_mapping_blocking_reason_codes"
+        ]
     )
-    alignment_rows = []
-    for row in rows:
-        alignment_rows.append(
-            {
-                "decision_group_id": row.get("decision_group_id"),
-                "market_id": row.get("market_id"),
-                "decision_ts": row.get("decision_ts"),
-                "current_provider_selected_action": row.get("selected_action"),
-                "canonical_selected_action": None,
-                "no_trade_selection_agrees": None,
-                "score_rank_differences_by_action": [],
-                "alignment_status": "blocked_fail_closed",
-                "alignment_reason_codes": [
-                    "canonical_frozen_o_scorer_not_invoked",
-                    "unsupported_provider_feature_row_shape",
-                    "missing_feature_backfill_mapping",
-                ],
-            }
-        )
+    reason_codes.extend(
+        canonical_scorer_report["canonical_scorer_blocking_reason_codes"]
+    )
+    reason_codes.extend(
+        scorer_comparison_report["scorer_comparison_blocking_reason_codes"]
+    )
+    passed = (
+        canonical_feature_mapping_report["canonical_feature_mapping_complete"] is True
+        and canonical_scorer_report["canonical_frozen_o_scorer_used"] is True
+        and scorer_comparison_report["scorer_comparison_complete"] is True
+        and not reason_codes
+    )
     report = {
         "schema_version": O_V8_PAPER_FRESH_CANONICAL_SCORER_ALIGNMENT_SCHEMA_VERSION,
         "report_type": "o_v8_paper_fresh_canonical_scorer_alignment",
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
         "run_id": config.run_id,
         "public_data_source": public_data_collection_report["public_data_source"],
-        "canonical_frozen_o_scorer_invoked": False,
-        "canonical_frozen_o_scorer_used": False,
-        "canonical_alignment_diagnostic_status": "blocked_fail_closed",
-        "canonical_alignment_blocking_reason_codes": [
-            "canonical_frozen_o_scorer_not_wired_for_fresh_provider_rows",
-            "missing_frozen_model_summary",
-            "missing_feature_schema",
-            "missing_feature_backfill_mapping",
-            "unsupported_provider_feature_row_shape",
-            "incomplete_action_row_normalization",
+        "canonical_frozen_o_scorer_invoked": canonical_scorer_report[
+            "canonical_frozen_o_scorer_invoked"
         ],
+        "canonical_frozen_o_scorer_used": canonical_scorer_report[
+            "canonical_frozen_o_scorer_used"
+        ],
+        "canonical_alignment_diagnostic_status": "passed"
+        if passed
+        else "blocked_fail_closed",
+        "canonical_alignment_blocking_reason_codes": sorted(set(reason_codes)),
         "fresh_provider_scoring_rule_id": "fresh_provider_simplified_score",
-        "feature_schema_matches_canonical_scorer_requirements": False,
+        "canonical_scoring_rule_id": (
+            "canonical_frozen_o_model_predicted_score_with_frozen_shadow_correction"
+        ),
+        "feature_schema_matches_canonical_scorer_requirements": (
+            canonical_feature_mapping_report["canonical_feature_mapping_complete"]
+        ),
         "provider_feature_names": provider_features,
-        "missing_canonical_feature_names": missing_canonical_features,
-        "extra_provider_only_feature_names": extra_provider_features,
-        "alignment_decision_rows": alignment_rows,
+        "canonical_feature_names": feature_names,
+        "missing_canonical_feature_names": canonical_feature_mapping_report[
+            "missing_canonical_feature_names"
+        ],
+        "extra_provider_only_feature_names": sorted(
+            set(provider_features).difference(feature_names)
+        ),
+        "canonical_feature_mapping_complete": canonical_feature_mapping_report[
+            "canonical_feature_mapping_complete"
+        ],
+        "canonical_action_row_count": canonical_feature_mapping_report[
+            "canonical_action_row_count"
+        ],
+        "canonical_scored_action_row_count": canonical_scorer_report[
+            "canonical_scored_action_row_count"
+        ],
+        "scorer_comparison_complete": scorer_comparison_report[
+            "scorer_comparison_complete"
+        ],
+        "selected_action_agreement_count": scorer_comparison_report[
+            "selected_action_agreement_count"
+        ],
+        "no_trade_agreement_count": scorer_comparison_report[
+            "no_trade_agreement_count"
+        ],
+        "alignment_decision_rows": scorer_comparison_report[
+            "comparison_decision_rows"
+        ],
         "source_o_score_mutated": False,
         "mutates_o_model_predicted_score": False,
         "mutates_source_ranking_scores": False,
@@ -1988,6 +2979,9 @@ def _fresh_loop_manifest(
     no_trade_report: dict[str, Any],
     score_decomposition_report: dict[str, Any],
     provider_feature_coverage_report: dict[str, Any],
+    canonical_feature_mapping_report: dict[str, Any],
+    canonical_scorer_report: dict[str, Any],
+    scorer_comparison_report: dict[str, Any],
     canonical_scorer_alignment_report: dict[str, Any],
 ) -> dict[str, Any]:
     manifest = {
@@ -2030,9 +3024,39 @@ def _fresh_loop_manifest(
         "fresh_provider_feature_coverage_report_id": provider_feature_coverage_report[
             "o_v8_paper_fresh_provider_feature_coverage_report_id"
         ],
+        "fresh_canonical_feature_mapping_report_id": canonical_feature_mapping_report[
+            "o_v8_paper_fresh_canonical_feature_mapping_report_id"
+        ],
+        "fresh_canonical_scorer_report_id": canonical_scorer_report[
+            "o_v8_paper_fresh_canonical_scorer_report_id"
+        ],
+        "fresh_scorer_comparison_report_id": scorer_comparison_report[
+            "o_v8_paper_fresh_scorer_comparison_report_id"
+        ],
         "fresh_canonical_scorer_alignment_report_id": canonical_scorer_alignment_report[
             "o_v8_paper_fresh_canonical_scorer_alignment_report_id"
         ],
+        "canonical_feature_mapping_complete": canonical_feature_mapping_report[
+            "canonical_feature_mapping_complete"
+        ],
+        "canonical_action_row_count": canonical_feature_mapping_report[
+            "canonical_action_row_count"
+        ],
+        "canonical_scorer_invoked": canonical_scorer_report[
+            "canonical_frozen_o_scorer_invoked"
+        ],
+        "canonical_scorer_scored_action_row_count": canonical_scorer_report[
+            "canonical_scored_action_row_count"
+        ],
+        "scorer_comparison_complete": scorer_comparison_report[
+            "scorer_comparison_complete"
+        ],
+        "simplified_canonical_no_trade_agreement_count": scorer_comparison_report[
+            "no_trade_agreement_count"
+        ],
+        "simplified_canonical_selected_action_agreement_count": (
+            scorer_comparison_report["selected_action_agreement_count"]
+        ),
         "canonical_frozen_o_scorer_used": canonical_scorer_alignment_report[
             "canonical_frozen_o_scorer_used"
         ],
@@ -2629,6 +3653,102 @@ def _fresh_comparison_row_from_report(
     }
 
 
+def _fresh_provider_feature_names(rows: list[dict[str, Any]]) -> list[str]:
+    names: set[str] = set()
+    for row in rows:
+        names.update(row.keys())
+        names.update(f"score_components.{key}" for key in row.get("score_components") or {})
+        names.update(
+            f"microstructure_snapshot.{key}"
+            for key in row.get("microstructure_snapshot") or {}
+        )
+        for action_row in row.get("full_5_action_ranking") or []:
+            names.update(
+                f"full_5_action_ranking.microstructure_snapshot.{key}"
+                for key in action_row.get("microstructure_snapshot") or {}
+            )
+    return sorted(names)
+
+
+def _fresh_feature_value(
+    value: Any,
+    *,
+    default: float,
+    feature_name: str,
+    defaults: list[str],
+) -> float:
+    if value is None:
+        defaults.append(feature_name)
+        return default
+    return _float(value)
+
+
+def _fresh_reference_distance(row: dict[str, Any]) -> tuple[float | None, bool]:
+    if row.get("reference_price_to_beat_distance_at_decision") is not None:
+        return _float(row.get("reference_price_to_beat_distance_at_decision")), False
+    score_components = dict(row.get("score_components") or {})
+    btc_mid = _float(score_components.get("btc_mid_price"))
+    reference = _float(score_components.get("reference_price_to_beat"))
+    if reference > 0.0:
+        return (btc_mid - reference) / reference, False
+    return 0.0, True
+
+
+def _fresh_opposite_book_staleness(
+    *,
+    ranking: list[dict[str, Any]],
+    action: str,
+    default: float,
+) -> float:
+    side = _side_from_action(action)
+    if side == "UP":
+        opposite_action = "BUY_DOWN_HOLD_TO_SETTLEMENT"
+    elif side == "DOWN":
+        opposite_action = "BUY_UP_HOLD_TO_SETTLEMENT"
+    else:
+        return default
+    opposite = _ranking_action(ranking, opposite_action)
+    micro = dict(opposite.get("microstructure_snapshot") or {})
+    return _float(micro.get("book_staleness_ms")) if micro else default
+
+
+def _fresh_hts_sbc_gap_proxy(
+    *,
+    ranking: list[dict[str, Any]],
+    action: str,
+) -> float:
+    side = _side_from_action(action)
+    if side not in {"UP", "DOWN"}:
+        return 0.0
+    hts = _ranking_action(ranking, f"BUY_{side}_HOLD_TO_SETTLEMENT")
+    sbc = _ranking_action(ranking, f"BUY_{side}_SELL_BEFORE_CLOSE")
+    if not hts or not sbc:
+        return 0.0
+    return _float(sbc.get("corrected_model_score")) - _float(
+        hts.get("corrected_model_score")
+    )
+
+
+def _rank_by_action(
+    rows: list[dict[str, Any]],
+    *,
+    score_field: str,
+    action_field: str,
+) -> dict[str, int]:
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            _float(row.get(score_field)),
+            1 if row.get(action_field) != "NO_TRADE" else 0,
+            str(row.get(action_field)),
+        ),
+        reverse=True,
+    )
+    return {
+        str(row.get(action_field)): rank for rank, row in enumerate(ordered, start=1)
+    }
+
+
 def _check(
     *,
     passed: bool,
@@ -2843,6 +3963,94 @@ def _fresh_provider_feature_coverage_md(report: dict[str, Any]) -> str:
             *_markdown_dict(
                 report["missing_required_microstructure_field_distribution"]
             ),
+            "",
+        ]
+    )
+
+
+def _fresh_canonical_feature_mapping_md(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Paper Fresh Canonical Feature Mapping",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- public_data_source: `{report['public_data_source']}`",
+            f"- canonical_feature_mapping_complete: `{str(report['canonical_feature_mapping_complete']).lower()}`",
+            f"- decision_group_count: `{report['decision_group_count']}`",
+            f"- canonical_action_row_count: `{report['canonical_action_row_count']}`",
+            f"- expected_canonical_action_row_count: `{report['expected_canonical_action_row_count']}`",
+            f"- canonical_feature_count: `{report['canonical_feature_count']}`",
+            f"- mapped_feature_count: `{report['mapped_feature_count']}`",
+            f"- provenance_invalid_count: `{report['provenance_invalid_count']}`",
+            f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
+            "",
+            "## Blocking Reason Codes",
+            "",
+            *_markdown_list(report["canonical_feature_mapping_blocking_reason_codes"]),
+            "",
+            "## Default Backfilled Feature Distribution",
+            "",
+            *_markdown_dict(report["default_backfilled_feature_distribution"]),
+            "",
+        ]
+    )
+
+
+def _fresh_canonical_scorer_md(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Paper Fresh Canonical Scorer",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- canonical_frozen_o_scorer_invoked: `{str(report['canonical_frozen_o_scorer_invoked']).lower()}`",
+            f"- canonical_frozen_o_scorer_used: `{str(report['canonical_frozen_o_scorer_used']).lower()}`",
+            f"- canonical_scorer_diagnostic_status: `{report['canonical_scorer_diagnostic_status']}`",
+            f"- canonical_action_row_count: `{report['canonical_action_row_count']}`",
+            f"- canonical_scored_action_row_count: `{report['canonical_scored_action_row_count']}`",
+            f"- canonical_selected_decision_count: `{report['canonical_selected_decision_count']}`",
+            f"- selected_feature_set_name: `{report['selected_feature_set_name']}`",
+            f"- selected_correction_policy_name: `{report['selected_correction_policy_name']}`",
+            f"- ranking_correction_config_hash_verified: `{str(report['ranking_correction_config_hash_verified']).lower()}`",
+            f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
+            "",
+            "## Blocking Reason Codes",
+            "",
+            *_markdown_list(report["canonical_scorer_blocking_reason_codes"]),
+            "",
+            "## Selected Action Distribution",
+            "",
+            *_markdown_dict(report["canonical_selected_action_distribution"]),
+            "",
+        ]
+    )
+
+
+def _fresh_scorer_comparison_md(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Paper Fresh Scorer Comparison",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- public_data_source: `{report['public_data_source']}`",
+            f"- scorer_comparison_complete: `{str(report['scorer_comparison_complete']).lower()}`",
+            f"- decision_group_count: `{report['decision_group_count']}`",
+            f"- selected_action_agreement_count: `{report['selected_action_agreement_count']}`",
+            f"- selected_action_disagreement_count: `{report['selected_action_disagreement_count']}`",
+            f"- no_trade_agreement_count: `{report['no_trade_agreement_count']}`",
+            f"- no_trade_disagreement_count: `{report['no_trade_disagreement_count']}`",
+            f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
+            "",
+            "## Blocking Reason Codes",
+            "",
+            *_markdown_list(report["scorer_comparison_blocking_reason_codes"]),
+            "",
+            "## Simplified Selected Action Distribution",
+            "",
+            *_markdown_dict(report["simplified_selected_action_distribution"]),
+            "",
+            "## Canonical Selected Action Distribution",
+            "",
+            *_markdown_dict(report["canonical_selected_action_distribution"]),
             "",
         ]
     )
