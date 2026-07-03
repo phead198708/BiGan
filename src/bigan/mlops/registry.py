@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -15,6 +16,11 @@ from bigan.monitoring.events import (
 )
 
 from .deployments import MODEL_DEPLOYMENTS_TABLE_DDL, MODEL_DEPLOYMENTS_VIEWS_DDL
+
+DEFAULT_MLOPS_DB_PATH = Path("data/mlops/champion_catalog.duckdb")
+ACTIVE_MODEL_FAMILY = "btc-updown-15m"
+DEFAULT_MLOPS_CONNECT_RETRIES = 12
+DEFAULT_MLOPS_CONNECT_RETRY_DELAY_SECONDS = 0.5
 
 MODEL_REGISTRY_STATUSES: tuple[str, ...] = (
     "candidate",
@@ -91,9 +97,37 @@ class ModelRegistryRecord:
         return row
 
 
-def connect_mlops_db(path: Path | str = ":memory:") -> duckdb.DuckDBPyConnection:
-    """Open a DuckDB connection for the MLOps catalog."""
+def connect_mlops_db(
+    path: Path | str = ":memory:",
+    *,
+    retry_attempts: int | None = None,
+    retry_delay_seconds: float | None = None,
+    read_only: bool = False,
+) -> duckdb.DuckDBPyConnection:
+    """Open a DuckDB connection for the MLOps catalog with lock retry."""
 
+    attempts = _connect_retry_attempts(retry_attempts)
+    delay = _connect_retry_delay(retry_delay_seconds)
+    last_exc: duckdb.Error | None = None
+    for attempt in range(attempts):
+        try:
+            return _connect_duckdb(path, read_only=read_only)
+        except duckdb.Error as exc:
+            if not _is_duckdb_lock_error(exc):
+                raise
+            last_exc = exc
+            if attempt == attempts - 1:
+                break
+            if delay > 0:
+                time.sleep(delay)
+    if last_exc is not None:
+        raise last_exc
+    return _connect_duckdb(path, read_only=read_only)
+
+
+def _connect_duckdb(path: Path | str, *, read_only: bool) -> duckdb.DuckDBPyConnection:
+    if read_only:
+        return duckdb.connect(str(path), read_only=True)
     return duckdb.connect(str(path))
 
 
@@ -232,6 +266,16 @@ def current_champion(
     return dict(zip(columns, rows[0], strict=True))
 
 
+def model_by_version(
+    conn: duckdb.DuckDBPyConnection,
+    model_version: str,
+) -> dict[str, Any] | None:
+    """Return one registry row by model version."""
+
+    initialize_mlops_db(conn)
+    return _fetch_model(conn, model_version)
+
+
 def _validate_record(record: ModelRegistryRecord) -> None:
     for name in (
         "model_version",
@@ -296,6 +340,46 @@ def _validate_json(field_name: str, value: str) -> None:
         json.loads(value)
     except json.JSONDecodeError as exc:
         raise ValueError(f"{field_name} must be valid JSON") from exc
+
+
+def _connect_retry_attempts(value: int | None) -> int:
+    if value is None:
+        value = _int_env("BIGAN_MLOPS_CONNECT_RETRIES", DEFAULT_MLOPS_CONNECT_RETRIES)
+    return max(1, int(value))
+
+
+def _connect_retry_delay(value: float | None) -> float:
+    if value is None:
+        value = _float_env(
+            "BIGAN_MLOPS_CONNECT_RETRY_DELAY_SECONDS",
+            DEFAULT_MLOPS_CONNECT_RETRY_DELAY_SECONDS,
+        )
+    return max(0.0, float(value))
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _is_duckdb_lock_error(exc: duckdb.Error) -> bool:
+    text = str(exc)
+    return "Could not set lock" in text or "Conflicting lock" in text
 
 
 def _require_non_empty(field_name: str, value: str) -> None:

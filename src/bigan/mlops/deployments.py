@@ -8,6 +8,10 @@ from typing import Any
 
 import duckdb
 
+ACTIVE_CHAMPION_MODEL_VERSION = "xgboost-v4"
+ACTIVE_CHAMPION_ENVIRONMENT = "prod"
+ACTIVE_CHAMPION_DEPLOYMENT_ID = "cutover-xgboost-v4-20260523T105710Z"
+
 DEPLOYMENT_STATUSES: tuple[str, ...] = (
     "planned",
     "running",

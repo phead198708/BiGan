@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from bigan.canonical.writer import WarehouseWriter
+from bigan.modeling import XGBOOST_V4_REQUIRED_FEATURES
 
 HORIZON_MS = 15 * 60_000
 
@@ -22,6 +23,8 @@ def _feature_row(
     ts: int,
     *,
     source_symbol: str = "tok-up",
+    source_market: str = "0xmkt",
+    canonical_symbol: str = "BTC-UP-15M",
     completeness_score: float = 1.0,
     data_gap_flag: bool = False,
     quality_filter_pass: bool = True,
@@ -34,9 +37,9 @@ def _feature_row(
         "ingest_ts": ts + 100,
         "source": "polymarket",
         "source_symbol": source_symbol,
-        "source_market": "0xmkt",
-        "canonical_symbol": "BTC-UP-15M",
-        "symbol": "BTC-UP-15M",
+        "source_market": source_market,
+        "canonical_symbol": canonical_symbol,
+        "symbol": canonical_symbol,
         "feature_version": "bigan-mvp-v1.0.0",
         "completeness_score": completeness_score,
         "data_gap_flag": data_gap_flag,
@@ -68,7 +71,12 @@ def _label_row(
     feature_ts: int,
     *,
     source_symbol: str = "tok-up",
+    source_market: str = "0xmkt",
+    canonical_symbol: str = "BTC-15M:btc-updown-15m-test:UP",
     label_up_15m: bool = True,
+    label_settlement_3way: str | None = None,
+    label_volatility_up: bool | None = None,
+    max_exit_gain_up: float | None = None,
     target_ts: int | None = None,
 ) -> dict:
     start_ts = feature_ts - 60_000
@@ -81,10 +89,10 @@ def _label_row(
         "ingest_ts": resolved_target_ts + 1_000,
         "source": "polymarket",
         "source_symbol": source_symbol,
-        "source_market": "0xmkt",
-        "canonical_symbol": "BTC-15M:btc-updown-15m-test:UP",
-        "symbol": "BTC-15M:btc-updown-15m-test:UP",
-        "label_version": "bigan-labels-15m-profitability-v1.1.0",
+        "source_market": source_market,
+        "canonical_symbol": canonical_symbol,
+        "symbol": canonical_symbol,
+        "label_version": "bigan-labels-15m-profitability-v1.2.0",
         "label_kind": "up_token_profitability",
         "round_slug": f"btc-updown-15m-{start_ts // 1000}",
         "round_start_ts": start_ts,
@@ -98,6 +106,25 @@ def _label_row(
         "entry_cost": 0.40,
         "realized_return": 0.60 if label_up_15m else -0.40,
         "fee_bps": 0.0,
+        "settlement_margin": 1.0 if label_up_15m else -1.0,
+        "settlement_abs_margin": 1.0,
+        "settlement_neutral_margin": 0.05,
+        "label_settlement_3way": label_settlement_3way
+        or ("UP" if label_up_15m else "DOWN"),
+        "max_exit_gain_up": max_exit_gain_up,
+        "max_exit_gain_down": None,
+        "max_exit_return_per_usdc_up": None if max_exit_gain_up is None else 0.40,
+        "max_exit_return_per_usdc_down": None,
+        "time_to_best_exit_up": 120.0 if max_exit_gain_up is not None else None,
+        "time_to_best_exit_down": None,
+        "best_exit_price_up": None if max_exit_gain_up is None else 0.58,
+        "best_exit_price_down": None,
+        "label_volatility_up": label_volatility_up,
+        "label_volatility_down": None,
+        "volatility_path_validity_up": "valid"
+        if label_volatility_up is not None
+        else "missing_price_path",
+        "volatility_path_validity_down": "missing_price_path",
         "label_profit_up_15m": label_up_15m,
         "label_up_15m": label_up_15m,
         "label_source": "polymarket_gamma_event_metadata_entry_ask_profitability",
@@ -137,7 +164,13 @@ def test_assemble_training_dataset_joins_filters_and_time_splits(tmp_path: Path)
         ]
     )
     label_rows = [
-        _label_row(ts, label_up_15m=(idx % 2 == 0))
+        _label_row(
+            ts,
+            label_up_15m=(idx % 2 == 0),
+            label_settlement_3way="NEUTRAL" if idx == 1 else None,
+            label_volatility_up=(idx % 2 == 0),
+            max_exit_gain_up=0.16 if idx % 2 == 0 else 0.03,
+        )
         for idx, ts in enumerate(good_ts)
     ]
     label_rows.extend([_label_row(gap_ts), _label_row(low_quality_ts)])
@@ -160,8 +193,9 @@ def test_assemble_training_dataset_joins_filters_and_time_splits(tmp_path: Path)
     assert report.splits["train"].positive_count == 2
     assert report.splits["train"].negative_count == 1
     assert report.feature_versions == ("bigan-mvp-v1.0.0",)
-    assert report.label_versions == ("bigan-labels-15m-profitability-v1.1.0",)
+    assert report.label_versions == ("bigan-labels-15m-profitability-v1.2.0",)
     assert {"spread", "market_implied_prob", "mid_price", "ret_15m"} <= set(report.feature_columns)
+    assert set(XGBOOST_V4_REQUIRED_FEATURES) <= set(report.feature_columns)
 
     train = pq.read_table(output_dir / "train.parquet")
     val = pq.read_table(output_dir / "val.parquet")
@@ -169,6 +203,10 @@ def test_assemble_training_dataset_joins_filters_and_time_splits(tmp_path: Path)
     assert train.column("feature_ts").to_pylist() == good_ts[:3]
     assert val.column("feature_ts").to_pylist() == good_ts[3:4]
     assert test.column("feature_ts").to_pylist() == good_ts[4:]
+    assert train.column("decision_ts").to_pylist() == good_ts[:3]
+    assert train.column("family").to_pylist() == ["BTC-15M", "BTC-15M", "BTC-15M"]
+    assert train.column("horizon").to_pylist() == ["15M", "15M", "15M"]
+    assert train.column("market_id").to_pylist() == ["0xmkt", "0xmkt", "0xmkt"]
     assert all(
         target_ts > feature_ts
         for feature_ts, target_ts in zip(
@@ -179,15 +217,38 @@ def test_assemble_training_dataset_joins_filters_and_time_splits(tmp_path: Path)
     )
     assert "label_up_15m" in train.schema.names
     assert "label_profit_up_15m" in train.schema.names
+    assert "label_settlement_3way" in train.schema.names
+    assert "max_exit_gain_up" in train.schema.names
+    assert "label_volatility_up" in train.schema.names
+    assert "volatility_path_validity_up" in train.schema.names
     assert "direction_up_15m" in train.schema.names
     assert "realized_return" in train.schema.names
     assert "market_implied_prob" in train.schema.names
     assert "mid_price" in train.schema.names
+    assert set(XGBOOST_V4_REQUIRED_FEATURES) <= set(train.schema.names)
 
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["rows_written"] == 6
     assert manifest["splits"]["test"]["positive_count"] == 1
     assert manifest["split_config"] == {"train_fraction": 0.6, "val_fraction": 0.2}
+    assert manifest["family_splits"]["BTC-15M"]["train"]["row_count"] == 3
+    assert manifest["family_splits"]["BTC-15M"]["test"]["row_count"] == 2
+    assert (
+        manifest["v6_label_diagnostics"]["settlement_3way_class_balance"]["train"]["NEUTRAL"]
+        == 1
+    )
+    assert (
+        manifest["v6_label_diagnostics"]["volatility_label_rates"]["train"]["up"][
+            "known_label_count"
+        ]
+        == 3
+    )
+    assert (
+        manifest["v6_label_diagnostics"]["volatility_label_rates"]["train"]["up"][
+            "positive_count"
+        ]
+        == 2
+    )
 
 
 def test_assemble_training_dataset_is_reproducible(tmp_path: Path) -> None:
@@ -210,6 +271,116 @@ def test_assemble_training_dataset_is_reproducible(tmp_path: Path) -> None:
 
     assert second == first
     assert second_rows == first_rows
+
+
+def test_assemble_training_dataset_ignores_down_token_labels(tmp_path: Path) -> None:
+    from bigan.modeling.dataset import assemble_training_dataset
+
+    warehouse = tmp_path / "warehouse"
+    output_dir = tmp_path / "dataset"
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    down_feature_ts = t0 + 60_000
+    down_label = _label_row(
+        down_feature_ts,
+        source_symbol="tok-down",
+        canonical_symbol="BTC-15M:btc-updown-15m-test:DOWN",
+        label_up_15m=False,
+    )
+    down_label.update(
+        {
+            "label_kind": "down_token_profitability",
+            "settlement_price": 1.0,
+            "realized_return": 0.60,
+            "label_profit_up_15m": None,
+            "label_profit_down_15m": True,
+            "label_down_15m": True,
+        }
+    )
+    _write_training_fixture(
+        warehouse,
+        feature_rows=[
+            _feature_row(t0, canonical_symbol="BTC-15M:btc-updown-15m-test:UP"),
+            _feature_row(
+                down_feature_ts,
+                source_symbol="tok-down",
+                canonical_symbol="BTC-15M:btc-updown-15m-test:DOWN",
+            ),
+        ],
+        label_rows=[
+            _label_row(t0, canonical_symbol="BTC-15M:btc-updown-15m-test:UP"),
+            down_label,
+        ],
+    )
+
+    report = assemble_training_dataset(warehouse, output_dir)
+
+    assert report.outcome_side == "UP"
+    assert report.rows_joined == 1
+    assert report.rows_written == 1
+    train_rows = pq.read_table(output_dir / "train.parquet").to_pylist()
+    val_rows = pq.read_table(output_dir / "val.parquet").to_pylist()
+    test_rows = pq.read_table(output_dir / "test.parquet").to_pylist()
+    written_rows = [*train_rows, *val_rows, *test_rows]
+    assert [row["source_symbol"] for row in written_rows] == ["tok-up"]
+
+
+def test_assemble_training_dataset_can_emit_down_token_validation_rows(
+    tmp_path: Path,
+) -> None:
+    from bigan.modeling.dataset import assemble_training_dataset
+
+    warehouse = tmp_path / "warehouse"
+    output_dir = tmp_path / "dataset"
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    down_label = _label_row(
+        t0,
+        source_symbol="tok-down",
+        canonical_symbol="BTC-15M:btc-updown-15m-test:DOWN",
+        label_up_15m=False,
+    )
+    down_label.update(
+        {
+            "label_kind": "down_token_profitability",
+            "settlement_price": 1.0,
+            "realized_return": 0.60,
+            "label_profit_up_15m": None,
+            "label_profit_down_15m": True,
+            "label_down_15m": True,
+        }
+    )
+    _write_training_fixture(
+        warehouse,
+        feature_rows=[
+            _feature_row(
+                t0,
+                source_symbol="tok-down",
+                canonical_symbol="BTC-15M:btc-updown-15m-test:DOWN",
+            ),
+            _feature_row(t0 + 60_000, canonical_symbol="BTC-15M:btc-updown-15m-test:UP"),
+        ],
+        label_rows=[
+            down_label,
+            _label_row(t0 + 60_000, canonical_symbol="BTC-15M:btc-updown-15m-test:UP"),
+        ],
+    )
+
+    report = assemble_training_dataset(warehouse, output_dir, outcome_side="DOWN")
+
+    assert report.outcome_side == "DOWN"
+    assert report.rows_joined == 1
+    assert report.rows_written == 1
+    assert report.splits["test"].positive_count == 1
+    train_rows = pq.read_table(output_dir / "train.parquet").to_pylist()
+    val_rows = pq.read_table(output_dir / "val.parquet").to_pylist()
+    test_rows = pq.read_table(output_dir / "test.parquet").to_pylist()
+    written_rows = [*train_rows, *val_rows, *test_rows]
+    assert [row["source_symbol"] for row in written_rows] == ["tok-down"]
+    assert written_rows[0]["label_kind"] == "down_token_profitability"
+    assert written_rows[0]["label_profit_down_15m"] is True
+
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["outcome_side"] == "DOWN"
+    assert manifest["family_splits"]["BTC-15M"]["test"]["positive_count"] == 1
 
 
 def test_assemble_training_dataset_rejects_label_leakage(tmp_path: Path) -> None:
@@ -244,3 +415,49 @@ def test_assemble_training_dataset_allows_pre_round_market_entry(tmp_path: Path)
     report = assemble_training_dataset(warehouse, tmp_path / "dataset")
 
     assert report.rows_written == 1
+
+
+def test_assemble_training_dataset_reports_market_family_split_coverage(tmp_path: Path) -> None:
+    from bigan.modeling.dataset import SplitConfig, assemble_training_dataset
+
+    warehouse = tmp_path / "warehouse"
+    t0 = _ts_at(2026, 5, 13, 12, 0)
+    families = [
+        ("tok-btc-15", "0xbtc15", "BTC-15M:btc-updown-15m-test:UP"),
+        ("tok-eth-15", "0xeth15", "ETH-15M:eth-updown-15m-test:UP"),
+        ("tok-btc-5", "0xbtc5", "BTC-5M:btc-updown-5m-test:UP"),
+        ("tok-eth-5", "0xeth5", "ETH-5M:eth-updown-5m-test:UP"),
+    ]
+    feature_rows = [
+        _feature_row(
+            t0 + idx * 60_000,
+            source_symbol=source_symbol,
+            source_market=source_market,
+            canonical_symbol=canonical_symbol,
+        )
+        for idx, (source_symbol, source_market, canonical_symbol) in enumerate(families)
+    ]
+    label_rows = [
+        _label_row(
+            t0 + idx * 60_000,
+            source_symbol=source_symbol,
+            source_market=source_market,
+            canonical_symbol=canonical_symbol,
+            label_up_15m=(idx % 2 == 0),
+        )
+        for idx, (source_symbol, source_market, canonical_symbol) in enumerate(families)
+    ]
+    _write_training_fixture(warehouse, feature_rows=feature_rows, label_rows=label_rows)
+
+    report = assemble_training_dataset(
+        warehouse,
+        tmp_path / "dataset",
+        split_config=SplitConfig(train_fraction=0.5, val_fraction=0.25),
+    )
+
+    assert sorted(report.family_splits) == ["BTC-15M", "BTC-5M", "ETH-15M", "ETH-5M"]
+    manifest = json.loads((tmp_path / "dataset" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["family_splits"]["BTC-15M"]["train"]["row_count"] == 1
+    assert manifest["family_splits"]["ETH-15M"]["train"]["row_count"] == 1
+    assert manifest["family_splits"]["BTC-5M"]["val"]["row_count"] == 1
+    assert manifest["family_splits"]["ETH-5M"]["test"]["row_count"] == 1

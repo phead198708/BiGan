@@ -3,7 +3,10 @@
 The default :class:`NdjsonGzipSink` writes one gzip-compressed NDJSON file per
 UTC date under ``<data_dir>/<raw_subdir>/YYYY-MM-DD.ndjson.gz``. Records are
 buffered in memory and flushed on a timer (or when the buffer hits
-``max_buffer_records``) to amortise gzip framing overhead.
+``max_buffer_records``). Non-segmented files append and close a complete gzip
+member on each flush. Segmented files are first written under a temporary name
+and only atomically published to ``*.ndjson.gz`` after the segment rotates or
+the sink closes, so readers never see half-written gzip footers.
 
 The :class:`Sink` Protocol exists so issue #3 (canonical DB schema) can plug
 in a Postgres / TimescaleDB sink without changing the WS client.
@@ -23,9 +26,11 @@ import asyncio
 import contextlib
 import gzip
 import logging
+import os
+import shutil
+import threading
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -51,12 +56,10 @@ def _utc_date_str(epoch_ms: int) -> str:
     return datetime.fromtimestamp(epoch_ms / 1000, tz=UTC).strftime("%Y-%m-%d")
 
 
-@dataclass
-class _OpenFile:
-    """Lazy handle wrapping a gzip writer for one UTC date partition."""
-
-    path: Path
-    fp: gzip.GzipFile
+def _utc_segment_str(epoch_ms: int, segment_duration_seconds: int) -> str:
+    segment_ms = segment_duration_seconds * 1_000
+    bucket_ms = (epoch_ms // segment_ms) * segment_ms
+    return datetime.fromtimestamp(bucket_ms / 1000, tz=UTC).strftime("%Y-%m-%dT%H%M%SZ")
 
 
 class NdjsonGzipSink:
@@ -73,18 +76,23 @@ class NdjsonGzipSink:
         *,
         flush_interval_seconds: float = 2.0,
         max_buffer_records: int = 1000,
+        segment_duration_seconds: int = 0,
     ) -> None:
+        if segment_duration_seconds < 0:
+            raise ValueError("segment_duration_seconds must be non-negative")
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
         self._flush_interval = flush_interval_seconds
         self._max_buffer = max_buffer_records
+        self._segment_duration_seconds = segment_duration_seconds
         self._buffer: list[bytes] = []
         self._buffer_bytes = 0
         self._lock = asyncio.Lock()
-        self._open_files: dict[str, _OpenFile] = {}
         self._flusher_task: asyncio.Task[None] | None = None
         self._closed = False
         self._last_flush = time.monotonic()
+        self._flush_thread_lock = threading.Lock()
+        self._segment_tmp_paths: dict[Path, Path] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -103,14 +111,19 @@ class NdjsonGzipSink:
             await self.flush()
 
     async def flush(self) -> None:
+        await self._flush(publish_all=False)
+
+    async def _flush(self, *, publish_all: bool) -> None:
         async with self._lock:
             if not self._buffer:
+                if publish_all and self._segment_tmp_paths:
+                    await asyncio.to_thread(self._publish_segment_tmp_paths, True)
                 return
             buffer, self._buffer = self._buffer, []
             self._buffer_bytes = 0
 
         start = time.monotonic()
-        await asyncio.to_thread(self._flush_blocking, buffer)
+        await asyncio.to_thread(self._flush_blocking, buffer, publish_all)
         SINK_RECORDS_WRITTEN_TOTAL.inc(len(buffer))
         SINK_FLUSH_SECONDS.observe(time.monotonic() - start)
         self._last_flush = time.monotonic()
@@ -124,8 +137,7 @@ class NdjsonGzipSink:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._flusher_task
             self._flusher_task = None
-        await self.flush()
-        await asyncio.to_thread(self._close_files)
+        await self._flush(publish_all=True)
 
     async def start_background_flusher(self) -> None:
         """Spawn a background task that flushes on a fixed interval.
@@ -151,37 +163,87 @@ class NdjsonGzipSink:
         except asyncio.CancelledError:
             raise
 
-    def _flush_blocking(self, buffer: list[bytes]) -> None:
+    def _flush_blocking(self, buffer: list[bytes], publish_all: bool) -> None:
         # Group records by UTC date partition via the first 4 bytes pattern.
         # Cheaper: just look for ``receive_time`` field in JSON; but simplest
         # is to re-parse the small subset of bytes needed.
-        groups: dict[str, list[bytes]] = {}
-        for line in buffer:
-            try:
-                rec = orjson.loads(line)
-                rt = int(rec.get("receive_time") or rec.get("ts") or 0)
-            except (orjson.JSONDecodeError, TypeError, ValueError):
-                rt = int(time.time() * 1000)
-            partition = _utc_date_str(rt)
-            groups.setdefault(partition, []).append(line)
+        with self._flush_thread_lock:
+            groups: dict[Path, list[bytes]] = {}
+            for line in buffer:
+                try:
+                    rec = orjson.loads(line)
+                    rt = int(rec.get("receive_time") or rec.get("ts") or 0)
+                except (orjson.JSONDecodeError, TypeError, ValueError):
+                    rt = int(time.time() * 1000)
+                path = self._path_for_receive_time(rt)
+                groups.setdefault(path, []).append(line)
 
-        for partition, lines in groups.items():
-            handle = self._open_files.get(partition)
-            if handle is None:
-                path = self._root / f"{partition}.ndjson.gz"
-                # ``ab`` ensures we append to existing partition file across restarts.
-                # Long-lived: closed in ``_close_files`` to amortise gzip framing overhead.
-                fp = gzip.open(path, mode="ab")  # type: ignore[assignment]  # noqa: SIM115
-                handle = _OpenFile(path=path, fp=fp)
-                self._open_files[partition] = handle
+            for path, lines in groups.items():
+                try:
+                    if self._segment_duration_seconds > 0:
+                        self._write_segment_tmp(path, lines)
+                    else:
+                        self._append_gzip_member(path, lines)
+                except Exception:  # noqa: BLE001
+                    logger.exception("sink.flush_file_failed", extra={"path": str(path)})
+                    raise
+
+            self._publish_segment_tmp_paths(publish_all)
+
+    def _append_gzip_member(self, path: Path, lines: list[bytes]) -> None:
+        # ``ab`` appends a new gzip member. Closing every flush makes the
+        # file readable by live ETL without waiting for process shutdown.
+        with gzip.open(path, mode="ab") as fp:
             for line in lines:
-                handle.fp.write(line)
-            handle.fp.flush()
+                fp.write(line)
 
-    def _close_files(self) -> None:
-        for handle in self._open_files.values():
-            try:
-                handle.fp.close()
-            except Exception:  # noqa: BLE001
-                logger.exception("sink.close_file_failed", extra={"path": str(handle.path)})
-        self._open_files.clear()
+    def _write_segment_tmp(self, final_path: Path, lines: list[bytes]) -> None:
+        tmp_path = self._segment_tmp_paths.get(final_path)
+        if tmp_path is None:
+            tmp_path = final_path.with_name(
+                f".{final_path.name}.{os.getpid()}.tmp"
+            )
+            self._segment_tmp_paths[final_path] = tmp_path
+        with gzip.open(tmp_path, mode="ab") as fp:
+            for line in lines:
+                fp.write(line)
+
+    def _publish_segment_tmp_paths(self, publish_all: bool) -> None:
+        if self._segment_duration_seconds <= 0 or not self._segment_tmp_paths:
+            return
+
+        latest_path = max(self._segment_tmp_paths)
+        for final_path, tmp_path in list(self._segment_tmp_paths.items()):
+            if not publish_all and final_path == latest_path:
+                continue
+            self._publish_segment_tmp(final_path, tmp_path)
+            self._segment_tmp_paths.pop(final_path, None)
+
+    def _publish_segment_tmp(self, final_path: Path, tmp_path: Path) -> None:
+        if not tmp_path.exists():
+            return
+        merge_path = final_path.with_name(
+            f".{final_path.name}.{os.getpid()}.merge"
+        )
+        try:
+            with merge_path.open("wb") as out:
+                if final_path.exists():
+                    with final_path.open("rb") as existing:
+                        shutil.copyfileobj(existing, out)
+                with tmp_path.open("rb") as pending:
+                    shutil.copyfileobj(pending, out)
+            os.replace(merge_path, final_path)
+            tmp_path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            with contextlib.suppress(FileNotFoundError):
+                merge_path.unlink()
+            logger.exception(
+                "sink.publish_segment_failed",
+                extra={"path": str(final_path), "tmp_path": str(tmp_path)},
+            )
+            raise
+
+    def _path_for_receive_time(self, receive_time_ms: int) -> Path:
+        if self._segment_duration_seconds > 0:
+            return self._root / f"{_utc_segment_str(receive_time_ms, self._segment_duration_seconds)}.ndjson.gz"
+        return self._root / f"{_utc_date_str(receive_time_ms)}.ndjson.gz"

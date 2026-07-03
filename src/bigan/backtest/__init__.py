@@ -15,6 +15,7 @@ from .config import (
 from .diagnostics import (
     GroupedThresholdBacktestReport,
     run_grouped_threshold_backtest,
+    run_model_threshold_backtest,
     run_oracle_label_sanity_backtest,
     run_prediction_threshold_backtest,
 )
@@ -36,12 +37,14 @@ from .strategy import (
     DEFAULT_EDGE_THRESHOLDS,
     DEFAULT_HOLD_MS,
     DEFAULT_THRESHOLDS,
+    PerFamilyThresholdSelection,
     PredictionSignal,
     ThresholdStrategyResult,
     ThresholdStrategySummary,
     ThresholdTrade,
     run_threshold_strategy,
     run_threshold_sweep,
+    run_per_family_threshold_search,
     save_threshold_strategy_outputs,
 )
 from .walk_forward import (
@@ -71,6 +74,7 @@ __all__ = [
     "GroupedThresholdBacktestReport",
     "MetricStability",
     "NoQuoteAvailableError",
+    "PerFamilyThresholdSelection",
     "PredictionSignal",
     "PredictionEvaluationReport",
     "Quote",
@@ -88,8 +92,10 @@ __all__ = [
     "generate_run_id",
     "load_backtest_config",
     "run_grouped_threshold_backtest",
+    "run_model_threshold_backtest",
     "run_oracle_label_sanity_backtest",
     "run_prediction_threshold_backtest",
+    "run_per_family_threshold_search",
     "run_walk_forward",
     "run_threshold_strategy",
     "run_threshold_sweep",

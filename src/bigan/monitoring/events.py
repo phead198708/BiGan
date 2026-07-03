@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -122,6 +124,125 @@ class MonitoringDailyRow:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def prediction_event_from_prediction_row(
+    row: dict[str, Any],
+    *,
+    serving_latency_ms: float = 0.0,
+) -> PredictionEvent:
+    """Build a monitoring event from a canonical ``predictions`` row."""
+
+    event_id = str(
+        row.get("event_id")
+        or _stable_event_id(
+            model_version=str(row["model_version"]),
+            source=str(row["source"]),
+            source_symbol=str(row["source_symbol"]),
+            prediction_ts=int(row["prediction_ts"]),
+        )
+    )
+    feature_snapshot_json = _prediction_feature_snapshot_json(row)
+    return PredictionEvent(
+        event_id=event_id,
+        ts=int(row["prediction_ts"]),
+        model_version=str(row["model_version"]),
+        feature_version=str(row["feature_version"]),
+        prob_up_15m=float(row["prob_up_15m"]),
+        confidence_bucket=str(row["confidence_bucket"]),
+        top_features_json=str(row["top_features_json"]),
+        feature_hash=_stable_hash(feature_snapshot_json),
+        feature_snapshot_json=feature_snapshot_json,
+        serving_latency_ms=float(serving_latency_ms),
+    )
+
+
+def record_prediction_rows_as_events(
+    conn: duckdb.DuckDBPyConnection,
+    rows: list[dict[str, Any]],
+    *,
+    serving_latency_ms: float = 0.0,
+    replace: bool = True,
+) -> int:
+    """Record canonical prediction rows as live monitoring events."""
+
+    count = 0
+    for row in rows:
+        record_prediction_event(
+            conn,
+            prediction_event_from_prediction_row(
+                row,
+                serving_latency_ms=serving_latency_ms,
+            ),
+            replace=replace,
+        )
+        count += 1
+    return count
+
+
+def prediction_outcome_from_label_row(
+    conn: duckdb.DuckDBPyConnection,
+    row: Mapping[str, Any],
+    *,
+    model_version: str,
+) -> PredictionOutcome | None:
+    """Build a monitoring outcome from a canonical ``labels_15m_v1`` row."""
+
+    event_id = _stable_event_id(
+        model_version=model_version,
+        source=str(row["source"]),
+        source_symbol=str(row["source_symbol"]),
+        prediction_ts=int(row["feature_ts"]),
+    )
+    event = conn.execute(
+        """
+        SELECT prob_up_15m, feature_snapshot_json
+        FROM prediction_events
+        WHERE event_id = ?
+        """,
+        [event_id],
+    ).fetchone()
+    if event is None:
+        return None
+    outcome_side = _label_outcome_side(row) or _snapshot_outcome_side(event[1])
+    realized_label = _label_value(row, outcome_side=outcome_side)
+    if realized_label is None:
+        return None
+    probability = _token_probability(float(event[0]), outcome_side)
+    target_ts = int(row["target_ts"])
+    outcome_ts = int(row.get("ingest_ts") or target_ts)
+    return PredictionOutcome(
+        event_id=event_id,
+        target_ts=target_ts,
+        realized_label=realized_label,
+        realized_return=_optional_float(row.get("realized_return")),
+        brier_component=compute_brier_component(probability, realized_label),
+        outcome_ts=outcome_ts,
+    )
+
+
+def record_label_rows_as_outcomes(
+    conn: duckdb.DuckDBPyConnection,
+    rows: list[dict[str, Any]],
+    *,
+    model_version: str,
+    replace: bool = True,
+) -> int:
+    """Record canonical label rows as settled monitoring outcomes."""
+
+    count = 0
+    initialize_monitoring_tables(conn)
+    for row in rows:
+        outcome = prediction_outcome_from_label_row(
+            conn,
+            row,
+            model_version=model_version,
+        )
+        if outcome is None:
+            continue
+        record_prediction_outcome(conn, outcome, replace=replace)
+        count += 1
+    return count
 
 
 def initialize_monitoring_tables(conn: duckdb.DuckDBPyConnection) -> None:
@@ -337,6 +458,116 @@ def _date_to_epoch_ms(value: str) -> int:
 
 def _mean(values: list[float]) -> float | None:
     return None if not values else sum(values) / len(values)
+
+
+def _prediction_feature_snapshot_json(row: dict[str, Any]) -> str:
+    payload: dict[str, Any] = {
+        "source": row.get("source"),
+        "source_symbol": row.get("source_symbol"),
+        "source_market": row.get("source_market"),
+        "canonical_symbol": row.get("canonical_symbol"),
+        "symbol": row.get("symbol"),
+        "market_implied_prob": row.get("market_implied_prob"),
+        "p_up": row.get("p_up"),
+        "p_down": row.get("p_down"),
+        "p_neutral": row.get("p_neutral"),
+        "p_vol_up": row.get("p_vol_up"),
+        "p_vol_down": row.get("p_vol_down"),
+        "settlement_residual": row.get("settlement_residual"),
+        "token_side": row.get("token_side"),
+        "token_expected_win_probability": row.get("token_expected_win_probability"),
+        "p_up_residual_adjusted": row.get("p_up_residual_adjusted"),
+        "p_down_residual_adjusted": row.get("p_down_residual_adjusted"),
+        "entry_worst_price_up": row.get("entry_worst_price_up"),
+        "entry_worst_price_down": row.get("entry_worst_price_down"),
+        "expected_edge_up": row.get("expected_edge_up"),
+        "expected_edge_down": row.get("expected_edge_down"),
+        "residual_expected_edge_up": row.get("residual_expected_edge_up"),
+        "residual_expected_edge_down": row.get("residual_expected_edge_down"),
+        "selected_side": row.get("selected_side"),
+        "selected_expected_edge": row.get("selected_expected_edge"),
+        "should_enter_settlement": row.get("should_enter_settlement"),
+    }
+    feature_values_json = row.get("feature_values_json")
+    if feature_values_json is not None:
+        try:
+            payload["features"] = json.loads(str(feature_values_json))
+        except json.JSONDecodeError:
+            payload["features"] = str(feature_values_json)
+    return json.dumps(payload, sort_keys=True)
+
+
+def _stable_event_id(
+    *,
+    model_version: str,
+    source: str,
+    source_symbol: str,
+    prediction_ts: int,
+) -> str:
+    raw = f"{model_version}:{source}:{source_symbol}:{prediction_ts}"
+    return f"pred-{_stable_hash(raw)[:24]}"
+
+
+def _stable_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _label_value(row: Mapping[str, Any], *, outcome_side: str | None) -> bool | None:
+    if outcome_side == "DOWN":
+        value = row.get("label_profit_down_15m")
+        if value is None:
+            value = row.get("label_down_15m")
+    else:
+        value = row.get("label_profit_up_15m")
+        if value is None:
+            value = row.get("label_up_15m")
+    if value is None:
+        return None
+    return bool(value)
+
+
+def _label_outcome_side(row: Mapping[str, Any]) -> str | None:
+    label_kind = str(row.get("label_kind") or "").strip().lower()
+    if label_kind.startswith("down_"):
+        return "DOWN"
+    if label_kind.startswith("up_"):
+        return "UP"
+    return _outcome_side_from_symbol(row.get("canonical_symbol") or row.get("symbol"))
+
+
+def _snapshot_outcome_side(snapshot_json: Any) -> str | None:
+    try:
+        snapshot = json.loads(str(snapshot_json))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(snapshot, Mapping):
+        return None
+    return _outcome_side_from_symbol(snapshot.get("canonical_symbol") or snapshot.get("symbol"))
+
+
+def _outcome_side_from_symbol(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    if text.endswith(":UP") or text.endswith("-UP-15M"):
+        return "UP"
+    if text.endswith(":DOWN") or text.endswith("-DOWN-15M"):
+        return "DOWN"
+    return None
+
+
+def _token_probability(prob_up_15m: float, outcome_side: str | None) -> float:
+    return 1.0 - prob_up_15m if outcome_side == "DOWN" else prob_up_15m
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _validate_json(field_name: str, value: str) -> None:

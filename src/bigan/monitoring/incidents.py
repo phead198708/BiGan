@@ -16,6 +16,8 @@ INCIDENT_TYPES: tuple[str, ...] = (
     "stream_gap",
     "decode_error",
     "quality_rule_failure",
+    "prediction_drift",
+    "label_shift",
 )
 
 INCIDENT_SEVERITIES: tuple[str, ...] = ("info", "warning", "critical")
@@ -27,7 +29,8 @@ CREATE TABLE IF NOT EXISTS data_quality_incidents (
     incident_type VARCHAR NOT NULL CHECK (
         incident_type IN (
             'data_missing', 'schema_change', 'latency_anomaly',
-            'stream_gap', 'decode_error', 'quality_rule_failure'
+            'stream_gap', 'decode_error', 'quality_rule_failure',
+            'prediction_drift', 'label_shift'
         )
     ),
     severity VARCHAR NOT NULL CHECK (severity IN ('info', 'warning', 'critical')),

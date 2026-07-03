@@ -12,9 +12,16 @@ import signal
 import time
 from contextlib import suppress
 
+import aiohttp
 from prometheus_client import start_http_server
 
 from bigan.canonical.schemas import PROVENANCE_REST_SEED, PROVENANCE_WS
+from bigan.canonical.transform import transform_event
+from bigan.features.low_latency import RAW_QUEUE_TABLES, JsonlRawQueue
+from bigan.monitoring.market_quality import (
+    round_end_ts_from_canonical_symbol,
+    round_start_ts_from_canonical_symbol,
+)
 
 from .backfill import (
     BackfillReport,
@@ -31,7 +38,12 @@ from .book_state import BookRegistry
 from .clob_rest import PolymarketRestClient
 from .clob_ws import ClobWsClient, EventHandler, WsClientConfig
 from .config import IngestionSettings
-from .gamma_client import ActiveMarket, GammaClient, active_market_symbol_mapping_rows
+from .gamma_client import (
+    ActiveMarket,
+    GammaClient,
+    active_market_symbol_mapping_rows,
+    parse_market_specs_json,
+)
 from .gap_detector import GapDetector, GapEvent
 from .message_types import BookEvent, MarketEvent, PriceChangeEvent
 from .metrics import (
@@ -49,6 +61,7 @@ from .rollup import run_rollup_worker
 from .sink import NdjsonGzipSink
 
 logger = logging.getLogger(__name__)
+_LOW_LATENCY_ORDERBOOK_DEPTH_LEVELS = 10
 
 
 class IngestionRunner:
@@ -67,6 +80,15 @@ class IngestionRunner:
             settings.raw_dir,
             flush_interval_seconds=settings.sink_flush_interval_seconds,
             max_buffer_records=settings.sink_max_buffer_records,
+            segment_duration_seconds=settings.sink_segment_duration_seconds,
+        )
+        self._low_latency_raw_queue = (
+            None
+            if settings.low_latency_raw_queue_path is None
+            else JsonlRawQueue(settings.low_latency_raw_queue_path)
+        )
+        self._low_latency_raw_queue_symbol_prefix = (
+            settings.low_latency_raw_queue_canonical_symbol_prefix.upper()
         )
         ws_cfg = WsClientConfig(
             url=settings.clob_ws_url,
@@ -79,6 +101,7 @@ class IngestionRunner:
             idle_probe_timeout_seconds=settings.ws_idle_probe_timeout_seconds,
             message_timeout_seconds=settings.ws_message_timeout_seconds,
             ingest_lag_warn_seconds=settings.ingest_lag_warn_seconds,
+            ingest_lag_warn_interval_seconds=settings.ingest_lag_warn_interval_seconds,
         )
         self._ws = ClobWsClient(ws_cfg, self.make_handler())
 
@@ -156,9 +179,7 @@ class IngestionRunner:
         async def handler(event: MarketEvent, raw: dict) -> None:
             # Preserve the original payload under ``raw`` and attach ordering
             # metadata beside it so WS and REST snapshots can be compared.
-            await self._sink.write(
-                self._annotate_raw_record(_raw_record_from_ws_event(event, raw))
-            )
+            await self._write_raw_record(_raw_record_from_ws_event(event, raw))
 
             if isinstance(event, BookEvent):
                 self._books.upsert_snapshot(event)
@@ -195,9 +216,14 @@ class IngestionRunner:
     # ------------------------------------------------------------------
 
     async def _gamma_poller(self) -> None:
+        market_specs = parse_market_specs_json(
+            self._settings.market_specs_json,
+            fallback_slug_prefix=self._settings.market_slug_prefix,
+        )
         async with GammaClient(
             self._settings.gamma_api_base,
             self._settings.market_slug_prefix,
+            market_specs=market_specs,
         ) as gamma:
             while not self._stop.is_set():
                 try:
@@ -219,13 +245,17 @@ class IngestionRunner:
                             else 0,
                         },
                     )
-                except Exception:  # noqa: BLE001
-                    logger.exception("gamma.poll_failed")
+                except Exception as exc:  # noqa: BLE001
+                    _log_gamma_poll_failure(exc)
 
                 try:
+                    poll_timeout = _gamma_poll_timeout_seconds(
+                        market_specs,
+                        interval_seconds=self._settings.gamma_poll_interval_seconds,
+                    )
                     await asyncio.wait_for(
                         self._stop.wait(),
-                        timeout=self._settings.gamma_poll_interval_seconds,
+                        timeout=poll_timeout,
                     )
                 except TimeoutError:
                     continue
@@ -415,13 +445,11 @@ class IngestionRunner:
             return "missing"
 
         receive_time_ms = _now_ms()
-        await self._sink.write(
-            self._annotate_raw_record(
-                synth_orderbook_record(
-                    book,
-                    receive_time_ms=receive_time_ms,
-                    provenance=PROVENANCE_REST_SEED,
-                )
+        await self._write_raw_record(
+            synth_orderbook_record(
+                book,
+                receive_time_ms=receive_time_ms,
+                provenance=PROVENANCE_REST_SEED,
             )
         )
         INITIAL_SNAPSHOT_RECORDS_TOTAL.inc()
@@ -577,6 +605,37 @@ class IngestionRunner:
             with suppress(NotImplementedError):  # Windows doesn't support add_signal_handler
                 loop.add_signal_handler(sig, self.stop)
 
+    async def _write_raw_record(self, record: dict) -> None:
+        annotated = self._annotate_raw_record(record)
+        await self._sink.write(annotated)
+        self._publish_low_latency_raw_rows(annotated)
+
+    def _publish_low_latency_raw_rows(self, record: dict) -> None:
+        queue = self._low_latency_raw_queue
+        if queue is None:
+            return
+        try:
+            tables = transform_event(record)
+        except Exception:  # noqa: BLE001
+            logger.exception("low_latency_raw_queue.transform_failed")
+            return
+        published_at_ms = _now_ms()
+        for table, rows in tables.items():
+            if table not in RAW_QUEUE_TABLES:
+                continue
+            for row in rows:
+                canonical = str(row.get("canonical_symbol") or "").upper()
+                if (
+                    self._low_latency_raw_queue_symbol_prefix
+                    and not canonical.startswith(self._low_latency_raw_queue_symbol_prefix)
+                ):
+                    continue
+                if not _is_low_latency_tradable_round_row(row):
+                    continue
+                if table == "raw_orderbook_snapshot" and not _is_low_latency_depth_row(row):
+                    continue
+                queue.append(table, row, published_at_ms=published_at_ms)
+
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
@@ -585,6 +644,63 @@ class IngestionRunner:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _log_gamma_poll_failure(exc: Exception) -> None:
+    if isinstance(exc, (aiohttp.ClientError, TimeoutError)):
+        logger.warning(
+            "gamma.poll_retryable_failed",
+            extra={
+                "err_type": type(exc).__name__,
+                "err": str(exc),
+            },
+        )
+        return
+    logger.exception("gamma.poll_failed")
+
+
+def _gamma_poll_timeout_seconds(
+    market_specs: list,
+    *,
+    interval_seconds: float,
+    now_ms: int | None = None,
+) -> float:
+    """Wake Gamma polling at market boundaries so subscriptions roll forward."""
+
+    base_interval = max(0.1, float(interval_seconds))
+    resolved_now_ms = _now_ms() if now_ms is None else int(now_ms)
+    boundary_waits: list[float] = []
+    for spec in market_specs:
+        horizon_ms = int(getattr(spec, "horizon_ms", 0) or 0)
+        if horizon_ms <= 0:
+            continue
+        remainder = resolved_now_ms % horizon_ms
+        wait_ms = horizon_ms - remainder if remainder else 0
+        boundary_waits.append((wait_ms / 1000.0) + 0.25)
+    if not boundary_waits:
+        return base_interval
+    return max(0.1, min(base_interval, *boundary_waits))
+
+
+def _is_low_latency_tradable_round_row(row: dict) -> bool:
+    canonical_symbol = str(row.get("canonical_symbol") or "")
+    round_start_ts = round_start_ts_from_canonical_symbol(canonical_symbol)
+    round_end_ts = round_end_ts_from_canonical_symbol(canonical_symbol)
+    if round_start_ts is None or round_end_ts is None:
+        return False
+    try:
+        event_ts = int(row.get("ts"))
+    except (TypeError, ValueError):
+        return False
+    return round_start_ts <= event_ts < round_end_ts
+
+
+def _is_low_latency_depth_row(row: dict) -> bool:
+    try:
+        level = int(row.get("level"))
+    except (TypeError, ValueError):
+        return False
+    return 0 <= level < _LOW_LATENCY_ORDERBOOK_DEPTH_LEVELS
 
 
 def _raw_record_from_ws_event(event: MarketEvent, raw: dict) -> dict:

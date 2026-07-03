@@ -62,6 +62,7 @@ class WsClientConfig:
     idle_probe_timeout_seconds: float = 10.0
     message_timeout_seconds: float = 45.0
     ingest_lag_warn_seconds: float = 0.5
+    ingest_lag_warn_interval_seconds: float = 60.0
 
 
 # Callback signature: (parsed_event, raw_payload_dict) -> awaitable
@@ -85,6 +86,7 @@ class ClobWsClient:
         self._desired_updated = asyncio.Event()
         self._cancelled = asyncio.Event()
         self._connection: websockets.WebSocketClientProtocol | None = None
+        self._last_ingest_lag_warning_by_type: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Subscription management (called from any task)
@@ -334,6 +336,8 @@ class ClobWsClient:
             payload=payload,
             receive_time_ms=receive_time_ms,
             warn_threshold_seconds=self._cfg.ingest_lag_warn_seconds,
+            warn_interval_seconds=self._cfg.ingest_lag_warn_interval_seconds,
+            last_warning_by_type=self._last_ingest_lag_warning_by_type,
         )
         await self._handler(event, payload)
 
@@ -344,6 +348,8 @@ def _observe_ingest_lag(
     payload: dict,
     receive_time_ms: int,
     warn_threshold_seconds: float,
+    warn_interval_seconds: float,
+    last_warning_by_type: dict[str, float] | None = None,
 ) -> None:
     message_ts_ms = int(event.timestamp)
     lag_seconds = (receive_time_ms - message_ts_ms) / 1000.0
@@ -352,6 +358,18 @@ def _observe_ingest_lag(
         lag_seconds
     )
     if lag_seconds > warn_threshold_seconds:
+        now_seconds = receive_time_ms / 1000.0
+        last_warning = None
+        if last_warning_by_type is not None:
+            last_warning = last_warning_by_type.get(event_type)
+        if (
+            last_warning is not None
+            and warn_interval_seconds > 0
+            and now_seconds - last_warning < warn_interval_seconds
+        ):
+            return
+        if last_warning_by_type is not None:
+            last_warning_by_type[event_type] = now_seconds
         logger.warning(
             "ingest_lag.high",
             extra={

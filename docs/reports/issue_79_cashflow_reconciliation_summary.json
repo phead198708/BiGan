@@ -1,0 +1,10 @@
+{
+  "account_cash_pnl": -0.500671,
+  "ambiguous_redeem": 0,
+  "cash_minus_theoretical": -0.77994146,
+  "dust_token_amount": 0.023387,
+  "matched": 15,
+  "missing_cash_flow": 0,
+  "positions": 15,
+  "theoretical_pnl": -1.06198954
+}

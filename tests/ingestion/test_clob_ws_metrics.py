@@ -63,6 +63,81 @@ def test_dispatch_observes_ingest_lag_metric_and_warns(monkeypatch, caplog) -> N
     assert any(record.message == "ingest_lag.high" for record in caplog.records)
 
 
+def test_dispatch_throttles_repeated_ingest_lag_warnings(monkeypatch, caplog) -> None:
+    events = []
+    now = 1_700_000_000.500
+
+    async def handler(event, raw) -> None:  # type: ignore[no-untyped-def]
+        events.append((event, raw))
+
+    client = ClobWsClient(
+        WsClientConfig(
+            url="ws://example.invalid",
+            ingest_lag_warn_seconds=0.1,
+            ingest_lag_warn_interval_seconds=60.0,
+        ),
+        handler,
+    )
+    labels = {"source": "polymarket", "event_type": "book"}
+    before_count = _sample("bigan_ingest_lag_seconds_count", labels)
+    monkeypatch.setattr("bigan.ingestion.clob_ws.time.time", lambda: now)
+
+    payload = {
+        "event_type": "book",
+        "asset_id": "tok-1",
+        "market": "0xmkt",
+        "bids": [],
+        "asks": [],
+        "timestamp": "1700000000000",
+        "hash": "h0",
+    }
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(client._dispatch(orjson.dumps(payload)))
+        asyncio.run(client._dispatch(orjson.dumps({**payload, "asset_id": "tok-2"})))
+
+    assert len(events) == 2
+    assert _sample("bigan_ingest_lag_seconds_count", labels) == before_count + 2
+    assert [record.message for record in caplog.records].count("ingest_lag.high") == 1
+
+
+def test_dispatch_logs_ingest_lag_again_after_throttle_interval(
+    monkeypatch,
+    caplog,
+) -> None:
+    now = 1_700_000_000.500
+
+    async def handler(event, raw) -> None:  # type: ignore[no-untyped-def]
+        return None
+
+    client = ClobWsClient(
+        WsClientConfig(
+            url="ws://example.invalid",
+            ingest_lag_warn_seconds=0.1,
+            ingest_lag_warn_interval_seconds=1.0,
+        ),
+        handler,
+    )
+    monkeypatch.setattr("bigan.ingestion.clob_ws.time.time", lambda: now)
+
+    payload = {
+        "event_type": "book",
+        "asset_id": "tok-1",
+        "market": "0xmkt",
+        "bids": [],
+        "asks": [],
+        "timestamp": "1700000000000",
+        "hash": "h0",
+    }
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(client._dispatch(orjson.dumps(payload)))
+        now += 1.001
+        asyncio.run(client._dispatch(orjson.dumps(payload)))
+
+    assert [record.message for record in caplog.records].count("ingest_lag.high") == 2
+
+
 def test_keepalive_frame_refreshes_liveness_metric(monkeypatch) -> None:
     async def handler(event, raw) -> None:  # type: ignore[no-untyped-def]
         raise AssertionError("keepalive should not dispatch to handler")

@@ -189,6 +189,120 @@ def test_etl_skips_in_flight_files(tmp_path: Path) -> None:
     assert report.records_read == 0
 
 
+def test_etl_processed_manifest_skips_immutable_segments(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    base = _ts(2026, 5, 10, 12, 0)
+    first_src = raw_dir / "2026-05-10T120000Z.ndjson.gz"
+    second_src = raw_dir / "2026-05-10T120100Z.ndjson.gz"
+    _write_ndjson_gz(
+        first_src,
+        [
+            {
+                "receive_time": base + 100,
+                "raw": {
+                    "event_type": "best_bid_ask",
+                    "asset_id": "tok-1",
+                    "market": "0xmkt",
+                    "best_bid": "0.50",
+                    "best_ask": "0.52",
+                    "spread": "0.02",
+                    "timestamp": str(base),
+                },
+            }
+        ],
+    )
+    _write_ndjson_gz(
+        second_src,
+        [
+            {
+                "receive_time": base + 60_100,
+                "raw": {
+                    "event_type": "best_bid_ask",
+                    "asset_id": "tok-1",
+                    "market": "0xmkt",
+                    "best_bid": "0.51",
+                    "best_ask": "0.53",
+                    "spread": "0.02",
+                    "timestamp": str(base + 60_000),
+                },
+            }
+        ],
+    )
+    import os
+
+    os.utime(first_src, (1, 1))
+    os.utime(second_src, (1, 1))
+    warehouse = tmp_path / "warehouse"
+    manifest = tmp_path / "state" / "etl-processed-files.txt"
+
+    first = run_etl_batch(
+        raw_dir=raw_dir,
+        warehouse_dir=warehouse,
+        lag_seconds=0.0,
+        processed_manifest_path=manifest,
+    )
+    second = run_etl_batch(
+        raw_dir=raw_dir,
+        warehouse_dir=warehouse,
+        lag_seconds=0.0,
+        processed_manifest_path=manifest,
+    )
+
+    assert first.files_processed == 2
+    assert first.rows_per_table["raw_top_of_book"] == 2
+    assert second.files_processed == 0
+    assert second.records_read == 0
+    manifest_lines = manifest.read_text(encoding="utf-8").splitlines()
+    assert len(manifest_lines) == 2
+    assert first_src.name in manifest_lines
+    assert second_src.name in manifest_lines
+
+    done_dir = raw_dir / "_done"
+    done_dir.mkdir()
+    first_src.rename(done_dir / first_src.name)
+    second_src.rename(done_dir / second_src.name)
+    moved = run_etl_batch(
+        raw_dir=raw_dir,
+        warehouse_dir=warehouse,
+        lag_seconds=0.0,
+        processed_manifest_path=manifest,
+    )
+    assert moved.files_processed == 0
+    assert moved.records_read == 0
+
+
+def test_etl_max_files_per_batch_limits_files(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    base = _ts(2026, 5, 10, 12, 0)
+    for day in (10, 11):
+        _write_ndjson_gz(
+            raw_dir / f"2026-05-{day}.ndjson.gz",
+            [
+                {
+                    "receive_time": base + 100,
+                    "raw": {
+                        "event_type": "best_bid_ask",
+                        "asset_id": "tok-1",
+                        "market": "0xmkt",
+                        "best_bid": "0.50",
+                        "best_ask": "0.52",
+                        "spread": "0.02",
+                        "timestamp": str(base),
+                    },
+                }
+            ],
+        )
+    report = run_etl_batch(
+        raw_dir=raw_dir,
+        warehouse_dir=tmp_path / "warehouse",
+        lag_seconds=0.0,
+        max_files_per_batch=1,
+    )
+    assert report.files_processed == 1
+
+
 def test_etl_quarantines_crossed_book_without_affecting_clean_rows(
     tmp_path: Path,
 ) -> None:

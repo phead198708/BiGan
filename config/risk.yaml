@@ -1,0 +1,17 @@
+# Live capital control defaults for champion execution.
+max_position_size_usdc: 10.0
+max_concurrent_positions: 2
+daily_loss_limit_usdc: 50.0
+max_drawdown_pct: 0.20
+
+# Conservative Kelly-style sizing:
+# - edge >= min_edge_for_full_size uses max_position_size_usdc
+# - smaller positive edge uses kelly_fraction * edge * available_budget_usdc
+# - calculated size below min_order_size_usdc is skipped
+kelly_fraction: 0.10
+min_edge_for_full_size: 0.50
+available_budget_usdc: 100.0
+min_order_size_usdc: 1.0
+
+# Used for drawdown guard until account-equity integration lands.
+starting_equity_usdc: 100.0

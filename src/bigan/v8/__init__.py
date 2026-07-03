@@ -1,0 +1,13 @@
+"""Versioned v8 trading-system architecture modules.
+
+Phase 0 is the data-correctness firewall. Phase 1 consumes only accepted
+Phase 0 artifacts and learns pure trading policy outputs. Phase 2 consumes a
+frozen accepted Phase 1.5 candidate and evaluates execution-consistent PnL.
+Phase 3 optimizes a differentiable, cost-aware PnL action overlay after the
+Phase 2 baseline has been established. Phase 4 replays the frozen policy stream
+through causal regime, lambda, and execution-aggressiveness adaptation gates.
+Phase 5 monitors shadow-vs-live degradation and emits fail-closed kill-switch
+and rollback actions.
+Phase 6 gates the full training, validation, shadow, staged-live, monitoring,
+and rollback lifecycle through a deterministic CI/CD release manifest.
+"""

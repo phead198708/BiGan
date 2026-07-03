@@ -53,6 +53,14 @@ class IngestionSettings(BaseSettings):
         default="btc-updown-15m-",
         description="Only markets whose slug starts with this prefix will be subscribed.",
     )
+    market_specs_json: str = Field(
+        default="",
+        description=(
+            "Optional JSON array of market discovery specs for multi-market "
+            "collection. Each item supports slug_prefix, underlying, "
+            "horizon_minutes or horizon_ms, and optional symbol_kind."
+        ),
+    )
     coinbase_product_id: str = Field(default="BTC-USD")
     kraken_symbol: str = Field(default="BTC/USD")
     chainlink_symbol: str = Field(default="BTC/USD")
@@ -130,6 +138,25 @@ class IngestionSettings(BaseSettings):
     )
     sink_flush_interval_seconds: float = Field(default=2.0, ge=0.1)
     sink_max_buffer_records: int = Field(default=1000, ge=1)
+    sink_segment_duration_seconds: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "When positive, write immutable raw gzip segments at this second "
+            "grain instead of one mutable daily gzip file."
+        ),
+    )
+    low_latency_raw_queue_path: Path | None = Field(
+        default=None,
+        description=(
+            "Optional append-only JSONL queue for canonical raw rows used by "
+            "low-latency online feature paths."
+        ),
+    )
+    low_latency_raw_queue_canonical_symbol_prefix: str = Field(
+        default="BTC-15M:",
+        description="Canonical-symbol prefix published to the low-latency raw queue.",
+    )
 
     # --- Rollup ---
     rollup_enabled: bool = Field(default=True)
@@ -147,6 +174,11 @@ class IngestionSettings(BaseSettings):
         default=0.5,
         ge=0.0,
         description="Warn when receive_time - message timestamp exceeds this SLA.",
+    )
+    ingest_lag_warn_interval_seconds: float = Field(
+        default=60.0,
+        ge=0.0,
+        description="Minimum seconds between repeated high-ingest-lag warnings per event type.",
     )
     log_level: str = Field(default="INFO")
 

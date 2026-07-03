@@ -100,14 +100,20 @@ def test_train_logistic_baseline_saves_reproducible_artifacts(tmp_path: Path) ->
     assert first.metrics["test"]["accuracy"] >= 0.75
     assert first.metrics["test"]["roc_auc"] == pytest.approx(1.0)
     assert first.metrics["test"]["brier_score"] < 0.25
+    assert first.metrics["test"]["ece"] is not None
+    assert 0.0 <= first.metrics["test"]["ece"] <= 1.0
     assert (first_output / "model.json").exists()
     assert (first_output / "baseline_config.json").exists()
     assert (first_output / "metrics.json").exists()
+    assert (first_output / "family_metrics.json").exists()
     assert (first_output / "manifest.json").exists()
     assert json.loads((first_output / "baseline_config.json").read_text(encoding="utf-8"))[
         "learning_rate"
     ] == 0.50
     assert json.loads((first_output / "metrics.json").read_text(encoding="utf-8")) == first.metrics
+    family_metrics = json.loads((first_output / "family_metrics.json").read_text(encoding="utf-8"))
+    assert family_metrics["test"]["BTC-15M"]["sample_count"] == 4
+    assert first.family_metrics["test"]["BTC-15M"]["sample_count"] == 4
     assert json.loads((second_output / "model.json").read_text(encoding="utf-8")) == json.loads(
         (first_output / "model.json").read_text(encoding="utf-8")
     )

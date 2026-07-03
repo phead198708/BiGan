@@ -1,0 +1,4128 @@
+"""Polymarket policy training runner tests."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from bigan.v8.polymarket import (
+    ACTION_VALUE_LABEL_ACTIONS,
+    ACTION_VALUE_TARGET_FIELD,
+    PRIMARY_POLICY_TARGET_ACTION_VALUE,
+    PolymarketCorpusBuildConfig,
+    PolymarketPolicyExample,
+    PolymarketPolicyPrediction,
+    PolymarketPolicyTrainingConfig,
+    build_polymarket_btc_corpus,
+    build_polymarket_ev_decisions,
+    load_polymarket_policy_dataset,
+    predict_polymarket_policy_examples,
+    run_polymarket_policy_training,
+    write_deterministic_polymarket_corpus_fixtures,
+)
+from bigan.v8.polymarket.contracts import canonical_json_sha256, looks_like_sha256
+from bigan.v8.polymarket.training.action_family_eligibility import (
+    build_action_family_counterfactual_prediction_sets,
+    build_sell_before_close_side_balanced_prediction_set,
+)
+from bigan.v8.polymarket.training.dataset import _split_examples
+from bigan.v8.polymarket.training.guard_compatible_coverage import (
+    build_guard_compatible_coverage_reports,
+)
+from bigan.v8.polymarket.training.model_ranking_diagnostics import (
+    build_model_ranking_candidate_comparison,
+)
+from bigan.v8.polymarket.training.sell_before_close_diagnostics import (
+    build_sell_before_close_p_up_disagreement_diagnostic_report,
+)
+from bigan.v8.polymarket.training.sell_before_close_exit_reliability import (
+    build_sell_before_close_exit_reliability_guard_decisions,
+    build_sell_before_close_exit_reliability_report,
+)
+from bigan.v8.polymarket.training.sell_before_close_promotion_support import (
+    SELL_BEFORE_CLOSE_PROMOTION_SUPPORT_THRESHOLDS,
+    evaluate_sell_before_close_promotion_support,
+)
+from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
+    SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+    SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+)
+from bigan.v8.polymarket.training.sell_before_close_support_aware_thresholds import (
+    SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_FAILURE_ATTRIBUTION_SCHEMA_VERSION,
+    SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_SELECTION_SCHEMA_VERSION,
+    SELL_BEFORE_CLOSE_VALIDATION_FAILURE_DRILLDOWN_SCHEMA_VERSION,
+)
+
+
+def test_training_dataset_loads_phase2_corpus_outputs(tmp_path: Path) -> None:
+    corpus_dir = _build_corpus(tmp_path)
+    config = PolymarketPolicyTrainingConfig(
+        corpus_dir=corpus_dir,
+        output_dir=tmp_path / "policy",
+    )
+
+    dataset = load_polymarket_policy_dataset(config)
+    labels = _labels_by_decision_state(corpus_dir / "polymarket_label_rows.jsonl")
+
+    assert len(dataset.examples) == 12
+    assert dataset.feature_columns
+    assert looks_like_sha256(dataset.feature_schema_hash)
+    assert looks_like_sha256(dataset.label_schema_hash)
+    assert looks_like_sha256(dataset.training_corpus_hash)
+    assert looks_like_sha256(dataset.dataset_hash)
+    assert dataset.split_metadata["split_strategy"] == "unique_decision_ts_temporal"
+    assert dataset.split_metadata["strict_temporal_separation"] is True
+    assert dataset.split_metadata["train_max_ts"] < dataset.split_metadata["validation_min_ts"]
+    assert (
+        dataset.split_metadata["validation_max_ts"]
+        < dataset.split_metadata["shadow_min_ts"]
+    )
+    assert {example.market_family for example in dataset.examples} == {
+        "btc_updown_5m",
+        "btc_updown_15m",
+        "btc_updown_1h",
+    }
+    dataset_payload = dataset.to_dict()
+    for example in dataset.examples:
+        assert example.feature_cutoff_ts <= example.decision_ts
+        assert example.max_input_ts <= example.decision_ts
+        assert 0.0 <= example.target_up_probability <= 1.0
+        assert set(example.action_return_targets) == set(ACTION_VALUE_LABEL_ACTIONS)
+        for action in ACTION_VALUE_LABEL_ACTIONS:
+            assert example.action_return_targets[action] == labels[
+                (example.market_id, example.decision_ts)
+            ][action][ACTION_VALUE_TARGET_FIELD]
+        for action in ("BUY_UP_SELL_BEFORE_CLOSE", "BUY_DOWN_SELL_BEFORE_CLOSE"):
+            assert action in example.sell_before_close_execution_class_targets
+            assert action in example.sell_before_close_theoretical_return_targets
+            assert action in example.sell_before_close_executable_return_targets
+            assert action in example.sell_before_close_execution_gap_targets
+            assert action in example.sell_before_close_queue_fill_probability_targets
+        assert example.best_policy_action in ACTION_VALUE_LABEL_ACTIONS
+        assert example.best_action_expected_return >= example.second_best_action_expected_return
+    assert dataset_payload["examples"][0]["action_return_targets"]
+
+
+def test_feature_schema_hash_is_deterministic(tmp_path: Path) -> None:
+    corpus_dir = _build_corpus(tmp_path)
+    first = load_polymarket_policy_dataset(
+        PolymarketPolicyTrainingConfig(
+            corpus_dir=corpus_dir,
+            output_dir=tmp_path / "first",
+        )
+    )
+    second = load_polymarket_policy_dataset(
+        PolymarketPolicyTrainingConfig(
+            corpus_dir=corpus_dir,
+            output_dir=tmp_path / "second",
+        )
+    )
+
+    assert first.feature_schema_hash == second.feature_schema_hash
+    assert first.dataset_hash == second.dataset_hash
+
+
+def test_policy_dataset_rejects_fixed_terminal_only_sell_before_close_labels(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = _build_corpus(tmp_path)
+    labels_path = corpus_dir / "polymarket_label_rows.jsonl"
+    labels = _read_jsonl(labels_path)
+    for row in labels:
+        if row["action"].endswith("SELL_BEFORE_CLOSE"):
+            row.pop("sell_before_close_label_schema_version", None)
+            row["sell_before_close_exit_path"] = {
+                "label_source": "fixed_terminal_bid_only"
+            }
+            break
+    _write_jsonl(labels_path, labels)
+
+    with pytest.raises(ValueError, match="executable exit schema"):
+        load_polymarket_policy_dataset(
+            PolymarketPolicyTrainingConfig(
+                corpus_dir=corpus_dir,
+                output_dir=tmp_path / "policy",
+            )
+        )
+
+
+def test_policy_split_keeps_shared_decision_ts_in_one_partition(tmp_path: Path) -> None:
+    config = PolymarketPolicyTrainingConfig(
+        corpus_dir=tmp_path / "corpus",
+        output_dir=tmp_path / "policy",
+        train_fraction=0.40,
+        validation_fraction=0.30,
+    )
+    examples = tuple(
+        _example(market_index=market_index, decision_ts=decision_ts)
+        for decision_ts in (1_000, 2_000, 3_000, 4_000, 5_000)
+        for market_index in (0, 1)
+    )
+
+    train, validation, shadow, metadata = _split_examples(examples, config)
+
+    split_by_ts = {}
+    for split_name, rows in (
+        ("train", train),
+        ("validation", validation),
+        ("shadow", shadow),
+    ):
+        for row in rows:
+            split_by_ts.setdefault(row.decision_ts, split_name)
+            assert split_by_ts[row.decision_ts] == split_name
+    assert metadata["train_max_ts"] < metadata["validation_min_ts"]
+    assert metadata["validation_max_ts"] < metadata["shadow_min_ts"]
+    assert len(train) == 4
+    assert len(validation) == 2
+    assert len(shadow) == 4
+
+
+def test_training_runner_writes_required_artifacts_and_manifest(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = _build_corpus(tmp_path)
+    result = run_polymarket_policy_training(
+        PolymarketPolicyTrainingConfig(
+            corpus_dir=corpus_dir,
+            output_dir=tmp_path / "policy",
+        )
+    )
+
+    expected = {
+        "training_config",
+        "dataset_profile",
+        "model",
+        "model_manifest",
+        "calibration_report",
+        "validation_report",
+        "ev_threshold_report",
+        "replay_report",
+        "action_value_calibration",
+        "action_value_signal_sanity_report",
+        "action_value_signal_sanity_summary",
+        "model_ranking_error_report",
+        "model_ranking_error_summary",
+        "model_ranking_candidate_comparison",
+        "model_ranking_candidate_comparison_summary",
+        "action_representation_diagnostic_report",
+        "action_representation_diagnostic_summary",
+        "ranking_overlay_zero_entry_diagnostic_report",
+        "ranking_overlay_zero_entry_diagnostic_summary",
+        "source_model_eligibility_report",
+        "source_model_eligibility_summary",
+        "sell_before_close_p_up_disagreement_diagnostic_report",
+        "sell_before_close_p_up_disagreement_diagnostic_summary",
+        "sell_before_close_exit_reliability_report",
+        "sell_before_close_exit_reliability_summary",
+        "sell_before_close_promotion_support_gate_report",
+        "sell_before_close_promotion_support_gate_summary",
+        "sell_before_close_support_aware_threshold_selection_report",
+        "sell_before_close_support_aware_threshold_selection_summary",
+        "sell_before_close_support_aware_threshold_failure_attribution_report",
+        "sell_before_close_support_aware_threshold_failure_attribution_summary",
+        "sell_before_close_validation_failure_drilldown_report",
+        "sell_before_close_validation_failure_drilldown_summary",
+        "sell_before_close_side_balanced_candidate_report",
+        "sell_before_close_side_balanced_candidate_summary",
+        "sell_before_close_side_balanced_promotion_replay_attribution_report",
+        "sell_before_close_side_balanced_promotion_replay_attribution_summary",
+        "m_frozen_selector_walk_forward_report",
+        "m_frozen_selector_walk_forward_summary",
+        "sell_before_close_guard_threshold_sweep_report",
+        "sell_before_close_guard_threshold_sweep_summary",
+        "guard_compatible_candidate_coverage_report",
+        "guard_compatible_candidate_coverage_summary",
+        "side_coverage_by_split_report",
+        "side_coverage_by_split_summary",
+        "entry_guard_pass_rate_by_side_report",
+        "entry_guard_pass_rate_by_side_summary",
+        "exit_reliability_pass_rate_by_side_report",
+        "exit_reliability_pass_rate_by_side_summary",
+        "p_up_alignment_pass_rate_by_side_report",
+        "p_up_alignment_pass_rate_by_side_summary",
+        "liquidity_spread_staleness_regime_report",
+        "liquidity_spread_staleness_regime_summary",
+        "round_guard_coverage_report",
+        "round_guard_coverage_summary",
+        "guard_ablation_coverage_report",
+        "guard_ablation_coverage_summary",
+        "action_family_eligibility_report",
+        "action_family_eligibility_summary",
+        "hold_to_settlement_longshot_guard_report",
+        "hold_to_settlement_longshot_guard_summary",
+        "action_family_replay_variants_report",
+        "action_family_replay_variants_summary",
+        "action_family_counterfactual_replay_report",
+        "action_family_counterfactual_replay_summary",
+        "all_predictions",
+        "predictions",
+        "train_predictions",
+        "validation_predictions",
+        "shadow_predictions",
+        "ev_decisions",
+        "summary",
+    }
+    assert set(result.artifact_paths) == expected
+    for name, path in result.artifact_paths.items():
+        assert path.exists(), name
+        assert looks_like_sha256(result.artifact_hashes[name])
+
+    manifest = _read_json(result.artifact_paths["model_manifest"])
+    profile = _read_json(result.artifact_paths["dataset_profile"])
+    assert manifest["schema_version"] == "bigan-v8-polymarket-policy-v1"
+    assert manifest["target"] == PRIMARY_POLICY_TARGET_ACTION_VALUE
+    assert manifest["primary_policy_target"] == PRIMARY_POLICY_TARGET_ACTION_VALUE
+    assert manifest["legacy_primary_policy_target"] == PRIMARY_POLICY_TARGET_ACTION_VALUE
+    assert manifest["primary_policy_target_unit"] == "fixed_notional_net_pnl_per_notional"
+    assert manifest["auxiliary_outcome_target"] == "resolved_up_probability"
+    assert manifest["model_output"] == "action_expected_returns_with_p_up_auxiliary"
+    assert "best_policy_action" in manifest["model_outputs"]
+    assert manifest["outcome_probability_head_enabled"] is True
+    assert manifest["action_value_head_enabled"] is True
+    assert manifest["model_version"] == "polymarket_action_value_policy_v1"
+    assert manifest["action_value_model_family"] == "feature_conditioned_action_return_model"
+    assert manifest["fallback_action_value_model_family"] == "market_family_mean_baseline"
+    assert manifest["feature_conditioned_action_value_model_enabled"] is True
+    assert manifest["action_value_target_field"] == ACTION_VALUE_TARGET_FIELD
+    assert manifest["fixed_notional_target_used"] is True
+    assert manifest["sell_before_close_label_schema_version"] == (
+        "bigan-v8-polymarket-sell-before-close-executable-exit-v1"
+    )
+    assert manifest["sell_before_close_fixed_terminal_bid_only_labels_allowed"] is False
+    assert manifest["sell_before_close_label_gate_passed"] is True
+    assert manifest["sell_before_close_execution_class_counts"]
+    assert profile["sell_before_close_label_schema_version"] == (
+        "bigan-v8-polymarket-sell-before-close-executable-exit-v1"
+    )
+    assert profile["sell_before_close_fixed_terminal_bid_only_labels_allowed"] is False
+    assert manifest["action_value_calibration_artifact_path"] == (
+        "polymarket_action_value_calibration.json"
+    )
+    assert looks_like_sha256(manifest["action_value_calibration_sha256"])
+    assert manifest["action_value_calibration_artifact_used"] is True
+    assert manifest["execution_uses_calibrated_action_value"] is True
+    assert manifest["calibration_support_passed"] is True
+    assert manifest["calibration_quality_passed"] is False
+    assert manifest["calibration_quality_gates"][
+        "shadow_calibrated_mae_not_worse"
+    ] is False
+    assert isinstance(
+        manifest["calibration_quality_gates"][
+            "high_score_bucket_min_support_passed"
+        ],
+        bool,
+    )
+    assert isinstance(
+        manifest["calibration_quality_gates"][
+            "high_score_bucket_realized_return_exceeds_buffer"
+        ],
+        bool,
+    )
+    assert manifest["shadow_mae_comparison"]["raw_mae"] == manifest[
+        "calibration_quality_gates"
+    ]["shadow_raw_mae"]
+    assert (
+        manifest["shadow_mae_comparison"]["action_level_calibrated_mae"]
+        == manifest["calibration_quality_gates"][
+            "shadow_action_level_calibrated_mae"
+        ]
+    )
+    assert (
+        manifest["shadow_mae_comparison"]["bucketed_calibrated_mae"]
+        == manifest["calibration_quality_gates"]["shadow_bucketed_calibrated_mae"]
+    )
+    assert manifest["bucket_shrinkage_enabled"] is True
+    assert manifest["bucket_shrinkage_prior"] > 0.0
+    assert manifest["high_score_min_support"] >= 10
+    assert manifest["high_score_execution_buffer"] == 0.015
+    assert manifest["action_value_calibration_support_count"] > 0
+    assert manifest["action_value_calibration_bucket_count"] >= len(ACTION_VALUE_LABEL_ACTIONS)
+    assert isinstance(manifest["best_action_concentration_passed"], bool)
+    assert isinstance(manifest["p_up_action_disagreement_within_limit"], bool)
+    assert manifest["action_value_paper_decision_eligible"] is False
+    assert "action_value_calibration_quality_failed" in manifest[
+        "action_value_paper_decision_ineligible_reasons"
+    ]
+    assert manifest["action_value_signal_sanity_report"][
+        "action_value_paper_decision_eligible"
+    ] is False
+    ranking_error = _read_json(result.artifact_paths["model_ranking_error_report"])
+    assert ranking_error["schema_version"] == (
+        "bigan-v8-polymarket-model-ranking-error-v1"
+    )
+    assert set(ranking_error["diagnostic_splits"]) == {"validation", "shadow"}
+    for split_name, expected_count in (
+        ("validation", len(result.dataset.validation_examples)),
+        ("shadow", len(result.dataset.shadow_examples)),
+    ):
+        split = ranking_error[split_name]
+        assert split["sample_count"] == expected_count
+        assert 0.0 <= split["top_1_action_hit_rate"] <= 1.0
+        assert 0.0 <= split["top_2_action_hit_rate"] <= 1.0
+        assert 0.0 <= split["top_3_action_hit_rate"] <= 1.0
+        assert split["rows"]
+        first_row = split["rows"][0]
+        for field_name in (
+            "calibrated_best_policy_action",
+            "realized_best_action",
+            "rank_of_realized_best_action_under_calibrated_scores",
+            "score_spread_selected_minus_realized_best",
+            "selected_action_realized_return",
+            "oracle_best_action_realized_return",
+            "regret",
+        ):
+            assert field_name in first_row
+        assert set(split["breakdowns"]) == {
+            "action_family",
+            "side",
+            "price_bucket",
+            "time_to_close_bucket",
+            "raw_score_bucket",
+            "market_family",
+        }
+    candidate_comparison = _read_json(
+        result.artifact_paths["model_ranking_candidate_comparison"]
+    )
+    candidate_comparison_id = candidate_comparison[
+        "model_ranking_candidate_comparison_id"
+    ]
+    candidate_comparison_payload = dict(candidate_comparison)
+    candidate_comparison_payload.pop("model_ranking_candidate_comparison_id")
+    assert canonical_json_sha256(candidate_comparison_payload) == (
+        candidate_comparison_id
+    )
+    assert candidate_comparison["schema_version"] == (
+        "bigan-v8-polymarket-model-ranking-candidate-comparison-v1"
+    )
+    assert candidate_comparison["candidate_count"] >= 6
+    assert candidate_comparison["source_model_candidate_eligible"] is False
+    assert candidate_comparison["requires_promotion_replay_gate"] is True
+    assert candidate_comparison["paper_run_resume_allowed"] is False
+    assert candidate_comparison["paper_run_resume_blocked_reason"] == (
+        "promotion_replay_gate_required"
+    )
+    assert {
+        "A_current_model_baseline",
+        "B_family_specific_calibration_only",
+        "C_action_specific_calibration_with_family_gates",
+        "D_pairwise_rank_correction",
+        "E_action_family_prior_penalty",
+        "F_live_eligible_feature_subset_retrain_proxy",
+        "G_bucketed_lcb_rank_selector",
+        "H_positive_bucket_rank_selector",
+        "I_sell_before_close_only_source_candidate",
+            "J_sell_before_close_exit_reliability_guard_candidate",
+            SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+            SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+            "M_sell_before_close_side_balanced_ranking_candidate",
+        }.issubset(set(candidate_comparison["candidate_names"]))
+    for candidate in candidate_comparison["candidates"]:
+        for field_name in (
+            "shadow_raw_mae",
+            "shadow_calibrated_mae",
+            "high_score_support_count",
+            "high_score_realized_return_mean",
+            "high_score_realized_return_sum",
+            "action_family_gates",
+            "source_model_eligible",
+            "ineligible_reason_codes",
+            "enabled_action_families",
+            "disabled_action_families",
+            "enabled_actions",
+            "disabled_actions",
+            "candidate_scoped_p_up_action_disagreement_rate",
+            "candidate_scoped_p_up_action_disagreement_within_limit",
+            "candidate_scoped_action_family_gate_results",
+            "candidate_scoped_high_score_support_count",
+            "candidate_scoped_high_score_realized_return_mean",
+            "candidate_scoped_high_score_realized_return_sum",
+            "exit_reliability_guard_enabled",
+            "exit_policy",
+            "entry_filter_thresholds",
+            "threshold_selection_method",
+            "threshold_selection_fit_split",
+            "threshold_selection_evaluation_split",
+            "uses_shadow_for_fit",
+            "shadow_sweep_not_used_for_threshold_fit",
+            "threshold_selection_passed",
+            "threshold_selection_failed",
+            "threshold_selection_failure_reason_codes",
+            "support_aware_threshold_selection_failed",
+            "support_aware_threshold_selection_reason_codes",
+            "entry_decision_count_before_guard",
+            "entry_decision_count_after_guard",
+            "entry_filter_blocked_count",
+            "positions_opened_count",
+            "positions_opened_but_not_closed_before_settlement",
+            "replay_realized_trade_pnl",
+            "replay_settlement_pnl",
+            "replay_total_polymarket_pnl",
+            "replay_residual_settlement_drag",
+            "promotion_support_eligible",
+            "promotion_support_gate_passed",
+            "promotion_support_reason_codes",
+            "promotion_support_thresholds",
+            "promotion_replay_entry_decision_count",
+            "promotion_replay_sell_decision_count",
+            "promotion_replay_unique_market_count",
+            "promotion_replay_side_count",
+            "promotion_replay_side_distribution",
+            "promotion_replay_mean_pnl_per_entry",
+            "side_balance_required",
+            "side_balance_gate_passed",
+            "side_balance_thresholds",
+            "side_balance_selection_summary",
+            "execution_pnl_aware_ranking_enabled",
+            "selected_execution_pnl_immediate_exit_pnl_sum",
+            "selected_execution_pnl_immediate_exit_return_mean",
+            "selected_execution_pnl_model_expected_pnl_sum",
+            "selected_execution_pnl_model_vs_immediate_exit_pnl_gap_estimate_sum",
+            "position_state_aware_selection_enabled",
+            "position_state_fresh_entry_candidate_count",
+            "position_state_blocked_count",
+            "position_state_blocked_reason_counts",
+            ):
+                assert field_name in candidate
+    sell_only_candidate = _candidate_by_name(
+        candidate_comparison,
+        "I_sell_before_close_only_source_candidate",
+    )
+    assert sell_only_candidate["enabled_action_families"] == ["SELL_BEFORE_CLOSE"]
+    assert sell_only_candidate["disabled_action_families"] == ["HOLD_TO_SETTLEMENT"]
+    assert sell_only_candidate["enabled_actions"] == [
+        "NO_TRADE",
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+    ]
+    assert sell_only_candidate["disabled_actions"] == [
+        "BUY_UP_HOLD_TO_SETTLEMENT",
+        "BUY_DOWN_HOLD_TO_SETTLEMENT",
+    ]
+    guard_candidate = _candidate_by_name(
+        candidate_comparison,
+        "J_sell_before_close_exit_reliability_guard_candidate",
+    )
+    assert guard_candidate["enabled_action_families"] == ["SELL_BEFORE_CLOSE"]
+    assert guard_candidate["disabled_action_families"] == ["HOLD_TO_SETTLEMENT"]
+    assert guard_candidate["enabled_actions"] == [
+        "NO_TRADE",
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+    ]
+    assert guard_candidate["disabled_actions"] == [
+        "BUY_UP_HOLD_TO_SETTLEMENT",
+        "BUY_DOWN_HOLD_TO_SETTLEMENT",
+    ]
+    assert guard_candidate["exit_reliability_guard_enabled"] is True
+    assert guard_candidate["exit_policy"] == "first_executable_exit_after_entry"
+    assert guard_candidate["entry_filter_thresholds"][
+        "min_executable_bid_notional"
+    ] == 0.20
+    assert guard_candidate["entry_decision_count_before_guard"] >= (
+        guard_candidate["entry_decision_count_after_guard"]
+    )
+    assert guard_candidate["entry_filter_blocked_count"] >= 0
+    assert guard_candidate["paper_run_resume_allowed"] is False
+    support_aware_candidate = _candidate_by_name(
+        candidate_comparison,
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+    )
+    assert support_aware_candidate["enabled_action_families"] == [
+        "SELL_BEFORE_CLOSE"
+    ]
+    assert support_aware_candidate["disabled_action_families"] == [
+        "HOLD_TO_SETTLEMENT"
+    ]
+    assert support_aware_candidate["enabled_actions"] == [
+        "NO_TRADE",
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+    ]
+    assert support_aware_candidate["disabled_actions"] == [
+        "BUY_UP_HOLD_TO_SETTLEMENT",
+        "BUY_DOWN_HOLD_TO_SETTLEMENT",
+    ]
+    assert support_aware_candidate["threshold_selection_method"] == (
+        "validation_fitted_support_aware_thresholds"
+    )
+    assert support_aware_candidate["threshold_selection_fit_split"] == "validation"
+    assert support_aware_candidate["threshold_selection_evaluation_split"] == "shadow"
+    assert support_aware_candidate["uses_shadow_for_fit"] is False
+    assert (
+        support_aware_candidate["shadow_sweep_not_used_for_threshold_fit"] is True
+    )
+    assert support_aware_candidate["threshold_selection_passed"] is False
+    assert support_aware_candidate["threshold_selection_failed"] is True
+    assert support_aware_candidate["threshold_selection_failure_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert support_aware_candidate["support_aware_threshold_selection_failed"] is True
+    assert support_aware_candidate["support_aware_threshold_selection_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert "support_aware_threshold_selection_failed" in support_aware_candidate[
+        "ineligible_reason_codes"
+    ]
+    assert support_aware_candidate["source_model_candidate_eligible"] is False
+    assert support_aware_candidate["paper_run_resume_allowed"] is False
+    source_eligibility = _read_json(
+        result.artifact_paths["source_model_eligibility_report"]
+    )
+    source_eligibility_id = source_eligibility["source_model_eligibility_report_id"]
+    source_eligibility_payload = dict(source_eligibility)
+    source_eligibility_payload.pop("source_model_eligibility_report_id")
+    assert canonical_json_sha256(source_eligibility_payload) == source_eligibility_id
+    assert source_eligibility["schema_version"] == (
+        "bigan-v8-polymarket-source-model-eligibility-v1"
+    )
+    assert source_eligibility["source_model_eligible"] is False
+    assert source_eligibility["source_model_candidate_eligible"] is False
+    assert source_eligibility["requires_promotion_replay_gate"] is True
+    assert source_eligibility["paper_run_resume_allowed"] is False
+    assert source_eligibility["paper_run_resume_blocked_reason"] == (
+        "promotion_replay_gate_required"
+    )
+    assert source_eligibility["hard_gates"]["calibration_quality_passed"] is False
+    assert source_eligibility["candidate_count"] == candidate_comparison["candidate_count"]
+    assert len(source_eligibility["candidate_scoped_eligibility_summary"]) == (
+        candidate_comparison["candidate_count"]
+    )
+    source_support_aware_summary = _candidate_by_name(
+        {"candidates": source_eligibility["candidate_scoped_eligibility_summary"]},
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+    )
+    assert source_support_aware_summary["threshold_selection_failed"] is True
+    assert source_support_aware_summary["threshold_selection_failure_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert source_support_aware_summary[
+        "support_aware_threshold_selection_failed"
+    ] is True
+    side_balanced_report = _read_json(
+        result.artifact_paths["sell_before_close_side_balanced_candidate_report"]
+    )
+    assert side_balanced_report["schema_version"] == (
+        "bigan-v8-polymarket-sell-before-close-side-balanced-candidate-v1"
+    )
+    attrition = side_balanced_report["selected_entry_guard_attrition_report"]
+    attrition_summary = side_balanced_report[
+        "selected_entry_guard_attrition_summary"
+    ]
+    assert attrition["schema_version"] == (
+        "bigan-v8-polymarket-m-selected-entry-guard-attrition-v1"
+    )
+    assert attrition_summary["selected_entry_count"] == attrition[
+        "selected_entry_count"
+    ]
+    assert attrition_summary["replay_entry_count"] == attrition[
+        "replay_entry_count"
+    ]
+    assert attrition_summary[
+        "selected_entries_filtered_count"
+    ] == attrition["selected_entries_filtered_count"]
+    assert len(attrition["selected_entry_rows"]) == attrition[
+        "selected_entry_count"
+    ]
+    assert sum(attrition["attrition_counts_by_stage"].values()) == attrition[
+        "selected_entry_count"
+    ]
+    assert attrition["guard_transition_counts"][0]["stage"] == (
+        "side_quota_selection"
+    )
+    assert attrition["guard_transition_counts"][-1]["stage"] == "replay_entry"
+    assert attrition["guard_transition_counts"][-1]["passed_count"] == attrition[
+        "replay_entry_count"
+    ]
+    assert source_eligibility[
+        "sell_before_close_side_balanced_candidate_summary"
+    ]["selected_entry_guard_attrition_summary"] == attrition_summary
+    attribution = _read_json(
+        result.artifact_paths[
+            "sell_before_close_side_balanced_promotion_replay_attribution_report"
+        ]
+    )
+    attribution_summary = attribution["summary"]
+    attribution_rows = attribution["rows"]
+    selected_attribution_rows = [
+        row for row in attribution_rows if row["side_quota_selected"]
+    ]
+    replay_entry_rows = [
+        row for row in selected_attribution_rows if row["entry_order_opened"]
+    ]
+    required_attribution_fields = {
+        "market_id",
+        "decision_ts",
+        "selected_side",
+        "action",
+        "p_up",
+        "p_up_side_alignment_passed",
+        "p_up_side_alignment_diagnostic_only",
+        "raw_calibrated_action_score",
+        "best_action_margin",
+        "candidate_rank_score",
+        "side_quota_rank",
+        "side_quota_selected",
+        "action_return_target",
+        "realized_trade_pnl",
+        "settlement_pnl",
+        "total_polymarket_pnl",
+        "exit_reason_codes",
+        "replay_reason_codes",
+        "attrition_stage",
+        "attrition_reason_codes",
+        "final_pnl",
+    }
+    assert attribution["schema_version"] == (
+        "bigan-v8-polymarket-m-promotion-replay-attribution-v1"
+    )
+    assert attribution["diagnostic_only"] is True
+    assert attribution["uses_shadow_for_fit"] is False
+    assert attribution["p_up_side_alignment_filter_enabled"] is False
+    assert attribution["p_up_side_alignment_diagnostic_enabled"] is True
+    assert attribution["promotion_evidence_eligible"] is False
+    assert attribution["paper_run_resume_allowed"] is False
+    assert attribution["#146_start_allowed"] is False
+    assert attribution["#134_resume_allowed"] is False
+    assert attribution["paper_only"] is True
+    assert attribution["capital_at_risk"] is False
+    assert attribution_summary["selected_entry_count"] == attrition[
+        "selected_entry_count"
+    ]
+    assert len(selected_attribution_rows) == attribution_summary[
+        "selected_entry_count"
+    ]
+    assert len(replay_entry_rows) == attribution_summary["replay_entry_count"]
+    assert attribution_summary["replay_entry_reconciliation"]["reconciled"] is True
+    assert attribution_summary["replay_entry_reconciliation"][
+        "selected_entry_count"
+    ] == attribution_summary["selected_entry_count"]
+    assert attribution_summary["replay_entry_reconciliation"][
+        "replay_entry_count"
+    ] == attribution_summary["replay_entry_count"]
+    assert set(attribution_summary["label_vs_replay_pnl_gap_by_side"]) == {
+        "UP",
+        "DOWN",
+    }
+    assert attribution_summary["label_vs_replay_pnl_gap"] == pytest.approx(
+        attribution_summary["selected_label_pnl_sum"]
+        - attribution_summary["replay_total_pnl_sum"]
+    )
+    assert all(required_attribution_fields <= set(row) for row in attribution_rows)
+    assert all(
+        row["p_up_side_alignment_diagnostic_only"] is True
+        for row in attribution_rows
+    )
+    assert all(row["attrition_stage"] in attribution["stage_order"] for row in attribution_rows)
+    assert source_eligibility[
+        "sell_before_close_side_balanced_promotion_replay_attribution_summary"
+    ]["label_vs_replay_pnl_gap"] == pytest.approx(
+        attribution_summary["label_vs_replay_pnl_gap"]
+    )
+    assert manifest[
+        "sell_before_close_side_balanced_promotion_replay_attribution_report_path"
+    ] == "sell_before_close_side_balanced_promotion_replay_attribution_report.json"
+    assert looks_like_sha256(
+        manifest[
+            "sell_before_close_side_balanced_promotion_replay_attribution_report_sha256"
+        ]
+    )
+    assert manifest[
+        "sell_before_close_side_balanced_promotion_replay_attribution_summary"
+    ]["#134_resume_allowed"] is False
+    if attribution_summary["replay_total_pnl_sum"] < 0.0:
+        assert attribution["source_model_candidate_eligible"] is False
+    walk_forward = _read_json(
+        result.artifact_paths["m_frozen_selector_walk_forward_report"]
+    )
+    walk_forward_summary = walk_forward[
+        "m_frozen_selector_walk_forward_report_id"
+    ]
+    walk_forward_payload = dict(walk_forward)
+    walk_forward_payload.pop("m_frozen_selector_walk_forward_report_id")
+    assert canonical_json_sha256(walk_forward_payload) == walk_forward_summary
+    assert walk_forward["schema_version"] == (
+        "bigan-v8-polymarket-m-frozen-selector-walk-forward-v1"
+    )
+    assert walk_forward["candidate_name"] == (
+        "M_sell_before_close_side_balanced_ranking_candidate"
+    )
+    assert walk_forward["diagnostic_only"] is True
+    assert walk_forward["baseline_selector_commit"] == (
+        "f35231014290b88e65970fab10193ec8acad0b49"
+    )
+    assert walk_forward["selector_method"] == (
+        "position_state_aware_execution_pnl_score_ranked_per_side_quota"
+    )
+    assert walk_forward["selector_weights_unchanged_from_baseline"] is True
+    assert walk_forward["rank_weight_tuning_allowed"] is False
+    assert walk_forward["rank_weight_tuning_performed"] is False
+    assert walk_forward["no_shadow_gate_feedback_used_for_tuning"] is True
+    assert walk_forward["uses_shadow_for_fit"] is False
+    assert walk_forward["walk_forward_window_source"] == (
+        "later_half_of_temporal_shadow_split"
+    )
+    assert walk_forward["rank_score_components"] == (
+        "0.20*calibrated_action_score + 0.10*best_action_margin + "
+        "entry_exit_quality_score + 8.00*immediate_exit_return - "
+        "0.05*model_vs_immediate_exit_pnl_gap_estimate"
+    )
+    assert walk_forward["frozen_rank_weights"] == {
+        "model_score_weight": 0.20,
+        "margin_weight": 0.10,
+        "entry_exit_quality_weight": 1.0,
+        "immediate_exit_return_weight": 8.0,
+        "gap_penalty_weight": 0.05,
+    }
+    assert walk_forward["p_up_side_alignment_filter_enabled"] is False
+    assert walk_forward["p_up_side_alignment_diagnostic_enabled"] is True
+    assert walk_forward["selected_entry_count"] == walk_forward[
+        "M_selected_entry_count"
+    ]
+    assert walk_forward["replay_entry_count"] == walk_forward[
+        "M_replay_entry_count"
+    ]
+    assert walk_forward["selected_exit_decision_count"] == 0
+    assert walk_forward["M_selected_exit_decision_count"] == 0
+    assert walk_forward["replay_entry_reconciliation"]["reconciled"] is True
+    assert walk_forward["M_replay_entry_reconciliation"] == walk_forward[
+        "replay_entry_reconciliation"
+    ]
+    assert set(walk_forward["replay_pnl_by_side"]) == {"UP", "DOWN"}
+    assert "rank_score_component_summary" in walk_forward
+    assert walk_forward["rank_score_component_summary"]["fields"][
+        "execution_pnl_aware_rank_score"
+    ]["selected_entries"]["count"] == walk_forward["selected_entry_count"]
+    assert isinstance(walk_forward["top_negative_replay_entries"], list)
+    assert walk_forward["source_model_candidate_eligible"] is False
+    assert walk_forward["promotion_evidence_eligible"] is False
+    assert walk_forward["paper_run_resume_allowed"] is False
+    assert walk_forward["#146_start_allowed"] is False
+    assert walk_forward["#134_resume_allowed"] is False
+    assert walk_forward["paper_only"] is True
+    assert walk_forward["capital_at_risk"] is False
+    assert "diagnostic_only_no_paper_live_unlock" in walk_forward[
+        "ineligible_reason_codes"
+    ]
+    assert source_eligibility["m_frozen_selector_walk_forward_summary"][
+        "selected_entry_count"
+    ] == walk_forward["selected_entry_count"]
+    assert manifest["m_frozen_selector_walk_forward_report_path"] == (
+        "m_frozen_selector_walk_forward_report.json"
+    )
+    assert looks_like_sha256(
+        manifest["m_frozen_selector_walk_forward_report_sha256"]
+    )
+    assert manifest["m_frozen_selector_walk_forward_summary"][
+        "selector_weights_unchanged_from_baseline"
+    ] is True
+    assert manifest["m_frozen_selector_walk_forward_summary"][
+        "#134_resume_allowed"
+    ] is False
+    coverage = _read_json(
+        result.artifact_paths["guard_compatible_candidate_coverage_report"]
+    )
+    assert coverage["schema_version"] == (
+        "bigan-v8-polymarket-guard-compatible-candidate-coverage-v1"
+    )
+    assert coverage["diagnostic_only"] is True
+    assert coverage["selection_pool"] == "guard_compatible_rows"
+    assert coverage["#146_start_allowed"] is False
+    assert coverage["#134_resume_allowed"] is False
+    assert coverage["prediction_alignment"]["prediction_alignment_passed"] is True
+    assert coverage["prediction_alignment"]["missing_prediction_keys"] == []
+    assert coverage["prediction_alignment"]["duplicate_prediction_keys"] == []
+    assert set(coverage["by_split"]) == {"train", "validation", "shadow"}
+    for split_name in ("overall", "train", "validation", "shadow"):
+        split = coverage["overall"] if split_name == "overall" else coverage["by_split"][split_name]
+        assert "pre_guard_candidate_count" in split
+        assert "guard_compatible_candidate_count" in split
+        assert "guard_compatible_up_entry_count" in split
+        assert "guard_compatible_down_entry_count" in split
+        assert "exit_reliability_guard_pass_count_by_side" in split
+        assert "p_up_side_alignment_pass_count_by_side" in split
+        assert "liquidity_guard_pass_count_by_side" in split
+        assert "spread_guard_pass_count_by_side" in split
+        assert "staleness_guard_pass_count_by_side" in split
+        assert "queue_fill_guard_pass_count_by_side" in split
+        assert split["positive_negative_counts_source"] == "action_return_targets"
+        assert "positive_label_candidate_count_by_side" in split
+        assert "negative_label_candidate_count_by_side" in split
+        assert "positive_replay_candidate_count_by_side" not in split
+        assert "negative_replay_candidate_count_by_side" not in split
+        assert "round_guard_coverage_rows" in split
+    assert coverage["coverage_target_results"]
+    assert isinstance(coverage["coverage_targets_passed"], bool)
+    assert coverage["guard_compatible_candidate_coverage_report_id"]
+    for report_name in (
+        "side_coverage_by_split_report",
+        "entry_guard_pass_rate_by_side_report",
+        "exit_reliability_pass_rate_by_side_report",
+        "p_up_alignment_pass_rate_by_side_report",
+        "liquidity_spread_staleness_regime_report",
+        "round_guard_coverage_report",
+    ):
+        report = _read_json(result.artifact_paths[report_name])
+        assert report["diagnostic_only"] is True
+        assert report["#146_start_allowed"] is False
+        assert report["#134_resume_allowed"] is False
+        assert set(report["by_split"]) == {"train", "validation", "shadow"}
+        assert looks_like_sha256(report[f"{report_name}_id"])
+    ablation = _read_json(result.artifact_paths["guard_ablation_coverage_report"])
+    assert ablation["report_type"] == "guard_ablation_coverage"
+    assert ablation["diagnostic_only"] is True
+    assert ablation["#146_start_allowed"] is False
+    assert ablation["#134_resume_allowed"] is False
+    assert [row["variant_name"] for row in ablation["variants"]] == [
+        "baseline_current_guard",
+        "without_p_up_alignment",
+        "p_up_alignment_min_0_50",
+        "p_up_alignment_min_0_52",
+        "p_up_alignment_min_0_55",
+        "p_up_alignment_min_0_58",
+        "relaxed_spread_1200",
+        "relaxed_queue_fill_0_50",
+        "relaxed_time_to_close_60",
+    ]
+    for variant in ablation["variants"]:
+        assert "guard_compatible_candidate_count" in variant
+        assert "guard_compatible_up_entry_count" in variant
+        assert "guard_compatible_down_entry_count" in variant
+        assert "validation_guard_compatible_up_entry_count" in variant
+        assert "shadow_guard_compatible_down_entry_count" in variant
+        assert "positive_label_candidate_count_by_side" in variant
+        assert "negative_label_candidate_count_by_side" in variant
+        assert "estimated_total_label_return" in variant
+        assert "p_up_disagreement_rate" in variant
+        assert "coverage_targets_passed" in variant
+        assert "exit_quality_only" in variant
+        assert "p_up_alignment_only" in variant
+    assert looks_like_sha256(ablation["guard_ablation_coverage_report_id"])
+    round_guard = _read_json(result.artifact_paths["round_guard_coverage_report"])
+    assert "rounds_with_zero_pre_guard_candidates" in round_guard["overall"]
+    assert "rounds_with_pre_guard_but_zero_guard_compatible" in round_guard["overall"]
+    assert "rounds_with_one_sided_guard_compatible" in round_guard["overall"]
+    assert "rounds_with_two_sided_guard_compatible" in round_guard["overall"]
+    assert manifest["guard_compatible_candidate_coverage_report_path"] == (
+        "guard_compatible_candidate_coverage_report.json"
+    )
+    assert looks_like_sha256(
+        manifest["guard_compatible_candidate_coverage_report_sha256"]
+    )
+    assert manifest["side_coverage_by_split_report_path"] == (
+        "side_coverage_by_split_report.json"
+    )
+    assert looks_like_sha256(manifest["side_coverage_by_split_report_sha256"])
+    assert looks_like_sha256(manifest["entry_guard_pass_rate_by_side_report_sha256"])
+    assert looks_like_sha256(
+        manifest["exit_reliability_pass_rate_by_side_report_sha256"]
+    )
+    assert looks_like_sha256(
+        manifest["p_up_alignment_pass_rate_by_side_report_sha256"]
+    )
+    assert looks_like_sha256(
+        manifest["liquidity_spread_staleness_regime_report_sha256"]
+    )
+    assert manifest["round_guard_coverage_report_path"] == (
+        "round_guard_coverage_report.json"
+    )
+    assert looks_like_sha256(manifest["round_guard_coverage_report_sha256"])
+    assert manifest["guard_ablation_coverage_report_path"] == (
+        "guard_ablation_coverage_report.json"
+    )
+    assert looks_like_sha256(manifest["guard_ablation_coverage_report_sha256"])
+    assert manifest["guard_compatible_candidate_coverage_summary"][
+        "coverage_targets_passed"
+    ] == coverage["coverage_targets_passed"]
+    for operator_report in (candidate_comparison, source_eligibility):
+        assert operator_report["guard_compatible_candidate_coverage_summary"][
+            "coverage_targets_passed"
+        ] == coverage["coverage_targets_passed"]
+        assert operator_report["guard_compatible_coverage_targets_passed"] == (
+            coverage["coverage_targets_passed"]
+        )
+        assert operator_report[
+            "guard_compatible_coverage_target_failed_reason_codes"
+        ] == coverage["coverage_target_failed_reason_codes"]
+        assert operator_report["#145_ready_for_rerun"] == coverage[
+            "#145_ready_for_rerun"
+        ]
+        assert operator_report["#146_start_allowed"] is False
+        assert operator_report["#134_resume_allowed"] is False
+    assert manifest["#146_start_allowed"] is False
+    assert manifest["#134_resume_allowed"] is False
+    assert manifest["candidate_scoped_source_model_eligibility_summary"] == (
+        source_eligibility["candidate_scoped_eligibility_summary"]
+    )
+    assert manifest[
+        "sell_before_close_p_up_disagreement_diagnostic_report_path"
+    ] == "sell_before_close_p_up_disagreement_diagnostic_report.json"
+    assert looks_like_sha256(
+        manifest["sell_before_close_p_up_disagreement_diagnostic_sha256"]
+    )
+    diagnostic = _read_json(
+        result.artifact_paths[
+            "sell_before_close_p_up_disagreement_diagnostic_report"
+        ]
+    )
+    assert diagnostic["schema_version"] == (
+        "bigan-v8-polymarket-sell-before-close-p-up-disagreement-diagnostic-v1"
+    )
+    assert diagnostic["candidate_name"] == (
+        "I_sell_before_close_only_source_candidate"
+    )
+    assert diagnostic["diagnostic_only"] is True
+    assert diagnostic["promotion_evidence_eligible"] is False
+    assert diagnostic["paper_run_resume_allowed"] is False
+    assert manifest["sell_before_close_p_up_disagreement_interpretation"] in {
+        "likely_model_direction_error",
+        "likely_auxiliary_p_up_action_value_semantic_mismatch",
+        "mixed_evidence",
+        "insufficient_evidence",
+    }
+    assert "sell_before_close_residual_settlement_drag" not in manifest
+    assert "sell_before_close_label_row_settlement_pnl_sum" in manifest
+    assert "sell_before_close_label_row_residual_settlement_drag" in manifest
+    assert "sell_before_close_replay_realized_trade_pnl" in manifest
+    assert "sell_before_close_replay_settlement_pnl" in manifest
+    assert "sell_before_close_replay_total_polymarket_pnl" in manifest
+    assert "sell_before_close_replay_residual_settlement_drag" in manifest
+    assert "sell_before_close_positions_opened_count" in manifest
+    assert (
+        "sell_before_close_positions_opened_but_not_closed_before_settlement"
+        in manifest
+    )
+    assert (
+        "sell_before_close_settlement_drag_attribution_interpretation"
+        in manifest
+    )
+    assert manifest["sell_before_close_exit_reliability_report_path"] == (
+        "sell_before_close_exit_reliability_report.json"
+    )
+    assert looks_like_sha256(
+        manifest["sell_before_close_exit_reliability_report_sha256"]
+    )
+    assert "sell_before_close_exit_failure_interpretation" in manifest
+    assert "sell_before_close_positions_opened_count" in manifest
+    assert "sell_before_close_positions_closed_before_settlement_count" in manifest
+    assert (
+        "sell_before_close_positions_opened_but_not_closed_before_settlement"
+        in manifest
+    )
+    assert "sell_before_close_best_diagnostic_exit_variant" in manifest
+    assert "sell_before_close_best_diagnostic_exit_variant_total_pnl" in manifest
+    assert manifest["sell_before_close_p_up_disagreement_diagnostic_summary"] == (
+        source_eligibility["sell_before_close_p_up_disagreement_diagnostic_summary"]
+    )
+    embedded_summary = manifest[
+        "sell_before_close_p_up_disagreement_diagnostic_summary"
+    ]
+    for field_name in (
+        "label_row_sell_before_close_settlement_pnl_sum",
+        "label_row_sell_before_close_residual_settlement_drag",
+        "replay_realized_trade_pnl",
+        "replay_settlement_pnl",
+        "replay_total_polymarket_pnl",
+        "replay_residual_settlement_drag",
+        "replay_positions_opened_but_not_closed_before_settlement",
+        "replay_exit_signal_missing_count",
+        "replay_exit_opportunities_missed_due_to_gate_count",
+        "settlement_drag_attribution_interpretation",
+    ):
+        assert field_name in embedded_summary
+    exit_reliability = _read_json(
+        result.artifact_paths["sell_before_close_exit_reliability_report"]
+    )
+    assert exit_reliability["schema_version"] == (
+        "bigan-v8-polymarket-sell-before-close-exit-reliability-v1"
+    )
+    assert exit_reliability["candidate_name"] == (
+        "I_sell_before_close_only_source_candidate"
+    )
+    assert exit_reliability["diagnostic_only"] is True
+    assert exit_reliability["promotion_evidence_eligible"] is False
+    assert exit_reliability["paper_run_resume_allowed"] is False
+    assert exit_reliability["diagnostic_counterfactual"] is True
+    assert {
+        report["candidate_name"] for report in exit_reliability["candidate_reports"]
+    } == {
+        "I_sell_before_close_only_source_candidate",
+        "J_sell_before_close_exit_reliability_guard_candidate",
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+        "M_sell_before_close_side_balanced_ranking_candidate",
+    }
+    assert exit_reliability["exit_reliability_guard_candidate_summary"][
+        "candidate_name"
+    ] == "J_sell_before_close_exit_reliability_guard_candidate"
+    assert exit_reliability["exit_reliability_guard_candidate_summary"][
+        "exit_reliability_guard_enabled"
+    ] is True
+    assert exit_reliability["exit_reliability_guard_candidate_summary"][
+        "paper_run_resume_allowed"
+    ] is False
+    assert len(exit_reliability["i_vs_j_replay_comparison"]) == 2
+    assert len(exit_reliability["i_vs_j_vs_k_replay_comparison"]) == 3
+    assert len(exit_reliability["i_vs_j_vs_k_vs_l_replay_comparison"]) == 4
+    assert len(exit_reliability["i_vs_j_vs_k_vs_l_vs_m_replay_comparison"]) == 5
+    assert exit_reliability["exit_reliability_p_up_aligned_candidate_summary"][
+        "candidate_name"
+    ] == SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME
+    assert exit_reliability["exit_reliability_p_up_aligned_candidate_summary"][
+        "p_up_side_alignment_filter_enabled"
+    ] is True
+    assert manifest["sell_before_close_exit_reliability_guard_summary"] == (
+        source_eligibility["sell_before_close_exit_reliability_guard_summary"]
+    )
+    assert manifest["sell_before_close_exit_reliability_p_up_aligned_summary"] == (
+        source_eligibility[
+            "sell_before_close_exit_reliability_p_up_aligned_summary"
+        ]
+    )
+    assert manifest["sell_before_close_i_vs_j_replay_comparison"] == (
+        source_eligibility["i_vs_j_replay_comparison"]
+    )
+    assert manifest["sell_before_close_i_vs_j_vs_k_replay_comparison"] == (
+        source_eligibility["i_vs_j_vs_k_replay_comparison"]
+    )
+    assert manifest["sell_before_close_i_vs_j_vs_k_vs_l_replay_comparison"] == (
+        source_eligibility["i_vs_j_vs_k_vs_l_replay_comparison"]
+    )
+    assert manifest["sell_before_close_i_vs_j_vs_k_vs_l_vs_m_replay_comparison"] == (
+        source_eligibility["i_vs_j_vs_k_vs_l_vs_m_replay_comparison"]
+    )
+    threshold_selection = _read_json(
+        result.artifact_paths[
+            "sell_before_close_support_aware_threshold_selection_report"
+        ]
+    )
+    assert threshold_selection["schema_version"] == (
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_SELECTION_SCHEMA_VERSION
+    )
+    assert threshold_selection["candidate_name"] == (
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+    )
+    assert threshold_selection["threshold_selection_fit_split"] == "validation"
+    assert threshold_selection["threshold_selection_evaluation_split"] == "shadow"
+    assert threshold_selection["uses_shadow_for_fit"] is False
+    assert threshold_selection["shadow_sweep_not_used_for_threshold_fit"] is True
+    assert threshold_selection["diagnostic_only"] is False
+    assert threshold_selection["validation_row_count"] == 9600
+    assert threshold_selection["promotion_evidence_eligible"] is False
+    assert threshold_selection["paper_run_resume_allowed"] is False
+    if threshold_selection["selection_reason_codes"]:
+        assert threshold_selection["selection_reason_codes"] == [
+            "support_aware_threshold_selection_failed"
+        ]
+        assert threshold_selection["selected_thresholds"] == {}
+        assert threshold_selection["selected_validation_row"] is None
+        assert threshold_selection["shadow_evaluation_row"] is None
+    assert manifest[
+        "sell_before_close_support_aware_threshold_selection_report_path"
+    ] == "sell_before_close_support_aware_threshold_selection_report.json"
+    assert looks_like_sha256(
+        manifest[
+            "sell_before_close_support_aware_threshold_selection_report_sha256"
+        ]
+    )
+    assert manifest[
+        "sell_before_close_support_aware_threshold_selection_summary"
+    ] == source_eligibility[
+        "sell_before_close_support_aware_threshold_selection_summary"
+    ]
+    assert threshold_selection["threshold_selection_passed"] is False
+    assert threshold_selection["threshold_selection_failed"] is True
+    assert threshold_selection["threshold_selection_failure_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert threshold_selection["failure_attribution_report_path"] == (
+        "sell_before_close_support_aware_threshold_failure_attribution_report.json"
+    )
+    assert looks_like_sha256(threshold_selection["failure_attribution_report_sha256"])
+    assert threshold_selection["validation_failure_drilldown_report_path"] == (
+        "sell_before_close_validation_failure_drilldown_report.json"
+    )
+    assert looks_like_sha256(
+        threshold_selection["validation_failure_drilldown_report_sha256"]
+    )
+    assert threshold_selection[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ] == manifest["sell_before_close_validation_failure_drilldown_summary"]
+    assert threshold_selection["threshold_selection_failure_interpretation"] in {
+        "support_too_sparse",
+        "one_sided_support",
+        "positive_pnl_only_at_low_support",
+        "exit_reliability_failure",
+        "p_up_alignment_over_filters",
+            "pnl_not_positive_under_support",
+            "support_prefilter_prevents_pnl_evaluation",
+            "mixed_threshold_failure",
+            "insufficient_evidence",
+        }
+    assert threshold_selection["recommended_next_action"] in {
+        "collect_more_real_corpus",
+        "expand_validation_grid_without_shadow_fit",
+        "relax_candidate_defaults_only_after_validation_evidence",
+        "revise_action_value_ranking_model",
+        "revise_p_up_auxiliary_calibration",
+        "keep_blocked",
+    }
+    assert threshold_selection["top_failed_gates"]
+    assert threshold_selection["best_near_miss_rows"]
+    failure_attribution = _read_json(
+        result.artifact_paths[
+            "sell_before_close_support_aware_threshold_failure_attribution_report"
+        ]
+    )
+    assert failure_attribution["schema_version"] == (
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_THRESHOLD_FAILURE_ATTRIBUTION_SCHEMA_VERSION
+    )
+    assert failure_attribution["diagnostic_only"] is True
+    assert failure_attribution["uses_shadow_for_fit"] is False
+    assert failure_attribution["promotion_evidence_eligible"] is False
+    assert failure_attribution["paper_run_resume_allowed"] is False
+    assert failure_attribution["row_count"] == 9600
+    assert failure_attribution["validation_row_count"] == (
+        threshold_selection["validation_row_count"]
+    )
+    assert failure_attribution["validation_passing_row_count"] == (
+        threshold_selection["validation_passing_row_count"]
+    )
+    assert failure_attribution["threshold_selection_failed"] is True
+    assert failure_attribution["threshold_selection_failure_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert failure_attribution["gate_level_attribution"]
+    for gate_row in failure_attribution["gate_level_attribution"]:
+        assert gate_row["passed_row_count"] + gate_row["failed_row_count"] == 9600
+    assert failure_attribution["reason_code_attribution"]
+    assert all(
+        row["reason_code"].startswith("validation_")
+        for row in failure_attribution["reason_code_attribution"]
+    )
+    assert failure_attribution["cumulative_blocker_combinations"]
+    assert failure_attribution["best_near_miss_rows"]
+    assert failure_attribution["best_rows_by_objective"]["least_bad_overall_row"]
+    assert len(failure_attribution["validation_threshold_rows"]) == 9600
+    assert failure_attribution[
+        "all_validation_rows_have_failed_gate_attribution"
+    ] is True
+    assert all(
+        not any(
+            reason.startswith("support_aware_validation_")
+            for reason in row["failed_reason_codes"]
+        )
+        for row in failure_attribution["validation_threshold_rows"]
+    )
+    drilldown = _read_json(
+        result.artifact_paths["sell_before_close_validation_failure_drilldown_report"]
+    )
+    assert drilldown["schema_version"] == (
+        SELL_BEFORE_CLOSE_VALIDATION_FAILURE_DRILLDOWN_SCHEMA_VERSION
+    )
+    assert drilldown["candidate_name"] == (
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+    )
+    assert drilldown["split_name"] == "validation"
+    assert drilldown["diagnostic_only"] is True
+    assert drilldown["uses_shadow_for_fit"] is False
+    assert drilldown["promotion_evidence_eligible"] is False
+    assert drilldown["paper_run_resume_allowed"] is False
+    assert drilldown["#146_start_allowed"] is False
+    assert drilldown["#134_resume_allowed"] is False
+    assert drilldown["paper_only"] is True
+    assert drilldown["capital_at_risk"] is False
+    assert drilldown["polymarket_write_enabled"] is False
+    assert drilldown["wallet_signing_enabled"] is False
+    assert drilldown["validation_row_count"] == 9600
+    assert drilldown["validation_passing_row_count"] == 0
+    quadrant_total = sum(
+        row["row_count"] for row in drilldown["support_vs_pnl_quadrants"].values()
+    )
+    assert quadrant_total == drilldown["validation_row_count"]
+    assert set(drilldown["support_vs_pnl_quadrants"]) == {
+        "support_passed_pnl_passed",
+        "support_passed_pnl_failed",
+        "support_failed_pnl_passed",
+        "support_failed_pnl_failed",
+    }
+    assert drilldown["support_vs_pnl_quadrants"][
+        "support_passed_pnl_passed"
+    ]["row_count"] == 0
+    assert drilldown["support_vs_pnl_quadrants"][
+        "support_failed_pnl_failed"
+    ]["row_count"] == 9600
+    assert drilldown["support_adequate_drilldown"][
+        "support_adequate_row_count"
+    ] == 0
+    assert drilldown["positive_pnl_drilldown"]["positive_pnl_row_count"] == 0
+    assert drilldown["positive_pnl_drilldown"][
+        "positive_pnl_support_passed_count"
+    ] == 0
+    assert drilldown["side_coverage_drilldown"][
+        "side_coverage_failure_rate"
+    ] == 1.0
+    assert drilldown["side_coverage_drilldown"]["rows_with_both_sides"] == 0
+    assert drilldown["side_coverage_drilldown"][
+        "positive_pnl_rows_with_both_sides"
+    ] == 0
+    assert drilldown["pnl_evaluated_row_count"] == 0
+    assert drilldown[
+        "pnl_not_evaluated_due_to_support_prefilter_count"
+    ] == 9600
+    assert drilldown["support_prefilter_prevents_pnl_evaluation"] is True
+    assert "support_prefilter_prevents_pnl_evaluation" in drilldown[
+        "failure_interpretations"
+    ]
+    assert "one_sided_support" in drilldown["failure_interpretations"]
+    assert "action_value_ranking_failure_likely" not in drilldown[
+        "failure_interpretations"
+    ]
+    assert "keep_blocked" in drilldown["recommended_next_actions"]
+    assert drilldown["model_ranking_failure_clues"][
+        "all_rows_total_pnl_failed"
+    ] is False
+    assert drilldown["model_ranking_failure_clues"][
+        "all_rows_mean_pnl_failed"
+    ] is False
+    assert drilldown["model_ranking_failure_clues"][
+        "side_coverage_all_rows_failed"
+    ] is True
+    assert drilldown["action_side_market_drilldown"][
+        "row_level_replay_decisions_retained"
+    ] is False
+    assert drilldown["action_side_market_drilldown"][
+        "compact_summary_from_threshold_rows"
+    ] is True
+    assert failure_attribution[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ]["validation_row_count"] == 9600
+    assert failure_attribution["validation_failure_drilldown_report_path"] == (
+        "sell_before_close_validation_failure_drilldown_report.json"
+    )
+    assert looks_like_sha256(
+        failure_attribution["validation_failure_drilldown_report_sha256"]
+    )
+    assert manifest[
+        "sell_before_close_support_aware_threshold_failure_attribution_report_path"
+    ] == "sell_before_close_support_aware_threshold_failure_attribution_report.json"
+    assert looks_like_sha256(
+        manifest[
+            "sell_before_close_support_aware_threshold_failure_attribution_report_sha256"
+        ]
+    )
+    assert manifest[
+        "sell_before_close_support_aware_threshold_failure_attribution_summary"
+    ] == source_eligibility[
+        "sell_before_close_support_aware_threshold_failure_attribution_summary"
+    ]
+    assert candidate_comparison[
+        "sell_before_close_support_aware_threshold_failure_attribution_summary"
+    ] == source_eligibility[
+        "sell_before_close_support_aware_threshold_failure_attribution_summary"
+    ]
+    assert manifest["sell_before_close_validation_failure_drilldown_report_path"] == (
+        "sell_before_close_validation_failure_drilldown_report.json"
+    )
+    assert looks_like_sha256(
+        manifest["sell_before_close_validation_failure_drilldown_report_sha256"]
+    )
+    assert manifest["sell_before_close_validation_failure_drilldown_summary"] == (
+        source_eligibility["sell_before_close_validation_failure_drilldown_summary"]
+    )
+    assert candidate_comparison[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ] == source_eligibility[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ]
+    assert manifest[
+        "sell_before_close_validation_failure_primary_interpretation"
+    ] == drilldown["primary_failure_interpretation"]
+    assert manifest["sell_before_close_validation_failure_interpretations"] == (
+        drilldown["failure_interpretations"]
+    )
+    assert manifest[
+        "sell_before_close_validation_failure_recommended_next_actions"
+    ] == drilldown["recommended_next_actions"]
+    assert manifest["sell_before_close_validation_support_adequate_row_count"] == 0
+    assert manifest["sell_before_close_validation_positive_pnl_row_count"] == 0
+    assert manifest[
+        "sell_before_close_validation_support_passed_pnl_failed_count"
+    ] == 0
+    assert manifest[
+        "sell_before_close_validation_support_failed_pnl_passed_count"
+    ] == 0
+    assert manifest["sell_before_close_validation_side_coverage_failure_rate"] == 1.0
+    assert manifest[
+        "sell_before_close_support_aware_threshold_selection_failed"
+    ] is True
+    assert manifest["threshold_selection_failed"] is True
+    assert manifest["threshold_selection_failure_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert manifest["threshold_selection_validation_row_count"] == 9600
+    assert manifest["threshold_selection_validation_passing_row_count"] == 0
+    assert manifest["top_failed_gates"] == threshold_selection["top_failed_gates"]
+    support_gate = _read_json(
+        result.artifact_paths["sell_before_close_promotion_support_gate_report"]
+    )
+    assert support_gate["schema_version"] == (
+        "bigan-v8-polymarket-sell-before-close-promotion-support-gate-v1"
+    )
+    assert support_gate["thresholds"] == SELL_BEFORE_CLOSE_PROMOTION_SUPPORT_THRESHOLDS
+    assert support_gate["candidate_name"] == (
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+    )
+    assert support_gate["support_gate_passed"] is False
+    assert support_gate["threshold_selection_failed"] is True
+    assert support_gate["threshold_selection_failure_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert support_gate["support_aware_threshold_selection_failed"] is True
+    assert support_gate["failure_attribution_report_path"] == (
+        "sell_before_close_support_aware_threshold_failure_attribution_report.json"
+    )
+    assert support_gate["failure_attribution_report_sha256"] == (
+        threshold_selection["failure_attribution_report_sha256"]
+    )
+    assert support_gate["validation_failure_drilldown_report_path"] == (
+        "sell_before_close_validation_failure_drilldown_report.json"
+    )
+    assert support_gate["validation_failure_drilldown_report_sha256"] == (
+        manifest["sell_before_close_validation_failure_drilldown_report_sha256"]
+    )
+    assert support_gate[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ] == manifest[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ]
+    assert support_gate["promotion_evidence_eligible"] is False
+    assert support_gate["paper_run_resume_allowed"] is False
+    assert "promotion_replay_entry_support_insufficient" in support_gate[
+        "support_gate_reason_codes"
+    ]
+    assert len(support_gate["i_vs_j_vs_k_promotion_support_comparison"]) == 4
+    assert len(support_gate["i_vs_j_vs_k_vs_l_promotion_support_comparison"]) == 4
+    l_support = _candidate_by_name(
+        {"candidates": support_gate["candidate_rows"]},
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+    )
+    assert l_support["promotion_support_eligible"] is False
+    assert l_support["paper_run_resume_allowed"] is False
+    k_support = _candidate_by_name(
+        {"candidates": support_gate["candidate_rows"]},
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+    assert k_support["promotion_support_eligible"] is False
+    assert k_support["paper_run_resume_allowed"] is False
+    k_candidate = _candidate_by_name(
+        candidate_comparison,
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+    assert k_candidate["source_model_candidate_eligible"] is False
+    assert k_candidate["promotion_support_eligible"] is False
+    assert "promotion_replay_entry_support_insufficient" in k_candidate[
+        "ineligible_reason_codes"
+    ]
+    assert manifest["sell_before_close_promotion_support_gate_report_path"] == (
+        "sell_before_close_promotion_support_gate_report.json"
+    )
+    assert looks_like_sha256(
+        manifest["sell_before_close_promotion_support_gate_report_sha256"]
+    )
+    assert manifest["sell_before_close_promotion_support_gate_summary"] == (
+        source_eligibility["sell_before_close_promotion_support_gate_summary"]
+    )
+    assert candidate_comparison[
+        "sell_before_close_promotion_support_gate_summary"
+    ] == source_eligibility["sell_before_close_promotion_support_gate_summary"]
+    assert manifest[
+        "sell_before_close_i_vs_j_vs_k_promotion_support_comparison"
+    ] == source_eligibility[
+        "sell_before_close_i_vs_j_vs_k_promotion_support_comparison"
+    ]
+    assert manifest[
+        "sell_before_close_i_vs_j_vs_k_vs_l_promotion_support_comparison"
+    ] == source_eligibility[
+        "sell_before_close_i_vs_j_vs_k_vs_l_promotion_support_comparison"
+    ]
+    assert manifest["sell_before_close_promotion_support_gate_passed"] is False
+    assert manifest["sell_before_close_promotion_support_reason_codes"] == (
+        support_gate["support_gate_reason_codes"]
+    )
+    assert manifest["sell_before_close_promotion_support_entry_decision_count"] == (
+        support_gate["entry_decision_count"]
+    )
+    assert manifest["sell_before_close_promotion_support_unique_market_count"] == (
+        support_gate["unique_market_count"]
+    )
+    assert manifest["sell_before_close_promotion_support_side_count"] == (
+        support_gate["side_count"]
+    )
+    assert manifest["sell_before_close_promotion_support_sell_decision_count"] == (
+        support_gate["sell_decision_count"]
+    )
+    assert manifest["sell_before_close_promotion_support_total_pnl"] == (
+        support_gate["total_pnl"]
+    )
+    assert manifest["sell_before_close_promotion_support_mean_pnl_per_entry"] == (
+        support_gate["mean_pnl_per_entry"]
+    )
+    threshold_sweep = _read_json(
+        result.artifact_paths["sell_before_close_guard_threshold_sweep_report"]
+    )
+    assert threshold_sweep["diagnostic_only"] is True
+    assert threshold_sweep["uses_shadow_for_fit"] is False
+    assert threshold_sweep["promotion_evidence_eligible"] is False
+    assert threshold_sweep["paper_run_resume_allowed"] is False
+    assert threshold_sweep["best_threshold_sweep_support_gate_passed"] is False
+    assert "promotion_replay_entry_support_insufficient" in threshold_sweep[
+        "best_threshold_sweep_support_gate_reason_codes"
+    ]
+    assert threshold_sweep["row_count"] >= 1
+    assert threshold_sweep["best_threshold_sweep_row"] is not None
+    assert manifest["sell_before_close_guard_threshold_sweep_summary"] == (
+        source_eligibility["sell_before_close_guard_threshold_sweep_summary"]
+    )
+    assert manifest["sell_before_close_exit_reliability_summary"] == (
+        source_eligibility["sell_before_close_exit_reliability_summary"]
+    )
+    assert candidate_comparison[
+        "sell_before_close_p_up_disagreement_diagnostic_summary"
+    ] == source_eligibility[
+        "sell_before_close_p_up_disagreement_diagnostic_summary"
+    ]
+    assert candidate_comparison[
+        "sell_before_close_exit_reliability_summary"
+    ] == source_eligibility["sell_before_close_exit_reliability_summary"]
+    assert candidate_comparison[
+        "sell_before_close_exit_reliability_guard_summary"
+    ] == source_eligibility["sell_before_close_exit_reliability_guard_summary"]
+    assert candidate_comparison[
+        "sell_before_close_exit_reliability_p_up_aligned_summary"
+    ] == source_eligibility[
+        "sell_before_close_exit_reliability_p_up_aligned_summary"
+    ]
+    assert candidate_comparison["i_vs_j_replay_comparison"] == (
+        source_eligibility["i_vs_j_replay_comparison"]
+    )
+    assert candidate_comparison["i_vs_j_vs_k_replay_comparison"] == (
+        source_eligibility["i_vs_j_vs_k_replay_comparison"]
+    )
+    counterfactual_replay = _read_json(
+        result.artifact_paths["action_family_counterfactual_replay_report"]
+    )
+    assert counterfactual_replay[
+        "sell_before_close_p_up_disagreement_diagnostic_summary"
+    ] == source_eligibility[
+        "sell_before_close_p_up_disagreement_diagnostic_summary"
+    ]
+    assert counterfactual_replay[
+        "sell_before_close_exit_reliability_summary"
+    ] == source_eligibility["sell_before_close_exit_reliability_summary"]
+    assert candidate_comparison["candidate_artifact_count"] >= 2
+    exported_names = {
+        artifact["candidate_name"]
+        for artifact in candidate_comparison["candidate_artifacts"]
+    }
+    assert {
+        "G_bucketed_lcb_rank_selector",
+        "H_positive_bucket_rank_selector",
+    }.issubset(exported_names)
+    for artifact in candidate_comparison["candidate_artifacts"]:
+        assert set(artifact["artifact_paths"]) == {
+            "manifest",
+            "predictions",
+            "ranking_overlay",
+        }
+        for artifact_path in artifact["artifact_paths"].values():
+            assert (result.run_dir / artifact_path).exists()
+        for artifact_hash in artifact["artifact_hashes"].values():
+            assert looks_like_sha256(artifact_hash)
+        if artifact["candidate_name"] in {
+            "G_bucketed_lcb_rank_selector",
+            "H_positive_bucket_rank_selector",
+        }:
+            overlay = _read_json(
+                result.run_dir / artifact["artifact_paths"]["ranking_overlay"]
+            )
+            candidate_manifest = _read_json(
+                result.run_dir / artifact["artifact_paths"]["manifest"]
+            )
+            assert overlay["fit_split"] == "validation"
+            assert overlay["evaluation_split"] == "shadow"
+            assert overlay["uses_shadow_for_fit"] is False
+            assert overlay["shrinkage_prior_support"] == 10
+            assert overlay["shrinkage_prior_mean"] == 0.0
+            assert "bucket_evidence_weight" in overlay
+            assert "model_score_weight" in overlay
+            assert candidate_manifest["ranking_overlay_fit_split"] == "validation"
+            assert candidate_manifest["ranking_overlay_evaluation_split"] == "shadow"
+            assert candidate_manifest["ranking_overlay_uses_shadow_split"] is False
+            assert candidate_manifest["ranking_overlay_min_bucket_support"] >= 3
+            assert candidate_manifest["ranking_overlay_min_family_support"] == 10
+            assert candidate_manifest["ranking_overlay_shrinkage_prior_support"] == 10
+            assert candidate_manifest["ranking_overlay_shrinkage_prior_mean"] == 0.0
+            assert "ranking_overlay_score_combination" in candidate_manifest
+            assert "ranking_overlay_bucket_evidence_weight" in candidate_manifest
+            assert "ranking_overlay_model_score_weight" in candidate_manifest
+    assert source_eligibility["candidate_artifacts"] == candidate_comparison[
+        "candidate_artifacts"
+    ]
+    assert manifest["model_ranking_error_report_path"] == (
+        "model_ranking_error_report.json"
+    )
+    assert looks_like_sha256(manifest["model_ranking_error_report_sha256"])
+    assert manifest["model_ranking_candidate_comparison_path"] == (
+        "model_ranking_candidate_comparison.json"
+    )
+    assert looks_like_sha256(manifest["model_ranking_candidate_comparison_sha256"])
+    action_representation = _read_json(
+        result.artifact_paths["action_representation_diagnostic_report"]
+    )
+    action_representation_id = action_representation[
+        "action_representation_diagnostic_report_id"
+    ]
+    action_representation_payload = dict(action_representation)
+    action_representation_payload.pop("action_representation_diagnostic_report_id")
+    assert canonical_json_sha256(action_representation_payload) == (
+        action_representation_id
+    )
+    assert action_representation["schema_version"] == (
+        "bigan-v8-polymarket-action-representation-diagnostic-v1"
+    )
+    assert action_representation["diagnostic_only"] is True
+    assert action_representation["promotion_evidence_eligible"] is False
+    assert action_representation["source_model_candidate_eligible"] is False
+    assert action_representation["paper_run_resume_allowed"] is False
+    assert action_representation["fine_action_family_definition"] == (
+        "side|intended_exit_policy|price_bucket|time_to_close_bucket"
+    )
+    assert action_representation["label_exit_path_assessment"][
+        "sell_before_close_exit_path_coarse"
+    ] is False
+    assert action_representation["label_exit_path_assessment"][
+        "sell_before_close_exit_path_is_fixed_terminal_bid"
+    ] is False
+    assert action_representation["label_exit_path_assessment"][
+        "uses_intraround_exit_opportunity_model"
+    ] is True
+    assert action_representation["label_exit_path_assessment"][
+        "uses_queue_fill_probability_model"
+    ] is True
+    assert action_representation["label_exit_path_assessment"][
+        "compares_theoretical_vs_executable_exit_return"
+    ] is True
+    assert "single_terminal_exit_bid_path" not in action_representation[
+        "label_exit_path_assessment"
+    ]["coarse_exit_path_risk_codes"]
+    for split_name in ("validation", "shadow"):
+        split = action_representation[split_name]
+        assert split["sell_before_close_summary"]["support_count"] > 0
+        assert "action_family_summary" in split
+        assert "fine_action_family_summary" in split
+        assert "side_exit_policy_price_time_summary" in split
+        assert "sell_before_close_negative_contributors" in split
+        assert "sell_before_close_positive_supported_buckets" in split
+        assert "top_negative_high_score_sell_before_close_examples" in split
+        for row in split["fine_action_family_summary"]:
+            assert "fine_action_family" in row
+            assert "unique_market_count" in row
+            assert "realized_trade_return_mean" in row
+            assert "theoretical_terminal_bid_return_mean" in row
+            assert "realized_executable_sell_before_close_return_mean" in row
+            assert "execution_gap_return_mean" in row
+            assert "sell_before_close_execution_class_distribution" in row
+        for row in split["top_negative_high_score_sell_before_close_examples"]:
+            assert "fine_action_family" in row
+            assert "calibrated_score" in row
+            assert "realized_return" in row
+            assert "time_to_close_seconds" in row
+    assert result.action_representation_diagnostic_report == action_representation
+    assert manifest["action_representation_diagnostic_report_path"] == (
+        "action_representation_diagnostic_report.json"
+    )
+    assert looks_like_sha256(manifest["action_representation_diagnostic_sha256"])
+    zero_entry_report = _read_json(
+        result.artifact_paths["ranking_overlay_zero_entry_diagnostic_report"]
+    )
+    zero_entry_report_id = zero_entry_report[
+        "ranking_overlay_zero_entry_diagnostic_report_id"
+    ]
+    zero_entry_payload = dict(zero_entry_report)
+    zero_entry_payload.pop("ranking_overlay_zero_entry_diagnostic_report_id")
+    assert canonical_json_sha256(zero_entry_payload) == zero_entry_report_id
+    assert zero_entry_report["schema_version"] == (
+        "bigan-v8-polymarket-ranking-overlay-zero-entry-diagnostic-v1"
+    )
+    assert zero_entry_report["diagnostic_only"] is True
+    assert zero_entry_report["promotion_evidence_eligible"] is False
+    assert zero_entry_report["source_model_candidate_eligible"] is False
+    assert zero_entry_report["paper_run_resume_allowed"] is False
+    assert zero_entry_report["uses_shadow_for_fit"] is False
+    assert {
+        "G_bucketed_lcb_rank_selector",
+        "H_positive_bucket_rank_selector",
+    } == set(zero_entry_report["candidate_names"])
+    assert len(zero_entry_report["diagnostic_sweeps"]) == 54
+    for row in zero_entry_report["diagnostic_sweeps"]:
+        assert row["diagnostic_only"] is True
+        assert row["source_model_candidate_eligible"] is False
+        assert row["promotion_eligible"] is False
+        assert row["paper_run_resume_allowed"] is False
+        assert row["paper_only"] is True
+        assert row["capital_at_risk"] is False
+    for candidate in zero_entry_report["candidates"]:
+        assert candidate["prediction_count"] == len(result.dataset.shadow_examples)
+        assert candidate["action_count_considered"] == (
+            len(result.dataset.shadow_examples)
+            * (len(ACTION_VALUE_LABEL_ACTIONS) - 1)
+        )
+        assert candidate["non_no_trade_candidate_count"] == (
+            candidate["action_count_considered"]
+        )
+        assert candidate["selected_non_no_trade_count"] >= 0
+        assert "bucket_missing_count" in candidate
+        assert "family_missing_count" in candidate
+        assert "bucket_support_failed_count" in candidate
+        assert "family_support_failed_count" in candidate
+        assert "bucket_lcb_or_mean_failed_count" in candidate
+        assert "family_lcb_or_mean_failed_count" in candidate
+        assert "bucket_sum_failed_count" in candidate
+        assert "passed_bucket_and_family_count" in candidate
+        assert set(candidate["grouped_summaries"]) == {
+            "action",
+            "action_family",
+            "fine_action_family",
+            "intended_exit_policy",
+            "side",
+            "price_bucket",
+            "time_to_close_bucket",
+            "raw_score_bucket",
+            "market_family",
+        }
+        assert "top_near_pass_buckets" in candidate
+        assert "top_near_pass_families" in candidate
+        assert candidate["source_model_candidate_eligible"] is False
+        assert candidate["promotion_eligible"] is False
+    assert result.ranking_overlay_zero_entry_diagnostic_report == zero_entry_report
+    assert manifest["ranking_overlay_zero_entry_diagnostic_report_path"] == (
+        "ranking_overlay_zero_entry_diagnostic_report.json"
+    )
+    assert looks_like_sha256(
+        manifest["ranking_overlay_zero_entry_diagnostic_sha256"]
+    )
+    assert manifest["source_model_eligibility_report_path"] == (
+        "source_model_eligibility_report.json"
+    )
+    assert looks_like_sha256(manifest["source_model_eligibility_report_sha256"])
+    action_family_report = _read_json(
+        result.artifact_paths["action_family_eligibility_report"]
+    )
+    assert action_family_report["schema_version"] == (
+        "bigan-v8-polymarket-action-family-eligibility-v1"
+    )
+    assert action_family_report["out_of_sample_replay"] is True
+    assert action_family_report["min_family_high_score_support"] >= 10
+    assert action_family_report["family_high_score_execution_buffer"] == 0.015
+    assert "action_family_paper_decision_eligible" in action_family_report
+    assert "action_family_gate_results" in action_family_report
+    assert "fine_action_family_gate_results" in action_family_report
+    assert "high_score_by_action" in action_family_report
+    assert "high_score_by_fine_action_family" in action_family_report
+    assert "high_score_by_action_family_side_price_time_raw_bucket" in action_family_report
+    assert "high_score_by_side_exit_policy_price_time_bucket" in action_family_report
+    assert manifest["action_family_eligibility_report_path"] == (
+        "action_family_eligibility_report.json"
+    )
+    assert manifest["action_family_paper_decision_eligible"] == action_family_report[
+        "action_family_paper_decision_eligible"
+    ]
+    assert manifest["action_family_paper_decision_ineligible_reasons"] == (
+        action_family_report["action_family_paper_decision_ineligible_reasons"]
+    )
+    if not action_family_report["action_family_paper_decision_eligible"]:
+        for reason in action_family_report[
+            "action_family_paper_decision_ineligible_reasons"
+        ]:
+            assert reason in manifest["action_value_paper_decision_ineligible_reasons"]
+    longshot_report = _read_json(
+        result.artifact_paths["hold_to_settlement_longshot_guard_report"]
+    )
+    assert longshot_report["schema_version"] == (
+        "bigan-v8-polymarket-hold-to-settlement-longshot-guard-v1"
+    )
+    assert longshot_report["guard_enabled"] is True
+    assert longshot_report["guard_mode"] == "block_to_no_trade"
+    assert longshot_report["guard_reason_codes"] == [
+        "hold_to_settlement_longshot_guard",
+        "action_family_ineligible",
+    ]
+    assert manifest["hold_to_settlement_longshot_guard_enabled"] is True
+    assert manifest["hold_to_settlement_longshot_guard_reason_codes"] == (
+        longshot_report["guard_reason_codes"]
+    )
+    replay_variants = _read_json(
+        result.artifact_paths["action_family_replay_variants_report"]
+    )
+    assert replay_variants["schema_version"] == (
+        "bigan-v8-polymarket-action-family-replay-variants-v1"
+    )
+    assert [
+        variant["variant"]
+        for variant in replay_variants["variants"]
+    ] == [
+        "A_baseline_current_calibrated_policy_blocked",
+        "B_hold_to_settlement_disabled",
+        "C_sell_before_close_only",
+        "D_hold_to_settlement_allowed_only_for_passed_buckets",
+    ]
+    assert [
+        variant["threshold"]
+        for variant in replay_variants["threshold_sweep_with_action_family_gates"]
+    ] == [0.0, 0.03, 0.05]
+    assert replay_variants["report_mode"] == "filtered_high_score_estimate"
+    assert replay_variants["promotion_evidence_eligible"] is False
+    counterfactual_replay = _read_json(
+        result.artifact_paths["action_family_counterfactual_replay_report"]
+    )
+    assert counterfactual_replay["schema_version"] == (
+        "bigan-v8-polymarket-action-family-counterfactual-replay-v1"
+    )
+    assert counterfactual_replay["report_mode"] == (
+        "re_ranked_counterfactual_policy_replay"
+    )
+    assert counterfactual_replay["promotion_evidence_eligible"] is False
+    assert counterfactual_replay["paper_run_resume_allowed"] is False
+    assert counterfactual_replay["#134_resume_allowed"] is False
+    assert counterfactual_replay["#146_start_allowed"] is False
+    assert "promotion_replay_entry_support_insufficient" in counterfactual_replay[
+        "promotion_evidence_ineligible_reasons"
+    ]
+    assert counterfactual_replay[
+        "sell_before_close_promotion_support_gate_summary"
+    ] == source_eligibility["sell_before_close_promotion_support_gate_summary"]
+    assert counterfactual_replay["threshold_selection_failed"] is True
+    assert counterfactual_replay["threshold_selection_failure_reason_codes"] == [
+        "support_aware_threshold_selection_failed"
+    ]
+    assert counterfactual_replay["support_aware_threshold_selection_failed"] is True
+    assert "support_aware_threshold_selection_failed" in counterfactual_replay[
+        "promotion_evidence_ineligible_reasons"
+    ]
+    assert counterfactual_replay[
+        "sell_before_close_validation_failure_drilldown_summary"
+    ] == manifest["sell_before_close_validation_failure_drilldown_summary"]
+    assert [variant["variant"] for variant in counterfactual_replay["variants"]] == [
+        "A_baseline_current_policy_with_runtime_guards",
+        "B_hold_to_settlement_disabled_reranked",
+        "C_sell_before_close_only_reranked",
+        "I_sell_before_close_only_source_candidate",
+        "J_sell_before_close_exit_reliability_guard_candidate",
+        SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME,
+        "M_sell_before_close_side_balanced_ranking_candidate",
+        "D_hold_to_settlement_allowed_only_for_passed_buckets_reranked",
+        "E_threshold_0.00_action_family_gates_reranked",
+        "E_threshold_0.03_action_family_gates_reranked",
+        "E_threshold_0.05_action_family_gates_reranked",
+    ]
+    for variant in counterfactual_replay["variants"]:
+        assert variant["counterfactual_replay_mode"] == (
+            "re_ranked_counterfactual_policy_replay"
+        )
+        assert variant["prediction_count"] == len(result.dataset.shadow_examples)
+        assert variant["decision_count"] == len(result.dataset.shadow_examples)
+        expected_artifact_paths = {
+            "decisions",
+            "ev_threshold_report",
+            "ledger_pnl_report",
+            "policy_replay_report",
+            "predictions",
+        }
+        if (
+            variant["variant"]
+            == "M_sell_before_close_side_balanced_ranking_candidate"
+        ):
+            expected_artifact_paths.add("side_balance_candidate_entries")
+        assert set(variant["artifact_paths"]) == expected_artifact_paths
+        for artifact_path in variant["artifact_paths"].values():
+            assert (result.run_dir / artifact_path).exists()
+        for artifact_hash in variant["artifact_hashes"].values():
+            assert looks_like_sha256(artifact_hash)
+        if variant["variant"] == (
+            "J_sell_before_close_exit_reliability_guard_candidate"
+        ):
+            assert variant["exit_reliability_guard_enabled"] is True
+            assert variant["exit_policy"] == "first_executable_exit_after_entry"
+            assert variant["exit_reliability_guard_summary"][
+                "paper_run_resume_allowed"
+            ] is False
+            assert variant["paper_run_resume_allowed"] is False
+            assert variant["promotion_evidence_eligible"] is False
+            assert "i_vs_j_replay_comparison" in variant
+        if variant["variant"] == SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME:
+            assert variant["exit_reliability_guard_enabled"] is True
+            assert variant["p_up_side_alignment_filter_enabled"] is True
+            assert variant["paper_run_resume_allowed"] is False
+            assert variant["promotion_evidence_eligible"] is False
+            assert "i_vs_j_vs_k_replay_comparison" in variant
+        if (
+            variant["variant"]
+            == SELL_BEFORE_CLOSE_SUPPORT_AWARE_P_UP_ALIGNED_CANDIDATE_NAME
+        ):
+            assert variant["p_up_side_alignment_filter_enabled"] is True
+            assert variant["threshold_selection_method"] == (
+                "validation_fitted_support_aware_thresholds"
+            )
+            assert variant["threshold_selection_fit_split"] == "validation"
+            assert variant["threshold_selection_evaluation_split"] == "shadow"
+            assert variant["uses_shadow_for_fit"] is False
+            assert variant["shadow_sweep_not_used_for_threshold_fit"] is True
+            assert variant["threshold_selection_failed"] is True
+            assert variant["threshold_selection_failure_reason_codes"] == [
+                "support_aware_threshold_selection_failed"
+            ]
+            assert variant["support_aware_threshold_selection_failed"] is True
+            assert variant["paper_run_resume_allowed"] is False
+            assert variant["promotion_evidence_eligible"] is False
+            assert "support_aware_threshold_selection_failed" in variant[
+                "promotion_evidence_ineligible_reasons"
+            ]
+            assert "sell_before_close_support_aware_threshold_selection_summary" in variant
+            assert "sell_before_close_validation_failure_drilldown_summary" in variant
+            assert variant[
+                "sell_before_close_validation_failure_drilldown_summary"
+            ] == manifest["sell_before_close_validation_failure_drilldown_summary"]
+        if (
+            variant["variant"]
+            == "M_sell_before_close_side_balanced_ranking_candidate"
+        ):
+            assert variant["p_up_side_alignment_filter_enabled"] is False
+            assert variant["p_up_side_alignment_diagnostic_enabled"] is True
+            assert variant["side_balance_selection_summary"][
+                "selected_entry_count"
+            ] >= 0
+            assert (
+                result.run_dir
+                / variant["artifact_paths"]["side_balance_candidate_entries"]
+            ).exists()
+    assert manifest["action_family_counterfactual_replay_report_path"] == (
+        "action_family_counterfactual_replay_report.json"
+    )
+    assert looks_like_sha256(manifest["action_family_counterfactual_replay_sha256"])
+    assert looks_like_sha256(manifest["action_family_eligibility_sha256"])
+    assert looks_like_sha256(manifest["hold_to_settlement_longshot_guard_sha256"])
+    assert looks_like_sha256(manifest["action_family_replay_variants_sha256"])
+    action_value_calibration = _read_json(result.artifact_paths["action_value_calibration"])
+    assert action_value_calibration["calibration_support_passed"] is True
+    assert action_value_calibration["calibration_quality_passed"] is False
+    assert action_value_calibration["calibration_fit_split"] == "validation"
+    assert action_value_calibration["calibration_evaluation_split"] == "shadow"
+    assert action_value_calibration["bucketed_calibration_enabled"] is True
+    assert action_value_calibration["bucket_shrinkage_enabled"] is True
+    assert action_value_calibration["bucket_shrinkage_prior"] > 0.0
+    assert action_value_calibration["calibration_buckets"]
+    low_support_bucket = next(
+        bucket
+        for bucket in action_value_calibration["calibration_buckets"].values()
+        if bucket["support_count"] <= 2
+    )
+    assert abs(low_support_bucket["correction"]) <= abs(
+        low_support_bucket["unshrunk_correction"]
+    ) + 1e-12
+    assert 0.0 < low_support_bucket["shrinkage_weight"] < 1.0
+    assert manifest["action_value_feature_columns"]
+    assert manifest["required_action_value_feature_columns"] == manifest[
+        "action_value_feature_columns"
+    ]
+    assert profile["primary_policy_target"] == PRIMARY_POLICY_TARGET_ACTION_VALUE
+    assert profile["action_value_target_field"] == ACTION_VALUE_TARGET_FIELD
+    assert profile["fixed_notional_target_used"] is True
+    assert profile["action_value_head_enabled"] is True
+    assert profile["action_label_coverage_by_action"] == {
+        action: len(result.dataset.examples) for action in ACTION_VALUE_LABEL_ACTIONS
+    }
+    assert set(manifest["market_families"]) == {
+        "btc_updown_5m",
+        "btc_updown_15m",
+        "btc_updown_1h",
+    }
+    assert looks_like_sha256(manifest["model_sha256"])
+    assert looks_like_sha256(manifest["training_corpus_hash"])
+    assert looks_like_sha256(manifest["feature_schema_hash"])
+    assert looks_like_sha256(manifest["label_schema_hash"])
+    assert manifest["train_row_count"] > 0
+    assert manifest["validation_row_count"] > 0
+    assert manifest["shadow_row_count"] > 0
+    assert manifest["train_max_ts"] < manifest["validation_min_ts"]
+    assert manifest["validation_max_ts"] < manifest["shadow_min_ts"]
+    assert manifest["strict_temporal_separation"] is True
+    assert manifest["calibration_split"] == "validation"
+    assert manifest["replay_split"] == "shadow"
+    assert manifest["out_of_sample_replay"] is True
+    assert manifest["direct_pnl_optimization"] is False
+    assert manifest["trained_model_used"] is True
+    assert manifest["policy_signal_source"] == "trained_model"
+    assert manifest["synthetic_fixture_signal_used"] is False
+    assert manifest["paper_replay_used_phase1_settlement_engine"] is True
+    _assert_safe(manifest)
+
+
+def test_guard_compatible_coverage_reports_prediction_alignment_errors(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = _build_corpus(tmp_path)
+    dataset = load_polymarket_policy_dataset(
+        PolymarketPolicyTrainingConfig(
+            corpus_dir=corpus_dir,
+            output_dir=tmp_path / "policy",
+        )
+    )
+    train_predictions = tuple(
+        _alignment_prediction(example, dataset) for example in dataset.train_examples
+    )
+    validation_predictions = tuple(
+        _alignment_prediction(example, dataset)
+        for example in dataset.validation_examples
+    )
+    shadow_predictions = tuple(
+        _alignment_prediction(example, dataset) for example in dataset.shadow_examples
+    )
+
+    bad_train_predictions = (
+        train_predictions[0],
+        train_predictions[0],
+        *train_predictions[2:],
+    )
+    with pytest.raises(ValueError) as exc:
+        build_guard_compatible_coverage_reports(
+            dataset=dataset,
+            train_predictions=bad_train_predictions,
+            validation_predictions=validation_predictions,
+            shadow_predictions=shadow_predictions,
+            execution_buffer=0.015,
+        )
+    message = str(exc.value)
+    assert "overall prediction alignment failed" in message
+    assert "missing_prediction_keys" in message
+    assert "duplicate_prediction_keys" in message
+
+
+def test_feature_conditioned_action_returns_vary_by_state_within_family(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = _build_corpus(tmp_path)
+    result = run_polymarket_policy_training(
+        PolymarketPolicyTrainingConfig(
+            corpus_dir=corpus_dir,
+            output_dir=tmp_path / "policy",
+        )
+    )
+
+    by_family = {}
+    for prediction in result.predictions:
+        by_family.setdefault(prediction.market_family, []).append(prediction)
+    comparable = next(rows for rows in by_family.values() if len(rows) >= 2)
+    first, second = comparable[0], comparable[-1]
+
+    assert first.market_family == second.market_family
+    assert first.features != second.features
+    assert first.action_value_model_family == "feature_conditioned_action_return_model"
+    assert first.feature_conditioned_action_value_model_enabled is True
+    assert any(
+        first.expected_return_by_action[action] != second.expected_return_by_action[action]
+        for action in ACTION_VALUE_LABEL_ACTIONS
+    )
+
+
+def test_hold_to_settlement_disabled_counterfactual_reranks_to_sell_before_close(
+    tmp_path: Path,
+) -> None:
+    action_returns = dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, -0.20)
+    action_returns["NO_TRADE"] = 0.0
+    action_returns["BUY_UP_HOLD_TO_SETTLEMENT"] = 0.20
+    action_returns["BUY_UP_SELL_BEFORE_CLOSE"] = 0.12
+    example = PolymarketPolicyExample(
+        market_id="market-rerank",
+        condition_id="condition-rerank",
+        slug="btc-updown-rerank",
+        market_family="btc_updown_5m",
+        horizon_ms=300_000,
+        decision_ts=1_000_000,
+        feature_cutoff_ts=1_000_000,
+        max_input_ts=1_000_000,
+        features={
+            "up_bid": 0.43,
+            "up_ask": 0.45,
+            "up_mid": 0.44,
+            "down_bid": 0.53,
+            "down_ask": 0.55,
+            "down_mid": 0.54,
+            "time_to_close_seconds": 120.0,
+        },
+        target_up_probability=1.0,
+        resolved_outcome="UP",
+        resolution_status="RESOLVED",
+        action_return_targets=action_returns,
+        best_policy_action="BUY_UP_HOLD_TO_SETTLEMENT",
+        best_action_expected_return=0.20,
+        second_best_action_expected_return=0.12,
+        best_action_margin=0.08,
+    )
+    prediction = PolymarketPolicyPrediction(
+        market_id=example.market_id,
+        condition_id=example.condition_id,
+        slug=example.slug,
+        market_family=example.market_family,
+        horizon_ms=example.horizon_ms,
+        decision_ts=example.decision_ts,
+        estimated_up_probability=0.70,
+        confidence=0.90,
+        score=0.20,
+        calibration_bucket="test-bucket",
+        model_version="test-action-value-model",
+        feature_schema_hash="a" * 64,
+        training_corpus_hash="b" * 64,
+        features=dict(example.features),
+        target_up_probability=example.target_up_probability,
+        p_up_auxiliary=0.70,
+        expected_return_by_action=action_returns,
+        expected_return_no_trade=0.0,
+        expected_return_buy_up_hold_to_settlement=0.20,
+        expected_return_buy_down_hold_to_settlement=-0.20,
+        expected_return_buy_up_sell_before_close=0.12,
+        expected_return_buy_down_sell_before_close=-0.20,
+        best_policy_action="BUY_UP_HOLD_TO_SETTLEMENT",
+        best_action_expected_return=0.20,
+        second_best_action_expected_return=0.12,
+        best_action_margin=0.08,
+        calibrated_expected_pnl_per_notional_by_action=action_returns,
+        calibrated_best_policy_action="BUY_UP_HOLD_TO_SETTLEMENT",
+        calibrated_expected_pnl_per_notional=0.20,
+        calibrated_second_best_expected_pnl_per_notional=0.12,
+        calibrated_action_margin=0.08,
+        action_value_calibration_applied=True,
+        action_value_calibration_id="c" * 64,
+        calibration_support_count=10,
+        calibration_bucket_count=len(ACTION_VALUE_LABEL_ACTIONS),
+        policy_confidence=0.90,
+        action_value_head_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        feature_conditioned_action_value_model_enabled=True,
+    )
+
+    variants = build_action_family_counterfactual_prediction_sets(
+        examples=(example,),
+        predictions=(prediction,),
+        execution_buffer=0.015,
+        thresholds=(),
+    )
+    hold_disabled = next(
+        variant
+        for variant in variants
+        if variant["variant"] == "B_hold_to_settlement_disabled_reranked"
+    )
+    reranked_prediction = hold_disabled["predictions"][0]
+    decisions = build_polymarket_ev_decisions(
+        predictions=(reranked_prediction,),
+        config=PolymarketPolicyTrainingConfig(
+            corpus_dir=tmp_path / "corpus",
+            output_dir=tmp_path / "policy",
+            ev_threshold=0.015,
+        ),
+    )
+
+    assert reranked_prediction.best_policy_action == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert (
+        reranked_prediction.calibrated_best_policy_action
+        == "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+    assert reranked_prediction.calibrated_expected_pnl_per_notional == 0.12
+    assert decisions[0].action == "BUY_UP"
+    assert decisions[0].entry_policy_action == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert decisions[0].intended_exit_policy == "sell_before_close"
+    assert decisions[0].planned_exit_before_ts is not None
+
+
+def test_bucketed_overlay_uses_validation_only_and_selects_supported_positive_bucket(
+    tmp_path: Path,
+) -> None:
+    validation_examples, raw_validation, calibrated_validation = (
+        _overlay_examples_and_predictions(
+            count=10,
+            positive_sell_return=0.20,
+            negative_hold_return=-0.20,
+        )
+    )
+    shadow_examples, raw_shadow, calibrated_shadow = _overlay_examples_and_predictions(
+        count=1,
+        positive_sell_return=-0.90,
+        negative_hold_return=0.90,
+        start_ts=20_000,
+    )
+
+    comparison = build_model_ranking_candidate_comparison(
+        validation_examples=validation_examples,
+        raw_validation_predictions=raw_validation,
+        calibrated_validation_predictions=calibrated_validation,
+        shadow_examples=shadow_examples,
+        raw_shadow_predictions=raw_shadow,
+        calibrated_shadow_predictions=calibrated_shadow,
+        execution_buffer=0.015,
+    )
+
+    for candidate_name in (
+        "G_bucketed_lcb_rank_selector",
+        "H_positive_bucket_rank_selector",
+    ):
+        candidate = _candidate_by_name(comparison, candidate_name)
+        assert candidate["ranking_overlay_fit_split"] == "validation"
+        assert candidate["ranking_overlay_evaluation_split"] == "shadow"
+        assert candidate["ranking_overlay_uses_shadow_split"] is False
+        assert candidate["ranking_overlay"]["shrinkage_prior_support"] == 10
+        assert candidate["ranking_overlay"]["shrinkage_prior_mean"] == 0.0
+        assert candidate["ranking_overlay_shrinkage_prior_support"] == 10
+        assert candidate["ranking_overlay_shrinkage_prior_mean"] == 0.0
+        assert candidate["candidate_predictions"][0][
+            "calibrated_best_policy_action"
+        ] == "BUY_UP_SELL_BEFORE_CLOSE"
+
+
+def test_bucketed_overlay_blocks_low_support_validation_buckets(tmp_path: Path) -> None:
+    validation_examples, raw_validation, calibrated_validation = (
+        _overlay_examples_and_predictions(
+            count=2,
+            positive_sell_return=0.20,
+            negative_hold_return=-0.20,
+        )
+    )
+    shadow_examples, raw_shadow, calibrated_shadow = _overlay_examples_and_predictions(
+        count=1,
+        positive_sell_return=0.20,
+        negative_hold_return=-0.20,
+        start_ts=20_000,
+    )
+
+    comparison = build_model_ranking_candidate_comparison(
+        validation_examples=validation_examples,
+        raw_validation_predictions=raw_validation,
+        calibrated_validation_predictions=calibrated_validation,
+        shadow_examples=shadow_examples,
+        raw_shadow_predictions=raw_shadow,
+        calibrated_shadow_predictions=calibrated_shadow,
+        execution_buffer=0.015,
+    )
+
+    for candidate_name in (
+        "G_bucketed_lcb_rank_selector",
+        "H_positive_bucket_rank_selector",
+    ):
+        candidate = _candidate_by_name(comparison, candidate_name)
+        assert candidate["candidate_predictions"][0][
+            "calibrated_best_policy_action"
+        ] == "NO_TRADE"
+
+
+def test_bucketed_overlay_requires_buffer_positive_validation_buckets(
+    tmp_path: Path,
+) -> None:
+    validation_examples, raw_validation, calibrated_validation = (
+        _overlay_examples_and_predictions(
+            count=10,
+            positive_sell_return=0.01,
+            negative_hold_return=-0.20,
+        )
+    )
+    shadow_examples, raw_shadow, calibrated_shadow = _overlay_examples_and_predictions(
+        count=1,
+        positive_sell_return=0.20,
+        negative_hold_return=-0.20,
+        start_ts=20_000,
+    )
+
+    comparison = build_model_ranking_candidate_comparison(
+        validation_examples=validation_examples,
+        raw_validation_predictions=raw_validation,
+        calibrated_validation_predictions=calibrated_validation,
+        shadow_examples=shadow_examples,
+        raw_shadow_predictions=raw_shadow,
+        calibrated_shadow_predictions=calibrated_shadow,
+        execution_buffer=0.015,
+    )
+
+    for candidate_name in (
+        "G_bucketed_lcb_rank_selector",
+        "H_positive_bucket_rank_selector",
+    ):
+        candidate = _candidate_by_name(comparison, candidate_name)
+        assert candidate["candidate_predictions"][0][
+            "calibrated_best_policy_action"
+        ] == "NO_TRADE"
+
+
+def test_bucketed_overlay_blocks_negative_validation_buckets(tmp_path: Path) -> None:
+    validation_examples, raw_validation, calibrated_validation = (
+        _overlay_examples_and_predictions(
+            count=10,
+            positive_sell_return=-0.20,
+            negative_hold_return=-0.10,
+        )
+    )
+    shadow_examples, raw_shadow, calibrated_shadow = _overlay_examples_and_predictions(
+        count=1,
+        positive_sell_return=0.20,
+        negative_hold_return=-0.20,
+        start_ts=20_000,
+    )
+
+    comparison = build_model_ranking_candidate_comparison(
+        validation_examples=validation_examples,
+        raw_validation_predictions=raw_validation,
+        calibrated_validation_predictions=calibrated_validation,
+        shadow_examples=shadow_examples,
+        raw_shadow_predictions=raw_shadow,
+        calibrated_shadow_predictions=calibrated_shadow,
+        execution_buffer=0.015,
+    )
+
+    for candidate_name in (
+        "G_bucketed_lcb_rank_selector",
+        "H_positive_bucket_rank_selector",
+    ):
+        candidate = _candidate_by_name(comparison, candidate_name)
+        assert candidate["candidate_predictions"][0][
+            "calibrated_best_policy_action"
+        ] == "NO_TRADE"
+
+
+def test_sell_before_close_source_candidate_ignores_disabled_hold_blockers(
+    tmp_path: Path,
+) -> None:
+    comparison = _sell_before_close_candidate_comparison(
+        positive_sell_return=0.20,
+        hold_return=-0.50,
+        selected_sell_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    candidate = _candidate_by_name(
+        comparison,
+        "I_sell_before_close_only_source_candidate",
+    )
+
+    assert candidate["enabled_action_families"] == ["SELL_BEFORE_CLOSE"]
+    assert candidate["disabled_action_families"] == ["HOLD_TO_SETTLEMENT"]
+    assert candidate["source_model_candidate_eligible"] is True
+    assert candidate["action_family_paper_decision_eligible"] is True
+    assert candidate["candidate_scoped_action_family_gate_results"][
+        "SELL_BEFORE_CLOSE"
+    ]["gate_passed"] is True
+    assert "HOLD_TO_SETTLEMENT" not in candidate[
+        "candidate_scoped_action_family_gate_results"
+    ]
+    assert "HOLD_TO_SETTLEMENT" in candidate[
+        "candidate_scoped_disabled_action_family_gate_results"
+    ]
+    assert "hold_to_settlement_high_score_unprofitable" not in candidate[
+        "ineligible_reason_codes"
+    ]
+    assert "buy_up_hold_to_settlement_unprofitable" not in candidate[
+        "ineligible_reason_codes"
+    ]
+    assert "buy_down_hold_to_settlement_unprofitable" not in candidate[
+        "ineligible_reason_codes"
+    ]
+    assert comparison["source_model_candidate_eligible"] is True
+
+
+def test_sell_before_close_candidate_scopes_p_up_disagreement_to_enabled_actions(
+    tmp_path: Path,
+) -> None:
+    comparison = _sell_before_close_candidate_comparison(
+        positive_sell_return=0.20,
+        hold_return=-0.50,
+        selected_sell_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    candidate = _candidate_by_name(
+        comparison,
+        "I_sell_before_close_only_source_candidate",
+    )
+    baseline = _candidate_by_name(comparison, "A_current_model_baseline")
+
+    assert baseline["p_up_action_disagreement_rate"] == pytest.approx(1.0)
+    assert candidate["candidate_scoped_p_up_action_disagreement_denominator"] == 12
+    assert candidate["candidate_scoped_p_up_action_disagreement_rate"] == pytest.approx(
+        2 / 12
+    )
+    assert candidate["candidate_scoped_p_up_action_disagreement_within_limit"] is True
+    assert candidate["source_model_candidate_eligible"] is True
+    assert "p_up_action_disagreement_excessive" not in candidate[
+        "ineligible_reason_codes"
+    ]
+
+
+def test_sell_before_close_candidate_fails_closed_when_sell_family_fails(
+    tmp_path: Path,
+) -> None:
+    comparison = _sell_before_close_candidate_comparison(
+        positive_sell_return=-0.20,
+        hold_return=-0.50,
+        selected_sell_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    candidate = _candidate_by_name(
+        comparison,
+        "I_sell_before_close_only_source_candidate",
+    )
+
+    assert candidate["source_model_candidate_eligible"] is False
+    assert candidate["action_family_paper_decision_eligible"] is False
+    assert candidate["candidate_scoped_high_score_realized_return_mean"] == pytest.approx(
+        -0.20
+    )
+    assert "action_family_high_score_unprofitable" in candidate[
+        "ineligible_reason_codes"
+    ]
+    assert "action_value_calibration_quality_failed" in candidate[
+        "ineligible_reason_codes"
+    ]
+
+
+def test_side_balanced_sell_before_close_candidate_fails_closed_on_one_side(
+    tmp_path: Path,
+) -> None:
+    comparison = _sell_before_close_candidate_comparison(
+        positive_sell_return=0.20,
+        hold_return=-0.50,
+        selected_sell_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    candidate = _candidate_by_name(
+        comparison,
+        SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+    )
+
+    assert candidate["enabled_action_families"] == ["SELL_BEFORE_CLOSE"]
+    assert candidate["disabled_action_families"] == ["HOLD_TO_SETTLEMENT"]
+    assert candidate["side_balance_required"] is True
+    assert candidate["side_balance_gate_passed"] is False
+    assert candidate["source_model_candidate_eligible"] is False
+    assert "side_balance_required_gate_failed" in candidate[
+        "ineligible_reason_codes"
+    ]
+
+
+def test_side_balanced_selection_keeps_p_up_disagreement_diagnostic_only(
+    tmp_path: Path,
+) -> None:
+    disagreed_up = _guard_prediction(
+        market_id="disagreed-up",
+        decision_ts=1_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.30,
+    )
+    good_up = _guard_prediction(
+        market_id="good-up",
+        decision_ts=2_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    good_down = _guard_prediction(
+        market_id="good-down",
+        decision_ts=3_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.30,
+    )
+
+    prediction_set = build_sell_before_close_side_balanced_prediction_set(
+        predictions=(disagreed_up, good_up, good_down),
+        execution_buffer=0.015,
+        side_balance_thresholds={
+            "side_quota_per_side": 1.0,
+            "min_per_side_entry_count": 1.0,
+            "min_per_side_market_count": 1.0,
+        },
+    )
+
+    rows = prediction_set["side_balance_candidate_entries"]
+    selected_rows = [row for row in rows if row["side_quota_selected"]]
+    disagreed_up_row = next(
+        row for row in rows if row["market_id"] == "disagreed-up"
+    )
+    summary = prediction_set["side_balance_selection_summary"]
+
+    assert prediction_set["p_up_side_alignment_filter_enabled"] is False
+    assert prediction_set["p_up_side_alignment_diagnostic_enabled"] is True
+    assert summary["selection_pool"] == (
+        "position_state_aware_guard_compatible_fresh_entry_rows"
+    )
+    assert summary["position_state_aware_selection_enabled"] is True
+    assert summary["candidate_count"] == 3
+    assert summary["guard_compatible_candidate_count"] == 3
+    assert summary["position_state_fresh_entry_candidate_count"] == 3
+    assert summary["guard_compatible_two_sided_entry_set_exists"] is True
+    assert summary["guard_compatible_side_balance_gate_passed"] is True
+    assert summary["side_balance_gate_passed"] is True
+    assert summary["selected_entry_count"] == 2
+    assert {row["market_id"] for row in selected_rows} == {
+        "disagreed-up",
+        "good-down",
+    }
+    assert all(row["side_balance_guard_compatible_entry"] for row in selected_rows)
+    assert all(row["position_state_fresh_entry_compatible"] for row in selected_rows)
+    assert disagreed_up_row["side_balance_guard_compatible_entry"] is True
+    assert disagreed_up_row["p_up_side_alignment_passed"] is False
+    assert disagreed_up_row["p_up_side_alignment_diagnostic_only"] is True
+    assert disagreed_up_row["side_quota_selected"] is True
+    assert "p_up_side_alignment_disagreed_diagnostic" in disagreed_up_row[
+        "side_balance_guard_reason_codes"
+    ]
+    assert "entry_blocked_p_up_action_disagreement" not in disagreed_up_row[
+        "side_balance_guard_reason_codes"
+    ]
+    replay_actions = {
+        prediction.market_id: prediction.calibrated_best_policy_action
+        for prediction in prediction_set["predictions"]
+    }
+    assert replay_actions["disagreed-up"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert replay_actions["good-up"] == "NO_TRADE"
+    assert replay_actions["good-down"] == "BUY_DOWN_SELL_BEFORE_CLOSE"
+
+
+def test_side_balanced_selection_excludes_position_state_exit_rows_before_quota(
+    tmp_path: Path,
+) -> None:
+    first_up_entry = _guard_prediction(
+        market_id="same-market",
+        decision_ts=1_000,
+        time_to_close_seconds=240.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    would_be_exit_row = _guard_prediction(
+        market_id="same-market",
+        decision_ts=2_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.72,
+    )
+    replacement_up_entry = _guard_prediction(
+        market_id="replacement-up",
+        decision_ts=3_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.74,
+    )
+    down_entry = _guard_prediction(
+        market_id="down-market",
+        decision_ts=4_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.30,
+    )
+
+    prediction_set = build_sell_before_close_side_balanced_prediction_set(
+        predictions=(
+            first_up_entry,
+            would_be_exit_row,
+            replacement_up_entry,
+            down_entry,
+        ),
+        execution_buffer=0.015,
+        side_balance_thresholds={
+            "side_quota_per_side": 2.0,
+            "min_per_side_entry_count": 1.0,
+            "min_per_side_market_count": 1.0,
+        },
+    )
+
+    rows = prediction_set["side_balance_candidate_entries"]
+    summary = prediction_set["side_balance_selection_summary"]
+    selected_rows = [row for row in rows if row["side_quota_selected"]]
+    same_market_exit_row = next(
+        row
+        for row in rows
+        if row["market_id"] == "same-market" and row["decision_ts"] == 2_000
+    )
+
+    assert summary["position_state_aware_selection_enabled"] is True
+    assert summary["guard_compatible_candidate_count"] == 4
+    assert summary["position_state_fresh_entry_candidate_count"] == 3
+    assert summary["position_state_blocked_count"] == 1
+    assert summary["position_state_blocked_reason_counts"][
+        "entry_blocked_position_state_not_fresh_entry"
+    ] == 1
+    assert same_market_exit_row["side_balance_guard_compatible_entry"] is True
+    assert same_market_exit_row["position_state_fresh_entry_compatible"] is False
+    assert same_market_exit_row["position_state_replay_action_if_selected"] == "SELL_UP"
+    assert "entry_blocked_existing_position_would_take_precedence" in (
+        same_market_exit_row["position_state_reason_codes"]
+    )
+    assert same_market_exit_row["side_quota_selected"] is False
+    assert {row["market_id"] for row in selected_rows} == {
+        "same-market",
+        "replacement-up",
+        "down-market",
+    }
+    assert all(row["position_state_fresh_entry_compatible"] for row in selected_rows)
+    assert {
+        (prediction.market_id, prediction.decision_ts): (
+            prediction.calibrated_best_policy_action
+        )
+        for prediction in prediction_set["predictions"]
+    } == {
+        ("same-market", 1_000): "BUY_UP_SELL_BEFORE_CLOSE",
+        ("same-market", 2_000): "NO_TRADE",
+        ("replacement-up", 3_000): "BUY_UP_SELL_BEFORE_CLOSE",
+        ("down-market", 4_000): "BUY_DOWN_SELL_BEFORE_CLOSE",
+    }
+
+
+def test_side_balanced_selection_uses_execution_pnl_aware_rank_score(
+    tmp_path: Path,
+) -> None:
+    high_model_bad_exit = _guard_prediction(
+        market_id="high-model-bad-exit-up",
+        decision_ts=1_000,
+        time_to_close_seconds=240.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.80,
+        up_bid=0.11,
+        up_ask=0.12,
+        up_spread_bps=869.0,
+        selected_action_return=0.20,
+    )
+    lower_model_better_exit = _guard_prediction(
+        market_id="lower-model-better-exit-up",
+        decision_ts=2_000,
+        time_to_close_seconds=240.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.78,
+        up_bid=0.51,
+        up_ask=0.52,
+        up_spread_bps=194.0,
+        selected_action_return=0.08,
+    )
+    down_entry = _guard_prediction(
+        market_id="balanced-down",
+        decision_ts=3_000,
+        time_to_close_seconds=240.0,
+        selected_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.20,
+        down_bid=0.51,
+        down_ask=0.52,
+        down_spread_bps=194.0,
+        selected_action_return=0.08,
+    )
+
+    prediction_set = build_sell_before_close_side_balanced_prediction_set(
+        predictions=(high_model_bad_exit, lower_model_better_exit, down_entry),
+        execution_buffer=0.015,
+        side_balance_thresholds={
+            "side_quota_per_side": 1.0,
+            "min_per_side_entry_count": 1.0,
+            "min_per_side_market_count": 1.0,
+        },
+    )
+
+    rows = prediction_set["side_balance_candidate_entries"]
+    summary = prediction_set["side_balance_selection_summary"]
+    bad_exit_row = next(row for row in rows if row["market_id"] == "high-model-bad-exit-up")
+    better_exit_row = next(
+        row for row in rows if row["market_id"] == "lower-model-better-exit-up"
+    )
+
+    assert prediction_set["execution_pnl_aware_ranking_enabled"] is True
+    assert summary["execution_pnl_aware_ranking_enabled"] is True
+    assert prediction_set["rank_score_components"] == (
+        "0.20*calibrated_action_score + 0.10*best_action_margin + "
+        "entry_exit_quality_score + 8.00*immediate_exit_return - "
+        "0.05*model_vs_immediate_exit_pnl_gap_estimate"
+    )
+    assert bad_exit_row["raw_calibrated_action_score"] > better_exit_row[
+        "raw_calibrated_action_score"
+    ]
+    assert bad_exit_row["execution_pnl_immediate_exit_return"] < better_exit_row[
+        "execution_pnl_immediate_exit_return"
+    ]
+    assert bad_exit_row["execution_pnl_aware_rank_score"] < better_exit_row[
+        "execution_pnl_aware_rank_score"
+    ]
+    assert bad_exit_row["side_quota_selected"] is False
+    assert better_exit_row["side_quota_selected"] is True
+    assert summary["selected_entry_count"] == 2
+    assert summary["selected_execution_pnl_immediate_exit_pnl_sum"] < 0.0
+    assert (
+        summary["selected_execution_pnl_model_vs_immediate_exit_pnl_gap_estimate_sum"]
+        > 0.0
+    )
+    assert {
+        prediction.market_id: prediction.calibrated_best_policy_action
+        for prediction in prediction_set["predictions"]
+    } == {
+        "high-model-bad-exit-up": "NO_TRADE",
+        "lower-model-better-exit-up": "BUY_UP_SELL_BEFORE_CLOSE",
+        "balanced-down": "BUY_DOWN_SELL_BEFORE_CLOSE",
+    }
+
+
+def test_side_balanced_selection_allows_absent_p_up_auxiliary(
+    tmp_path: Path,
+) -> None:
+    missing_aux_up = _guard_prediction(
+        market_id="missing-aux-up",
+        decision_ts=1_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=None,
+        estimated_up_probability=0.30,
+    )
+    disagreed_up = _guard_prediction(
+        market_id="disagreed-up",
+        decision_ts=2_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.30,
+    )
+    good_down = _guard_prediction(
+        market_id="good-down",
+        decision_ts=3_000,
+        time_to_close_seconds=180.0,
+        selected_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.30,
+    )
+
+    prediction_set = build_sell_before_close_side_balanced_prediction_set(
+        predictions=(missing_aux_up, disagreed_up, good_down),
+        execution_buffer=0.015,
+        side_balance_thresholds={
+            "side_quota_per_side": 2.0,
+            "min_per_side_entry_count": 1.0,
+            "min_per_side_market_count": 1.0,
+        },
+    )
+
+    rows = prediction_set["side_balance_candidate_entries"]
+    summary = prediction_set["side_balance_selection_summary"]
+    missing_aux_row = next(row for row in rows if row["market_id"] == "missing-aux-up")
+
+    assert summary["guard_compatible_candidate_count"] == 3
+    assert summary["side_balance_gate_passed"] is True
+    assert summary["selected_entry_count"] == 3
+    assert missing_aux_row["side_balance_guard_compatible_entry"] is True
+    assert missing_aux_row["position_state_fresh_entry_compatible"] is True
+    assert missing_aux_row["p_up_side_alignment_passed"] is False
+    assert missing_aux_row["p_up_side_alignment_diagnostic_only"] is True
+    assert {
+        prediction.market_id: prediction.calibrated_best_policy_action
+        for prediction in prediction_set["predictions"]
+    } == {
+        "missing-aux-up": "BUY_UP_SELL_BEFORE_CLOSE",
+        "disagreed-up": "BUY_UP_SELL_BEFORE_CLOSE",
+        "good-down": "BUY_DOWN_SELL_BEFORE_CLOSE",
+    }
+
+
+def test_sell_before_close_candidate_does_not_resume_without_promotion_replay(
+    tmp_path: Path,
+) -> None:
+    comparison = _sell_before_close_candidate_comparison(
+        positive_sell_return=0.20,
+        hold_return=-0.50,
+        selected_sell_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    candidate = _candidate_by_name(
+        comparison,
+        "I_sell_before_close_only_source_candidate",
+    )
+
+    assert candidate["source_model_candidate_eligible"] is True
+    assert candidate["requires_promotion_replay_gate"] is True
+    assert candidate["paper_run_resume_allowed"] is False
+    assert comparison["paper_run_resume_allowed"] is False
+    assert comparison["paper_run_resume_blocked_reason"] == (
+        "promotion_replay_gate_required"
+    )
+
+
+def test_sell_before_close_promotion_support_blocks_one_positive_trade() -> None:
+    support = evaluate_sell_before_close_promotion_support(
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        decisions=[
+            {
+                "market_id": "market-one",
+                "action": "BUY_UP",
+                "selected_outcome": "UP",
+                "intended_exit_policy": "sell_before_close",
+            },
+            {
+                "market_id": "market-one",
+                "action": "SELL_UP",
+                "selected_outcome": "UP",
+            },
+        ],
+        replay_report={
+            "total_polymarket_pnl": 0.043325818181818174,
+            "max_drawdown": 0.0,
+            "settlement_pnl": 0.0,
+            "settled_position_count": 0,
+        },
+        exit_reliability_summary={
+            "replay_residual_settlement_drag": 0.0,
+            "positions_opened_but_not_closed_before_settlement": 0,
+            "candidate_scoped_p_up_action_disagreement_rate": 0.0,
+        },
+    )
+
+    assert support["entry_decision_count"] == 1
+    assert support["sell_decision_count"] == 1
+    assert support["unique_market_count"] == 1
+    assert support["side_count"] == 1
+    assert support["total_pnl"] > 0.0
+    assert support["support_gate_passed"] is False
+    assert support["promotion_support_eligible"] is False
+    assert support["promotion_evidence_eligible"] is False
+    assert support["paper_run_resume_allowed"] is False
+    assert "promotion_replay_entry_support_insufficient" in support[
+        "support_gate_reason_codes"
+    ]
+
+
+def test_sell_before_close_promotion_support_requires_up_and_down_coverage() -> None:
+    decisions = []
+    for index in range(20):
+        decisions.extend(
+            [
+                {
+                    "market_id": f"market-{index % 10}",
+                    "action": "BUY_UP",
+                    "selected_outcome": "UP",
+                    "intended_exit_policy": "sell_before_close",
+                },
+                {
+                    "market_id": f"market-{index % 10}",
+                    "action": "SELL_UP",
+                    "selected_outcome": "UP",
+                },
+            ]
+        )
+
+    support = evaluate_sell_before_close_promotion_support(
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        decisions=decisions,
+        replay_report={
+            "total_polymarket_pnl": 0.20,
+            "max_drawdown": 0.01,
+            "settlement_pnl": 0.0,
+            "settled_position_count": 0,
+        },
+        exit_reliability_summary={
+            "replay_residual_settlement_drag": 0.0,
+            "positions_opened_but_not_closed_before_settlement": 0,
+            "candidate_scoped_p_up_action_disagreement_rate": 0.0,
+        },
+    )
+
+    assert support["entry_decision_count"] == 20
+    assert support["sell_decision_count"] == 20
+    assert support["unique_market_count"] == 10
+    assert support["side_count"] == 1
+    assert support["side_distribution"] == {"UP": 20}
+    assert support["support_gate_passed"] is False
+    assert support["support_gate_reason_codes"] == [
+        "promotion_replay_side_coverage_insufficient"
+    ]
+
+
+def test_sell_before_close_promotion_support_passes_with_minimum_coverage() -> None:
+    decisions = []
+    for index in range(20):
+        side = "UP" if index % 2 == 0 else "DOWN"
+        decisions.extend(
+            [
+                {
+                    "market_id": f"market-{index % 10}",
+                    "action": f"BUY_{side}",
+                    "selected_outcome": side,
+                    "intended_exit_policy": "sell_before_close",
+                },
+                {
+                    "market_id": f"market-{index % 10}",
+                    "action": f"SELL_{side}",
+                    "selected_outcome": side,
+                },
+            ]
+        )
+
+    support = evaluate_sell_before_close_promotion_support(
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+        decisions=decisions,
+        replay_report={
+            "total_polymarket_pnl": 0.20,
+            "max_drawdown": 0.01,
+            "settlement_pnl": 0.0,
+            "settled_position_count": 0,
+        },
+        exit_reliability_summary={
+            "replay_residual_settlement_drag": 0.0,
+            "positions_opened_but_not_closed_before_settlement": 0,
+            "candidate_scoped_p_up_action_disagreement_rate": 0.0,
+        },
+    )
+
+    assert support["support_gate_passed"] is True
+    assert support["promotion_support_eligible"] is True
+    assert support["support_gate_reason_codes"] == []
+
+
+def test_sell_before_close_p_up_disagreement_diagnostic_is_candidate_scoped() -> None:
+    shadow_examples, comparison, counterfactual_replays = (
+        _sell_before_close_diagnostic_inputs()
+    )
+
+    report = build_sell_before_close_p_up_disagreement_diagnostic_report(
+        shadow_examples=shadow_examples,
+        model_ranking_candidate_comparison=comparison,
+        action_family_counterfactual_replays=counterfactual_replays,
+        pnl_notional=0.20,
+    )
+
+    assert report["diagnostic_only"] is True
+    assert report["promotion_evidence_eligible"] is False
+    assert report["paper_run_resume_allowed"] is False
+    assert report["candidate_name"] == "I_sell_before_close_only_source_candidate"
+    assert report["row_count"] == 12
+    assert {
+        row["selected_action"] for row in report["row_level_diagnostics"]
+    } == {
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+    }
+    assert report["summary"]["disagreed_support_count"] == 10
+    assert report["summary"]["agreed_support_count"] == 2
+    assert report["summary"][
+        "sell_before_close_disagreed_trade_pnl_sum"
+    ] == pytest.approx(0.30)
+    assert report["summary"][
+        "label_row_sell_before_close_disagreed_settlement_pnl_sum"
+    ] == pytest.approx(-0.50)
+    assert report["summary"][
+        "label_row_sell_before_close_agreed_settlement_pnl_sum"
+    ] == pytest.approx(0.50)
+    assert report["summary"][
+        "label_row_sell_before_close_settlement_pnl_sum"
+    ] == pytest.approx(0.0)
+    assert report["summary"][
+        "label_row_sell_before_close_residual_settlement_drag"
+    ] == pytest.approx(0.0)
+    assert report["summary"][
+        "sell_before_close_residual_settlement_drag_deprecated_alias"
+    ] == pytest.approx(0.0)
+    assert report["summary"]["replay_settlement_pnl"] == pytest.approx(-2.0)
+    assert report["summary"]["replay_residual_settlement_drag"] == pytest.approx(
+        -2.0
+    )
+    assert report["summary"][
+        "replay_positions_opened_but_not_closed_before_settlement"
+    ] == 3
+    assert report["summary"][
+        "replay_exit_signal_missing_count"
+    ] == 3
+    assert report["summary"][
+        "replay_exit_opportunities_missed_due_to_gate_count"
+    ] == 4
+    assert report["summary"][
+        "settlement_drag_attribution_interpretation"
+    ] == (
+        "label_rows_no_settlement_drag_but_replay_has_residual_settlement_drag"
+    )
+    assert report["settlement_drag_attribution_interpretation"] == (
+        "label_rows_no_settlement_drag_but_replay_has_residual_settlement_drag"
+    )
+    assert report["summary"]["sell_before_close_disagreed_total_pnl_sum"] == (
+        pytest.approx(-0.20)
+    )
+    assert report["p_up_disagreement_interpretation"] == (
+        "likely_auxiliary_p_up_action_value_semantic_mismatch"
+    )
+    first_row = report["row_level_diagnostics"][0]
+    for field_name in (
+        "market_id",
+        "slug",
+        "decision_ts",
+        "market_end_ts",
+        "seconds_to_close",
+        "selected_action",
+        "selected_side",
+        "p_up",
+        "p_down",
+        "p_up_direction",
+        "action_side",
+        "p_up_action_disagrees",
+        "calibrated_action_score",
+        "second_best_action",
+        "best_action_margin",
+        "entry_ask",
+        "entry_bid",
+        "exit_bid",
+        "exit_ts",
+        "sell_before_close_execution_class",
+        "queue_fill_probability_estimate",
+        "executable_liquidity_notional",
+        "realized_trade_return",
+        "settlement_return",
+        "realized_total_return",
+        "trade_pnl_contribution",
+        "settlement_pnl_contribution",
+        "total_pnl_contribution",
+        "counterfactual_replay_variant",
+        "reason_codes",
+    ):
+        assert field_name in first_row
+    assert report["comparison_tables"][
+        "high_p_up_disagreement_rows_with_positive_trade_pnl_negative_settlement_pnl"
+    ]
+    assert report["counterfactual_replay_attribution"][
+        "positions_opened_but_not_closed_before_settlement"
+    ] == 3
+
+
+def test_sell_before_close_exit_reliability_counts_residuals_and_variants() -> None:
+    dataset, replays = _sell_before_close_exit_reliability_inputs()
+
+    report = build_sell_before_close_exit_reliability_report(
+        dataset=dataset,
+        action_family_counterfactual_replays=replays,
+    )
+
+    summary = report["summary"]
+    assert report["candidate_name"] == "I_sell_before_close_only_source_candidate"
+    assert report["diagnostic_only"] is True
+    assert report["promotion_evidence_eligible"] is False
+    assert report["paper_run_resume_allowed"] is False
+    assert report["diagnostic_counterfactual"] is True
+    assert summary["entry_decision_count"] == 2
+    assert summary["sell_decision_count"] == 1
+    assert summary["positions_opened_count"] == 2
+    assert summary["positions_closed_before_settlement_count"] == 1
+    assert summary["positions_opened_but_not_closed_before_settlement"] == 1
+    assert summary["replay_residual_settlement_drag"] == pytest.approx(-0.20)
+    assert summary["sell_before_close_exit_failure_interpretation"] in {
+        "mixed_exit_reliability_failure",
+        "policy_does_not_enforce_planned_exit",
+    }
+    assert {
+        row["exit_lifecycle_class"] for row in report["position_lifecycle_rows"]
+    } == {"closed_before_settlement", "no_exit_signal_generated"}
+    for variant in report["diagnostic_exit_variants"]:
+        assert variant["diagnostic_counterfactual"] is True
+        assert variant["promotion_evidence_eligible"] is False
+        assert variant["paper_run_resume_allowed"] is False
+    forced = next(
+        variant
+        for variant in report["diagnostic_exit_variants"]
+        if variant["variant"] == "forced_preclose_exit_if_executable"
+    )
+    assert forced["exit_count"] >= 1
+    assert "source_model_candidate_eligible" not in report
+
+
+def test_sell_before_close_exit_reliability_guard_blocks_unsafe_entries(
+    tmp_path: Path,
+) -> None:
+    prediction = _guard_prediction(
+        decision_ts=1_000,
+        time_to_close_seconds=120.0,
+        up_executable_bid_notional=0.01,
+        up_queue_fill_probability_proxy=0.10,
+        up_spread_bps=1_500.0,
+    )
+
+    decisions, summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=(prediction,),
+        config=PolymarketPolicyTrainingConfig(
+            corpus_dir=tmp_path / "corpus",
+            output_dir=tmp_path / "policy",
+        ),
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].action == "NO_TRADE"
+    assert "entry_blocked_exit_reliability_guard" in decisions[0].reason_codes
+    assert "entry_blocked_insufficient_executable_bid_notional" in (
+        decisions[0].reason_codes
+    )
+    assert "entry_blocked_low_queue_fill_probability" in decisions[0].reason_codes
+    assert "entry_blocked_spread_too_wide" in decisions[0].reason_codes
+    assert summary["entry_decision_count_before_guard"] == 1
+    assert summary["entry_decision_count_after_guard"] == 0
+    assert summary["entry_filter_blocked_count"] == 1
+    assert summary["paper_run_resume_allowed"] is False
+
+
+def test_sell_before_close_exit_reliability_guard_exits_when_executable(
+    tmp_path: Path,
+) -> None:
+    entry = _guard_prediction(
+        decision_ts=1_000,
+        time_to_close_seconds=120.0,
+        up_bid=0.50,
+        up_ask=0.55,
+        up_executable_bid_notional=0.30,
+    )
+    exit_tick = _guard_prediction(
+        decision_ts=2_000,
+        time_to_close_seconds=119.0,
+        up_bid=0.58,
+        up_ask=0.60,
+        up_executable_bid_notional=0.30,
+    )
+
+    decisions, summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=(entry, exit_tick),
+        config=PolymarketPolicyTrainingConfig(
+            corpus_dir=tmp_path / "corpus",
+            output_dir=tmp_path / "policy",
+        ),
+    )
+
+    assert [decision.action for decision in decisions] == ["BUY_UP", "SELL_UP"]
+    assert decisions[0].entry_policy_action == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert decisions[0].intended_exit_policy == "sell_before_close"
+    assert decisions[1].policy_exit_reason == "first_executable_exit_after_entry"
+    assert "exit_executed_policy_constrained" in decisions[1].reason_codes
+    assert "forced_settlement_after_exit_failure" not in decisions[1].reason_codes
+    assert summary["entry_decision_count_before_guard"] == 1
+    assert summary["entry_decision_count_after_guard"] == 1
+    assert summary["entry_filter_blocked_count"] == 0
+    assert summary["promotion_evidence_eligible"] is False
+
+
+def test_k_p_up_side_alignment_blocks_disagreed_entries(tmp_path: Path) -> None:
+    buy_up_disagree = _guard_prediction(
+        market_id="k-up-disagree",
+        decision_ts=1_000,
+        time_to_close_seconds=120.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.40,
+    )
+    buy_down_disagree = _guard_prediction(
+        market_id="k-down-disagree",
+        decision_ts=2_000,
+        time_to_close_seconds=120.0,
+        selected_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+
+    decisions, summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=(buy_up_disagree, buy_down_disagree),
+        config=PolymarketPolicyTrainingConfig(
+            corpus_dir=tmp_path / "corpus",
+            output_dir=tmp_path / "policy",
+        ),
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+
+    assert [decision.action for decision in decisions] == ["NO_TRADE", "NO_TRADE"]
+    assert all(
+        "entry_blocked_p_up_side_alignment_failed" in decision.reason_codes
+        for decision in decisions
+    )
+    assert summary["p_up_side_alignment_filter_enabled"] is True
+    assert summary["entry_decision_count_before_guard"] == 2
+    assert summary["entry_decision_count_after_exit_guard"] == 2
+    assert summary["entry_decision_count_after_p_up_alignment"] == 0
+    assert summary["entry_filter_blocked_by_p_up_alignment_count"] == 2
+
+
+def test_k_p_up_side_alignment_reduces_scoped_disagreement(tmp_path: Path) -> None:
+    disagreed = _guard_prediction(
+        market_id="k-disagreed",
+        decision_ts=1_000,
+        time_to_close_seconds=120.0,
+        selected_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    agreed = _guard_prediction(
+        market_id="k-agreed",
+        decision_ts=2_000,
+        time_to_close_seconds=120.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    config = PolymarketPolicyTrainingConfig(
+        corpus_dir=tmp_path / "corpus",
+        output_dir=tmp_path / "policy",
+    )
+
+    _, j_summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=(disagreed, agreed),
+        config=config,
+    )
+    _, k_summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=(disagreed, agreed),
+        config=config,
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+
+    assert j_summary["candidate_scoped_p_up_action_disagreement_rate"] > 0.0
+    assert k_summary["candidate_scoped_p_up_action_disagreement_rate"] == 0.0
+    assert k_summary["entry_filter_blocked_by_p_up_alignment_count"] == 1
+
+
+def test_k_keeps_policy_constrained_planned_exit(tmp_path: Path) -> None:
+    entry = _guard_prediction(
+        market_id="k-exit",
+        decision_ts=1_000,
+        time_to_close_seconds=120.0,
+        up_bid=0.50,
+        up_ask=0.55,
+        up_executable_bid_notional=0.30,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    exit_tick = _guard_prediction(
+        market_id="k-exit",
+        decision_ts=2_000,
+        time_to_close_seconds=119.0,
+        up_bid=0.58,
+        up_ask=0.60,
+        up_executable_bid_notional=0.30,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+
+    decisions, summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=(entry, exit_tick),
+        config=PolymarketPolicyTrainingConfig(
+            corpus_dir=tmp_path / "corpus",
+            output_dir=tmp_path / "policy",
+        ),
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+
+    assert [decision.action for decision in decisions] == ["BUY_UP", "SELL_UP"]
+    assert decisions[1].policy_exit_reason == "first_executable_exit_after_entry"
+    assert "exit_executed_policy_constrained" in decisions[1].reason_codes
+    assert summary["entry_decision_count_after_p_up_alignment"] == 1
+
+
+def test_k_reentry_cooldown_blocks_immediate_reentry(tmp_path: Path) -> None:
+    entry = _guard_prediction(
+        market_id="k-reentry",
+        decision_ts=1_000,
+        time_to_close_seconds=120.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    exit_tick = _guard_prediction(
+        market_id="k-reentry",
+        decision_ts=2_000,
+        time_to_close_seconds=119.0,
+        up_bid=0.58,
+        up_executable_bid_notional=0.30,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+    reentry = _guard_prediction(
+        market_id="k-reentry",
+        decision_ts=3_000,
+        time_to_close_seconds=118.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.70,
+    )
+
+    decisions, summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=(entry, exit_tick, reentry),
+        config=PolymarketPolicyTrainingConfig(
+            corpus_dir=tmp_path / "corpus",
+            output_dir=tmp_path / "policy",
+        ),
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+
+    assert [decision.action for decision in decisions] == [
+        "BUY_UP",
+        "SELL_UP",
+        "NO_TRADE",
+    ]
+    assert "entry_blocked_reentry_cooldown" in decisions[-1].reason_codes
+    assert summary["reentry_blocked_count"] == 1
+    assert summary["entries_per_market_distribution"] == {1: 1}
+
+
+def test_k_can_remain_fail_closed_when_p_up_disagreement_excessive(
+    tmp_path: Path,
+) -> None:
+    borderline_disagree = _guard_prediction(
+        market_id="k-borderline",
+        decision_ts=1_000,
+        time_to_close_seconds=120.0,
+        selected_action="BUY_UP_SELL_BEFORE_CLOSE",
+        p_up_auxiliary=0.42,
+    )
+
+    decisions, summary = build_sell_before_close_exit_reliability_guard_decisions(
+        predictions=(borderline_disagree,),
+        config=PolymarketPolicyTrainingConfig(
+            corpus_dir=tmp_path / "corpus",
+            output_dir=tmp_path / "policy",
+        ),
+        thresholds={"p_up_alignment_min": 0.40},
+        candidate_name=SELL_BEFORE_CLOSE_P_UP_ALIGNED_GUARD_CANDIDATE_NAME,
+    )
+
+    assert decisions[0].action == "BUY_UP"
+    assert summary["candidate_scoped_p_up_action_disagreement_rate"] == 1.0
+    assert (
+        summary["candidate_scoped_p_up_action_disagreement_within_limit"]
+        is False
+    )
+
+
+def _sell_before_close_diagnostic_inputs() -> tuple[
+    tuple[PolymarketPolicyExample, ...],
+    dict,
+    tuple[dict, ...],
+]:
+    validation_examples, raw_validation, calibrated_validation = (
+        _sell_before_close_candidate_examples_and_predictions(
+            count=12,
+            start_ts=50_000,
+            selected_sell_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+            selected_sell_realized_return=0.20,
+            hold_realized_return=-0.50,
+            p_up_auxiliary=0.70,
+        )
+    )
+    shadow_examples, raw_shadow, calibrated_shadow = (
+        _sell_before_close_candidate_examples_and_predictions(
+            count=12,
+            start_ts=60_000,
+            selected_sell_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+            selected_sell_realized_return=0.20,
+            hold_realized_return=-0.50,
+            p_up_auxiliary=0.70,
+        )
+    )
+    validation_examples = tuple(
+        _with_sell_before_close_diagnostic_targets(example)
+        for example in validation_examples
+    )
+    shadow_examples = tuple(
+        _with_sell_before_close_diagnostic_targets(example)
+        for example in shadow_examples
+    )
+    comparison = build_model_ranking_candidate_comparison(
+        validation_examples=validation_examples,
+        raw_validation_predictions=raw_validation,
+        calibrated_validation_predictions=calibrated_validation,
+        shadow_examples=shadow_examples,
+        raw_shadow_predictions=raw_shadow,
+        calibrated_shadow_predictions=calibrated_shadow,
+        execution_buffer=0.015,
+    )
+    return (
+        shadow_examples,
+        comparison,
+        (
+            {
+                "variant": "I_sell_before_close_only_source_candidate",
+                "summary": {
+                    "entry_decision_count": 12,
+                    "action_counts": {
+                        "BUY_UP": 2,
+                        "BUY_DOWN": 10,
+                        "SELL_UP": 5,
+                        "SELL_DOWN": 4,
+                    },
+                    "reason_counts": {
+                        "hold_threshold_not_met": 3,
+                        "low_confidence": 1,
+                    },
+                    "realized_trade_pnl": 1.0,
+                    "settlement_pnl": -2.0,
+                    "total_polymarket_pnl": -1.0,
+                    "settlement_event_count": 3,
+                },
+            },
+        ),
+    )
+
+
+def _sell_before_close_exit_reliability_inputs() -> tuple[SimpleNamespace, tuple[dict, ...]]:
+    decisions = [
+        _exit_reliability_decision(
+            market_id="market-closed",
+            slug="btc-updown-5m-closed",
+            decision_ts=1_000,
+            action="BUY_UP",
+            selected_outcome="UP",
+            execution_price=0.50,
+            paper_notional=0.20,
+            planned_exit_before_ts=2_000,
+            entry_policy_action="BUY_UP_SELL_BEFORE_CLOSE",
+            reason_codes=("policy_buy_up_sell_before_close",),
+        ),
+        _exit_reliability_decision(
+            market_id="market-residual",
+            slug="btc-updown-5m-residual",
+            decision_ts=1_000,
+            action="BUY_DOWN",
+            selected_outcome="DOWN",
+            execution_price=0.50,
+            paper_notional=0.20,
+            planned_exit_before_ts=2_000,
+            entry_policy_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+            reason_codes=("policy_buy_down_sell_before_close",),
+        ),
+        _exit_reliability_decision(
+            market_id="market-closed",
+            slug="btc-updown-5m-closed",
+            decision_ts=2_500,
+            action="SELL_UP",
+            selected_outcome="UP",
+            execution_price=0.56,
+            paper_notional=0.224,
+            planned_exit_before_ts=2_000,
+            entry_policy_action="BUY_UP_SELL_BEFORE_CLOSE",
+            reason_codes=("sell_up_ev_deteriorated", "bid_price_execution"),
+        ),
+    ]
+    predictions = [
+        _exit_reliability_prediction("market-closed", "btc-updown-5m-closed", 1_000),
+        _exit_reliability_prediction(
+            "market-closed",
+            "btc-updown-5m-closed",
+            2_500,
+            up_bid=0.56,
+            up_liquidity=0.25,
+        ),
+        _exit_reliability_prediction(
+            "market-residual",
+            "btc-updown-5m-residual",
+            1_000,
+            down_bid=0.50,
+        ),
+        _exit_reliability_prediction(
+            "market-residual",
+            "btc-updown-5m-residual",
+            1_500,
+            down_bid=0.60,
+            down_liquidity=0.25,
+        ),
+    ]
+    dataset = SimpleNamespace(
+        market_metadata={
+            "market-closed": {"market_end_ts": 4_000},
+            "market-residual": {"market_end_ts": 4_000},
+        },
+        resolution_events={
+            "market-closed": {"payout_up": 1.0, "payout_down": 0.0},
+            "market-residual": {"payout_up": 1.0, "payout_down": 0.0},
+        },
+    )
+    replay = {
+        "variant": "I_sell_before_close_only_source_candidate",
+        "decisions": decisions,
+        "predictions": predictions,
+        "replay_report": {"planned_sell_before_close_exit_count": 0},
+        "summary": {
+            "entry_decision_count": 2,
+            "action_counts": {"BUY_UP": 1, "BUY_DOWN": 1, "SELL_UP": 1},
+            "reason_counts": {"hold_threshold_not_met": 1},
+            "realized_trade_pnl": 0.024,
+            "settlement_pnl": -0.20,
+            "total_polymarket_pnl": -0.176,
+        },
+    }
+    return dataset, (replay,)
+
+
+def _alignment_prediction(
+    example: PolymarketPolicyExample,
+    dataset,
+) -> PolymarketPolicyPrediction:
+    return PolymarketPolicyPrediction(
+        market_id=example.market_id,
+        condition_id=example.condition_id,
+        slug=example.slug,
+        market_family=example.market_family,
+        horizon_ms=example.horizon_ms,
+        decision_ts=example.decision_ts,
+        estimated_up_probability=example.target_up_probability,
+        confidence=0.50,
+        score=0.0,
+        calibration_bucket="alignment-test",
+        model_version="alignment-test",
+        feature_schema_hash=dataset.feature_schema_hash,
+        training_corpus_hash=dataset.training_corpus_hash,
+        features=dict(example.features),
+        target_up_probability=example.target_up_probability,
+        p_up_auxiliary=example.target_up_probability,
+        expected_return_by_action=dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, 0.0),
+        expected_return_no_trade=0.0,
+        expected_return_buy_up_hold_to_settlement=0.0,
+        expected_return_buy_down_hold_to_settlement=0.0,
+        expected_return_buy_up_sell_before_close=0.0,
+        expected_return_buy_down_sell_before_close=0.0,
+        best_policy_action="NO_TRADE",
+        best_action_expected_return=0.0,
+        second_best_action_expected_return=0.0,
+        best_action_margin=0.0,
+        action_value_head_enabled=True,
+        outcome_probability_head_enabled=True,
+        action_value_model_family="alignment_test_action_value",
+        feature_conditioned_action_value_model_enabled=True,
+    )
+
+
+def _exit_reliability_decision(
+    *,
+    market_id: str,
+    slug: str,
+    decision_ts: int,
+    action: str,
+    selected_outcome: str,
+    execution_price: float,
+    paper_notional: float,
+    planned_exit_before_ts: int,
+    entry_policy_action: str,
+    reason_codes: tuple[str, ...],
+) -> dict:
+    return {
+        "market_id": market_id,
+        "slug": slug,
+        "decision_ts": decision_ts,
+        "action": action,
+        "selected_outcome": selected_outcome,
+        "execution_price": execution_price,
+        "paper_notional": paper_notional,
+        "intended_exit_policy": "sell_before_close",
+        "planned_exit_before_ts": planned_exit_before_ts,
+        "entry_policy_action": entry_policy_action,
+        "expected_return_by_action": {
+            "NO_TRADE": 0.0,
+            "BUY_UP_HOLD_TO_SETTLEMENT": -0.1,
+            "BUY_DOWN_HOLD_TO_SETTLEMENT": -0.1,
+            "BUY_UP_SELL_BEFORE_CLOSE": 0.2,
+            "BUY_DOWN_SELL_BEFORE_CLOSE": 0.2,
+        },
+        "reason_codes": list(reason_codes),
+    }
+
+
+def _exit_reliability_prediction(
+    market_id: str,
+    slug: str,
+    decision_ts: int,
+    *,
+    up_bid: float = 0.55,
+    down_bid: float = 0.55,
+    up_liquidity: float = 0.25,
+    down_liquidity: float = 0.25,
+) -> dict:
+    return {
+        "market_id": market_id,
+        "slug": slug,
+        "decision_ts": decision_ts,
+        "features": {
+            "up_bid": up_bid,
+            "up_ask": 0.50,
+            "down_bid": down_bid,
+            "down_ask": 0.50,
+            "up_queue_fill_probability_proxy": 0.90,
+            "down_queue_fill_probability_proxy": 0.90,
+            "up_executable_bid_notional": up_liquidity,
+            "down_executable_bid_notional": down_liquidity,
+            "time_to_close_seconds": max(0.0, (4_000 - decision_ts) / 1000.0),
+        },
+    }
+
+
+def _guard_prediction(
+    *,
+    market_id: str = "guard-market",
+    decision_ts: int,
+    time_to_close_seconds: float,
+    selected_action: str = "BUY_UP_SELL_BEFORE_CLOSE",
+    p_up_auxiliary: float | None = 0.70,
+    estimated_up_probability: float | None = None,
+    up_bid: float = 0.52,
+    up_ask: float = 0.54,
+    down_bid: float = 0.45,
+    down_ask: float = 0.47,
+    up_executable_bid_notional: float = 0.30,
+    down_executable_bid_notional: float = 0.30,
+    up_queue_fill_probability_proxy: float = 0.90,
+    down_queue_fill_probability_proxy: float = 0.90,
+    up_spread_bps: float = 100.0,
+    down_spread_bps: float = 100.0,
+    selected_action_return: float = 0.08,
+    unselected_sell_action_return: float = -0.10,
+) -> PolymarketPolicyPrediction:
+    estimated_up_probability_value = (
+        float(estimated_up_probability)
+        if estimated_up_probability is not None
+        else float(p_up_auxiliary if p_up_auxiliary is not None else 0.50)
+    )
+    buy_up_sell_return = (
+        selected_action_return
+        if selected_action == "BUY_UP_SELL_BEFORE_CLOSE"
+        else unselected_sell_action_return
+    )
+    buy_down_sell_return = (
+        selected_action_return
+        if selected_action == "BUY_DOWN_SELL_BEFORE_CLOSE"
+        else unselected_sell_action_return
+    )
+    action_returns = {
+        "NO_TRADE": 0.0,
+        "BUY_UP_HOLD_TO_SETTLEMENT": -0.20,
+        "BUY_DOWN_HOLD_TO_SETTLEMENT": -0.20,
+        "BUY_UP_SELL_BEFORE_CLOSE": buy_up_sell_return,
+        "BUY_DOWN_SELL_BEFORE_CLOSE": buy_down_sell_return,
+    }
+    ranked_returns = sorted(
+        action_returns.items(),
+        key=lambda item: (-float(item[1]), item[0]),
+    )
+    return PolymarketPolicyPrediction(
+        market_id=market_id,
+        condition_id="guard-condition",
+        slug="guard-slug",
+        market_family="btc_updown_5m",
+        horizon_ms=300_000,
+        decision_ts=decision_ts,
+        estimated_up_probability=estimated_up_probability_value,
+        confidence=0.90,
+        score=float(action_returns[selected_action]),
+        calibration_bucket="guard-test",
+        model_version="guard-test-model",
+        feature_schema_hash="a" * 64,
+        training_corpus_hash="b" * 64,
+        features={
+            "up_bid": up_bid,
+            "up_ask": up_ask,
+            "up_mid": (up_bid + up_ask) / 2.0,
+            "down_bid": down_bid,
+            "down_ask": down_ask,
+            "down_mid": (down_bid + down_ask) / 2.0,
+            "up_liquidity_depth": 10.0,
+            "down_liquidity_depth": 10.0,
+            "up_executable_bid_notional": up_executable_bid_notional,
+            "down_executable_bid_notional": down_executable_bid_notional,
+            "up_queue_fill_probability_proxy": up_queue_fill_probability_proxy,
+            "down_queue_fill_probability_proxy": down_queue_fill_probability_proxy,
+            "up_spread_bps": up_spread_bps,
+            "down_spread_bps": down_spread_bps,
+            "up_book_staleness_ms": 500.0,
+            "down_book_staleness_ms": 500.0,
+            "up_recent_book_update_count_1m": 5.0,
+            "down_recent_book_update_count_1m": 5.0,
+            "time_to_close_seconds": time_to_close_seconds,
+        },
+        target_up_probability=1.0,
+        p_up_auxiliary=p_up_auxiliary,
+        expected_return_by_action=action_returns,
+        expected_return_no_trade=0.0,
+        expected_return_buy_up_hold_to_settlement=-0.20,
+        expected_return_buy_down_hold_to_settlement=-0.20,
+        expected_return_buy_up_sell_before_close=buy_up_sell_return,
+        expected_return_buy_down_sell_before_close=buy_down_sell_return,
+        best_policy_action=ranked_returns[0][0],
+        best_action_expected_return=ranked_returns[0][1],
+        second_best_action_expected_return=ranked_returns[1][1],
+        best_action_margin=ranked_returns[0][1] - ranked_returns[1][1],
+        calibrated_expected_pnl_per_notional_by_action=action_returns,
+        calibrated_best_policy_action=ranked_returns[0][0],
+        calibrated_expected_pnl_per_notional=ranked_returns[0][1],
+        calibrated_second_best_expected_pnl_per_notional=ranked_returns[1][1],
+        calibrated_action_margin=ranked_returns[0][1] - ranked_returns[1][1],
+        action_value_calibration_applied=True,
+        action_value_calibration_id="c" * 64,
+        calibration_support_count=10,
+        calibration_bucket_count=len(ACTION_VALUE_LABEL_ACTIONS),
+        policy_confidence=0.90,
+        action_value_head_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        feature_conditioned_action_value_model_enabled=True,
+    )
+
+
+def _with_sell_before_close_diagnostic_targets(
+    example: PolymarketPolicyExample,
+) -> PolymarketPolicyExample:
+    action_returns = {
+        "NO_TRADE": 0.0,
+        "BUY_UP_HOLD_TO_SETTLEMENT": -0.50,
+        "BUY_DOWN_HOLD_TO_SETTLEMENT": -0.50,
+        "BUY_UP_SELL_BEFORE_CLOSE": 1.30,
+        "BUY_DOWN_SELL_BEFORE_CLOSE": -0.10,
+    }
+    trade_returns = {
+        "NO_TRADE": 0.0,
+        "BUY_UP_HOLD_TO_SETTLEMENT": 0.0,
+        "BUY_DOWN_HOLD_TO_SETTLEMENT": 0.0,
+        "BUY_UP_SELL_BEFORE_CLOSE": 0.05,
+        "BUY_DOWN_SELL_BEFORE_CLOSE": 0.15,
+    }
+    settlement_returns = {
+        "NO_TRADE": 0.0,
+        "BUY_UP_HOLD_TO_SETTLEMENT": -0.50,
+        "BUY_DOWN_HOLD_TO_SETTLEMENT": -0.50,
+        "BUY_UP_SELL_BEFORE_CLOSE": 1.25,
+        "BUY_DOWN_SELL_BEFORE_CLOSE": -0.25,
+    }
+    ranked = _rank_action_returns(action_returns)
+    features = {
+        **example.features,
+        "up_executable_bid_notional": 0.20,
+        "down_executable_bid_notional": 0.20,
+    }
+    return replace(
+        example,
+        features=features,
+        action_return_targets=action_returns,
+        realized_trade_return_targets=trade_returns,
+        settlement_return_targets=settlement_returns,
+        action_is_positive_targets={
+            action: value > 0.0 for action, value in action_returns.items()
+        },
+        sell_before_close_execution_class_targets={
+            "BUY_UP_SELL_BEFORE_CLOSE": "realizable_sell_before_close",
+            "BUY_DOWN_SELL_BEFORE_CLOSE": "realizable_sell_before_close",
+        },
+        sell_before_close_queue_fill_probability_targets={
+            "BUY_UP_SELL_BEFORE_CLOSE": 0.90,
+            "BUY_DOWN_SELL_BEFORE_CLOSE": 0.80,
+        },
+        sell_before_close_exit_bid_targets={
+            "BUY_UP_SELL_BEFORE_CLOSE": 0.55,
+            "BUY_DOWN_SELL_BEFORE_CLOSE": 0.60,
+        },
+        sell_before_close_executable_liquidity_notional_targets={
+            "BUY_UP_SELL_BEFORE_CLOSE": 0.20,
+            "BUY_DOWN_SELL_BEFORE_CLOSE": 0.20,
+        },
+        sell_before_close_exit_path_targets={
+            "BUY_UP_SELL_BEFORE_CLOSE": {
+                "best_executable_exit_ts": example.decision_ts + 30_000,
+            },
+            "BUY_DOWN_SELL_BEFORE_CLOSE": {
+                "best_executable_exit_ts": example.decision_ts + 30_000,
+            },
+        },
+        sell_before_close_label_uses_executable_exit_path_targets={
+            "BUY_UP_SELL_BEFORE_CLOSE": True,
+            "BUY_DOWN_SELL_BEFORE_CLOSE": True,
+        },
+        best_policy_action=ranked[0][0],
+        best_action_expected_return=ranked[0][1],
+        second_best_action_expected_return=ranked[1][1],
+        best_action_margin=ranked[0][1] - ranked[1][1],
+    )
+
+
+def test_action_value_prediction_api_rejects_missing_features_by_default(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = _build_corpus(tmp_path)
+    result = run_polymarket_policy_training(
+        PolymarketPolicyTrainingConfig(
+            corpus_dir=corpus_dir,
+            output_dir=tmp_path / "policy",
+        )
+    )
+    missing_feature = result.model.action_value_feature_columns[0]
+    example = result.dataset.examples[0]
+    sparse_features = dict(example.features)
+    sparse_features.pop(missing_feature)
+    sparse_example = replace(example, features=sparse_features)
+
+    with pytest.raises(ValueError, match="action_value_feature_missing"):
+        predict_polymarket_policy_examples(result.model, (sparse_example,))
+
+    diagnostic_predictions = predict_polymarket_policy_examples(
+        result.model,
+        (sparse_example,),
+        missing_feature_mode="train_mean_impute",
+    )
+    assert len(diagnostic_predictions) == 1
+    assert diagnostic_predictions[0].best_policy_action in ACTION_VALUE_LABEL_ACTIONS
+
+
+def _build_corpus(tmp_path: Path) -> Path:
+    raw_dir = tmp_path / "raw"
+    corpus_dir = tmp_path / "corpus"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=corpus_dir,
+        )
+    )
+    return corpus_dir
+
+
+def _example(*, market_index: int, decision_ts: int) -> PolymarketPolicyExample:
+    return PolymarketPolicyExample(
+        market_id=f"market-{decision_ts}-{market_index}",
+        condition_id=f"condition-{decision_ts}-{market_index}",
+        slug=f"btc-updown-{decision_ts}-{market_index}",
+        market_family="btc_updown_15m",
+        horizon_ms=900_000,
+        decision_ts=decision_ts,
+        feature_cutoff_ts=decision_ts,
+        max_input_ts=decision_ts,
+        features={
+            "up_bid": 0.48,
+            "up_ask": 0.52,
+            "up_mid": 0.50,
+            "down_bid": 0.48,
+            "down_ask": 0.52,
+            "down_mid": 0.50,
+            "time_to_close_seconds": 120.0,
+        },
+        target_up_probability=1.0 if market_index == 0 else 0.0,
+        resolved_outcome="UP" if market_index == 0 else "DOWN",
+        resolution_status="RESOLVED",
+    )
+
+
+def _overlay_examples_and_predictions(
+    *,
+    count: int,
+    positive_sell_return: float,
+    negative_hold_return: float,
+    start_ts: int = 10_000,
+) -> tuple[
+    tuple[PolymarketPolicyExample, ...],
+    tuple[PolymarketPolicyPrediction, ...],
+    tuple[PolymarketPolicyPrediction, ...],
+]:
+    examples = []
+    predictions = []
+    for index in range(count):
+        action_returns = dict.fromkeys(ACTION_VALUE_LABEL_ACTIONS, -0.30)
+        action_returns["NO_TRADE"] = 0.0
+        action_returns["BUY_UP_SELL_BEFORE_CLOSE"] = positive_sell_return
+        action_returns["BUY_DOWN_SELL_BEFORE_CLOSE"] = positive_sell_return
+        action_returns["BUY_DOWN_HOLD_TO_SETTLEMENT"] = negative_hold_return
+        decision_ts = start_ts + index
+        features = {
+            "up_bid": 0.43,
+            "up_ask": 0.45,
+            "up_mid": 0.44,
+            "down_bid": 0.53,
+            "down_ask": 0.55,
+            "down_mid": 0.54,
+            "time_to_close_seconds": 120.0,
+        }
+        example = PolymarketPolicyExample(
+            market_id=f"overlay-market-{decision_ts}",
+            condition_id=f"overlay-condition-{decision_ts}",
+            slug=f"overlay-slug-{decision_ts}",
+            market_family="btc_updown_5m",
+            horizon_ms=300_000,
+            decision_ts=decision_ts,
+            feature_cutoff_ts=decision_ts,
+            max_input_ts=decision_ts,
+            features=features,
+            target_up_probability=1.0,
+            resolved_outcome="UP",
+            resolution_status="RESOLVED",
+            action_return_targets=action_returns,
+            best_policy_action=_rank_action_returns(action_returns)[0][0],
+            best_action_expected_return=_rank_action_returns(action_returns)[0][1],
+            second_best_action_expected_return=_rank_action_returns(action_returns)[1][1],
+            best_action_margin=(
+                _rank_action_returns(action_returns)[0][1]
+                - _rank_action_returns(action_returns)[1][1]
+            ),
+        )
+        prediction = _overlay_prediction(
+            example=example,
+            action_returns={
+                "NO_TRADE": 0.0,
+                "BUY_UP_HOLD_TO_SETTLEMENT": -0.10,
+                "BUY_DOWN_HOLD_TO_SETTLEMENT": 0.50,
+                "BUY_UP_SELL_BEFORE_CLOSE": 0.10,
+                "BUY_DOWN_SELL_BEFORE_CLOSE": -0.10,
+            },
+        )
+        examples.append(example)
+        predictions.append(prediction)
+    return tuple(examples), tuple(predictions), tuple(predictions)
+
+
+def _overlay_prediction(
+    *,
+    example: PolymarketPolicyExample,
+    action_returns: dict[str, float],
+) -> PolymarketPolicyPrediction:
+    return PolymarketPolicyPrediction(
+        market_id=example.market_id,
+        condition_id=example.condition_id,
+        slug=example.slug,
+        market_family=example.market_family,
+        horizon_ms=example.horizon_ms,
+        decision_ts=example.decision_ts,
+        estimated_up_probability=0.70,
+        confidence=0.90,
+        score=0.50,
+        calibration_bucket="overlay-test",
+        model_version="overlay-test-model",
+        feature_schema_hash="a" * 64,
+        training_corpus_hash="b" * 64,
+        features=dict(example.features),
+        target_up_probability=example.target_up_probability,
+        p_up_auxiliary=0.70,
+        expected_return_by_action=action_returns,
+        expected_return_no_trade=action_returns["NO_TRADE"],
+        expected_return_buy_up_hold_to_settlement=action_returns[
+            "BUY_UP_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_down_hold_to_settlement=action_returns[
+            "BUY_DOWN_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_up_sell_before_close=action_returns[
+            "BUY_UP_SELL_BEFORE_CLOSE"
+        ],
+        expected_return_buy_down_sell_before_close=action_returns[
+            "BUY_DOWN_SELL_BEFORE_CLOSE"
+        ],
+        best_policy_action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+        best_action_expected_return=0.50,
+        second_best_action_expected_return=0.10,
+        best_action_margin=0.40,
+        calibrated_expected_pnl_per_notional_by_action=action_returns,
+        calibrated_best_policy_action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+        calibrated_expected_pnl_per_notional=0.50,
+        calibrated_second_best_expected_pnl_per_notional=0.10,
+        calibrated_action_margin=0.40,
+        action_value_calibration_applied=True,
+        action_value_calibration_id="c" * 64,
+        calibration_support_count=10,
+        calibration_bucket_count=len(ACTION_VALUE_LABEL_ACTIONS),
+        policy_confidence=0.90,
+        action_value_head_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        feature_conditioned_action_value_model_enabled=True,
+    )
+
+
+def _sell_before_close_candidate_comparison(
+    *,
+    positive_sell_return: float,
+    hold_return: float,
+    selected_sell_action: str,
+    p_up_auxiliary: float,
+) -> dict:
+    validation_examples, raw_validation, calibrated_validation = (
+        _sell_before_close_candidate_examples_and_predictions(
+            count=12,
+            start_ts=30_000,
+            selected_sell_action=selected_sell_action,
+            selected_sell_realized_return=positive_sell_return,
+            hold_realized_return=hold_return,
+            p_up_auxiliary=p_up_auxiliary,
+        )
+    )
+    shadow_examples, raw_shadow, calibrated_shadow = (
+        _sell_before_close_candidate_examples_and_predictions(
+            count=12,
+            start_ts=40_000,
+            selected_sell_action=selected_sell_action,
+            selected_sell_realized_return=positive_sell_return,
+            hold_realized_return=hold_return,
+            p_up_auxiliary=p_up_auxiliary,
+        )
+    )
+    return build_model_ranking_candidate_comparison(
+        validation_examples=validation_examples,
+        raw_validation_predictions=raw_validation,
+        calibrated_validation_predictions=calibrated_validation,
+        shadow_examples=shadow_examples,
+        raw_shadow_predictions=raw_shadow,
+        calibrated_shadow_predictions=calibrated_shadow,
+        execution_buffer=0.015,
+    )
+
+
+def _sell_before_close_candidate_examples_and_predictions(
+    *,
+    count: int,
+    start_ts: int,
+    selected_sell_action: str,
+    selected_sell_realized_return: float,
+    hold_realized_return: float,
+    p_up_auxiliary: float,
+) -> tuple[
+    tuple[PolymarketPolicyExample, ...],
+    tuple[PolymarketPolicyPrediction, ...],
+    tuple[PolymarketPolicyPrediction, ...],
+]:
+    other_sell_action = (
+        "BUY_DOWN_SELL_BEFORE_CLOSE"
+        if selected_sell_action == "BUY_UP_SELL_BEFORE_CLOSE"
+        else "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+    examples = []
+    predictions = []
+    for index in range(count):
+        decision_ts = start_ts + index
+        example = _example(market_index=index % 2, decision_ts=decision_ts)
+        active_sell_action = (
+            other_sell_action if index % 6 == 0 else selected_sell_action
+        )
+        inactive_sell_action = (
+            selected_sell_action if active_sell_action == other_sell_action else other_sell_action
+        )
+        action_targets = {
+            "NO_TRADE": 0.0,
+            "BUY_UP_HOLD_TO_SETTLEMENT": hold_realized_return,
+            "BUY_DOWN_HOLD_TO_SETTLEMENT": hold_realized_return,
+            selected_sell_action: selected_sell_realized_return,
+            other_sell_action: selected_sell_realized_return,
+        }
+        ranked_targets = _rank_action_returns(action_targets)
+        example = replace(
+            example,
+            action_return_targets=action_targets,
+            best_policy_action=ranked_targets[0][0],
+            best_action_expected_return=ranked_targets[0][1],
+            second_best_action_expected_return=ranked_targets[1][1],
+            best_action_margin=ranked_targets[0][1] - ranked_targets[1][1],
+        )
+        action_scores = {
+            "NO_TRADE": 0.0,
+            "BUY_UP_HOLD_TO_SETTLEMENT": 0.30,
+            "BUY_DOWN_HOLD_TO_SETTLEMENT": 0.50,
+            active_sell_action: 0.20,
+            inactive_sell_action: 0.10,
+        }
+        prediction = _scoped_candidate_prediction(
+            example=example,
+            action_returns=action_scores,
+            p_up_auxiliary=p_up_auxiliary,
+        )
+        examples.append(example)
+        predictions.append(prediction)
+    return tuple(examples), tuple(predictions), tuple(predictions)
+
+
+def _scoped_candidate_prediction(
+    *,
+    example: PolymarketPolicyExample,
+    action_returns: dict[str, float],
+    p_up_auxiliary: float,
+) -> PolymarketPolicyPrediction:
+    ranked = _rank_action_returns(action_returns)
+    best_action, best_return = ranked[0]
+    second_return = ranked[1][1]
+    return PolymarketPolicyPrediction(
+        market_id=example.market_id,
+        condition_id=example.condition_id,
+        slug=example.slug,
+        market_family=example.market_family,
+        horizon_ms=example.horizon_ms,
+        decision_ts=example.decision_ts,
+        estimated_up_probability=p_up_auxiliary,
+        confidence=0.90,
+        score=best_return,
+        calibration_bucket="scoped-source-candidate-test",
+        model_version="scoped-source-candidate-test-model",
+        feature_schema_hash="a" * 64,
+        training_corpus_hash="b" * 64,
+        features=dict(example.features),
+        target_up_probability=example.target_up_probability,
+        p_up_auxiliary=p_up_auxiliary,
+        expected_return_by_action=action_returns,
+        expected_return_no_trade=action_returns["NO_TRADE"],
+        expected_return_buy_up_hold_to_settlement=action_returns[
+            "BUY_UP_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_down_hold_to_settlement=action_returns[
+            "BUY_DOWN_HOLD_TO_SETTLEMENT"
+        ],
+        expected_return_buy_up_sell_before_close=action_returns[
+            "BUY_UP_SELL_BEFORE_CLOSE"
+        ],
+        expected_return_buy_down_sell_before_close=action_returns[
+            "BUY_DOWN_SELL_BEFORE_CLOSE"
+        ],
+        best_policy_action=best_action,
+        best_action_expected_return=best_return,
+        second_best_action_expected_return=second_return,
+        best_action_margin=best_return - second_return,
+        calibrated_expected_pnl_per_notional_by_action=action_returns,
+        calibrated_best_policy_action=best_action,
+        calibrated_expected_pnl_per_notional=best_return,
+        calibrated_second_best_expected_pnl_per_notional=second_return,
+        calibrated_action_margin=best_return - second_return,
+        action_value_calibration_applied=True,
+        action_value_calibration_id="d" * 64,
+        calibration_support_count=12,
+        calibration_bucket_count=len(ACTION_VALUE_LABEL_ACTIONS),
+        policy_confidence=0.90,
+        action_value_head_enabled=True,
+        action_value_model_family="feature_conditioned_action_return_model",
+        feature_conditioned_action_value_model_enabled=True,
+    )
+
+
+def _candidate_by_name(comparison: dict, candidate_name: str) -> dict:
+    return next(
+        candidate
+        for candidate in comparison["candidates"]
+        if candidate["candidate_name"] == candidate_name
+    )
+
+
+def _rank_action_returns(action_returns: dict[str, float]) -> list[tuple[str, float]]:
+    return sorted(action_returns.items(), key=lambda item: (-float(item[1]), item[0]))
+
+
+def _read_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def _labels_by_decision_state(path: Path) -> dict[tuple[str, int], dict[str, dict]]:
+    labels: dict[tuple[str, int], dict[str, dict]] = {}
+    for row in _read_jsonl(path):
+        if row["action"] not in ACTION_VALUE_LABEL_ACTIONS:
+            continue
+        labels.setdefault((row["market_id"], row["decision_ts"]), {})[row["action"]] = row
+    return labels
+
+
+def _assert_safe(payload: dict) -> None:
+    assert payload["paper_only"] is True
+    assert payload["capital_at_risk"] is False
+    assert payload["polymarket_write_enabled"] is False
+    assert payload["wallet_signing_enabled"] is False

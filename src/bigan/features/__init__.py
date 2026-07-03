@@ -5,6 +5,13 @@ from .aggregation import (
     aggregate_features_15m_v1,
     run_feature_batch,
 )
+from .low_latency import (
+    IncrementalBtc15mFeaturePath,
+    JsonlRawQueue,
+    LowLatencyFeatureQueueReport,
+    RawQueueItem,
+    run_low_latency_feature_queue_batch,
+)
 from .quality import (
     DEFAULT_QUALITY_CONFIG,
     FeatureQualityConfig,
@@ -37,6 +44,10 @@ __all__ = [
     "FeatureQualitySqlCheck",
     "FeatureQualitySqlReport",
     "FeatureSpec",
+    "IncrementalBtc15mFeaturePath",
+    "JsonlRawQueue",
+    "LowLatencyFeatureQueueReport",
+    "RawQueueItem",
     "aggregate_features_15m_v1",
     "compute_quality_fields",
     "feature_names",
@@ -46,4 +57,5 @@ __all__ = [
     "get_feature",
     "run_feature_batch",
     "run_feature_quality_sql_checks",
+    "run_low_latency_feature_queue_batch",
 ]

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 ConfidenceLevel = Literal["HIGH", "MEDIUM", "LOW"]
+BootstrapPromotionAction = Literal["first_champion", "replace_champion"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,8 +20,17 @@ class BootstrapRules:
     max_brier_delta: float = 0.0
     min_backtest_net_pnl: float = 0.0
     require_cost_adjusted_backtest: bool = True
+    require_shadow_evaluation: bool = False
+    # Allow lower Sharpe than baseline when probability quality is materially better
+    # and trading utility still clears positive Sharpe plus positive net-PnL delta.
+    allow_lower_sharpe_if_brier_gap: float = 0.05
+    max_global_ece: float | None = None
+    max_execution_subset_ece: float | None = None
+    min_high_up_realized_up_rate: float | None = None
+    min_high_down_realized_down_rate: float | None = None
+    require_positive_avg_return_by_family: bool = False
 
-    def to_dict(self) -> dict[str, bool | float]:
+    def to_dict(self) -> dict[str, bool | float | None]:
         return asdict(self)
 
 
@@ -34,6 +44,7 @@ class BootstrapCandidateInput:
     serving_readiness_path: Path | str | None = None
     feature_schema_path: Path | str | None = None
     model_complexity_notes_path: Path | str | None = None
+    shadow_evaluation_path: Path | str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +122,7 @@ class BootstrapChampionReport:
     risks: tuple[str, ...]
     next_actions: tuple[str, ...]
     bootstrap_rationale: str
+    artifact_paths: dict[str, str | None]
     output_dir: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -129,6 +141,7 @@ class BootstrapChampionReport:
             "risks": list(self.risks),
             "next_actions": list(self.next_actions),
             "bootstrap_rationale": self.bootstrap_rationale,
+            "artifact_paths": self.artifact_paths,
             "output_dir": self.output_dir,
         }
 
@@ -228,16 +241,24 @@ def evaluate_bootstrap_champion(
     baseline_backtest_summary_path: Path | str | None = None,
     rollback_runbook_path: Path | str | None = Path("docs/runbooks/model_rollback.md"),
     rules: BootstrapRules | None = None,
+    promotion_action: BootstrapPromotionAction = "first_champion",
 ) -> BootstrapChampionReport:
     """Evaluate whether any initial candidate is ready to be the first champion."""
 
     active_rules = rules or BootstrapRules()
+    if promotion_action not in {"first_champion", "replace_champion"}:
+        raise ValueError("promotion_action must be 'first_champion' or 'replace_champion'")
     target = Path(output_dir)
     target.mkdir(parents=True, exist_ok=True)
 
     baseline = _load_model_run(baseline_dir, fallback_name="inferred_naive_prior_15m")
     baseline_backtest = _load_backtest_summary(baseline_backtest_summary_path)
     rollback_ready = _rollback_ready(rollback_runbook_path, baseline)
+    baseline_artifacts = _bootstrap_artifact_paths(
+        baseline_dir=baseline_dir,
+        baseline_backtest_summary_path=baseline_backtest_summary_path,
+        rollback_runbook_path=rollback_runbook_path,
+    )
     baseline_row = _baseline_row(
         baseline=baseline,
         baseline_backtest=baseline_backtest,
@@ -285,6 +306,7 @@ def evaluate_bootstrap_champion(
             bootstrap_rationale=(
                 "No first champion can be selected without a concrete candidate and evidence bundle."
             ),
+            artifact_paths=baseline_artifacts,
             output_dir=str(target),
         )
         return _write_bootstrap_report(report, target)
@@ -292,7 +314,11 @@ def evaluate_bootstrap_champion(
     passing = [assessment for assessment in assessments if assessment.gate.passed]
     if passing:
         best = max(passing, key=lambda assessment: assessment.score)
-        recommended_action = f"PROMOTE_FIRST_CHAMPION:{best.model_version}"
+        recommended_action = (
+            "PROMOTE_CHAMPION"
+            if promotion_action == "replace_champion"
+            else f"PROMOTE_FIRST_CHAMPION:{best.model_version}"
+        )
         confidence: ConfidenceLevel = "HIGH"
         rationale = (
             f"{best.model_version} clears the hard bootstrap gates and is good enough for "
@@ -344,6 +370,12 @@ def evaluate_bootstrap_champion(
         next_actions=next_actions
         or ("Monitor prediction quality, calibration, latency, drift, and rollback readiness.",),
         bootstrap_rationale=rationale,
+        artifact_paths=_bootstrap_artifact_paths(
+            baseline_dir=baseline_dir,
+            baseline_backtest_summary_path=baseline_backtest_summary_path,
+            rollback_runbook_path=rollback_runbook_path,
+            candidate_input=_candidate_input_by_version(candidates, best.model_version),
+        ),
         output_dir=str(target),
     )
     return _write_bootstrap_report(report, target)
@@ -369,13 +401,15 @@ def _assess_candidate(
     test_metrics = _split_metrics(candidate.metrics, "test")
     baseline_test_metrics = _split_metrics(baseline.metrics, "test")
     offline = _offline_assessment(baseline_test_metrics, test_metrics, rules)
-    calibration = _calibration_assessment(candidate_input.calibration_dir)
+    calibration = _calibration_assessment(candidate_input.calibration_dir, rules)
     candidate_backtest = _backtest_assessment(
         candidate_input.candidate_backtest_summary_path,
         baseline_backtest=baseline_backtest,
         rules=rules,
+        brier_improvement=_metric(offline, "brier_improvement"),
     )
     serving = _serving_assessment(candidate_input.serving_readiness_path)
+    shadow = _shadow_assessment(candidate_input.shadow_evaluation_path, rules)
     schema = _schema_assessment(candidate_input, candidate)
     simplicity = _simplicity_assessment(candidate, candidate_input.model_complexity_notes_path)
 
@@ -383,14 +417,14 @@ def _assess_candidate(
         beats_baseline=offline["passed"],
         calibration_acceptable=calibration["passed"],
         backtest_acceptable=candidate_backtest["passed"],
-        serving_readiness_acceptable=serving["passed"],
+        serving_readiness_acceptable=serving["passed"] and shadow["passed"],
         rollback_fallback_available=rollback_ready,
         schema_stable=schema["passed"],
         simple_enough=simplicity["passed"],
     )
     failed_reasons = [
         str(item["reason"])
-        for item in (offline, calibration, candidate_backtest, serving, schema)
+        for item in (offline, calibration, candidate_backtest, serving, shadow, schema)
         if not bool(item["passed"])
     ]
     gate_passed = (
@@ -408,7 +442,15 @@ def _assess_candidate(
     )
     missing_or_weak = tuple(
         item
-        for assessment in (offline, calibration, candidate_backtest, serving, schema, simplicity)
+        for assessment in (
+            offline,
+            calibration,
+            candidate_backtest,
+            serving,
+            shadow,
+            schema,
+            simplicity,
+        )
         for item in assessment["missing_or_weak"]
     )
     row = BootstrapComparisonRow(
@@ -416,18 +458,26 @@ def _assess_candidate(
         offline=str(offline["summary"]),
         calibration=str(calibration["summary"]),
         backtest=str(candidate_backtest["summary"]),
-        production_readiness=str(serving["summary"]),
+        production_readiness=_join_summaries(serving["summary"], shadow["summary"]),
         simplicity=str(simplicity["summary"]),
         verdict="Eligible for v1 champion" if gate_passed else "Not eligible for promotion",
     )
     risks = tuple(
         item
-        for assessment in (offline, calibration, candidate_backtest, serving, schema, simplicity)
+        for assessment in (
+            offline,
+            calibration,
+            candidate_backtest,
+            serving,
+            shadow,
+            schema,
+            simplicity,
+        )
         for item in assessment["risks"]
     )
     next_actions = tuple(
         item
-        for assessment in (offline, calibration, candidate_backtest, serving, schema)
+        for assessment in (offline, calibration, candidate_backtest, serving, shadow, schema)
         for item in assessment["next_actions"]
     )
     score = _weighted_score(
@@ -438,7 +488,7 @@ def _assess_candidate(
     )
     explicit_unacceptable = any(
         bool(assessment["explicit_unacceptable"])
-        for assessment in (offline, calibration, candidate_backtest, serving, schema)
+        for assessment in (offline, calibration, candidate_backtest, serving, shadow, schema)
     )
     return BootstrapCandidateAssessment(
         model_version=candidate.model_version,
@@ -451,6 +501,56 @@ def _assess_candidate(
         next_actions=next_actions,
         explicit_unacceptable=explicit_unacceptable,
     )
+
+
+def _candidate_input_by_version(
+    candidates: tuple[BootstrapCandidateInput, ...],
+    model_version: str,
+) -> BootstrapCandidateInput | None:
+    for candidate_input in candidates:
+        candidate = _load_model_run(candidate_input.candidate_dir, fallback_name="candidate_unspecified")
+        if candidate.model_version == model_version:
+            return candidate_input
+    return None
+
+
+def _bootstrap_artifact_paths(
+    *,
+    baseline_dir: Path | str | None,
+    baseline_backtest_summary_path: Path | str | None,
+    rollback_runbook_path: Path | str | None,
+    candidate_input: BootstrapCandidateInput | None = None,
+) -> dict[str, str | None]:
+    return {
+        "baseline_dir": _path_str(baseline_dir),
+        "baseline_eval_dir": _path_str(baseline_dir),
+        "baseline_backtest_summary_path": _path_str(baseline_backtest_summary_path),
+        "candidate_dir": _path_str(None if candidate_input is None else candidate_input.candidate_dir),
+        "candidate_eval_dir": _path_str(
+            None if candidate_input is None else candidate_input.candidate_dir
+        ),
+        "calibration_dir": _path_str(None if candidate_input is None else candidate_input.calibration_dir),
+        "candidate_backtest_summary_path": _path_str(
+            None if candidate_input is None else candidate_input.candidate_backtest_summary_path
+        ),
+        "serving_readiness_path": _path_str(
+            None if candidate_input is None else candidate_input.serving_readiness_path
+        ),
+        "feature_schema_path": _path_str(
+            None if candidate_input is None else candidate_input.feature_schema_path
+        ),
+        "model_complexity_notes_path": _path_str(
+            None if candidate_input is None else candidate_input.model_complexity_notes_path
+        ),
+        "shadow_evaluation_path": _path_str(
+            None if candidate_input is None else candidate_input.shadow_evaluation_path
+        ),
+        "rollback_runbook_path": _path_str(rollback_runbook_path),
+    }
+
+
+def _path_str(path: Path | str | None) -> str | None:
+    return None if path is None else str(path)
 
 
 def _offline_assessment(
@@ -489,6 +589,7 @@ def _offline_assessment(
 
     auc_delta = float(candidate_auc) - float(baseline_auc)
     brier_delta = float(candidate_brier) - float(baseline_brier)
+    brier_improvement = float(baseline_brier) - float(candidate_brier)
     passed = auc_delta >= rules.min_roc_auc_delta and brier_delta <= rules.max_brier_delta
     summary = (
         f"AUC {candidate_auc:.4f} vs {baseline_auc:.4f}; "
@@ -497,7 +598,7 @@ def _offline_assessment(
     if not passed:
         risks.append("Candidate offline lift is not strong enough to justify replacing the baseline.")
         next_actions.append("Try a simpler feature or calibration variant and require clear test-set lift over baseline.")
-    return _assessment(
+    assessment = _assessment(
         passed,
         summary,
         missing,
@@ -506,9 +607,18 @@ def _offline_assessment(
         explicit_unacceptable=not passed,
         quality_score=max(0.0, min(1.0, 0.5 + auc_delta * 5.0 - max(0.0, brier_delta) * 5.0)),
     )
+    return {
+        **assessment,
+        "auc_delta": auc_delta,
+        "brier_delta": brier_delta,
+        "brier_improvement": brier_improvement,
+    }
 
 
-def _calibration_assessment(calibration_dir: Path | str | None) -> dict[str, Any]:
+def _calibration_assessment(
+    calibration_dir: Path | str | None,
+    rules: BootstrapRules,
+) -> dict[str, Any]:
     missing: list[str] = []
     risks: list[str] = []
     next_actions: list[str] = []
@@ -528,19 +638,28 @@ def _calibration_assessment(calibration_dir: Path | str | None) -> dict[str, Any
         missing.append("Calibrated ECE missing")
     if brier is None:
         missing.append("Calibrated Brier missing")
-    passed = improved and ece is not None and brier is not None
-    summary = (
-        f"{report.get('method', 'unknown')} ECE {ece:.4f}, Brier {brier:.4f}"
-        if passed
-        else "Calibration incomplete or not improved"
-    )
+    gate_missing = _calibration_gate_missing(report, rules)
+    gate_failures = _bucket_level_calibration_gate_failures(report, rules)
+    passed = improved and ece is not None and brier is not None and not gate_missing and not gate_failures
+    summary_parts = []
+    if ece is not None and brier is not None:
+        summary_parts.append(f"{report.get('method', 'unknown')} ECE {ece:.4f}, Brier {brier:.4f}")
+    execution_ece = _execution_subset_ece(report)
+    if execution_ece is not None:
+        summary_parts.append(f"execution ECE {execution_ece:.4f}")
+    if report.get("family_metrics"):
+        summary_parts.append(f"families {len(report.get('family_metrics') or {})}")
+    if gate_failures:
+        summary_parts.append("bucket/family gate FAIL")
+    summary = ", ".join(summary_parts) if summary_parts else "Calibration incomplete or not improved"
     if not passed:
         risks.append("Candidate calibration is poor or unknown.")
+        risks.extend(gate_failures)
         next_actions.append("Recalibrate on validation data and verify calibrated Brier/ECE on holdout data.")
     return _assessment(
         passed,
         summary,
-        missing,
+        missing + gate_missing,
         risks,
         next_actions,
         explicit_unacceptable=not passed and not missing,
@@ -548,11 +667,154 @@ def _calibration_assessment(calibration_dir: Path | str | None) -> dict[str, Any
     )
 
 
+def _calibration_gate_missing(report: dict[str, Any], rules: BootstrapRules) -> list[str]:
+    missing: list[str] = []
+    bucket_metrics = report.get("bucket_metrics")
+    family_metrics = report.get("family_metrics")
+    if (
+        rules.min_high_up_realized_up_rate is not None
+        and _bucket_metric(bucket_metrics, "high_up", ("realized_up_rate", "positive_rate", "up_rate")) is None
+    ):
+        missing.append("high_up bucket realized up rate missing")
+    if rules.min_high_down_realized_down_rate is not None and _high_down_realized_rate(bucket_metrics) is None:
+        missing.append("high_down bucket realized down rate missing")
+    if rules.max_execution_subset_ece is not None and _execution_subset_ece(report) is None:
+        missing.append("execution subset ECE missing")
+    if rules.require_positive_avg_return_by_family and not isinstance(family_metrics, dict):
+        missing.append("family calibration metrics missing")
+    elif rules.require_positive_avg_return_by_family and not family_metrics:
+        missing.append("family calibration metrics empty")
+    return missing
+
+
+def _bucket_level_calibration_gate_failures(
+    report: dict[str, Any],
+    rules: BootstrapRules,
+) -> list[str]:
+    failures: list[str] = []
+    calibrated = report.get("calibrated_metrics") if isinstance(report, dict) else None
+    ece = _metric(calibrated, "ece") if isinstance(calibrated, dict) else None
+    if rules.max_global_ece is not None and ece is not None and ece >= rules.max_global_ece:
+        failures.append(f"Global ECE {ece:.4f} does not beat gate {rules.max_global_ece:.4f}.")
+    execution_ece = _execution_subset_ece(report)
+    if (
+        rules.max_execution_subset_ece is not None
+        and execution_ece is not None
+        and execution_ece >= rules.max_execution_subset_ece
+    ):
+        failures.append(
+            f"Execution subset ECE {execution_ece:.4f} does not beat gate "
+            f"{rules.max_execution_subset_ece:.4f}."
+        )
+    bucket_metrics = report.get("bucket_metrics")
+    high_up = _bucket_metric(bucket_metrics, "high_up", ("realized_up_rate", "positive_rate", "up_rate"))
+    if (
+        rules.min_high_up_realized_up_rate is not None
+        and high_up is not None
+        and high_up <= rules.min_high_up_realized_up_rate
+    ):
+        failures.append(
+            f"high_up realized up rate {high_up:.4f} <= "
+            f"{rules.min_high_up_realized_up_rate:.4f}."
+        )
+    high_down = _high_down_realized_rate(bucket_metrics)
+    if (
+        rules.min_high_down_realized_down_rate is not None
+        and high_down is not None
+        and high_down <= rules.min_high_down_realized_down_rate
+    ):
+        failures.append(
+            f"high_down realized down rate {high_down:.4f} <= "
+            f"{rules.min_high_down_realized_down_rate:.4f}."
+        )
+    family_metrics = report.get("family_metrics")
+    if rules.require_positive_avg_return_by_family and isinstance(family_metrics, dict):
+        bad_families = [
+            family
+            for family, metrics in family_metrics.items()
+            if _metric(metrics, "avg_realized_return") is not None
+            and float(_metric(metrics, "avg_realized_return")) <= 0.0
+        ]
+        missing_returns = [
+            family
+            for family, metrics in family_metrics.items()
+            if _metric(metrics, "avg_realized_return") is None
+        ]
+        if bad_families:
+            failures.append(
+                "Family avg realized return is non-positive for "
+                + ", ".join(sorted(map(str, bad_families)))
+                + "."
+            )
+        if missing_returns:
+            failures.append(
+                "Family avg realized return missing for "
+                + ", ".join(sorted(map(str, missing_returns)))
+                + "."
+            )
+    return failures
+
+
+def _execution_subset_ece(report: dict[str, Any]) -> float | None:
+    metrics = report.get("execution_subset_metrics")
+    if isinstance(metrics, dict):
+        calibrated = metrics.get("calibrated_metrics")
+        if isinstance(calibrated, dict):
+            return _metric(calibrated, "ece")
+    family_metrics = report.get("family_metrics")
+    if isinstance(family_metrics, dict):
+        subset = family_metrics.get("_execution_subset")
+        if isinstance(subset, dict):
+            calibrated = subset.get("calibrated_metrics")
+            if isinstance(calibrated, dict):
+                return _metric(calibrated, "ece")
+    return None
+
+
+def _high_down_realized_rate(bucket_metrics: Any) -> float | None:
+    realized_down = _bucket_metric(
+        bucket_metrics,
+        "high_down",
+        ("realized_down_rate", "negative_rate", "down_rate"),
+    )
+    if realized_down is not None:
+        return realized_down
+    realized_up = _bucket_metric(
+        bucket_metrics,
+        "high_down",
+        ("realized_up_rate", "positive_rate", "up_rate"),
+    )
+    return None if realized_up is None else 1.0 - realized_up
+
+
+def _bucket_metric(
+    bucket_metrics: Any,
+    bucket_name: str,
+    metric_names: tuple[str, ...],
+) -> float | None:
+    bucket = None
+    if isinstance(bucket_metrics, dict):
+        bucket = bucket_metrics.get(bucket_name)
+    elif isinstance(bucket_metrics, list):
+        bucket = next(
+            (
+                row
+                for row in bucket_metrics
+                if isinstance(row, dict) and row.get("bucket") == bucket_name
+            ),
+            None,
+        )
+    if not isinstance(bucket, dict):
+        return None
+    return _first_metric(bucket, metric_names)
+
+
 def _backtest_assessment(
     backtest_summary_path: Path | str | None,
     *,
     baseline_backtest: dict[str, Any] | None,
     rules: BootstrapRules,
+    brier_improvement: float | None = None,
 ) -> dict[str, Any]:
     missing: list[str] = []
     risks: list[str] = []
@@ -568,6 +830,26 @@ def _backtest_assessment(
 
     net_pnl = _metric(row, "net_pnl")
     trade_count = _metric(row, "trade_count")
+    baseline_net_pnl = _metric(baseline_backtest, "net_pnl")
+    net_pnl_delta = (
+        None
+        if net_pnl is None or baseline_net_pnl is None
+        else net_pnl - baseline_net_pnl
+    )
+    max_drawdown = _first_metric(row, ("max_drawdown", "max_drawdown_pct"))
+    sharpe = _first_metric(row, ("sharpe_ratio", "sharpe"))
+    baseline_sharpe = _first_metric(baseline_backtest, ("sharpe_ratio", "sharpe"))
+    sortino = _first_metric(row, ("sortino_ratio", "sortino"))
+    turnover = _first_metric(
+        row,
+        (
+            "turnover",
+            "turnover_trades_per_signal",
+            "turnover_trades_per_1000_signals",
+            "trades_per_1000_signals",
+            "trades_per_day",
+        ),
+    )
     settings = row.get("settings") if isinstance(row, dict) else None
     fee_bps = _metric(settings, "fee_bps") if isinstance(settings, dict) else None
     slippage_bps = _metric(settings, "slippage_bps") if isinstance(settings, dict) else None
@@ -575,10 +857,16 @@ def _backtest_assessment(
         missing.append("Candidate backtest net_pnl missing")
     if trade_count is None:
         missing.append("Candidate backtest trade_count missing")
-    if _metric(row, "max_drawdown") is None and _metric(row, "max_drawdown_pct") is None:
+    if baseline_backtest is not None and baseline_net_pnl is None:
+        missing.append("Baseline backtest net_pnl missing")
+    if max_drawdown is None:
         missing.append("Backtest max drawdown missing")
-    if _metric(row, "sharpe") is None and _metric(row, "sortino") is None:
+    if sharpe is None and sortino is None:
         missing.append("Backtest Sharpe/Sortino missing")
+    if turnover is None:
+        missing.append("Backtest turnover missing")
+    if not _concentration_available(row):
+        missing.append("Backtest concentration missing")
     cost_adjusted = (
         fee_bps is not None
         and slippage_bps is not None
@@ -592,15 +880,52 @@ def _backtest_assessment(
     explicit_bad = (
         (net_pnl is not None and net_pnl < rules.min_backtest_net_pnl)
         or (trade_count is not None and trade_count <= 0)
+        or (net_pnl_delta is not None and net_pnl_delta < 0.0)
     )
+    lower_sharpe_allowed = _lower_sharpe_allowed(
+        candidate_sharpe=sharpe,
+        baseline_sharpe=baseline_sharpe,
+        net_pnl_delta=net_pnl_delta,
+        brier_improvement=brier_improvement,
+        rules=rules,
+    )
+    lower_sharpe_unjustified = (
+        sharpe is not None
+        and baseline_sharpe is not None
+        and sharpe < baseline_sharpe
+        and not lower_sharpe_allowed
+    )
+    explicit_bad = explicit_bad or lower_sharpe_unjustified
     if explicit_bad:
-        risks.append("Candidate backtest utility is unacceptable.")
+        if net_pnl_delta is not None and net_pnl_delta < 0.0:
+            risks.append("Candidate cost-adjusted backtest underperforms the baseline.")
+        elif lower_sharpe_unjustified:
+            risks.append("Candidate Sharpe underperforms the baseline without enough Brier/net-PnL justification.")
+        else:
+            risks.append("Candidate backtest utility is unacceptable.")
     passed = not missing and not explicit_bad
-    summary = (
-        f"net_pnl {net_pnl:.4f}, trades {int(trade_count)}"
-        if net_pnl is not None and trade_count is not None
-        else "Backtest incomplete"
-    )
+    summary_parts = []
+    if net_pnl is not None and trade_count is not None:
+        summary_parts.append(f"net_pnl {net_pnl:.4f}, trades {int(trade_count)}")
+    if net_pnl_delta is not None:
+        summary_parts.append(f"delta_vs_baseline {net_pnl_delta:.4f}")
+    if max_drawdown is not None:
+        summary_parts.append(f"max_dd {max_drawdown:.4f}")
+    if sharpe is not None:
+        summary_parts.append(f"sharpe {sharpe:.4f}")
+        if baseline_sharpe is not None:
+            summary_parts.append(f"sharpe_delta_vs_baseline {sharpe - baseline_sharpe:.4f}")
+    elif sortino is not None:
+        summary_parts.append(f"sortino {sortino:.4f}")
+    if (
+        lower_sharpe_allowed
+        and brier_improvement is not None
+        and sharpe is not None
+        and baseline_sharpe is not None
+        and sharpe < baseline_sharpe
+    ):
+        summary_parts.append(f"lower_sharpe_allowed_brier_gap {brier_improvement:.4f}")
+    summary = ", ".join(summary_parts) if summary_parts else "Backtest incomplete"
     return _assessment(
         passed,
         summary,
@@ -609,6 +934,27 @@ def _backtest_assessment(
         next_actions,
         explicit_unacceptable=explicit_bad,
         quality_score=1.0 if passed else 0.0,
+    )
+
+
+def _lower_sharpe_allowed(
+    *,
+    candidate_sharpe: float | None,
+    baseline_sharpe: float | None,
+    net_pnl_delta: float | None,
+    brier_improvement: float | None,
+    rules: BootstrapRules,
+) -> bool:
+    if candidate_sharpe is None or baseline_sharpe is None:
+        return False
+    if candidate_sharpe >= baseline_sharpe:
+        return True
+    return (
+        brier_improvement is not None
+        and brier_improvement >= rules.allow_lower_sharpe_if_brier_gap
+        and candidate_sharpe > 0.0
+        and net_pnl_delta is not None
+        and net_pnl_delta > 0.0
     )
 
 
@@ -657,6 +1003,73 @@ def _serving_assessment(serving_readiness_path: Path | str | None) -> dict[str, 
     )
 
 
+def _shadow_assessment(
+    shadow_evaluation_path: Path | str | None,
+    rules: BootstrapRules,
+) -> dict[str, Any]:
+    missing: list[str] = []
+    risks: list[str] = []
+    next_actions: list[str] = []
+    if shadow_evaluation_path is None:
+        if not rules.require_shadow_evaluation:
+            return _assessment(
+                True,
+                "Shadow evaluation not supplied",
+                [],
+                [],
+                [],
+                quality_score=0.5,
+            )
+        missing.append("Shadow evaluation report missing")
+        risks.append("Live shadow behavior is unknown.")
+        next_actions.append("Run shadow mode and generate shadow evaluation JSON before promotion.")
+        return _assessment(False, "Shadow evaluation missing", missing, risks, next_actions)
+
+    report = _read_optional_json(Path(shadow_evaluation_path))
+    if report is None:
+        missing.append("Shadow evaluation report missing or unreadable")
+        risks.append("Live shadow behavior is unknown.")
+        next_actions.append("Regenerate shadow evaluation JSON from the shadow run.")
+        return _assessment(False, "Shadow evaluation missing", missing, risks, next_actions)
+    if not isinstance(report, dict):
+        missing.append("Shadow evaluation report is not a JSON object")
+        return _assessment(False, "Shadow evaluation malformed", missing, risks, next_actions)
+
+    overall_passed = bool(report.get("overall_passed") or report.get("passed"))
+    checks = report.get("checks") if isinstance(report.get("checks"), dict) else {}
+    failed_checks = sorted(
+        name
+        for name, check in checks.items()
+        if isinstance(check, dict) and not bool(check.get("passed"))
+    )
+    challenger_trigger_rate = _metric(report, "challenger_edge_trigger_rate")
+    schema_error_rate = _metric(report, "schema_error_rate")
+    latency = report.get("latency_ms") if isinstance(report.get("latency_ms"), dict) else {}
+    latency_summary = _shadow_latency_summary(latency, str(report.get("challenger_model_version", "")))
+    summary_parts = [f"shadow {'PASS' if overall_passed else 'FAIL'}"]
+    if challenger_trigger_rate is not None:
+        summary_parts.append(f"edge_trigger_rate {challenger_trigger_rate:.4f}")
+    if schema_error_rate is not None:
+        summary_parts.append(f"schema_error_rate {schema_error_rate:.4f}")
+    if latency_summary:
+        summary_parts.append(latency_summary)
+    if not overall_passed:
+        risks.append(
+            "Shadow evaluation failed promotion criteria"
+            + (f": {', '.join(failed_checks)}" if failed_checks else ".")
+        )
+        next_actions.append("Fix or rerun shadow evaluation until all pass/fail criteria clear.")
+    return _assessment(
+        overall_passed,
+        ", ".join(summary_parts),
+        missing,
+        risks,
+        next_actions,
+        explicit_unacceptable=not overall_passed,
+        quality_score=1.0 if overall_passed else 0.0,
+    )
+
+
 def _schema_assessment(
     candidate_input: BootstrapCandidateInput,
     candidate: _ModelRun,
@@ -698,7 +1111,8 @@ def _simplicity_assessment(
     manifest = candidate.manifest or {}
     best_params = manifest.get("best_params") if isinstance(manifest.get("best_params"), dict) else {}
     model_version = candidate.model_version.lower()
-    notes = _read_text_optional(None if complexity_notes_path is None else Path(complexity_notes_path))
+    notes_path = _complexity_notes_path(candidate, complexity_notes_path)
+    notes = _read_text_optional(notes_path)
     if "logreg" in model_version or "baseline" in model_version:
         return _assessment(True, "Simple/interpretable", [], [], [], quality_score=1.0)
     if "xgboost" in model_version or "xgb" in model_version:
@@ -708,6 +1122,20 @@ def _simplicity_assessment(
         compact = rounds is not None and rounds <= 100
         if shallow and compact:
             return _assessment(True, f"Shallow XGBoost depth {int(max_depth)}, rounds {int(rounds)}", [], [], [], quality_score=0.7)
+        if notes is not None:
+            missing_sections = _missing_complexity_note_sections(notes)
+            if not missing_sections:
+                return _assessment(
+                    True,
+                    "Model card complexity notes present",
+                    [],
+                    [],
+                    [],
+                    quality_score=0.8,
+                )
+            missing.extend(
+                f"Model complexity notes missing {section}" for section in missing_sections
+            )
     if notes is None:
         missing.append("Model complexity notes missing")
     return _assessment(
@@ -718,6 +1146,61 @@ def _simplicity_assessment(
         ["Add model complexity notes covering dependencies, retraining, interpretability, and feature stability."],
         quality_score=0.3,
     )
+
+
+def _complexity_notes_path(
+    candidate: _ModelRun,
+    complexity_notes_path: Path | str | None,
+) -> Path | None:
+    if complexity_notes_path is not None:
+        return Path(complexity_notes_path)
+    candidates = []
+    if candidate.model_dir is not None:
+        candidates.extend(
+            [
+                candidate.model_dir / "model_card.md",
+                candidate.model_dir / "model_complexity.md",
+            ]
+        )
+    candidates.append(Path("docs") / "models" / f"{candidate.model_version}.md")
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _missing_complexity_note_sections(notes: str) -> tuple[str, ...]:
+    lower = notes.lower()
+    requirements = {
+        "dependencies": ("dependencies", "dependency"),
+        "training cost": ("training cost", "training time", "retraining cost"),
+        "retraining": ("retraining", "retrain"),
+        "interpretability": ("interpretability", "feature importance", "contribution"),
+        "feature stability": ("feature stability", "schema stability", "stable features"),
+        "monitoring": ("monitoring", "monitor"),
+    }
+    return tuple(
+        section
+        for section, keywords in requirements.items()
+        if not any(keyword in lower for keyword in keywords)
+    )
+
+
+def _shadow_latency_summary(latency: dict[str, Any], challenger_model_version: str) -> str:
+    if not latency:
+        return ""
+    summary = latency.get(challenger_model_version) if challenger_model_version else None
+    if not isinstance(summary, dict):
+        candidates = [value for value in latency.values() if isinstance(value, dict)]
+        summary = candidates[-1] if candidates else None
+    if not isinstance(summary, dict):
+        return ""
+    p95 = _metric(summary, "p95")
+    return "" if p95 is None else f"shadow_p95 {p95:.4f}ms"
+
+
+def _join_summaries(*items: object) -> str:
+    return "; ".join(str(item) for item in items if str(item))
 
 
 def _baseline_row(
@@ -790,6 +1273,25 @@ def _metric(row: dict[str, Any] | None, name: str) -> float | None:
     except (TypeError, ValueError):
         return None
     return result if math.isfinite(result) else None
+
+
+def _first_metric(row: dict[str, Any] | None, names: tuple[str, ...]) -> float | None:
+    for name in names:
+        value = _metric(row, name)
+        if value is not None:
+            return value
+    return None
+
+
+def _concentration_available(row: dict[str, Any] | None) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if _metric(row, "top1_market_abs_net_pnl_share") is not None:
+        return True
+    concentration = row.get("concentration")
+    if not isinstance(concentration, dict):
+        return False
+    return _metric(concentration, "top1_abs_net_pnl_share") is not None
 
 
 def _read_optional_json(path: Path | None) -> Any:

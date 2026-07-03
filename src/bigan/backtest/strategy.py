@@ -32,6 +32,8 @@ class PredictionSignal:
     target_ts: int | None = None
     market_implied_prob: float | None = None
     settlement_price: float | None = None
+    outcome_side: str | None = None
+    family_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,9 +47,11 @@ class ThresholdTrade:
     market_implied_prob: float
     edge: float
     execution: SimulatedTakerTrade
+    outcome_side: str | None = None
+    realized_label: bool | None = None
 
-    def to_dict(self) -> dict[str, float | int | str]:
-        return {
+    def to_dict(self) -> dict[str, float | int | str | bool]:
+        row = {
             "threshold": self.threshold,
             "edge_threshold": self.threshold,
             "source": self.source,
@@ -57,6 +61,11 @@ class ThresholdTrade:
             "edge": self.edge,
             **self.execution.to_dict(),
         }
+        if self.outcome_side is not None:
+            row["outcome_side"] = self.outcome_side
+        if self.realized_label is not None:
+            row["realized_label"] = self.realized_label
+        return row
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +86,8 @@ class ThresholdStrategySummary:
     average_gross_return: float | None
     average_net_return: float | None
     win_rate: float | None
+    brier_score: float | None
+    brier_sample_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +97,20 @@ class ThresholdStrategyResult:
     threshold: float
     trades: tuple[ThresholdTrade, ...]
     summary: ThresholdStrategySummary
+
+
+@dataclass(frozen=True, slots=True)
+class PerFamilyThresholdSelection:
+    """Best edge threshold and diagnostics for one market family."""
+
+    family_key: str
+    selected_threshold: float | None
+    selected_net_pnl: float | None
+    selected_trade_count: int
+    selected_expected_value: float | None
+    selected_trades_per_day: float | None
+    eligible_thresholds: tuple[float, ...]
+    summaries: tuple[ThresholdStrategySummary, ...]
 
 
 def run_threshold_strategy(
@@ -159,6 +184,10 @@ def run_threshold_strategy(
                 market_implied_prob=market_implied_prob,
                 edge=edge,
                 execution=execution,
+                outcome_side=signal.outcome_side,
+                realized_label=(
+                    None if signal.settlement_price is None else signal.settlement_price >= 0.5
+                ),
             )
         )
         next_available_ts = execution.exit_ts
@@ -176,6 +205,67 @@ def run_threshold_strategy(
             trades=trade_tuple,
         ),
     )
+
+
+def run_per_family_threshold_search(
+    *,
+    signals: Sequence[PredictionSignal],
+    quotes: Sequence[Quote],
+    settings: TakerExecutionSettings,
+    thresholds: Sequence[float] = (0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50),
+    hold_ms: int = DEFAULT_HOLD_MS,
+    min_expected_value: float = 0.0,
+    max_trades_per_family_per_day: float | None = None,
+) -> tuple[PerFamilyThresholdSelection, ...]:
+    """Search edge thresholds independently by market family."""
+
+    groups: dict[str, list[PredictionSignal]] = {}
+    for signal in signals:
+        key = signal.family_key or _family_key_from_signal(signal)
+        groups.setdefault(key, []).append(signal)
+
+    selections: list[PerFamilyThresholdSelection] = []
+    for family_key, family_signals in sorted(groups.items()):
+        results = run_threshold_sweep(
+            signals=family_signals,
+            quotes=quotes,
+            settings=settings,
+            thresholds=thresholds,
+            hold_ms=hold_ms,
+        )
+        eligible = [
+            result
+            for result in results
+            if _threshold_summary_eligible(
+                result.summary,
+                signals=family_signals,
+                min_expected_value=min_expected_value,
+                max_trades_per_day=max_trades_per_family_per_day,
+            )
+        ]
+        selected = max(eligible, key=lambda result: result.summary.net_pnl) if eligible else None
+        selected_summary = None if selected is None else selected.summary
+        selections.append(
+            PerFamilyThresholdSelection(
+                family_key=family_key,
+                selected_threshold=None if selected_summary is None else selected_summary.threshold,
+                selected_net_pnl=None if selected_summary is None else selected_summary.net_pnl,
+                selected_trade_count=0 if selected_summary is None else selected_summary.trade_count,
+                selected_expected_value=(
+                    None
+                    if selected_summary is None or selected_summary.trade_count == 0
+                    else selected_summary.net_pnl / selected_summary.trade_count
+                ),
+                selected_trades_per_day=(
+                    None
+                    if selected_summary is None
+                    else _trades_per_day(selected_summary.trade_count, family_signals)
+                ),
+                eligible_thresholds=tuple(result.threshold for result in eligible),
+                summaries=tuple(result.summary for result in results),
+            )
+        )
+    return tuple(selections)
 
 
 def run_threshold_sweep(
@@ -198,6 +288,39 @@ def run_threshold_sweep(
         )
         for threshold in thresholds
     )
+
+
+def _threshold_summary_eligible(
+    summary: ThresholdStrategySummary,
+    *,
+    signals: Sequence[PredictionSignal],
+    min_expected_value: float,
+    max_trades_per_day: float | None,
+) -> bool:
+    if summary.trade_count <= 0:
+        return False
+    expected_value = summary.net_pnl / summary.trade_count
+    if expected_value < min_expected_value:
+        return False
+    trades_per_day = _trades_per_day(summary.trade_count, signals)
+    return max_trades_per_day is None or trades_per_day <= max_trades_per_day
+
+
+def _trades_per_day(trade_count: int, signals: Sequence[PredictionSignal]) -> float:
+    if trade_count <= 0 or not signals:
+        return 0.0
+    min_ts = min(signal.ts for signal in signals)
+    max_ts = max(signal.ts for signal in signals)
+    span_days = max(1.0 / 24.0, (max_ts - min_ts) / 86_400_000)
+    return trade_count / span_days
+
+
+def _family_key_from_signal(signal: PredictionSignal) -> str:
+    if signal.outcome_side:
+        symbol = signal.outcome_side.upper()
+    else:
+        symbol = signal.source_symbol or signal.source or "unknown"
+    return symbol
 
 
 def save_threshold_strategy_outputs(
@@ -237,6 +360,11 @@ def _summarize_strategy(
     gross_return_sum = sum(trade.execution.gross_return for trade in trades)
     net_return_sum = sum(trade.execution.net_return for trade in trades)
     wins = sum(1 for trade in trades if trade.execution.net_pnl > 0)
+    brier_components = [
+        (trade.prob_up_15m - (1.0 if trade.realized_label else 0.0)) ** 2
+        for trade in trades
+        if trade.realized_label is not None
+    ]
     return ThresholdStrategySummary(
         threshold=threshold,
         edge_threshold=threshold,
@@ -252,6 +380,8 @@ def _summarize_strategy(
         average_gross_return=None if trade_count == 0 else gross_return_sum / trade_count,
         average_net_return=None if trade_count == 0 else net_return_sum / trade_count,
         win_rate=None if trade_count == 0 else wins / trade_count,
+        brier_score=None if not brier_components else sum(brier_components) / len(brier_components),
+        brier_sample_count=len(brier_components),
     )
 
 

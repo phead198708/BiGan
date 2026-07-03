@@ -43,10 +43,17 @@ def open_warehouse(root: Path | str, *, read_only: bool = True) -> Iterator[duck
             base = root / table
             if not base.exists():
                 continue
-            glob = str(base / "**/*.parquet")
+            paths = [
+                path
+                for path in sorted(base.glob("**/*.parquet"))
+                if _is_complete_parquet_file(path)
+            ]
+            if not paths:
+                continue
             conn.execute(
                 f"CREATE OR REPLACE VIEW {table} AS "
-                f"SELECT * FROM read_parquet({_sql_string(glob)}, hive_partitioning=true)"
+                f"SELECT * FROM read_parquet("
+                f"{_sql_string_list(paths)}, hive_partitioning=true, union_by_name=true)"
             )
         yield conn
     finally:
@@ -72,3 +79,20 @@ def warehouse_summary(root: Path | str) -> dict[str, int]:
 
 def _sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _sql_string_list(values: list[Path]) -> str:
+    return "[" + ", ".join(_sql_string(str(value)) for value in values) + "]"
+
+
+def _is_complete_parquet_file(path: Path) -> bool:
+    try:
+        if path.stat().st_size < 8:
+            return False
+        with path.open("rb") as handle:
+            header = handle.read(4)
+            handle.seek(-4, 2)
+            footer = handle.read(4)
+    except OSError:
+        return False
+    return header == b"PAR1" and footer == b"PAR1"

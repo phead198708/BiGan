@@ -76,8 +76,10 @@ def run_etl_batch(
     warehouse_dir: Path | str,
     lag_seconds: float = 60.0,
     max_rows_per_partition: int = 50_000,
+    max_files_per_batch: int | None = None,
     symbol_mapper: SymbolMapper | None = None,
     symbol_mapping_path: Path | str | None = None,
+    processed_manifest_path: Path | str | None = None,
     timestamp_future_grace_seconds: float = 5.0,
     timestamp_stale_threshold_seconds: float = 600.0,
 ) -> EtlReport:
@@ -102,8 +104,26 @@ def run_etl_batch(
     trade_deduper = CrossBatchTradeDeduper(warehouse_dir)
     ingest_ts_now_ms = int(time.time() * 1000)
 
-    files = _eligible_files(raw_dir, lag_seconds)
-    logger.info("etl.start", extra={"files": len(files), "raw_dir": str(raw_dir)})
+    processed_manifest = None if processed_manifest_path is None else Path(processed_manifest_path)
+    processed_keys = _load_processed_manifest(processed_manifest)
+    files = [
+        path
+        for path in _eligible_files(raw_dir, lag_seconds)
+        if _processed_manifest_key(path) not in processed_keys
+    ]
+    if max_files_per_batch is not None:
+        if max_files_per_batch <= 0:
+            raise ValueError("max_files_per_batch must be positive")
+        files = files[:max_files_per_batch]
+    processed_this_run: list[Path] = []
+    logger.info(
+        "etl.start",
+        extra={
+            "files": len(files),
+            "raw_dir": str(raw_dir),
+            "max_files_per_batch": max_files_per_batch,
+        },
+    )
 
     with WarehouseWriter(
         warehouse_dir, max_rows_per_partition=max_rows_per_partition
@@ -128,6 +148,7 @@ def run_etl_batch(
                 logger.exception("etl.file_failed", extra={"src": str(src)})
                 raise
             report.files_processed += 1
+            processed_this_run.append(src)
 
         # Candle aggregation runs after all raw rows are in flight to ensure
         # OHLC reflects the full set of events seen during this batch.
@@ -139,6 +160,7 @@ def run_etl_batch(
     for table in TABLE_NAMES:
         report.rows_per_table[table] = writer.stats.rows_written.get(table, 0)
     report.quarantined_by_rule = dict(validator.stats.rows_quarantined_by_rule)
+    _append_processed_manifest(processed_manifest, processed_this_run)
 
     logger.info(
         "etl.done",
@@ -172,6 +194,29 @@ def _eligible_files(raw_dir: Path, lag_seconds: float) -> list[Path]:
         except FileNotFoundError:
             continue
     return out
+
+
+def _processed_manifest_key(path: Path) -> str:
+    return path.name
+
+
+def _load_processed_manifest(path: Path | None) -> set[str]:
+    if path is None or not path.exists():
+        return set()
+    return {
+        Path(line.strip()).name
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    }
+
+
+def _append_processed_manifest(path: Path | None, processed: list[Path]) -> None:
+    if path is None or not processed:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fp:
+        for src in processed:
+            fp.write(_processed_manifest_key(src) + "\n")
 
 
 def _process_file(

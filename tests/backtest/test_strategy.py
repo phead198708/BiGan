@@ -12,6 +12,7 @@ from bigan.backtest import (
     PredictionSignal,
     Quote,
     TakerExecutionSettings,
+    run_per_family_threshold_search,
     run_threshold_strategy,
     run_threshold_sweep,
     save_threshold_strategy_outputs,
@@ -194,3 +195,36 @@ def test_threshold_strategy_uses_explicit_market_implied_probability() -> None:
 
     assert result.summary.trade_count == 0
     assert result.summary.threshold_signals == 0
+
+
+def test_per_family_threshold_search_selects_independent_thresholds() -> None:
+    selections = run_per_family_threshold_search(
+        signals=[
+            PredictionSignal(
+                ts=0,
+                prob_up_15m=0.80,
+                market_implied_prob=0.51,
+                family_key="BTC-15M",
+                source_symbol="btc-up",
+            ),
+            PredictionSignal(
+                ts=DEFAULT_HOLD_MS + 1_000,
+                prob_up_15m=0.66,
+                market_implied_prob=0.57,
+                family_key="ETH-5M",
+                source_symbol="eth-up",
+            ),
+        ],
+        quotes=_quotes(),
+        settings=TakerExecutionSettings(fee_bps=0, slippage_bps=0, latency_ms=0),
+        thresholds=[0.05, 0.20, 0.30],
+        min_expected_value=-1.0,
+    )
+
+    by_family = {row.family_key: row for row in selections}
+
+    assert set(by_family) == {"BTC-15M", "ETH-5M"}
+    assert by_family["BTC-15M"].selected_threshold == pytest.approx(0.05)
+    assert by_family["BTC-15M"].eligible_thresholds == pytest.approx((0.05, 0.20))
+    assert by_family["ETH-5M"].selected_threshold == pytest.approx(0.05)
+    assert by_family["ETH-5M"].selected_trade_count == 1
