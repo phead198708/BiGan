@@ -61,6 +61,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     O_MIN_TOP1_HIT_RATE,
     O_MODEL_PREDICTED_VARIANT,
     O_RELAXED_DIAGNOSTIC_MAX_MEAN_REGRET,
+    O_REPORT_ONLY_EVALUATION_FIELDS,
     O_REQUIRED_DECISION_ACTION_FAMILIES,
     O_SHADOW_P_UP_SELECTION_BUFFER_TARGET,
     O_SOURCE_CANDIDATE_COMPARISON_SCHEMA_VERSION,
@@ -104,6 +105,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     _v8_future_unseen_holdout_plan_report,
     _v8_future_unseen_holdout_policy_readiness_report,
     _v8_future_unseen_holdout_raw_collection_manifest,
+    _v8_initial_runtime_state,
     _v8_paper_candidate_gate_design_report,
     run_polymarket_o_replay_aligned_source_ranking,
 )
@@ -135,6 +137,12 @@ from bigan.v8.polymarket.training.sell_before_close_source_candidates import (
     SELL_BEFORE_CLOSE_N2_NON_LEAKY_UP_REPLAY_ALIGNED_FEATURE_PROXY_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_N_UP_REPLAY_ALIGNED_ACTION_VALUE_CANDIDATE_NAME,
     SELL_BEFORE_CLOSE_SIDE_BALANCED_RANKING_CANDIDATE_NAME,
+)
+from examples.v8.generate_o_v8_future_unseen_holdout_raw_input import (
+    FORBIDDEN_HOLDOUT_ROW_FIELDS,
+    _filter_runtime_quality_rows,
+    _prepare_runtime_quality_action_entry,
+    _runtime_input_quality_rule_counts,
 )
 
 
@@ -6417,6 +6425,139 @@ def _write_future_holdout_raw_manifest(
         encoding="utf-8",
     )
     return path
+
+
+def _contains_forbidden_holdout_field(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            key in FORBIDDEN_HOLDOUT_ROW_FIELDS
+            or _contains_forbidden_holdout_field(child)
+            for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_forbidden_holdout_field(child) for child in value)
+    return False
+
+
+def test_o_v8_future_holdout_generator_prepares_runtime_quality_fields() -> None:
+    guard_config = _v8_execution_guard_config()
+    initial_state = _v8_initial_runtime_state(guard_config)
+    entry = {
+        "decision_group_id": "future-source|market|10000",
+        "market_id": "market",
+        "decision_ts": 10_000,
+        "selected_action": "BUY_UP_SELL_BEFORE_CLOSE",
+        "selected_side": "UP",
+        "selected_action_family": "SELL_BEFORE_CLOSE",
+        "corrected_model_score": 0.90,
+        "raw_model_score": 0.85,
+        "score_components": {"model_predicted_score": 0.90},
+        "high_score_flag": True,
+        "p_up": 0.70,
+        "p_down": 0.30,
+        "p_up_action_disagreement": False,
+        "microstructure_snapshot": {
+            "book_staleness_ms": 500.0,
+            "spread_bps": 200.0,
+            "queue_fill_proxy": 0.90,
+            "time_to_close_seconds": None,
+        },
+        "reference_price_feature_provenance": {
+            "provenance_valid": True,
+            "decision_ts": 10_000,
+            "max_input_ts": 9_999,
+            "source_field_name": "future_holdout_reference_mid",
+        },
+        "runtime_field_backfill_sources": {
+            "microstructure_snapshot.time_to_close_seconds": {
+                "field": "microstructure_snapshot.time_to_close_seconds",
+                "value": 180.0,
+                "source_field_name": "polymarket_feature_rows.features.time_to_close_seconds",
+                "source_timestamp": 9_999,
+                "max_input_ts": 9_999,
+                "decision_ts": 10_000,
+                "deterministic_rule_id": (
+                    "backfill_time_to_close_from_decision_time_feature_or_market_schedule"
+                ),
+                "provenance_valid": True,
+                "reason_codes": ["decision_time_time_to_close_source_available"],
+            }
+        },
+        "full_5_action_ranking": [
+            {
+                "selected_action": "NO_TRADE",
+                "realized_trade_pnl": 1.0,
+                "oracle_action": "BUY_UP_SELL_BEFORE_CLOSE",
+            }
+        ],
+        "oracle_executable_best_action": "BUY_UP_SELL_BEFORE_CLOSE",
+        "realized_replay_return_report_only": 1.0,
+        "future_return": 1.0,
+        "settlement_outcome": "UP",
+    }
+
+    prepared = _prepare_runtime_quality_action_entry(
+        entry,
+        guard_config=guard_config,
+        initial_runtime_state=initial_state,
+    )
+
+    assert {
+        *O_REPORT_ONLY_EVALUATION_FIELDS,
+        "oracle_action",
+        "oracle_executable_best_action",
+        "future_return",
+        "settlement_outcome",
+    } <= FORBIDDEN_HOLDOUT_ROW_FIELDS
+    assert _contains_forbidden_holdout_field(prepared) is False
+    assert prepared["microstructure_snapshot"]["time_to_close_seconds"] == 180.0
+    assert prepared["runtime_exposure_state"]["runtime_state_validation_passed"] is True
+    assert prepared["runtime_exposure_state"]["current_total_exposure"] == 0.0
+    assert prepared["configured_execution_limits"]["max_total_exposure"] == 1.0
+    assert prepared["runtime_input_quality_rules_applied"] is True
+    assert _runtime_input_quality_rule_counts([prepared]) == {
+        "attach_initial_simulated_runtime_exposure_state": 1,
+        "backfill_time_to_close_from_decision_time_feature_or_market_schedule": 1,
+    }
+
+
+def test_o_v8_future_holdout_generator_filters_late_or_stale_rows() -> None:
+    guard_config = _v8_execution_guard_config()
+    initial_state = _v8_initial_runtime_state(guard_config)
+    safe = _prepare_runtime_quality_action_entry(
+        _future_holdout_raw_row(1, decision_ts=10_001),
+        guard_config=guard_config,
+        initial_runtime_state=initial_state,
+    )
+    late = _prepare_runtime_quality_action_entry(
+        _future_holdout_raw_row(2, decision_ts=10_002),
+        guard_config=guard_config,
+        initial_runtime_state=initial_state,
+    )
+    late["microstructure_snapshot"]["time_to_close_seconds"] = 45.0
+    stale = _prepare_runtime_quality_action_entry(
+        _future_holdout_raw_row(3, decision_ts=10_003),
+        guard_config=guard_config,
+        initial_runtime_state=initial_state,
+    )
+    stale["microstructure_snapshot"]["book_staleness_ms"] = 3_500.0
+
+    accepted, rejected = _filter_runtime_quality_rows(
+        [safe, late, stale],
+        min_selected_time_to_close_seconds=120.0,
+        max_selected_book_staleness_ms=2_000.0,
+    )
+
+    assert [row["decision_group_id"] for row in accepted] == [
+        safe["decision_group_id"]
+    ]
+    rejected_by_id = {row["decision_group_id"]: row for row in rejected}
+    assert rejected_by_id[late["decision_group_id"]][
+        "runtime_input_quality_reason_codes"
+    ] == ["runtime_quality_time_to_close_below_execution_threshold"]
+    assert rejected_by_id[stale["decision_group_id"]][
+        "runtime_input_quality_reason_codes"
+    ] == ["runtime_quality_book_stale"]
 
 
 def test_o_v8_future_unseen_holdout_reports_pass_diagnostic_but_stay_closed(
