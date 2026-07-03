@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
+    O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
+    O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE,
     PINNED_ISSUE_160_MANIFEST_SHA256,
     PolymarketOV8PaperFreshLoopConfig,
     run_polymarket_o_v8_paper_fresh_loop,
@@ -72,6 +74,11 @@ def main() -> None:
         if args.public_data_snapshot is not None
         else None
     )
+    public_data_source = (
+        O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE
+        if public_cycles is not None
+        else O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER
+    )
     config = PolymarketOV8PaperFreshLoopConfig(
         run_id=args.run_id,
         output_dir=args.output_dir,
@@ -83,6 +90,7 @@ def main() -> None:
         max_cycles=args.max_cycles,
         sleep_seconds=args.sleep_seconds,
         public_data_cycles=public_cycles,
+        public_data_source=public_data_source,
         overwrite_existing=args.overwrite_existing,
     )
     result = run_polymarket_o_v8_paper_fresh_loop(config)
@@ -91,6 +99,10 @@ def main() -> None:
     print(f"output_dir={result.output_dir}")
     print(f"paper_fresh_loop_enabled={manifest['paper_fresh_loop_enabled']}")
     print(f"paper_fresh_loop_mode={manifest['paper_fresh_loop_mode']}")
+    print(
+        "paper_fresh_loop_public_data_source="
+        f"{manifest['paper_fresh_loop_public_data_source']}"
+    )
     print(f"paper_fresh_loop_cycle_count={manifest['paper_fresh_loop_cycle_count']}")
     print(f"paper_fresh_order_intent_count={manifest['paper_fresh_order_intent_count']}")
     print(f"paper_fresh_fill_count={manifest['paper_fresh_fill_count']}")

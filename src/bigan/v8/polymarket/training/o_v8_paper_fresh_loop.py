@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.corpus.contracts import BTC_UPDOWN_MARKET_HORIZONS_MS
+from bigan.v8.polymarket.recorder.contracts import PolymarketRealCorpusRecorderConfig
+from bigan.v8.polymarket.recorder.public_provider import (
+    PolymarketPublicHTTPRealCorpusProvider,
+    RealCorpusPublicProviderError,
+)
 from bigan.v8.polymarket.training.contracts import (
     POLYMARKET_POLICY_TRAINING_PHASE,
     compact_safety_fields,
@@ -61,6 +67,12 @@ O_V8_PAPER_FRESH_FORBIDDEN_PUBLIC_DATA_FIELDS: tuple[str, ...] = (
     "future_outcome",
     "total_polymarket_pnl",
 )
+O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER = "read_only_public_provider"
+O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE = "snapshot_fixture"
+O_V8_PAPER_FRESH_PUBLIC_DATA_SOURCES = (
+    O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
+    O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE,
+)
 
 _FALSE_SAFETY_FIELDS = (
     "capital_at_risk",
@@ -86,7 +98,8 @@ class PolymarketOV8PaperFreshLoopConfig:
     max_cycles: int = 1
     sleep_seconds: float = 0.0
     public_data_cycles: tuple[tuple[dict[str, Any], ...], ...] | None = None
-    public_data_source: str = "read_only_public_provider"
+    public_data_source: str = O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER
+    public_provider: Any | None = None
     expected_paper_candidate_unlock_manifest_sha256: str | None = (
         PINNED_ISSUE_160_MANIFEST_SHA256
     )
@@ -107,6 +120,15 @@ class PolymarketOV8PaperFreshLoopConfig:
             raise ValueError("single_cycle mode requires max_cycles=1")
         if self.sleep_seconds < 0.0:
             raise ValueError("sleep_seconds must be non-negative")
+        if self.public_data_source not in O_V8_PAPER_FRESH_PUBLIC_DATA_SOURCES:
+            raise ValueError(
+                "public_data_source must be read_only_public_provider or snapshot_fixture"
+            )
+        if (
+            self.public_data_source == O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE
+            and self.public_data_cycles is None
+        ):
+            raise ValueError("snapshot_fixture mode requires public_data_cycles")
         if self.paper_only is not True:
             raise ValueError("paper_only must be true")
         if self.capital_at_risk is not False:
@@ -152,10 +174,13 @@ def run_polymarket_o_v8_paper_fresh_loop(
 
     unlock_evidence = _verify_paper_candidate_unlock(config)
     unlock_verified = bool(unlock_evidence["paper_candidate_unlock_verified"])
-    public_cycles = _resolve_public_data_cycles(config, unlock_evidence)
+    public_data = _resolve_public_data_cycles(config, unlock_evidence)
+    public_cycles = public_data["public_data_cycles"]
+    public_data_collection_report = public_data["public_data_collection_report"]
     execution_result = _execute_fresh_public_cycles(
         config=config,
         public_cycles=public_cycles,
+        public_data_source=public_data_collection_report["public_data_source"],
         unlock_verified=unlock_verified,
     )
     intents = execution_result["paper_order_intents"]
@@ -165,6 +190,7 @@ def run_polymarket_o_v8_paper_fresh_loop(
     run_report = _fresh_loop_run_report(
         config=config,
         unlock_evidence=unlock_evidence,
+        public_data_collection_report=public_data_collection_report,
         public_cycles=public_cycles,
         execution_result=execution_result,
         intents=intents,
@@ -256,6 +282,7 @@ def run_polymarket_o_v8_paper_fresh_loop(
         artifact_paths=artifact_paths,
         artifact_hashes=artifact_hashes,
         unlock_evidence=unlock_evidence,
+        public_data_collection_report=public_data_collection_report,
         run_report=run_report,
         fill_report=fill_report,
         safety_report=safety_report,
@@ -358,35 +385,543 @@ def _verify_paper_candidate_unlock(
 def _resolve_public_data_cycles(
     config: PolymarketOV8PaperFreshLoopConfig,
     unlock_evidence: dict[str, Any],
-) -> list[list[dict[str, Any]]]:
+) -> dict[str, Any]:
     if config.public_data_cycles is not None:
-        return [[dict(row) for row in cycle] for cycle in config.public_data_cycles]
-    manifest = unlock_evidence.get("unlock_manifest") or {}
-    intent_path = _resolve_unlock_artifact_path(
-        Path(unlock_evidence["paper_candidate_unlock_dir"]),
-        (manifest.get("artifact_paths") or {}).get("paper_order_intent_log") or "",
+        cycles = [
+            [dict(row) for row in cycle] for cycle in config.public_data_cycles
+        ]
+        return {
+            "public_data_cycles": cycles,
+            "public_data_collection_report": _snapshot_fixture_collection_report(
+                config=config,
+                cycles=cycles,
+                unlock_evidence=unlock_evidence,
+            ),
+        }
+    return _collect_read_only_public_provider_cycles(
+        config=config,
+        unlock_evidence=unlock_evidence,
     )
-    if not intent_path.exists():
-        return [[] for _ in range(config.max_cycles)]
-    unlock_intents = _read_jsonl(intent_path)
-    cycles: list[list[dict[str, Any]]] = [[] for _ in range(config.max_cycles)]
-    for index, intent in enumerate(unlock_intents):
-        cycle_index = index % config.max_cycles
-        cycles[cycle_index].append(
-            _public_row_from_unlock_intent(
-                intent=intent,
-                run_id=config.run_id,
-                cycle_index=cycle_index,
-                row_index=index,
+
+
+def _snapshot_fixture_collection_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    cycles: list[list[dict[str, Any]]],
+    unlock_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    row_count = sum(len(cycle) for cycle in cycles)
+    return {
+        "public_data_source": O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE,
+        "public_data_collection_mode": "offline_snapshot_fixture",
+        "public_provider_class": None,
+        "public_provider_read_only": True,
+        "paper_fresh_provider_collection_failed": False,
+        "public_data_collection_reason_codes": [],
+        "public_data_cycle_count": len(cycles),
+        "public_data_row_count": row_count,
+        "public_market_count": len(
+            {str(row.get("market_id")) for cycle in cycles for row in cycle}
+        ),
+        "public_orderbook_row_count": None,
+        "public_trade_row_count": None,
+        "public_btc_feature_candle_row_count": None,
+        "public_feature_row_count": row_count,
+        "frozen_o_action_rank_reference_source": "issue_160_paper_candidate_unlock_manifest",
+        "frozen_o_action_rank_reference_sha256": unlock_evidence[
+            "observed_manifest_sha256"
+        ],
+        "scoring_rule_id": "snapshot_fixture_pre_scored_rows",
+        "uses_paper_intent_logs_as_fresh_public_data": False,
+        "uses_validation_outcomes_for_tuning": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "thresholds_tuned": False,
+        "forbidden_outcome_fields_used": [],
+    }
+
+
+def _collect_read_only_public_provider_cycles(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    unlock_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    provider = config.public_provider or PolymarketPublicHTTPRealCorpusProvider()
+    provider_class = provider.__class__.__name__
+    provider_safety = _public_provider_safety(provider)
+    base_report = {
+        "public_data_source": O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
+        "public_data_collection_mode": "read_only_public_provider_live_snapshot",
+        "public_provider_class": provider_class,
+        **provider_safety,
+        "frozen_o_action_rank_reference_source": "issue_160_paper_candidate_unlock_manifest",
+        "frozen_o_action_rank_reference_sha256": unlock_evidence[
+            "observed_manifest_sha256"
+        ],
+        "scoring_rule_id": "frozen_v8_o_public_provider_feature_score_v1",
+        "uses_paper_intent_logs_as_fresh_public_data": False,
+        "uses_validation_outcomes_for_tuning": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "thresholds_tuned": False,
+        "forbidden_outcome_fields_used": [],
+    }
+    if not provider_safety["public_provider_safety_passed"]:
+        report = {
+            **base_report,
+            "paper_fresh_provider_collection_failed": True,
+            "public_data_collection_reason_codes": [
+                "read_only_public_provider_safety_flags_invalid"
+            ],
+            "public_data_cycle_count": config.max_cycles,
+            "public_data_row_count": 0,
+            "public_market_count": 0,
+            "public_orderbook_row_count": 0,
+            "public_trade_row_count": 0,
+            "public_btc_feature_candle_row_count": 0,
+            "public_feature_row_count": 0,
+            "provider_exception_type": None,
+            "provider_exception_message": None,
+        }
+        return {
+            "public_data_cycles": [[] for _ in range(config.max_cycles)],
+            "public_data_collection_report": report,
+        }
+
+    recorder_config = PolymarketRealCorpusRecorderConfig(
+        run_id=f"{config.run_id}-fresh-public-provider",
+        output_dir=Path(config.output_dir) / config.run_id / "_public_provider_input",
+        market_families=tuple(BTC_UPDOWN_MARKET_HORIZONS_MS),
+        mock_public_data=False,
+        build_phase2_corpus=False,
+    )
+    try:
+        markets = provider.market_rows(recorder_config)
+        orderbooks = provider.orderbook_rows(markets, recorder_config)
+        trades = provider.trade_rows(markets, recorder_config)
+        btc_candles = provider.btc_feature_candle_rows(markets, recorder_config)
+        rows = _fresh_public_rows_from_provider_payloads(
+            run_id=config.run_id,
+            markets=markets,
+            orderbooks=orderbooks,
+            trades=trades,
+            btc_candles=btc_candles,
+        )
+        reason_codes: list[str] = []
+        collection_failed = False
+        if not rows:
+            collection_failed = True
+            reason_codes.append("read_only_public_provider_no_decision_feature_rows")
+    except RealCorpusPublicProviderError as exc:
+        markets = []
+        orderbooks = []
+        trades = []
+        btc_candles = []
+        rows = []
+        collection_failed = True
+        reason_codes = list(exc.reason_codes) or [
+            "read_only_public_provider_collection_failed"
+        ]
+        exception_type = exc.__class__.__name__
+        exception_message = str(exc)
+    except Exception as exc:  # noqa: BLE001
+        markets = []
+        orderbooks = []
+        trades = []
+        btc_candles = []
+        rows = []
+        collection_failed = True
+        reason_codes = ["read_only_public_provider_collection_failed"]
+        exception_type = exc.__class__.__name__
+        exception_message = str(exc)
+    else:
+        exception_type = None
+        exception_message = None
+
+    cycles = _partition_public_rows(rows, config.max_cycles)
+    report = {
+        **base_report,
+        "paper_fresh_provider_collection_failed": collection_failed,
+        "public_data_collection_reason_codes": sorted(set(reason_codes)),
+        "public_data_cycle_count": len(cycles),
+        "public_data_row_count": len(rows),
+        "public_market_count": len(markets),
+        "public_orderbook_row_count": len(orderbooks),
+        "public_trade_row_count": len(trades),
+        "public_btc_feature_candle_row_count": len(btc_candles),
+        "public_feature_row_count": len(rows),
+        "provider_exception_type": exception_type,
+        "provider_exception_message": exception_message,
+    }
+    return {
+        "public_data_cycles": cycles,
+        "public_data_collection_report": report,
+    }
+
+
+def _public_provider_safety(provider: Any) -> dict[str, Any]:
+    required = {
+        "read_only": True,
+        "write_capable": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "broker_exchange_write_enabled": False,
+        "live_exchange_write_enabled": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    checks = {
+        field_name: {
+            "expected": expected,
+            "observed": getattr(provider, field_name, None),
+            "passed": getattr(provider, field_name, None) is expected,
+        }
+        for field_name, expected in required.items()
+    }
+    return {
+        "public_provider_read_only": checks["read_only"]["passed"],
+        "public_provider_safety_passed": all(
+            row["passed"] is True for row in checks.values()
+        ),
+        "public_provider_safety_checks": checks,
+    }
+
+
+def _fresh_public_rows_from_provider_payloads(
+    *,
+    run_id: str,
+    markets: list[dict[str, Any]],
+    orderbooks: list[dict[str, Any]],
+    trades: list[dict[str, Any]],
+    btc_candles: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    del trades
+    markets_by_id = {str(market.get("market_id")): dict(market) for market in markets}
+    books_by_market = _latest_public_books_by_market(orderbooks)
+    candles = sorted(btc_candles, key=lambda row: int(row.get("available_at_ts") or row.get("ts") or 0))
+    rows: list[dict[str, Any]] = []
+    for market_id, pair in sorted(books_by_market.items()):
+        market = markets_by_id.get(market_id)
+        if market is None or "UP" not in pair or "DOWN" not in pair:
+            continue
+        up = pair["UP"]
+        down = pair["DOWN"]
+        decision_ts = max(
+            _book_available_at(up),
+            _book_available_at(down),
+            int(market.get("market_start_ts") or 0),
+        )
+        market_end_ts = int(market.get("market_end_ts") or 0)
+        if decision_ts <= 0 or market_end_ts <= decision_ts:
+            continue
+        candle = _latest_public_btc_candle(candles, decision_ts)
+        if candle is None:
+            continue
+        rows.append(
+            _fresh_public_row_from_provider_feature_context(
+                run_id=run_id,
+                row_index=len(rows),
+                market=market,
+                up=up,
+                down=down,
+                candle=candle,
+                decision_ts=decision_ts,
             )
         )
+    return rows
+
+
+def _latest_public_books_by_market(
+    orderbooks: list[dict[str, Any]],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    grouped: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in orderbooks:
+        market_id = str(row.get("market_id") or "")
+        outcome = str(row.get("outcome") or "").upper()
+        if market_id == "" or outcome not in {"UP", "DOWN"}:
+            continue
+        previous = grouped.setdefault(market_id, {}).get(outcome)
+        if previous is None or _book_available_at(row) >= _book_available_at(previous):
+            grouped[market_id][outcome] = dict(row)
+    return grouped
+
+
+def _latest_public_btc_candle(
+    candles: list[dict[str, Any]],
+    decision_ts: int,
+) -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    for row in candles:
+        available_at = int(row.get("available_at_ts") or row.get("ts") or 0)
+        if available_at <= decision_ts:
+            latest = dict(row)
+        if available_at > decision_ts:
+            break
+    return latest
+
+
+def _fresh_public_row_from_provider_feature_context(
+    *,
+    run_id: str,
+    row_index: int,
+    market: dict[str, Any],
+    up: dict[str, Any],
+    down: dict[str, Any],
+    candle: dict[str, Any],
+    decision_ts: int,
+) -> dict[str, Any]:
+    p_up = _public_p_up(up=up, down=down)
+    p_down = 1.0 - p_up
+    scores = _provider_action_scores(p_up=p_up, p_down=p_down, up=up, down=down)
+    ranking = _provider_full_action_ranking(
+        scores=scores,
+        p_up=p_up,
+        up=up,
+        down=down,
+        market=market,
+        decision_ts=decision_ts,
+    )
+    selected = ranking[0]
+    selected_action = str(selected["selected_action"])
+    selected_side = _side_from_action(selected_action)
+    reference_provenance = _provider_reference_price_provenance(
+        market=market,
+        candle=candle,
+        decision_ts=decision_ts,
+    )
+    max_input_ts = max(
+        _book_available_at(up),
+        _book_available_at(down),
+        int(candle.get("available_at_ts") or candle.get("ts") or 0),
+        int(reference_provenance.get("max_input_ts") or 0),
+    )
+    return {
+        "decision_group_id": (
+            f"{run_id}|read-only-public-provider|{market.get('market_id')}|"
+            f"{decision_ts}"
+        ),
+        "market_id": str(market.get("market_id") or ""),
+        "condition_id": str(market.get("condition_id") or ""),
+        "slug": str(market.get("slug") or ""),
+        "market_family": str(market.get("market_family") or ""),
+        "decision_ts": decision_ts,
+        "selected_action": selected_action,
+        "selected_side": selected_side,
+        "selected_action_family": _action_family(selected_action),
+        "corrected_model_score": _float(selected.get("corrected_model_score")),
+        "raw_model_score": _float(selected.get("raw_model_score")),
+        "high_score_flag": _float(selected.get("corrected_model_score")) >= 0.02,
+        "p_up": p_up,
+        "p_down": p_down,
+        "p_up_action_disagreement": _p_up_action_disagreement(
+            action=selected_action,
+            p_up=p_up,
+        ),
+        "microstructure_snapshot": _provider_microstructure_for_action(
+            action=selected_action,
+            up=up,
+            down=down,
+            market=market,
+            decision_ts=decision_ts,
+        ),
+        "reference_price_feature_provenance": reference_provenance,
+        "decision_time_feature_max_input_ts": max_input_ts,
+        "full_5_action_ranking": ranking,
+        "score_components": {
+            "scoring_rule_id": "frozen_v8_o_public_provider_feature_score_v1",
+            "p_up": p_up,
+            "p_down": p_down,
+            "btc_mid_price": _float(candle.get("close_price")),
+            "reference_price_to_beat": _float(
+                market.get("reference_price_start")
+                if market.get("reference_price_start") is not None
+                else market.get("reference_price_at_start")
+            ),
+            "max_input_ts": max_input_ts,
+        },
+        "public_data_source": O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
+        "public_provider_row_index": row_index,
+        "public_provider_feature_builder_rule_id": (
+            "public_provider_market_orderbook_trade_btc_to_decision_features_v1"
+        ),
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+
+
+def _provider_action_scores(
+    *,
+    p_up: float,
+    p_down: float,
+    up: dict[str, Any],
+    down: dict[str, Any],
+) -> dict[str, float]:
+    up_ask = _float(up.get("ask_price"))
+    down_ask = _float(down.get("ask_price"))
+    up_bid = _float(up.get("bid_price"))
+    down_bid = _float(down.get("bid_price"))
+    up_spread_penalty = _provider_spread_bps(up) / 10_000.0
+    down_spread_penalty = _provider_spread_bps(down) / 10_000.0
+    return {
+        "BUY_UP_HOLD_TO_SETTLEMENT": p_up - up_ask - up_spread_penalty,
+        "BUY_DOWN_HOLD_TO_SETTLEMENT": p_down - down_ask - down_spread_penalty,
+        "BUY_UP_SELL_BEFORE_CLOSE": up_bid - up_ask - up_spread_penalty,
+        "BUY_DOWN_SELL_BEFORE_CLOSE": down_bid - down_ask - down_spread_penalty,
+        "NO_TRADE": 0.0,
+    }
+
+
+def _provider_full_action_ranking(
+    *,
+    scores: dict[str, float],
+    p_up: float,
+    up: dict[str, Any],
+    down: dict[str, Any],
+    market: dict[str, Any],
+    decision_ts: int,
+) -> list[dict[str, Any]]:
+    ranking: list[dict[str, Any]] = []
+    for action in O_REQUIRED_DECISION_ACTION_FAMILIES:
+        side = _side_from_action(action)
+        score = _float(scores.get(action))
+        ranking.append(
+            {
+                "selected_action": action,
+                "selected_side": side,
+                "selected_action_family": _action_family(action),
+                "corrected_model_score": score,
+                "raw_model_score": score,
+                "p_up_action_disagreement": _p_up_action_disagreement(
+                    action=action,
+                    p_up=p_up,
+                ),
+                "microstructure_snapshot": _provider_microstructure_for_action(
+                    action=action,
+                    up=up,
+                    down=down,
+                    market=market,
+                    decision_ts=decision_ts,
+                ),
+            }
+        )
+    return sorted(
+        ranking,
+        key=lambda row: (
+            _float(row.get("corrected_model_score")),
+            1 if row.get("selected_action") != "NO_TRADE" else 0,
+            str(row.get("selected_action")),
+        ),
+        reverse=True,
+    )
+
+
+def _provider_microstructure_for_action(
+    *,
+    action: str,
+    up: dict[str, Any],
+    down: dict[str, Any],
+    market: dict[str, Any],
+    decision_ts: int,
+) -> dict[str, Any]:
+    if action == "NO_TRADE":
+        return {}
+    book = up if _side_from_action(action) == "UP" else down
+    return {
+        "entry_ask": _float(book.get("ask_price")),
+        "executable_exit_bid_proxy": _float(book.get("bid_price")),
+        "spread_bps": _provider_spread_bps(book),
+        "book_staleness_ms": max(0, decision_ts - _book_available_at(book)),
+        "queue_fill_proxy": _provider_queue_fill_proxy(book),
+        "time_to_close_seconds": max(
+            0.0,
+            (int(market.get("market_end_ts") or decision_ts) - decision_ts)
+            / 1000.0,
+        ),
+    }
+
+
+def _provider_reference_price_provenance(
+    *,
+    market: dict[str, Any],
+    candle: dict[str, Any],
+    decision_ts: int,
+) -> dict[str, Any]:
+    reference_ts = int(market.get("market_start_ts") or 0)
+    candle_ts = int(candle.get("available_at_ts") or candle.get("ts") or 0)
+    max_input_ts = max(reference_ts, candle_ts)
+    return {
+        "provenance_valid": max_input_ts <= decision_ts,
+        "decision_ts": decision_ts,
+        "max_input_ts": max_input_ts,
+        "source_fields_used": [
+            "raw_polymarket_markets.reference_price_start",
+            "raw_btc_feature_candles.close_price",
+        ],
+        "source_field_name": "read_only_public_provider_reference_and_btc_candle",
+        "source_timestamp": max_input_ts,
+    }
+
+
+def _partition_public_rows(
+    rows: list[dict[str, Any]],
+    max_cycles: int,
+) -> list[list[dict[str, Any]]]:
+    cycles: list[list[dict[str, Any]]] = [[] for _ in range(max_cycles)]
+    for index, row in enumerate(rows):
+        cycles[index % max_cycles].append(row)
     return cycles
+
+
+def _public_p_up(*, up: dict[str, Any], down: dict[str, Any]) -> float:
+    up_mid = _float(up.get("mid_price"))
+    down_mid = _float(down.get("mid_price"))
+    total = up_mid + down_mid
+    if total <= 0.0:
+        return 0.5
+    return max(0.0, min(1.0, up_mid / total))
+
+
+def _provider_spread_bps(book: dict[str, Any]) -> float:
+    bid = _float(book.get("bid_price"))
+    ask = _float(book.get("ask_price"))
+    mid = _float(book.get("mid_price")) or (bid + ask) / 2.0
+    if mid <= 0.0:
+        return 10_000.0
+    return max(0.0, (ask - bid) / mid * 10_000.0)
+
+
+def _provider_queue_fill_proxy(book: dict[str, Any]) -> float:
+    bid_notional = _float(book.get("bid_price")) * _float(book.get("bid_size"))
+    ask_notional = _float(book.get("ask_price")) * _float(book.get("ask_size"))
+    depth_score = min(1.0, _float(book.get("liquidity_depth")) / 2.0)
+    notional_score = min(1.0, max(bid_notional, ask_notional))
+    spread_score = max(0.0, 1.0 - _provider_spread_bps(book) / 2_000.0)
+    return max(
+        0.0,
+        min(1.0, 0.55 * notional_score + 0.35 * depth_score + 0.10 * spread_score),
+    )
+
+
+def _book_available_at(book: dict[str, Any]) -> int:
+    return int(book.get("available_at_ts") or book.get("ts") or 0)
+
+
+def _p_up_action_disagreement(*, action: str, p_up: float) -> bool:
+    side = _side_from_action(action)
+    if side == "UP":
+        return p_up < 0.50
+    if side == "DOWN":
+        return p_up > 0.50
+    return False
 
 
 def _execute_fresh_public_cycles(
     *,
     config: PolymarketOV8PaperFreshLoopConfig,
     public_cycles: list[list[dict[str, Any]]],
+    public_data_source: str,
     unlock_verified: bool,
 ) -> dict[str, Any]:
     runtime_state = _initial_fresh_runtime_state()
@@ -418,7 +953,7 @@ def _execute_fresh_public_cycles(
                     runtime_mode="simulated_runtime_state",
                 )
                 guard_row["cycle_id"] = cycle_id
-                guard_row["public_data_source"] = config.public_data_source
+                guard_row["public_data_source"] = public_data_source
                 guard_row["pre_decision_exposure_state"] = pre_state
                 if guard_row.get("order_allowed") is True:
                     guard_row["simulated_order_id"] = (
@@ -454,6 +989,7 @@ def _execute_fresh_public_cycles(
                 intents=cycle_intents,
                 cycle_failed=cycle_failed,
                 cycle_forbidden_rows=cycle_forbidden_rows,
+                public_data_source=public_data_source,
                 runtime_state=runtime_state,
             )
         )
@@ -475,6 +1011,7 @@ def _fresh_loop_run_report(
     *,
     config: PolymarketOV8PaperFreshLoopConfig,
     unlock_evidence: dict[str, Any],
+    public_data_collection_report: dict[str, Any],
     public_cycles: list[list[dict[str, Any]]],
     execution_result: dict[str, Any],
     intents: list[dict[str, Any]],
@@ -485,6 +1022,9 @@ def _fresh_loop_run_report(
     blockers = list(unlock_evidence["paper_candidate_unlock_blocking_reason_codes"])
     if execution_result["cycle_failure_count"]:
         blockers.append("paper_fresh_public_data_cycle_failed")
+    if public_data_collection_report["paper_fresh_provider_collection_failed"]:
+        blockers.append("paper_fresh_public_provider_collection_failed")
+        blockers.extend(public_data_collection_report["public_data_collection_reason_codes"])
     report = {
         "schema_version": O_V8_PAPER_FRESH_LOOP_RUN_SCHEMA_VERSION,
         "report_type": "o_v8_paper_fresh_loop_run",
@@ -497,7 +1037,19 @@ def _fresh_loop_run_report(
         "paper_fresh_loop_cycle_count": len(public_cycles),
         "paper_fresh_loop_max_cycles": config.max_cycles,
         "paper_fresh_loop_sleep_seconds": config.sleep_seconds,
-        "paper_fresh_loop_public_data_source": config.public_data_source,
+        "paper_fresh_loop_public_data_source": public_data_collection_report[
+            "public_data_source"
+        ],
+        "public_data_collection_report": public_data_collection_report,
+        "paper_fresh_provider_collection_failed": public_data_collection_report[
+            "paper_fresh_provider_collection_failed"
+        ],
+        "public_data_collection_reason_codes": public_data_collection_report[
+            "public_data_collection_reason_codes"
+        ],
+        "uses_paper_intent_logs_as_fresh_public_data": public_data_collection_report[
+            "uses_paper_intent_logs_as_fresh_public_data"
+        ],
         "paper_candidate_unlock_verified": unlock_evidence[
             "paper_candidate_unlock_verified"
         ],
@@ -820,6 +1372,7 @@ def _fresh_loop_manifest(
     artifact_paths: dict[str, Path],
     artifact_hashes: dict[str, str],
     unlock_evidence: dict[str, Any],
+    public_data_collection_report: dict[str, Any],
     run_report: dict[str, Any],
     fill_report: dict[str, Any],
     safety_report: dict[str, Any],
@@ -866,6 +1419,16 @@ def _fresh_loop_manifest(
         ],
         "paper_fresh_loop_public_data_source": run_report[
             "paper_fresh_loop_public_data_source"
+        ],
+        "public_data_collection_report": public_data_collection_report,
+        "paper_fresh_provider_collection_failed": run_report[
+            "paper_fresh_provider_collection_failed"
+        ],
+        "public_data_collection_reason_codes": run_report[
+            "public_data_collection_reason_codes"
+        ],
+        "uses_paper_intent_logs_as_fresh_public_data": run_report[
+            "uses_paper_intent_logs_as_fresh_public_data"
         ],
         "paper_fresh_order_intent_count": run_report[
             "paper_fresh_order_intent_count"
@@ -947,62 +1510,6 @@ def _guard_input_from_public_row(
             "decision_time_feature_max_input_ts", decision_ts
         ),
     }
-
-
-def _public_row_from_unlock_intent(
-    *,
-    intent: dict[str, Any],
-    run_id: str,
-    cycle_index: int,
-    row_index: int,
-) -> dict[str, Any]:
-    decision_ts = int(intent.get("decision_ts") or 0) + (cycle_index + 1) * 60_000
-    market_id = f"{intent.get('market_id')}-fresh-{cycle_index + 1:02d}"
-    action = str(intent.get("execution_guarded_action") or "")
-    score = _float(intent.get("execution_guarded_score"))
-    return {
-        "decision_group_id": f"{run_id}|cycle-{cycle_index + 1:06d}|{market_id}|{decision_ts}",
-        "market_id": market_id,
-        "decision_ts": decision_ts,
-        "selected_action": action,
-        "selected_side": intent.get("execution_guarded_side"),
-        "selected_action_family": intent.get("execution_guarded_family"),
-        "corrected_model_score": score,
-        "raw_model_score": _float(intent.get("source_raw_model_score")),
-        "high_score_flag": True,
-        "p_up": _float(intent.get("p_up")),
-        "p_down": _float(intent.get("p_down")),
-        "p_up_action_disagreement": bool(intent.get("p_up_action_disagreement")),
-        "microstructure_snapshot": {
-            "entry_ask": _float(intent.get("entry_ask")),
-            "executable_exit_bid_proxy": _float(
-                intent.get("executable_exit_bid_proxy")
-            ),
-            "spread_bps": _float(intent.get("spread_bps")),
-            "book_staleness_ms": _float(intent.get("book_staleness_ms")),
-            "queue_fill_proxy": _float(intent.get("queue_fill_proxy")),
-            "time_to_close_seconds": _float(intent.get("time_to_close_seconds")),
-        },
-        "reference_price_feature_provenance": {
-            "provenance_valid": True,
-            "decision_ts": decision_ts,
-            "max_input_ts": decision_ts - 250,
-            "source_fields_used": ["paper_unlock_public_read_only_fixture"],
-        },
-        "decision_time_feature_max_input_ts": decision_ts - 250,
-        "full_5_action_ranking": [
-            {
-                "selected_action": candidate,
-                "corrected_model_score": score
-                if candidate == action
-                else score - 0.1 - 0.01 * index,
-                "raw_model_score": _float(intent.get("source_raw_model_score")),
-            }
-            for index, candidate in enumerate(O_REQUIRED_DECISION_ACTION_FAMILIES)
-        ],
-        "public_provider_row_index": row_index,
-    }
-
 
 def _resolve_unlock_artifact_path(unlock_dir: Path, raw_path: str) -> Path:
     artifact_path = Path(raw_path)
@@ -1156,6 +1663,7 @@ def _cycle_monitoring_row(
     intents: list[dict[str, Any]],
     cycle_failed: bool,
     cycle_forbidden_rows: list[dict[str, Any]],
+    public_data_source: str,
     runtime_state: dict[str, Any],
 ) -> dict[str, Any]:
     unique_markets = sorted({str(row.get("market_id")) for row in public_rows})
@@ -1168,7 +1676,10 @@ def _cycle_monitoring_row(
         ]
         if cycle_failed and not cycle_forbidden_rows
         else (["fresh_public_data_forbidden_outcome_fields_present"] if cycle_failed else []),
-        "public_data_freshness": "read_only_public_provider_snapshot",
+        "public_data_source": public_data_source,
+        "public_data_freshness": "read_only_public_provider_snapshot"
+        if public_data_source == O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER
+        else "offline_snapshot_fixture",
         "market_count": len(public_rows),
         "unique_market_count": len(unique_markets),
         "unique_market_ids": unique_markets,
@@ -1339,6 +1850,8 @@ def _fresh_loop_run_md(report: dict[str, Any]) -> str:
             f"- run_id: `{report['run_id']}`",
             f"- paper_fresh_loop_enabled: `{str(report['paper_fresh_loop_enabled']).lower()}`",
             f"- paper_fresh_loop_mode: `{report['paper_fresh_loop_mode']}`",
+            f"- public_data_source: `{report['paper_fresh_loop_public_data_source']}`",
+            f"- provider_collection_failed: `{str(report['paper_fresh_provider_collection_failed']).lower()}`",
             f"- paper_fresh_loop_cycle_count: `{report['paper_fresh_loop_cycle_count']}`",
             f"- paper_fresh_order_intent_count: `{report['paper_fresh_order_intent_count']}`",
             f"- paper_fresh_fill_count: `{report['paper_fresh_fill_count']}`",

@@ -15,6 +15,7 @@ from bigan.v8.polymarket import (
     write_deterministic_polymarket_corpus_fixtures,
 )
 from bigan.v8.polymarket.contracts import canonical_json_sha256, looks_like_sha256
+from bigan.v8.polymarket.recorder.public_provider import RealCorpusPublicProviderError
 from bigan.v8.polymarket.training.o_v8_paper_candidate_unlock import (
     O_V8_PAPER_CANDIDATE_UNLOCK_MANIFEST_SCHEMA_VERSION,
     O_V8_PAPER_CANDIDATE_UNLOCK_SCHEMA_VERSION,
@@ -32,6 +33,8 @@ from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
     O_V8_PAPER_FRESH_LOOP_RUN_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_MONITORING_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_RUNTIME_SAFETY_SCHEMA_VERSION,
+    O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
+    O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE,
     PolymarketOV8PaperFreshLoopConfig,
     run_polymarket_o_v8_paper_fresh_loop,
 )
@@ -7515,6 +7518,11 @@ def test_o_v8_paper_fresh_loop_single_cycle_success(tmp_path: Path) -> None:
     assert run_report["schema_version"] == O_V8_PAPER_FRESH_LOOP_RUN_SCHEMA_VERSION
     assert run_report["paper_fresh_loop_enabled"] is True
     assert run_report["paper_fresh_loop_mode"] == "single_cycle"
+    assert (
+        run_report["paper_fresh_loop_public_data_source"]
+        == O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE
+    )
+    assert run_report["uses_paper_intent_logs_as_fresh_public_data"] is False
     assert run_report["paper_fresh_loop_cycle_count"] == 1
     assert run_report["candidate_decision_count"] == 2
     assert run_report["guard_allowed_decision_count"] == 2
@@ -7561,6 +7569,9 @@ def test_o_v8_paper_fresh_loop_single_cycle_success(tmp_path: Path) -> None:
     assert monitoring["schema_version"] == O_V8_PAPER_FRESH_MONITORING_SCHEMA_VERSION
     assert monitoring["paper_fresh_monitoring_passed"] is True
     assert monitoring["cycle_count"] == 1
+    assert monitoring["cycle_monitoring_reports"][0]["public_data_source"] == (
+        O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE
+    )
     assert monitoring["cycle_monitoring_reports"][0]["unique_market_count"] == 2
 
     cumulative = result.cumulative_monitoring_report
@@ -7585,6 +7596,10 @@ def test_o_v8_paper_fresh_loop_single_cycle_success(tmp_path: Path) -> None:
     assert manifest["schema_version"] == O_V8_PAPER_FRESH_LOOP_MANIFEST_SCHEMA_VERSION
     assert manifest["paper_fresh_loop_enabled"] is True
     assert manifest["paper_fresh_monitoring_passed"] is True
+    assert (
+        manifest["paper_fresh_loop_public_data_source"]
+        == O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE
+    )
     assert manifest["v8_paper_internal_handoff_allowed"] is True
     assert manifest["v8_execution_handoff_allowed"] is False
     assert manifest["paper_only"] is True
@@ -7662,6 +7677,64 @@ def test_o_v8_paper_fresh_loop_bounded_recurring_cumulative_monitoring(
     assert result.manifest["#134_resume_allowed"] is False
 
 
+def test_o_v8_paper_fresh_loop_default_uses_read_only_public_provider(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-provider",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_provider=_FakeFreshPublicProvider(),
+        )
+    )
+
+    run_report = result.fresh_loop_run_report
+    assert (
+        run_report["paper_fresh_loop_public_data_source"]
+        == O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER
+    )
+    assert run_report["public_data_collection_report"][
+        "public_provider_safety_passed"
+    ] is True
+    assert run_report["public_data_collection_report"][
+        "paper_fresh_provider_collection_failed"
+    ] is False
+    assert run_report["public_data_collection_report"]["public_market_count"] == 1
+    assert run_report["public_data_collection_report"]["public_orderbook_row_count"] == 2
+    assert run_report["public_data_collection_report"]["public_trade_row_count"] == 1
+    assert (
+        run_report["public_data_collection_report"][
+            "public_btc_feature_candle_row_count"
+        ]
+        == 1
+    )
+    assert run_report["uses_paper_intent_logs_as_fresh_public_data"] is False
+    assert run_report["candidate_decision_count"] == 1
+    assert run_report["guard_allowed_decision_count"] == 1
+    assert run_report["paper_fresh_order_intent_count"] == 1
+    assert result.monitoring_report["cycle_monitoring_reports"][0][
+        "public_data_source"
+    ] == O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER
+    assert result.manifest["paper_fresh_loop_public_data_source"] == (
+        O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER
+    )
+    assert result.manifest["uses_paper_intent_logs_as_fresh_public_data"] is False
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["capital_at_risk"] is False
+    assert result.manifest["polymarket_write_enabled"] is False
+    assert result.manifest["wallet_signing_enabled"] is False
+
+    intents = _read_jsonl(result.artifact_paths["fresh_order_intent_log"])
+    assert len(intents) == 1
+    assert intents[0]["market_id"] == "provider-market-1"
+    assert intents[0]["paper_only"] is True
+    assert intents[0]["capital_at_risk"] is False
+
+
 def test_o_v8_paper_fresh_loop_fails_closed_on_unlock_hash_mismatch(
     tmp_path: Path,
 ) -> None:
@@ -7695,6 +7768,44 @@ def test_o_v8_paper_fresh_loop_fails_closed_on_unlock_hash_mismatch(
     assert result.monitoring_report["paper_fresh_monitoring_passed"] is False
     assert result.manifest["v8_paper_internal_handoff_allowed"] is False
     assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert _read_jsonl(result.artifact_paths["fresh_order_intent_log"]) == []
+
+
+def test_o_v8_paper_fresh_loop_fails_closed_on_public_provider_error(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-provider-error",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_provider=_FailingFreshPublicProvider(),
+        )
+    )
+
+    run_report = result.fresh_loop_run_report
+    assert (
+        run_report["paper_fresh_loop_public_data_source"]
+        == O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER
+    )
+    assert run_report["paper_fresh_provider_collection_failed"] is True
+    assert "paper_fresh_public_provider_collection_failed" in run_report[
+        "paper_fresh_loop_blocking_reason_codes"
+    ]
+    assert "test_public_provider_unavailable" in run_report[
+        "paper_fresh_loop_blocking_reason_codes"
+    ]
+    assert run_report["candidate_decision_count"] == 0
+    assert run_report["paper_fresh_order_intent_count"] == 0
+    assert result.monitoring_report["paper_fresh_monitoring_passed"] is False
+    assert result.manifest["paper_fresh_provider_collection_failed"] is True
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["source_model_candidate_eligible"] is False
+    assert result.manifest["freeze_ready"] is False
+    assert result.manifest["promotion_evidence_eligible"] is False
     assert _read_jsonl(result.artifact_paths["fresh_order_intent_log"]) == []
 
 
@@ -7736,6 +7847,147 @@ def test_o_v8_paper_fresh_loop_records_failed_public_data_cycle_fail_closed(
     assert result.manifest["source_model_candidate_eligible"] is False
     assert result.manifest["freeze_ready"] is False
     assert result.manifest["promotion_evidence_eligible"] is False
+
+
+class _FakeFreshPublicProvider:
+    read_only = True
+    write_capable = False
+    paper_only = True
+    capital_at_risk = False
+    broker_exchange_write_enabled = False
+    live_exchange_write_enabled = False
+    polymarket_write_enabled = False
+    wallet_signing_enabled = False
+
+    def market_rows(self, config: Any) -> list[dict[str, Any]]:
+        del config
+        return [
+            {
+                "market_id": "provider-market-1",
+                "condition_id": "provider-market-1",
+                "slug": "btc-updown-5m-3000",
+                "market_family": "btc_updown_5m",
+                "horizon_ms": 300_000,
+                "market_start_ts": 3_000_000,
+                "market_end_ts": 3_300_000,
+                "settlement_ts": 3_360_000,
+                "up_token_id": "provider-up-token",
+                "down_token_id": "provider-down-token",
+                "reference_price_source": "polymarket_official_btc_usd_reference",
+                "reference_price_start": 65_000.0,
+                "reference_price_at_start": 65_000.0,
+                "settlement_rule": "BTC 5m UP/DOWN public provider fixture",
+                "raw_market_sha256": "1" * 64,
+                "paper_only": True,
+                "capital_at_risk": False,
+                "broker_exchange_write_enabled": False,
+                "live_exchange_write_enabled": False,
+                "polymarket_write_enabled": False,
+                "wallet_signing_enabled": False,
+            }
+        ]
+
+    def orderbook_rows(
+        self,
+        markets: list[dict[str, Any]],
+        config: Any,
+    ) -> list[dict[str, Any]]:
+        del markets, config
+        common = {
+            "market_id": "provider-market-1",
+            "ts": 3_060_000,
+            "available_at_ts": 3_060_000,
+            "bid_size": 2.0,
+            "ask_size": 2.0,
+            "liquidity_depth": 4.0,
+            "paper_only": True,
+            "capital_at_risk": False,
+            "broker_exchange_write_enabled": False,
+            "live_exchange_write_enabled": False,
+            "polymarket_write_enabled": False,
+            "wallet_signing_enabled": False,
+        }
+        return [
+            {
+                **common,
+                "token_id": "provider-up-token",
+                "outcome": "UP",
+                "bid_price": 0.64,
+                "ask_price": 0.66,
+                "mid_price": 0.65,
+            },
+            {
+                **common,
+                "token_id": "provider-down-token",
+                "outcome": "DOWN",
+                "bid_price": 0.10,
+                "ask_price": 0.12,
+                "mid_price": 0.11,
+            },
+        ]
+
+    def trade_rows(
+        self,
+        markets: list[dict[str, Any]],
+        config: Any,
+    ) -> list[dict[str, Any]]:
+        del markets, config
+        return [
+            {
+                "market_id": "provider-market-1",
+                "token_id": "provider-up-token",
+                "outcome": "UP",
+                "ts": 3_050_000,
+                "available_at_ts": 3_050_000,
+                "price": 0.63,
+                "size": 1.0,
+                "side": "BUY",
+                "paper_only": True,
+                "capital_at_risk": False,
+                "broker_exchange_write_enabled": False,
+                "live_exchange_write_enabled": False,
+                "polymarket_write_enabled": False,
+                "wallet_signing_enabled": False,
+            }
+        ]
+
+    def btc_feature_candle_rows(
+        self,
+        markets: list[dict[str, Any]],
+        config: Any,
+    ) -> list[dict[str, Any]]:
+        del markets, config
+        return [
+            {
+                "ts": 3_000_000,
+                "close_time": 3_060_000,
+                "available_at_ts": 3_060_000,
+                "open_price": 65_000.0,
+                "high_price": 65_100.0,
+                "low_price": 64_900.0,
+                "close_price": 65_050.0,
+                "volume": 10.0,
+                "timeframe_ms": 60_000,
+                "source": "coinbase_btc_usd",
+            }
+        ]
+
+    def resolution_rows(
+        self,
+        markets: list[dict[str, Any]],
+        config: Any,
+    ) -> list[dict[str, Any]]:
+        del markets, config
+        return []
+
+
+class _FailingFreshPublicProvider(_FakeFreshPublicProvider):
+    def market_rows(self, config: Any) -> list[dict[str, Any]]:
+        del config
+        raise RealCorpusPublicProviderError(
+            "test provider unavailable",
+            reason_codes=("test_public_provider_unavailable",),
+        )
 
 
 def _build_issue160_unlock_fixture(tmp_path: Path) -> tuple[Path, str]:
