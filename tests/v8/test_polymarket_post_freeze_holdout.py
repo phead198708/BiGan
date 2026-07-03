@@ -34,6 +34,7 @@ from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
     O_V8_PAPER_FRESH_EXIT_LEDGER_UPDATE_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_EXIT_SIGNAL_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_FILL_SIMULATION_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_LEGACY_POSITION_POLICY_AUDIT_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_LOOP_MANIFEST_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_LOOP_RUN_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_MONITORING_SCHEMA_VERSION,
@@ -8184,6 +8185,36 @@ def test_o_v8_paper_fresh_exit_adapter_no_position_emits_no_exit(
         == O_V8_PAPER_FRESH_POSITION_STATE_SCHEMA_VERSION
     )
     assert position_report["open_paper_position_count"] == 0
+    assert position_report["exit_threshold_profile_name"] == (
+        "paper_only_adapter_heuristic_v1"
+    )
+    assert position_report["exit_threshold_source"] == (
+        "static_code_constants_for_paper_only_diagnostic_adapter_not_legacy_tuned"
+    )
+    assert position_report["exit_thresholds_tuned"] is False
+    assert position_report["legacy_state_manager_reused"] is True
+    assert position_report["legacy_decision_policy_reused"] is False
+    assert position_report["exit_decision_policy_source"] == (
+        "paper_only_adapter_heuristic_v1"
+    )
+
+    audit = result.legacy_position_policy_audit_report
+    audit_payload = dict(audit)
+    audit_id = audit_payload.pop(
+        "o_v8_paper_fresh_legacy_position_policy_audit_report_id"
+    )
+    assert canonical_json_sha256(audit_payload) == audit_id
+    assert (
+        audit["schema_version"]
+        == O_V8_PAPER_FRESH_LEGACY_POSITION_POLICY_AUDIT_SCHEMA_VERSION
+    )
+    assert audit["legacy_state_manager_reused"] is True
+    assert audit["legacy_decision_policy_reused"] is False
+    assert audit["reusable_legacy_decision_policy_found"] is False
+    assert audit["exit_decision_policy_source"] == "paper_only_adapter_heuristic_v1"
+    assert "src/bigan/execution/position_manager.py" in {
+        row["module_or_script"] for row in audit["discovered_modules_and_functions"]
+    }
 
     exit_report = result.paper_exit_signal_report
     exit_payload = dict(exit_report)
@@ -8196,6 +8227,17 @@ def test_o_v8_paper_fresh_exit_adapter_no_position_emits_no_exit(
         result.artifact_paths["fresh_paper_sell_position_intent_log"]
     ) == []
     assert result.manifest["paper_sell_position_intent_count"] == 0
+    assert "fresh_legacy_position_policy_audit_report" in result.manifest[
+        "artifact_hashes"
+    ]
+    assert result.manifest["fresh_legacy_position_policy_audit_report_id"] == (
+        result.legacy_position_policy_audit_report[
+            "o_v8_paper_fresh_legacy_position_policy_audit_report_id"
+        ]
+    )
+    assert result.manifest["exit_thresholds_tuned"] is False
+    assert result.manifest["legacy_decision_policy_reused"] is False
+    assert result.manifest["paper_exit_adapter_mutates_o_entry_scorer"] is False
     assert result.manifest["v8_execution_handoff_allowed"] is False
     assert result.manifest["#146_start_allowed"] is False
     assert result.manifest["#134_resume_allowed"] is False
@@ -8235,9 +8277,11 @@ def test_o_v8_paper_fresh_exit_adapter_holds_open_position(
     exit_rows = result.paper_exit_signal_report["paper_exit_signal_rows"]
     assert len(exit_rows) == 1
     assert exit_rows[0]["paper_exit_decision"] == "HOLD_POSITION"
-    assert "legacy_hold_position" in exit_rows[0]["exit_reason_codes"]
+    assert "paper_adapter_hold_position" in exit_rows[0]["exit_reason_codes"]
     assert "p_up" in exit_rows[0]["legacy_consumed_signal_fields"]
     assert "entry_price" in exit_rows[0]["legacy_consumed_position_fields"]
+    assert exit_rows[0]["legacy_decision_policy_reused"] is False
+    assert exit_rows[0]["exit_thresholds_tuned"] is False
     assert result.paper_exit_signal_report["sell_position_signal_count"] == 0
     assert result.synthetic_ledger_update_report["synthetic_ledger_update_count"] == 0
     assert result.runtime_safety_report["paper_fresh_runtime_safety_passed"] is True
@@ -8277,13 +8321,16 @@ def test_o_v8_paper_fresh_exit_adapter_sells_open_position_paper_only(
 
     exit_row = result.paper_exit_signal_report["paper_exit_signal_rows"][0]
     assert exit_row["paper_exit_decision"] == "SELL_POSITION"
-    assert "legacy_profit_target_crossed" in exit_row["exit_reason_codes"]
+    assert "paper_adapter_profit_target_crossed" in exit_row["exit_reason_codes"]
     assert exit_row["accepted_for_paper_exit_intent"] is True
+    assert exit_row["exit_decision_policy_source"] == "paper_only_adapter_heuristic_v1"
     assert exit_row["uses_settlement_oracle_future_return_fields"] is False
     sell_intents = _read_jsonl(
         result.artifact_paths["fresh_paper_sell_position_intent_log"]
     )
     assert len(sell_intents) == 1
+    assert sell_intents[0]["exit_thresholds_tuned"] is False
+    assert sell_intents[0]["legacy_decision_policy_reused"] is False
     assert sell_intents[0]["paper_only"] is True
     assert sell_intents[0]["capital_at_risk"] is False
     assert sell_intents[0]["polymarket_write_enabled"] is False
@@ -8348,6 +8395,95 @@ def test_o_v8_paper_fresh_exit_adapter_forbidden_outcome_fails_closed(
     assert result.paper_exit_signal_report["v8_execution_handoff_allowed"] is False
     assert result.manifest["paper_sell_position_intent_count"] == 0
     assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def test_o_v8_paper_fresh_exit_adapter_invalid_initial_side_fails_closed(
+    tmp_path: Path,
+) -> None:
+    result = _run_paper_fresh_exit_adapter_with_initial_positions(
+        tmp_path,
+        run_id="fresh-exit-invalid-side",
+        initial_positions=(
+            _paper_fresh_initial_position_row(
+                market_id="fresh-exit-invalid-side",
+                side="MAYBE",
+                entry_price=0.40,
+                entry_time=2_999_000,
+            ),
+        ),
+    )
+
+    assert result.paper_position_state_report["position_state_adapter_status"] == (
+        "blocked_fail_closed"
+    )
+    assert result.paper_position_state_report["position_open_failed_count"] == 1
+    failure = result.paper_position_state_report["position_open_failure_rows"][0]
+    assert "position_open_invalid_side" in failure[
+        "position_open_failure_reason_codes"
+    ]
+    assert result.paper_exit_signal_report["sell_position_intent_count"] == 0
+    assert "position_open_failure_present_fail_closed" in result.paper_exit_signal_report[
+        "paper_exit_signal_rows"
+    ][0]["exit_reason_codes"]
+    assert result.manifest["position_open_failed_count"] == 1
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def test_o_v8_paper_fresh_exit_adapter_invalid_entry_price_fails_closed(
+    tmp_path: Path,
+) -> None:
+    result = _run_paper_fresh_exit_adapter_with_initial_positions(
+        tmp_path,
+        run_id="fresh-exit-invalid-price",
+        initial_positions=(
+            _paper_fresh_initial_position_row(
+                market_id="fresh-exit-invalid-price",
+                side="UP",
+                entry_price=0.0,
+                entry_time=2_999_000,
+            ),
+        ),
+    )
+
+    failure = result.paper_position_state_report["position_open_failure_rows"][0]
+    assert "position_open_non_positive_entry_price" in failure[
+        "position_open_failure_reason_codes"
+    ]
+    assert result.paper_position_state_report["open_paper_position_count"] == 0
+    assert result.paper_exit_signal_report["sell_position_intent_count"] == 0
+    assert result.synthetic_ledger_update_report["synthetic_ledger_update_count"] == 0
+    assert result.manifest["#146_start_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
+
+
+def test_o_v8_paper_fresh_exit_adapter_duplicate_initial_event_id_fails_closed(
+    tmp_path: Path,
+) -> None:
+    first = _paper_fresh_initial_position_row(
+        market_id="fresh-exit-duplicate",
+        side="UP",
+        entry_price=0.40,
+        entry_time=2_999_000,
+    )
+    second = dict(first)
+    second["entry_price"] = 0.41
+    result = _run_paper_fresh_exit_adapter_with_initial_positions(
+        tmp_path,
+        run_id="fresh-exit-duplicate",
+        initial_positions=(first, second),
+    )
+
+    assert result.paper_position_state_report["position_open_failed_count"] == 1
+    failure = result.paper_position_state_report["position_open_failure_rows"][0]
+    assert "position_open_duplicate_event_id" in failure[
+        "position_open_failure_reason_codes"
+    ]
+    assert result.paper_exit_signal_report["sell_position_intent_count"] == 0
+    assert result.synthetic_ledger_update_report[
+        "ledger_updates_only_for_accepted_paper_exit_intents"
+    ] is True
+    assert result.manifest["position_state_adapter_status"] == "blocked_fail_closed"
+    assert result.manifest["source_model_candidate_eligible"] is False
 
 
 def test_o_v8_paper_fresh_canonical_mapping_invalid_provenance_fails_closed(
@@ -8930,6 +9066,33 @@ def _paper_fresh_initial_position_row(
         "polymarket_write_enabled": False,
         "wallet_signing_enabled": False,
     }
+
+
+def _run_paper_fresh_exit_adapter_with_initial_positions(
+    tmp_path: Path,
+    *,
+    run_id: str,
+    initial_positions: tuple[dict[str, Any], ...],
+):
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    row = _paper_fresh_public_row(
+        index=1,
+        market_id=str(initial_positions[0].get("market_id") or run_id),
+        action="NO_TRADE",
+        side="NONE",
+        p_up=0.82,
+    )
+    row["microstructure_snapshot"]["executable_exit_bid_proxy"] = 0.50
+    return run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id=run_id,
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((row,),),
+            initial_paper_position_rows=initial_positions,
+        )
+    )
 
 
 def _write_canonical_o_source_fixture(

@@ -83,6 +83,9 @@ O_V8_PAPER_FRESH_SIGNAL_TRACE_SCHEMA_VERSION = (
 O_V8_PAPER_FRESH_TIME_WINDOW_DIAGNOSTIC_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-paper-fresh-time-window-diagnostic-v1"
 )
+O_V8_PAPER_FRESH_LEGACY_POSITION_POLICY_AUDIT_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-paper-fresh-legacy-position-policy-audit-v1"
+)
 O_V8_PAPER_FRESH_POSITION_STATE_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-paper-fresh-position-state-v1"
 )
@@ -125,6 +128,8 @@ O_V8_PAPER_FRESH_EXIT_FORBIDDEN_OUTCOME_FIELDS: tuple[str, ...] = (
 O_V8_PAPER_FRESH_EXIT_EDGE_THRESHOLD = -0.02
 O_V8_PAPER_FRESH_EXIT_PROFIT_TARGET = 0.05
 O_V8_PAPER_FRESH_EXIT_FORCE_SECONDS_TO_CLOSE = 60.0
+O_V8_PAPER_FRESH_EXIT_THRESHOLD_PROFILE_NAME = "paper_only_adapter_heuristic_v1"
+O_V8_PAPER_FRESH_EXIT_DECISION_POLICY_SOURCE = "paper_only_adapter_heuristic_v1"
 O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER = "read_only_public_provider"
 O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE = "snapshot_fixture"
 O_V8_PAPER_FRESH_PUBLIC_DATA_SOURCES = (
@@ -245,6 +250,7 @@ class PolymarketOV8PaperFreshLoopResult:
     canonical_scorer_alignment_report: dict[str, Any]
     signal_trace_report: dict[str, Any]
     time_window_diagnostic_report: dict[str, Any]
+    legacy_position_policy_audit_report: dict[str, Any]
     paper_position_state_report: dict[str, Any]
     paper_exit_signal_report: dict[str, Any]
     paper_sell_position_intents: list[dict[str, Any]]
@@ -361,6 +367,9 @@ def run_polymarket_o_v8_paper_fresh_loop(
         config=config,
         signal_trace_report=signal_trace_report,
     )
+    legacy_position_policy_audit_report = (
+        _fresh_legacy_position_policy_audit_report(config=config)
+    )
     exit_adapter_bundle = _fresh_paper_exit_adapter_bundle(
         config=config,
         signal_trace_report=signal_trace_report,
@@ -461,6 +470,10 @@ def run_polymarket_o_v8_paper_fresh_loop(
         / "o_v8_paper_fresh_time_window_diagnostic.json",
         "fresh_time_window_diagnostic_summary": output_dir
         / "o_v8_paper_fresh_time_window_diagnostic.md",
+        "fresh_legacy_position_policy_audit_report": output_dir
+        / "o_v8_paper_fresh_legacy_position_policy_audit.json",
+        "fresh_legacy_position_policy_audit_summary": output_dir
+        / "o_v8_paper_fresh_legacy_position_policy_audit.md",
         "fresh_paper_position_state_report": output_dir
         / "o_v8_paper_fresh_position_state_report.json",
         "fresh_paper_position_state_summary": output_dir
@@ -571,6 +584,16 @@ def run_polymarket_o_v8_paper_fresh_loop(
         _fresh_time_window_diagnostic_md(time_window_diagnostic_report),
     )
     _write_json(
+        artifact_paths["fresh_legacy_position_policy_audit_report"],
+        legacy_position_policy_audit_report,
+    )
+    _write_text(
+        artifact_paths["fresh_legacy_position_policy_audit_summary"],
+        _fresh_legacy_position_policy_audit_md(
+            legacy_position_policy_audit_report
+        ),
+    )
+    _write_json(
         artifact_paths["fresh_paper_position_state_report"],
         paper_position_state_report,
     )
@@ -624,6 +647,7 @@ def run_polymarket_o_v8_paper_fresh_loop(
         canonical_scorer_alignment_report=canonical_scorer_alignment_report,
         signal_trace_report=signal_trace_report,
         time_window_diagnostic_report=time_window_diagnostic_report,
+        legacy_position_policy_audit_report=legacy_position_policy_audit_report,
         paper_position_state_report=paper_position_state_report,
         paper_exit_signal_report=paper_exit_signal_report,
         paper_sell_position_intents=paper_sell_position_intents,
@@ -651,6 +675,7 @@ def run_polymarket_o_v8_paper_fresh_loop(
         canonical_scorer_alignment_report=canonical_scorer_alignment_report,
         signal_trace_report=signal_trace_report,
         time_window_diagnostic_report=time_window_diagnostic_report,
+        legacy_position_policy_audit_report=legacy_position_policy_audit_report,
         paper_position_state_report=paper_position_state_report,
         paper_exit_signal_report=paper_exit_signal_report,
         paper_sell_position_intents=paper_sell_position_intents,
@@ -3488,6 +3513,169 @@ def _fresh_time_window_diagnostic_report(
     )
 
 
+def _fresh_exit_threshold_profile() -> dict[str, Any]:
+    return {
+        "exit_threshold_profile_name": O_V8_PAPER_FRESH_EXIT_THRESHOLD_PROFILE_NAME,
+        "exit_threshold_source": (
+            "static_code_constants_for_paper_only_diagnostic_adapter_not_legacy_tuned"
+        ),
+        "exit_thresholds_tuned": False,
+        "exit_threshold_values": {
+            "exit_edge_threshold": O_V8_PAPER_FRESH_EXIT_EDGE_THRESHOLD,
+            "exit_profit_target": O_V8_PAPER_FRESH_EXIT_PROFIT_TARGET,
+            "exit_force_seconds_to_close": (
+                O_V8_PAPER_FRESH_EXIT_FORCE_SECONDS_TO_CLOSE
+            ),
+        },
+        "exit_policy_kind": "paper_only_diagnostic_exit_adapter",
+        "exit_decision_policy_source": O_V8_PAPER_FRESH_EXIT_DECISION_POLICY_SOURCE,
+        "legacy_state_manager_reused": True,
+        "legacy_decision_policy_reused": False,
+        "exit_thresholds_are_live_execution_thresholds": False,
+        "exit_thresholds_are_model_training_thresholds": False,
+    }
+
+
+def _fresh_exit_policy_contract_fields() -> dict[str, Any]:
+    profile = _fresh_exit_threshold_profile()
+    return {
+        "legacy_state_manager_reused": profile["legacy_state_manager_reused"],
+        "legacy_decision_policy_reused": profile["legacy_decision_policy_reused"],
+        "exit_decision_policy_source": profile["exit_decision_policy_source"],
+        "exit_threshold_profile_name": profile["exit_threshold_profile_name"],
+        "exit_threshold_source": profile["exit_threshold_source"],
+        "exit_thresholds_tuned": profile["exit_thresholds_tuned"],
+        "exit_threshold_values": profile["exit_threshold_values"],
+        "exit_policy_kind": profile["exit_policy_kind"],
+    }
+
+
+def _fresh_legacy_position_policy_audit_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+) -> dict[str, Any]:
+    discovered = [
+        {
+            "module_or_script": "src/bigan/execution/position_manager.py",
+            "functions_or_classes": [
+                "PositionManager.open_position",
+                "PositionManager.update_price",
+                "PositionManager.close_position",
+                "PositionManager.get_all_open",
+            ],
+            "classification": "state_tracking",
+            "safe_to_reuse_in_v8_paper_only": True,
+            "touches_live_write_wallet_capital": False,
+            "uses_settlement_oracle_future_return_fields": False,
+            "uses_realized_pnl_labels_for_tuning": False,
+            "current_adapter_reuse": "direct_state_manager_reuse",
+        },
+        {
+            "module_or_script": "scripts/replay_v7_settlement_position_manager.py",
+            "functions_or_classes": [
+                "_replay_positions",
+                "_take_profit_candidate",
+                "_convergence_evaluation",
+                "Decision",
+                "SimPosition",
+            ],
+            "classification": "offline_replay_decision_policy",
+            "safe_to_reuse_in_v8_paper_only": False,
+            "touches_live_write_wallet_capital": False,
+            "uses_settlement_oracle_future_return_fields": True,
+            "uses_realized_pnl_labels_for_tuning": False,
+            "current_adapter_reuse": "audited_not_reused_script_replay_coupled",
+        },
+        {
+            "module_or_script": "scripts/polymarket_phase4_live_champion_executor.py",
+            "functions_or_classes": [
+                "_maybe_exit",
+                "_sell_settlement_policy_exit",
+                "_sell_position",
+                "_maybe_v7_settlement_position_adjustment",
+            ],
+            "classification": "live_execution_decision_policy",
+            "safe_to_reuse_in_v8_paper_only": False,
+            "touches_live_write_wallet_capital": True,
+            "uses_settlement_oracle_future_return_fields": True,
+            "uses_realized_pnl_labels_for_tuning": False,
+            "current_adapter_reuse": "not_reused_live_write_path",
+        },
+        {
+            "module_or_script": "src/bigan/execution/reconciliation.py",
+            "functions_or_classes": ["reconcile_stale_open_positions"],
+            "classification": "position_reconciliation",
+            "safe_to_reuse_in_v8_paper_only": False,
+            "touches_live_write_wallet_capital": False,
+            "uses_settlement_oracle_future_return_fields": True,
+            "uses_realized_pnl_labels_for_tuning": False,
+            "current_adapter_reuse": "not_reused_settlement_reconciliation_path",
+        },
+        {
+            "module_or_script": (
+                "src/bigan/v8/polymarket/training/"
+                "sell_before_close_exit_reliability.py"
+            ),
+            "functions_or_classes": [
+                "_open_position_row",
+                "_exit_reason_code",
+                "sell-before-close replay attribution helpers",
+            ],
+            "classification": "training_replay_label_diagnostic",
+            "safe_to_reuse_in_v8_paper_only": False,
+            "touches_live_write_wallet_capital": False,
+            "uses_settlement_oracle_future_return_fields": True,
+            "uses_realized_pnl_labels_for_tuning": True,
+            "current_adapter_reuse": "not_reused_training_replay_label_path",
+        },
+    ]
+    report = {
+        "schema_version": O_V8_PAPER_FRESH_LEGACY_POSITION_POLICY_AUDIT_SCHEMA_VERSION,
+        "report_type": "o_v8_paper_fresh_legacy_position_policy_audit",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "audit_search_terms": [
+            "position",
+            "exit",
+            "close",
+            "sell",
+            "hold",
+            "take_profit",
+            "stop_loss",
+            "unrealized",
+            "drawdown",
+            "PositionManager",
+        ],
+        "discovered_modules_and_functions": discovered,
+        "reusable_legacy_decision_policy_found": False,
+        "legacy_decision_policy_reused": False,
+        "legacy_state_manager_reused": True,
+        "exit_decision_policy_source": O_V8_PAPER_FRESH_EXIT_DECISION_POLICY_SOURCE,
+        "exit_policy_kind": "paper_only_diagnostic_exit_adapter",
+        "exit_threshold_profile": _fresh_exit_threshold_profile(),
+        "exit_thresholds_tuned": False,
+        "audit_conclusion": (
+            "Only PositionManager state lifecycle is reused directly; legacy "
+            "decision policies are script/live/replay coupled and remain audit-only."
+        ),
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(
+        report, "o_v8_paper_fresh_legacy_position_policy_audit_report_id"
+    )
+
+
 def _fresh_paper_exit_adapter_bundle(
     *,
     config: PolymarketOV8PaperFreshLoopConfig,
@@ -3511,27 +3699,30 @@ def _fresh_paper_exit_adapter_bundle(
             fills=fills,
             forbidden_rows=forbidden_rows,
         )
+        position_open_failure_rows = opened_rows["position_open_failure_rows"]
         exit_signal_rows, sell_intents, ledger_update_rows = (
             _fresh_evaluate_legacy_position_exits(
                 config=config,
                 manager=manager,
                 trace_rows=trace_rows,
                 forbidden_rows=forbidden_rows,
+                position_open_failure_rows=position_open_failure_rows,
             )
         )
         position_rows = _fresh_position_state_rows(
             manager=manager,
-            opened_rows=opened_rows,
+            opened_rows=opened_rows["opened_position_rows"],
             trace_rows=trace_rows,
         )
     finally:
         conn.close()
     position_report = _fresh_paper_position_state_report(
         config=config,
-        opened_rows=opened_rows,
+        opened_rows=opened_rows["opened_position_rows"],
         position_rows=position_rows,
         ledger_rows=ledger_rows,
         forbidden_rows=forbidden_rows,
+        position_open_failure_rows=position_open_failure_rows,
     )
     exit_signal_report = _fresh_paper_exit_signal_report(
         config=config,
@@ -3559,29 +3750,37 @@ def _fresh_open_legacy_positions(
     manager: PositionManager,
     fills: list[dict[str, Any]],
     forbidden_rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> dict[str, list[dict[str, Any]]]:
     if forbidden_rows:
-        return []
+        return {"opened_position_rows": [], "position_open_failure_rows": []}
     opened_rows: list[dict[str, Any]] = []
+    failure_rows: list[dict[str, Any]] = []
     for index, row in enumerate(config.initial_paper_position_rows, start=1):
-        opened_rows.append(
-            _fresh_open_legacy_position_from_row(
-                manager=manager,
-                row=dict(row),
-                row_index=index,
-                source="initial_paper_position_rows",
-            )
+        opened, failure = _fresh_open_legacy_position_from_row(
+            manager=manager,
+            row=dict(row),
+            row_index=index,
+            source="initial_paper_position_rows",
         )
+        if opened is not None:
+            opened_rows.append(opened)
+        if failure is not None:
+            failure_rows.append(failure)
     for index, fill in enumerate(fills, start=1):
-        opened_rows.append(
-            _fresh_open_legacy_position_from_row(
+        opened, failure = _fresh_open_legacy_position_from_row(
                 manager=manager,
-                row=_fresh_initial_position_row_from_fill(fill),
+            row=_fresh_initial_position_row_from_fill(fill),
                 row_index=index,
-                source="accepted_paper_entry_fill",
-            )
+            source="accepted_paper_entry_fill",
         )
-    return opened_rows
+        if opened is not None:
+            opened_rows.append(opened)
+        if failure is not None:
+            failure_rows.append(failure)
+    return {
+        "opened_position_rows": opened_rows,
+        "position_open_failure_rows": failure_rows,
+    }
 
 
 def _fresh_open_legacy_position_from_row(
@@ -3590,7 +3789,7 @@ def _fresh_open_legacy_position_from_row(
     row: dict[str, Any],
     row_index: int,
     source: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     market_id = str(row.get("market_id") or row.get("event_id") or "")
     side = str(row.get("side") or row.get("execution_guarded_side") or "").upper()
     entry_time = int(row.get("entry_time") or row.get("decision_ts") or 0)
@@ -3599,17 +3798,51 @@ def _fresh_open_legacy_position_from_row(
     event_id = str(row.get("event_id") or f"{source}-{market_id}-{side}-{row_index:06d}")
     symbol = str(row.get("symbol") or f"POLYMARKET:{market_id}:{side}")
     fill_price = row.get("fill_price")
-    manager.open_position(
+    validation_reasons = _fresh_validate_legacy_position_open_row(
+        row=row,
+        market_id=market_id,
         event_id=event_id,
-        symbol=symbol,
         side=side,
         entry_price=entry_price,
         size=size,
-        order_id=str(row.get("order_id") or f"{source}-order-{row_index:06d}"),
-        sleeve=str(row.get("sleeve") or "volatility"),
-        entry_time=entry_time,
-        fill_price=_float(fill_price) if fill_price is not None else entry_price,
     )
+    if validation_reasons:
+        return None, _fresh_position_open_failure_row(
+            row=row,
+            row_index=row_index,
+            source=source,
+            market_id=market_id,
+            event_id=event_id,
+            side=side,
+            reason_codes=validation_reasons,
+            error_message=None,
+        )
+    try:
+        manager.open_position(
+            event_id=event_id,
+            symbol=symbol,
+            side=side,
+            entry_price=entry_price,
+            size=size,
+            order_id=str(row.get("order_id") or f"{source}-order-{row_index:06d}"),
+            sleeve=str(row.get("sleeve") or "volatility"),
+            entry_time=entry_time,
+            fill_price=_float(fill_price) if fill_price is not None else entry_price,
+        )
+    except ValueError as exc:
+        reason_codes = ["position_open_failed_exception"]
+        if "already exists" in str(exc):
+            reason_codes.append("position_open_duplicate_event_id")
+        return None, _fresh_position_open_failure_row(
+            row=row,
+            row_index=row_index,
+            source=source,
+            market_id=market_id,
+            event_id=event_id,
+            side=side,
+            reason_codes=reason_codes,
+            error_message=str(exc),
+        )
     opened_row = {
         "legacy_position_event_id": event_id,
         "position_source": source,
@@ -3626,7 +3859,7 @@ def _fresh_open_legacy_position_from_row(
         "wallet_signing_enabled": False,
     }
     opened_row["paper_position_open_row_hash"] = canonical_json_sha256(opened_row)
-    return opened_row
+    return opened_row, None
 
 
 def _fresh_initial_position_row_from_fill(fill: dict[str, Any]) -> dict[str, Any]:
@@ -3646,23 +3879,87 @@ def _fresh_initial_position_row_from_fill(fill: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _fresh_validate_legacy_position_open_row(
+    *,
+    row: dict[str, Any],
+    market_id: str,
+    event_id: str,
+    side: str,
+    entry_price: float,
+    size: float,
+) -> list[str]:
+    reasons: list[str] = []
+    if not str(market_id).strip() and not str(event_id).strip():
+        reasons.append("position_open_missing_market_or_event_id")
+    if (
+        row.get("event_id") is None
+        and row.get("market_id") is None
+        and row.get("condition_id") is None
+    ):
+        reasons.append("position_open_missing_market_or_event_id")
+    if side not in {"UP", "DOWN"}:
+        reasons.append("position_open_invalid_side")
+    if entry_price <= 0.0:
+        reasons.append("position_open_non_positive_entry_price")
+    if size <= 0.0:
+        reasons.append("position_open_non_positive_size")
+    return sorted(set(reasons))
+
+
+def _fresh_position_open_failure_row(
+    *,
+    row: dict[str, Any],
+    row_index: int,
+    source: str,
+    market_id: str,
+    event_id: str,
+    side: str,
+    reason_codes: list[str],
+    error_message: str | None,
+) -> dict[str, Any]:
+    failure = {
+        "position_open_failure_row_id": f"position-open-failure-{row_index:06d}",
+        "position_source": source,
+        "row_index": row_index,
+        "market_id": market_id,
+        "event_id": event_id,
+        "side": side,
+        "position_open_failure_reason_codes": sorted(set(reason_codes)),
+        "position_open_error_message": error_message,
+        "raw_row_hash": canonical_json_sha256(row),
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    failure["position_open_failure_row_hash"] = canonical_json_sha256(failure)
+    return failure
+
+
 def _fresh_evaluate_legacy_position_exits(
     *,
     config: PolymarketOV8PaperFreshLoopConfig,
     manager: PositionManager,
     trace_rows: list[dict[str, Any]],
     forbidden_rows: list[dict[str, Any]],
+    position_open_failure_rows: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     open_positions = manager.get_all_open()
     if not open_positions:
+        reason_codes = ["no_open_paper_position"]
+        if forbidden_rows:
+            reason_codes.append("forbidden_outcome_field_present_fail_closed")
+        if position_open_failure_rows:
+            reason_codes.append("position_open_failure_present_fail_closed")
         no_exit = {
             "paper_exit_signal_row_id": f"{config.run_id}-exit-signal-none",
             "run_id": config.run_id,
             "paper_exit_decision": "NO_EXIT",
             "exit_decision": "NO_EXIT",
-            "exit_reason_codes": ["no_open_paper_position"],
+            "exit_reason_codes": sorted(set(reason_codes)),
             "accepted_for_paper_exit_intent": False,
             "legacy_position_manager_operations": [],
+            **_fresh_exit_policy_contract_fields(),
             "paper_only": True,
             "capital_at_risk": False,
             "polymarket_write_enabled": False,
@@ -3686,6 +3983,7 @@ def _fresh_evaluate_legacy_position_exits(
             position_payload=position_payload,
             trace_row=trace_row,
             forbidden_rows=forbidden_rows,
+            position_open_failure_rows=position_open_failure_rows,
             signal_index=len(signal_rows) + 1,
         )
         signal_rows.append(signal_row)
@@ -3744,6 +4042,7 @@ def _fresh_legacy_exit_signal_row(
     position_payload: dict[str, Any],
     trace_row: dict[str, Any] | None,
     forbidden_rows: list[dict[str, Any]],
+    position_open_failure_rows: list[dict[str, Any]],
     signal_index: int,
 ) -> dict[str, Any]:
     position_side = str(position_payload.get("side") or "").upper()
@@ -3757,6 +4056,8 @@ def _fresh_legacy_exit_signal_row(
     time_to_close = None
     if forbidden_rows:
         reason_codes.append("forbidden_outcome_field_present_fail_closed")
+    elif position_open_failure_rows:
+        reason_codes.append("position_open_failure_present_fail_closed")
     elif trace_row is None:
         reason_codes.append("no_post_entry_signal_trace_for_open_position")
     else:
@@ -3768,7 +4069,7 @@ def _fresh_legacy_exit_signal_row(
         else:
             manager.update_price(str(position_payload["event_id"]), exit_price)
             hold_edge = None if p_side is None else p_side - exit_price
-            sell, sell_reasons = _fresh_legacy_sell_decision(
+            sell, sell_reasons = _fresh_paper_adapter_sell_decision(
                 exit_price=exit_price,
                 entry_price=entry_price,
                 p_side=p_side,
@@ -3784,21 +4085,22 @@ def _fresh_legacy_exit_signal_row(
                 )
                 position_payload = closed.to_row()
             else:
-                reason_codes.extend(sell_reasons or ["legacy_hold_edge_above_exit_threshold"])
+                reason_codes.extend(
+                    sell_reasons or ["paper_adapter_hold_edge_above_exit_threshold"]
+                )
     row = {
         "paper_exit_signal_row_id": f"{config.run_id}-exit-signal-{signal_index:06d}",
         "run_id": config.run_id,
         "legacy_adapter_rule_id": "v8_paper_legacy_position_manager_exit_adapter_v1",
         "legacy_position_manager_reused": True,
+        **_fresh_exit_policy_contract_fields(),
         "legacy_position_manager_module": "bigan.execution.position_manager.PositionManager",
         "legacy_position_manager_operations": _fresh_legacy_operations_for_decision(
             decision=decision,
             trace_row=trace_row,
             exit_price=exit_price,
         ),
-        "legacy_signal_logic_reference": (
-            "v7_signal_driven_position_management_hold_exit_semantics"
-        ),
+        "legacy_signal_logic_reference": "audited_not_directly_reused",
         "legacy_position_event_id": position_payload.get("event_id"),
         "market_id": _fresh_market_id_from_position(position_payload),
         "symbol": position_payload.get("symbol"),
@@ -3848,7 +4150,7 @@ def _fresh_legacy_exit_signal_row(
     return row
 
 
-def _fresh_legacy_sell_decision(
+def _fresh_paper_adapter_sell_decision(
     *,
     exit_price: float,
     entry_price: float,
@@ -3860,14 +4162,14 @@ def _fresh_legacy_sell_decision(
         time_to_close is not None
         and time_to_close <= O_V8_PAPER_FRESH_EXIT_FORCE_SECONDS_TO_CLOSE
     ):
-        reasons.append("legacy_soft_force_exit_window")
+        reasons.append("paper_adapter_force_exit_window")
     if exit_price - entry_price >= O_V8_PAPER_FRESH_EXIT_PROFIT_TARGET:
-        reasons.append("legacy_profit_target_crossed")
+        reasons.append("paper_adapter_profit_target_crossed")
     if p_side is not None and p_side - exit_price <= O_V8_PAPER_FRESH_EXIT_EDGE_THRESHOLD:
-        reasons.append("legacy_exit_edge_threshold_crossed")
+        reasons.append("paper_adapter_exit_edge_threshold_crossed")
     if reasons:
         return True, reasons
-    return False, ["legacy_hold_position"]
+    return False, ["paper_adapter_hold_position"]
 
 
 def _fresh_legacy_operations_for_decision(
@@ -3906,6 +4208,7 @@ def _fresh_sell_position_intent_from_signal(
         "synthetic_exit_notional": _float(signal_row.get("exit_size"))
         * _float(signal_row.get("exit_price")),
         "exit_reason_codes": list(signal_row.get("exit_reason_codes") or []),
+        **_fresh_exit_policy_contract_fields(),
         "order_intent_contract": "local_paper_sell_position_intent_no_exchange_write_v1",
         "uses_settlement_oracle_future_return_fields": False,
         "uses_input_realized_pnl_fields": False,
@@ -4016,13 +4319,20 @@ def _fresh_paper_position_state_report(
     position_rows: list[dict[str, Any]],
     ledger_rows: list[dict[str, Any]],
     forbidden_rows: list[dict[str, Any]],
+    position_open_failure_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    blocking_reason_codes = []
+    if forbidden_rows:
+        blocking_reason_codes.append("forbidden_outcome_field_present_fail_closed")
+    if position_open_failure_rows:
+        blocking_reason_codes.append("position_open_failure_present_fail_closed")
     report = {
         "schema_version": O_V8_PAPER_FRESH_POSITION_STATE_SCHEMA_VERSION,
         "report_type": "o_v8_paper_fresh_position_state",
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
         "run_id": config.run_id,
         "legacy_position_manager_reused": True,
+        **_fresh_exit_policy_contract_fields(),
         "legacy_position_manager_module": "bigan.execution.position_manager.PositionManager",
         "legacy_position_manager_consumed_fields": _fresh_legacy_position_fields_consumed(),
         "paper_ledger_fields_consumed_for_position_mapping": (
@@ -4032,6 +4342,8 @@ def _fresh_paper_position_state_report(
         "paper_ledger_rows_checked_for_forbidden_outcomes": True,
         "opened_position_rows": opened_rows,
         "position_state_rows": position_rows,
+        "position_open_failed_count": len(position_open_failure_rows),
+        "position_open_failure_rows": position_open_failure_rows,
         "initial_paper_position_row_count": len(config.initial_paper_position_rows),
         "accepted_entry_fill_position_count": sum(
             1 for row in opened_rows if row.get("position_source") == "accepted_paper_entry_fill"
@@ -4049,8 +4361,9 @@ def _fresh_paper_position_state_report(
         "forbidden_outcome_fields_present": bool(forbidden_rows),
         "forbidden_outcome_field_rows": forbidden_rows,
         "position_state_adapter_status": "blocked_fail_closed"
-        if forbidden_rows
+        if blocking_reason_codes
         else "passed",
+        "position_state_blocking_reason_codes": sorted(set(blocking_reason_codes)),
         "uses_settlement_oracle_future_return_fields": False,
         "uses_input_realized_pnl_fields": False,
         "mutates_o_entry_scorer": False,
@@ -4081,10 +4394,9 @@ def _fresh_paper_exit_signal_report(
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
         "run_id": config.run_id,
         "legacy_position_manager_reused": True,
+        **_fresh_exit_policy_contract_fields(),
         "legacy_position_manager_module": "bigan.execution.position_manager.PositionManager",
-        "legacy_signal_logic_reference": (
-            "v7_signal_driven_position_management_hold_exit_semantics"
-        ),
+        "legacy_signal_logic_reference": "audited_not_directly_reused",
         "legacy_consumed_signal_fields": _fresh_legacy_signal_fields_consumed(),
         "signal_trace_row_count": len(trace_rows),
         "paper_exit_signal_rows": exit_signal_rows,
@@ -4144,6 +4456,7 @@ def _fresh_synthetic_exit_ledger_update_report(
         "report_type": "o_v8_paper_fresh_synthetic_ledger_update",
         "phase": POLYMARKET_POLICY_TRAINING_PHASE,
         "run_id": config.run_id,
+        **_fresh_exit_policy_contract_fields(),
         "synthetic_ledger_update_rows": ledger_update_rows,
         "synthetic_ledger_update_count": len(ledger_update_rows),
         "paper_sell_position_intent_count": len(sell_intents),
@@ -4610,6 +4923,7 @@ def _fresh_loop_manifest(
     canonical_scorer_alignment_report: dict[str, Any],
     signal_trace_report: dict[str, Any],
     time_window_diagnostic_report: dict[str, Any],
+    legacy_position_policy_audit_report: dict[str, Any],
     paper_position_state_report: dict[str, Any],
     paper_exit_signal_report: dict[str, Any],
     paper_sell_position_intents: list[dict[str, Any]],
@@ -4673,6 +4987,11 @@ def _fresh_loop_manifest(
         "fresh_time_window_diagnostic_report_id": time_window_diagnostic_report[
             "o_v8_paper_fresh_time_window_diagnostic_report_id"
         ],
+        "fresh_legacy_position_policy_audit_report_id": (
+            legacy_position_policy_audit_report[
+                "o_v8_paper_fresh_legacy_position_policy_audit_report_id"
+            ]
+        ),
         "fresh_paper_position_state_report_id": paper_position_state_report[
             "o_v8_paper_fresh_position_state_report_id"
         ],
@@ -4764,6 +5083,31 @@ def _fresh_loop_manifest(
         "open_paper_position_count": paper_position_state_report[
             "open_paper_position_count"
         ],
+        "position_open_failed_count": paper_position_state_report[
+            "position_open_failed_count"
+        ],
+        "position_state_adapter_status": paper_position_state_report[
+            "position_state_adapter_status"
+        ],
+        "position_state_blocking_reason_codes": paper_position_state_report[
+            "position_state_blocking_reason_codes"
+        ],
+        "legacy_state_manager_reused": paper_exit_signal_report[
+            "legacy_state_manager_reused"
+        ],
+        "legacy_decision_policy_reused": paper_exit_signal_report[
+            "legacy_decision_policy_reused"
+        ],
+        "exit_decision_policy_source": paper_exit_signal_report[
+            "exit_decision_policy_source"
+        ],
+        "exit_threshold_profile_name": paper_exit_signal_report[
+            "exit_threshold_profile_name"
+        ],
+        "exit_threshold_source": paper_exit_signal_report["exit_threshold_source"],
+        "exit_thresholds_tuned": paper_exit_signal_report["exit_thresholds_tuned"],
+        "exit_threshold_values": paper_exit_signal_report["exit_threshold_values"],
+        "exit_policy_kind": paper_exit_signal_report["exit_policy_kind"],
         "paper_exit_signal_count": paper_exit_signal_report[
             "paper_exit_signal_count"
         ],
@@ -5851,6 +6195,10 @@ def _fresh_paper_position_state_md(report: dict[str, Any]) -> str:
             f"- legacy_position_manager_reused: `{str(report['legacy_position_manager_reused']).lower()}`",
             f"- initial_paper_position_row_count: `{report['initial_paper_position_row_count']}`",
             f"- accepted_entry_fill_position_count: `{report['accepted_entry_fill_position_count']}`",
+            f"- position_open_failed_count: `{report['position_open_failed_count']}`",
+            f"- position_state_adapter_status: `{report['position_state_adapter_status']}`",
+            f"- exit_decision_policy_source: `{report['exit_decision_policy_source']}`",
+            f"- exit_thresholds_tuned: `{str(report['exit_thresholds_tuned']).lower()}`",
             f"- open_paper_position_count: `{report['open_paper_position_count']}`",
             f"- eligible_for_exit_signal_count: `{report['eligible_for_exit_signal_count']}`",
             f"- forbidden_outcome_fields_present: `{str(report['forbidden_outcome_fields_present']).lower()}`",
@@ -5863,6 +6211,34 @@ def _fresh_paper_position_state_md(report: dict[str, Any]) -> str:
             "## Consumed Paper Ledger Fields",
             "",
             *_markdown_list(report["paper_ledger_fields_consumed_for_position_mapping"]),
+            "",
+            "## Blocking Reason Codes",
+            "",
+            *_markdown_list(report["position_state_blocking_reason_codes"]),
+            "",
+        ]
+    )
+
+
+def _fresh_legacy_position_policy_audit_md(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Paper Fresh Legacy Position Policy Audit",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- reusable_legacy_decision_policy_found: `{str(report['reusable_legacy_decision_policy_found']).lower()}`",
+            f"- legacy_state_manager_reused: `{str(report['legacy_state_manager_reused']).lower()}`",
+            f"- legacy_decision_policy_reused: `{str(report['legacy_decision_policy_reused']).lower()}`",
+            f"- exit_decision_policy_source: `{report['exit_decision_policy_source']}`",
+            f"- exit_thresholds_tuned: `{str(report['exit_thresholds_tuned']).lower()}`",
+            f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
+            "",
+            "## Discovered Modules",
+            "",
+            *[
+                f"- `{row['module_or_script']}`: `{row['classification']}`, reuse `{row['current_adapter_reuse']}`"
+                for row in report["discovered_modules_and_functions"]
+            ],
             "",
         ]
     )
@@ -5879,6 +6255,11 @@ def _fresh_paper_exit_signal_md(report: dict[str, Any]) -> str:
             f"- sell_position_signal_count: `{report['sell_position_signal_count']}`",
             f"- sell_position_intent_count: `{report['sell_position_intent_count']}`",
             f"- sell_position_intents_are_local_paper_only: `{str(report['sell_position_intents_are_local_paper_only']).lower()}`",
+            f"- legacy_state_manager_reused: `{str(report['legacy_state_manager_reused']).lower()}`",
+            f"- legacy_decision_policy_reused: `{str(report['legacy_decision_policy_reused']).lower()}`",
+            f"- exit_decision_policy_source: `{report['exit_decision_policy_source']}`",
+            f"- exit_threshold_profile_name: `{report['exit_threshold_profile_name']}`",
+            f"- exit_thresholds_tuned: `{str(report['exit_thresholds_tuned']).lower()}`",
             f"- forbidden_outcome_fields_present: `{str(report['forbidden_outcome_fields_present']).lower()}`",
             f"- mutates_o_entry_scorer: `{str(report['mutates_o_entry_scorer']).lower()}`",
             f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
@@ -5904,6 +6285,8 @@ def _fresh_synthetic_ledger_update_md(report: dict[str, Any]) -> str:
             f"- paper_sell_position_intent_count: `{report['paper_sell_position_intent_count']}`",
             f"- synthetic_ledger_update_count: `{report['synthetic_ledger_update_count']}`",
             f"- ledger_updates_only_for_accepted_paper_exit_intents: `{str(report['ledger_updates_only_for_accepted_paper_exit_intents']).lower()}`",
+            f"- exit_decision_policy_source: `{report['exit_decision_policy_source']}`",
+            f"- exit_thresholds_tuned: `{str(report['exit_thresholds_tuned']).lower()}`",
             f"- synthetic_cash_delta_sum: `{report['synthetic_cash_delta_sum']}`",
             f"- synthetic_position_delta_sum: `{report['synthetic_position_delta_sum']}`",
             f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",

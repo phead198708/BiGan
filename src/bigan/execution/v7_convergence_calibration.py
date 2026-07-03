@@ -101,7 +101,7 @@ class V7ConvergenceCalibrationGate:
         path: str | Path,
         *,
         config: V7ConvergenceCalibrationConfig,
-    ) -> "V7ConvergenceCalibrationGate":
+    ) -> V7ConvergenceCalibrationGate:
         artifact_path = Path(path)
         payload = json.loads(artifact_path.read_text(encoding="utf-8"))
         tables_payload = payload.get("calibration_tables") or payload.get("tables") or {}
@@ -295,9 +295,7 @@ def _stats_from_payload(payload: Any) -> V7ConvergenceCalibrationStats | None:
     key_payload = payload.get("key", ["GLOBAL"])
     if isinstance(key_payload, (str, int, float)):
         key = (str(key_payload),)
-    elif isinstance(key_payload, list):
-        key = tuple(str(item) for item in key_payload)
-    elif isinstance(key_payload, tuple):
+    elif isinstance(key_payload, (list, tuple)):
         key = tuple(str(item) for item in key_payload)
     else:
         key = ("GLOBAL",)

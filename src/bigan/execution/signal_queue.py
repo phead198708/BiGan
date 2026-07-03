@@ -271,9 +271,12 @@ class JsonlSignalSource:
         after_position = cursor.position
         if after_position > len(lines):
             after_position = 0
-        if after_position > 0 and cursor.signature:
-            if signal_jsonl_prefix_signature(lines, after_position) != cursor.signature:
-                after_position = 0
+        if (
+            after_position > 0
+            and cursor.signature
+            and signal_jsonl_prefix_signature(lines, after_position) != cursor.signature
+        ):
+            after_position = 0
         payloads: list[dict[str, Any]] = []
         last_position = after_position
         for idx, line in enumerate(lines[after_position:], start=after_position + 1):
