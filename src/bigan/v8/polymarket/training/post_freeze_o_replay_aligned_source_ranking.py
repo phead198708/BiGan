@@ -882,6 +882,21 @@ def run_polymarket_o_replay_aligned_source_ranking(
         "future_unseen_holdout_raw_collection_blocking_reason_codes": reports[21][
             "future_unseen_holdout_raw_collection_blocking_reason_codes"
         ],
+        "future_window_time_validation_passed": reports[21][
+            "future_window_time_validation_passed"
+        ],
+        "future_holdout_prior_reference_hash": reports[21][
+            "prior_reference_hash"
+        ],
+        "future_holdout_prior_reference_sources": reports[21][
+            "prior_reference_sources"
+        ],
+        "future_holdout_collection_plan_created_ts": reports[21][
+            "collection_plan_created_ts"
+        ],
+        "future_holdout_raw_manifest_created_ts": reports[21][
+            "raw_manifest_created_ts"
+        ],
         "v8_future_unseen_holdout_input_freeze_manifest_available": True,
         "v8_future_unseen_holdout_input_freeze_manifest_id": reports[22][
             "o_v8_future_unseen_holdout_input_freeze_manifest_id"
@@ -9832,6 +9847,16 @@ def _v8_future_unseen_holdout_collection_plan_report(
         "paper_candidate_gate_design": paper_candidate_gate_design_report,
     }
     report_ids = _v8_existing_diagnostic_report_ids(reports)
+    prior_reference_summary = _v8_future_holdout_prior_reference_summary(
+        m2_report=m2_report,
+        action_rank_handoff_report=action_rank_handoff_report,
+        simulated_order_replay_report=simulated_order_replay_report,
+    )
+    collection_plan_created_ts = (
+        int(prior_reference_summary["max_prior_decision_ts"]) + 1
+        if prior_reference_summary["max_prior_decision_ts"] is not None
+        else 0
+    )
     frozen_config_references = {
         "action_rank_config": {
             "model_sha256": action_rank_handoff_report.get("model_sha256"),
@@ -10136,6 +10161,9 @@ def _v8_future_unseen_holdout_collection_plan_report(
         ),
         "future_unseen_holdout_required": True,
         "future_paper_candidate_gate_required": True,
+        "collection_plan_created_ts": collection_plan_created_ts,
+        "prior_reference_sources": prior_reference_summary["prior_reference_sources"],
+        "prior_reference_hash": prior_reference_summary["prior_reference_hash"],
         "collection_status": "not_started",
         "future_outcome_evaluation_generated": False,
         "future_outcome_evaluation_artifacts_generated": [],
@@ -10191,23 +10219,13 @@ def _v8_future_unseen_holdout_raw_collection_manifest(
         or (raw_payload or {}).get("decision_rows")
         or []
     )
-    prior_rows = [
-        *list(action_rank_handoff_report.get("selected_action_handoff_rows") or []),
-        *list(simulated_order_replay_report.get("simulated_decision_rows") or []),
-    ]
-    prior_market_ids = {
-        str(row.get("market_id") or "") for row in prior_rows if row.get("market_id")
-    }
-    prior_decision_group_ids = {
-        str(row.get("decision_group_id") or "")
-        for row in prior_rows
-        if row.get("decision_group_id")
-    }
-    prior_decision_ts_values = [
-        value
-        for value in (_optional_int(row.get("decision_ts")) for row in prior_rows)
-        if value is not None
-    ]
+    prior_reference_summary = _v8_future_holdout_prior_reference_summary(
+        m2_report=m2_report,
+        action_rank_handoff_report=action_rank_handoff_report,
+        simulated_order_replay_report=simulated_order_replay_report,
+    )
+    prior_market_ids = set(prior_reference_summary["prior_market_ids"])
+    prior_decision_group_ids = set(prior_reference_summary["prior_decision_group_ids"])
     holdout_market_ids = sorted(
         {str(row.get("market_id") or "") for row in holdout_rows if row.get("market_id")}
     )
@@ -10223,10 +10241,22 @@ def _v8_future_unseen_holdout_raw_collection_manifest(
         for value in (_optional_int(row.get("decision_ts")) for row in holdout_rows)
         if value is not None
     ]
-    max_prior_decision_ts = max(prior_decision_ts_values, default=None)
+    max_prior_decision_ts = prior_reference_summary["max_prior_decision_ts"]
     min_holdout_decision_ts = min(holdout_decision_ts_values, default=None)
     window_start_ts = _optional_int((raw_payload or {}).get("window_start_ts"))
     window_end_ts = _optional_int((raw_payload or {}).get("window_end_ts"))
+    collection_plan_created_ts = _optional_int(
+        collection_plan_report.get("collection_plan_created_ts")
+    )
+    raw_manifest_created_ts = _optional_int(
+        (raw_payload or {}).get("raw_manifest_created_ts")
+        or (raw_payload or {}).get("created_ts")
+        or (raw_payload or {}).get("manifest_created_ts")
+    )
+    input_freeze_created_ts = _optional_int(
+        (raw_payload or {}).get("input_freeze_created_ts")
+        or (raw_payload or {}).get("config_freeze_created_ts")
+    )
     forbidden_field_hits = _v8_future_holdout_forbidden_field_hits(holdout_rows)
     market_overlap = sorted(set(holdout_market_ids).intersection(prior_market_ids))
     decision_group_overlap = sorted(
@@ -10238,6 +10268,27 @@ def _v8_future_unseen_holdout_raw_collection_manifest(
         and min_holdout_decision_ts is not None
         and min_holdout_decision_ts > max_prior_decision_ts
         and (window_start_ts is None or window_start_ts > max_prior_decision_ts)
+    )
+    window_start_after_prior = bool(
+        window_start_ts is not None
+        and max_prior_decision_ts is not None
+        and window_start_ts > max_prior_decision_ts
+    )
+    window_start_after_collection_plan = bool(
+        window_start_ts is not None
+        and collection_plan_created_ts is not None
+        and window_start_ts > collection_plan_created_ts
+    )
+    raw_manifest_after_input_freeze = bool(
+        raw_manifest_created_ts is not None
+        and input_freeze_created_ts is not None
+        and raw_manifest_created_ts > input_freeze_created_ts
+    )
+    future_window_time_validation_passed = (
+        future_only
+        and window_start_after_prior
+        and window_start_after_collection_plan
+        and raw_manifest_after_input_freeze
     )
     no_overlap = not market_overlap and not decision_group_overlap
     input_available = raw_path is not None and raw_payload is not None
@@ -10263,16 +10314,30 @@ def _v8_future_unseen_holdout_raw_collection_manifest(
             current_evidence_satisfied=bool(holdout_rows),
         ),
         "future_only_window": _v8_design_gate_check(
-            passed=future_only,
+            passed=future_window_time_validation_passed,
             observed={
                 "max_prior_decision_ts": max_prior_decision_ts,
                 "min_holdout_decision_ts": min_holdout_decision_ts,
                 "window_start_ts": window_start_ts,
+                "collection_plan_created_ts": collection_plan_created_ts,
+                "raw_manifest_created_ts": raw_manifest_created_ts,
+                "input_freeze_created_ts": input_freeze_created_ts,
+                "window_start_after_prior_decision_ts": window_start_after_prior,
+                "window_start_after_collection_plan_created_ts": (
+                    window_start_after_collection_plan
+                ),
+                "raw_manifest_created_after_input_freeze": (
+                    raw_manifest_after_input_freeze
+                ),
             },
-            required="holdout_decision_ts_and_window_start_gt_prior_max_decision_ts",
+            required=(
+                "holdout_decision_ts_and_window_start_gt_prior_max_decision_ts; "
+                "window_start_ts_gt_collection_plan_created_ts; "
+                "raw_manifest_created_ts_gt_input_freeze_created_ts"
+            ),
             reason_code="future_holdout_window_not_future_unseen",
             source_report="future_holdout_raw_input",
-            current_evidence_satisfied=future_only,
+            current_evidence_satisfied=future_window_time_validation_passed,
         ),
         "no_overlap_with_prior_replay_validation_shadow": _v8_design_gate_check(
             passed=no_overlap,
@@ -10339,19 +10404,22 @@ def _v8_future_unseen_holdout_raw_collection_manifest(
             "window_start_ts": window_start_ts,
             "window_end_ts": window_end_ts,
             "market_family": (raw_payload or {}).get("market_family"),
-            "unseen_future_dates_only": future_only,
+            "unseen_future_dates_only": future_window_time_validation_passed,
         },
+        "future_window_time_validation_passed": future_window_time_validation_passed,
+        "collection_plan_created_ts": collection_plan_created_ts,
+        "raw_manifest_created_ts": raw_manifest_created_ts,
+        "input_freeze_created_ts": input_freeze_created_ts,
+        "prior_reference_sources": prior_reference_summary["prior_reference_sources"],
+        "prior_reference_hash": prior_reference_summary["prior_reference_hash"],
         "prior_data_reference": {
             "max_prior_decision_ts": max_prior_decision_ts,
             "prior_market_count": len(prior_market_ids),
             "prior_decision_group_count": len(prior_decision_group_ids),
-            "prior_reference_hash": canonical_json_sha256(
-                {
-                    "market_ids": sorted(prior_market_ids),
-                    "decision_group_ids": sorted(prior_decision_group_ids),
-                    "max_prior_decision_ts": max_prior_decision_ts,
-                }
-            ),
+            "prior_reference_hash": prior_reference_summary["prior_reference_hash"],
+            "prior_reference_sources": prior_reference_summary[
+                "prior_reference_sources"
+            ],
         },
         "holdout_market_ids": holdout_market_ids,
         "holdout_decision_group_ids": holdout_decision_group_ids,
@@ -10379,6 +10447,158 @@ def _v8_future_unseen_holdout_raw_collection_manifest(
         canonical_json_sha256(report)
     )
     return report
+
+
+def _v8_future_holdout_prior_reference_summary(
+    *,
+    m2_report: dict[str, Any],
+    action_rank_handoff_report: dict[str, Any],
+    simulated_order_replay_report: dict[str, Any],
+) -> dict[str, Any]:
+    source_rows: dict[str, list[dict[str, Any]]] = {
+        "m2_selected_rows": list(m2_report.get("m2_selected_rows") or []),
+        "m2_blocked_rows": list(m2_report.get("m2_blocked_rows") or []),
+        "action_rank_handoff_rows": list(
+            action_rank_handoff_report.get("selected_action_handoff_rows") or []
+        ),
+        "simulated_replay_rows": list(
+            simulated_order_replay_report.get("simulated_decision_rows") or []
+        ),
+    }
+    for result in m2_report.get("run_results") or []:
+        if not isinstance(result, dict):
+            continue
+        source_rows.setdefault("m2_run_result_selected_rows", []).extend(
+            list(result.get("m2_selected_rows") or [])
+        )
+        source_rows.setdefault("m2_run_result_blocked_rows", []).extend(
+            list(result.get("m2_blocked_rows") or [])
+        )
+    source_report_paths = _v8_future_holdout_source_report_paths(source_rows)
+    source_report_rows, source_report_summaries = (
+        _v8_future_holdout_source_report_reference_rows(source_report_paths)
+    )
+    source_rows.update(source_report_rows)
+
+    prior_market_ids: set[str] = set()
+    prior_decision_group_ids: set[str] = set()
+    prior_decision_ts_values: list[int] = []
+    prior_reference_sources = []
+    for source_name, rows in sorted(source_rows.items()):
+        market_ids = sorted(
+            {str(row.get("market_id") or "") for row in rows if row.get("market_id")}
+        )
+        decision_group_ids = sorted(
+            {
+                str(row.get("decision_group_id") or "")
+                for row in rows
+                if row.get("decision_group_id")
+            }
+        )
+        decision_ts_values = [
+            value
+            for value in (_optional_int(row.get("decision_ts")) for row in rows)
+            if value is not None
+        ]
+        split_counts = Counter(
+            str(row.get("split") or "unknown")
+            for row in rows
+            if row.get("split") or source_name.startswith("source_report_rows")
+        )
+        prior_market_ids.update(market_ids)
+        prior_decision_group_ids.update(decision_group_ids)
+        prior_decision_ts_values.extend(decision_ts_values)
+        prior_reference_sources.append(
+            {
+                "source_name": source_name,
+                "row_count": len(rows),
+                "market_count": len(market_ids),
+                "decision_group_count": len(decision_group_ids),
+                "max_decision_ts": max(decision_ts_values, default=None),
+                "split_counts": dict(sorted(split_counts.items())),
+                "source_report_path": source_report_summaries.get(
+                    source_name,
+                    {},
+                ).get("source_report_path"),
+                "source_report_sha256": source_report_summaries.get(
+                    source_name,
+                    {},
+                ).get("source_report_sha256"),
+            }
+        )
+    max_prior_decision_ts = max(prior_decision_ts_values, default=None)
+    prior_payload = {
+        "prior_market_ids": sorted(prior_market_ids),
+        "prior_decision_group_ids": sorted(prior_decision_group_ids),
+        "max_prior_decision_ts": max_prior_decision_ts,
+        "prior_reference_sources": prior_reference_sources,
+    }
+    return {
+        **prior_payload,
+        "prior_reference_hash": canonical_json_sha256(prior_payload),
+    }
+
+
+def _v8_future_holdout_source_report_paths(
+    source_rows: dict[str, list[dict[str, Any]]],
+) -> list[Path]:
+    paths = []
+    for rows in source_rows.values():
+        for row in rows:
+            path_value = row.get("source_report_path")
+            if not path_value:
+                continue
+            path = Path(str(path_value)).expanduser()
+            paths.append(path.resolve() if path.is_absolute() else path.resolve())
+    return sorted(set(paths))
+
+
+def _v8_future_holdout_source_report_reference_rows(
+    source_report_paths: list[Path],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
+    rows_by_source: dict[str, list[dict[str, Any]]] = {}
+    summaries: dict[str, dict[str, Any]] = {}
+    for index, path in enumerate(source_report_paths):
+        source_name = f"source_report_rows_{index:03d}"
+        if not path.exists():
+            rows_by_source[source_name] = []
+            summaries[source_name] = {
+                "source_report_path": str(path),
+                "source_report_sha256": None,
+                "source_report_exists": False,
+            }
+            continue
+        payload = _read_json(path)
+        rows = _v8_future_holdout_rows_from_source_report(payload)
+        rows_by_source[source_name] = rows
+        summaries[source_name] = {
+            "source_report_path": str(path),
+            "source_report_sha256": _sha256_file(path),
+            "source_report_exists": True,
+            "source_report_type": payload.get("report_type"),
+        }
+    return rows_by_source, summaries
+
+
+def _v8_future_holdout_rows_from_source_report(
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for field_name in (
+        "rows",
+        "selected_rows",
+        "blocked_rows",
+        "m2_selected_rows",
+        "m2_blocked_rows",
+        "selected_action_handoff_rows",
+        "simulated_decision_rows",
+        "allowed_order_quality_rows",
+        "residual_blocked_decision_rows",
+    ):
+        value = payload.get(field_name)
+        if isinstance(value, list):
+            rows.extend(row for row in value if isinstance(row, dict))
+    return rows
 
 
 def _v8_future_holdout_forbidden_field_hits(

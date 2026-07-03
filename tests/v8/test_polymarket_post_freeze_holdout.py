@@ -4647,6 +4647,11 @@ def test_o_replay_aligned_source_ranking_reports_fail_closed_without_mutation(
         "future_holdout_raw_collection_manifest_missing"
         in manifest["future_unseen_holdout_raw_collection_blocking_reason_codes"]
     )
+    assert manifest["future_window_time_validation_passed"] is False
+    assert looks_like_sha256(manifest["future_holdout_prior_reference_hash"])
+    assert manifest["future_holdout_prior_reference_sources"]
+    assert manifest["future_holdout_collection_plan_created_ts"] is not None
+    assert manifest["future_holdout_raw_manifest_created_ts"] is None
     assert (
         manifest["v8_future_unseen_holdout_input_freeze_manifest_available"]
         is True
@@ -6392,6 +6397,8 @@ def _write_future_holdout_raw_manifest(
     *,
     rows: list[dict[str, Any]],
     window_start_ts: int,
+    input_freeze_created_ts: int = 8_000,
+    raw_manifest_created_ts: int = 9_000,
 ) -> Path:
     path = tmp_path / "future_holdout_raw_manifest.json"
     path.write_text(
@@ -6401,6 +6408,8 @@ def _write_future_holdout_raw_manifest(
                 "market_family": "btc_updown_5m",
                 "window_start_ts": window_start_ts,
                 "window_end_ts": window_start_ts + 300_000,
+                "input_freeze_created_ts": input_freeze_created_ts,
+                "raw_manifest_created_ts": raw_manifest_created_ts,
                 "holdout_decision_rows": rows,
             },
             sort_keys=True,
@@ -6447,6 +6456,13 @@ def test_o_v8_future_unseen_holdout_reports_pass_diagnostic_but_stay_closed(
     assert raw["future_unseen_holdout_raw_collection_blocking_reason_codes"] == []
     assert raw["collection_status"] == "collected"
     assert raw["holdout_decision_count"] == 5
+    assert raw["future_window_time_validation_passed"] is True
+    assert raw["collection_plan_created_ts"] is not None
+    assert raw["raw_manifest_created_ts"] == 9_000
+    assert looks_like_sha256(raw["prior_reference_hash"])
+    assert {
+        source["source_name"] for source in raw["prior_reference_sources"]
+    } >= {"simulated_replay_rows", "m2_selected_rows", "m2_blocked_rows"}
 
     freeze = _v8_future_unseen_holdout_input_freeze_manifest(
         m2_report_path=fixture["m2_report_path"],
@@ -6617,6 +6633,152 @@ def test_o_v8_future_unseen_holdout_raw_collection_fails_on_overlap_past_or_outc
     assert action_rank["prediction_attempted"] is False
     assert execution["execution_replay_attempted"] is False
     assert execution["future_unseen_holdout_execution_replay_ready"] is False
+
+
+def test_o_v8_future_unseen_holdout_raw_collection_detects_m2_row_overlap(
+    tmp_path: Path,
+) -> None:
+    fixture = _build_v8_future_gate_design_fixture(tmp_path)
+    fixture["m2_report"]["m2_selected_rows"] = [
+        {
+            "market_id": "m2-selected-market",
+            "decision_group_id": "m2-selected|m2-selected-market|7",
+            "decision_ts": 7,
+        }
+    ]
+    fixture["m2_report"]["m2_blocked_rows"] = [
+        {
+            "market_id": "m2-blocked-market",
+            "decision_group_id": "m2-blocked|m2-blocked-market|8",
+            "decision_ts": 8,
+        }
+    ]
+    row = _future_holdout_raw_row(1, decision_ts=10_001)
+    row["market_id"] = "m2-selected-market"
+    raw_path = _write_future_holdout_raw_manifest(
+        tmp_path,
+        rows=[row],
+        window_start_ts=10_000,
+    )
+    config = PolymarketOReplayAlignedSourceRankingConfig(
+        m2_candidate_report_path=fixture["m2_report_path"],
+        output_dir=tmp_path,
+        future_holdout_raw_manifest_path=raw_path,
+    )
+    raw = _v8_future_unseen_holdout_raw_collection_manifest(
+        config=config,
+        m2_report_path=fixture["m2_report_path"],
+        m2_report=fixture["m2_report"],
+        action_rank_handoff_report=fixture["action_rank_handoff"],
+        simulated_order_replay_report=fixture["simulated_order_replay"],
+        collection_plan_report=fixture["collection_plan"],
+    )
+    assert raw["future_unseen_holdout_raw_collection_ready"] is False
+    assert "future_holdout_overlap_with_prior_data" in raw[
+        "future_unseen_holdout_raw_collection_blocking_reason_codes"
+    ]
+    sources = {source["source_name"]: source for source in raw["prior_reference_sources"]}
+    assert sources["m2_selected_rows"]["row_count"] == 1
+    assert sources["m2_blocked_rows"]["row_count"] == 1
+    assert looks_like_sha256(raw["prior_reference_hash"])
+
+
+def test_o_v8_future_unseen_holdout_raw_collection_detects_source_report_overlap(
+    tmp_path: Path,
+) -> None:
+    fixture = _build_v8_future_gate_design_fixture(tmp_path)
+    source_report_path = tmp_path / "source_report.json"
+    source_report_path.write_text(
+        json.dumps(
+            {
+                "report_type": "source-overlap-fixture",
+                "rows": [
+                    {
+                        "market_id": "source-only-market",
+                        "decision_group_id": "source-only|source-only-market|9",
+                        "decision_ts": 9,
+                        "split": "validation",
+                    }
+                ],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    fixture["m2_report"]["m2_blocked_rows"] = [
+        {
+            "market_id": "m2-pointer-market",
+            "decision_ts": 8,
+            "source_report_path": str(source_report_path),
+        }
+    ]
+    row = _future_holdout_raw_row(1, decision_ts=10_001)
+    row["market_id"] = "source-only-market"
+    raw_path = _write_future_holdout_raw_manifest(
+        tmp_path,
+        rows=[row],
+        window_start_ts=10_000,
+    )
+    config = PolymarketOReplayAlignedSourceRankingConfig(
+        m2_candidate_report_path=fixture["m2_report_path"],
+        output_dir=tmp_path,
+        future_holdout_raw_manifest_path=raw_path,
+    )
+    raw = _v8_future_unseen_holdout_raw_collection_manifest(
+        config=config,
+        m2_report_path=fixture["m2_report_path"],
+        m2_report=fixture["m2_report"],
+        action_rank_handoff_report=fixture["action_rank_handoff"],
+        simulated_order_replay_report=fixture["simulated_order_replay"],
+        collection_plan_report=fixture["collection_plan"],
+    )
+    assert raw["future_unseen_holdout_raw_collection_ready"] is False
+    assert "future_holdout_overlap_with_prior_data" in raw[
+        "future_unseen_holdout_raw_collection_blocking_reason_codes"
+    ]
+    source_report_sources = [
+        source
+        for source in raw["prior_reference_sources"]
+        if source["source_name"].startswith("source_report_rows_")
+    ]
+    assert source_report_sources
+    assert source_report_sources[0]["row_count"] == 1
+    assert source_report_sources[0]["split_counts"] == {"validation": 1}
+
+
+def test_o_v8_future_unseen_holdout_raw_collection_fails_invalid_time_windows(
+    tmp_path: Path,
+) -> None:
+    fixture = _build_v8_future_gate_design_fixture(tmp_path)
+    row = _future_holdout_raw_row(1, decision_ts=10_001)
+    raw_path = _write_future_holdout_raw_manifest(
+        tmp_path,
+        rows=[row],
+        window_start_ts=5,
+        input_freeze_created_ts=9_000,
+        raw_manifest_created_ts=8_000,
+    )
+    config = PolymarketOReplayAlignedSourceRankingConfig(
+        m2_candidate_report_path=fixture["m2_report_path"],
+        output_dir=tmp_path,
+        future_holdout_raw_manifest_path=raw_path,
+    )
+    raw = _v8_future_unseen_holdout_raw_collection_manifest(
+        config=config,
+        m2_report_path=fixture["m2_report_path"],
+        m2_report=fixture["m2_report"],
+        action_rank_handoff_report=fixture["action_rank_handoff"],
+        simulated_order_replay_report=fixture["simulated_order_replay"],
+        collection_plan_report=fixture["collection_plan"],
+    )
+    assert raw["future_unseen_holdout_raw_collection_ready"] is False
+    assert raw["future_window_time_validation_passed"] is False
+    check = raw["future_unseen_holdout_raw_collection_required_checks"][
+        "future_only_window"
+    ]
+    assert check["observed"]["window_start_after_prior_decision_ts"] is False
+    assert check["observed"]["window_start_after_collection_plan_created_ts"] is False
+    assert check["observed"]["raw_manifest_created_after_input_freeze"] is False
 
 
 def test_o_v8_execution_guard_block_analysis_classifies_safe_order_discovery(

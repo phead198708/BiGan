@@ -204,6 +204,16 @@ def run_polymarket_o_replay_aligned_source_ranking_cli(
         "future_unseen_holdout_raw_collection_blocking_reason_codes": future_raw[
             "future_unseen_holdout_raw_collection_blocking_reason_codes"
         ],
+        "future_window_time_validation_passed": future_raw[
+            "future_window_time_validation_passed"
+        ],
+        "future_holdout_prior_reference_hash": future_raw["prior_reference_hash"],
+        "future_holdout_collection_plan_created_ts": future_raw[
+            "collection_plan_created_ts"
+        ],
+        "future_holdout_raw_manifest_created_ts": future_raw[
+            "raw_manifest_created_ts"
+        ],
         "future_unseen_holdout_input_freeze_ready": future_freeze[
             "future_unseen_holdout_input_freeze_ready"
         ],
