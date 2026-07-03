@@ -74,6 +74,12 @@ O_V8_PAPER_FRESH_CANONICAL_SCORER_SCHEMA_VERSION = (
 O_V8_PAPER_FRESH_SCORER_COMPARISON_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-paper-fresh-scorer-comparison-v1"
 )
+O_V8_PAPER_FRESH_SIGNAL_TRACE_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-paper-fresh-signal-trace-v1"
+)
+O_V8_PAPER_FRESH_TIME_WINDOW_DIAGNOSTIC_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-paper-fresh-time-window-diagnostic-v1"
+)
 
 PINNED_ISSUE_160_RUN_ID = "o-v8-paper-candidate-unlock-20260703T073000Z"
 PINNED_ISSUE_160_MANIFEST_SHA256 = (
@@ -202,6 +208,8 @@ class PolymarketOV8PaperFreshLoopResult:
     canonical_scorer_report: dict[str, Any]
     scorer_comparison_report: dict[str, Any]
     canonical_scorer_alignment_report: dict[str, Any]
+    signal_trace_report: dict[str, Any]
+    time_window_diagnostic_report: dict[str, Any]
     manifest: dict[str, Any]
 
 
@@ -323,6 +331,20 @@ def run_polymarket_o_v8_paper_fresh_loop(
         canonical_scorer_report=canonical_scorer_report,
         scorer_comparison_report=scorer_comparison_report,
     )
+    signal_trace_report = _fresh_signal_trace_report(
+        config=config,
+        public_cycles=public_cycles,
+        public_data_collection_report=public_data_collection_report,
+        canonical_scorer_report=canonical_scorer_report,
+        scorer_comparison_report=scorer_comparison_report,
+        execution_result=execution_result,
+        intents=intents,
+        fills=fills,
+    )
+    time_window_diagnostic_report = _fresh_time_window_diagnostic_report(
+        config=config,
+        signal_trace_report=signal_trace_report,
+    )
 
     artifact_paths = {
         "fresh_loop_run_report": output_dir / "o_v8_paper_fresh_loop_run_report.json",
@@ -375,6 +397,14 @@ def run_polymarket_o_v8_paper_fresh_loop(
         / "o_v8_paper_fresh_canonical_scorer_alignment_report.json",
         "fresh_canonical_scorer_alignment_summary": output_dir
         / "o_v8_paper_fresh_canonical_scorer_alignment_report.md",
+        "fresh_signal_trace_report": output_dir
+        / "o_v8_paper_fresh_signal_trace.json",
+        "fresh_signal_trace_summary": output_dir
+        / "o_v8_paper_fresh_signal_trace.md",
+        "fresh_time_window_diagnostic_report": output_dir
+        / "o_v8_paper_fresh_time_window_diagnostic.json",
+        "fresh_time_window_diagnostic_summary": output_dir
+        / "o_v8_paper_fresh_time_window_diagnostic.md",
         "manifest": output_dir / "o_v8_paper_fresh_loop_manifest.json",
     }
     _write_json(artifact_paths["fresh_loop_run_report"], run_report)
@@ -457,6 +487,19 @@ def run_polymarket_o_v8_paper_fresh_loop(
         artifact_paths["fresh_canonical_scorer_alignment_summary"],
         _fresh_canonical_scorer_alignment_md(canonical_scorer_alignment_report),
     )
+    _write_json(artifact_paths["fresh_signal_trace_report"], signal_trace_report)
+    _write_text(
+        artifact_paths["fresh_signal_trace_summary"],
+        _fresh_signal_trace_md(signal_trace_report),
+    )
+    _write_json(
+        artifact_paths["fresh_time_window_diagnostic_report"],
+        time_window_diagnostic_report,
+    )
+    _write_text(
+        artifact_paths["fresh_time_window_diagnostic_summary"],
+        _fresh_time_window_diagnostic_md(time_window_diagnostic_report),
+    )
 
     artifact_hashes = {
         name: _sha256_file(path)
@@ -481,6 +524,8 @@ def run_polymarket_o_v8_paper_fresh_loop(
         canonical_scorer_report=canonical_scorer_report,
         scorer_comparison_report=scorer_comparison_report,
         canonical_scorer_alignment_report=canonical_scorer_alignment_report,
+        signal_trace_report=signal_trace_report,
+        time_window_diagnostic_report=time_window_diagnostic_report,
     )
     _write_json(artifact_paths["manifest"], manifest)
     artifact_hashes["manifest"] = _sha256_file(artifact_paths["manifest"])
@@ -502,6 +547,8 @@ def run_polymarket_o_v8_paper_fresh_loop(
         canonical_scorer_report=canonical_scorer_report,
         scorer_comparison_report=scorer_comparison_report,
         canonical_scorer_alignment_report=canonical_scorer_alignment_report,
+        signal_trace_report=signal_trace_report,
+        time_window_diagnostic_report=time_window_diagnostic_report,
         manifest=manifest,
     )
 
@@ -2964,6 +3011,627 @@ def _fresh_canonical_scorer_alignment_report(
     )
 
 
+def _fresh_signal_trace_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    public_cycles: list[list[dict[str, Any]]],
+    public_data_collection_report: dict[str, Any],
+    canonical_scorer_report: dict[str, Any],
+    scorer_comparison_report: dict[str, Any],
+    execution_result: dict[str, Any],
+    intents: list[dict[str, Any]],
+    fills: list[dict[str, Any]],
+) -> dict[str, Any]:
+    guard_config = dict(execution_result.get("guard_config") or {})
+    provider_by_group: dict[str, dict[str, Any]] = {}
+    for cycle_index, cycle in enumerate(public_cycles, start=1):
+        cycle_id = f"{config.run_id}-cycle-{cycle_index:06d}"
+        for row_index, public_row in enumerate(cycle):
+            group_id = str(public_row.get("decision_group_id"))
+            provider_by_group[group_id] = {
+                **dict(public_row),
+                "cycle_id": cycle_id,
+                "cycle_index": cycle_index,
+                "cycle_row_index": row_index,
+            }
+    canonical_rows_by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in canonical_scorer_report.get("canonical_scored_action_rows", []):
+        canonical_rows_by_group[str(row.get("decision_group_id"))].append(dict(row))
+    canonical_selected_by_group = {
+        str(row.get("decision_group_id")): dict(row)
+        for row in canonical_scorer_report.get("canonical_selected_decision_rows", [])
+    }
+    comparison_by_group = {
+        str(row.get("decision_group_id")): dict(row)
+        for row in scorer_comparison_report.get("comparison_decision_rows", [])
+    }
+    guard_by_group = {
+        str(row.get("decision_group_id")): dict(row)
+        for row in execution_result.get("guard_decision_rows", [])
+    }
+    intent_by_group = {
+        str(row.get("decision_group_id")): dict(row) for row in intents
+    }
+    fill_by_intent = {
+        str(row.get("paper_fresh_order_intent_id")): dict(row) for row in fills
+    }
+    trace_rows: list[dict[str, Any]] = []
+    for group_id, provider_row in provider_by_group.items():
+        guard_row = guard_by_group.get(group_id, {})
+        canonical_selected = canonical_selected_by_group.get(group_id, {})
+        canonical_group_rows = sorted(
+            canonical_rows_by_group.get(group_id, []),
+            key=lambda row: int(row.get("canonical_rank") or 999),
+        )
+        comparison_row = comparison_by_group.get(group_id, {})
+        intent_row = intent_by_group.get(group_id, {})
+        fill_row = fill_by_intent.get(str(intent_row.get("paper_fresh_order_intent_id")), {})
+        selected_action = str(
+            canonical_selected.get("action")
+            or guard_row.get("source_selected_action")
+            or provider_row.get("selected_action")
+            or ""
+        )
+        selected_family = _action_family(selected_action)
+        micro = dict(guard_row.get("microstructure_snapshot") or {})
+        if not micro:
+            micro = dict(provider_row.get("microstructure_snapshot") or {})
+        decision_ts = int(provider_row.get("decision_ts") or guard_row.get("decision_ts") or 0)
+        market_start_ts = _trace_int_or_none(
+            provider_row.get("market_start_ts")
+            or provider_row.get("market_start_timestamp")
+            or provider_row.get("score_components", {}).get("market_start_ts")
+        )
+        market_end_ts = _trace_int_or_none(
+            provider_row.get("market_end_ts")
+            or provider_row.get("market_end_timestamp")
+            or provider_row.get("score_components", {}).get("market_end_ts")
+        )
+        time_to_close = _trace_time_to_close_seconds(
+            decision_ts=decision_ts,
+            market_end_ts=market_end_ts,
+            micro=micro,
+        )
+        if market_end_ts is None and time_to_close is not None:
+            market_end_ts = int(decision_ts + time_to_close * 1000)
+        if market_start_ts is None and market_end_ts is not None:
+            horizon_ms = _trace_int_or_none(provider_row.get("horizon_ms")) or 300_000
+            market_start_ts = market_end_ts - horizon_ms
+        elapsed = (
+            (decision_ts - market_start_ts) / 1000.0
+            if market_start_ts is not None and decision_ts
+            else None
+        )
+        required_min = _trace_required_min_time_to_close_seconds(
+            action=selected_action,
+            guard_config=guard_config,
+        )
+        shortfall = (
+            max(0.0, required_min - time_to_close)
+            if time_to_close is not None
+            else required_min
+        )
+        time_gate_passed = (
+            True
+            if selected_action == "NO_TRADE"
+            else bool(time_to_close is not None and time_to_close >= required_min)
+        )
+        lifecycle = _trace_lifecycle_window(
+            elapsed_since_market_start_seconds=elapsed,
+            time_to_close_seconds=time_to_close,
+        )
+        blocking_reasons = list(guard_row.get("execution_blocking_reason_codes") or [])
+        paper_intent_id = intent_row.get("paper_fresh_order_intent_id")
+        trace_row = {
+            "run_id": config.run_id,
+            "cycle_id": provider_row.get("cycle_id"),
+            "cycle_index": provider_row.get("cycle_index"),
+            "cycle_row_index": provider_row.get("cycle_row_index"),
+            "market_id": provider_row.get("market_id"),
+            "condition_id": provider_row.get("condition_id"),
+            "slug": provider_row.get("slug"),
+            "decision_group_id": group_id,
+            "market_start_ts": market_start_ts,
+            "decision_ts": decision_ts,
+            "market_end_ts": market_end_ts,
+            "elapsed_since_market_start_seconds": elapsed,
+            "time_to_close_seconds": time_to_close,
+            "provider_row_source": provider_row.get("provider_row_source")
+            or public_data_collection_report.get("public_data_collection_mode"),
+            "public_data_source": public_data_collection_report["public_data_source"],
+            "simplified_selected_action": provider_row.get("selected_action"),
+            "simplified_selected_side": provider_row.get("selected_side"),
+            "simplified_selected_family": provider_row.get("selected_action_family"),
+            "simplified_corrected_score": provider_row.get("corrected_model_score"),
+            "simplified_full_5_action_ranking_summary": (
+                _trace_ranking_summary(provider_row.get("full_5_action_ranking") or [])
+            ),
+            "canonical_scorer_invoked": canonical_scorer_report[
+                "canonical_frozen_o_scorer_invoked"
+            ],
+            "canonical_scorer_used": canonical_scorer_report[
+                "canonical_frozen_o_scorer_used"
+            ],
+            "canonical_selected_action": canonical_selected.get("action"),
+            "canonical_selected_side": canonical_selected.get("selected_side"),
+            "canonical_selected_family": canonical_selected.get(
+                "selected_action_family"
+            ),
+            "canonical_raw_score": canonical_selected.get("canonical_raw_model_score"),
+            "canonical_corrected_score": canonical_selected.get(
+                "canonical_corrected_model_score"
+            ),
+            "canonical_rank": canonical_selected.get("canonical_rank"),
+            "canonical_full_5_action_ranking_summary": _trace_canonical_ranking_summary(
+                canonical_group_rows
+            ),
+            "simplified_canonical_selected_action_agrees": comparison_row.get(
+                "selected_action_agrees"
+            ),
+            "simplified_canonical_no_trade_agrees": comparison_row.get(
+                "no_trade_selection_agrees"
+            ),
+            "selected_action_family": selected_family,
+            "selected_action_is_hts": selected_family == "HOLD_TO_SETTLEMENT",
+            "required_min_time_to_close_seconds": required_min,
+            "time_to_close_shortfall_seconds": shortfall,
+            "time_to_close_gate_passed": time_gate_passed,
+            "lifecycle_window": lifecycle,
+            "is_in_hts_allowed_window": bool(
+                time_to_close is not None
+                and time_to_close
+                >= float(guard_config.get("min_hts_time_to_close_seconds") or 120.0)
+            ),
+            "is_in_sbc_allowed_window": bool(
+                time_to_close is not None
+                and time_to_close
+                >= float(guard_config.get("min_time_to_close_seconds") or 60.0)
+            ),
+            "is_in_final_no_trade_window": lifecycle == "final_no_trade_window",
+            "spread_bps": micro.get("spread_bps"),
+            "queue_fill_proxy": micro.get("queue_fill_proxy"),
+            "book_staleness_ms": micro.get("book_staleness_ms"),
+            "p_up": guard_row.get("p_up", provider_row.get("p_up")),
+            "p_down": guard_row.get("p_down", provider_row.get("p_down")),
+            "p_up_action_disagreement": guard_row.get(
+                "p_up_action_disagreement",
+                provider_row.get("p_up_action_disagreement"),
+            ),
+            "high_score_flag": guard_row.get(
+                "source_high_score_flag",
+                canonical_selected.get("high_score_flag", provider_row.get("high_score_flag")),
+            ),
+            "score_margin": _top_action_margin(
+                guard_row.get("top_k_action_ranking")
+                or provider_row.get("full_5_action_ranking")
+                or []
+            ),
+            "execution_guarded_action": guard_row.get("execution_guarded_action"),
+            "execution_guarded_side": guard_row.get("execution_guarded_side"),
+            "execution_guarded_family": guard_row.get("execution_guarded_family"),
+            "execution_guarded_score": guard_row.get("execution_guarded_score"),
+            "order_allowed": bool(guard_row.get("order_allowed")),
+            "proposed_order_size": guard_row.get("proposed_order_size"),
+            "paper_intent_id": paper_intent_id,
+            "paper_fill_id": fill_row.get("paper_fresh_fill_id"),
+            "execution_blocking_reason_codes": blocking_reasons,
+            "execution_guard_reason_codes": list(
+                guard_row.get("execution_guard_reason_codes") or []
+            ),
+            "exposure_reason_codes": list(guard_row.get("exposure_reason_codes") or []),
+            "missing_runtime_field_codes": list(
+                guard_row.get("missing_runtime_field_codes") or []
+            ),
+            "provenance_violations": list(
+                guard_row.get("runtime_field_backfill_provenance_violations") or []
+            ),
+            "rank_blocked_by_no_trade": selected_action == "NO_TRADE",
+            "execution_guard_blocked": bool(blocking_reasons),
+            "time_window_blocked": (
+                "execution_time_to_close_unsafe" in blocking_reasons
+                or (selected_action != "NO_TRADE" and not time_gate_passed)
+            ),
+            "fail_closed": bool(blocking_reasons) or selected_action == "NO_TRADE",
+            "signal_outcome_classification": _trace_signal_outcome_classification(
+                selected_action=selected_action,
+                order_allowed=bool(guard_row.get("order_allowed")),
+                blocking_reasons=blocking_reasons,
+            ),
+        }
+        trace_row["o_v8_paper_fresh_signal_trace_row_hash"] = canonical_json_sha256(
+            trace_row
+        )
+        trace_rows.append(trace_row)
+    trace_rows = sorted(
+        trace_rows,
+        key=lambda row: (
+            int(row.get("decision_ts") or 0),
+            str(row.get("market_id") or ""),
+            str(row.get("decision_group_id") or ""),
+        ),
+    )
+    aggregate = _fresh_signal_trace_aggregate(
+        trace_rows=trace_rows,
+        canonical_scorer_report=canonical_scorer_report,
+        intents=intents,
+        fills=fills,
+    )
+    report = {
+        "schema_version": O_V8_PAPER_FRESH_SIGNAL_TRACE_SCHEMA_VERSION,
+        "report_type": "o_v8_paper_fresh_signal_trace",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "public_data_source": public_data_collection_report["public_data_source"],
+        "trace_row_count": len(trace_rows),
+        "trace_rows_sorted_by_decision_ts": _trace_rows_sorted(trace_rows),
+        "trace_rows": trace_rows,
+        **aggregate,
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(report, "o_v8_paper_fresh_signal_trace_report_id")
+
+
+def _fresh_time_window_diagnostic_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    signal_trace_report: dict[str, Any],
+) -> dict[str, Any]:
+    trace_rows = list(signal_trace_report.get("trace_rows") or [])
+    report = {
+        "schema_version": O_V8_PAPER_FRESH_TIME_WINDOW_DIAGNOSTIC_SCHEMA_VERSION,
+        "report_type": "o_v8_paper_fresh_time_window_diagnostic",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "trace_row_count": len(trace_rows),
+        "rows_by_lifecycle_window": _counter_from_rows(trace_rows, "lifecycle_window"),
+        "rows_by_selected_action_family": _counter_from_rows(
+            trace_rows, "selected_action_family"
+        ),
+        "rows_blocked_by_time_to_close": sum(
+            1 for row in trace_rows if row.get("time_window_blocked") is True
+        ),
+        "hts_selected_after_hts_window_expired_count": sum(
+            1
+            for row in trace_rows
+            if row.get("selected_action_is_hts") is True
+            and row.get("is_in_hts_allowed_window") is not True
+        ),
+        "real_action_selected_inside_executable_window_count": sum(
+            1
+            for row in trace_rows
+            if row.get("rank_blocked_by_no_trade") is not True
+            and row.get("time_to_close_gate_passed") is True
+        ),
+        "time_to_close_by_action_family": _trace_numeric_summary_by_field(
+            trace_rows,
+            group_field="selected_action_family",
+            value_field="time_to_close_seconds",
+        ),
+        "time_to_close_shortfall_by_action_family": _trace_numeric_summary_by_field(
+            trace_rows,
+            group_field="selected_action_family",
+            value_field="time_to_close_shortfall_seconds",
+        ),
+        "provider_collection_too_late_for_selected_action_family": (
+            signal_trace_report[
+                "provider_collection_too_late_for_selected_action_family"
+            ]
+        ),
+        "zero_intent_explanation": signal_trace_report["zero_intent_explanation"],
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(
+        report, "o_v8_paper_fresh_time_window_diagnostic_report_id"
+    )
+
+
+def _fresh_signal_trace_aggregate(
+    *,
+    trace_rows: list[dict[str, Any]],
+    canonical_scorer_report: dict[str, Any],
+    intents: list[dict[str, Any]],
+    fills: list[dict[str, Any]],
+) -> dict[str, Any]:
+    canonical_buy_rows = [
+        row
+        for row in trace_rows
+        if row.get("canonical_selected_action")
+        and row.get("canonical_selected_action") != "NO_TRADE"
+    ]
+    canonical_real_rows = [
+        row for row in trace_rows if row.get("selected_action_family") != "NO_TRADE"
+    ]
+    executable_rows = [
+        row for row in canonical_real_rows if row.get("time_to_close_gate_passed") is True
+    ]
+    hts_expired_rows = [
+        row
+        for row in canonical_real_rows
+        if row.get("selected_action_is_hts") is True
+        and row.get("is_in_hts_allowed_window") is not True
+    ]
+    time_blocked_rows = [
+        row for row in trace_rows if row.get("time_window_blocked") is True
+    ]
+    aggregate = {
+        "total_provider_decision_count": len(trace_rows),
+        "canonical_selected_decision_count": canonical_scorer_report[
+            "canonical_selected_decision_count"
+        ],
+        "paper_intent_count": len(intents),
+        "fill_count": len(fills),
+        "rows_by_lifecycle_window": _counter_from_rows(trace_rows, "lifecycle_window"),
+        "rows_by_selected_action_family": _counter_from_rows(
+            trace_rows, "selected_action_family"
+        ),
+        "rows_by_execution_blocking_reason": _counter_from_rows(
+            trace_rows, "execution_blocking_reason_codes"
+        ),
+        "rows_blocked_by_time_to_close": len(time_blocked_rows),
+        "rows_blocked_by_spread": _trace_block_count(
+            trace_rows, "execution_spread_too_wide"
+        ),
+        "rows_blocked_by_staleness": _trace_block_count(
+            trace_rows, "execution_book_stale"
+        ),
+        "rows_blocked_by_liquidity": _trace_block_count(
+            trace_rows, "execution_liquidity_too_weak"
+        ),
+        "rows_blocked_by_p_up_disagreement": _trace_block_count(
+            trace_rows, "execution_p_up_side_disagreement"
+        ),
+        "rows_blocked_by_exposure_cooldown_duplicate": sum(
+            1
+            for row in trace_rows
+            if any(
+                token in reason
+                for reason in row.get("execution_blocking_reason_codes") or []
+                for token in ("exposure", "cooldown", "duplicate")
+            )
+        ),
+        "rows_with_missing_runtime_fields": sum(
+            1 for row in trace_rows if row.get("missing_runtime_field_codes")
+        ),
+        "rows_with_provenance_violations": sum(
+            1 for row in trace_rows if row.get("provenance_violations")
+        ),
+        "time_to_close_by_action_family": _trace_numeric_summary_by_field(
+            trace_rows,
+            group_field="selected_action_family",
+            value_field="time_to_close_seconds",
+        ),
+        "score_by_action_family": _trace_numeric_summary_by_field(
+            trace_rows,
+            group_field="selected_action_family",
+            value_field="canonical_corrected_score",
+        ),
+        "spread_by_action_family": _trace_numeric_summary_by_field(
+            trace_rows,
+            group_field="selected_action_family",
+            value_field="spread_bps",
+        ),
+        "queue_fill_by_action_family": _trace_numeric_summary_by_field(
+            trace_rows,
+            group_field="selected_action_family",
+            value_field="queue_fill_proxy",
+        ),
+        "book_staleness_by_action_family": _trace_numeric_summary_by_field(
+            trace_rows,
+            group_field="selected_action_family",
+            value_field="book_staleness_ms",
+        ),
+        "proportion_canonical_signals_inside_executable_window": (
+            len(executable_rows) / len(canonical_real_rows)
+            if canonical_real_rows
+            else 0.0
+        ),
+        "proportion_canonical_signals_after_hts_window_expired": (
+            len(hts_expired_rows) / len(canonical_real_rows)
+            if canonical_real_rows
+            else 0.0
+        ),
+        "provider_collection_too_late_for_selected_action_family": bool(
+            canonical_real_rows and len(executable_rows) == 0 and time_blocked_rows
+        ),
+        "zero_intent_explanation": {
+            "canonical_buy_side_signal_count": len(canonical_buy_rows),
+            "canonical_selected_action_family_distribution": _counter_from_rows(
+                trace_rows, "selected_action_family"
+            ),
+            "signals_inside_allowed_execution_window_count": len(executable_rows),
+            "time_to_close_blocked_count": len(time_blocked_rows),
+            "non_time_guard_blocking_reason_distribution": _trace_non_time_blockers(
+                trace_rows
+            ),
+            "likely_collection_cadence_or_market_window_issue": bool(
+                canonical_buy_rows and len(executable_rows) == 0 and time_blocked_rows
+            ),
+        },
+    }
+    return aggregate
+
+
+def _trace_ranking_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ordered = sorted(
+        [dict(row) for row in rows],
+        key=lambda row: float(row.get("corrected_model_score") or 0.0),
+        reverse=True,
+    )
+    return [
+        {
+            "rank": index,
+            "action": row.get("selected_action") or row.get("action"),
+            "side": row.get("selected_side"),
+            "family": row.get("selected_action_family"),
+            "corrected_score": row.get("corrected_model_score"),
+            "raw_score": row.get("raw_model_score"),
+        }
+        for index, row in enumerate(ordered, start=1)
+    ]
+
+
+def _trace_canonical_ranking_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "rank": row.get("canonical_rank"),
+            "action": row.get("action"),
+            "side": row.get("selected_side"),
+            "family": row.get("selected_action_family"),
+            "canonical_raw_score": row.get("canonical_raw_model_score"),
+            "canonical_corrected_score": row.get("canonical_corrected_model_score"),
+            "high_score_flag": row.get("high_score_flag"),
+        }
+        for row in sorted(rows, key=lambda item: int(item.get("canonical_rank") or 999))
+    ]
+
+
+def _trace_required_min_time_to_close_seconds(
+    *,
+    action: str,
+    guard_config: dict[str, Any],
+) -> float:
+    family = _action_family(action)
+    if family == "NO_TRADE":
+        return 0.0
+    if family == "HOLD_TO_SETTLEMENT":
+        return float(guard_config.get("min_hts_time_to_close_seconds") or 120.0)
+    return float(guard_config.get("min_time_to_close_seconds") or 60.0)
+
+
+def _trace_lifecycle_window(
+    *,
+    elapsed_since_market_start_seconds: float | None,
+    time_to_close_seconds: float | None,
+) -> str:
+    if time_to_close_seconds is None:
+        return "pre_market_or_invalid_time"
+    if time_to_close_seconds < 0:
+        return "post_market_close"
+    if elapsed_since_market_start_seconds is not None and elapsed_since_market_start_seconds < 0:
+        return "pre_market_or_invalid_time"
+    if time_to_close_seconds < 60.0:
+        return "final_no_trade_window"
+    if elapsed_since_market_start_seconds is not None and elapsed_since_market_start_seconds < 60.0:
+        return "early_window"
+    if time_to_close_seconds < 120.0:
+        return "sbc_only_window"
+    return "hts_allowed_window"
+
+
+def _trace_signal_outcome_classification(
+    *,
+    selected_action: str,
+    order_allowed: bool,
+    blocking_reasons: list[str],
+) -> str:
+    if order_allowed:
+        return "paper_intent_created"
+    if selected_action == "NO_TRADE":
+        return "rank_blocked_by_no_trade"
+    if "execution_time_to_close_unsafe" in blocking_reasons:
+        return "guard_blocked_time_window"
+    if blocking_reasons:
+        return "guard_blocked_other"
+    return "no_guard_decision_available"
+
+
+def _trace_time_to_close_seconds(
+    *,
+    decision_ts: int,
+    market_end_ts: int | None,
+    micro: dict[str, Any],
+) -> float | None:
+    if micro.get("time_to_close_seconds") is not None:
+        return _float(micro.get("time_to_close_seconds"))
+    if market_end_ts is not None and decision_ts:
+        return (market_end_ts - decision_ts) / 1000.0
+    return None
+
+
+def _trace_int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _trace_rows_sorted(rows: list[dict[str, Any]]) -> bool:
+    keys = [
+        (
+            int(row.get("decision_ts") or 0),
+            str(row.get("market_id") or ""),
+            str(row.get("decision_group_id") or ""),
+        )
+        for row in rows
+    ]
+    return keys == sorted(keys)
+
+
+def _trace_block_count(rows: list[dict[str, Any]], reason_code: str) -> int:
+    return sum(
+        1
+        for row in rows
+        if reason_code in (row.get("execution_blocking_reason_codes") or [])
+    )
+
+
+def _trace_non_time_blockers(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for row in rows:
+        for reason in row.get("execution_blocking_reason_codes") or []:
+            if reason != "execution_time_to_close_unsafe":
+                counter[str(reason)] += 1
+    return dict(sorted(counter.items()))
+
+
+def _trace_numeric_summary_by_field(
+    rows: list[dict[str, Any]],
+    *,
+    group_field: str,
+    value_field: str,
+) -> dict[str, dict[str, float | int | None]]:
+    grouped: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        value = row.get(value_field)
+        if value is None:
+            continue
+        grouped[str(row.get(group_field))].append(_float(value))
+    return {
+        group: _numeric_summary(values)
+        for group, values in sorted(grouped.items())
+    }
+
+
 def _fresh_loop_manifest(
     *,
     config: PolymarketOV8PaperFreshLoopConfig,
@@ -2983,6 +3651,8 @@ def _fresh_loop_manifest(
     canonical_scorer_report: dict[str, Any],
     scorer_comparison_report: dict[str, Any],
     canonical_scorer_alignment_report: dict[str, Any],
+    signal_trace_report: dict[str, Any],
+    time_window_diagnostic_report: dict[str, Any],
 ) -> dict[str, Any]:
     manifest = {
         "schema_version": O_V8_PAPER_FRESH_LOOP_MANIFEST_SCHEMA_VERSION,
@@ -3036,6 +3706,28 @@ def _fresh_loop_manifest(
         "fresh_canonical_scorer_alignment_report_id": canonical_scorer_alignment_report[
             "o_v8_paper_fresh_canonical_scorer_alignment_report_id"
         ],
+        "fresh_signal_trace_report_id": signal_trace_report[
+            "o_v8_paper_fresh_signal_trace_report_id"
+        ],
+        "fresh_time_window_diagnostic_report_id": time_window_diagnostic_report[
+            "o_v8_paper_fresh_time_window_diagnostic_report_id"
+        ],
+        "signal_trace_row_count": signal_trace_report["trace_row_count"],
+        "signal_trace_rows_sorted_by_decision_ts": signal_trace_report[
+            "trace_rows_sorted_by_decision_ts"
+        ],
+        "signal_trace_rows_by_lifecycle_window": signal_trace_report[
+            "rows_by_lifecycle_window"
+        ],
+        "signal_trace_rows_by_execution_blocking_reason": signal_trace_report[
+            "rows_by_execution_blocking_reason"
+        ],
+        "time_window_rows_blocked_by_time_to_close": time_window_diagnostic_report[
+            "rows_blocked_by_time_to_close"
+        ],
+        "provider_collection_too_late_for_selected_action_family": (
+            signal_trace_report["provider_collection_too_late_for_selected_action_family"]
+        ),
         "canonical_feature_mapping_complete": canonical_feature_mapping_report[
             "canonical_feature_mapping_complete"
         ],
@@ -4076,6 +4768,75 @@ def _fresh_canonical_scorer_alignment_md(report: dict[str, Any]) -> str:
             "## Blocking Reason Codes",
             "",
             *_markdown_list(report["canonical_alignment_blocking_reason_codes"]),
+            "",
+        ]
+    )
+
+
+def _fresh_signal_trace_md(report: dict[str, Any]) -> str:
+    zero = report["zero_intent_explanation"]
+    return "\n".join(
+        [
+            "# O v8 Paper Fresh Signal Trace",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- public_data_source: `{report['public_data_source']}`",
+            f"- trace_row_count: `{report['trace_row_count']}`",
+            f"- trace_rows_sorted_by_decision_ts: `{str(report['trace_rows_sorted_by_decision_ts']).lower()}`",
+            f"- canonical_selected_decision_count: `{report['canonical_selected_decision_count']}`",
+            f"- paper_intent_count: `{report['paper_intent_count']}`",
+            f"- fill_count: `{report['fill_count']}`",
+            f"- rows_blocked_by_time_to_close: `{report['rows_blocked_by_time_to_close']}`",
+            f"- provider_collection_too_late_for_selected_action_family: `{str(report['provider_collection_too_late_for_selected_action_family']).lower()}`",
+            f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
+            f"- paper_only: `{str(report['paper_only']).lower()}`",
+            f"- capital_at_risk: `{str(report['capital_at_risk']).lower()}`",
+            "",
+            "## Zero Intent Explanation",
+            "",
+            f"- canonical_buy_side_signal_count: `{zero['canonical_buy_side_signal_count']}`",
+            f"- signals_inside_allowed_execution_window_count: `{zero['signals_inside_allowed_execution_window_count']}`",
+            f"- time_to_close_blocked_count: `{zero['time_to_close_blocked_count']}`",
+            f"- likely_collection_cadence_or_market_window_issue: `{str(zero['likely_collection_cadence_or_market_window_issue']).lower()}`",
+            "",
+            "## Rows By Lifecycle Window",
+            "",
+            *_markdown_dict(report["rows_by_lifecycle_window"]),
+            "",
+            "## Rows By Execution Blocking Reason",
+            "",
+            *_markdown_dict(report["rows_by_execution_blocking_reason"]),
+            "",
+            "## Rows By Selected Action Family",
+            "",
+            *_markdown_dict(report["rows_by_selected_action_family"]),
+            "",
+        ]
+    )
+
+
+def _fresh_time_window_diagnostic_md(report: dict[str, Any]) -> str:
+    zero = report["zero_intent_explanation"]
+    return "\n".join(
+        [
+            "# O v8 Paper Fresh Time Window Diagnostic",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- trace_row_count: `{report['trace_row_count']}`",
+            f"- rows_blocked_by_time_to_close: `{report['rows_blocked_by_time_to_close']}`",
+            f"- hts_selected_after_hts_window_expired_count: `{report['hts_selected_after_hts_window_expired_count']}`",
+            f"- real_action_selected_inside_executable_window_count: `{report['real_action_selected_inside_executable_window_count']}`",
+            f"- provider_collection_too_late_for_selected_action_family: `{str(report['provider_collection_too_late_for_selected_action_family']).lower()}`",
+            f"- likely_collection_cadence_or_market_window_issue: `{str(zero['likely_collection_cadence_or_market_window_issue']).lower()}`",
+            f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
+            "",
+            "## Rows By Lifecycle Window",
+            "",
+            *_markdown_dict(report["rows_by_lifecycle_window"]),
+            "",
+            "## Time To Close By Action Family",
+            "",
+            *_markdown_summary_dict(report["time_to_close_by_action_family"]),
             "",
         ]
     )

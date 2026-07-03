@@ -40,6 +40,8 @@ from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
     O_V8_PAPER_FRESH_RUNTIME_SAFETY_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_SCORE_DECOMPOSITION_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_SCORER_COMPARISON_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_SIGNAL_TRACE_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_TIME_WINDOW_DIAGNOSTIC_SCHEMA_VERSION,
     O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
     O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE,
     PolymarketOV8PaperFreshLoopConfig,
@@ -7977,6 +7979,177 @@ def test_o_v8_paper_fresh_canonical_scorer_no_trade_agreement(
     assert result.manifest["v8_execution_handoff_allowed"] is False
 
 
+def test_o_v8_paper_fresh_signal_trace_canonical_time_windows(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    canonical_manifest_path = _write_canonical_o_source_fixture(
+        tmp_path,
+        prefer_no_trade=False,
+        preferred_action="BUY_UP_HOLD_TO_SETTLEMENT",
+    )
+    early_row = _paper_fresh_public_row(
+        index=3,
+        market_id="fresh-trace-early",
+        action="NO_TRADE",
+        side="NONE",
+        p_up=0.82,
+    )
+    early_row["microstructure_snapshot"]["time_to_close_seconds"] = 260.0
+    hts_allowed_row = _paper_fresh_public_row(
+        index=1,
+        market_id="fresh-trace-hts",
+        action="NO_TRADE",
+        side="NONE",
+        p_up=0.83,
+    )
+    hts_allowed_row["microstructure_snapshot"]["time_to_close_seconds"] = 180.0
+    sbc_only_row = _paper_fresh_public_row(
+        index=4,
+        market_id="fresh-trace-sbc-only",
+        action="NO_TRADE",
+        side="NONE",
+        p_up=0.84,
+    )
+    sbc_only_row["microstructure_snapshot"]["time_to_close_seconds"] = 90.0
+    final_row = _paper_fresh_public_row(
+        index=2,
+        market_id="fresh-trace-final",
+        action="NO_TRADE",
+        side="NONE",
+        p_up=0.85,
+    )
+    final_row["microstructure_snapshot"]["time_to_close_seconds"] = 45.0
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-signal-trace-canonical",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            canonical_o_source_manifest_path=canonical_manifest_path,
+            public_data_cycles=((early_row, hts_allowed_row, sbc_only_row, final_row),),
+        )
+    )
+
+    trace = result.signal_trace_report
+    trace_payload = dict(trace)
+    trace_id = trace_payload.pop("o_v8_paper_fresh_signal_trace_report_id")
+    assert canonical_json_sha256(trace_payload) == trace_id
+    assert trace["schema_version"] == O_V8_PAPER_FRESH_SIGNAL_TRACE_SCHEMA_VERSION
+    assert trace["trace_row_count"] == 4
+    assert trace["trace_rows_sorted_by_decision_ts"] is True
+    assert [row["decision_ts"] for row in trace["trace_rows"]] == sorted(
+        row["decision_ts"] for row in trace["trace_rows"]
+    )
+    assert trace["canonical_selected_decision_count"] == 4
+    assert trace["rows_by_lifecycle_window"] == {
+        "early_window": 1,
+        "final_no_trade_window": 1,
+        "hts_allowed_window": 1,
+        "sbc_only_window": 1,
+    }
+    by_market = {row["market_id"]: row for row in trace["trace_rows"]}
+    assert by_market["fresh-trace-sbc-only"]["selected_action_is_hts"] is True
+    assert by_market["fresh-trace-sbc-only"]["required_min_time_to_close_seconds"] == 120.0
+    assert by_market["fresh-trace-sbc-only"]["time_to_close_gate_passed"] is False
+    assert by_market["fresh-trace-sbc-only"]["time_to_close_shortfall_seconds"] == 30.0
+    assert by_market["fresh-trace-sbc-only"]["signal_outcome_classification"] == (
+        "guard_blocked_time_window"
+    )
+    assert "execution_time_to_close_unsafe" in by_market["fresh-trace-sbc-only"][
+        "execution_blocking_reason_codes"
+    ]
+    assert by_market["fresh-trace-final"]["lifecycle_window"] == (
+        "final_no_trade_window"
+    )
+    assert by_market["fresh-trace-final"]["is_in_final_no_trade_window"] is True
+    assert by_market["fresh-trace-early"]["lifecycle_window"] == "early_window"
+    assert by_market["fresh-trace-hts"]["lifecycle_window"] == "hts_allowed_window"
+    assert trace["rows_blocked_by_time_to_close"] == 2
+    assert trace["rows_with_missing_runtime_fields"] == 0
+    assert trace["rows_with_provenance_violations"] == 0
+    assert trace["paper_only"] is True
+    assert trace["capital_at_risk"] is False
+    assert trace["v8_execution_handoff_allowed"] is False
+
+    time_window = result.time_window_diagnostic_report
+    time_window_payload = dict(time_window)
+    time_window_id = time_window_payload.pop(
+        "o_v8_paper_fresh_time_window_diagnostic_report_id"
+    )
+    assert canonical_json_sha256(time_window_payload) == time_window_id
+    assert (
+        time_window["schema_version"]
+        == O_V8_PAPER_FRESH_TIME_WINDOW_DIAGNOSTIC_SCHEMA_VERSION
+    )
+    assert time_window["rows_blocked_by_time_to_close"] == 2
+    assert time_window["hts_selected_after_hts_window_expired_count"] == 2
+    assert result.manifest["signal_trace_row_count"] == 4
+    assert result.manifest["signal_trace_rows_sorted_by_decision_ts"] is True
+    assert "fresh_signal_trace_report" in result.manifest["artifact_hashes"]
+    assert "fresh_time_window_diagnostic_report" in result.manifest["artifact_hashes"]
+    assert result.artifact_hashes["fresh_signal_trace_report"] == (
+        _file_sha256_for_test(result.artifact_paths["fresh_signal_trace_report"])
+    )
+    assert result.artifact_hashes["fresh_time_window_diagnostic_report"] == (
+        _file_sha256_for_test(
+            result.artifact_paths["fresh_time_window_diagnostic_report"]
+        )
+    )
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["#146_start_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
+
+
+def test_o_v8_paper_fresh_signal_trace_sbc_window_can_pass(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    canonical_manifest_path = _write_canonical_o_source_fixture(
+        tmp_path,
+        prefer_no_trade=False,
+        preferred_action="BUY_UP_SELL_BEFORE_CLOSE",
+    )
+    row = _paper_fresh_public_row(
+        index=1,
+        market_id="fresh-trace-sbc-pass",
+        action="NO_TRADE",
+        side="NONE",
+        p_up=0.82,
+    )
+    row["microstructure_snapshot"]["time_to_close_seconds"] = 90.0
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-signal-trace-sbc-pass",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            canonical_o_source_manifest_path=canonical_manifest_path,
+            public_data_cycles=((row,),),
+        )
+    )
+
+    trace_row = result.signal_trace_report["trace_rows"][0]
+    assert trace_row["canonical_scorer_used"] is True
+    assert trace_row["canonical_selected_action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert trace_row["selected_action_family"] == "SELL_BEFORE_CLOSE"
+    assert trace_row["lifecycle_window"] == "sbc_only_window"
+    assert trace_row["required_min_time_to_close_seconds"] == 60.0
+    assert trace_row["time_to_close_gate_passed"] is True
+    assert trace_row["time_to_close_shortfall_seconds"] == 0.0
+    assert trace_row["order_allowed"] is True
+    assert trace_row["paper_intent_id"]
+    assert trace_row["signal_outcome_classification"] == "paper_intent_created"
+    assert result.signal_trace_report["paper_intent_count"] == 1
+    assert result.time_window_diagnostic_report[
+        "real_action_selected_inside_executable_window_count"
+    ] == 1
+    assert result.manifest["paper_fresh_order_intent_count"] == 1
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
 def test_o_v8_paper_fresh_canonical_mapping_invalid_provenance_fails_closed(
     tmp_path: Path,
 ) -> None:
@@ -8538,6 +8711,7 @@ def _write_canonical_o_source_fixture(
     tmp_path: Path,
     *,
     prefer_no_trade: bool,
+    preferred_action: str | None = None,
 ) -> Path:
     source_dir = tmp_path / (
         "canonical-o-no-trade" if prefer_no_trade else "canonical-o-buy-up"
@@ -8545,14 +8719,13 @@ def _write_canonical_o_source_fixture(
     source_dir.mkdir(parents=True, exist_ok=True)
     feature_names = list(O_DEPLOYABLE_MODEL_FEATURE_NAMES)
     coefficients = dict.fromkeys(feature_names, 0.0)
-    if prefer_no_trade:
-        coefficients["action_no_trade"] = 3.0
-        coefficients["action_buy_up_hold_to_settlement"] = -1.0
-        coefficients["action_buy_down_hold_to_settlement"] = -1.0
-    else:
-        coefficients["action_buy_up_hold_to_settlement"] = 3.0
-        coefficients["action_buy_down_hold_to_settlement"] = 0.5
-        coefficients["action_no_trade"] = -1.0
+    selected_action = preferred_action or (
+        "NO_TRADE" if prefer_no_trade else "BUY_UP_HOLD_TO_SETTLEMENT"
+    )
+    for action in O_REQUIRED_DECISION_ACTION_FAMILIES:
+        feature_name = f"action_{action.lower()}"
+        coefficients[feature_name] = 3.0 if action == selected_action else -1.0
+    if selected_action != "NO_TRADE":
         coefficients["p_up"] = 0.25
     ranking_correction_config = _canonical_o_source_fixture_correction_config(
         prefer_no_trade=prefer_no_trade,
