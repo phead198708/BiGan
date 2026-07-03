@@ -15,6 +15,16 @@ from bigan.v8.polymarket import (
     write_deterministic_polymarket_corpus_fixtures,
 )
 from bigan.v8.polymarket.contracts import canonical_json_sha256, looks_like_sha256
+from bigan.v8.polymarket.training.o_v8_paper_candidate_unlock import (
+    O_V8_PAPER_CANDIDATE_UNLOCK_MANIFEST_SCHEMA_VERSION,
+    O_V8_PAPER_CANDIDATE_UNLOCK_SCHEMA_VERSION,
+    O_V8_PAPER_FILL_SIMULATION_SCHEMA_VERSION,
+    O_V8_PAPER_INTERNAL_EXECUTION_LOOP_SCHEMA_VERSION,
+    O_V8_PAPER_RUNTIME_SAFETY_SCHEMA_VERSION,
+    PINNED_ISSUE_159_ARTIFACT_FILENAMES,
+    PolymarketOV8PaperCandidateUnlockConfig,
+    run_polymarket_o_v8_paper_candidate_unlock,
+)
 from bigan.v8.polymarket.training.post_freeze_holdout import (
     FROZEN_M_SELECTOR_BASELINE_COMMIT,
     FROZEN_M_SELECTOR_METHOD,
@@ -7267,6 +7277,386 @@ def test_o_v8_execution_runtime_field_coverage_classifies_backfill_plan(
     assert report["#134_resume_allowed"] is False
     assert report["paper_only"] is True
     assert report["capital_at_risk"] is False
+
+
+def test_o_v8_paper_candidate_unlock_allows_local_paper_loop_only(
+    tmp_path: Path,
+) -> None:
+    issue159_dir, expected_hashes = _write_issue159_paper_unlock_fixture(
+        tmp_path / "issue159"
+    )
+
+    result = run_polymarket_o_v8_paper_candidate_unlock(
+        PolymarketOV8PaperCandidateUnlockConfig(
+            run_id="paper-unlock-pass",
+            output_dir=tmp_path / "out",
+            issue_159_eval_dir=issue159_dir,
+            expected_issue_159_hashes=expected_hashes,
+            manual_approval_approved=True,
+            manual_approval_id="manual-approval-test",
+            manual_approval_operator="pytest",
+        )
+    )
+
+    unlock = result.paper_candidate_unlock_report
+    unlock_payload = dict(unlock)
+    unlock_id = unlock_payload.pop("o_v8_paper_candidate_unlock_report_id")
+    assert canonical_json_sha256(unlock_payload) == unlock_id
+    assert unlock["schema_version"] == O_V8_PAPER_CANDIDATE_UNLOCK_SCHEMA_VERSION
+    assert unlock["paper_candidate_allowed"] is True
+    assert unlock["paper_candidate_blocking_reason_codes"] == []
+    assert unlock["pinned_artifact_hashes_verified"] is True
+    assert unlock["manual_approval_payload"]["manual_approval_approved"] is True
+    assert unlock["v8_execution_handoff_allowed"] is False
+    assert unlock["paper_only"] is True
+    assert unlock["capital_at_risk"] is False
+    assert unlock["polymarket_write_enabled"] is False
+    assert unlock["wallet_signing_enabled"] is False
+    assert unlock["source_model_candidate_eligible"] is False
+    assert unlock["freeze_ready"] is False
+    assert unlock["promotion_evidence_eligible"] is False
+    assert unlock["#146_start_allowed"] is False
+    assert unlock["#134_resume_allowed"] is False
+
+    loop = result.paper_internal_execution_loop_report
+    loop_payload = dict(loop)
+    loop_id = loop_payload.pop("o_v8_paper_internal_execution_loop_report_id")
+    assert canonical_json_sha256(loop_payload) == loop_id
+    assert loop["schema_version"] == O_V8_PAPER_INTERNAL_EXECUTION_LOOP_SCHEMA_VERSION
+    assert loop["paper_internal_execution_loop_enabled"] is True
+    assert loop["v8_paper_internal_handoff_allowed"] is True
+    assert loop["v8_execution_handoff_allowed"] is False
+    assert loop["paper_order_intent_count"] == 2
+    assert loop["paper_fill_count"] == 2
+    assert loop["paper_ledger_entry_count"] == 2
+
+    fill_report = result.paper_fill_simulation_report
+    fill_payload = dict(fill_report)
+    fill_id = fill_payload.pop("o_v8_paper_fill_simulation_report_id")
+    assert canonical_json_sha256(fill_payload) == fill_id
+    assert (
+        fill_report["schema_version"] == O_V8_PAPER_FILL_SIMULATION_SCHEMA_VERSION
+    )
+    assert fill_report["fill_count"] == 2
+    assert fill_report["outcome_pnl_used"] is False
+    assert fill_report["realized_pnl_used"] is False
+
+    safety = result.paper_runtime_safety_report
+    safety_payload = dict(safety)
+    safety_id = safety_payload.pop("o_v8_paper_runtime_safety_report_id")
+    assert canonical_json_sha256(safety_payload) == safety_id
+    assert safety["schema_version"] == O_V8_PAPER_RUNTIME_SAFETY_SCHEMA_VERSION
+    assert safety["paper_runtime_safety_passed"] is True
+    assert safety["ledger_updates_only_accepted_intents"] is True
+    assert safety["v8_execution_handoff_allowed"] is False
+
+    manifest = result.manifest
+    manifest_payload = dict(manifest)
+    manifest_id = manifest_payload.pop("o_v8_paper_candidate_unlock_manifest_id")
+    assert canonical_json_sha256(manifest_payload) == manifest_id
+    assert (
+        manifest["schema_version"]
+        == O_V8_PAPER_CANDIDATE_UNLOCK_MANIFEST_SCHEMA_VERSION
+    )
+    assert manifest["paper_candidate_allowed"] is True
+    assert manifest["paper_internal_execution_loop_enabled"] is True
+    assert manifest["v8_paper_internal_handoff_allowed"] is True
+    assert manifest["v8_execution_handoff_allowed"] is False
+    assert manifest["artifact_hashes"]["paper_order_intent_log"]
+
+    intents = _read_jsonl(result.artifact_paths["paper_order_intent_log"])
+    assert len(intents) == 2
+    assert {row["simulated_order_id"] for row in intents} == {
+        "sim-v8-o-000001",
+        "sim-v8-o-000002",
+    }
+    assert all(row["paper_only"] is True for row in intents)
+    assert all(row["capital_at_risk"] is False for row in intents)
+    assert all(row["polymarket_write_enabled"] is False for row in intents)
+    assert all(row["wallet_signing_enabled"] is False for row in intents)
+
+
+def test_o_v8_paper_candidate_unlock_fails_without_manual_approval(
+    tmp_path: Path,
+) -> None:
+    issue159_dir, expected_hashes = _write_issue159_paper_unlock_fixture(
+        tmp_path / "issue159"
+    )
+
+    result = run_polymarket_o_v8_paper_candidate_unlock(
+        PolymarketOV8PaperCandidateUnlockConfig(
+            run_id="paper-unlock-no-approval",
+            output_dir=tmp_path / "out",
+            issue_159_eval_dir=issue159_dir,
+            expected_issue_159_hashes=expected_hashes,
+            manual_approval_approved=False,
+            manual_approval_id="manual-approval-test",
+            manual_approval_operator="pytest",
+        )
+    )
+
+    assert result.paper_candidate_unlock_report["paper_candidate_allowed"] is False
+    assert "manual_approval_required_before_paper_candidate" in result.paper_candidate_unlock_report[
+        "paper_candidate_blocking_reason_codes"
+    ]
+    assert (
+        result.paper_internal_execution_loop_report[
+            "paper_internal_execution_loop_enabled"
+        ]
+        is False
+    )
+    assert result.paper_internal_execution_loop_report["paper_order_intent_count"] == 0
+    assert _read_jsonl(result.artifact_paths["paper_order_intent_log"]) == []
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["#146_start_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
+
+
+def test_o_v8_paper_candidate_unlock_fails_on_pinned_hash_mismatch(
+    tmp_path: Path,
+) -> None:
+    issue159_dir, expected_hashes = _write_issue159_paper_unlock_fixture(
+        tmp_path / "issue159"
+    )
+    expected_hashes["execution_replay_report"] = "0" * 64
+
+    result = run_polymarket_o_v8_paper_candidate_unlock(
+        PolymarketOV8PaperCandidateUnlockConfig(
+            run_id="paper-unlock-hash-mismatch",
+            output_dir=tmp_path / "out",
+            issue_159_eval_dir=issue159_dir,
+            expected_issue_159_hashes=expected_hashes,
+            manual_approval_approved=True,
+            manual_approval_id="manual-approval-test",
+            manual_approval_operator="pytest",
+        )
+    )
+
+    assert result.paper_candidate_unlock_report["paper_candidate_allowed"] is False
+    assert "pinned_issue_159_artifact_hash_mismatch" in result.paper_candidate_unlock_report[
+        "paper_candidate_blocking_reason_codes"
+    ]
+    assert result.manifest["paper_internal_execution_loop_enabled"] is False
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def test_o_v8_paper_candidate_unlock_fails_on_upstream_safety_flag(
+    tmp_path: Path,
+) -> None:
+    issue159_dir, expected_hashes = _write_issue159_paper_unlock_fixture(
+        tmp_path / "issue159",
+        upstream_capital_at_risk=True,
+    )
+
+    result = run_polymarket_o_v8_paper_candidate_unlock(
+        PolymarketOV8PaperCandidateUnlockConfig(
+            run_id="paper-unlock-safety-flag",
+            output_dir=tmp_path / "out",
+            issue_159_eval_dir=issue159_dir,
+            expected_issue_159_hashes=expected_hashes,
+            manual_approval_approved=True,
+            manual_approval_id="manual-approval-test",
+            manual_approval_operator="pytest",
+        )
+    )
+
+    assert result.paper_candidate_unlock_report["paper_candidate_allowed"] is False
+    assert "paper_candidate_live_safety_flags_not_blocked" in result.paper_candidate_unlock_report[
+        "paper_candidate_blocking_reason_codes"
+    ]
+    assert result.manifest["paper_candidate_allowed"] is False
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def _write_issue159_paper_unlock_fixture(
+    run_dir: Path,
+    *,
+    upstream_capital_at_risk: bool = False,
+) -> tuple[Path, dict[str, str]]:
+    run_dir.mkdir(parents=True)
+    common = {
+        "paper_only": True,
+        "capital_at_risk": upstream_capital_at_risk,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "v8_execution_handoff_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "thresholds_tuned": False,
+        "uses_validation_outcomes_for_tuning": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+    }
+    reports = {
+        "source_manifest": {
+            **common,
+            "run_id": "issue159-fixture",
+            "future_unseen_holdout_simulated_allowed_order_count": 2,
+            "future_unseen_holdout_raw_collection_ready": True,
+            "future_window_time_validation_passed": True,
+            "future_unseen_holdout_policy_readiness_passed": True,
+            "future_unseen_holdout_handoff_gate_passed": True,
+            "future_unseen_holdout_paper_candidate_gate_passed": True,
+            "paper_candidate_allowed": False,
+        },
+        "raw_collection_manifest": {
+            **common,
+            "future_unseen_holdout_raw_collection_ready": True,
+            "future_window_time_validation_passed": True,
+            "future_unseen_holdout_raw_collection_required_checks": {
+                "no_overlap_with_prior_replay_validation_shadow": {
+                    "passed": True,
+                    "observed": {"decision_group_overlap": [], "market_overlap": []},
+                    "reason_code": "future_holdout_overlap_with_prior_data",
+                }
+            },
+            "paper_candidate_allowed": False,
+        },
+        "execution_replay_report": {
+            **common,
+            "zero_missing_runtime_fields": True,
+            "zero_provenance_violations": True,
+            "simulated_allowed_order_count": 2,
+            "blocked_decision_count": 1,
+            "future_unseen_holdout_execution_replay_ready": True,
+            "paper_candidate_allowed": False,
+            "derived_reports": {
+                "simulated_order_replay": {
+                    "simulated_decision_rows": [
+                        _paper_unlock_simulated_row(
+                            index=1,
+                            market_id="market-up",
+                            action="BUY_UP_HOLD_TO_SETTLEMENT",
+                            side="UP",
+                            p_up=0.82,
+                            order_allowed=True,
+                        ),
+                        _paper_unlock_simulated_row(
+                            index=2,
+                            market_id="market-down",
+                            action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+                            side="DOWN",
+                            p_up=0.21,
+                            order_allowed=True,
+                        ),
+                        _paper_unlock_simulated_row(
+                            index=3,
+                            market_id="market-blocked",
+                            action="BUY_UP_HOLD_TO_SETTLEMENT",
+                            side="UP",
+                            p_up=0.78,
+                            order_allowed=False,
+                        ),
+                    ],
+                }
+            },
+        },
+        "policy_readiness_report": {
+            **common,
+            "future_unseen_holdout_policy_readiness_passed": True,
+            "allowed_order_count": 2,
+            "min_allowed_order_count": 2,
+            "paper_candidate_allowed": False,
+        },
+        "handoff_gate_report": {
+            **common,
+            "future_unseen_holdout_handoff_gate_passed": True,
+            "derived_explicit_handoff_gate_passed": True,
+            "paper_candidate_allowed": False,
+        },
+        "paper_candidate_gate_report": {
+            **common,
+            "future_unseen_holdout_paper_candidate_gate_passed": True,
+            "future_paper_candidate_gate_required": True,
+            "paper_candidate_allowed": False,
+        },
+    }
+    expected_hashes: dict[str, str] = {}
+    for name, filename in PINNED_ISSUE_159_ARTIFACT_FILENAMES.items():
+        path = run_dir / filename
+        path.write_text(
+            json.dumps(reports[name], indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        expected_hashes[name] = _file_sha256_for_test(path)
+    return run_dir, expected_hashes
+
+
+def _paper_unlock_simulated_row(
+    *,
+    index: int,
+    market_id: str,
+    action: str,
+    side: str,
+    p_up: float,
+    order_allowed: bool,
+) -> dict[str, Any]:
+    decision_ts = 2_000_000 + index
+    return {
+        "decision_group_id": f"fixture|{market_id}|{decision_ts}",
+        "market_id": market_id,
+        "decision_ts": decision_ts,
+        "simulated_order_id": f"sim-v8-o-{index:06d}" if order_allowed else None,
+        "source_selected_action": action,
+        "source_selected_family": "HOLD_TO_SETTLEMENT",
+        "source_selected_side": side,
+        "execution_guarded_action": action,
+        "execution_guarded_family": "HOLD_TO_SETTLEMENT",
+        "execution_guarded_side": side,
+        "source_model_score": 1.0 + index / 10.0,
+        "execution_guarded_score": 1.0 + index / 10.0,
+        "source_raw_model_score": 10.0 + index,
+        "p_up": p_up,
+        "p_down": 1.0 - p_up,
+        "p_up_action_disagreement": False,
+        "order_allowed": order_allowed,
+        "fail_closed": not order_allowed,
+        "proposed_order_size": 0.2 if order_allowed else 0.0,
+        "microstructure_snapshot": {
+            "entry_ask": 0.44 if side == "UP" else 0.56,
+            "executable_exit_bid_proxy": 0.43 if side == "UP" else 0.55,
+            "spread_bps": 100.0 + index,
+            "book_staleness_ms": 200.0,
+            "queue_fill_proxy": 0.9,
+            "time_to_close_seconds": 180.0,
+        },
+        "pre_decision_exposure_state": {
+            "current_total_exposure": 0.0,
+            "current_side_exposure_by_side": {"UP": 0.0, "DOWN": 0.0},
+        },
+        "post_decision_exposure_state": {
+            "current_total_exposure": 0.2 if order_allowed else 0.0,
+            "current_side_exposure_by_side": {
+                "UP": 0.2 if order_allowed and side == "UP" else 0.0,
+                "DOWN": 0.2 if order_allowed and side == "DOWN" else 0.0,
+            },
+        },
+        "execution_guard_reason_codes": [],
+        "execution_blocking_reason_codes": []
+        if order_allowed
+        else ["execution_total_exposure_limit_reached"],
+        "sizing_reason_codes": ["execution_base_size_applied"]
+        if order_allowed
+        else ["execution_blocked_size_zero"],
+        "source_score_mutated": False,
+        "o_model_predicted_score_mutated": False,
+    }
+
+
+def _file_sha256_for_test(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _build_corpus(root: Path) -> Path:
