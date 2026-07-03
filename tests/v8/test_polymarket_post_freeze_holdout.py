@@ -31,11 +31,14 @@ from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
     O_V8_PAPER_FRESH_CANONICAL_SCORER_ALIGNMENT_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_CANONICAL_SCORER_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_CUMULATIVE_MONITORING_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_EXIT_LEDGER_UPDATE_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_EXIT_SIGNAL_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_FILL_SIMULATION_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_LOOP_MANIFEST_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_LOOP_RUN_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_MONITORING_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_NO_TRADE_DIAGNOSTIC_SCHEMA_VERSION,
+    O_V8_PAPER_FRESH_POSITION_STATE_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_PROVIDER_FEATURE_COVERAGE_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_RUNTIME_SAFETY_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_SCORE_DECOMPOSITION_SCHEMA_VERSION,
@@ -8150,6 +8153,203 @@ def test_o_v8_paper_fresh_signal_trace_sbc_window_can_pass(
     assert result.manifest["v8_execution_handoff_allowed"] is False
 
 
+def test_o_v8_paper_fresh_exit_adapter_no_position_emits_no_exit(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    row = _paper_fresh_public_row(
+        index=1,
+        market_id="fresh-exit-no-position",
+        action="NO_TRADE",
+        side="NONE",
+        p_up=0.55,
+    )
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-exit-no-position",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((row,),),
+        )
+    )
+
+    position_report = result.paper_position_state_report
+    position_payload = dict(position_report)
+    position_id = position_payload.pop("o_v8_paper_fresh_position_state_report_id")
+    assert canonical_json_sha256(position_payload) == position_id
+    assert (
+        position_report["schema_version"]
+        == O_V8_PAPER_FRESH_POSITION_STATE_SCHEMA_VERSION
+    )
+    assert position_report["open_paper_position_count"] == 0
+
+    exit_report = result.paper_exit_signal_report
+    exit_payload = dict(exit_report)
+    exit_id = exit_payload.pop("o_v8_paper_fresh_exit_signal_report_id")
+    assert canonical_json_sha256(exit_payload) == exit_id
+    assert exit_report["schema_version"] == O_V8_PAPER_FRESH_EXIT_SIGNAL_SCHEMA_VERSION
+    assert exit_report["paper_exit_signal_rows"][0]["paper_exit_decision"] == "NO_EXIT"
+    assert exit_report["sell_position_intent_count"] == 0
+    assert _read_jsonl(
+        result.artifact_paths["fresh_paper_sell_position_intent_log"]
+    ) == []
+    assert result.manifest["paper_sell_position_intent_count"] == 0
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["#146_start_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
+
+
+def test_o_v8_paper_fresh_exit_adapter_holds_open_position(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    row = _paper_fresh_public_row(
+        index=1,
+        market_id="fresh-exit-hold",
+        action="NO_TRADE",
+        side="NONE",
+        p_up=0.82,
+    )
+    row["microstructure_snapshot"]["executable_exit_bid_proxy"] = 0.41
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-exit-hold",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((row,),),
+            initial_paper_position_rows=(
+                _paper_fresh_initial_position_row(
+                    market_id="fresh-exit-hold",
+                    side="UP",
+                    entry_price=0.40,
+                    entry_time=2_999_000,
+                ),
+            ),
+        )
+    )
+
+    exit_rows = result.paper_exit_signal_report["paper_exit_signal_rows"]
+    assert len(exit_rows) == 1
+    assert exit_rows[0]["paper_exit_decision"] == "HOLD_POSITION"
+    assert "legacy_hold_position" in exit_rows[0]["exit_reason_codes"]
+    assert "p_up" in exit_rows[0]["legacy_consumed_signal_fields"]
+    assert "entry_price" in exit_rows[0]["legacy_consumed_position_fields"]
+    assert result.paper_exit_signal_report["sell_position_signal_count"] == 0
+    assert result.synthetic_ledger_update_report["synthetic_ledger_update_count"] == 0
+    assert result.runtime_safety_report["paper_fresh_runtime_safety_passed"] is True
+    assert result.manifest["paper_exit_adapter_mutates_o_entry_scorer"] is False
+
+
+def test_o_v8_paper_fresh_exit_adapter_sells_open_position_paper_only(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    row = _paper_fresh_public_row(
+        index=1,
+        market_id="fresh-exit-sell",
+        action="NO_TRADE",
+        side="NONE",
+        p_up=0.82,
+    )
+    row["microstructure_snapshot"]["executable_exit_bid_proxy"] = 0.50
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-exit-sell",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((row,),),
+            initial_paper_position_rows=(
+                _paper_fresh_initial_position_row(
+                    market_id="fresh-exit-sell",
+                    side="UP",
+                    entry_price=0.40,
+                    entry_time=2_999_000,
+                ),
+            ),
+        )
+    )
+
+    exit_row = result.paper_exit_signal_report["paper_exit_signal_rows"][0]
+    assert exit_row["paper_exit_decision"] == "SELL_POSITION"
+    assert "legacy_profit_target_crossed" in exit_row["exit_reason_codes"]
+    assert exit_row["accepted_for_paper_exit_intent"] is True
+    assert exit_row["uses_settlement_oracle_future_return_fields"] is False
+    sell_intents = _read_jsonl(
+        result.artifact_paths["fresh_paper_sell_position_intent_log"]
+    )
+    assert len(sell_intents) == 1
+    assert sell_intents[0]["paper_only"] is True
+    assert sell_intents[0]["capital_at_risk"] is False
+    assert sell_intents[0]["polymarket_write_enabled"] is False
+    assert sell_intents[0]["wallet_signing_enabled"] is False
+    ledger_report = result.synthetic_ledger_update_report
+    assert (
+        ledger_report["schema_version"]
+        == O_V8_PAPER_FRESH_EXIT_LEDGER_UPDATE_SCHEMA_VERSION
+    )
+    assert ledger_report["synthetic_ledger_update_count"] == 1
+    assert ledger_report["ledger_updates_only_for_accepted_paper_exit_intents"] is True
+    assert result.runtime_safety_report[
+        "paper_fresh_runtime_safety_checks"
+    ]["exit_ledger_updates_only_accepted_sell_position_intents"]["passed"] is True
+    assert result.manifest["paper_sell_position_intent_count"] == 1
+    assert result.manifest["synthetic_exit_ledger_update_count"] == 1
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["#146_start_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
+
+
+def test_o_v8_paper_fresh_exit_adapter_forbidden_outcome_fails_closed(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    row = _paper_fresh_public_row(
+        index=1,
+        market_id="fresh-exit-forbidden",
+        action="NO_TRADE",
+        side="NONE",
+        p_up=0.82,
+    )
+    row["microstructure_snapshot"]["executable_exit_bid_proxy"] = 0.50
+    initial_position = _paper_fresh_initial_position_row(
+        market_id="fresh-exit-forbidden",
+        side="UP",
+        entry_price=0.40,
+        entry_time=2_999_000,
+    )
+    initial_position["future_return"] = 0.25
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-exit-forbidden",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((row,),),
+            initial_paper_position_rows=(initial_position,),
+        )
+    )
+
+    assert result.paper_position_state_report["position_state_adapter_status"] == (
+        "blocked_fail_closed"
+    )
+    assert result.paper_exit_signal_report["forbidden_outcome_fields_present"] is True
+    assert result.paper_exit_signal_report["sell_position_intent_count"] == 0
+    assert result.synthetic_ledger_update_report["synthetic_ledger_update_count"] == 0
+    assert _read_jsonl(
+        result.artifact_paths["fresh_paper_sell_position_intent_log"]
+    ) == []
+    assert result.paper_exit_signal_report["v8_execution_handoff_allowed"] is False
+    assert result.manifest["paper_sell_position_intent_count"] == 0
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
 def test_o_v8_paper_fresh_canonical_mapping_invalid_provenance_fails_closed(
     tmp_path: Path,
 ) -> None:
@@ -8704,6 +8904,31 @@ def _paper_fresh_public_row(
                 O_REQUIRED_DECISION_ACTION_FAMILIES
             )
         ],
+    }
+
+
+def _paper_fresh_initial_position_row(
+    *,
+    market_id: str,
+    side: str,
+    entry_price: float,
+    entry_time: int,
+) -> dict[str, Any]:
+    return {
+        "event_id": f"initial-{market_id}-{side}",
+        "market_id": market_id,
+        "symbol": f"POLYMARKET:{market_id}:{side}",
+        "side": side,
+        "entry_time": entry_time,
+        "entry_price": entry_price,
+        "fill_price": entry_price,
+        "size": 0.2,
+        "order_id": f"initial-order-{market_id}-{side}",
+        "sleeve": "volatility",
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
     }
 
 

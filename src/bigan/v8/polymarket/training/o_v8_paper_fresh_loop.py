@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import duckdb
+
+from bigan.execution.position_manager import PositionManager
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.corpus.contracts import BTC_UPDOWN_MARKET_HORIZONS_MS
 from bigan.v8.polymarket.recorder.contracts import PolymarketRealCorpusRecorderConfig
@@ -80,6 +83,15 @@ O_V8_PAPER_FRESH_SIGNAL_TRACE_SCHEMA_VERSION = (
 O_V8_PAPER_FRESH_TIME_WINDOW_DIAGNOSTIC_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-paper-fresh-time-window-diagnostic-v1"
 )
+O_V8_PAPER_FRESH_POSITION_STATE_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-paper-fresh-position-state-v1"
+)
+O_V8_PAPER_FRESH_EXIT_SIGNAL_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-paper-fresh-exit-signal-v1"
+)
+O_V8_PAPER_FRESH_EXIT_LEDGER_UPDATE_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-o-v8-paper-fresh-exit-ledger-update-v1"
+)
 
 PINNED_ISSUE_160_RUN_ID = "o-v8-paper-candidate-unlock-20260703T073000Z"
 PINNED_ISSUE_160_MANIFEST_SHA256 = (
@@ -97,6 +109,22 @@ O_V8_PAPER_FRESH_FORBIDDEN_PUBLIC_DATA_FIELDS: tuple[str, ...] = (
     "future_outcome",
     "total_polymarket_pnl",
 )
+O_V8_PAPER_FRESH_EXIT_FORBIDDEN_OUTCOME_FIELDS: tuple[str, ...] = (
+    *O_V8_PAPER_FRESH_FORBIDDEN_PUBLIC_DATA_FIELDS,
+    "oracle_side",
+    "oracle_label",
+    "winning_outcome",
+    "settlement_result",
+    "settlement_status",
+    "resolved_outcome",
+    "future_return_net",
+    "future_last_price",
+    "label_return",
+    "action_return_target",
+)
+O_V8_PAPER_FRESH_EXIT_EDGE_THRESHOLD = -0.02
+O_V8_PAPER_FRESH_EXIT_PROFIT_TARGET = 0.05
+O_V8_PAPER_FRESH_EXIT_FORCE_SECONDS_TO_CLOSE = 60.0
 O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER = "read_only_public_provider"
 O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE = "snapshot_fixture"
 O_V8_PAPER_FRESH_PUBLIC_DATA_SOURCES = (
@@ -135,6 +163,7 @@ class PolymarketOV8PaperFreshLoopConfig:
     public_data_cycles: tuple[tuple[dict[str, Any], ...], ...] | None = None
     public_data_source: str = O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER
     public_provider: Any | None = None
+    initial_paper_position_rows: tuple[dict[str, Any], ...] = ()
     canonical_o_source_manifest_path: Path | str | None = None
     expected_paper_candidate_unlock_manifest_sha256: str | None = (
         PINNED_ISSUE_160_MANIFEST_SHA256
@@ -173,6 +202,12 @@ class PolymarketOV8PaperFreshLoopConfig:
             raise ValueError("polymarket_write_enabled must be false")
         if self.wallet_signing_enabled is not False:
             raise ValueError("wallet_signing_enabled must be false")
+        if not isinstance(self.initial_paper_position_rows, tuple):
+            object.__setattr__(
+                self,
+                "initial_paper_position_rows",
+                tuple(dict(row) for row in self.initial_paper_position_rows),
+            )
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         object.__setattr__(
             self, "paper_candidate_unlock_dir", Path(self.paper_candidate_unlock_dir)
@@ -210,6 +245,10 @@ class PolymarketOV8PaperFreshLoopResult:
     canonical_scorer_alignment_report: dict[str, Any]
     signal_trace_report: dict[str, Any]
     time_window_diagnostic_report: dict[str, Any]
+    paper_position_state_report: dict[str, Any]
+    paper_exit_signal_report: dict[str, Any]
+    paper_sell_position_intents: list[dict[str, Any]]
+    synthetic_ledger_update_report: dict[str, Any]
     manifest: dict[str, Any]
 
 
@@ -281,29 +320,6 @@ def run_polymarket_o_v8_paper_fresh_loop(
         ledger_rows=ledger_rows,
     )
     fill_report = _fresh_fill_simulation_report(config=config, fills=fills)
-    safety_report = _fresh_runtime_safety_report(
-        config=config,
-        run_report=run_report,
-        intents=intents,
-        fills=fills,
-        ledger_rows=ledger_rows,
-    )
-    monitoring_report = _fresh_monitoring_report(
-        config=config,
-        run_report=run_report,
-        execution_result=execution_result,
-        intents=intents,
-        fills=fills,
-        ledger_rows=ledger_rows,
-    )
-    cumulative_report = _fresh_cumulative_monitoring_report(
-        config=config,
-        run_report=run_report,
-        monitoring_report=monitoring_report,
-        intents=intents,
-        fills=fills,
-        ledger_rows=ledger_rows,
-    )
     no_trade_report = _fresh_no_trade_diagnostic_report(
         config=config,
         public_cycles=execution_cycles,
@@ -344,6 +360,46 @@ def run_polymarket_o_v8_paper_fresh_loop(
     time_window_diagnostic_report = _fresh_time_window_diagnostic_report(
         config=config,
         signal_trace_report=signal_trace_report,
+    )
+    exit_adapter_bundle = _fresh_paper_exit_adapter_bundle(
+        config=config,
+        signal_trace_report=signal_trace_report,
+        fills=fills,
+        ledger_rows=ledger_rows,
+    )
+    paper_position_state_report = exit_adapter_bundle["paper_position_state_report"]
+    paper_exit_signal_report = exit_adapter_bundle["paper_exit_signal_report"]
+    paper_sell_position_intents = exit_adapter_bundle["paper_sell_position_intents"]
+    synthetic_ledger_update_report = exit_adapter_bundle[
+        "synthetic_ledger_update_report"
+    ]
+    synthetic_ledger_update_rows = synthetic_ledger_update_report[
+        "synthetic_ledger_update_rows"
+    ]
+    safety_report = _fresh_runtime_safety_report(
+        config=config,
+        run_report=run_report,
+        intents=intents,
+        fills=fills,
+        ledger_rows=ledger_rows,
+        sell_position_intents=paper_sell_position_intents,
+        synthetic_exit_ledger_rows=synthetic_ledger_update_rows,
+    )
+    monitoring_report = _fresh_monitoring_report(
+        config=config,
+        run_report=run_report,
+        execution_result=execution_result,
+        intents=intents,
+        fills=fills,
+        ledger_rows=ledger_rows,
+    )
+    cumulative_report = _fresh_cumulative_monitoring_report(
+        config=config,
+        run_report=run_report,
+        monitoring_report=monitoring_report,
+        intents=intents,
+        fills=fills,
+        ledger_rows=ledger_rows,
     )
 
     artifact_paths = {
@@ -405,6 +461,20 @@ def run_polymarket_o_v8_paper_fresh_loop(
         / "o_v8_paper_fresh_time_window_diagnostic.json",
         "fresh_time_window_diagnostic_summary": output_dir
         / "o_v8_paper_fresh_time_window_diagnostic.md",
+        "fresh_paper_position_state_report": output_dir
+        / "o_v8_paper_fresh_position_state_report.json",
+        "fresh_paper_position_state_summary": output_dir
+        / "o_v8_paper_fresh_position_state_report.md",
+        "fresh_paper_exit_signal_report": output_dir
+        / "o_v8_paper_fresh_exit_signal_report.json",
+        "fresh_paper_exit_signal_summary": output_dir
+        / "o_v8_paper_fresh_exit_signal_report.md",
+        "fresh_paper_sell_position_intent_log": output_dir
+        / "o_v8_paper_fresh_sell_position_intent_log.jsonl",
+        "fresh_synthetic_ledger_update_report": output_dir
+        / "o_v8_paper_fresh_synthetic_ledger_update_report.json",
+        "fresh_synthetic_ledger_update_summary": output_dir
+        / "o_v8_paper_fresh_synthetic_ledger_update_report.md",
         "manifest": output_dir / "o_v8_paper_fresh_loop_manifest.json",
     }
     _write_json(artifact_paths["fresh_loop_run_report"], run_report)
@@ -500,6 +570,34 @@ def run_polymarket_o_v8_paper_fresh_loop(
         artifact_paths["fresh_time_window_diagnostic_summary"],
         _fresh_time_window_diagnostic_md(time_window_diagnostic_report),
     )
+    _write_json(
+        artifact_paths["fresh_paper_position_state_report"],
+        paper_position_state_report,
+    )
+    _write_text(
+        artifact_paths["fresh_paper_position_state_summary"],
+        _fresh_paper_position_state_md(paper_position_state_report),
+    )
+    _write_json(
+        artifact_paths["fresh_paper_exit_signal_report"],
+        paper_exit_signal_report,
+    )
+    _write_text(
+        artifact_paths["fresh_paper_exit_signal_summary"],
+        _fresh_paper_exit_signal_md(paper_exit_signal_report),
+    )
+    _write_jsonl(
+        artifact_paths["fresh_paper_sell_position_intent_log"],
+        paper_sell_position_intents,
+    )
+    _write_json(
+        artifact_paths["fresh_synthetic_ledger_update_report"],
+        synthetic_ledger_update_report,
+    )
+    _write_text(
+        artifact_paths["fresh_synthetic_ledger_update_summary"],
+        _fresh_synthetic_ledger_update_md(synthetic_ledger_update_report),
+    )
 
     artifact_hashes = {
         name: _sha256_file(path)
@@ -526,6 +624,10 @@ def run_polymarket_o_v8_paper_fresh_loop(
         canonical_scorer_alignment_report=canonical_scorer_alignment_report,
         signal_trace_report=signal_trace_report,
         time_window_diagnostic_report=time_window_diagnostic_report,
+        paper_position_state_report=paper_position_state_report,
+        paper_exit_signal_report=paper_exit_signal_report,
+        paper_sell_position_intents=paper_sell_position_intents,
+        synthetic_ledger_update_report=synthetic_ledger_update_report,
     )
     _write_json(artifact_paths["manifest"], manifest)
     artifact_hashes["manifest"] = _sha256_file(artifact_paths["manifest"])
@@ -549,6 +651,10 @@ def run_polymarket_o_v8_paper_fresh_loop(
         canonical_scorer_alignment_report=canonical_scorer_alignment_report,
         signal_trace_report=signal_trace_report,
         time_window_diagnostic_report=time_window_diagnostic_report,
+        paper_position_state_report=paper_position_state_report,
+        paper_exit_signal_report=paper_exit_signal_report,
+        paper_sell_position_intents=paper_sell_position_intents,
+        synthetic_ledger_update_report=synthetic_ledger_update_report,
         manifest=manifest,
     )
 
@@ -1496,8 +1602,16 @@ def _fresh_runtime_safety_report(
     intents: list[dict[str, Any]],
     fills: list[dict[str, Any]],
     ledger_rows: list[dict[str, Any]],
+    sell_position_intents: list[dict[str, Any]],
+    synthetic_exit_ledger_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    rows = [*intents, *fills, *ledger_rows]
+    rows = [
+        *intents,
+        *fills,
+        *ledger_rows,
+        *sell_position_intents,
+        *synthetic_exit_ledger_rows,
+    ]
     safety_checks = {
         "paper_only_true": _check(
             passed=config.paper_only is True
@@ -1537,6 +1651,23 @@ def _fresh_runtime_safety_report(
                 "ledger_entry_count": len(ledger_rows),
             },
             required="ledger ids equal accepted fresh intent ids",
+        ),
+        "exit_ledger_updates_only_accepted_sell_position_intents": _check(
+            passed=len(synthetic_exit_ledger_rows) == len(sell_position_intents)
+            and {
+                row["paper_sell_position_intent_id"]
+                for row in synthetic_exit_ledger_rows
+            }
+            == {
+                row["paper_sell_position_intent_id"]
+                for row in sell_position_intents
+            },
+            reason_code="paper_fresh_exit_ledger_updates_unaccepted_intents",
+            observed={
+                "sell_position_intent_count": len(sell_position_intents),
+                "synthetic_exit_ledger_entry_count": len(synthetic_exit_ledger_rows),
+            },
+            required="exit ledger ids equal accepted sell position intent ids",
         ),
         "live_handoff_remains_blocked": _check(
             passed=run_report["v8_execution_handoff_allowed"] is False
@@ -1582,6 +1713,8 @@ def _fresh_runtime_safety_report(
         "paper_fresh_order_intent_count": len(intents),
         "paper_fresh_fill_count": len(fills),
         "paper_fresh_ledger_entry_count": len(ledger_rows),
+        "paper_sell_position_intent_count": len(sell_position_intents),
+        "synthetic_exit_ledger_entry_count": len(synthetic_exit_ledger_rows),
         "source_model_candidate_eligible": False,
         "freeze_ready": False,
         "promotion_evidence_eligible": False,
@@ -3191,6 +3324,8 @@ def _fresh_signal_trace_report(
             "spread_bps": micro.get("spread_bps"),
             "queue_fill_proxy": micro.get("queue_fill_proxy"),
             "book_staleness_ms": micro.get("book_staleness_ms"),
+            "entry_ask": micro.get("entry_ask"),
+            "executable_exit_bid_proxy": micro.get("executable_exit_bid_proxy"),
             "p_up": guard_row.get("p_up", provider_row.get("p_up")),
             "p_down": guard_row.get("p_down", provider_row.get("p_down")),
             "p_up_action_disagreement": guard_row.get(
@@ -3351,6 +3486,828 @@ def _fresh_time_window_diagnostic_report(
     return _with_report_id(
         report, "o_v8_paper_fresh_time_window_diagnostic_report_id"
     )
+
+
+def _fresh_paper_exit_adapter_bundle(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    signal_trace_report: dict[str, Any],
+    fills: list[dict[str, Any]],
+    ledger_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    trace_rows = list(signal_trace_report.get("trace_rows") or [])
+    forbidden_rows = [
+        *_rows_with_forbidden_exit_fields(list(config.initial_paper_position_rows)),
+        *_rows_with_forbidden_exit_fields(trace_rows),
+        *_rows_with_forbidden_exit_fields(fills),
+        *_rows_with_forbidden_exit_fields(ledger_rows),
+    ]
+    conn = duckdb.connect(":memory:")
+    manager = PositionManager(conn=conn)
+    try:
+        opened_rows = _fresh_open_legacy_positions(
+            config=config,
+            manager=manager,
+            fills=fills,
+            forbidden_rows=forbidden_rows,
+        )
+        exit_signal_rows, sell_intents, ledger_update_rows = (
+            _fresh_evaluate_legacy_position_exits(
+                config=config,
+                manager=manager,
+                trace_rows=trace_rows,
+                forbidden_rows=forbidden_rows,
+            )
+        )
+        position_rows = _fresh_position_state_rows(
+            manager=manager,
+            opened_rows=opened_rows,
+            trace_rows=trace_rows,
+        )
+    finally:
+        conn.close()
+    position_report = _fresh_paper_position_state_report(
+        config=config,
+        opened_rows=opened_rows,
+        position_rows=position_rows,
+        ledger_rows=ledger_rows,
+        forbidden_rows=forbidden_rows,
+    )
+    exit_signal_report = _fresh_paper_exit_signal_report(
+        config=config,
+        trace_rows=trace_rows,
+        exit_signal_rows=exit_signal_rows,
+        sell_intents=sell_intents,
+        forbidden_rows=forbidden_rows,
+    )
+    ledger_report = _fresh_synthetic_exit_ledger_update_report(
+        config=config,
+        sell_intents=sell_intents,
+        ledger_update_rows=ledger_update_rows,
+    )
+    return {
+        "paper_position_state_report": position_report,
+        "paper_exit_signal_report": exit_signal_report,
+        "paper_sell_position_intents": sell_intents,
+        "synthetic_ledger_update_report": ledger_report,
+    }
+
+
+def _fresh_open_legacy_positions(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    manager: PositionManager,
+    fills: list[dict[str, Any]],
+    forbidden_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if forbidden_rows:
+        return []
+    opened_rows: list[dict[str, Any]] = []
+    for index, row in enumerate(config.initial_paper_position_rows, start=1):
+        opened_rows.append(
+            _fresh_open_legacy_position_from_row(
+                manager=manager,
+                row=dict(row),
+                row_index=index,
+                source="initial_paper_position_rows",
+            )
+        )
+    for index, fill in enumerate(fills, start=1):
+        opened_rows.append(
+            _fresh_open_legacy_position_from_row(
+                manager=manager,
+                row=_fresh_initial_position_row_from_fill(fill),
+                row_index=index,
+                source="accepted_paper_entry_fill",
+            )
+        )
+    return opened_rows
+
+
+def _fresh_open_legacy_position_from_row(
+    *,
+    manager: PositionManager,
+    row: dict[str, Any],
+    row_index: int,
+    source: str,
+) -> dict[str, Any]:
+    market_id = str(row.get("market_id") or row.get("event_id") or "")
+    side = str(row.get("side") or row.get("execution_guarded_side") or "").upper()
+    entry_time = int(row.get("entry_time") or row.get("decision_ts") or 0)
+    entry_price = _float(row.get("entry_price") or row.get("fill_price"))
+    size = _float(row.get("size") or row.get("filled_size"))
+    event_id = str(row.get("event_id") or f"{source}-{market_id}-{side}-{row_index:06d}")
+    symbol = str(row.get("symbol") or f"POLYMARKET:{market_id}:{side}")
+    fill_price = row.get("fill_price")
+    manager.open_position(
+        event_id=event_id,
+        symbol=symbol,
+        side=side,
+        entry_price=entry_price,
+        size=size,
+        order_id=str(row.get("order_id") or f"{source}-order-{row_index:06d}"),
+        sleeve=str(row.get("sleeve") or "volatility"),
+        entry_time=entry_time,
+        fill_price=_float(fill_price) if fill_price is not None else entry_price,
+    )
+    opened_row = {
+        "legacy_position_event_id": event_id,
+        "position_source": source,
+        "market_id": market_id,
+        "side": side,
+        "symbol": symbol,
+        "entry_time": entry_time,
+        "entry_price": entry_price,
+        "fill_price": _float(fill_price) if fill_price is not None else entry_price,
+        "size": size,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    opened_row["paper_position_open_row_hash"] = canonical_json_sha256(opened_row)
+    return opened_row
+
+
+def _fresh_initial_position_row_from_fill(fill: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event_id": f"fresh-fill-{fill.get('paper_fresh_fill_id')}",
+        "market_id": fill.get("market_id"),
+        "symbol": (
+            f"POLYMARKET:{fill.get('market_id')}:{fill.get('execution_guarded_side')}"
+        ),
+        "side": fill.get("execution_guarded_side"),
+        "entry_time": fill.get("decision_ts"),
+        "entry_price": fill.get("paper_fill_price"),
+        "fill_price": fill.get("paper_fill_price"),
+        "size": fill.get("filled_size"),
+        "order_id": fill.get("paper_fresh_order_intent_id"),
+        "sleeve": "volatility",
+    }
+
+
+def _fresh_evaluate_legacy_position_exits(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    manager: PositionManager,
+    trace_rows: list[dict[str, Any]],
+    forbidden_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    open_positions = manager.get_all_open()
+    if not open_positions:
+        no_exit = {
+            "paper_exit_signal_row_id": f"{config.run_id}-exit-signal-none",
+            "run_id": config.run_id,
+            "paper_exit_decision": "NO_EXIT",
+            "exit_decision": "NO_EXIT",
+            "exit_reason_codes": ["no_open_paper_position"],
+            "accepted_for_paper_exit_intent": False,
+            "legacy_position_manager_operations": [],
+            "paper_only": True,
+            "capital_at_risk": False,
+            "polymarket_write_enabled": False,
+            "wallet_signing_enabled": False,
+        }
+        no_exit["paper_exit_signal_row_hash"] = canonical_json_sha256(no_exit)
+        return [no_exit], [], []
+    signal_rows: list[dict[str, Any]] = []
+    sell_intents: list[dict[str, Any]] = []
+    ledger_rows: list[dict[str, Any]] = []
+    trace_by_market = _fresh_trace_rows_by_market(trace_rows)
+    for position in open_positions:
+        position_payload = position.to_row()
+        trace_row = _fresh_latest_post_entry_trace_for_position(
+            position_payload=position_payload,
+            trace_by_market=trace_by_market,
+        )
+        signal_row = _fresh_legacy_exit_signal_row(
+            config=config,
+            manager=manager,
+            position_payload=position_payload,
+            trace_row=trace_row,
+            forbidden_rows=forbidden_rows,
+            signal_index=len(signal_rows) + 1,
+        )
+        signal_rows.append(signal_row)
+        if signal_row["paper_exit_decision"] == "SELL_POSITION":
+            intent = _fresh_sell_position_intent_from_signal(
+                config=config,
+                signal_row=signal_row,
+                intent_index=len(sell_intents) + 1,
+            )
+            sell_intents.append(intent)
+            ledger_rows.append(
+                _fresh_synthetic_exit_ledger_update_from_intent(
+                    intent=intent,
+                    row_index=len(ledger_rows) + 1,
+                )
+            )
+    return signal_rows, sell_intents, ledger_rows
+
+
+def _fresh_trace_rows_by_market(
+    trace_rows: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in trace_rows:
+        grouped[str(row.get("market_id") or "")].append(dict(row))
+    return {
+        market_id: sorted(rows, key=lambda row: int(row.get("decision_ts") or 0))
+        for market_id, rows in grouped.items()
+    }
+
+
+def _fresh_latest_post_entry_trace_for_position(
+    *,
+    position_payload: dict[str, Any],
+    trace_by_market: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    market_id = _fresh_market_id_from_position(position_payload)
+    entry_time = int(position_payload.get("entry_time") or 0)
+    side = str(position_payload.get("side") or "")
+    candidates = [
+        row
+        for row in trace_by_market.get(market_id, [])
+        if int(row.get("decision_ts") or 0) > entry_time
+        and str(row.get("execution_guarded_side") or row.get("canonical_selected_side") or "")
+        in {side, "NONE", ""}
+    ]
+    if not candidates:
+        return None
+    return candidates[-1]
+
+
+def _fresh_legacy_exit_signal_row(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    manager: PositionManager,
+    position_payload: dict[str, Any],
+    trace_row: dict[str, Any] | None,
+    forbidden_rows: list[dict[str, Any]],
+    signal_index: int,
+) -> dict[str, Any]:
+    position_side = str(position_payload.get("side") or "").upper()
+    entry_price = _float(position_payload.get("fill_price") or position_payload.get("entry_price"))
+    size = _float(position_payload.get("size"))
+    reason_codes: list[str] = []
+    decision = "HOLD_POSITION"
+    exit_price = None
+    p_side = None
+    hold_edge = None
+    time_to_close = None
+    if forbidden_rows:
+        reason_codes.append("forbidden_outcome_field_present_fail_closed")
+    elif trace_row is None:
+        reason_codes.append("no_post_entry_signal_trace_for_open_position")
+    else:
+        exit_price = _fresh_exit_bid_from_trace(trace_row)
+        time_to_close = _trace_float_or_none(trace_row.get("time_to_close_seconds"))
+        p_side = _fresh_probability_for_position_side(trace_row, position_side)
+        if exit_price is None:
+            reason_codes.append("missing_decision_time_exit_bid_proxy")
+        else:
+            manager.update_price(str(position_payload["event_id"]), exit_price)
+            hold_edge = None if p_side is None else p_side - exit_price
+            sell, sell_reasons = _fresh_legacy_sell_decision(
+                exit_price=exit_price,
+                entry_price=entry_price,
+                p_side=p_side,
+                time_to_close=time_to_close,
+            )
+            if sell:
+                decision = "SELL_POSITION"
+                reason_codes.extend(sell_reasons)
+                closed = manager.close_position(
+                    str(position_payload["event_id"]),
+                    exit_price,
+                    exit_time=int(trace_row.get("decision_ts") or 0),
+                )
+                position_payload = closed.to_row()
+            else:
+                reason_codes.extend(sell_reasons or ["legacy_hold_edge_above_exit_threshold"])
+    row = {
+        "paper_exit_signal_row_id": f"{config.run_id}-exit-signal-{signal_index:06d}",
+        "run_id": config.run_id,
+        "legacy_adapter_rule_id": "v8_paper_legacy_position_manager_exit_adapter_v1",
+        "legacy_position_manager_reused": True,
+        "legacy_position_manager_module": "bigan.execution.position_manager.PositionManager",
+        "legacy_position_manager_operations": _fresh_legacy_operations_for_decision(
+            decision=decision,
+            trace_row=trace_row,
+            exit_price=exit_price,
+        ),
+        "legacy_signal_logic_reference": (
+            "v7_signal_driven_position_management_hold_exit_semantics"
+        ),
+        "legacy_position_event_id": position_payload.get("event_id"),
+        "market_id": _fresh_market_id_from_position(position_payload),
+        "symbol": position_payload.get("symbol"),
+        "side": position_side,
+        "position_status_after_decision": position_payload.get("status"),
+        "entry_time": position_payload.get("entry_time"),
+        "entry_price": entry_price,
+        "fill_price": _float(position_payload.get("fill_price") or entry_price),
+        "size": size,
+        "decision_ts": None if trace_row is None else trace_row.get("decision_ts"),
+        "matched_signal_trace_row_hash": None
+        if trace_row is None
+        else trace_row.get("o_v8_paper_fresh_signal_trace_row_hash"),
+        "paper_exit_decision": decision,
+        "exit_decision": decision,
+        "accepted_for_paper_exit_intent": decision == "SELL_POSITION",
+        "exit_price": exit_price,
+        "exit_size": size if decision == "SELL_POSITION" else 0.0,
+        "current_mark_price": exit_price,
+        "synthetic_unrealized_paper_pnl": None
+        if exit_price is None
+        else (exit_price - entry_price) * size,
+        "position_side_probability": p_side,
+        "position_hold_edge": hold_edge,
+        "time_to_close_seconds": time_to_close,
+        "exit_reason_codes": reason_codes,
+        "legacy_consumed_position_fields": _fresh_legacy_position_fields_consumed(),
+        "legacy_consumed_signal_fields": _fresh_legacy_signal_fields_consumed(),
+        "mapped_signal_input": _fresh_mapped_legacy_signal_input(
+            trace_row=trace_row,
+            position_side=position_side,
+            exit_price=exit_price,
+            p_side=p_side,
+            hold_edge=hold_edge,
+        ),
+        "uses_settlement_oracle_future_return_fields": False,
+        "uses_input_realized_pnl_fields": False,
+        "outcome_pnl_used": False,
+        "mutates_o_entry_scorer": False,
+        "mutates_source_ranking_scores": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    row["paper_exit_signal_row_hash"] = canonical_json_sha256(row)
+    return row
+
+
+def _fresh_legacy_sell_decision(
+    *,
+    exit_price: float,
+    entry_price: float,
+    p_side: float | None,
+    time_to_close: float | None,
+) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+    if (
+        time_to_close is not None
+        and time_to_close <= O_V8_PAPER_FRESH_EXIT_FORCE_SECONDS_TO_CLOSE
+    ):
+        reasons.append("legacy_soft_force_exit_window")
+    if exit_price - entry_price >= O_V8_PAPER_FRESH_EXIT_PROFIT_TARGET:
+        reasons.append("legacy_profit_target_crossed")
+    if p_side is not None and p_side - exit_price <= O_V8_PAPER_FRESH_EXIT_EDGE_THRESHOLD:
+        reasons.append("legacy_exit_edge_threshold_crossed")
+    if reasons:
+        return True, reasons
+    return False, ["legacy_hold_position"]
+
+
+def _fresh_legacy_operations_for_decision(
+    *,
+    decision: str,
+    trace_row: dict[str, Any] | None,
+    exit_price: float | None,
+) -> list[str]:
+    operations = ["open_position"]
+    if trace_row is not None and exit_price is not None:
+        operations.append("update_price")
+    if decision == "SELL_POSITION":
+        operations.append("close_position")
+    return operations
+
+
+def _fresh_sell_position_intent_from_signal(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    signal_row: dict[str, Any],
+    intent_index: int,
+) -> dict[str, Any]:
+    intent = {
+        "paper_sell_position_intent_id": (
+            f"{config.run_id}-sell-position-intent-{intent_index:06d}"
+        ),
+        "paper_exit_signal_row_id": signal_row["paper_exit_signal_row_id"],
+        "legacy_position_event_id": signal_row["legacy_position_event_id"],
+        "market_id": signal_row["market_id"],
+        "decision_ts": signal_row["decision_ts"],
+        "side": signal_row["side"],
+        "paper_exit_decision": "SELL_POSITION",
+        "sell_position_intent_status": "accepted_local_paper_exit_intent",
+        "sell_size": _float(signal_row.get("exit_size")),
+        "paper_limit_price": _float(signal_row.get("exit_price")),
+        "synthetic_exit_notional": _float(signal_row.get("exit_size"))
+        * _float(signal_row.get("exit_price")),
+        "exit_reason_codes": list(signal_row.get("exit_reason_codes") or []),
+        "order_intent_contract": "local_paper_sell_position_intent_no_exchange_write_v1",
+        "uses_settlement_oracle_future_return_fields": False,
+        "uses_input_realized_pnl_fields": False,
+        "outcome_pnl_used": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+    }
+    intent["paper_sell_position_intent_hash"] = canonical_json_sha256(intent)
+    return intent
+
+
+def _fresh_synthetic_exit_ledger_update_from_intent(
+    *,
+    intent: dict[str, Any],
+    row_index: int,
+) -> dict[str, Any]:
+    size = _float(intent.get("sell_size"))
+    exit_price = _float(intent.get("paper_limit_price"))
+    row = {
+        "synthetic_exit_ledger_update_id": f"fresh-paper-exit-ledger-{row_index:06d}",
+        "paper_sell_position_intent_id": intent["paper_sell_position_intent_id"],
+        "paper_exit_signal_row_id": intent["paper_exit_signal_row_id"],
+        "legacy_position_event_id": intent["legacy_position_event_id"],
+        "market_id": intent["market_id"],
+        "decision_ts": intent["decision_ts"],
+        "side": intent["side"],
+        "synthetic_cash_delta": size * exit_price,
+        "synthetic_position_delta": -size,
+        "paper_position_closed": True,
+        "ledger_update_source": "accepted_local_paper_sell_position_intent",
+        "uses_settlement_oracle_future_return_fields": False,
+        "uses_input_realized_pnl_fields": False,
+        "outcome_pnl_used": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+    }
+    row["synthetic_exit_ledger_update_hash"] = canonical_json_sha256(row)
+    return row
+
+
+def _fresh_position_state_rows(
+    *,
+    manager: PositionManager,
+    opened_rows: list[dict[str, Any]],
+    trace_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    latest_trace_by_market = {
+        market_id: rows[-1]
+        for market_id, rows in _fresh_trace_rows_by_market(trace_rows).items()
+        if rows
+    }
+    source_by_event_id = {
+        row["legacy_position_event_id"]: row for row in opened_rows
+    }
+    rows: list[dict[str, Any]] = []
+    for index, position in enumerate(manager.list_positions(), start=1):
+        payload = position.to_row()
+        market_id = _fresh_market_id_from_position(payload)
+        trace_row = latest_trace_by_market.get(market_id)
+        row = {
+            "paper_position_state_row_id": f"paper-position-state-{index:06d}",
+            "legacy_position_event_id": payload["event_id"],
+            "legacy_position_manager_reused": True,
+            "position_source": source_by_event_id.get(payload["event_id"], {}).get(
+                "position_source"
+            ),
+            "market_id": market_id,
+            "symbol": payload["symbol"],
+            "side": payload["side"],
+            "sleeve": payload["sleeve"],
+            "status": payload["status"],
+            "entry_time": payload["entry_time"],
+            "entry_price": payload["entry_price"],
+            "fill_price": payload["fill_price"],
+            "size": payload["size"],
+            "current_price": payload["current_price"],
+            "synthetic_unrealized_paper_pnl": payload["unrealized_pnl"],
+            "exit_price": payload["exit_price"],
+            "exit_time": payload["exit_time"],
+            "matched_latest_signal_trace_row_hash": None
+            if trace_row is None
+            else trace_row.get("o_v8_paper_fresh_signal_trace_row_hash"),
+            "eligible_for_exit_signal": bool(
+                payload["status"] == "open"
+                and trace_row is not None
+                and int(trace_row.get("decision_ts") or 0) > int(payload["entry_time"])
+            ),
+            "uses_settlement_oracle_future_return_fields": False,
+            "uses_input_realized_pnl_fields": False,
+            "paper_only": True,
+            "capital_at_risk": False,
+            "polymarket_write_enabled": False,
+            "wallet_signing_enabled": False,
+        }
+        row["paper_position_state_row_hash"] = canonical_json_sha256(row)
+        rows.append(row)
+    return rows
+
+
+def _fresh_paper_position_state_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    opened_rows: list[dict[str, Any]],
+    position_rows: list[dict[str, Any]],
+    ledger_rows: list[dict[str, Any]],
+    forbidden_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    report = {
+        "schema_version": O_V8_PAPER_FRESH_POSITION_STATE_SCHEMA_VERSION,
+        "report_type": "o_v8_paper_fresh_position_state",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "legacy_position_manager_reused": True,
+        "legacy_position_manager_module": "bigan.execution.position_manager.PositionManager",
+        "legacy_position_manager_consumed_fields": _fresh_legacy_position_fields_consumed(),
+        "paper_ledger_fields_consumed_for_position_mapping": (
+            _fresh_paper_ledger_fields_consumed_for_position_mapping()
+        ),
+        "paper_ledger_row_count": len(ledger_rows),
+        "paper_ledger_rows_checked_for_forbidden_outcomes": True,
+        "opened_position_rows": opened_rows,
+        "position_state_rows": position_rows,
+        "initial_paper_position_row_count": len(config.initial_paper_position_rows),
+        "accepted_entry_fill_position_count": sum(
+            1 for row in opened_rows if row.get("position_source") == "accepted_paper_entry_fill"
+        ),
+        "paper_position_count": len(position_rows),
+        "open_paper_position_count": sum(
+            1 for row in position_rows if row.get("status") == "open"
+        ),
+        "closed_paper_position_count": sum(
+            1 for row in position_rows if row.get("status") == "closed"
+        ),
+        "eligible_for_exit_signal_count": sum(
+            1 for row in position_rows if row.get("eligible_for_exit_signal") is True
+        ),
+        "forbidden_outcome_fields_present": bool(forbidden_rows),
+        "forbidden_outcome_field_rows": forbidden_rows,
+        "position_state_adapter_status": "blocked_fail_closed"
+        if forbidden_rows
+        else "passed",
+        "uses_settlement_oracle_future_return_fields": False,
+        "uses_input_realized_pnl_fields": False,
+        "mutates_o_entry_scorer": False,
+        "mutates_source_ranking_scores": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(report, "o_v8_paper_fresh_position_state_report_id")
+
+
+def _fresh_paper_exit_signal_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    trace_rows: list[dict[str, Any]],
+    exit_signal_rows: list[dict[str, Any]],
+    sell_intents: list[dict[str, Any]],
+    forbidden_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    report = {
+        "schema_version": O_V8_PAPER_FRESH_EXIT_SIGNAL_SCHEMA_VERSION,
+        "report_type": "o_v8_paper_fresh_exit_signal",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "legacy_position_manager_reused": True,
+        "legacy_position_manager_module": "bigan.execution.position_manager.PositionManager",
+        "legacy_signal_logic_reference": (
+            "v7_signal_driven_position_management_hold_exit_semantics"
+        ),
+        "legacy_consumed_signal_fields": _fresh_legacy_signal_fields_consumed(),
+        "signal_trace_row_count": len(trace_rows),
+        "paper_exit_signal_rows": exit_signal_rows,
+        "paper_exit_signal_count": len(exit_signal_rows),
+        "hold_no_exit_count": sum(
+            1
+            for row in exit_signal_rows
+            if row.get("paper_exit_decision") in {"HOLD_POSITION", "NO_EXIT"}
+        ),
+        "sell_position_signal_count": sum(
+            1 for row in exit_signal_rows if row.get("paper_exit_decision") == "SELL_POSITION"
+        ),
+        "sell_position_intent_count": len(sell_intents),
+        "sell_position_intents_are_local_paper_only": all(
+            row.get("paper_only") is True
+            and row.get("capital_at_risk") is False
+            and row.get("polymarket_write_enabled") is False
+            and row.get("wallet_signing_enabled") is False
+            for row in sell_intents
+        ),
+        "exit_reason_distribution": _counter_from_rows(
+            exit_signal_rows, "exit_reason_codes"
+        ),
+        "forbidden_outcome_fields_present": bool(forbidden_rows),
+        "forbidden_outcome_field_rows": forbidden_rows,
+        "uses_settlement_oracle_future_return_fields": False,
+        "uses_input_realized_pnl_fields": False,
+        "outcome_pnl_used": False,
+        "mutates_o_entry_scorer": False,
+        "mutates_source_ranking_scores": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(report, "o_v8_paper_fresh_exit_signal_report_id")
+
+
+def _fresh_synthetic_exit_ledger_update_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    sell_intents: list[dict[str, Any]],
+    ledger_update_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    accepted_intent_ids = {
+        str(row.get("paper_sell_position_intent_id")) for row in sell_intents
+    }
+    ledger_intent_ids = {
+        str(row.get("paper_sell_position_intent_id")) for row in ledger_update_rows
+    }
+    report = {
+        "schema_version": O_V8_PAPER_FRESH_EXIT_LEDGER_UPDATE_SCHEMA_VERSION,
+        "report_type": "o_v8_paper_fresh_synthetic_ledger_update",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "synthetic_ledger_update_rows": ledger_update_rows,
+        "synthetic_ledger_update_count": len(ledger_update_rows),
+        "paper_sell_position_intent_count": len(sell_intents),
+        "ledger_updates_only_for_accepted_paper_exit_intents": (
+            accepted_intent_ids == ledger_intent_ids
+        ),
+        "synthetic_cash_delta_sum": sum(
+            _float(row.get("synthetic_cash_delta")) for row in ledger_update_rows
+        ),
+        "synthetic_position_delta_sum": sum(
+            _float(row.get("synthetic_position_delta")) for row in ledger_update_rows
+        ),
+        "uses_settlement_oracle_future_return_fields": False,
+        "uses_input_realized_pnl_fields": False,
+        "outcome_pnl_used": False,
+        "mutates_o_entry_scorer": False,
+        "mutates_source_ranking_scores": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(report, "o_v8_paper_fresh_synthetic_ledger_update_report_id")
+
+
+def _fresh_exit_bid_from_trace(trace_row: dict[str, Any]) -> float | None:
+    for field_name in ("executable_exit_bid_proxy", "paper_limit_price", "entry_ask"):
+        value = trace_row.get(field_name)
+        if value is not None:
+            return _float(value)
+    return None
+
+
+def _fresh_probability_for_position_side(
+    trace_row: dict[str, Any],
+    side: str,
+) -> float | None:
+    if side == "UP" and trace_row.get("p_up") is not None:
+        return _float(trace_row.get("p_up"))
+    if side == "DOWN" and trace_row.get("p_down") is not None:
+        return _float(trace_row.get("p_down"))
+    return None
+
+
+def _fresh_mapped_legacy_signal_input(
+    *,
+    trace_row: dict[str, Any] | None,
+    position_side: str,
+    exit_price: float | None,
+    p_side: float | None,
+    hold_edge: float | None,
+) -> dict[str, Any]:
+    if trace_row is None:
+        return {}
+    return {
+        "event_id": trace_row.get("decision_group_id"),
+        "round_slug": trace_row.get("slug") or trace_row.get("market_id"),
+        "side": position_side,
+        "ts_ms": trace_row.get("decision_ts"),
+        "created_at_ms": trace_row.get("decision_ts"),
+        "round_end_ts_ms": trace_row.get("market_end_ts"),
+        "token_probability": p_side,
+        "p_up": trace_row.get("p_up"),
+        "p_down": trace_row.get("p_down"),
+        "polymarket_price": exit_price,
+        "mispricing_edge": hold_edge,
+    }
+
+
+def _fresh_legacy_position_fields_consumed() -> list[str]:
+    return [
+        "event_id",
+        "symbol",
+        "side",
+        "sleeve",
+        "status",
+        "entry_time",
+        "entry_price",
+        "fill_price",
+        "size",
+        "order_id",
+        "current_price",
+        "unrealized_pnl",
+        "exit_price",
+        "exit_time",
+    ]
+
+
+def _fresh_legacy_signal_fields_consumed() -> list[str]:
+    return [
+        "decision_group_id",
+        "market_id",
+        "slug",
+        "decision_ts",
+        "market_end_ts",
+        "p_up",
+        "p_down",
+        "time_to_close_seconds",
+        "spread_bps",
+        "book_staleness_ms",
+        "queue_fill_proxy",
+        "executable_exit_bid_proxy",
+        "entry_ask",
+        "selected_action_family",
+        "execution_guarded_action",
+        "execution_guarded_side",
+    ]
+
+
+def _fresh_paper_ledger_fields_consumed_for_position_mapping() -> list[str]:
+    return [
+        "paper_fresh_ledger_entry_id",
+        "paper_fresh_fill_id",
+        "paper_fresh_order_intent_id",
+        "market_id",
+        "decision_ts",
+        "execution_guarded_action",
+        "execution_guarded_side",
+        "synthetic_position_after",
+        "total_exposure_after",
+        "side_exposure_after",
+    ]
+
+
+def _fresh_market_id_from_position(position_payload: dict[str, Any]) -> str:
+    symbol = str(position_payload.get("symbol") or "")
+    parts = symbol.split(":")
+    if len(parts) >= 3:
+        return parts[1]
+    event_id = str(position_payload.get("event_id") or "")
+    if event_id.startswith("fresh-fill-"):
+        return event_id.removeprefix("fresh-fill-")
+    return str(position_payload.get("market_id") or event_id)
+
+
+def _rows_with_forbidden_exit_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        present = sorted(
+            field_name
+            for field_name in O_V8_PAPER_FRESH_EXIT_FORBIDDEN_OUTCOME_FIELDS
+            if _forbidden_field_present(row, field_name)
+        )
+        if present:
+            failures.append(
+                {
+                    "row_index": index,
+                    "market_id": row.get("market_id"),
+                    "decision_ts": row.get("decision_ts") or row.get("entry_time"),
+                    "forbidden_fields": present,
+                }
+            )
+    return failures
+
+
+def _forbidden_field_present(row: dict[str, Any], field_name: str) -> bool:
+    if field_name not in row:
+        return False
+    value = row.get(field_name)
+    return value not in (None, "", [], {})
 
 
 def _fresh_signal_trace_aggregate(
@@ -3653,6 +4610,10 @@ def _fresh_loop_manifest(
     canonical_scorer_alignment_report: dict[str, Any],
     signal_trace_report: dict[str, Any],
     time_window_diagnostic_report: dict[str, Any],
+    paper_position_state_report: dict[str, Any],
+    paper_exit_signal_report: dict[str, Any],
+    paper_sell_position_intents: list[dict[str, Any]],
+    synthetic_ledger_update_report: dict[str, Any],
 ) -> dict[str, Any]:
     manifest = {
         "schema_version": O_V8_PAPER_FRESH_LOOP_MANIFEST_SCHEMA_VERSION,
@@ -3711,6 +4672,15 @@ def _fresh_loop_manifest(
         ],
         "fresh_time_window_diagnostic_report_id": time_window_diagnostic_report[
             "o_v8_paper_fresh_time_window_diagnostic_report_id"
+        ],
+        "fresh_paper_position_state_report_id": paper_position_state_report[
+            "o_v8_paper_fresh_position_state_report_id"
+        ],
+        "fresh_paper_exit_signal_report_id": paper_exit_signal_report[
+            "o_v8_paper_fresh_exit_signal_report_id"
+        ],
+        "fresh_synthetic_ledger_update_report_id": synthetic_ledger_update_report[
+            "o_v8_paper_fresh_synthetic_ledger_update_report_id"
         ],
         "signal_trace_row_count": signal_trace_report["trace_row_count"],
         "signal_trace_rows_sorted_by_decision_ts": signal_trace_report[
@@ -3790,6 +4760,27 @@ def _fresh_loop_manifest(
         "paper_fresh_fill_count": run_report["paper_fresh_fill_count"],
         "paper_fresh_ledger_entry_count": run_report[
             "paper_fresh_ledger_entry_count"
+        ],
+        "open_paper_position_count": paper_position_state_report[
+            "open_paper_position_count"
+        ],
+        "paper_exit_signal_count": paper_exit_signal_report[
+            "paper_exit_signal_count"
+        ],
+        "paper_sell_position_intent_count": len(paper_sell_position_intents),
+        "synthetic_exit_ledger_update_count": synthetic_ledger_update_report[
+            "synthetic_ledger_update_count"
+        ],
+        "ledger_updates_only_for_accepted_paper_exit_intents": (
+            synthetic_ledger_update_report[
+                "ledger_updates_only_for_accepted_paper_exit_intents"
+            ]
+        ),
+        "paper_exit_adapter_uses_settlement_oracle_future_return_fields": (
+            paper_exit_signal_report["uses_settlement_oracle_future_return_fields"]
+        ),
+        "paper_exit_adapter_mutates_o_entry_scorer": paper_exit_signal_report[
+            "mutates_o_entry_scorer"
         ],
         "paper_fresh_monitoring_passed": monitoring_report[
             "paper_fresh_monitoring_passed"
@@ -4477,6 +5468,15 @@ def _float(value: Any) -> float:
         return 0.0
 
 
+def _trace_float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _fresh_loop_run_md(report: dict[str, Any]) -> str:
     return "\n".join(
         [
@@ -4837,6 +5837,76 @@ def _fresh_time_window_diagnostic_md(report: dict[str, Any]) -> str:
             "## Time To Close By Action Family",
             "",
             *_markdown_summary_dict(report["time_to_close_by_action_family"]),
+            "",
+        ]
+    )
+
+
+def _fresh_paper_position_state_md(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Paper Fresh Position State",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- legacy_position_manager_reused: `{str(report['legacy_position_manager_reused']).lower()}`",
+            f"- initial_paper_position_row_count: `{report['initial_paper_position_row_count']}`",
+            f"- accepted_entry_fill_position_count: `{report['accepted_entry_fill_position_count']}`",
+            f"- open_paper_position_count: `{report['open_paper_position_count']}`",
+            f"- eligible_for_exit_signal_count: `{report['eligible_for_exit_signal_count']}`",
+            f"- forbidden_outcome_fields_present: `{str(report['forbidden_outcome_fields_present']).lower()}`",
+            f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
+            "",
+            "## Consumed Legacy Position Fields",
+            "",
+            *_markdown_list(report["legacy_position_manager_consumed_fields"]),
+            "",
+            "## Consumed Paper Ledger Fields",
+            "",
+            *_markdown_list(report["paper_ledger_fields_consumed_for_position_mapping"]),
+            "",
+        ]
+    )
+
+
+def _fresh_paper_exit_signal_md(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Paper Fresh Exit Signal",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- paper_exit_signal_count: `{report['paper_exit_signal_count']}`",
+            f"- hold_no_exit_count: `{report['hold_no_exit_count']}`",
+            f"- sell_position_signal_count: `{report['sell_position_signal_count']}`",
+            f"- sell_position_intent_count: `{report['sell_position_intent_count']}`",
+            f"- sell_position_intents_are_local_paper_only: `{str(report['sell_position_intents_are_local_paper_only']).lower()}`",
+            f"- forbidden_outcome_fields_present: `{str(report['forbidden_outcome_fields_present']).lower()}`",
+            f"- mutates_o_entry_scorer: `{str(report['mutates_o_entry_scorer']).lower()}`",
+            f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
+            "",
+            "## Exit Reason Distribution",
+            "",
+            *_markdown_dict(report["exit_reason_distribution"]),
+            "",
+            "## Consumed Legacy Signal Fields",
+            "",
+            *_markdown_list(report["legacy_consumed_signal_fields"]),
+            "",
+        ]
+    )
+
+
+def _fresh_synthetic_ledger_update_md(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# O v8 Paper Fresh Synthetic Ledger Update",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- paper_sell_position_intent_count: `{report['paper_sell_position_intent_count']}`",
+            f"- synthetic_ledger_update_count: `{report['synthetic_ledger_update_count']}`",
+            f"- ledger_updates_only_for_accepted_paper_exit_intents: `{str(report['ledger_updates_only_for_accepted_paper_exit_intents']).lower()}`",
+            f"- synthetic_cash_delta_sum: `{report['synthetic_cash_delta_sum']}`",
+            f"- synthetic_position_delta_sum: `{report['synthetic_position_delta_sum']}`",
+            f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
             "",
         ]
     )
