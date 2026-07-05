@@ -49,6 +49,7 @@ def main() -> None:
 
     ev = result.ev_mapping_report
     shadow = result.forward_shadow_report
+    guard = result.guard_intersection_report
     print(f"run_id={args.run_id}")
     print(f"output_dir={result.output_dir}")
     print(f"raw_row_count={shadow['raw_row_count']}")
@@ -60,6 +61,14 @@ def main() -> None:
             f"variant={name} allowed={metrics['allowed_decision_count']} "
             f"entries={metrics['entry_count']} exits={metrics['exit_count']} "
             f"holds={metrics['hold_count']} rejected={metrics['rejected_decision_count']}"
+        )
+    for name, metrics in guard["policy_variant_guard_intersections"].items():
+        print(
+            f"guard_intersection_variant={name} "
+            f"policy_candidates={metrics['policy_candidate_count']} "
+            f"guard_passed={metrics['guard_passed_candidate_count']} "
+            f"guard_unknown={metrics['guard_unknown_candidate_count']} "
+            f"executable={metrics['executable_shadow_count']}"
         )
     print(
         "ev_mapping_report_path="
@@ -76,6 +85,14 @@ def main() -> None:
     print(
         "forward_shadow_report_sha256="
         f"{result.artifact_hashes['execution_layer_v2_forward_shadow_policy_report']}"
+    )
+    print(
+        "guard_intersection_report_path="
+        f"{result.artifact_paths['execution_layer_v2_forward_shadow_guard_intersection_report']}"
+    )
+    print(
+        "guard_intersection_report_sha256="
+        f"{result.artifact_hashes['execution_layer_v2_forward_shadow_guard_intersection_report']}"
     )
     print(
         "manifest_path="

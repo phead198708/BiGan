@@ -568,8 +568,111 @@ def test_execution_layer_v2_forward_shadow_calibrated_ev_and_bucket_plus_sbc(
     assert result.forward_shadow_report["uses_oracle_actions_or_future_returns"] is False
     assert result.artifact_paths["execution_layer_v2_calibrated_ev_mapping_report"].exists()
     assert result.artifact_paths["execution_layer_v2_forward_shadow_policy_report"].exists()
+    assert result.artifact_paths[
+        "execution_layer_v2_forward_shadow_guard_intersection_report"
+    ].exists()
     assert result.artifact_paths["execution_layer_v2_forward_shadow_manifest"].exists()
     assert result.artifact_hashes["execution_layer_v2_forward_shadow_manifest"]
+
+
+def test_execution_layer_v2_forward_shadow_guard_intersection_counts(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "fresh_signal_trace.jsonl"
+    _write_jsonl(
+        input_path,
+        [
+            _forward_shadow_row(
+                market_id="guard-pass-sbc",
+                action="BUY_DOWN_SELL_BEFORE_CLOSE",
+                selected_side="DOWN",
+                entry_ask=0.55,
+                calibrated_action_expected_net_return=0.05,
+                order_allowed=True,
+                execution_guarded_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+                execution_guarded_side="DOWN",
+                execution_blocking_reason_codes=[],
+                paper_intent_id="intent-pass",
+                paper_fill_id="fill-pass",
+                time_to_close_seconds=90.0,
+            ),
+            _forward_shadow_row(
+                market_id="guard-blocked-hts",
+                action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+                selected_side="DOWN",
+                entry_ask=0.80,
+                p_model_fair_value_down=0.85,
+                order_allowed=False,
+                execution_guarded_action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+                execution_guarded_side="DOWN",
+                execution_blocking_reason_codes=["execution_time_to_close_unsafe"],
+                time_to_close_seconds=40.0,
+            ),
+            _forward_shadow_row(
+                market_id="guard-unknown-sbc",
+                action="BUY_DOWN_SELL_BEFORE_CLOSE",
+                selected_side="DOWN",
+                entry_ask=0.54,
+                calibrated_action_expected_net_return=0.04,
+                time_to_close_seconds=100.0,
+            ),
+            _forward_shadow_row(
+                market_id="guard-no-trade",
+                action="NO_TRADE",
+                selected_side="NONE",
+                entry_ask=0.0,
+                calibrated_action_expected_net_return=0.10,
+                order_allowed=True,
+                execution_guarded_action="NO_TRADE",
+                execution_guarded_side="NONE",
+                execution_blocking_reason_codes=[],
+            ),
+        ],
+    )
+
+    result = run_execution_layer_v2_forward_shadow_policy(
+        ExecutionLayerV2ForwardShadowConfig(
+            run_id="forward-shadow-guard-intersection",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+        )
+    )
+
+    intersections = result.guard_intersection_report[
+        "policy_variant_guard_intersections"
+    ]
+    plus_sbc = intersections["bucket_aware_v1_plus_sbc"]
+    assert plus_sbc["policy_candidate_count"] == 3
+    assert plus_sbc["guard_passed_candidate_count"] == 1
+    assert plus_sbc["guard_blocked_candidate_count"] == 1
+    assert plus_sbc["guard_unknown_candidate_count"] == 1
+    assert plus_sbc["candidate_but_not_executable_count"] == 2
+    assert plus_sbc["executable_shadow_count"] == 1
+    assert plus_sbc["executable_shadow_entry_count"] == 1
+    assert plus_sbc["executable_shadow_no_trade_count"] == 0
+    assert plus_sbc["guard_blocking_reason_distribution"][
+        "execution_time_to_close_unsafe"
+    ] == 1
+    assert plus_sbc["guard_blocking_reason_distribution"][
+        "missing_execution_guard_decision_fields"
+    ] == 1
+
+    calibrated = intersections["calibrated_ev_v2"]
+    assert calibrated["policy_candidate_count"] == 3
+    assert calibrated["guard_passed_candidate_count"] == 1
+    assert calibrated["guard_blocked_candidate_count"] == 1
+    assert calibrated["guard_unknown_candidate_count"] == 1
+    assert intersections["calibrated_ev_plus_bucket_v2"]["policy_candidate_count"] == 3
+    assert intersections["bucket_aware_v1_conservative"]["policy_candidate_count"] == 1
+    assert result.forward_shadow_report["policy_variants"]["baseline_current_guard"][
+        "allowed_decision_count"
+    ] == 3
+    assert result.manifest["guard_intersection_summary"][
+        "bucket_aware_v1_plus_sbc"
+    ]["executable_shadow_count"] == 1
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
+    assert result.manifest["#146_start_allowed"] is False
 
 
 def test_execution_layer_v2_forward_shadow_forbidden_outcome_fields_fail_closed(
@@ -612,6 +715,39 @@ def test_execution_layer_v2_forward_shadow_forbidden_outcome_fields_fail_closed(
     assert result.manifest["v8_execution_handoff_allowed"] is False
     assert result.manifest["#134_resume_allowed"] is False
     assert result.manifest["#146_start_allowed"] is False
+
+
+def test_execution_layer_v2_forward_shadow_nested_forbidden_fields_fail_closed(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "fresh_signal_trace.json"
+    row = _forward_shadow_row(
+        market_id="nested-forbidden-forward",
+        action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+        selected_side="DOWN",
+        entry_ask=0.80,
+        calibrated_action_expected_net_return=0.05,
+    )
+    row["features"] = {"metadata": {"future_return": 0.1}}
+    _write_forward_shadow_input(input_path, [row])
+
+    result = run_execution_layer_v2_forward_shadow_policy(
+        ExecutionLayerV2ForwardShadowConfig(
+            run_id="forward-shadow-nested-forbidden",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+        )
+    )
+
+    assert result.ev_mapping_report["ev_mapping_status"] == (
+        "blocked_forbidden_outcome_fields_present"
+    )
+    assert result.forward_shadow_report["accepted_signal_row_count"] == 0
+    forbidden = result.forward_shadow_report["forbidden_outcome_fields_by_row"]
+    assert forbidden[0]["forbidden_fields"] == ["features.metadata.future_return"]
+    assert result.guard_intersection_report["guard_intersection_status"] == (
+        "blocked_fail_closed"
+    )
 
 
 def _write_settlement_csv(path, rows: list[dict[str, object]]) -> None:
@@ -705,6 +841,12 @@ def _forward_shadow_row(
     calibrated_action_expected_net_return: float | None = None,
     canonical_o_action_score: float = 0.75,
     time_to_close_seconds: float = 180.0,
+    order_allowed: bool | None = None,
+    execution_guarded_action: str | None = None,
+    execution_guarded_side: str | None = None,
+    execution_blocking_reason_codes: list[str] | None = None,
+    paper_intent_id: str | None = None,
+    paper_fill_id: str | None = None,
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "market_id": market_id,
@@ -716,6 +858,9 @@ def _forward_shadow_row(
         "time_to_close_seconds": time_to_close_seconds,
         "paper_only": True,
         "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
     }
     if p_up is not None:
         row["p_up"] = p_up
@@ -727,6 +872,18 @@ def _forward_shadow_row(
         row["calibrated_action_expected_net_return"] = (
             calibrated_action_expected_net_return
         )
+    if order_allowed is not None:
+        row["order_allowed"] = order_allowed
+    if execution_guarded_action is not None:
+        row["execution_guarded_action"] = execution_guarded_action
+    if execution_guarded_side is not None:
+        row["execution_guarded_side"] = execution_guarded_side
+    if execution_blocking_reason_codes is not None:
+        row["execution_blocking_reason_codes"] = execution_blocking_reason_codes
+    if paper_intent_id is not None:
+        row["paper_intent_id"] = paper_intent_id
+    if paper_fill_id is not None:
+        row["paper_fill_id"] = paper_fill_id
     return row
 
 

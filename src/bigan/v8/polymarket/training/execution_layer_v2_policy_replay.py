@@ -35,6 +35,9 @@ EXECUTION_LAYER_V2_CALIBRATED_EV_MAPPING_SCHEMA_VERSION = (
 EXECUTION_LAYER_V2_FORWARD_SHADOW_SCHEMA_VERSION = (
     "bigan-v8-polymarket-execution-layer-v2-forward-shadow-policy-v1"
 )
+EXECUTION_LAYER_V2_FORWARD_SHADOW_GUARD_INTERSECTION_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-execution-layer-v2-forward-shadow-guard-intersection-v1"
+)
 EXECUTION_LAYER_V2_FORWARD_SHADOW_MANIFEST_SCHEMA_VERSION = (
     "bigan-v8-polymarket-execution-layer-v2-forward-shadow-manifest-v1"
 )
@@ -171,6 +174,7 @@ class ExecutionLayerV2ForwardShadowResult:
     artifact_hashes: dict[str, str]
     ev_mapping_report: dict[str, Any]
     forward_shadow_report: dict[str, Any]
+    guard_intersection_report: dict[str, Any]
     manifest: dict[str, Any]
 
 
@@ -298,6 +302,16 @@ def run_execution_layer_v2_forward_shadow_policy(
         forbidden_outcome_fields_by_row=forbidden,
         entry_ev_threshold=config.entry_ev_threshold,
     )
+    guard_intersection_report = (
+        build_execution_layer_v2_forward_shadow_guard_intersection_report(
+            normalized_rows,
+            run_id=config.run_id,
+            input_path=str(config.input_path),
+            raw_row_count=len(raw_rows),
+            forbidden_outcome_fields_by_row=forbidden,
+            entry_ev_threshold=config.entry_ev_threshold,
+        )
+    )
     artifact_paths = {
         "execution_layer_v2_calibrated_ev_mapping_report": run_dir
         / "execution_layer_v2_calibrated_ev_mapping_report.json",
@@ -307,6 +321,10 @@ def run_execution_layer_v2_forward_shadow_policy(
         / "execution_layer_v2_forward_shadow_policy_report.json",
         "execution_layer_v2_forward_shadow_policy_summary": run_dir
         / "execution_layer_v2_forward_shadow_policy_report.md",
+        "execution_layer_v2_forward_shadow_guard_intersection_report": run_dir
+        / "execution_layer_v2_forward_shadow_guard_intersection_report.json",
+        "execution_layer_v2_forward_shadow_guard_intersection_summary": run_dir
+        / "execution_layer_v2_forward_shadow_guard_intersection_report.md",
         "execution_layer_v2_forward_shadow_manifest": run_dir
         / "execution_layer_v2_forward_shadow_manifest.json",
     }
@@ -328,6 +346,16 @@ def run_execution_layer_v2_forward_shadow_policy(
             forward_shadow_report
         ),
     )
+    _write_json(
+        artifact_paths["execution_layer_v2_forward_shadow_guard_intersection_report"],
+        guard_intersection_report,
+    )
+    _write_text(
+        artifact_paths["execution_layer_v2_forward_shadow_guard_intersection_summary"],
+        execution_layer_v2_forward_shadow_guard_intersection_report_to_markdown(
+            guard_intersection_report
+        ),
+    )
     artifact_hashes = {
         name: _sha256_file(path)
         for name, path in artifact_paths.items()
@@ -345,6 +373,9 @@ def run_execution_layer_v2_forward_shadow_policy(
         "forward_shadow_report_id": forward_shadow_report[
             "execution_layer_v2_forward_shadow_policy_report_id"
         ],
+        "forward_shadow_guard_intersection_report_id": guard_intersection_report[
+            "execution_layer_v2_forward_shadow_guard_intersection_report_id"
+        ],
         "raw_row_count": len(raw_rows),
         "accepted_signal_row_count": len(normalized_rows),
         "forbidden_outcome_fields_present": bool(forbidden),
@@ -354,6 +385,22 @@ def run_execution_layer_v2_forward_shadow_policy(
             "market_implied_probability_used_for_ev"
         ],
         "forward_shadow_policy_variant_names": list(FORWARD_SHADOW_POLICY_VARIANTS),
+        "guard_intersection_policy_variant_names": list(FORWARD_SHADOW_POLICY_VARIANTS),
+        "guard_intersection_summary": {
+            name: {
+                "policy_candidate_count": metrics["policy_candidate_count"],
+                "guard_passed_candidate_count": metrics[
+                    "guard_passed_candidate_count"
+                ],
+                "guard_unknown_candidate_count": metrics[
+                    "guard_unknown_candidate_count"
+                ],
+                "executable_shadow_count": metrics["executable_shadow_count"],
+            }
+            for name, metrics in guard_intersection_report[
+                "policy_variant_guard_intersections"
+            ].items()
+        },
         "diagnostic_only": True,
         "uses_settlement_pnl_or_outcome_labels": False,
         "uses_oracle_actions_or_future_returns": False,
@@ -374,6 +421,7 @@ def run_execution_layer_v2_forward_shadow_policy(
         artifact_hashes=artifact_hashes,
         ev_mapping_report=ev_mapping_report,
         forward_shadow_report=forward_shadow_report,
+        guard_intersection_report=guard_intersection_report,
         manifest=manifest,
     )
 
@@ -650,6 +698,83 @@ def build_execution_layer_v2_forward_shadow_policy_report(
     return report
 
 
+def build_execution_layer_v2_forward_shadow_guard_intersection_report(
+    rows: list[dict[str, Any]],
+    *,
+    run_id: str,
+    input_path: str,
+    raw_row_count: int | None = None,
+    forbidden_outcome_fields_by_row: list[dict[str, Any]] | None = None,
+    entry_ev_threshold: float = 0.02,
+) -> dict[str, Any]:
+    """Build policy-candidate by execution-guard intersection diagnostics."""
+
+    forbidden = forbidden_outcome_fields_by_row or []
+    if forbidden:
+        variant_reports = {
+            name: _blocked_guard_intersection_variant_metrics(
+                name,
+                rows,
+                ["forbidden_outcome_fields_present"],
+            )
+            for name in FORWARD_SHADOW_POLICY_VARIANTS
+        }
+        status = "blocked_fail_closed"
+        blocking_reasons = ["forbidden_outcome_fields_present"]
+    else:
+        variant_reports = {
+            name: _guard_intersection_variant_metrics(
+                rows,
+                name,
+                entry_ev_threshold=entry_ev_threshold,
+            )
+            for name in FORWARD_SHADOW_POLICY_VARIANTS
+        }
+        status = "diagnostic_only_fail_closed"
+        blocking_reasons = []
+        if not rows:
+            status = "blocked_fail_closed"
+            blocking_reasons.append("no_forward_shadow_rows")
+
+    report = {
+        "schema_version": (
+            EXECUTION_LAYER_V2_FORWARD_SHADOW_GUARD_INTERSECTION_SCHEMA_VERSION
+        ),
+        "run_id": run_id,
+        "input_path": input_path,
+        "raw_row_count": raw_row_count if raw_row_count is not None else len(rows),
+        "accepted_signal_row_count": len(rows),
+        "guard_intersection_status": status,
+        "guard_intersection_blocking_reason_codes": blocking_reasons,
+        "diagnostic_only": True,
+        "uses_settlement_pnl_or_outcome_labels": False,
+        "uses_oracle_actions_or_future_returns": False,
+        "uses_settlement_labels_for_threshold_tuning": False,
+        "entry_ev_threshold": entry_ev_threshold,
+        "policy_variant_names": list(FORWARD_SHADOW_POLICY_VARIANTS),
+        "policy_variant_guard_intersections": variant_reports,
+        "guard_pass_definition": {
+            "order_allowed_must_be_true": True,
+            "blocking_reason_codes_must_be_empty": True,
+            "selected_action_must_not_be_no_trade": True,
+            "safety_flags_must_remain_blocked": True,
+            "missing_guard_fields_are_executable": False,
+        },
+        "missing_guard_fields_reason_code": "missing_execution_guard_decision_fields",
+        "forbidden_outcome_fields_present": bool(forbidden),
+        "forbidden_outcome_fields_by_row": forbidden,
+        "market_implied_probability_used_as_calibrated_ev_source": False,
+        "source_scores_mutated": False,
+        "o_score_mutated": False,
+        "paper_live_unlock_changed": False,
+        **_safety_report_fields(),
+    }
+    report["execution_layer_v2_forward_shadow_guard_intersection_report_id"] = (
+        canonical_json_sha256(report)
+    )
+    return report
+
+
 def execution_layer_v2_calibrated_ev_mapping_report_to_markdown(
     report: dict[str, Any],
 ) -> str:
@@ -721,6 +846,49 @@ def execution_layer_v2_forward_shadow_policy_report_to_markdown(
             "## Blocking Reasons",
             "",
             *_markdown_list(report["forward_shadow_policy_blocking_reason_codes"]),
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def execution_layer_v2_forward_shadow_guard_intersection_report_to_markdown(
+    report: dict[str, Any],
+) -> str:
+    """Render the forward shadow guard intersection report."""
+
+    lines = [
+        "# v8 Execution Layer v2 Forward Shadow Guard Intersection",
+        "",
+        f"- run_id: `{report['run_id']}`",
+        f"- raw_row_count: `{report['raw_row_count']}`",
+        f"- accepted_signal_row_count: `{report['accepted_signal_row_count']}`",
+        f"- guard_intersection_status: `{report['guard_intersection_status']}`",
+        f"- diagnostic_only: `{report['diagnostic_only']}`",
+        f"- v8_execution_handoff_allowed: `{report['v8_execution_handoff_allowed']}`",
+        "",
+        "## Policy Candidate x Guard Intersection",
+        "",
+        "| variant | policy_candidate_count | guard_passed_candidate_count | "
+        "guard_blocked_candidate_count | guard_unknown_candidate_count | "
+        "executable_shadow_count |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for name in FORWARD_SHADOW_POLICY_VARIANTS:
+        metrics = report["policy_variant_guard_intersections"][name]
+        lines.append(
+            f"| `{name}` | {metrics['policy_candidate_count']} | "
+            f"{metrics['guard_passed_candidate_count']} | "
+            f"{metrics['guard_blocked_candidate_count']} | "
+            f"{metrics['guard_unknown_candidate_count']} | "
+            f"{metrics['executable_shadow_count']} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Blocking Reasons",
+            "",
+            *_markdown_list(report["guard_intersection_blocking_reason_codes"]),
             "",
         ]
     )
@@ -923,6 +1091,183 @@ def _blocked_forward_shadow_variant_metrics(
         "uses_settlement_pnl_or_outcome_labels": False,
         "uses_oracle_actions_or_future_returns": False,
         "market_implied_probability_used_as_calibrated_ev_source": False,
+        "diagnostic_only": True,
+    }
+
+
+def _guard_intersection_variant_metrics(
+    rows: list[dict[str, Any]],
+    variant: str,
+    *,
+    entry_ev_threshold: float,
+) -> dict[str, Any]:
+    candidate_rows: list[dict[str, Any]] = []
+    guard_passed_rows: list[dict[str, Any]] = []
+    guard_blocked_rows: list[dict[str, Any]] = []
+    guard_unknown_rows: list[dict[str, Any]] = []
+    guard_reasons: Counter[str] = Counter()
+    intersection_rows: list[dict[str, Any]] = []
+    for row in rows:
+        policy_allowed, policy_reasons = _forward_shadow_variant_allows_row(
+            row,
+            variant,
+            entry_ev_threshold=entry_ev_threshold,
+        )
+        if not policy_allowed:
+            continue
+        candidate_rows.append(row)
+        guard_status, guard_status_reasons = _execution_guard_status(row)
+        guard_reasons.update(guard_status_reasons)
+        if guard_status == "guard_passed":
+            guard_passed_rows.append(row)
+        elif guard_status == "guard_unknown":
+            guard_unknown_rows.append(row)
+        else:
+            guard_blocked_rows.append(row)
+        intersection_rows.append(
+            _guard_intersection_decision_row(
+                row,
+                variant,
+                policy_reasons=policy_reasons,
+                guard_status=guard_status,
+                guard_reason_codes=guard_status_reasons,
+            )
+        )
+    executable_count = len(guard_passed_rows)
+    return {
+        "variant_name": variant,
+        "policy_candidate_count": len(candidate_rows),
+        "guard_passed_candidate_count": len(guard_passed_rows),
+        "guard_blocked_candidate_count": len(guard_blocked_rows),
+        "guard_unknown_candidate_count": len(guard_unknown_rows),
+        "candidate_but_not_executable_count": len(guard_blocked_rows)
+        + len(guard_unknown_rows),
+        "executable_shadow_count": executable_count,
+        "executable_shadow_entry_count": sum(
+            1 for row in guard_passed_rows if _is_entry_action(row["action"])
+        ),
+        "executable_shadow_exit_count": sum(
+            1 for row in guard_passed_rows if _is_exit_action(row["action"])
+        ),
+        "executable_shadow_hold_count": sum(
+            1 for row in guard_passed_rows if _is_hold_action(row["action"])
+        ),
+        "executable_shadow_no_trade_count": sum(
+            1 for row in guard_passed_rows if row["action"] == "NO_TRADE"
+        ),
+        "guard_blocking_reason_distribution": dict(sorted(guard_reasons.items())),
+        "time_window_distribution_for_guard_passed": _count_distribution(
+            guard_passed_rows,
+            "time_window_bucket",
+        ),
+        "time_window_distribution_for_guard_blocked": _count_distribution(
+            guard_blocked_rows,
+            "time_window_bucket",
+        ),
+        "time_window_distribution_for_guard_unknown": _count_distribution(
+            guard_unknown_rows,
+            "time_window_bucket",
+        ),
+        "intersection_rows": intersection_rows,
+        "diagnostic_only": True,
+        "uses_settlement_pnl_or_outcome_labels": False,
+        "uses_oracle_actions_or_future_returns": False,
+        "market_implied_probability_used_as_calibrated_ev_source": False,
+    }
+
+
+def _blocked_guard_intersection_variant_metrics(
+    variant: str,
+    rows: list[dict[str, Any]],
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    return {
+        "variant_name": variant,
+        "policy_candidate_count": 0,
+        "guard_passed_candidate_count": 0,
+        "guard_blocked_candidate_count": 0,
+        "guard_unknown_candidate_count": 0,
+        "candidate_but_not_executable_count": 0,
+        "executable_shadow_count": 0,
+        "executable_shadow_entry_count": 0,
+        "executable_shadow_exit_count": 0,
+        "executable_shadow_hold_count": 0,
+        "executable_shadow_no_trade_count": 0,
+        "guard_blocking_reason_distribution": dict(Counter(reason_codes)),
+        "time_window_distribution_for_guard_passed": {},
+        "time_window_distribution_for_guard_blocked": {},
+        "time_window_distribution_for_guard_unknown": {},
+        "intersection_rows": [],
+        "diagnostic_only": True,
+        "uses_settlement_pnl_or_outcome_labels": False,
+        "uses_oracle_actions_or_future_returns": False,
+        "market_implied_probability_used_as_calibrated_ev_source": False,
+    }
+
+
+def _execution_guard_status(row: dict[str, Any]) -> tuple[str, list[str]]:
+    if row["action"] == "NO_TRADE":
+        return "guard_blocked", ["selected_action_no_trade"]
+    missing_fields = list(row["missing_execution_guard_decision_fields"])
+    if missing_fields:
+        return (
+            "guard_unknown",
+            [
+                "missing_execution_guard_decision_fields",
+                *[f"missing_guard_field:{field}" for field in missing_fields],
+            ],
+        )
+    if not row["execution_guard_safety_flags_blocked"]:
+        return "guard_blocked", ["execution_guard_safety_flags_not_blocked"]
+    blocking_codes = list(row["execution_guard_blocking_reason_codes"])
+    if row["order_allowed"] is not True:
+        return (
+            "guard_blocked",
+            blocking_codes or ["execution_guard_order_not_allowed"],
+        )
+    if blocking_codes:
+        return "guard_blocked", blocking_codes
+    return "guard_passed", []
+
+
+def _guard_intersection_decision_row(
+    row: dict[str, Any],
+    variant: str,
+    *,
+    policy_reasons: list[str],
+    guard_status: str,
+    guard_reason_codes: list[str],
+) -> dict[str, Any]:
+    return {
+        "variant_name": variant,
+        "row_index": row["row_index"],
+        "market_id": row["market_id"],
+        "decision_ts": row["decision_ts"],
+        "selected_action": row["action"],
+        "selected_side": row["side"],
+        "family": row["family"],
+        "time_window_bucket": row["time_window_bucket"],
+        "policy_candidate": True,
+        "policy_reason_codes": policy_reasons,
+        "guard_status": guard_status,
+        "guard_reason_codes": guard_reason_codes,
+        "order_allowed": row["order_allowed"],
+        "execution_guarded_action": row["execution_guarded_action"],
+        "execution_guarded_side": row["execution_guarded_side"],
+        "execution_blocking_reason_codes": row[
+            "execution_guard_blocking_reason_codes"
+        ],
+        "time_to_close_gate_passed": row["time_to_close_gate_passed"],
+        "time_to_close_seconds": row["time_to_close_seconds"],
+        "required_min_time_to_close_seconds": row[
+            "required_min_time_to_close_seconds"
+        ],
+        "spread_bps": row["spread_bps"],
+        "book_staleness_ms": row["book_staleness_ms"],
+        "queue_fill_proxy": row["queue_fill_proxy"],
+        "paper_intent_id": row["paper_intent_id"],
+        "paper_fill_id": row["paper_fill_id"],
+        "executable_shadow": guard_status == "guard_passed",
         "diagnostic_only": True,
     }
 
@@ -1337,11 +1682,35 @@ def _extract_forward_shadow_rows_from_object(payload: dict[str, Any]) -> list[di
     ):
         rows = payload.get(field_name)
         if isinstance(rows, list):
-            return rows
+            return [_copy_row_with_report_context(row, payload) for row in rows]
     raise ValueError(
         "forward shadow JSON object must include one of: signal_trace_rows, "
         "trace_rows, holdout_decision_rows, decision_rows, rows, feature_rows"
     )
+
+
+def _copy_row_with_report_context(
+    row: Any,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(row, dict):
+        return row
+    copied = dict(row)
+    for field_name in (
+        "paper_only",
+        "capital_at_risk",
+        "polymarket_write_enabled",
+        "wallet_signing_enabled",
+        "v8_execution_handoff_allowed",
+        "source_model_candidate_eligible",
+        "freeze_ready",
+        "promotion_evidence_eligible",
+        "#134_resume_allowed",
+        "#146_start_allowed",
+    ):
+        if field_name in payload and field_name not in copied:
+            copied[field_name] = payload[field_name]
+    return copied
 
 
 def _normalize_forward_shadow_row(
@@ -1438,6 +1807,75 @@ def _normalize_forward_shadow_row(
         ),
         default=None,
     )
+    guard_blocking_codes, guard_blocking_source_fields = _reason_codes_from_fields(
+        row,
+        (
+            "execution_blocking_reason_codes",
+            "execution_guard_blocking_reason_codes",
+            "blocking_reason_codes",
+            "reason_codes",
+            "execution_guard_reason_codes",
+        ),
+    )
+    order_allowed, order_allowed_field = _first_bool_with_field(
+        row,
+        ("order_allowed", "execution_order_allowed", "guard_order_allowed"),
+    )
+    execution_guarded_action = _canonical_action(
+        _first_text(
+            row,
+            (
+                "execution_guarded_action",
+                "guarded_action",
+                "order_action",
+            ),
+            default="",
+        )
+    )
+    execution_guarded_side = _first_text(
+        row,
+        ("execution_guarded_side", "guarded_side", "order_side"),
+        default="",
+    ).upper()
+    time_to_close_gate_passed, _ = _first_bool_with_field(
+        row,
+        ("time_to_close_gate_passed", "execution_time_to_close_gate_passed"),
+    )
+    required_min_time_to_close = _first_float(
+        row,
+        ("required_min_time_to_close_seconds", "min_time_to_close_seconds"),
+        default=None,
+    )
+    spread_bps = _first_float(
+        row,
+        ("spread_bps", "microstructure_snapshot.spread_bps", "features.spread_bps"),
+        default=None,
+    )
+    book_staleness_ms = _first_float(
+        row,
+        (
+            "book_staleness_ms",
+            "microstructure_snapshot.book_staleness_ms",
+            "features.book_staleness_ms",
+        ),
+        default=None,
+    )
+    queue_fill_proxy = _first_float(
+        row,
+        (
+            "queue_fill_proxy",
+            "queue_fill_probability_estimate",
+            "microstructure_snapshot.queue_fill_proxy",
+            "features.queue_fill_proxy",
+        ),
+        default=None,
+    )
+    missing_guard_fields = _missing_guard_decision_fields(
+        order_allowed_field=order_allowed_field,
+        execution_guarded_action=execution_guarded_action,
+        execution_guarded_side=execution_guarded_side,
+        guard_blocking_source_fields=guard_blocking_source_fields,
+    )
     calibrated_ev, ev_source, ev_provenance, ev_status, ev_reasons = (
         _derive_calibrated_ev_contract(
             expected_return=expected_return,
@@ -1473,6 +1911,22 @@ def _normalize_forward_shadow_row(
         "execution_cost": execution_cost,
         "time_to_close_seconds": time_to_close,
         "time_window_bucket": _time_window_bucket(time_to_close),
+        "order_allowed": order_allowed,
+        "execution_guarded_action": execution_guarded_action or None,
+        "execution_guarded_side": execution_guarded_side or None,
+        "execution_guard_blocking_reason_codes": guard_blocking_codes,
+        "execution_guard_blocking_reason_source_fields": guard_blocking_source_fields,
+        "missing_execution_guard_decision_fields": missing_guard_fields,
+        "time_to_close_gate_passed": time_to_close_gate_passed,
+        "required_min_time_to_close_seconds": required_min_time_to_close,
+        "spread_bps": spread_bps,
+        "book_staleness_ms": book_staleness_ms,
+        "queue_fill_proxy": queue_fill_proxy,
+        "paper_intent_id": _first_text(row, ("paper_intent_id",), default="") or None,
+        "paper_fill_id": _first_text(row, ("paper_fill_id",), default="") or None,
+        "execution_guard_safety_flags_blocked": _execution_guard_safety_flags_blocked(
+            row
+        ),
         "calibrated_ev": calibrated_ev,
         "ev_source": ev_source,
         "ev_source_provenance": ev_provenance,
@@ -1534,6 +1988,70 @@ def _derive_calibrated_ev_contract(
         },
         "blocked_missing_calibrated_ev_source",
         reasons,
+    )
+
+
+def _reason_codes_from_fields(
+    row: Mapping[str, Any],
+    field_names: tuple[str, ...],
+) -> tuple[list[str], list[str]]:
+    values: list[str] = []
+    source_fields: list[str] = []
+    for field_name in field_names:
+        raw_value = _lookup_value(row, field_name)
+        if raw_value is None:
+            continue
+        source_fields.append(field_name)
+        values.extend(_coerce_reason_codes(raw_value))
+    return sorted(set(values)), source_fields
+
+
+def _coerce_reason_codes(raw_value: Any) -> list[str]:
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, str):
+        if not raw_value.strip():
+            return []
+        try:
+            parsed = json.loads(raw_value)
+        except json.JSONDecodeError:
+            parsed = raw_value
+        else:
+            return _coerce_reason_codes(parsed)
+        return [part.strip() for part in parsed.split(",") if part.strip()]
+    if isinstance(raw_value, list | tuple | set):
+        values: list[str] = []
+        for item in raw_value:
+            values.extend(_coerce_reason_codes(item))
+        return values
+    return [str(raw_value)]
+
+
+def _missing_guard_decision_fields(
+    *,
+    order_allowed_field: str | None,
+    execution_guarded_action: str,
+    execution_guarded_side: str,
+    guard_blocking_source_fields: list[str],
+) -> list[str]:
+    missing = []
+    if order_allowed_field is None:
+        missing.append("order_allowed")
+    if not execution_guarded_action:
+        missing.append("execution_guarded_action")
+    if not execution_guarded_side:
+        missing.append("execution_guarded_side")
+    if not guard_blocking_source_fields:
+        missing.append("execution_blocking_reason_codes")
+    return missing
+
+
+def _execution_guard_safety_flags_blocked(row: Mapping[str, Any]) -> bool:
+    return (
+        _optional_bool(row, "capital_at_risk", default=False) is False
+        and _optional_bool(row, "polymarket_write_enabled", default=False) is False
+        and _optional_bool(row, "wallet_signing_enabled", default=False) is False
+        and _optional_bool(row, "v8_execution_handoff_allowed", default=False) is False
     )
 
 
@@ -1775,6 +2293,42 @@ def _first_sort_number(
     return float(default)
 
 
+def _first_bool_with_field(
+    row: Mapping[str, Any],
+    field_names: tuple[str, ...],
+) -> tuple[bool | None, str | None]:
+    for field_name in field_names:
+        raw_value = _lookup_value(row, field_name)
+        if raw_value is None:
+            continue
+        parsed = _coerce_bool(raw_value)
+        if parsed is not None:
+            return parsed, field_name
+    return None, None
+
+
+def _optional_bool(row: Mapping[str, Any], field_name: str, *, default: bool) -> bool:
+    raw_value = _lookup_value(row, field_name)
+    parsed = _coerce_bool(raw_value)
+    return default if parsed is None else parsed
+
+
+def _coerce_bool(raw_value: Any) -> bool | None:
+    if isinstance(raw_value, bool):
+        return raw_value
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, int | float) and math.isfinite(float(raw_value)):
+        return bool(raw_value)
+    if isinstance(raw_value, str):
+        normalized = raw_value.strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n"}:
+            return False
+    return None
+
+
 def _lookup_value(row: Mapping[str, Any], field_name: str) -> Any:
     if field_name in row:
         return row.get(field_name)
@@ -1835,7 +2389,7 @@ def _forbidden_fields_by_row(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     forbidden_set = set(EXECUTION_LAYER_V2_FORBIDDEN_OUTCOME_FIELDS)
     violations = []
     for index, row in enumerate(rows):
-        present = sorted(forbidden_set.intersection(row))
+        present = sorted(_recursive_forbidden_field_paths(row, forbidden_set))
         if present:
             violations.append(
                 {
@@ -1846,6 +2400,39 @@ def _forbidden_fields_by_row(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                 }
             )
     return violations
+
+
+def _recursive_forbidden_field_paths(
+    payload: Any,
+    forbidden_set: set[str],
+    *,
+    prefix: str = "",
+) -> list[str]:
+    paths: list[str] = []
+    if isinstance(payload, Mapping):
+        for key, value in payload.items():
+            key_text = str(key)
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            if key_text in forbidden_set:
+                paths.append(path)
+            paths.extend(
+                _recursive_forbidden_field_paths(
+                    value,
+                    forbidden_set,
+                    prefix=path,
+                )
+            )
+    elif isinstance(payload, list):
+        for index, value in enumerate(payload):
+            path = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            paths.extend(
+                _recursive_forbidden_field_paths(
+                    value,
+                    forbidden_set,
+                    prefix=path,
+                )
+            )
+    return paths
 
 
 def _markdown_list(items: list[str]) -> list[str]:
