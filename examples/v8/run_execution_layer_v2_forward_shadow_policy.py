@@ -28,6 +28,7 @@ def main() -> None:
     )
     parser.add_argument("--entry-ev-threshold", default=0.02, type=float)
     parser.add_argument("--default-execution-cost", default=0.001, type=float)
+    parser.add_argument("--frozen-ev-calibration-artifact", type=Path)
     parser.add_argument("--max-rows", type=int)
     parser.add_argument("--overwrite-existing", action="store_true")
     args = parser.parse_args()
@@ -40,6 +41,7 @@ def main() -> None:
                 output_dir=args.output_dir,
                 entry_ev_threshold=args.entry_ev_threshold,
                 default_execution_cost=args.default_execution_cost,
+                frozen_ev_calibration_artifact=args.frozen_ev_calibration_artifact,
                 max_rows=args.max_rows,
                 overwrite_existing=args.overwrite_existing,
             )
@@ -47,6 +49,7 @@ def main() -> None:
     except FileNotFoundError as exc:
         parser.error(str(exc))
 
+    source = result.calibrated_ev_source_report
     ev = result.ev_mapping_report
     shadow = result.forward_shadow_report
     guard = result.guard_intersection_report
@@ -54,6 +57,9 @@ def main() -> None:
     print(f"output_dir={result.output_dir}")
     print(f"raw_row_count={shadow['raw_row_count']}")
     print(f"accepted_signal_row_count={shadow['accepted_signal_row_count']}")
+    print(f"calibrated_ev_source_status={source['calibrated_ev_source_status']}")
+    print(f"calibrated_ev_produced_count={source['calibrated_ev_produced_count']}")
+    print(f"calibrated_ev_missing_count={source['calibrated_ev_missing_count']}")
     print(f"ev_mapping_status={ev['ev_mapping_status']}")
     print(f"calibrated_ev_available={str(ev['calibrated_ev_available']).lower()}")
     for name, metrics in shadow["policy_variants"].items():
@@ -70,6 +76,14 @@ def main() -> None:
             f"guard_unknown={metrics['guard_unknown_candidate_count']} "
             f"executable={metrics['executable_shadow_count']}"
         )
+    print(
+        "calibrated_ev_source_report_path="
+        f"{result.artifact_paths['execution_layer_v2_calibrated_ev_source_report']}"
+    )
+    print(
+        "calibrated_ev_source_report_sha256="
+        f"{result.artifact_hashes['execution_layer_v2_calibrated_ev_source_report']}"
+    )
     print(
         "ev_mapping_report_path="
         f"{result.artifact_paths['execution_layer_v2_calibrated_ev_mapping_report']}"

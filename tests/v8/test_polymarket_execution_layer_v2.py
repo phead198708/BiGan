@@ -471,6 +471,16 @@ def test_execution_layer_v2_forward_shadow_missing_calibrated_ev_fails_closed(
         )
     )
 
+    source = result.calibrated_ev_source_report
+    assert source["calibrated_ev_source_status"] == "blocked_missing_calibrated_ev_source"
+    assert source["calibrated_ev_source"] == "missing_frozen_ev_calibration_artifact"
+    assert source["calibration_artifact_path"] is None
+    assert source["calibrated_ev_produced_count"] == 0
+    assert source["calibrated_ev_missing_count"] == 1
+    assert "missing_frozen_ev_calibration_artifact" in source[
+        "calibrated_ev_source_blocking_reason_codes"
+    ]
+
     ev = result.ev_mapping_report
     assert ev["ev_mapping_status"] == "blocked_missing_calibrated_ev_source"
     assert ev["calibrated_ev_available"] is False
@@ -495,6 +505,96 @@ def test_execution_layer_v2_forward_shadow_missing_calibrated_ev_fails_closed(
     assert result.manifest["v8_execution_handoff_allowed"] is False
     assert result.manifest["paper_only"] is True
     assert result.manifest["capital_at_risk"] is False
+
+
+def test_execution_layer_v2_forward_shadow_frozen_calibration_artifact_produces_ev(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "fresh_signal_trace.jsonl"
+    calibration_path = tmp_path / "frozen_ev_calibration.json"
+    _write_ev_calibration_artifact(
+        calibration_path,
+        {
+            "intercept": 0.0,
+            "canonical_o_action_score_weight": 0.10,
+        },
+    )
+    _write_jsonl(
+        input_path,
+        [
+            _forward_shadow_row(
+                market_id="artifact-sbc-pass",
+                action="BUY_DOWN_SELL_BEFORE_CLOSE",
+                selected_side="DOWN",
+                entry_ask=0.55,
+                canonical_o_action_score=0.75,
+                order_allowed=True,
+                execution_guarded_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+                execution_guarded_side="DOWN",
+                execution_blocking_reason_codes=[],
+                time_to_close_seconds=90.0,
+            ),
+            _forward_shadow_row(
+                market_id="artifact-up-hts",
+                action="BUY_UP_HOLD_TO_SETTLEMENT",
+                selected_side="UP",
+                entry_ask=0.50,
+                canonical_o_action_score=0.70,
+                order_allowed=True,
+                execution_guarded_action="BUY_UP_HOLD_TO_SETTLEMENT",
+                execution_guarded_side="UP",
+                execution_blocking_reason_codes=[],
+                time_to_close_seconds=180.0,
+            ),
+        ],
+    )
+
+    result = run_execution_layer_v2_forward_shadow_policy(
+        ExecutionLayerV2ForwardShadowConfig(
+            run_id="forward-shadow-frozen-ev-artifact",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+            frozen_ev_calibration_artifact=calibration_path,
+        )
+    )
+
+    source = result.calibrated_ev_source_report
+    assert source["calibrated_ev_source_status"] == "calibrated_ev_source_available"
+    assert source["calibrated_ev_source"] == "frozen_ev_calibration_artifact"
+    assert source["calibration_artifact_valid"] is True
+    assert source["calibrated_ev_produced_count"] == 2
+    assert source["calibrated_ev_missing_count"] == 0
+    assert source["source_fields_used"] == [
+        "action_family",
+        "canonical_o_action_score",
+        "execution_cost",
+        "intercept",
+        "selected_action",
+        "selected_side",
+    ]
+    assert source["source_rows"][0]["calibrated_action_expected_net_return"] == (
+        pytest.approx(0.074)
+    )
+    assert source["calibrated_ev_v2_candidate_count"] == 2
+    assert source["calibrated_ev_v2_guard_passed_count"] == 2
+    assert source["calibrated_ev_plus_bucket_v2_candidate_count"] == 1
+    assert source["calibrated_ev_plus_bucket_v2_guard_passed_count"] == 1
+
+    variants = result.forward_shadow_report["policy_variants"]
+    assert variants["calibrated_ev_v2"]["allowed_decision_count"] == 2
+    assert variants["calibrated_ev_plus_bucket_v2"]["allowed_decision_count"] == 1
+    intersections = result.guard_intersection_report[
+        "policy_variant_guard_intersections"
+    ]
+    assert intersections["calibrated_ev_v2"]["guard_passed_candidate_count"] == 2
+    assert intersections["calibrated_ev_plus_bucket_v2"][
+        "guard_passed_candidate_count"
+    ] == 1
+    assert result.ev_mapping_report["ev_mapping_status"] == "calibrated_ev_available"
+    assert result.manifest["calibrated_ev_produced_count"] == 2
+    assert result.manifest["frozen_ev_calibration_artifact_hash"]
+    assert result.manifest["market_implied_probability_used_for_ev"] is False
+    assert result.artifact_paths["execution_layer_v2_calibrated_ev_source_report"].exists()
 
 
 def test_execution_layer_v2_forward_shadow_calibrated_ev_and_bucket_plus_sbc(
@@ -706,6 +806,9 @@ def test_execution_layer_v2_forward_shadow_forbidden_outcome_fields_fail_closed(
     assert result.ev_mapping_report["ev_mapping_status"] == (
         "blocked_forbidden_outcome_fields_present"
     )
+    assert result.calibrated_ev_source_report["calibrated_ev_source_status"] == (
+        "blocked_forbidden_outcome_fields_present"
+    )
     assert result.forward_shadow_report["forward_shadow_policy_status"] == (
         "blocked_fail_closed"
     )
@@ -775,6 +878,27 @@ def _write_forward_shadow_input(path, rows: list[dict[str, object]]) -> None:
 def _write_jsonl(path, rows: list[dict[str, object]]) -> None:
     path.write_text(
         "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def _write_ev_calibration_artifact(
+    path,
+    score_to_expected_net_return: dict[str, object],
+) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "test-frozen-ev-calibration-v1",
+                "frozen": True,
+                "decision_time_safe": True,
+                "uses_validation_labels_for_tuning": False,
+                "market_implied_probability_used_for_ev": False,
+                "subtract_execution_cost": True,
+                "score_to_expected_net_return": score_to_expected_net_return,
+            },
+            sort_keys=True,
+        ),
         encoding="utf-8",
     )
 

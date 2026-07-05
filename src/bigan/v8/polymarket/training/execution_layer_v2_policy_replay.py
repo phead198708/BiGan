@@ -32,6 +32,9 @@ EXECUTION_LAYER_V2_POLICY_REPLAY_MANIFEST_SCHEMA_VERSION = (
 EXECUTION_LAYER_V2_CALIBRATED_EV_MAPPING_SCHEMA_VERSION = (
     "bigan-v8-polymarket-execution-layer-v2-calibrated-ev-mapping-v1"
 )
+EXECUTION_LAYER_V2_CALIBRATED_EV_SOURCE_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-execution-layer-v2-calibrated-ev-source-v1"
+)
 EXECUTION_LAYER_V2_FORWARD_SHADOW_SCHEMA_VERSION = (
     "bigan-v8-polymarket-execution-layer-v2-forward-shadow-policy-v1"
 )
@@ -132,6 +135,7 @@ class ExecutionLayerV2ForwardShadowConfig:
     max_rows: int | None = None
     entry_ev_threshold: float = 0.02
     default_execution_cost: float = DEFAULT_FORWARD_SHADOW_EXECUTION_COST
+    frozen_ev_calibration_artifact: Path | str | None = None
     paper_only: bool = True
     capital_at_risk: bool = False
     polymarket_write_enabled: bool = False
@@ -152,6 +156,12 @@ class ExecutionLayerV2ForwardShadowConfig:
             raise ValueError("default_execution_cost must be finite and non-negative")
         object.__setattr__(self, "input_path", Path(self.input_path))
         object.__setattr__(self, "output_dir", Path(self.output_dir))
+        if self.frozen_ev_calibration_artifact is not None:
+            object.__setattr__(
+                self,
+                "frozen_ev_calibration_artifact",
+                Path(self.frozen_ev_calibration_artifact),
+            )
         _validate_safety_flags(self)
 
     @property
@@ -162,6 +172,10 @@ class ExecutionLayerV2ForwardShadowConfig:
         payload = asdict(self)
         payload["input_path"] = str(self.input_path)
         payload["output_dir"] = str(self.output_dir)
+        if self.frozen_ev_calibration_artifact is not None:
+            payload["frozen_ev_calibration_artifact"] = str(
+                self.frozen_ev_calibration_artifact
+            )
         return payload
 
 
@@ -172,6 +186,7 @@ class ExecutionLayerV2ForwardShadowResult:
     output_dir: Path
     artifact_paths: dict[str, Path]
     artifact_hashes: dict[str, str]
+    calibrated_ev_source_report: dict[str, Any]
     ev_mapping_report: dict[str, Any]
     forward_shadow_report: dict[str, Any]
     guard_intersection_report: dict[str, Any]
@@ -275,6 +290,9 @@ def run_execution_layer_v2_forward_shadow_policy(
     if config.max_rows is not None:
         raw_rows = raw_rows[: config.max_rows]
     forbidden = _forbidden_fields_by_row(raw_rows)
+    ev_calibration_artifact = _load_frozen_ev_calibration_artifact(
+        config.frozen_ev_calibration_artifact
+    )
     normalized_rows = (
         []
         if forbidden
@@ -283,6 +301,7 @@ def run_execution_layer_v2_forward_shadow_policy(
                 row,
                 index,
                 default_execution_cost=config.default_execution_cost,
+                ev_calibration_artifact=ev_calibration_artifact,
             )
             for index, row in enumerate(raw_rows)
         ]
@@ -312,7 +331,21 @@ def run_execution_layer_v2_forward_shadow_policy(
             entry_ev_threshold=config.entry_ev_threshold,
         )
     )
+    calibrated_ev_source_report = build_execution_layer_v2_calibrated_ev_source_report(
+        normalized_rows,
+        run_id=config.run_id,
+        input_path=str(config.input_path),
+        raw_row_count=len(raw_rows),
+        forbidden_outcome_fields_by_row=forbidden,
+        ev_calibration_artifact=ev_calibration_artifact,
+        forward_shadow_report=forward_shadow_report,
+        guard_intersection_report=guard_intersection_report,
+    )
     artifact_paths = {
+        "execution_layer_v2_calibrated_ev_source_report": run_dir
+        / "execution_layer_v2_calibrated_ev_source_report.json",
+        "execution_layer_v2_calibrated_ev_source_summary": run_dir
+        / "execution_layer_v2_calibrated_ev_source_report.md",
         "execution_layer_v2_calibrated_ev_mapping_report": run_dir
         / "execution_layer_v2_calibrated_ev_mapping_report.json",
         "execution_layer_v2_calibrated_ev_mapping_summary": run_dir
@@ -328,6 +361,16 @@ def run_execution_layer_v2_forward_shadow_policy(
         "execution_layer_v2_forward_shadow_manifest": run_dir
         / "execution_layer_v2_forward_shadow_manifest.json",
     }
+    _write_json(
+        artifact_paths["execution_layer_v2_calibrated_ev_source_report"],
+        calibrated_ev_source_report,
+    )
+    _write_text(
+        artifact_paths["execution_layer_v2_calibrated_ev_source_summary"],
+        execution_layer_v2_calibrated_ev_source_report_to_markdown(
+            calibrated_ev_source_report
+        ),
+    )
     _write_json(
         artifact_paths["execution_layer_v2_calibrated_ev_mapping_report"],
         ev_mapping_report,
@@ -365,8 +408,16 @@ def run_execution_layer_v2_forward_shadow_policy(
         "schema_version": EXECUTION_LAYER_V2_FORWARD_SHADOW_MANIFEST_SCHEMA_VERSION,
         "run_id": config.run_id,
         "input_path": str(config.input_path),
+        "frozen_ev_calibration_artifact": (
+            str(config.frozen_ev_calibration_artifact)
+            if config.frozen_ev_calibration_artifact is not None
+            else None
+        ),
         "artifact_paths": {name: str(path) for name, path in artifact_paths.items()},
         "artifact_hashes": dict(artifact_hashes),
+        "calibrated_ev_source_report_id": calibrated_ev_source_report[
+            "execution_layer_v2_calibrated_ev_source_report_id"
+        ],
         "ev_mapping_report_id": ev_mapping_report[
             "execution_layer_v2_calibrated_ev_mapping_report_id"
         ],
@@ -380,7 +431,19 @@ def run_execution_layer_v2_forward_shadow_policy(
         "accepted_signal_row_count": len(normalized_rows),
         "forbidden_outcome_fields_present": bool(forbidden),
         "ev_mapping_status": ev_mapping_report["ev_mapping_status"],
+        "calibrated_ev_source_status": calibrated_ev_source_report[
+            "calibrated_ev_source_status"
+        ],
         "calibrated_ev_available": ev_mapping_report["calibrated_ev_available"],
+        "calibrated_ev_produced_count": calibrated_ev_source_report[
+            "calibrated_ev_produced_count"
+        ],
+        "calibrated_ev_missing_count": calibrated_ev_source_report[
+            "calibrated_ev_missing_count"
+        ],
+        "frozen_ev_calibration_artifact_hash": calibrated_ev_source_report[
+            "calibration_artifact_hash"
+        ],
         "market_implied_probability_used_for_ev": ev_mapping_report[
             "market_implied_probability_used_for_ev"
         ],
@@ -419,6 +482,7 @@ def run_execution_layer_v2_forward_shadow_policy(
         output_dir=run_dir,
         artifact_paths=artifact_paths,
         artifact_hashes=artifact_hashes,
+        calibrated_ev_source_report=calibrated_ev_source_report,
         ev_mapping_report=ev_mapping_report,
         forward_shadow_report=forward_shadow_report,
         guard_intersection_report=guard_intersection_report,
@@ -523,6 +587,152 @@ def execution_layer_v2_policy_replay_report_to_markdown(report: dict[str, Any]) 
         lines.append(f"- {rule}")
     lines.append("")
     return "\n".join(lines)
+
+
+def build_execution_layer_v2_calibrated_ev_source_report(
+    rows: list[dict[str, Any]],
+    *,
+    run_id: str,
+    input_path: str,
+    raw_row_count: int | None = None,
+    forbidden_outcome_fields_by_row: list[dict[str, Any]] | None = None,
+    ev_calibration_artifact: dict[str, Any],
+    forward_shadow_report: dict[str, Any],
+    guard_intersection_report: dict[str, Any],
+) -> dict[str, Any]:
+    """Build calibrated EV source production diagnostics."""
+
+    forbidden = forbidden_outcome_fields_by_row or []
+    missing_rows = [
+        row
+        for row in rows
+        if not row["calibrated_action_expected_net_return_available"]
+    ]
+    produced_rows = [
+        row for row in rows if row["calibrated_ev_source"] == "frozen_ev_calibration_artifact"
+    ]
+    input_rows = [
+        row
+        for row in rows
+        if row["calibrated_ev_source"] == "input_calibrated_action_expected_net_return"
+    ]
+    reason_codes = sorted(
+        {
+            reason
+            for row in missing_rows
+            for reason in row["calibrated_ev_blocking_reason_codes"]
+        }
+    )
+    if forbidden:
+        status = "blocked_forbidden_outcome_fields_present"
+        reason_codes = ["forbidden_outcome_fields_present"]
+    elif not rows:
+        status = "blocked_no_forward_shadow_rows"
+        reason_codes = ["no_forward_shadow_rows"]
+    elif missing_rows:
+        status = "blocked_missing_calibrated_ev_source"
+    else:
+        status = "calibrated_ev_source_available"
+
+    calibrated_ev_v2 = forward_shadow_report["policy_variants"]["calibrated_ev_v2"]
+    calibrated_ev_plus_bucket = forward_shadow_report["policy_variants"][
+        "calibrated_ev_plus_bucket_v2"
+    ]
+    guard_intersections = guard_intersection_report["policy_variant_guard_intersections"]
+    report = {
+        "schema_version": EXECUTION_LAYER_V2_CALIBRATED_EV_SOURCE_SCHEMA_VERSION,
+        "run_id": run_id,
+        "input_path": input_path,
+        "raw_row_count": raw_row_count if raw_row_count is not None else len(rows),
+        "accepted_signal_row_count": len(rows),
+        "diagnostic_only": True,
+        "uses_settlement_pnl_or_outcome_labels": False,
+        "uses_oracle_actions_or_future_returns": False,
+        "uses_settlement_labels_for_threshold_tuning": False,
+        "forbidden_outcome_fields_present": bool(forbidden),
+        "forbidden_outcome_fields_by_row": forbidden,
+        "calibrated_ev_source_status": status,
+        "calibrated_ev_source_blocking_reason_codes": reason_codes,
+        "calibrated_ev_source": ev_calibration_artifact["source"],
+        "calibration_artifact_path": ev_calibration_artifact["path"],
+        "calibration_artifact_hash": ev_calibration_artifact["sha256"],
+        "calibration_artifact_valid": ev_calibration_artifact["valid"],
+        "calibration_artifact_status": ev_calibration_artifact["status"],
+        "calibration_artifact_blocking_reason_codes": ev_calibration_artifact[
+            "blocking_reason_codes"
+        ],
+        "calibrated_ev_produced_count": len(produced_rows),
+        "input_calibrated_ev_count": len(input_rows),
+        "calibrated_ev_missing_count": len(missing_rows),
+        "calibrated_ev_available_count": len(rows) - len(missing_rows),
+        "source_fields_used": sorted(
+            {
+                field
+                for row in produced_rows
+                for field in row["calibrated_ev_source_provenance"][
+                    "source_fields_used"
+                ]
+                if field
+            }
+        ),
+        "source_rows": [_calibrated_ev_source_row(row) for row in rows],
+        "calibrated_ev_v2_candidate_count": calibrated_ev_v2[
+            "allowed_decision_count"
+        ],
+        "calibrated_ev_v2_guard_passed_count": guard_intersections[
+            "calibrated_ev_v2"
+        ]["guard_passed_candidate_count"],
+        "calibrated_ev_plus_bucket_v2_candidate_count": calibrated_ev_plus_bucket[
+            "allowed_decision_count"
+        ],
+        "calibrated_ev_plus_bucket_v2_guard_passed_count": guard_intersections[
+            "calibrated_ev_plus_bucket_v2"
+        ]["guard_passed_candidate_count"],
+        "market_implied_probability_used_for_ev": False,
+        "source_scores_mutated": False,
+        "o_score_mutated": False,
+        "paper_live_unlock_changed": False,
+        **_safety_report_fields(),
+    }
+    report["execution_layer_v2_calibrated_ev_source_report_id"] = (
+        canonical_json_sha256(report)
+    )
+    return report
+
+
+def execution_layer_v2_calibrated_ev_source_report_to_markdown(
+    report: dict[str, Any],
+) -> str:
+    """Render calibrated EV source production diagnostics."""
+
+    return "\n".join(
+        [
+            "# v8 Execution Layer v2 Calibrated EV Source",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- raw_row_count: `{report['raw_row_count']}`",
+            f"- accepted_signal_row_count: `{report['accepted_signal_row_count']}`",
+            f"- calibrated_ev_source_status: `{report['calibrated_ev_source_status']}`",
+            f"- calibrated_ev_source: `{report['calibrated_ev_source']}`",
+            f"- calibration_artifact_path: `{report['calibration_artifact_path']}`",
+            f"- calibration_artifact_hash: `{report['calibration_artifact_hash']}`",
+            f"- calibration_artifact_valid: `{report['calibration_artifact_valid']}`",
+            f"- calibrated_ev_produced_count: `{report['calibrated_ev_produced_count']}`",
+            f"- input_calibrated_ev_count: `{report['input_calibrated_ev_count']}`",
+            f"- calibrated_ev_missing_count: `{report['calibrated_ev_missing_count']}`",
+            f"- calibrated_ev_v2_candidate_count: `{report['calibrated_ev_v2_candidate_count']}`",
+            f"- calibrated_ev_v2_guard_passed_count: `{report['calibrated_ev_v2_guard_passed_count']}`",
+            f"- calibrated_ev_plus_bucket_v2_candidate_count: `{report['calibrated_ev_plus_bucket_v2_candidate_count']}`",
+            f"- calibrated_ev_plus_bucket_v2_guard_passed_count: `{report['calibrated_ev_plus_bucket_v2_guard_passed_count']}`",
+            f"- market_implied_probability_used_for_ev: `{report['market_implied_probability_used_for_ev']}`",
+            f"- v8_execution_handoff_allowed: `{report['v8_execution_handoff_allowed']}`",
+            "",
+            "## Blocking Reasons",
+            "",
+            *_markdown_list(report["calibrated_ev_source_blocking_reason_codes"]),
+            "",
+        ]
+    )
 
 
 def build_execution_layer_v2_calibrated_ev_mapping_report(
@@ -1431,6 +1641,37 @@ def _ev_mapping_contract_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _calibrated_ev_source_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "row_index": row["row_index"],
+        "market_id": row["market_id"],
+        "decision_ts": row["decision_ts"],
+        "selected_action": row["action"],
+        "selected_side": row["side"],
+        "family": row["family"],
+        "canonical_o_action_score": row["canonical_o_action_score"],
+        "canonical_o_raw_score": row["canonical_o_raw_score"],
+        "execution_price": row["execution_price"],
+        "executable_exit_bid_proxy": row["executable_exit_bid_proxy"],
+        "spread_bps": row["spread_bps"],
+        "queue_fill_proxy": row["queue_fill_proxy"],
+        "book_staleness_ms": row["book_staleness_ms"],
+        "time_to_close_seconds": row["time_to_close_seconds"],
+        "calibrated_action_expected_net_return": row[
+            "calibrated_action_expected_net_return"
+        ],
+        "calibrated_ev_source": row["calibrated_ev_source"],
+        "calibrated_ev_source_provenance": row["calibrated_ev_source_provenance"],
+        "calibrated_ev_available": row[
+            "calibrated_action_expected_net_return_available"
+        ],
+        "calibrated_ev_blocking_reason_codes": row[
+            "calibrated_ev_blocking_reason_codes"
+        ],
+        "market_implied_probability_used_for_ev": False,
+    }
+
+
 def _signal_to_ev_diagnostic(rows: list[dict[str, Any]]) -> dict[str, Any]:
     model_fields = sorted(
         {
@@ -1713,11 +1954,78 @@ def _copy_row_with_report_context(
     return copied
 
 
+def _load_frozen_ev_calibration_artifact(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {
+            "path": None,
+            "sha256": None,
+            "payload": {},
+            "valid": False,
+            "status": "missing_frozen_ev_calibration_artifact",
+            "source": "missing_frozen_ev_calibration_artifact",
+            "blocking_reason_codes": ["missing_frozen_ev_calibration_artifact"],
+        }
+    resolved = path.expanduser().resolve()
+    if not resolved.exists():
+        return {
+            "path": str(path),
+            "sha256": None,
+            "payload": {},
+            "valid": False,
+            "status": "frozen_ev_calibration_artifact_not_found",
+            "source": "missing_frozen_ev_calibration_artifact",
+            "blocking_reason_codes": ["frozen_ev_calibration_artifact_not_found"],
+        }
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {
+            "path": str(resolved),
+            "sha256": _sha256_file(resolved),
+            "payload": {},
+            "valid": False,
+            "status": "frozen_ev_calibration_artifact_invalid_json",
+            "source": "invalid_frozen_ev_calibration_artifact",
+            "blocking_reason_codes": ["frozen_ev_calibration_artifact_invalid_json"],
+        }
+    forbidden_paths = _recursive_forbidden_field_paths(
+        payload,
+        set(EXECUTION_LAYER_V2_FORBIDDEN_OUTCOME_FIELDS),
+    )
+    blocking_reasons: list[str] = []
+    if not bool(payload.get("frozen", False)):
+        blocking_reasons.append("frozen_ev_calibration_artifact_not_frozen")
+    if not bool(payload.get("decision_time_safe", False)):
+        blocking_reasons.append("frozen_ev_calibration_artifact_not_decision_time_safe")
+    if bool(payload.get("uses_validation_labels_for_tuning", False)):
+        blocking_reasons.append("frozen_ev_calibration_artifact_uses_validation_labels")
+    if bool(payload.get("market_implied_probability_used_for_ev", False)):
+        blocking_reasons.append("frozen_ev_calibration_artifact_uses_market_implied_ev")
+    if forbidden_paths:
+        blocking_reasons.append("frozen_ev_calibration_artifact_forbidden_fields_present")
+    valid = not blocking_reasons
+    return {
+        "path": str(resolved),
+        "sha256": _sha256_file(resolved),
+        "payload": payload,
+        "valid": valid,
+        "status": "frozen_ev_calibration_artifact_valid"
+        if valid
+        else "frozen_ev_calibration_artifact_invalid",
+        "source": "frozen_ev_calibration_artifact"
+        if valid
+        else "invalid_frozen_ev_calibration_artifact",
+        "blocking_reason_codes": blocking_reasons,
+        "forbidden_field_paths": forbidden_paths,
+    }
+
+
 def _normalize_forward_shadow_row(
     row: dict[str, Any],
     index: int,
     *,
     default_execution_cost: float,
+    ev_calibration_artifact: dict[str, Any],
 ) -> dict[str, Any]:
     action = _canonical_action(
         _first_text(
@@ -1786,6 +2094,14 @@ def _normalize_forward_shadow_row(
             "selected_score",
             "action_score",
             "model_score",
+        ),
+    )
+    canonical_raw_score, canonical_raw_score_field = _first_float_with_field(
+        row,
+        (
+            "canonical_o_raw_score",
+            "canonical_raw_score",
+            "raw_calibrated_action_score",
         ),
     )
     execution_cost = _first_float(
@@ -1870,6 +2186,42 @@ def _normalize_forward_shadow_row(
         ),
         default=None,
     )
+    executable_exit_bid_proxy = _first_float(
+        row,
+        (
+            "executable_exit_bid_proxy",
+            "terminal_bid",
+            "best_candidate_bid",
+            "microstructure_snapshot.executable_exit_bid_proxy",
+            "features.executable_exit_bid_proxy",
+        ),
+        default=None,
+    )
+    (
+        expected_return,
+        expected_return_field,
+        calibrated_ev_source,
+        calibrated_ev_source_provenance,
+        calibrated_ev_blocking_reasons,
+    ) = _calibrated_expected_return_source(
+        input_expected_return=expected_return,
+        input_expected_return_field=expected_return_field,
+        canonical_score=canonical_score,
+        canonical_score_field=canonical_score_field,
+        canonical_raw_score=canonical_raw_score,
+        canonical_raw_score_field=canonical_raw_score_field,
+        execution_price=execution_price,
+        execution_price_field=execution_price_field,
+        executable_exit_bid_proxy=executable_exit_bid_proxy,
+        spread_bps=spread_bps,
+        queue_fill_proxy=queue_fill_proxy,
+        book_staleness_ms=book_staleness_ms,
+        time_to_close=time_to_close,
+        family=family,
+        side=side,
+        execution_cost=execution_cost,
+        ev_calibration_artifact=ev_calibration_artifact,
+    )
     missing_guard_fields = _missing_guard_decision_fields(
         order_allowed_field=order_allowed_field,
         execution_guarded_action=execution_guarded_action,
@@ -1906,8 +2258,14 @@ def _normalize_forward_shadow_row(
         "p_model_fair_value_source_field": p_model_field,
         "calibrated_action_expected_net_return": expected_return,
         "calibrated_action_expected_net_return_source_field": expected_return_field,
+        "calibrated_action_expected_net_return_available": expected_return is not None,
+        "calibrated_ev_source": calibrated_ev_source,
+        "calibrated_ev_source_provenance": calibrated_ev_source_provenance,
+        "calibrated_ev_blocking_reason_codes": calibrated_ev_blocking_reasons,
         "canonical_o_action_score": canonical_score,
         "canonical_o_action_score_source_field": canonical_score_field,
+        "canonical_o_raw_score": canonical_raw_score,
+        "canonical_o_raw_score_source_field": canonical_raw_score_field,
         "execution_cost": execution_cost,
         "time_to_close_seconds": time_to_close,
         "time_window_bucket": _time_window_bucket(time_to_close),
@@ -1922,6 +2280,7 @@ def _normalize_forward_shadow_row(
         "spread_bps": spread_bps,
         "book_staleness_ms": book_staleness_ms,
         "queue_fill_proxy": queue_fill_proxy,
+        "executable_exit_bid_proxy": executable_exit_bid_proxy,
         "paper_intent_id": _first_text(row, ("paper_intent_id",), default="") or None,
         "paper_fill_id": _first_text(row, ("paper_fill_id",), default="") or None,
         "execution_guard_safety_flags_blocked": _execution_guard_safety_flags_blocked(
@@ -1936,6 +2295,145 @@ def _normalize_forward_shadow_row(
         "market_implied_probability_used_for_ev": False,
         "raw_fields": sorted(row.keys()),
     }
+
+
+def _calibrated_expected_return_source(
+    *,
+    input_expected_return: float | None,
+    input_expected_return_field: str | None,
+    canonical_score: float | None,
+    canonical_score_field: str | None,
+    canonical_raw_score: float | None,
+    canonical_raw_score_field: str | None,
+    execution_price: float | None,
+    execution_price_field: str | None,
+    executable_exit_bid_proxy: float | None,
+    spread_bps: float | None,
+    queue_fill_proxy: float | None,
+    book_staleness_ms: float | None,
+    time_to_close: float | None,
+    family: str,
+    side: str,
+    execution_cost: float | None,
+    ev_calibration_artifact: dict[str, Any],
+) -> tuple[float | None, str | None, str, dict[str, Any], list[str]]:
+    if input_expected_return is not None:
+        return (
+            input_expected_return,
+            input_expected_return_field,
+            "input_calibrated_action_expected_net_return",
+            {
+                "source_fields_used": [input_expected_return_field],
+                "formula": "input_calibrated_action_expected_net_return",
+                "market_implied_probability_used_for_ev": False,
+            },
+            [],
+        )
+    if not ev_calibration_artifact["valid"]:
+        return (
+            None,
+            None,
+            ev_calibration_artifact["source"],
+            {
+                "source_fields_used": [],
+                "formula": None,
+                "calibration_artifact_path": ev_calibration_artifact["path"],
+                "calibration_artifact_hash": ev_calibration_artifact["sha256"],
+                "market_implied_probability_used_for_ev": False,
+            },
+            list(ev_calibration_artifact["blocking_reason_codes"]),
+        )
+    payload = ev_calibration_artifact["payload"]
+    score_config = payload.get("score_to_expected_net_return") or payload.get(
+        "score_to_ev",
+        {},
+    )
+    if not isinstance(score_config, Mapping):
+        return (
+            None,
+            None,
+            "invalid_frozen_ev_calibration_artifact",
+            {
+                "source_fields_used": [],
+                "formula": None,
+                "calibration_artifact_path": ev_calibration_artifact["path"],
+                "calibration_artifact_hash": ev_calibration_artifact["sha256"],
+                "market_implied_probability_used_for_ev": False,
+            },
+            ["frozen_ev_calibration_artifact_missing_score_to_expected_net_return"],
+        )
+    features = {
+        "canonical_o_action_score": canonical_score,
+        "canonical_o_raw_score": canonical_raw_score,
+        "execution_price": execution_price,
+        "executable_exit_bid_proxy": executable_exit_bid_proxy,
+        "spread_bps": spread_bps,
+        "queue_fill_proxy": queue_fill_proxy,
+        "book_staleness_ms": book_staleness_ms,
+        "time_to_close_seconds": time_to_close,
+    }
+    field_sources = {
+        "canonical_o_action_score": canonical_score_field,
+        "canonical_o_raw_score": canonical_raw_score_field,
+        "execution_price": execution_price_field,
+        "executable_exit_bid_proxy": "executable_exit_bid_proxy",
+        "spread_bps": "spread_bps",
+        "queue_fill_proxy": "queue_fill_proxy",
+        "book_staleness_ms": "book_staleness_ms",
+        "time_to_close_seconds": "time_to_close_seconds",
+    }
+    value = _float_from_mapping(score_config, "intercept", default=0.0)
+    source_fields_used: list[str] = ["intercept"]
+    missing_features: list[str] = []
+    for feature_name, feature_value in features.items():
+        weight = _feature_weight(score_config, feature_name)
+        if weight == 0.0:
+            continue
+        if feature_value is None:
+            missing_features.append(feature_name)
+            continue
+        value += weight * float(feature_value)
+        source_fields_used.append(field_sources[feature_name] or feature_name)
+    if missing_features:
+        return (
+            None,
+            None,
+            "frozen_ev_calibration_artifact",
+            {
+                "source_fields_used": sorted(set(source_fields_used)),
+                "formula": "linear_score_to_expected_net_return",
+                "missing_required_feature_fields": sorted(missing_features),
+                "calibration_artifact_path": ev_calibration_artifact["path"],
+                "calibration_artifact_hash": ev_calibration_artifact["sha256"],
+                "market_implied_probability_used_for_ev": False,
+            },
+            [
+                f"missing_decision_time_ev_feature:{feature}"
+                for feature in sorted(missing_features)
+            ],
+        )
+    value += _offset_from_mapping(payload.get("family_offsets"), family)
+    value += _offset_from_mapping(payload.get("side_offsets"), side)
+    source_fields_used.extend(["selected_action", "selected_side", "action_family"])
+    if bool(payload.get("subtract_execution_cost", True)):
+        value -= 0.0 if execution_cost is None else float(execution_cost)
+        source_fields_used.append("execution_cost")
+    return (
+        value,
+        "frozen_ev_calibration_artifact",
+        "frozen_ev_calibration_artifact",
+        {
+            "source_fields_used": sorted(set(source_fields_used)),
+            "formula": "linear_score_to_expected_net_return_minus_cost",
+            "calibration_artifact_path": ev_calibration_artifact["path"],
+            "calibration_artifact_hash": ev_calibration_artifact["sha256"],
+            "score_to_expected_net_return_config": dict(score_config),
+            "family": family,
+            "side": side,
+            "market_implied_probability_used_for_ev": False,
+        },
+        [],
+    )
 
 
 def _derive_calibrated_ev_contract(
@@ -2327,6 +2825,43 @@ def _coerce_bool(raw_value: Any) -> bool | None:
         if normalized in {"false", "0", "no", "n"}:
             return False
     return None
+
+
+def _float_from_mapping(
+    payload: Mapping[str, Any],
+    field_name: str,
+    *,
+    default: float,
+) -> float:
+    value = payload.get(field_name, default)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if math.isfinite(parsed) else default
+
+
+def _feature_weight(payload: Mapping[str, Any], feature_name: str) -> float:
+    for key in (
+        f"{feature_name}_weight",
+        feature_name,
+    ):
+        if key in payload:
+            return _float_from_mapping(payload, key, default=0.0)
+    return 0.0
+
+
+def _offset_from_mapping(payload: Any, key: str) -> float:
+    if not isinstance(payload, Mapping):
+        return 0.0
+    value = payload.get(key) or payload.get(str(key).upper()) or payload.get(str(key).lower())
+    if value is None:
+        return 0.0
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if math.isfinite(parsed) else 0.0
 
 
 def _lookup_value(row: Mapping[str, Any], field_name: str) -> Any:
