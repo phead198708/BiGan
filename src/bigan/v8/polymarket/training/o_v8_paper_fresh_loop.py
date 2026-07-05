@@ -95,6 +95,9 @@ O_V8_PAPER_FRESH_EXIT_SIGNAL_SCHEMA_VERSION = (
 O_V8_PAPER_FRESH_EXIT_LEDGER_UPDATE_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-paper-fresh-exit-ledger-update-v1"
 )
+EXECUTION_LAYER_V2_PAPER_REMAP_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-execution-layer-v2-paper-remap-v1"
+)
 
 PINNED_ISSUE_160_RUN_ID = "o-v8-paper-candidate-unlock-20260703T073000Z"
 PINNED_ISSUE_160_MANIFEST_SHA256 = (
@@ -130,6 +133,9 @@ O_V8_PAPER_FRESH_EXIT_PROFIT_TARGET = 0.05
 O_V8_PAPER_FRESH_EXIT_FORCE_SECONDS_TO_CLOSE = 60.0
 O_V8_PAPER_FRESH_EXIT_THRESHOLD_PROFILE_NAME = "paper_only_adapter_heuristic_v1"
 O_V8_PAPER_FRESH_EXIT_DECISION_POLICY_SOURCE = "paper_only_adapter_heuristic_v1"
+O_V8_PAPER_FRESH_HTS_REMAP_EV_THRESHOLD = 0.02
+O_V8_PAPER_FRESH_HTS_REMAP_SCORE_TO_EXPECTED_NET_RETURN_WEIGHT = 0.02
+O_V8_PAPER_FRESH_HTS_REMAP_EXECUTION_COST = 0.001
 O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER = "read_only_public_provider"
 O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE = "snapshot_fixture"
 O_V8_PAPER_FRESH_PUBLIC_DATA_SOURCES = (
@@ -255,6 +261,7 @@ class PolymarketOV8PaperFreshLoopResult:
     paper_exit_signal_report: dict[str, Any]
     paper_sell_position_intents: list[dict[str, Any]]
     synthetic_ledger_update_report: dict[str, Any]
+    execution_layer_v2_paper_remap_report: dict[str, Any]
     manifest: dict[str, Any]
 
 
@@ -314,6 +321,13 @@ def run_polymarket_o_v8_paper_fresh_loop(
     intents = execution_result["paper_order_intents"]
     fills = _fresh_paper_fills_from_intents(intents)
     ledger_rows = _fresh_paper_ledger_from_fills(fills)
+    execution_layer_v2_paper_remap_report = (
+        _execution_layer_v2_paper_remap_report(
+            config=config,
+            execution_result=execution_result,
+            intents=intents,
+        )
+    )
 
     run_report = _fresh_loop_run_report(
         config=config,
@@ -488,6 +502,10 @@ def run_polymarket_o_v8_paper_fresh_loop(
         / "o_v8_paper_fresh_synthetic_ledger_update_report.json",
         "fresh_synthetic_ledger_update_summary": output_dir
         / "o_v8_paper_fresh_synthetic_ledger_update_report.md",
+        "execution_layer_v2_paper_remap_report": output_dir
+        / "execution_layer_v2_paper_remap_report.json",
+        "execution_layer_v2_paper_remap_summary": output_dir
+        / "execution_layer_v2_paper_remap_report.md",
         "manifest": output_dir / "o_v8_paper_fresh_loop_manifest.json",
     }
     _write_json(artifact_paths["fresh_loop_run_report"], run_report)
@@ -621,6 +639,16 @@ def run_polymarket_o_v8_paper_fresh_loop(
         artifact_paths["fresh_synthetic_ledger_update_summary"],
         _fresh_synthetic_ledger_update_md(synthetic_ledger_update_report),
     )
+    _write_json(
+        artifact_paths["execution_layer_v2_paper_remap_report"],
+        execution_layer_v2_paper_remap_report,
+    )
+    _write_text(
+        artifact_paths["execution_layer_v2_paper_remap_summary"],
+        _execution_layer_v2_paper_remap_md(
+            execution_layer_v2_paper_remap_report
+        ),
+    )
 
     artifact_hashes = {
         name: _sha256_file(path)
@@ -652,6 +680,7 @@ def run_polymarket_o_v8_paper_fresh_loop(
         paper_exit_signal_report=paper_exit_signal_report,
         paper_sell_position_intents=paper_sell_position_intents,
         synthetic_ledger_update_report=synthetic_ledger_update_report,
+        execution_layer_v2_paper_remap_report=execution_layer_v2_paper_remap_report,
     )
     _write_json(artifact_paths["manifest"], manifest)
     artifact_hashes["manifest"] = _sha256_file(artifact_paths["manifest"])
@@ -680,6 +709,7 @@ def run_polymarket_o_v8_paper_fresh_loop(
         paper_exit_signal_report=paper_exit_signal_report,
         paper_sell_position_intents=paper_sell_position_intents,
         synthetic_ledger_update_report=synthetic_ledger_update_report,
+        execution_layer_v2_paper_remap_report=execution_layer_v2_paper_remap_report,
         manifest=manifest,
     )
 
@@ -1388,6 +1418,7 @@ def _execute_fresh_public_cycles(
     guard_config = _v8_execution_guard_config()
     all_guard_rows: list[dict[str, Any]] = []
     all_intents: list[dict[str, Any]] = []
+    all_remap_rows: list[dict[str, Any]] = []
     cycle_reports: list[dict[str, Any]] = []
     cycle_failure_count = 0
 
@@ -1415,6 +1446,18 @@ def _execute_fresh_public_cycles(
                 guard_row["cycle_id"] = cycle_id
                 guard_row["public_data_source"] = public_data_source
                 guard_row["pre_decision_exposure_state"] = pre_state
+                guard_row, remap_row = _paper_hts_time_window_remap_guard_row(
+                    original_guard_row=guard_row,
+                    guard_input=guard_input,
+                    guard_config=guard_config,
+                    runtime_state=runtime_state,
+                    runtime_mode="simulated_runtime_state",
+                    cycle_id=cycle_id,
+                    public_data_source=public_data_source,
+                    pre_state=pre_state,
+                )
+                if remap_row is not None:
+                    all_remap_rows.append(remap_row)
                 if guard_row.get("order_allowed") is True:
                     guard_row["simulated_order_id"] = (
                         f"{config.run_id}-fresh-sim-{len(all_intents) + 1:06d}"
@@ -1462,9 +1505,387 @@ def _execute_fresh_public_cycles(
         "cycle_monitoring_rows": cycle_reports,
         "guard_decision_rows": all_guard_rows,
         "paper_order_intents": all_intents,
+        "paper_remap_rows": all_remap_rows,
         "final_runtime_state": _compact_runtime_state(runtime_state),
         "cycle_failure_count": cycle_failure_count,
     }
+
+
+def _paper_hts_time_window_remap_guard_row(
+    *,
+    original_guard_row: dict[str, Any],
+    guard_input: dict[str, Any],
+    guard_config: dict[str, Any],
+    runtime_state: dict[str, Any],
+    runtime_mode: str,
+    cycle_id: str,
+    public_data_source: str,
+    pre_state: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if not _paper_hts_time_window_remap_applicable(
+        original_guard_row=original_guard_row,
+        guard_config=guard_config,
+    ):
+        original_guard_row.setdefault("hts_time_window_remap_applied", False)
+        original_guard_row.setdefault("remap_reason_codes", [])
+        return original_guard_row, None
+
+    original_action = str(original_guard_row.get("source_selected_action") or "")
+    side = str(original_guard_row.get("source_selected_side") or _side_from_action(original_action))
+    remapped_action = f"BUY_{side}_SELL_BEFORE_CLOSE"
+    reason_codes: list[str] = ["hts_time_window_blocked_original_action"]
+    candidate = _paper_same_side_sbc_candidate(
+        full_ranking=list(guard_input.get("full_5_action_ranking") or []),
+        remapped_action=remapped_action,
+    )
+    if candidate is None:
+        return original_guard_row, _paper_remap_row(
+            original_guard_row=original_guard_row,
+            remapped_guard_row=None,
+            remapped_action=remapped_action,
+            applied=False,
+            candidate=False,
+            calibrated_ev=None,
+            calibrated_ev_source="missing_same_side_sbc_candidate",
+            reason_codes=[*reason_codes, "same_side_sbc_alternative_missing"],
+        )
+
+    calibrated_ev, ev_source = _paper_remap_calibrated_ev(guard_input)
+    if calibrated_ev is None:
+        return original_guard_row, _paper_remap_row(
+            original_guard_row=original_guard_row,
+            remapped_guard_row=None,
+            remapped_action=remapped_action,
+            applied=False,
+            candidate=False,
+            calibrated_ev=None,
+            calibrated_ev_source=ev_source,
+            reason_codes=[*reason_codes, "same_side_sbc_calibrated_ev_missing"],
+        )
+    if calibrated_ev < O_V8_PAPER_FRESH_HTS_REMAP_EV_THRESHOLD:
+        return original_guard_row, _paper_remap_row(
+            original_guard_row=original_guard_row,
+            remapped_guard_row=None,
+            remapped_action=remapped_action,
+            applied=False,
+            candidate=False,
+            calibrated_ev=calibrated_ev,
+            calibrated_ev_source=ev_source,
+            reason_codes=[
+                *reason_codes,
+                "same_side_sbc_calibrated_ev_below_threshold",
+            ],
+        )
+
+    remap_input = _paper_remap_guard_input(
+        guard_input=guard_input,
+        candidate=candidate,
+        remapped_action=remapped_action,
+        side=side,
+    )
+    remapped_guard_row = _v8_execution_guard_decision(
+        remap_input,
+        guard_config=guard_config,
+        runtime_state=runtime_state,
+        runtime_mode=runtime_mode,
+    )
+    remapped_guard_row["cycle_id"] = cycle_id
+    remapped_guard_row["public_data_source"] = public_data_source
+    remapped_guard_row["pre_decision_exposure_state"] = pre_state
+    remapped_guard_row["original_action"] = original_action
+    remapped_guard_row["original_family"] = original_guard_row.get(
+        "source_selected_family"
+    )
+    remapped_guard_row["original_side"] = side
+    remapped_guard_row["remapped_action"] = remapped_action
+    remapped_guard_row["remapped_family"] = "SELL_BEFORE_CLOSE"
+    remapped_guard_row["remapped_side"] = side
+    remapped_guard_row["source_selected_action"] = original_action
+    remapped_guard_row["source_selected_family"] = original_guard_row.get(
+        "source_selected_family"
+    )
+    remapped_guard_row["source_selected_side"] = side
+    remapped_guard_row["source_model_score"] = original_guard_row.get(
+        "source_model_score"
+    )
+    remapped_guard_row["source_raw_model_score"] = original_guard_row.get(
+        "source_raw_model_score"
+    )
+    remapped_guard_row["original_execution_blocking_reason_codes"] = list(
+        original_guard_row.get("execution_blocking_reason_codes") or []
+    )
+    remapped_guard_row["original_execution_guard_reason_codes"] = list(
+        original_guard_row.get("execution_guard_reason_codes") or []
+    )
+    remapped_guard_row["original_order_allowed"] = bool(
+        original_guard_row.get("order_allowed")
+    )
+    remapped_guard_row["hts_time_window_remap_calibrated_ev"] = calibrated_ev
+    remapped_guard_row["hts_time_window_remap_calibrated_ev_source"] = ev_source
+    remapped_guard_row["hts_time_window_remap_ev_threshold"] = (
+        O_V8_PAPER_FRESH_HTS_REMAP_EV_THRESHOLD
+    )
+    remapped_guard_row["hts_time_window_remap_applied"] = (
+        remapped_guard_row.get("order_allowed") is True
+    )
+    remap_reasons = [
+        *reason_codes,
+        "same_side_sbc_alternative_available",
+        "same_side_sbc_calibrated_ev_threshold_passed",
+    ]
+    if remapped_guard_row.get("order_allowed") is True:
+        remap_reasons.append("same_side_sbc_guard_passed")
+    else:
+        remap_reasons.extend(
+            list(remapped_guard_row.get("execution_blocking_reason_codes") or [])
+            or ["same_side_sbc_guard_blocked"]
+        )
+    remapped_guard_row["remap_reason_codes"] = sorted(set(remap_reasons))
+
+    return (
+        remapped_guard_row if remapped_guard_row.get("order_allowed") is True else original_guard_row,
+        _paper_remap_row(
+            original_guard_row=original_guard_row,
+            remapped_guard_row=remapped_guard_row,
+            remapped_action=remapped_action,
+            applied=remapped_guard_row.get("order_allowed") is True,
+            candidate=True,
+            calibrated_ev=calibrated_ev,
+            calibrated_ev_source=ev_source,
+            reason_codes=remapped_guard_row["remap_reason_codes"],
+        ),
+    )
+
+
+def _paper_hts_time_window_remap_applicable(
+    *,
+    original_guard_row: dict[str, Any],
+    guard_config: dict[str, Any],
+) -> bool:
+    action = str(original_guard_row.get("source_selected_action") or "")
+    if action not in {"BUY_UP_HOLD_TO_SETTLEMENT", "BUY_DOWN_HOLD_TO_SETTLEMENT"}:
+        return False
+    if original_guard_row.get("order_allowed") is True:
+        return False
+    blocking = set(original_guard_row.get("execution_blocking_reason_codes") or [])
+    if blocking != {"execution_time_to_close_unsafe"}:
+        return False
+    micro = dict(original_guard_row.get("microstructure_snapshot") or {})
+    time_to_close = _trace_float_or_none(micro.get("time_to_close_seconds"))
+    return bool(
+        time_to_close is not None
+        and time_to_close >= float(guard_config["min_time_to_close_seconds"])
+        and time_to_close < float(guard_config["min_hts_time_to_close_seconds"])
+    )
+
+
+def _paper_same_side_sbc_candidate(
+    *,
+    full_ranking: list[dict[str, Any]],
+    remapped_action: str,
+) -> dict[str, Any] | None:
+    for row in full_ranking:
+        if str(row.get("selected_action") or "") == remapped_action:
+            return dict(row)
+    return None
+
+
+def _paper_remap_calibrated_ev(guard_input: dict[str, Any]) -> tuple[float | None, str]:
+    explicit = guard_input.get("calibrated_action_expected_net_return")
+    if explicit is not None:
+        return _float(explicit), "input_calibrated_action_expected_net_return"
+    source_score = guard_input.get("corrected_model_score")
+    if source_score is None:
+        return None, "missing_source_model_score_for_frozen_ev_mapping"
+    return (
+        _float(source_score)
+        * O_V8_PAPER_FRESH_HTS_REMAP_SCORE_TO_EXPECTED_NET_RETURN_WEIGHT
+        - O_V8_PAPER_FRESH_HTS_REMAP_EXECUTION_COST,
+        "paper_fresh_frozen_score_to_expected_net_return_v1",
+    )
+
+
+def _paper_remap_guard_input(
+    *,
+    guard_input: dict[str, Any],
+    candidate: dict[str, Any],
+    remapped_action: str,
+    side: str,
+) -> dict[str, Any]:
+    micro = {
+        **dict(guard_input.get("microstructure_snapshot") or {}),
+        **dict(candidate.get("microstructure_snapshot") or {}),
+    }
+    return {
+        **dict(guard_input),
+        "selected_action": remapped_action,
+        "selected_side": side,
+        "selected_action_family": "SELL_BEFORE_CLOSE",
+        "microstructure_snapshot": micro,
+        "p_up_action_disagreement": _p_up_action_disagreement(
+            action=remapped_action,
+            p_up=_float(guard_input.get("p_up")),
+        ),
+    }
+
+
+def _paper_remap_row(
+    *,
+    original_guard_row: dict[str, Any],
+    remapped_guard_row: dict[str, Any] | None,
+    remapped_action: str,
+    applied: bool,
+    candidate: bool,
+    calibrated_ev: float | None,
+    calibrated_ev_source: str,
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    return {
+        "decision_group_id": original_guard_row.get("decision_group_id"),
+        "market_id": original_guard_row.get("market_id"),
+        "decision_ts": original_guard_row.get("decision_ts"),
+        "original_action": original_guard_row.get("source_selected_action"),
+        "original_family": original_guard_row.get("source_selected_family"),
+        "original_side": original_guard_row.get("source_selected_side"),
+        "remapped_action": remapped_action,
+        "remapped_family": "SELL_BEFORE_CLOSE",
+        "remapped_side": _side_from_action(remapped_action),
+        "hts_time_window_remap_applied": applied,
+        "remap_candidate": candidate,
+        "calibrated_ev": calibrated_ev,
+        "calibrated_ev_source": calibrated_ev_source,
+        "calibrated_ev_threshold": O_V8_PAPER_FRESH_HTS_REMAP_EV_THRESHOLD,
+        "original_order_allowed": bool(original_guard_row.get("order_allowed")),
+        "remapped_order_allowed": bool(
+            remapped_guard_row and remapped_guard_row.get("order_allowed") is True
+        ),
+        "original_execution_blocking_reason_codes": list(
+            original_guard_row.get("execution_blocking_reason_codes") or []
+        ),
+        "original_execution_guard_reason_codes": list(
+            original_guard_row.get("execution_guard_reason_codes") or []
+        ),
+        "remapped_execution_blocking_reason_codes": list(
+            (remapped_guard_row or {}).get("execution_blocking_reason_codes") or []
+        ),
+        "remapped_execution_guard_reason_codes": list(
+            (remapped_guard_row or {}).get("execution_guard_reason_codes") or []
+        ),
+        "remap_reason_codes": sorted(set(reason_codes)),
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+        "uses_settlement_pnl_or_outcome_labels": False,
+        "uses_oracle_actions_or_future_returns": False,
+        "source_scores_mutated": False,
+        "o_score_mutated": False,
+    }
+
+
+def _execution_layer_v2_paper_remap_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    execution_result: dict[str, Any],
+    intents: list[dict[str, Any]],
+) -> dict[str, Any]:
+    rows = list(execution_result.get("paper_remap_rows") or [])
+    applied_rows = [
+        row for row in rows if row.get("hts_time_window_remap_applied") is True
+    ]
+    intent_remaps = [
+        intent for intent in intents if intent.get("hts_time_window_remap_applied") is True
+    ]
+    report = {
+        "schema_version": EXECUTION_LAYER_V2_PAPER_REMAP_SCHEMA_VERSION,
+        "report_type": "execution_layer_v2_paper_remap",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "execution_layer_v2_paper_remap_enabled": True,
+        "paper_only_intent_path": True,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "hts_time_window_blocked_count": len(rows),
+        "same_side_sbc_alternative_available_count": sum(
+            1
+            for row in rows
+            if "same_side_sbc_alternative_available"
+            in set(row.get("remap_reason_codes") or [])
+        ),
+        "same_side_sbc_calibrated_ev_available_count": sum(
+            1 for row in rows if row.get("calibrated_ev") is not None
+        ),
+        "same_side_sbc_guard_passed_count": len(applied_rows),
+        "remap_candidate_count": sum(
+            1 for row in rows if row.get("remap_candidate") is True
+        ),
+        "remap_guard_passed_count": len(applied_rows),
+        "paper_intent_remap_applied_count": len(intent_remaps),
+        "original_action_distribution": _counter_from_rows(rows, "original_action"),
+        "remapped_action_distribution": _counter_from_rows(rows, "remapped_action"),
+        "remap_reason_distribution": _counter_from_rows(rows, "remap_reason_codes"),
+        "remap_failure_reason_distribution": _counter_from_rows(
+            [row for row in rows if row.get("hts_time_window_remap_applied") is not True],
+            "remap_reason_codes",
+        ),
+        "paper_intent_remap_ids": [
+            str(intent.get("paper_fresh_order_intent_id")) for intent in intent_remaps
+        ],
+        "remap_rows": rows,
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "source_scores_mutated": False,
+        "o_score_mutated": False,
+        "promotion_evidence": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(report, "execution_layer_v2_paper_remap_report_id")
+
+
+def _execution_layer_v2_paper_remap_md(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# Execution Layer v2 Paper HTS Time-Window Remap",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- paper_only_intent_path: `{report['paper_only_intent_path']}`",
+            f"- hts_time_window_blocked_count: `{report['hts_time_window_blocked_count']}`",
+            f"- remap_candidate_count: `{report['remap_candidate_count']}`",
+            f"- remap_guard_passed_count: `{report['remap_guard_passed_count']}`",
+            f"- paper_intent_remap_applied_count: `{report['paper_intent_remap_applied_count']}`",
+            f"- same_side_sbc_alternative_available_count: `{report['same_side_sbc_alternative_available_count']}`",
+            f"- same_side_sbc_calibrated_ev_available_count: `{report['same_side_sbc_calibrated_ev_available_count']}`",
+            f"- same_side_sbc_guard_passed_count: `{report['same_side_sbc_guard_passed_count']}`",
+            f"- v8_execution_handoff_allowed: `{report['v8_execution_handoff_allowed']}`",
+            f"- capital_at_risk: `{report['capital_at_risk']}`",
+            f"- polymarket_write_enabled: `{report['polymarket_write_enabled']}`",
+            f"- wallet_signing_enabled: `{report['wallet_signing_enabled']}`",
+            "",
+            "## Remap Reason Distribution",
+            "",
+            "```json",
+            json.dumps(report["remap_reason_distribution"], indent=2, sort_keys=True),
+            "```",
+            "",
+            "This report promotes the HTS time-window remap only into the local "
+            "paper intent path. It does not mutate O/source scores and does not "
+            "unlock live, paper promotion, wallet signing, or Polymarket writes.",
+            "",
+        ]
+    )
 
 
 def _fresh_loop_run_report(
@@ -1479,6 +1900,7 @@ def _fresh_loop_run_report(
     ledger_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     guard_rows = execution_result["guard_decision_rows"]
+    remap_rows = list(execution_result.get("paper_remap_rows") or [])
     blockers = list(unlock_evidence["paper_candidate_unlock_blocking_reason_codes"])
     canonical_scorer_used = any(
         row.get("canonical_frozen_o_scorer_used") is True
@@ -1537,6 +1959,13 @@ def _fresh_loop_run_report(
         ),
         "guard_blocked_decision_count": sum(
             1 for row in guard_rows if row.get("order_allowed") is not True
+        ),
+        "execution_layer_v2_paper_remap_enabled": True,
+        "execution_layer_v2_paper_remap_candidate_count": sum(
+            1 for row in remap_rows if row.get("remap_candidate") is True
+        ),
+        "execution_layer_v2_paper_remap_applied_count": sum(
+            1 for row in remap_rows if row.get("hts_time_window_remap_applied") is True
         ),
         "paper_fresh_order_intent_count": len(intents),
         "paper_fresh_fill_count": len(fills),
@@ -3370,6 +3799,13 @@ def _fresh_signal_trace_report(
             "execution_guarded_side": guard_row.get("execution_guarded_side"),
             "execution_guarded_family": guard_row.get("execution_guarded_family"),
             "execution_guarded_score": guard_row.get("execution_guarded_score"),
+            "original_action": guard_row.get("original_action")
+            or guard_row.get("source_selected_action"),
+            "remapped_action": guard_row.get("remapped_action"),
+            "remap_reason_codes": list(guard_row.get("remap_reason_codes") or []),
+            "hts_time_window_remap_applied": bool(
+                guard_row.get("hts_time_window_remap_applied")
+            ),
             "order_allowed": bool(guard_row.get("order_allowed")),
             "proposed_order_size": guard_row.get("proposed_order_size"),
             "paper_intent_id": paper_intent_id,
@@ -4923,6 +5359,7 @@ def _fresh_loop_manifest(
     canonical_scorer_alignment_report: dict[str, Any],
     signal_trace_report: dict[str, Any],
     time_window_diagnostic_report: dict[str, Any],
+    execution_layer_v2_paper_remap_report: dict[str, Any],
     legacy_position_policy_audit_report: dict[str, Any],
     paper_position_state_report: dict[str, Any],
     paper_exit_signal_report: dict[str, Any],
@@ -4987,6 +5424,25 @@ def _fresh_loop_manifest(
         "fresh_time_window_diagnostic_report_id": time_window_diagnostic_report[
             "o_v8_paper_fresh_time_window_diagnostic_report_id"
         ],
+        "execution_layer_v2_paper_remap_report_id": (
+            execution_layer_v2_paper_remap_report[
+                "execution_layer_v2_paper_remap_report_id"
+            ]
+        ),
+        "execution_layer_v2_paper_remap_enabled": (
+            execution_layer_v2_paper_remap_report[
+                "execution_layer_v2_paper_remap_enabled"
+            ]
+        ),
+        "execution_layer_v2_paper_remap_applied_count": (
+            execution_layer_v2_paper_remap_report["remap_guard_passed_count"]
+        ),
+        "execution_layer_v2_paper_remap_candidate_count": (
+            execution_layer_v2_paper_remap_report["remap_candidate_count"]
+        ),
+        "execution_layer_v2_paper_remap_reason_distribution": (
+            execution_layer_v2_paper_remap_report["remap_reason_distribution"]
+        ),
         "fresh_legacy_position_policy_audit_report_id": (
             legacy_position_policy_audit_report[
                 "o_v8_paper_fresh_legacy_position_policy_audit_report_id"
@@ -5225,6 +5681,33 @@ def _fresh_order_intent_from_guard_row(
         "source_selected_action": guard_row.get("source_selected_action"),
         "source_selected_family": guard_row.get("source_selected_family"),
         "source_selected_side": guard_row.get("source_selected_side"),
+        "original_action": guard_row.get("original_action")
+        or guard_row.get("source_selected_action"),
+        "original_family": guard_row.get("original_family")
+        or guard_row.get("source_selected_family"),
+        "original_side": guard_row.get("original_side")
+        or guard_row.get("source_selected_side"),
+        "remapped_action": guard_row.get("remapped_action"),
+        "remapped_family": guard_row.get("remapped_family"),
+        "remapped_side": guard_row.get("remapped_side"),
+        "hts_time_window_remap_applied": bool(
+            guard_row.get("hts_time_window_remap_applied")
+        ),
+        "remap_reason_codes": list(guard_row.get("remap_reason_codes") or []),
+        "hts_time_window_remap_calibrated_ev": (
+            _float(guard_row.get("hts_time_window_remap_calibrated_ev"))
+            if guard_row.get("hts_time_window_remap_calibrated_ev") is not None
+            else None
+        ),
+        "hts_time_window_remap_calibrated_ev_source": guard_row.get(
+            "hts_time_window_remap_calibrated_ev_source"
+        ),
+        "original_execution_blocking_reason_codes": list(
+            guard_row.get("original_execution_blocking_reason_codes") or []
+        ),
+        "original_execution_guard_reason_codes": list(
+            guard_row.get("original_execution_guard_reason_codes") or []
+        ),
         "execution_guarded_action": guard_row.get("execution_guarded_action"),
         "execution_guarded_family": guard_row.get("execution_guarded_family"),
         "execution_guarded_side": guard_row.get("execution_guarded_side"),
