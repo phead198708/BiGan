@@ -20,7 +20,9 @@ from bigan.v8.polymarket.training.execution_layer_v2 import (
     time_decayed_kelly_notional,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_policy_replay import (
+    ExecutionLayerV2ForwardShadowConfig,
     ExecutionLayerV2PolicyReplayConfig,
+    run_execution_layer_v2_forward_shadow_policy,
     run_execution_layer_v2_policy_replay_from_settlement_csv,
 )
 
@@ -443,6 +445,175 @@ def test_execution_layer_v2_policy_replay_from_settlement_csv_metrics_and_warnin
     assert result.artifact_hashes["execution_layer_v2_policy_replay_report"]
 
 
+def test_execution_layer_v2_forward_shadow_missing_calibrated_ev_fails_closed(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "fresh_signal_trace.json"
+    _write_forward_shadow_input(
+        input_path,
+        [
+            _forward_shadow_row(
+                market_id="missing-calibrated-ev",
+                action="BUY_UP_HOLD_TO_SETTLEMENT",
+                selected_side="UP",
+                entry_ask=0.50,
+                p_up=0.61,
+                time_to_close_seconds=240.0,
+            )
+        ],
+    )
+
+    result = run_execution_layer_v2_forward_shadow_policy(
+        ExecutionLayerV2ForwardShadowConfig(
+            run_id="forward-shadow-missing-ev",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+        )
+    )
+
+    ev = result.ev_mapping_report
+    assert ev["ev_mapping_status"] == "blocked_missing_calibrated_ev_source"
+    assert ev["calibrated_ev_available"] is False
+    assert ev["calibrated_ev_missing_count"] == 1
+    assert ev["market_implied_probability_used_for_ev"] is False
+    assert "missing_calibrated_model_fair_value_or_action_expected_return" in ev[
+        "ev_mapping_blocking_reason_codes"
+    ]
+
+    shadow = result.forward_shadow_report
+    assert shadow["policy_variants"]["calibrated_ev_v2"]["allowed_decision_count"] == 0
+    assert shadow["policy_variants"]["calibrated_ev_v2"]["rejected_reason_counts"][
+        "calibrated_ev_source_missing"
+    ] == 1
+    assert (
+        shadow["policy_variants"]["baseline_current_guard"]["rejected_reason_counts"][
+            "baseline_current_guard_missing_calibrated_ev_source"
+        ]
+        == 1
+    )
+    assert shadow["market_implied_probability_used_as_calibrated_ev_source"] is False
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["paper_only"] is True
+    assert result.manifest["capital_at_risk"] is False
+
+
+def test_execution_layer_v2_forward_shadow_calibrated_ev_and_bucket_plus_sbc(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "fresh_signal_trace.jsonl"
+    _write_jsonl(
+        input_path,
+        [
+            _forward_shadow_row(
+                market_id="cal-ev-up-hts",
+                action="BUY_UP_HOLD_TO_SETTLEMENT",
+                selected_side="UP",
+                entry_ask=0.50,
+                p_model_fair_value_up=0.58,
+                time_to_close_seconds=240.0,
+            ),
+            _forward_shadow_row(
+                market_id="cal-ev-down-sbc",
+                action="BUY_DOWN_SELL_BEFORE_CLOSE",
+                selected_side="DOWN",
+                entry_ask=0.55,
+                calibrated_action_expected_net_return=0.04,
+                time_to_close_seconds=90.0,
+            ),
+            _forward_shadow_row(
+                market_id="cal-ev-down-hts",
+                action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+                selected_side="DOWN",
+                entry_ask=0.82,
+                p_model_fair_value_down=0.86,
+                time_to_close_seconds=180.0,
+            ),
+        ],
+    )
+
+    result = run_execution_layer_v2_forward_shadow_policy(
+        ExecutionLayerV2ForwardShadowConfig(
+            run_id="forward-shadow-calibrated-ev",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+        )
+    )
+    ev = result.ev_mapping_report
+    assert ev["ev_mapping_status"] == "calibrated_ev_available"
+    assert ev["calibrated_ev_available"] is True
+    assert ev["probability_source_summary"]["p_model_fair_value_count"] == 2
+    assert ev["probability_source_summary"][
+        "calibrated_action_expected_net_return_count"
+    ] == 1
+    assert {
+        row["ev_source"] for row in ev["row_ev_mapping_contracts"]
+    } == {
+        "p_model_fair_value_minus_execution_price_minus_cost",
+        "calibrated_action_expected_net_return",
+    }
+
+    variants = result.forward_shadow_report["policy_variants"]
+    assert variants["calibrated_ev_v2"]["allowed_decision_count"] == 3
+    assert variants["calibrated_ev_v2"]["entry_count"] == 3
+    assert variants["bucket_aware_v1_conservative"]["allowed_decision_count"] == 1
+    assert variants["bucket_aware_v1_plus_sbc"]["allowed_decision_count"] == 2
+    assert variants["bucket_aware_v1_plus_sbc"]["family_distribution"][
+        "SELL_BEFORE_CLOSE"
+    ] == 1
+    assert variants["calibrated_ev_plus_bucket_v2"]["allowed_decision_count"] == 2
+    assert variants["calibrated_ev_plus_bucket_v2"]["rejected_reason_counts"][
+        "bucket_aware_plus_sbc_excluded_buy_up_hts"
+    ] == 1
+    assert result.forward_shadow_report["uses_settlement_pnl_or_outcome_labels"] is False
+    assert result.forward_shadow_report["uses_oracle_actions_or_future_returns"] is False
+    assert result.artifact_paths["execution_layer_v2_calibrated_ev_mapping_report"].exists()
+    assert result.artifact_paths["execution_layer_v2_forward_shadow_policy_report"].exists()
+    assert result.artifact_paths["execution_layer_v2_forward_shadow_manifest"].exists()
+    assert result.artifact_hashes["execution_layer_v2_forward_shadow_manifest"]
+
+
+def test_execution_layer_v2_forward_shadow_forbidden_outcome_fields_fail_closed(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "fresh_signal_trace.json"
+    _write_forward_shadow_input(
+        input_path,
+        [
+            {
+                **_forward_shadow_row(
+                    market_id="forbidden-forward",
+                    action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+                    selected_side="DOWN",
+                    entry_ask=0.80,
+                    calibrated_action_expected_net_return=0.05,
+                ),
+                "settlement_pnl": 1.0,
+            }
+        ],
+    )
+
+    result = run_execution_layer_v2_forward_shadow_policy(
+        ExecutionLayerV2ForwardShadowConfig(
+            run_id="forward-shadow-forbidden",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+        )
+    )
+
+    assert result.ev_mapping_report["ev_mapping_status"] == (
+        "blocked_forbidden_outcome_fields_present"
+    )
+    assert result.forward_shadow_report["forward_shadow_policy_status"] == (
+        "blocked_fail_closed"
+    )
+    assert result.forward_shadow_report["accepted_signal_row_count"] == 0
+    assert result.forward_shadow_report["forbidden_outcome_fields_present"] is True
+    assert result.manifest["paper_only"] is True
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
+    assert result.manifest["#146_start_allowed"] is False
+
+
 def _write_settlement_csv(path, rows: list[dict[str, object]]) -> None:
     fieldnames = [
         "market_id",
@@ -459,6 +630,17 @@ def _write_settlement_csv(path, rows: list[dict[str, object]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _write_forward_shadow_input(path, rows: list[dict[str, object]]) -> None:
+    path.write_text(json.dumps({"trace_rows": rows}, sort_keys=True), encoding="utf-8")
+
+
+def _write_jsonl(path, rows: list[dict[str, object]]) -> None:
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
 
 
 def _settlement_row(
@@ -508,6 +690,44 @@ def _full_grid_row(
         "paper_only": True,
         "capital_at_risk": False,
     }
+
+
+def _forward_shadow_row(
+    *,
+    market_id: str,
+    action: str,
+    selected_side: str,
+    entry_ask: float,
+    decision_ts: int = 1_000,
+    p_up: float | None = None,
+    p_model_fair_value_up: float | None = None,
+    p_model_fair_value_down: float | None = None,
+    calibrated_action_expected_net_return: float | None = None,
+    canonical_o_action_score: float = 0.75,
+    time_to_close_seconds: float = 180.0,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "market_id": market_id,
+        "decision_ts": decision_ts,
+        "selected_action": action,
+        "selected_side": selected_side,
+        "entry_ask": entry_ask,
+        "canonical_o_action_score": canonical_o_action_score,
+        "time_to_close_seconds": time_to_close_seconds,
+        "paper_only": True,
+        "capital_at_risk": False,
+    }
+    if p_up is not None:
+        row["p_up"] = p_up
+    if p_model_fair_value_up is not None:
+        row["p_model_fair_value_up"] = p_model_fair_value_up
+    if p_model_fair_value_down is not None:
+        row["p_model_fair_value_down"] = p_model_fair_value_down
+    if calibrated_action_expected_net_return is not None:
+        row["calibrated_action_expected_net_return"] = (
+            calibrated_action_expected_net_return
+        )
+    return row
 
 
 def _action_row(
