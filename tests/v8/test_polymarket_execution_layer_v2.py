@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from bigan.v8.polymarket.training.execution_layer_v2 import (
     EXECUTION_LAYER_V2_BASELINE_NAME,
+    ExecutionLayerV2BacktestConfig,
     ExecutionLayerV2Config,
     ExecutionLayerV2Engine,
     ExecutionLayerV2Position,
@@ -12,6 +15,7 @@ from bigan.v8.polymarket.training.execution_layer_v2 import (
     build_execution_layer_v2_report,
     build_execution_layer_v2_report_from_rows,
     decide_execution_layer_v2,
+    run_execution_layer_v2_backtest,
     time_decayed_kelly_notional,
 )
 
@@ -216,3 +220,157 @@ def test_execution_layer_v2_rejects_non_paper_position() -> None:
             shares=20.0,
             paper_only=False,
         )
+
+
+def test_execution_layer_v2_backtest_writes_artifact_bundle_from_full_action_grid(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "holdout_raw.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "paper_only": True,
+                "capital_at_risk": False,
+                "uses_realized_pnl_or_labels_for_analysis": False,
+                "future_outcome_evaluation_generated": False,
+                "holdout_decision_rows": [
+                    _full_grid_row(
+                        market_id="grid-1",
+                        decision_ts=1_000,
+                        p_up=0.70,
+                        up_ask=0.50,
+                        down_ask=0.52,
+                        time_to_close=240.0,
+                    ),
+                    _full_grid_row(
+                        market_id="grid-1",
+                        decision_ts=1_060,
+                        p_up=0.57,
+                        up_ask=0.50,
+                        down_ask=0.52,
+                        time_to_close=180.0,
+                    ),
+                    _full_grid_row(
+                        market_id="grid-2",
+                        decision_ts=1_120,
+                        p_up=0.42,
+                        up_ask=0.57,
+                        down_ask=0.45,
+                        time_to_close=180.0,
+                    ),
+                ],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_execution_layer_v2_backtest(
+        ExecutionLayerV2BacktestConfig(
+            run_id="v2-backtest-fixture",
+            output_dir=tmp_path / "runs",
+            input_path=input_path,
+        )
+    )
+
+    assert result.report["execution_layer_v2_status"] == "diagnostic_only_fail_closed"
+    assert result.report["decision_count"] == 3
+    assert result.report["entry_decision_count"] == 2
+    assert result.report["exit_decision_count"] == 1
+    assert result.report["outcome_evaluation_generated"] is False
+    assert result.report["pnl_claim_generated"] is False
+    assert result.manifest["artifact_hashes"]["execution_layer_v2_backtest_report"]
+    assert result.manifest["paper_only"] is True
+    assert result.manifest["capital_at_risk"] is False
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.artifact_paths["execution_layer_v2_backtest_report"].exists()
+    assert result.artifact_paths["execution_layer_v2_backtest_summary"].exists()
+    assert result.artifact_paths["execution_layer_v2_backtest_manifest"].exists()
+
+
+def test_execution_layer_v2_backtest_fails_closed_when_signal_probability_missing(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "feature_rows.jsonl"
+    input_path.write_text(
+        json.dumps(
+            {
+                "market_id": "feature-only",
+                "decision_ts": 1_000,
+                "features": {
+                    "up_ask": 0.50,
+                    "down_ask": 0.52,
+                    "up_bid": 0.49,
+                    "down_bid": 0.51,
+                    "time_to_close_seconds": 180.0,
+                },
+                "paper_only": True,
+                "capital_at_risk": False,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_execution_layer_v2_backtest(
+        ExecutionLayerV2BacktestConfig(
+            run_id="v2-backtest-missing-probability",
+            output_dir=tmp_path / "runs",
+            input_path=input_path,
+        )
+    )
+
+    assert result.report["execution_layer_v2_status"] == "blocked_fail_closed"
+    assert result.report["decision_count"] == 0
+    assert result.report["accepted_signal_row_count"] == 0
+    assert result.report["rejected_signal_row_count"] == 1
+    reasons = result.report["rejected_signal_rows"][0]["reason_codes"]
+    assert "missing_decision_time_probability" in reasons
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def _full_grid_row(
+    *,
+    market_id: str,
+    decision_ts: int,
+    p_up: float,
+    up_ask: float,
+    down_ask: float,
+    time_to_close: float,
+) -> dict:
+    return {
+        "market_id": market_id,
+        "decision_ts": decision_ts,
+        "p_up": p_up,
+        "p_down": 1.0 - p_up,
+        "selected_action": "BUY_UP_HOLD_TO_SETTLEMENT" if p_up >= 0.5 else "BUY_DOWN_HOLD_TO_SETTLEMENT",
+        "selected_side": "UP" if p_up >= 0.5 else "DOWN",
+        "full_5_action_ranking": [
+            _action_row("BUY_UP_HOLD_TO_SETTLEMENT", "UP", up_ask, up_ask - 0.01, time_to_close),
+            _action_row("BUY_UP_SELL_BEFORE_CLOSE", "UP", up_ask, up_ask - 0.01, time_to_close),
+            _action_row("BUY_DOWN_HOLD_TO_SETTLEMENT", "DOWN", down_ask, down_ask - 0.01, time_to_close),
+            _action_row("BUY_DOWN_SELL_BEFORE_CLOSE", "DOWN", down_ask, down_ask - 0.01, time_to_close),
+            {"action": "NO_TRADE", "side": "NONE", "microstructure_snapshot": {}},
+        ],
+        "paper_only": True,
+        "capital_at_risk": False,
+    }
+
+
+def _action_row(
+    action: str,
+    side: str,
+    entry_ask: float,
+    exit_bid: float,
+    time_to_close: float,
+) -> dict:
+    return {
+        "action": action,
+        "side": side,
+        "microstructure_snapshot": {
+            "entry_ask": entry_ask,
+            "executable_exit_bid_proxy": exit_bid,
+            "time_to_close_seconds": time_to_close,
+        },
+    }

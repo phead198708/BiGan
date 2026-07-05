@@ -6,9 +6,12 @@ not place orders, mutate O source scores, or unlock paper/live execution.
 
 from __future__ import annotations
 
+import json
 import math
+import shutil
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256
@@ -17,6 +20,9 @@ from bigan.v8.polymarket.training.contracts import compact_safety_fields
 EXECUTION_LAYER_V2_SCHEMA_VERSION = "bigan-v8-polymarket-execution-layer-v2-v1"
 EXECUTION_LAYER_V2_REPORT_SCHEMA_VERSION = (
     "bigan-v8-polymarket-execution-layer-v2-report-v1"
+)
+EXECUTION_LAYER_V2_BACKTEST_MANIFEST_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-execution-layer-v2-backtest-manifest-v1"
 )
 EXECUTION_LAYER_V2_POLICY_NAME = (
     "v8_execution_layer_v2_signal_position_dynamic_exit"
@@ -119,6 +125,56 @@ class ExecutionLayerV2Config:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLayerV2BacktestConfig:
+    """Configuration for writing a deterministic v2 backtest artifact bundle."""
+
+    run_id: str
+    output_dir: Path | str
+    input_path: Path | str
+    max_rows: int | None = None
+    execution_config: ExecutionLayerV2Config = field(default_factory=ExecutionLayerV2Config)
+    overwrite_existing: bool = False
+    paper_only: bool = True
+    capital_at_risk: bool = False
+    polymarket_write_enabled: bool = False
+    wallet_signing_enabled: bool = False
+    v8_execution_handoff_allowed: bool = False
+    source_model_candidate_eligible: bool = False
+    freeze_ready: bool = False
+    promotion_evidence_eligible: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        if self.max_rows is not None and self.max_rows <= 0:
+            raise ValueError("max_rows must be positive when provided")
+        object.__setattr__(self, "output_dir", Path(self.output_dir))
+        object.__setattr__(self, "input_path", Path(self.input_path))
+        _validate_safety_flags(self)
+
+    @property
+    def run_dir(self) -> Path:
+        return self.output_dir.expanduser().resolve() / self.run_id
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["output_dir"] = str(self.output_dir)
+        payload["input_path"] = str(self.input_path)
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLayerV2BacktestResult:
+    """Written execution layer v2 backtest bundle."""
+
+    output_dir: Path
+    artifact_paths: dict[str, Path]
+    artifact_hashes: dict[str, str]
+    report: dict[str, Any]
+    manifest: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,8 +444,13 @@ def build_execution_layer_v2_report(
     reason_counts: Counter[str] = Counter()
     for decision in decisions:
         reason_counts.update(decision.reason_codes)
-    v1_baseline = _v1_baseline_summary(tuple(signals), config=config)
+    v1_baseline = _v1_baseline_summary(
+        tuple(signals),
+        decisions=decisions,
+        config=config,
+    )
     lambda_diagnostics = _lambda_grid_diagnostics(tuple(signals), config=config)
+    entry_ev_values = [_best_entry_ev(signal, config) for signal in signals]
     report = {
         "schema_version": EXECUTION_LAYER_V2_REPORT_SCHEMA_VERSION,
         "execution_layer_v2_policy_name": EXECUTION_LAYER_V2_POLICY_NAME,
@@ -402,6 +463,14 @@ def build_execution_layer_v2_report(
         "action_counts": dict(sorted(action_counts.items())),
         "state_transition_counts": dict(sorted(transition_counts.items())),
         "reason_counts": dict(sorted(reason_counts.items())),
+        "entry_ev_threshold": config.entry_ev_threshold,
+        "max_candidate_entry_ev": max(entry_ev_values, default=0.0),
+        "mean_candidate_entry_ev": (
+            sum(entry_ev_values) / len(entry_ev_values) if entry_ev_values else 0.0
+        ),
+        "positive_entry_ev_count": sum(
+            value >= config.entry_ev_threshold for value in entry_ev_values
+        ),
         "decision_rows": decision_rows,
         "open_position_count": len(engine.positions),
         "open_positions": [
@@ -432,6 +501,7 @@ def build_execution_layer_v2_report_from_rows(
     rows: tuple[dict[str, Any], ...] | list[dict[str, Any]],
     *,
     config: ExecutionLayerV2Config | None = None,
+    input_path: str | None = None,
 ) -> dict[str, Any]:
     """Build a report from raw rows, fail-closed on forbidden outcome fields."""
 
@@ -450,14 +520,191 @@ def build_execution_layer_v2_report_from_rows(
             "forbidden_outcome_fields_used": sorted(
                 {field for item in forbidden for field in item["forbidden_fields"]}
             ),
+            "input_path": input_path,
             "source_scores_mutated": False,
             "paper_live_unlock_changed": False,
             **_safety_report_fields(config),
         }
         report["execution_layer_v2_report_id"] = canonical_json_sha256(report)
         return report
-    signals = tuple(_signal_from_row(row) for row in rows)
-    return build_execution_layer_v2_report(signals, config=config)
+    loaded = _signals_from_rows(rows)
+    if loaded["rejected_rows"]:
+        report = {
+            "schema_version": EXECUTION_LAYER_V2_REPORT_SCHEMA_VERSION,
+            "execution_layer_v2_policy_name": EXECUTION_LAYER_V2_POLICY_NAME,
+            "execution_layer_v2_status": "blocked_fail_closed",
+            "decision_count": 0,
+            "accepted_signal_row_count": loaded["accepted_signal_row_count"],
+            "rejected_signal_row_count": len(loaded["rejected_rows"]),
+            "rejected_signal_rows": loaded["rejected_rows"],
+            "decision_rows": [],
+            "forbidden_outcome_fields_present": False,
+            "forbidden_outcome_fields_used": [],
+            "input_path": input_path,
+            "source_scores_mutated": False,
+            "paper_live_unlock_changed": False,
+            **_safety_report_fields(config),
+        }
+        report["execution_layer_v2_report_id"] = canonical_json_sha256(report)
+        return report
+    report = build_execution_layer_v2_report(tuple(loaded["signals"]), config=config)
+    report["input_path"] = input_path
+    report["accepted_signal_row_count"] = loaded["accepted_signal_row_count"]
+    report["rejected_signal_row_count"] = 0
+    report["rejected_signal_rows"] = []
+    report["execution_layer_v2_report_id"] = canonical_json_sha256(report)
+    return report
+
+
+def run_execution_layer_v2_backtest(
+    config: ExecutionLayerV2BacktestConfig,
+) -> ExecutionLayerV2BacktestResult:
+    """Write a deterministic paper-only v2 backtest artifact bundle."""
+
+    run_dir = config.run_dir
+    if run_dir.exists():
+        if not config.overwrite_existing:
+            raise FileExistsError(f"execution layer v2 backtest exists: {run_dir}")
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True)
+
+    rows = load_execution_layer_v2_input_rows(config.input_path, max_rows=config.max_rows)
+    report = build_execution_layer_v2_report_from_rows(
+        rows,
+        config=config.execution_config,
+        input_path=str(config.input_path),
+    )
+    report["run_id"] = config.run_id
+    report["input_row_count"] = len(rows)
+    report["backtest_artifact_mode"] = "deterministic_offline_diagnostic"
+    report["outcome_evaluation_generated"] = False
+    report["pnl_claim_generated"] = False
+    report["execution_layer_v2_report_id"] = canonical_json_sha256(report)
+
+    artifact_paths = {
+        "execution_layer_v2_backtest_report": run_dir
+        / "execution_layer_v2_backtest_report.json",
+        "execution_layer_v2_backtest_summary": run_dir
+        / "execution_layer_v2_backtest_report.md",
+        "execution_layer_v2_backtest_manifest": run_dir
+        / "execution_layer_v2_backtest_manifest.json",
+    }
+    _write_json(artifact_paths["execution_layer_v2_backtest_report"], report)
+    _write_text(
+        artifact_paths["execution_layer_v2_backtest_summary"],
+        execution_layer_v2_report_to_markdown(report),
+    )
+    artifact_hashes = {
+        name: _sha256_file(path)
+        for name, path in artifact_paths.items()
+        if name != "execution_layer_v2_backtest_manifest"
+    }
+    manifest = {
+        "schema_version": EXECUTION_LAYER_V2_BACKTEST_MANIFEST_SCHEMA_VERSION,
+        "run_id": config.run_id,
+        "input_path": str(config.input_path),
+        "input_row_count": len(rows),
+        "artifact_paths": {name: str(path) for name, path in artifact_paths.items()},
+        "artifact_hashes": dict(artifact_hashes),
+        "execution_layer_v2_report_id": report["execution_layer_v2_report_id"],
+        "execution_layer_v2_status": report["execution_layer_v2_status"],
+        "entry_decision_count": report.get("entry_decision_count", 0),
+        "hold_decision_count": report.get("hold_decision_count", 0),
+        "exit_decision_count": report.get("exit_decision_count", 0),
+        "rotation_decision_count": report.get("rotation_decision_count", 0),
+        "outcome_evaluation_generated": False,
+        "pnl_claim_generated": False,
+        "source_scores_mutated": False,
+        "paper_live_unlock_changed": False,
+        **_safety_report_fields(config.execution_config),
+    }
+    manifest["manifest_id"] = canonical_json_sha256(manifest)
+    _write_json(artifact_paths["execution_layer_v2_backtest_manifest"], manifest)
+    artifact_hashes["execution_layer_v2_backtest_manifest"] = _sha256_file(
+        artifact_paths["execution_layer_v2_backtest_manifest"]
+    )
+    return ExecutionLayerV2BacktestResult(
+        output_dir=run_dir,
+        artifact_paths=artifact_paths,
+        artifact_hashes=artifact_hashes,
+        report=report,
+        manifest=manifest,
+    )
+
+
+def load_execution_layer_v2_input_rows(
+    input_path: Path | str,
+    *,
+    max_rows: int | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Load JSON/JSONL rows from a signal trace or future holdout raw manifest."""
+
+    path = Path(input_path)
+    if not path.exists():
+        raise FileNotFoundError(f"execution layer v2 input not found: {path}")
+    if max_rows is not None and max_rows <= 0:
+        raise ValueError("max_rows must be positive when provided")
+    if path.suffix == ".jsonl":
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    else:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        rows = _rows_from_json_payload(payload)
+    if max_rows is not None:
+        rows = rows[:max_rows]
+    return tuple(dict(row) for row in rows)
+
+
+def execution_layer_v2_report_to_markdown(report: dict[str, Any]) -> str:
+    """Render the v2 report as a compact Markdown evidence summary."""
+
+    baseline = report.get("v1_baseline_comparison", {})
+    lines = [
+        "# v8 Execution Layer v2 Backtest",
+        "",
+        f"- status: `{report.get('execution_layer_v2_status')}`",
+        f"- run_id: `{report.get('run_id', '')}`",
+        f"- input_path: `{report.get('input_path', '')}`",
+        f"- input_row_count: `{report.get('input_row_count', report.get('decision_count', 0))}`",
+        f"- decision_count: `{report.get('decision_count', 0)}`",
+        f"- entry_decision_count: `{report.get('entry_decision_count', 0)}`",
+        f"- hold_decision_count: `{report.get('hold_decision_count', 0)}`",
+        f"- exit_decision_count: `{report.get('exit_decision_count', 0)}`",
+        f"- rotation_decision_count: `{report.get('rotation_decision_count', 0)}`",
+        f"- entry_ev_threshold: `{report.get('entry_ev_threshold', '')}`",
+        f"- max_candidate_entry_ev: `{report.get('max_candidate_entry_ev', '')}`",
+        f"- positive_entry_ev_count: `{report.get('positive_entry_ev_count', '')}`",
+        f"- v1_baseline: `{baseline.get('baseline_name', EXECUTION_LAYER_V2_BASELINE_NAME)}`",
+        f"- v2_differs_from_v1: `{baseline.get('v2_differs_from_v1', False)}`",
+        f"- outcome_evaluation_generated: `{report.get('outcome_evaluation_generated', False)}`",
+        f"- pnl_claim_generated: `{report.get('pnl_claim_generated', False)}`",
+        f"- paper_only: `{report.get('paper_only')}`",
+        f"- capital_at_risk: `{report.get('capital_at_risk')}`",
+        f"- v8_execution_handoff_allowed: `{report.get('v8_execution_handoff_allowed')}`",
+        f"- #134_resume_allowed: `{report.get('#134_resume_allowed')}`",
+        f"- #146_start_allowed: `{report.get('#146_start_allowed')}`",
+        "",
+        "## Action Counts",
+        "",
+    ]
+    for action, count in sorted(report.get("action_counts", {}).items()):
+        lines.append(f"- {action}: `{count}`")
+    lines.extend(["", "## State Transitions", ""])
+    for transition, count in sorted(report.get("state_transition_counts", {}).items()):
+        lines.append(f"- {transition}: `{count}`")
+    lines.extend(["", "## Reason Counts", ""])
+    for reason, count in sorted(report.get("reason_counts", {}).items()):
+        lines.append(f"- {reason}: `{count}`")
+    if report.get("rejected_signal_rows"):
+        lines.extend(["", "## Rejected Signal Rows", ""])
+        for row in report["rejected_signal_rows"][:10]:
+            lines.append(
+                "- "
+                f"row_index=`{row.get('row_index')}` "
+                f"market_id=`{row.get('market_id')}` "
+                f"reason_codes=`{row.get('reason_codes')}`"
+            )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def time_decay_multiplier(time_to_expiry_seconds: float | None, decay_lambda: float) -> float:
@@ -799,23 +1046,130 @@ def _position_from_decision(
 
 
 def _signal_from_row(row: dict[str, Any]) -> ExecutionLayerV2Signal:
+    normalized = _normalized_signal_fields(row)
     return ExecutionLayerV2Signal(
-        market_id=str(row["market_id"]),
-        decision_ts=int(row["decision_ts"]),
-        p_up=float(row["p_up"]),
-        p_down=float(row["p_down"]) if row.get("p_down") is not None else None,
-        ask_up=float(row["ask_up"]),
-        ask_down=float(row["ask_down"]),
-        bid_up=float(row["bid_up"]) if row.get("bid_up") is not None else None,
-        bid_down=float(row["bid_down"]) if row.get("bid_down") is not None else None,
+        market_id=str(normalized["market_id"]),
+        decision_ts=int(normalized["decision_ts"]),
+        p_up=float(normalized["p_up"]),
+        p_down=float(normalized["p_down"]) if normalized.get("p_down") is not None else None,
+        ask_up=float(normalized["ask_up"]),
+        ask_down=float(normalized["ask_down"]),
+        bid_up=float(normalized["bid_up"]) if normalized.get("bid_up") is not None else None,
+        bid_down=float(normalized["bid_down"]) if normalized.get("bid_down") is not None else None,
         time_to_expiry_seconds=(
-            float(row["time_to_expiry_seconds"])
-            if row.get("time_to_expiry_seconds") is not None
+            float(normalized["time_to_expiry_seconds"])
+            if normalized.get("time_to_expiry_seconds") is not None
             else None
         ),
-        source_signal_id=row.get("source_signal_id"),
-        model_score=float(row["model_score"]) if row.get("model_score") is not None else None,
+        source_signal_id=normalized.get("source_signal_id"),
+        model_score=(
+            float(normalized["model_score"])
+            if normalized.get("model_score") is not None
+            else None
+        ),
     )
+
+
+def _signals_from_rows(rows: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    signals: list[ExecutionLayerV2Signal] = []
+    rejected = []
+    for index, row in enumerate(rows):
+        try:
+            signals.append(_signal_from_row(row))
+        except (KeyError, TypeError, ValueError) as exc:
+            rejected.append(
+                {
+                    "row_index": index,
+                    "market_id": row.get("market_id"),
+                    "decision_ts": row.get("decision_ts"),
+                    "reason_codes": _signal_rejection_reason_codes(row, exc),
+                    "error": str(exc),
+                }
+            )
+    return {
+        "signals": tuple(signals),
+        "accepted_signal_row_count": len(signals),
+        "rejected_rows": rejected,
+    }
+
+
+def _normalized_signal_fields(row: dict[str, Any]) -> dict[str, Any]:
+    features = row.get("features")
+    source = {**row, **features} if isinstance(features, dict) else dict(row)
+    if "full_5_action_ranking" in row and (
+        "ask_up" not in source or "ask_down" not in source
+    ):
+        source.update(_price_fields_from_full_action_ranking(row["full_5_action_ranking"]))
+    snapshot = row.get("microstructure_snapshot")
+    selected_side = row.get("selected_side") or row.get("canonical_selected_side")
+    if isinstance(snapshot, dict) and selected_side in {"UP", "DOWN"}:
+        suffix = "up" if selected_side == "UP" else "down"
+        source.setdefault(f"ask_{suffix}", snapshot.get("entry_ask"))
+        source.setdefault(f"bid_{suffix}", snapshot.get("executable_exit_bid_proxy"))
+        source.setdefault("time_to_expiry_seconds", snapshot.get("time_to_close_seconds"))
+    source.setdefault("time_to_expiry_seconds", source.get("time_to_close_seconds"))
+    source.setdefault("model_score", source.get("corrected_model_score"))
+    source.setdefault(
+        "source_signal_id",
+        source.get("decision_group_id")
+        or source.get("o_v8_paper_fresh_signal_trace_row_hash")
+        or canonical_json_sha256(
+            {
+                "market_id": source.get("market_id"),
+                "decision_ts": source.get("decision_ts"),
+            }
+        ),
+    )
+    return source
+
+
+def _price_fields_from_full_action_ranking(rows: Any) -> dict[str, Any]:
+    if not isinstance(rows, list):
+        return {}
+    fields: dict[str, Any] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        side = row.get("selected_side") or row.get("side")
+        snapshot = row.get("microstructure_snapshot")
+        if side not in {"UP", "DOWN"} or not isinstance(snapshot, dict):
+            continue
+        suffix = "up" if side == "UP" else "down"
+        fields.setdefault(f"ask_{suffix}", snapshot.get("entry_ask"))
+        fields.setdefault(f"bid_{suffix}", snapshot.get("executable_exit_bid_proxy"))
+        fields.setdefault("time_to_expiry_seconds", snapshot.get("time_to_close_seconds"))
+    return fields
+
+
+def _signal_rejection_reason_codes(row: dict[str, Any], exc: Exception) -> list[str]:
+    reasons = ["signal_row_not_convertible_fail_closed"]
+    normalized = _normalized_signal_fields(row)
+    for field_name in ("market_id", "decision_ts", "p_up", "ask_up", "ask_down"):
+        if normalized.get(field_name) is None:
+            reasons.append(f"missing_{field_name}")
+    if "p_up" not in normalized and "p_down" not in normalized:
+        reasons.append("missing_decision_time_probability")
+    if isinstance(exc, ValueError):
+        reasons.append("invalid_signal_field_value")
+    return sorted(set(reasons))
+
+
+def _rows_from_json_payload(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [dict(row) for row in payload]
+    if not isinstance(payload, dict):
+        raise ValueError("execution layer v2 JSON input must be an object or list")
+    for key in (
+        "holdout_decision_rows",
+        "trace_rows",
+        "decision_rows",
+        "signal_rows",
+        "rows",
+    ):
+        rows = payload.get(key)
+        if isinstance(rows, list):
+            return [dict(row) for row in rows]
+    return [dict(payload)]
 
 
 def _forbidden_fields_by_row(rows: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
@@ -838,9 +1192,11 @@ def _forbidden_fields_by_row(rows: tuple[dict[str, Any], ...]) -> list[dict[str,
 def _v1_baseline_summary(
     signals: tuple[ExecutionLayerV2Signal, ...],
     *,
+    decisions: tuple[ExecutionLayerV2Decision, ...],
     config: ExecutionLayerV2Config,
 ) -> dict[str, Any]:
     action_counts: Counter[str] = Counter()
+    state_machine_action_counts: Counter[str] = Counter()
     for signal in signals:
         up_ev = _entry_ev(signal, "UP", config)
         down_ev = _entry_ev(signal, "DOWN", config)
@@ -848,13 +1204,20 @@ def _v1_baseline_summary(
         best_side = "UP" if up_ev >= down_ev else "DOWN"
         if best_ev >= config.entry_ev_threshold:
             action_counts[f"BUY_{best_side}_HOLD_TO_SETTLEMENT"] += 1
+            state_machine_action_counts["ENTER_POSITION"] += 1
         else:
             action_counts["NO_TRADE"] += 1
+            state_machine_action_counts["NO_ACTION"] += 1
+    v2_action_counts = Counter(decision.action for decision in decisions)
     return {
         "baseline_name": EXECUTION_LAYER_V2_BASELINE_NAME,
         "baseline_assumption": "enter positive EV then hold to settlement",
         "baseline_action_counts": dict(sorted(action_counts.items())),
-        "v2_differs_from_v1": True,
+        "baseline_state_machine_action_counts": dict(
+            sorted(state_machine_action_counts.items())
+        ),
+        "v2_action_counts": dict(sorted(v2_action_counts.items())),
+        "v2_differs_from_v1": dict(state_machine_action_counts) != dict(v2_action_counts),
         "uses_realized_pnl_or_settlement_outcomes": False,
     }
 
@@ -904,6 +1267,13 @@ def _entry_ev(
     config: ExecutionLayerV2Config,
 ) -> float:
     return _probability(signal, side) - _ask(signal, side) - _cost(config)
+
+
+def _best_entry_ev(
+    signal: ExecutionLayerV2Signal,
+    config: ExecutionLayerV2Config,
+) -> float:
+    return max(_entry_ev(signal, "UP", config), _entry_ev(signal, "DOWN", config))
 
 
 def _probability(signal: ExecutionLayerV2Signal, side: ExecutionLayerV2Side) -> float:
@@ -985,3 +1355,26 @@ def _validate_price(field_name: str, value: float, *, allow_zero: bool = False) 
 def _require_finite(field_name: str, value: float) -> None:
     if not math.isfinite(value):
         raise ValueError(f"{field_name} must be finite")
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
