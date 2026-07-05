@@ -342,12 +342,12 @@ def test_execution_layer_v2_policy_replay_from_settlement_csv_metrics_and_warnin
     _write_settlement_csv(
         csv_path,
         [
-            _settlement_row("BUY_UP_HOLD_TO_SETTLEMENT", 300_000, 0.80, 10.0, -2.0),
-            _settlement_row("BUY_UP_HOLD_TO_SETTLEMENT", 300_000, 0.95, 10.0, -4.0),
-            _settlement_row("BUY_DOWN_HOLD_TO_SETTLEMENT", 300_000, 0.80, 10.0, 3.0),
-            _settlement_row("BUY_UP_SELL_BEFORE_CLOSE", 300_000, 0.75, 10.0, 1.0),
-            _settlement_row("BUY_DOWN_SELL_BEFORE_CLOSE", 900_000, 0.65, 10.0, 0.5),
-            _settlement_row("BUY_DOWN_HOLD_TO_SETTLEMENT", 900_000, 0.85, 10.0, -1.0),
+            _settlement_row("BUY_DOWN_HOLD_TO_SETTLEMENT", 300_000, 0.80, 10.0, 3.0, 4),
+            _settlement_row("BUY_UP_HOLD_TO_SETTLEMENT", 300_000, 0.95, 10.0, -4.0, 3),
+            _settlement_row("BUY_UP_SELL_BEFORE_CLOSE", 300_000, 0.75, 10.0, 1.0, 5),
+            _settlement_row("BUY_DOWN_SELL_BEFORE_CLOSE", 900_000, 0.65, 10.0, 0.5, 6),
+            _settlement_row("BUY_UP_HOLD_TO_SETTLEMENT", 300_000, 0.80, 10.0, -2.0, 2),
+            _settlement_row("BUY_DOWN_HOLD_TO_SETTLEMENT", 900_000, 0.85, 10.0, -1.0, 1),
         ],
     )
 
@@ -367,7 +367,14 @@ def test_execution_layer_v2_policy_replay_from_settlement_csv_metrics_and_warnin
     assert baseline["settlement_pnl"] == pytest.approx(-2.5)
     assert baseline["roi"] == pytest.approx(-2.5 / 60.0)
     assert baseline["win_rate"] == pytest.approx(3 / 6)
-    assert baseline["max_drawdown"] == pytest.approx(-6.0)
+    assert baseline["max_drawdown"] == pytest.approx(-7.0)
+    assert baseline["max_drawdown_ordering"] == "chronological"
+    assert baseline["chronological_sort_fields"] == [
+        "numeric_iteration",
+        "decision_ts_numeric",
+        "intent_id",
+        "row_index",
+    ]
     assert baseline["action_distribution"]["BUY_UP_HOLD_TO_SETTLEMENT"] == 2
     assert baseline["family_distribution"]["HOLD_TO_SETTLEMENT"] == 4
     assert baseline["horizon_distribution"] == {"15m": 2, "5m": 4}
@@ -383,8 +390,23 @@ def test_execution_layer_v2_policy_replay_from_settlement_csv_metrics_and_warnin
     assert variants["buy_down_hts_only"]["settlement_pnl"] == pytest.approx(2.0)
     assert variants["five_min_only"]["settlement_pnl"] == pytest.approx(-2.0)
     assert variants["fifteen_min_only"]["settlement_pnl"] == pytest.approx(-0.5)
-    assert variants["bucket_aware_v1"]["row_count"] == 3
-    assert variants["bucket_aware_v1"]["settlement_pnl"] == pytest.approx(3.0)
+    assert variants["bucket_aware_v1_conservative"]["row_count"] == 3
+    assert variants["bucket_aware_v1_conservative"]["settlement_pnl"] == pytest.approx(3.0)
+    assert variants["bucket_aware_v1_conservative"]["rejected_reason_counts"][
+        "bucket_aware_conservative_price_not_070_090"
+    ] == 2
+    assert variants["bucket_aware_v1_plus_sbc"]["row_count"] == 4
+    assert variants["bucket_aware_v1_plus_sbc"]["settlement_pnl"] == pytest.approx(3.5)
+    assert variants["bucket_aware_v1_plus_sbc"]["family_distribution"][
+        "SELL_BEFORE_CLOSE"
+    ] == 2
+    assert variants["bucket_aware_v1_plus_sbc"]["price_bucket_distribution"][
+        "0_60_0_70"
+    ] == 1
+    assert "bucket_aware_v1_conservative" in report["policy_variant_names"]
+    assert "bucket_aware_v1_plus_sbc" in report["policy_variant_names"]
+    assert report["max_drawdown_ordering"] == "chronological"
+    assert report["small_sample_warnings"] == ["sell_before_close_small_sample"]
 
     ev = report["signal_to_ev_diagnostic"]
     assert ev["ev_mapping_status"] == "blocked_requires_calibrated_model_fair_value"
@@ -396,8 +418,11 @@ def test_execution_layer_v2_policy_replay_from_settlement_csv_metrics_and_warnin
 
     recommendation = report["recommended_execution_policy_v1"]
     assert recommendation["policy_name"] == "bucket_aware_execution_policy_v1_diagnostic"
+    assert recommendation["candidate_variant_name"] == "bucket_aware_v1_plus_sbc"
     assert recommendation["do_not_relax_execution_guard_thresholds"] is True
     assert "sell_before_close_small_sample" in recommendation["small_sample_warnings"]
+    assert recommendation["sell_before_close_positive_in_csv"] is True
+    assert recommendation["sell_before_close_summary"]["settlement_pnl"] == pytest.approx(1.5)
     assert "Avoid BUY_UP_HOLD_TO_SETTLEMENT unless strong calibrated edge exists." in (
         recommendation["rules"]
     )
@@ -427,6 +452,8 @@ def _write_settlement_csv(path, rows: list[dict[str, object]]) -> None:
         "entry_price",
         "cost_basis",
         "settlement_pnl",
+        "iteration",
+        "intent_id",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -440,6 +467,7 @@ def _settlement_row(
     entry_price: float,
     cost_basis: float,
     settlement_pnl: float,
+    iteration: int,
 ) -> dict[str, object]:
     return {
         "market_id": f"{action}-{horizon_ms}-{entry_price}",
@@ -449,6 +477,8 @@ def _settlement_row(
         "entry_price": entry_price,
         "cost_basis": cost_basis,
         "settlement_pnl": settlement_pnl,
+        "iteration": iteration,
+        "intent_id": f"intent-{iteration:03d}",
     }
 
 

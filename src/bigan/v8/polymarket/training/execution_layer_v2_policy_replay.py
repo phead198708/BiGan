@@ -37,7 +37,8 @@ POLICY_REPLAY_VARIANTS: tuple[str, ...] = (
     "buy_down_hts_only",
     "five_min_only",
     "fifteen_min_only",
-    "bucket_aware_v1",
+    "bucket_aware_v1_conservative",
+    "bucket_aware_v1_plus_sbc",
 )
 
 PRICE_BUCKET_EDGES: tuple[tuple[str, float, float | None], ...] = (
@@ -46,6 +47,7 @@ PRICE_BUCKET_EDGES: tuple[tuple[str, float, float | None], ...] = (
     ("0_70_0_90", 0.70, 0.90),
     ("gt_0_90", 0.90, None),
 )
+MISSING_SORT_NUMBER = 10**30
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +148,8 @@ def run_execution_layer_v2_policy_replay_from_settlement_csv(
         "report_id": report["execution_layer_v2_policy_replay_report_id"],
         "row_count": report["row_count"],
         "policy_variant_names": list(POLICY_REPLAY_VARIANTS),
+        "max_drawdown_ordering": report["max_drawdown_ordering"],
+        "chronological_sort_fields": list(report["chronological_sort_fields"]),
         "recommended_execution_policy": report["recommended_execution_policy_v1"][
             "policy_name"
         ],
@@ -195,11 +199,21 @@ def build_execution_layer_v2_policy_replay_report(
         "o_score_mutated": False,
         "source_ranking_score_mutated": False,
         "paper_live_unlock_changed": False,
+        "max_drawdown_ordering": "chronological",
+        "chronological_sort_fields": [
+            "numeric_iteration",
+            "decision_ts_numeric",
+            "intent_id",
+            "row_index",
+        ],
+        "policy_variant_names": list(POLICY_REPLAY_VARIANTS),
+        "policy_variant_definitions": _policy_variant_definitions(),
         "policy_variants": variant_reports,
         "price_bucket_summary": _price_bucket_summary(rows),
         "action_family_summary": _family_summary(rows),
         "signal_to_ev_diagnostic": _signal_to_ev_diagnostic(rows),
         "recommended_execution_policy_v1": _recommended_execution_policy(rows, variant_reports),
+        "small_sample_warnings": _small_sample_warnings(variant_reports),
         **_safety_report_fields(),
     }
     report["execution_layer_v2_policy_replay_report_id"] = canonical_json_sha256(report)
@@ -221,6 +235,9 @@ def execution_layer_v2_policy_replay_report_to_markdown(report: dict[str, Any]) 
         f"- ev_mapping_status: `{ev['ev_mapping_status']}`",
         f"- recommended_ev_source: `{ev['recommended_ev_source']}`",
         f"- recommended_policy: `{policy['policy_name']}`",
+        f"- max_drawdown_ordering: `{report['max_drawdown_ordering']}`",
+        f"- small_sample_warnings: `{report['small_sample_warnings']}`",
+        f"- sell_before_close_positive_in_csv: `{policy['sell_before_close_positive_in_csv']}`",
         f"- paper_only: `{report['paper_only']}`",
         f"- capital_at_risk: `{report['capital_at_risk']}`",
         f"- v8_execution_handoff_allowed: `{report['v8_execution_handoff_allowed']}`",
@@ -267,6 +284,11 @@ def _policy_variant_metrics(rows: list[dict[str, Any]], variant: str) -> dict[st
         else:
             rejected_reasons.update(reasons)
     pnl_values = [float(row["settlement_pnl"]) for row in selected]
+    chronological_rows = sorted(
+        selected,
+        key=lambda row: tuple(row["chronological_sort_key"]),
+    )
+    chronological_pnl_values = [float(row["settlement_pnl"]) for row in chronological_rows]
     cost_basis = sum(float(row["cost_basis"]) for row in selected)
     settlement_pnl = sum(pnl_values)
     roi = settlement_pnl / cost_basis if cost_basis else 0.0
@@ -286,9 +308,38 @@ def _policy_variant_metrics(rows: list[dict[str, Any]], variant: str) -> dict[st
         "family_distribution": _count_distribution(selected, "family"),
         "horizon_distribution": _count_distribution(selected, "horizon"),
         "price_bucket_distribution": _count_distribution(selected, "price_bucket"),
-        "max_drawdown": _max_drawdown(pnl_values),
+        "max_drawdown": _max_drawdown(chronological_pnl_values),
+        "max_drawdown_ordering": "chronological",
+        "chronological_sort_fields": [
+            "numeric_iteration",
+            "decision_ts_numeric",
+            "intent_id",
+            "row_index",
+        ],
         "rejected_reason_counts": dict(sorted(rejected_reasons.items())),
         "diagnostic_only": True,
+    }
+
+
+def _policy_variant_definitions() -> dict[str, str]:
+    return {
+        "all_executed_baseline": "all rows from the settlement CSV",
+        "price_070_090_only": "only rows with entry price in [0.70, 0.90]",
+        "exclude_buy_up_hts": "all rows except BUY_UP_HOLD_TO_SETTLEMENT",
+        "sell_before_close_only": "only SELL_BEFORE_CLOSE family rows",
+        "buy_down_hts_only": "only BUY_DOWN_HOLD_TO_SETTLEMENT rows",
+        "five_min_only": "only 5m horizon rows",
+        "fifteen_min_only": "only 15m horizon rows",
+        "bucket_aware_v1_conservative": (
+            "price 0.70-0.90, exclude BUY_UP_HOLD_TO_SETTLEMENT, "
+            "allow BUY_DOWN_HOLD_TO_SETTLEMENT, allow SELL_BEFORE_CLOSE only "
+            "if it also passes the 0.70-0.90 price bucket"
+        ),
+        "bucket_aware_v1_plus_sbc": (
+            "allow BUY_DOWN_HOLD_TO_SETTLEMENT only in price 0.70-0.90, "
+            "allow SELL_BEFORE_CLOSE regardless of price bucket, exclude "
+            "BUY_UP_HOLD_TO_SETTLEMENT"
+        ),
     }
 
 
@@ -323,14 +374,25 @@ def _variant_allows_row(row: dict[str, Any], variant: str) -> tuple[bool, list[s
         if horizon == "15m":
             return True, []
         return False, ["not_15m_horizon"]
-    if variant == "bucket_aware_v1":
+    if variant == "bucket_aware_v1_conservative":
         reasons = []
         if not _price_in_070_090(price):
-            reasons.append("bucket_aware_price_not_070_090")
+            reasons.append("bucket_aware_conservative_price_not_070_090")
         if action == "BUY_UP_HOLD_TO_SETTLEMENT":
-            reasons.append("bucket_aware_excluded_buy_up_hts")
+            reasons.append("bucket_aware_conservative_excluded_buy_up_hts")
         if family != "SELL_BEFORE_CLOSE" and action != "BUY_DOWN_HOLD_TO_SETTLEMENT":
-            reasons.append("bucket_aware_action_not_candidate")
+            reasons.append("bucket_aware_conservative_action_not_candidate")
+        return not reasons, reasons
+    if variant == "bucket_aware_v1_plus_sbc":
+        reasons = []
+        if action == "BUY_UP_HOLD_TO_SETTLEMENT":
+            reasons.append("bucket_aware_plus_sbc_excluded_buy_up_hts")
+        if family == "SELL_BEFORE_CLOSE":
+            return not reasons, reasons
+        if action != "BUY_DOWN_HOLD_TO_SETTLEMENT":
+            reasons.append("bucket_aware_plus_sbc_action_not_candidate")
+        if not _price_in_070_090(price):
+            reasons.append("bucket_aware_plus_sbc_price_not_070_090_for_hts")
         return not reasons, reasons
     raise ValueError(f"unsupported policy replay variant: {variant}")
 
@@ -391,22 +453,37 @@ def _recommended_execution_policy(
     rows: list[dict[str, Any]],
     variant_reports: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    sbc_count = variant_reports["sell_before_close_only"]["row_count"]
+    sbc_metrics = variant_reports["sell_before_close_only"]
+    sbc_count = sbc_metrics["row_count"]
+    sbc_positive = float(sbc_metrics["settlement_pnl"]) > 0.0
     return {
         "policy_name": EXECUTION_LAYER_V2_RECOMMENDED_EXECUTION_POLICY_NAME,
         "derived_from_settlement_csv_diagnostics_only": True,
         "uses_validation_labels_for_threshold_tuning": False,
         "do_not_relax_execution_guard_thresholds": True,
-        "candidate_variant_name": "bucket_aware_v1",
-        "candidate_variant_metrics": variant_reports["bucket_aware_v1"],
+        "candidate_variant_name": "bucket_aware_v1_plus_sbc",
+        "candidate_variant_metrics": variant_reports["bucket_aware_v1_plus_sbc"],
+        "comparison_variant_metrics": {
+            "bucket_aware_v1_conservative": variant_reports[
+                "bucket_aware_v1_conservative"
+            ],
+            "bucket_aware_v1_plus_sbc": variant_reports["bucket_aware_v1_plus_sbc"],
+        },
         "small_sample_warnings": (
             ["sell_before_close_small_sample"] if 0 < sbc_count < 30 else []
+        ),
+        "sell_before_close_summary": sbc_metrics,
+        "sell_before_close_positive_in_csv": sbc_positive,
+        "sell_before_close_diagnostic_interpretation": (
+            "SELL_BEFORE_CLOSE is positive in this CSV but remains small-sample."
+            if sbc_positive and 0 < sbc_count < 30
+            else "SELL_BEFORE_CLOSE support is not sufficient for promotion evidence."
         ),
         "rules": [
             "Do not use market-implied p_up as EV fair value without calibrated provenance.",
             "Avoid BUY_UP_HOLD_TO_SETTLEMENT unless strong calibrated edge exists.",
-            "Prefer entry price bucket 0.70-0.90 when calibrated edge exists.",
-            "Keep SELL_BEFORE_CLOSE as a candidate, but mark small-sample until support grows.",
+            "Prefer entry price bucket 0.70-0.90 for BUY_DOWN_HOLD_TO_SETTLEMENT when calibrated edge exists.",
+            "Keep SELL_BEFORE_CLOSE as a candidate even below 0.70, but mark small-sample until support grows.",
             "Keep BUY_DOWN_HOLD_TO_SETTLEMENT as a candidate.",
             "Avoid price >0.90 unless calibrated edge is strong.",
             "Avoid price 0.60-0.70 by default.",
@@ -418,6 +495,15 @@ def _recommended_execution_policy(
         ),
         "row_count": len(rows),
     }
+
+
+def _small_sample_warnings(
+    variant_reports: dict[str, dict[str, Any]],
+) -> list[str]:
+    sbc_count = variant_reports["sell_before_close_only"]["row_count"]
+    if 0 < sbc_count < 30:
+        return ["sell_before_close_small_sample"]
+    return []
 
 
 def _normalize_settlement_row(row: dict[str, str], index: int) -> dict[str, Any]:
@@ -477,10 +563,31 @@ def _normalize_settlement_row(row: dict[str, str], index: int) -> dict[str, Any]
     )
     horizon = _infer_horizon(row)
     family = _infer_family(row, action)
+    decision_ts_raw = _first_text(row, ("decision_ts", "ts", "timestamp"), default=str(index))
+    decision_ts_numeric = _parse_sort_number(decision_ts_raw)
+    numeric_iteration = _first_sort_number(
+        row,
+        ("iteration", "round_iteration", "loop_iteration", "cycle_index"),
+        default=MISSING_SORT_NUMBER,
+    )
+    intent_id = _first_text(
+        row,
+        ("intent_id", "paper_intent_id", "order_intent_id", "signal_id"),
+        default="",
+    )
     return {
         "row_index": index,
         "market_id": _first_text(row, ("market_id", "condition_id", "slug"), default=""),
-        "decision_ts": _first_text(row, ("decision_ts", "ts", "timestamp"), default=str(index)),
+        "decision_ts": decision_ts_raw,
+        "decision_ts_numeric": decision_ts_numeric,
+        "numeric_iteration": numeric_iteration,
+        "intent_id": intent_id,
+        "chronological_sort_key": [
+            numeric_iteration,
+            decision_ts_numeric,
+            intent_id,
+            index,
+        ],
         "action": action,
         "family": family,
         "horizon": horizon,
@@ -642,6 +749,30 @@ def _first_float_with_field(
         if math.isfinite(value):
             return value, field_name
     return None, None
+
+
+def _first_sort_number(
+    row: dict[str, str],
+    field_names: tuple[str, ...],
+    *,
+    default: float,
+) -> float:
+    for field_name in field_names:
+        raw_value = row.get(field_name)
+        if raw_value is None or str(raw_value).strip() == "":
+            continue
+        parsed = _parse_sort_number(str(raw_value))
+        if math.isfinite(parsed):
+            return parsed
+    return float(default)
+
+
+def _parse_sort_number(raw_value: str) -> float:
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return float(MISSING_SORT_NUMBER)
+    return value if math.isfinite(value) else float(MISSING_SORT_NUMBER)
 
 
 def _safety_report_fields() -> dict[str, Any]:
