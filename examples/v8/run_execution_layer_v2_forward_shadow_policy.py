@@ -53,6 +53,7 @@ def main() -> None:
     ev = result.ev_mapping_report
     shadow = result.forward_shadow_report
     guard = result.guard_intersection_report
+    remap = result.hts_time_window_remap_report
     print(f"run_id={args.run_id}")
     print(f"output_dir={result.output_dir}")
     print(f"raw_row_count={shadow['raw_row_count']}")
@@ -76,6 +77,24 @@ def main() -> None:
             f"guard_unknown={metrics['guard_unknown_candidate_count']} "
             f"executable={metrics['executable_shadow_count']}"
         )
+    print(
+        "hts_time_window_blocked_count="
+        f"{remap['hts_time_window_blocked_count']}"
+    )
+    print(
+        "same_side_sbc_alternative_available_count="
+        f"{remap['same_side_sbc_alternative_available_count']}"
+    )
+    print(
+        "same_side_sbc_calibrated_ev_available_count="
+        f"{remap['same_side_sbc_calibrated_ev_available_count']}"
+    )
+    print(
+        "same_side_sbc_guard_passed_count="
+        f"{remap['same_side_sbc_guard_passed_count']}"
+    )
+    print(f"remap_candidate_count={remap['remap_candidate_count']}")
+    print(f"remap_guard_passed_count={remap['remap_guard_passed_count']}")
     print(
         "calibrated_ev_source_report_path="
         f"{result.artifact_paths['execution_layer_v2_calibrated_ev_source_report']}"
@@ -107,6 +126,14 @@ def main() -> None:
     print(
         "guard_intersection_report_sha256="
         f"{result.artifact_hashes['execution_layer_v2_forward_shadow_guard_intersection_report']}"
+    )
+    print(
+        "hts_time_window_remap_report_path="
+        f"{result.artifact_paths['execution_layer_v2_hts_time_window_remap_report']}"
+    )
+    print(
+        "hts_time_window_remap_report_sha256="
+        f"{result.artifact_hashes['execution_layer_v2_hts_time_window_remap_report']}"
     )
     print(
         "manifest_path="

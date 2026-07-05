@@ -41,6 +41,9 @@ EXECUTION_LAYER_V2_FORWARD_SHADOW_SCHEMA_VERSION = (
 EXECUTION_LAYER_V2_FORWARD_SHADOW_GUARD_INTERSECTION_SCHEMA_VERSION = (
     "bigan-v8-polymarket-execution-layer-v2-forward-shadow-guard-intersection-v1"
 )
+EXECUTION_LAYER_V2_HTS_TIME_WINDOW_REMAP_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-execution-layer-v2-hts-time-window-remap-v1"
+)
 EXECUTION_LAYER_V2_FORWARD_SHADOW_MANIFEST_SCHEMA_VERSION = (
     "bigan-v8-polymarket-execution-layer-v2-forward-shadow-manifest-v1"
 )
@@ -190,6 +193,7 @@ class ExecutionLayerV2ForwardShadowResult:
     ev_mapping_report: dict[str, Any]
     forward_shadow_report: dict[str, Any]
     guard_intersection_report: dict[str, Any]
+    hts_time_window_remap_report: dict[str, Any]
     manifest: dict[str, Any]
 
 
@@ -331,6 +335,16 @@ def run_execution_layer_v2_forward_shadow_policy(
             entry_ev_threshold=config.entry_ev_threshold,
         )
     )
+    hts_time_window_remap_report = (
+        build_execution_layer_v2_hts_time_window_remap_report(
+            normalized_rows,
+            run_id=config.run_id,
+            input_path=str(config.input_path),
+            raw_row_count=len(raw_rows),
+            forbidden_outcome_fields_by_row=forbidden,
+            entry_ev_threshold=config.entry_ev_threshold,
+        )
+    )
     calibrated_ev_source_report = build_execution_layer_v2_calibrated_ev_source_report(
         normalized_rows,
         run_id=config.run_id,
@@ -358,6 +372,10 @@ def run_execution_layer_v2_forward_shadow_policy(
         / "execution_layer_v2_forward_shadow_guard_intersection_report.json",
         "execution_layer_v2_forward_shadow_guard_intersection_summary": run_dir
         / "execution_layer_v2_forward_shadow_guard_intersection_report.md",
+        "execution_layer_v2_hts_time_window_remap_report": run_dir
+        / "execution_layer_v2_hts_time_window_remap_report.json",
+        "execution_layer_v2_hts_time_window_remap_summary": run_dir
+        / "execution_layer_v2_hts_time_window_remap_report.md",
         "execution_layer_v2_forward_shadow_manifest": run_dir
         / "execution_layer_v2_forward_shadow_manifest.json",
     }
@@ -399,6 +417,16 @@ def run_execution_layer_v2_forward_shadow_policy(
             guard_intersection_report
         ),
     )
+    _write_json(
+        artifact_paths["execution_layer_v2_hts_time_window_remap_report"],
+        hts_time_window_remap_report,
+    )
+    _write_text(
+        artifact_paths["execution_layer_v2_hts_time_window_remap_summary"],
+        execution_layer_v2_hts_time_window_remap_report_to_markdown(
+            hts_time_window_remap_report
+        ),
+    )
     artifact_hashes = {
         name: _sha256_file(path)
         for name, path in artifact_paths.items()
@@ -426,6 +454,9 @@ def run_execution_layer_v2_forward_shadow_policy(
         ],
         "forward_shadow_guard_intersection_report_id": guard_intersection_report[
             "execution_layer_v2_forward_shadow_guard_intersection_report_id"
+        ],
+        "hts_time_window_remap_report_id": hts_time_window_remap_report[
+            "execution_layer_v2_hts_time_window_remap_report_id"
         ],
         "raw_row_count": len(raw_rows),
         "accepted_signal_row_count": len(normalized_rows),
@@ -464,6 +495,31 @@ def run_execution_layer_v2_forward_shadow_policy(
                 "policy_variant_guard_intersections"
             ].items()
         },
+        "hts_time_window_remap_summary": {
+            "hts_time_window_blocked_count": hts_time_window_remap_report[
+                "hts_time_window_blocked_count"
+            ],
+            "same_side_sbc_alternative_available_count": hts_time_window_remap_report[
+                "same_side_sbc_alternative_available_count"
+            ],
+            "same_side_sbc_calibrated_ev_available_count": (
+                hts_time_window_remap_report[
+                    "same_side_sbc_calibrated_ev_available_count"
+                ]
+            ),
+            "same_side_sbc_guard_passed_count": hts_time_window_remap_report[
+                "same_side_sbc_guard_passed_count"
+            ],
+            "remap_candidate_count": hts_time_window_remap_report[
+                "remap_candidate_count"
+            ],
+            "remap_guard_passed_count": hts_time_window_remap_report[
+                "remap_guard_passed_count"
+            ],
+            "reason_distribution": hts_time_window_remap_report[
+                "remap_reason_distribution"
+            ],
+        },
         "diagnostic_only": True,
         "uses_settlement_pnl_or_outcome_labels": False,
         "uses_oracle_actions_or_future_returns": False,
@@ -486,6 +542,7 @@ def run_execution_layer_v2_forward_shadow_policy(
         ev_mapping_report=ev_mapping_report,
         forward_shadow_report=forward_shadow_report,
         guard_intersection_report=guard_intersection_report,
+        hts_time_window_remap_report=hts_time_window_remap_report,
         manifest=manifest,
     )
 
@@ -985,6 +1042,111 @@ def build_execution_layer_v2_forward_shadow_guard_intersection_report(
     return report
 
 
+def build_execution_layer_v2_hts_time_window_remap_report(
+    rows: list[dict[str, Any]],
+    *,
+    run_id: str,
+    input_path: str,
+    raw_row_count: int | None = None,
+    forbidden_outcome_fields_by_row: list[dict[str, Any]] | None = None,
+    entry_ev_threshold: float = 0.02,
+) -> dict[str, Any]:
+    """Build diagnostic-only HTS-to-same-side-SBC time-window remap evidence."""
+
+    forbidden = forbidden_outcome_fields_by_row or []
+    if forbidden:
+        remap_rows: list[dict[str, Any]] = []
+        status = "blocked_fail_closed"
+        blocking_reasons = ["forbidden_outcome_fields_present"]
+    else:
+        remap_rows = [
+            _hts_time_window_remap_row(
+                row,
+                entry_ev_threshold=entry_ev_threshold,
+            )
+            for row in rows
+            if _is_hts_time_window_blocked_row(row)
+        ]
+        status = "diagnostic_only_fail_closed"
+        blocking_reasons = []
+        if not rows:
+            status = "blocked_fail_closed"
+            blocking_reasons.append("no_forward_shadow_rows")
+
+    candidate_rows = [row for row in remap_rows if row["diagnostic_remap_candidate"]]
+    guard_passed_rows = [
+        row for row in remap_rows if row["diagnostic_remap_guard_passed"]
+    ]
+    reason_counter: Counter[str] = Counter()
+    original_reason_counter: Counter[str] = Counter()
+    for row in remap_rows:
+        reason_counter.update(row["remap_reason_codes"])
+        original_reason_counter.update(row["original_guard_reason_codes"])
+
+    examples = sorted(
+        remap_rows,
+        key=lambda row: (not row["diagnostic_remap_guard_passed"], row["row_index"]),
+    )[:20]
+    report = {
+        "schema_version": EXECUTION_LAYER_V2_HTS_TIME_WINDOW_REMAP_SCHEMA_VERSION,
+        "run_id": run_id,
+        "input_path": input_path,
+        "raw_row_count": raw_row_count if raw_row_count is not None else len(rows),
+        "accepted_signal_row_count": len(rows),
+        "hts_time_window_remap_status": status,
+        "hts_time_window_remap_blocking_reason_codes": blocking_reasons,
+        "diagnostic_only": True,
+        "remap_policy": (
+            "if BUY_UP/DOWN_HOLD_TO_SETTLEMENT is blocked in "
+            "sell_before_close_only_window, evaluate same-side "
+            "BUY_UP/DOWN_SELL_BEFORE_CLOSE as a diagnostic-only alternative"
+        ),
+        "remap_score_source": (
+            "existing decision-time calibrated EV from the selected row; "
+            "O/source ranking scores are not mutated"
+        ),
+        "entry_ev_threshold": entry_ev_threshold,
+        "hts_time_window_blocked_count": len(remap_rows),
+        "same_side_sbc_alternative_available_count": sum(
+            1 for row in remap_rows if row["same_side_sbc_alternative_available"]
+        ),
+        "same_side_sbc_calibrated_ev_available_count": sum(
+            1 for row in remap_rows if row["same_side_sbc_calibrated_ev_available"]
+        ),
+        "same_side_sbc_guard_passed_count": len(guard_passed_rows),
+        "remap_candidate_count": len(candidate_rows),
+        "remap_guard_passed_count": len(guard_passed_rows),
+        "remap_reason_distribution": dict(sorted(reason_counter.items())),
+        "original_guard_reason_distribution": dict(
+            sorted(original_reason_counter.items())
+        ),
+        "time_window_distribution": _count_distribution(
+            remap_rows,
+            "time_window_bucket",
+        ),
+        "proposed_action_distribution": _count_distribution(
+            remap_rows,
+            "proposed_same_side_sbc_action",
+        ),
+        "remap_rows": remap_rows,
+        "examples": examples,
+        "forbidden_outcome_fields_present": bool(forbidden),
+        "forbidden_outcome_fields_by_row": forbidden,
+        "uses_settlement_pnl_or_outcome_labels": False,
+        "uses_oracle_actions_or_future_returns": False,
+        "uses_settlement_labels_for_threshold_tuning": False,
+        "market_implied_probability_used_as_calibrated_ev_source": False,
+        "source_scores_mutated": False,
+        "o_score_mutated": False,
+        "paper_live_unlock_changed": False,
+        **_safety_report_fields(),
+    }
+    report["execution_layer_v2_hts_time_window_remap_report_id"] = (
+        canonical_json_sha256(report)
+    )
+    return report
+
+
 def execution_layer_v2_calibrated_ev_mapping_report_to_markdown(
     report: dict[str, Any],
 ) -> str:
@@ -1102,6 +1264,53 @@ def execution_layer_v2_forward_shadow_guard_intersection_report_to_markdown(
             "",
         ]
     )
+    return "\n".join(lines)
+
+
+def execution_layer_v2_hts_time_window_remap_report_to_markdown(
+    report: dict[str, Any],
+) -> str:
+    """Render the diagnostic HTS-to-same-side-SBC remap report."""
+
+    lines = [
+        "# v8 Execution Layer v2 HTS Time-Window Remap",
+        "",
+        f"- run_id: `{report['run_id']}`",
+        f"- raw_row_count: `{report['raw_row_count']}`",
+        f"- accepted_signal_row_count: `{report['accepted_signal_row_count']}`",
+        f"- hts_time_window_remap_status: `{report['hts_time_window_remap_status']}`",
+        f"- hts_time_window_blocked_count: `{report['hts_time_window_blocked_count']}`",
+        "- same_side_sbc_alternative_available_count: "
+        f"`{report['same_side_sbc_alternative_available_count']}`",
+        "- same_side_sbc_calibrated_ev_available_count: "
+        f"`{report['same_side_sbc_calibrated_ev_available_count']}`",
+        f"- same_side_sbc_guard_passed_count: `{report['same_side_sbc_guard_passed_count']}`",
+        f"- remap_candidate_count: `{report['remap_candidate_count']}`",
+        f"- remap_guard_passed_count: `{report['remap_guard_passed_count']}`",
+        f"- diagnostic_only: `{report['diagnostic_only']}`",
+        f"- source_scores_mutated: `{report['source_scores_mutated']}`",
+        f"- o_score_mutated: `{report['o_score_mutated']}`",
+        f"- v8_execution_handoff_allowed: `{report['v8_execution_handoff_allowed']}`",
+        "",
+        "## Remap Reason Distribution",
+        "",
+        *[
+            f"- `{reason}`: `{count}`"
+            for reason, count in report["remap_reason_distribution"].items()
+        ],
+        "",
+        "## Original Guard Reason Distribution",
+        "",
+        *[
+            f"- `{reason}`: `{count}`"
+            for reason, count in report["original_guard_reason_distribution"].items()
+        ],
+        "",
+        "## Blocking Reasons",
+        "",
+        *_markdown_list(report["hts_time_window_remap_blocking_reason_codes"]),
+        "",
+    ]
     return "\n".join(lines)
 
 
@@ -1432,12 +1641,149 @@ def _execution_guard_status(row: dict[str, Any]) -> tuple[str, list[str]]:
     blocking_codes = list(row["execution_guard_blocking_reason_codes"])
     if row["order_allowed"] is not True:
         return (
-            "guard_blocked",
-            blocking_codes or ["execution_guard_order_not_allowed"],
-        )
+        "guard_blocked",
+        blocking_codes or ["execution_guard_order_not_allowed"],
+    )
     if blocking_codes:
         return "guard_blocked", blocking_codes
     return "guard_passed", []
+
+
+_HTS_TIME_WINDOW_REMAP_IGNORABLE_GUARD_CODES = {
+    "execution_hts_downgraded_to_same_side_sbc",
+    "execution_hts_guard_failed",
+    "execution_time_to_close_unsafe",
+}
+
+
+def _is_hts_time_window_blocked_row(row: dict[str, Any]) -> bool:
+    if row["action"] not in {
+        "BUY_UP_HOLD_TO_SETTLEMENT",
+        "BUY_DOWN_HOLD_TO_SETTLEMENT",
+    }:
+        return False
+    if row["time_window_bucket"] != "sell_before_close_only_window":
+        return False
+    guard_status, guard_reasons = _execution_guard_status(row)
+    if guard_status == "guard_passed":
+        return False
+    reason_set = set(guard_reasons)
+    return bool(
+        reason_set
+        & {
+            "execution_time_to_close_unsafe",
+            "execution_hts_downgraded_to_same_side_sbc",
+            "execution_hts_guard_failed",
+        }
+    )
+
+
+def _hts_time_window_remap_row(
+    row: dict[str, Any],
+    *,
+    entry_ev_threshold: float,
+) -> dict[str, Any]:
+    proposed_action = _same_side_sbc_action(row)
+    original_guard_status, original_guard_reasons = _execution_guard_status(row)
+    reason_codes: list[str] = []
+    if proposed_action is None or not _same_side_sbc_action_available(
+        row,
+        proposed_action,
+    ):
+        reason_codes.append("same_side_sbc_alternative_missing")
+    if not row["calibrated_ev_available"]:
+        reason_codes.append("same_side_sbc_calibrated_ev_missing")
+        reason_codes.extend(row["ev_mapping_blocking_reason_codes"])
+    elif float(row["calibrated_ev"]) < entry_ev_threshold:
+        reason_codes.append("same_side_sbc_calibrated_ev_below_threshold")
+    if row["missing_execution_guard_decision_fields"]:
+        reason_codes.append("missing_execution_guard_decision_fields")
+        reason_codes.extend(
+            f"missing_guard_field:{field}"
+            for field in row["missing_execution_guard_decision_fields"]
+        )
+    if not row["execution_guard_safety_flags_blocked"]:
+        reason_codes.append("execution_guard_safety_flags_not_blocked")
+    if row["time_window_bucket"] == "final_no_trade_window":
+        reason_codes.append("same_side_sbc_time_to_close_final_no_trade_window")
+    elif row["time_window_bucket"] != "sell_before_close_only_window":
+        reason_codes.append("same_side_sbc_time_window_not_sbc_only")
+
+    non_remappable_guard_codes = [
+        code
+        for code in original_guard_reasons
+        if code not in _HTS_TIME_WINDOW_REMAP_IGNORABLE_GUARD_CODES
+    ]
+    reason_codes.extend(non_remappable_guard_codes)
+    reason_codes = sorted(set(reason_codes))
+    candidate = (
+        proposed_action is not None
+        and "same_side_sbc_alternative_missing" not in reason_codes
+        and row["calibrated_ev_available"]
+        and float(row["calibrated_ev"]) >= entry_ev_threshold
+    )
+    remap_guard_passed = candidate and not reason_codes
+    if remap_guard_passed:
+        reason_codes = ["diagnostic_remap_guard_passed"]
+    elif candidate and not reason_codes:
+        reason_codes = ["diagnostic_remap_guard_blocked_unknown"]
+    return {
+        "row_index": row["row_index"],
+        "market_id": row["market_id"],
+        "decision_ts": row["decision_ts"],
+        "selected_action": row["action"],
+        "selected_side": row["side"],
+        "selected_family": row["family"],
+        "time_window_bucket": row["time_window_bucket"],
+        "time_to_close_seconds": row["time_to_close_seconds"],
+        "required_min_time_to_close_seconds": row[
+            "required_min_time_to_close_seconds"
+        ],
+        "proposed_same_side_sbc_action": proposed_action,
+        "proposed_same_side_sbc_side": row["side"],
+        "proposed_same_side_sbc_family": (
+            "SELL_BEFORE_CLOSE" if proposed_action is not None else None
+        ),
+        "same_side_sbc_alternative_available": (
+            proposed_action is not None
+            and _same_side_sbc_action_available(row, proposed_action)
+        ),
+        "same_side_sbc_calibrated_ev_available": row["calibrated_ev_available"],
+        "calibrated_ev": row["calibrated_ev"],
+        "entry_ev_threshold": entry_ev_threshold,
+        "diagnostic_remap_candidate": candidate,
+        "diagnostic_remap_guard_passed": remap_guard_passed,
+        "original_guard_status": original_guard_status,
+        "original_guard_reason_codes": original_guard_reasons,
+        "remap_reason_codes": reason_codes,
+        "non_remappable_guard_reason_codes": sorted(set(non_remappable_guard_codes)),
+        "available_actions": row["available_actions"],
+        "execution_price": row["execution_price"],
+        "spread_bps": row["spread_bps"],
+        "book_staleness_ms": row["book_staleness_ms"],
+        "queue_fill_proxy": row["queue_fill_proxy"],
+        "execution_guarded_action": row["execution_guarded_action"],
+        "execution_guarded_side": row["execution_guarded_side"],
+        "source_scores_mutated": False,
+        "o_score_mutated": False,
+        "paper_live_unlock_changed": False,
+        "diagnostic_only": True,
+    }
+
+
+def _same_side_sbc_action(row: Mapping[str, Any]) -> str | None:
+    if row.get("side") == "UP" and row.get("action") == "BUY_UP_HOLD_TO_SETTLEMENT":
+        return "BUY_UP_SELL_BEFORE_CLOSE"
+    if row.get("side") == "DOWN" and row.get("action") == "BUY_DOWN_HOLD_TO_SETTLEMENT":
+        return "BUY_DOWN_SELL_BEFORE_CLOSE"
+    return None
+
+
+def _same_side_sbc_action_available(row: Mapping[str, Any], action: str) -> bool:
+    available_actions = row.get("available_actions")
+    if available_actions is None:
+        return True
+    return action in set(available_actions)
 
 
 def _guard_intersection_decision_row(
@@ -2275,6 +2621,7 @@ def _normalize_forward_shadow_row(
         "execution_guard_blocking_reason_codes": guard_blocking_codes,
         "execution_guard_blocking_reason_source_fields": guard_blocking_source_fields,
         "missing_execution_guard_decision_fields": missing_guard_fields,
+        "available_actions": _available_actions(row),
         "time_to_close_gate_passed": time_to_close_gate_passed,
         "required_min_time_to_close_seconds": required_min_time_to_close,
         "spread_bps": spread_bps,
@@ -2523,6 +2870,34 @@ def _coerce_reason_codes(raw_value: Any) -> list[str]:
             values.extend(_coerce_reason_codes(item))
         return values
     return [str(raw_value)]
+
+
+def _available_actions(row: Mapping[str, Any]) -> list[str] | None:
+    for field_name in (
+        "available_actions",
+        "candidate_actions",
+        "action_candidates",
+    ):
+        raw_value = _lookup_value(row, field_name)
+        if raw_value is None:
+            continue
+        if isinstance(raw_value, str):
+            try:
+                parsed = json.loads(raw_value)
+            except json.JSONDecodeError:
+                parsed = [part.strip() for part in raw_value.split(",")]
+            raw_value = parsed
+        if not isinstance(raw_value, list | tuple | set):
+            continue
+        actions = sorted(
+            {
+                _canonical_action(str(item))
+                for item in raw_value
+                if str(item).strip()
+            }
+        )
+        return actions
+    return None
 
 
 def _missing_guard_decision_fields(

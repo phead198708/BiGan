@@ -775,6 +775,186 @@ def test_execution_layer_v2_forward_shadow_guard_intersection_counts(
     assert result.manifest["#146_start_allowed"] is False
 
 
+def test_execution_layer_v2_hts_time_window_remap_reports_guard_passed_sbc(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "fresh_signal_trace.jsonl"
+    _write_jsonl(
+        input_path,
+        [
+            _forward_shadow_row(
+                market_id="hts-sbc-remap-pass",
+                action="BUY_UP_HOLD_TO_SETTLEMENT",
+                selected_side="UP",
+                entry_ask=0.72,
+                calibrated_action_expected_net_return=0.05,
+                order_allowed=False,
+                execution_guarded_action="BUY_UP_SELL_BEFORE_CLOSE",
+                execution_guarded_side="UP",
+                execution_blocking_reason_codes=[
+                    "execution_hts_downgraded_to_same_side_sbc",
+                    "execution_hts_guard_failed",
+                    "execution_time_to_close_unsafe",
+                ],
+                time_to_close_seconds=90.0,
+            )
+        ],
+    )
+
+    result = run_execution_layer_v2_forward_shadow_policy(
+        ExecutionLayerV2ForwardShadowConfig(
+            run_id="hts-sbc-remap-pass",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+        )
+    )
+
+    remap = result.hts_time_window_remap_report
+    assert remap["hts_time_window_blocked_count"] == 1
+    assert remap["same_side_sbc_alternative_available_count"] == 1
+    assert remap["same_side_sbc_calibrated_ev_available_count"] == 1
+    assert remap["remap_candidate_count"] == 1
+    assert remap["same_side_sbc_guard_passed_count"] == 1
+    assert remap["remap_guard_passed_count"] == 1
+    assert remap["remap_rows"][0]["proposed_same_side_sbc_action"] == (
+        "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+    assert remap["remap_rows"][0]["diagnostic_remap_guard_passed"] is True
+    assert remap["remap_rows"][0]["remap_reason_codes"] == [
+        "diagnostic_remap_guard_passed"
+    ]
+    assert result.guard_intersection_report["policy_variant_guard_intersections"][
+        "calibrated_ev_v2"
+    ]["guard_passed_candidate_count"] == 0
+    assert result.artifact_paths[
+        "execution_layer_v2_hts_time_window_remap_report"
+    ].exists()
+    assert result.manifest["hts_time_window_remap_summary"][
+        "remap_guard_passed_count"
+    ] == 1
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert remap["source_scores_mutated"] is False
+    assert remap["o_score_mutated"] is False
+
+
+def test_execution_layer_v2_hts_time_window_remap_missing_sbc_alternative(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "fresh_signal_trace.jsonl"
+    _write_jsonl(
+        input_path,
+        [
+            _forward_shadow_row(
+                market_id="hts-sbc-remap-missing",
+                action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+                selected_side="DOWN",
+                entry_ask=0.75,
+                calibrated_action_expected_net_return=0.06,
+                order_allowed=False,
+                execution_guarded_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+                execution_guarded_side="DOWN",
+                execution_blocking_reason_codes=[
+                    "execution_hts_downgraded_to_same_side_sbc",
+                    "execution_hts_guard_failed",
+                    "execution_time_to_close_unsafe",
+                ],
+                time_to_close_seconds=90.0,
+                available_actions=["BUY_DOWN_HOLD_TO_SETTLEMENT"],
+            )
+        ],
+    )
+
+    result = run_execution_layer_v2_forward_shadow_policy(
+        ExecutionLayerV2ForwardShadowConfig(
+            run_id="hts-sbc-remap-missing",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+        )
+    )
+
+    remap = result.hts_time_window_remap_report
+    assert remap["hts_time_window_blocked_count"] == 1
+    assert remap["same_side_sbc_alternative_available_count"] == 0
+    assert remap["same_side_sbc_calibrated_ev_available_count"] == 1
+    assert remap["remap_candidate_count"] == 0
+    assert remap["remap_guard_passed_count"] == 0
+    assert remap["remap_reason_distribution"][
+        "same_side_sbc_alternative_missing"
+    ] == 1
+    assert remap["remap_rows"][0]["diagnostic_remap_guard_passed"] is False
+
+
+def test_execution_layer_v2_hts_time_window_remap_guard_blocked_and_ev_negative(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "fresh_signal_trace.jsonl"
+    _write_jsonl(
+        input_path,
+        [
+            _forward_shadow_row(
+                market_id="hts-sbc-remap-spread-blocked",
+                action="BUY_UP_HOLD_TO_SETTLEMENT",
+                selected_side="UP",
+                entry_ask=0.78,
+                calibrated_action_expected_net_return=0.05,
+                order_allowed=False,
+                execution_guarded_action="BUY_UP_SELL_BEFORE_CLOSE",
+                execution_guarded_side="UP",
+                execution_blocking_reason_codes=[
+                    "execution_hts_downgraded_to_same_side_sbc",
+                    "execution_hts_guard_failed",
+                    "execution_time_to_close_unsafe",
+                    "execution_spread_too_wide",
+                ],
+                time_to_close_seconds=90.0,
+            ),
+            _forward_shadow_row(
+                market_id="hts-sbc-remap-ev-low",
+                action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+                selected_side="DOWN",
+                entry_ask=0.80,
+                calibrated_action_expected_net_return=0.005,
+                order_allowed=False,
+                execution_guarded_action="BUY_DOWN_SELL_BEFORE_CLOSE",
+                execution_guarded_side="DOWN",
+                execution_blocking_reason_codes=[
+                    "execution_hts_downgraded_to_same_side_sbc",
+                    "execution_hts_guard_failed",
+                    "execution_time_to_close_unsafe",
+                ],
+                time_to_close_seconds=90.0,
+            ),
+        ],
+    )
+
+    result = run_execution_layer_v2_forward_shadow_policy(
+        ExecutionLayerV2ForwardShadowConfig(
+            run_id="hts-sbc-remap-blocked",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+        )
+    )
+
+    remap = result.hts_time_window_remap_report
+    assert remap["hts_time_window_blocked_count"] == 2
+    assert remap["same_side_sbc_alternative_available_count"] == 2
+    assert remap["same_side_sbc_calibrated_ev_available_count"] == 2
+    assert remap["remap_candidate_count"] == 1
+    assert remap["remap_guard_passed_count"] == 0
+    assert remap["remap_reason_distribution"]["execution_spread_too_wide"] == 1
+    assert remap["remap_reason_distribution"][
+        "same_side_sbc_calibrated_ev_below_threshold"
+    ] == 1
+    assert remap["remap_rows"][0]["non_remappable_guard_reason_codes"] == [
+        "execution_spread_too_wide"
+    ]
+    assert remap["paper_only"] is True
+    assert remap["capital_at_risk"] is False
+    assert remap["polymarket_write_enabled"] is False
+    assert remap["wallet_signing_enabled"] is False
+    assert remap["v8_execution_handoff_allowed"] is False
+
+
 def test_execution_layer_v2_forward_shadow_forbidden_outcome_fields_fail_closed(
     tmp_path,
 ) -> None:
@@ -971,6 +1151,7 @@ def _forward_shadow_row(
     execution_blocking_reason_codes: list[str] | None = None,
     paper_intent_id: str | None = None,
     paper_fill_id: str | None = None,
+    available_actions: list[str] | None = None,
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "market_id": market_id,
@@ -1008,6 +1189,8 @@ def _forward_shadow_row(
         row["paper_intent_id"] = paper_intent_id
     if paper_fill_id is not None:
         row["paper_fill_id"] = paper_fill_id
+    if available_actions is not None:
+        row["available_actions"] = available_actions
     return row
 
 
