@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 
 import pytest
@@ -17,6 +18,10 @@ from bigan.v8.polymarket.training.execution_layer_v2 import (
     decide_execution_layer_v2,
     run_execution_layer_v2_backtest,
     time_decayed_kelly_notional,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_policy_replay import (
+    ExecutionLayerV2PolicyReplayConfig,
+    run_execution_layer_v2_policy_replay_from_settlement_csv,
 )
 
 
@@ -328,6 +333,123 @@ def test_execution_layer_v2_backtest_fails_closed_when_signal_probability_missin
     reasons = result.report["rejected_signal_rows"][0]["reason_codes"]
     assert "missing_decision_time_probability" in reasons
     assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def test_execution_layer_v2_policy_replay_from_settlement_csv_metrics_and_warning(
+    tmp_path,
+) -> None:
+    csv_path = tmp_path / "current_clob_condition_settlement_pnl_rows.csv"
+    _write_settlement_csv(
+        csv_path,
+        [
+            _settlement_row("BUY_UP_HOLD_TO_SETTLEMENT", 300_000, 0.80, 10.0, -2.0),
+            _settlement_row("BUY_UP_HOLD_TO_SETTLEMENT", 300_000, 0.95, 10.0, -4.0),
+            _settlement_row("BUY_DOWN_HOLD_TO_SETTLEMENT", 300_000, 0.80, 10.0, 3.0),
+            _settlement_row("BUY_UP_SELL_BEFORE_CLOSE", 300_000, 0.75, 10.0, 1.0),
+            _settlement_row("BUY_DOWN_SELL_BEFORE_CLOSE", 900_000, 0.65, 10.0, 0.5),
+            _settlement_row("BUY_DOWN_HOLD_TO_SETTLEMENT", 900_000, 0.85, 10.0, -1.0),
+        ],
+    )
+
+    result = run_execution_layer_v2_policy_replay_from_settlement_csv(
+        ExecutionLayerV2PolicyReplayConfig(
+            run_id="policy-replay-fixture",
+            input_csv=csv_path,
+            output_dir=tmp_path / "runs",
+        )
+    )
+    report = result.report
+    variants = report["policy_variants"]
+
+    baseline = variants["all_executed_baseline"]
+    assert baseline["row_count"] == 6
+    assert baseline["cost_basis"] == pytest.approx(60.0)
+    assert baseline["settlement_pnl"] == pytest.approx(-2.5)
+    assert baseline["roi"] == pytest.approx(-2.5 / 60.0)
+    assert baseline["win_rate"] == pytest.approx(3 / 6)
+    assert baseline["max_drawdown"] == pytest.approx(-6.0)
+    assert baseline["action_distribution"]["BUY_UP_HOLD_TO_SETTLEMENT"] == 2
+    assert baseline["family_distribution"]["HOLD_TO_SETTLEMENT"] == 4
+    assert baseline["horizon_distribution"] == {"15m": 2, "5m": 4}
+
+    assert variants["price_070_090_only"]["row_count"] == 4
+    assert variants["price_070_090_only"]["settlement_pnl"] == pytest.approx(1.0)
+    assert variants["price_070_090_only"]["rejected_reason_counts"] == {
+        "price_above_090": 1,
+        "price_below_070": 1,
+    }
+    assert variants["exclude_buy_up_hts"]["settlement_pnl"] == pytest.approx(3.5)
+    assert variants["sell_before_close_only"]["settlement_pnl"] == pytest.approx(1.5)
+    assert variants["buy_down_hts_only"]["settlement_pnl"] == pytest.approx(2.0)
+    assert variants["five_min_only"]["settlement_pnl"] == pytest.approx(-2.0)
+    assert variants["fifteen_min_only"]["settlement_pnl"] == pytest.approx(-0.5)
+    assert variants["bucket_aware_v1"]["row_count"] == 3
+    assert variants["bucket_aware_v1"]["settlement_pnl"] == pytest.approx(3.0)
+
+    ev = report["signal_to_ev_diagnostic"]
+    assert ev["ev_mapping_status"] == "blocked_requires_calibrated_model_fair_value"
+    assert ev["p_model_fair_value_source_fields_present"] is False
+    assert ev["current_p_up_should_not_be_used_as_ev_fair_value_without_provenance"] is True
+    assert "market_implied_probability_collapses_ev_to_spread_minus_cost" in ev[
+        "ev_mapping_blocking_reason_codes"
+    ]
+
+    recommendation = report["recommended_execution_policy_v1"]
+    assert recommendation["policy_name"] == "bucket_aware_execution_policy_v1_diagnostic"
+    assert recommendation["do_not_relax_execution_guard_thresholds"] is True
+    assert "sell_before_close_small_sample" in recommendation["small_sample_warnings"]
+    assert "Avoid BUY_UP_HOLD_TO_SETTLEMENT unless strong calibrated edge exists." in (
+        recommendation["rules"]
+    )
+
+    assert report["paper_only"] is True
+    assert report["capital_at_risk"] is False
+    assert report["polymarket_write_enabled"] is False
+    assert report["wallet_signing_enabled"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["freeze_ready"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["#134_resume_allowed"] is False
+    assert report["#146_start_allowed"] is False
+    assert result.artifact_paths["execution_layer_v2_policy_replay_report"].exists()
+    assert result.artifact_paths["execution_layer_v2_policy_replay_summary"].exists()
+    assert result.artifact_paths["execution_layer_v2_policy_replay_manifest"].exists()
+    assert result.artifact_hashes["execution_layer_v2_policy_replay_report"]
+
+
+def _write_settlement_csv(path, rows: list[dict[str, object]]) -> None:
+    fieldnames = [
+        "market_id",
+        "decision_ts",
+        "action",
+        "horizon_ms",
+        "entry_price",
+        "cost_basis",
+        "settlement_pnl",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _settlement_row(
+    action: str,
+    horizon_ms: int,
+    entry_price: float,
+    cost_basis: float,
+    settlement_pnl: float,
+) -> dict[str, object]:
+    return {
+        "market_id": f"{action}-{horizon_ms}-{entry_price}",
+        "decision_ts": str(horizon_ms + int(entry_price * 1000)),
+        "action": action,
+        "horizon_ms": horizon_ms,
+        "entry_price": entry_price,
+        "cost_basis": cost_basis,
+        "settlement_pnl": settlement_pnl,
+    }
 
 
 def _full_grid_row(
