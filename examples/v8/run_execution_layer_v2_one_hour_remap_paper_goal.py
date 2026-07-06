@@ -33,6 +33,8 @@ def main() -> None:
     )
     parser.add_argument("--duration-seconds", type=int, default=3600)
     parser.add_argument("--poll-interval-seconds", type=float, default=60.0)
+    parser.add_argument("--settlement-poll-max-wait-seconds", type=float, default=600.0)
+    parser.add_argument("--settlement-poll-interval-seconds", type=float, default=15.0)
     parser.add_argument(
         "--paper-candidate-unlock-dir",
         type=Path,
@@ -67,6 +69,8 @@ def main() -> None:
             ),
             frozen_ev_calibration_artifact_path=args.frozen_ev_calibration_artifact,
             canonical_o_source_manifest_path=args.canonical_o_source_manifest,
+            settlement_poll_max_wait_seconds=args.settlement_poll_max_wait_seconds,
+            settlement_poll_interval_seconds=args.settlement_poll_interval_seconds,
             overwrite_existing=args.overwrite_existing,
         )
     )
@@ -85,6 +89,9 @@ def main() -> None:
     print(f"forced_coverage_bet_count={report['forced_coverage_bet_count']}")
     print(f"settled_pnl={report['settled_pnl']}")
     print(f"unresolved_pnl={report['unresolved_pnl']}")
+    print(f"settlement_poll_attempt_count={report['settlement_poll_attempt_count']}")
+    print(f"settlement_evaluation_row_count={report['settlement_evaluation_row_count']}")
+    print(f"settlement_resolution_reason_codes={report['settlement_resolution_reason_codes']}")
     print(f"final_goal_success={str(report['final_goal_success']).lower()}")
     print(f"goal_failure_reason_codes={report['goal_failure_reason_codes']}")
     print(

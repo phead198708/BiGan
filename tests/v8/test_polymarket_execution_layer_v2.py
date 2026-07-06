@@ -1157,6 +1157,67 @@ def test_execution_layer_v2_one_hour_goal_reports_missing_round_bet_fail_closed(
     assert result.manifest["#146_start_allowed"] is False
 
 
+def test_execution_layer_v2_one_hour_goal_polls_read_only_resolution_provider(
+    tmp_path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    row = _paper_fresh_public_row(
+        index=1,
+        market_id="one-hour-settlement-poll",
+        action="BUY_UP_HOLD_TO_SETTLEMENT",
+        side="UP",
+        p_up=0.82,
+    )
+    row.update(
+        {
+            "condition_id": "one-hour-settlement-poll",
+            "slug": "btc-updown-5m-3000",
+            "market_family": "btc_updown_5m",
+            "market_start_ts": 3_000_000,
+            "market_end_ts": 3_300_000,
+            "settlement_ts": 3_360_000,
+            "up_token_id": "up-token",
+            "down_token_id": "down-token",
+            "reference_price_source": "polymarket_official_btc_usd_reference",
+        }
+    )
+    row["microstructure_snapshot"]["time_to_close_seconds"] = 360.0
+
+    result = run_execution_layer_v2_one_hour_remap_paper_goal(
+        ExecutionLayerV2OneHourRemapPaperGoalConfig(
+            run_id="one-hour-goal-resolution-poll",
+            output_dir=tmp_path / "runs",
+            duration_seconds=3600,
+            poll_interval_seconds=0.0,
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((row,),),
+            public_provider=_OneHourResolvedOutcomeProvider(outcome="UP"),
+            settlement_poll_max_wait_seconds=0.0,
+            settlement_poll_interval_seconds=1.0,
+        )
+    )
+
+    report = result.goal_report
+    settlement_report = result.settlement_resolution_report
+    settlement_rows = _read_jsonl(result.artifact_paths["settlement_pnl_rows"])
+    assert settlement_report["settlement_poll_attempt_count"] == 1
+    assert settlement_report["settlement_evaluation_row_count"] == 1
+    assert settlement_report["unresolved_fill_count_after_poll"] == 0
+    assert "settlement_resolution_all_fills_resolved" in settlement_report[
+        "settlement_resolution_reason_codes"
+    ]
+    assert settlement_rows[0]["settlement_status"] == "settled"
+    assert settlement_rows[0]["resolved_outcome"] == "UP"
+    assert report["settled_pnl"] > 0.0
+    assert report["unresolved_settlement_count"] == 0
+    assert report["final_goal_success"] is True
+    assert report["uses_settlement_pnl_or_outcome_labels_in_decision_logic"] is False
+    assert result.manifest["settlement_evaluation_row_count"] == 1
+    assert "settlement_resolution_report" in result.manifest["artifact_hashes"]
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
 def _write_settlement_csv(path, rows: list[dict[str, object]]) -> None:
     fieldnames = [
         "market_id",
@@ -1200,6 +1261,46 @@ def _set_action_score(row: dict[str, object], action: str, score: float) -> None
             candidate["corrected_model_score"] = score
             return
     raise AssertionError(f"missing action in full ranking: {action}")
+
+
+class _OneHourResolvedOutcomeProvider:
+    read_only = True
+    write_capable = False
+    paper_only = True
+    capital_at_risk = False
+    broker_exchange_write_enabled = False
+    live_exchange_write_enabled = False
+    polymarket_write_enabled = False
+    wallet_signing_enabled = False
+
+    def __init__(self, *, outcome: str) -> None:
+        self.outcome = outcome
+        self.resolution_calls = 0
+
+    def resolution_rows(self, markets, config):
+        del config
+        self.resolution_calls += 1
+        rows = []
+        for market in markets:
+            rows.append(
+                {
+                    "market_id": market["market_id"],
+                    "reference_price_source": market["reference_price_source"],
+                    "resolution_status": "normal",
+                    "resolved_outcome": self.outcome,
+                    "payout_up": 1.0 if self.outcome == "UP" else 0.0,
+                    "payout_down": 1.0 if self.outcome == "DOWN" else 0.0,
+                    "resolution_source_type": "pytest_read_only_resolution_provider",
+                    "raw_resolution_text": "pytest resolved outcome",
+                    "paper_only": True,
+                    "capital_at_risk": False,
+                    "broker_exchange_write_enabled": False,
+                    "live_exchange_write_enabled": False,
+                    "polymarket_write_enabled": False,
+                    "wallet_signing_enabled": False,
+                }
+            )
+        return rows
 
 
 def _write_ev_calibration_artifact(
