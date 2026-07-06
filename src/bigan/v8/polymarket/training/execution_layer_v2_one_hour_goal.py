@@ -22,6 +22,16 @@ from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
     O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE,
     PINNED_ISSUE_160_MANIFEST_SHA256,
     PolymarketOV8PaperFreshLoopConfig,
+    _action_family,
+    _apply_guard_row_to_runtime_state,
+    _fresh_order_intent_from_guard_row,
+    _fresh_paper_fills_from_intents,
+    _fresh_paper_ledger_from_fills,
+    _guard_input_from_public_row,
+    _initial_fresh_runtime_state,
+    _side_from_action,
+    _v8_execution_guard_config,
+    _v8_execution_guard_decision,
     run_polymarket_o_v8_paper_fresh_loop,
 )
 
@@ -169,9 +179,26 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         )
     )
 
-    intents = _read_jsonl(fresh_result.artifact_paths["fresh_order_intent_log"])
-    fills = _read_jsonl(fresh_result.artifact_paths["fresh_fill_log"])
+    base_intents = _read_jsonl(fresh_result.artifact_paths["fresh_order_intent_log"])
     trace_rows = list(fresh_result.signal_trace_report.get("trace_rows") or [])
+    forced_coverage = _forced_coverage_attempt_report(
+        config=config,
+        fresh_loop_config=PolymarketOV8PaperFreshLoopConfig(
+            run_id=f"{config.run_id}-fresh-loop",
+            output_dir=goal_dir,
+            paper_candidate_unlock_dir=config.paper_candidate_unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=(
+                config.expected_paper_candidate_unlock_manifest_sha256
+            ),
+            public_data_source=public_data_source,
+            public_data_cycles=(),
+        ),
+        trace_rows=trace_rows,
+        base_intents=base_intents,
+    )
+    intents = [*base_intents, *forced_coverage["forced_coverage_intents"]]
+    fills = _fresh_paper_fills_from_intents(intents)
+    ledger_rows = _fresh_paper_ledger_from_fills(fills)
     settlement_resolution = _settlement_resolution_report(
         config=config,
         fills=fills,
@@ -195,6 +222,7 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         fresh_remap_report=fresh_result.execution_layer_v2_paper_remap_report,
         intents=intents,
         fills=fills,
+        forced_coverage=forced_coverage,
     )
     goal_report = _one_hour_goal_report(
         config=config,
@@ -223,14 +251,17 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         "settlement_resolution_summary": goal_dir
         / "settlement_resolution_report.md",
         "settlement_pnl_rows": goal_dir / "settlement_pnl_rows.jsonl",
-        "paper_intent_log": fresh_result.artifact_paths["fresh_order_intent_log"],
-        "paper_fill_log": fresh_result.artifact_paths["fresh_fill_log"],
-        "paper_ledger_log": fresh_result.artifact_paths["fresh_ledger_log"],
+        "paper_intent_log": goal_dir / "one_hour_paper_intent_log.jsonl",
+        "paper_fill_log": goal_dir / "one_hour_paper_fill_log.jsonl",
+        "paper_ledger_log": goal_dir / "one_hour_paper_ledger_log.jsonl",
         "paper_fresh_loop_manifest": fresh_result.artifact_paths["manifest"],
         "paper_remap_report": fresh_result.artifact_paths[
             "execution_layer_v2_paper_remap_report"
         ],
     }
+    _write_jsonl(artifact_paths["paper_intent_log"], intents)
+    _write_jsonl(artifact_paths["paper_fill_log"], fills)
+    _write_jsonl(artifact_paths["paper_ledger_log"], ledger_rows)
     _write_json(artifact_paths["one_hour_remap_paper_goal_report"], goal_report)
     _write_text(
         artifact_paths["one_hour_remap_paper_goal_summary"],
@@ -333,9 +364,13 @@ def _remap_execution_report(
     fresh_remap_report: dict[str, Any],
     intents: list[dict[str, Any]],
     fills: list[dict[str, Any]],
+    forced_coverage: dict[str, Any],
 ) -> dict[str, Any]:
     remap_intents = [
         intent for intent in intents if intent.get("hts_time_window_remap_applied") is True
+    ]
+    forced_intents = [
+        intent for intent in intents if intent.get("coverage_forced_paper_bet") is True
     ]
     report = {
         "schema_version": ONE_HOUR_REMAP_EXECUTION_REPORT_SCHEMA_VERSION,
@@ -348,9 +383,22 @@ def _remap_execution_report(
             "remap_guard_passed_count"
         ],
         "remap_paper_bet_count": len(remap_intents),
-        "normal_policy_bet_count": len(intents) - len(remap_intents),
+        "normal_policy_bet_count": len(intents) - len(remap_intents) - len(forced_intents),
         "paper_fill_count": len(fills),
-        "forced_coverage_bet_count": 0,
+        "forced_coverage_bet_count": len(forced_intents),
+        "forced_coverage_round_ids": forced_coverage["forced_coverage_round_ids"],
+        "forced_coverage_guard_passed_count": forced_coverage[
+            "forced_coverage_guard_passed_count"
+        ],
+        "forced_coverage_guard_blocked_count": forced_coverage[
+            "forced_coverage_guard_blocked_count"
+        ],
+        "forced_coverage_blocking_reason_distribution": forced_coverage[
+            "forced_coverage_blocking_reason_distribution"
+        ],
+        "forced_coverage_attempt_rows": forced_coverage[
+            "forced_coverage_attempt_rows"
+        ],
         "remap_reason_distribution": fresh_remap_report[
             "remap_reason_distribution"
         ],
@@ -364,6 +412,338 @@ def _remap_execution_report(
         "o_score_mutated": False,
     }
     return _with_report_id(report, "remap_execution_report_id")
+
+
+def _forced_coverage_attempt_report(
+    *,
+    config: ExecutionLayerV2OneHourRemapPaperGoalConfig,
+    fresh_loop_config: PolymarketOV8PaperFreshLoopConfig,
+    trace_rows: list[dict[str, Any]],
+    base_intents: list[dict[str, Any]],
+) -> dict[str, Any]:
+    bet_rounds = {str(intent.get("market_id")) for intent in base_intents}
+    trace_by_market: dict[str, list[dict[str, Any]]] = {}
+    for row in trace_rows:
+        market_id = str(row.get("market_id") or "")
+        if market_id:
+            trace_by_market.setdefault(market_id, []).append(dict(row))
+    missing_market_ids = sorted(set(trace_by_market) - bet_rounds)
+    runtime_state = _runtime_state_from_intents(base_intents)
+    guard_config = _v8_execution_guard_config()
+    forced_intents: list[dict[str, Any]] = []
+    attempt_rows: list[dict[str, Any]] = []
+    for market_id in missing_market_ids:
+        source_trace = _forced_coverage_source_trace(trace_by_market[market_id])
+        coverage_public_row = _forced_coverage_public_row(
+            run_id=config.run_id,
+            source_trace=source_trace,
+        )
+        if coverage_public_row is None:
+            attempt_rows.append(
+                _forced_coverage_attempt_row(
+                    market_id=market_id,
+                    source_trace=source_trace,
+                    guard_row=None,
+                    intent=None,
+                    reason_codes=["forced_coverage_no_trade_candidate_available"],
+                )
+            )
+            continue
+        guard_input = _guard_input_from_public_row(
+            public_row=coverage_public_row,
+            cycle_id=f"{config.run_id}-forced-coverage",
+            row_index=len(attempt_rows),
+        )
+        guard_row = _v8_execution_guard_decision(
+            guard_input,
+            guard_config=guard_config,
+            runtime_state=runtime_state,
+            runtime_mode="simulated_runtime_state",
+        )
+        guard_row["cycle_id"] = f"{config.run_id}-forced-coverage"
+        guard_row["public_data_source"] = coverage_public_row["public_data_source"]
+        guard_row["coverage_forced_attempted"] = True
+        guard_row["coverage_forced_round_id"] = market_id
+        guard_row["coverage_forced_reason_codes"] = [
+            "complete_round_missing_paper_bet",
+            "forced_coverage_full_execution_guard_checked",
+        ]
+        if guard_row.get("order_allowed") is True:
+            guard_row["coverage_forced_paper_bet"] = True
+            guard_row["simulated_order_id"] = (
+                f"{fresh_loop_config.run_id}-forced-coverage-sim-"
+                f"{len(base_intents) + len(forced_intents) + 1:06d}"
+            )
+            guard_row["proposed_order_size"] = min(
+                float(guard_row.get("proposed_order_size") or 0.0),
+                float(guard_config["base_order_size"]),
+            )
+            guard_row["sizing_reason_codes"] = sorted(
+                {
+                    *list(guard_row.get("sizing_reason_codes") or []),
+                    "forced_coverage_smallest_size_applied",
+                }
+            )
+            _apply_guard_row_to_runtime_state(runtime_state, guard_row)
+            guard_row["post_decision_exposure_state"] = dict(runtime_state)
+            intent = _fresh_order_intent_from_guard_row(
+                config=fresh_loop_config,
+                cycle_id=f"{config.run_id}-forced-coverage",
+                guard_row=guard_row,
+                intent_index=len(base_intents) + len(forced_intents) + 1,
+            )
+            intent["coverage_forced_paper_bet"] = True
+            intent["coverage_forced_round_id"] = market_id
+            intent["coverage_forced_reason_codes"] = list(
+                guard_row["coverage_forced_reason_codes"]
+            )
+            intent["order_origin"] = "forced_coverage_full_guard_paper_only"
+            intent["paper_fresh_order_intent_hash"] = canonical_json_sha256(intent)
+            forced_intents.append(intent)
+        else:
+            guard_row["coverage_forced_paper_bet"] = False
+            runtime_state["blocked_simulated_order_count"] = int(
+                runtime_state["blocked_simulated_order_count"]
+            ) + 1
+            guard_row["simulated_order_id"] = None
+            guard_row["post_decision_exposure_state"] = dict(runtime_state)
+            intent = None
+        attempt_rows.append(
+            _forced_coverage_attempt_row(
+                market_id=market_id,
+                source_trace=source_trace,
+                guard_row=guard_row,
+                intent=intent,
+                reason_codes=list(guard_row.get("execution_blocking_reason_codes") or []),
+            )
+        )
+    block_reasons = Counter(
+        reason
+        for row in attempt_rows
+        if row["forced_coverage_guard_passed"] is not True
+        for reason in row["forced_coverage_blocking_reason_codes"]
+    )
+    return {
+        "forced_coverage_round_ids": sorted(
+            {
+                str(intent.get("market_id"))
+                for intent in forced_intents
+                if intent.get("market_id")
+            }
+        ),
+        "forced_coverage_intents": forced_intents,
+        "forced_coverage_attempt_rows": attempt_rows,
+        "forced_coverage_guard_passed_count": len(forced_intents),
+        "forced_coverage_guard_blocked_count": len(attempt_rows) - len(forced_intents),
+        "forced_coverage_blocking_reason_distribution": dict(sorted(block_reasons.items())),
+    }
+
+
+def _runtime_state_from_intents(intents: list[dict[str, Any]]) -> dict[str, Any]:
+    state = _initial_fresh_runtime_state()
+    for intent in intents:
+        market_id = str(intent.get("market_id") or "")
+        side = str(intent.get("execution_guarded_side") or "NONE")
+        size = _float(intent.get("paper_fresh_order_size"))
+        if not market_id or size <= 0.0:
+            continue
+        state["current_market_exposure_by_market_id"][market_id] = (
+            _float(state["current_market_exposure_by_market_id"].get(market_id)) + size
+        )
+        state["current_side_exposure_by_side"][side] = (
+            _float(state["current_side_exposure_by_side"].get(side)) + size
+        )
+        state["current_total_exposure"] = _float(state["current_total_exposure"]) + size
+        position = {
+            "market_id": market_id,
+            "side": side,
+            "action": intent.get("execution_guarded_action"),
+            "notional": size,
+            "simulated_order_id": intent.get("simulated_order_id"),
+        }
+        state["open_position_by_market_id"][market_id] = position
+        state["open_position_by_market_side"][f"{market_id}|{side}"] = position
+        state["executed_simulated_order_count"] = int(
+            state["executed_simulated_order_count"]
+        ) + 1
+    return state
+
+
+def _forced_coverage_source_trace(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            bool(row.get("order_allowed")),
+            _float(
+                row.get("canonical_corrected_score")
+                or row.get("simplified_corrected_score")
+            ),
+            int(row.get("decision_ts") or 0),
+        ),
+        reverse=True,
+    )[0]
+
+
+def _forced_coverage_public_row(
+    *,
+    run_id: str,
+    source_trace: dict[str, Any],
+) -> dict[str, Any] | None:
+    ranking = _forced_coverage_full_ranking(source_trace)
+    candidate = next(
+        (
+            row
+            for row in ranking
+            if str(row.get("selected_action") or "") != "NO_TRADE"
+        ),
+        None,
+    )
+    if candidate is None:
+        return None
+    action = str(candidate["selected_action"])
+    side = str(candidate.get("selected_side") or _side_from_action(action))
+    family = str(candidate.get("selected_action_family") or _action_family(action))
+    decision_ts = int(source_trace.get("decision_ts") or 0)
+    return {
+        "decision_group_id": (
+            f"{run_id}|forced-coverage|{source_trace.get('market_id')}|{decision_ts}"
+        ),
+        "market_id": source_trace.get("market_id"),
+        "decision_ts": decision_ts,
+        "selected_action": action,
+        "selected_side": side,
+        "selected_action_family": family,
+        "full_5_action_ranking": ranking,
+        "corrected_model_score": _float(candidate.get("corrected_model_score")),
+        "raw_model_score": _float(candidate.get("raw_model_score")),
+        "high_score_flag": bool(source_trace.get("high_score_flag", True)),
+        "p_up": _float(source_trace.get("p_up")),
+        "p_down": _float(source_trace.get("p_down")),
+        "p_up_action_disagreement": _coverage_p_up_action_disagreement(
+            action=action,
+            p_up=_float(source_trace.get("p_up")),
+        ),
+        "microstructure_snapshot": {
+            "entry_ask": source_trace.get("entry_ask"),
+            "executable_exit_bid_proxy": source_trace.get("executable_exit_bid_proxy"),
+            "spread_bps": source_trace.get("spread_bps"),
+            "book_staleness_ms": source_trace.get("book_staleness_ms"),
+            "queue_fill_proxy": source_trace.get("queue_fill_proxy"),
+            "time_to_close_seconds": source_trace.get("time_to_close_seconds"),
+        },
+        "reference_price_feature_provenance": {
+            "provenance_valid": True,
+            "decision_ts": decision_ts,
+            "max_input_ts": source_trace.get("decision_time_feature_max_input_ts")
+            or decision_ts,
+            "source_fields_used": ["one_hour_signal_trace_decision_time_fields"],
+        },
+        "decision_time_feature_max_input_ts": source_trace.get(
+            "decision_time_feature_max_input_ts", decision_ts
+        ),
+        "public_data_source": source_trace.get("public_data_source"),
+        "coverage_forced_candidate_source": "one_hour_signal_trace_ranking_summary",
+    }
+
+
+def _forced_coverage_full_ranking(source_trace: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_rows = (
+        source_trace.get("canonical_full_5_action_ranking_summary")
+        if source_trace.get("canonical_scorer_used") is True
+        else source_trace.get("simplified_full_5_action_ranking_summary")
+    ) or []
+    rows = []
+    for row in raw_rows:
+        action = str(row.get("action") or row.get("selected_action") or "")
+        if not action:
+            continue
+        score = row.get("canonical_corrected_score", row.get("corrected_score"))
+        raw_score = row.get("canonical_raw_score", row.get("raw_score"))
+        rows.append(
+            {
+                "selected_action": action,
+                "selected_side": row.get("side") or _side_from_action(action),
+                "selected_action_family": row.get("family") or _action_family(action),
+                "corrected_model_score": _float(score),
+                "raw_model_score": _float(raw_score),
+            }
+        )
+    if not rows:
+        action = str(
+            source_trace.get("canonical_selected_action")
+            or source_trace.get("simplified_selected_action")
+            or ""
+        )
+        if action:
+            rows.append(
+                {
+                    "selected_action": action,
+                    "selected_side": source_trace.get("canonical_selected_side")
+                    or source_trace.get("simplified_selected_side")
+                    or _side_from_action(action),
+                    "selected_action_family": source_trace.get(
+                        "canonical_selected_family"
+                    )
+                    or source_trace.get("simplified_selected_family")
+                    or _action_family(action),
+                    "corrected_model_score": _float(
+                        source_trace.get("canonical_corrected_score")
+                        or source_trace.get("simplified_corrected_score")
+                    ),
+                    "raw_model_score": _float(source_trace.get("canonical_raw_score")),
+                }
+            )
+    return sorted(
+        rows,
+        key=lambda row: _float(row.get("corrected_model_score")),
+        reverse=True,
+    )
+
+
+def _coverage_p_up_action_disagreement(*, action: str, p_up: float) -> bool:
+    side = _side_from_action(action)
+    if side == "UP":
+        return p_up < 0.50
+    if side == "DOWN":
+        return p_up > 0.50
+    return False
+
+
+def _forced_coverage_attempt_row(
+    *,
+    market_id: str,
+    source_trace: dict[str, Any],
+    guard_row: dict[str, Any] | None,
+    intent: dict[str, Any] | None,
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    passed = intent is not None
+    blocking = sorted(set(reason_codes or ["forced_coverage_guard_blocked"]))
+    row = {
+        "market_id": market_id,
+        "decision_ts": source_trace.get("decision_ts"),
+        "coverage_forced_attempted": True,
+        "coverage_forced_paper_bet": passed,
+        "forced_coverage_guard_passed": passed,
+        "forced_coverage_blocking_reason_codes": [] if passed else blocking,
+        "forced_coverage_selected_action": (
+            guard_row.get("source_selected_action") if guard_row is not None else None
+        ),
+        "forced_coverage_execution_guarded_action": (
+            guard_row.get("execution_guarded_action") if guard_row is not None else None
+        ),
+        "paper_fresh_order_intent_id": (
+            intent.get("paper_fresh_order_intent_id") if intent is not None else None
+        ),
+        "uses_settlement_pnl_or_outcome_labels_in_decision_logic": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+    }
+    row["forced_coverage_attempt_row_hash"] = canonical_json_sha256(row)
+    return row
 
 
 def _settlement_resolution_report(
@@ -709,7 +1089,17 @@ def _one_hour_goal_report(
         "missing_bet_round_count": round_coverage["missing_bet_round_count"],
         "normal_policy_bet_count": remap_execution["normal_policy_bet_count"],
         "remap_paper_bet_count": remap_execution["remap_paper_bet_count"],
-        "forced_coverage_bet_count": 0,
+        "forced_coverage_bet_count": remap_execution["forced_coverage_bet_count"],
+        "forced_coverage_round_ids": remap_execution["forced_coverage_round_ids"],
+        "forced_coverage_guard_passed_count": remap_execution[
+            "forced_coverage_guard_passed_count"
+        ],
+        "forced_coverage_guard_blocked_count": remap_execution[
+            "forced_coverage_guard_blocked_count"
+        ],
+        "forced_coverage_blocking_reason_distribution": remap_execution[
+            "forced_coverage_blocking_reason_distribution"
+        ],
         "paper_intent_count": len(intents),
         "paper_fill_count": len(fills),
         "settled_pnl": settled_pnl,
@@ -791,6 +1181,16 @@ def _one_hour_goal_manifest(
         "normal_policy_bet_count": goal_report["normal_policy_bet_count"],
         "remap_paper_bet_count": goal_report["remap_paper_bet_count"],
         "forced_coverage_bet_count": goal_report["forced_coverage_bet_count"],
+        "forced_coverage_round_ids": goal_report["forced_coverage_round_ids"],
+        "forced_coverage_guard_passed_count": goal_report[
+            "forced_coverage_guard_passed_count"
+        ],
+        "forced_coverage_guard_blocked_count": goal_report[
+            "forced_coverage_guard_blocked_count"
+        ],
+        "forced_coverage_blocking_reason_distribution": goal_report[
+            "forced_coverage_blocking_reason_distribution"
+        ],
         "settled_pnl": goal_report["settled_pnl"],
         "unresolved_pnl": goal_report["unresolved_pnl"],
         "settlement_poll_attempt_count": goal_report["settlement_poll_attempt_count"],
@@ -828,6 +1228,8 @@ def _one_hour_goal_md(report: dict[str, Any]) -> str:
             f"- normal_policy_bet_count: `{report['normal_policy_bet_count']}`",
             f"- remap_paper_bet_count: `{report['remap_paper_bet_count']}`",
             f"- forced_coverage_bet_count: `{report['forced_coverage_bet_count']}`",
+            f"- forced_coverage_guard_passed_count: `{report['forced_coverage_guard_passed_count']}`",
+            f"- forced_coverage_guard_blocked_count: `{report['forced_coverage_guard_blocked_count']}`",
             f"- settled_pnl: `{report['settled_pnl']}`",
             f"- unresolved_pnl: `{report['unresolved_pnl']}`",
             f"- settlement_poll_attempt_count: `{report['settlement_poll_attempt_count']}`",
@@ -840,6 +1242,11 @@ def _one_hour_goal_md(report: dict[str, Any]) -> str:
                 f"- `{reason}`"
                 for reason in report["settlement_resolution_reason_codes"]
             ],
+            "",
+            "## Forced Coverage",
+            "",
+            f"- forced_coverage_round_ids: `{report['forced_coverage_round_ids']}`",
+            f"- forced_coverage_blocking_reason_distribution: `{report['forced_coverage_blocking_reason_distribution']}`",
             "",
             "## Failure Reasons",
             "",
@@ -871,6 +1278,9 @@ def _remap_execution_md(report: dict[str, Any]) -> str:
             f"- same_side_sbc_remap_guard_passed_count: `{report['same_side_sbc_remap_guard_passed_count']}`",
             f"- remap_paper_bet_count: `{report['remap_paper_bet_count']}`",
             f"- normal_policy_bet_count: `{report['normal_policy_bet_count']}`",
+            f"- forced_coverage_bet_count: `{report['forced_coverage_bet_count']}`",
+            f"- forced_coverage_guard_passed_count: `{report['forced_coverage_guard_passed_count']}`",
+            f"- forced_coverage_guard_blocked_count: `{report['forced_coverage_guard_blocked_count']}`",
             "",
         ]
     )

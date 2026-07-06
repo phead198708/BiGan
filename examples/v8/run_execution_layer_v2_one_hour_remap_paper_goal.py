@@ -10,6 +10,7 @@ from pathlib import Path
 from bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal import (
     DEFAULT_FROZEN_EV_CALIBRATION_ARTIFACT,
     DEFAULT_ONE_HOUR_UNLOCK_DIR,
+    PINNED_ISSUE_160_MANIFEST_SHA256,
     ExecutionLayerV2OneHourRemapPaperGoalConfig,
     run_execution_layer_v2_one_hour_remap_paper_goal,
 )
@@ -42,8 +43,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--paper-candidate-unlock-manifest-sha256",
-        default=None,
+        default=PINNED_ISSUE_160_MANIFEST_SHA256,
     )
+    parser.add_argument("--allow-unpinned-unlock-manifest", action="store_true")
     parser.add_argument(
         "--frozen-ev-calibration-artifact",
         type=Path,
@@ -56,6 +58,11 @@ def main() -> None:
     )
     parser.add_argument("--overwrite-existing", action="store_true")
     args = parser.parse_args()
+    expected_unlock_manifest_sha256 = (
+        None
+        if args.allow_unpinned_unlock_manifest
+        else args.paper_candidate_unlock_manifest_sha256
+    )
 
     result = run_execution_layer_v2_one_hour_remap_paper_goal(
         ExecutionLayerV2OneHourRemapPaperGoalConfig(
@@ -65,7 +72,7 @@ def main() -> None:
             poll_interval_seconds=args.poll_interval_seconds,
             paper_candidate_unlock_dir=args.paper_candidate_unlock_dir,
             expected_paper_candidate_unlock_manifest_sha256=(
-                args.paper_candidate_unlock_manifest_sha256
+                expected_unlock_manifest_sha256
             ),
             frozen_ev_calibration_artifact_path=args.frozen_ev_calibration_artifact,
             canonical_o_source_manifest_path=args.canonical_o_source_manifest,

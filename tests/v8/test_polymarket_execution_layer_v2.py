@@ -1146,6 +1146,11 @@ def test_execution_layer_v2_one_hour_goal_reports_missing_round_bet_fail_closed(
     assert report["complete_rounds_with_bet_count"] == 0
     assert report["missing_bet_round_count"] == 1
     assert report["remap_paper_bet_count"] == 0
+    assert report["forced_coverage_bet_count"] == 0
+    assert report["forced_coverage_guard_blocked_count"] == 1
+    assert "execution_time_to_close_unsafe" in report[
+        "forced_coverage_blocking_reason_distribution"
+    ]
     assert report["final_goal_success"] is False
     assert "complete_rounds_missing_paper_bets" in report[
         "goal_failure_reason_codes"
@@ -1155,6 +1160,57 @@ def test_execution_layer_v2_one_hour_goal_reports_missing_round_bet_fail_closed(
     assert result.manifest["v8_execution_handoff_allowed"] is False
     assert result.manifest["#134_resume_allowed"] is False
     assert result.manifest["#146_start_allowed"] is False
+
+
+def test_execution_layer_v2_one_hour_goal_forced_coverage_creates_guarded_bet(
+    tmp_path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    row = _paper_fresh_public_row(
+        index=1,
+        market_id="one-hour-forced-coverage",
+        action="NO_TRADE",
+        side="NONE",
+        p_up=0.82,
+    )
+    _set_action_score(row, "NO_TRADE", 1.60)
+    _set_action_score(row, "BUY_UP_HOLD_TO_SETTLEMENT", 1.30)
+    row["microstructure_snapshot"]["time_to_close_seconds"] = 360.0
+
+    result = run_execution_layer_v2_one_hour_remap_paper_goal(
+        ExecutionLayerV2OneHourRemapPaperGoalConfig(
+            run_id="one-hour-goal-forced-coverage",
+            output_dir=tmp_path / "runs",
+            duration_seconds=3600,
+            poll_interval_seconds=0.0,
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((row,),),
+            settlement_evaluation_rows=(
+                {"market_id": "one-hour-forced-coverage", "settlement_pnl": 0.25},
+            ),
+        )
+    )
+
+    report = result.goal_report
+    intents = _read_jsonl(result.artifact_paths["paper_intent_log"])
+    fills = _read_jsonl(result.artifact_paths["paper_fill_log"])
+    ledger = _read_jsonl(result.artifact_paths["paper_ledger_log"])
+    assert report["complete_round_count"] == 1
+    assert report["complete_rounds_with_bet_count"] == 1
+    assert report["missing_bet_round_count"] == 0
+    assert report["normal_policy_bet_count"] == 0
+    assert report["remap_paper_bet_count"] == 0
+    assert report["forced_coverage_bet_count"] == 1
+    assert report["forced_coverage_guard_passed_count"] == 1
+    assert report["forced_coverage_guard_blocked_count"] == 0
+    assert report["forced_coverage_round_ids"] == ["one-hour-forced-coverage"]
+    assert intents[0]["coverage_forced_paper_bet"] is True
+    assert intents[0]["order_origin"] == "forced_coverage_full_guard_paper_only"
+    assert fills[0]["execution_guarded_action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+    assert ledger[0]["outcome_pnl_used"] is False
+    assert result.manifest["forced_coverage_bet_count"] == 1
+    assert result.manifest["v8_execution_handoff_allowed"] is False
 
 
 def test_execution_layer_v2_one_hour_goal_polls_read_only_resolution_provider(
