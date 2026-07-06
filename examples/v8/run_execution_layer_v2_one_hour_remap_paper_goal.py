@@ -37,6 +37,16 @@ def main() -> None:
     parser.add_argument("--settlement-poll-max-wait-seconds", type=float, default=600.0)
     parser.add_argument("--settlement-poll-interval-seconds", type=float, default=15.0)
     parser.add_argument(
+        "--max-consecutive-orderbook-failure-rounds",
+        type=int,
+        default=3,
+    )
+    parser.add_argument(
+        "--allow-short-diagnostic-run",
+        action="store_true",
+        help="Allow duration-seconds below 3600 for bounded smoke diagnostics.",
+    )
+    parser.add_argument(
         "--paper-candidate-unlock-dir",
         type=Path,
         default=DEFAULT_ONE_HOUR_UNLOCK_DIR,
@@ -78,6 +88,10 @@ def main() -> None:
             canonical_o_source_manifest_path=args.canonical_o_source_manifest,
             settlement_poll_max_wait_seconds=args.settlement_poll_max_wait_seconds,
             settlement_poll_interval_seconds=args.settlement_poll_interval_seconds,
+            max_consecutive_orderbook_failure_rounds=(
+                args.max_consecutive_orderbook_failure_rounds
+            ),
+            allow_short_diagnostic_run=args.allow_short_diagnostic_run,
             overwrite_existing=args.overwrite_existing,
         )
     )
@@ -99,6 +113,12 @@ def main() -> None:
     print(f"settlement_poll_attempt_count={report['settlement_poll_attempt_count']}")
     print(f"settlement_evaluation_row_count={report['settlement_evaluation_row_count']}")
     print(f"settlement_resolution_reason_codes={report['settlement_resolution_reason_codes']}")
+    print(f"provider_fail_fast_stop_triggered={str(report['provider_fail_fast_stop_triggered']).lower()}")
+    print(f"provider_fail_fast_reason_codes={report['provider_fail_fast_reason_codes']}")
+    print(
+        "consecutive_orderbook_failure_count_at_stop="
+        f"{report['consecutive_orderbook_failure_count_at_stop']}"
+    )
     print(f"final_goal_success={str(report['final_goal_success']).lower()}")
     print(f"goal_failure_reason_codes={report['goal_failure_reason_codes']}")
     print(

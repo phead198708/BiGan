@@ -82,12 +82,15 @@ class ExecutionLayerV2OneHourRemapPaperGoalConfig:
     settlement_poll_max_wait_seconds: float = 600.0
     settlement_poll_interval_seconds: float = 15.0
     max_consecutive_orderbook_failure_rounds: int = 3
+    allow_short_diagnostic_run: bool = False
     overwrite_existing: bool = False
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
             raise ValueError("run_id is required")
-        if self.duration_seconds < 3600:
+        if self.duration_seconds <= 0:
+            raise ValueError("duration_seconds must be positive")
+        if self.duration_seconds < 3600 and not self.allow_short_diagnostic_run:
             raise ValueError("duration_seconds must be at least 3600")
         if self.poll_interval_seconds < 0.0:
             raise ValueError("poll_interval_seconds must be non-negative")
@@ -1846,6 +1849,7 @@ def _one_hour_goal_report(
         "run_id": config.run_id,
         "duration_seconds": config.duration_seconds,
         "duration_requirement_passed": config.duration_seconds >= 3600,
+        "short_diagnostic_run_allowed": config.allow_short_diagnostic_run,
         "public_data_source": fresh_result.manifest["paper_fresh_loop_public_data_source"],
         "read_only_public_provider_required_for_real_run": True,
         "uses_read_only_public_provider_only": (
