@@ -71,6 +71,12 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--frozen-ev-calibration-artifact",
+        type=Path,
+        default=None,
+        help="Optional frozen EV calibration artifact for paper remap EV checks.",
+    )
+    parser.add_argument(
         "--overwrite-existing",
         action="store_true",
         help="Replace an existing run directory with the same run id.",
@@ -100,6 +106,7 @@ def main() -> None:
         public_data_cycles=public_cycles,
         public_data_source=public_data_source,
         canonical_o_source_manifest_path=args.canonical_o_source_manifest,
+        frozen_ev_calibration_artifact_path=args.frozen_ev_calibration_artifact,
         overwrite_existing=args.overwrite_existing,
     )
     result = run_polymarket_o_v8_paper_fresh_loop(config)

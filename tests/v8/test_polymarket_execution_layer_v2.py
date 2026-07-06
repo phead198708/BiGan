@@ -19,11 +19,20 @@ from bigan.v8.polymarket.training.execution_layer_v2 import (
     run_execution_layer_v2_backtest,
     time_decayed_kelly_notional,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal import (
+    ONE_HOUR_REMAP_PAPER_GOAL_SCHEMA_VERSION,
+    ExecutionLayerV2OneHourRemapPaperGoalConfig,
+    run_execution_layer_v2_one_hour_remap_paper_goal,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_policy_replay import (
     ExecutionLayerV2ForwardShadowConfig,
     ExecutionLayerV2PolicyReplayConfig,
     run_execution_layer_v2_forward_shadow_policy,
     run_execution_layer_v2_policy_replay_from_settlement_csv,
+)
+from tests.v8.test_polymarket_post_freeze_holdout import (
+    _build_issue160_unlock_fixture,
+    _paper_fresh_public_row,
 )
 
 
@@ -1033,6 +1042,121 @@ def test_execution_layer_v2_forward_shadow_nested_forbidden_fields_fail_closed(
     )
 
 
+def test_execution_layer_v2_one_hour_goal_remap_success_with_positive_settlement(
+    tmp_path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    row = _paper_fresh_public_row(
+        index=1,
+        market_id="one-hour-remap-success",
+        action="BUY_UP_HOLD_TO_SETTLEMENT",
+        side="UP",
+        p_up=0.82,
+    )
+    row["microstructure_snapshot"]["time_to_close_seconds"] = 90.0
+    _set_action_score(row, "BUY_UP_SELL_BEFORE_CLOSE", 1.50)
+
+    result = run_execution_layer_v2_one_hour_remap_paper_goal(
+        ExecutionLayerV2OneHourRemapPaperGoalConfig(
+            run_id="one-hour-goal-success",
+            output_dir=tmp_path / "runs",
+            duration_seconds=3600,
+            poll_interval_seconds=0.0,
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((row,),),
+            settlement_evaluation_rows=(
+                {"market_id": "one-hour-remap-success", "settlement_pnl": 0.25},
+            ),
+        )
+    )
+
+    report = result.goal_report
+    assert report["schema_version"] == ONE_HOUR_REMAP_PAPER_GOAL_SCHEMA_VERSION
+    assert report["duration_seconds"] == 3600
+    assert report["complete_round_count"] == 1
+    assert report["complete_rounds_with_bet_count"] == 1
+    assert report["missing_bet_round_count"] == 0
+    assert report["normal_policy_bet_count"] == 0
+    assert report["remap_paper_bet_count"] == 1
+    assert report["forced_coverage_bet_count"] == 0
+    assert report["settled_pnl"] == pytest.approx(0.25)
+    assert report["unresolved_pnl"] == 0.0
+    assert report["final_goal_success"] is True
+    assert report["uses_settlement_pnl_or_outcome_labels_in_decision_logic"] is False
+    assert report["paper_only"] is True
+    assert report["capital_at_risk"] is False
+    assert report["polymarket_write_enabled"] is False
+    assert report["wallet_signing_enabled"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["#134_resume_allowed"] is False
+    assert report["#146_start_allowed"] is False
+
+    intents = _read_jsonl(result.artifact_paths["paper_intent_log"])
+    fills = _read_jsonl(result.artifact_paths["paper_fill_log"])
+    settlement_rows = _read_jsonl(result.artifact_paths["settlement_pnl_rows"])
+    assert len(intents) == 1
+    assert len(fills) == 1
+    assert len(settlement_rows) == 1
+    assert intents[0]["hts_time_window_remap_applied"] is True
+    assert intents[0]["original_action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+    assert intents[0]["remapped_action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert fills[0]["execution_guarded_action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert settlement_rows[0]["settlement_status"] == "settled"
+    assert result.round_coverage_report["missing_bet_round_count"] == 0
+    assert result.remap_execution_report["remap_paper_bet_count"] == 1
+    assert "one_hour_remap_paper_goal_report" in result.manifest["artifact_hashes"]
+    assert result.manifest["final_goal_success"] is True
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def test_execution_layer_v2_one_hour_goal_reports_missing_round_bet_fail_closed(
+    tmp_path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    row = _paper_fresh_public_row(
+        index=1,
+        market_id="one-hour-remap-blocked",
+        action="BUY_UP_HOLD_TO_SETTLEMENT",
+        side="UP",
+        p_up=0.82,
+    )
+    row["microstructure_snapshot"]["time_to_close_seconds"] = 90.0
+    for candidate in row["full_5_action_ranking"]:
+        if candidate["selected_action"] == "BUY_UP_SELL_BEFORE_CLOSE":
+            candidate["microstructure_snapshot"] = {
+                **row["microstructure_snapshot"],
+                "spread_bps": 9_999.0,
+            }
+
+    result = run_execution_layer_v2_one_hour_remap_paper_goal(
+        ExecutionLayerV2OneHourRemapPaperGoalConfig(
+            run_id="one-hour-goal-fail",
+            output_dir=tmp_path / "runs",
+            duration_seconds=3600,
+            poll_interval_seconds=0.0,
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((row,),),
+        )
+    )
+
+    report = result.goal_report
+    assert report["complete_round_count"] == 1
+    assert report["complete_rounds_with_bet_count"] == 0
+    assert report["missing_bet_round_count"] == 1
+    assert report["remap_paper_bet_count"] == 0
+    assert report["final_goal_success"] is False
+    assert "complete_rounds_missing_paper_bets" in report[
+        "goal_failure_reason_codes"
+    ]
+    assert "settled_pnl_not_positive" in report["goal_failure_reason_codes"]
+    assert result.remap_execution_report["remap_paper_bet_count"] == 0
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
+    assert result.manifest["#146_start_allowed"] is False
+
+
 def _write_settlement_csv(path, rows: list[dict[str, object]]) -> None:
     fieldnames = [
         "market_id",
@@ -1060,6 +1184,22 @@ def _write_jsonl(path, rows: list[dict[str, object]]) -> None:
         "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def _read_jsonl(path) -> list[dict[str, object]]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _set_action_score(row: dict[str, object], action: str, score: float) -> None:
+    for candidate in row["full_5_action_ranking"]:
+        if candidate["selected_action"] == action:
+            candidate["corrected_model_score"] = score
+            return
+    raise AssertionError(f"missing action in full ranking: {action}")
 
 
 def _write_ev_calibration_artifact(

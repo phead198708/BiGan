@@ -24,6 +24,10 @@ from bigan.v8.polymarket.training.contracts import (
     POLYMARKET_POLICY_TRAINING_PHASE,
     compact_safety_fields,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_policy_replay import (
+    _calibrated_expected_return_source,
+    _load_frozen_ev_calibration_artifact,
+)
 from bigan.v8.polymarket.training.o_v8_paper_candidate_unlock import (
     _sha256_file as _sha256_file_existing,
 )
@@ -176,6 +180,7 @@ class PolymarketOV8PaperFreshLoopConfig:
     public_provider: Any | None = None
     initial_paper_position_rows: tuple[dict[str, Any], ...] = ()
     canonical_o_source_manifest_path: Path | str | None = None
+    frozen_ev_calibration_artifact_path: Path | str | None = None
     expected_paper_candidate_unlock_manifest_sha256: str | None = (
         PINNED_ISSUE_160_MANIFEST_SHA256
     )
@@ -231,6 +236,15 @@ class PolymarketOV8PaperFreshLoopConfig:
                 self,
                 "canonical_o_source_manifest_path",
                 Path(self.canonical_o_source_manifest_path),
+            )
+        if self.frozen_ev_calibration_artifact_path is not None and not isinstance(
+            self.frozen_ev_calibration_artifact_path,
+            Path,
+        ):
+            object.__setattr__(
+                self,
+                "frozen_ev_calibration_artifact_path",
+                Path(self.frozen_ev_calibration_artifact_path),
             )
 
 
@@ -308,6 +322,9 @@ def run_polymarket_o_v8_paper_fresh_loop(
         public_data_collection_report=public_data_collection_report,
         canonical_scorer_report=canonical_scorer_report,
     )
+    ev_calibration_artifact = _load_frozen_ev_calibration_artifact(
+        config.frozen_ev_calibration_artifact_path
+    )
     execution_cycles = _fresh_execution_cycles_from_canonical_scorer(
         public_cycles=public_cycles,
         canonical_scorer_report=canonical_scorer_report,
@@ -317,6 +334,7 @@ def run_polymarket_o_v8_paper_fresh_loop(
         public_cycles=execution_cycles,
         public_data_source=public_data_collection_report["public_data_source"],
         unlock_verified=unlock_verified,
+        ev_calibration_artifact=ev_calibration_artifact,
     )
     intents = execution_result["paper_order_intents"]
     fills = _fresh_paper_fills_from_intents(intents)
@@ -434,6 +452,8 @@ def run_polymarket_o_v8_paper_fresh_loop(
         / "o_v8_paper_fresh_fill_simulation_report.json",
         "fresh_fill_simulation_summary": output_dir
         / "o_v8_paper_fresh_fill_simulation_report.md",
+        "fresh_fill_log": output_dir / "o_v8_paper_fresh_fill_log.jsonl",
+        "fresh_ledger_log": output_dir / "o_v8_paper_fresh_ledger_log.jsonl",
         "fresh_runtime_safety_report": output_dir
         / "o_v8_paper_fresh_runtime_safety_report.json",
         "fresh_runtime_safety_summary": output_dir
@@ -516,6 +536,8 @@ def run_polymarket_o_v8_paper_fresh_loop(
         artifact_paths["fresh_fill_simulation_summary"],
         _fresh_fill_simulation_md(fill_report),
     )
+    _write_jsonl(artifact_paths["fresh_fill_log"], fills)
+    _write_jsonl(artifact_paths["fresh_ledger_log"], ledger_rows)
     _write_json(artifact_paths["fresh_runtime_safety_report"], safety_report)
     _write_text(
         artifact_paths["fresh_runtime_safety_summary"],
@@ -1413,6 +1435,7 @@ def _execute_fresh_public_cycles(
     public_cycles: list[list[dict[str, Any]]],
     public_data_source: str,
     unlock_verified: bool,
+    ev_calibration_artifact: dict[str, Any],
 ) -> dict[str, Any]:
     runtime_state = _initial_fresh_runtime_state()
     guard_config = _v8_execution_guard_config()
@@ -1455,6 +1478,7 @@ def _execute_fresh_public_cycles(
                     cycle_id=cycle_id,
                     public_data_source=public_data_source,
                     pre_state=pre_state,
+                    ev_calibration_artifact=ev_calibration_artifact,
                 )
                 if remap_row is not None:
                     all_remap_rows.append(remap_row)
@@ -1521,6 +1545,7 @@ def _paper_hts_time_window_remap_guard_row(
     cycle_id: str,
     public_data_source: str,
     pre_state: dict[str, Any],
+    ev_calibration_artifact: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     if not _paper_hts_time_window_remap_applicable(
         original_guard_row=original_guard_row,
@@ -1549,8 +1574,14 @@ def _paper_hts_time_window_remap_guard_row(
             calibrated_ev_source="missing_same_side_sbc_candidate",
             reason_codes=[*reason_codes, "same_side_sbc_alternative_missing"],
         )
+    reason_codes.append("same_side_sbc_alternative_available")
 
-    calibrated_ev, ev_source = _paper_remap_calibrated_ev(guard_input)
+    calibrated_ev, ev_source = _paper_remap_calibrated_ev(
+        guard_input=guard_input,
+        candidate=candidate,
+        side=side,
+        ev_calibration_artifact=ev_calibration_artifact,
+    )
     if calibrated_ev is None:
         return original_guard_row, _paper_remap_row(
             original_guard_row=original_guard_row,
@@ -1630,7 +1661,6 @@ def _paper_hts_time_window_remap_guard_row(
     )
     remap_reasons = [
         *reason_codes,
-        "same_side_sbc_alternative_available",
         "same_side_sbc_calibrated_ev_threshold_passed",
     ]
     if remapped_guard_row.get("order_allowed") is True:
@@ -1690,10 +1720,55 @@ def _paper_same_side_sbc_candidate(
     return None
 
 
-def _paper_remap_calibrated_ev(guard_input: dict[str, Any]) -> tuple[float | None, str]:
-    explicit = guard_input.get("calibrated_action_expected_net_return")
+def _paper_remap_calibrated_ev(
+    *,
+    guard_input: dict[str, Any],
+    candidate: dict[str, Any],
+    side: str,
+    ev_calibration_artifact: dict[str, Any],
+) -> tuple[float | None, str]:
+    explicit = candidate.get(
+        "calibrated_action_expected_net_return",
+        guard_input.get("calibrated_action_expected_net_return"),
+    )
     if explicit is not None:
         return _float(explicit), "input_calibrated_action_expected_net_return"
+    micro = {
+        **dict(guard_input.get("microstructure_snapshot") or {}),
+        **dict(candidate.get("microstructure_snapshot") or {}),
+    }
+    if ev_calibration_artifact.get("path") is not None:
+        source_score = candidate.get(
+            "corrected_model_score",
+            guard_input.get("corrected_model_score"),
+        )
+        expected_return, _, ev_source, _, reasons = _calibrated_expected_return_source(
+            input_expected_return=None,
+            input_expected_return_field=None,
+            canonical_score=_trace_float_or_none(source_score),
+            canonical_score_field="same_side_sbc.corrected_model_score",
+            canonical_raw_score=_trace_float_or_none(
+                candidate.get("raw_model_score", guard_input.get("raw_model_score"))
+            ),
+            canonical_raw_score_field="same_side_sbc.raw_model_score",
+            execution_price=_trace_float_or_none(micro.get("entry_ask")),
+            execution_price_field="microstructure_snapshot.entry_ask",
+            executable_exit_bid_proxy=_trace_float_or_none(
+                micro.get("executable_exit_bid_proxy")
+            ),
+            spread_bps=_trace_float_or_none(micro.get("spread_bps")),
+            queue_fill_proxy=_trace_float_or_none(micro.get("queue_fill_proxy")),
+            book_staleness_ms=_trace_float_or_none(micro.get("book_staleness_ms")),
+            time_to_close=_trace_float_or_none(micro.get("time_to_close_seconds")),
+            family="SELL_BEFORE_CLOSE",
+            side=side,
+            execution_cost=O_V8_PAPER_FRESH_HTS_REMAP_EXECUTION_COST,
+            ev_calibration_artifact=ev_calibration_artifact,
+        )
+        if expected_return is None:
+            reason_suffix = ",".join(reasons) if reasons else "unknown"
+            return None, f"{ev_source}:{reason_suffix}"
+        return expected_return, ev_source
     source_score = guard_input.get("corrected_model_score")
     if source_score is None:
         return None, "missing_source_model_score_for_frozen_ev_mapping"
