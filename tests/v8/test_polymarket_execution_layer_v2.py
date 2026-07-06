@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+from pathlib import Path
 
 import pytest
 
@@ -1108,6 +1109,20 @@ def test_execution_layer_v2_one_hour_goal_remap_success_with_positive_settlement
     assert "one_hour_remap_paper_goal_report" in result.manifest["artifact_hashes"]
     assert result.manifest["final_goal_success"] is True
     assert result.manifest["v8_execution_handoff_allowed"] is False
+    per_round_manifest = json.loads(
+        Path(result.goal_report["per_round_artifact_manifest_path"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert report["per_round_async_artifact_flush_enabled"] is True
+    assert report["per_round_bet_artifact_count"] == 1
+    assert report["per_round_outcome_artifact_count"] == 1
+    assert per_round_manifest["round_artifact_rows"][0][
+        "paper_bet_artifact_exists"
+    ] is True
+    assert per_round_manifest["round_artifact_rows"][0][
+        "round_outcome_artifact_exists"
+    ] is True
 
 
 def test_execution_layer_v2_one_hour_goal_reports_missing_round_bet_fail_closed(
@@ -1274,6 +1289,51 @@ def test_execution_layer_v2_one_hour_goal_polls_read_only_resolution_provider(
     assert result.manifest["v8_execution_handoff_allowed"] is False
 
 
+def test_execution_layer_v2_one_hour_goal_stops_after_consecutive_orderbook_failures(
+    tmp_path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    provider = _NoOrderbookProvider()
+
+    result = run_execution_layer_v2_one_hour_remap_paper_goal(
+        ExecutionLayerV2OneHourRemapPaperGoalConfig(
+            run_id="one-hour-goal-orderbook-fail-fast",
+            output_dir=tmp_path / "runs",
+            duration_seconds=3600,
+            poll_interval_seconds=3600.0,
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_provider=provider,
+            max_consecutive_orderbook_failure_rounds=1,
+        )
+    )
+
+    report = result.goal_report
+    fresh_report = result.manifest
+    assert provider.orderbook_calls == 1
+    assert report["provider_fail_fast_stop_triggered"] is True
+    assert report["max_consecutive_orderbook_failure_rounds"] == 1
+    assert report["consecutive_orderbook_failure_count_at_stop"] == 1
+    assert "orderbook_collection_failed_consecutive_limit" in report[
+        "goal_failure_reason_codes"
+    ]
+    assert "consecutive_orderbook_collection_failures_exceeded_limit" in report[
+        "provider_fail_fast_reason_codes"
+    ]
+    assert report["complete_round_count"] == 0
+    assert report["paper_intent_count"] == 0
+    assert report["final_goal_success"] is False
+    assert fresh_report["provider_fail_fast_stop_triggered"] is True
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    status_rows = _read_jsonl(
+        result.output_dir
+        / "incremental_fresh_loop"
+        / "provider_cycle_status.jsonl"
+    )
+    assert status_rows[0]["orderbook_failure"] is True
+    assert status_rows[0]["public_orderbook_row_count"] == 0
+
+
 def _write_settlement_csv(path, rows: list[dict[str, object]]) -> None:
     fieldnames = [
         "market_id",
@@ -1357,6 +1417,65 @@ class _OneHourResolvedOutcomeProvider:
                 }
             )
         return rows
+
+
+class _NoOrderbookProvider:
+    read_only = True
+    write_capable = False
+    paper_only = True
+    capital_at_risk = False
+    broker_exchange_write_enabled = False
+    live_exchange_write_enabled = False
+    polymarket_write_enabled = False
+    wallet_signing_enabled = False
+
+    def __init__(self) -> None:
+        self.orderbook_calls = 0
+
+    def market_rows(self, config):
+        del config
+        return [
+            {
+                "market_id": "no-orderbook-round",
+                "condition_id": "no-orderbook-condition",
+                "slug": "btc-updown-5m-no-orderbook",
+                "market_family": "btc_updown_5m",
+                "up_token_id": "up-token",
+                "down_token_id": "down-token",
+                "market_start_ts": 1_000_000,
+                "market_end_ts": 1_300_000,
+                "reference_price_source": "polymarket_official_btc_usd_reference",
+                "reference_price_start": 100_000.0,
+            }
+        ]
+
+    def orderbook_rows(self, markets, config):
+        del markets, config
+        self.orderbook_calls += 1
+        return []
+
+    def trade_rows(self, markets, config):
+        del config
+        return [
+            {
+                "market_id": market["market_id"],
+                "price": 0.50,
+                "size": 1.0,
+                "ts": 1_010_000,
+            }
+            for market in markets
+        ]
+
+    def btc_feature_candle_rows(self, markets, config):
+        del markets, config
+        return [
+            {
+                "ts": 1_000_000,
+                "available_at_ts": 1_000_000,
+                "close_price": 100_001.0,
+                "source": "pytest",
+            }
+        ]
 
 
 def _write_ev_calibration_artifact(

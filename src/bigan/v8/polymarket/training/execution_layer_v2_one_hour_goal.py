@@ -8,6 +8,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256
@@ -80,6 +81,7 @@ class ExecutionLayerV2OneHourRemapPaperGoalConfig:
     settlement_evaluation_rows: tuple[dict[str, Any], ...] = ()
     settlement_poll_max_wait_seconds: float = 600.0
     settlement_poll_interval_seconds: float = 15.0
+    max_consecutive_orderbook_failure_rounds: int = 3
     overwrite_existing: bool = False
 
     def __post_init__(self) -> None:
@@ -93,6 +95,8 @@ class ExecutionLayerV2OneHourRemapPaperGoalConfig:
             raise ValueError("settlement_poll_max_wait_seconds must be non-negative")
         if self.settlement_poll_interval_seconds <= 0.0:
             raise ValueError("settlement_poll_interval_seconds must be positive")
+        if self.max_consecutive_orderbook_failure_rounds <= 0:
+            raise ValueError("max_consecutive_orderbook_failure_rounds must be positive")
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         object.__setattr__(
             self, "paper_candidate_unlock_dir", Path(self.paper_candidate_unlock_dir)
@@ -133,6 +137,217 @@ class ExecutionLayerV2OneHourRemapPaperGoalResult:
     manifest: dict[str, Any]
 
 
+def _run_incremental_read_only_provider_fresh_loop(
+    *,
+    config: ExecutionLayerV2OneHourRemapPaperGoalConfig,
+    goal_dir: Path,
+    max_cycles: int,
+    base_fresh_loop_config: PolymarketOV8PaperFreshLoopConfig,
+) -> SimpleNamespace:
+    """Collect read-only provider data once per poll cycle and fail fast on book loss."""
+
+    aggregate_dir = goal_dir / "incremental_fresh_loop"
+    cycle_output_dir = goal_dir / "incremental_fresh_loop_cycles"
+    aggregate_dir.mkdir(parents=True, exist_ok=True)
+    cycle_output_dir.mkdir(parents=True, exist_ok=True)
+
+    all_trace_rows: list[dict[str, Any]] = []
+    all_intents: list[dict[str, Any]] = []
+    all_fills: list[dict[str, Any]] = []
+    all_ledger_rows: list[dict[str, Any]] = []
+    all_remap_rows: list[dict[str, Any]] = []
+    cycle_status_rows: list[dict[str, Any]] = []
+    cycle_results: list[Any] = []
+    reason_counter: Counter[str] = Counter()
+    block_counter: Counter[str] = Counter()
+    consecutive_orderbook_failures = 0
+    max_consecutive_failures = config.max_consecutive_orderbook_failure_rounds
+    fail_fast_stop_triggered = False
+    fail_fast_reason_codes: list[str] = []
+
+    for cycle_index in range(max_cycles):
+        cycle_run_id = f"{base_fresh_loop_config.run_id}-cycle-{cycle_index + 1:06d}"
+        cycle_config = PolymarketOV8PaperFreshLoopConfig(
+            run_id=cycle_run_id,
+            output_dir=cycle_output_dir,
+            paper_candidate_unlock_dir=config.paper_candidate_unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=(
+                config.expected_paper_candidate_unlock_manifest_sha256
+            ),
+            loop_mode="single_cycle",
+            max_cycles=1,
+            sleep_seconds=0.0,
+            public_data_cycles=None,
+            public_data_source=O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
+            public_provider=config.public_provider,
+            canonical_o_source_manifest_path=config.canonical_o_source_manifest_path,
+            frozen_ev_calibration_artifact_path=(
+                config.frozen_ev_calibration_artifact_path
+            ),
+            overwrite_existing=config.overwrite_existing,
+        )
+        cycle_result = run_polymarket_o_v8_paper_fresh_loop(cycle_config)
+        cycle_results.append(cycle_result)
+
+        public_report = cycle_result.fresh_loop_run_report[
+            "public_data_collection_report"
+        ]
+        orderbook_count = int(public_report.get("public_orderbook_row_count") or 0)
+        feature_count = int(public_report.get("public_feature_row_count") or 0)
+        orderbook_failure = orderbook_count <= 0 or feature_count <= 0
+        if orderbook_failure:
+            consecutive_orderbook_failures += 1
+        else:
+            consecutive_orderbook_failures = 0
+
+        reason_codes = list(public_report.get("public_data_collection_reason_codes") or [])
+        reason_counter.update(reason_codes)
+        block_counter.update(
+            cycle_result.fresh_loop_run_report.get("block_reason_distribution") or {}
+        )
+        cycle_trace_rows = list(cycle_result.signal_trace_report.get("trace_rows") or [])
+        cycle_intents = _read_jsonl(cycle_result.artifact_paths["fresh_order_intent_log"])
+        cycle_fills = _read_jsonl(cycle_result.artifact_paths["fresh_fill_log"])
+        cycle_ledger_rows = _read_jsonl(cycle_result.artifact_paths["fresh_ledger_log"])
+        all_trace_rows.extend(cycle_trace_rows)
+        all_intents.extend(cycle_intents)
+        all_fills.extend(cycle_fills)
+        all_ledger_rows.extend(cycle_ledger_rows)
+        all_remap_rows.extend(
+            cycle_result.execution_layer_v2_paper_remap_report.get("remap_rows", [])
+        )
+
+        cycle_status = {
+            "cycle_index": cycle_index,
+            "cycle_run_id": cycle_run_id,
+            "provider_collection_failed": public_report[
+                "paper_fresh_provider_collection_failed"
+            ],
+            "orderbook_failure": orderbook_failure,
+            "consecutive_orderbook_failure_count": consecutive_orderbook_failures,
+            "max_consecutive_orderbook_failure_rounds": max_consecutive_failures,
+            "public_data_collection_reason_codes": reason_codes,
+            "public_market_count": public_report.get("public_market_count"),
+            "public_orderbook_row_count": orderbook_count,
+            "public_trade_row_count": public_report.get("public_trade_row_count"),
+            "public_btc_feature_candle_row_count": public_report.get(
+                "public_btc_feature_candle_row_count"
+            ),
+            "public_feature_row_count": feature_count,
+            "signal_trace_row_count": len(cycle_trace_rows),
+            "paper_intent_count": len(cycle_intents),
+            "paper_fill_count": len(cycle_fills),
+            "paper_only": True,
+            "capital_at_risk": False,
+            "polymarket_write_enabled": False,
+            "wallet_signing_enabled": False,
+            "v8_execution_handoff_allowed": False,
+        }
+        cycle_status_rows.append(cycle_status)
+        _write_jsonl(
+            aggregate_dir / "provider_cycle_status.jsonl",
+            cycle_status_rows,
+        )
+
+        _write_per_round_bet_artifacts(
+            goal_dir=goal_dir,
+            intents=all_intents,
+            fills=all_fills,
+            ledger_rows=all_ledger_rows,
+        )
+
+        if consecutive_orderbook_failures >= max_consecutive_failures:
+            fail_fast_stop_triggered = True
+            fail_fast_reason_codes = [
+                "consecutive_orderbook_collection_failures_exceeded_limit"
+            ]
+            break
+        if cycle_index < max_cycles - 1 and config.poll_interval_seconds > 0.0:
+            time.sleep(config.poll_interval_seconds)
+
+    attempted_cycle_count = len(cycle_status_rows)
+    aggregate_public_report = _aggregate_public_collection_report(
+        config=config,
+        cycle_status_rows=cycle_status_rows,
+        cycle_results=cycle_results,
+        reason_counter=reason_counter,
+        fail_fast_stop_triggered=fail_fast_stop_triggered,
+        fail_fast_reason_codes=fail_fast_reason_codes,
+    )
+    remap_report = _aggregate_incremental_remap_report(
+        run_id=base_fresh_loop_config.run_id,
+        cycle_results=cycle_results,
+        remap_rows=all_remap_rows,
+        intents=all_intents,
+    )
+    run_report = _aggregate_incremental_fresh_loop_run_report(
+        config=base_fresh_loop_config,
+        attempted_cycle_count=attempted_cycle_count,
+        max_cycles=max_cycles,
+        public_collection_report=aggregate_public_report,
+        trace_rows=all_trace_rows,
+        intents=all_intents,
+        fills=all_fills,
+        ledger_rows=all_ledger_rows,
+        block_counter=block_counter,
+    )
+    runtime_safety_report = _aggregate_incremental_runtime_safety_report(
+        run_id=base_fresh_loop_config.run_id,
+        cycle_results=cycle_results,
+    )
+    signal_trace_report = _aggregate_incremental_signal_trace_report(
+        run_id=base_fresh_loop_config.run_id,
+        trace_rows=all_trace_rows,
+    )
+
+    artifact_paths = {
+        "manifest": aggregate_dir / "o_v8_paper_fresh_loop_manifest.json",
+        "fresh_loop_run_report": aggregate_dir / "o_v8_paper_fresh_loop_run_report.json",
+        "fresh_order_intent_log": aggregate_dir / "o_v8_paper_fresh_order_intent_log.jsonl",
+        "fresh_fill_log": aggregate_dir / "o_v8_paper_fresh_fill_log.jsonl",
+        "fresh_ledger_log": aggregate_dir / "o_v8_paper_fresh_ledger_log.jsonl",
+        "provider_cycle_status": aggregate_dir / "provider_cycle_status.jsonl",
+        "execution_layer_v2_paper_remap_report": aggregate_dir
+        / "execution_layer_v2_paper_remap_report.json",
+        "signal_trace_report": aggregate_dir / "o_v8_paper_fresh_signal_trace.json",
+        "runtime_safety_report": aggregate_dir
+        / "o_v8_paper_fresh_runtime_safety_report.json",
+    }
+    _write_jsonl(artifact_paths["fresh_order_intent_log"], all_intents)
+    _write_jsonl(artifact_paths["fresh_fill_log"], all_fills)
+    _write_jsonl(artifact_paths["fresh_ledger_log"], all_ledger_rows)
+    _write_json(artifact_paths["fresh_loop_run_report"], run_report)
+    _write_json(artifact_paths["execution_layer_v2_paper_remap_report"], remap_report)
+    _write_json(artifact_paths["signal_trace_report"], signal_trace_report)
+    _write_json(artifact_paths["runtime_safety_report"], runtime_safety_report)
+    artifact_hashes = {
+        name: _sha256_file(path)
+        for name, path in sorted(artifact_paths.items())
+        if name != "manifest"
+    }
+    manifest = _aggregate_incremental_fresh_loop_manifest(
+        run_id=base_fresh_loop_config.run_id,
+        artifact_paths=artifact_paths,
+        artifact_hashes=artifact_hashes,
+        run_report=run_report,
+        remap_report=remap_report,
+        runtime_safety_report=runtime_safety_report,
+    )
+    _write_json(artifact_paths["manifest"], manifest)
+    artifact_hashes["manifest"] = _sha256_file(artifact_paths["manifest"])
+    manifest["artifact_hashes"] = dict(artifact_hashes)
+    _write_json(artifact_paths["manifest"], manifest)
+
+    return SimpleNamespace(
+        artifact_paths=artifact_paths,
+        fresh_loop_run_report=run_report,
+        runtime_safety_report=runtime_safety_report,
+        execution_layer_v2_paper_remap_report=remap_report,
+        signal_trace_report=signal_trace_report,
+        manifest=manifest,
+    )
+
+
 def run_execution_layer_v2_one_hour_remap_paper_goal(
     config: ExecutionLayerV2OneHourRemapPaperGoalConfig,
 ) -> ExecutionLayerV2OneHourRemapPaperGoalResult:
@@ -155,29 +370,36 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         if config.public_data_cycles is not None
         else max(1, int(config.duration_seconds / max(config.poll_interval_seconds, 1.0)))
     )
-    fresh_result = run_polymarket_o_v8_paper_fresh_loop(
-        PolymarketOV8PaperFreshLoopConfig(
-            run_id=f"{config.run_id}-fresh-loop",
-            output_dir=goal_dir,
-            paper_candidate_unlock_dir=config.paper_candidate_unlock_dir,
-            expected_paper_candidate_unlock_manifest_sha256=(
-                config.expected_paper_candidate_unlock_manifest_sha256
-            ),
-            loop_mode="bounded_recurring" if max_cycles > 1 else "single_cycle",
-            max_cycles=max_cycles,
-            sleep_seconds=0.0
-            if config.public_data_cycles is not None
-            else config.poll_interval_seconds,
-            public_data_cycles=config.public_data_cycles,
-            public_data_source=public_data_source,
-            public_provider=config.public_provider,
-            canonical_o_source_manifest_path=config.canonical_o_source_manifest_path,
-            frozen_ev_calibration_artifact_path=(
-                config.frozen_ev_calibration_artifact_path
-            ),
-            overwrite_existing=config.overwrite_existing,
-        )
+    fresh_loop_config = PolymarketOV8PaperFreshLoopConfig(
+        run_id=f"{config.run_id}-fresh-loop",
+        output_dir=goal_dir,
+        paper_candidate_unlock_dir=config.paper_candidate_unlock_dir,
+        expected_paper_candidate_unlock_manifest_sha256=(
+            config.expected_paper_candidate_unlock_manifest_sha256
+        ),
+        loop_mode="bounded_recurring" if max_cycles > 1 else "single_cycle",
+        max_cycles=max_cycles,
+        sleep_seconds=0.0
+        if config.public_data_cycles is not None
+        else config.poll_interval_seconds,
+        public_data_cycles=config.public_data_cycles,
+        public_data_source=public_data_source,
+        public_provider=config.public_provider,
+        canonical_o_source_manifest_path=config.canonical_o_source_manifest_path,
+        frozen_ev_calibration_artifact_path=(
+            config.frozen_ev_calibration_artifact_path
+        ),
+        overwrite_existing=config.overwrite_existing,
     )
+    if config.public_data_cycles is None:
+        fresh_result = _run_incremental_read_only_provider_fresh_loop(
+            config=config,
+            goal_dir=goal_dir,
+            max_cycles=max_cycles,
+            base_fresh_loop_config=fresh_loop_config,
+        )
+    else:
+        fresh_result = run_polymarket_o_v8_paper_fresh_loop(fresh_loop_config)
 
     base_intents = _read_jsonl(fresh_result.artifact_paths["fresh_order_intent_log"])
     trace_rows = list(fresh_result.signal_trace_report.get("trace_rows") or [])
@@ -212,6 +434,13 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
             *settlement_resolution["settlement_evaluation_rows"],
         ],
     )
+    round_artifacts = _write_per_round_artifacts(
+        goal_dir=goal_dir,
+        intents=intents,
+        fills=fills,
+        ledger_rows=ledger_rows,
+        settlement_rows=settlement_rows,
+    )
     round_coverage = _round_coverage_report(
         run_id=config.run_id,
         trace_rows=trace_rows,
@@ -233,6 +462,7 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         fills=fills,
         settlement_rows=settlement_rows,
         settlement_resolution=settlement_resolution,
+        round_artifacts=round_artifacts,
     )
 
     artifact_paths = {
@@ -254,6 +484,7 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         "paper_intent_log": goal_dir / "one_hour_paper_intent_log.jsonl",
         "paper_fill_log": goal_dir / "one_hour_paper_fill_log.jsonl",
         "paper_ledger_log": goal_dir / "one_hour_paper_ledger_log.jsonl",
+        "per_round_artifact_manifest": Path(round_artifacts["manifest_path"]),
         "paper_fresh_loop_manifest": fresh_result.artifact_paths["manifest"],
         "paper_remap_report": fresh_result.artifact_paths[
             "execution_layer_v2_paper_remap_report"
@@ -358,6 +589,403 @@ def _round_coverage_report(
     return _with_report_id(report, "round_coverage_report_id")
 
 
+def _aggregate_public_collection_report(
+    *,
+    config: ExecutionLayerV2OneHourRemapPaperGoalConfig,
+    cycle_status_rows: list[dict[str, Any]],
+    cycle_results: list[Any],
+    reason_counter: Counter[str],
+    fail_fast_stop_triggered: bool,
+    fail_fast_reason_codes: list[str],
+) -> dict[str, Any]:
+    public_reports = [
+        result.fresh_loop_run_report["public_data_collection_report"]
+        for result in cycle_results
+    ]
+    reason_codes = sorted(
+        {
+            reason
+            for report in public_reports
+            for reason in report.get("public_data_collection_reason_codes", [])
+        }
+    )
+    if fail_fast_stop_triggered:
+        reason_codes.extend(
+            reason
+            for reason in fail_fast_reason_codes
+            if reason not in reason_codes
+        )
+    provider_class = (
+        public_reports[-1].get("public_provider_class") if public_reports else None
+    )
+    return {
+        "public_data_source": O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
+        "public_data_collection_mode": "read_only_public_provider_live_polling",
+        "public_provider_class": provider_class,
+        "public_provider_read_only": True,
+        "public_provider_safety_passed": all(
+            bool(report.get("public_provider_safety_passed")) for report in public_reports
+        )
+        if public_reports
+        else False,
+        "paper_fresh_provider_collection_failed": any(
+            bool(report.get("paper_fresh_provider_collection_failed"))
+            for report in public_reports
+        ),
+        "public_data_collection_reason_codes": reason_codes,
+        "public_data_collection_reason_distribution": dict(
+            sorted(reason_counter.items())
+        ),
+        "public_data_cycle_count": len(cycle_status_rows),
+        "public_data_row_count": sum(
+            int(report.get("public_data_row_count") or 0) for report in public_reports
+        ),
+        "public_market_count": sum(
+            int(report.get("public_market_count") or 0) for report in public_reports
+        ),
+        "public_orderbook_row_count": sum(
+            int(report.get("public_orderbook_row_count") or 0)
+            for report in public_reports
+        ),
+        "public_trade_row_count": sum(
+            int(report.get("public_trade_row_count") or 0) for report in public_reports
+        ),
+        "public_btc_feature_candle_row_count": sum(
+            int(report.get("public_btc_feature_candle_row_count") or 0)
+            for report in public_reports
+        ),
+        "public_feature_row_count": sum(
+            int(report.get("public_feature_row_count") or 0)
+            for report in public_reports
+        ),
+        "provider_exception_type": None,
+        "provider_exception_message": None,
+        "provider_fail_fast_stop_triggered": fail_fast_stop_triggered,
+        "provider_fail_fast_reason_codes": list(fail_fast_reason_codes),
+        "max_consecutive_orderbook_failure_rounds": (
+            config.max_consecutive_orderbook_failure_rounds
+        ),
+        "consecutive_orderbook_failure_count_at_stop": (
+            cycle_status_rows[-1]["consecutive_orderbook_failure_count"]
+            if cycle_status_rows
+            else 0
+        ),
+        "cycle_status_rows": cycle_status_rows,
+        "frozen_o_action_rank_reference_source": (
+            public_reports[-1].get("frozen_o_action_rank_reference_source")
+            if public_reports
+            else "issue_160_paper_candidate_unlock_manifest"
+        ),
+        "frozen_o_action_rank_reference_sha256": (
+            public_reports[-1].get("frozen_o_action_rank_reference_sha256")
+            if public_reports
+            else ""
+        ),
+        "scoring_rule_id": "fresh_provider_simplified_score",
+        "canonical_frozen_o_scorer_used": any(
+            bool(report.get("canonical_frozen_o_scorer_used"))
+            for report in public_reports
+        ),
+        "uses_paper_intent_logs_as_fresh_public_data": False,
+        "uses_validation_outcomes_for_tuning": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "thresholds_tuned": False,
+        "forbidden_outcome_fields_used": [],
+    }
+
+
+def _aggregate_incremental_remap_report(
+    *,
+    run_id: str,
+    cycle_results: list[Any],
+    remap_rows: list[dict[str, Any]],
+    intents: list[dict[str, Any]],
+) -> dict[str, Any]:
+    remap_intents = [
+        intent for intent in intents if intent.get("hts_time_window_remap_applied") is True
+    ]
+    report = {
+        "schema_version": "bigan-v8-polymarket-execution-layer-v2-paper-remap-v1",
+        "report_type": "execution_layer_v2_paper_remap",
+        "phase": "polymarket_policy_training",
+        "run_id": run_id,
+        "paper_only_intent_path": True,
+        "execution_layer_v2_paper_remap_enabled": True,
+        "hts_time_window_blocked_count": sum(
+            int(result.execution_layer_v2_paper_remap_report.get("hts_time_window_blocked_count") or 0)
+            for result in cycle_results
+        ),
+        "same_side_sbc_alternative_available_count": sum(
+            int(result.execution_layer_v2_paper_remap_report.get("same_side_sbc_alternative_available_count") or 0)
+            for result in cycle_results
+        ),
+        "same_side_sbc_calibrated_ev_available_count": sum(
+            int(result.execution_layer_v2_paper_remap_report.get("same_side_sbc_calibrated_ev_available_count") or 0)
+            for result in cycle_results
+        ),
+        "same_side_sbc_guard_passed_count": sum(
+            int(result.execution_layer_v2_paper_remap_report.get("same_side_sbc_guard_passed_count") or 0)
+            for result in cycle_results
+        ),
+        "remap_candidate_count": sum(
+            int(result.execution_layer_v2_paper_remap_report.get("remap_candidate_count") or 0)
+            for result in cycle_results
+        ),
+        "remap_guard_passed_count": sum(
+            int(result.execution_layer_v2_paper_remap_report.get("remap_guard_passed_count") or 0)
+            for result in cycle_results
+        ),
+        "paper_intent_remap_applied_count": len(remap_intents),
+        "paper_intent_remap_ids": [
+            str(intent.get("paper_fresh_order_intent_id")) for intent in remap_intents
+        ],
+        "original_action_distribution": dict(
+            sorted(Counter(str(row.get("original_action")) for row in remap_rows).items())
+        ),
+        "remapped_action_distribution": dict(
+            sorted(Counter(str(row.get("remapped_action")) for row in remap_rows).items())
+        ),
+        "remap_reason_distribution": _reason_distribution(remap_rows, "remap_reason_codes"),
+        "remap_failure_reason_distribution": _reason_distribution(
+            [
+                row
+                for row in remap_rows
+                if row.get("hts_time_window_remap_applied") is not True
+            ],
+            "remap_reason_codes",
+        ),
+        "remap_rows": remap_rows,
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "source_scores_mutated": False,
+        "o_score_mutated": False,
+        "promotion_evidence": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(report, "execution_layer_v2_paper_remap_report_id")
+
+
+def _aggregate_incremental_fresh_loop_run_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    attempted_cycle_count: int,
+    max_cycles: int,
+    public_collection_report: dict[str, Any],
+    trace_rows: list[dict[str, Any]],
+    intents: list[dict[str, Any]],
+    fills: list[dict[str, Any]],
+    ledger_rows: list[dict[str, Any]],
+    block_counter: Counter[str],
+) -> dict[str, Any]:
+    blockers = []
+    if public_collection_report["paper_fresh_provider_collection_failed"]:
+        blockers.append("paper_fresh_public_provider_collection_failed")
+        blockers.extend(public_collection_report["public_data_collection_reason_codes"])
+    if public_collection_report["provider_fail_fast_stop_triggered"]:
+        blockers.extend(public_collection_report["provider_fail_fast_reason_codes"])
+    report = {
+        "schema_version": "bigan-v8-polymarket-o-v8-paper-fresh-loop-run-v1",
+        "report_type": "o_v8_paper_fresh_loop_run",
+        "phase": "polymarket_policy_training",
+        "run_id": config.run_id,
+        "paper_fresh_loop_enabled": True,
+        "paper_fresh_loop_mode": "bounded_recurring_live_polling",
+        "paper_fresh_loop_cycle_count": attempted_cycle_count,
+        "paper_fresh_loop_max_cycles": max_cycles,
+        "paper_fresh_loop_sleep_seconds": config.sleep_seconds,
+        "paper_fresh_loop_public_data_source": O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
+        "public_data_collection_report": public_collection_report,
+        "paper_fresh_provider_collection_failed": public_collection_report[
+            "paper_fresh_provider_collection_failed"
+        ],
+        "public_data_collection_reason_codes": public_collection_report[
+            "public_data_collection_reason_codes"
+        ],
+        "provider_fail_fast_stop_triggered": public_collection_report[
+            "provider_fail_fast_stop_triggered"
+        ],
+        "provider_fail_fast_reason_codes": public_collection_report[
+            "provider_fail_fast_reason_codes"
+        ],
+        "max_consecutive_orderbook_failure_rounds": public_collection_report[
+            "max_consecutive_orderbook_failure_rounds"
+        ],
+        "consecutive_orderbook_failure_count_at_stop": public_collection_report[
+            "consecutive_orderbook_failure_count_at_stop"
+        ],
+        "scoring_rule_id": "fresh_provider_simplified_score",
+        "canonical_frozen_o_scorer_used": False,
+        "uses_paper_intent_logs_as_fresh_public_data": False,
+        "paper_candidate_unlock_verified": True,
+        "paper_candidate_unlock_manifest_sha256": public_collection_report[
+            "frozen_o_action_rank_reference_sha256"
+        ],
+        "paper_candidate_unlock_blocking_reason_codes": [],
+        "paper_fresh_loop_blocking_reason_codes": sorted(set(blockers)),
+        "public_data_cycle_input_count": len(trace_rows),
+        "candidate_decision_count": len(trace_rows),
+        "guard_allowed_decision_count": len(intents),
+        "guard_blocked_decision_count": max(0, len(trace_rows) - len(intents)),
+        "execution_layer_v2_paper_remap_enabled": True,
+        "execution_layer_v2_paper_remap_candidate_count": 0,
+        "execution_layer_v2_paper_remap_applied_count": sum(
+            1 for intent in intents if intent.get("hts_time_window_remap_applied") is True
+        ),
+        "paper_fresh_order_intent_count": len(intents),
+        "paper_fresh_fill_count": len(fills),
+        "paper_fresh_ledger_entry_count": len(ledger_rows),
+        "runtime_field_missing_count": 0,
+        "provenance_violation_count": 0,
+        "block_reason_distribution": dict(sorted(block_counter.items())),
+        "action_distribution": dict(
+            sorted(Counter(str(row.get("selected_action")) for row in trace_rows).items())
+        ),
+        "family_distribution": dict(
+            sorted(Counter(str(row.get("selected_action_family")) for row in trace_rows).items())
+        ),
+        "side_distribution": dict(
+            sorted(Counter(str(row.get("selected_side")) for row in trace_rows).items())
+        ),
+        "v8_paper_internal_handoff_allowed": True,
+        "v8_execution_handoff_allowed": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(report, "o_v8_paper_fresh_loop_run_report_id")
+
+
+def _aggregate_incremental_runtime_safety_report(
+    *,
+    run_id: str,
+    cycle_results: list[Any],
+) -> dict[str, Any]:
+    safety_passed = all(
+        result.runtime_safety_report.get("paper_fresh_runtime_safety_passed") is True
+        for result in cycle_results
+    )
+    report = {
+        "schema_version": "bigan-v8-polymarket-o-v8-paper-fresh-runtime-safety-v1",
+        "report_type": "o_v8_paper_fresh_runtime_safety",
+        "phase": "polymarket_policy_training",
+        "run_id": run_id,
+        "paper_fresh_runtime_safety_passed": safety_passed,
+        "paper_fresh_runtime_safety_blocking_reason_codes": sorted(
+            {
+                reason
+                for result in cycle_results
+                for reason in result.runtime_safety_report.get(
+                    "paper_fresh_runtime_safety_blocking_reason_codes", []
+                )
+            }
+        ),
+        "paper_fresh_loop_enabled": True,
+        "paper_fresh_order_intent_count": sum(
+            int(result.runtime_safety_report.get("paper_fresh_order_intent_count") or 0)
+            for result in cycle_results
+        ),
+        "paper_fresh_fill_count": sum(
+            int(result.runtime_safety_report.get("paper_fresh_fill_count") or 0)
+            for result in cycle_results
+        ),
+        "paper_fresh_ledger_entry_count": sum(
+            int(result.runtime_safety_report.get("paper_fresh_ledger_entry_count") or 0)
+            for result in cycle_results
+        ),
+        "v8_paper_internal_handoff_allowed": True,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(report, "o_v8_paper_fresh_runtime_safety_report_id")
+
+
+def _aggregate_incremental_signal_trace_report(
+    *,
+    run_id: str,
+    trace_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    report = {
+        "schema_version": "bigan-v8-polymarket-o-v8-paper-fresh-signal-trace-v1",
+        "report_type": "o_v8_paper_fresh_signal_trace",
+        "phase": "polymarket_policy_training",
+        "run_id": run_id,
+        "public_data_source": O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
+        "trace_row_count": len(trace_rows),
+        "total_provider_decision_count": len(trace_rows),
+        "canonical_selected_decision_count": len(trace_rows),
+        "trace_rows": trace_rows,
+        "trace_rows_sorted_by_decision_ts": True,
+        "paper_intent_count": 0,
+        "fill_count": 0,
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "mutates_o_model_predicted_score": False,
+        "mutates_source_ranking_scores": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(report, "o_v8_paper_fresh_signal_trace_report_id")
+
+
+def _aggregate_incremental_fresh_loop_manifest(
+    *,
+    run_id: str,
+    artifact_paths: dict[str, Path],
+    artifact_hashes: dict[str, str],
+    run_report: dict[str, Any],
+    remap_report: dict[str, Any],
+    runtime_safety_report: dict[str, Any],
+) -> dict[str, Any]:
+    manifest = {
+        "schema_version": "bigan-v8-polymarket-o-v8-paper-fresh-loop-manifest-v1",
+        "report_type": "o_v8_paper_fresh_loop_manifest",
+        "phase": "polymarket_policy_training",
+        "run_id": run_id,
+        "artifact_paths": {
+            name: str(path) for name, path in sorted(artifact_paths.items())
+        },
+        "artifact_hashes": dict(artifact_hashes),
+        "fresh_loop_run_report_id": run_report["o_v8_paper_fresh_loop_run_report_id"],
+        "fresh_runtime_safety_report_id": runtime_safety_report[
+            "o_v8_paper_fresh_runtime_safety_report_id"
+        ],
+        "execution_layer_v2_paper_remap_report_id": remap_report[
+            "execution_layer_v2_paper_remap_report_id"
+        ],
+        "paper_fresh_loop_public_data_source": run_report[
+            "paper_fresh_loop_public_data_source"
+        ],
+        "paper_fresh_loop_cycle_count": run_report["paper_fresh_loop_cycle_count"],
+        "paper_fresh_provider_collection_failed": run_report[
+            "paper_fresh_provider_collection_failed"
+        ],
+        "provider_fail_fast_stop_triggered": run_report[
+            "provider_fail_fast_stop_triggered"
+        ],
+        "provider_fail_fast_reason_codes": run_report[
+            "provider_fail_fast_reason_codes"
+        ],
+        "max_consecutive_orderbook_failure_rounds": run_report[
+            "max_consecutive_orderbook_failure_rounds"
+        ],
+        "consecutive_orderbook_failure_count_at_stop": run_report[
+            "consecutive_orderbook_failure_count_at_stop"
+        ],
+        "paper_fresh_order_intent_count": run_report[
+            "paper_fresh_order_intent_count"
+        ],
+        "paper_fresh_fill_count": run_report["paper_fresh_fill_count"],
+        "paper_fresh_runtime_safety_passed": runtime_safety_report[
+            "paper_fresh_runtime_safety_passed"
+        ],
+        **compact_safety_fields(),
+    }
+    return _with_report_id(manifest, "o_v8_paper_fresh_loop_manifest_id")
+
+
 def _remap_execution_report(
     *,
     run_id: str,
@@ -412,6 +1040,145 @@ def _remap_execution_report(
         "o_score_mutated": False,
     }
     return _with_report_id(report, "remap_execution_report_id")
+
+
+def _write_per_round_bet_artifacts(
+    *,
+    goal_dir: Path,
+    intents: list[dict[str, Any]],
+    fills: list[dict[str, Any]],
+    ledger_rows: list[dict[str, Any]],
+) -> None:
+    rounds_dir = goal_dir / "round_artifacts"
+    market_ids = sorted(
+        {
+            str(row.get("market_id"))
+            for row in [*intents, *fills, *ledger_rows]
+            if row.get("market_id")
+        }
+    )
+    for market_id in market_ids:
+        market_dir = rounds_dir / _safe_path_component(market_id)
+        _write_jsonl(
+            market_dir / "paper_bets.jsonl",
+            [row for row in intents if str(row.get("market_id")) == market_id],
+        )
+        _write_jsonl(
+            market_dir / "paper_fills.jsonl",
+            [row for row in fills if str(row.get("market_id")) == market_id],
+        )
+        _write_jsonl(
+            market_dir / "paper_ledger.jsonl",
+            [row for row in ledger_rows if str(row.get("market_id")) == market_id],
+        )
+
+
+def _write_per_round_artifacts(
+    *,
+    goal_dir: Path,
+    intents: list[dict[str, Any]],
+    fills: list[dict[str, Any]],
+    ledger_rows: list[dict[str, Any]],
+    settlement_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    _write_per_round_bet_artifacts(
+        goal_dir=goal_dir,
+        intents=intents,
+        fills=fills,
+        ledger_rows=ledger_rows,
+    )
+    rounds_dir = goal_dir / "round_artifacts"
+    market_ids = sorted(
+        {
+            str(row.get("market_id"))
+            for row in [*intents, *fills, *ledger_rows, *settlement_rows]
+            if row.get("market_id")
+        }
+    )
+    round_rows: list[dict[str, Any]] = []
+    for market_id in market_ids:
+        market_dir = rounds_dir / _safe_path_component(market_id)
+        settlement_for_market = [
+            row for row in settlement_rows if str(row.get("market_id")) == market_id
+        ]
+        outcome_path = market_dir / "round_outcome.json"
+        if settlement_for_market:
+            outcome_payload = {
+                "market_id": market_id,
+                "settlement_rows": settlement_for_market,
+                "settlement_status": (
+                    "settled"
+                    if all(
+                        row.get("settlement_status") == "settled"
+                        for row in settlement_for_market
+                    )
+                    else "unresolved"
+                ),
+                "paper_only": True,
+                "capital_at_risk": False,
+                "polymarket_write_enabled": False,
+                "wallet_signing_enabled": False,
+                "v8_execution_handoff_allowed": False,
+            }
+            _write_json(outcome_path, outcome_payload)
+        paths = {
+            "paper_bets": market_dir / "paper_bets.jsonl",
+            "paper_fills": market_dir / "paper_fills.jsonl",
+            "paper_ledger": market_dir / "paper_ledger.jsonl",
+            "round_outcome": outcome_path,
+        }
+        row = {
+            "market_id": market_id,
+            "round_artifact_dir": str(market_dir),
+            "paper_bet_artifact_exists": paths["paper_bets"].exists(),
+            "paper_fill_artifact_exists": paths["paper_fills"].exists(),
+            "paper_ledger_artifact_exists": paths["paper_ledger"].exists(),
+            "round_outcome_artifact_exists": paths["round_outcome"].exists(),
+            "paper_bet_count": sum(
+                1 for intent in intents if str(intent.get("market_id")) == market_id
+            ),
+            "paper_fill_count": sum(
+                1 for fill in fills if str(fill.get("market_id")) == market_id
+            ),
+            "settlement_row_count": len(settlement_for_market),
+            "artifact_paths": {
+                name: str(path)
+                for name, path in paths.items()
+                if path.exists()
+            },
+            "artifact_hashes": {
+                name: _sha256_file(path)
+                for name, path in paths.items()
+                if path.exists()
+            },
+        }
+        round_rows.append(row)
+    manifest = {
+        "schema_version": (
+            "bigan-v8-polymarket-execution-layer-v2-per-round-artifacts-v1"
+        ),
+        "report_type": "one_hour_remap_per_round_artifacts",
+        "per_round_async_artifact_flush_enabled": True,
+        "per_round_bet_artifact_count": sum(
+            1 for row in round_rows if row["paper_bet_artifact_exists"]
+        ),
+        "per_round_outcome_artifact_count": sum(
+            1 for row in round_rows if row["round_outcome_artifact_exists"]
+        ),
+        "round_artifact_rows": round_rows,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+    }
+    manifest = _with_report_id(manifest, "per_round_artifact_manifest_id")
+    manifest_path = rounds_dir / "round_artifacts_manifest.json"
+    _write_json(manifest_path, manifest)
+    manifest["manifest_path"] = str(manifest_path)
+    manifest["manifest_sha256"] = _sha256_file(manifest_path)
+    _write_json(manifest_path, manifest)
+    return manifest
 
 
 def _forced_coverage_attempt_report(
@@ -1049,6 +1816,7 @@ def _one_hour_goal_report(
     fills: list[dict[str, Any]],
     settlement_rows: list[dict[str, Any]],
     settlement_resolution: dict[str, Any],
+    round_artifacts: dict[str, Any],
 ) -> dict[str, Any]:
     settled_pnl = sum(_float(row.get("settlement_pnl")) for row in settlement_rows)
     unresolved_pnl = sum(_float(row.get("unresolved_pnl")) for row in settlement_rows)
@@ -1066,6 +1834,11 @@ def _one_hour_goal_report(
         blockers.append("unresolved_round_pnl_remaining")
     if fresh_result.runtime_safety_report["paper_fresh_runtime_safety_passed"] is not True:
         blockers.append("paper_fresh_runtime_safety_failed")
+    provider_fail_fast_stop_triggered = bool(
+        fresh_result.fresh_loop_run_report.get("provider_fail_fast_stop_triggered")
+    )
+    if provider_fail_fast_stop_triggered:
+        blockers.append("orderbook_collection_failed_consecutive_limit")
     final_success = blockers == []
     report = {
         "schema_version": ONE_HOUR_REMAP_PAPER_GOAL_SCHEMA_VERSION,
@@ -1115,6 +1888,31 @@ def _one_hour_goal_report(
         "settlement_evaluation_row_count": settlement_resolution[
             "settlement_evaluation_row_count"
         ],
+        "provider_fail_fast_stop_triggered": provider_fail_fast_stop_triggered,
+        "provider_fail_fast_reason_codes": fresh_result.fresh_loop_run_report.get(
+            "provider_fail_fast_reason_codes", []
+        ),
+        "max_consecutive_orderbook_failure_rounds": (
+            fresh_result.fresh_loop_run_report.get(
+                "max_consecutive_orderbook_failure_rounds"
+            )
+        ),
+        "consecutive_orderbook_failure_count_at_stop": (
+            fresh_result.fresh_loop_run_report.get(
+                "consecutive_orderbook_failure_count_at_stop"
+            )
+        ),
+        "per_round_async_artifact_flush_enabled": round_artifacts[
+            "per_round_async_artifact_flush_enabled"
+        ],
+        "per_round_bet_artifact_count": round_artifacts[
+            "per_round_bet_artifact_count"
+        ],
+        "per_round_outcome_artifact_count": round_artifacts[
+            "per_round_outcome_artifact_count"
+        ],
+        "per_round_artifact_manifest_path": round_artifacts["manifest_path"],
+        "per_round_artifact_manifest_sha256": round_artifacts["manifest_sha256"],
         "final_goal_success": final_success,
         "goal_failure_reason_codes": blockers,
         "losing_action_distribution": _action_distribution_by_pnl(
@@ -1198,6 +1996,27 @@ def _one_hour_goal_manifest(
         "settlement_resolution_reason_codes": goal_report[
             "settlement_resolution_reason_codes"
         ],
+        "provider_fail_fast_stop_triggered": goal_report[
+            "provider_fail_fast_stop_triggered"
+        ],
+        "provider_fail_fast_reason_codes": goal_report[
+            "provider_fail_fast_reason_codes"
+        ],
+        "max_consecutive_orderbook_failure_rounds": goal_report[
+            "max_consecutive_orderbook_failure_rounds"
+        ],
+        "consecutive_orderbook_failure_count_at_stop": goal_report[
+            "consecutive_orderbook_failure_count_at_stop"
+        ],
+        "per_round_async_artifact_flush_enabled": goal_report[
+            "per_round_async_artifact_flush_enabled"
+        ],
+        "per_round_bet_artifact_count": goal_report[
+            "per_round_bet_artifact_count"
+        ],
+        "per_round_outcome_artifact_count": goal_report[
+            "per_round_outcome_artifact_count"
+        ],
         "final_goal_success": goal_report["final_goal_success"],
         "goal_failure_reason_codes": goal_report["goal_failure_reason_codes"],
         "paper_only": True,
@@ -1234,6 +2053,12 @@ def _one_hour_goal_md(report: dict[str, Any]) -> str:
             f"- unresolved_pnl: `{report['unresolved_pnl']}`",
             f"- settlement_poll_attempt_count: `{report['settlement_poll_attempt_count']}`",
             f"- settlement_evaluation_row_count: `{report['settlement_evaluation_row_count']}`",
+            f"- provider_fail_fast_stop_triggered: `{report['provider_fail_fast_stop_triggered']}`",
+            f"- max_consecutive_orderbook_failure_rounds: `{report['max_consecutive_orderbook_failure_rounds']}`",
+            f"- consecutive_orderbook_failure_count_at_stop: `{report['consecutive_orderbook_failure_count_at_stop']}`",
+            f"- per_round_async_artifact_flush_enabled: `{report['per_round_async_artifact_flush_enabled']}`",
+            f"- per_round_bet_artifact_count: `{report['per_round_bet_artifact_count']}`",
+            f"- per_round_outcome_artifact_count: `{report['per_round_outcome_artifact_count']}`",
             f"- final_goal_success: `{report['final_goal_success']}`",
             "",
             "## Settlement Resolution",
@@ -1326,6 +2151,24 @@ def _action_distribution_by_pnl(
             continue
         counter[str(row.get("execution_guarded_action"))] += 1
     return dict(sorted(counter.items()))
+
+
+def _reason_distribution(rows: list[dict[str, Any]], field_name: str) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for row in rows:
+        values = row.get(field_name) or []
+        if isinstance(values, str):
+            values = [values]
+        counter.update(str(value) for value in values)
+    return dict(sorted(counter.items()))
+
+
+def _safe_path_component(value: str) -> str:
+    cleaned = "".join(
+        char if char.isalnum() or char in {"-", "_", "."} else "_"
+        for char in value
+    ).strip("._")
+    return cleaned or "unknown_market"
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
