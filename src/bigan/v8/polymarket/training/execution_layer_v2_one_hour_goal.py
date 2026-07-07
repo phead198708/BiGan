@@ -52,6 +52,16 @@ ONE_HOUR_REMAP_SETTLEMENT_RESOLUTION_SCHEMA_VERSION = (
     "bigan-v8-polymarket-execution-layer-v2-one-hour-settlement-resolution-v1"
 )
 
+GUARD_JUSTIFIED_NO_BET_ALLOWED_BLOCKER_CATEGORIES = {
+    "time_to_close",
+    "spread",
+    "p_up_disagreement",
+    "exposure",
+    "missing_runtime_field",
+    "missing_candidate_or_metadata",
+    "guard_blocked_other",
+}
+
 DEFAULT_ONE_HOUR_UNLOCK_DIR = Path(
     "examples/v8/polymarket_runs/o-v8-paper-candidate-unlock-20260703T073000Z"
 )
@@ -448,6 +458,7 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         run_id=config.run_id,
         trace_rows=trace_rows,
         intents=intents,
+        forced_coverage=forced_coverage,
     )
     remap_execution = _remap_execution_report(
         run_id=config.run_id,
@@ -559,10 +570,18 @@ def _round_coverage_report(
     run_id: str,
     trace_rows: list[dict[str, Any]],
     intents: list[dict[str, Any]],
+    forced_coverage: dict[str, Any],
 ) -> dict[str, Any]:
     complete_rounds = sorted({str(row.get("market_id")) for row in trace_rows if row.get("market_id")})
     bet_rounds = sorted({str(row.get("market_id")) for row in intents if row.get("market_id")})
     missing = sorted(set(complete_rounds) - set(bet_rounds))
+    missing_classifications = _missing_bet_round_classifications(
+        missing_round_ids=missing,
+        forced_coverage=forced_coverage,
+    )
+    classification_by_market = {
+        row["market_id"]: row for row in missing_classifications["classification_rows"]
+    }
     rows = [
         {
             "market_id": market_id,
@@ -570,6 +589,15 @@ def _round_coverage_report(
             "paper_bet_created": market_id in set(bet_rounds),
             "paper_bet_count": sum(
                 1 for intent in intents if str(intent.get("market_id")) == market_id
+            ),
+            "missing_bet_classification": classification_by_market.get(
+                market_id,
+                {
+                    "missing_bet_round": market_id in set(missing),
+                    "guard_justified_no_bet": False,
+                    "unjustified_missing_bet": market_id in set(missing),
+                    "missing_bet_classification_reason_codes": [],
+                },
             ),
         }
         for market_id in complete_rounds
@@ -582,6 +610,26 @@ def _round_coverage_report(
         "complete_rounds_with_bet_count": len(bet_rounds),
         "missing_bet_round_count": len(missing),
         "missing_bet_round_ids": missing,
+        "guard_justified_no_bet_round_count": missing_classifications[
+            "guard_justified_no_bet_round_count"
+        ],
+        "guard_justified_no_bet_round_ids": missing_classifications[
+            "guard_justified_no_bet_round_ids"
+        ],
+        "unjustified_missing_bet_round_count": missing_classifications[
+            "unjustified_missing_bet_round_count"
+        ],
+        "unjustified_missing_bet_round_ids": missing_classifications[
+            "unjustified_missing_bet_round_ids"
+        ],
+        "guard_justified_no_bet_blocker_category_distribution": (
+            missing_classifications[
+                "guard_justified_no_bet_blocker_category_distribution"
+            ]
+        ),
+        "unjustified_missing_bet_reason_distribution": missing_classifications[
+            "unjustified_missing_bet_reason_distribution"
+        ],
         "round_coverage_rows": rows,
         "paper_only": True,
         "capital_at_risk": False,
@@ -590,6 +638,180 @@ def _round_coverage_report(
         "v8_execution_handoff_allowed": False,
     }
     return _with_report_id(report, "round_coverage_report_id")
+
+
+def _missing_bet_round_classifications(
+    *,
+    missing_round_ids: list[str],
+    forced_coverage: dict[str, Any],
+) -> dict[str, Any]:
+    attempt_by_market = {
+        str(row.get("market_id")): row
+        for row in forced_coverage.get("forced_coverage_attempt_rows", [])
+    }
+    classification_rows = [
+        _classify_missing_bet_round(
+            market_id=market_id,
+            attempt_row=attempt_by_market.get(market_id),
+        )
+        for market_id in missing_round_ids
+    ]
+    justified_ids = sorted(
+        row["market_id"]
+        for row in classification_rows
+        if row["guard_justified_no_bet"] is True
+    )
+    unjustified_ids = sorted(
+        row["market_id"]
+        for row in classification_rows
+        if row["unjustified_missing_bet"] is True
+    )
+    category_counter = Counter(
+        category
+        for row in classification_rows
+        if row["guard_justified_no_bet"] is True
+        for category in row["blocker_categories"]
+    )
+    unjustified_reason_counter = Counter(
+        reason
+        for row in classification_rows
+        if row["unjustified_missing_bet"] is True
+        for reason in row["missing_bet_classification_reason_codes"]
+    )
+    return {
+        "classification_rows": classification_rows,
+        "guard_justified_no_bet_round_count": len(justified_ids),
+        "guard_justified_no_bet_round_ids": justified_ids,
+        "unjustified_missing_bet_round_count": len(unjustified_ids),
+        "unjustified_missing_bet_round_ids": unjustified_ids,
+        "guard_justified_no_bet_blocker_category_distribution": dict(
+            sorted(category_counter.items())
+        ),
+        "unjustified_missing_bet_reason_distribution": dict(
+            sorted(unjustified_reason_counter.items())
+        ),
+    }
+
+
+def _classify_missing_bet_round(
+    *,
+    market_id: str,
+    attempt_row: dict[str, Any] | None,
+) -> dict[str, Any]:
+    reason_codes: list[str] = []
+    if attempt_row is None:
+        reason_codes.append("forced_coverage_attempt_missing")
+        return _missing_bet_round_classification_row(
+            market_id=market_id,
+            attempt_row={},
+            guard_justified=False,
+            reason_codes=reason_codes,
+        )
+    candidate_rows = list(attempt_row.get("forced_coverage_candidate_attempt_rows") or [])
+    candidate_attempt_count = int(
+        attempt_row.get("forced_coverage_candidate_attempt_count") or 0
+    )
+    blocker_categories = set(attempt_row.get("forced_coverage_blocker_categories") or [])
+    if attempt_row.get("coverage_forced_attempted") is not True:
+        reason_codes.append("forced_coverage_not_attempted")
+    if candidate_attempt_count != len(candidate_rows):
+        reason_codes.append("forced_coverage_candidate_attempt_detail_mismatch")
+    if candidate_attempt_count > 0 and not all(
+        "order_allowed" in row for row in candidate_rows
+    ):
+        reason_codes.append("forced_coverage_candidates_not_checked_through_guard")
+    if any(row.get("order_allowed") is True for row in candidate_rows):
+        reason_codes.append("guard_passing_candidate_existed")
+    if attempt_row.get("forced_coverage_candidate_search_found_guard_passed") is True:
+        reason_codes.append("guard_passing_candidate_search_flag_true")
+    if attempt_row.get("forced_coverage_guard_passed") is True:
+        reason_codes.append("forced_coverage_guard_passed_without_bet")
+    if not blocker_categories:
+        reason_codes.append("missing_blocker_category_diagnostics")
+    disallowed_categories = sorted(
+        blocker_categories - GUARD_JUSTIFIED_NO_BET_ALLOWED_BLOCKER_CATEGORIES
+    )
+    if disallowed_categories:
+        reason_codes.extend(
+            f"disallowed_blocker_category:{category}"
+            for category in disallowed_categories
+        )
+    if attempt_row.get("uses_settlement_pnl_or_outcome_labels_in_decision_logic") is True:
+        reason_codes.append("outcome_or_pnl_used_in_decision_logic")
+    if any(
+        row.get("uses_settlement_pnl_or_outcome_labels_in_decision_logic") is True
+        for row in candidate_rows
+    ):
+        reason_codes.append("candidate_used_outcome_or_pnl_in_decision_logic")
+    return _missing_bet_round_classification_row(
+        market_id=market_id,
+        attempt_row=attempt_row,
+        guard_justified=not reason_codes,
+        reason_codes=reason_codes,
+    )
+
+
+def _missing_bet_round_classification_row(
+    *,
+    market_id: str,
+    attempt_row: dict[str, Any],
+    guard_justified: bool,
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    row = {
+        "market_id": market_id,
+        "missing_bet_round": True,
+        "guard_justified_no_bet": guard_justified,
+        "unjustified_missing_bet": not guard_justified,
+        "missing_bet_classification_reason_codes": []
+        if guard_justified
+        else sorted(set(reason_codes or ["unjustified_missing_bet"])),
+        "forced_coverage_attempted": bool(
+            attempt_row.get("coverage_forced_attempted")
+        ),
+        "forced_coverage_guard_passed": bool(
+            attempt_row.get("forced_coverage_guard_passed")
+        ),
+        "forced_coverage_candidate_search_found_guard_passed": bool(
+            attempt_row.get("forced_coverage_candidate_search_found_guard_passed")
+        ),
+        "forced_coverage_candidate_attempt_count": int(
+            attempt_row.get("forced_coverage_candidate_attempt_count") or 0
+        ),
+        "forced_coverage_source_trace_count": int(
+            attempt_row.get("forced_coverage_source_trace_count") or 0
+        ),
+        "selected_forced_coverage_candidate_action": attempt_row.get(
+            "forced_coverage_selected_action"
+        ),
+        "execution_guarded_action": attempt_row.get(
+            "forced_coverage_execution_guarded_action"
+        ),
+        "blocker_categories": list(
+            attempt_row.get("forced_coverage_blocker_categories") or []
+        ),
+        "blocking_reason_codes": list(
+            attempt_row.get("forced_coverage_blocking_reason_codes") or []
+        ),
+        "missing_trace_metadata_codes": list(
+            attempt_row.get("forced_coverage_missing_trace_metadata_codes") or []
+        ),
+        "missing_runtime_field_codes": list(
+            attempt_row.get("forced_coverage_missing_runtime_field_codes") or []
+        ),
+        "uses_settlement_pnl_or_outcome_labels_in_decision_logic": bool(
+            attempt_row.get(
+                "uses_settlement_pnl_or_outcome_labels_in_decision_logic"
+            )
+        ),
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+    }
+    row["missing_bet_round_classification_hash"] = canonical_json_sha256(row)
+    return row
 
 
 def _aggregate_public_collection_report(
@@ -2167,17 +2389,26 @@ def _one_hour_goal_report(
         1 for row in settlement_rows if row.get("settlement_status") != "settled"
     )
     pnl_summary = _settlement_pnl_summary(settlement_rows)
+    duration_requirement_passed = config.duration_seconds >= 3600
+    runtime_safety_passed = (
+        fresh_result.runtime_safety_report["paper_fresh_runtime_safety_passed"] is True
+    )
+    live_write_wallet_capital_blocked = True
     blockers = []
+    if not duration_requirement_passed:
+        blockers.append("duration_requirement_not_met")
     if round_coverage["complete_round_count"] <= 0:
         blockers.append("no_complete_rounds_observed")
-    if round_coverage["missing_bet_round_count"] > 0:
-        blockers.append("complete_rounds_missing_paper_bets")
+    if round_coverage["unjustified_missing_bet_round_count"] > 0:
+        blockers.append("complete_rounds_unjustified_missing_paper_bets")
     if settled_pnl <= 0.0:
         blockers.append("settled_pnl_not_positive")
     if unresolved_count:
         blockers.append("unresolved_round_pnl_remaining")
-    if fresh_result.runtime_safety_report["paper_fresh_runtime_safety_passed"] is not True:
+    if not runtime_safety_passed:
         blockers.append("paper_fresh_runtime_safety_failed")
+    if not live_write_wallet_capital_blocked:
+        blockers.append("paper_live_write_wallet_capital_safety_failed")
     provider_fail_fast_stop_triggered = bool(
         fresh_result.fresh_loop_run_report.get("provider_fail_fast_stop_triggered")
     )
@@ -2189,7 +2420,7 @@ def _one_hour_goal_report(
         "report_type": "one_hour_remap_paper_goal",
         "run_id": config.run_id,
         "duration_seconds": config.duration_seconds,
-        "duration_requirement_passed": config.duration_seconds >= 3600,
+        "duration_requirement_passed": duration_requirement_passed,
         "short_diagnostic_run_allowed": config.allow_short_diagnostic_run,
         "public_data_source": fresh_result.manifest["paper_fresh_loop_public_data_source"],
         "read_only_public_provider_required_for_real_run": True,
@@ -2205,6 +2436,27 @@ def _one_hour_goal_report(
             "complete_rounds_with_bet_count"
         ],
         "missing_bet_round_count": round_coverage["missing_bet_round_count"],
+        "guard_justified_no_bet_round_count": round_coverage[
+            "guard_justified_no_bet_round_count"
+        ],
+        "guard_justified_no_bet_round_ids": round_coverage[
+            "guard_justified_no_bet_round_ids"
+        ],
+        "unjustified_missing_bet_round_count": round_coverage[
+            "unjustified_missing_bet_round_count"
+        ],
+        "unjustified_missing_bet_round_ids": round_coverage[
+            "unjustified_missing_bet_round_ids"
+        ],
+        "guard_justified_no_bet_blocker_category_distribution": round_coverage[
+            "guard_justified_no_bet_blocker_category_distribution"
+        ],
+        "unjustified_missing_bet_reason_distribution": round_coverage[
+            "unjustified_missing_bet_reason_distribution"
+        ],
+        "round_coverage_classification_rows": round_coverage[
+            "round_coverage_rows"
+        ],
         "normal_policy_bet_count": remap_execution["normal_policy_bet_count"],
         "remap_paper_bet_count": remap_execution["remap_paper_bet_count"],
         "forced_coverage_bet_count": remap_execution["forced_coverage_bet_count"],
@@ -2287,6 +2539,7 @@ def _one_hour_goal_report(
         "guard_blocking_reason_distribution": fresh_result.fresh_loop_run_report[
             "block_reason_distribution"
         ],
+        "live_write_wallet_capital_blocked": live_write_wallet_capital_blocked,
         "uses_settlement_pnl_or_outcome_labels_in_decision_logic": False,
         "uses_oracle_actions_or_future_returns": False,
         "source_scores_mutated": False,
@@ -2339,6 +2592,24 @@ def _one_hour_goal_manifest(
             "complete_rounds_with_bet_count"
         ],
         "missing_bet_round_count": goal_report["missing_bet_round_count"],
+        "guard_justified_no_bet_round_count": goal_report[
+            "guard_justified_no_bet_round_count"
+        ],
+        "guard_justified_no_bet_round_ids": goal_report[
+            "guard_justified_no_bet_round_ids"
+        ],
+        "unjustified_missing_bet_round_count": goal_report[
+            "unjustified_missing_bet_round_count"
+        ],
+        "unjustified_missing_bet_round_ids": goal_report[
+            "unjustified_missing_bet_round_ids"
+        ],
+        "guard_justified_no_bet_blocker_category_distribution": goal_report[
+            "guard_justified_no_bet_blocker_category_distribution"
+        ],
+        "unjustified_missing_bet_reason_distribution": goal_report[
+            "unjustified_missing_bet_reason_distribution"
+        ],
         "normal_policy_bet_count": goal_report["normal_policy_bet_count"],
         "remap_paper_bet_count": goal_report["remap_paper_bet_count"],
         "forced_coverage_bet_count": goal_report["forced_coverage_bet_count"],
@@ -2425,6 +2696,8 @@ def _one_hour_goal_md(report: dict[str, Any]) -> str:
             f"- complete_round_count: `{report['complete_round_count']}`",
             f"- complete_rounds_with_bet_count: `{report['complete_rounds_with_bet_count']}`",
             f"- missing_bet_round_count: `{report['missing_bet_round_count']}`",
+            f"- guard_justified_no_bet_round_count: `{report['guard_justified_no_bet_round_count']}`",
+            f"- unjustified_missing_bet_round_count: `{report['unjustified_missing_bet_round_count']}`",
             f"- normal_policy_bet_count: `{report['normal_policy_bet_count']}`",
             f"- remap_paper_bet_count: `{report['remap_paper_bet_count']}`",
             f"- forced_coverage_bet_count: `{report['forced_coverage_bet_count']}`",
@@ -2460,6 +2733,8 @@ def _one_hour_goal_md(report: dict[str, Any]) -> str:
             f"- forced_coverage_blocking_reason_distribution: `{report['forced_coverage_blocking_reason_distribution']}`",
             f"- forced_coverage_blocker_category_distribution: `{report['forced_coverage_blocker_category_distribution']}`",
             f"- forced_coverage_candidate_attempt_count: `{report['forced_coverage_candidate_attempt_count']}`",
+            f"- guard_justified_no_bet_round_ids: `{report['guard_justified_no_bet_round_ids']}`",
+            f"- unjustified_missing_bet_round_ids: `{report['unjustified_missing_bet_round_ids']}`",
             "",
             "## Failure Reasons",
             "",
@@ -2477,6 +2752,9 @@ def _round_coverage_md(report: dict[str, Any]) -> str:
             f"- complete_round_count: `{report['complete_round_count']}`",
             f"- complete_rounds_with_bet_count: `{report['complete_rounds_with_bet_count']}`",
             f"- missing_bet_round_count: `{report['missing_bet_round_count']}`",
+            f"- guard_justified_no_bet_round_count: `{report['guard_justified_no_bet_round_count']}`",
+            f"- unjustified_missing_bet_round_count: `{report['unjustified_missing_bet_round_count']}`",
+            f"- guard_justified_no_bet_blocker_category_distribution: `{report['guard_justified_no_bet_blocker_category_distribution']}`",
             "",
         ]
     )

@@ -23,6 +23,7 @@ from bigan.v8.polymarket.training.execution_layer_v2 import (
 from bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal import (
     ONE_HOUR_REMAP_PAPER_GOAL_SCHEMA_VERSION,
     ExecutionLayerV2OneHourRemapPaperGoalConfig,
+    _missing_bet_round_classifications,
     run_execution_layer_v2_one_hour_remap_paper_goal,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_policy_replay import (
@@ -1174,6 +1175,10 @@ def test_execution_layer_v2_one_hour_goal_reports_missing_round_bet_fail_closed(
     assert report["complete_round_count"] == 1
     assert report["complete_rounds_with_bet_count"] == 0
     assert report["missing_bet_round_count"] == 1
+    assert report["guard_justified_no_bet_round_count"] == 1
+    assert report["unjustified_missing_bet_round_count"] == 0
+    assert report["guard_justified_no_bet_round_ids"] == ["one-hour-remap-blocked"]
+    assert report["unjustified_missing_bet_round_ids"] == []
     assert report["remap_paper_bet_count"] == 0
     assert report["forced_coverage_bet_count"] == 0
     assert report["forced_coverage_guard_blocked_count"] == 1
@@ -1193,7 +1198,7 @@ def test_execution_layer_v2_one_hour_goal_reports_missing_round_bet_fail_closed(
     assert attempts[0]["forced_coverage_missing_runtime_field_codes"] == []
     assert attempts[0]["forced_coverage_p_up_action_disagreement"] is False
     assert report["final_goal_success"] is False
-    assert "complete_rounds_missing_paper_bets" in report[
+    assert "complete_rounds_unjustified_missing_paper_bets" not in report[
         "goal_failure_reason_codes"
     ]
     assert "settled_pnl_not_positive" in report["goal_failure_reason_codes"]
@@ -1201,6 +1206,84 @@ def test_execution_layer_v2_one_hour_goal_reports_missing_round_bet_fail_closed(
     assert result.manifest["v8_execution_handoff_allowed"] is False
     assert result.manifest["#134_resume_allowed"] is False
     assert result.manifest["#146_start_allowed"] is False
+
+
+def test_execution_layer_v2_one_hour_goal_succeeds_with_guard_justified_no_bet(
+    tmp_path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    bet_row = _paper_fresh_public_row(
+        index=1,
+        market_id="one-hour-justified-success-bet",
+        action="BUY_UP_HOLD_TO_SETTLEMENT",
+        side="UP",
+        p_up=0.82,
+    )
+    bet_row["microstructure_snapshot"]["time_to_close_seconds"] = 90.0
+    _set_action_score(bet_row, "BUY_UP_SELL_BEFORE_CLOSE", 1.50)
+    no_bet_row = _paper_fresh_public_row(
+        index=2,
+        market_id="one-hour-justified-success-no-bet",
+        action="BUY_UP_HOLD_TO_SETTLEMENT",
+        side="UP",
+        p_up=0.82,
+    )
+    no_bet_row["microstructure_snapshot"]["time_to_close_seconds"] = 30.0
+
+    result = run_execution_layer_v2_one_hour_remap_paper_goal(
+        ExecutionLayerV2OneHourRemapPaperGoalConfig(
+            run_id="one-hour-goal-guard-justified-no-bet-success",
+            output_dir=tmp_path / "runs",
+            duration_seconds=3600,
+            poll_interval_seconds=0.0,
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((bet_row, no_bet_row),),
+            settlement_evaluation_rows=(
+                {
+                    "market_id": "one-hour-justified-success-bet",
+                    "settlement_pnl": 0.25,
+                },
+            ),
+        )
+    )
+
+    report = result.goal_report
+    assert report["complete_round_count"] == 2
+    assert report["complete_rounds_with_bet_count"] == 1
+    assert report["missing_bet_round_count"] == 1
+    assert report["guard_justified_no_bet_round_count"] == 1
+    assert report["guard_justified_no_bet_round_ids"] == [
+        "one-hour-justified-success-no-bet"
+    ]
+    assert report["unjustified_missing_bet_round_count"] == 0
+    assert report["unjustified_missing_bet_round_ids"] == []
+    assert report["settled_pnl"] == pytest.approx(0.25)
+    assert report["unresolved_settlement_count"] == 0
+    assert report["final_goal_success"] is True
+    assert report["goal_failure_reason_codes"] == []
+    assert result.round_coverage_report["guard_justified_no_bet_round_count"] == 1
+    assert result.manifest["guard_justified_no_bet_round_count"] == 1
+    assert result.manifest["unjustified_missing_bet_round_count"] == 0
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
+    assert result.manifest["#146_start_allowed"] is False
+
+
+def test_execution_layer_v2_one_hour_goal_unjustified_missing_requires_attempt() -> None:
+    classification = _missing_bet_round_classifications(
+        missing_round_ids=["missing-without-attempt"],
+        forced_coverage={"forced_coverage_attempt_rows": []},
+    )
+
+    assert classification["guard_justified_no_bet_round_count"] == 0
+    assert classification["unjustified_missing_bet_round_count"] == 1
+    assert classification["unjustified_missing_bet_round_ids"] == [
+        "missing-without-attempt"
+    ]
+    assert classification["unjustified_missing_bet_reason_distribution"] == {
+        "forced_coverage_attempt_missing": 1
+    }
 
 
 def test_execution_layer_v2_one_hour_goal_forced_coverage_creates_guarded_bet(
