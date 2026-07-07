@@ -1150,7 +1150,7 @@ def test_execution_layer_v2_one_hour_goal_reports_missing_round_bet_fail_closed(
         side="UP",
         p_up=0.82,
     )
-    row["microstructure_snapshot"]["time_to_close_seconds"] = 90.0
+    row["microstructure_snapshot"]["time_to_close_seconds"] = 30.0
     for candidate in row["full_5_action_ranking"]:
         if candidate["selected_action"] == "BUY_UP_SELL_BEFORE_CLOSE":
             candidate["microstructure_snapshot"] = {
@@ -1180,6 +1180,18 @@ def test_execution_layer_v2_one_hour_goal_reports_missing_round_bet_fail_closed(
     assert "execution_time_to_close_unsafe" in report[
         "forced_coverage_blocking_reason_distribution"
     ]
+    assert report["forced_coverage_blocker_category_distribution"] == {
+        "time_to_close": 1
+    }
+    attempts = result.remap_execution_report["forced_coverage_attempt_rows"]
+    assert attempts[0]["forced_coverage_candidate_attempt_count"] >= 1
+    assert attempts[0]["forced_coverage_candidate_attempt_count"] == len(
+        attempts[0]["forced_coverage_candidate_attempt_rows"]
+    )
+    assert attempts[0]["forced_coverage_selected_action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+    assert attempts[0]["forced_coverage_blocker_categories"] == ["time_to_close"]
+    assert attempts[0]["forced_coverage_missing_runtime_field_codes"] == []
+    assert attempts[0]["forced_coverage_p_up_action_disagreement"] is False
     assert report["final_goal_success"] is False
     assert "complete_rounds_missing_paper_bets" in report[
         "goal_failure_reason_codes"
@@ -1239,6 +1251,71 @@ def test_execution_layer_v2_one_hour_goal_forced_coverage_creates_guarded_bet(
     assert fills[0]["execution_guarded_action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
     assert ledger[0]["outcome_pnl_used"] is False
     assert result.manifest["forced_coverage_bet_count"] == 1
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def test_execution_layer_v2_one_hour_goal_forced_coverage_searches_guarded_candidates(
+    tmp_path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    blocked_late_row = _paper_fresh_public_row(
+        index=2,
+        market_id="one-hour-forced-coverage-search",
+        action="NO_TRADE",
+        side="NONE",
+        p_up=0.82,
+    )
+    _set_action_score(blocked_late_row, "NO_TRADE", 1.90)
+    _set_action_score(blocked_late_row, "BUY_UP_HOLD_TO_SETTLEMENT", 1.80)
+    blocked_late_row["microstructure_snapshot"]["time_to_close_seconds"] = 60.0
+    blocked_late_row["microstructure_snapshot"]["spread_bps"] = 9_999.0
+    safe_early_row = _paper_fresh_public_row(
+        index=1,
+        market_id="one-hour-forced-coverage-search",
+        action="NO_TRADE",
+        side="NONE",
+        p_up=0.82,
+    )
+    _set_action_score(safe_early_row, "NO_TRADE", 1.60)
+    _set_action_score(safe_early_row, "BUY_UP_HOLD_TO_SETTLEMENT", 1.30)
+    safe_early_row["microstructure_snapshot"]["time_to_close_seconds"] = 360.0
+
+    result = run_execution_layer_v2_one_hour_remap_paper_goal(
+        ExecutionLayerV2OneHourRemapPaperGoalConfig(
+            run_id="one-hour-goal-forced-coverage-search",
+            output_dir=tmp_path / "runs",
+            duration_seconds=3600,
+            poll_interval_seconds=0.0,
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((blocked_late_row, safe_early_row),),
+            settlement_evaluation_rows=(
+                {
+                    "market_id": "one-hour-forced-coverage-search",
+                    "settlement_pnl": 0.25,
+                },
+            ),
+        )
+    )
+
+    report = result.goal_report
+    attempts = result.remap_execution_report["forced_coverage_attempt_rows"]
+    candidate_attempts = attempts[0]["forced_coverage_candidate_attempt_rows"]
+    intents = _read_jsonl(result.artifact_paths["paper_intent_log"])
+
+    assert report["forced_coverage_bet_count"] == 1
+    assert report["complete_rounds_with_bet_count"] == 1
+    assert attempts[0]["forced_coverage_candidate_search_found_guard_passed"] is True
+    assert attempts[0]["forced_coverage_candidate_attempt_count"] > 1
+    assert candidate_attempts[0]["blocker_categories"] == ["spread", "time_to_close"]
+    assert any(row["order_allowed"] is True for row in candidate_attempts)
+    assert attempts[0]["forced_coverage_selected_action"] in {
+        "BUY_UP_HOLD_TO_SETTLEMENT",
+        "BUY_UP_SELL_BEFORE_CLOSE",
+    }
+    assert attempts[0]["forced_coverage_time_to_close_seconds"] == pytest.approx(360.0)
+    assert intents[0]["coverage_forced_paper_bet"] is True
+    assert intents[0]["order_origin"] == "forced_coverage_full_guard_paper_only"
     assert result.manifest["v8_execution_handoff_allowed"] is False
 
 
