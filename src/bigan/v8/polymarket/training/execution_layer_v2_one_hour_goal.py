@@ -1076,6 +1076,53 @@ def _write_per_round_bet_artifacts(
         )
 
 
+def _settlement_pnl_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    settled_rows = [row for row in rows if row.get("settlement_status") == "settled"]
+    unresolved_rows = [
+        row for row in rows if row.get("settlement_status") != "settled"
+    ]
+    settled_pnl = sum(_float(row.get("settlement_pnl")) for row in rows)
+    unresolved_pnl = sum(_float(row.get("unresolved_pnl")) for row in rows)
+    return {
+        "settlement_row_count": len(rows),
+        "settled_fill_count": len(settled_rows),
+        "unresolved_fill_count": len(unresolved_rows),
+        "winning_fill_count": sum(
+            1 for row in settled_rows if _float(row.get("settlement_pnl")) > 0.0
+        ),
+        "losing_fill_count": sum(
+            1 for row in settled_rows if _float(row.get("settlement_pnl")) < 0.0
+        ),
+        "flat_fill_count": sum(
+            1 for row in settled_rows if _float(row.get("settlement_pnl")) == 0.0
+        ),
+        "settled_pnl": settled_pnl,
+        "unresolved_pnl": unresolved_pnl,
+        "pnl_by_side": _pnl_by_field(rows, "execution_guarded_side"),
+        "pnl_by_action": _pnl_by_field(rows, "execution_guarded_action"),
+        "resolved_outcome_distribution": _counter_from_field(
+            settled_rows, "resolved_outcome"
+        ),
+    }
+
+
+def _pnl_by_field(rows: list[dict[str, Any]], field_name: str) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for row in rows:
+        field_value = str(row.get(field_name) or "UNKNOWN")
+        totals[field_value] = totals.get(field_value, 0.0) + _float(
+            row.get("settlement_pnl")
+        )
+    return dict(sorted(totals.items()))
+
+
+def _counter_from_field(rows: list[dict[str, Any]], field_name: str) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for row in rows:
+        counter[str(row.get(field_name) or "UNKNOWN")] += 1
+    return dict(sorted(counter.items()))
+
+
 def _write_per_round_artifacts(
     *,
     goal_dir: Path,
@@ -1105,6 +1152,7 @@ def _write_per_round_artifacts(
             row for row in settlement_rows if str(row.get("market_id")) == market_id
         ]
         outcome_path = market_dir / "round_outcome.json"
+        pnl_summary = _settlement_pnl_summary(settlement_for_market)
         if settlement_for_market:
             outcome_payload = {
                 "market_id": market_id,
@@ -1117,6 +1165,7 @@ def _write_per_round_artifacts(
                     )
                     else "unresolved"
                 ),
+                **pnl_summary,
                 "paper_only": True,
                 "capital_at_risk": False,
                 "polymarket_write_enabled": False,
@@ -1143,7 +1192,7 @@ def _write_per_round_artifacts(
             "paper_fill_count": sum(
                 1 for fill in fills if str(fill.get("market_id")) == market_id
             ),
-            "settlement_row_count": len(settlement_for_market),
+            **pnl_summary,
             "artifact_paths": {
                 name: str(path)
                 for name, path in paths.items()
@@ -1168,6 +1217,14 @@ def _write_per_round_artifacts(
         "per_round_outcome_artifact_count": sum(
             1 for row in round_rows if row["round_outcome_artifact_exists"]
         ),
+        "settled_pnl": sum(_float(row["settled_pnl"]) for row in round_rows),
+        "unresolved_pnl": sum(_float(row["unresolved_pnl"]) for row in round_rows),
+        "settled_fill_count": sum(int(row["settled_fill_count"]) for row in round_rows),
+        "unresolved_fill_count": sum(
+            int(row["unresolved_fill_count"]) for row in round_rows
+        ),
+        "winning_fill_count": sum(int(row["winning_fill_count"]) for row in round_rows),
+        "losing_fill_count": sum(int(row["losing_fill_count"]) for row in round_rows),
         "round_artifact_rows": round_rows,
         "paper_only": True,
         "capital_at_risk": False,
@@ -1826,6 +1883,7 @@ def _one_hour_goal_report(
     unresolved_count = sum(
         1 for row in settlement_rows if row.get("settlement_status") != "settled"
     )
+    pnl_summary = _settlement_pnl_summary(settlement_rows)
     blockers = []
     if round_coverage["complete_round_count"] <= 0:
         blockers.append("no_complete_rounds_observed")
@@ -1882,6 +1940,15 @@ def _one_hour_goal_report(
         "settled_pnl": settled_pnl,
         "unresolved_pnl": unresolved_pnl,
         "unresolved_settlement_count": unresolved_count,
+        "settled_fill_count": pnl_summary["settled_fill_count"],
+        "winning_fill_count": pnl_summary["winning_fill_count"],
+        "losing_fill_count": pnl_summary["losing_fill_count"],
+        "flat_fill_count": pnl_summary["flat_fill_count"],
+        "pnl_by_side": pnl_summary["pnl_by_side"],
+        "pnl_by_action": pnl_summary["pnl_by_action"],
+        "resolved_outcome_distribution": pnl_summary[
+            "resolved_outcome_distribution"
+        ],
         "settlement_polling_enabled": settlement_resolution["settlement_polling_enabled"],
         "settlement_poll_attempt_count": settlement_resolution[
             "settlement_poll_attempt_count"
@@ -1995,6 +2062,15 @@ def _one_hour_goal_manifest(
         ],
         "settled_pnl": goal_report["settled_pnl"],
         "unresolved_pnl": goal_report["unresolved_pnl"],
+        "settled_fill_count": goal_report["settled_fill_count"],
+        "winning_fill_count": goal_report["winning_fill_count"],
+        "losing_fill_count": goal_report["losing_fill_count"],
+        "flat_fill_count": goal_report["flat_fill_count"],
+        "pnl_by_side": goal_report["pnl_by_side"],
+        "pnl_by_action": goal_report["pnl_by_action"],
+        "resolved_outcome_distribution": goal_report[
+            "resolved_outcome_distribution"
+        ],
         "settlement_poll_attempt_count": goal_report["settlement_poll_attempt_count"],
         "settlement_evaluation_row_count": goal_report["settlement_evaluation_row_count"],
         "settlement_resolution_reason_codes": goal_report[
@@ -2055,6 +2131,11 @@ def _one_hour_goal_md(report: dict[str, Any]) -> str:
             f"- forced_coverage_guard_blocked_count: `{report['forced_coverage_guard_blocked_count']}`",
             f"- settled_pnl: `{report['settled_pnl']}`",
             f"- unresolved_pnl: `{report['unresolved_pnl']}`",
+            f"- settled_fill_count: `{report['settled_fill_count']}`",
+            f"- winning_fill_count: `{report['winning_fill_count']}`",
+            f"- losing_fill_count: `{report['losing_fill_count']}`",
+            f"- pnl_by_side: `{report['pnl_by_side']}`",
+            f"- pnl_by_action: `{report['pnl_by_action']}`",
             f"- settlement_poll_attempt_count: `{report['settlement_poll_attempt_count']}`",
             f"- settlement_evaluation_row_count: `{report['settlement_evaluation_row_count']}`",
             f"- provider_fail_fast_stop_triggered: `{report['provider_fail_fast_stop_triggered']}`",

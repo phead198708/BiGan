@@ -1083,6 +1083,10 @@ def test_execution_layer_v2_one_hour_goal_remap_success_with_positive_settlement
     assert report["forced_coverage_bet_count"] == 0
     assert report["settled_pnl"] == pytest.approx(0.25)
     assert report["unresolved_pnl"] == 0.0
+    assert report["settled_fill_count"] == 1
+    assert report["winning_fill_count"] == 1
+    assert report["losing_fill_count"] == 0
+    assert report["pnl_by_side"] == {"UP": pytest.approx(0.25)}
     assert report["final_goal_success"] is True
     assert report["uses_settlement_pnl_or_outcome_labels_in_decision_logic"] is False
     assert report["paper_only"] is True
@@ -1123,6 +1127,16 @@ def test_execution_layer_v2_one_hour_goal_remap_success_with_positive_settlement
     assert per_round_manifest["round_artifact_rows"][0][
         "round_outcome_artifact_exists"
     ] is True
+    round_row = per_round_manifest["round_artifact_rows"][0]
+    assert round_row["settled_pnl"] == pytest.approx(0.25)
+    assert round_row["winning_fill_count"] == 1
+    round_outcome = json.loads(
+        Path(round_row["artifact_paths"]["round_outcome"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert round_outcome["settled_pnl"] == pytest.approx(0.25)
+    assert round_outcome["pnl_by_side"] == {"UP": pytest.approx(0.25)}
 
 
 def test_execution_layer_v2_one_hour_goal_reports_missing_round_bet_fail_closed(
