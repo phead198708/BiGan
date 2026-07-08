@@ -28,8 +28,10 @@ from bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal import (
 )
 from bigan.v8.polymarket.training.execution_layer_v2_policy_replay import (
     ExecutionLayerV2ForwardShadowConfig,
+    ExecutionLayerV2HTSRegimeRiskReplayConfig,
     ExecutionLayerV2PolicyReplayConfig,
     run_execution_layer_v2_forward_shadow_policy,
+    run_execution_layer_v2_hts_regime_risk_replay,
     run_execution_layer_v2_policy_replay_from_settlement_csv,
 )
 from tests.v8.test_polymarket_post_freeze_holdout import (
@@ -454,6 +456,85 @@ def test_execution_layer_v2_policy_replay_from_settlement_csv_metrics_and_warnin
     assert result.artifact_paths["execution_layer_v2_policy_replay_summary"].exists()
     assert result.artifact_paths["execution_layer_v2_policy_replay_manifest"].exists()
     assert result.artifact_hashes["execution_layer_v2_policy_replay_report"]
+
+
+def test_execution_layer_v2_hts_regime_risk_replay_is_diagnostic_only(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "settled-paper-goal"
+    run_dir.mkdir()
+    intents = [
+        _hts_regime_intent("i1", "m1", "BUY_UP_HOLD_TO_SETTLEMENT", 0.85, 0.15, 0.80),
+        _hts_regime_intent("i2", "m2", "BUY_UP_HOLD_TO_SETTLEMENT", 0.52, 0.48, 0.70),
+        _hts_regime_intent("i3", "m3", "BUY_DOWN_HOLD_TO_SETTLEMENT", 0.20, 0.80, 0.78),
+        _hts_regime_intent("i4", "m4", "BUY_UP_SELL_BEFORE_CLOSE", 0.62, 0.38, 0.56),
+        _hts_regime_intent("i5", "m5", "BUY_UP_HOLD_TO_SETTLEMENT", 0.20, 0.80, 0.82),
+    ]
+    fills = [
+        _hts_regime_fill("i1", "m1", "BUY_UP_HOLD_TO_SETTLEMENT", "UP", 0.80),
+        _hts_regime_fill("i2", "m2", "BUY_UP_HOLD_TO_SETTLEMENT", "UP", 0.70),
+        _hts_regime_fill("i3", "m3", "BUY_DOWN_HOLD_TO_SETTLEMENT", "DOWN", 0.78),
+        _hts_regime_fill("i4", "m4", "BUY_UP_SELL_BEFORE_CLOSE", "UP", 0.56),
+        _hts_regime_fill("i5", "m5", "BUY_UP_HOLD_TO_SETTLEMENT", "UP", 0.82),
+    ]
+    settlements = [
+        _hts_regime_settlement("i1", "m1", "BUY_UP_HOLD_TO_SETTLEMENT", "UP", "DOWN", -0.16),
+        _hts_regime_settlement("i2", "m2", "BUY_UP_HOLD_TO_SETTLEMENT", "UP", "UP", 0.08),
+        _hts_regime_settlement("i3", "m3", "BUY_DOWN_HOLD_TO_SETTLEMENT", "DOWN", "DOWN", 0.06),
+        _hts_regime_settlement("i4", "m4", "BUY_UP_SELL_BEFORE_CLOSE", "UP", "UP", 0.04),
+        _hts_regime_settlement("i5", "m5", "BUY_UP_HOLD_TO_SETTLEMENT", "UP", "DOWN", -0.12),
+    ]
+    _write_jsonl(run_dir / "one_hour_paper_intent_log.jsonl", intents)
+    _write_jsonl(run_dir / "one_hour_paper_fill_log.jsonl", fills)
+    _write_jsonl(run_dir / "settlement_pnl_rows.jsonl", settlements)
+
+    result = run_execution_layer_v2_hts_regime_risk_replay(
+        ExecutionLayerV2HTSRegimeRiskReplayConfig(
+            run_id="hts-regime-risk-fixture",
+            input_path=run_dir,
+            output_dir=tmp_path / "runs",
+        )
+    )
+    report = result.report
+
+    assert report["fill_count"] == 5
+    assert report["hts_fill_count"] == 4
+    assert report["global_up_hts_disable_recommended"] is False
+    assert report["uses_outcome_for_policy_selection"] is False
+    assert report["uses_outcome_for_offline_evaluation"] is True
+    assert report["policy_variants"]["baseline_all"]["settled_pnl"] == pytest.approx(-0.10)
+    assert report["policy_variants"]["side_blind_hts"]["fill_count"] == 4
+    assert report["policy_variants"]["up_hts_only_when_up_regime_confirmed"][
+        "fill_count"
+    ] == 1
+    assert report["policy_variants"]["down_hts_only_when_down_regime_confirmed"][
+        "settled_pnl"
+    ] == pytest.approx(0.06)
+    assert report["false_positive_up_hts_examples"][0]["market_id"] == "m1"
+    assert report["missed_opportunity_up_hts_examples"][0]["market_id"] == "m2"
+    assert "resolved_outcome" in report["evaluation_only_fields"]
+    assert "Do not disable BUY_UP_HOLD_TO_SETTLEMENT globally" in (
+        report["recommended_decision_time_guard_signals"][0]
+    )
+    assert report["paper_only"] is True
+    assert report["capital_at_risk"] is False
+    assert report["polymarket_write_enabled"] is False
+    assert report["wallet_signing_enabled"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["freeze_ready"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["#134_resume_allowed"] is False
+    assert report["#146_start_allowed"] is False
+    assert result.artifact_paths[
+        "execution_layer_v2_hts_regime_risk_replay_report"
+    ].exists()
+    assert result.artifact_paths[
+        "execution_layer_v2_hts_regime_risk_replay_manifest"
+    ].exists()
+    assert result.artifact_hashes[
+        "execution_layer_v2_hts_regime_risk_replay_report"
+    ]
 
 
 def test_execution_layer_v2_forward_shadow_missing_calibrated_ev_fails_closed(
@@ -1524,6 +1605,89 @@ def _write_settlement_csv(path, rows: list[dict[str, object]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _hts_regime_intent(
+    intent_id: str,
+    market_id: str,
+    action: str,
+    p_up: float,
+    p_down: float,
+    entry_price: float,
+) -> dict[str, object]:
+    side = "UP" if "BUY_UP" in action else "DOWN"
+    return {
+        "paper_fresh_order_intent_id": intent_id,
+        "market_id": market_id,
+        "decision_ts": 1_000 + len(intent_id),
+        "execution_guarded_action": action,
+        "execution_guarded_family": (
+            "SELL_BEFORE_CLOSE"
+            if "SELL_BEFORE_CLOSE" in action
+            else "HOLD_TO_SETTLEMENT"
+        ),
+        "execution_guarded_side": side,
+        "p_up": p_up,
+        "p_down": p_down,
+        "paper_limit_price": entry_price,
+        "time_to_close_seconds": 180.0,
+        "spread_bps": 200.0,
+        "book_staleness_ms": 500.0,
+        "queue_fill_proxy": 0.80,
+        "source_model_score": 0.10,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+
+
+def _hts_regime_fill(
+    intent_id: str,
+    market_id: str,
+    action: str,
+    side: str,
+    price: float,
+) -> dict[str, object]:
+    return {
+        "paper_fresh_order_intent_id": intent_id,
+        "paper_fresh_fill_id": f"fill-{intent_id}",
+        "market_id": market_id,
+        "decision_ts": 1_000 + len(intent_id),
+        "execution_guarded_action": action,
+        "execution_guarded_side": side,
+        "paper_fill_price": price,
+        "filled_size": 0.20,
+        "total_execution_cost": 0.001,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+
+
+def _hts_regime_settlement(
+    intent_id: str,
+    market_id: str,
+    action: str,
+    side: str,
+    outcome: str,
+    pnl: float,
+) -> dict[str, object]:
+    return {
+        "paper_fresh_order_intent_id": intent_id,
+        "paper_fresh_fill_id": f"fill-{intent_id}",
+        "market_id": market_id,
+        "decision_ts": 1_000 + len(intent_id),
+        "execution_guarded_action": action,
+        "execution_guarded_side": side,
+        "settlement_status": "settled",
+        "resolved_outcome": outcome,
+        "settlement_pnl": pnl,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "uses_settlement_pnl_for_decision_time_logic": False,
+    }
 
 
 def _write_forward_shadow_input(path, rows: list[dict[str, object]]) -> None:

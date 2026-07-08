@@ -44,6 +44,12 @@ EXECUTION_LAYER_V2_FORWARD_SHADOW_GUARD_INTERSECTION_SCHEMA_VERSION = (
 EXECUTION_LAYER_V2_HTS_TIME_WINDOW_REMAP_SCHEMA_VERSION = (
     "bigan-v8-polymarket-execution-layer-v2-hts-time-window-remap-v1"
 )
+EXECUTION_LAYER_V2_HTS_REGIME_RISK_REPLAY_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-execution-layer-v2-hts-regime-risk-replay-v1"
+)
+EXECUTION_LAYER_V2_HTS_REGIME_RISK_REPLAY_MANIFEST_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-execution-layer-v2-hts-regime-risk-replay-manifest-v1"
+)
 EXECUTION_LAYER_V2_FORWARD_SHADOW_MANIFEST_SCHEMA_VERSION = (
     "bigan-v8-polymarket-execution-layer-v2-forward-shadow-manifest-v1"
 )
@@ -69,6 +75,15 @@ FORWARD_SHADOW_POLICY_VARIANTS: tuple[str, ...] = (
     "bucket_aware_v1_plus_sbc",
     "calibrated_ev_v2",
     "calibrated_ev_plus_bucket_v2",
+)
+HTS_REGIME_RISK_POLICY_VARIANTS: tuple[str, ...] = (
+    "baseline_all",
+    "side_blind_hts",
+    "regime_aware_up_down_hts",
+    "up_hts_only_when_up_regime_confirmed",
+    "down_hts_only_when_down_regime_confirmed",
+    "hts_allowed_only_when_regime_and_price_bucket_agree",
+    "hts_to_sbc_when_late_or_uncertain",
 )
 
 PRICE_BUCKET_EDGES: tuple[tuple[str, float, float | None], ...] = (
@@ -119,6 +134,52 @@ class ExecutionLayerV2PolicyReplayConfig:
 @dataclass(frozen=True, slots=True)
 class ExecutionLayerV2PolicyReplayResult:
     """Written settlement-CSV replay bundle."""
+
+    output_dir: Path
+    artifact_paths: dict[str, Path]
+    artifact_hashes: dict[str, str]
+    report: dict[str, Any]
+    manifest: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLayerV2HTSRegimeRiskReplayConfig:
+    """Configuration for outcome-aware HTS regime risk diagnostics."""
+
+    run_id: str
+    input_path: Path | str
+    output_dir: Path | str
+    overwrite_existing: bool = False
+    paper_only: bool = True
+    capital_at_risk: bool = False
+    polymarket_write_enabled: bool = False
+    wallet_signing_enabled: bool = False
+    v8_execution_handoff_allowed: bool = False
+    source_model_candidate_eligible: bool = False
+    freeze_ready: bool = False
+    promotion_evidence_eligible: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        object.__setattr__(self, "input_path", Path(self.input_path))
+        object.__setattr__(self, "output_dir", Path(self.output_dir))
+        _validate_safety_flags(self)
+
+    @property
+    def run_dir(self) -> Path:
+        return self.output_dir.expanduser().resolve() / self.run_id
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["input_path"] = str(self.input_path)
+        payload["output_dir"] = str(self.output_dir)
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLayerV2HTSRegimeRiskReplayResult:
+    """Written HTS regime risk diagnostic bundle."""
 
     output_dir: Path
     artifact_paths: dict[str, Path]
@@ -268,6 +329,95 @@ def run_execution_layer_v2_policy_replay_from_settlement_csv(
         artifact_paths["execution_layer_v2_policy_replay_manifest"]
     )
     return ExecutionLayerV2PolicyReplayResult(
+        output_dir=run_dir,
+        artifact_paths=artifact_paths,
+        artifact_hashes=artifact_hashes,
+        report=report,
+        manifest=manifest,
+    )
+
+
+def run_execution_layer_v2_hts_regime_risk_replay(
+    config: ExecutionLayerV2HTSRegimeRiskReplayConfig,
+) -> ExecutionLayerV2HTSRegimeRiskReplayResult:
+    """Run and write diagnostic-only HTS regime risk replay artifacts."""
+
+    if not config.input_path.exists():
+        raise FileNotFoundError(f"HTS regime replay input not found: {config.input_path}")
+    run_dir = config.run_dir
+    if run_dir.exists():
+        if not config.overwrite_existing:
+            raise FileExistsError(f"HTS regime replay output exists: {run_dir}")
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True)
+
+    rows = _load_hts_regime_replay_rows(config.input_path)
+    report = build_execution_layer_v2_hts_regime_risk_replay_report(
+        rows,
+        run_id=config.run_id,
+        input_path=str(config.input_path),
+    )
+    artifact_paths = {
+        "execution_layer_v2_hts_regime_risk_replay_report": run_dir
+        / "execution_layer_v2_hts_regime_risk_replay_report.json",
+        "execution_layer_v2_hts_regime_risk_replay_summary": run_dir
+        / "execution_layer_v2_hts_regime_risk_replay_report.md",
+        "execution_layer_v2_hts_regime_risk_replay_manifest": run_dir
+        / "execution_layer_v2_hts_regime_risk_replay_manifest.json",
+    }
+    _write_json(
+        artifact_paths["execution_layer_v2_hts_regime_risk_replay_report"],
+        report,
+    )
+    _write_text(
+        artifact_paths["execution_layer_v2_hts_regime_risk_replay_summary"],
+        execution_layer_v2_hts_regime_risk_replay_report_to_markdown(report),
+    )
+    artifact_hashes = {
+        "execution_layer_v2_hts_regime_risk_replay_report": _sha256_file(
+            artifact_paths["execution_layer_v2_hts_regime_risk_replay_report"]
+        ),
+        "execution_layer_v2_hts_regime_risk_replay_summary": _sha256_file(
+            artifact_paths["execution_layer_v2_hts_regime_risk_replay_summary"]
+        ),
+    }
+    manifest = {
+        "schema_version": (
+            EXECUTION_LAYER_V2_HTS_REGIME_RISK_REPLAY_MANIFEST_SCHEMA_VERSION
+        ),
+        "run_id": config.run_id,
+        "input_path": str(config.input_path),
+        "artifact_paths": {name: str(path) for name, path in artifact_paths.items()},
+        "artifact_hashes": dict(artifact_hashes),
+        "report_id": report["execution_layer_v2_hts_regime_risk_replay_report_id"],
+        "fill_count": report["fill_count"],
+        "hts_fill_count": report["hts_fill_count"],
+        "settled_pnl": report["policy_variants"]["baseline_all"]["settled_pnl"],
+        "policy_variant_names": list(HTS_REGIME_RISK_POLICY_VARIANTS),
+        "recommended_guard_signal_count": len(
+            report["recommended_decision_time_guard_signals"]
+        ),
+        "diagnostic_only": True,
+        "outcome_aware_offline_replay": True,
+        "uses_outcome_for_policy_selection": False,
+        "uses_outcome_for_offline_evaluation": True,
+        "thresholds_tuned": False,
+        "source_scores_mutated": False,
+        "o_score_mutated": False,
+        "paper_live_unlock_changed": False,
+        **_safety_report_fields(),
+    }
+    manifest["manifest_id"] = canonical_json_sha256(manifest)
+    _write_json(
+        artifact_paths["execution_layer_v2_hts_regime_risk_replay_manifest"],
+        manifest,
+    )
+    artifact_hashes["execution_layer_v2_hts_regime_risk_replay_manifest"] = (
+        _sha256_file(
+            artifact_paths["execution_layer_v2_hts_regime_risk_replay_manifest"]
+        )
+    )
+    return ExecutionLayerV2HTSRegimeRiskReplayResult(
         output_dir=run_dir,
         artifact_paths=artifact_paths,
         artifact_hashes=artifact_hashes,
@@ -592,6 +742,74 @@ def build_execution_layer_v2_policy_replay_report(
     return report
 
 
+def build_execution_layer_v2_hts_regime_risk_replay_report(
+    rows: list[dict[str, Any]],
+    *,
+    run_id: str,
+    input_path: str,
+) -> dict[str, Any]:
+    """Build an outcome-aware, decision-time-feature HTS risk diagnostic report."""
+
+    variant_reports = {
+        name: _hts_regime_policy_metrics(rows, name)
+        for name in HTS_REGIME_RISK_POLICY_VARIANTS
+    }
+    hts_rows = [row for row in rows if row["family"] == "HOLD_TO_SETTLEMENT"]
+    up_hts_rows = [
+        row for row in hts_rows if row["action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+    ]
+    report = {
+        "schema_version": EXECUTION_LAYER_V2_HTS_REGIME_RISK_REPLAY_SCHEMA_VERSION,
+        "run_id": run_id,
+        "input_path": input_path,
+        "fill_count": len(rows),
+        "hts_fill_count": len(hts_rows),
+        "up_hts_fill_count": len(up_hts_rows),
+        "diagnostic_only": True,
+        "outcome_aware_offline_replay": True,
+        "uses_outcome_for_policy_selection": False,
+        "uses_outcome_for_offline_evaluation": True,
+        "uses_settlement_pnl_for_decision_time_logic": False,
+        "uses_oracle_actions_or_future_returns": False,
+        "uses_validation_labels_for_threshold_tuning": False,
+        "thresholds_tuned": False,
+        "global_up_hts_disable_recommended": False,
+        "policy_variant_names": list(HTS_REGIME_RISK_POLICY_VARIANTS),
+        "policy_variant_definitions": _hts_regime_policy_definitions(),
+        "decision_time_regime_feature_fields": _hts_regime_decision_time_fields(),
+        "evaluation_only_fields": [
+            "resolved_outcome",
+            "settlement_pnl",
+            "settlement_status",
+        ],
+        "feature_coverage": _hts_regime_feature_coverage(rows),
+        "policy_variants": variant_reports,
+        "pnl_by_side": _pnl_distribution(rows, "side"),
+        "pnl_by_action": _pnl_distribution(rows, "action"),
+        "pnl_by_regime": _pnl_distribution(rows, "market_regime"),
+        "pnl_by_price_bucket": _pnl_distribution(rows, "price_bucket"),
+        "pnl_by_time_window": _pnl_distribution(rows, "time_window_bucket"),
+        "false_positive_up_hts_examples": _false_positive_up_hts_examples(rows),
+        "missed_opportunity_up_hts_examples": _missed_opportunity_up_hts_examples(rows),
+        "recommended_decision_time_guard_signals": (
+            _recommended_hts_regime_guard_signals(rows, variant_reports)
+        ),
+        "recommendation_summary": (
+            "Do not disable UP HTS globally. Use regime-aware, decision-time-only "
+            "guard signals and keep UP HTS available when UP regime evidence and "
+            "entry quality are strong enough."
+        ),
+        "source_scores_mutated": False,
+        "o_score_mutated": False,
+        "paper_live_unlock_changed": False,
+        **_safety_report_fields(),
+    }
+    report["execution_layer_v2_hts_regime_risk_replay_report_id"] = (
+        canonical_json_sha256(report)
+    )
+    return report
+
+
 def execution_layer_v2_policy_replay_report_to_markdown(report: dict[str, Any]) -> str:
     """Render a compact Markdown summary for #166 review."""
 
@@ -642,6 +860,93 @@ def execution_layer_v2_policy_replay_report_to_markdown(report: dict[str, Any]) 
     )
     for rule in policy["rules"]:
         lines.append(f"- {rule}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def execution_layer_v2_hts_regime_risk_replay_report_to_markdown(
+    report: dict[str, Any],
+) -> str:
+    """Render the HTS regime risk diagnostic report."""
+
+    lines = [
+        "# v8 Execution Layer v2 HTS Regime Risk Replay",
+        "",
+        f"- run_id: `{report['run_id']}`",
+        f"- input_path: `{report['input_path']}`",
+        f"- fill_count: `{report['fill_count']}`",
+        f"- hts_fill_count: `{report['hts_fill_count']}`",
+        f"- up_hts_fill_count: `{report['up_hts_fill_count']}`",
+        f"- diagnostic_only: `{report['diagnostic_only']}`",
+        "- uses_outcome_for_policy_selection: "
+        f"`{report['uses_outcome_for_policy_selection']}`",
+        "- uses_outcome_for_offline_evaluation: "
+        f"`{report['uses_outcome_for_offline_evaluation']}`",
+        "- global_up_hts_disable_recommended: "
+        f"`{report['global_up_hts_disable_recommended']}`",
+        f"- v8_execution_handoff_allowed: `{report['v8_execution_handoff_allowed']}`",
+        "",
+        "## Policy Variants",
+        "",
+        "| variant | fills | pnl | roi | win_rate | max_drawdown |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for name in HTS_REGIME_RISK_POLICY_VARIANTS:
+        metrics = report["policy_variants"][name]
+        lines.append(
+            f"| `{name}` | {metrics['fill_count']} | "
+            f"{metrics['settled_pnl']:.6f} | {metrics['roi']:.6f} | "
+            f"{metrics['win_rate']:.6f} | {metrics['max_drawdown']:.6f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## PnL Breakdown",
+            "",
+            f"- pnl_by_side: `{report['pnl_by_side']}`",
+            f"- pnl_by_action: `{report['pnl_by_action']}`",
+            f"- pnl_by_regime: `{report['pnl_by_regime']}`",
+            f"- pnl_by_price_bucket: `{report['pnl_by_price_bucket']}`",
+            f"- pnl_by_time_window: `{report['pnl_by_time_window']}`",
+            "",
+            "## Recommended Decision-Time Guard Signals",
+            "",
+        ]
+    )
+    for signal in report["recommended_decision_time_guard_signals"]:
+        lines.append(f"- {signal}")
+    lines.extend(
+        [
+            "",
+            "## False-Positive UP HTS Examples",
+            "",
+            "| market | action | regime | price_bucket | time_window | pnl | reasons |",
+            "| --- | --- | --- | --- | --- | ---: | --- |",
+        ]
+    )
+    for row in report["false_positive_up_hts_examples"][:10]:
+        lines.append(
+            f"| `{_short_id(row['market_id'])}` | `{row['action']}` | "
+            f"`{row['market_regime']}` | `{row['price_bucket']}` | "
+            f"`{row['time_window_bucket']}` | {row['settlement_pnl']:.6f} | "
+            f"`{row['diagnostic_reason_codes']}` |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Missed-Opportunity UP HTS Examples",
+            "",
+            "| market | action | regime | price_bucket | time_window | pnl | reasons |",
+            "| --- | --- | --- | --- | --- | ---: | --- |",
+        ]
+    )
+    for row in report["missed_opportunity_up_hts_examples"][:10]:
+        lines.append(
+            f"| `{_short_id(row['market_id'])}` | `{row['action']}` | "
+            f"`{row['market_regime']}` | `{row['price_bucket']}` | "
+            f"`{row['time_window_bucket']}` | {row['settlement_pnl']:.6f} | "
+            f"`{row['diagnostic_reason_codes']}` |"
+        )
     lines.append("")
     return "\n".join(lines)
 
@@ -1381,6 +1686,165 @@ def _policy_variant_definitions() -> dict[str, str]:
             "BUY_UP_HOLD_TO_SETTLEMENT"
         ),
     }
+
+
+def _hts_regime_policy_definitions() -> dict[str, str]:
+    return {
+        "baseline_all": "all settled paper fills, including HTS and SBC rows",
+        "side_blind_hts": "all HOLD_TO_SETTLEMENT entries regardless of side/regime",
+        "regime_aware_up_down_hts": (
+            "HTS entries only when the selected side is confirmed by "
+            "decision-time regime signals"
+        ),
+        "up_hts_only_when_up_regime_confirmed": (
+            "BUY_UP_HOLD_TO_SETTLEMENT only when decision-time UP regime is confirmed"
+        ),
+        "down_hts_only_when_down_regime_confirmed": (
+            "BUY_DOWN_HOLD_TO_SETTLEMENT only when decision-time DOWN regime is confirmed"
+        ),
+        "hts_allowed_only_when_regime_and_price_bucket_agree": (
+            "HTS entries only when side regime is confirmed and entry price is "
+            "inside the fixed diagnostic quality bucket"
+        ),
+        "hts_to_sbc_when_late_or_uncertain": (
+            "Observed SBC rows remain candidates; HTS rows are kept only when "
+            "regime is confirmed and the time window is HTS-safe. Late or "
+            "uncertain HTS rows are reported as SBC-remap candidates without "
+            "fabricating counterfactual PnL."
+        ),
+    }
+
+
+def _hts_regime_policy_metrics(
+    rows: list[dict[str, Any]],
+    variant: str,
+) -> dict[str, Any]:
+    selected: list[dict[str, Any]] = []
+    rejected_reasons: Counter[str] = Counter()
+    decision_rows: list[dict[str, Any]] = []
+    for row in rows:
+        allowed, reasons = _hts_regime_variant_allows_row(row, variant)
+        if allowed:
+            selected.append(row)
+        else:
+            rejected_reasons.update(reasons)
+        decision_rows.append(
+            {
+                "row_index": row["row_index"],
+                "market_id": row["market_id"],
+                "decision_ts": row["decision_ts"],
+                "action": row["action"],
+                "side": row["side"],
+                "family": row["family"],
+                "market_regime": row["market_regime"],
+                "p_up_down_balance": row["p_up_down_balance"],
+                "btc_momentum_regime": row["btc_momentum_regime"],
+                "price_bucket": row["price_bucket"],
+                "time_window_bucket": row["time_window_bucket"],
+                "same_market_entry_index": row["same_market_entry_index"],
+                "side_context": row["side_context"],
+                "policy_selected": allowed,
+                "policy_reason_codes": reasons,
+                "settlement_pnl": row["settlement_pnl"],
+                "resolved_outcome": row["resolved_outcome"],
+                "diagnostic_only": True,
+            }
+        )
+    return {
+        "variant_name": variant,
+        "fill_count": len(selected),
+        "settled_pnl": sum(float(row["settlement_pnl"]) for row in selected),
+        "cost_basis": sum(float(row["cost_basis"]) for row in selected),
+        "roi": _safe_roi(selected),
+        "win_rate": _win_rate(selected),
+        "pnl_by_side": _pnl_distribution(selected, "side"),
+        "pnl_by_action": _pnl_distribution(selected, "action"),
+        "pnl_by_regime": _pnl_distribution(selected, "market_regime"),
+        "pnl_by_price_bucket": _pnl_distribution(selected, "price_bucket"),
+        "pnl_by_time_window": _pnl_distribution(selected, "time_window_bucket"),
+        "action_distribution": _count_distribution(selected, "action"),
+        "family_distribution": _count_distribution(selected, "family"),
+        "side_distribution": _count_distribution(selected, "side"),
+        "regime_distribution": _count_distribution(selected, "market_regime"),
+        "price_bucket_distribution": _count_distribution(selected, "price_bucket"),
+        "time_window_distribution": _count_distribution(selected, "time_window_bucket"),
+        "max_drawdown": _max_drawdown(
+            [
+                float(row["settlement_pnl"])
+                for row in sorted(
+                    selected,
+                    key=lambda row: tuple(row["chronological_sort_key"]),
+                )
+            ]
+        ),
+        "rejected_reason_counts": dict(sorted(rejected_reasons.items())),
+        "decision_rows": decision_rows,
+        "diagnostic_only": True,
+        "uses_outcome_for_policy_selection": False,
+        "uses_outcome_for_offline_evaluation": True,
+    }
+
+
+def _hts_regime_variant_allows_row(
+    row: Mapping[str, Any],
+    variant: str,
+) -> tuple[bool, list[str]]:
+    action = str(row["action"])
+    family = str(row["family"])
+    if variant == "baseline_all":
+        return True, []
+    if variant == "side_blind_hts":
+        if family == "HOLD_TO_SETTLEMENT":
+            return True, []
+        return False, ["not_hold_to_settlement"]
+    if variant == "regime_aware_up_down_hts":
+        return _allow_hts_when_side_regime_confirmed(row)
+    if variant == "up_hts_only_when_up_regime_confirmed":
+        if action != "BUY_UP_HOLD_TO_SETTLEMENT":
+            return False, ["not_buy_up_hold_to_settlement"]
+        return _allow_hts_when_side_regime_confirmed(row)
+    if variant == "down_hts_only_when_down_regime_confirmed":
+        if action != "BUY_DOWN_HOLD_TO_SETTLEMENT":
+            return False, ["not_buy_down_hold_to_settlement"]
+        return _allow_hts_when_side_regime_confirmed(row)
+    if variant == "hts_allowed_only_when_regime_and_price_bucket_agree":
+        allowed, reasons = _allow_hts_when_side_regime_confirmed(row)
+        if not _hts_entry_price_quality_passed(row):
+            reasons.append("hts_price_bucket_not_quality_candidate")
+        return allowed and "hts_price_bucket_not_quality_candidate" not in reasons, reasons
+    if variant == "hts_to_sbc_when_late_or_uncertain":
+        if family == "SELL_BEFORE_CLOSE":
+            return True, []
+        allowed, reasons = _allow_hts_when_side_regime_confirmed(row)
+        if row.get("time_window_bucket") in {
+            "sell_before_close_only_window",
+            "final_no_trade_window",
+        }:
+            reasons.append("hts_time_window_late_prefer_sbc")
+        if not allowed:
+            reasons.append("hts_regime_uncertain_prefer_sbc")
+        return allowed and not reasons, reasons
+    raise ValueError(f"unsupported HTS regime risk variant: {variant}")
+
+
+def _allow_hts_when_side_regime_confirmed(
+    row: Mapping[str, Any],
+) -> tuple[bool, list[str]]:
+    if row.get("family") != "HOLD_TO_SETTLEMENT":
+        return False, ["not_hold_to_settlement"]
+    side = str(row.get("side") or "")
+    if side == "UP" and bool(row.get("up_regime_confirmed")):
+        return True, []
+    if side == "DOWN" and bool(row.get("down_regime_confirmed")):
+        return True, []
+    return False, [f"{side.lower() or 'unknown'}_hts_regime_not_confirmed"]
+
+
+def _hts_entry_price_quality_passed(row: Mapping[str, Any]) -> bool:
+    price = row.get("entry_price")
+    if price is None:
+        return False
+    return 0.50 <= float(price) <= 0.90
 
 
 def _variant_allows_row(row: dict[str, Any], variant: str) -> tuple[bool, list[str]]:
@@ -2125,6 +2589,540 @@ def _small_sample_warnings(
     if 0 < sbc_count < 30:
         return ["sell_before_close_small_sample"]
     return []
+
+
+def _load_hts_regime_replay_rows(path: Path) -> list[dict[str, Any]]:
+    if path.is_dir():
+        settlement_path = path / "settlement_pnl_rows.jsonl"
+        fills_path = path / "one_hour_paper_fill_log.jsonl"
+        intents_path = path / "one_hour_paper_intent_log.jsonl"
+        if not settlement_path.exists():
+            raise ValueError(
+                "HTS regime replay directory must include settlement_pnl_rows.jsonl"
+            )
+        settlement_rows = _read_jsonl_dicts(settlement_path)
+        fill_by_intent = {
+            str(row.get("paper_fresh_order_intent_id")): row
+            for row in _read_jsonl_dicts(fills_path)
+            if row.get("paper_fresh_order_intent_id")
+        }
+        intent_by_id = {
+            str(row.get("paper_fresh_order_intent_id")): row
+            for row in _read_jsonl_dicts(intents_path)
+            if row.get("paper_fresh_order_intent_id")
+        }
+        merged_rows = []
+        for row in settlement_rows:
+            intent_id = str(row.get("paper_fresh_order_intent_id") or "")
+            merged = {
+                **intent_by_id.get(intent_id, {}),
+                **fill_by_intent.get(intent_id, {}),
+                **row,
+            }
+            merged_rows.append(merged)
+        return _attach_hts_regime_sequence_context(
+            [
+                _normalize_hts_regime_replay_row(row, index)
+                for index, row in enumerate(merged_rows)
+            ]
+        )
+    if path.suffix.lower() == ".csv":
+        rows = _load_csv_rows(path)
+        return _attach_hts_regime_sequence_context(
+            [
+                _normalize_hts_regime_replay_row(row, index)
+                for index, row in enumerate(rows)
+            ]
+        )
+    if path.suffix.lower() == ".jsonl":
+        rows = _read_jsonl_dicts(path)
+        return _attach_hts_regime_sequence_context(
+            [
+                _normalize_hts_regime_replay_row(row, index)
+                for index, row in enumerate(rows)
+            ]
+        )
+    raise ValueError("HTS regime replay input must be a run directory, CSV, or JSONL")
+
+
+def _normalize_hts_regime_replay_row(
+    row: Mapping[str, Any],
+    index: int,
+) -> dict[str, Any]:
+    action = _canonical_action(
+        _first_text(
+            row,
+            (
+                "execution_guarded_action",
+                "action",
+                "selected_action",
+                "source_selected_action",
+            ),
+            default="UNKNOWN",
+        )
+    )
+    side = _infer_side(dict(row), action)
+    family = _infer_family(dict(row), action)
+    entry_price, entry_price_field = _first_float_with_field(
+        row,
+        (
+            "paper_fill_price",
+            "entry_price",
+            "execution_price",
+            "paper_limit_price",
+            "entry_ask",
+            "ask",
+        ),
+    )
+    filled_size = _first_float(row, ("filled_size", "size", "shares"), default=0.0)
+    execution_cost = _first_float(row, ("total_execution_cost", "execution_cost"), default=0.0)
+    cost_basis = _first_float(
+        row,
+        ("cost_basis", "paper_notional", "notional"),
+        default=0.0,
+    )
+    if cost_basis <= 0.0 and entry_price is not None and filled_size is not None:
+        cost_basis = (entry_price * filled_size) + (execution_cost or 0.0)
+    decision_ts_raw = _first_text(row, ("decision_ts", "ts", "timestamp"), default=str(index))
+    decision_ts_numeric = _parse_sort_number(decision_ts_raw)
+    numeric_iteration = _first_sort_number(
+        row,
+        ("iteration", "round_iteration", "loop_iteration", "cycle_index"),
+        default=MISSING_SORT_NUMBER,
+    )
+    intent_id = _first_text(
+        row,
+        ("paper_fresh_order_intent_id", "intent_id", "order_intent_id", "signal_id"),
+        default="",
+    )
+    p_up = _first_float(row, ("p_up", "p_market_implied_up", "probability_up"), default=None)
+    p_down = _first_float(
+        row,
+        ("p_down", "p_market_implied_down", "probability_down"),
+        default=None,
+    )
+    btc_momentum = _first_float(
+        row,
+        (
+            "recent_btc_momentum_120s",
+            "recent_btc_momentum_60s",
+            "recent_btc_momentum_30s",
+            "recent_reference_price_momentum_120s",
+            "recent_reference_price_momentum_60s",
+            "recent_reference_price_momentum_30s",
+        ),
+        default=None,
+    )
+    reference_distance = _first_float(
+        row,
+        (
+            "reference_price_to_beat_distance_at_decision",
+            "price_to_beat_distance",
+            "reference_distance",
+        ),
+        default=None,
+    )
+    time_to_close = _first_float(row, ("time_to_close_seconds",), default=None)
+    time_since_start = _first_float(
+        row,
+        ("time_since_market_start_seconds", "time_since_start_seconds"),
+        default=None,
+    )
+    spread_bps = _first_float(row, ("spread_bps",), default=None)
+    book_staleness_ms = _first_float(row, ("book_staleness_ms",), default=None)
+    queue_fill_proxy = _first_float(row, ("queue_fill_proxy",), default=None)
+    score_margin = _first_float(
+        row,
+        ("best_action_margin", "action_score_margin", "top_action_margin"),
+        default=None,
+    )
+    action_score = _first_float(
+        row,
+        ("source_model_score", "execution_guarded_score", "canonical_o_action_score"),
+        default=None,
+    )
+    settlement_pnl = _first_float(
+        row,
+        (
+            "settlement_pnl",
+            "settlement_pnl_usdc",
+            "total_polymarket_pnl",
+            "pnl",
+            "realized_pnl",
+            "net_pnl",
+        ),
+        default=0.0,
+    )
+    resolved_outcome = _first_text(
+        row,
+        ("resolved_outcome", "winning_outcome"),
+        default="UNKNOWN",
+    ).upper()
+    p_balance = (p_up - p_down) if p_up is not None and p_down is not None else None
+    p_balance_regime = _p_up_down_balance_regime(p_balance)
+    btc_regime = _btc_momentum_regime(btc_momentum)
+    market_regime = _combined_market_regime(p_balance_regime, btc_regime)
+    return {
+        "row_index": index,
+        "market_id": _first_text(row, ("market_id", "condition_id", "slug"), default=""),
+        "decision_ts": decision_ts_raw,
+        "decision_ts_numeric": decision_ts_numeric,
+        "numeric_iteration": numeric_iteration,
+        "intent_id": intent_id,
+        "chronological_sort_key": [
+            numeric_iteration,
+            decision_ts_numeric,
+            intent_id,
+            index,
+        ],
+        "action": action,
+        "family": family,
+        "side": side,
+        "horizon": _infer_horizon(dict(row)),
+        "entry_price": entry_price,
+        "entry_price_source_field": entry_price_field,
+        "price_bucket": _price_bucket(entry_price),
+        "cost_basis": cost_basis or 0.0,
+        "settlement_pnl": settlement_pnl or 0.0,
+        "settlement_status": _first_text(row, ("settlement_status",), default="settled"),
+        "resolved_outcome": resolved_outcome,
+        "p_up": p_up,
+        "p_down": p_down,
+        "p_up_down_balance": p_balance,
+        "p_up_down_balance_regime": p_balance_regime,
+        "btc_momentum": btc_momentum,
+        "btc_momentum_regime": btc_regime,
+        "reference_price_to_beat_distance_at_decision": reference_distance,
+        "reference_distance_bucket": _reference_distance_bucket(reference_distance),
+        "time_since_market_start_seconds": time_since_start,
+        "time_since_market_start_bucket": _time_since_start_bucket(time_since_start),
+        "time_to_close_seconds": time_to_close,
+        "time_window_bucket": _time_window_bucket(time_to_close),
+        "spread_bps": spread_bps,
+        "spread_bucket": _spread_bucket(spread_bps),
+        "book_staleness_ms": book_staleness_ms,
+        "staleness_bucket": _staleness_bucket(book_staleness_ms),
+        "queue_fill_proxy": queue_fill_proxy,
+        "queue_bucket": _queue_bucket(queue_fill_proxy),
+        "action_score_margin": score_margin,
+        "action_score_margin_bucket": _score_margin_bucket(score_margin),
+        "action_score": action_score,
+        "market_regime": market_regime,
+        "up_regime_confirmed": market_regime == "up_regime_confirmed",
+        "down_regime_confirmed": market_regime == "down_regime_confirmed",
+        "raw_fields": sorted(str(key) for key in row),
+    }
+
+
+def _attach_hts_regime_sequence_context(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    previous_side_by_market: dict[str, str] = {}
+    count_by_market: Counter[str] = Counter()
+    enriched = []
+    for row in sorted(rows, key=lambda item: tuple(item["chronological_sort_key"])):
+        copied = dict(row)
+        market_id = str(copied.get("market_id") or "")
+        previous_side = previous_side_by_market.get(market_id)
+        copied["same_market_prior_entry_count"] = count_by_market[market_id]
+        copied["same_market_entry_index"] = count_by_market[market_id] + 1
+        if previous_side is None:
+            copied["side_context"] = "first_entry"
+        elif previous_side == copied.get("side"):
+            copied["side_context"] = "trend_continuation_same_side"
+        else:
+            copied["side_context"] = "side_flip"
+        count_by_market[market_id] += 1
+        if copied.get("side") in {"UP", "DOWN"}:
+            previous_side_by_market[market_id] = str(copied["side"])
+        enriched.append(copied)
+    return sorted(enriched, key=lambda item: int(item["row_index"]))
+
+
+def _p_up_down_balance_regime(balance: float | None) -> str:
+    if balance is None:
+        return "missing_p_up_down_balance"
+    if balance >= 0.10:
+        return "p_up_regime"
+    if balance <= -0.10:
+        return "p_down_regime"
+    return "p_up_down_uncertain"
+
+
+def _btc_momentum_regime(momentum: float | None) -> str:
+    if momentum is None:
+        return "missing_btc_momentum"
+    if momentum > 0.0:
+        return "btc_up_momentum"
+    if momentum < 0.0:
+        return "btc_down_momentum"
+    return "btc_flat_momentum"
+
+
+def _combined_market_regime(p_balance_regime: str, btc_regime: str) -> str:
+    p_side = {
+        "p_up_regime": "UP",
+        "p_down_regime": "DOWN",
+    }.get(p_balance_regime)
+    btc_side = {
+        "btc_up_momentum": "UP",
+        "btc_down_momentum": "DOWN",
+    }.get(btc_regime)
+    if p_side is not None and btc_side is not None and p_side != btc_side:
+        return "conflicting_regime"
+    side = p_side or btc_side
+    if side == "UP":
+        return "up_regime_confirmed"
+    if side == "DOWN":
+        return "down_regime_confirmed"
+    return "uncertain_or_missing_regime"
+
+
+def _reference_distance_bucket(value: float | None) -> str:
+    if value is None:
+        return "missing_reference_distance"
+    if value > 0.0:
+        return "above_reference_price"
+    if value < 0.0:
+        return "below_reference_price"
+    return "at_reference_price"
+
+
+def _time_since_start_bucket(value: float | None) -> str:
+    if value is None:
+        return "missing_time_since_start"
+    if value < 60.0:
+        return "first_minute"
+    if value < 180.0:
+        return "early_round"
+    if value < 420.0:
+        return "mid_round"
+    return "late_round"
+
+
+def _spread_bucket(value: float | None) -> str:
+    if value is None:
+        return "missing_spread"
+    if value <= 300.0:
+        return "tight_spread"
+    if value <= 800.0:
+        return "medium_spread"
+    return "wide_spread"
+
+
+def _staleness_bucket(value: float | None) -> str:
+    if value is None:
+        return "missing_staleness"
+    if value <= 2_000.0:
+        return "fresh_book"
+    if value <= 10_000.0:
+        return "aging_book"
+    return "stale_book"
+
+
+def _queue_bucket(value: float | None) -> str:
+    if value is None:
+        return "missing_queue"
+    if value >= 0.75:
+        return "high_queue_fill"
+    if value >= 0.50:
+        return "medium_queue_fill"
+    return "low_queue_fill"
+
+
+def _score_margin_bucket(value: float | None) -> str:
+    if value is None:
+        return "missing_score_margin"
+    if value >= 0.05:
+        return "strong_margin"
+    if value >= 0.02:
+        return "medium_margin"
+    return "weak_margin"
+
+
+def _pnl_distribution(rows: list[dict[str, Any]], field_name: str) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for row in rows:
+        key = str(row.get(field_name) or "unknown")
+        totals[key] = totals.get(key, 0.0) + float(row.get("settlement_pnl") or 0.0)
+    return dict(sorted(totals.items()))
+
+
+def _safe_roi(rows: list[dict[str, Any]]) -> float:
+    cost = sum(float(row.get("cost_basis") or 0.0) for row in rows)
+    if cost == 0.0:
+        return 0.0
+    pnl = sum(float(row.get("settlement_pnl") or 0.0) for row in rows)
+    return pnl / cost
+
+
+def _win_rate(rows: list[dict[str, Any]]) -> float:
+    if not rows:
+        return 0.0
+    return sum(1 for row in rows if float(row.get("settlement_pnl") or 0.0) > 0.0) / len(
+        rows
+    )
+
+
+def _false_positive_up_hts_examples(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    examples = [
+        _hts_regime_example_row(
+            row,
+            ["up_hts_lost", *_regime_example_reason_codes(row)],
+        )
+        for row in rows
+        if row["action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+        and float(row["settlement_pnl"]) < 0.0
+    ]
+    return sorted(examples, key=lambda row: float(row["settlement_pnl"]))[:20]
+
+
+def _missed_opportunity_up_hts_examples(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    examples = []
+    for row in rows:
+        if row["action"] != "BUY_UP_HOLD_TO_SETTLEMENT":
+            continue
+        if float(row["settlement_pnl"]) <= 0.0:
+            continue
+        allowed, reasons = _hts_regime_variant_allows_row(
+            row,
+            "up_hts_only_when_up_regime_confirmed",
+        )
+        if allowed:
+            continue
+        examples.append(
+            _hts_regime_example_row(
+                row,
+                ["profitable_up_hts_would_be_blocked", *reasons],
+            )
+        )
+    return sorted(examples, key=lambda row: -float(row["settlement_pnl"]))[:20]
+
+
+def _hts_regime_example_row(
+    row: Mapping[str, Any],
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    return {
+        "row_index": row["row_index"],
+        "market_id": row["market_id"],
+        "decision_ts": row["decision_ts"],
+        "intent_id": row["intent_id"],
+        "action": row["action"],
+        "side": row["side"],
+        "entry_price": row["entry_price"],
+        "price_bucket": row["price_bucket"],
+        "resolved_outcome": row["resolved_outcome"],
+        "settlement_pnl": row["settlement_pnl"],
+        "market_regime": row["market_regime"],
+        "p_up": row["p_up"],
+        "p_down": row["p_down"],
+        "p_up_down_balance": row["p_up_down_balance"],
+        "btc_momentum_regime": row["btc_momentum_regime"],
+        "reference_distance_bucket": row["reference_distance_bucket"],
+        "time_window_bucket": row["time_window_bucket"],
+        "spread_bucket": row["spread_bucket"],
+        "staleness_bucket": row["staleness_bucket"],
+        "queue_bucket": row["queue_bucket"],
+        "action_score_margin_bucket": row["action_score_margin_bucket"],
+        "same_market_entry_index": row["same_market_entry_index"],
+        "side_context": row["side_context"],
+        "diagnostic_reason_codes": sorted(set(reason_codes)),
+    }
+
+
+def _regime_example_reason_codes(row: Mapping[str, Any]) -> list[str]:
+    reasons = []
+    if row.get("market_regime") != "up_regime_confirmed":
+        reasons.append("up_regime_not_confirmed")
+    if row.get("time_window_bucket") in {
+        "sell_before_close_only_window",
+        "final_no_trade_window",
+    }:
+        reasons.append("late_or_sbc_only_time_window")
+    if row.get("price_bucket") == "gt_0_90":
+        reasons.append("entry_price_above_090")
+    if row.get("side_context") == "side_flip":
+        reasons.append("same_market_side_flip")
+    if int(row.get("same_market_prior_entry_count") or 0) > 0:
+        reasons.append("repeated_same_market_entry")
+    if row.get("staleness_bucket") == "stale_book":
+        reasons.append("stale_book")
+    return reasons
+
+
+def _recommended_hts_regime_guard_signals(
+    rows: list[dict[str, Any]],
+    variant_reports: dict[str, dict[str, Any]],
+) -> list[str]:
+    up_hts = [
+        row for row in rows if row["action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+    ]
+    up_hts_pnl = sum(float(row["settlement_pnl"]) for row in up_hts)
+    missed_up_count = len(_missed_opportunity_up_hts_examples(rows))
+    recommendations = [
+        "Do not disable BUY_UP_HOLD_TO_SETTLEMENT globally; keep it available for confirmed UP regimes.",
+        "Require side-specific regime confirmation before HTS entries when coverage is sufficient.",
+        "Treat p_up/p_down balance, BTC/reference momentum, and reference-price distance as decision-time guard inputs.",
+        "Track repeated same-market entries and side flips before adding more HTS exposure.",
+        "Keep spread, queue-fill, and book-staleness execution guards intact.",
+        "Route late or uncertain HTS candidates toward SBC evaluation rather than forcing HTS.",
+        "Do not tune these diagnostic thresholds from settlement outcomes; freeze them before forward holdout.",
+    ]
+    if up_hts_pnl < 0.0 and missed_up_count:
+        recommendations.append(
+            "UP HTS is negative here but has profitable missed-opportunity examples, so a regime gate is preferred over a side ban."
+        )
+    regime_variant = variant_reports["regime_aware_up_down_hts"]
+    if regime_variant["fill_count"] == 0:
+        recommendations.append(
+            "Current artifacts do not have enough decision-time regime feature coverage for a deployable HTS regime gate."
+        )
+    return recommendations
+
+
+def _hts_regime_feature_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    fields = _hts_regime_decision_time_fields()
+    return {
+        field: {
+            "available_count": sum(1 for row in rows if row.get(field) is not None),
+            "row_count": len(rows),
+        }
+        for field in fields
+        if field
+        in {
+            "p_up",
+            "p_down",
+            "btc_momentum",
+            "reference_price_to_beat_distance_at_decision",
+            "time_since_market_start_seconds",
+            "time_to_close_seconds",
+            "spread_bps",
+            "book_staleness_ms",
+            "queue_fill_proxy",
+            "action_score_margin",
+        }
+    }
+
+
+def _hts_regime_decision_time_fields() -> list[str]:
+    return [
+        "p_up",
+        "p_down",
+        "p_up_down_balance",
+        "btc_momentum",
+        "reference_price_to_beat_distance_at_decision",
+        "time_since_market_start_seconds",
+        "time_to_close_seconds",
+        "entry_price",
+        "spread_bps",
+        "book_staleness_ms",
+        "queue_fill_proxy",
+        "action_score_margin",
+        "action_score",
+        "same_market_prior_entry_count",
+        "side_context",
+    ]
 
 
 def _normalize_settlement_row(row: dict[str, str], index: int) -> dict[str, Any]:
@@ -3106,6 +4104,21 @@ def _load_csv_rows(path: Path) -> list[dict[str, str]]:
         return [dict(row) for row in csv.DictReader(handle)]
 
 
+def _read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                raise ValueError(f"JSONL row must be an object: {path}")
+            rows.append(payload)
+    return rows
+
+
 def _canonical_action(action: str) -> str:
     return action.strip().upper().replace(" ", "_")
 
@@ -3349,6 +4362,13 @@ def _markdown_list(items: list[str]) -> list[str]:
     if not items:
         return ["- none"]
     return [f"- `{item}`" for item in items]
+
+
+def _short_id(value: Any) -> str:
+    text = str(value or "")
+    if len(text) <= 18:
+        return text
+    return f"{text[:10]}...{text[-6:]}"
 
 
 def _safety_report_fields() -> dict[str, Any]:
