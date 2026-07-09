@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
@@ -906,8 +907,23 @@ class PolymarketPublicHTTPRealCorpusProvider:
             headers={"User-Agent": "bigan-v8-polymarket-real-corpus-readonly/1.0"},
             method="GET",
         )
-        with urllib.request.urlopen(request, timeout=self.http_timeout_seconds) as response:
-            return json.loads(response.read().decode("utf-8"))
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=self.http_timeout_seconds) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except TimeoutError as exc:
+            raise RealCorpusPublicProviderError(
+                "Read-only public HTTP request timed out.",
+                reason_codes=("read_only_public_http_timeout",),
+            ) from exc
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", None)
+            if isinstance(reason, TimeoutError) or "timed out" in str(exc).lower():
+                raise RealCorpusPublicProviderError(
+                    "Read-only public HTTP request timed out.",
+                    reason_codes=("read_only_public_http_timeout",),
+                ) from exc
+            raise
 
     def _current_time_ms(self) -> int:
         return self.current_time_ms if self.current_time_ms is not None else int(time.time() * 1000)

@@ -7327,6 +7327,9 @@ def _v8_execution_guard_decision(
         "reference_price_feature_provenance": reference_provenance,
         "btc_momentum": row.get("btc_momentum"),
         "btc_momentum_provenance": dict(row.get("btc_momentum_provenance") or {}),
+        "reference_price_to_beat_at_decision": row.get(
+            "reference_price_to_beat_at_decision"
+        ),
         "reference_price_to_beat_distance_at_decision": row.get(
             "reference_price_to_beat_distance_at_decision"
         ),

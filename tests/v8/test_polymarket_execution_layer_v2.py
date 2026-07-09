@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal import (
     ONE_HOUR_REMAP_PAPER_GOAL_SCHEMA_VERSION,
     ExecutionLayerV2OneHourRemapPaperGoalConfig,
     _missing_bet_round_classifications,
+    _settlement_resolution_report,
     run_execution_layer_v2_one_hour_remap_paper_goal,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_policy_replay import (
@@ -767,6 +769,81 @@ def test_fresh_provider_row_adds_decision_time_regime_features() -> None:
     assert row["decision_time_regime_feature_provenance"]["provenance_valid"] is True
     assert row["decision_time_regime_feature_max_input_ts"] <= decision_ts
     assert row["score_components"]["btc_momentum"] == pytest.approx(0.002)
+    assert row["paper_only"] is True
+    assert row["capital_at_risk"] is False
+
+
+def test_fresh_provider_row_uses_market_start_btc_proxy_when_price_to_beat_missing() -> None:
+    decision_ts = 1_180_000
+    row = _fresh_public_row_from_provider_feature_context(
+        run_id="provider-regime-reference-proxy-fixture",
+        row_index=1,
+        market={
+            "market_id": "provider-market-no-price-to-beat",
+            "condition_id": "provider-condition",
+            "slug": "btc-updown-5m-provider",
+            "market_family": "btc_updown_5m",
+            "up_token_id": "up-token",
+            "down_token_id": "down-token",
+            "market_start_ts": 1_120_000,
+            "market_end_ts": 1_420_000,
+            "reference_price_source": "https://data.chain.link/streams/btc-usd",
+        },
+        up={
+            "token_id": "up-token",
+            "bid_price": 0.58,
+            "ask_price": 0.60,
+            "mid_price": 0.59,
+            "bid_size": 2.0,
+            "ask_size": 2.0,
+            "liquidity_depth": 4.0,
+            "available_at_ts": 1_179_000,
+        },
+        down={
+            "token_id": "down-token",
+            "bid_price": 0.40,
+            "ask_price": 0.42,
+            "mid_price": 0.41,
+            "bid_size": 2.0,
+            "ask_size": 2.0,
+            "liquidity_depth": 4.0,
+            "available_at_ts": 1_179_000,
+        },
+        candle={
+            "ts": 1_120_000,
+            "available_at_ts": 1_180_000,
+            "open_price": 100_000.0,
+            "close_price": 100_500.0,
+            "timeframe_ms": 60_000,
+            "source": "pytest",
+        },
+        reference_candle={
+            "ts": 1_060_000,
+            "close_time": 1_120_000,
+            "available_at_ts": 1_120_000,
+            "open_price": 99_900.0,
+            "close_price": 100_000.0,
+            "timeframe_ms": 60_000,
+            "source": "pytest",
+        },
+        decision_ts=decision_ts,
+    )
+
+    assert row["reference_price_start"] is None
+    assert row["reference_price_to_beat_at_decision"] == pytest.approx(100_000.0)
+    assert row["reference_price_to_beat_distance_at_decision"] == pytest.approx(0.005)
+    provenance = row["reference_price_to_beat_distance_provenance"]
+    assert provenance["provenance_valid"] is True
+    assert provenance["max_input_ts"] <= decision_ts
+    assert provenance["reference_price_to_beat_source_type"] == (
+        "btc_feature_candle_market_start_proxy"
+    )
+    assert "official_polymarket_price_to_beat_unavailable_btc_feature_candle_proxy_used" in (
+        provenance["warning_reason_codes"]
+    )
+    assert row["score_components"]["reference_price_to_beat"] == pytest.approx(
+        100_000.0
+    )
     assert row["paper_only"] is True
     assert row["capital_at_risk"] is False
 
@@ -1778,6 +1855,63 @@ def test_execution_layer_v2_one_hour_goal_polls_read_only_resolution_provider(
     assert result.manifest["v8_execution_handoff_allowed"] is False
 
 
+def test_execution_layer_v2_one_hour_goal_settlement_resolution_times_out_fail_closed(
+    tmp_path,
+) -> None:
+    report = _settlement_resolution_report(
+        config=ExecutionLayerV2OneHourRemapPaperGoalConfig(
+            run_id="one-hour-goal-resolution-timeout",
+            output_dir=tmp_path / "runs",
+            public_provider=_SlowResolutionProvider(),
+            settlement_poll_max_wait_seconds=0.01,
+            settlement_poll_interval_seconds=0.01,
+        ),
+        fills=[
+            {
+                "paper_fresh_order_intent_id": "intent-timeout",
+                "market_id": "one-hour-resolution-timeout",
+                "execution_guarded_side": "UP",
+                "paper_fill_price": 0.60,
+                "filled_size": 0.20,
+                "total_execution_cost": 0.0,
+                "paper_only": True,
+                "capital_at_risk": False,
+            }
+        ],
+        trace_rows=[
+            {
+                "market_id": "one-hour-resolution-timeout",
+                "condition_id": "one-hour-resolution-timeout",
+                "slug": "btc-updown-5m-timeout",
+                "market_family": "btc_updown_5m",
+                "market_start_ts": 4_000_000,
+                "market_end_ts": 4_300_000,
+                "settlement_ts": 4_360_000,
+                "up_token_id": "up-token",
+                "down_token_id": "down-token",
+                "reference_price_source": "polymarket_official_btc_usd_reference",
+                "reference_price_start": 100_000.0,
+            }
+        ],
+        settlement_evaluation_rows=[],
+    )
+
+    assert report["settlement_poll_attempt_count"] == 1
+    assert "settlement_resolution_provider_timeout" in report[
+        "settlement_resolution_reason_codes"
+    ]
+    assert "settlement_resolution_http_timeout" in report[
+        "settlement_resolution_reason_codes"
+    ]
+    assert report["settlement_evaluation_row_count"] == 0
+    assert report["resolved_fill_count"] == 0
+    assert report["unresolved_fill_count_after_poll"] == 1
+    assert report["unresolved_paper_fresh_order_intent_ids"] == ["intent-timeout"]
+    assert report["paper_only"] is True
+    assert report["capital_at_risk"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+
+
 def test_execution_layer_v2_one_hour_goal_stops_after_consecutive_orderbook_failures(
     tmp_path,
 ) -> None:
@@ -2048,6 +2182,22 @@ class _NoOrderbookProvider:
                 "source": "pytest",
             }
         ]
+
+
+class _SlowResolutionProvider:
+    read_only = True
+    write_capable = False
+    paper_only = True
+    capital_at_risk = False
+    broker_exchange_write_enabled = False
+    live_exchange_write_enabled = False
+    polymarket_write_enabled = False
+    wallet_signing_enabled = False
+
+    def resolution_rows(self, markets, config):
+        del markets, config
+        time.sleep(0.25)
+        return []
 
 
 def _write_ev_calibration_artifact(

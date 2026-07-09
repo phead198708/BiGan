@@ -2828,6 +2828,15 @@ def _normalize_hts_regime_replay_row(
         ),
         default=None,
     )
+    reference_price_to_beat = _first_float(
+        row,
+        (
+            "reference_price_to_beat_at_decision",
+            "reference_price_to_beat",
+            "price_to_beat",
+        ),
+        default=None,
+    )
     time_to_close = _first_float(row, ("time_to_close_seconds",), default=None)
     time_since_start = _first_float(
         row,
@@ -2924,6 +2933,7 @@ def _normalize_hts_regime_replay_row(
         "p_up_down_balance_regime": p_balance_regime,
         "btc_momentum": btc_momentum,
         "btc_momentum_regime": btc_regime,
+        "reference_price_to_beat_at_decision": reference_price_to_beat,
         "reference_price_to_beat_distance_at_decision": reference_distance,
         "reference_distance_bucket": reference_bucket,
         "time_since_market_start_seconds": time_since_start,
@@ -3248,6 +3258,9 @@ def _hts_regime_example_row(
         "p_up_down_balance": row["p_up_down_balance"],
         "btc_momentum": row["btc_momentum"],
         "btc_momentum_regime": row["btc_momentum_regime"],
+        "reference_price_to_beat_at_decision": row[
+            "reference_price_to_beat_at_decision"
+        ],
         "reference_price_to_beat_distance_at_decision": row[
             "reference_price_to_beat_distance_at_decision"
         ],

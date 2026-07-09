@@ -1049,6 +1049,11 @@ def _fresh_public_rows_from_provider_payloads(
         candle = _latest_public_btc_candle(candles, decision_ts)
         if candle is None:
             continue
+        reference_candle = _market_start_reference_public_btc_candle(
+            candles,
+            market_start_ts=int(market.get("market_start_ts") or 0),
+            decision_ts=decision_ts,
+        )
         rows.append(
             _fresh_public_row_from_provider_feature_context(
                 run_id=run_id,
@@ -1057,6 +1062,7 @@ def _fresh_public_rows_from_provider_payloads(
                 up=up,
                 down=down,
                 candle=candle,
+                reference_candle=reference_candle,
                 decision_ts=decision_ts,
             )
         )
@@ -1092,6 +1098,25 @@ def _latest_public_btc_candle(
     return latest
 
 
+def _market_start_reference_public_btc_candle(
+    candles: list[dict[str, Any]],
+    *,
+    market_start_ts: int,
+    decision_ts: int,
+) -> dict[str, Any] | None:
+    if market_start_ts <= 0:
+        return None
+    latest: dict[str, Any] | None = None
+    for row in candles:
+        available_at = int(row.get("available_at_ts") or row.get("ts") or 0)
+        close_time = int(row.get("close_time") or available_at)
+        if available_at <= decision_ts and close_time <= market_start_ts:
+            latest = dict(row)
+        if close_time > market_start_ts and available_at > decision_ts:
+            break
+    return latest
+
+
 def _fresh_public_row_from_provider_feature_context(
     *,
     run_id: str,
@@ -1100,6 +1125,7 @@ def _fresh_public_row_from_provider_feature_context(
     up: dict[str, Any],
     down: dict[str, Any],
     candle: dict[str, Any],
+    reference_candle: dict[str, Any] | None = None,
     decision_ts: int,
 ) -> dict[str, Any]:
     p_up = _public_p_up(up=up, down=down)
@@ -1116,17 +1142,21 @@ def _fresh_public_row_from_provider_feature_context(
     selected = ranking[0]
     selected_action = str(selected["selected_action"])
     selected_side = _side_from_action(selected_action)
-    reference_provenance = _provider_reference_price_provenance(
-        market=market,
-        candle=candle,
-        decision_ts=decision_ts,
-    )
     regime_features = _provider_decision_time_regime_features(
         market=market,
         candle=candle,
+        reference_candle=reference_candle,
         decision_ts=decision_ts,
         ranking=ranking,
         selected_action=selected_action,
+    )
+    reference_provenance = dict(
+        regime_features.get("reference_price_to_beat_distance_provenance")
+        or _provider_reference_price_provenance(
+            market=market,
+            candle=candle,
+            decision_ts=decision_ts,
+        )
     )
     max_input_ts = max(
         _book_available_at(up),
@@ -1149,6 +1179,9 @@ def _fresh_public_row_from_provider_feature_context(
         "reference_price_source": str(market.get("reference_price_source") or ""),
         "reference_price_start": market.get("reference_price_start"),
         "reference_price_at_start": market.get("reference_price_at_start"),
+        "reference_price_to_beat_at_decision": regime_features.get(
+            "reference_price_to_beat_at_decision"
+        ),
         "raw_market_sha256": market.get("raw_market_sha256"),
         "decision_ts": decision_ts,
         "selected_action": selected_action,
@@ -1181,9 +1214,7 @@ def _fresh_public_row_from_provider_feature_context(
             "p_down": p_down,
             "btc_mid_price": _float(candle.get("close_price")),
             "reference_price_to_beat": _float(
-                market.get("reference_price_start")
-                if market.get("reference_price_start") is not None
-                else market.get("reference_price_at_start")
+                regime_features.get("reference_price_to_beat_at_decision")
             ),
             "btc_momentum": regime_features.get("btc_momentum"),
             "reference_price_to_beat_distance_at_decision": regime_features.get(
@@ -1406,6 +1437,7 @@ def _provider_decision_time_regime_features(
     *,
     market: dict[str, Any],
     candle: dict[str, Any],
+    reference_candle: dict[str, Any] | None,
     decision_ts: int,
     ranking: list[dict[str, Any]],
     selected_action: str,
@@ -1414,9 +1446,14 @@ def _provider_decision_time_regime_features(
         candle=candle,
         decision_ts=decision_ts,
     )
-    reference_distance, reference_provenance = _provider_reference_distance_feature(
+    (
+        reference_price_to_beat,
+        reference_distance,
+        reference_provenance,
+    ) = _provider_reference_distance_feature(
         market=market,
         candle=candle,
+        reference_candle=reference_candle,
         decision_ts=decision_ts,
     )
     time_since_start, time_provenance = _provider_time_since_market_start_feature(
@@ -1448,6 +1485,7 @@ def _provider_decision_time_regime_features(
     return {
         "btc_momentum": btc_momentum,
         "btc_momentum_provenance": btc_provenance,
+        "reference_price_to_beat_at_decision": reference_price_to_beat,
         "reference_price_to_beat_distance_at_decision": reference_distance,
         "reference_price_to_beat_distance_provenance": reference_provenance,
         "time_since_market_start_seconds": time_since_start,
@@ -1529,13 +1567,40 @@ def _provider_reference_distance_feature(
     *,
     market: dict[str, Any],
     candle: dict[str, Any],
+    reference_candle: dict[str, Any] | None,
     decision_ts: int,
-) -> tuple[float | None, dict[str, Any]]:
+) -> tuple[float | None, float | None, dict[str, Any]]:
     reference = _float(
         market.get("reference_price_start")
         if market.get("reference_price_start") is not None
         else market.get("reference_price_at_start")
     )
+    reference_source_type = "polymarket_market_metadata_price_to_beat"
+    reference_source_timestamp = decision_ts if reference > 0.0 else 0
+    reference_warning_reason_codes: list[str] = []
+    source_fields_used = [
+        "raw_polymarket_markets.reference_price_start",
+        "raw_polymarket_markets.reference_price_at_start",
+    ]
+    if reference <= 0.0 and reference_candle is not None:
+        reference = _float(reference_candle.get("close_price"))
+        reference_source_timestamp = int(
+            reference_candle.get("available_at_ts")
+            or reference_candle.get("close_time")
+            or reference_candle.get("ts")
+            or 0
+        )
+        reference_source_type = "btc_feature_candle_market_start_proxy"
+        source_fields_used.extend(
+            [
+                "raw_btc_feature_candles.close_price",
+                "raw_btc_feature_candles.available_at_ts",
+                "raw_btc_feature_candles.close_time",
+            ]
+        )
+        reference_warning_reason_codes.append(
+            "official_polymarket_price_to_beat_unavailable_btc_feature_candle_proxy_used"
+        )
     close_price = _float(candle.get("close_price"))
     candle_ts = int(candle.get("available_at_ts") or candle.get("ts") or 0)
     reason_codes: list[str] = []
@@ -1543,23 +1608,23 @@ def _provider_reference_distance_feature(
         reason_codes.append("btc_candle_not_decision_time_available")
     if reference <= 0.0:
         reason_codes.append("reference_price_to_beat_missing_or_non_positive")
+    if reference_source_timestamp > decision_ts:
+        reason_codes.append("reference_price_to_beat_not_decision_time_available")
     if close_price <= 0.0:
         reason_codes.append("btc_candle_close_price_missing_or_non_positive")
     value = (close_price - reference) / reference if not reason_codes else None
-    max_input_ts = max(candle_ts, decision_ts if reference > 0.0 else 0)
-    return value, {
+    max_input_ts = max(candle_ts, reference_source_timestamp)
+    return reference if not reason_codes else None, value, {
         "provenance_valid": not reason_codes and max_input_ts <= decision_ts,
         "decision_ts": decision_ts,
         "max_input_ts": max_input_ts,
-        "source_fields_used": [
-            "raw_polymarket_markets.reference_price_start",
-            "raw_polymarket_markets.reference_price_at_start",
-            "raw_btc_feature_candles.close_price",
-            "raw_btc_feature_candles.available_at_ts",
-        ],
+        "source_fields_used": source_fields_used,
         "source_field_name": "read_only_public_provider_reference_distance",
+        "reference_price_to_beat_source_type": reference_source_type,
+        "reference_price_to_beat_at_decision": reference if reference > 0.0 else None,
         "source_timestamp": max_input_ts,
         "unavailable_reason_codes": reason_codes,
+        "warning_reason_codes": reference_warning_reason_codes,
     }
 
 
@@ -4180,6 +4245,10 @@ def _fresh_signal_trace_report(
                 or provider_row.get("btc_momentum_provenance")
                 or {}
             ),
+            "reference_price_to_beat_at_decision": guard_row.get(
+                "reference_price_to_beat_at_decision",
+                provider_row.get("reference_price_to_beat_at_decision"),
+            ),
             "reference_price_to_beat_distance_at_decision": guard_row.get(
                 "reference_price_to_beat_distance_at_decision",
                 provider_row.get("reference_price_to_beat_distance_at_decision"),
@@ -6081,6 +6150,9 @@ def _guard_input_from_public_row(
         "btc_momentum_provenance": dict(
             public_row.get("btc_momentum_provenance") or {}
         ),
+        "reference_price_to_beat_at_decision": public_row.get(
+            "reference_price_to_beat_at_decision"
+        ),
         "reference_price_to_beat_distance_at_decision": public_row.get(
             "reference_price_to_beat_distance_at_decision"
         ),
@@ -6183,6 +6255,9 @@ def _fresh_order_intent_from_guard_row(
         "executable_exit_bid_proxy": _float(micro.get("executable_exit_bid_proxy")),
         "btc_momentum": guard_row.get("btc_momentum"),
         "btc_momentum_provenance": dict(guard_row.get("btc_momentum_provenance") or {}),
+        "reference_price_to_beat_at_decision": guard_row.get(
+            "reference_price_to_beat_at_decision"
+        ),
         "reference_price_to_beat_distance_at_decision": guard_row.get(
             "reference_price_to_beat_distance_at_decision"
         ),
@@ -6255,6 +6330,9 @@ def _fresh_paper_fills_from_intents(
             "paper_fill_price": fill_price,
             "btc_momentum": intent.get("btc_momentum"),
             "btc_momentum_provenance": dict(intent.get("btc_momentum_provenance") or {}),
+            "reference_price_to_beat_at_decision": intent.get(
+                "reference_price_to_beat_at_decision"
+            ),
             "reference_price_to_beat_distance_at_decision": intent.get(
                 "reference_price_to_beat_distance_at_decision"
             ),

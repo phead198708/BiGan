@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import queue
 import shutil
+import threading
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -2160,16 +2162,28 @@ def _settlement_resolution_report(
         deadline = time.monotonic() + config.settlement_poll_max_wait_seconds
         while True:
             attempt_count += 1
+            request_timeout = min(
+                config.settlement_poll_interval_seconds,
+                max(0.001, deadline - time.monotonic()),
+            )
             try:
-                resolution_rows = list(
-                    provider.resolution_rows(
-                        market_rows,
-                        _settlement_recorder_config(config=config),
-                    )
+                resolution_rows = _provider_resolution_rows_with_timeout(
+                    provider=provider,
+                    market_rows=market_rows,
+                    recorder_config=_settlement_recorder_config(config=config),
+                    timeout_seconds=request_timeout,
                 )
             except RealCorpusPublicProviderError as exc:
                 reason_codes.extend(
                     ["settlement_resolution_provider_error", *list(exc.reason_codes)]
+                )
+                break
+            except TimeoutError:
+                reason_codes.extend(
+                    [
+                        "settlement_resolution_provider_timeout",
+                        "settlement_resolution_http_timeout",
+                    ]
                 )
                 break
             except Exception as exc:  # pragma: no cover - defensive provider boundary
@@ -2240,6 +2254,38 @@ def _settlement_resolution_report(
         "v8_execution_handoff_allowed": False,
     }
     return _with_report_id(report, "settlement_resolution_report_id")
+
+
+def _provider_resolution_rows_with_timeout(
+    *,
+    provider: Any,
+    market_rows: list[dict[str, Any]],
+    recorder_config: PolymarketRealCorpusRecorderConfig,
+    timeout_seconds: float,
+) -> list[dict[str, Any]]:
+    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+    def _target() -> None:
+        try:
+            result_queue.put(
+                ("result", list(provider.resolution_rows(market_rows, recorder_config)))
+            )
+        except Exception as exc:  # noqa: BLE001
+            result_queue.put(("exception", exc))
+
+    thread = threading.Thread(
+        target=_target,
+        name="v8-settlement-resolution-provider",
+        daemon=True,
+    )
+    thread.start()
+    thread.join(timeout=max(0.001, timeout_seconds))
+    if thread.is_alive():
+        raise TimeoutError("settlement resolution provider request timed out")
+    kind, payload = result_queue.get_nowait()
+    if kind == "exception":
+        raise payload
+    return list(payload)
 
 
 def _settlement_provider_safe(provider: Any) -> bool:
