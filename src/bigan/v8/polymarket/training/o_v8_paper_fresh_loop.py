@@ -1121,11 +1121,19 @@ def _fresh_public_row_from_provider_feature_context(
         candle=candle,
         decision_ts=decision_ts,
     )
+    regime_features = _provider_decision_time_regime_features(
+        market=market,
+        candle=candle,
+        decision_ts=decision_ts,
+        ranking=ranking,
+        selected_action=selected_action,
+    )
     max_input_ts = max(
         _book_available_at(up),
         _book_available_at(down),
         int(candle.get("available_at_ts") or candle.get("ts") or 0),
         int(reference_provenance.get("max_input_ts") or 0),
+        int(regime_features.get("decision_time_regime_feature_max_input_ts") or 0),
     )
     return {
         "decision_group_id": (
@@ -1163,6 +1171,7 @@ def _fresh_public_row_from_provider_feature_context(
             decision_ts=decision_ts,
         ),
         "reference_price_feature_provenance": reference_provenance,
+        **regime_features,
         "decision_time_feature_max_input_ts": max_input_ts,
         "full_5_action_ranking": ranking,
         "score_components": {
@@ -1175,6 +1184,17 @@ def _fresh_public_row_from_provider_feature_context(
                 market.get("reference_price_start")
                 if market.get("reference_price_start") is not None
                 else market.get("reference_price_at_start")
+            ),
+            "btc_momentum": regime_features.get("btc_momentum"),
+            "reference_price_to_beat_distance_at_decision": regime_features.get(
+                "reference_price_to_beat_distance_at_decision"
+            ),
+            "time_since_market_start_seconds": regime_features.get(
+                "time_since_market_start_seconds"
+            ),
+            "action_score_margin": regime_features.get("action_score_margin"),
+            "side_specific_action_score_margin": regime_features.get(
+                "side_specific_action_score_margin"
             ),
             "max_input_ts": max_input_ts,
         },
@@ -1379,6 +1399,259 @@ def _provider_reference_price_provenance(
         ],
         "source_field_name": "read_only_public_provider_reference_and_btc_candle",
         "source_timestamp": max_input_ts,
+    }
+
+
+def _provider_decision_time_regime_features(
+    *,
+    market: dict[str, Any],
+    candle: dict[str, Any],
+    decision_ts: int,
+    ranking: list[dict[str, Any]],
+    selected_action: str,
+) -> dict[str, Any]:
+    btc_momentum, btc_provenance = _provider_btc_momentum_feature(
+        candle=candle,
+        decision_ts=decision_ts,
+    )
+    reference_distance, reference_provenance = _provider_reference_distance_feature(
+        market=market,
+        candle=candle,
+        decision_ts=decision_ts,
+    )
+    time_since_start, time_provenance = _provider_time_since_market_start_feature(
+        market=market,
+        decision_ts=decision_ts,
+    )
+    margin_features = _provider_action_score_margin_features(
+        ranking=ranking,
+        selected_action=selected_action,
+        decision_ts=decision_ts,
+    )
+    required_provenances = [
+        btc_provenance,
+        reference_provenance,
+        time_provenance,
+        margin_features["action_score_margin_provenance"],
+    ]
+    optional_provenances = [
+        margin_features["side_specific_action_score_margin_provenance"],
+    ]
+    provenances = [*required_provenances, *optional_provenances]
+    valid_provenances = [
+        provenance for provenance in provenances if provenance.get("provenance_valid")
+    ]
+    max_input_ts = max(
+        [int(provenance.get("max_input_ts") or 0) for provenance in valid_provenances]
+        or [decision_ts]
+    )
+    return {
+        "btc_momentum": btc_momentum,
+        "btc_momentum_provenance": btc_provenance,
+        "reference_price_to_beat_distance_at_decision": reference_distance,
+        "reference_price_to_beat_distance_provenance": reference_provenance,
+        "time_since_market_start_seconds": time_since_start,
+        "time_since_market_start_provenance": time_provenance,
+        "action_score_margin": margin_features["action_score_margin"],
+        "action_score_margin_provenance": margin_features[
+            "action_score_margin_provenance"
+        ],
+        "side_specific_action_score_margin": margin_features[
+            "side_specific_action_score_margin"
+        ],
+        "side_specific_action_score_margin_provenance": margin_features[
+            "side_specific_action_score_margin_provenance"
+        ],
+        "decision_time_regime_feature_provenance": {
+            "provenance_valid": all(
+                bool(provenance.get("provenance_valid"))
+                for provenance in required_provenances
+            ),
+            "decision_ts": decision_ts,
+            "max_input_ts": max_input_ts,
+            "source_fields_used": sorted(
+                {
+                    str(source)
+                    for provenance in provenances
+                    for source in provenance.get("source_fields_used", [])
+                }
+            ),
+            "source_field_name": "decision_time_hts_regime_feature_block_v1",
+            "source_timestamp": max_input_ts,
+            "unavailable_reason_codes": sorted(
+                {
+                    str(reason)
+                    for provenance in provenances
+                    for reason in provenance.get("unavailable_reason_codes", [])
+                }
+            ),
+        },
+        "decision_time_regime_feature_max_input_ts": max_input_ts,
+    }
+
+
+def _provider_btc_momentum_feature(
+    *,
+    candle: dict[str, Any],
+    decision_ts: int,
+) -> tuple[float | None, dict[str, Any]]:
+    available_at = int(candle.get("available_at_ts") or candle.get("ts") or 0)
+    open_price = _float(candle.get("open_price"))
+    close_price = _float(candle.get("close_price"))
+    reason_codes: list[str] = []
+    if available_at > decision_ts:
+        reason_codes.append("btc_candle_not_decision_time_available")
+    if open_price <= 0.0:
+        reason_codes.append("btc_candle_open_price_missing_or_non_positive")
+    if close_price <= 0.0:
+        reason_codes.append("btc_candle_close_price_missing_or_non_positive")
+    value = (
+        (close_price - open_price) / open_price
+        if not reason_codes
+        else None
+    )
+    return value, {
+        "provenance_valid": not reason_codes,
+        "decision_ts": decision_ts,
+        "max_input_ts": available_at,
+        "source_fields_used": [
+            "raw_btc_feature_candles.open_price",
+            "raw_btc_feature_candles.close_price",
+            "raw_btc_feature_candles.available_at_ts",
+        ],
+        "source_field_name": "read_only_public_provider_btc_candle_momentum",
+        "source_timestamp": available_at,
+        "unavailable_reason_codes": reason_codes,
+    }
+
+
+def _provider_reference_distance_feature(
+    *,
+    market: dict[str, Any],
+    candle: dict[str, Any],
+    decision_ts: int,
+) -> tuple[float | None, dict[str, Any]]:
+    reference = _float(
+        market.get("reference_price_start")
+        if market.get("reference_price_start") is not None
+        else market.get("reference_price_at_start")
+    )
+    close_price = _float(candle.get("close_price"))
+    candle_ts = int(candle.get("available_at_ts") or candle.get("ts") or 0)
+    reason_codes: list[str] = []
+    if candle_ts > decision_ts:
+        reason_codes.append("btc_candle_not_decision_time_available")
+    if reference <= 0.0:
+        reason_codes.append("reference_price_to_beat_missing_or_non_positive")
+    if close_price <= 0.0:
+        reason_codes.append("btc_candle_close_price_missing_or_non_positive")
+    value = (close_price - reference) / reference if not reason_codes else None
+    max_input_ts = max(candle_ts, decision_ts if reference > 0.0 else 0)
+    return value, {
+        "provenance_valid": not reason_codes and max_input_ts <= decision_ts,
+        "decision_ts": decision_ts,
+        "max_input_ts": max_input_ts,
+        "source_fields_used": [
+            "raw_polymarket_markets.reference_price_start",
+            "raw_polymarket_markets.reference_price_at_start",
+            "raw_btc_feature_candles.close_price",
+            "raw_btc_feature_candles.available_at_ts",
+        ],
+        "source_field_name": "read_only_public_provider_reference_distance",
+        "source_timestamp": max_input_ts,
+        "unavailable_reason_codes": reason_codes,
+    }
+
+
+def _provider_time_since_market_start_feature(
+    *,
+    market: dict[str, Any],
+    decision_ts: int,
+) -> tuple[float | None, dict[str, Any]]:
+    market_start_ts = int(market.get("market_start_ts") or 0)
+    reason_codes: list[str] = []
+    if market_start_ts <= 0:
+        reason_codes.append("market_start_ts_missing")
+    value = (
+        (decision_ts - market_start_ts) / 1000.0
+        if not reason_codes
+        else None
+    )
+    # Market schedule metadata is read at decision time from the public market row.
+    source_ts = decision_ts if not reason_codes else 0
+    return value, {
+        "provenance_valid": not reason_codes and source_ts <= decision_ts,
+        "decision_ts": decision_ts,
+        "max_input_ts": source_ts,
+        "source_fields_used": ["raw_polymarket_markets.market_start_ts"],
+        "source_field_name": "read_only_public_provider_market_schedule",
+        "source_timestamp": source_ts,
+        "unavailable_reason_codes": reason_codes,
+    }
+
+
+def _provider_action_score_margin_features(
+    *,
+    ranking: list[dict[str, Any]],
+    selected_action: str,
+    decision_ts: int,
+) -> dict[str, Any]:
+    selected = _ranking_action(ranking, selected_action)
+    selected_score = (
+        _float(selected.get("corrected_model_score")) if selected else None
+    )
+    other_scores = [
+        _float(row.get("corrected_model_score"))
+        for row in ranking
+        if row.get("selected_action") != selected_action
+    ]
+    action_margin = (
+        selected_score - max(other_scores)
+        if selected_score is not None and other_scores
+        else None
+    )
+    selected_side = _side_from_action(selected_action)
+    opposite_side = (
+        "DOWN" if selected_side == "UP" else "UP" if selected_side == "DOWN" else ""
+    )
+    opposite_scores = [
+        _float(row.get("corrected_model_score"))
+        for row in ranking
+        if _side_from_action(str(row.get("selected_action") or "")) == opposite_side
+    ]
+    side_margin = (
+        selected_score - max(opposite_scores)
+        if selected_score is not None and opposite_scores
+        else None
+    )
+    common_provenance = {
+        "decision_ts": decision_ts,
+        "max_input_ts": decision_ts,
+        "source_fields_used": [
+            "full_5_action_ranking.selected_action",
+            "full_5_action_ranking.corrected_model_score",
+        ],
+        "source_timestamp": decision_ts,
+    }
+    return {
+        "action_score_margin": action_margin,
+        "action_score_margin_provenance": {
+            **common_provenance,
+            "provenance_valid": action_margin is not None,
+            "source_field_name": "full_5_action_ranking_top_action_margin",
+            "unavailable_reason_codes": []
+            if action_margin is not None
+            else ["full_5_action_ranking_missing_second_action"],
+        },
+        "side_specific_action_score_margin": side_margin,
+        "side_specific_action_score_margin_provenance": {
+            **common_provenance,
+            "provenance_valid": side_margin is not None,
+            "source_field_name": "full_5_action_ranking_side_margin",
+            "unavailable_reason_codes": []
+            if side_margin is not None
+            else ["full_5_action_ranking_missing_opposite_side_action"],
+        },
     }
 
 
@@ -3790,6 +4063,28 @@ def _fresh_signal_trace_report(
         )
         blocking_reasons = list(guard_row.get("execution_blocking_reason_codes") or [])
         paper_intent_id = intent_row.get("paper_fresh_order_intent_id")
+        ranking_for_trace = (
+            guard_row.get("top_k_action_ranking")
+            or provider_row.get("full_5_action_ranking")
+            or []
+        )
+        action_score_margin = (
+            guard_row.get("action_score_margin")
+            if guard_row.get("action_score_margin") is not None
+            else provider_row.get("action_score_margin")
+        )
+        if action_score_margin is None:
+            action_score_margin = _top_action_margin(ranking_for_trace)
+        side_score_margin = (
+            guard_row.get("side_specific_action_score_margin")
+            if guard_row.get("side_specific_action_score_margin") is not None
+            else provider_row.get("side_specific_action_score_margin")
+        )
+        if side_score_margin is None:
+            side_score_margin = _top_action_side_margin(
+                ranking_for_trace,
+                selected_action=selected_action,
+            )
         trace_row = {
             "run_id": config.run_id,
             "cycle_id": provider_row.get("cycle_id"),
@@ -3803,6 +4098,15 @@ def _fresh_signal_trace_report(
             "decision_ts": decision_ts,
             "market_end_ts": market_end_ts,
             "elapsed_since_market_start_seconds": elapsed,
+            "time_since_market_start_seconds": guard_row.get(
+                "time_since_market_start_seconds",
+                provider_row.get("time_since_market_start_seconds", elapsed),
+            ),
+            "time_since_market_start_provenance": dict(
+                guard_row.get("time_since_market_start_provenance")
+                or provider_row.get("time_since_market_start_provenance")
+                or {}
+            ),
             "time_to_close_seconds": time_to_close,
             "provider_row_source": provider_row.get("provider_row_source")
             or public_data_collection_report.get("public_data_collection_mode"),
@@ -3867,14 +4171,52 @@ def _fresh_signal_trace_report(
                 "p_up_action_disagreement",
                 provider_row.get("p_up_action_disagreement"),
             ),
+            "btc_momentum": guard_row.get(
+                "btc_momentum",
+                provider_row.get("btc_momentum"),
+            ),
+            "btc_momentum_provenance": dict(
+                guard_row.get("btc_momentum_provenance")
+                or provider_row.get("btc_momentum_provenance")
+                or {}
+            ),
+            "reference_price_to_beat_distance_at_decision": guard_row.get(
+                "reference_price_to_beat_distance_at_decision",
+                provider_row.get("reference_price_to_beat_distance_at_decision"),
+            ),
+            "reference_price_to_beat_distance_provenance": dict(
+                guard_row.get("reference_price_to_beat_distance_provenance")
+                or provider_row.get("reference_price_to_beat_distance_provenance")
+                or {}
+            ),
             "high_score_flag": guard_row.get(
                 "source_high_score_flag",
-                canonical_selected.get("high_score_flag", provider_row.get("high_score_flag")),
+                canonical_selected.get(
+                    "high_score_flag",
+                    provider_row.get("high_score_flag"),
+                ),
             ),
-            "score_margin": _top_action_margin(
-                guard_row.get("top_k_action_ranking")
-                or provider_row.get("full_5_action_ranking")
-                or []
+            "action_score_margin": action_score_margin,
+            "score_margin": action_score_margin,
+            "action_score_margin_provenance": dict(
+                guard_row.get("action_score_margin_provenance")
+                or provider_row.get("action_score_margin_provenance")
+                or {}
+            ),
+            "side_specific_action_score_margin": side_score_margin,
+            "side_specific_action_score_margin_provenance": dict(
+                guard_row.get("side_specific_action_score_margin_provenance")
+                or provider_row.get("side_specific_action_score_margin_provenance")
+                or {}
+            ),
+            "decision_time_regime_feature_provenance": dict(
+                guard_row.get("decision_time_regime_feature_provenance")
+                or provider_row.get("decision_time_regime_feature_provenance")
+                or {}
+            ),
+            "decision_time_regime_feature_max_input_ts": guard_row.get(
+                "decision_time_regime_feature_max_input_ts",
+                provider_row.get("decision_time_regime_feature_max_input_ts"),
             ),
             "execution_guarded_action": guard_row.get("execution_guarded_action"),
             "execution_guarded_side": guard_row.get("execution_guarded_side"),
@@ -5735,6 +6077,39 @@ def _guard_input_from_public_row(
         "decision_time_feature_max_input_ts": public_row.get(
             "decision_time_feature_max_input_ts", decision_ts
         ),
+        "btc_momentum": public_row.get("btc_momentum"),
+        "btc_momentum_provenance": dict(
+            public_row.get("btc_momentum_provenance") or {}
+        ),
+        "reference_price_to_beat_distance_at_decision": public_row.get(
+            "reference_price_to_beat_distance_at_decision"
+        ),
+        "reference_price_to_beat_distance_provenance": dict(
+            public_row.get("reference_price_to_beat_distance_provenance") or {}
+        ),
+        "time_since_market_start_seconds": public_row.get(
+            "time_since_market_start_seconds"
+        ),
+        "time_since_market_start_provenance": dict(
+            public_row.get("time_since_market_start_provenance") or {}
+        ),
+        "action_score_margin": public_row.get("action_score_margin"),
+        "action_score_margin_provenance": dict(
+            public_row.get("action_score_margin_provenance") or {}
+        ),
+        "side_specific_action_score_margin": public_row.get(
+            "side_specific_action_score_margin"
+        ),
+        "side_specific_action_score_margin_provenance": dict(
+            public_row.get("side_specific_action_score_margin_provenance") or {}
+        ),
+        "decision_time_regime_feature_provenance": dict(
+            public_row.get("decision_time_regime_feature_provenance") or {}
+        ),
+        "decision_time_regime_feature_max_input_ts": public_row.get(
+            "decision_time_regime_feature_max_input_ts",
+            public_row.get("decision_time_feature_max_input_ts", decision_ts),
+        ),
     }
 
 def _resolve_unlock_artifact_path(unlock_dir: Path, raw_path: str) -> Path:
@@ -5806,6 +6181,36 @@ def _fresh_order_intent_from_guard_row(
         "time_to_close_seconds": _float(micro.get("time_to_close_seconds")),
         "entry_ask": _float(micro.get("entry_ask")),
         "executable_exit_bid_proxy": _float(micro.get("executable_exit_bid_proxy")),
+        "btc_momentum": guard_row.get("btc_momentum"),
+        "btc_momentum_provenance": dict(guard_row.get("btc_momentum_provenance") or {}),
+        "reference_price_to_beat_distance_at_decision": guard_row.get(
+            "reference_price_to_beat_distance_at_decision"
+        ),
+        "reference_price_to_beat_distance_provenance": dict(
+            guard_row.get("reference_price_to_beat_distance_provenance") or {}
+        ),
+        "time_since_market_start_seconds": guard_row.get(
+            "time_since_market_start_seconds"
+        ),
+        "time_since_market_start_provenance": dict(
+            guard_row.get("time_since_market_start_provenance") or {}
+        ),
+        "action_score_margin": guard_row.get("action_score_margin"),
+        "action_score_margin_provenance": dict(
+            guard_row.get("action_score_margin_provenance") or {}
+        ),
+        "side_specific_action_score_margin": guard_row.get(
+            "side_specific_action_score_margin"
+        ),
+        "side_specific_action_score_margin_provenance": dict(
+            guard_row.get("side_specific_action_score_margin_provenance") or {}
+        ),
+        "decision_time_regime_feature_provenance": dict(
+            guard_row.get("decision_time_regime_feature_provenance") or {}
+        ),
+        "decision_time_regime_feature_max_input_ts": guard_row.get(
+            "decision_time_regime_feature_max_input_ts"
+        ),
         "pre_decision_exposure_state": guard_row.get("pre_decision_exposure_state"),
         "post_decision_exposure_state": guard_row.get("post_decision_exposure_state"),
         "execution_guard_reason_codes": guard_row.get("execution_guard_reason_codes", []),
@@ -5848,6 +6253,36 @@ def _fresh_paper_fills_from_intents(
             "filled_size": size,
             "fill_probability": _float(intent.get("queue_fill_proxy")),
             "paper_fill_price": fill_price,
+            "btc_momentum": intent.get("btc_momentum"),
+            "btc_momentum_provenance": dict(intent.get("btc_momentum_provenance") or {}),
+            "reference_price_to_beat_distance_at_decision": intent.get(
+                "reference_price_to_beat_distance_at_decision"
+            ),
+            "reference_price_to_beat_distance_provenance": dict(
+                intent.get("reference_price_to_beat_distance_provenance") or {}
+            ),
+            "time_since_market_start_seconds": intent.get(
+                "time_since_market_start_seconds"
+            ),
+            "time_since_market_start_provenance": dict(
+                intent.get("time_since_market_start_provenance") or {}
+            ),
+            "action_score_margin": intent.get("action_score_margin"),
+            "action_score_margin_provenance": dict(
+                intent.get("action_score_margin_provenance") or {}
+            ),
+            "side_specific_action_score_margin": intent.get(
+                "side_specific_action_score_margin"
+            ),
+            "side_specific_action_score_margin_provenance": dict(
+                intent.get("side_specific_action_score_margin_provenance") or {}
+            ),
+            "decision_time_regime_feature_provenance": dict(
+                intent.get("decision_time_regime_feature_provenance") or {}
+            ),
+            "decision_time_regime_feature_max_input_ts": intent.get(
+                "decision_time_regime_feature_max_input_ts"
+            ),
             "spread_cost": spread_cost,
             "fee_cost": 0.0,
             "slippage_cost": 0.0,
@@ -6094,6 +6529,28 @@ def _top_action_margin(ranking: list[dict[str, Any]]) -> float | None:
         reverse=True,
     )
     return scores[0] - scores[1]
+
+
+def _top_action_side_margin(
+    ranking: list[dict[str, Any]],
+    *,
+    selected_action: str,
+) -> float | None:
+    selected = _ranking_action(ranking, selected_action)
+    if not selected:
+        return None
+    selected_side = _side_from_action(selected_action)
+    if selected_side not in {"UP", "DOWN"}:
+        return None
+    opposite_side = "DOWN" if selected_side == "UP" else "UP"
+    opposite_scores = [
+        _float(row.get("corrected_model_score"))
+        for row in ranking
+        if _side_from_action(str(row.get("selected_action") or "")) == opposite_side
+    ]
+    if not opposite_scores:
+        return None
+    return _float(selected.get("corrected_model_score")) - max(opposite_scores)
 
 
 def _numeric_summary(values: list[float]) -> dict[str, Any]:

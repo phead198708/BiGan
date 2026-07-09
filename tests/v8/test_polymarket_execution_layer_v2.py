@@ -34,6 +34,9 @@ from bigan.v8.polymarket.training.execution_layer_v2_policy_replay import (
     run_execution_layer_v2_hts_regime_risk_replay,
     run_execution_layer_v2_policy_replay_from_settlement_csv,
 )
+from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
+    _fresh_public_row_from_provider_feature_context,
+)
 from tests.v8.test_polymarket_post_freeze_holdout import (
     _build_issue160_unlock_fixture,
     _paper_fresh_public_row,
@@ -535,6 +538,204 @@ def test_execution_layer_v2_hts_regime_risk_replay_is_diagnostic_only(
     assert result.artifact_hashes[
         "execution_layer_v2_hts_regime_risk_replay_report"
     ]
+
+
+def test_execution_layer_v2_hts_regime_risk_replay_uses_decision_time_features(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "feature-rich-paper-goal"
+    run_dir.mkdir()
+    up_intent = _hts_regime_intent(
+        "i-feature-up",
+        "m-feature-up",
+        "BUY_UP_HOLD_TO_SETTLEMENT",
+        0.51,
+        0.49,
+        0.76,
+    )
+    up_intent.update(
+        {
+            "btc_momentum": 0.004,
+            "reference_price_to_beat_distance_at_decision": 0.003,
+            "time_since_market_start_seconds": 120.0,
+            "action_score_margin": 0.06,
+            "side_specific_action_score_margin": 0.08,
+            "decision_time_regime_feature_provenance": {
+                "provenance_valid": True,
+                "decision_ts": up_intent["decision_ts"],
+                "max_input_ts": up_intent["decision_ts"],
+                "source_fields_used": [
+                    "raw_btc_feature_candles.open_price",
+                    "raw_polymarket_markets.reference_price_start",
+                    "full_5_action_ranking.corrected_model_score",
+                ],
+            },
+            "decision_time_regime_feature_max_input_ts": up_intent["decision_ts"],
+        }
+    )
+    down_alias_intent = _hts_regime_intent(
+        "i-alias-down",
+        "m-alias-down",
+        "BUY_DOWN_HOLD_TO_SETTLEMENT",
+        0.20,
+        0.80,
+        0.72,
+    )
+    _write_jsonl(run_dir / "one_hour_paper_intent_log.jsonl", [up_intent, down_alias_intent])
+    trace_dir = run_dir / "incremental_fresh_loop"
+    trace_dir.mkdir()
+    (trace_dir / "o_v8_paper_fresh_signal_trace.json").write_text(
+        json.dumps(
+            {
+                "trace_rows": [
+                    {
+                        "paper_intent_id": "i-alias-down",
+                        "market_id": "m-alias-down",
+                        "decision_ts": down_alias_intent["decision_ts"],
+                        "elapsed_since_market_start_seconds": 180.0,
+                        "score_margin": 0.04,
+                    }
+                ]
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    _write_jsonl(
+        run_dir / "one_hour_paper_fill_log.jsonl",
+        [
+            _hts_regime_fill(
+                "i-feature-up",
+                "m-feature-up",
+                "BUY_UP_HOLD_TO_SETTLEMENT",
+                "UP",
+                0.76,
+            ),
+            _hts_regime_fill(
+                "i-alias-down",
+                "m-alias-down",
+                "BUY_DOWN_HOLD_TO_SETTLEMENT",
+                "DOWN",
+                0.72,
+            ),
+        ],
+    )
+    _write_jsonl(
+        run_dir / "settlement_pnl_rows.jsonl",
+        [
+            _hts_regime_settlement(
+                "i-feature-up",
+                "m-feature-up",
+                "BUY_UP_HOLD_TO_SETTLEMENT",
+                "UP",
+                "UP",
+                0.04,
+            ),
+            _hts_regime_settlement(
+                "i-alias-down",
+                "m-alias-down",
+                "BUY_DOWN_HOLD_TO_SETTLEMENT",
+                "DOWN",
+                "DOWN",
+                0.03,
+            ),
+        ],
+    )
+
+    result = run_execution_layer_v2_hts_regime_risk_replay(
+        ExecutionLayerV2HTSRegimeRiskReplayConfig(
+            run_id="hts-regime-feature-fixture",
+            input_path=run_dir,
+            output_dir=tmp_path / "runs",
+        )
+    )
+    report = result.report
+
+    assert report["feature_coverage_before"]["btc_momentum"]["available_count"] == 1
+    assert report["feature_coverage_before"]["time_since_market_start_seconds"][
+        "available_count"
+    ] == 1
+    assert report["feature_coverage_after"]["time_since_market_start_seconds"][
+        "available_count"
+    ] == 2
+    assert report["feature_coverage_after"]["action_score_margin"][
+        "available_count"
+    ] == 2
+    assert report["policy_variants"]["up_hts_only_when_up_regime_confirmed"][
+        "fill_count"
+    ] == 1
+    assert report["policy_variants"]["down_hts_only_when_down_regime_confirmed"][
+        "fill_count"
+    ] == 1
+    assert report["up_hts_win_examples"][0]["market_id"] == "m-feature-up"
+    assert report["up_hts_win_examples"][0]["btc_momentum"] == pytest.approx(0.004)
+    assert report["up_hts_win_examples"][0]["regime_feature_vote_summary"][
+        "up_vote_count"
+    ] >= 2
+    assert report["paper_only"] is True
+    assert report["capital_at_risk"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+
+
+def test_fresh_provider_row_adds_decision_time_regime_features() -> None:
+    decision_ts = 1_120_000
+    row = _fresh_public_row_from_provider_feature_context(
+        run_id="provider-regime-fixture",
+        row_index=1,
+        market={
+            "market_id": "provider-market",
+            "condition_id": "provider-condition",
+            "slug": "btc-updown-5m-provider",
+            "market_family": "btc_updown_5m",
+            "up_token_id": "up-token",
+            "down_token_id": "down-token",
+            "market_start_ts": 1_000_000,
+            "market_end_ts": 1_300_000,
+            "reference_price_source": "polymarket_official_btc_usd_reference",
+            "reference_price_start": 100_000.0,
+        },
+        up={
+            "token_id": "up-token",
+            "bid_price": 0.58,
+            "ask_price": 0.60,
+            "mid_price": 0.59,
+            "bid_size": 2.0,
+            "ask_size": 2.0,
+            "liquidity_depth": 4.0,
+            "available_at_ts": 1_119_000,
+        },
+        down={
+            "token_id": "down-token",
+            "bid_price": 0.40,
+            "ask_price": 0.42,
+            "mid_price": 0.41,
+            "bid_size": 2.0,
+            "ask_size": 2.0,
+            "liquidity_depth": 4.0,
+            "available_at_ts": 1_119_000,
+        },
+        candle={
+            "ts": 1_000_000,
+            "available_at_ts": 1_060_000,
+            "open_price": 100_000.0,
+            "close_price": 100_200.0,
+            "timeframe_ms": 60_000,
+            "source": "pytest",
+        },
+        decision_ts=decision_ts,
+    )
+
+    assert row["btc_momentum"] == pytest.approx(0.002)
+    assert row["reference_price_to_beat_distance_at_decision"] == pytest.approx(0.002)
+    assert row["time_since_market_start_seconds"] == pytest.approx(120.0)
+    assert row["action_score_margin"] is not None
+    assert "side_specific_action_score_margin" in row
+    assert "side_specific_action_score_margin_provenance" in row
+    assert row["decision_time_regime_feature_provenance"]["provenance_valid"] is True
+    assert row["decision_time_regime_feature_max_input_ts"] <= decision_ts
+    assert row["score_components"]["btc_momentum"] == pytest.approx(0.002)
+    assert row["paper_only"] is True
+    assert row["capital_at_risk"] is False
 
 
 def test_execution_layer_v2_forward_shadow_missing_calibrated_ev_fails_closed(

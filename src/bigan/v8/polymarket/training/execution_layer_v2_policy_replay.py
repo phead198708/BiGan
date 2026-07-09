@@ -782,6 +782,11 @@ def build_execution_layer_v2_hts_regime_risk_replay_report(
             "settlement_pnl",
             "settlement_status",
         ],
+        "feature_coverage_before": _hts_regime_feature_coverage(
+            rows,
+            canonical_only=True,
+        ),
+        "feature_coverage_after": _hts_regime_feature_coverage(rows),
         "feature_coverage": _hts_regime_feature_coverage(rows),
         "policy_variants": variant_reports,
         "pnl_by_side": _pnl_distribution(rows, "side"),
@@ -791,6 +796,8 @@ def build_execution_layer_v2_hts_regime_risk_replay_report(
         "pnl_by_time_window": _pnl_distribution(rows, "time_window_bucket"),
         "false_positive_up_hts_examples": _false_positive_up_hts_examples(rows),
         "missed_opportunity_up_hts_examples": _missed_opportunity_up_hts_examples(rows),
+        "up_hts_win_examples": _up_hts_win_examples(rows),
+        "up_hts_loss_cluster_diagnostics": _up_hts_loss_cluster_diagnostics(rows),
         "recommended_decision_time_guard_signals": (
             _recommended_hts_regime_guard_signals(rows, variant_reports)
         ),
@@ -947,6 +954,19 @@ def execution_layer_v2_hts_regime_risk_replay_report_to_markdown(
             f"`{row['time_window_bucket']}` | {row['settlement_pnl']:.6f} | "
             f"`{row['diagnostic_reason_codes']}` |"
         )
+    lines.extend(
+        [
+            "",
+            "## Feature Coverage",
+            "",
+            f"- before: `{report['feature_coverage_before']}`",
+            f"- after: `{report['feature_coverage_after']}`",
+            "",
+            "## UP HTS Loss Clusters",
+            "",
+            f"`{report['up_hts_loss_cluster_diagnostics']}`",
+        ]
+    )
     lines.append("")
     return "\n".join(lines)
 
@@ -1737,8 +1757,11 @@ def _hts_regime_policy_metrics(
                 "side": row["side"],
                 "family": row["family"],
                 "market_regime": row["market_regime"],
+                "regime_feature_vote_summary": row["regime_feature_vote_summary"],
                 "p_up_down_balance": row["p_up_down_balance"],
                 "btc_momentum_regime": row["btc_momentum_regime"],
+                "reference_distance_bucket": row["reference_distance_bucket"],
+                "action_score_margin_bucket": row["action_score_margin_bucket"],
                 "price_bucket": row["price_bucket"],
                 "time_window_bucket": row["time_window_bucket"],
                 "same_market_entry_index": row["same_market_entry_index"],
@@ -2611,10 +2634,12 @@ def _load_hts_regime_replay_rows(path: Path) -> list[dict[str, Any]]:
             for row in _read_jsonl_dicts(intents_path)
             if row.get("paper_fresh_order_intent_id")
         }
+        trace_by_intent = _load_hts_regime_trace_rows_by_intent(path)
         merged_rows = []
         for row in settlement_rows:
             intent_id = str(row.get("paper_fresh_order_intent_id") or "")
             merged = {
+                **trace_by_intent.get(intent_id, {}),
                 **intent_by_id.get(intent_id, {}),
                 **fill_by_intent.get(intent_id, {}),
                 **row,
@@ -2643,6 +2668,38 @@ def _load_hts_regime_replay_rows(path: Path) -> list[dict[str, Any]]:
             ]
         )
     raise ValueError("HTS regime replay input must be a run directory, CSV, or JSONL")
+
+
+def _load_hts_regime_trace_rows_by_intent(path: Path) -> dict[str, dict[str, Any]]:
+    trace_paths = [
+        path / "o_v8_paper_fresh_signal_trace.json",
+        path / "incremental_fresh_loop" / "o_v8_paper_fresh_signal_trace.json",
+    ]
+    trace_paths.extend(
+        sorted(
+            path.glob(
+                "incremental_fresh_loop_cycles/*/o_v8_paper_fresh_signal_trace.json"
+            )
+        )
+    )
+    rows_by_intent: dict[str, dict[str, Any]] = {}
+    for trace_path in trace_paths:
+        if not trace_path.exists():
+            continue
+        try:
+            payload = json.loads(trace_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        for row in payload.get("trace_rows") or []:
+            if not isinstance(row, Mapping):
+                continue
+            intent_id = str(row.get("paper_intent_id") or "")
+            if not intent_id:
+                continue
+            rows_by_intent.setdefault(intent_id, dict(row))
+    return rows_by_intent
 
 
 def _normalize_hts_regime_replay_row(
@@ -2704,6 +2761,7 @@ def _normalize_hts_regime_replay_row(
     btc_momentum = _first_float(
         row,
         (
+            "btc_momentum",
             "recent_btc_momentum_120s",
             "recent_btc_momentum_60s",
             "recent_btc_momentum_30s",
@@ -2725,7 +2783,11 @@ def _normalize_hts_regime_replay_row(
     time_to_close = _first_float(row, ("time_to_close_seconds",), default=None)
     time_since_start = _first_float(
         row,
-        ("time_since_market_start_seconds", "time_since_start_seconds"),
+        (
+            "time_since_market_start_seconds",
+            "time_since_start_seconds",
+            "elapsed_since_market_start_seconds",
+        ),
         default=None,
     )
     spread_bps = _first_float(row, ("spread_bps",), default=None)
@@ -2733,7 +2795,21 @@ def _normalize_hts_regime_replay_row(
     queue_fill_proxy = _first_float(row, ("queue_fill_proxy",), default=None)
     score_margin = _first_float(
         row,
-        ("best_action_margin", "action_score_margin", "top_action_margin"),
+        (
+            "best_action_margin",
+            "action_score_margin",
+            "top_action_margin",
+            "score_margin",
+        ),
+        default=None,
+    )
+    side_score_margin = _first_float(
+        row,
+        (
+            "side_specific_action_score_margin",
+            "selected_side_action_score_margin",
+            "side_score_margin",
+        ),
         default=None,
     )
     action_score = _first_float(
@@ -2761,7 +2837,15 @@ def _normalize_hts_regime_replay_row(
     p_balance = (p_up - p_down) if p_up is not None and p_down is not None else None
     p_balance_regime = _p_up_down_balance_regime(p_balance)
     btc_regime = _btc_momentum_regime(btc_momentum)
-    market_regime = _combined_market_regime(p_balance_regime, btc_regime)
+    reference_bucket = _reference_distance_bucket(reference_distance)
+    score_bucket = _score_margin_bucket(score_margin)
+    regime_vote_summary = _hts_regime_vote_summary(
+        p_balance_regime=p_balance_regime,
+        btc_regime=btc_regime,
+        reference_distance_bucket=reference_bucket,
+        action_score_margin_bucket=score_bucket,
+    )
+    regime_provenance = dict(row.get("decision_time_regime_feature_provenance") or {})
     return {
         "row_index": index,
         "market_id": _first_text(row, ("market_id", "condition_id", "slug"), default=""),
@@ -2793,7 +2877,7 @@ def _normalize_hts_regime_replay_row(
         "btc_momentum": btc_momentum,
         "btc_momentum_regime": btc_regime,
         "reference_price_to_beat_distance_at_decision": reference_distance,
-        "reference_distance_bucket": _reference_distance_bucket(reference_distance),
+        "reference_distance_bucket": reference_bucket,
         "time_since_market_start_seconds": time_since_start,
         "time_since_market_start_bucket": _time_since_start_bucket(time_since_start),
         "time_to_close_seconds": time_to_close,
@@ -2805,11 +2889,39 @@ def _normalize_hts_regime_replay_row(
         "queue_fill_proxy": queue_fill_proxy,
         "queue_bucket": _queue_bucket(queue_fill_proxy),
         "action_score_margin": score_margin,
-        "action_score_margin_bucket": _score_margin_bucket(score_margin),
+        "action_score_margin_bucket": score_bucket,
+        "side_specific_action_score_margin": side_score_margin,
+        "side_specific_action_score_margin_bucket": _score_margin_bucket(
+            side_score_margin
+        ),
         "action_score": action_score,
-        "market_regime": market_regime,
-        "up_regime_confirmed": market_regime == "up_regime_confirmed",
-        "down_regime_confirmed": market_regime == "down_regime_confirmed",
+        "market_regime": regime_vote_summary["market_regime"],
+        "regime_feature_vote_summary": regime_vote_summary,
+        "decision_time_regime_feature_provenance": regime_provenance,
+        "decision_time_regime_feature_provenance_valid": bool(
+            regime_provenance.get("provenance_valid")
+        ),
+        "decision_time_regime_feature_max_input_ts": _first_float(
+            row,
+            ("decision_time_regime_feature_max_input_ts",),
+            default=None,
+        ),
+        "canonical_regime_feature_presence": {
+            "btc_momentum": row.get("btc_momentum") is not None,
+            "reference_price_to_beat_distance_at_decision": row.get(
+                "reference_price_to_beat_distance_at_decision"
+            )
+            is not None,
+            "time_since_market_start_seconds": row.get(
+                "time_since_market_start_seconds"
+            )
+            is not None,
+            "action_score_margin": row.get("action_score_margin") is not None,
+        },
+        "up_regime_confirmed": regime_vote_summary["market_regime"]
+        == "up_regime_confirmed",
+        "down_regime_confirmed": regime_vote_summary["market_regime"]
+        == "down_regime_confirmed",
         "raw_fields": sorted(str(key) for key in row),
     }
 
@@ -2857,6 +2969,66 @@ def _btc_momentum_regime(momentum: float | None) -> str:
     if momentum < 0.0:
         return "btc_down_momentum"
     return "btc_flat_momentum"
+
+
+def _hts_regime_vote_summary(
+    *,
+    p_balance_regime: str,
+    btc_regime: str,
+    reference_distance_bucket: str,
+    action_score_margin_bucket: str,
+) -> dict[str, Any]:
+    votes: list[dict[str, str]] = []
+    p_side = {
+        "p_up_regime": "UP",
+        "p_down_regime": "DOWN",
+    }.get(p_balance_regime)
+    if p_side is not None:
+        votes.append({"feature": "p_up_down_balance", "side": p_side})
+    btc_side = {
+        "btc_up_momentum": "UP",
+        "btc_down_momentum": "DOWN",
+    }.get(btc_regime)
+    if btc_side is not None:
+        votes.append({"feature": "btc_momentum", "side": btc_side})
+    reference_side = {
+        "above_reference_price": "UP",
+        "below_reference_price": "DOWN",
+    }.get(reference_distance_bucket)
+    if reference_side is not None:
+        votes.append(
+            {
+                "feature": "reference_price_to_beat_distance_at_decision",
+                "side": reference_side,
+            }
+        )
+    up_votes = sum(1 for vote in votes if vote["side"] == "UP")
+    down_votes = sum(1 for vote in votes if vote["side"] == "DOWN")
+    if up_votes > down_votes:
+        market_regime = "up_regime_confirmed"
+    elif down_votes > up_votes:
+        market_regime = "down_regime_confirmed"
+    elif votes:
+        market_regime = "conflicting_regime"
+    else:
+        market_regime = "uncertain_or_missing_regime"
+    return {
+        "market_regime": market_regime,
+        "vote_count": len(votes),
+        "up_vote_count": up_votes,
+        "down_vote_count": down_votes,
+        "votes": votes,
+        "p_up_down_balance_regime": p_balance_regime,
+        "btc_momentum_regime": btc_regime,
+        "reference_distance_bucket": reference_distance_bucket,
+        "action_score_margin_bucket": action_score_margin_bucket,
+        "directional_features_used": [
+            "p_up_down_balance",
+            "btc_momentum",
+            "reference_price_to_beat_distance_at_decision",
+        ],
+        "quality_features_used": ["action_score_margin"],
+    }
 
 
 def _combined_market_regime(p_balance_regime: str, btc_regime: str) -> str:
@@ -2999,6 +3171,19 @@ def _missed_opportunity_up_hts_examples(rows: list[dict[str, Any]]) -> list[dict
     return sorted(examples, key=lambda row: -float(row["settlement_pnl"]))[:20]
 
 
+def _up_hts_win_examples(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    examples = [
+        _hts_regime_example_row(
+            row,
+            ["profitable_up_hts", *_regime_example_reason_codes(row)],
+        )
+        for row in rows
+        if row["action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+        and float(row["settlement_pnl"]) > 0.0
+    ]
+    return sorted(examples, key=lambda row: -float(row["settlement_pnl"]))[:20]
+
+
 def _hts_regime_example_row(
     row: Mapping[str, Any],
     reason_codes: list[str],
@@ -3018,13 +3203,30 @@ def _hts_regime_example_row(
         "p_up": row["p_up"],
         "p_down": row["p_down"],
         "p_up_down_balance": row["p_up_down_balance"],
+        "btc_momentum": row["btc_momentum"],
         "btc_momentum_regime": row["btc_momentum_regime"],
+        "reference_price_to_beat_distance_at_decision": row[
+            "reference_price_to_beat_distance_at_decision"
+        ],
         "reference_distance_bucket": row["reference_distance_bucket"],
+        "time_since_market_start_seconds": row["time_since_market_start_seconds"],
+        "time_since_market_start_bucket": row["time_since_market_start_bucket"],
         "time_window_bucket": row["time_window_bucket"],
         "spread_bucket": row["spread_bucket"],
         "staleness_bucket": row["staleness_bucket"],
         "queue_bucket": row["queue_bucket"],
+        "action_score_margin": row["action_score_margin"],
         "action_score_margin_bucket": row["action_score_margin_bucket"],
+        "side_specific_action_score_margin": row[
+            "side_specific_action_score_margin"
+        ],
+        "side_specific_action_score_margin_bucket": row[
+            "side_specific_action_score_margin_bucket"
+        ],
+        "regime_feature_vote_summary": row["regime_feature_vote_summary"],
+        "decision_time_regime_feature_provenance_valid": row[
+            "decision_time_regime_feature_provenance_valid"
+        ],
         "same_market_entry_index": row["same_market_entry_index"],
         "side_context": row["side_context"],
         "diagnostic_reason_codes": sorted(set(reason_codes)),
@@ -3081,28 +3283,136 @@ def _recommended_hts_regime_guard_signals(
     return recommendations
 
 
-def _hts_regime_feature_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    fields = _hts_regime_decision_time_fields()
+def _up_hts_loss_cluster_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    losses = [
+        row
+        for row in rows
+        if row["action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+        and float(row["settlement_pnl"]) < 0.0
+    ]
+    cluster_fields = [
+        "market_regime",
+        "btc_momentum_regime",
+        "reference_distance_bucket",
+        "action_score_margin_bucket",
+        "side_specific_action_score_margin_bucket",
+        "time_since_market_start_bucket",
+        "time_window_bucket",
+        "price_bucket",
+        "spread_bucket",
+        "staleness_bucket",
+        "queue_bucket",
+        "side_context",
+    ]
+    clusters = {
+        field: _pnl_distribution(losses, field)
+        for field in cluster_fields
+    }
+    strongest_cluster_by_field = {
+        field: _largest_loss_cluster(distribution)
+        for field, distribution in clusters.items()
+    }
     return {
-        field: {
-            "available_count": sum(1 for row in rows if row.get(field) is not None),
+        "loss_count": len(losses),
+        "loss_pnl_sum": sum(float(row["settlement_pnl"]) for row in losses),
+        "cluster_fields": cluster_fields,
+        "pnl_by_cluster": clusters,
+        "strongest_loss_cluster_by_field": strongest_cluster_by_field,
+        "diagnostic_conclusion": _up_hts_loss_cluster_conclusion(
+            strongest_cluster_by_field
+        ),
+    }
+
+
+def _largest_loss_cluster(distribution: dict[str, float]) -> dict[str, Any]:
+    if not distribution:
+        return {"bucket": None, "pnl": 0.0}
+    bucket, pnl = min(distribution.items(), key=lambda item: item[1])
+    return {"bucket": bucket, "pnl": pnl}
+
+
+def _up_hts_loss_cluster_conclusion(
+    strongest_cluster_by_field: dict[str, dict[str, Any]],
+) -> list[str]:
+    conclusions = []
+    bucket_by_field = {
+        field: str(value.get("bucket"))
+        for field, value in strongest_cluster_by_field.items()
+    }
+    if bucket_by_field.get("btc_momentum_regime") in {
+        "btc_down_momentum",
+        "missing_btc_momentum",
+    }:
+        conclusions.append("up_hts_losses_cluster_around_weak_or_missing_btc_momentum")
+    if bucket_by_field.get("reference_distance_bucket") in {
+        "below_reference_price",
+        "missing_reference_distance",
+    }:
+        conclusions.append(
+            "up_hts_losses_cluster_around_poor_or_missing_reference_distance"
+        )
+    if bucket_by_field.get("action_score_margin_bucket") in {
+        "weak_margin",
+        "missing_score_margin",
+    }:
+        conclusions.append("up_hts_losses_cluster_around_low_or_missing_score_margin")
+    if bucket_by_field.get("time_window_bucket") in {
+        "sell_before_close_only_window",
+        "final_no_trade_window",
+    }:
+        conclusions.append("up_hts_losses_cluster_around_late_entry")
+    if bucket_by_field.get("price_bucket") == "gt_0_90":
+        conclusions.append("up_hts_losses_cluster_around_high_entry_price")
+    if not conclusions:
+        conclusions.append("up_hts_loss_cluster_not_explained_by_single_bucket")
+    return conclusions
+
+
+def _hts_regime_feature_coverage(
+    rows: list[dict[str, Any]],
+    *,
+    canonical_only: bool = False,
+) -> dict[str, Any]:
+    fields = _hts_regime_decision_time_fields()
+    tracked_fields = {
+        "p_up",
+        "p_down",
+        "btc_momentum",
+        "reference_price_to_beat_distance_at_decision",
+        "time_since_market_start_seconds",
+        "time_to_close_seconds",
+        "spread_bps",
+        "book_staleness_ms",
+        "queue_fill_proxy",
+        "action_score_margin",
+        "side_specific_action_score_margin",
+    }
+    coverage = {}
+    for field in fields:
+        if field not in tracked_fields:
+            continue
+        if canonical_only:
+            canonical_presence_rows = [
+                row
+                for row in rows
+                if field in (row.get("canonical_regime_feature_presence") or {})
+            ]
+            available_count = sum(
+                1
+                for row in canonical_presence_rows
+                if bool(
+                    (row.get("canonical_regime_feature_presence") or {}).get(field)
+                )
+            )
+            if not canonical_presence_rows:
+                available_count = sum(1 for row in rows if row.get(field) is not None)
+        else:
+            available_count = sum(1 for row in rows if row.get(field) is not None)
+        coverage[field] = {
+            "available_count": available_count,
             "row_count": len(rows),
         }
-        for field in fields
-        if field
-        in {
-            "p_up",
-            "p_down",
-            "btc_momentum",
-            "reference_price_to_beat_distance_at_decision",
-            "time_since_market_start_seconds",
-            "time_to_close_seconds",
-            "spread_bps",
-            "book_staleness_ms",
-            "queue_fill_proxy",
-            "action_score_margin",
-        }
-    }
+    return coverage
 
 
 def _hts_regime_decision_time_fields() -> list[str]:
@@ -3119,6 +3429,7 @@ def _hts_regime_decision_time_fields() -> list[str]:
         "book_staleness_ms",
         "queue_fill_proxy",
         "action_score_margin",
+        "side_specific_action_score_margin",
         "action_score",
         "same_market_prior_entry_count",
         "side_context",

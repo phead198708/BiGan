@@ -1802,6 +1802,43 @@ def _forced_coverage_public_row(
         "decision_time_feature_max_input_ts": source_trace.get(
             "decision_time_feature_max_input_ts", decision_ts
         ),
+        "btc_momentum": source_trace.get("btc_momentum"),
+        "btc_momentum_provenance": dict(
+            source_trace.get("btc_momentum_provenance") or {}
+        ),
+        "reference_price_to_beat_distance_at_decision": source_trace.get(
+            "reference_price_to_beat_distance_at_decision"
+        ),
+        "reference_price_to_beat_distance_provenance": dict(
+            source_trace.get("reference_price_to_beat_distance_provenance") or {}
+        ),
+        "time_since_market_start_seconds": source_trace.get(
+            "time_since_market_start_seconds",
+            source_trace.get("elapsed_since_market_start_seconds"),
+        ),
+        "time_since_market_start_provenance": dict(
+            source_trace.get("time_since_market_start_provenance") or {}
+        ),
+        "action_score_margin": source_trace.get(
+            "action_score_margin",
+            source_trace.get("score_margin"),
+        ),
+        "action_score_margin_provenance": dict(
+            source_trace.get("action_score_margin_provenance") or {}
+        ),
+        "side_specific_action_score_margin": source_trace.get(
+            "side_specific_action_score_margin"
+        ),
+        "side_specific_action_score_margin_provenance": dict(
+            source_trace.get("side_specific_action_score_margin_provenance") or {}
+        ),
+        "decision_time_regime_feature_provenance": dict(
+            source_trace.get("decision_time_regime_feature_provenance") or {}
+        ),
+        "decision_time_regime_feature_max_input_ts": source_trace.get(
+            "decision_time_regime_feature_max_input_ts",
+            source_trace.get("decision_time_feature_max_input_ts", decision_ts),
+        ),
         "public_data_source": source_trace.get("public_data_source"),
         "coverage_forced_candidate_source": "one_hour_signal_trace_ranking_summary",
     }
