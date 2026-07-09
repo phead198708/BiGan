@@ -592,14 +592,33 @@ def test_execution_layer_v2_hts_regime_risk_replay_uses_decision_time_features(
                         "paper_intent_id": "i-alias-down",
                         "market_id": "m-alias-down",
                         "decision_ts": down_alias_intent["decision_ts"],
+                        "btc_momentum": -0.006,
+                        "reference_price_to_beat_distance_at_decision": -0.002,
                         "elapsed_since_market_start_seconds": 180.0,
                         "score_margin": 0.04,
+                        "side_specific_action_score_margin": 0.05,
                     }
                 ]
             },
             sort_keys=True,
         ),
         encoding="utf-8",
+    )
+    down_fill = _hts_regime_fill(
+        "i-alias-down",
+        "m-alias-down",
+        "BUY_DOWN_HOLD_TO_SETTLEMENT",
+        "DOWN",
+        0.72,
+    )
+    down_fill.update(
+        {
+            "btc_momentum": None,
+            "reference_price_to_beat_distance_at_decision": None,
+            "time_since_market_start_seconds": None,
+            "action_score_margin": None,
+            "side_specific_action_score_margin": None,
+        }
     )
     _write_jsonl(
         run_dir / "one_hour_paper_fill_log.jsonl",
@@ -611,14 +630,25 @@ def test_execution_layer_v2_hts_regime_risk_replay_uses_decision_time_features(
                 "UP",
                 0.76,
             ),
-            _hts_regime_fill(
-                "i-alias-down",
-                "m-alias-down",
-                "BUY_DOWN_HOLD_TO_SETTLEMENT",
-                "DOWN",
-                0.72,
-            ),
+            down_fill,
         ],
+    )
+    down_settlement = _hts_regime_settlement(
+        "i-alias-down",
+        "m-alias-down",
+        "BUY_DOWN_HOLD_TO_SETTLEMENT",
+        "DOWN",
+        "DOWN",
+        0.03,
+    )
+    down_settlement.update(
+        {
+            "btc_momentum": None,
+            "reference_price_to_beat_distance_at_decision": None,
+            "time_since_market_start_seconds": None,
+            "action_score_margin": None,
+            "side_specific_action_score_margin": None,
+        }
     )
     _write_jsonl(
         run_dir / "settlement_pnl_rows.jsonl",
@@ -631,14 +661,7 @@ def test_execution_layer_v2_hts_regime_risk_replay_uses_decision_time_features(
                 "UP",
                 0.04,
             ),
-            _hts_regime_settlement(
-                "i-alias-down",
-                "m-alias-down",
-                "BUY_DOWN_HOLD_TO_SETTLEMENT",
-                "DOWN",
-                "DOWN",
-                0.03,
-            ),
+            down_settlement,
         ],
     )
 
@@ -652,6 +675,13 @@ def test_execution_layer_v2_hts_regime_risk_replay_uses_decision_time_features(
     report = result.report
 
     assert report["feature_coverage_before"]["btc_momentum"]["available_count"] == 1
+    assert report["feature_coverage_after"]["btc_momentum"]["available_count"] == 2
+    assert report["feature_coverage_before"][
+        "reference_price_to_beat_distance_at_decision"
+    ]["available_count"] == 1
+    assert report["feature_coverage_after"][
+        "reference_price_to_beat_distance_at_decision"
+    ]["available_count"] == 2
     assert report["feature_coverage_before"]["time_since_market_start_seconds"][
         "available_count"
     ] == 1
@@ -659,6 +689,9 @@ def test_execution_layer_v2_hts_regime_risk_replay_uses_decision_time_features(
         "available_count"
     ] == 2
     assert report["feature_coverage_after"]["action_score_margin"][
+        "available_count"
+    ] == 2
+    assert report["feature_coverage_after"]["side_specific_action_score_margin"][
         "available_count"
     ] == 2
     assert report["policy_variants"]["up_hts_only_when_up_regime_confirmed"][

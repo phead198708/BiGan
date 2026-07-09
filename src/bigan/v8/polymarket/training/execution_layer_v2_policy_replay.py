@@ -85,6 +85,13 @@ HTS_REGIME_RISK_POLICY_VARIANTS: tuple[str, ...] = (
     "hts_allowed_only_when_regime_and_price_bucket_agree",
     "hts_to_sbc_when_late_or_uncertain",
 )
+HTS_REGIME_CANONICAL_FEATURE_FIELDS: tuple[str, ...] = (
+    "btc_momentum",
+    "reference_price_to_beat_distance_at_decision",
+    "time_since_market_start_seconds",
+    "action_score_margin",
+    "side_specific_action_score_margin",
+)
 
 PRICE_BUCKET_EDGES: tuple[tuple[str, float, float | None], ...] = (
     ("lt_0_60", -math.inf, 0.60),
@@ -2614,6 +2621,35 @@ def _small_sample_warnings(
     return []
 
 
+def _replay_missing_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip() == "":
+        return True
+    return bool(isinstance(value, dict) and not value)
+
+
+def _merge_replay_sources_preserve_non_null(
+    *sources: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for source in sources:
+        for key, value in dict(source).items():
+            if _replay_missing_value(value):
+                continue
+            merged[key] = value
+    return merged
+
+
+def _hts_regime_canonical_feature_presence(
+    row: Mapping[str, Any],
+) -> dict[str, bool]:
+    return {
+        field: row.get(field) is not None
+        for field in HTS_REGIME_CANONICAL_FEATURE_FIELDS
+    }
+
+
 def _load_hts_regime_replay_rows(path: Path) -> list[dict[str, Any]]:
     if path.is_dir():
         settlement_path = path / "settlement_pnl_rows.jsonl"
@@ -2638,12 +2674,24 @@ def _load_hts_regime_replay_rows(path: Path) -> list[dict[str, Any]]:
         merged_rows = []
         for row in settlement_rows:
             intent_id = str(row.get("paper_fresh_order_intent_id") or "")
-            merged = {
-                **trace_by_intent.get(intent_id, {}),
-                **intent_by_id.get(intent_id, {}),
-                **fill_by_intent.get(intent_id, {}),
-                **row,
-            }
+            pre_trace_merged = _merge_replay_sources_preserve_non_null(
+                intent_by_id.get(intent_id, {}),
+                fill_by_intent.get(intent_id, {}),
+                row,
+            )
+            trace_row = trace_by_intent.get(intent_id, {})
+            merged = _merge_replay_sources_preserve_non_null(
+                trace_row,
+                intent_by_id.get(intent_id, {}),
+                fill_by_intent.get(intent_id, {}),
+                row,
+            )
+            merged["_pre_trace_merge_regime_feature_presence"] = (
+                _hts_regime_canonical_feature_presence(pre_trace_merged)
+            )
+            merged["_trace_regime_feature_presence"] = (
+                _hts_regime_canonical_feature_presence(trace_row)
+            )
             merged_rows.append(merged)
         return _attach_hts_regime_sequence_context(
             [
@@ -2906,18 +2954,13 @@ def _normalize_hts_regime_replay_row(
             ("decision_time_regime_feature_max_input_ts",),
             default=None,
         ),
-        "canonical_regime_feature_presence": {
-            "btc_momentum": row.get("btc_momentum") is not None,
-            "reference_price_to_beat_distance_at_decision": row.get(
-                "reference_price_to_beat_distance_at_decision"
-            )
-            is not None,
-            "time_since_market_start_seconds": row.get(
-                "time_since_market_start_seconds"
-            )
-            is not None,
-            "action_score_margin": row.get("action_score_margin") is not None,
-        },
+        "canonical_regime_feature_presence": dict(
+            row.get("_pre_trace_merge_regime_feature_presence")
+            or _hts_regime_canonical_feature_presence(row)
+        ),
+        "trace_regime_feature_presence": dict(
+            row.get("_trace_regime_feature_presence") or {}
+        ),
         "up_regime_confirmed": regime_vote_summary["market_regime"]
         == "up_regime_confirmed",
         "down_regime_confirmed": regime_vote_summary["market_regime"]

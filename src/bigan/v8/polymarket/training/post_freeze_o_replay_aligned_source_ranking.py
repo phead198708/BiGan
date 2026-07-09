@@ -7325,6 +7325,36 @@ def _v8_execution_guard_decision(
         "p_up_action_disagreement": row.get("p_up_action_disagreement"),
         "microstructure_snapshot": microstructure,
         "reference_price_feature_provenance": reference_provenance,
+        "btc_momentum": row.get("btc_momentum"),
+        "btc_momentum_provenance": dict(row.get("btc_momentum_provenance") or {}),
+        "reference_price_to_beat_distance_at_decision": row.get(
+            "reference_price_to_beat_distance_at_decision"
+        ),
+        "reference_price_to_beat_distance_provenance": dict(
+            row.get("reference_price_to_beat_distance_provenance") or {}
+        ),
+        "time_since_market_start_seconds": row.get(
+            "time_since_market_start_seconds"
+        ),
+        "time_since_market_start_provenance": dict(
+            row.get("time_since_market_start_provenance") or {}
+        ),
+        "action_score_margin": row.get("action_score_margin"),
+        "action_score_margin_provenance": dict(
+            row.get("action_score_margin_provenance") or {}
+        ),
+        "side_specific_action_score_margin": row.get(
+            "side_specific_action_score_margin"
+        ),
+        "side_specific_action_score_margin_provenance": dict(
+            row.get("side_specific_action_score_margin_provenance") or {}
+        ),
+        "decision_time_regime_feature_provenance": dict(
+            row.get("decision_time_regime_feature_provenance") or {}
+        ),
+        "decision_time_regime_feature_max_input_ts": row.get(
+            "decision_time_regime_feature_max_input_ts"
+        ),
         "runtime_field_backfill_rules_applied": cleanup[
             "runtime_field_backfill_rules_applied"
         ],
