@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigan://v8/execution_layer_v2_frozen_regime_conditioned_ev_v1.schema.json",
+  "title": "Execution Layer v2 Frozen Regime-Conditioned EV v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "artifact_name",
+    "diagnostic_only",
+    "frozen",
+    "decision_time_safe",
+    "uses_validation_labels_for_tuning",
+    "market_implied_probability_used_for_ev",
+    "no_outcome_field_usage",
+    "no_oracle_field_usage",
+    "no_future_return_field_usage",
+    "source_score_mutation_enabled",
+    "o_score_mutation_enabled",
+    "paper_only",
+    "capital_at_risk",
+    "polymarket_write_enabled",
+    "wallet_signing_enabled",
+    "v8_execution_handoff_allowed",
+    "source_model_candidate_eligible",
+    "freeze_ready",
+    "promotion_evidence_eligible",
+    "#134_resume_allowed",
+    "#146_start_allowed",
+    "fit_provenance",
+    "independence_constraints",
+    "feature_groups",
+    "coefficients"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "bigan-v8-execution-layer-v2-frozen-regime-conditioned-ev-v1"
+    },
+    "artifact_name": {
+      "const": "execution_layer_v2_frozen_regime_conditioned_ev_v1"
+    },
+    "diagnostic_only": {"const": true},
+    "frozen": {"const": true},
+    "decision_time_safe": {"const": true},
+    "uses_validation_labels_for_tuning": {"const": false},
+    "market_implied_probability_used_for_ev": {"const": false},
+    "no_outcome_field_usage": {"const": true},
+    "no_oracle_field_usage": {"const": true},
+    "no_future_return_field_usage": {"const": true},
+    "source_score_mutation_enabled": {"const": false},
+    "o_score_mutation_enabled": {"const": false},
+    "paper_only": {"const": true},
+    "capital_at_risk": {"const": false},
+    "polymarket_write_enabled": {"const": false},
+    "wallet_signing_enabled": {"const": false},
+    "v8_execution_handoff_allowed": {"const": false},
+    "source_model_candidate_eligible": {"const": false},
+    "freeze_ready": {"const": false},
+    "promotion_evidence_eligible": {"const": false},
+    "#134_resume_allowed": {"const": false},
+    "#146_start_allowed": {"const": false},
+    "fit_provenance": {
+      "type": "object",
+      "required": [
+        "coefficients_source",
+        "coefficients_fitted_from_current_75_row_replay",
+        "uses_settlement_pnl_for_fitting",
+        "uses_outcomes_for_fitting",
+        "uses_oracle_actions_for_fitting",
+        "uses_future_returns_for_fitting",
+        "fitted_from_run_ids",
+        "excluded_run_ids",
+        "fit_dataset_hash",
+        "fit_config_hash"
+      ],
+      "properties": {
+        "coefficients_source": {
+          "enum": ["separate_calibration_training_split", "shadow_split_only"]
+        },
+        "coefficients_fitted_from_current_75_row_replay": {"const": false},
+        "uses_settlement_pnl_for_fitting": {"const": false},
+        "uses_outcomes_for_fitting": {"const": false},
+        "uses_oracle_actions_for_fitting": {"const": false},
+        "uses_future_returns_for_fitting": {"const": false},
+        "fitted_from_run_ids": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "excluded_run_ids": {
+          "type": "array",
+          "contains": {
+            "const": "execution-layer-v2-regime-entry-edge-replay-20260710T123338Z"
+          }
+        },
+        "fit_dataset_hash": {"$ref": "#/$defs/sha256"},
+        "fit_config_hash": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "independence_constraints": {
+      "type": "object",
+      "required": [
+        "p_up_p_down_single_group",
+        "btc_anchor_fields_single_group",
+        "btc_anchor_maximum_signal_vote_weight",
+        "correlated_momentum_reference_counted_as_independent_votes"
+      ],
+      "properties": {
+        "p_up_p_down_single_group": {"const": "market_price_value"},
+        "btc_anchor_fields_single_group": {"const": "btc_anchor_direction"},
+        "btc_anchor_maximum_signal_vote_weight": {"const": 1.0},
+        "correlated_momentum_reference_counted_as_independent_votes": {
+          "const": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "feature_groups": {
+      "type": "object",
+      "required": [
+        "canonical_o_score_and_action_margin",
+        "btc_anchor_direction",
+        "market_price_value",
+        "execution_quality",
+        "pre_entry_exposure_state"
+      ],
+      "properties": {
+        "canonical_o_score_and_action_margin": {
+          "$ref": "#/$defs/canonicalGroup"
+        },
+        "btc_anchor_direction": {"$ref": "#/$defs/btcAnchorGroup"},
+        "market_price_value": {"$ref": "#/$defs/marketValueGroup"},
+        "execution_quality": {"$ref": "#/$defs/executionQualityGroup"},
+        "pre_entry_exposure_state": {"$ref": "#/$defs/exposureGroup"}
+      },
+      "additionalProperties": false
+    },
+    "coefficients": {
+      "type": "object",
+      "required": [
+        "intercept",
+        "groups",
+        "side_offsets",
+        "family_offsets",
+        "subtract_execution_cost"
+      ],
+      "properties": {
+        "intercept": {"type": "number"},
+        "groups": {
+          "type": "object",
+          "required": [
+            "canonical_o_score_and_action_margin",
+            "btc_anchor_direction",
+            "market_price_value",
+            "execution_quality",
+            "pre_entry_exposure_state"
+          ],
+          "properties": {
+            "canonical_o_score_and_action_margin": {
+              "$ref": "#/$defs/groupCoefficient"
+            },
+            "btc_anchor_direction": {"$ref": "#/$defs/groupCoefficient"},
+            "market_price_value": {"$ref": "#/$defs/groupCoefficient"},
+            "execution_quality": {"$ref": "#/$defs/groupCoefficient"},
+            "pre_entry_exposure_state": {
+              "$ref": "#/$defs/groupCoefficient"
+            }
+          },
+          "additionalProperties": false
+        },
+        "side_offsets": {"$ref": "#/$defs/numericMap"},
+        "family_offsets": {"$ref": "#/$defs/numericMap"},
+        "subtract_execution_cost": {"const": true}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "canonicalGroup": {
+      "type": "object",
+      "required": ["features"],
+      "properties": {
+        "features": {
+          "const": ["canonical_o_action_score", "action_score_margin"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "btcAnchorGroup": {
+      "type": "object",
+      "required": ["features"],
+      "properties": {
+        "features": {
+          "const": [
+            "btc_momentum",
+            "reference_price_to_beat_distance_at_decision"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "marketValueGroup": {
+      "type": "object",
+      "required": ["features"],
+      "properties": {
+        "features": {"const": ["p_up", "p_down", "execution_price"]}
+      },
+      "additionalProperties": false
+    },
+    "executionQualityGroup": {
+      "type": "object",
+      "required": ["features"],
+      "properties": {
+        "features": {
+          "const": [
+            "spread_bps",
+            "book_staleness_ms",
+            "queue_fill_proxy",
+            "time_to_close_seconds"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "exposureGroup": {
+      "type": "object",
+      "required": ["features"],
+      "properties": {
+        "features": {
+          "const": [
+            "entry_index_within_market",
+            "cumulative_market_exposure_before_entry",
+            "same_side_reentry",
+            "side_flip"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "groupCoefficient": {
+      "type": "object",
+      "required": [
+        "group_coefficient",
+        "maximum_absolute_contribution",
+        "feature_weights",
+        "feature_transforms"
+      ],
+      "properties": {
+        "group_coefficient": {"type": "number"},
+        "maximum_absolute_contribution": {
+          "type": "number",
+          "minimum": 0
+        },
+        "feature_weights": {"$ref": "#/$defs/numericMap"},
+        "feature_transforms": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/featureTransform"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "featureTransform": {
+      "type": "object",
+      "required": ["center", "scale", "clip_min", "clip_max"],
+      "properties": {
+        "center": {"type": "number"},
+        "scale": {"type": "number", "exclusiveMinimum": 0},
+        "clip_min": {"type": "number"},
+        "clip_max": {"type": "number"}
+      },
+      "additionalProperties": false
+    },
+    "numericMap": {
+      "type": "object",
+      "additionalProperties": {"type": "number"}
+    }
+  }
+}

@@ -38,6 +38,12 @@ from bigan.v8.polymarket.training.execution_layer_v2_policy_replay import (
     run_execution_layer_v2_policy_replay_from_settlement_csv,
     run_execution_layer_v2_regime_entry_edge_replay,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev import (
+    CURRENT_75_ROW_REPLAY_RUN_ID,
+    ExecutionLayerV2RegimeConditionedEVForwardShadowConfig,
+    run_execution_layer_v2_regime_conditioned_ev_forward_shadow,
+    validate_frozen_regime_conditioned_ev_artifact,
+)
 from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
     _fresh_public_row_from_provider_feature_context,
 )
@@ -1028,6 +1034,214 @@ def test_regime_entry_edge_replay_missing_calibration_fails_closed(
     assert report["promotion_evidence_eligible"] is False
     assert report["#134_resume_allowed"] is False
     assert report["#146_start_allowed"] is False
+
+
+def test_regime_conditioned_ev_forward_shadow_valid_artifact_and_full_guard(
+    tmp_path,
+) -> None:
+    schema = json.loads(
+        Path(
+            "examples/v8/polymarket_configs/"
+            "execution_layer_v2_frozen_regime_conditioned_ev_v1.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["artifact_name"]["const"] == (
+        "execution_layer_v2_frozen_regime_conditioned_ev_v1"
+    )
+    input_path = tmp_path / "fresh-regime-trace.jsonl"
+    artifact_path = tmp_path / "frozen-regime-ev.json"
+    _write_regime_conditioned_ev_artifact(artifact_path)
+    pass_row = _regime_conditioned_forward_row(
+        market_id="regime-up-pass",
+        action="BUY_UP_HOLD_TO_SETTLEMENT",
+        side="UP",
+        p_up=0.64,
+        order_allowed=True,
+        blocking_reason_codes=[],
+    )
+    blocked_row = _regime_conditioned_forward_row(
+        market_id="regime-down-blocked",
+        action="BUY_DOWN_SELL_BEFORE_CLOSE",
+        side="DOWN",
+        p_up=0.42,
+        order_allowed=False,
+        blocking_reason_codes=["execution_spread_too_wide"],
+    )
+    missing_row = _regime_conditioned_forward_row(
+        market_id="regime-missing-margin",
+        action="BUY_UP_HOLD_TO_SETTLEMENT",
+        side="UP",
+        p_up=0.62,
+        order_allowed=True,
+        blocking_reason_codes=[],
+    )
+    missing_row.pop("action_score_margin")
+    _write_jsonl(input_path, [pass_row, blocked_row, missing_row])
+
+    result = run_execution_layer_v2_regime_conditioned_ev_forward_shadow(
+        ExecutionLayerV2RegimeConditionedEVForwardShadowConfig(
+            run_id="regime-conditioned-forward-shadow-valid",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+            frozen_regime_conditioned_ev_artifact=artifact_path,
+        )
+    )
+    report = result.forward_shadow_report
+
+    assert result.artifact_validation_report["artifact_valid"] is True
+    assert report["regime_conditioned_ev_produced_count"] == 2
+    assert report["regime_conditioned_ev_missing_count"] == 1
+    assert report["candidate_count"] == 2
+    assert report["full_guard_passed_count"] == 1
+    assert report["executable_shadow_count"] == 1
+    assert report["counts_by_stage"]["candidate"]["by_side"] == {
+        "DOWN": 1,
+        "UP": 1,
+    }
+    assert report["counts_by_stage"]["full_guard_passed"]["by_action"] == {
+        "BUY_UP_HOLD_TO_SETTLEMENT": 1
+    }
+    assert report["feature_coverage"]["btc_momentum"]["available_count"] == 3
+    assert report["feature_coverage"]["action_score_margin"]["missing_count"] == 1
+    assert report["provenance_coverage"]["violation_count"] == 0
+    assert report["decision_rows"][0]["regime_conditioned_ev_source"] == (
+        "execution_layer_v2_frozen_regime_conditioned_ev_v1"
+    )
+    assert report["decision_rows"][0][
+        "market_implied_probability_used_as_direct_fair_value_ev"
+    ] is False
+    assert report["p_up_p_down_used_only_in_market_price_value_group"] is True
+    assert (
+        report["correlated_momentum_reference_counted_as_independent_votes"]
+        is False
+    )
+    assert report["uses_settlement_pnl_or_outcome_labels"] is False
+    assert report["source_scores_mutated"] is False
+    assert report["o_score_mutated"] is False
+    assert report["paper_only"] is True
+    assert report["capital_at_risk"] is False
+    assert report["polymarket_write_enabled"] is False
+    assert report["wallet_signing_enabled"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["freeze_ready"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["#134_resume_allowed"] is False
+    assert report["#146_start_allowed"] is False
+    assert result.artifact_hashes[
+        "execution_layer_v2_regime_conditioned_ev_forward_shadow_manifest"
+    ]
+    assert result.manifest["frozen_regime_conditioned_ev_contract_hash"]
+
+
+def test_regime_conditioned_ev_artifact_rejects_double_count_and_current_replay(
+    tmp_path,
+) -> None:
+    artifact_path = tmp_path / "invalid-regime-ev.json"
+    payload = _regime_conditioned_ev_artifact_payload()
+    payload["feature_groups"]["btc_anchor_direction"]["features"].append("p_up")
+    payload["fit_provenance"]["fitted_from_run_ids"] = [
+        CURRENT_75_ROW_REPLAY_RUN_ID
+    ]
+    payload["fit_provenance"][
+        "coefficients_fitted_from_current_75_row_replay"
+    ] = True
+    payload["settlement_pnl"] = 0.0
+    artifact_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    validation = validate_frozen_regime_conditioned_ev_artifact(artifact_path)
+
+    assert validation["valid"] is False
+    assert "current_75_row_replay_present_in_fit_lineage" in validation[
+        "blocking_reason_codes"
+    ]
+    assert (
+        "regime_conditioned_ev_fit_provenance_"
+        "coefficients_fitted_from_current_75_row_replay_not_false"
+        in validation["blocking_reason_codes"]
+    )
+    assert "regime_conditioned_ev_feature_group_fields_mismatch:btc_anchor_direction" in validation[
+        "blocking_reason_codes"
+    ]
+    assert "regime_conditioned_ev_artifact_forbidden_fields_present" in validation[
+        "blocking_reason_codes"
+    ]
+    assert validation["forbidden_field_paths"] == ["settlement_pnl"]
+
+
+def test_regime_conditioned_ev_forward_shadow_missing_artifact_fails_closed(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "fresh-regime-trace.jsonl"
+    _write_jsonl(
+        input_path,
+        [
+            _regime_conditioned_forward_row(
+                market_id="missing-artifact",
+                action="BUY_UP_HOLD_TO_SETTLEMENT",
+                side="UP",
+                p_up=0.65,
+                order_allowed=True,
+                blocking_reason_codes=[],
+            )
+        ],
+    )
+
+    result = run_execution_layer_v2_regime_conditioned_ev_forward_shadow(
+        ExecutionLayerV2RegimeConditionedEVForwardShadowConfig(
+            run_id="regime-conditioned-forward-shadow-missing-artifact",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+        )
+    )
+    report = result.forward_shadow_report
+
+    assert report["forward_shadow_status"] == "blocked_fail_closed"
+    assert report["regime_conditioned_ev_produced_count"] == 0
+    assert report["regime_conditioned_ev_missing_count"] == 1
+    assert report["candidate_count"] == 0
+    assert report["full_guard_passed_count"] == 0
+    assert report["executable_shadow_count"] == 0
+    assert report["rejection_reason_distribution"] == {
+        "missing_frozen_regime_conditioned_ev_artifact": 1
+    }
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["promotion_evidence_eligible"] is False
+
+
+def test_regime_conditioned_ev_forward_shadow_forbidden_outcome_fails_closed(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "forbidden-regime-trace.jsonl"
+    artifact_path = tmp_path / "frozen-regime-ev.json"
+    _write_regime_conditioned_ev_artifact(artifact_path)
+    row = _regime_conditioned_forward_row(
+        market_id="forbidden-outcome",
+        action="BUY_UP_HOLD_TO_SETTLEMENT",
+        side="UP",
+        p_up=0.65,
+        order_allowed=True,
+        blocking_reason_codes=[],
+    )
+    row["settlement_pnl"] = 1.0
+    _write_jsonl(input_path, [row])
+
+    report = run_execution_layer_v2_regime_conditioned_ev_forward_shadow(
+        ExecutionLayerV2RegimeConditionedEVForwardShadowConfig(
+            run_id="regime-conditioned-forward-shadow-forbidden",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+            frozen_regime_conditioned_ev_artifact=artifact_path,
+        )
+    ).forward_shadow_report
+
+    assert report["forward_shadow_status"] == "blocked_fail_closed"
+    assert report["forbidden_outcome_fields_present"] is True
+    assert report["accepted_signal_row_count"] == 0
+    assert report["candidate_count"] == 0
+    assert report["executable_shadow_count"] == 0
+    assert report["v8_execution_handoff_allowed"] is False
 
 
 def test_fresh_provider_row_adds_decision_time_regime_features() -> None:
@@ -2537,6 +2751,177 @@ def _write_ev_calibration_artifact(
         ),
         encoding="utf-8",
     )
+
+
+def _write_regime_conditioned_ev_artifact(path) -> None:
+    path.write_text(
+        json.dumps(_regime_conditioned_ev_artifact_payload(), sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _regime_conditioned_ev_artifact_payload() -> dict[str, object]:
+    feature_groups = {
+        "canonical_o_score_and_action_margin": {
+            "features": ["canonical_o_action_score", "action_score_margin"]
+        },
+        "btc_anchor_direction": {
+            "features": [
+                "btc_momentum",
+                "reference_price_to_beat_distance_at_decision",
+            ]
+        },
+        "market_price_value": {
+            "features": ["p_up", "p_down", "execution_price"]
+        },
+        "execution_quality": {
+            "features": [
+                "spread_bps",
+                "book_staleness_ms",
+                "queue_fill_proxy",
+                "time_to_close_seconds",
+            ]
+        },
+        "pre_entry_exposure_state": {
+            "features": [
+                "entry_index_within_market",
+                "cumulative_market_exposure_before_entry",
+                "same_side_reentry",
+                "side_flip",
+            ]
+        },
+    }
+    scales = {
+        "canonical_o_action_score": 1.0,
+        "action_score_margin": 0.10,
+        "btc_momentum": 0.01,
+        "reference_price_to_beat_distance_at_decision": 0.01,
+        "p_up": 1.0,
+        "p_down": 1.0,
+        "execution_price": 1.0,
+        "spread_bps": 1_000.0,
+        "book_staleness_ms": 1_000.0,
+        "queue_fill_proxy": 1.0,
+        "time_to_close_seconds": 600.0,
+        "entry_index_within_market": 10.0,
+        "cumulative_market_exposure_before_entry": 1.0,
+        "same_side_reentry": 1.0,
+        "side_flip": 1.0,
+    }
+    coefficient_groups = {}
+    for group_name, group in feature_groups.items():
+        features = group["features"]
+        feature_count = len(features)
+        coefficient_groups[group_name] = {
+            "group_coefficient": 0.002,
+            "maximum_absolute_contribution": 0.002,
+            "feature_weights": dict.fromkeys(features, 1.0 / feature_count),
+            "feature_transforms": {
+                feature: {
+                    "center": 0.0,
+                    "scale": scales[feature],
+                    "clip_min": -1.0,
+                    "clip_max": 1.0,
+                }
+                for feature in features
+            },
+        }
+    return {
+        "schema_version": (
+            "bigan-v8-execution-layer-v2-frozen-regime-conditioned-ev-v1"
+        ),
+        "artifact_name": "execution_layer_v2_frozen_regime_conditioned_ev_v1",
+        "diagnostic_only": True,
+        "frozen": True,
+        "decision_time_safe": True,
+        "uses_validation_labels_for_tuning": False,
+        "market_implied_probability_used_for_ev": False,
+        "no_outcome_field_usage": True,
+        "no_oracle_field_usage": True,
+        "no_future_return_field_usage": True,
+        "source_score_mutation_enabled": False,
+        "o_score_mutation_enabled": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        "fit_provenance": {
+            "coefficients_source": "separate_calibration_training_split",
+            "coefficients_fitted_from_current_75_row_replay": False,
+            "uses_settlement_pnl_for_fitting": False,
+            "uses_outcomes_for_fitting": False,
+            "uses_oracle_actions_for_fitting": False,
+            "uses_future_returns_for_fitting": False,
+            "fitted_from_run_ids": ["separate-calibration-fixture"],
+            "excluded_run_ids": [CURRENT_75_ROW_REPLAY_RUN_ID],
+            "fit_dataset_hash": "a" * 64,
+            "fit_config_hash": "b" * 64,
+        },
+        "independence_constraints": {
+            "p_up_p_down_single_group": "market_price_value",
+            "btc_anchor_fields_single_group": "btc_anchor_direction",
+            "btc_anchor_maximum_signal_vote_weight": 1.0,
+            "correlated_momentum_reference_counted_as_independent_votes": False,
+        },
+        "feature_groups": feature_groups,
+        "coefficients": {
+            "intercept": 0.03,
+            "groups": coefficient_groups,
+            "side_offsets": {},
+            "family_offsets": {},
+            "subtract_execution_cost": True,
+        },
+    }
+
+
+def _regime_conditioned_forward_row(
+    *,
+    market_id: str,
+    action: str,
+    side: str,
+    p_up: float,
+    order_allowed: bool,
+    blocking_reason_codes: list[str],
+) -> dict[str, object]:
+    row = _forward_shadow_row(
+        market_id=market_id,
+        action=action,
+        selected_side=side,
+        entry_ask=0.56,
+        decision_ts=2_000,
+        p_up=p_up,
+        canonical_o_action_score=0.80,
+        time_to_close_seconds=240.0,
+        order_allowed=order_allowed,
+        execution_guarded_action=action,
+        execution_guarded_side=side,
+        execution_blocking_reason_codes=blocking_reason_codes,
+    )
+    row.update(
+        {
+            "p_down": 1.0 - p_up,
+            "action_score_margin": 0.08,
+            "btc_momentum": 0.002 if side == "UP" else -0.002,
+            "reference_price_to_beat_distance_at_decision": (
+                0.001 if side == "UP" else -0.001
+            ),
+            "spread_bps": 50.0,
+            "book_staleness_ms": 200.0,
+            "queue_fill_proxy": 0.80,
+            "entry_index_within_market": 1,
+            "cumulative_market_exposure_before_entry": 0.0,
+            "same_side_reentry": False,
+            "side_flip": False,
+            "decision_time_regime_feature_max_input_ts": 2_000,
+        }
+    )
+    return row
 
 
 def _settlement_row(
