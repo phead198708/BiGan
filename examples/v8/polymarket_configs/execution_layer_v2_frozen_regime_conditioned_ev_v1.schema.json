@@ -10,7 +10,9 @@
     "frozen",
     "decision_time_safe",
     "uses_validation_labels_for_tuning",
-    "market_implied_probability_used_for_ev",
+    "market_implied_probability_used_as_direct_fair_value_ev",
+    "market_implied_probability_used_as_conditioning_feature",
+    "market_implied_probability_used_as_regime_direction_vote",
     "no_outcome_field_usage",
     "no_oracle_field_usage",
     "no_future_return_field_usage",
@@ -42,7 +44,15 @@
     "frozen": {"const": true},
     "decision_time_safe": {"const": true},
     "uses_validation_labels_for_tuning": {"const": false},
-    "market_implied_probability_used_for_ev": {"const": false},
+    "market_implied_probability_used_as_direct_fair_value_ev": {
+      "const": false
+    },
+    "market_implied_probability_used_as_conditioning_feature": {
+      "const": true
+    },
+    "market_implied_probability_used_as_regime_direction_vote": {
+      "const": false
+    },
     "no_outcome_field_usage": {"const": true},
     "no_oracle_field_usage": {"const": true},
     "no_future_return_field_usage": {"const": true},

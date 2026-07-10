@@ -1049,6 +1049,7 @@ def test_regime_conditioned_ev_forward_shadow_valid_artifact_and_full_guard(
     assert schema["properties"]["artifact_name"]["const"] == (
         "execution_layer_v2_frozen_regime_conditioned_ev_v1"
     )
+    assert "market_implied_probability_used_for_ev" not in schema["properties"]
     input_path = tmp_path / "fresh-regime-trace.jsonl"
     artifact_path = tmp_path / "frozen-regime-ev.json"
     _write_regime_conditioned_ev_artifact(artifact_path)
@@ -1111,6 +1112,15 @@ def test_regime_conditioned_ev_forward_shadow_valid_artifact_and_full_guard(
     assert report["decision_rows"][0][
         "market_implied_probability_used_as_direct_fair_value_ev"
     ] is False
+    assert report["decision_rows"][0][
+        "market_implied_probability_used_as_conditioning_feature"
+    ] is True
+    assert report["decision_rows"][0][
+        "market_implied_probability_used_as_regime_direction_vote"
+    ] is False
+    assert report["market_implied_probability_used_as_direct_fair_value_ev"] is False
+    assert report["market_implied_probability_used_as_conditioning_feature"] is True
+    assert report["market_implied_probability_used_as_regime_direction_vote"] is False
     assert report["p_up_p_down_used_only_in_market_price_value_group"] is True
     assert (
         report["correlated_momentum_reference_counted_as_independent_votes"]
@@ -1133,6 +1143,34 @@ def test_regime_conditioned_ev_forward_shadow_valid_artifact_and_full_guard(
         "execution_layer_v2_regime_conditioned_ev_forward_shadow_manifest"
     ]
     assert result.manifest["frozen_regime_conditioned_ev_contract_hash"]
+    assert result.manifest[
+        "market_implied_probability_used_as_direct_fair_value_ev"
+    ] is False
+    assert result.manifest[
+        "market_implied_probability_used_as_conditioning_feature"
+    ] is True
+    assert result.manifest[
+        "market_implied_probability_used_as_regime_direction_vote"
+    ] is False
+    assert result.manifest["legacy_ambiguous_probability_flag_present"] is False
+    recommendation = report["future_v2_probability_value_contract_recommendation"]
+    assert recommendation["fields"] == [
+        "selected_side_probability",
+        "execution_price",
+        "selected_side_probability_minus_execution_price",
+    ]
+    assert recommendation["real_coefficients_created"] is False
+    validation_report = result.artifact_validation_report
+    assert validation_report[
+        "market_implied_probability_used_as_direct_fair_value_ev"
+    ] is False
+    assert validation_report[
+        "market_implied_probability_used_as_conditioning_feature"
+    ] is True
+    assert validation_report[
+        "market_implied_probability_used_as_regime_direction_vote"
+    ] is False
+    assert validation_report["legacy_ambiguous_probability_flag_present"] is False
 
 
 def test_regime_conditioned_ev_artifact_rejects_double_count_and_current_replay(
@@ -1168,6 +1206,55 @@ def test_regime_conditioned_ev_artifact_rejects_double_count_and_current_replay(
         "blocking_reason_codes"
     ]
     assert validation["forbidden_field_paths"] == ["settlement_pnl"]
+
+
+def test_regime_conditioned_ev_legacy_ambiguous_probability_flag_fails_closed(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "legacy-probability-trace.jsonl"
+    artifact_path = tmp_path / "legacy-regime-ev.json"
+    payload = _regime_conditioned_ev_artifact_payload()
+    payload.pop("market_implied_probability_used_as_direct_fair_value_ev")
+    payload.pop("market_implied_probability_used_as_conditioning_feature")
+    payload.pop("market_implied_probability_used_as_regime_direction_vote")
+    payload["market_implied_probability_used_for_ev"] = False
+    artifact_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    _write_jsonl(
+        input_path,
+        [
+            _regime_conditioned_forward_row(
+                market_id="legacy-ambiguous-artifact",
+                action="BUY_UP_HOLD_TO_SETTLEMENT",
+                side="UP",
+                p_up=0.65,
+                order_allowed=True,
+                blocking_reason_codes=[],
+            )
+        ],
+    )
+
+    result = run_execution_layer_v2_regime_conditioned_ev_forward_shadow(
+        ExecutionLayerV2RegimeConditionedEVForwardShadowConfig(
+            run_id="legacy-ambiguous-regime-artifact",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+            frozen_regime_conditioned_ev_artifact=artifact_path,
+        )
+    )
+    validation = result.artifact_validation_report
+    report = result.forward_shadow_report
+
+    assert validation["artifact_valid"] is False
+    assert validation["legacy_ambiguous_probability_flag_present"] is True
+    assert (
+        "legacy_ambiguous_market_implied_probability_used_for_ev_present"
+        in validation["artifact_blocking_reason_codes"]
+    )
+    assert report["forward_shadow_status"] == "blocked_fail_closed"
+    assert report["regime_conditioned_ev_produced_count"] == 0
+    assert report["candidate_count"] == 0
+    assert report["full_guard_passed_count"] == 0
+    assert report["executable_shadow_count"] == 0
 
 
 def test_regime_conditioned_ev_forward_shadow_missing_artifact_fails_closed(
@@ -2835,7 +2922,9 @@ def _regime_conditioned_ev_artifact_payload() -> dict[str, object]:
         "frozen": True,
         "decision_time_safe": True,
         "uses_validation_labels_for_tuning": False,
-        "market_implied_probability_used_for_ev": False,
+        "market_implied_probability_used_as_direct_fair_value_ev": False,
+        "market_implied_probability_used_as_conditioning_feature": True,
+        "market_implied_probability_used_as_regime_direction_vote": False,
         "no_outcome_field_usage": True,
         "no_oracle_field_usage": True,
         "no_future_return_field_usage": True,

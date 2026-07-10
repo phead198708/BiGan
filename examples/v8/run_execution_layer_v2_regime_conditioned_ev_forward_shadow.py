@@ -75,6 +75,13 @@ def main() -> None:
     print(f"candidate_count={report['candidate_count']}")
     print(f"full_guard_passed_count={report['full_guard_passed_count']}")
     print(f"executable_shadow_count={report['executable_shadow_count']}")
+    print("market_implied_probability_used_as_direct_fair_value_ev=false")
+    print("market_implied_probability_used_as_conditioning_feature=true")
+    print("market_implied_probability_used_as_regime_direction_vote=false")
+    print(
+        "future_v2_probability_value_contract_status="
+        f"{report['future_v2_probability_value_contract_recommendation']['status']}"
+    )
     print(
         "rejection_reason_distribution="
         f"{report['rejection_reason_distribution']}"

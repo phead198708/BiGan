@@ -91,7 +91,9 @@ _ARTIFACT_TOP_LEVEL_FIELDS = {
     "frozen",
     "decision_time_safe",
     "uses_validation_labels_for_tuning",
-    "market_implied_probability_used_for_ev",
+    "market_implied_probability_used_as_direct_fair_value_ev",
+    "market_implied_probability_used_as_conditioning_feature",
+    "market_implied_probability_used_as_regime_direction_vote",
     "no_outcome_field_usage",
     "no_oracle_field_usage",
     "no_future_return_field_usage",
@@ -197,6 +199,11 @@ def frozen_regime_conditioned_ev_artifact_contract() -> dict[str, Any]:
             "btc_anchor_maximum_signal_vote_weight": 1.0,
             "correlated_momentum_reference_counted_as_independent_votes": False,
         },
+        "market_implied_probability_semantics": {
+            "market_implied_probability_used_as_direct_fair_value_ev": False,
+            "market_implied_probability_used_as_conditioning_feature": True,
+            "market_implied_probability_used_as_regime_direction_vote": False,
+        },
         "excluded_fit_run_ids": [CURRENT_75_ROW_REPLAY_RUN_ID],
         "coefficients_must_be_fitted_separately": True,
         "allowed_top_level_fields": sorted(_ARTIFACT_TOP_LEVEL_FIELDS),
@@ -246,6 +253,10 @@ def validate_frozen_regime_conditioned_ev_artifact(
         )
 
     reasons: list[str] = []
+    if "market_implied_probability_used_for_ev" in payload:
+        reasons.append(
+            "legacy_ambiguous_market_implied_probability_used_for_ev_present"
+        )
     unknown_top_level = sorted(set(payload) - _ARTIFACT_TOP_LEVEL_FIELDS)
     missing_top_level = sorted(_ARTIFACT_TOP_LEVEL_FIELDS - set(payload))
     if unknown_top_level:
@@ -280,12 +291,14 @@ def validate_frozen_regime_conditioned_ev_artifact(
         "no_outcome_field_usage",
         "no_oracle_field_usage",
         "no_future_return_field_usage",
+        "market_implied_probability_used_as_conditioning_feature",
     ):
         if payload.get(field_name) is not True:
             reasons.append(f"regime_conditioned_ev_artifact_{field_name}_not_true")
     false_flags = (
         "uses_validation_labels_for_tuning",
-        "market_implied_probability_used_for_ev",
+        "market_implied_probability_used_as_direct_fair_value_ev",
+        "market_implied_probability_used_as_regime_direction_vote",
         "source_score_mutation_enabled",
         "o_score_mutation_enabled",
         "capital_at_risk",
@@ -455,6 +468,15 @@ def run_execution_layer_v2_regime_conditioned_ev_forward_shadow(
         "candidate_count": report["candidate_count"],
         "full_guard_passed_count": report["full_guard_passed_count"],
         "executable_shadow_count": report["executable_shadow_count"],
+        "market_implied_probability_used_as_direct_fair_value_ev": False,
+        "market_implied_probability_used_as_conditioning_feature": True,
+        "market_implied_probability_used_as_regime_direction_vote": False,
+        "future_v2_probability_value_contract_recommendation": (
+            _future_v2_probability_value_contract_recommendation()
+        ),
+        "legacy_ambiguous_probability_flag_present": artifact_report[
+            "legacy_ambiguous_probability_flag_present"
+        ],
         "diagnostic_only": True,
         "production_gate_implemented": False,
         "uses_settlement_pnl_or_outcome_labels": False,
@@ -508,6 +530,9 @@ def execution_layer_v2_regime_conditioned_ev_forward_shadow_report_to_markdown(
         f"- candidate_count: `{report['candidate_count']}`",
         f"- full_guard_passed_count: `{report['full_guard_passed_count']}`",
         f"- executable_shadow_count: `{report['executable_shadow_count']}`",
+        "- market_implied_probability_used_as_direct_fair_value_ev: `false`",
+        "- market_implied_probability_used_as_conditioning_feature: `true`",
+        "- market_implied_probability_used_as_regime_direction_vote: `false`",
         "- outcome_or_pnl_fields_used: `false`",
         "- production_gate_implemented: `false`",
         "- v8_execution_handoff_allowed: `false`",
@@ -525,6 +550,18 @@ def execution_layer_v2_regime_conditioned_ev_forward_shadow_report_to_markdown(
         lines.append(
             f"- `{feature}`: `{metrics['available_count']}/{metrics['row_count']}`"
         )
+    recommendation = report["future_v2_probability_value_contract_recommendation"]
+    lines.extend(
+        [
+            "",
+            "## Future v2 Probability/Value Contract",
+            "",
+            f"- status: `{recommendation['status']}`",
+            "- fields: "
+            + ", ".join(f"`{field}`" for field in recommendation["fields"]),
+            "- real_coefficients_created: `false`",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -621,6 +658,7 @@ def _build_regime_conditioned_shadow_rows(
             "rejection_reason_codes": sorted(set(rejection_reasons)),
             "market_implied_probability_used_as_regime_direction_vote": False,
             "market_implied_probability_used_as_direct_fair_value_ev": False,
+            "market_implied_probability_used_as_conditioning_feature": True,
             "correlated_momentum_reference_counted_as_independent_votes": False,
             "outcome_fields_used": False,
             "source_scores_mutated": False,
@@ -963,7 +1001,12 @@ def _build_regime_conditioned_forward_shadow_report(
         "independent_signal_group_contract": frozen_regime_conditioned_ev_artifact_contract(),
         "p_up_p_down_used_only_in_market_price_value_group": True,
         "correlated_momentum_reference_counted_as_independent_votes": False,
-        "market_implied_probability_used_as_calibrated_ev_fallback": False,
+        "market_implied_probability_used_as_direct_fair_value_ev": False,
+        "market_implied_probability_used_as_conditioning_feature": True,
+        "market_implied_probability_used_as_regime_direction_vote": False,
+        "future_v2_probability_value_contract_recommendation": (
+            _future_v2_probability_value_contract_recommendation()
+        ),
         "forbidden_outcome_fields_present": bool(forbidden_outcome_fields_by_row),
         "forbidden_outcome_fields_by_row": forbidden_outcome_fields_by_row,
         "diagnostic_only": True,
@@ -998,6 +1041,32 @@ def _build_artifact_validation_report(
         "forbidden_field_paths": artifact_validation["forbidden_field_paths"],
         "contract": artifact_validation["contract"],
         "contract_hash": canonical_json_sha256(artifact_validation["contract"]),
+        "market_implied_probability_used_as_direct_fair_value_ev": (
+            _artifact_probability_semantic(
+                artifact_validation.get("payload"),
+                "market_implied_probability_used_as_direct_fair_value_ev",
+            )
+        ),
+        "market_implied_probability_used_as_conditioning_feature": (
+            _artifact_probability_semantic(
+                artifact_validation.get("payload"),
+                "market_implied_probability_used_as_conditioning_feature",
+            )
+        ),
+        "market_implied_probability_used_as_regime_direction_vote": (
+            _artifact_probability_semantic(
+                artifact_validation.get("payload"),
+                "market_implied_probability_used_as_regime_direction_vote",
+            )
+        ),
+        "legacy_ambiguous_probability_flag_present": bool(
+            isinstance(artifact_validation.get("payload"), Mapping)
+            and "market_implied_probability_used_for_ev"
+            in artifact_validation["payload"]
+        ),
+        "future_v2_probability_value_contract_recommendation": (
+            _future_v2_probability_value_contract_recommendation()
+        ),
         "current_75_row_replay_used_for_fitting": (
             _current_replay_used_for_fitting(artifact_validation.get("payload"))
         ),
@@ -1017,6 +1086,14 @@ def _artifact_validation_report_to_markdown(report: Mapping[str, Any]) -> str:
         f"- artifact_valid: `{report['artifact_valid']}`",
         f"- artifact_status: `{report['artifact_status']}`",
         f"- artifact_hash: `{report['artifact_hash']}`",
+        "- market_implied_probability_used_as_direct_fair_value_ev: "
+        f"`{report['market_implied_probability_used_as_direct_fair_value_ev']}`",
+        "- market_implied_probability_used_as_conditioning_feature: "
+        f"`{report['market_implied_probability_used_as_conditioning_feature']}`",
+        "- market_implied_probability_used_as_regime_direction_vote: "
+        f"`{report['market_implied_probability_used_as_regime_direction_vote']}`",
+        "- legacy_ambiguous_probability_flag_present: "
+        f"`{str(report['legacy_ambiguous_probability_flag_present']).lower()}`",
         "- current_75_row_replay_used_for_fitting: "
         f"`{str(report['current_75_row_replay_used_for_fitting']).lower()}`",
         "- production_gate_implemented: `false`",
@@ -1418,6 +1495,40 @@ def _current_replay_used_for_fitting(payload: Any) -> bool:
             in {str(value) for value in fitted_run_ids}
         )
     )
+
+
+def _artifact_probability_semantic(payload: Any, field_name: str) -> bool | None:
+    if not isinstance(payload, Mapping):
+        return None
+    value = payload.get(field_name)
+    return value if isinstance(value, bool) else None
+
+
+def _future_v2_probability_value_contract_recommendation() -> dict[str, Any]:
+    return {
+        "contract_name": "execution_layer_v2_regime_conditioned_ev_v2_proposed",
+        "status": "recommended_not_implemented",
+        "fields": [
+            "selected_side_probability",
+            "execution_price",
+            "selected_side_probability_minus_execution_price",
+        ],
+        "selected_side_probability_definition": (
+            "p_up_for_up_action_and_p_down_for_down_action"
+        ),
+        "derived_value_formula": (
+            "selected_side_probability - execution_price"
+        ),
+        "derived_value_semantics": (
+            "market_relative_value_conditioner_not_calibrated_fair_value_ev"
+        ),
+        "calibrated_ev_formula_defined": False,
+        "direct_fair_value_ev_fallback_allowed": False,
+        "regime_direction_vote_allowed": False,
+        "conditioning_feature_only": True,
+        "real_coefficients_created": False,
+        "future_schema_version_required": True,
+    }
 
 
 __all__ = [
