@@ -50,6 +50,12 @@ EXECUTION_LAYER_V2_HTS_REGIME_RISK_REPLAY_SCHEMA_VERSION = (
 EXECUTION_LAYER_V2_HTS_REGIME_RISK_REPLAY_MANIFEST_SCHEMA_VERSION = (
     "bigan-v8-polymarket-execution-layer-v2-hts-regime-risk-replay-manifest-v1"
 )
+EXECUTION_LAYER_V2_REGIME_ENTRY_EDGE_REPLAY_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-execution-layer-v2-regime-entry-edge-replay-v1"
+)
+EXECUTION_LAYER_V2_REGIME_ENTRY_EDGE_REPLAY_MANIFEST_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-execution-layer-v2-regime-entry-edge-replay-manifest-v1"
+)
 EXECUTION_LAYER_V2_FORWARD_SHADOW_MANIFEST_SCHEMA_VERSION = (
     "bigan-v8-polymarket-execution-layer-v2-forward-shadow-manifest-v1"
 )
@@ -85,6 +91,15 @@ HTS_REGIME_RISK_POLICY_VARIANTS: tuple[str, ...] = (
     "hts_allowed_only_when_regime_and_price_bucket_agree",
     "hts_to_sbc_when_late_or_uncertain",
 )
+REGIME_ENTRY_EDGE_POLICY_VARIANTS: tuple[str, ...] = (
+    "baseline",
+    "first_entry_only",
+    "require_incremental_edge_for_reentry",
+    "cap_same_market_exposure",
+    "regime_confirmed_and_not_overextended",
+    "calibrated_ev_conditioned_on_regime",
+    "high_direction_confidence_but_price_too_expensive_rejected",
+)
 HTS_REGIME_CANONICAL_FEATURE_FIELDS: tuple[str, ...] = (
     "btc_momentum",
     "reference_price_to_beat_distance_at_decision",
@@ -101,6 +116,8 @@ PRICE_BUCKET_EDGES: tuple[tuple[str, float, float | None], ...] = (
 )
 MISSING_SORT_NUMBER = 10**30
 DEFAULT_FORWARD_SHADOW_EXECUTION_COST = 0.001
+REGIME_ENTRY_EDGE_EXPOSURE_CAP_FIRST_ENTRY_MULTIPLE = 2.0
+REGIME_ENTRY_EDGE_HIGH_DIRECTION_CONFIDENCE_MIN = 0.90
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +204,63 @@ class ExecutionLayerV2HTSRegimeRiskReplayConfig:
 @dataclass(frozen=True, slots=True)
 class ExecutionLayerV2HTSRegimeRiskReplayResult:
     """Written HTS regime risk diagnostic bundle."""
+
+    output_dir: Path
+    artifact_paths: dict[str, Path]
+    artifact_hashes: dict[str, str]
+    report: dict[str, Any]
+    manifest: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLayerV2RegimeEntryEdgeReplayConfig:
+    """Configuration for regime-conditioned entry-edge diagnostics."""
+
+    run_id: str
+    input_path: Path | str
+    output_dir: Path | str
+    frozen_ev_calibration_artifact: Path | str | None = None
+    overwrite_existing: bool = False
+    paper_only: bool = True
+    capital_at_risk: bool = False
+    polymarket_write_enabled: bool = False
+    wallet_signing_enabled: bool = False
+    v8_execution_handoff_allowed: bool = False
+    source_model_candidate_eligible: bool = False
+    freeze_ready: bool = False
+    promotion_evidence_eligible: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        object.__setattr__(self, "input_path", Path(self.input_path))
+        object.__setattr__(self, "output_dir", Path(self.output_dir))
+        if self.frozen_ev_calibration_artifact is not None:
+            object.__setattr__(
+                self,
+                "frozen_ev_calibration_artifact",
+                Path(self.frozen_ev_calibration_artifact),
+            )
+        _validate_safety_flags(self)
+
+    @property
+    def run_dir(self) -> Path:
+        return self.output_dir.expanduser().resolve() / self.run_id
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["input_path"] = str(self.input_path)
+        payload["output_dir"] = str(self.output_dir)
+        if self.frozen_ev_calibration_artifact is not None:
+            payload["frozen_ev_calibration_artifact"] = str(
+                self.frozen_ev_calibration_artifact
+            )
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLayerV2RegimeEntryEdgeReplayResult:
+    """Written regime-conditioned entry-edge diagnostic bundle."""
 
     output_dir: Path
     artifact_paths: dict[str, Path]
@@ -425,6 +499,111 @@ def run_execution_layer_v2_hts_regime_risk_replay(
         )
     )
     return ExecutionLayerV2HTSRegimeRiskReplayResult(
+        output_dir=run_dir,
+        artifact_paths=artifact_paths,
+        artifact_hashes=artifact_hashes,
+        report=report,
+        manifest=manifest,
+    )
+
+
+def run_execution_layer_v2_regime_entry_edge_replay(
+    config: ExecutionLayerV2RegimeEntryEdgeReplayConfig,
+) -> ExecutionLayerV2RegimeEntryEdgeReplayResult:
+    """Run outcome-aware entry-edge and repeated-exposure diagnostics."""
+
+    if not config.input_path.exists():
+        raise FileNotFoundError(
+            f"regime entry-edge replay input not found: {config.input_path}"
+        )
+    run_dir = config.run_dir
+    if run_dir.exists():
+        if not config.overwrite_existing:
+            raise FileExistsError(f"regime entry-edge replay output exists: {run_dir}")
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True)
+
+    calibration_artifact = _load_frozen_ev_calibration_artifact(
+        config.frozen_ev_calibration_artifact
+    )
+    rows = _attach_regime_entry_edge_context(
+        _load_hts_regime_replay_rows(config.input_path),
+        calibration_artifact=calibration_artifact,
+    )
+    report = build_execution_layer_v2_regime_entry_edge_replay_report(
+        rows,
+        run_id=config.run_id,
+        input_path=str(config.input_path),
+        calibration_artifact=calibration_artifact,
+    )
+    artifact_paths = {
+        "execution_layer_v2_regime_entry_edge_replay_report": run_dir
+        / "execution_layer_v2_regime_entry_edge_replay_report.json",
+        "execution_layer_v2_regime_entry_edge_replay_summary": run_dir
+        / "execution_layer_v2_regime_entry_edge_replay_report.md",
+        "execution_layer_v2_regime_entry_edge_replay_manifest": run_dir
+        / "execution_layer_v2_regime_entry_edge_replay_manifest.json",
+    }
+    _write_json(
+        artifact_paths["execution_layer_v2_regime_entry_edge_replay_report"],
+        report,
+    )
+    _write_text(
+        artifact_paths["execution_layer_v2_regime_entry_edge_replay_summary"],
+        execution_layer_v2_regime_entry_edge_replay_report_to_markdown(report),
+    )
+    artifact_hashes = {
+        "execution_layer_v2_regime_entry_edge_replay_report": _sha256_file(
+            artifact_paths["execution_layer_v2_regime_entry_edge_replay_report"]
+        ),
+        "execution_layer_v2_regime_entry_edge_replay_summary": _sha256_file(
+            artifact_paths["execution_layer_v2_regime_entry_edge_replay_summary"]
+        ),
+    }
+    manifest = {
+        "schema_version": (
+            EXECUTION_LAYER_V2_REGIME_ENTRY_EDGE_REPLAY_MANIFEST_SCHEMA_VERSION
+        ),
+        "run_id": config.run_id,
+        "input_path": str(config.input_path),
+        "artifact_paths": {name: str(path) for name, path in artifact_paths.items()},
+        "artifact_hashes": dict(artifact_hashes),
+        "report_id": report[
+            "execution_layer_v2_regime_entry_edge_replay_report_id"
+        ],
+        "row_count": report["row_count"],
+        "unique_market_count": report["unique_market_count"],
+        "baseline_settled_pnl": report["policy_variants"]["baseline"][
+            "settled_pnl"
+        ],
+        "policy_variant_names": list(REGIME_ENTRY_EDGE_POLICY_VARIANTS),
+        "diagnostic_policy_config_hash": report[
+            "diagnostic_policy_config_hash"
+        ],
+        "frozen_ev_calibration_artifact_hash": calibration_artifact["sha256"],
+        "correlated_momentum_reference_counted_as_independent_votes": False,
+        "diagnostic_only": True,
+        "outcome_aware_offline_replay": True,
+        "uses_outcome_for_policy_selection": False,
+        "uses_outcome_for_offline_evaluation": True,
+        "thresholds_tuned": False,
+        "source_scores_mutated": False,
+        "o_score_mutated": False,
+        "production_gate_implemented": False,
+        "paper_live_unlock_changed": False,
+        **_safety_report_fields(),
+    }
+    manifest["manifest_id"] = canonical_json_sha256(manifest)
+    _write_json(
+        artifact_paths["execution_layer_v2_regime_entry_edge_replay_manifest"],
+        manifest,
+    )
+    artifact_hashes["execution_layer_v2_regime_entry_edge_replay_manifest"] = (
+        _sha256_file(
+            artifact_paths["execution_layer_v2_regime_entry_edge_replay_manifest"]
+        )
+    )
+    return ExecutionLayerV2RegimeEntryEdgeReplayResult(
         output_dir=run_dir,
         artifact_paths=artifact_paths,
         artifact_hashes=artifact_hashes,
@@ -824,6 +1003,106 @@ def build_execution_layer_v2_hts_regime_risk_replay_report(
     return report
 
 
+def build_execution_layer_v2_regime_entry_edge_replay_report(
+    rows: list[dict[str, Any]],
+    *,
+    run_id: str,
+    input_path: str,
+    calibration_artifact: dict[str, Any],
+) -> dict[str, Any]:
+    """Build entry-value and repeated-market exposure diagnostics."""
+
+    policy_config = _regime_entry_edge_diagnostic_policy_config()
+    variant_reports = {
+        name: _regime_entry_edge_policy_metrics(rows, name)
+        for name in REGIME_ENTRY_EDGE_POLICY_VARIANTS
+    }
+    report = {
+        "schema_version": EXECUTION_LAYER_V2_REGIME_ENTRY_EDGE_REPLAY_SCHEMA_VERSION,
+        "run_id": run_id,
+        "input_path": input_path,
+        "row_count": len(rows),
+        "unique_market_count": len({row["market_id"] for row in rows}),
+        "diagnostic_only": True,
+        "outcome_aware_offline_replay": True,
+        "uses_outcome_for_policy_selection": False,
+        "uses_outcome_for_offline_evaluation": True,
+        "uses_settlement_pnl_for_decision_time_logic": False,
+        "uses_oracle_actions_or_future_returns_for_decision_time_logic": False,
+        "uses_validation_labels_for_threshold_tuning": False,
+        "thresholds_tuned": False,
+        "production_gate_implemented": False,
+        "policy_variant_names": list(REGIME_ENTRY_EDGE_POLICY_VARIANTS),
+        "policy_variant_definitions": _regime_entry_edge_policy_definitions(),
+        "diagnostic_policy_config": policy_config,
+        "diagnostic_policy_config_hash": canonical_json_sha256(policy_config),
+        "frozen_ev_calibration_artifact": {
+            "path": calibration_artifact["path"],
+            "sha256": calibration_artifact["sha256"],
+            "status": calibration_artifact["status"],
+            "valid": calibration_artifact["valid"],
+            "blocking_reason_codes": calibration_artifact[
+                "blocking_reason_codes"
+            ],
+        },
+        "entry_value_feature_coverage": _regime_entry_edge_feature_coverage(rows),
+        "decision_time_provenance_violation_count": sum(
+            1
+            for row in rows
+            if row.get("decision_time_regime_feature_max_input_ts") is not None
+            and float(row["decision_time_regime_feature_max_input_ts"])
+            > float(row["decision_ts_numeric"])
+        ),
+        "independent_signal_group_contract": _independent_signal_group_contract(),
+        "correlated_momentum_reference_counted_as_independent_votes": False,
+        "entry_rows": [_regime_entry_edge_report_row(row) for row in rows],
+        "policy_variants": variant_reports,
+        "pnl_by_market": _regime_entry_edge_pnl_by_market(rows),
+        "pnl_by_entry_index": _regime_entry_edge_group_metrics(
+            rows,
+            "same_market_entry_index",
+        ),
+        "pnl_by_cumulative_market_exposure": _regime_entry_edge_group_metrics(
+            rows,
+            "cumulative_market_exposure_bucket",
+        ),
+        "pnl_by_side_reference_distance_bucket": (
+            _regime_entry_edge_cross_metrics(rows, "side", "reference_distance_bucket")
+        ),
+        "pnl_by_side_execution_price_bucket": _regime_entry_edge_cross_metrics(
+            rows,
+            "side",
+            "price_bucket",
+        ),
+        "repeated_entry_marginal_pnl": _repeated_entry_marginal_pnl(rows),
+        "up_rule_tradeoff_summary": {
+            name: _regime_entry_edge_up_tradeoff(rows, name)
+            for name in REGIME_ENTRY_EDGE_POLICY_VARIANTS
+            if name != "baseline"
+        },
+        "future_frozen_regime_conditioned_ev_artifact_recommendation": (
+            _future_regime_conditioned_ev_artifact_recommendation()
+        ),
+        "future_unseen_forward_shadow_required": True,
+        "bounded_per_condition_clob_settlement_fallback_proposal": (
+            _bounded_clob_settlement_fallback_proposal()
+        ),
+        "evaluation_only_fields": [
+            "resolved_outcome",
+            "settlement_pnl",
+            "settlement_status",
+        ],
+        "source_scores_mutated": False,
+        "o_score_mutated": False,
+        "paper_live_unlock_changed": False,
+        **_safety_report_fields(),
+    }
+    report["execution_layer_v2_regime_entry_edge_replay_report_id"] = (
+        canonical_json_sha256(report)
+    )
+    return report
+
+
 def execution_layer_v2_policy_replay_report_to_markdown(report: dict[str, Any]) -> str:
     """Render a compact Markdown summary for #166 review."""
 
@@ -975,6 +1254,69 @@ def execution_layer_v2_hts_regime_risk_replay_report_to_markdown(
         ]
     )
     lines.append("")
+    return "\n".join(lines)
+
+
+def execution_layer_v2_regime_entry_edge_replay_report_to_markdown(
+    report: dict[str, Any],
+) -> str:
+    """Render the regime-conditioned entry-edge diagnostic report."""
+
+    lines = [
+        "# v8 Execution Layer v2 Regime-Conditioned Entry Edge Replay",
+        "",
+        f"- run_id: `{report['run_id']}`",
+        f"- input_path: `{report['input_path']}`",
+        f"- row_count: `{report['row_count']}`",
+        f"- unique_market_count: `{report['unique_market_count']}`",
+        f"- diagnostic_only: `{report['diagnostic_only']}`",
+        "- correlated_momentum_reference_counted_as_independent_votes: "
+        f"`{report['correlated_momentum_reference_counted_as_independent_votes']}`",
+        f"- thresholds_tuned: `{report['thresholds_tuned']}`",
+        f"- production_gate_implemented: `{report['production_gate_implemented']}`",
+        f"- v8_execution_handoff_allowed: `{report['v8_execution_handoff_allowed']}`",
+        "",
+        "## Policy Variants",
+        "",
+        "| variant | fills | markets | pnl | roi | win_rate | max_drawdown |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for name in REGIME_ENTRY_EDGE_POLICY_VARIANTS:
+        metrics = report["policy_variants"][name]
+        lines.append(
+            f"| `{name}` | {metrics['fill_count']} | "
+            f"{metrics['unique_market_count']} | {metrics['settled_pnl']:.6f} | "
+            f"{metrics['roi']:.6f} | {metrics['win_rate']:.6f} | "
+            f"{metrics['max_drawdown']:.6f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Exposure Diagnostics",
+            "",
+            f"- pnl_by_entry_index: `{report['pnl_by_entry_index']}`",
+            "- pnl_by_cumulative_market_exposure: "
+            f"`{report['pnl_by_cumulative_market_exposure']}`",
+            "- repeated_entry_marginal_pnl: "
+            f"`{report['repeated_entry_marginal_pnl']}`",
+            "",
+            "## Side And Value Diagnostics",
+            "",
+            "- pnl_by_side_reference_distance_bucket: "
+            f"`{report['pnl_by_side_reference_distance_bucket']}`",
+            "- pnl_by_side_execution_price_bucket: "
+            f"`{report['pnl_by_side_execution_price_bucket']}`",
+            "",
+            "## Future Artifact Recommendation",
+            "",
+            f"`{report['future_frozen_regime_conditioned_ev_artifact_recommendation']}`",
+            "",
+            "## Settlement Fallback Proposal",
+            "",
+            f"`{report['bounded_per_condition_clob_settlement_fallback_proposal']}`",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -2869,9 +3211,38 @@ def _normalize_hts_regime_replay_row(
         ),
         default=None,
     )
-    action_score = _first_float(
+    action_score, action_score_field = _first_float_with_field(
         row,
-        ("source_model_score", "execution_guarded_score", "canonical_o_action_score"),
+        (
+            "canonical_o_action_score",
+            "canonical_corrected_score",
+            "source_model_score",
+            "execution_guarded_score",
+        ),
+    )
+    canonical_raw_score, canonical_raw_score_field = _first_float_with_field(
+        row,
+        (
+            "canonical_o_raw_score",
+            "canonical_raw_score",
+            "raw_calibrated_action_score",
+        ),
+    )
+    input_calibrated_ev, input_calibrated_ev_field = _first_float_with_field(
+        row,
+        (
+            "calibrated_action_expected_net_return",
+            "action_expected_net_return",
+            "calibrated_ev",
+        ),
+    )
+    executable_exit_bid_proxy = _first_float(
+        row,
+        (
+            "executable_exit_bid_proxy",
+            "best_candidate_bid",
+            "terminal_bid",
+        ),
         default=None,
     )
     settlement_pnl = _first_float(
@@ -2953,6 +3324,14 @@ def _normalize_hts_regime_replay_row(
             side_score_margin
         ),
         "action_score": action_score,
+        "canonical_o_action_score": action_score,
+        "canonical_o_action_score_source_field": action_score_field,
+        "canonical_o_raw_score": canonical_raw_score,
+        "canonical_o_raw_score_source_field": canonical_raw_score_field,
+        "input_calibrated_ev": input_calibrated_ev,
+        "input_calibrated_ev_source_field": input_calibrated_ev_field,
+        "execution_cost": execution_cost or 0.0,
+        "executable_exit_bid_proxy": executable_exit_bid_proxy,
         "market_regime": regime_vote_summary["market_regime"],
         "regime_feature_vote_summary": regime_vote_summary,
         "decision_time_regime_feature_provenance": regime_provenance,
@@ -3002,6 +3381,754 @@ def _attach_hts_regime_sequence_context(
             previous_side_by_market[market_id] = str(copied["side"])
         enriched.append(copied)
     return sorted(enriched, key=lambda item: int(item["row_index"]))
+
+
+def _attach_regime_entry_edge_context(
+    rows: list[dict[str, Any]],
+    *,
+    calibration_artifact: dict[str, Any],
+) -> list[dict[str, Any]]:
+    derived_rows = []
+    for row in rows:
+        copied = dict(row)
+        (
+            calibrated_ev,
+            calibrated_ev_source_field,
+            calibrated_ev_source,
+            calibrated_ev_provenance,
+            calibrated_ev_blocking_reason_codes,
+        ) = _calibrated_expected_return_source(
+            input_expected_return=copied.get("input_calibrated_ev"),
+            input_expected_return_field=copied.get(
+                "input_calibrated_ev_source_field"
+            ),
+            canonical_score=copied.get("canonical_o_action_score"),
+            canonical_score_field=copied.get(
+                "canonical_o_action_score_source_field"
+            ),
+            canonical_raw_score=copied.get("canonical_o_raw_score"),
+            canonical_raw_score_field=copied.get(
+                "canonical_o_raw_score_source_field"
+            ),
+            execution_price=copied.get("entry_price"),
+            execution_price_field=copied.get("entry_price_source_field"),
+            executable_exit_bid_proxy=copied.get("executable_exit_bid_proxy"),
+            spread_bps=copied.get("spread_bps"),
+            queue_fill_proxy=copied.get("queue_fill_proxy"),
+            book_staleness_ms=copied.get("book_staleness_ms"),
+            time_to_close=copied.get("time_to_close_seconds"),
+            family=str(copied.get("family") or ""),
+            side=str(copied.get("side") or ""),
+            execution_cost=copied.get("execution_cost"),
+            ev_calibration_artifact=calibration_artifact,
+        )
+        copied.update(
+            {
+                "calibrated_ev": calibrated_ev,
+                "calibrated_ev_available": calibrated_ev is not None,
+                "calibrated_ev_source_field": calibrated_ev_source_field,
+                "calibrated_ev_source": calibrated_ev_source,
+                "calibrated_ev_source_provenance": calibrated_ev_provenance,
+                "calibrated_ev_blocking_reason_codes": (
+                    calibrated_ev_blocking_reason_codes
+                ),
+                "market_implied_probability_used_for_ev": False,
+            }
+        )
+        derived_rows.append(copied)
+
+    cumulative_by_market: dict[str, float] = {}
+    first_cost_by_market: dict[str, float] = {}
+    prior_ev_by_market: dict[str, list[float]] = {}
+    previous_side_by_market: dict[str, str] = {}
+    count_by_market: Counter[str] = Counter()
+    enriched = []
+    for row in sorted(
+        derived_rows,
+        key=lambda item: tuple(item["chronological_sort_key"]),
+    ):
+        copied = dict(row)
+        market_id = str(copied.get("market_id") or "")
+        cost_basis = float(copied.get("cost_basis") or 0.0)
+        entry_index = count_by_market[market_id] + 1
+        if market_id not in first_cost_by_market:
+            first_cost_by_market[market_id] = cost_basis
+        first_cost = first_cost_by_market[market_id]
+        exposure_before = cumulative_by_market.get(market_id, 0.0)
+        exposure_after = exposure_before + cost_basis
+        prior_evs = prior_ev_by_market.get(market_id, [])
+        prior_max_ev = max(prior_evs) if prior_evs else None
+        calibrated_ev = copied.get("calibrated_ev")
+        previous_side = previous_side_by_market.get(market_id)
+        copied.update(
+            {
+                "same_market_entry_index": entry_index,
+                "same_market_prior_entry_count": entry_index - 1,
+                "first_market_entry_cost_basis": first_cost,
+                "cumulative_market_exposure_before_entry": exposure_before,
+                "cumulative_market_exposure_after_entry": exposure_after,
+                "cumulative_market_exposure_bucket": (
+                    _relative_market_exposure_bucket(exposure_before, first_cost)
+                ),
+                "same_side_reentry": bool(
+                    previous_side is not None
+                    and previous_side == copied.get("side")
+                ),
+                "side_flip": bool(
+                    previous_side is not None
+                    and previous_side != copied.get("side")
+                ),
+                "prior_market_max_calibrated_ev": prior_max_ev,
+                "incremental_calibrated_ev_vs_prior_max": (
+                    None
+                    if calibrated_ev is None or prior_max_ev is None
+                    else float(calibrated_ev) - prior_max_ev
+                ),
+            }
+        )
+        copied["independent_signal_groups"] = _regime_entry_edge_signal_groups(
+            copied
+        )
+        copied["direction_regime_confirmed"] = bool(
+            copied["independent_signal_groups"]["direction_regime_evidence"][
+                "regime_confirmed_for_selected_side"
+            ]
+        )
+        copied["overextended"] = bool(
+            copied["independent_signal_groups"]["overextension_evidence"][
+                "overextended"
+            ]
+        )
+        copied["high_direction_confidence"] = bool(
+            copied["independent_signal_groups"]["market_implied_price_value"][
+                "high_direction_confidence"
+            ]
+        )
+        enriched.append(copied)
+        count_by_market[market_id] += 1
+        cumulative_by_market[market_id] = exposure_after
+        if calibrated_ev is not None:
+            prior_ev_by_market.setdefault(market_id, []).append(float(calibrated_ev))
+        if copied.get("side") in {"UP", "DOWN"}:
+            previous_side_by_market[market_id] = str(copied["side"])
+    return sorted(enriched, key=lambda item: int(item["row_index"]))
+
+
+def _regime_entry_edge_signal_groups(row: Mapping[str, Any]) -> dict[str, Any]:
+    momentum_side = _direction_side_from_number(row.get("btc_momentum"))
+    reference_side = _direction_side_from_number(
+        row.get("reference_price_to_beat_distance_at_decision")
+    )
+    btc_anchor_side = _combine_correlated_anchor_sides(
+        momentum_side,
+        reference_side,
+    )
+    p_side = {
+        "p_up_regime": "UP",
+        "p_down_regime": "DOWN",
+    }.get(str(row.get("p_up_down_balance_regime")), "UNKNOWN")
+    directional_sides = [
+        side for side in (p_side, btc_anchor_side) if side in {"UP", "DOWN"}
+    ]
+    if len(set(directional_sides)) > 1:
+        consensus_side = "CONFLICT"
+    elif directional_sides:
+        consensus_side = directional_sides[0]
+    else:
+        consensus_side = "UNKNOWN"
+    selected_side = str(row.get("side") or "")
+    selected_probability = (
+        row.get("p_up") if selected_side == "UP" else row.get("p_down")
+    )
+    entry_price = row.get("entry_price")
+    price_bucket = str(row.get("price_bucket") or "missing")
+    regime_confirmed = bool(
+        p_side == selected_side
+        and btc_anchor_side == selected_side
+        and selected_side in {"UP", "DOWN"}
+    )
+    high_direction_confidence = bool(
+        selected_probability is not None
+        and float(selected_probability)
+        >= REGIME_ENTRY_EDGE_HIGH_DIRECTION_CONFIDENCE_MIN
+    )
+    overextended = price_bucket == "gt_0_90"
+    return {
+        "direction_regime_evidence": {
+            "selected_side": selected_side,
+            "canonical_o_action_score": row.get("canonical_o_action_score"),
+            "action_score_margin": row.get("action_score_margin"),
+            "market_implied_direction_side": p_side,
+            "btc_anchor_direction_side": btc_anchor_side,
+            "independent_direction_consensus_side": consensus_side,
+            "regime_confirmed_for_selected_side": regime_confirmed,
+            "independent_direction_group_count": 2,
+            "correlated_anchor_component_count": 2,
+            "correlated_anchor_vote_weight": 1,
+            "btc_anchor_components": {
+                "btc_momentum": row.get("btc_momentum"),
+                "btc_momentum_side": momentum_side,
+                "reference_price_to_beat_distance_at_decision": row.get(
+                    "reference_price_to_beat_distance_at_decision"
+                ),
+                "reference_distance_side": reference_side,
+            },
+        },
+        "market_implied_price_value": {
+            "p_up": row.get("p_up"),
+            "p_down": row.get("p_down"),
+            "selected_side_probability": selected_probability,
+            "execution_price": entry_price,
+            "execution_price_bucket": price_bucket,
+            "payout_headroom": (
+                None if entry_price is None else 1.0 - float(entry_price)
+            ),
+            "canonical_o_action_score": row.get("canonical_o_action_score"),
+            "calibrated_ev": row.get("calibrated_ev"),
+            "calibrated_ev_available": row.get("calibrated_ev_available"),
+            "high_direction_confidence": high_direction_confidence,
+        },
+        "overextension_evidence": {
+            "overextended": overextended,
+            "reason_codes": ["execution_price_at_or_above_090"]
+            if overextended
+            else [],
+            "uses_reference_distance_as_separate_vote": False,
+        },
+        "execution_quality": {
+            "spread_bps": row.get("spread_bps"),
+            "queue_fill_proxy": row.get("queue_fill_proxy"),
+            "book_staleness_ms": row.get("book_staleness_ms"),
+            "time_to_close_seconds": row.get("time_to_close_seconds"),
+            "source": "observed_guard_passed_paper_fill",
+        },
+        "exposure_state": {
+            "entry_index_within_market": row.get("same_market_entry_index"),
+            "cumulative_market_exposure_before_entry": row.get(
+                "cumulative_market_exposure_before_entry"
+            ),
+            "cumulative_market_exposure_after_entry": row.get(
+                "cumulative_market_exposure_after_entry"
+            ),
+            "same_side_reentry": row.get("same_side_reentry"),
+            "side_flip": row.get("side_flip"),
+        },
+    }
+
+
+def _direction_side_from_number(value: Any) -> str:
+    if value is None:
+        return "UNKNOWN"
+    numeric = float(value)
+    if numeric > 0.0:
+        return "UP"
+    if numeric < 0.0:
+        return "DOWN"
+    return "NEUTRAL"
+
+
+def _combine_correlated_anchor_sides(momentum_side: str, reference_side: str) -> str:
+    directional = [
+        side for side in (momentum_side, reference_side) if side in {"UP", "DOWN"}
+    ]
+    if len(set(directional)) > 1:
+        return "CONFLICT"
+    if directional:
+        return directional[0]
+    if "NEUTRAL" in {momentum_side, reference_side}:
+        return "NEUTRAL"
+    return "UNKNOWN"
+
+
+def _relative_market_exposure_bucket(exposure: float, first_cost: float) -> str:
+    if exposure <= 0.0:
+        return "no_prior_exposure"
+    if first_cost <= 0.0:
+        return "missing_first_entry_cost_basis"
+    multiple = exposure / first_cost
+    if multiple <= 1.0 + 1e-12:
+        return "up_to_1x_first_entry"
+    if multiple <= 2.0 + 1e-12:
+        return "1x_to_2x_first_entry"
+    return "over_2x_first_entry"
+
+
+def _regime_entry_edge_policy_allows(
+    row: Mapping[str, Any],
+    variant: str,
+) -> tuple[bool, list[str]]:
+    if variant == "baseline":
+        return True, []
+    if variant == "first_entry_only":
+        if int(row.get("same_market_entry_index") or 0) == 1:
+            return True, []
+        return False, ["repeated_market_entry_rejected"]
+    if variant == "require_incremental_edge_for_reentry":
+        if int(row.get("same_market_entry_index") or 0) == 1:
+            return True, []
+        if not row.get("calibrated_ev_available"):
+            return False, ["reentry_calibrated_ev_missing"]
+        prior_max = row.get("prior_market_max_calibrated_ev")
+        if prior_max is None:
+            return False, ["reentry_prior_market_ev_missing"]
+        if float(row["calibrated_ev"]) > float(prior_max):
+            return True, []
+        return False, ["reentry_incremental_calibrated_ev_not_improved"]
+    if variant == "cap_same_market_exposure":
+        first_cost = float(row.get("first_market_entry_cost_basis") or 0.0)
+        if first_cost <= 0.0:
+            return False, ["first_entry_cost_basis_missing"]
+        cap = first_cost * REGIME_ENTRY_EDGE_EXPOSURE_CAP_FIRST_ENTRY_MULTIPLE
+        if float(row.get("cumulative_market_exposure_after_entry") or 0.0) <= (
+            cap + 1e-12
+        ):
+            return True, []
+        return False, ["same_market_exposure_cap_exceeded"]
+    if variant == "regime_confirmed_and_not_overextended":
+        reasons = []
+        if not row.get("direction_regime_confirmed"):
+            reasons.append("independent_regime_not_confirmed_for_selected_side")
+        if row.get("overextended"):
+            reasons.append("entry_price_overextended")
+        return not reasons, reasons
+    if variant == "calibrated_ev_conditioned_on_regime":
+        reasons = []
+        if not row.get("calibrated_ev_available"):
+            reasons.append("calibrated_ev_missing")
+        elif float(row.get("calibrated_ev") or 0.0) <= 0.0:
+            reasons.append("calibrated_ev_not_positive")
+        if not row.get("direction_regime_confirmed"):
+            reasons.append("independent_regime_not_confirmed_for_selected_side")
+        return not reasons, reasons
+    if variant == "high_direction_confidence_but_price_too_expensive_rejected":
+        if row.get("high_direction_confidence") and row.get("overextended"):
+            return False, ["high_direction_confidence_price_too_expensive"]
+        return True, []
+    raise ValueError(f"unknown regime entry-edge policy variant: {variant}")
+
+
+def _regime_entry_edge_policy_metrics(
+    rows: list[dict[str, Any]],
+    variant: str,
+) -> dict[str, Any]:
+    selected = []
+    rejected = Counter()
+    decisions = []
+    for row in rows:
+        allowed, reasons = _regime_entry_edge_policy_allows(row, variant)
+        if allowed:
+            selected.append(row)
+        else:
+            rejected.update(reasons)
+        decisions.append(
+            {
+                "row_index": row["row_index"],
+                "market_id": row["market_id"],
+                "decision_ts": row["decision_ts"],
+                "entry_index_within_market": row["same_market_entry_index"],
+                "policy_selected": allowed,
+                "policy_reason_codes": reasons,
+            }
+        )
+    return {
+        "variant_name": variant,
+        **_regime_entry_edge_metric_subset(selected),
+        "pnl_by_side": _pnl_distribution(selected, "side"),
+        "pnl_by_action": _pnl_distribution(selected, "action"),
+        "pnl_by_market": _regime_entry_edge_pnl_by_market(selected),
+        "rejected_reason_counts": dict(sorted(rejected.items())),
+        "decision_rows": decisions,
+        "diagnostic_only": True,
+        "uses_outcome_for_policy_selection": False,
+        "uses_outcome_for_offline_evaluation": True,
+    }
+
+
+def _regime_entry_edge_metric_subset(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    pnl = sum(float(row.get("settlement_pnl") or 0.0) for row in rows)
+    return {
+        "fill_count": len(rows),
+        "unique_market_count": len({row["market_id"] for row in rows}),
+        "cost_basis": sum(float(row.get("cost_basis") or 0.0) for row in rows),
+        "settled_pnl": pnl,
+        "mean_pnl_per_fill": pnl / len(rows) if rows else 0.0,
+        "roi": _safe_roi(rows),
+        "win_rate": _win_rate(rows),
+        "max_drawdown": _max_drawdown(
+            [
+                float(row.get("settlement_pnl") or 0.0)
+                for row in sorted(
+                    rows,
+                    key=lambda item: tuple(item["chronological_sort_key"]),
+                )
+            ]
+        ),
+    }
+
+
+def _regime_entry_edge_pnl_by_market(
+    rows: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    result = {}
+    for market_id in sorted({str(row["market_id"]) for row in rows}):
+        market_rows = [row for row in rows if str(row["market_id"]) == market_id]
+        first_rows = [row for row in market_rows if row["same_market_entry_index"] == 1]
+        repeated_rows = [row for row in market_rows if row["same_market_entry_index"] > 1]
+        result[market_id] = {
+            **_regime_entry_edge_metric_subset(market_rows),
+            "first_entry_pnl": sum(
+                float(row["settlement_pnl"]) for row in first_rows
+            ),
+            "repeated_entry_pnl": sum(
+                float(row["settlement_pnl"]) for row in repeated_rows
+            ),
+            "action_distribution": _count_distribution(market_rows, "action"),
+            "side_distribution": _count_distribution(market_rows, "side"),
+            "max_cumulative_market_exposure": max(
+                (
+                    float(row["cumulative_market_exposure_after_entry"])
+                    for row in market_rows
+                ),
+                default=0.0,
+            ),
+        }
+    return result
+
+
+def _regime_entry_edge_group_metrics(
+    rows: list[dict[str, Any]],
+    field_name: str,
+) -> dict[str, dict[str, Any]]:
+    result = {}
+    for value in sorted({str(row.get(field_name) or "unknown") for row in rows}):
+        selected = [row for row in rows if str(row.get(field_name) or "unknown") == value]
+        result[value] = _regime_entry_edge_metric_subset(selected)
+    return result
+
+
+def _regime_entry_edge_cross_metrics(
+    rows: list[dict[str, Any]],
+    left_field: str,
+    right_field: str,
+) -> dict[str, dict[str, Any]]:
+    result = {}
+    keys = {
+        f"{row.get(left_field) or 'unknown'}|{row.get(right_field) or 'unknown'}"
+        for row in rows
+    }
+    for key in sorted(keys):
+        left, right = key.split("|", 1)
+        selected = [
+            row
+            for row in rows
+            if str(row.get(left_field) or "unknown") == left
+            and str(row.get(right_field) or "unknown") == right
+        ]
+        result[key] = _regime_entry_edge_metric_subset(selected)
+    return result
+
+
+def _repeated_entry_marginal_pnl(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    first_entries = [row for row in rows if row["same_market_entry_index"] == 1]
+    repeated_entries = [row for row in rows if row["same_market_entry_index"] > 1]
+    same_side = [row for row in repeated_entries if row["same_side_reentry"]]
+    side_flips = [row for row in repeated_entries if row["side_flip"]]
+    first_metrics = _regime_entry_edge_metric_subset(first_entries)
+    repeated_metrics = _regime_entry_edge_metric_subset(repeated_entries)
+    return {
+        "first_entries": first_metrics,
+        "repeated_entries": repeated_metrics,
+        "same_side_reentries": _regime_entry_edge_metric_subset(same_side),
+        "side_flip_entries": _regime_entry_edge_metric_subset(side_flips),
+        "repeated_minus_first_mean_pnl": (
+            repeated_metrics["mean_pnl_per_fill"]
+            - first_metrics["mean_pnl_per_fill"]
+        ),
+    }
+
+
+def _regime_entry_edge_up_tradeoff(
+    rows: list[dict[str, Any]],
+    variant: str,
+) -> dict[str, Any]:
+    rejected = []
+    for row in rows:
+        allowed, reasons = _regime_entry_edge_policy_allows(row, variant)
+        if not allowed:
+            rejected.append((row, reasons))
+    removed_wins = [
+        (row, reasons)
+        for row, reasons in rejected
+        if row["side"] == "UP" and float(row["settlement_pnl"]) > 0.0
+    ]
+    avoided_losses = [
+        (row, reasons)
+        for row, reasons in rejected
+        if row["side"] == "UP" and float(row["settlement_pnl"]) < 0.0
+    ]
+    return {
+        "incorrectly_removed_up_win_count": len(removed_wins),
+        "incorrectly_removed_up_win_pnl_sum": sum(
+            float(row["settlement_pnl"]) for row, _ in removed_wins
+        ),
+        "avoided_up_loss_count": len(avoided_losses),
+        "avoided_up_loss_pnl_sum": sum(
+            float(row["settlement_pnl"]) for row, _ in avoided_losses
+        ),
+        "avoided_up_loss_magnitude": -sum(
+            float(row["settlement_pnl"]) for row, _ in avoided_losses
+        ),
+        "incorrectly_removed_up_win_examples": [
+            _regime_entry_edge_example(row, reasons)
+            for row, reasons in sorted(
+                removed_wins,
+                key=lambda item: -float(item[0]["settlement_pnl"]),
+            )[:10]
+        ],
+        "avoided_up_loss_examples": [
+            _regime_entry_edge_example(row, reasons)
+            for row, reasons in sorted(
+                avoided_losses,
+                key=lambda item: float(item[0]["settlement_pnl"]),
+            )[:10]
+        ],
+        "evaluation_only": True,
+    }
+
+
+def _regime_entry_edge_example(
+    row: Mapping[str, Any],
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    return {
+        "market_id": row["market_id"],
+        "decision_ts": row["decision_ts"],
+        "action": row["action"],
+        "side": row["side"],
+        "entry_price": row["entry_price"],
+        "entry_index_within_market": row["same_market_entry_index"],
+        "cumulative_market_exposure_before_entry": row[
+            "cumulative_market_exposure_before_entry"
+        ],
+        "canonical_o_action_score": row["canonical_o_action_score"],
+        "calibrated_ev": row["calibrated_ev"],
+        "btc_momentum": row["btc_momentum"],
+        "reference_price_to_beat_distance_at_decision": row[
+            "reference_price_to_beat_distance_at_decision"
+        ],
+        "action_score_margin": row["action_score_margin"],
+        "time_to_close_seconds": row["time_to_close_seconds"],
+        "settlement_pnl": row["settlement_pnl"],
+        "resolved_outcome": row["resolved_outcome"],
+        "diagnostic_rejection_reason_codes": reason_codes,
+    }
+
+
+def _regime_entry_edge_report_row(row: dict[str, Any]) -> dict[str, Any]:
+    variant_decisions = {}
+    for variant in REGIME_ENTRY_EDGE_POLICY_VARIANTS:
+        allowed, reasons = _regime_entry_edge_policy_allows(row, variant)
+        variant_decisions[variant] = {
+            "selected": allowed,
+            "reason_codes": reasons,
+        }
+    return {
+        "row_index": row["row_index"],
+        "market_id": row["market_id"],
+        "decision_ts": row["decision_ts"],
+        "action": row["action"],
+        "side": row["side"],
+        "execution_price": row["entry_price"],
+        "p_up": row["p_up"],
+        "p_down": row["p_down"],
+        "canonical_o_action_score": row["canonical_o_action_score"],
+        "calibrated_ev": row["calibrated_ev"],
+        "calibrated_ev_available": row["calibrated_ev_available"],
+        "calibrated_ev_source": row["calibrated_ev_source"],
+        "calibrated_ev_source_provenance": row[
+            "calibrated_ev_source_provenance"
+        ],
+        "btc_momentum": row["btc_momentum"],
+        "reference_price_to_beat_distance_at_decision": row[
+            "reference_price_to_beat_distance_at_decision"
+        ],
+        "time_to_close_seconds": row["time_to_close_seconds"],
+        "action_score_margin": row["action_score_margin"],
+        "decision_time_regime_feature_max_input_ts": row[
+            "decision_time_regime_feature_max_input_ts"
+        ],
+        "entry_index_within_market": row["same_market_entry_index"],
+        "cumulative_market_exposure_before_entry": row[
+            "cumulative_market_exposure_before_entry"
+        ],
+        "cumulative_market_exposure_after_entry": row[
+            "cumulative_market_exposure_after_entry"
+        ],
+        "cumulative_market_exposure_bucket": row[
+            "cumulative_market_exposure_bucket"
+        ],
+        "same_side_reentry": row["same_side_reentry"],
+        "side_flip": row["side_flip"],
+        "prior_market_max_calibrated_ev": row[
+            "prior_market_max_calibrated_ev"
+        ],
+        "incremental_calibrated_ev_vs_prior_max": row[
+            "incremental_calibrated_ev_vs_prior_max"
+        ],
+        "independent_signal_groups": row["independent_signal_groups"],
+        "variant_decisions": variant_decisions,
+        "settlement_pnl": row["settlement_pnl"],
+        "resolved_outcome": row["resolved_outcome"],
+        "settlement_status": row["settlement_status"],
+        "outcome_fields_used_for_decision": False,
+    }
+
+
+def _regime_entry_edge_feature_coverage(
+    rows: list[dict[str, Any]],
+) -> dict[str, dict[str, int]]:
+    fields = (
+        "entry_price",
+        "p_up",
+        "p_down",
+        "canonical_o_action_score",
+        "calibrated_ev",
+        "btc_momentum",
+        "reference_price_to_beat_distance_at_decision",
+        "time_to_close_seconds",
+        "action_score_margin",
+    )
+    return {
+        field: {
+            "row_count": len(rows),
+            "available_count": sum(1 for row in rows if row.get(field) is not None),
+        }
+        for field in fields
+    }
+
+
+def _regime_entry_edge_diagnostic_policy_config() -> dict[str, Any]:
+    return {
+        "config_source": "predeclared_diagnostic_only_constants",
+        "uses_current_outcomes_for_configuration": False,
+        "incremental_edge_rule": "current_calibrated_ev_strictly_above_prior_market_max",
+        "same_market_exposure_cap_first_entry_multiple": (
+            REGIME_ENTRY_EDGE_EXPOSURE_CAP_FIRST_ENTRY_MULTIPLE
+        ),
+        "high_direction_confidence_min": (
+            REGIME_ENTRY_EDGE_HIGH_DIRECTION_CONFIDENCE_MIN
+        ),
+        "overextended_execution_price_bucket": "gt_0_90",
+        "correlated_btc_anchor_vote_weight": 1,
+        "thresholds_tuned": False,
+    }
+
+
+def _regime_entry_edge_policy_definitions() -> dict[str, str]:
+    return {
+        "baseline": "All settled paper fills.",
+        "first_entry_only": "Keep only the first paper entry in each market.",
+        "require_incremental_edge_for_reentry": (
+            "Keep the first entry; require each re-entry calibrated EV to be "
+            "strictly above the prior maximum for that market."
+        ),
+        "cap_same_market_exposure": (
+            "Cap cumulative market exposure at two first-entry-equivalent notionals."
+        ),
+        "regime_confirmed_and_not_overextended": (
+            "Require selected-side agreement from market-implied direction and the "
+            "single combined BTC-anchor group, and reject the >0.90 price bucket."
+        ),
+        "calibrated_ev_conditioned_on_regime": (
+            "Require positive frozen calibrated EV and independent regime confirmation."
+        ),
+        "high_direction_confidence_but_price_too_expensive_rejected": (
+            "Reject only selected-side probability >=0.90 entries priced >=0.90."
+        ),
+    }
+
+
+def _independent_signal_group_contract() -> dict[str, Any]:
+    return {
+        "groups": {
+            "direction_regime_evidence": [
+                "canonical_o_action_score",
+                "action_score_margin",
+                "btc_anchor_direction",
+            ],
+            "market_implied_price_value": [
+                "p_up",
+                "p_down",
+                "execution_price",
+                "calibrated_ev",
+            ],
+            "overextension_evidence": ["execution_price_bucket"],
+            "execution_quality": [
+                "spread_bps",
+                "queue_fill_proxy",
+                "book_staleness_ms",
+                "time_to_close_seconds",
+            ],
+            "exposure_state": [
+                "entry_index_within_market",
+                "cumulative_market_exposure_before_entry",
+                "same_side_reentry",
+                "side_flip",
+            ],
+        },
+        "correlated_field_groups": [
+            {
+                "group_name": "btc_anchor_direction",
+                "fields": [
+                    "btc_momentum",
+                    "reference_price_to_beat_distance_at_decision",
+                ],
+                "maximum_vote_weight": 1,
+                "counted_as_independent_votes": False,
+            }
+        ],
+        "market_implied_probability_used_as_calibrated_ev": False,
+    }
+
+
+def _future_regime_conditioned_ev_artifact_recommendation() -> dict[str, Any]:
+    return {
+        "artifact_status": "proposed_not_created",
+        "artifact_name": "execution_layer_v2_frozen_regime_conditioned_ev_v1",
+        "fit_source": "shadow_split_only",
+        "required_input_groups": [
+            "canonical_o_score_and_margin",
+            "single_combined_btc_anchor_direction",
+            "market_implied_price_value",
+            "execution_quality",
+            "pre_entry_market_exposure_state",
+        ],
+        "correlated_anchor_fields_must_share_one_group": True,
+        "uses_validation_or_settlement_labels_for_threshold_tuning": False,
+        "freeze_before_future_unseen_forward_shadow": True,
+        "future_unseen_forward_shadow_required": True,
+        "future_unseen_outcome_reconciliation_required_after_shadow": True,
+        "promotion_or_live_unlock_allowed": False,
+    }
+
+
+def _bounded_clob_settlement_fallback_proposal() -> dict[str, Any]:
+    return {
+        "proposal_status": "diagnostic_design_only_not_applied_to_original_manifest",
+        "endpoint_template": "https://clob.polymarket.com/markets/{condition_id}",
+        "read_only": True,
+        "bounded_per_condition_timeout_required": True,
+        "bounded_worker_pool_required": True,
+        "require_closed_market": True,
+        "require_exactly_one_winner_token": True,
+        "fail_closed_on_timeout_or_ambiguous_winner": True,
+        "write_supplemental_reconciliation_bundle": True,
+        "mutate_original_run_manifest": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
 
 
 def _p_up_down_balance_regime(balance: float | None) -> str:

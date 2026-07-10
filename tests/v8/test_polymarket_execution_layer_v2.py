@@ -32,9 +32,11 @@ from bigan.v8.polymarket.training.execution_layer_v2_policy_replay import (
     ExecutionLayerV2ForwardShadowConfig,
     ExecutionLayerV2HTSRegimeRiskReplayConfig,
     ExecutionLayerV2PolicyReplayConfig,
+    ExecutionLayerV2RegimeEntryEdgeReplayConfig,
     run_execution_layer_v2_forward_shadow_policy,
     run_execution_layer_v2_hts_regime_risk_replay,
     run_execution_layer_v2_policy_replay_from_settlement_csv,
+    run_execution_layer_v2_regime_entry_edge_replay,
 )
 from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
     _fresh_public_row_from_provider_feature_context,
@@ -710,6 +712,322 @@ def test_execution_layer_v2_hts_regime_risk_replay_uses_decision_time_features(
     assert report["paper_only"] is True
     assert report["capital_at_risk"] is False
     assert report["v8_execution_handoff_allowed"] is False
+
+
+def test_regime_entry_edge_replay_groups_correlated_signals_and_exposure(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "regime-entry-edge-input"
+    run_dir.mkdir()
+    specs = [
+        (
+            "i1",
+            "m1",
+            "BUY_UP_HOLD_TO_SETTLEMENT",
+            0.70,
+            0.30,
+            0.60,
+            1.0,
+            0.01,
+            0.01,
+            "UP",
+            0.10,
+        ),
+        (
+            "i2",
+            "m1",
+            "BUY_UP_HOLD_TO_SETTLEMENT",
+            0.70,
+            0.30,
+            0.60,
+            2.0,
+            0.01,
+            0.01,
+            "DOWN",
+            -0.08,
+        ),
+        (
+            "i3",
+            "m1",
+            "BUY_UP_HOLD_TO_SETTLEMENT",
+            0.95,
+            0.05,
+            0.95,
+            1.5,
+            0.02,
+            0.02,
+            "UP",
+            0.04,
+        ),
+        (
+            "i4",
+            "m1",
+            "BUY_DOWN_HOLD_TO_SETTLEMENT",
+            0.20,
+            0.80,
+            0.65,
+            2.5,
+            -0.01,
+            -0.01,
+            "DOWN",
+            0.03,
+        ),
+        (
+            "i5",
+            "m2",
+            "BUY_UP_HOLD_TO_SETTLEMENT",
+            0.70,
+            0.30,
+            0.65,
+            1.2,
+            -0.01,
+            -0.01,
+            "DOWN",
+            -0.06,
+        ),
+    ]
+    intents = []
+    fills = []
+    settlements = []
+    for index, spec in enumerate(specs, start=1):
+        (
+            intent_id,
+            market_id,
+            action,
+            p_up,
+            p_down,
+            price,
+            score,
+            momentum,
+            reference_distance,
+            outcome,
+            pnl,
+        ) = spec
+        side = "UP" if "BUY_UP" in action else "DOWN"
+        decision_ts = index * 1_000
+        intent = _hts_regime_intent(
+            intent_id,
+            market_id,
+            action,
+            p_up,
+            p_down,
+            price,
+        )
+        intent.update(
+            {
+                "decision_ts": decision_ts,
+                "source_model_score": score,
+                "canonical_corrected_score": score,
+                "canonical_raw_score": score * 10.0,
+                "action_score_margin": 0.03,
+                "btc_momentum": momentum,
+                "reference_price_to_beat_distance_at_decision": (
+                    reference_distance
+                ),
+            }
+        )
+        fill = _hts_regime_fill(
+            intent_id,
+            market_id,
+            action,
+            side,
+            price,
+        )
+        fill["decision_ts"] = decision_ts
+        settlement = _hts_regime_settlement(
+            intent_id,
+            market_id,
+            action,
+            side,
+            outcome,
+            pnl,
+        )
+        settlement["decision_ts"] = decision_ts
+        intents.append(intent)
+        fills.append(fill)
+        settlements.append(settlement)
+    _write_jsonl(run_dir / "one_hour_paper_intent_log.jsonl", intents)
+    _write_jsonl(run_dir / "one_hour_paper_fill_log.jsonl", fills)
+    _write_jsonl(run_dir / "settlement_pnl_rows.jsonl", settlements)
+
+    calibration_path = tmp_path / "frozen-ev.json"
+    calibration_path.write_text(
+        json.dumps(
+            {
+                "frozen": True,
+                "decision_time_safe": True,
+                "uses_validation_labels_for_tuning": False,
+                "market_implied_probability_used_for_ev": False,
+                "score_to_expected_net_return": {
+                    "intercept": 0.0,
+                    "canonical_o_action_score_weight": 0.10,
+                },
+                "subtract_execution_cost": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    result = run_execution_layer_v2_regime_entry_edge_replay(
+        ExecutionLayerV2RegimeEntryEdgeReplayConfig(
+            run_id="regime-entry-edge-fixture",
+            input_path=run_dir,
+            output_dir=tmp_path / "runs",
+            frozen_ev_calibration_artifact=calibration_path,
+        )
+    )
+    report = result.report
+
+    assert report["row_count"] == 5
+    assert report["unique_market_count"] == 2
+    assert report["decision_time_provenance_violation_count"] == 0
+    assert report[
+        "correlated_momentum_reference_counted_as_independent_votes"
+    ] is False
+    correlated = report["independent_signal_group_contract"][
+        "correlated_field_groups"
+    ][0]
+    assert correlated["maximum_vote_weight"] == 1
+    assert correlated["counted_as_independent_votes"] is False
+    m1_rows = [row for row in report["entry_rows"] if row["market_id"] == "m1"]
+    assert [row["entry_index_within_market"] for row in m1_rows] == [1, 2, 3, 4]
+    assert m1_rows[0]["cumulative_market_exposure_before_entry"] == 0.0
+    assert m1_rows[1]["same_side_reentry"] is True
+    assert m1_rows[3]["side_flip"] is True
+    assert m1_rows[0]["independent_signal_groups"][
+        "direction_regime_evidence"
+    ]["correlated_anchor_vote_weight"] == 1
+    assert report["policy_variants"]["first_entry_only"]["fill_count"] == 2
+    assert report["policy_variants"]["first_entry_only"][
+        "settled_pnl"
+    ] == pytest.approx(0.04)
+    assert report["policy_variants"]["require_incremental_edge_for_reentry"][
+        "fill_count"
+    ] == 4
+    assert report["policy_variants"]["cap_same_market_exposure"][
+        "fill_count"
+    ] == 3
+    assert report["pnl_by_market"]["m1"]["fill_count"] == 4
+    assert report["repeated_entry_marginal_pnl"]["same_side_reentries"][
+        "fill_count"
+    ] == 2
+    assert report["repeated_entry_marginal_pnl"]["side_flip_entries"][
+        "fill_count"
+    ] == 1
+    first_entry_tradeoff = report["up_rule_tradeoff_summary"]["first_entry_only"]
+    assert first_entry_tradeoff["incorrectly_removed_up_win_count"] == 1
+    assert first_entry_tradeoff["avoided_up_loss_count"] == 1
+    assert report["bounded_per_condition_clob_settlement_fallback_proposal"][
+        "mutate_original_run_manifest"
+    ] is False
+    assert report["future_unseen_forward_shadow_required"] is True
+    assert report["uses_outcome_for_policy_selection"] is False
+    assert report["production_gate_implemented"] is False
+    assert report["paper_only"] is True
+    assert report["capital_at_risk"] is False
+    assert report["polymarket_write_enabled"] is False
+    assert report["wallet_signing_enabled"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["freeze_ready"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert result.artifact_paths[
+        "execution_layer_v2_regime_entry_edge_replay_report"
+    ].exists()
+    assert result.artifact_hashes[
+        "execution_layer_v2_regime_entry_edge_replay_manifest"
+    ]
+
+    mutated_settlements = []
+    for row in settlements:
+        mutated = dict(row)
+        mutated["settlement_pnl"] = -float(mutated["settlement_pnl"])
+        mutated["resolved_outcome"] = (
+            "DOWN" if mutated["resolved_outcome"] == "UP" else "UP"
+        )
+        mutated_settlements.append(mutated)
+    _write_jsonl(
+        run_dir / "settlement_pnl_rows.jsonl",
+        mutated_settlements,
+    )
+    mutated_report = run_execution_layer_v2_regime_entry_edge_replay(
+        ExecutionLayerV2RegimeEntryEdgeReplayConfig(
+            run_id="regime-entry-edge-mutated-outcomes",
+            input_path=run_dir,
+            output_dir=tmp_path / "runs",
+            frozen_ev_calibration_artifact=calibration_path,
+        )
+    ).report
+    assert [row["variant_decisions"] for row in report["entry_rows"]] == [
+        row["variant_decisions"] for row in mutated_report["entry_rows"]
+    ]
+
+
+def test_regime_entry_edge_replay_missing_calibration_fails_closed(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "regime-entry-edge-missing-ev"
+    run_dir.mkdir()
+    intent = _hts_regime_intent(
+        "i1",
+        "m1",
+        "BUY_UP_HOLD_TO_SETTLEMENT",
+        0.70,
+        0.30,
+        0.60,
+    )
+    intent.update(
+        {
+            "btc_momentum": 0.01,
+            "reference_price_to_beat_distance_at_decision": 0.01,
+        }
+    )
+    _write_jsonl(run_dir / "one_hour_paper_intent_log.jsonl", [intent])
+    _write_jsonl(
+        run_dir / "one_hour_paper_fill_log.jsonl",
+        [
+            _hts_regime_fill(
+                "i1",
+                "m1",
+                "BUY_UP_HOLD_TO_SETTLEMENT",
+                "UP",
+                0.60,
+            )
+        ],
+    )
+    _write_jsonl(
+        run_dir / "settlement_pnl_rows.jsonl",
+        [
+            _hts_regime_settlement(
+                "i1",
+                "m1",
+                "BUY_UP_HOLD_TO_SETTLEMENT",
+                "UP",
+                "UP",
+                0.10,
+            )
+        ],
+    )
+    report = run_execution_layer_v2_regime_entry_edge_replay(
+        ExecutionLayerV2RegimeEntryEdgeReplayConfig(
+            run_id="regime-entry-edge-missing-ev-fixture",
+            input_path=run_dir,
+            output_dir=tmp_path / "runs",
+        )
+    ).report
+
+    calibrated_variant = report["policy_variants"][
+        "calibrated_ev_conditioned_on_regime"
+    ]
+    assert calibrated_variant["fill_count"] == 0
+    assert calibrated_variant["rejected_reason_counts"] == {
+        "calibrated_ev_missing": 1
+    }
+    assert report["frozen_ev_calibration_artifact"]["valid"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["#134_resume_allowed"] is False
+    assert report["#146_start_allowed"] is False
 
 
 def test_fresh_provider_row_adds_decision_time_regime_features() -> None:
