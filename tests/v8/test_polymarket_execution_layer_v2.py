@@ -1752,6 +1752,70 @@ def test_regime_conditioned_ev_v2_corpus_builder_ingests_and_excludes(
     assert calibration.split_report["leakage_checks_passed"] is True
 
 
+def test_regime_conditioned_ev_v2_corpus_follows_nested_trace_manifest_hash_chain(
+    tmp_path,
+) -> None:
+    source_root = tmp_path / "sources"
+    valid_manifest = _write_regime_ev_corpus_source_run(
+        source_root / "nested-valid",
+        run_id="historical-nested-trace-valid",
+        row_count=2,
+    )
+    valid_trace_manifest = _nest_regime_ev_corpus_signal_trace(valid_manifest)
+    invalid_manifest = _write_regime_ev_corpus_source_run(
+        source_root / "nested-invalid",
+        run_id="historical-nested-trace-invalid",
+        row_count=1,
+    )
+    invalid_trace_manifest = _nest_regime_ev_corpus_signal_trace(invalid_manifest)
+    invalid_trace_manifest.write_text(
+        invalid_trace_manifest.read_text(encoding="utf-8") + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_execution_layer_v2_regime_conditioned_ev_corpus_builder(
+        ExecutionLayerV2RegimeConditionedEVCorpusConfig(
+            run_id="nested-trace-chain",
+            source_roots=(source_root,),
+            output_dir=tmp_path / "runs",
+        )
+    )
+    report = result.quality_report
+    rows = _read_jsonl(result.artifact_paths["corpus_rows"])
+
+    assert report["source_manifest_discovered_count"] == 2
+    assert report["source_run_included_count"] == 1
+    assert report["source_run_excluded_count"] == 1
+    assert report["eligible_row_count"] == 2
+    valid_source_report = next(
+        source_report
+        for source_report in report["source_ingestion_reports"]
+        if source_report["source_run_id"] == "historical-nested-trace-valid"
+    )
+    assert valid_source_report["signal_trace_resolution_mode"] == (
+        "nested_manifest_chain"
+    )
+    assert valid_source_report["signal_trace_manifest_chain_verified"] is True
+    assert report["source_exclusion_reason_distribution"][
+        "source_artifact_hash_mismatch:paper_fresh_loop_manifest"
+    ] == 1
+    assert all(
+        row["source_lineage"]["source_manifest_path"]
+        == str(valid_manifest.resolve())
+        for row in rows
+    )
+    assert all(
+        row["source_lineage"]["trace_manifest_path"]
+        == str(valid_trace_manifest.resolve())
+        for row in rows
+    )
+    assert all(
+        row["source_lineage"]["trace_manifest_sha256"]
+        == hashlib.sha256(valid_trace_manifest.read_bytes()).hexdigest()
+        for row in rows
+    )
+
+
 def test_regime_conditioned_ev_v2_corpus_incremental_matches_rebuild(
     tmp_path,
 ) -> None:
@@ -3719,6 +3783,40 @@ def _write_regime_ev_corpus_source_run(
     return manifest_path
 
 
+def _nest_regime_ev_corpus_signal_trace(manifest_path: Path) -> Path:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    trace_path = Path(manifest["artifact_paths"].pop("signal_trace"))
+    trace_sha256 = manifest["artifact_hashes"].pop("signal_trace")
+    trace_manifest_dir = manifest_path.parent / "nested-fresh-loop"
+    trace_manifest_dir.mkdir(parents=True, exist_ok=True)
+    trace_manifest_path = trace_manifest_dir / "o_v8_paper_fresh_loop_manifest.json"
+    trace_manifest = {
+        "schema_version": "test-paper-fresh-loop-manifest-v1",
+        "run_id": f"{manifest['run_id']}-fresh-loop",
+        "artifact_paths": {
+            "signal_trace_report": str(trace_path.resolve()),
+        },
+        "artifact_hashes": {
+            "signal_trace_report": trace_sha256,
+        },
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    trace_manifest_path.write_text(
+        json.dumps(trace_manifest, sort_keys=True), encoding="utf-8"
+    )
+    manifest["artifact_paths"]["paper_fresh_loop_manifest"] = str(
+        trace_manifest_path.resolve()
+    )
+    manifest["artifact_hashes"]["paper_fresh_loop_manifest"] = hashlib.sha256(
+        trace_manifest_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    return trace_manifest_path
+
+
 def _attach_regime_conditioned_ev_v2_target_source(
     rows: list[dict[str, object]], tmp_path: Path
 ) -> None:
@@ -3738,6 +3836,10 @@ def _attach_regime_conditioned_ev_v2_target_source(
             source_fill_id=source_fill_id,
         )
         row["source_lineage"] = {
+            "source_manifest_path": source_path.name,
+            "source_manifest_sha256": source_hash,
+            "trace_manifest_path": source_path.name,
+            "trace_manifest_sha256": source_hash,
             "trace_artifact_path": source_path.name,
             "trace_artifact_sha256": source_hash,
             "trace_row_id": f"trace-{source_fill_id}",
@@ -3801,6 +3903,10 @@ def _regime_conditioned_ev_v2_calibration_row(
         "source_fill_id": f"fill-{market_index}-{row_index}",
         "row_identity": "0" * 64,
         "source_lineage": {
+            "source_manifest_path": "pending",
+            "source_manifest_sha256": "0" * 64,
+            "trace_manifest_path": "pending",
+            "trace_manifest_sha256": "0" * 64,
             "trace_artifact_path": "pending",
             "trace_artifact_sha256": "0" * 64,
             "trace_row_id": "pending",

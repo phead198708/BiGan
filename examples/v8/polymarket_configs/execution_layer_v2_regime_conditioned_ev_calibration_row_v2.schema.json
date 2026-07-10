@@ -19,6 +19,8 @@
     "source_lineage": {
       "type": "object",
       "required": [
+        "source_manifest_path", "source_manifest_sha256",
+        "trace_manifest_path", "trace_manifest_sha256",
         "trace_artifact_path", "trace_artifact_sha256", "trace_row_id",
         "intent_artifact_path", "intent_artifact_sha256",
         "fill_artifact_path", "fill_artifact_sha256",
@@ -26,6 +28,10 @@
         "settlement_row_id"
       ],
       "properties": {
+        "source_manifest_path": {"type": "string", "minLength": 1},
+        "source_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "trace_manifest_path": {"type": "string", "minLength": 1},
+        "trace_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "trace_artifact_path": {"type": "string", "minLength": 1},
         "trace_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "trace_row_id": {"type": "string", "minLength": 1},

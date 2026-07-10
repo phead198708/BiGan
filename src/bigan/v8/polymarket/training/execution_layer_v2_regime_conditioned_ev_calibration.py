@@ -787,9 +787,19 @@ def _source_lineage_reason_codes(
     if not isinstance(payload, dict):
         return ["source_lineage_missing"]
     reasons: list[str] = []
-    for artifact_name in ("trace", "intent", "fill", "settlement"):
-        path_field = f"{artifact_name}_artifact_path"
-        hash_field = f"{artifact_name}_artifact_sha256"
+    lineage_artifacts = (
+        ("source_manifest", "source_manifest_path", "source_manifest_sha256"),
+        ("trace_manifest", "trace_manifest_path", "trace_manifest_sha256"),
+        ("trace", "trace_artifact_path", "trace_artifact_sha256"),
+        ("intent", "intent_artifact_path", "intent_artifact_sha256"),
+        ("fill", "fill_artifact_path", "fill_artifact_sha256"),
+        (
+            "settlement",
+            "settlement_artifact_path",
+            "settlement_artifact_sha256",
+        ),
+    )
+    for artifact_name, path_field, hash_field in lineage_artifacts:
         path_text = str(payload.get(path_field) or "")
         expected_hash = str(payload.get(hash_field) or "")
         if not path_text:

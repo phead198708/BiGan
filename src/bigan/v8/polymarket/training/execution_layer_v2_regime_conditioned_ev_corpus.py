@@ -49,11 +49,6 @@ PROHIBITED_RUN_IDS = {
     ),
 }
 REQUIRED_ARTIFACT_ALIASES = {
-    "signal_trace": (
-        "signal_trace",
-        "incremental_fresh_loop/o_v8_paper_fresh_signal_trace.json",
-        "o_v8_paper_fresh_signal_trace.json",
-    ),
     "paper_intent_log": (
         "paper_intent_log",
         "one_hour_paper_intent_log.jsonl",
@@ -69,6 +64,17 @@ REQUIRED_ARTIFACT_ALIASES = {
         "settlement_pnl_rows.jsonl",
     ),
 }
+SIGNAL_TRACE_ALIASES = (
+    "signal_trace",
+    "fresh_signal_trace_report",
+    "signal_trace_report",
+    "incremental_fresh_loop/o_v8_paper_fresh_signal_trace.json",
+    "o_v8_paper_fresh_signal_trace.json",
+)
+PAPER_FRESH_LOOP_MANIFEST_ALIASES = (
+    "paper_fresh_loop_manifest",
+    "o_v8_paper_fresh_loop_manifest.json",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,7 +267,15 @@ def _ingest_source_manifest(
         ), []
     source_run_id = str(manifest.get("source_run_id") or manifest.get("run_id") or "")
     reasons = _source_manifest_blocking_reasons(manifest, source_run_id)
-    resolved_artifacts: dict[str, dict[str, Any]] = {}
+    source_manifest_artifact = {
+        "logical_name": "source_manifest",
+        "manifest_key": "__self__",
+        "path": manifest_path.resolve(),
+        "sha256": _sha256_file(manifest_path),
+    }
+    resolved_artifacts: dict[str, dict[str, Any]] = {
+        "source_manifest": source_manifest_artifact,
+    }
     if not reasons:
         for artifact_name, aliases in REQUIRED_ARTIFACT_ALIASES.items():
             resolved, artifact_reasons = _resolve_and_verify_artifact(
@@ -272,6 +286,13 @@ def _ingest_source_manifest(
             reasons.extend(artifact_reasons)
             if resolved is not None:
                 resolved_artifacts[artifact_name] = resolved
+        trace_artifacts, trace_reasons = _resolve_signal_trace_artifacts(
+            manifest_path=manifest_path,
+            manifest=manifest,
+            source_manifest_artifact=source_manifest_artifact,
+        )
+        reasons.extend(trace_reasons)
+        resolved_artifacts.update(trace_artifacts)
     if reasons:
         return _source_report(
             manifest_path,
@@ -402,6 +423,57 @@ def _resolve_and_verify_artifact(
         "manifest_key": selected_key,
         "path": path,
         "sha256": actual_hash,
+    }, []
+
+
+def _resolve_signal_trace_artifacts(
+    *,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    source_manifest_artifact: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    direct_trace, direct_reasons = _resolve_and_verify_artifact(
+        manifest_path,
+        manifest,
+        SIGNAL_TRACE_ALIASES,
+    )
+    if direct_trace is not None:
+        return {
+            "signal_trace": direct_trace,
+            "trace_manifest": source_manifest_artifact,
+        }, []
+    if direct_reasons != ["required_source_artifact_missing:signal_trace"]:
+        return {}, direct_reasons
+
+    trace_manifest, trace_manifest_reasons = _resolve_and_verify_artifact(
+        manifest_path,
+        manifest,
+        PAPER_FRESH_LOOP_MANIFEST_ALIASES,
+    )
+    if trace_manifest is None:
+        if trace_manifest_reasons == [
+            "required_source_artifact_missing:paper_fresh_loop_manifest"
+        ]:
+            return {}, direct_reasons
+        return {}, trace_manifest_reasons
+    try:
+        trace_manifest_payload = json.loads(
+            trace_manifest["path"].read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return {}, ["trace_manifest_invalid_json"]
+    if not isinstance(trace_manifest_payload, dict):
+        return {}, ["trace_manifest_not_object"]
+    nested_trace, nested_trace_reasons = _resolve_and_verify_artifact(
+        trace_manifest["path"],
+        trace_manifest_payload,
+        SIGNAL_TRACE_ALIASES,
+    )
+    if nested_trace is None:
+        return {"trace_manifest": trace_manifest}, nested_trace_reasons
+    return {
+        "signal_trace": nested_trace,
+        "trace_manifest": trace_manifest,
     }, []
 
 
@@ -645,6 +717,10 @@ def _calibration_row_from_join(
         "source_fill_id": fill_id,
         "row_identity": row_identity,
         "source_lineage": {
+            "source_manifest_path": str(artifacts["source_manifest"]["path"]),
+            "source_manifest_sha256": artifacts["source_manifest"]["sha256"],
+            "trace_manifest_path": str(artifacts["trace_manifest"]["path"]),
+            "trace_manifest_sha256": artifacts["trace_manifest"]["sha256"],
             "trace_artifact_path": str(artifacts["signal_trace"]["path"]),
             "trace_artifact_sha256": artifacts["signal_trace"]["sha256"],
             "trace_row_id": trace_id,
@@ -1130,6 +1206,21 @@ def _source_report(
     row_exclusion_reason_distribution: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     artifacts = resolved_artifacts or {}
+    source_manifest = artifacts.get("source_manifest")
+    trace_manifest = artifacts.get("trace_manifest")
+    signal_trace = artifacts.get("signal_trace")
+    trace_chain_verified = bool(
+        source_manifest is not None
+        and trace_manifest is not None
+        and signal_trace is not None
+    )
+    trace_resolution_mode = None
+    if trace_chain_verified:
+        trace_resolution_mode = (
+            "direct_manifest"
+            if source_manifest["path"] == trace_manifest["path"]
+            else "nested_manifest_chain"
+        )
     return {
         "source_manifest_path": str(manifest_path),
         "source_manifest_sha256": (
@@ -1138,6 +1229,8 @@ def _source_report(
         "source_run_id": source_run_id,
         "included": included,
         "blocking_reason_codes": reasons,
+        "signal_trace_resolution_mode": trace_resolution_mode,
+        "signal_trace_manifest_chain_verified": trace_chain_verified,
         "resolved_artifacts": {
             name: {
                 "path": str(artifact["path"]),
