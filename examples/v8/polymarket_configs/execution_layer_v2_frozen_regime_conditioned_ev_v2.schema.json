@@ -56,7 +56,9 @@
         "uses_oracle_actions_for_fitting", "uses_future_returns_for_fitting",
         "future_unseen_run_pattern_excluded", "fitted_from_run_ids",
         "excluded_run_ids", "fit_dataset_hash", "validation_dataset_hash",
-        "split_hash", "calibration_config_hash", "fit_coefficients_hash"
+        "split_hash", "calibration_config_hash", "fit_coefficients_hash",
+        "calibration_row_schema_sha256", "statistical_eligibility_config_hash",
+        "statistical_eligibility_summary_hash", "statistical_eligibility_passed"
       ],
       "properties": {
         "coefficients_source": {"const": "historical_fit_split_only"},
@@ -81,7 +83,11 @@
         "validation_dataset_hash": {"$ref": "#/$defs/sha256"},
         "split_hash": {"$ref": "#/$defs/sha256"},
         "calibration_config_hash": {"$ref": "#/$defs/sha256"},
-        "fit_coefficients_hash": {"$ref": "#/$defs/sha256"}
+        "fit_coefficients_hash": {"$ref": "#/$defs/sha256"},
+        "calibration_row_schema_sha256": {"$ref": "#/$defs/sha256"},
+        "statistical_eligibility_config_hash": {"$ref": "#/$defs/sha256"},
+        "statistical_eligibility_summary_hash": {"$ref": "#/$defs/sha256"},
+        "statistical_eligibility_passed": {"const": true}
       },
       "additionalProperties": false
     },
@@ -93,7 +99,9 @@
         "feature_max_input_ts_must_not_exceed_decision_ts",
         "historical_fit_target", "validation_labels_used_for_evaluation_only",
         "future_shadow_outcome_free_at_inference", "threshold_selection_source",
-        "refit_from_future_shadow_result_allowed"
+        "refit_from_future_shadow_result_allowed", "statistical_eligibility_required",
+        "market_level_evaluation_required", "market_bootstrap_confidence_required",
+        "coefficient_stability_required", "validation_coverage_required"
       ],
       "properties": {
         "split_order": {"const": ["historical_fit", "validation", "future_unseen_shadow_holdout"]},
@@ -104,7 +112,12 @@
         "validation_labels_used_for_evaluation_only": {"const": true},
         "future_shadow_outcome_free_at_inference": {"const": true},
         "threshold_selection_source": {"const": "fixed_pre_validation_config"},
-        "refit_from_future_shadow_result_allowed": {"const": false}
+        "refit_from_future_shadow_result_allowed": {"const": false},
+        "statistical_eligibility_required": {"const": true},
+        "market_level_evaluation_required": {"const": true},
+        "market_bootstrap_confidence_required": {"const": true},
+        "coefficient_stability_required": {"const": true},
+        "validation_coverage_required": {"const": true}
       },
       "additionalProperties": false
     },

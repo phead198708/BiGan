@@ -60,6 +60,11 @@ LATEST_ONE_HOUR_RECONCILED_RUN_ID = (
     "execution-layer-v2-one-hour-remap-paper-goal-20260710T042608Z-"
     "clob-settlement-reconciled"
 )
+V2_CALIBRATION_ROW_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[5]
+    / "examples/v8/polymarket_configs/"
+    "execution_layer_v2_regime_conditioned_ev_calibration_row_v2.schema.json"
+)
 
 REGIME_CONDITIONED_EV_FEATURE_GROUPS: dict[str, tuple[str, ...]] = {
     "canonical_o_score_and_action_margin": (
@@ -1310,8 +1315,6 @@ def _validate_fit_provenance(
     for field_name in ("fit_dataset_hash", "fit_config_hash"):
         if not _is_sha256(payload.get(field_name)):
             reasons.append(f"regime_conditioned_ev_{field_name}_invalid")
-
-
 def _validate_v2_fit_provenance(payload: Mapping[str, Any], reasons: list[str]) -> None:
     expected_fields = {
         "coefficients_source",
@@ -1331,6 +1334,10 @@ def _validate_v2_fit_provenance(payload: Mapping[str, Any], reasons: list[str]) 
         "split_hash",
         "calibration_config_hash",
         "fit_coefficients_hash",
+        "calibration_row_schema_sha256",
+        "statistical_eligibility_config_hash",
+        "statistical_eligibility_summary_hash",
+        "statistical_eligibility_passed",
     }
     if set(payload) != expected_fields:
         reasons.append("regime_conditioned_ev_v2_fit_provenance_fields_mismatch")
@@ -1352,6 +1359,8 @@ def _validate_v2_fit_provenance(payload: Mapping[str, Any], reasons: list[str]) 
             reasons.append(f"regime_conditioned_ev_v2_{field_name}_not_false")
     if payload.get("future_unseen_run_pattern_excluded") is not True:
         reasons.append("future_unseen_forward_shadow_runs_not_excluded_from_fit")
+    if payload.get("statistical_eligibility_passed") is not True:
+        reasons.append("regime_conditioned_ev_v2_statistical_eligibility_not_passed")
     fitted_run_ids = payload.get("fitted_from_run_ids")
     fitted = (
         {str(value) for value in fitted_run_ids}
@@ -1379,9 +1388,18 @@ def _validate_v2_fit_provenance(payload: Mapping[str, Any], reasons: list[str]) 
         "split_hash",
         "calibration_config_hash",
         "fit_coefficients_hash",
+        "calibration_row_schema_sha256",
+        "statistical_eligibility_config_hash",
+        "statistical_eligibility_summary_hash",
     ):
         if not _is_sha256(payload.get(field_name)):
             reasons.append(f"regime_conditioned_ev_{field_name}_invalid")
+    if not V2_CALIBRATION_ROW_SCHEMA_PATH.is_file():
+        reasons.append("regime_conditioned_ev_v2_calibration_row_schema_missing")
+    elif payload.get("calibration_row_schema_sha256") != _sha256_file(
+        V2_CALIBRATION_ROW_SCHEMA_PATH
+    ):
+        reasons.append("regime_conditioned_ev_v2_calibration_row_schema_hash_mismatch")
 
 
 def _validate_v2_calibration_protocol(payload: Any, reasons: list[str]) -> None:
@@ -1399,6 +1417,11 @@ def _validate_v2_calibration_protocol(payload: Any, reasons: list[str]) -> None:
         "future_shadow_outcome_free_at_inference": True,
         "threshold_selection_source": "fixed_pre_validation_config",
         "refit_from_future_shadow_result_allowed": False,
+        "statistical_eligibility_required": True,
+        "market_level_evaluation_required": True,
+        "market_bootstrap_confidence_required": True,
+        "coefficient_stability_required": True,
+        "validation_coverage_required": True,
     }
     if not isinstance(payload, Mapping):
         reasons.append("regime_conditioned_ev_v2_calibration_protocol_missing")

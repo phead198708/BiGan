@@ -1399,6 +1399,10 @@ def test_regime_conditioned_ev_v2_calibration_protocol_and_future_shadow(
             min_validation_rows=8,
             min_fit_markets=4,
             min_validation_markets=2,
+            bootstrap_samples=200,
+            min_validation_rows_per_side=2,
+            min_validation_rows_per_action_family=2,
+            min_validation_rows_per_resolved_outcome=2,
         )
     )
 
@@ -1411,14 +1415,52 @@ def test_regime_conditioned_ev_v2_calibration_protocol_and_future_shadow(
     assert split["uses_validation_labels_for_fitting"] is False
     assert split["uses_validation_labels_for_threshold_selection"] is False
     assert split["leakage_checks_passed"] is True
+    assert split["schema_validation_row_count"] == len(rows)
+    assert split["schema_runtime_validation_agreement_passed"] is True
+    assert split["invalid_row_reason_distribution"] == {}
     assert report["artifact_created"] is True
     assert report["validation_improved_over_constant_and_legacy"] is True
+    assert report["statistical_eligibility_passed"] is True
+    assert report["market_level_metrics"]["validation_candidate"][
+        "market_count"
+    ] == 2
+    assert report["relative_baseline_improvements"][
+        "row_level_gate_passed"
+    ] is True
+    assert report["relative_baseline_improvements"][
+        "market_level_gate_passed"
+    ] is True
+    assert report["market_bootstrap_confidence_intervals"][
+        "confidence_gate_passed"
+    ] is True
+    assert report["coefficient_stability_metrics"][
+        "stability_gate_passed"
+    ] is True
+    assert report["validation_coverage"]["coverage_gate_passed"] is True
+    assert report["validation_coverage"]["side_unique_market_counts"] == {
+        "DOWN": 2,
+        "UP": 2,
+    }
     assert report["coefficients_finite_and_bounded"] is True
     assert report["threshold_selection_source"] == "fixed_pre_validation_config"
     artifact_path = result.artifact_paths["frozen_artifact"]
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     validation = validate_frozen_regime_conditioned_ev_artifact(artifact_path)
     assert validation["valid"] is True
+    mismatched_schema_artifact = tmp_path / "mismatched-schema-artifact.json"
+    mismatched_payload = json.loads(json.dumps(artifact))
+    mismatched_payload["fit_provenance"]["calibration_row_schema_sha256"] = "d" * 64
+    mismatched_schema_artifact.write_text(
+        json.dumps(mismatched_payload, sort_keys=True), encoding="utf-8"
+    )
+    mismatched_validation = validate_frozen_regime_conditioned_ev_artifact(
+        mismatched_schema_artifact
+    )
+    assert mismatched_validation["valid"] is False
+    assert (
+        "regime_conditioned_ev_v2_calibration_row_schema_hash_mismatch"
+        in mismatched_validation["blocking_reason_codes"]
+    )
     assert artifact["fit_provenance"][
         "settled_outcomes_or_pnl_used_as_training_targets"
     ] is True
@@ -1426,6 +1468,13 @@ def test_regime_conditioned_ev_v2_calibration_protocol_and_future_shadow(
         "settled_outcomes_or_pnl_used_as_decision_time_inputs"
     ] is False
     assert artifact["coefficients"]["subtract_execution_cost"] is False
+    assert artifact["fit_provenance"]["statistical_eligibility_passed"] is True
+    assert len(
+        artifact["fit_provenance"]["statistical_eligibility_config_hash"]
+    ) == 64
+    assert len(
+        artifact["fit_provenance"]["statistical_eligibility_summary_hash"]
+    ) == 64
     assert artifact["feature_groups"]["market_price_value"]["features"] == [
         "selected_side_probability",
         "execution_price",
@@ -1514,6 +1563,117 @@ def test_regime_conditioned_ev_v2_causality_violation_blocks_artifact(
     ]
     assert "frozen_artifact" not in result.artifact_paths
     assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def test_regime_conditioned_ev_v2_strict_row_validation_fails_closed(
+    tmp_path,
+) -> None:
+    rows = _regime_conditioned_ev_v2_calibration_rows()
+    _attach_regime_conditioned_ev_v2_target_source(rows, tmp_path)
+    rows[0].pop("selected_side")
+    features = rows[1]["decision_time_features"]
+    features["selected_side_probability"] = 1.2
+    features["execution_price"] = -0.1
+    features["queue_fill_proxy"] = 1.1
+    features["cumulative_market_exposure_before_entry"] = -0.1
+    rows[1]["target_provenance"]["source_type"] = "unapproved_write_provider"
+    rows[1]["target_available_at_ts"] = rows[1]["market_close_ts"] - 1
+    rows[2]["decision_time_features"][
+        "selected_side_probability_minus_execution_price"
+    ] += 0.01
+    input_path = tmp_path / "strict-invalid.jsonl"
+    _write_jsonl(input_path, rows)
+
+    result = run_execution_layer_v2_regime_conditioned_ev_calibration(
+        ExecutionLayerV2RegimeConditionedEVCalibrationConfig(
+            run_id="strict-invalid",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+            min_fit_rows=16,
+            min_validation_rows=8,
+            min_fit_markets=4,
+            min_validation_markets=2,
+        )
+    )
+
+    split = result.split_report
+    reasons = split["invalid_row_reason_distribution"]
+    assert split["invalid_row_count"] == 3
+    assert split["schema_validation_row_count"] == len(rows)
+    assert split["schema_runtime_validation_disagreement_count"] >= 1
+    assert split["schema_runtime_validation_agreement_passed"] is False
+    assert reasons["selected_side_invalid"] == 1
+    assert reasons["selected_side_probability_outside_unit_interval"] == 1
+    assert reasons["execution_price_outside_unit_interval"] == 1
+    assert reasons["queue_fill_proxy_outside_unit_interval"] == 1
+    assert reasons[
+        "negative_feature_not_allowed:cumulative_market_exposure_before_entry"
+    ] == 1
+    assert reasons[
+        "target_provenance_source_not_approved_read_only_settlement"
+    ] == 1
+    assert reasons["target_available_before_market_close"] == 1
+    assert reasons[
+        "selected_side_probability_minus_execution_price_mismatch"
+    ] >= 1
+    assert result.calibration_report["artifact_created"] is False
+    assert result.calibration_report["final_artifact_eligibility_reason_codes"]
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def test_regime_conditioned_ev_v2_statistical_gates_fail_closed(
+    tmp_path,
+) -> None:
+    rows = _regime_conditioned_ev_v2_calibration_rows()
+    _attach_regime_conditioned_ev_v2_target_source(rows, tmp_path)
+    input_path = tmp_path / "statistical-gates.jsonl"
+    _write_jsonl(input_path, rows)
+
+    result = run_execution_layer_v2_regime_conditioned_ev_calibration(
+        ExecutionLayerV2RegimeConditionedEVCalibrationConfig(
+            run_id="statistical-gates",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+            validation_fraction=0.25,
+            ridge_alpha=0.01,
+            min_fit_rows=16,
+            min_validation_rows=8,
+            min_fit_markets=4,
+            min_validation_markets=2,
+            min_relative_mae_improvement=0.95,
+            min_relative_mse_improvement=0.95,
+            bootstrap_samples=200,
+            min_bootstrap_improvement_lower_bound=0.1,
+            max_lomo_coefficient_absolute_deviation=0.0,
+            min_validation_rows_per_side=5,
+            min_validation_rows_per_action_family=5,
+            min_validation_rows_per_resolved_outcome=5,
+        )
+    )
+
+    report = result.calibration_report
+    reasons = report["final_artifact_eligibility_reason_codes"]
+    assert report["artifact_created"] is False
+    assert report["statistical_eligibility_passed"] is False
+    assert "row_level_relative_improvement_gate_failed" in reasons
+    assert "market_level_relative_improvement_gate_failed" in reasons
+    assert "market_bootstrap_confidence_gate_failed" in reasons
+    assert "coefficient_stability_gate_failed" in reasons
+    assert "validation_side_coverage_gate_failed" in reasons
+    assert "validation_action_family_coverage_gate_failed" in reasons
+    assert "validation_resolved_outcome_coverage_gate_failed" in reasons
+    assert report["market_level_metrics"]["validation_candidate"][
+        "market_count"
+    ] == 2
+    assert report["market_bootstrap_confidence_intervals"][
+        "resampling_unit"
+    ] == "market_id"
+    assert report["coefficient_stability_metrics"]["method"] == (
+        "leave_one_market_out_fixed_fit_transforms"
+    )
+    assert result.manifest["source_model_candidate_eligible"] is False
+    assert result.manifest["freeze_ready"] is False
+    assert result.manifest["promotion_evidence_eligible"] is False
 
 
 def test_fresh_provider_row_adds_decision_time_regime_features() -> None:
@@ -3219,9 +3379,13 @@ def _attach_regime_conditioned_ev_v2_target_source(
     source_hash = hashlib.sha256(source_content).hexdigest()
     for row in rows:
         row["target_provenance"] = {
-            "source_type": "settled_paper_net_return_after_cost",
+            "source_type": "polymarket_clob_read_only_settlement",
             "source_artifact_path": source_path.name,
             "source_artifact_sha256": source_hash,
+            "settlement_ts": row["market_close_ts"] + 50,
+            "resolved_outcome": (
+                "UP" if (int(row["decision_ts"]) // 10) % 2 == 0 else "DOWN"
+            ),
         }
 
 
@@ -3249,6 +3413,7 @@ def _regime_conditioned_ev_v2_calibration_row(
     exposure = 0.1 * row_index
     same_side_reentry = 1.0 if row_index > 0 else 0.0
     side_flip = 0.0
+    family = "HOLD_TO_SETTLEMENT" if row_index % 2 == 0 else "SELL_BEFORE_CLOSE"
     target = (
         0.12 * (selected_probability - execution_price)
         + 0.02 * quality
@@ -3264,9 +3429,10 @@ def _regime_conditioned_ev_v2_calibration_row(
         "market_id": f"calibration-market-{market_index}",
         "decision_ts": decision_ts,
         "max_input_ts": decision_ts,
+        "market_close_ts": decision_ts + 200,
         "selected_side": side,
-        "selected_action": f"BUY_{side}_HOLD_TO_SETTLEMENT",
-        "action_family": "HOLD_TO_SETTLEMENT",
+        "selected_action": f"BUY_{side}_{family}",
+        "action_family": family,
         "decision_time_features": {
             "canonical_o_action_score": canonical_score,
             "action_score_margin": action_margin,
@@ -3283,15 +3449,17 @@ def _regime_conditioned_ev_v2_calibration_row(
             "time_to_close_seconds": time_to_close,
             "entry_index_within_market": entry_index,
             "cumulative_market_exposure_before_entry": exposure,
-            "same_side_reentry": same_side_reentry,
-            "side_flip": side_flip,
+            "same_side_reentry": int(same_side_reentry),
+            "side_flip": int(side_flip),
         },
         "target_net_return_after_cost": target,
         "target_available_at_ts": decision_ts + 300,
         "target_provenance": {
-            "source_type": "settled_paper_net_return_after_cost",
+            "source_type": "polymarket_clob_read_only_settlement",
             "source_artifact_path": f"historical/{source_run_id}.jsonl",
             "source_artifact_sha256": "c" * 64,
+            "settlement_ts": decision_ts + 250,
+            "resolved_outcome": "UP" if row_index % 2 == 0 else "DOWN",
         },
     }
 

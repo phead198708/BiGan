@@ -9,10 +9,15 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import shutil
+from collections import Counter
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from jsonschema import Draft202012Validator
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training.execution_layer_v2 import (
@@ -56,11 +61,34 @@ V2_REQUIRED_EXCLUDED_RUN_IDS = (
     CURRENT_75_ROW_REPLAY_RUN_ID,
     LATEST_ONE_HOUR_RECONCILED_RUN_ID,
 )
+V2_CALIBRATION_ROW_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[5]
+    / "examples/v8/polymarket_configs/"
+    "execution_layer_v2_regime_conditioned_ev_calibration_row_v2.schema.json"
+)
+V2_APPROVED_TARGET_PROVENANCE_SOURCES = (
+    "polymarket_clob_read_only_settlement",
+    "polymarket_gamma_read_only_settlement",
+    "paper_ledger_read_only_settlement_reconciliation",
+)
+V2_ACTION_CONTRACT = {
+    "BUY_UP_HOLD_TO_SETTLEMENT": ("UP", "HOLD_TO_SETTLEMENT"),
+    "BUY_DOWN_HOLD_TO_SETTLEMENT": ("DOWN", "HOLD_TO_SETTLEMENT"),
+    "BUY_UP_SELL_BEFORE_CLOSE": ("UP", "SELL_BEFORE_CLOSE"),
+    "BUY_DOWN_SELL_BEFORE_CLOSE": ("DOWN", "SELL_BEFORE_CLOSE"),
+}
+V2_REQUIRED_VALIDATION_SIDES = ("UP", "DOWN")
+V2_REQUIRED_VALIDATION_ACTION_FAMILIES = (
+    "HOLD_TO_SETTLEMENT",
+    "SELL_BEFORE_CLOSE",
+)
+V2_REQUIRED_VALIDATION_RESOLVED_OUTCOMES = ("UP", "DOWN")
 _CALIBRATION_ROW_FIELDS = {
     "source_run_id",
     "market_id",
     "decision_ts",
     "max_input_ts",
+    "market_close_ts",
     "selected_side",
     "selected_action",
     "action_family",
@@ -114,6 +142,19 @@ class ExecutionLayerV2RegimeConditionedEVCalibrationConfig:
     min_fit_markets: int = 20
     min_validation_markets: int = 10
     max_abs_coefficient: float = 2.0
+    probability_price_tolerance: float = 1e-9
+    min_relative_mae_improvement: float = 0.05
+    min_relative_mse_improvement: float = 0.05
+    bootstrap_samples: int = 1_000
+    bootstrap_confidence_level: float = 0.95
+    min_bootstrap_improvement_lower_bound: float = 0.0
+    max_lomo_coefficient_absolute_deviation: float = 0.50
+    min_lomo_coefficient_sign_agreement: float = 0.75
+    min_validation_rows_per_side: int = 5
+    min_validation_rows_per_action_family: int = 5
+    min_validation_rows_per_resolved_outcome: int = 5
+    min_validation_markets_per_category: int = 2
+    statistical_random_seed: int = 17_029
     overwrite_existing: bool = False
 
     def __post_init__(self) -> None:
@@ -125,6 +166,12 @@ class ExecutionLayerV2RegimeConditionedEVCalibrationConfig:
             "ridge_alpha",
             "entry_ev_threshold",
             "max_abs_coefficient",
+            "probability_price_tolerance",
+            "min_relative_mae_improvement",
+            "min_relative_mse_improvement",
+            "min_bootstrap_improvement_lower_bound",
+            "max_lomo_coefficient_absolute_deviation",
+            "min_lomo_coefficient_sign_agreement",
         ):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0:
@@ -134,9 +181,26 @@ class ExecutionLayerV2RegimeConditionedEVCalibrationConfig:
             "min_validation_rows",
             "min_fit_markets",
             "min_validation_markets",
+            "bootstrap_samples",
+            "min_validation_rows_per_side",
+            "min_validation_rows_per_action_family",
+            "min_validation_rows_per_resolved_outcome",
+            "min_validation_markets_per_category",
         ):
             if int(getattr(self, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
+        if not 0.0 < self.bootstrap_confidence_level < 1.0:
+            raise ValueError("bootstrap_confidence_level must be in (0, 1)")
+        for name in (
+            "min_relative_mae_improvement",
+            "min_relative_mse_improvement",
+        ):
+            if float(getattr(self, name)) > 1.0:
+                raise ValueError(f"{name} must be <= 1")
+        if not 0.0 <= self.min_lomo_coefficient_sign_agreement <= 1.0:
+            raise ValueError(
+                "min_lomo_coefficient_sign_agreement must be in [0, 1]"
+            )
         object.__setattr__(self, "input_path", Path(self.input_path))
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         if self.future_shadow_input_path is not None:
@@ -190,6 +254,7 @@ def run_execution_layer_v2_regime_conditioned_ev_calibration(
     normalized_rows, invalid_rows, excluded_rows = _normalize_calibration_rows(
         raw_rows,
         source_root=input_file.parent,
+        probability_price_tolerance=config.probability_price_tolerance,
     )
     fit_rows, validation_rows, split_reasons = _chronological_market_split(
         normalized_rows,
@@ -219,6 +284,30 @@ def run_execution_layer_v2_regime_conditioned_ev_calibration(
             validation_rows,
             ridge_alpha=config.ridge_alpha,
             max_abs_coefficient=config.max_abs_coefficient,
+            min_relative_mae_improvement=config.min_relative_mae_improvement,
+            min_relative_mse_improvement=config.min_relative_mse_improvement,
+            bootstrap_samples=config.bootstrap_samples,
+            bootstrap_confidence_level=config.bootstrap_confidence_level,
+            min_bootstrap_improvement_lower_bound=(
+                config.min_bootstrap_improvement_lower_bound
+            ),
+            max_lomo_coefficient_absolute_deviation=(
+                config.max_lomo_coefficient_absolute_deviation
+            ),
+            min_lomo_coefficient_sign_agreement=(
+                config.min_lomo_coefficient_sign_agreement
+            ),
+            min_validation_rows_per_side=config.min_validation_rows_per_side,
+            min_validation_rows_per_action_family=(
+                config.min_validation_rows_per_action_family
+            ),
+            min_validation_rows_per_resolved_outcome=(
+                config.min_validation_rows_per_resolved_outcome
+            ),
+            min_validation_markets_per_category=(
+                config.min_validation_markets_per_category
+            ),
+            statistical_random_seed=config.statistical_random_seed,
         )
         eligibility_reasons.extend(fit_result["blocking_reason_codes"])
         if not eligibility_reasons:
@@ -300,9 +389,30 @@ def run_execution_layer_v2_regime_conditioned_ev_calibration(
         "fit_dataset_hash": split_report["fit_dataset_hash"],
         "validation_dataset_hash": split_report["validation_dataset_hash"],
         "split_hash": split_report["split_hash"],
+        "calibration_row_schema_sha256": split_report[
+            "calibration_row_schema_sha256"
+        ],
         "leakage_checks_passed": split_report["leakage_checks_passed"],
         "validation_improved_over_constant_and_legacy": calibration_report[
             "validation_improved_over_constant_and_legacy"
+        ],
+        "statistical_eligibility_passed": calibration_report[
+            "statistical_eligibility_passed"
+        ],
+        "statistical_eligibility_config_hash": calibration_report[
+            "statistical_eligibility_config_hash"
+        ],
+        "statistical_eligibility_summary_hash": calibration_report[
+            "statistical_eligibility_summary_hash"
+        ],
+        "schema_runtime_validation_agreement_passed": split_report[
+            "schema_runtime_validation_agreement_passed"
+        ],
+        "invalid_row_reason_distribution": split_report[
+            "invalid_row_reason_distribution"
+        ],
+        "final_artifact_eligibility_reason_codes": calibration_report[
+            "blocking_reason_codes"
         ],
         "future_shadow": future_shadow_summary,
         "outcomes_reconciled_after_shadow_window": False,
@@ -355,68 +465,75 @@ def _normalize_calibration_rows(
     rows: list[dict[str, Any]],
     *,
     source_root: Path,
+    probability_price_tolerance: float,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     normalized: list[dict[str, Any]] = []
     invalid: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
+    schema_validator = _calibration_row_schema_validator()
     for index, row in enumerate(rows):
         source_run_id = str(row.get("source_run_id") or "")
-        exclusion_reason = _fit_source_exclusion_reason(source_run_id)
-        if exclusion_reason:
-            excluded.append(
-                {
-                    "row_index": index,
-                    "source_run_id": source_run_id,
-                    "market_id": row.get("market_id"),
-                    "reason_code": exclusion_reason,
-                }
-            )
-            continue
-        reasons: list[str] = []
+        schema_reason_codes = _schema_validation_reason_codes(
+            schema_validator, row
+        )
+        runtime_reason_codes: list[str] = []
         unknown_fields = sorted(set(row) - _CALIBRATION_ROW_FIELDS)
-        reasons.extend(
+        runtime_reason_codes.extend(
             f"calibration_row_unknown_top_level_field:{field}"
             for field in unknown_fields
         )
         features = row.get("decision_time_features")
         if not isinstance(features, dict):
-            reasons.append("decision_time_features_missing")
+            runtime_reason_codes.append("decision_time_features_missing")
             features = {}
         forbidden = _recursive_forbidden_field_paths(
             features, set(EXECUTION_LAYER_V2_FORBIDDEN_OUTCOME_FIELDS)
         )
         if forbidden:
-            reasons.append("forbidden_outcome_field_present_in_decision_time_inputs")
+            runtime_reason_codes.append(
+                "forbidden_outcome_field_present_in_decision_time_inputs"
+            )
         decision_ts = _finite_float(row.get("decision_ts"))
         max_input_ts = _finite_float(row.get("max_input_ts"))
+        market_close_ts = _finite_float(row.get("market_close_ts"))
         target = _finite_float(row.get("target_net_return_after_cost"))
         target_available_at_ts = _finite_float(row.get("target_available_at_ts"))
         target_provenance = row.get("target_provenance")
         if not str(row.get("market_id") or ""):
-            reasons.append("market_id_missing")
+            runtime_reason_codes.append("market_id_missing")
         if not source_run_id:
-            reasons.append("source_run_id_missing")
+            runtime_reason_codes.append("source_run_id_missing")
         if decision_ts is None:
-            reasons.append("decision_ts_invalid")
+            runtime_reason_codes.append("decision_ts_invalid")
         if max_input_ts is None:
-            reasons.append("max_input_ts_invalid")
+            runtime_reason_codes.append("max_input_ts_invalid")
         elif decision_ts is not None and max_input_ts > decision_ts:
-            reasons.append("feature_max_input_ts_after_decision_ts")
+            runtime_reason_codes.append("feature_max_input_ts_after_decision_ts")
+        if market_close_ts is None:
+            runtime_reason_codes.append("market_close_ts_invalid")
+        elif decision_ts is not None and market_close_ts <= decision_ts:
+            runtime_reason_codes.append("market_close_ts_not_after_decision_ts")
         if target is None:
-            reasons.append("target_net_return_after_cost_invalid")
+            runtime_reason_codes.append("target_net_return_after_cost_invalid")
         if target_available_at_ts is None:
-            reasons.append("target_available_at_ts_invalid")
-        elif decision_ts is not None and target_available_at_ts < decision_ts:
-            reasons.append("target_available_before_decision_ts_invalid")
+            runtime_reason_codes.append("target_available_at_ts_invalid")
         if not isinstance(target_provenance, dict):
-            reasons.append("target_provenance_missing")
+            runtime_reason_codes.append("target_provenance_missing")
+            target_provenance = {}
         else:
-            if not str(target_provenance.get("source_type") or ""):
-                reasons.append("target_provenance_source_type_missing")
+            source_type = str(target_provenance.get("source_type") or "")
+            if source_type not in V2_APPROVED_TARGET_PROVENANCE_SOURCES:
+                runtime_reason_codes.append(
+                    "target_provenance_source_not_approved_read_only_settlement"
+                )
             if not str(target_provenance.get("source_artifact_path") or ""):
-                reasons.append("target_provenance_source_artifact_path_missing")
+                runtime_reason_codes.append(
+                    "target_provenance_source_artifact_path_missing"
+                )
             if not _is_sha256(target_provenance.get("source_artifact_sha256")):
-                reasons.append("target_provenance_source_artifact_sha256_invalid")
+                runtime_reason_codes.append(
+                    "target_provenance_source_artifact_sha256_invalid"
+                )
             source_path_text = str(
                 target_provenance.get("source_artifact_path") or ""
             )
@@ -424,25 +541,141 @@ def _normalize_calibration_rows(
             if source_path_text and not source_path.is_absolute():
                 source_path = source_root / source_path
             if source_path_text and not source_path.is_file():
-                reasons.append("target_provenance_source_artifact_not_found")
+                runtime_reason_codes.append(
+                    "target_provenance_source_artifact_not_found"
+                )
             elif source_path.is_file() and _sha256_file(source_path) != str(
                 target_provenance.get("source_artifact_sha256")
             ):
-                reasons.append("target_provenance_source_artifact_sha256_mismatch")
-        missing = [feature for feature in V2_REQUIRED_FEATURES if _finite_float(features.get(feature)) is None]
-        reasons.extend(f"required_feature_missing:{feature}" for feature in missing)
-        if reasons:
+                runtime_reason_codes.append(
+                    "target_provenance_source_artifact_sha256_mismatch"
+                )
+        settlement_ts = _finite_float(target_provenance.get("settlement_ts"))
+        resolved_outcome = str(
+            target_provenance.get("resolved_outcome") or ""
+        ).upper()
+        if settlement_ts is None:
+            runtime_reason_codes.append("target_provenance_settlement_ts_invalid")
+        elif market_close_ts is not None and settlement_ts < market_close_ts:
+            runtime_reason_codes.append("settlement_ts_before_market_close_ts")
+        if resolved_outcome not in V2_REQUIRED_VALIDATION_RESOLVED_OUTCOMES:
+            runtime_reason_codes.append("resolved_outcome_invalid")
+        if (
+            target_available_at_ts is not None
+            and market_close_ts is not None
+            and target_available_at_ts < market_close_ts
+        ):
+            runtime_reason_codes.append("target_available_before_market_close")
+        if (
+            target_available_at_ts is not None
+            and settlement_ts is not None
+            and target_available_at_ts < settlement_ts
+        ):
+            runtime_reason_codes.append("target_available_before_settlement")
+
+        missing = [
+            feature
+            for feature in V2_REQUIRED_FEATURES
+            if _finite_float(features.get(feature)) is None
+        ]
+        runtime_reason_codes.extend(
+            f"required_feature_missing:{feature}" for feature in missing
+        )
+        selected_side = str(row.get("selected_side") or "").upper()
+        selected_action = str(row.get("selected_action") or "")
+        action_family = str(row.get("action_family") or "")
+        if selected_side not in V2_REQUIRED_VALIDATION_SIDES:
+            runtime_reason_codes.append("selected_side_invalid")
+        expected_action_contract = V2_ACTION_CONTRACT.get(selected_action)
+        if expected_action_contract is None:
+            runtime_reason_codes.append("selected_action_invalid")
+        elif (selected_side, action_family) != expected_action_contract:
+            runtime_reason_codes.append("selected_action_side_family_mismatch")
+        if action_family not in V2_REQUIRED_VALIDATION_ACTION_FAMILIES:
+            runtime_reason_codes.append("action_family_invalid")
+
+        probability = _finite_float(features.get("selected_side_probability"))
+        execution_price = _finite_float(features.get("execution_price"))
+        relative_value = _finite_float(
+            features.get("selected_side_probability_minus_execution_price")
+        )
+        for field_name, value in (
+            ("selected_side_probability", probability),
+            ("execution_price", execution_price),
+        ):
+            if value is not None and not 0.0 <= value <= 1.0:
+                runtime_reason_codes.append(f"{field_name}_outside_unit_interval")
+        if (
+            probability is not None
+            and execution_price is not None
+            and relative_value is not None
+            and not math.isclose(
+                relative_value,
+                probability - execution_price,
+                rel_tol=0.0,
+                abs_tol=probability_price_tolerance,
+            )
+        ):
+            runtime_reason_codes.append(
+                "selected_side_probability_minus_execution_price_mismatch"
+            )
+        for feature in (
+            "action_score_margin",
+            "spread_bps",
+            "book_staleness_ms",
+            "time_to_close_seconds",
+            "cumulative_market_exposure_before_entry",
+        ):
+            value = _finite_float(features.get(feature))
+            if value is not None and value < 0.0:
+                runtime_reason_codes.append(f"negative_feature_not_allowed:{feature}")
+        entry_index = _finite_float(features.get("entry_index_within_market"))
+        if entry_index is not None and entry_index < 1.0:
+            runtime_reason_codes.append("entry_index_within_market_below_one")
+        queue_fill = _finite_float(features.get("queue_fill_proxy"))
+        if queue_fill is not None and not 0.0 <= queue_fill <= 1.0:
+            runtime_reason_codes.append("queue_fill_proxy_outside_unit_interval")
+        for feature in ("same_side_reentry", "side_flip"):
+            value = features.get(feature)
+            if isinstance(value, bool) or value not in {0, 1}:
+                runtime_reason_codes.append(f"binary_feature_invalid:{feature}")
+
+        schema_valid = not schema_reason_codes
+        runtime_reason_codes = sorted(set(runtime_reason_codes))
+        runtime_valid = not runtime_reason_codes
+        exclusion_reason = _fit_source_exclusion_reason(source_run_id)
+        if not schema_valid or not runtime_valid:
             invalid.append(
                 {
                     "row_index": index,
                     "market_id": row.get("market_id"),
                     "source_run_id": source_run_id,
-                    "reason_codes": sorted(set(reasons)),
+                    "schema_valid": schema_valid,
+                    "runtime_valid": runtime_valid,
+                    "schema_runtime_validation_agreement": (
+                        schema_valid == runtime_valid
+                    ),
+                    "schema_reason_codes": schema_reason_codes,
+                    "runtime_reason_codes": runtime_reason_codes,
+                    "reason_codes": sorted(
+                        set(schema_reason_codes + runtime_reason_codes)
+                    ),
                     "forbidden_field_paths": forbidden,
                 }
             )
             continue
-        selected_side = str(row.get("selected_side") or "UP").upper()
+        if exclusion_reason:
+            excluded.append(
+                {
+                    "row_index": index,
+                    "source_run_id": source_run_id,
+                    "market_id": row.get("market_id"),
+                    "reason_code": exclusion_reason,
+                    "schema_valid": True,
+                    "runtime_valid": True,
+                }
+            )
+            continue
         normalized.append(
             {
                 "row_index": index,
@@ -450,19 +683,43 @@ def _normalize_calibration_rows(
                 "market_id": str(row["market_id"]),
                 "decision_ts": float(decision_ts),
                 "max_input_ts": float(max_input_ts),
+                "market_close_ts": float(market_close_ts),
                 "selected_side": selected_side,
-                "selected_action": str(row.get("selected_action") or ""),
-                "action_family": str(row.get("action_family") or ""),
+                "selected_action": selected_action,
+                "action_family": action_family,
                 "decision_time_features": {
                     feature: float(features[feature]) for feature in V2_REQUIRED_FEATURES
                 },
                 "target_net_return_after_cost": float(target),
                 "target_available_at_ts": target_available_at_ts,
                 "target_provenance": target_provenance,
+                "resolved_outcome": resolved_outcome,
             }
         )
     normalized.sort(key=lambda row: (row["decision_ts"], row["market_id"], row["row_index"]))
     return normalized, invalid, excluded
+
+
+@lru_cache(maxsize=1)
+def _calibration_row_schema_validator() -> Draft202012Validator:
+    schema = json.loads(V2_CALIBRATION_ROW_SCHEMA_PATH.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    return Draft202012Validator(schema)
+
+
+def _schema_validation_reason_codes(
+    validator: Draft202012Validator,
+    row: dict[str, Any],
+) -> list[str]:
+    reasons: list[str] = []
+    errors = sorted(
+        validator.iter_errors(row),
+        key=lambda error: (list(error.absolute_path), error.validator or ""),
+    )
+    for error in errors:
+        path = ".".join(str(part) for part in error.absolute_path) or "$"
+        reasons.append(f"json_schema_validation_failed:{path}:{error.validator}")
+    return sorted(set(reasons))
 
 
 def _fit_source_exclusion_reason(source_run_id: str) -> str | None:
@@ -553,6 +810,20 @@ def _build_split_report(
         reasons.append("feature_timestamp_causality_violation")
     if prohibited_fit_ids:
         reasons.append("prohibited_source_run_present_in_fit_split")
+    invalid_reason_distribution: Counter[str] = Counter()
+    for row in invalid_rows:
+        invalid_reason_distribution.update(row["reason_codes"])
+    schema_valid_count = len(normalized_rows) + len(excluded_rows) + sum(
+        bool(row["schema_valid"]) for row in invalid_rows
+    )
+    runtime_valid_count = len(normalized_rows) + len(excluded_rows) + sum(
+        bool(row["runtime_valid"]) for row in invalid_rows
+    )
+    schema_runtime_disagreements = [
+        row
+        for row in invalid_rows
+        if not row["schema_runtime_validation_agreement"]
+    ]
     fit_hash = canonical_json_sha256(fit_rows)
     validation_hash = canonical_json_sha256(validation_rows)
     split_identity = {
@@ -584,6 +855,33 @@ def _build_split_report(
         "required_excluded_run_ids": list(V2_REQUIRED_EXCLUDED_RUN_IDS),
         "excluded_rows": excluded_rows,
         "invalid_rows": invalid_rows,
+        "invalid_row_reason_distribution": dict(
+            sorted(invalid_reason_distribution.items())
+        ),
+        "calibration_row_schema_path": str(V2_CALIBRATION_ROW_SCHEMA_PATH),
+        "calibration_row_schema_sha256": _sha256_file(
+            V2_CALIBRATION_ROW_SCHEMA_PATH
+        ),
+        "approved_target_provenance_sources": list(
+            V2_APPROVED_TARGET_PROVENANCE_SOURCES
+        ),
+        "schema_validation_row_count": len(raw_rows),
+        "schema_valid_row_count": schema_valid_count,
+        "schema_invalid_row_count": len(raw_rows) - schema_valid_count,
+        "runtime_valid_row_count": runtime_valid_count,
+        "runtime_invalid_row_count": len(raw_rows) - runtime_valid_count,
+        "schema_runtime_validation_agreement_count": (
+            len(raw_rows) - len(schema_runtime_disagreements)
+        ),
+        "schema_runtime_validation_disagreement_count": len(
+            schema_runtime_disagreements
+        ),
+        "schema_runtime_validation_agreement_passed": not bool(
+            schema_runtime_disagreements
+        ),
+        "schema_runtime_validation_disagreement_rows": (
+            schema_runtime_disagreements
+        ),
         "chronological_split_passed": chronological,
         "market_id_disjointness_passed": market_disjoint,
         "market_id_overlap": sorted(fit_markets & validation_markets),
@@ -616,6 +914,18 @@ def _fit_and_evaluate(
     *,
     ridge_alpha: float,
     max_abs_coefficient: float,
+    min_relative_mae_improvement: float,
+    min_relative_mse_improvement: float,
+    bootstrap_samples: int,
+    bootstrap_confidence_level: float,
+    min_bootstrap_improvement_lower_bound: float,
+    max_lomo_coefficient_absolute_deviation: float,
+    min_lomo_coefficient_sign_agreement: float,
+    min_validation_rows_per_side: int,
+    min_validation_rows_per_action_family: int,
+    min_validation_rows_per_resolved_outcome: int,
+    min_validation_markets_per_category: int,
+    statistical_random_seed: int,
 ) -> dict[str, Any]:
     transforms = _fit_feature_transforms(fit_rows)
     fit_x = [_group_scores(row, transforms) for row in fit_rows]
@@ -648,35 +958,459 @@ def _fit_and_evaluate(
             validation_y, legacy_predictions
         ),
     }
-    candidate = metrics["validation_candidate"]
-    baselines = (
-        metrics["validation_constant_baseline"],
-        metrics["validation_legacy_o_score_baseline"],
+    market_metrics = {
+        "validation_candidate": _market_level_metrics(
+            validation_rows, validation_y, validation_predictions
+        ),
+        "validation_constant_baseline": _market_level_metrics(
+            validation_rows, validation_y, constant_predictions
+        ),
+        "validation_legacy_o_score_baseline": _market_level_metrics(
+            validation_rows, validation_y, legacy_predictions
+        ),
+    }
+    relative_improvements = _relative_baseline_improvements(
+        metrics,
+        market_metrics,
+        min_relative_mae_improvement=min_relative_mae_improvement,
+        min_relative_mse_improvement=min_relative_mse_improvement,
     )
-    improves = all(
-        candidate[metric] < baseline[metric]
-        for baseline in baselines
-        for metric in ("mse", "mae")
+    bootstrap = _market_bootstrap_improvement_intervals(
+        validation_rows,
+        validation_y,
+        candidate_predictions=validation_predictions,
+        baseline_predictions={
+            "constant_baseline": constant_predictions,
+            "legacy_o_score_baseline": legacy_predictions,
+        },
+        samples=bootstrap_samples,
+        confidence_level=bootstrap_confidence_level,
+        minimum_lower_bound=min_bootstrap_improvement_lower_bound,
+        random_seed=statistical_random_seed,
+    )
+    coefficient_stability = _leave_one_market_out_coefficient_stability(
+        fit_rows,
+        fit_x,
+        fit_y,
+        full_coefficients=coefficients,
+        ridge_alpha=ridge_alpha,
+        max_absolute_deviation_allowed=(
+            max_lomo_coefficient_absolute_deviation
+        ),
+        min_sign_agreement_required=min_lomo_coefficient_sign_agreement,
+    )
+    validation_coverage = _validation_coverage_gate(
+        validation_rows,
+        min_rows_per_side=min_validation_rows_per_side,
+        min_rows_per_action_family=min_validation_rows_per_action_family,
+        min_rows_per_resolved_outcome=min_validation_rows_per_resolved_outcome,
+        min_markets_per_category=min_validation_markets_per_category,
     )
     finite_bounded = all(
         math.isfinite(value) and abs(value) <= max_abs_coefficient
         for value in coefficients
     )
     reasons: list[str] = []
-    if not improves:
-        reasons.append("validation_did_not_improve_over_constant_and_legacy_baselines")
+    if not relative_improvements["row_level_gate_passed"]:
+        reasons.append("row_level_relative_improvement_gate_failed")
+    if not relative_improvements["market_level_gate_passed"]:
+        reasons.append("market_level_relative_improvement_gate_failed")
+    if not bootstrap["confidence_gate_passed"]:
+        reasons.append("market_bootstrap_confidence_gate_failed")
+    if not coefficient_stability["stability_gate_passed"]:
+        reasons.append("coefficient_stability_gate_failed")
+    reasons.extend(validation_coverage["blocking_reason_codes"])
     if not finite_bounded:
         reasons.append("coefficients_not_finite_and_bounded")
+    statistical_eligibility_config = {
+        "min_relative_mae_improvement": min_relative_mae_improvement,
+        "min_relative_mse_improvement": min_relative_mse_improvement,
+        "bootstrap_samples": bootstrap_samples,
+        "bootstrap_confidence_level": bootstrap_confidence_level,
+        "min_bootstrap_improvement_lower_bound": (
+            min_bootstrap_improvement_lower_bound
+        ),
+        "max_lomo_coefficient_absolute_deviation": (
+            max_lomo_coefficient_absolute_deviation
+        ),
+        "min_lomo_coefficient_sign_agreement": (
+            min_lomo_coefficient_sign_agreement
+        ),
+        "min_validation_rows_per_side": min_validation_rows_per_side,
+        "min_validation_rows_per_action_family": (
+            min_validation_rows_per_action_family
+        ),
+        "min_validation_rows_per_resolved_outcome": (
+            min_validation_rows_per_resolved_outcome
+        ),
+        "min_validation_markets_per_category": (
+            min_validation_markets_per_category
+        ),
+        "statistical_random_seed": statistical_random_seed,
+    }
+    statistical_summary = {
+        "relative_improvements": relative_improvements,
+        "market_bootstrap_confidence_intervals": bootstrap,
+        "coefficient_stability": coefficient_stability,
+        "validation_coverage": validation_coverage,
+    }
     return {
         "feature_transforms": transforms,
         "group_weights": _GROUP_WEIGHTS,
         "coefficients": coefficients,
         "legacy_coefficients": legacy_coefficients,
         "metrics": metrics,
-        "validation_improved_over_constant_and_legacy": improves,
+        "market_level_metrics": market_metrics,
+        "relative_baseline_improvements": relative_improvements,
+        "market_bootstrap_confidence_intervals": bootstrap,
+        "coefficient_stability_metrics": coefficient_stability,
+        "validation_coverage": validation_coverage,
+        "statistical_eligibility_config": statistical_eligibility_config,
+        "statistical_eligibility_config_hash": canonical_json_sha256(
+            statistical_eligibility_config
+        ),
+        "statistical_eligibility_summary_hash": canonical_json_sha256(
+            statistical_summary
+        ),
+        "validation_improved_over_constant_and_legacy": bool(
+            relative_improvements["row_level_gate_passed"]
+            and relative_improvements["market_level_gate_passed"]
+        ),
+        "statistical_eligibility_passed": not reasons,
         "coefficients_finite_and_bounded": finite_bounded,
         "fit_coefficients_hash": canonical_json_sha256(coefficients),
         "blocking_reason_codes": reasons,
+    }
+
+
+def _market_level_metrics(
+    rows: list[dict[str, Any]],
+    actual: list[float],
+    predicted: list[float],
+) -> dict[str, Any]:
+    by_market: dict[str, list[float]] = {}
+    for row, target, prediction in zip(rows, actual, predicted, strict=True):
+        by_market.setdefault(row["market_id"], []).append(prediction - target)
+    market_rows = {
+        market_id: {
+            "row_count": len(errors),
+            "mae": sum(abs(error) for error in errors) / len(errors),
+            "mse": sum(error * error for error in errors) / len(errors),
+        }
+        for market_id, errors in sorted(by_market.items())
+    }
+    return {
+        "market_count": len(market_rows),
+        "mae": sum(row["mae"] for row in market_rows.values())
+        / len(market_rows),
+        "mse": sum(row["mse"] for row in market_rows.values())
+        / len(market_rows),
+        "by_market": market_rows,
+    }
+
+
+def _relative_baseline_improvements(
+    row_metrics: dict[str, dict[str, float]],
+    market_metrics: dict[str, dict[str, Any]],
+    *,
+    min_relative_mae_improvement: float,
+    min_relative_mse_improvement: float,
+) -> dict[str, Any]:
+    thresholds = {
+        "mae": min_relative_mae_improvement,
+        "mse": min_relative_mse_improvement,
+    }
+    levels = {
+        "row_level": row_metrics,
+        "market_level": market_metrics,
+    }
+    result: dict[str, Any] = {"thresholds": thresholds}
+    for level_name, values in levels.items():
+        candidate = values["validation_candidate"]
+        comparisons: dict[str, Any] = {}
+        for baseline_name in (
+            "validation_constant_baseline",
+            "validation_legacy_o_score_baseline",
+        ):
+            baseline = values[baseline_name]
+            comparison = {
+                metric: _relative_error_improvement(
+                    float(candidate[metric]), float(baseline[metric])
+                )
+                for metric in ("mae", "mse")
+            }
+            comparison["passed"] = all(
+                comparison[metric] >= thresholds[metric]
+                for metric in ("mae", "mse")
+            )
+            comparisons[baseline_name] = comparison
+        result[level_name] = comparisons
+        result[f"{level_name}_gate_passed"] = all(
+            comparison["passed"] for comparison in comparisons.values()
+        )
+    return result
+
+
+def _relative_error_improvement(candidate: float, baseline: float) -> float:
+    if baseline <= 1e-15:
+        return 1.0 if candidate < baseline else 0.0
+    return (baseline - candidate) / baseline
+
+
+def _market_bootstrap_improvement_intervals(
+    rows: list[dict[str, Any]],
+    actual: list[float],
+    *,
+    candidate_predictions: list[float],
+    baseline_predictions: dict[str, list[float]],
+    samples: int,
+    confidence_level: float,
+    minimum_lower_bound: float,
+    random_seed: int,
+) -> dict[str, Any]:
+    by_market: dict[str, list[int]] = {}
+    for index, row in enumerate(rows):
+        by_market.setdefault(row["market_id"], []).append(index)
+    market_ids = sorted(by_market)
+    rng = random.Random(random_seed)
+    alpha = (1.0 - confidence_level) / 2.0
+    comparisons: dict[str, Any] = {}
+    for baseline_name, baseline_values in baseline_predictions.items():
+        metric_results: dict[str, Any] = {}
+        per_market = {
+            market_id: {
+                metric: _market_error_improvement(
+                    by_market[market_id],
+                    actual,
+                    candidate_predictions,
+                    baseline_values,
+                    metric=metric,
+                )
+                for metric in ("mae", "mse")
+            }
+            for market_id in market_ids
+        }
+        for metric in ("mae", "mse"):
+            values = [per_market[market_id][metric] for market_id in market_ids]
+            bootstrap_means = []
+            for _ in range(samples):
+                sample = [rng.choice(values) for _ in values]
+                bootstrap_means.append(sum(sample) / len(sample))
+            bootstrap_means.sort()
+            lower = _quantile(bootstrap_means, alpha)
+            upper = _quantile(bootstrap_means, 1.0 - alpha)
+            metric_results[metric] = {
+                "baseline_minus_candidate_point_estimate": sum(values)
+                / len(values),
+                "confidence_interval_lower": lower,
+                "confidence_interval_upper": upper,
+                "minimum_lower_bound_required": minimum_lower_bound,
+                "passed": lower > minimum_lower_bound,
+            }
+        metric_results["passed"] = all(
+            metric_results[metric]["passed"] for metric in ("mae", "mse")
+        )
+        comparisons[baseline_name] = metric_results
+    return {
+        "resampling_unit": "market_id",
+        "market_count": len(market_ids),
+        "bootstrap_samples": samples,
+        "confidence_level": confidence_level,
+        "random_seed": random_seed,
+        "comparisons": comparisons,
+        "confidence_gate_passed": all(
+            comparison["passed"] for comparison in comparisons.values()
+        ),
+    }
+
+
+def _market_error_improvement(
+    indices: list[int],
+    actual: list[float],
+    candidate: list[float],
+    baseline: list[float],
+    *,
+    metric: str,
+) -> float:
+    exponent = 1 if metric == "mae" else 2
+    candidate_error = sum(
+        abs(candidate[index] - actual[index]) ** exponent for index in indices
+    ) / len(indices)
+    baseline_error = sum(
+        abs(baseline[index] - actual[index]) ** exponent for index in indices
+    ) / len(indices)
+    return baseline_error - candidate_error
+
+
+def _quantile(values: list[float], probability: float) -> float:
+    if not values:
+        return float("nan")
+    position = probability * (len(values) - 1)
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return values[lower]
+    fraction = position - lower
+    return values[lower] * (1.0 - fraction) + values[upper] * fraction
+
+
+def _leave_one_market_out_coefficient_stability(
+    fit_rows: list[dict[str, Any]],
+    fit_x: list[list[float]],
+    fit_y: list[float],
+    *,
+    full_coefficients: list[float],
+    ridge_alpha: float,
+    max_absolute_deviation_allowed: float,
+    min_sign_agreement_required: float,
+) -> dict[str, Any]:
+    markets = sorted({row["market_id"] for row in fit_rows})
+    replicate_coefficients: list[list[float]] = []
+    by_omitted_market: dict[str, Any] = {}
+    for omitted_market in markets:
+        kept = [
+            index
+            for index, row in enumerate(fit_rows)
+            if row["market_id"] != omitted_market
+        ]
+        coefficients = _ridge_fit(
+            [fit_x[index] for index in kept],
+            [fit_y[index] for index in kept],
+            ridge_alpha,
+        )
+        replicate_coefficients.append(coefficients)
+        deviations = [
+            abs(value - full)
+            for value, full in zip(
+                coefficients, full_coefficients, strict=True
+            )
+        ]
+        by_omitted_market[omitted_market] = {
+            "coefficient_hash": canonical_json_sha256(coefficients),
+            "max_absolute_deviation": max(deviations),
+        }
+    coefficient_stddev = []
+    for index in range(len(full_coefficients)):
+        values = [coefficients[index] for coefficients in replicate_coefficients]
+        mean = sum(values) / len(values)
+        coefficient_stddev.append(
+            math.sqrt(sum((value - mean) ** 2 for value in values) / len(values))
+        )
+    max_deviation = max(
+        row["max_absolute_deviation"] for row in by_omitted_market.values()
+    )
+    sign_checks = []
+    for coefficients in replicate_coefficients:
+        for value, full in zip(coefficients[1:], full_coefficients[1:], strict=True):
+            if abs(full) <= 1e-12:
+                sign_checks.append(abs(value) <= max_absolute_deviation_allowed)
+            else:
+                sign_checks.append((value > 0.0) == (full > 0.0))
+    sign_agreement = sum(sign_checks) / len(sign_checks) if sign_checks else 0.0
+    passed = bool(
+        max_deviation <= max_absolute_deviation_allowed
+        and sign_agreement >= min_sign_agreement_required
+    )
+    return {
+        "method": "leave_one_market_out_fixed_fit_transforms",
+        "fit_market_count": len(markets),
+        "replicate_count": len(replicate_coefficients),
+        "coefficient_stddev": coefficient_stddev,
+        "max_coefficient_stddev": max(coefficient_stddev),
+        "max_absolute_deviation": max_deviation,
+        "max_absolute_deviation_allowed": max_absolute_deviation_allowed,
+        "coefficient_sign_agreement_rate": sign_agreement,
+        "min_sign_agreement_required": min_sign_agreement_required,
+        "by_omitted_market": by_omitted_market,
+        "stability_gate_passed": passed,
+    }
+
+
+def _validation_coverage_gate(
+    validation_rows: list[dict[str, Any]],
+    *,
+    min_rows_per_side: int,
+    min_rows_per_action_family: int,
+    min_rows_per_resolved_outcome: int,
+    min_markets_per_category: int,
+) -> dict[str, Any]:
+    side_counts = Counter(row["selected_side"] for row in validation_rows)
+    family_counts = Counter(row["action_family"] for row in validation_rows)
+    outcome_counts = Counter(row["resolved_outcome"] for row in validation_rows)
+    side_market_counts = _unique_market_counts(validation_rows, "selected_side")
+    family_market_counts = _unique_market_counts(validation_rows, "action_family")
+    outcome_market_counts = _unique_market_counts(validation_rows, "resolved_outcome")
+    side_passed = all(
+        side_counts[value] >= min_rows_per_side
+        for value in V2_REQUIRED_VALIDATION_SIDES
+    )
+    family_passed = all(
+        family_counts[value] >= min_rows_per_action_family
+        for value in V2_REQUIRED_VALIDATION_ACTION_FAMILIES
+    )
+    outcome_passed = all(
+        outcome_counts[value] >= min_rows_per_resolved_outcome
+        for value in V2_REQUIRED_VALIDATION_RESOLVED_OUTCOMES
+    )
+    side_market_passed = all(
+        side_market_counts[value] >= min_markets_per_category
+        for value in V2_REQUIRED_VALIDATION_SIDES
+    )
+    family_market_passed = all(
+        family_market_counts[value] >= min_markets_per_category
+        for value in V2_REQUIRED_VALIDATION_ACTION_FAMILIES
+    )
+    outcome_market_passed = all(
+        outcome_market_counts[value] >= min_markets_per_category
+        for value in V2_REQUIRED_VALIDATION_RESOLVED_OUTCOMES
+    )
+    reasons = []
+    if not side_passed:
+        reasons.append("validation_side_coverage_gate_failed")
+    if not family_passed:
+        reasons.append("validation_action_family_coverage_gate_failed")
+    if not outcome_passed:
+        reasons.append("validation_resolved_outcome_coverage_gate_failed")
+    if not side_market_passed:
+        reasons.append("validation_side_market_coverage_gate_failed")
+    if not family_market_passed:
+        reasons.append("validation_action_family_market_coverage_gate_failed")
+    if not outcome_market_passed:
+        reasons.append("validation_resolved_outcome_market_coverage_gate_failed")
+    return {
+        "side_counts": dict(sorted(side_counts.items())),
+        "action_family_counts": dict(sorted(family_counts.items())),
+        "resolved_outcome_counts": dict(sorted(outcome_counts.items())),
+        "side_unique_market_counts": side_market_counts,
+        "action_family_unique_market_counts": family_market_counts,
+        "resolved_outcome_unique_market_counts": outcome_market_counts,
+        "minimum_rows_per_side": min_rows_per_side,
+        "minimum_rows_per_action_family": min_rows_per_action_family,
+        "minimum_rows_per_resolved_outcome": min_rows_per_resolved_outcome,
+        "minimum_markets_per_category": min_markets_per_category,
+        "side_coverage_passed": side_passed and side_market_passed,
+        "action_family_coverage_passed": family_passed and family_market_passed,
+        "resolved_outcome_coverage_passed": outcome_passed and outcome_market_passed,
+        "coverage_gate_passed": bool(
+            side_passed
+            and family_passed
+            and outcome_passed
+            and side_market_passed
+            and family_market_passed
+            and outcome_market_passed
+        ),
+        "blocking_reason_codes": reasons,
+    }
+
+
+def _unique_market_counts(
+    rows: list[dict[str, Any]], field_name: str
+) -> dict[str, int]:
+    markets: dict[str, set[str]] = {}
+    for row in rows:
+        markets.setdefault(str(row[field_name]), set()).add(row["market_id"])
+    return {
+        value: len(market_ids) for value, market_ids in sorted(markets.items())
     }
 
 
@@ -818,6 +1552,13 @@ def _build_frozen_artifact(
         "min_fit_markets": config.min_fit_markets,
         "min_validation_markets": config.min_validation_markets,
         "max_abs_coefficient": config.max_abs_coefficient,
+        "probability_price_tolerance": config.probability_price_tolerance,
+        "statistical_eligibility_config": fit_result[
+            "statistical_eligibility_config"
+        ],
+        "calibration_row_schema_sha256": _sha256_file(
+            V2_CALIBRATION_ROW_SCHEMA_PATH
+        ),
         "group_weights": _GROUP_WEIGHTS,
     }
     feature_groups = {
@@ -869,6 +1610,16 @@ def _build_frozen_artifact(
             "split_hash": canonical_json_sha256(split_identity),
             "calibration_config_hash": canonical_json_sha256(calibration_config),
             "fit_coefficients_hash": fit_result["fit_coefficients_hash"],
+            "calibration_row_schema_sha256": _sha256_file(
+                V2_CALIBRATION_ROW_SCHEMA_PATH
+            ),
+            "statistical_eligibility_config_hash": fit_result[
+                "statistical_eligibility_config_hash"
+            ],
+            "statistical_eligibility_summary_hash": fit_result[
+                "statistical_eligibility_summary_hash"
+            ],
+            "statistical_eligibility_passed": True,
         },
         "calibration_protocol": {
             "split_order": [
@@ -884,6 +1635,11 @@ def _build_frozen_artifact(
             "future_shadow_outcome_free_at_inference": True,
             "threshold_selection_source": "fixed_pre_validation_config",
             "refit_from_future_shadow_result_allowed": False,
+            "statistical_eligibility_required": True,
+            "market_level_evaluation_required": True,
+            "market_bootstrap_confidence_required": True,
+            "coefficient_stability_required": True,
+            "validation_coverage_required": True,
         },
         "independence_constraints": {
             "selected_side_probability_single_group": "market_price_value",
@@ -1018,6 +1774,39 @@ def _build_calibration_report(
         "artifact_path": str(artifact_path) if artifact_path is not None else None,
         "artifact_sha256": _sha256_file(artifact_path) if artifact_path else None,
         "fit_metrics": fit_result["metrics"] if fit_result else {},
+        "market_level_metrics": (
+            fit_result["market_level_metrics"] if fit_result else {}
+        ),
+        "relative_baseline_improvements": (
+            fit_result["relative_baseline_improvements"] if fit_result else {}
+        ),
+        "market_bootstrap_confidence_intervals": (
+            fit_result["market_bootstrap_confidence_intervals"]
+            if fit_result
+            else {}
+        ),
+        "coefficient_stability_metrics": (
+            fit_result["coefficient_stability_metrics"] if fit_result else {}
+        ),
+        "validation_coverage": (
+            fit_result["validation_coverage"] if fit_result else {}
+        ),
+        "statistical_eligibility_passed": bool(
+            fit_result and fit_result["statistical_eligibility_passed"]
+        ),
+        "statistical_eligibility_config_hash": (
+            fit_result["statistical_eligibility_config_hash"]
+            if fit_result
+            else None
+        ),
+        "statistical_eligibility_config": (
+            fit_result["statistical_eligibility_config"] if fit_result else {}
+        ),
+        "statistical_eligibility_summary_hash": (
+            fit_result["statistical_eligibility_summary_hash"]
+            if fit_result
+            else None
+        ),
         "fit_coefficients_hash": (
             fit_result["fit_coefficients_hash"] if fit_result else None
         ),
@@ -1036,7 +1825,14 @@ def _build_calibration_report(
         "settled_outcomes_or_pnl_used_as_historical_training_targets": True,
         "settled_outcomes_or_pnl_used_as_decision_time_inputs": False,
         "leakage_checks_passed": split_report["leakage_checks_passed"],
+        "schema_runtime_validation_agreement_passed": split_report[
+            "schema_runtime_validation_agreement_passed"
+        ],
+        "invalid_row_reason_distribution": split_report[
+            "invalid_row_reason_distribution"
+        ],
         "blocking_reason_codes": eligibility_reasons,
+        "final_artifact_eligibility_reason_codes": eligibility_reasons,
         "future_shadow": future_shadow_summary,
         "future_shadow_outcomes_may_be_reconciled_only_after_window_close": True,
         "refit_from_future_shadow_result_allowed": False,
@@ -1063,6 +1859,10 @@ def _split_report_markdown(report: dict[str, Any]) -> str:
             f"- chronological: `{report['chronological_split_passed']}`",
             f"- market disjoint: `{report['market_id_disjointness_passed']}`",
             f"- leakage checks passed: `{report['leakage_checks_passed']}`",
+            "- schema/runtime validation agreement: "
+            f"`{report['schema_runtime_validation_agreement_passed']}`",
+            f"- invalid rows: `{report['invalid_row_count']}`",
+            f"- invalid reason distribution: `{report['invalid_row_reason_distribution']}`",
             "",
             "## Blocking Reasons",
             "",
@@ -1080,6 +1880,21 @@ def _calibration_report_markdown(report: dict[str, Any]) -> str:
             "",
             f"- status: `{report['protocol_status']}`",
             f"- artifact created: `{report['artifact_created']}`",
+            "- statistical eligibility passed: "
+            f"`{report['statistical_eligibility_passed']}`",
+            "- schema/runtime validation agreement: "
+            f"`{report['schema_runtime_validation_agreement_passed']}`",
+            "- row-level metrics: "
+            f"`{report['fit_metrics']}`",
+            "- market-level metrics: "
+            f"`{report['market_level_metrics']}`",
+            "- relative baseline improvements: "
+            f"`{report['relative_baseline_improvements']}`",
+            "- market bootstrap confidence: "
+            f"`{report['market_bootstrap_confidence_intervals']}`",
+            "- coefficient stability: "
+            f"`{report['coefficient_stability_metrics']}`",
+            f"- validation coverage: `{report['validation_coverage']}`",
             "- validation labels used for fitting: `false`",
             "- validation labels used for threshold selection: `false`",
             "- future shadow refit allowed: `false`",

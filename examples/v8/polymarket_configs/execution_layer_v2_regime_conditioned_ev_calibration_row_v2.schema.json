@@ -5,7 +5,7 @@
   "description": "A settled target is allowed only outside decision_time_features and is consumed only by historical fit or validation evaluation.",
   "type": "object",
   "required": [
-    "source_run_id", "market_id", "decision_ts", "max_input_ts",
+    "source_run_id", "market_id", "decision_ts", "max_input_ts", "market_close_ts",
     "selected_side", "selected_action", "action_family",
     "decision_time_features", "target_net_return_after_cost",
     "target_available_at_ts", "target_provenance"
@@ -15,9 +15,15 @@
     "market_id": {"type": "string", "minLength": 1},
     "decision_ts": {"type": "number"},
     "max_input_ts": {"type": "number"},
+    "market_close_ts": {"type": "number"},
     "selected_side": {"enum": ["UP", "DOWN"]},
-    "selected_action": {"type": "string", "minLength": 1},
-    "action_family": {"type": "string", "minLength": 1},
+    "selected_action": {
+      "enum": [
+        "BUY_UP_HOLD_TO_SETTLEMENT", "BUY_DOWN_HOLD_TO_SETTLEMENT",
+        "BUY_UP_SELL_BEFORE_CLOSE", "BUY_DOWN_SELL_BEFORE_CLOSE"
+      ]
+    },
+    "action_family": {"enum": ["HOLD_TO_SETTLEMENT", "SELL_BEFORE_CLOSE"]},
     "decision_time_features": {
       "type": "object",
       "required": [
@@ -32,20 +38,20 @@
       ],
       "properties": {
         "canonical_o_action_score": {"type": "number"},
-        "action_score_margin": {"type": "number"},
+        "action_score_margin": {"type": "number", "minimum": 0},
         "btc_momentum": {"type": "number"},
         "reference_price_to_beat_distance_at_decision": {"type": "number"},
-        "selected_side_probability": {"type": "number"},
-        "execution_price": {"type": "number"},
+        "selected_side_probability": {"type": "number", "minimum": 0, "maximum": 1},
+        "execution_price": {"type": "number", "minimum": 0, "maximum": 1},
         "selected_side_probability_minus_execution_price": {"type": "number"},
-        "spread_bps": {"type": "number"},
-        "book_staleness_ms": {"type": "number"},
-        "queue_fill_proxy": {"type": "number"},
-        "time_to_close_seconds": {"type": "number"},
-        "entry_index_within_market": {"type": "number"},
-        "cumulative_market_exposure_before_entry": {"type": "number"},
-        "same_side_reentry": {"type": "number", "enum": [0, 1]},
-        "side_flip": {"type": "number", "enum": [0, 1]}
+        "spread_bps": {"type": "number", "minimum": 0},
+        "book_staleness_ms": {"type": "number", "minimum": 0},
+        "queue_fill_proxy": {"type": "number", "minimum": 0, "maximum": 1},
+        "time_to_close_seconds": {"type": "number", "minimum": 0},
+        "entry_index_within_market": {"type": "number", "minimum": 1},
+        "cumulative_market_exposure_before_entry": {"type": "number", "minimum": 0},
+        "same_side_reentry": {"type": "integer", "enum": [0, 1]},
+        "side_flip": {"type": "integer", "enum": [0, 1]}
       },
       "additionalProperties": false
     },
@@ -53,14 +59,40 @@
     "target_available_at_ts": {"type": "number"},
     "target_provenance": {
       "type": "object",
-      "required": ["source_type", "source_artifact_path", "source_artifact_sha256"],
+      "required": ["source_type", "source_artifact_path", "source_artifact_sha256", "settlement_ts", "resolved_outcome"],
       "properties": {
-        "source_type": {"type": "string", "minLength": 1},
+        "source_type": {
+          "enum": [
+            "polymarket_clob_read_only_settlement",
+            "polymarket_gamma_read_only_settlement",
+            "paper_ledger_read_only_settlement_reconciliation"
+          ]
+        },
         "source_artifact_path": {"type": "string", "minLength": 1},
-        "source_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "source_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "settlement_ts": {"type": "number"},
+        "resolved_outcome": {"enum": ["UP", "DOWN"]}
       },
       "additionalProperties": false
     }
   },
+  "allOf": [
+    {
+      "if": {"required": ["selected_action"], "properties": {"selected_action": {"const": "BUY_UP_HOLD_TO_SETTLEMENT"}}},
+      "then": {"properties": {"selected_side": {"const": "UP"}, "action_family": {"const": "HOLD_TO_SETTLEMENT"}}}
+    },
+    {
+      "if": {"required": ["selected_action"], "properties": {"selected_action": {"const": "BUY_DOWN_HOLD_TO_SETTLEMENT"}}},
+      "then": {"properties": {"selected_side": {"const": "DOWN"}, "action_family": {"const": "HOLD_TO_SETTLEMENT"}}}
+    },
+    {
+      "if": {"required": ["selected_action"], "properties": {"selected_action": {"const": "BUY_UP_SELL_BEFORE_CLOSE"}}},
+      "then": {"properties": {"selected_side": {"const": "UP"}, "action_family": {"const": "SELL_BEFORE_CLOSE"}}}
+    },
+    {
+      "if": {"required": ["selected_action"], "properties": {"selected_action": {"const": "BUY_DOWN_SELL_BEFORE_CLOSE"}}},
+      "then": {"properties": {"selected_side": {"const": "DOWN"}, "action_family": {"const": "SELL_BEFORE_CLOSE"}}}
+    }
+  ],
   "additionalProperties": false
 }

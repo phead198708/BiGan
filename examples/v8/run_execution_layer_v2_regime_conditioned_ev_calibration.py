@@ -34,6 +34,31 @@ def main() -> None:
     parser.add_argument("--min-fit-markets", default=20, type=int)
     parser.add_argument("--min-validation-markets", default=10, type=int)
     parser.add_argument("--max-abs-coefficient", default=2.0, type=float)
+    parser.add_argument("--probability-price-tolerance", default=1e-9, type=float)
+    parser.add_argument("--min-relative-mae-improvement", default=0.05, type=float)
+    parser.add_argument("--min-relative-mse-improvement", default=0.05, type=float)
+    parser.add_argument("--bootstrap-samples", default=1_000, type=int)
+    parser.add_argument("--bootstrap-confidence-level", default=0.95, type=float)
+    parser.add_argument(
+        "--min-bootstrap-improvement-lower-bound", default=0.0, type=float
+    )
+    parser.add_argument(
+        "--max-lomo-coefficient-absolute-deviation", default=0.50, type=float
+    )
+    parser.add_argument(
+        "--min-lomo-coefficient-sign-agreement", default=0.75, type=float
+    )
+    parser.add_argument("--min-validation-rows-per-side", default=5, type=int)
+    parser.add_argument(
+        "--min-validation-rows-per-action-family", default=5, type=int
+    )
+    parser.add_argument(
+        "--min-validation-rows-per-resolved-outcome", default=5, type=int
+    )
+    parser.add_argument(
+        "--min-validation-markets-per-category", default=2, type=int
+    )
+    parser.add_argument("--statistical-random-seed", default=17_029, type=int)
     parser.add_argument("--overwrite-existing", action="store_true")
     args = parser.parse_args()
 
@@ -52,6 +77,33 @@ def main() -> None:
                 min_fit_markets=args.min_fit_markets,
                 min_validation_markets=args.min_validation_markets,
                 max_abs_coefficient=args.max_abs_coefficient,
+                probability_price_tolerance=args.probability_price_tolerance,
+                min_relative_mae_improvement=args.min_relative_mae_improvement,
+                min_relative_mse_improvement=args.min_relative_mse_improvement,
+                bootstrap_samples=args.bootstrap_samples,
+                bootstrap_confidence_level=args.bootstrap_confidence_level,
+                min_bootstrap_improvement_lower_bound=(
+                    args.min_bootstrap_improvement_lower_bound
+                ),
+                max_lomo_coefficient_absolute_deviation=(
+                    args.max_lomo_coefficient_absolute_deviation
+                ),
+                min_lomo_coefficient_sign_agreement=(
+                    args.min_lomo_coefficient_sign_agreement
+                ),
+                min_validation_rows_per_side=(
+                    args.min_validation_rows_per_side
+                ),
+                min_validation_rows_per_action_family=(
+                    args.min_validation_rows_per_action_family
+                ),
+                min_validation_rows_per_resolved_outcome=(
+                    args.min_validation_rows_per_resolved_outcome
+                ),
+                min_validation_markets_per_category=(
+                    args.min_validation_markets_per_category
+                ),
+                statistical_random_seed=args.statistical_random_seed,
                 overwrite_existing=args.overwrite_existing,
             )
         )
@@ -68,6 +120,15 @@ def main() -> None:
     print(f"fit_market_count={split['fit_market_count']}")
     print(f"validation_market_count={split['validation_market_count']}")
     print(f"leakage_checks_passed={str(split['leakage_checks_passed']).lower()}")
+    print(
+        "schema_runtime_validation_agreement_passed="
+        f"{str(split['schema_runtime_validation_agreement_passed']).lower()}"
+    )
+    print(f"invalid_row_reason_distribution={split['invalid_row_reason_distribution']}")
+    print(
+        "statistical_eligibility_passed="
+        f"{str(report['statistical_eligibility_passed']).lower()}"
+    )
     print(f"artifact_created={str(report['artifact_created']).lower()}")
     print(f"artifact_sha256={report['artifact_sha256']}")
     print(f"future_shadow_status={shadow['status']}")
