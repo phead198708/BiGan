@@ -41,6 +41,12 @@ FROZEN_REGIME_CONDITIONED_EV_ARTIFACT_NAME = (
 FROZEN_REGIME_CONDITIONED_EV_SCHEMA_VERSION = (
     "bigan-v8-execution-layer-v2-frozen-regime-conditioned-ev-v1"
 )
+FROZEN_REGIME_CONDITIONED_EV_V2_ARTIFACT_NAME = (
+    "execution_layer_v2_frozen_regime_conditioned_ev_v2"
+)
+FROZEN_REGIME_CONDITIONED_EV_V2_SCHEMA_VERSION = (
+    "bigan-v8-execution-layer-v2-frozen-regime-conditioned-ev-v2"
+)
 REGIME_CONDITIONED_EV_FORWARD_SHADOW_SCHEMA_VERSION = (
     "bigan-v8-execution-layer-v2-regime-conditioned-ev-forward-shadow-v1"
 )
@@ -49,6 +55,10 @@ REGIME_CONDITIONED_EV_FORWARD_SHADOW_MANIFEST_SCHEMA_VERSION = (
 )
 CURRENT_75_ROW_REPLAY_RUN_ID = (
     "execution-layer-v2-regime-entry-edge-replay-20260710T123338Z"
+)
+LATEST_ONE_HOUR_RECONCILED_RUN_ID = (
+    "execution-layer-v2-one-hour-remap-paper-goal-20260710T042608Z-"
+    "clob-settlement-reconciled"
 )
 
 REGIME_CONDITIONED_EV_FEATURE_GROUPS: dict[str, tuple[str, ...]] = {
@@ -83,6 +93,27 @@ REGIME_CONDITIONED_EV_REQUIRED_FEATURES = tuple(
     for group_features in REGIME_CONDITIONED_EV_FEATURE_GROUPS.values()
     for feature in group_features
 )
+REGIME_CONDITIONED_EV_V2_FEATURE_GROUPS: dict[str, tuple[str, ...]] = {
+    "canonical_o_score_and_action_margin": (
+        "canonical_o_action_score",
+        "action_score_margin",
+    ),
+    "btc_anchor_direction": (
+        "btc_momentum",
+        "reference_price_to_beat_distance_at_decision",
+    ),
+    "market_price_value": (
+        "selected_side_probability",
+        "execution_price",
+        "selected_side_probability_minus_execution_price",
+    ),
+    "execution_quality": REGIME_CONDITIONED_EV_FEATURE_GROUPS[
+        "execution_quality"
+    ],
+    "pre_entry_exposure_state": REGIME_CONDITIONED_EV_FEATURE_GROUPS[
+        "pre_entry_exposure_state"
+    ],
+}
 _HEX_DIGEST_LENGTH = 64
 _ARTIFACT_TOP_LEVEL_FIELDS = {
     "schema_version",
@@ -113,6 +144,9 @@ _ARTIFACT_TOP_LEVEL_FIELDS = {
     "independence_constraints",
     "feature_groups",
     "coefficients",
+}
+_V2_ARTIFACT_TOP_LEVEL_FIELDS = _ARTIFACT_TOP_LEVEL_FIELDS | {
+    "calibration_protocol"
 }
 
 
@@ -183,31 +217,61 @@ class ExecutionLayerV2RegimeConditionedEVForwardShadowResult:
     manifest: dict[str, Any]
 
 
-def frozen_regime_conditioned_ev_artifact_contract() -> dict[str, Any]:
+def frozen_regime_conditioned_ev_artifact_contract(
+    *, schema_version: str = FROZEN_REGIME_CONDITIONED_EV_SCHEMA_VERSION
+) -> dict[str, Any]:
     """Return the immutable semantic contract enforced by the validator."""
 
+    is_v2 = schema_version == FROZEN_REGIME_CONDITIONED_EV_V2_SCHEMA_VERSION
+    feature_groups = (
+        REGIME_CONDITIONED_EV_V2_FEATURE_GROUPS
+        if is_v2
+        else REGIME_CONDITIONED_EV_FEATURE_GROUPS
+    )
     return {
-        "artifact_name": FROZEN_REGIME_CONDITIONED_EV_ARTIFACT_NAME,
-        "schema_version": FROZEN_REGIME_CONDITIONED_EV_SCHEMA_VERSION,
+        "artifact_name": (
+            FROZEN_REGIME_CONDITIONED_EV_V2_ARTIFACT_NAME
+            if is_v2
+            else FROZEN_REGIME_CONDITIONED_EV_ARTIFACT_NAME
+        ),
+        "schema_version": schema_version,
         "required_feature_groups": {
             name: list(features)
-            for name, features in REGIME_CONDITIONED_EV_FEATURE_GROUPS.items()
+            for name, features in feature_groups.items()
         },
-        "independence_constraints": {
-            "p_up_p_down_single_group": "market_price_value",
-            "btc_anchor_fields_single_group": "btc_anchor_direction",
-            "btc_anchor_maximum_signal_vote_weight": 1.0,
-            "correlated_momentum_reference_counted_as_independent_votes": False,
-        },
+        "independence_constraints": (
+            {
+                "selected_side_probability_single_group": "market_price_value",
+                "p_up_p_down_used_only_to_derive_selected_side_probability": True,
+                "btc_anchor_fields_single_group": "btc_anchor_direction",
+                "btc_anchor_maximum_signal_vote_weight": 1.0,
+                "correlated_momentum_reference_counted_as_independent_votes": False,
+            }
+            if is_v2
+            else {
+                "p_up_p_down_single_group": "market_price_value",
+                "btc_anchor_fields_single_group": "btc_anchor_direction",
+                "btc_anchor_maximum_signal_vote_weight": 1.0,
+                "correlated_momentum_reference_counted_as_independent_votes": False,
+            }
+        ),
         "market_implied_probability_semantics": {
             "market_implied_probability_used_as_direct_fair_value_ev": False,
             "market_implied_probability_used_as_conditioning_feature": True,
             "market_implied_probability_used_as_regime_direction_vote": False,
         },
-        "excluded_fit_run_ids": [CURRENT_75_ROW_REPLAY_RUN_ID],
+        "excluded_fit_run_ids": (
+            [CURRENT_75_ROW_REPLAY_RUN_ID, LATEST_ONE_HOUR_RECONCILED_RUN_ID]
+            if is_v2
+            else [CURRENT_75_ROW_REPLAY_RUN_ID]
+        ),
         "coefficients_must_be_fitted_separately": True,
-        "allowed_top_level_fields": sorted(_ARTIFACT_TOP_LEVEL_FIELDS),
+        "allowed_top_level_fields": sorted(
+            _V2_ARTIFACT_TOP_LEVEL_FIELDS if is_v2 else _ARTIFACT_TOP_LEVEL_FIELDS
+        ),
         "outcome_fields_allowed_as_inputs": False,
+        "settled_outcomes_allowed_as_historical_fit_targets": is_v2,
+        "subtract_execution_cost": not is_v2,
         "production_gate_implemented": False,
     }
 
@@ -252,13 +316,39 @@ def validate_frozen_regime_conditioned_ev_artifact(
             sha256=_sha256_file(resolved),
         )
 
+    schema_version = str(payload.get("schema_version") or "")
+    supported_schema_versions = {
+        FROZEN_REGIME_CONDITIONED_EV_SCHEMA_VERSION,
+        FROZEN_REGIME_CONDITIONED_EV_V2_SCHEMA_VERSION,
+    }
+    if schema_version not in supported_schema_versions:
+        return _invalid_artifact_result(
+            path=str(resolved),
+            status="frozen_regime_conditioned_ev_artifact_unsupported_schema",
+            reason_codes=["regime_conditioned_ev_schema_version_unsupported"],
+            contract=contract,
+            sha256=_sha256_file(resolved),
+        )
+    contract = frozen_regime_conditioned_ev_artifact_contract(
+        schema_version=schema_version
+    )
+    is_v2 = schema_version == FROZEN_REGIME_CONDITIONED_EV_V2_SCHEMA_VERSION
+    allowed_top_level_fields = (
+        _V2_ARTIFACT_TOP_LEVEL_FIELDS if is_v2 else _ARTIFACT_TOP_LEVEL_FIELDS
+    )
+    feature_groups = (
+        REGIME_CONDITIONED_EV_V2_FEATURE_GROUPS
+        if is_v2
+        else REGIME_CONDITIONED_EV_FEATURE_GROUPS
+    )
+
     reasons: list[str] = []
     if "market_implied_probability_used_for_ev" in payload:
         reasons.append(
             "legacy_ambiguous_market_implied_probability_used_for_ev_present"
         )
-    unknown_top_level = sorted(set(payload) - _ARTIFACT_TOP_LEVEL_FIELDS)
-    missing_top_level = sorted(_ARTIFACT_TOP_LEVEL_FIELDS - set(payload))
+    unknown_top_level = sorted(set(payload) - allowed_top_level_fields)
+    missing_top_level = sorted(allowed_top_level_fields - set(payload))
     if unknown_top_level:
         reasons.extend(
             f"regime_conditioned_ev_unknown_top_level_field:{field}"
@@ -272,14 +362,14 @@ def validate_frozen_regime_conditioned_ev_artifact(
     _require_equal(
         payload,
         "artifact_name",
-        FROZEN_REGIME_CONDITIONED_EV_ARTIFACT_NAME,
+        contract["artifact_name"],
         "regime_conditioned_ev_artifact_name_mismatch",
         reasons,
     )
     _require_equal(
         payload,
         "schema_version",
-        FROZEN_REGIME_CONDITIONED_EV_SCHEMA_VERSION,
+        schema_version,
         "regime_conditioned_ev_schema_version_mismatch",
         reasons,
     )
@@ -321,10 +411,21 @@ def validate_frozen_regime_conditioned_ev_artifact(
     )
     if forbidden_paths:
         reasons.append("regime_conditioned_ev_artifact_forbidden_fields_present")
-    _validate_fit_provenance(payload.get("fit_provenance"), reasons)
-    _validate_independence_constraints(payload.get("independence_constraints"), reasons)
-    _validate_feature_groups(payload.get("feature_groups"), reasons)
-    _validate_coefficient_contract(payload.get("coefficients"), reasons)
+    _validate_fit_provenance(payload.get("fit_provenance"), reasons, is_v2=is_v2)
+    _validate_independence_constraints(
+        payload.get("independence_constraints"), reasons, contract=contract
+    )
+    _validate_feature_groups(
+        payload.get("feature_groups"), reasons, feature_groups=feature_groups
+    )
+    _validate_coefficient_contract(
+        payload.get("coefficients"),
+        reasons,
+        feature_groups=feature_groups,
+        subtract_execution_cost=contract["subtract_execution_cost"],
+    )
+    if is_v2:
+        _validate_v2_calibration_protocol(payload.get("calibration_protocol"), reasons)
 
     reasons = sorted(set(reasons))
     valid = not reasons
@@ -341,6 +442,7 @@ def validate_frozen_regime_conditioned_ev_artifact(
         "blocking_reason_codes": reasons,
         "forbidden_field_paths": forbidden_paths,
         "contract": contract,
+        "artifact_schema_version": schema_version,
     }
 
 
@@ -642,7 +744,7 @@ def _build_regime_conditioned_shadow_rows(
             "regime_conditioned_ev": value,
             "regime_conditioned_ev_available": value is not None,
             "regime_conditioned_ev_source": (
-                FROZEN_REGIME_CONDITIONED_EV_ARTIFACT_NAME
+                str(artifact_validation["contract"]["artifact_name"])
                 if artifact_validation["valid"]
                 else artifact_validation["status"]
             ),
@@ -704,6 +806,17 @@ def _extract_decision_time_features(
     if p_up is None and p_down is not None:
         p_up = 1.0 - p_down
         p_up_source = f"derived_one_minus:{p_down_source}"
+    selected_side = normalized["side"]
+    selected_side_probability = p_down if selected_side == "DOWN" else p_up
+    selected_side_probability_source = (
+        p_down_source if selected_side == "DOWN" else p_up_source
+    )
+    execution_price = _optional_float(normalized.get("execution_price"))
+    probability_minus_price = (
+        selected_side_probability - execution_price
+        if selected_side_probability is not None and execution_price is not None
+        else None
+    )
 
     action_margin, action_margin_source = _first_number_with_field(
         raw,
@@ -743,7 +856,6 @@ def _extract_decision_time_features(
     )
     derived_entry_index = int(market_state["entry_count"]) + 1
     prior_side = market_state.get("last_side")
-    selected_side = normalized["side"]
     same_side = (
         explicit_same_side
         if explicit_same_side is not None
@@ -768,7 +880,9 @@ def _extract_decision_time_features(
         "reference_price_to_beat_distance_at_decision": reference_distance,
         "p_up": p_up,
         "p_down": p_down,
-        "execution_price": _optional_float(normalized.get("execution_price")),
+        "selected_side_probability": selected_side_probability,
+        "execution_price": execution_price,
+        "selected_side_probability_minus_execution_price": probability_minus_price,
         "spread_bps": _optional_float(normalized.get("spread_bps")),
         "book_staleness_ms": _optional_float(normalized.get("book_staleness_ms")),
         "queue_fill_proxy": _optional_float(normalized.get("queue_fill_proxy")),
@@ -797,7 +911,11 @@ def _extract_decision_time_features(
         "reference_price_to_beat_distance_at_decision": reference_source,
         "p_up": p_up_source,
         "p_down": p_down_source,
+        "selected_side_probability": selected_side_probability_source,
         "execution_price": normalized.get("execution_price_source_field"),
+        "selected_side_probability_minus_execution_price": (
+            "derived_selected_side_probability_minus_execution_price"
+        ),
         "spread_bps": "spread_bps",
         "book_staleness_ms": "book_staleness_ms",
         "queue_fill_proxy": "queue_fill_proxy",
@@ -862,14 +980,25 @@ def _score_regime_conditioned_ev(
             {},
             list(artifact_validation["blocking_reason_codes"]),
         )
+    feature_groups = {
+        str(name): tuple(str(feature) for feature in group_features)
+        for name, group_features in artifact_validation["contract"][
+            "required_feature_groups"
+        ].items()
+    }
+    required_features = tuple(
+        feature
+        for group_features in feature_groups.values()
+        for feature in group_features
+    )
     missing = sorted(
         feature
-        for feature in REGIME_CONDITIONED_EV_REQUIRED_FEATURES
+        for feature in required_features
         if features.get(feature) is None
     )
     invalid_provenance = sorted(
         feature
-        for feature in REGIME_CONDITIONED_EV_REQUIRED_FEATURES
+        for feature in required_features
         if features.get(feature) is not None
         and not provenance["features"][feature]["valid"]
     )
@@ -885,7 +1014,7 @@ def _score_regime_conditioned_ev(
     coefficients = payload["coefficients"]
     total = float(coefficients["intercept"])
     group_components: dict[str, Any] = {}
-    for group_name, expected_features in REGIME_CONDITIONED_EV_FEATURE_GROUPS.items():
+    for group_name, expected_features in feature_groups.items():
         group_config = coefficients["groups"][group_name]
         feature_values: dict[str, float] = {}
         raw_group_score = 0.0
@@ -934,7 +1063,11 @@ def _score_regime_conditioned_ev(
                 coefficients.get("subtract_execution_cost", True)
             ),
             "execution_cost": execution_cost,
-            "formula": "intercept_plus_independent_group_contributions_minus_cost",
+            "formula": (
+                "intercept_plus_independent_group_contributions_minus_cost"
+                if bool(coefficients.get("subtract_execution_cost", True))
+                else "intercept_plus_independent_group_contributions_net_return_target"
+            ),
         },
         [],
     )
@@ -971,6 +1104,13 @@ def _build_regime_conditioned_forward_shadow_report(
     if not rows and not forbidden_outcome_fields_by_row:
         status = "blocked_fail_closed"
         blocking_reasons.append("no_forward_shadow_rows")
+    required_features = tuple(
+        feature
+        for group_features in artifact_validation["contract"][
+            "required_feature_groups"
+        ].values()
+        for feature in group_features
+    )
     report = {
         "schema_version": REGIME_CONDITIONED_EV_FORWARD_SHADOW_SCHEMA_VERSION,
         "run_id": run_id,
@@ -995,10 +1135,10 @@ def _build_regime_conditioned_forward_shadow_report(
             "executable_shadow": _multi_dimension_counts(guard_passed),
         },
         "rejection_reason_distribution": dict(sorted(rejection_reasons.items())),
-        "feature_coverage": _feature_coverage(rows),
-        "provenance_coverage": _provenance_coverage(rows),
+        "feature_coverage": _feature_coverage(rows, required_features),
+        "provenance_coverage": _provenance_coverage(rows, required_features),
         "decision_rows": rows,
-        "independent_signal_group_contract": frozen_regime_conditioned_ev_artifact_contract(),
+        "independent_signal_group_contract": artifact_validation["contract"],
         "p_up_p_down_used_only_in_market_price_value_group": True,
         "correlated_momentum_reference_counted_as_independent_votes": False,
         "market_implied_probability_used_as_direct_fair_value_ev": False,
@@ -1029,7 +1169,7 @@ def _build_artifact_validation_report(
     run_id: str,
 ) -> dict[str, Any]:
     report = {
-        "schema_version": FROZEN_REGIME_CONDITIONED_EV_SCHEMA_VERSION,
+        "schema_version": artifact_validation["contract"]["schema_version"],
         "run_id": run_id,
         "artifact_path": artifact_validation["path"],
         "artifact_hash": artifact_validation["sha256"],
@@ -1070,6 +1210,14 @@ def _build_artifact_validation_report(
         "current_75_row_replay_used_for_fitting": (
             _current_replay_used_for_fitting(artifact_validation.get("payload"))
         ),
+        "latest_one_hour_reconciled_run_used_for_fitting": _fit_run_used(
+            artifact_validation.get("payload"), LATEST_ONE_HOUR_RECONCILED_RUN_ID
+        ),
+        "future_unseen_forward_shadow_run_used_for_fitting": (
+            _future_shadow_run_used_for_fitting(
+                artifact_validation.get("payload")
+            )
+        ),
         "diagnostic_only": True,
         "production_gate_implemented": False,
         **_safety_report_fields(),
@@ -1096,6 +1244,10 @@ def _artifact_validation_report_to_markdown(report: Mapping[str, Any]) -> str:
         f"`{str(report['legacy_ambiguous_probability_flag_present']).lower()}`",
         "- current_75_row_replay_used_for_fitting: "
         f"`{str(report['current_75_row_replay_used_for_fitting']).lower()}`",
+        "- latest_one_hour_reconciled_run_used_for_fitting: "
+        f"`{str(report['latest_one_hour_reconciled_run_used_for_fitting']).lower()}`",
+        "- future_unseen_forward_shadow_run_used_for_fitting: "
+        f"`{str(report['future_unseen_forward_shadow_run_used_for_fitting']).lower()}`",
         "- production_gate_implemented: `false`",
         "- v8_execution_handoff_allowed: `false`",
         "",
@@ -1106,9 +1258,14 @@ def _artifact_validation_report_to_markdown(report: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _validate_fit_provenance(payload: Any, reasons: list[str]) -> None:
+def _validate_fit_provenance(
+    payload: Any, reasons: list[str], *, is_v2: bool
+) -> None:
     if not isinstance(payload, Mapping):
         reasons.append("regime_conditioned_ev_fit_provenance_missing")
+        return
+    if is_v2:
+        _validate_v2_fit_provenance(payload, reasons)
         return
     expected_fields = {
         "coefficients_source",
@@ -1155,13 +1312,116 @@ def _validate_fit_provenance(payload: Any, reasons: list[str]) -> None:
             reasons.append(f"regime_conditioned_ev_{field_name}_invalid")
 
 
-def _validate_independence_constraints(payload: Any, reasons: list[str]) -> None:
+def _validate_v2_fit_provenance(payload: Mapping[str, Any], reasons: list[str]) -> None:
+    expected_fields = {
+        "coefficients_source",
+        "settled_outcomes_or_pnl_used_as_training_targets",
+        "settled_outcomes_or_pnl_used_as_decision_time_inputs",
+        "uses_validation_labels_for_fitting",
+        "uses_validation_labels_for_threshold_selection",
+        "uses_holdout_labels_for_fitting",
+        "uses_holdout_labels_for_threshold_selection",
+        "uses_oracle_actions_for_fitting",
+        "uses_future_returns_for_fitting",
+        "future_unseen_run_pattern_excluded",
+        "fitted_from_run_ids",
+        "excluded_run_ids",
+        "fit_dataset_hash",
+        "validation_dataset_hash",
+        "split_hash",
+        "calibration_config_hash",
+        "fit_coefficients_hash",
+    }
+    if set(payload) != expected_fields:
+        reasons.append("regime_conditioned_ev_v2_fit_provenance_fields_mismatch")
+    if payload.get("coefficients_source") != "historical_fit_split_only":
+        reasons.append("regime_conditioned_ev_v2_coefficients_source_invalid")
+    if payload.get("settled_outcomes_or_pnl_used_as_training_targets") is not True:
+        reasons.append("regime_conditioned_ev_v2_historical_target_usage_not_true")
+    false_fields = (
+        "settled_outcomes_or_pnl_used_as_decision_time_inputs",
+        "uses_validation_labels_for_fitting",
+        "uses_validation_labels_for_threshold_selection",
+        "uses_holdout_labels_for_fitting",
+        "uses_holdout_labels_for_threshold_selection",
+        "uses_oracle_actions_for_fitting",
+        "uses_future_returns_for_fitting",
+    )
+    for field_name in false_fields:
+        if payload.get(field_name) is not False:
+            reasons.append(f"regime_conditioned_ev_v2_{field_name}_not_false")
+    if payload.get("future_unseen_run_pattern_excluded") is not True:
+        reasons.append("future_unseen_forward_shadow_runs_not_excluded_from_fit")
+    fitted_run_ids = payload.get("fitted_from_run_ids")
+    fitted = (
+        {str(value) for value in fitted_run_ids}
+        if isinstance(fitted_run_ids, list)
+        else set()
+    )
+    if not fitted:
+        reasons.append("regime_conditioned_ev_fitted_from_run_ids_missing")
+    excluded_run_ids = payload.get("excluded_run_ids")
+    excluded = (
+        {str(value) for value in excluded_run_ids}
+        if isinstance(excluded_run_ids, list)
+        else set()
+    )
+    for run_id in (CURRENT_75_ROW_REPLAY_RUN_ID, LATEST_ONE_HOUR_RECONCILED_RUN_ID):
+        if run_id in fitted:
+            reasons.append(f"excluded_run_present_in_fit_lineage:{run_id}")
+        if run_id not in excluded:
+            reasons.append(f"required_excluded_run_missing:{run_id}")
+    if any("forward-shadow" in run_id or "forward_shadow" in run_id for run_id in fitted):
+        reasons.append("future_unseen_forward_shadow_run_present_in_fit_lineage")
+    for field_name in (
+        "fit_dataset_hash",
+        "validation_dataset_hash",
+        "split_hash",
+        "calibration_config_hash",
+        "fit_coefficients_hash",
+    ):
+        if not _is_sha256(payload.get(field_name)):
+            reasons.append(f"regime_conditioned_ev_{field_name}_invalid")
+
+
+def _validate_v2_calibration_protocol(payload: Any, reasons: list[str]) -> None:
+    expected = {
+        "split_order": [
+            "historical_fit",
+            "validation",
+            "future_unseen_shadow_holdout",
+        ],
+        "chronological_split_required": True,
+        "market_id_disjointness_required_where_possible": True,
+        "feature_max_input_ts_must_not_exceed_decision_ts": True,
+        "historical_fit_target": "settled_net_return_after_cost",
+        "validation_labels_used_for_evaluation_only": True,
+        "future_shadow_outcome_free_at_inference": True,
+        "threshold_selection_source": "fixed_pre_validation_config",
+        "refit_from_future_shadow_result_allowed": False,
+    }
+    if not isinstance(payload, Mapping):
+        reasons.append("regime_conditioned_ev_v2_calibration_protocol_missing")
+        return
+    if set(payload) != set(expected):
+        reasons.append("regime_conditioned_ev_v2_calibration_protocol_fields_mismatch")
+    for field_name, expected_value in expected.items():
+        if payload.get(field_name) != expected_value:
+            reasons.append(
+                f"regime_conditioned_ev_v2_calibration_protocol_invalid:{field_name}"
+            )
+
+
+def _validate_independence_constraints(
+    payload: Any,
+    reasons: list[str],
+    *,
+    contract: Mapping[str, Any],
+) -> None:
     if not isinstance(payload, Mapping):
         reasons.append("regime_conditioned_ev_independence_constraints_missing")
         return
-    expected = frozen_regime_conditioned_ev_artifact_contract()[
-        "independence_constraints"
-    ]
+    expected = contract["independence_constraints"]
     if set(payload) != set(expected):
         reasons.append("regime_conditioned_ev_independence_constraint_fields_mismatch")
     for key, value in expected.items():
@@ -1169,14 +1429,19 @@ def _validate_independence_constraints(payload: Any, reasons: list[str]) -> None
             reasons.append(f"regime_conditioned_ev_independence_constraint_invalid:{key}")
 
 
-def _validate_feature_groups(payload: Any, reasons: list[str]) -> None:
+def _validate_feature_groups(
+    payload: Any,
+    reasons: list[str],
+    *,
+    feature_groups: Mapping[str, tuple[str, ...]],
+) -> None:
     if not isinstance(payload, Mapping):
         reasons.append("regime_conditioned_ev_feature_groups_missing")
         return
-    if set(payload) != set(REGIME_CONDITIONED_EV_FEATURE_GROUPS):
+    if set(payload) != set(feature_groups):
         reasons.append("regime_conditioned_ev_feature_group_names_mismatch")
     memberships: dict[str, list[str]] = {}
-    for group_name, expected_features in REGIME_CONDITIONED_EV_FEATURE_GROUPS.items():
+    for group_name, expected_features in feature_groups.items():
         group = payload.get(group_name)
         if not isinstance(group, Mapping):
             reasons.append(f"regime_conditioned_ev_feature_group_missing:{group_name}")
@@ -1194,7 +1459,12 @@ def _validate_feature_groups(payload: Any, reasons: list[str]) -> None:
     for feature, groups in memberships.items():
         if len(groups) != 1:
             reasons.append(f"regime_conditioned_ev_feature_double_counted:{feature}")
-    for feature in ("p_up", "p_down"):
+    probability_features = (
+        ("selected_side_probability",)
+        if "selected_side_probability" in memberships
+        else ("p_up", "p_down")
+    )
+    for feature in probability_features:
         if memberships.get(feature) != ["market_price_value"]:
             reasons.append(f"regime_conditioned_ev_probability_group_invalid:{feature}")
     for feature in (
@@ -1205,7 +1475,13 @@ def _validate_feature_groups(payload: Any, reasons: list[str]) -> None:
             reasons.append(f"regime_conditioned_ev_btc_anchor_group_invalid:{feature}")
 
 
-def _validate_coefficient_contract(payload: Any, reasons: list[str]) -> None:
+def _validate_coefficient_contract(
+    payload: Any,
+    reasons: list[str],
+    *,
+    feature_groups: Mapping[str, tuple[str, ...]],
+    subtract_execution_cost: bool,
+) -> None:
     if not isinstance(payload, Mapping):
         reasons.append("regime_conditioned_ev_coefficients_missing")
         return
@@ -1224,9 +1500,9 @@ def _validate_coefficient_contract(payload: Any, reasons: list[str]) -> None:
     if not isinstance(groups, Mapping):
         reasons.append("regime_conditioned_ev_group_coefficients_missing")
         return
-    if set(groups) != set(REGIME_CONDITIONED_EV_FEATURE_GROUPS):
+    if set(groups) != set(feature_groups):
         reasons.append("regime_conditioned_ev_group_coefficient_names_mismatch")
-    for group_name, expected_features in REGIME_CONDITIONED_EV_FEATURE_GROUPS.items():
+    for group_name, expected_features in feature_groups.items():
         group = groups.get(group_name)
         if not isinstance(group, Mapping):
             reasons.append(f"regime_conditioned_ev_group_coefficient_missing:{group_name}")
@@ -1282,8 +1558,8 @@ def _validate_coefficient_contract(payload: Any, reasons: list[str]) -> None:
             not _is_finite_number(value) for value in offsets.values()
         ):
             reasons.append(f"regime_conditioned_ev_{offset_name}_invalid")
-    if payload.get("subtract_execution_cost") is not True:
-        reasons.append("regime_conditioned_ev_execution_cost_not_subtracted")
+    if payload.get("subtract_execution_cost") is not subtract_execution_cost:
+        reasons.append("regime_conditioned_ev_execution_cost_semantics_invalid")
 
 
 def _invalid_artifact_result(
@@ -1319,9 +1595,11 @@ def _count(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
     return dict(sorted(Counter(str(row.get(field) or "UNKNOWN") for row in rows).items()))
 
 
-def _feature_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _feature_coverage(
+    rows: list[dict[str, Any]], required_features: tuple[str, ...]
+) -> dict[str, Any]:
     coverage: dict[str, Any] = {}
-    for feature in REGIME_CONDITIONED_EV_REQUIRED_FEATURES:
+    for feature in required_features:
         available = [
             row
             for row in rows
@@ -1340,13 +1618,15 @@ def _feature_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return coverage
 
 
-def _provenance_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    total = len(rows) * len(REGIME_CONDITIONED_EV_REQUIRED_FEATURES)
+def _provenance_coverage(
+    rows: list[dict[str, Any]], required_features: tuple[str, ...]
+) -> dict[str, Any]:
+    total = len(rows) * len(required_features)
     valid = 0
     available = 0
     violation = 0
     by_feature: dict[str, Any] = {}
-    for feature in REGIME_CONDITIONED_EV_REQUIRED_FEATURES:
+    for feature in required_features:
         feature_available = 0
         feature_valid = 0
         feature_violations = 0
@@ -1497,6 +1777,36 @@ def _current_replay_used_for_fitting(payload: Any) -> bool:
     )
 
 
+def _fit_run_used(payload: Any, run_id: str) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    fit = payload.get("fit_provenance")
+    if not isinstance(fit, Mapping):
+        return False
+    fitted_run_ids = fit.get("fitted_from_run_ids")
+    return bool(
+        isinstance(fitted_run_ids, list)
+        and run_id in {str(value) for value in fitted_run_ids}
+    )
+
+
+def _future_shadow_run_used_for_fitting(payload: Any) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    fit = payload.get("fit_provenance")
+    if not isinstance(fit, Mapping):
+        return False
+    fitted_run_ids = fit.get("fitted_from_run_ids")
+    return bool(
+        isinstance(fitted_run_ids, list)
+        and any(
+            "forward-shadow" in str(value).lower()
+            or "forward_shadow" in str(value).lower()
+            for value in fitted_run_ids
+        )
+    )
+
+
 def _artifact_probability_semantic(payload: Any, field_name: str) -> bool | None:
     if not isinstance(payload, Mapping):
         return None
@@ -1506,8 +1816,8 @@ def _artifact_probability_semantic(payload: Any, field_name: str) -> bool | None
 
 def _future_v2_probability_value_contract_recommendation() -> dict[str, Any]:
     return {
-        "contract_name": "execution_layer_v2_regime_conditioned_ev_v2_proposed",
-        "status": "recommended_not_implemented",
+        "contract_name": FROZEN_REGIME_CONDITIONED_EV_V2_ARTIFACT_NAME,
+        "status": "calibration_protocol_implemented_real_coefficients_pending",
         "fields": [
             "selected_side_probability",
             "execution_price",
@@ -1522,20 +1832,24 @@ def _future_v2_probability_value_contract_recommendation() -> dict[str, Any]:
         "derived_value_semantics": (
             "market_relative_value_conditioner_not_calibrated_fair_value_ev"
         ),
-        "calibrated_ev_formula_defined": False,
+        "calibrated_ev_formula_defined": True,
         "direct_fair_value_ev_fallback_allowed": False,
         "regime_direction_vote_allowed": False,
         "conditioning_feature_only": True,
         "real_coefficients_created": False,
-        "future_schema_version_required": True,
+        "future_schema_version_required": False,
     }
 
 
 __all__ = [
     "CURRENT_75_ROW_REPLAY_RUN_ID",
+    "LATEST_ONE_HOUR_RECONCILED_RUN_ID",
     "FROZEN_REGIME_CONDITIONED_EV_ARTIFACT_NAME",
     "FROZEN_REGIME_CONDITIONED_EV_SCHEMA_VERSION",
+    "FROZEN_REGIME_CONDITIONED_EV_V2_ARTIFACT_NAME",
+    "FROZEN_REGIME_CONDITIONED_EV_V2_SCHEMA_VERSION",
     "REGIME_CONDITIONED_EV_FEATURE_GROUPS",
+    "REGIME_CONDITIONED_EV_V2_FEATURE_GROUPS",
     "REGIME_CONDITIONED_EV_FORWARD_SHADOW_MANIFEST_SCHEMA_VERSION",
     "REGIME_CONDITIONED_EV_FORWARD_SHADOW_SCHEMA_VERSION",
     "ExecutionLayerV2RegimeConditionedEVForwardShadowConfig",

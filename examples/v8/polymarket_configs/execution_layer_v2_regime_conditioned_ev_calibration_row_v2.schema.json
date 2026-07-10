@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigan://v8/execution_layer_v2_regime_conditioned_ev_calibration_row_v2.schema.json",
+  "title": "Execution Layer v2 Regime-Conditioned EV Calibration Row v2",
+  "description": "A settled target is allowed only outside decision_time_features and is consumed only by historical fit or validation evaluation.",
+  "type": "object",
+  "required": [
+    "source_run_id", "market_id", "decision_ts", "max_input_ts",
+    "selected_side", "selected_action", "action_family",
+    "decision_time_features", "target_net_return_after_cost",
+    "target_available_at_ts", "target_provenance"
+  ],
+  "properties": {
+    "source_run_id": {"type": "string", "minLength": 1},
+    "market_id": {"type": "string", "minLength": 1},
+    "decision_ts": {"type": "number"},
+    "max_input_ts": {"type": "number"},
+    "selected_side": {"enum": ["UP", "DOWN"]},
+    "selected_action": {"type": "string", "minLength": 1},
+    "action_family": {"type": "string", "minLength": 1},
+    "decision_time_features": {
+      "type": "object",
+      "required": [
+        "canonical_o_action_score", "action_score_margin", "btc_momentum",
+        "reference_price_to_beat_distance_at_decision",
+        "selected_side_probability", "execution_price",
+        "selected_side_probability_minus_execution_price", "spread_bps",
+        "book_staleness_ms", "queue_fill_proxy", "time_to_close_seconds",
+        "entry_index_within_market",
+        "cumulative_market_exposure_before_entry", "same_side_reentry",
+        "side_flip"
+      ],
+      "properties": {
+        "canonical_o_action_score": {"type": "number"},
+        "action_score_margin": {"type": "number"},
+        "btc_momentum": {"type": "number"},
+        "reference_price_to_beat_distance_at_decision": {"type": "number"},
+        "selected_side_probability": {"type": "number"},
+        "execution_price": {"type": "number"},
+        "selected_side_probability_minus_execution_price": {"type": "number"},
+        "spread_bps": {"type": "number"},
+        "book_staleness_ms": {"type": "number"},
+        "queue_fill_proxy": {"type": "number"},
+        "time_to_close_seconds": {"type": "number"},
+        "entry_index_within_market": {"type": "number"},
+        "cumulative_market_exposure_before_entry": {"type": "number"},
+        "same_side_reentry": {"type": "number", "enum": [0, 1]},
+        "side_flip": {"type": "number", "enum": [0, 1]}
+      },
+      "additionalProperties": false
+    },
+    "target_net_return_after_cost": {"type": "number"},
+    "target_available_at_ts": {"type": "number"},
+    "target_provenance": {
+      "type": "object",
+      "required": ["source_type", "source_artifact_path", "source_artifact_sha256"],
+      "properties": {
+        "source_type": {"type": "string", "minLength": 1},
+        "source_artifact_path": {"type": "string", "minLength": 1},
+        "source_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
