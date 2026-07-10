@@ -5,13 +5,40 @@
   "description": "A settled target is allowed only outside decision_time_features and is consumed only by historical fit or validation evaluation.",
   "type": "object",
   "required": [
-    "source_run_id", "market_id", "decision_ts", "max_input_ts", "market_close_ts",
+    "source_run_id", "source_intent_id", "source_fill_id", "row_identity",
+    "source_lineage", "market_id", "decision_ts", "max_input_ts", "market_close_ts",
     "selected_side", "selected_action", "action_family",
     "decision_time_features", "target_net_return_after_cost",
     "target_available_at_ts", "target_provenance"
   ],
   "properties": {
     "source_run_id": {"type": "string", "minLength": 1},
+    "source_intent_id": {"type": "string", "minLength": 1},
+    "source_fill_id": {"type": "string", "minLength": 1},
+    "row_identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_lineage": {
+      "type": "object",
+      "required": [
+        "trace_artifact_path", "trace_artifact_sha256", "trace_row_id",
+        "intent_artifact_path", "intent_artifact_sha256",
+        "fill_artifact_path", "fill_artifact_sha256",
+        "settlement_artifact_path", "settlement_artifact_sha256",
+        "settlement_row_id"
+      ],
+      "properties": {
+        "trace_artifact_path": {"type": "string", "minLength": 1},
+        "trace_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "trace_row_id": {"type": "string", "minLength": 1},
+        "intent_artifact_path": {"type": "string", "minLength": 1},
+        "intent_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "fill_artifact_path": {"type": "string", "minLength": 1},
+        "fill_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "settlement_artifact_path": {"type": "string", "minLength": 1},
+        "settlement_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "settlement_row_id": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
     "market_id": {"type": "string", "minLength": 1},
     "decision_ts": {"type": "number"},
     "max_input_ts": {"type": "number"},

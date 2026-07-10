@@ -85,6 +85,10 @@ V2_REQUIRED_VALIDATION_ACTION_FAMILIES = (
 V2_REQUIRED_VALIDATION_RESOLVED_OUTCOMES = ("UP", "DOWN")
 _CALIBRATION_ROW_FIELDS = {
     "source_run_id",
+    "source_intent_id",
+    "source_fill_id",
+    "row_identity",
+    "source_lineage",
     "market_id",
     "decision_ts",
     "max_input_ts",
@@ -235,6 +239,44 @@ class ExecutionLayerV2RegimeConditionedEVCalibrationResult:
     manifest: dict[str, Any]
 
 
+def regime_conditioned_ev_v2_calibration_row_identity(
+    *,
+    source_run_id: str,
+    market_id: str,
+    decision_ts: float | int,
+    selected_action: str,
+    source_intent_id: str,
+    source_fill_id: str,
+) -> str:
+    """Return the stable economic decision/fill identity used by #167."""
+
+    return canonical_json_sha256(
+        {
+            "source_run_id": source_run_id,
+            "market_id": market_id,
+            "decision_ts": decision_ts,
+            "selected_action": selected_action,
+            "source_intent_id": source_intent_id,
+            "source_fill_id": source_fill_id,
+        }
+    )
+
+
+def validate_regime_conditioned_ev_v2_calibration_rows(
+    rows: list[dict[str, Any]],
+    *,
+    source_root: Path | str,
+    probability_price_tolerance: float = 1e-9,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Reuse the exact v2 schema/runtime validator for corpus construction."""
+
+    return _normalize_calibration_rows(
+        rows,
+        source_root=Path(source_root),
+        probability_price_tolerance=probability_price_tolerance,
+    )
+
+
 def run_execution_layer_v2_regime_conditioned_ev_calibration(
     config: ExecutionLayerV2RegimeConditionedEVCalibrationConfig,
 ) -> ExecutionLayerV2RegimeConditionedEVCalibrationResult:
@@ -251,10 +293,12 @@ def run_execution_layer_v2_regime_conditioned_ev_calibration(
 
     input_file = _resolve_input_file(config.input_path)
     raw_rows = _load_rows(input_file)
-    normalized_rows, invalid_rows, excluded_rows = _normalize_calibration_rows(
+    normalized_rows, invalid_rows, excluded_rows = (
+        validate_regime_conditioned_ev_v2_calibration_rows(
         raw_rows,
         source_root=input_file.parent,
         probability_price_tolerance=config.probability_price_tolerance,
+        )
     )
     fit_rows, validation_rows, split_reasons = _chronological_market_split(
         normalized_rows,
@@ -499,10 +543,17 @@ def _normalize_calibration_rows(
         target = _finite_float(row.get("target_net_return_after_cost"))
         target_available_at_ts = _finite_float(row.get("target_available_at_ts"))
         target_provenance = row.get("target_provenance")
+        source_intent_id = str(row.get("source_intent_id") or "")
+        source_fill_id = str(row.get("source_fill_id") or "")
+        source_lineage = row.get("source_lineage")
         if not str(row.get("market_id") or ""):
             runtime_reason_codes.append("market_id_missing")
         if not source_run_id:
             runtime_reason_codes.append("source_run_id_missing")
+        if not source_intent_id:
+            runtime_reason_codes.append("source_intent_id_missing")
+        if not source_fill_id:
+            runtime_reason_codes.append("source_fill_id_missing")
         if decision_ts is None:
             runtime_reason_codes.append("decision_ts_invalid")
         if max_input_ts is None:
@@ -593,6 +644,32 @@ def _normalize_calibration_rows(
             runtime_reason_codes.append("selected_action_side_family_mismatch")
         if action_family not in V2_REQUIRED_VALIDATION_ACTION_FAMILIES:
             runtime_reason_codes.append("action_family_invalid")
+        expected_row_identity = regime_conditioned_ev_v2_calibration_row_identity(
+            source_run_id=source_run_id,
+            market_id=str(row.get("market_id") or ""),
+            decision_ts=row.get("decision_ts"),
+            selected_action=selected_action,
+            source_intent_id=source_intent_id,
+            source_fill_id=source_fill_id,
+        )
+        if row.get("row_identity") != expected_row_identity:
+            runtime_reason_codes.append("calibration_row_identity_mismatch")
+        runtime_reason_codes.extend(
+            _source_lineage_reason_codes(source_lineage, source_root=source_root)
+        )
+        if isinstance(source_lineage, dict) and isinstance(target_provenance, dict):
+            if target_provenance.get("source_artifact_path") != source_lineage.get(
+                "settlement_artifact_path"
+            ):
+                runtime_reason_codes.append(
+                    "target_and_lineage_settlement_artifact_path_mismatch"
+                )
+            if target_provenance.get(
+                "source_artifact_sha256"
+            ) != source_lineage.get("settlement_artifact_sha256"):
+                runtime_reason_codes.append(
+                    "target_and_lineage_settlement_artifact_hash_mismatch"
+                )
 
         probability = _finite_float(features.get("selected_side_probability"))
         execution_price = _finite_float(features.get("execution_price"))
@@ -680,6 +757,10 @@ def _normalize_calibration_rows(
             {
                 "row_index": index,
                 "source_run_id": source_run_id,
+                "source_intent_id": source_intent_id,
+                "source_fill_id": source_fill_id,
+                "row_identity": str(row["row_identity"]),
+                "source_lineage": source_lineage,
                 "market_id": str(row["market_id"]),
                 "decision_ts": float(decision_ts),
                 "max_input_ts": float(max_input_ts),
@@ -698,6 +779,35 @@ def _normalize_calibration_rows(
         )
     normalized.sort(key=lambda row: (row["decision_ts"], row["market_id"], row["row_index"]))
     return normalized, invalid, excluded
+
+
+def _source_lineage_reason_codes(
+    payload: Any, *, source_root: Path
+) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["source_lineage_missing"]
+    reasons: list[str] = []
+    for artifact_name in ("trace", "intent", "fill", "settlement"):
+        path_field = f"{artifact_name}_artifact_path"
+        hash_field = f"{artifact_name}_artifact_sha256"
+        path_text = str(payload.get(path_field) or "")
+        expected_hash = str(payload.get(hash_field) or "")
+        if not path_text:
+            reasons.append(f"source_lineage_path_missing:{artifact_name}")
+            continue
+        path = Path(path_text).expanduser()
+        if not path.is_absolute():
+            path = source_root / path
+        if not path.is_file():
+            reasons.append(f"source_lineage_artifact_not_found:{artifact_name}")
+        elif not _is_sha256(expected_hash):
+            reasons.append(f"source_lineage_artifact_hash_invalid:{artifact_name}")
+        elif _sha256_file(path) != expected_hash:
+            reasons.append(f"source_lineage_artifact_hash_mismatch:{artifact_name}")
+    for field_name in ("trace_row_id", "settlement_row_id"):
+        if not str(payload.get(field_name) or ""):
+            reasons.append(f"source_lineage_identifier_missing:{field_name}")
+    return reasons
 
 
 @lru_cache(maxsize=1)

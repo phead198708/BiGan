@@ -105,7 +105,17 @@ from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev_calib
     REGIME_CONDITIONED_EV_V2_SPLIT_REPORT_SCHEMA_VERSION,
     ExecutionLayerV2RegimeConditionedEVCalibrationConfig,
     ExecutionLayerV2RegimeConditionedEVCalibrationResult,
+    regime_conditioned_ev_v2_calibration_row_identity,
     run_execution_layer_v2_regime_conditioned_ev_calibration,
+    validate_regime_conditioned_ev_v2_calibration_rows,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev_corpus import (
+    REGIME_CONDITIONED_EV_V2_CORPUS_MANIFEST_SCHEMA_VERSION,
+    REGIME_CONDITIONED_EV_V2_CORPUS_QUALITY_SCHEMA_VERSION,
+    ExecutionLayerV2RegimeConditionedEVCorpusConfig,
+    ExecutionLayerV2RegimeConditionedEVCorpusResult,
+    execution_layer_v2_regime_conditioned_ev_corpus_quality_to_markdown,
+    run_execution_layer_v2_regime_conditioned_ev_corpus_builder,
 )
 from bigan.v8.polymarket.training.model import (
     predict_polymarket_policy_examples,
@@ -166,6 +176,8 @@ __all__ = [
     "REGIME_CONDITIONED_EV_FORWARD_SHADOW_MANIFEST_SCHEMA_VERSION",
     "REGIME_CONDITIONED_EV_FORWARD_SHADOW_SCHEMA_VERSION",
     "REGIME_CONDITIONED_EV_V2_CALIBRATION_REPORT_SCHEMA_VERSION",
+    "REGIME_CONDITIONED_EV_V2_CORPUS_MANIFEST_SCHEMA_VERSION",
+    "REGIME_CONDITIONED_EV_V2_CORPUS_QUALITY_SCHEMA_VERSION",
     "REGIME_CONDITIONED_EV_V2_PROTOCOL_MANIFEST_SCHEMA_VERSION",
     "REGIME_CONDITIONED_EV_V2_SPLIT_REPORT_SCHEMA_VERSION",
     "DEFAULT_REAL_CORPUS_MODEL_VERSION",
@@ -186,6 +198,8 @@ __all__ = [
     "ExecutionLayerV2RegimeConditionedEVForwardShadowResult",
     "ExecutionLayerV2RegimeConditionedEVCalibrationConfig",
     "ExecutionLayerV2RegimeConditionedEVCalibrationResult",
+    "ExecutionLayerV2RegimeConditionedEVCorpusConfig",
+    "ExecutionLayerV2RegimeConditionedEVCorpusResult",
     "ExecutionLayerV2Signal",
     "HTS_REGIME_RISK_POLICY_VARIANTS",
     "POLICY_REPLAY_VARIANTS",
@@ -214,6 +228,7 @@ __all__ = [
     "execution_layer_v2_policy_replay_report_to_markdown",
     "execution_layer_v2_regime_entry_edge_replay_report_to_markdown",
     "execution_layer_v2_regime_conditioned_ev_forward_shadow_report_to_markdown",
+    "execution_layer_v2_regime_conditioned_ev_corpus_quality_to_markdown",
     "frozen_regime_conditioned_ev_artifact_contract",
     "load_execution_layer_v2_input_rows",
     "load_polymarket_policy_dataset",
@@ -226,6 +241,8 @@ __all__ = [
     "run_execution_layer_v2_regime_entry_edge_replay",
     "run_execution_layer_v2_regime_conditioned_ev_forward_shadow",
     "run_execution_layer_v2_regime_conditioned_ev_calibration",
+    "run_execution_layer_v2_regime_conditioned_ev_corpus_builder",
+    "regime_conditioned_ev_v2_calibration_row_identity",
     "split_calibration_report",
     "train_polymarket_action_value_model",
     "train_polymarket_probability_model",
@@ -233,4 +250,5 @@ __all__ = [
     "time_decay_multiplier",
     "validation_report",
     "validate_frozen_regime_conditioned_ev_artifact",
+    "validate_regime_conditioned_ev_v2_calibration_rows",
 ]

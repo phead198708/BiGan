@@ -48,7 +48,12 @@ from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev impor
 )
 from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev_calibration import (
     ExecutionLayerV2RegimeConditionedEVCalibrationConfig,
+    regime_conditioned_ev_v2_calibration_row_identity,
     run_execution_layer_v2_regime_conditioned_ev_calibration,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev_corpus import (
+    ExecutionLayerV2RegimeConditionedEVCorpusConfig,
+    run_execution_layer_v2_regime_conditioned_ev_corpus_builder,
 )
 from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
     _fresh_public_row_from_provider_feature_context,
@@ -1674,6 +1679,193 @@ def test_regime_conditioned_ev_v2_statistical_gates_fail_closed(
     assert result.manifest["source_model_candidate_eligible"] is False
     assert result.manifest["freeze_ready"] is False
     assert result.manifest["promotion_evidence_eligible"] is False
+
+
+def test_regime_conditioned_ev_v2_corpus_builder_ingests_and_excludes(
+    tmp_path,
+) -> None:
+    source_root = tmp_path / "sources"
+    _write_regime_ev_corpus_source_run(
+        source_root / "eligible",
+        run_id="historical-paper-run-eligible",
+        row_count=8,
+    )
+    _write_regime_ev_corpus_source_run(
+        source_root / "prohibited",
+        run_id=LATEST_ONE_HOUR_RECONCILED_RUN_ID,
+        row_count=1,
+    )
+    _write_regime_ev_corpus_source_run(
+        source_root / "future",
+        run_id="future-unseen-forward-shadow-run",
+        row_count=1,
+    )
+
+    result = run_execution_layer_v2_regime_conditioned_ev_corpus_builder(
+        ExecutionLayerV2RegimeConditionedEVCorpusConfig(
+            run_id="corpus-ingestion",
+            source_roots=(source_root,),
+            output_dir=tmp_path / "runs",
+        )
+    )
+    report = result.quality_report
+
+    assert report["source_manifest_discovered_count"] == 3
+    assert report["source_run_included_count"] == 1
+    assert report["source_run_excluded_count"] == 2
+    assert report["eligible_row_count"] == 8
+    assert report["unique_market_count"] == 8
+    assert report["invalid_row_count"] == 0
+    assert report["coverage"]["by_side"] == {"DOWN": 4, "UP": 4}
+    assert report["coverage"]["by_action_family"] == {
+        "HOLD_TO_SETTLEMENT": 4,
+        "SELL_BEFORE_CLOSE": 4,
+    }
+    assert report["provenance_coverage"]["violation_count"] == 0
+    assert report["incremental_full_rebuild_hash_match"] is True
+    assert report["minimum_protocol_smoke_passed"] is False
+    assert report["real_frozen_artifact_created"] is False
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["source_model_candidate_eligible"] is False
+    assert result.manifest["freeze_ready"] is False
+    assert result.manifest["promotion_evidence_eligible"] is False
+    corpus_rows_path = result.artifact_paths["corpus_rows"]
+    calibration = run_execution_layer_v2_regime_conditioned_ev_calibration(
+        ExecutionLayerV2RegimeConditionedEVCalibrationConfig(
+            run_id="consume-corpus",
+            input_path=corpus_rows_path,
+            output_dir=tmp_path / "calibration-runs",
+            validation_fraction=0.25,
+            ridge_alpha=0.01,
+            min_fit_rows=4,
+            min_validation_rows=2,
+            min_fit_markets=4,
+            min_validation_markets=2,
+            bootstrap_samples=100,
+            min_validation_rows_per_side=1,
+            min_validation_rows_per_action_family=1,
+            min_validation_rows_per_resolved_outcome=1,
+            min_validation_markets_per_category=1,
+        )
+    )
+    assert calibration.split_report["invalid_row_count"] == 0
+    assert calibration.split_report["leakage_checks_passed"] is True
+
+
+def test_regime_conditioned_ev_v2_corpus_incremental_matches_rebuild(
+    tmp_path,
+) -> None:
+    source_root = tmp_path / "sources"
+    _write_regime_ev_corpus_source_run(
+        source_root / "first",
+        run_id="historical-paper-run-first",
+        row_count=4,
+    )
+    initial = run_execution_layer_v2_regime_conditioned_ev_corpus_builder(
+        ExecutionLayerV2RegimeConditionedEVCorpusConfig(
+            run_id="initial",
+            source_roots=(source_root,),
+            output_dir=tmp_path / "runs",
+        )
+    )
+    _write_regime_ev_corpus_source_run(
+        source_root / "second",
+        run_id="historical-paper-run-second",
+        row_count=4,
+        market_offset=10,
+    )
+    incremental = run_execution_layer_v2_regime_conditioned_ev_corpus_builder(
+        ExecutionLayerV2RegimeConditionedEVCorpusConfig(
+            run_id="incremental",
+            source_roots=(source_root,),
+            output_dir=tmp_path / "runs",
+            existing_corpus_manifest=initial.artifact_paths["corpus_manifest"],
+        )
+    )
+    rebuild = run_execution_layer_v2_regime_conditioned_ev_corpus_builder(
+        ExecutionLayerV2RegimeConditionedEVCorpusConfig(
+            run_id="rebuild",
+            source_roots=(source_root,),
+            output_dir=tmp_path / "runs",
+        )
+    )
+
+    assert incremental.quality_report["incremental_build"]["appended_row_count"] == 4
+    assert incremental.quality_report["incremental_build"][
+        "existing_rows_preserved"
+    ] is True
+    assert incremental.quality_report["incremental_full_rebuild_hash_match"] is True
+    assert incremental.manifest["corpus_sha256"] == rebuild.manifest["corpus_sha256"]
+
+
+def test_regime_conditioned_ev_v2_corpus_fail_closed_diagnostics(
+    tmp_path,
+) -> None:
+    source_root = tmp_path / "sources"
+    _write_regime_ev_corpus_source_run(
+        source_root / "hash-mismatch",
+        run_id="historical-hash-mismatch",
+        row_count=1,
+        hash_mismatch=True,
+    )
+    _write_regime_ev_corpus_source_run(
+        source_root / "unresolved",
+        run_id="historical-unresolved",
+        row_count=1,
+        unresolved=True,
+    )
+    _write_regime_ev_corpus_source_run(
+        source_root / "causality",
+        run_id="historical-causality",
+        row_count=1,
+        max_input_ts_violation=True,
+    )
+    _write_regime_ev_corpus_source_run(
+        source_root / "duplicate-a",
+        run_id="historical-duplicate-source",
+        row_count=1,
+        settlement_pnl_offset=0.0,
+    )
+    _write_regime_ev_corpus_source_run(
+        source_root / "duplicate-b",
+        run_id="historical-duplicate-source",
+        row_count=1,
+        settlement_pnl_offset=0.25,
+    )
+    _write_regime_ev_corpus_source_run(
+        source_root / "duplicate-c",
+        run_id="historical-duplicate-source",
+        row_count=1,
+        settlement_pnl_offset=0.0,
+    )
+
+    result = run_execution_layer_v2_regime_conditioned_ev_corpus_builder(
+        ExecutionLayerV2RegimeConditionedEVCorpusConfig(
+            run_id="fail-closed",
+            source_roots=(source_root,),
+            output_dir=tmp_path / "runs",
+        )
+    )
+    report = result.quality_report
+
+    assert report["source_exclusion_reason_distribution"][
+        "source_artifact_hash_mismatch:signal_trace"
+    ] == 1
+    assert report["row_exclusion_reason_distribution"][
+        "ambiguous_or_unresolved_settlement"
+    ] == 1
+    assert report["row_exclusion_reason_distribution"][
+        "feature_max_input_ts_after_decision_ts"
+    ] == 1
+    assert report["deduplication"]["conflicting_identity_count"] == 1
+    assert report["deduplication"]["exact_duplicate_count"] == 1
+    assert report["deduplication"]["supplemental_duplicate_fill_count"] >= 1
+    assert "conflicting_duplicate_rows_present" in report[
+        "readiness_blocking_reason_codes"
+    ]
+    assert report["corpus_ready"] is False
+    assert report["real_frozen_artifact_created"] is False
+    assert result.manifest["v8_execution_handoff_allowed"] is False
 
 
 def test_fresh_provider_row_adds_decision_time_regime_features() -> None:
@@ -3370,6 +3562,163 @@ def _regime_conditioned_ev_v2_calibration_rows() -> list[dict[str, object]]:
     ]
 
 
+def _write_regime_ev_corpus_source_run(
+    run_dir: Path,
+    *,
+    run_id: str,
+    row_count: int,
+    market_offset: int = 0,
+    settlement_pnl_offset: float = 0.0,
+    unresolved: bool = False,
+    hash_mismatch: bool = False,
+    max_input_ts_violation: bool = False,
+) -> Path:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = run_dir / "signal_trace.json"
+    intent_path = run_dir / "paper_intents.jsonl"
+    fill_path = run_dir / "paper_fills.jsonl"
+    settlement_path = run_dir / "settlement_rows.jsonl"
+    trace_rows = []
+    intent_rows = []
+    fill_rows = []
+    settlement_rows = []
+    for index in range(row_count):
+        market_index = market_offset + index
+        decision_ts = 100_000 + market_index * 1_000
+        side = "UP" if market_index % 2 == 0 else "DOWN"
+        family = (
+            "HOLD_TO_SETTLEMENT"
+            if market_index % 2 == 0
+            else "SELL_BEFORE_CLOSE"
+        )
+        action = f"BUY_{side}_{family}"
+        intent_id = f"intent-{market_index}"
+        fill_id = f"fill-{market_index}"
+        market_id = f"market-{market_index}"
+        p_up = 0.65 if side == "UP" else 0.35
+        trace_rows.append(
+            {
+                "market_id": market_id,
+                "decision_ts": decision_ts,
+                "market_end_ts": decision_ts + 300,
+                "paper_intent_id": intent_id,
+                "paper_fill_id": fill_id,
+                "canonical_selected_action": action,
+                "canonical_o_action_score": 0.55 + index * 0.01,
+                "action_score_margin": 0.08,
+                "btc_momentum": 0.002 if side == "UP" else -0.002,
+                "reference_price_to_beat_distance_at_decision": (
+                    0.003 if side == "UP" else -0.003
+                ),
+                "decision_time_regime_feature_max_input_ts": (
+                    decision_ts + 1 if max_input_ts_violation else decision_ts
+                ),
+                "o_v8_paper_fresh_signal_trace_row_hash": hashlib.sha256(
+                    f"trace-{run_id}-{index}".encode()
+                ).hexdigest(),
+            }
+        )
+        intent_rows.append(
+            {
+                "market_id": market_id,
+                "decision_ts": decision_ts,
+                "paper_fresh_order_intent_id": intent_id,
+                "execution_guarded_action": action,
+                "execution_guarded_side": side,
+                "execution_guarded_family": family,
+                "p_up": p_up,
+                "p_down": 1.0 - p_up,
+                "entry_ask": 0.55,
+                "spread_bps": 80.0,
+                "book_staleness_ms": 100.0,
+                "queue_fill_proxy": 0.8,
+                "time_to_close_seconds": 240.0,
+                "pre_decision_exposure_state": {
+                    "current_market_exposure_by_market_id": {},
+                    "runtime_state_validation_passed": True,
+                },
+                "decision_time_regime_feature_max_input_ts": decision_ts,
+                "paper_only": True,
+                "capital_at_risk": False,
+                "polymarket_write_enabled": False,
+                "wallet_signing_enabled": False,
+            }
+        )
+        fill_rows.append(
+            {
+                "market_id": market_id,
+                "decision_ts": decision_ts,
+                "paper_fresh_order_intent_id": intent_id,
+                "paper_fresh_fill_id": fill_id,
+                "paper_fill_price": 0.55,
+                "filled_size": 0.2,
+                "paper_only": True,
+                "capital_at_risk": False,
+                "polymarket_write_enabled": False,
+                "wallet_signing_enabled": False,
+            }
+        )
+        settlement_rows.append(
+            {
+                "market_id": market_id,
+                "paper_fresh_order_intent_id": intent_id,
+                "paper_fresh_fill_id": fill_id,
+                "resolution_status": "pending" if unresolved else "resolved",
+                "resolution_source_type": "polymarket_clob_read_only_settlement",
+                "resolved_outcome": (
+                    None if unresolved else ("UP" if index % 2 == 0 else "DOWN")
+                ),
+                "settlement_pnl": 0.01 * (index + 1) + settlement_pnl_offset,
+                "settlement_ts": decision_ts + 350,
+                "settlement_evaluation_row_hash": hashlib.sha256(
+                    f"settlement-{run_id}-{index}-{settlement_pnl_offset}".encode()
+                ).hexdigest(),
+                "paper_only": True,
+                "capital_at_risk": False,
+                "polymarket_write_enabled": False,
+                "wallet_signing_enabled": False,
+            }
+        )
+    trace_path.write_text(
+        json.dumps({"trace_rows": trace_rows}, sort_keys=True), encoding="utf-8"
+    )
+    _write_jsonl(intent_path, intent_rows)
+    _write_jsonl(fill_path, fill_rows)
+    _write_jsonl(settlement_path, settlement_rows)
+    artifact_paths = {
+        "signal_trace": str(trace_path.resolve()),
+        "paper_intent_log": str(intent_path.resolve()),
+        "paper_fill_log": str(fill_path.resolve()),
+        "settlement_evaluation_rows": str(settlement_path.resolve()),
+    }
+    artifact_hashes = {
+        key: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        for key, path in artifact_paths.items()
+    }
+    if hash_mismatch:
+        artifact_hashes["signal_trace"] = "f" * 64
+    manifest = {
+        "schema_version": "test-historical-calibration-source-v1",
+        "run_id": run_id,
+        "source_run_id": run_id,
+        "completed": True,
+        "immutable": True,
+        "unresolved_settlement_count": 0,
+        "artifact_paths": artifact_paths,
+        "artifact_hashes": artifact_hashes,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+    }
+    manifest_path = (
+        run_dir / "execution_layer_v2_historical_calibration_source_manifest.json"
+    )
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    return manifest_path
+
+
 def _attach_regime_conditioned_ev_v2_target_source(
     rows: list[dict[str, object]], tmp_path: Path
 ) -> None:
@@ -3378,6 +3727,28 @@ def _attach_regime_conditioned_ev_v2_target_source(
     source_path.write_bytes(source_content)
     source_hash = hashlib.sha256(source_content).hexdigest()
     for row in rows:
+        source_intent_id = str(row["source_intent_id"])
+        source_fill_id = str(row["source_fill_id"])
+        row["row_identity"] = regime_conditioned_ev_v2_calibration_row_identity(
+            source_run_id=str(row["source_run_id"]),
+            market_id=str(row["market_id"]),
+            decision_ts=row["decision_ts"],
+            selected_action=str(row["selected_action"]),
+            source_intent_id=source_intent_id,
+            source_fill_id=source_fill_id,
+        )
+        row["source_lineage"] = {
+            "trace_artifact_path": source_path.name,
+            "trace_artifact_sha256": source_hash,
+            "trace_row_id": f"trace-{source_fill_id}",
+            "intent_artifact_path": source_path.name,
+            "intent_artifact_sha256": source_hash,
+            "fill_artifact_path": source_path.name,
+            "fill_artifact_sha256": source_hash,
+            "settlement_artifact_path": source_path.name,
+            "settlement_artifact_sha256": source_hash,
+            "settlement_row_id": f"settlement-{source_fill_id}",
+        }
         row["target_provenance"] = {
             "source_type": "polymarket_clob_read_only_settlement",
             "source_artifact_path": source_path.name,
@@ -3426,6 +3797,21 @@ def _regime_conditioned_ev_v2_calibration_row(
     )
     return {
         "source_run_id": source_run_id,
+        "source_intent_id": f"intent-{market_index}-{row_index}",
+        "source_fill_id": f"fill-{market_index}-{row_index}",
+        "row_identity": "0" * 64,
+        "source_lineage": {
+            "trace_artifact_path": "pending",
+            "trace_artifact_sha256": "0" * 64,
+            "trace_row_id": "pending",
+            "intent_artifact_path": "pending",
+            "intent_artifact_sha256": "0" * 64,
+            "fill_artifact_path": "pending",
+            "fill_artifact_sha256": "0" * 64,
+            "settlement_artifact_path": "pending",
+            "settlement_artifact_sha256": "0" * 64,
+            "settlement_row_id": "pending",
+        },
         "market_id": f"calibration-market-{market_index}",
         "decision_ts": decision_ts,
         "max_input_ts": decision_ts,
