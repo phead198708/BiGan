@@ -22,6 +22,10 @@ from bigan.v8.polymarket.training.execution_layer_v2 import (
     run_execution_layer_v2_backtest,
     time_decayed_kelly_notional,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_historical_outcome_reconciliation import (
+    ExecutionLayerV2HistoricalOutcomeReconciliationConfig,
+    run_execution_layer_v2_historical_outcome_reconciliation,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal import (
     ONE_HOUR_REMAP_PAPER_GOAL_SCHEMA_VERSION,
     ExecutionLayerV2OneHourRemapPaperGoalConfig,
@@ -1806,6 +1810,82 @@ def test_regime_conditioned_ev_v2_corpus_builder_ingests_and_excludes(
     )
     assert calibration.split_report["invalid_row_count"] == 0
     assert calibration.split_report["leakage_checks_passed"] is True
+
+
+def test_historical_outcome_reconciliation_resolves_rows_and_feeds_corpus(
+    tmp_path,
+) -> None:
+    source_manifest = _write_regime_ev_corpus_source_run(
+        tmp_path / "source",
+        run_id="historical-unresolved-for-clob-reconciliation",
+        row_count=3,
+        unresolved=True,
+        repeat_market=True,
+    )
+    source_payload = json.loads(source_manifest.read_text(encoding="utf-8"))
+    original_settlement_path = Path(
+        source_payload["artifact_paths"]["settlement_evaluation_rows"]
+    )
+    original_settlement_sha256 = hashlib.sha256(
+        original_settlement_path.read_bytes()
+    ).hexdigest()
+
+    def _fetch_market(condition_id: str, timeout_seconds: float) -> dict[str, object]:
+        assert timeout_seconds == 2.0
+        market_index = int(condition_id.rsplit("-", 1)[-1])
+        up_wins = market_index % 2 == 0
+        return {
+            "closed": True,
+            "condition_id": condition_id,
+            "tokens": [
+                {"outcome": "Up", "winner": up_wins},
+                {"outcome": "Down", "winner": not up_wins},
+            ],
+        }
+
+    reconciliation = run_execution_layer_v2_historical_outcome_reconciliation(
+        ExecutionLayerV2HistoricalOutcomeReconciliationConfig(
+            run_id="historical-clob-reconciliation",
+            source_manifest_paths=(source_manifest,),
+            output_dir=tmp_path / "reconciliation-runs",
+            request_timeout_seconds=2.0,
+            max_workers=2,
+        ),
+        fetch_market=_fetch_market,
+        outcome_observed_at_ts=1_000_000.0,
+    )
+
+    assert reconciliation.report["unresolved_fill_count_before"] == 3
+    assert reconciliation.report["resolved_fill_count"] == 3
+    assert reconciliation.report["unresolved_fill_count_after"] == 0
+    assert reconciliation.report["original_source_artifacts_mutated"] is False
+    assert hashlib.sha256(original_settlement_path.read_bytes()).hexdigest() == (
+        original_settlement_sha256
+    )
+    corpus = run_execution_layer_v2_regime_conditioned_ev_corpus_builder(
+        ExecutionLayerV2RegimeConditionedEVCorpusConfig(
+            run_id="corpus-from-clob-reconciliation",
+            source_roots=(source_manifest.parent, reconciliation.output_dir),
+            output_dir=tmp_path / "corpus-runs",
+        )
+    )
+    assert corpus.quality_report["source_run_included_count"] == 1
+    assert corpus.quality_report["source_exclusion_reason_distribution"][
+        "source_manifest_superseded_by_complete_reconciliation_bundle"
+    ] == 1
+    assert corpus.quality_report["eligible_row_count"] == 3
+    assert corpus.quality_report["invalid_row_count"] == 0
+    rows = _read_jsonl(corpus.artifact_paths["corpus_rows"])
+    assert all(row["target_provenance"]["resolution_status"] == "resolved" for row in rows)
+    assert all(
+        row["target_provenance"]["outcome_observation_time_source"]
+        == "provider_response_clock"
+        for row in rows
+    )
+    assert [
+        row["decision_time_features"]["cumulative_market_exposure_before_entry"]
+        for row in rows
+    ] == pytest.approx([0.0, 0.2, 0.4])
 
 
 def test_regime_conditioned_ev_v2_corpus_follows_nested_trace_manifest_hash_chain(
@@ -3692,6 +3772,7 @@ def _write_regime_ev_corpus_source_run(
     unresolved: bool = False,
     hash_mismatch: bool = False,
     max_input_ts_violation: bool = False,
+    repeat_market: bool = False,
 ) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     trace_path = run_dir / "signal_trace.json"
@@ -3703,8 +3784,8 @@ def _write_regime_ev_corpus_source_run(
     fill_rows = []
     settlement_rows = []
     for index in range(row_count):
-        market_index = market_offset + index
-        decision_ts = 100_000 + market_index * 1_000
+        market_index = market_offset if repeat_market else market_offset + index
+        decision_ts = 100_000 + market_offset * 1_000 + index * 100
         side = "UP" if market_index % 2 == 0 else "DOWN"
         family = (
             "HOLD_TO_SETTLEMENT"
@@ -3712,8 +3793,9 @@ def _write_regime_ev_corpus_source_run(
             else "SELL_BEFORE_CLOSE"
         )
         action = f"BUY_{side}_{family}"
-        intent_id = f"intent-{market_index}"
-        fill_id = f"fill-{market_index}"
+        identity_suffix = f"{market_index}-{index}" if repeat_market else str(market_index)
+        intent_id = f"intent-{identity_suffix}"
+        fill_id = f"fill-{identity_suffix}"
         market_id = f"market-{market_index}"
         p_up = 0.65 if side == "UP" else 0.35
         trace_rows.append(

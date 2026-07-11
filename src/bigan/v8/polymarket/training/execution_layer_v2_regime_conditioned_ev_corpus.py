@@ -148,10 +148,37 @@ def run_execution_layer_v2_regime_conditioned_ev_corpus_builder(
     run_dir.mkdir(parents=True)
 
     manifest_paths = _discover_source_manifests(config.source_roots)
-    source_reports: list[dict[str, Any]] = []
-    candidate_envelopes: list[dict[str, Any]] = []
+    ingestions: list[
+        tuple[Path, dict[str, Any], list[dict[str, Any]]]
+    ] = []
     for manifest_path in manifest_paths:
         report, envelopes = _ingest_source_manifest(manifest_path)
+        ingestions.append((manifest_path, report, envelopes))
+    reconciled_source_run_ids = {
+        report["source_run_id"]
+        for manifest_path, report, _ in ingestions
+        if manifest_path.name == "clob_settlement_reconciliation_manifest.json"
+        and report["included"]
+    }
+    source_reports: list[dict[str, Any]] = []
+    candidate_envelopes: list[dict[str, Any]] = []
+    for manifest_path, report, envelopes in ingestions:
+        if (
+            manifest_path.name != "clob_settlement_reconciliation_manifest.json"
+            and report["source_run_id"] in reconciled_source_run_ids
+        ):
+            report = {
+                **report,
+                "included": False,
+                "blocking_reason_codes": [
+                    "source_manifest_superseded_by_complete_reconciliation_bundle"
+                ],
+                "candidate_row_count": 0,
+                "source_fill_row_count": 0,
+                "row_excluded_count": 0,
+                "row_exclusion_reason_distribution": {},
+            }
+            envelopes = []
         source_reports.append(report)
         candidate_envelopes.extend(envelopes)
 
@@ -569,7 +596,13 @@ def _join_source_rows(
                 "source_manifest_sha256": _sha256_file(source_manifest_path),
             }
         )
-        market_history.setdefault(row["market_id"], []).append(row)
+        history_row = dict(row)
+        history_row["_entry_notional"] = _first_number(
+            fill,
+            intent,
+            fields=("filled_size", "paper_fresh_order_size", "proposed_order_size"),
+        )
+        market_history.setdefault(row["market_id"], []).append(history_row)
     return envelopes, dict(sorted(reasons.items()))
 
 
@@ -688,7 +721,15 @@ def _calibration_row_from_join(
     prior_rows = market_history.get(market_id, [])
     cumulative_exposure = _number(market_exposure.get(market_id))
     if cumulative_exposure is None and prior_rows:
-        reasons.append("pre_entry_market_exposure_value_missing_for_reentry")
+        prior_entry_notionals = [
+            _number(row.get("_entry_notional")) for row in prior_rows
+        ]
+        if all(notional is not None for notional in prior_entry_notionals):
+            cumulative_exposure = sum(
+                float(notional) for notional in prior_entry_notionals
+            )
+        else:
+            reasons.append("pre_entry_market_exposure_reconstruction_failed")
     elif cumulative_exposure is None:
         cumulative_exposure = 0.0
     if reasons:
