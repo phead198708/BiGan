@@ -30,6 +30,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal import (
     ONE_HOUR_REMAP_PAPER_GOAL_SCHEMA_VERSION,
     ExecutionLayerV2OneHourRemapPaperGoalConfig,
     _missing_bet_round_classifications,
+    _raw_evidence_completeness_report,
     _settlement_resolution_report,
     _write_per_round_artifacts,
     run_execution_layer_v2_one_hour_remap_paper_goal,
@@ -2863,6 +2864,23 @@ def test_execution_layer_v2_one_hour_goal_remap_success_with_positive_settlement
     assert "one_hour_remap_paper_goal_report" in result.manifest["artifact_hashes"]
     assert result.manifest["final_goal_success"] is True
     assert result.manifest["v8_execution_handoff_allowed"] is False
+    persisted_goal_manifest = json.loads(
+        result.artifact_paths["one_hour_remap_paper_goal_manifest"].read_text(
+            encoding="utf-8"
+        )
+    )
+    goal_manifest_descriptor = json.loads(
+        result.artifact_paths[
+            "one_hour_remap_paper_goal_manifest_descriptor"
+        ].read_text(encoding="utf-8")
+    )
+    assert "one_hour_remap_paper_goal_manifest" not in persisted_goal_manifest[
+        "artifact_hashes"
+    ]
+    assert goal_manifest_descriptor["final_manifest_sha256"] == (
+        result.artifact_hashes["one_hour_remap_paper_goal_manifest"]
+    )
+    assert goal_manifest_descriptor["self_hash_embedded_in_manifest"] is False
     per_round_manifest = json.loads(
         Path(result.goal_report["per_round_artifact_manifest_path"]).read_text(
             encoding="utf-8"
@@ -2967,6 +2985,139 @@ def test_execution_layer_v2_round_artifacts_preserve_raw_book_and_trace(
     ) == 2
     assert manifest["per_round_raw_orderbook_artifact_count"] == 1
     assert manifest["per_round_signal_trace_artifact_count"] == 1
+    persisted_manifest = json.loads(
+        Path(manifest["manifest_path"]).read_text(encoding="utf-8")
+    )
+    descriptor = json.loads(
+        Path(manifest["manifest_descriptor_path"]).read_text(encoding="utf-8")
+    )
+    assert "manifest_sha256" not in persisted_manifest
+    assert "final_manifest_sha256" not in persisted_manifest
+    assert descriptor["final_manifest_sha256"] == manifest["manifest_sha256"]
+    assert descriptor["self_hash_embedded_in_manifest"] is False
+
+
+def test_execution_layer_v2_round_orderbook_coverage_requires_rows(tmp_path) -> None:
+    manifest = _write_per_round_artifacts(
+        goal_dir=tmp_path,
+        intents=[],
+        fills=[],
+        ledger_rows=[],
+        settlement_rows=[],
+        trace_rows=[
+            {
+                "market_id": "empty-book-market",
+                "decision_ts": 3_060_000,
+                "market_start_ts": 3_000_000,
+            }
+        ],
+        raw_market_rows=[
+            {
+                "market_id": "empty-book-market",
+                "market_start_ts": 3_000_000,
+            }
+        ],
+        raw_orderbook_rows=[],
+        raw_trade_rows=[],
+        raw_btc_candle_rows=[],
+    )
+
+    round_row = manifest["round_artifact_rows"][0]
+    assert Path(round_row["artifact_paths"]["raw_polymarket_orderbooks"]).exists()
+    assert round_row["raw_orderbook_row_count"] == 0
+    assert manifest["per_round_raw_orderbook_artifact_count"] == 0
+    assert manifest["per_round_raw_orderbook_covered_market_count"] == 0
+
+
+def test_execution_layer_v2_raw_evidence_audits_no_bet_market_causally(
+    tmp_path,
+) -> None:
+    market_id = "complete-no-bet-market"
+    decision_ts = 3_060_000
+    trace_rows = [
+        {
+            "market_id": market_id,
+            "decision_ts": decision_ts,
+            "market_start_ts": 3_000_000,
+            "reference_price_to_beat_distance_at_decision": 25.0,
+            "reference_price_to_beat_distance_provenance": {
+                "max_input_ts": 3_050_000,
+                "provenance_valid": True,
+            },
+            "decision_time_regime_feature_max_input_ts": 3_050_000,
+        }
+    ]
+    market_rows = [
+        {
+            "market_id": market_id,
+            "market_start_ts": 3_000_000,
+            "market_end_ts": 3_300_000,
+        }
+    ]
+    book_rows = [
+        {
+            "market_id": market_id,
+            "outcome": outcome,
+            "available_at_ts": 3_050_000,
+            "ts": 3_050_000,
+        }
+        for outcome in ("UP", "DOWN")
+    ]
+    trade_rows = [
+        {"market_id": market_id, "available_at_ts": 3_040_000, "ts": 3_040_000}
+    ]
+    candle_rows = [
+        {
+            "available_at_ts": 3_050_000,
+            "ts": 3_000_000,
+            "close_price": 65_000.0,
+        }
+    ]
+    round_artifacts = _write_per_round_artifacts(
+        goal_dir=tmp_path,
+        intents=[],
+        fills=[],
+        ledger_rows=[],
+        settlement_rows=[],
+        trace_rows=trace_rows,
+        raw_market_rows=market_rows,
+        raw_orderbook_rows=book_rows,
+        raw_trade_rows=trade_rows,
+        raw_btc_candle_rows=candle_rows,
+    )
+    aggregate_paths = {
+        "raw_polymarket_markets": Path(
+            round_artifacts["round_artifact_rows"][0]["artifact_paths"][
+                "raw_polymarket_markets"
+            ]
+        ),
+        "raw_polymarket_orderbooks": Path(
+            round_artifacts["round_artifact_rows"][0]["artifact_paths"][
+                "raw_polymarket_orderbooks"
+            ]
+        ),
+    }
+
+    report = _raw_evidence_completeness_report(
+        run_id="raw-evidence-complete",
+        trace_rows=trace_rows,
+        intents=[],
+        raw_market_rows=market_rows,
+        raw_orderbook_rows=book_rows,
+        raw_trade_rows=trade_rows,
+        raw_btc_candle_rows=candle_rows,
+        round_artifacts=round_artifacts,
+        aggregate_artifact_paths=aggregate_paths,
+    )
+
+    assert report["observed_market_count"] == 1
+    assert report["bet_market_count"] == 0
+    assert report["no_bet_market_count"] == 1
+    assert report["markets_with_raw_orderbook_rows"] == 1
+    assert report["markets_with_complete_btc_reference_provenance"] == 1
+    assert report["evidence_complete_market_count"] == 1
+    assert report["markets_missing_required_evidence_count"] == 0
+    assert report["causal_source_timestamp_violation_count"] == 0
 
 
 def test_execution_layer_v2_one_hour_goal_reports_missing_round_bet_fail_closed(

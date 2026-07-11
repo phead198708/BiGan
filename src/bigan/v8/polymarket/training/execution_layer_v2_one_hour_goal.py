@@ -53,6 +53,9 @@ ONE_HOUR_REMAP_EXECUTION_REPORT_SCHEMA_VERSION = (
 ONE_HOUR_REMAP_SETTLEMENT_RESOLUTION_SCHEMA_VERSION = (
     "bigan-v8-polymarket-execution-layer-v2-one-hour-settlement-resolution-v1"
 )
+ONE_HOUR_RAW_EVIDENCE_COMPLETENESS_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-execution-layer-v2-raw-evidence-completeness-v1"
+)
 
 GUARD_JUSTIFIED_NO_BET_ALLOWED_BLOCKER_CATEGORIES = {
     "time_to_close",
@@ -158,6 +161,7 @@ def _run_incremental_read_only_provider_fresh_loop(
     goal_dir: Path,
     max_cycles: int,
     base_fresh_loop_config: PolymarketOV8PaperFreshLoopConfig,
+    collection_deadline_monotonic: float,
 ) -> SimpleNamespace:
     """Collect read-only provider data once per poll cycle and fail fast on book loss."""
 
@@ -185,6 +189,8 @@ def _run_incremental_read_only_provider_fresh_loop(
     fail_fast_reason_codes: list[str] = []
 
     for cycle_index in range(max_cycles):
+        if cycle_index > 0 and time.monotonic() >= collection_deadline_monotonic:
+            break
         cycle_run_id = f"{base_fresh_loop_config.run_id}-cycle-{cycle_index + 1:06d}"
         cycle_config = PolymarketOV8PaperFreshLoopConfig(
             run_id=cycle_run_id,
@@ -312,7 +318,10 @@ def _run_incremental_read_only_provider_fresh_loop(
             ]
             break
         if cycle_index < max_cycles - 1 and config.poll_interval_seconds > 0.0:
-            time.sleep(config.poll_interval_seconds)
+            remaining_seconds = collection_deadline_monotonic - time.monotonic()
+            if remaining_seconds <= 0.0:
+                break
+            time.sleep(min(config.poll_interval_seconds, remaining_seconds))
 
     attempted_cycle_count = len(cycle_status_rows)
     aggregate_public_report = _aggregate_public_collection_report(
@@ -451,11 +460,13 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         overwrite_existing=config.overwrite_existing,
     )
     if config.public_data_cycles is None:
+        collection_deadline_monotonic = time.monotonic() + config.duration_seconds
         fresh_result = _run_incremental_read_only_provider_fresh_loop(
             config=config,
             goal_dir=goal_dir,
             max_cycles=max_cycles,
             base_fresh_loop_config=fresh_loop_config,
+            collection_deadline_monotonic=collection_deadline_monotonic,
         )
     else:
         fresh_result = run_polymarket_o_v8_paper_fresh_loop(fresh_loop_config)
@@ -493,6 +504,18 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
             *settlement_resolution["settlement_evaluation_rows"],
         ],
     )
+    raw_market_rows = _read_optional_jsonl(
+        fresh_result.artifact_paths.get("raw_polymarket_markets")
+    )
+    raw_orderbook_rows = _read_optional_jsonl(
+        fresh_result.artifact_paths.get("raw_polymarket_orderbooks")
+    )
+    raw_trade_rows = _read_optional_jsonl(
+        fresh_result.artifact_paths.get("raw_polymarket_trades")
+    )
+    raw_btc_candle_rows = _read_optional_jsonl(
+        fresh_result.artifact_paths.get("raw_btc_feature_candles")
+    )
     round_artifacts = _write_per_round_artifacts(
         goal_dir=goal_dir,
         intents=intents,
@@ -500,18 +523,21 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         ledger_rows=ledger_rows,
         settlement_rows=settlement_rows,
         trace_rows=trace_rows,
-        raw_market_rows=_read_optional_jsonl(
-            fresh_result.artifact_paths.get("raw_polymarket_markets")
-        ),
-        raw_orderbook_rows=_read_optional_jsonl(
-            fresh_result.artifact_paths.get("raw_polymarket_orderbooks")
-        ),
-        raw_trade_rows=_read_optional_jsonl(
-            fresh_result.artifact_paths.get("raw_polymarket_trades")
-        ),
-        raw_btc_candle_rows=_read_optional_jsonl(
-            fresh_result.artifact_paths.get("raw_btc_feature_candles")
-        ),
+        raw_market_rows=raw_market_rows,
+        raw_orderbook_rows=raw_orderbook_rows,
+        raw_trade_rows=raw_trade_rows,
+        raw_btc_candle_rows=raw_btc_candle_rows,
+    )
+    raw_evidence_completeness = _raw_evidence_completeness_report(
+        run_id=config.run_id,
+        trace_rows=trace_rows,
+        intents=intents,
+        raw_market_rows=raw_market_rows,
+        raw_orderbook_rows=raw_orderbook_rows,
+        raw_trade_rows=raw_trade_rows,
+        raw_btc_candle_rows=raw_btc_candle_rows,
+        round_artifacts=round_artifacts,
+        aggregate_artifact_paths=fresh_result.artifact_paths,
     )
     round_coverage = _round_coverage_report(
         run_id=config.run_id,
@@ -536,6 +562,7 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         settlement_rows=settlement_rows,
         settlement_resolution=settlement_resolution,
         round_artifacts=round_artifacts,
+        raw_evidence_completeness=raw_evidence_completeness,
     )
 
     artifact_paths = {
@@ -545,6 +572,8 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         / "one_hour_remap_paper_goal_report.md",
         "one_hour_remap_paper_goal_manifest": goal_dir
         / "one_hour_remap_paper_goal_manifest.json",
+        "one_hour_remap_paper_goal_manifest_descriptor": goal_dir
+        / "one_hour_remap_paper_goal_manifest_descriptor.json",
         "round_coverage_report": goal_dir / "round_coverage_report.json",
         "round_coverage_summary": goal_dir / "round_coverage_report.md",
         "remap_execution_report": goal_dir / "remap_execution_report.json",
@@ -554,10 +583,17 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         "settlement_resolution_summary": goal_dir
         / "settlement_resolution_report.md",
         "settlement_pnl_rows": goal_dir / "settlement_pnl_rows.jsonl",
+        "raw_evidence_completeness_report": goal_dir
+        / "raw_evidence_completeness_report.json",
+        "raw_evidence_completeness_summary": goal_dir
+        / "raw_evidence_completeness_report.md",
         "paper_intent_log": goal_dir / "one_hour_paper_intent_log.jsonl",
         "paper_fill_log": goal_dir / "one_hour_paper_fill_log.jsonl",
         "paper_ledger_log": goal_dir / "one_hour_paper_ledger_log.jsonl",
         "per_round_artifact_manifest": Path(round_artifacts["manifest_path"]),
+        "per_round_artifact_manifest_descriptor": Path(
+            round_artifacts["manifest_descriptor_path"]
+        ),
         "paper_fresh_loop_manifest": fresh_result.artifact_paths["manifest"],
         "paper_remap_report": fresh_result.artifact_paths[
             "execution_layer_v2_paper_remap_report"
@@ -587,10 +623,22 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         _settlement_resolution_md(settlement_resolution),
     )
     _write_jsonl(artifact_paths["settlement_pnl_rows"], settlement_rows)
+    _write_json(
+        artifact_paths["raw_evidence_completeness_report"],
+        raw_evidence_completeness,
+    )
+    _write_text(
+        artifact_paths["raw_evidence_completeness_summary"],
+        _raw_evidence_completeness_md(raw_evidence_completeness),
+    )
     artifact_hashes = {
         name: _sha256_file(path)
         for name, path in sorted(artifact_paths.items())
-        if name != "one_hour_remap_paper_goal_manifest"
+        if name
+        not in {
+            "one_hour_remap_paper_goal_manifest",
+            "one_hour_remap_paper_goal_manifest_descriptor",
+        }
     }
     manifest = _one_hour_goal_manifest(
         config=config,
@@ -600,16 +648,33 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         round_coverage=round_coverage,
         remap_execution=remap_execution,
         settlement_resolution=settlement_resolution,
+        raw_evidence_completeness=raw_evidence_completeness,
         fresh_manifest=fresh_result.manifest,
     )
     _write_json(artifact_paths["one_hour_remap_paper_goal_manifest"], manifest)
     artifact_hashes["one_hour_remap_paper_goal_manifest"] = _sha256_file(
         artifact_paths["one_hour_remap_paper_goal_manifest"]
     )
-    manifest["artifact_hashes"] = dict(artifact_hashes)
-    _write_json(artifact_paths["one_hour_remap_paper_goal_manifest"], manifest)
-    artifact_hashes["one_hour_remap_paper_goal_manifest"] = _sha256_file(
-        artifact_paths["one_hour_remap_paper_goal_manifest"]
+    _write_json(
+        artifact_paths["one_hour_remap_paper_goal_manifest_descriptor"],
+        {
+            "schema_version": (
+                "bigan-v8-polymarket-execution-layer-v2-one-hour-"
+                "manifest-descriptor-v1"
+            ),
+            "manifest_path": str(
+                artifact_paths["one_hour_remap_paper_goal_manifest"]
+            ),
+            "final_manifest_sha256": artifact_hashes[
+                "one_hour_remap_paper_goal_manifest"
+            ],
+            "self_hash_embedded_in_manifest": False,
+        },
+    )
+    artifact_hashes["one_hour_remap_paper_goal_manifest_descriptor"] = (
+        _sha256_file(
+            artifact_paths["one_hour_remap_paper_goal_manifest_descriptor"]
+        )
     )
 
     return ExecutionLayerV2OneHourRemapPaperGoalResult(
@@ -1656,9 +1721,10 @@ def _write_per_round_artifacts(
             1 for row in round_rows if row["round_outcome_artifact_exists"]
         ),
         "per_round_raw_orderbook_artifact_count": sum(
-            1
-            for row in round_rows
-            if row["artifact_paths"].get("raw_polymarket_orderbooks")
+            1 for row in round_rows if int(row["raw_orderbook_row_count"]) > 0
+        ),
+        "per_round_raw_orderbook_covered_market_count": sum(
+            1 for row in round_rows if int(row["raw_orderbook_row_count"]) > 0
         ),
         "per_round_signal_trace_artifact_count": sum(
             1 for row in round_rows if row["artifact_paths"].get("signal_trace")
@@ -1680,11 +1746,317 @@ def _write_per_round_artifacts(
     }
     manifest = _with_report_id(manifest, "per_round_artifact_manifest_id")
     manifest_path = rounds_dir / "round_artifacts_manifest.json"
-    _write_json(manifest_path, manifest)
+    descriptor_path = rounds_dir / "round_artifacts_manifest_descriptor.json"
     manifest["manifest_path"] = str(manifest_path)
-    manifest["manifest_sha256"] = _sha256_file(manifest_path)
     _write_json(manifest_path, manifest)
-    return manifest
+    final_manifest_sha256 = _sha256_file(manifest_path)
+    descriptor = {
+        "schema_version": (
+            "bigan-v8-polymarket-execution-layer-v2-per-round-"
+            "manifest-descriptor-v1"
+        ),
+        "manifest_path": str(manifest_path),
+        "final_manifest_sha256": final_manifest_sha256,
+        "self_hash_embedded_in_manifest": False,
+    }
+    _write_json(descriptor_path, descriptor)
+    return {
+        **manifest,
+        "manifest_sha256": final_manifest_sha256,
+        "manifest_descriptor_path": str(descriptor_path),
+        "manifest_descriptor_sha256": _sha256_file(descriptor_path),
+    }
+
+
+def _raw_evidence_completeness_report(
+    *,
+    run_id: str,
+    trace_rows: list[dict[str, Any]],
+    intents: list[dict[str, Any]],
+    raw_market_rows: list[dict[str, Any]],
+    raw_orderbook_rows: list[dict[str, Any]],
+    raw_trade_rows: list[dict[str, Any]],
+    raw_btc_candle_rows: list[dict[str, Any]],
+    round_artifacts: dict[str, Any],
+    aggregate_artifact_paths: dict[str, Path],
+) -> dict[str, Any]:
+    bet_market_ids = {
+        _artifact_market_id(row) for row in intents if _artifact_market_id(row)
+    }
+    round_artifact_by_market = {
+        str(row["market_id"]): row
+        for row in round_artifacts.get("round_artifact_rows", [])
+    }
+    observed_market_ids = sorted(
+        {
+            _artifact_market_id(row)
+            for row in [*trace_rows, *raw_market_rows]
+            if _artifact_market_id(row)
+        }
+    )
+    market_rows: list[dict[str, Any]] = []
+    reason_counter: Counter[str] = Counter()
+    for market_id in observed_market_ids:
+        market_trace = _rows_for_market(trace_rows, market_id)
+        market_raw = _rows_for_market(raw_market_rows, market_id)
+        market_books = _rows_for_market(raw_orderbook_rows, market_id)
+        market_trades = _rows_for_market(raw_trade_rows, market_id)
+        round_row = round_artifact_by_market.get(market_id, {})
+        market_candles = _btc_candles_for_market(
+            raw_btc_candle_rows,
+            market_rows=market_raw,
+            trace_rows=market_trace,
+        )
+        reasons: list[str] = []
+        if not round_row:
+            reasons.append("round_artifact_directory_missing")
+        if not market_trace:
+            reasons.append("signal_trace_missing")
+        if not market_raw:
+            reasons.append("raw_market_rows_missing")
+        if not market_books:
+            reasons.append("raw_orderbook_rows_missing")
+        if not market_trades:
+            reasons.append("raw_trade_rows_missing")
+        if not market_candles:
+            reasons.append("raw_btc_candle_rows_missing")
+
+        reconstructable_decision_count = 0
+        source_timestamp_violation_count = 0
+        complete_reference_provenance_count = 0
+        decision_rows: list[dict[str, Any]] = []
+        for trace in market_trace:
+            decision_ts = _float(trace.get("decision_ts"))
+            causal_books = [
+                row
+                for row in market_books
+                if _source_available_ts(row) <= decision_ts
+            ]
+            causal_book_outcomes = {
+                str(row.get("outcome") or "").upper() for row in causal_books
+            }
+            causal_candles = [
+                row
+                for row in market_candles
+                if _source_available_ts(row) <= decision_ts
+            ]
+            regime_max_input_ts = trace.get(
+                "decision_time_regime_feature_max_input_ts"
+            )
+            reference_provenance = trace.get(
+                "reference_price_to_beat_distance_provenance"
+            ) or {}
+            reference_max_input_ts = reference_provenance.get("max_input_ts")
+            provenance_timestamps = [
+                value
+                for value in (regime_max_input_ts, reference_max_input_ts)
+                if value is not None
+            ]
+            violations = [
+                _float(value)
+                for value in provenance_timestamps
+                if _float(value) > decision_ts
+            ]
+            source_timestamp_violation_count += len(violations)
+            reference_complete = bool(
+                trace.get("reference_price_to_beat_distance_at_decision")
+                is not None
+                and reference_provenance.get("provenance_valid") is True
+                and reference_max_input_ts is not None
+                and _float(reference_max_input_ts) <= decision_ts
+            )
+            if reference_complete:
+                complete_reference_provenance_count += 1
+            reconstructable = bool(
+                {"UP", "DOWN"}.issubset(causal_book_outcomes)
+                and causal_candles
+                and reference_complete
+                and not violations
+            )
+            if reconstructable:
+                reconstructable_decision_count += 1
+            decision_rows.append(
+                {
+                    "decision_ts": trace.get("decision_ts"),
+                    "causal_book_outcomes": sorted(causal_book_outcomes),
+                    "causal_book_row_count": len(causal_books),
+                    "causal_btc_candle_row_count": len(causal_candles),
+                    "reference_provenance_complete": reference_complete,
+                    "source_timestamp_violation_count": len(violations),
+                    "decision_time_features_reconstructable": reconstructable,
+                }
+            )
+        if market_trace and reconstructable_decision_count != len(market_trace):
+            reasons.append("decision_time_features_not_fully_reconstructable")
+        if market_trace and complete_reference_provenance_count != len(market_trace):
+            reasons.append("btc_reference_provenance_incomplete")
+        if source_timestamp_violation_count:
+            reasons.append("decision_time_source_timestamp_violation")
+
+        required_artifact_names = {
+            "signal_trace",
+            "raw_polymarket_markets",
+            "raw_polymarket_orderbooks",
+            "raw_polymarket_trades",
+            "raw_btc_feature_candles",
+            "paper_bets",
+            "paper_fills",
+            "paper_ledger",
+        }
+        artifact_paths = round_row.get("artifact_paths") or {}
+        artifact_hashes = round_row.get("artifact_hashes") or {}
+        missing_artifact_paths = sorted(required_artifact_names - set(artifact_paths))
+        missing_artifact_hashes = sorted(required_artifact_names - set(artifact_hashes))
+        if missing_artifact_paths:
+            reasons.append("required_round_artifact_paths_missing")
+        if missing_artifact_hashes:
+            reasons.append("required_round_artifact_hashes_missing")
+        reasons = sorted(set(reasons))
+        reason_counter.update(reasons)
+        market_rows.append(
+            {
+                "market_id": market_id,
+                "paper_bet_created": market_id in bet_market_ids,
+                "paper_bet_count": sum(
+                    1 for row in intents if _artifact_market_id(row) == market_id
+                ),
+                "round_artifact_directory_exists": bool(round_row),
+                "signal_trace_row_count": len(market_trace),
+                "raw_market_row_count": len(market_raw),
+                "raw_orderbook_row_count": len(market_books),
+                "raw_trade_row_count": len(market_trades),
+                "raw_btc_candle_row_count": len(market_candles),
+                "reconstructable_decision_count": reconstructable_decision_count,
+                "complete_reference_provenance_count": (
+                    complete_reference_provenance_count
+                ),
+                "source_timestamp_violation_count": (
+                    source_timestamp_violation_count
+                ),
+                "raw_evidence_complete": not reasons,
+                "evidence_completeness_reason_codes": reasons,
+                "missing_artifact_paths": missing_artifact_paths,
+                "missing_artifact_hashes": missing_artifact_hashes,
+                "artifact_paths": artifact_paths,
+                "artifact_hashes": artifact_hashes,
+                "decision_rows": decision_rows,
+            }
+        )
+
+    aggregate_names = (
+        "raw_polymarket_markets",
+        "raw_polymarket_orderbooks",
+        "raw_polymarket_trades",
+        "raw_btc_feature_candles",
+        "signal_trace_report",
+        "fresh_order_intent_log",
+        "fresh_fill_log",
+        "fresh_ledger_log",
+    )
+    aggregate_paths = {
+        name: str(aggregate_artifact_paths[name])
+        for name in aggregate_names
+        if name in aggregate_artifact_paths
+    }
+    aggregate_hashes = {
+        name: _sha256_file(Path(path)) for name, path in aggregate_paths.items()
+    }
+    complete_markets = [row for row in market_rows if row["raw_evidence_complete"]]
+    missing_markets = [
+        row for row in market_rows if not row["raw_evidence_complete"]
+    ]
+    report = {
+        "schema_version": ONE_HOUR_RAW_EVIDENCE_COMPLETENESS_SCHEMA_VERSION,
+        "report_type": "raw_evidence_completeness_report",
+        "run_id": run_id,
+        "causal_selection_policy": "latest_source_timestamp_lte_decision_ts",
+        "full_round_future_snapshots_excluded_from_decision_reconstruction": True,
+        "observed_market_count": len(market_rows),
+        "bet_market_count": sum(row["paper_bet_created"] for row in market_rows),
+        "no_bet_market_count": sum(
+            not row["paper_bet_created"] for row in market_rows
+        ),
+        "markets_with_raw_orderbook_rows": sum(
+            int(row["raw_orderbook_row_count"]) > 0 for row in market_rows
+        ),
+        "markets_with_complete_btc_reference_provenance": sum(
+            row["signal_trace_row_count"] > 0
+            and row["complete_reference_provenance_count"]
+            == row["signal_trace_row_count"]
+            for row in market_rows
+        ),
+        "evidence_complete_market_count": len(complete_markets),
+        "markets_missing_required_evidence_count": len(missing_markets),
+        "markets_missing_required_evidence": [
+            row["market_id"] for row in missing_markets
+        ],
+        "evidence_completeness_reason_distribution": dict(
+            sorted(reason_counter.items())
+        ),
+        "causal_source_timestamp_violation_count": sum(
+            int(row["source_timestamp_violation_count"]) for row in market_rows
+        ),
+        "aggregate_artifact_paths": aggregate_paths,
+        "aggregate_artifact_hashes": aggregate_hashes,
+        "round_artifact_manifest_path": round_artifacts["manifest_path"],
+        "round_artifact_manifest_sha256": round_artifacts["manifest_sha256"],
+        "round_artifact_manifest_descriptor_path": round_artifacts[
+            "manifest_descriptor_path"
+        ],
+        "round_artifact_manifest_descriptor_sha256": round_artifacts[
+            "manifest_descriptor_sha256"
+        ],
+        "market_evidence_rows": market_rows,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+    }
+    return _with_report_id(report, "raw_evidence_completeness_report_id")
+
+
+def _source_available_ts(row: dict[str, Any]) -> float:
+    for field_name in ("available_at_ts", "close_time", "receive_time", "ts"):
+        value = row.get(field_name)
+        if value is not None:
+            return _float(value)
+    return float("inf")
+
+
+def _raw_evidence_completeness_md(report: dict[str, Any]) -> str:
+    lines = [
+        "# Raw Evidence Completeness",
+        "",
+        f"- run_id: `{report['run_id']}`",
+        f"- observed_market_count: `{report['observed_market_count']}`",
+        f"- bet_market_count: `{report['bet_market_count']}`",
+        f"- no_bet_market_count: `{report['no_bet_market_count']}`",
+        "- markets_with_raw_orderbook_rows: "
+        f"`{report['markets_with_raw_orderbook_rows']}`",
+        "- markets_with_complete_btc_reference_provenance: "
+        f"`{report['markets_with_complete_btc_reference_provenance']}`",
+        "- evidence_complete_market_count: "
+        f"`{report['evidence_complete_market_count']}`",
+        "- markets_missing_required_evidence_count: "
+        f"`{report['markets_missing_required_evidence_count']}`",
+        "- causal_source_timestamp_violation_count: "
+        f"`{report['causal_source_timestamp_violation_count']}`",
+        "",
+        "## Markets",
+        "",
+        "| market_id | bet | trace | books | trades | BTC | complete | reasons |",
+        "|---|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in report["market_evidence_rows"]:
+        lines.append(
+            f"| {row['market_id']} | {int(row['paper_bet_created'])} | "
+            f"{row['signal_trace_row_count']} | {row['raw_orderbook_row_count']} | "
+            f"{row['raw_trade_row_count']} | {row['raw_btc_candle_row_count']} | "
+            f"{int(row['raw_evidence_complete'])} | "
+            f"{', '.join(row['evidence_completeness_reason_codes']) or '-'} |"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _forced_coverage_attempt_report(
@@ -2678,6 +3050,7 @@ def _one_hour_goal_report(
     settlement_rows: list[dict[str, Any]],
     settlement_resolution: dict[str, Any],
     round_artifacts: dict[str, Any],
+    raw_evidence_completeness: dict[str, Any],
 ) -> dict[str, Any]:
     settled_pnl = sum(_float(row.get("settlement_pnl")) for row in settlement_rows)
     unresolved_pnl = sum(_float(row.get("unresolved_pnl")) for row in settlement_rows)
@@ -2824,6 +3197,17 @@ def _one_hour_goal_report(
         ],
         "per_round_artifact_manifest_path": round_artifacts["manifest_path"],
         "per_round_artifact_manifest_sha256": round_artifacts["manifest_sha256"],
+        "raw_evidence_complete_market_count": raw_evidence_completeness[
+            "evidence_complete_market_count"
+        ],
+        "raw_evidence_incomplete_market_count": raw_evidence_completeness[
+            "markets_missing_required_evidence_count"
+        ],
+        "raw_evidence_completeness_reason_distribution": (
+            raw_evidence_completeness[
+                "evidence_completeness_reason_distribution"
+            ]
+        ),
         "final_goal_success": final_success,
         "goal_failure_reason_codes": blockers,
         "losing_action_distribution": _action_distribution_by_pnl(
@@ -2861,6 +3245,7 @@ def _one_hour_goal_manifest(
     round_coverage: dict[str, Any],
     remap_execution: dict[str, Any],
     settlement_resolution: dict[str, Any],
+    raw_evidence_completeness: dict[str, Any],
     fresh_manifest: dict[str, Any],
 ) -> dict[str, Any]:
     manifest = {
@@ -2878,6 +3263,15 @@ def _one_hour_goal_manifest(
         "remap_execution_report_id": remap_execution["remap_execution_report_id"],
         "settlement_resolution_report_id": settlement_resolution[
             "settlement_resolution_report_id"
+        ],
+        "raw_evidence_completeness_report_id": raw_evidence_completeness[
+            "raw_evidence_completeness_report_id"
+        ],
+        "raw_evidence_complete_market_count": raw_evidence_completeness[
+            "evidence_complete_market_count"
+        ],
+        "raw_evidence_incomplete_market_count": raw_evidence_completeness[
+            "markets_missing_required_evidence_count"
         ],
         "paper_fresh_loop_manifest_id": fresh_manifest[
             "o_v8_paper_fresh_loop_manifest_id"
