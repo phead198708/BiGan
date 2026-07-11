@@ -61,6 +61,14 @@ ONE_HOUR_RAW_EVIDENCE_COMPLETENESS_SCHEMA_VERSION = (
 )
 POLYMARKET_CLOB_MARKET_ENDPOINT = "https://clob.polymarket.com/markets/{condition_id}"
 SETTLEMENT_CLOB_MAX_WORKERS = 8
+SETTLEMENT_METADATA_CONFLICT_FIELDS = (
+    "market_id",
+    "condition_id",
+    "up_token_id",
+    "down_token_id",
+    "market_start_ts",
+    "market_end_ts",
+)
 
 GUARD_JUSTIFIED_NO_BET_ALLOWED_BLOCKER_CATEGORIES = {
     "time_to_close",
@@ -2753,12 +2761,19 @@ def _settlement_resolution_report(
         for fill in fills
         if str(fill.get("market_id")) not in explicit_settled_market_ids
     ]
-    market_rows = _settlement_market_rows_from_trace(trace_rows=trace_rows, fills=fills)
-    market_rows = [
-        row
-        for row in market_rows
-        if str(row.get("market_id")) in {str(fill.get("market_id")) for fill in unresolved_fills}
-    ]
+    metadata = _settlement_market_metadata_report(
+        trace_rows=trace_rows,
+        fills=unresolved_fills,
+    )
+    market_rows = metadata["market_rows"]
+    metadata_conflicts = metadata["metadata_conflicts"]
+    condition_metadata = {
+        _settlement_condition_key(row): row for row in market_rows
+    }
+    condition_key_by_market_id = {
+        str(row["market_id"]): condition_key
+        for condition_key, row in condition_metadata.items()
+    }
     reason_codes: list[str] = []
     evaluation_rows: list[dict[str, Any]] = []
     resolution_rows: list[dict[str, Any]] = []
@@ -2769,17 +2784,22 @@ def _settlement_resolution_report(
     provider_read_only = bool(getattr(provider, "read_only", False)) if provider else False
     provider_safe = _settlement_provider_safe(provider) if provider is not None else False
     attempt_count = 0
-    resolution_failures: list[dict[str, Any]] = []
-    resolutions_by_market: dict[str, dict[str, Any]] = {}
+    attempt_failures: list[dict[str, Any]] = []
+    resolutions_by_condition: dict[str, dict[str, Any]] = {}
+    condition_request_count_by_attempt: list[dict[str, Any]] = []
     query_mode = (
         "concurrent_clob_condition_id"
         if isinstance(provider, PolymarketPublicHTTPRealCorpusProvider)
         else "provider_resolution_rows"
     )
+    if metadata_conflicts:
+        reason_codes.append("settlement_metadata_conflict_fail_closed")
     if not unresolved_fills:
         reason_codes.append("settlement_poll_skipped_no_unresolved_fills")
-    elif not market_rows:
+    elif not market_rows and not metadata_conflicts:
         reason_codes.append("settlement_poll_skipped_missing_market_metadata")
+    elif not market_rows:
+        reason_codes.append("settlement_poll_skipped_no_non_conflicting_conditions")
     elif provider is None:
         reason_codes.append("settlement_poll_skipped_no_public_provider")
     elif not provider_safe:
@@ -2791,22 +2811,39 @@ def _settlement_resolution_report(
             unresolved_market_rows = [
                 row
                 for row in market_rows
-                if str(row.get("market_id")) not in resolutions_by_market
+                if _settlement_condition_key(row) not in resolutions_by_condition
             ]
+            if not unresolved_market_rows:
+                break
+            requested_condition_keys = [
+                _settlement_condition_key(row) for row in unresolved_market_rows
+            ]
+            condition_request_count_by_attempt.append(
+                {
+                    "attempt": attempt_count,
+                    "condition_request_count": len(requested_condition_keys),
+                    "condition_ids": requested_condition_keys,
+                }
+            )
             request_timeout = min(
                 config.settlement_poll_interval_seconds,
                 max(0.001, deadline - time.monotonic()),
             )
             try:
                 if isinstance(provider, PolymarketPublicHTTPRealCorpusProvider):
-                    attempt_rows, attempt_failures = (
+                    attempt_rows, attempt_failure_rows = (
                         _clob_resolution_rows_for_markets(
                             market_rows=unresolved_market_rows,
                             timeout_seconds=request_timeout,
                         )
                     )
-                    resolution_failures.extend(
-                        {**row, "attempt": attempt_count} for row in attempt_failures
+                    attempt_failures.extend(
+                        _settlement_attempt_failure(
+                            row=row,
+                            attempt=attempt_count,
+                            condition_key_by_market_id=condition_key_by_market_id,
+                        )
+                        for row in attempt_failure_rows
                     )
                 else:
                     attempt_rows = _provider_resolution_rows_with_timeout(
@@ -2819,6 +2856,14 @@ def _settlement_resolution_report(
                 reason_codes.extend(
                     ["settlement_resolution_provider_error", *list(exc.reason_codes)]
                 )
+                attempt_failures.extend(
+                    _settlement_attempt_failures_for_conditions(
+                        condition_keys=requested_condition_keys,
+                        attempt=attempt_count,
+                        reason_codes=list(exc.reason_codes)
+                        or ["settlement_resolution_provider_error"],
+                    )
+                )
                 break
             except TimeoutError:
                 reason_codes.extend(
@@ -2826,6 +2871,13 @@ def _settlement_resolution_report(
                         "settlement_resolution_provider_timeout",
                         "settlement_resolution_http_timeout",
                     ]
+                )
+                attempt_failures.extend(
+                    _settlement_attempt_failures_for_conditions(
+                        condition_keys=requested_condition_keys,
+                        attempt=attempt_count,
+                        reason_codes=["settlement_resolution_provider_timeout"],
+                    )
                 )
                 break
             except Exception as exc:  # pragma: no cover - defensive provider boundary
@@ -2835,22 +2887,66 @@ def _settlement_resolution_report(
                         exc.__class__.__name__,
                     ]
                 )
+                attempt_failures.extend(
+                    _settlement_attempt_failures_for_conditions(
+                        condition_keys=requested_condition_keys,
+                        attempt=attempt_count,
+                        reason_codes=[
+                            "settlement_resolution_provider_unexpected_error"
+                        ],
+                    )
+                )
                 break
+            returned_condition_keys: set[str] = set()
             for row in attempt_rows:
                 market_id = str(row.get("market_id") or "")
-                if market_id and _resolved_outcome_from_resolution(row) in {"UP", "DOWN"}:
-                    resolutions_by_market[market_id] = dict(row)
+                condition_key = str(
+                    row.get("condition_id")
+                    or condition_key_by_market_id.get(market_id)
+                    or market_id
+                )
+                returned_condition_keys.add(condition_key)
+                if (
+                    condition_key in condition_metadata
+                    and _resolved_outcome_from_resolution(row) in {"UP", "DOWN"}
+                ):
+                    resolutions_by_condition[condition_key] = dict(row)
+            failed_condition_keys = {
+                str(row.get("condition_key") or "")
+                for row in attempt_failures
+                if row.get("attempt") == attempt_count
+            }
+            missing_result_keys = (
+                set(requested_condition_keys)
+                - returned_condition_keys
+                - failed_condition_keys
+            )
+            attempt_failures.extend(
+                _settlement_attempt_failures_for_conditions(
+                    condition_keys=sorted(missing_result_keys),
+                    attempt=attempt_count,
+                    reason_codes=["settlement_resolution_no_official_outcome"],
+                )
+            )
             resolution_rows = [
-                resolutions_by_market[market_id]
-                for market_id in sorted(resolutions_by_market)
+                resolutions_by_condition[condition_key]
+                for condition_key in sorted(resolutions_by_condition)
             ]
-            if resolutions_by_market:
+            if resolutions_by_condition:
+                resolutions_by_market = {
+                    str(condition_metadata[condition_key]["market_id"]): resolution
+                    for condition_key, resolution in resolutions_by_condition.items()
+                }
                 evaluation_rows = _settlement_evaluation_rows_from_resolutions(
                     fills=unresolved_fills,
                     resolutions_by_market=resolutions_by_market,
                 )
-            if len(evaluation_rows) >= len(unresolved_fills):
-                reason_codes.append("settlement_resolution_all_fills_resolved")
+            if len(resolutions_by_condition) >= len(condition_metadata):
+                reason_codes.append(
+                    "settlement_resolution_all_queryable_conditions_resolved"
+                    if metadata_conflicts
+                    else "settlement_resolution_all_fills_resolved"
+                )
                 break
             if time.monotonic() >= deadline:
                 reason_codes.append("settlement_resolution_max_wait_elapsed")
@@ -2869,6 +2965,40 @@ def _settlement_resolution_report(
         for fill in unresolved_fills
         if str(fill.get("paper_fresh_order_intent_id")) not in resolved_fill_ids
     ]
+    failed_condition_keys = {
+        str(row.get("condition_key") or "") for row in attempt_failures
+    }
+    eventually_resolved_after_failure = (
+        failed_condition_keys & set(resolutions_by_condition)
+    )
+    conflict_by_condition = {
+        str(row.get("condition_key") or ""): row for row in metadata_conflicts
+    }
+    terminal_condition_keys = (
+        set(condition_metadata) - set(resolutions_by_condition)
+    ) | set(conflict_by_condition)
+    terminal_unresolved_conditions = [
+        _terminal_unresolved_condition(
+            condition_key=condition_key,
+            condition_metadata=condition_metadata,
+            conflict_by_condition=conflict_by_condition,
+            attempt_failures=attempt_failures,
+        )
+        for condition_key in sorted(terminal_condition_keys)
+    ]
+    attempt_failure_reason_distribution = _reason_code_distribution(
+        attempt_failures
+    )
+    terminal_failure_reason_distribution = Counter(
+        reason_code
+        for row in terminal_unresolved_conditions
+        for reason_code in row["reason_codes"]
+    )
+    total_condition_request_count = sum(
+        row["condition_request_count"] for row in condition_request_count_by_attempt
+    )
+    resolved_condition_count = len(resolutions_by_condition)
+    terminal_unresolved_condition_count = len(terminal_unresolved_conditions)
     report = {
         "schema_version": ONE_HOUR_REMAP_SETTLEMENT_RESOLUTION_SCHEMA_VERSION,
         "report_type": "one_hour_remap_settlement_resolution",
@@ -2892,36 +3022,151 @@ def _settlement_resolution_report(
             else 1
         ),
         "unresolved_fill_count_before_poll": len(unresolved_fills),
-        "settlement_market_metadata_count": len(market_rows),
-        "resolved_market_count": len(resolutions_by_market),
-        "unresolved_market_count": len(market_rows) - len(resolutions_by_market),
-        "raw_resolution_row_count": len(resolution_rows),
-        "settlement_evaluation_row_count": len(evaluation_rows),
         "resolved_fill_count": len(evaluation_rows),
         "unresolved_fill_count_after_poll": len(unresolved_fill_ids),
+        "unique_condition_count_before_poll": metadata["unique_condition_count"],
+        "resolved_condition_count": resolved_condition_count,
+        "terminal_unresolved_condition_count": terminal_unresolved_condition_count,
+        "terminal_unresolved_conditions": terminal_unresolved_conditions,
+        "condition_request_count_by_attempt": condition_request_count_by_attempt,
+        "total_condition_request_count": total_condition_request_count,
+        "duplicate_condition_requests_prevented_count": metadata[
+            "duplicate_condition_requests_prevented_count"
+        ],
+        "fill_derived_settlement_market_metadata_count": metadata[
+            "fill_derived_settlement_market_metadata_count"
+        ],
+        "settlement_metadata_conflict_count": len(metadata_conflicts),
+        "settlement_metadata_conflicts": metadata_conflicts,
+        "attempt_failure_count": len(attempt_failures),
+        "attempt_failure_reason_distribution": attempt_failure_reason_distribution,
+        "eventually_resolved_after_failure_count": len(
+            eventually_resolved_after_failure
+        ),
+        "terminal_failure_reason_distribution": dict(
+            sorted(terminal_failure_reason_distribution.items())
+        ),
+        "settlement_market_metadata_count": len(market_rows),
+        "settlement_market_metadata_count_semantics": (
+            "unique_non_conflicting_conditions"
+        ),
+        "resolved_market_count": resolved_condition_count,
+        "resolved_market_count_semantics": "resolved_unique_conditions",
+        "unresolved_market_count": terminal_unresolved_condition_count,
+        "unresolved_market_count_semantics": "terminal_unresolved_unique_conditions",
+        "raw_resolution_row_count": len(resolution_rows),
+        "settlement_evaluation_row_count": len(evaluation_rows),
         "unresolved_paper_fresh_order_intent_ids": unresolved_fill_ids,
         "settlement_evaluation_rows": evaluation_rows,
         "resolution_rows": resolution_rows,
-        "settlement_resolution_failure_count": len(resolution_failures),
-        "settlement_resolution_failure_reason_distribution": dict(
-            sorted(
-                Counter(
-                    str(row.get("reason_code") or "settlement_resolution_unknown_failure")
-                    for row in resolution_failures
-                ).items()
-            )
+        "settlement_resolution_failure_count": len(attempt_failures),
+        "settlement_resolution_failure_count_semantics": (
+            "attempt_level_transient_failure_events"
         ),
-        "settlement_resolution_failures": resolution_failures,
+        "settlement_resolution_failure_reason_distribution": (
+            attempt_failure_reason_distribution
+        ),
+        "settlement_resolution_failures": attempt_failures,
         "settlement_resolution_reason_codes": sorted(set(reason_codes)),
         "uses_settlement_pnl_for_decision_time_logic": False,
         "uses_oracle_actions_or_future_returns_for_decision_time_logic": False,
+        "diagnostic_only": True,
         "paper_only": True,
         "capital_at_risk": False,
         "polymarket_write_enabled": False,
         "wallet_signing_enabled": False,
         "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
     }
     return _with_report_id(report, "settlement_resolution_report_id")
+
+
+def _settlement_attempt_failure(
+    *,
+    row: dict[str, Any],
+    attempt: int,
+    condition_key_by_market_id: dict[str, str],
+) -> dict[str, Any]:
+    market_id = str(row.get("market_id") or "")
+    condition_key = str(
+        row.get("condition_id")
+        or condition_key_by_market_id.get(market_id)
+        or market_id
+    )
+    return {
+        "attempt": attempt,
+        "condition_key": condition_key,
+        "condition_id": str(row.get("condition_id") or condition_key),
+        "market_id": market_id,
+        "reason_code": str(
+            row.get("reason_code") or "settlement_resolution_unknown_failure"
+        ),
+    }
+
+
+def _settlement_attempt_failures_for_conditions(
+    *,
+    condition_keys: list[str],
+    attempt: int,
+    reason_codes: list[str],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "attempt": attempt,
+            "condition_key": condition_key,
+            "condition_id": condition_key,
+            "market_id": None,
+            "reason_code": reason_code,
+        }
+        for condition_key in condition_keys
+        for reason_code in reason_codes
+    ]
+
+
+def _terminal_unresolved_condition(
+    *,
+    condition_key: str,
+    condition_metadata: dict[str, dict[str, Any]],
+    conflict_by_condition: dict[str, dict[str, Any]],
+    attempt_failures: list[dict[str, Any]],
+) -> dict[str, Any]:
+    metadata = condition_metadata.get(condition_key, {})
+    conflict = conflict_by_condition.get(condition_key)
+    if conflict is not None:
+        reason_codes = [str(conflict["reason_code"])]
+        market_id = conflict.get("market_id")
+        condition_id = conflict.get("condition_id") or condition_key
+    else:
+        reason_codes = sorted(
+            {
+                str(row["reason_code"])
+                for row in attempt_failures
+                if str(row.get("condition_key") or "") == condition_key
+            }
+        ) or ["settlement_resolution_not_attempted_or_no_official_outcome"]
+        market_id = metadata.get("market_id")
+        condition_id = metadata.get("condition_id") or condition_key
+    return {
+        "condition_key": condition_key,
+        "condition_id": condition_id,
+        "market_id": market_id,
+        "reason_codes": reason_codes,
+    }
+
+
+def _reason_code_distribution(rows: list[dict[str, Any]]) -> dict[str, int]:
+    return dict(
+        sorted(
+            Counter(
+                str(row.get("reason_code") or "settlement_resolution_unknown_failure")
+                for row in rows
+            ).items()
+        )
+    )
 
 
 def _provider_resolution_rows_with_timeout(
@@ -3053,11 +3298,21 @@ def _clob_resolution_row_for_market(
         return None, "settlement_resolution_winner_not_available"
     winner = winners[0]
     winner_token_id = str(winner.get("token_id") or winner.get("asset_id") or "")
-    outcome = str(winner.get("outcome") or "").strip().upper()
+    outcome_from_label = str(winner.get("outcome") or "").strip().upper()
+    if outcome_from_label not in {"UP", "DOWN"}:
+        outcome_from_label = ""
+    outcome_from_token = ""
     if winner_token_id == str(market_row.get("up_token_id") or ""):
-        outcome = "UP"
+        outcome_from_token = "UP"
     elif winner_token_id == str(market_row.get("down_token_id") or ""):
-        outcome = "DOWN"
+        outcome_from_token = "DOWN"
+    if (
+        outcome_from_label
+        and outcome_from_token
+        and outcome_from_label != outcome_from_token
+    ):
+        return None, "settlement_resolution_winner_mapping_ambiguous"
+    outcome = outcome_from_token or outcome_from_label
     if outcome not in {"UP", "DOWN"}:
         return None, "settlement_resolution_winner_outcome_invalid"
     observed_at_ts = time.time() * 1000.0
@@ -3111,45 +3366,147 @@ def _settlement_market_rows_from_trace(
     trace_rows: list[dict[str, Any]],
     fills: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    by_market: dict[str, dict[str, Any]] = {}
+    return _settlement_market_metadata_report(
+        trace_rows=trace_rows,
+        fills=fills,
+    )["market_rows"]
+
+
+def _settlement_market_metadata_report(
+    *,
+    trace_rows: list[dict[str, Any]],
+    fills: list[dict[str, Any]],
+) -> dict[str, Any]:
+    fill_market_ids = [str(fill.get("market_id") or "") for fill in fills]
+    relevant_market_ids = {market_id for market_id in fill_market_ids if market_id}
+    source_by_market: dict[str, dict[str, Any]] = {}
     for row in trace_rows:
         market_id = str(row.get("market_id") or "")
-        if not market_id:
-            continue
-        by_market.setdefault(market_id, row)
-    rows = []
-    for fill in fills:
-        market_id = str(fill.get("market_id") or "")
-        source = by_market.get(market_id, {})
-        if not source:
-            continue
-        rows.append(
+        if market_id in relevant_market_ids:
+            source_by_market.setdefault(market_id, row)
+    candidates = [
+        _settlement_market_metadata_row(source_by_market[market_id])
+        for market_id in fill_market_ids
+        if market_id in source_by_market
+    ]
+    missing_market_ids = sorted(relevant_market_ids - set(source_by_market))
+    grouped_by_condition: dict[str, list[dict[str, Any]]] = {}
+    for row in candidates:
+        grouped_by_condition.setdefault(_settlement_condition_key(row), []).append(row)
+
+    conflicts: list[dict[str, Any]] = []
+    conflicted_condition_keys: set[str] = set()
+    for condition_key, rows in sorted(grouped_by_condition.items()):
+        differing_fields = _settlement_metadata_differing_fields(rows)
+        if differing_fields:
+            conflicted_condition_keys.add(condition_key)
+            conflicts.append(
+                _settlement_metadata_conflict(
+                    condition_key=condition_key,
+                    market_id=str(rows[0].get("market_id") or ""),
+                    rows=rows,
+                    differing_fields=differing_fields,
+                )
+            )
+
+    for market_id in missing_market_ids:
+        conflicted_condition_keys.add(market_id)
+        conflicts.append(
             {
+                "condition_key": market_id,
+                "condition_id": None,
                 "market_id": market_id,
-                "condition_id": str(source.get("condition_id") or market_id),
-                "slug": str(source.get("slug") or ""),
-                "market_family": str(source.get("market_family") or "btc_updown_5m"),
-                "market_start_ts": source.get("market_start_ts"),
-                "market_end_ts": source.get("market_end_ts"),
-                "settlement_ts": source.get("settlement_ts"),
-                "up_token_id": source.get("up_token_id"),
-                "down_token_id": source.get("down_token_id"),
-                "reference_price_source": str(
-                    source.get("reference_price_source")
-                    or "polymarket_official_btc_usd_reference"
-                ),
-                "reference_price_start": source.get("reference_price_start"),
-                "reference_price_at_start": source.get("reference_price_at_start"),
-                "raw_market_sha256": source.get("raw_market_sha256") or "0" * 64,
-                "paper_only": True,
-                "capital_at_risk": False,
-                "broker_exchange_write_enabled": False,
-                "live_exchange_write_enabled": False,
-                "polymarket_write_enabled": False,
-                "wallet_signing_enabled": False,
+                "reason_code": "settlement_metadata_missing_for_fill_market",
+                "differing_fields": [],
+                "observed_values": {},
             }
         )
-    return rows
+
+    market_rows = [
+        dict(rows[0])
+        for condition_key, rows in sorted(grouped_by_condition.items())
+        if condition_key not in conflicted_condition_keys
+    ]
+    fill_derived_metadata_count = len(candidates)
+    all_condition_keys = set(grouped_by_condition) | set(missing_market_ids)
+    return {
+        "market_rows": market_rows,
+        "metadata_conflicts": sorted(
+            conflicts,
+            key=lambda row: (str(row.get("condition_key") or ""), row["reason_code"]),
+        ),
+        "unique_condition_count": len(all_condition_keys),
+        "valid_unique_condition_count": len(market_rows),
+        "fill_derived_settlement_market_metadata_count": fill_derived_metadata_count,
+        "duplicate_condition_requests_prevented_count": max(
+            0,
+            fill_derived_metadata_count - len(all_condition_keys),
+        ),
+    }
+
+
+def _settlement_market_metadata_row(source: dict[str, Any]) -> dict[str, Any]:
+    market_id = str(source.get("market_id") or "")
+    return {
+        "market_id": market_id,
+        "condition_id": str(source.get("condition_id") or market_id),
+        "slug": str(source.get("slug") or ""),
+        "market_family": str(source.get("market_family") or "btc_updown_5m"),
+        "market_start_ts": source.get("market_start_ts"),
+        "market_end_ts": source.get("market_end_ts"),
+        "settlement_ts": source.get("settlement_ts"),
+        "up_token_id": source.get("up_token_id"),
+        "down_token_id": source.get("down_token_id"),
+        "reference_price_source": str(
+            source.get("reference_price_source")
+            or "polymarket_official_btc_usd_reference"
+        ),
+        "reference_price_start": source.get("reference_price_start"),
+        "reference_price_at_start": source.get("reference_price_at_start"),
+        "raw_market_sha256": source.get("raw_market_sha256") or "0" * 64,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "broker_exchange_write_enabled": False,
+        "live_exchange_write_enabled": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+
+
+def _settlement_condition_key(row: dict[str, Any]) -> str:
+    return str(row.get("condition_id") or row.get("market_id") or "")
+
+
+def _settlement_metadata_differing_fields(
+    rows: list[dict[str, Any]],
+) -> list[str]:
+    return [
+        field
+        for field in SETTLEMENT_METADATA_CONFLICT_FIELDS
+        if len({json.dumps(row.get(field), sort_keys=True) for row in rows}) > 1
+    ]
+
+
+def _settlement_metadata_conflict(
+    *,
+    condition_key: str,
+    market_id: str,
+    rows: list[dict[str, Any]],
+    differing_fields: list[str],
+) -> dict[str, Any]:
+    return {
+        "condition_key": condition_key,
+        "condition_id": condition_key,
+        "market_id": market_id,
+        "reason_code": "settlement_metadata_conflict",
+        "differing_fields": differing_fields,
+        "observed_values": {
+            field: sorted(
+                {json.dumps(row.get(field), sort_keys=True) for row in rows}
+            )
+            for field in differing_fields
+        },
+    }
 
 
 def _settlement_evaluation_rows_from_resolutions(
@@ -3489,6 +3846,21 @@ def _one_hour_goal_manifest(
         "settlement_resolution_report_id": settlement_resolution[
             "settlement_resolution_report_id"
         ],
+        "settlement_unique_condition_count_before_poll": settlement_resolution[
+            "unique_condition_count_before_poll"
+        ],
+        "settlement_resolved_condition_count": settlement_resolution[
+            "resolved_condition_count"
+        ],
+        "settlement_terminal_unresolved_condition_count": settlement_resolution[
+            "terminal_unresolved_condition_count"
+        ],
+        "settlement_total_condition_request_count": settlement_resolution[
+            "total_condition_request_count"
+        ],
+        "settlement_duplicate_condition_requests_prevented_count": (
+            settlement_resolution["duplicate_condition_requests_prevented_count"]
+        ),
         "raw_evidence_completeness_report_id": raw_evidence_completeness[
             "raw_evidence_completeness_report_id"
         ],
@@ -3703,6 +4075,14 @@ def _settlement_resolution_md(report: dict[str, Any]) -> str:
             f"- settlement_provider_safety_passed: `{report['settlement_provider_safety_passed']}`",
             f"- settlement_poll_attempt_count: `{report['settlement_poll_attempt_count']}`",
             f"- unresolved_fill_count_before_poll: `{report['unresolved_fill_count_before_poll']}`",
+            f"- resolved_fill_count: `{report['resolved_fill_count']}`",
+            f"- unique_condition_count_before_poll: `{report['unique_condition_count_before_poll']}`",
+            f"- resolved_condition_count: `{report['resolved_condition_count']}`",
+            f"- terminal_unresolved_condition_count: `{report['terminal_unresolved_condition_count']}`",
+            f"- total_condition_request_count: `{report['total_condition_request_count']}`",
+            f"- duplicate_condition_requests_prevented_count: `{report['duplicate_condition_requests_prevented_count']}`",
+            f"- attempt_failure_count: `{report['attempt_failure_count']}`",
+            f"- eventually_resolved_after_failure_count: `{report['eventually_resolved_after_failure_count']}`",
             f"- raw_resolution_row_count: `{report['raw_resolution_row_count']}`",
             f"- settlement_evaluation_row_count: `{report['settlement_evaluation_row_count']}`",
             f"- unresolved_fill_count_after_poll: `{report['unresolved_fill_count_after_poll']}`",

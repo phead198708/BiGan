@@ -3444,6 +3444,10 @@ def test_execution_layer_v2_one_hour_goal_polls_read_only_resolution_provider(
     assert report["final_goal_success"] is True
     assert report["uses_settlement_pnl_or_outcome_labels_in_decision_logic"] is False
     assert result.manifest["settlement_evaluation_row_count"] == 1
+    assert result.manifest["settlement_unique_condition_count_before_poll"] == 1
+    assert result.manifest["settlement_resolved_condition_count"] == 1
+    assert result.manifest["settlement_terminal_unresolved_condition_count"] == 0
+    assert result.manifest["settlement_total_condition_request_count"] == 1
     assert "settlement_resolution_report" in result.manifest["artifact_hashes"]
     assert result.manifest["v8_execution_handoff_allowed"] is False
 
@@ -3591,14 +3595,280 @@ def test_one_hour_settlement_accumulates_concurrent_clob_results_by_condition(
     assert report["settlement_resolution_query_mode"] == "concurrent_clob_condition_id"
     assert report["resolved_market_count"] == 2
     assert report["unresolved_market_count"] == 0
+    assert report["unique_condition_count_before_poll"] == 2
+    assert report["resolved_condition_count"] == 2
+    assert report["terminal_unresolved_condition_count"] == 0
     assert report["resolved_fill_count"] == 2
     assert report["unresolved_fill_count_after_poll"] == 0
+    assert report["condition_request_count_by_attempt"] == [
+        {
+            "attempt": 1,
+            "condition_request_count": 2,
+            "condition_ids": ["market-a", "market-b"],
+        },
+        {
+            "attempt": 2,
+            "condition_request_count": 1,
+            "condition_ids": ["market-b"],
+        },
+    ]
+    assert report["total_condition_request_count"] == 3
+    assert report["attempt_failure_count"] == 1
+    assert report["eventually_resolved_after_failure_count"] == 1
+    assert report["terminal_failure_reason_distribution"] == {}
     assert report["settlement_resolution_failure_reason_distribution"] == {
         "settlement_resolution_market_not_closed": 1
     }
     assert report["paper_only"] is True
     assert report["capital_at_risk"] is False
     assert report["v8_execution_handoff_allowed"] is False
+
+
+def test_one_hour_settlement_queries_one_condition_for_multiple_fills(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    requested_condition_ids: list[tuple[str, ...]] = []
+
+    def _resolve_once(*, market_rows, timeout_seconds):
+        assert timeout_seconds > 0.0
+        requested_condition_ids.append(
+            tuple(str(row["condition_id"]) for row in market_rows)
+        )
+        return [
+            {
+                "market_id": "market-shared",
+                "condition_id": "condition-shared",
+                "resolution_status": "normal",
+                "resolved_outcome": "UP",
+                "payout_up": 1.0,
+                "payout_down": 0.0,
+                "resolution_source_type": "polymarket_clob_read_only_settlement",
+                "paper_only": True,
+                "capital_at_risk": False,
+            }
+        ], []
+
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal."
+        "_clob_resolution_rows_for_markets",
+        _resolve_once,
+    )
+    fills = [
+        {
+            "paper_fresh_order_intent_id": f"intent-{index}",
+            "market_id": "market-shared",
+            "execution_guarded_side": "UP",
+            "paper_fill_price": 0.60,
+            "filled_size": 0.20,
+            "total_execution_cost": 0.0,
+        }
+        for index in range(3)
+    ]
+    report = _settlement_resolution_report(
+        config=ExecutionLayerV2OneHourRemapPaperGoalConfig(
+            run_id="one-condition-three-fills",
+            output_dir=tmp_path / "runs",
+            public_provider=PolymarketPublicHTTPRealCorpusProvider(
+                fetch_json=lambda _url: {}
+            ),
+            settlement_poll_max_wait_seconds=0.0,
+            settlement_poll_interval_seconds=0.001,
+        ),
+        fills=fills,
+        trace_rows=[
+            {
+                "market_id": "market-shared",
+                "condition_id": "condition-shared",
+                "slug": "btc-updown-5m-shared",
+                "market_family": "btc_updown_5m",
+                "market_start_ts": 1_000_000,
+                "market_end_ts": 1_300_000,
+                "up_token_id": "up-shared",
+                "down_token_id": "down-shared",
+            }
+        ],
+        settlement_evaluation_rows=[],
+    )
+
+    assert requested_condition_ids == [("condition-shared",)]
+    assert report["fill_derived_settlement_market_metadata_count"] == 3
+    assert report["unique_condition_count_before_poll"] == 1
+    assert report["duplicate_condition_requests_prevented_count"] == 2
+    assert report["total_condition_request_count"] == 1
+    assert report["resolved_condition_count"] == 1
+    assert report["terminal_unresolved_condition_count"] == 0
+    assert report["resolved_fill_count"] == 3
+    assert report["unresolved_fill_count_after_poll"] == 0
+    assert {
+        row["paper_fresh_order_intent_id"]
+        for row in report["settlement_evaluation_rows"]
+    } == {"intent-0", "intent-1", "intent-2"}
+
+
+def test_one_hour_settlement_metadata_conflict_blocks_condition_request(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    def _unexpected_request(**_kwargs):
+        raise AssertionError("conflicting condition must not be requested")
+
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal."
+        "_clob_resolution_rows_for_markets",
+        _unexpected_request,
+    )
+    trace_base = {
+        "condition_id": "condition-conflict",
+        "slug": "btc-updown-5m-conflict",
+        "market_family": "btc_updown_5m",
+        "market_start_ts": 1_000_000,
+        "market_end_ts": 1_300_000,
+        "down_token_id": "down-token",
+    }
+    report = _settlement_resolution_report(
+        config=ExecutionLayerV2OneHourRemapPaperGoalConfig(
+            run_id="conflicting-condition-metadata",
+            output_dir=tmp_path / "runs",
+            public_provider=PolymarketPublicHTTPRealCorpusProvider(
+                fetch_json=lambda _url: {}
+            ),
+            settlement_poll_max_wait_seconds=0.0,
+            settlement_poll_interval_seconds=0.001,
+        ),
+        fills=[
+            {
+                "paper_fresh_order_intent_id": f"intent-conflict-{suffix}",
+                "market_id": f"market-conflict-{suffix}",
+                "execution_guarded_side": "UP",
+                "paper_fill_price": 0.60,
+                "filled_size": 0.20,
+                "total_execution_cost": 0.0,
+            }
+            for suffix in ("a", "b")
+        ],
+        trace_rows=[
+            {
+                **trace_base,
+                "market_id": "market-conflict-a",
+                "up_token_id": "up-token-a",
+            },
+            {
+                **trace_base,
+                "market_id": "market-conflict-b",
+                "up_token_id": "up-token-b",
+            },
+        ],
+        settlement_evaluation_rows=[],
+    )
+
+    assert report["settlement_poll_attempt_count"] == 0
+    assert report["total_condition_request_count"] == 0
+    assert report["settlement_metadata_conflict_count"] == 1
+    assert report["settlement_metadata_conflicts"][0]["differing_fields"] == [
+        "market_id",
+        "up_token_id",
+    ]
+    assert report["resolved_condition_count"] == 0
+    assert report["terminal_unresolved_condition_count"] == 1
+    assert report["terminal_failure_reason_distribution"] == {
+        "settlement_metadata_conflict": 1
+    }
+    assert report["unresolved_fill_count_after_poll"] == 2
+
+
+def test_one_hour_settlement_preserves_resolved_condition_at_terminal_deadline(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    requests: list[tuple[str, ...]] = []
+
+    def _partially_resolve(*, market_rows, timeout_seconds):
+        assert timeout_seconds > 0.0
+        condition_ids = tuple(str(row["condition_id"]) for row in market_rows)
+        requests.append(condition_ids)
+        rows = []
+        if "condition-a" in condition_ids:
+            rows.append(
+                {
+                    "market_id": "market-a",
+                    "condition_id": "condition-a",
+                    "resolution_status": "normal",
+                    "resolved_outcome": "UP",
+                    "payout_up": 1.0,
+                    "payout_down": 0.0,
+                }
+            )
+        failures = [
+            {
+                "market_id": "market-b",
+                "condition_id": "condition-b",
+                "reason_code": "settlement_resolution_market_not_closed",
+            }
+        ]
+        return rows, failures
+
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal."
+        "_clob_resolution_rows_for_markets",
+        _partially_resolve,
+    )
+    fills = [
+        {
+            "paper_fresh_order_intent_id": f"intent-{suffix}",
+            "market_id": f"market-{suffix}",
+            "execution_guarded_side": "UP",
+            "paper_fill_price": 0.60,
+            "filled_size": 0.20,
+            "total_execution_cost": 0.0,
+        }
+        for suffix in ("a", "b")
+    ]
+    trace_rows = [
+        {
+            "market_id": f"market-{suffix}",
+            "condition_id": f"condition-{suffix}",
+            "slug": f"btc-updown-5m-{suffix}",
+            "market_family": "btc_updown_5m",
+            "market_start_ts": 1_000_000,
+            "market_end_ts": 1_300_000,
+            "up_token_id": f"up-{suffix}",
+            "down_token_id": f"down-{suffix}",
+        }
+        for suffix in ("a", "b")
+    ]
+    report = _settlement_resolution_report(
+        config=ExecutionLayerV2OneHourRemapPaperGoalConfig(
+            run_id="terminal-unresolved-condition",
+            output_dir=tmp_path / "runs",
+            public_provider=PolymarketPublicHTTPRealCorpusProvider(
+                fetch_json=lambda _url: {}
+            ),
+            settlement_poll_max_wait_seconds=0.003,
+            settlement_poll_interval_seconds=0.001,
+        ),
+        fills=fills,
+        trace_rows=trace_rows,
+        settlement_evaluation_rows=[],
+    )
+
+    assert requests[0] == ("condition-a", "condition-b")
+    assert all(request == ("condition-b",) for request in requests[1:])
+    assert report["resolved_condition_count"] == 1
+    assert report["terminal_unresolved_condition_count"] == 1
+    assert report["resolved_fill_count"] == 1
+    assert report["unresolved_fill_count_after_poll"] == 1
+    assert report["terminal_unresolved_conditions"] == [
+        {
+            "condition_key": "condition-b",
+            "condition_id": "condition-b",
+            "market_id": "market-b",
+            "reason_codes": ["settlement_resolution_market_not_closed"],
+        }
+    ]
+    assert report["terminal_failure_reason_distribution"] == {
+        "settlement_resolution_market_not_closed": 1
+    }
 
 
 def test_clob_settlement_keeps_not_closed_market_fail_closed(monkeypatch) -> None:
