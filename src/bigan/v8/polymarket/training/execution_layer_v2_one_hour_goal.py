@@ -61,13 +61,24 @@ ONE_HOUR_RAW_EVIDENCE_COMPLETENESS_SCHEMA_VERSION = (
 )
 POLYMARKET_CLOB_MARKET_ENDPOINT = "https://clob.polymarket.com/markets/{condition_id}"
 SETTLEMENT_CLOB_MAX_WORKERS = 8
-SETTLEMENT_METADATA_CONFLICT_FIELDS = (
+SETTLEMENT_WITHIN_MARKET_CONFLICT_FIELDS = (
     "market_id",
     "condition_id",
     "up_token_id",
     "down_token_id",
     "market_start_ts",
     "market_end_ts",
+    "slug",
+    "market_family",
+)
+SETTLEMENT_CROSS_MARKET_CONDITION_CONFLICT_FIELDS = (
+    "condition_id",
+    "up_token_id",
+    "down_token_id",
+    "market_start_ts",
+    "market_end_ts",
+    "slug",
+    "market_family",
 )
 
 GUARD_JUSTIFIED_NO_BET_ALLOWED_BLOCKER_CATEGORIES = {
@@ -2771,8 +2782,9 @@ def _settlement_resolution_report(
         _settlement_condition_key(row): row for row in market_rows
     }
     condition_key_by_market_id = {
-        str(row["market_id"]): condition_key
-        for condition_key, row in condition_metadata.items()
+        market_id: condition_key
+        for condition_key, market_ids in metadata["condition_market_ids"].items()
+        for market_id in market_ids
     }
     reason_codes: list[str] = []
     evaluation_rows: list[dict[str, Any]] = []
@@ -2934,8 +2946,9 @@ def _settlement_resolution_report(
             ]
             if resolutions_by_condition:
                 resolutions_by_market = {
-                    str(condition_metadata[condition_key]["market_id"]): resolution
+                    market_id: resolution
                     for condition_key, resolution in resolutions_by_condition.items()
+                    for market_id in metadata["condition_market_ids"][condition_key]
                 }
                 evaluation_rows = _settlement_evaluation_rows_from_resolutions(
                     fills=unresolved_fills,
@@ -2974,17 +2987,32 @@ def _settlement_resolution_report(
     conflict_by_condition = {
         str(row.get("condition_key") or ""): row for row in metadata_conflicts
     }
-    terminal_condition_keys = (
-        set(condition_metadata) - set(resolutions_by_condition)
-    ) | set(conflict_by_condition)
-    terminal_unresolved_conditions = [
-        _terminal_unresolved_condition(
+    last_request_attempt_by_condition = {
+        condition_key: max(
+            int(row["attempt"])
+            for row in condition_request_count_by_attempt
+            if condition_key in row["condition_ids"]
+        )
+        for condition_key in condition_metadata
+        if any(
+            condition_key in row["condition_ids"]
+            for row in condition_request_count_by_attempt
+        )
+    }
+    all_condition_keys = set(condition_metadata) | set(conflict_by_condition)
+    condition_resolution_histories = [
+        _condition_resolution_history(
             condition_key=condition_key,
+            resolved=condition_key in resolutions_by_condition,
             condition_metadata=condition_metadata,
             conflict_by_condition=conflict_by_condition,
             attempt_failures=attempt_failures,
+            last_request_attempt=last_request_attempt_by_condition.get(condition_key),
         )
-        for condition_key in sorted(terminal_condition_keys)
+        for condition_key in sorted(all_condition_keys)
+    ]
+    terminal_unresolved_conditions = [
+        row for row in condition_resolution_histories if not row["resolved"]
     ]
     attempt_failure_reason_distribution = _reason_code_distribution(
         attempt_failures
@@ -2992,7 +3020,28 @@ def _settlement_resolution_report(
     terminal_failure_reason_distribution = Counter(
         reason_code
         for row in terminal_unresolved_conditions
-        for reason_code in row["reason_codes"]
+        for reason_code in row["terminal_reason_codes"]
+    )
+    historical_attempt_reason_codes = sorted(
+        {
+            reason_code
+            for row in condition_resolution_histories
+            for reason_code in row["historical_attempt_reason_codes"]
+        }
+    )
+    last_attempt_reason_codes = sorted(
+        {
+            reason_code
+            for row in condition_resolution_histories
+            for reason_code in row["last_attempt_reason_codes"]
+        }
+    )
+    terminal_reason_codes = sorted(
+        {
+            reason_code
+            for row in terminal_unresolved_conditions
+            for reason_code in row["terminal_reason_codes"]
+        }
     )
     total_condition_request_count = sum(
         row["condition_request_count"] for row in condition_request_count_by_attempt
@@ -3028,6 +3077,10 @@ def _settlement_resolution_report(
         "resolved_condition_count": resolved_condition_count,
         "terminal_unresolved_condition_count": terminal_unresolved_condition_count,
         "terminal_unresolved_conditions": terminal_unresolved_conditions,
+        "condition_resolution_histories": condition_resolution_histories,
+        "historical_attempt_reason_codes": historical_attempt_reason_codes,
+        "last_attempt_reason_codes": last_attempt_reason_codes,
+        "terminal_reason_codes": terminal_reason_codes,
         "condition_request_count_by_attempt": condition_request_count_by_attempt,
         "total_condition_request_count": total_condition_request_count,
         "duplicate_condition_requests_prevented_count": metadata[
@@ -3038,6 +3091,22 @@ def _settlement_resolution_report(
         ],
         "settlement_metadata_conflict_count": len(metadata_conflicts),
         "settlement_metadata_conflicts": metadata_conflicts,
+        "metadata_conflict_count": len(metadata_conflicts),
+        "metadata_conflicts": metadata_conflicts,
+        "relevant_trace_row_count": metadata["relevant_trace_row_count"],
+        "relevant_market_count": metadata["relevant_market_count"],
+        "within_market_duplicate_trace_row_count": metadata[
+            "within_market_duplicate_trace_row_count"
+        ],
+        "within_market_conflict_count": metadata[
+            "within_market_conflict_count"
+        ],
+        "cross_market_condition_conflict_count": metadata[
+            "cross_market_condition_conflict_count"
+        ],
+        "queryable_unique_condition_count": metadata[
+            "queryable_unique_condition_count"
+        ],
         "attempt_failure_count": len(attempt_failures),
         "attempt_failure_reason_distribution": attempt_failure_reason_distribution,
         "eventually_resolved_after_failure_count": len(
@@ -3127,34 +3196,56 @@ def _settlement_attempt_failures_for_conditions(
     ]
 
 
-def _terminal_unresolved_condition(
+def _condition_resolution_history(
     *,
     condition_key: str,
+    resolved: bool,
     condition_metadata: dict[str, dict[str, Any]],
     conflict_by_condition: dict[str, dict[str, Any]],
     attempt_failures: list[dict[str, Any]],
+    last_request_attempt: int | None,
 ) -> dict[str, Any]:
     metadata = condition_metadata.get(condition_key, {})
     conflict = conflict_by_condition.get(condition_key)
+    condition_failures = [
+        row
+        for row in attempt_failures
+        if str(row.get("condition_key") or "") == condition_key
+    ]
+    historical_reason_codes = sorted(
+        {str(row["reason_code"]) for row in condition_failures}
+    )
+    last_reason_codes = sorted(
+        {
+            str(row["reason_code"])
+            for row in condition_failures
+            if int(row["attempt"]) == last_request_attempt
+        }
+    )
     if conflict is not None:
-        reason_codes = [str(conflict["reason_code"])]
+        terminal_reason_codes = [str(conflict["reason_code"])]
         market_id = conflict.get("market_id")
         condition_id = conflict.get("condition_id") or condition_key
+    elif resolved:
+        terminal_reason_codes = []
+        market_id = metadata.get("market_id")
+        condition_id = metadata.get("condition_id") or condition_key
     else:
-        reason_codes = sorted(
-            {
-                str(row["reason_code"])
-                for row in attempt_failures
-                if str(row.get("condition_key") or "") == condition_key
-            }
-        ) or ["settlement_resolution_not_attempted_or_no_official_outcome"]
+        terminal_reason_codes = last_reason_codes or [
+            "settlement_resolution_not_attempted_or_no_official_outcome"
+        ]
         market_id = metadata.get("market_id")
         condition_id = metadata.get("condition_id") or condition_key
     return {
         "condition_key": condition_key,
         "condition_id": condition_id,
         "market_id": market_id,
-        "reason_codes": reason_codes,
+        "resolved": resolved,
+        "last_request_attempt": last_request_attempt,
+        "historical_attempt_reason_codes": historical_reason_codes,
+        "last_attempt_reason_codes": last_reason_codes,
+        "terminal_reason_codes": terminal_reason_codes,
+        "reason_codes": terminal_reason_codes,
     }
 
 
@@ -3379,63 +3470,181 @@ def _settlement_market_metadata_report(
 ) -> dict[str, Any]:
     fill_market_ids = [str(fill.get("market_id") or "") for fill in fills]
     relevant_market_ids = {market_id for market_id in fill_market_ids if market_id}
-    source_by_market: dict[str, dict[str, Any]] = {}
-    for row in trace_rows:
+    entries_by_market: dict[str, list[dict[str, Any]]] = {}
+    for row_index, row in enumerate(trace_rows):
         market_id = str(row.get("market_id") or "")
         if market_id in relevant_market_ids:
-            source_by_market.setdefault(market_id, row)
-    candidates = [
-        _settlement_market_metadata_row(source_by_market[market_id])
-        for market_id in fill_market_ids
-        if market_id in source_by_market
-    ]
-    missing_market_ids = sorted(relevant_market_ids - set(source_by_market))
-    grouped_by_condition: dict[str, list[dict[str, Any]]] = {}
-    for row in candidates:
-        grouped_by_condition.setdefault(_settlement_condition_key(row), []).append(row)
-
+            entries_by_market.setdefault(market_id, []).append(
+                {
+                    "metadata": _settlement_market_metadata_row(row),
+                    "source_trace_row_index": row_index,
+                    "source_trace_row_hash": canonical_json_sha256(row),
+                }
+            )
+    missing_market_ids = sorted(relevant_market_ids - set(entries_by_market))
     conflicts: list[dict[str, Any]] = []
-    conflicted_condition_keys: set[str] = set()
-    for condition_key, rows in sorted(grouped_by_condition.items()):
-        differing_fields = _settlement_metadata_differing_fields(rows)
+    blocked_condition_keys: set[str] = set()
+    within_market_duplicate_trace_row_count = 0
+    consistent_market_rows: list[dict[str, Any]] = []
+    for market_id, entries in sorted(entries_by_market.items()):
+        metadata_rows = [entry["metadata"] for entry in entries]
+        metadata_hashes = [
+            canonical_json_sha256(
+                {
+                    field: row.get(field)
+                    for field in SETTLEMENT_WITHIN_MARKET_CONFLICT_FIELDS
+                }
+            )
+            for row in metadata_rows
+        ]
+        within_market_duplicate_trace_row_count += len(metadata_hashes) - len(
+            set(metadata_hashes)
+        )
+        differing_fields = _settlement_metadata_differing_fields(
+            metadata_rows,
+            fields=SETTLEMENT_WITHIN_MARKET_CONFLICT_FIELDS,
+        )
         if differing_fields:
-            conflicted_condition_keys.add(condition_key)
+            condition_ids = {
+                str(row.get("condition_id") or "") for row in metadata_rows
+            } - {""}
+            condition_key = (
+                next(iter(condition_ids)) if len(condition_ids) == 1 else market_id
+            )
+            blocked_condition_keys.add(condition_key)
             conflicts.append(
                 _settlement_metadata_conflict(
+                    conflict_scope="within_market",
                     condition_key=condition_key,
-                    market_id=str(rows[0].get("market_id") or ""),
-                    rows=rows,
+                    market_id=market_id,
+                    rows=metadata_rows,
                     differing_fields=differing_fields,
+                    source_trace_row_indices=[
+                        int(entry["source_trace_row_index"]) for entry in entries
+                    ],
+                    source_trace_row_hashes=[
+                        str(entry["source_trace_row_hash"]) for entry in entries
+                    ],
+                    reason_code="settlement_metadata_within_market_conflict",
                 )
             )
+            continue
+        canonical_row = dict(metadata_rows[0])
+        canonical_row["_associated_market_ids"] = [market_id]
+        canonical_row["_source_trace_row_indices"] = sorted(
+            int(entry["source_trace_row_index"]) for entry in entries
+        )
+        canonical_row["_source_trace_row_hashes"] = sorted(
+            str(entry["source_trace_row_hash"]) for entry in entries
+        )
+        consistent_market_rows.append(canonical_row)
 
     for market_id in missing_market_ids:
-        conflicted_condition_keys.add(market_id)
+        blocked_condition_keys.add(market_id)
         conflicts.append(
             {
+                "conflict_scope": "missing_market_metadata",
                 "condition_key": market_id,
                 "condition_id": None,
                 "market_id": market_id,
                 "reason_code": "settlement_metadata_missing_for_fill_market",
                 "differing_fields": [],
                 "observed_values": {},
+                "source_trace_row_indices": [],
+                "source_trace_row_hashes": [],
             }
         )
 
-    market_rows = [
-        dict(rows[0])
-        for condition_key, rows in sorted(grouped_by_condition.items())
-        if condition_key not in conflicted_condition_keys
-    ]
-    fill_derived_metadata_count = len(candidates)
-    all_condition_keys = set(grouped_by_condition) | set(missing_market_ids)
+    rows_by_condition: dict[str, list[dict[str, Any]]] = {}
+    for row in consistent_market_rows:
+        rows_by_condition.setdefault(_settlement_condition_key(row), []).append(row)
+    market_rows: list[dict[str, Any]] = []
+    condition_market_ids: dict[str, list[str]] = {}
+    cross_market_condition_conflict_count = 0
+    for condition_key, rows in sorted(rows_by_condition.items()):
+        if condition_key in blocked_condition_keys:
+            continue
+        differing_fields = _settlement_metadata_differing_fields(
+            rows,
+            fields=SETTLEMENT_CROSS_MARKET_CONDITION_CONFLICT_FIELDS,
+        )
+        if differing_fields:
+            blocked_condition_keys.add(condition_key)
+            cross_market_condition_conflict_count += 1
+            conflicts.append(
+                _settlement_metadata_conflict(
+                    conflict_scope="cross_market_condition",
+                    condition_key=condition_key,
+                    market_id=str(rows[0].get("market_id") or ""),
+                    rows=rows,
+                    differing_fields=differing_fields,
+                    source_trace_row_indices=[
+                        index
+                        for row in rows
+                        for index in row["_source_trace_row_indices"]
+                    ],
+                    source_trace_row_hashes=[
+                        row_hash
+                        for row in rows
+                        for row_hash in row["_source_trace_row_hashes"]
+                    ],
+                    reason_code=(
+                        "settlement_metadata_cross_market_condition_conflict"
+                    ),
+                )
+            )
+            continue
+        associated_market_ids = sorted(
+            {
+                market_id
+                for row in rows
+                for market_id in row["_associated_market_ids"]
+            }
+        )
+        canonical_row = dict(rows[0])
+        canonical_row["_associated_market_ids"] = associated_market_ids
+        canonical_row["_source_trace_row_indices"] = sorted(
+            {index for row in rows for index in row["_source_trace_row_indices"]}
+        )
+        canonical_row["_source_trace_row_hashes"] = sorted(
+            {
+                row_hash
+                for row in rows
+                for row_hash in row["_source_trace_row_hashes"]
+            }
+        )
+        market_rows.append(canonical_row)
+        condition_market_ids[condition_key] = associated_market_ids
+
+    all_condition_keys = set(rows_by_condition) | set(blocked_condition_keys)
+    fill_derived_metadata_count = sum(
+        market_id in entries_by_market for market_id in fill_market_ids
+    )
+    within_market_conflict_count = sum(
+        row["conflict_scope"] == "within_market" for row in conflicts
+    )
     return {
         "market_rows": market_rows,
+        "condition_market_ids": condition_market_ids,
         "metadata_conflicts": sorted(
             conflicts,
-            key=lambda row: (str(row.get("condition_key") or ""), row["reason_code"]),
+            key=lambda row: (
+                str(row.get("condition_key") or ""),
+                row["conflict_scope"],
+                row["reason_code"],
+            ),
+        ),
+        "relevant_trace_row_count": sum(len(rows) for rows in entries_by_market.values()),
+        "relevant_market_count": len(relevant_market_ids),
+        "within_market_duplicate_trace_row_count": (
+            within_market_duplicate_trace_row_count
+        ),
+        "within_market_conflict_count": within_market_conflict_count,
+        "cross_market_condition_conflict_count": (
+            cross_market_condition_conflict_count
         ),
         "unique_condition_count": len(all_condition_keys),
+        "queryable_unique_condition_count": len(market_rows),
         "valid_unique_condition_count": len(market_rows),
         "fill_derived_settlement_market_metadata_count": fill_derived_metadata_count,
         "duplicate_condition_requests_prevented_count": max(
@@ -3479,34 +3688,51 @@ def _settlement_condition_key(row: dict[str, Any]) -> str:
 
 def _settlement_metadata_differing_fields(
     rows: list[dict[str, Any]],
+    *,
+    fields: tuple[str, ...],
 ) -> list[str]:
     return [
         field
-        for field in SETTLEMENT_METADATA_CONFLICT_FIELDS
+        for field in fields
         if len({json.dumps(row.get(field), sort_keys=True) for row in rows}) > 1
     ]
 
 
 def _settlement_metadata_conflict(
     *,
+    conflict_scope: str,
     condition_key: str,
     market_id: str,
     rows: list[dict[str, Any]],
     differing_fields: list[str],
+    source_trace_row_indices: list[int],
+    source_trace_row_hashes: list[str],
+    reason_code: str,
 ) -> dict[str, Any]:
     return {
+        "conflict_scope": conflict_scope,
         "condition_key": condition_key,
         "condition_id": condition_key,
         "market_id": market_id,
-        "reason_code": "settlement_metadata_conflict",
+        "reason_code": reason_code,
         "differing_fields": differing_fields,
         "observed_values": {
-            field: sorted(
-                {json.dumps(row.get(field), sort_keys=True) for row in rows}
-            )
+            field: _settlement_metadata_observed_values(rows, field)
             for field in differing_fields
         },
+        "source_trace_row_indices": sorted(set(source_trace_row_indices)),
+        "source_trace_row_hashes": sorted(set(source_trace_row_hashes)),
     }
+
+
+def _settlement_metadata_observed_values(
+    rows: list[dict[str, Any]],
+    field: str,
+) -> list[Any]:
+    values = {
+        json.dumps(row.get(field), sort_keys=True): row.get(field) for row in rows
+    }
+    return [values[key] for key in sorted(values)]
 
 
 def _settlement_evaluation_rows_from_resolutions(
@@ -3861,6 +4087,21 @@ def _one_hour_goal_manifest(
         "settlement_duplicate_condition_requests_prevented_count": (
             settlement_resolution["duplicate_condition_requests_prevented_count"]
         ),
+        "settlement_relevant_trace_row_count": settlement_resolution[
+            "relevant_trace_row_count"
+        ],
+        "settlement_within_market_duplicate_trace_row_count": (
+            settlement_resolution["within_market_duplicate_trace_row_count"]
+        ),
+        "settlement_within_market_conflict_count": settlement_resolution[
+            "within_market_conflict_count"
+        ],
+        "settlement_cross_market_condition_conflict_count": settlement_resolution[
+            "cross_market_condition_conflict_count"
+        ],
+        "settlement_queryable_unique_condition_count": settlement_resolution[
+            "queryable_unique_condition_count"
+        ],
         "raw_evidence_completeness_report_id": raw_evidence_completeness[
             "raw_evidence_completeness_report_id"
         ],
@@ -4077,8 +4318,14 @@ def _settlement_resolution_md(report: dict[str, Any]) -> str:
             f"- unresolved_fill_count_before_poll: `{report['unresolved_fill_count_before_poll']}`",
             f"- resolved_fill_count: `{report['resolved_fill_count']}`",
             f"- unique_condition_count_before_poll: `{report['unique_condition_count_before_poll']}`",
+            f"- queryable_unique_condition_count: `{report['queryable_unique_condition_count']}`",
             f"- resolved_condition_count: `{report['resolved_condition_count']}`",
             f"- terminal_unresolved_condition_count: `{report['terminal_unresolved_condition_count']}`",
+            f"- relevant_trace_row_count: `{report['relevant_trace_row_count']}`",
+            f"- relevant_market_count: `{report['relevant_market_count']}`",
+            f"- within_market_duplicate_trace_row_count: `{report['within_market_duplicate_trace_row_count']}`",
+            f"- within_market_conflict_count: `{report['within_market_conflict_count']}`",
+            f"- cross_market_condition_conflict_count: `{report['cross_market_condition_conflict_count']}`",
             f"- total_condition_request_count: `{report['total_condition_request_count']}`",
             f"- duplicate_condition_requests_prevented_count: `{report['duplicate_condition_requests_prevented_count']}`",
             f"- attempt_failure_count: `{report['attempt_failure_count']}`",
@@ -4094,6 +4341,10 @@ def _settlement_resolution_md(report: dict[str, Any]) -> str:
                 f"- `{reason}`"
                 for reason in report["settlement_resolution_reason_codes"]
             ],
+            "",
+            "## Terminal Reason Codes",
+            "",
+            *[f"- `{reason}`" for reason in report["terminal_reason_codes"]],
             "",
         ]
     )

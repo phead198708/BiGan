@@ -3616,6 +3616,20 @@ def test_one_hour_settlement_accumulates_concurrent_clob_results_by_condition(
     assert report["attempt_failure_count"] == 1
     assert report["eventually_resolved_after_failure_count"] == 1
     assert report["terminal_failure_reason_distribution"] == {}
+    history_by_condition = {
+        row["condition_key"]: row
+        for row in report["condition_resolution_histories"]
+    }
+    assert history_by_condition["market-b"]["resolved"] is True
+    assert history_by_condition["market-b"][
+        "historical_attempt_reason_codes"
+    ] == ["settlement_resolution_market_not_closed"]
+    assert history_by_condition["market-b"]["last_attempt_reason_codes"] == []
+    assert history_by_condition["market-b"]["terminal_reason_codes"] == []
+    assert report["historical_attempt_reason_codes"] == [
+        "settlement_resolution_market_not_closed"
+    ]
+    assert report["terminal_reason_codes"] == []
     assert report["settlement_resolution_failure_reason_distribution"] == {
         "settlement_resolution_market_not_closed": 1
     }
@@ -3687,7 +3701,8 @@ def test_one_hour_settlement_queries_one_condition_for_multiple_fills(
                 "up_token_id": "up-shared",
                 "down_token_id": "down-shared",
             }
-        ],
+        ]
+        * 2,
         settlement_evaluation_rows=[],
     )
 
@@ -3695,6 +3710,13 @@ def test_one_hour_settlement_queries_one_condition_for_multiple_fills(
     assert report["fill_derived_settlement_market_metadata_count"] == 3
     assert report["unique_condition_count_before_poll"] == 1
     assert report["duplicate_condition_requests_prevented_count"] == 2
+    assert report["relevant_trace_row_count"] == 2
+    assert report["relevant_market_count"] == 1
+    assert report["within_market_duplicate_trace_row_count"] == 1
+    assert report["within_market_conflict_count"] == 0
+    assert report["cross_market_condition_conflict_count"] == 0
+    assert report["queryable_unique_condition_count"] == 1
+    assert report["metadata_conflict_count"] == 0
     assert report["total_condition_request_count"] == 1
     assert report["resolved_condition_count"] == 1
     assert report["terminal_unresolved_condition_count"] == 0
@@ -3706,7 +3728,115 @@ def test_one_hour_settlement_queries_one_condition_for_multiple_fills(
     } == {"intent-0", "intent-1", "intent-2"}
 
 
-def test_one_hour_settlement_metadata_conflict_blocks_condition_request(
+def _within_market_settlement_conflict_report(
+    *,
+    tmp_path,
+    monkeypatch,
+    second_trace_overrides,
+):
+    def _unexpected_request(**_kwargs):
+        raise AssertionError("within-market conflict must not be requested")
+
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal."
+        "_clob_resolution_rows_for_markets",
+        _unexpected_request,
+    )
+    trace = {
+        "market_id": "market-within-conflict",
+        "condition_id": "condition-within-conflict",
+        "slug": "btc-updown-5m-within-conflict",
+        "market_family": "btc_updown_5m",
+        "market_start_ts": 1_000_000,
+        "market_end_ts": 1_300_000,
+        "up_token_id": "up-token-a",
+        "down_token_id": "down-token",
+    }
+    return _settlement_resolution_report(
+        config=ExecutionLayerV2OneHourRemapPaperGoalConfig(
+            run_id="within-market-metadata-conflict",
+            output_dir=tmp_path / "runs",
+            public_provider=PolymarketPublicHTTPRealCorpusProvider(
+                fetch_json=lambda _url: {}
+            ),
+            settlement_poll_max_wait_seconds=0.0,
+            settlement_poll_interval_seconds=0.001,
+        ),
+        fills=[
+            {
+                "paper_fresh_order_intent_id": f"intent-within-{index}",
+                "market_id": "market-within-conflict",
+                "execution_guarded_side": "UP",
+                "paper_fill_price": 0.60,
+                "filled_size": 0.20,
+                "total_execution_cost": 0.0,
+            }
+            for index in range(2)
+        ],
+        trace_rows=[trace, {**trace, **second_trace_overrides}],
+        settlement_evaluation_rows=[],
+    )
+
+
+def test_one_hour_settlement_same_market_token_conflict_fails_closed(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    report = _within_market_settlement_conflict_report(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        second_trace_overrides={"up_token_id": "up-token-b"},
+    )
+
+    assert report["total_condition_request_count"] == 0
+    assert report["resolved_fill_count"] == 0
+    assert report["unresolved_fill_count_after_poll"] == 2
+    assert report["within_market_conflict_count"] == 1
+    assert report["cross_market_condition_conflict_count"] == 0
+    conflict = report["metadata_conflicts"][0]
+    assert conflict["conflict_scope"] == "within_market"
+    assert conflict["differing_fields"] == ["up_token_id"]
+    assert conflict["observed_values"]["up_token_id"] == [
+        "up-token-a",
+        "up-token-b",
+    ]
+    assert conflict["source_trace_row_indices"] == [0, 1]
+    assert len(conflict["source_trace_row_hashes"]) == 2
+    assert conflict["reason_code"] == "settlement_metadata_within_market_conflict"
+    terminal = report["terminal_unresolved_conditions"][0]
+    assert terminal["historical_attempt_reason_codes"] == []
+    assert terminal["last_attempt_reason_codes"] == []
+    assert terminal["terminal_reason_codes"] == [
+        "settlement_metadata_within_market_conflict"
+    ]
+
+
+def test_one_hour_settlement_same_market_timestamp_conflict_fails_closed(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    report = _within_market_settlement_conflict_report(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        second_trace_overrides={"market_end_ts": 1_360_000},
+    )
+
+    assert report["settlement_poll_attempt_count"] == 0
+    assert report["total_condition_request_count"] == 0
+    assert report["within_market_conflict_count"] == 1
+    conflict = report["metadata_conflicts"][0]
+    assert conflict["conflict_scope"] == "within_market"
+    assert conflict["differing_fields"] == ["market_end_ts"]
+    assert conflict["observed_values"]["market_end_ts"] == [
+        1_300_000,
+        1_360_000,
+    ]
+    assert report["terminal_reason_codes"] == [
+        "settlement_metadata_within_market_conflict"
+    ]
+
+
+def test_one_hour_settlement_cross_market_condition_conflict_blocks_request(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -3766,13 +3896,20 @@ def test_one_hour_settlement_metadata_conflict_blocks_condition_request(
     assert report["total_condition_request_count"] == 0
     assert report["settlement_metadata_conflict_count"] == 1
     assert report["settlement_metadata_conflicts"][0]["differing_fields"] == [
-        "market_id",
         "up_token_id",
     ]
+    assert report["settlement_metadata_conflicts"][0]["conflict_scope"] == (
+        "cross_market_condition"
+    )
+    assert report["settlement_metadata_conflicts"][0]["reason_code"] == (
+        "settlement_metadata_cross_market_condition_conflict"
+    )
+    assert report["within_market_conflict_count"] == 0
+    assert report["cross_market_condition_conflict_count"] == 1
     assert report["resolved_condition_count"] == 0
     assert report["terminal_unresolved_condition_count"] == 1
     assert report["terminal_failure_reason_distribution"] == {
-        "settlement_metadata_conflict": 1
+        "settlement_metadata_cross_market_condition_conflict": 1
     }
     assert report["unresolved_fill_count_after_poll"] == 2
 
@@ -3858,14 +3995,24 @@ def test_one_hour_settlement_preserves_resolved_condition_at_terminal_deadline(
     assert report["terminal_unresolved_condition_count"] == 1
     assert report["resolved_fill_count"] == 1
     assert report["unresolved_fill_count_after_poll"] == 1
-    assert report["terminal_unresolved_conditions"] == [
-        {
-            "condition_key": "condition-b",
-            "condition_id": "condition-b",
-            "market_id": "market-b",
-            "reason_codes": ["settlement_resolution_market_not_closed"],
-        }
+    terminal = report["terminal_unresolved_conditions"][0]
+    assert terminal["condition_key"] == "condition-b"
+    assert terminal["condition_id"] == "condition-b"
+    assert terminal["market_id"] == "market-b"
+    assert terminal["resolved"] is False
+    assert terminal["historical_attempt_reason_codes"] == [
+        "settlement_resolution_market_not_closed"
     ]
+    assert terminal["last_attempt_reason_codes"] == [
+        "settlement_resolution_market_not_closed"
+    ]
+    assert terminal["terminal_reason_codes"] == [
+        "settlement_resolution_market_not_closed"
+    ]
+    assert report["attempt_failure_count"] == len(requests)
+    assert [row["attempt"] for row in report["settlement_resolution_failures"]] == (
+        list(range(1, len(requests) + 1))
+    )
     assert report["terminal_failure_reason_distribution"] == {
         "settlement_resolution_market_not_closed": 1
     }
