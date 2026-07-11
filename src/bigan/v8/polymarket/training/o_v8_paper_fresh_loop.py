@@ -17,6 +17,8 @@ from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.corpus.contracts import BTC_UPDOWN_MARKET_HORIZONS_MS
 from bigan.v8.polymarket.recorder.contracts import PolymarketRealCorpusRecorderConfig
 from bigan.v8.polymarket.recorder.public_provider import (
+    BTC_UPDOWN_FAMILY_BY_SLUG,
+    BTC_UPDOWN_SLUG_PATTERN,
     PolymarketPublicHTTPRealCorpusProvider,
     RealCorpusPublicProviderError,
 )
@@ -1353,6 +1355,29 @@ def _fresh_public_row_from_provider_feature_context(
         int(reference_provenance.get("max_input_ts") or 0),
         int(regime_features.get("decision_time_regime_feature_max_input_ts") or 0),
     )
+    market_start_ts = int(market.get("market_start_ts") or 0)
+    market_end_ts = int(market.get("market_end_ts") or 0)
+    horizon_ms = int(
+        market.get("horizon_ms") or max(0, market_end_ts - market_start_ts)
+    )
+    market_schedule_provenance = {
+        "source_type": "normalized_public_market_metadata",
+        "source_fields_used": [
+            "raw_polymarket_markets.slug",
+            "raw_polymarket_markets.market_start_ts",
+            "raw_polymarket_markets.market_end_ts",
+            "raw_polymarket_markets.horizon_ms",
+        ],
+        "raw_market_sha256": market.get("raw_market_sha256"),
+        "decision_ts": decision_ts,
+        "max_input_ts": decision_ts,
+        "provenance_valid": bool(
+            market_start_ts > 0
+            and market_end_ts > market_start_ts
+            and horizon_ms == market_end_ts - market_start_ts
+        ),
+        "warning_reason_codes": [],
+    }
     return {
         "decision_group_id": (
             f"{run_id}|read-only-public-provider|{market.get('market_id')}|"
@@ -1362,6 +1387,11 @@ def _fresh_public_row_from_provider_feature_context(
         "condition_id": str(market.get("condition_id") or ""),
         "slug": str(market.get("slug") or ""),
         "market_family": str(market.get("market_family") or ""),
+        "market_start_ts": market_start_ts,
+        "market_end_ts": market_end_ts,
+        "horizon_ms": horizon_ms,
+        "market_schedule_source_type": "normalized_public_market_metadata",
+        "market_schedule_provenance": market_schedule_provenance,
         "up_token_id": str(market.get("up_token_id") or up.get("token_id") or ""),
         "down_token_id": str(market.get("down_token_id") or down.get("token_id") or ""),
         "reference_price_source": str(market.get("reference_price_source") or ""),
@@ -4271,26 +4301,18 @@ def _fresh_signal_trace_report(
         if not micro:
             micro = dict(provider_row.get("microstructure_snapshot") or {})
         decision_ts = int(provider_row.get("decision_ts") or guard_row.get("decision_ts") or 0)
-        market_start_ts = _trace_int_or_none(
-            provider_row.get("market_start_ts")
-            or provider_row.get("market_start_timestamp")
-            or provider_row.get("score_components", {}).get("market_start_ts")
+        market_schedule = _trace_market_schedule(
+            provider_row=provider_row,
+            decision_ts=decision_ts,
+            micro=micro,
         )
-        market_end_ts = _trace_int_or_none(
-            provider_row.get("market_end_ts")
-            or provider_row.get("market_end_timestamp")
-            or provider_row.get("score_components", {}).get("market_end_ts")
-        )
+        market_start_ts = market_schedule["market_start_ts"]
+        market_end_ts = market_schedule["market_end_ts"]
         time_to_close = _trace_time_to_close_seconds(
             decision_ts=decision_ts,
             market_end_ts=market_end_ts,
             micro=micro,
         )
-        if market_end_ts is None and time_to_close is not None:
-            market_end_ts = int(decision_ts + time_to_close * 1000)
-        if market_start_ts is None and market_end_ts is not None:
-            horizon_ms = _trace_int_or_none(provider_row.get("horizon_ms")) or 300_000
-            market_start_ts = market_end_ts - horizon_ms
         elapsed = (
             (decision_ts - market_start_ts) / 1000.0
             if market_start_ts is not None and decision_ts
@@ -4350,6 +4372,11 @@ def _fresh_signal_trace_report(
             "market_start_ts": market_start_ts,
             "decision_ts": decision_ts,
             "market_end_ts": market_end_ts,
+            "market_schedule_source_type": market_schedule["source_type"],
+            "market_schedule_provenance": market_schedule["provenance"],
+            "market_schedule_warning_reason_codes": market_schedule[
+                "warning_reason_codes"
+            ],
             "elapsed_since_market_start_seconds": elapsed,
             "time_since_market_start_seconds": guard_row.get(
                 "time_since_market_start_seconds",
@@ -5949,16 +5976,113 @@ def _trace_signal_outcome_classification(
     return "no_guard_decision_available"
 
 
+def _trace_market_schedule(
+    *,
+    provider_row: dict[str, Any],
+    decision_ts: int,
+    micro: dict[str, Any],
+) -> dict[str, Any]:
+    provided_start = _trace_int_or_none(
+        provider_row.get("market_start_ts")
+        or provider_row.get("market_start_timestamp")
+        or provider_row.get("score_components", {}).get("market_start_ts")
+    )
+    provided_end = _trace_int_or_none(
+        provider_row.get("market_end_ts")
+        or provider_row.get("market_end_timestamp")
+        or provider_row.get("score_components", {}).get("market_end_ts")
+    )
+    slug = str(provider_row.get("slug") or "")
+    slug_schedule = _trace_market_schedule_from_slug(slug)
+    warning_reason_codes: list[str] = []
+    source_type = "market_schedule_unavailable"
+    source_fields_used: list[str] = []
+    market_start_ts: int | None = None
+    market_end_ts: int | None = None
+    if slug_schedule is not None:
+        slug_start, slug_end = slug_schedule
+        if provided_start == slug_start and provided_end == slug_end:
+            market_start_ts = provided_start
+            market_end_ts = provided_end
+            source_type = "normalized_public_market_metadata"
+            source_fields_used = [
+                "provider_row.market_start_ts",
+                "provider_row.market_end_ts",
+                "provider_row.slug",
+            ]
+        else:
+            market_start_ts = slug_start
+            market_end_ts = slug_end
+            source_type = "canonical_market_slug_schedule"
+            source_fields_used = ["provider_row.slug"]
+            warning_reason_codes.append(
+                "market_schedule_backfilled_from_canonical_slug"
+                if provided_start is None or provided_end is None
+                else "provider_market_schedule_mismatch_canonical_slug"
+            )
+    elif (
+        provided_start is not None
+        and provided_end is not None
+        and provided_start > 0
+        and provided_end > provided_start
+    ):
+        market_start_ts = provided_start
+        market_end_ts = provided_end
+        source_type = "normalized_public_market_metadata_without_slug_schedule"
+        source_fields_used = [
+            "provider_row.market_start_ts",
+            "provider_row.market_end_ts",
+        ]
+    else:
+        warning_reason_codes.append("market_schedule_identity_unavailable")
+        if micro.get("time_to_close_seconds") is not None:
+            warning_reason_codes.append(
+                "microstructure_time_to_close_not_used_for_market_identity"
+            )
+    provenance = {
+        "source_type": source_type,
+        "source_fields_used": source_fields_used,
+        "slug": slug,
+        "raw_market_sha256": provider_row.get("raw_market_sha256"),
+        "decision_ts": decision_ts,
+        "max_input_ts": decision_ts,
+        "provenance_valid": bool(
+            decision_ts > 0
+            and market_start_ts is not None
+            and market_end_ts is not None
+            and market_start_ts > 0
+            and market_end_ts > market_start_ts
+        ),
+        "warning_reason_codes": sorted(set(warning_reason_codes)),
+    }
+    return {
+        "market_start_ts": market_start_ts,
+        "market_end_ts": market_end_ts,
+        "source_type": source_type,
+        "warning_reason_codes": provenance["warning_reason_codes"],
+        "provenance": provenance,
+    }
+
+
+def _trace_market_schedule_from_slug(slug: str) -> tuple[int, int] | None:
+    match = BTC_UPDOWN_SLUG_PATTERN.match(slug)
+    if match is None:
+        return None
+    family = BTC_UPDOWN_FAMILY_BY_SLUG[match.group(1)]
+    start_ts = int(match.group(2)) * 1000
+    return start_ts, start_ts + BTC_UPDOWN_MARKET_HORIZONS_MS[family]
+
+
 def _trace_time_to_close_seconds(
     *,
     decision_ts: int,
     market_end_ts: int | None,
     micro: dict[str, Any],
 ) -> float | None:
-    if micro.get("time_to_close_seconds") is not None:
-        return _float(micro.get("time_to_close_seconds"))
     if market_end_ts is not None and decision_ts:
         return (market_end_ts - decision_ts) / 1000.0
+    if micro.get("time_to_close_seconds") is not None:
+        return _float(micro.get("time_to_close_seconds"))
     return None
 
 

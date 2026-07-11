@@ -69,6 +69,8 @@ from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev_corpu
 )
 from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
     _fresh_public_row_from_provider_feature_context,
+    _trace_market_schedule,
+    _trace_time_to_close_seconds,
 )
 from tests.v8.test_polymarket_post_freeze_holdout import (
     _build_issue160_unlock_fixture,
@@ -2132,8 +2134,61 @@ def test_fresh_provider_row_adds_decision_time_regime_features() -> None:
     assert row["decision_time_regime_feature_provenance"]["provenance_valid"] is True
     assert row["decision_time_regime_feature_max_input_ts"] <= decision_ts
     assert row["score_components"]["btc_momentum"] == pytest.approx(0.002)
+    assert row["market_start_ts"] == 1_000_000
+    assert row["market_end_ts"] == 1_300_000
+    assert row["horizon_ms"] == 300_000
+    assert row["market_schedule_source_type"] == (
+        "normalized_public_market_metadata"
+    )
+    assert row["market_schedule_provenance"]["provenance_valid"] is True
     assert row["paper_only"] is True
     assert row["capital_at_risk"] is False
+
+
+def test_trace_market_schedule_uses_canonical_slug_before_zero_ttl_fallback() -> None:
+    start_ts = 1_700_001_000_000
+    decision_ts = start_ts + 100_000
+    schedule = _trace_market_schedule(
+        provider_row={
+            "slug": "btc-updown-5m-1700001000",
+            "raw_market_sha256": "a" * 64,
+        },
+        decision_ts=decision_ts,
+        micro={"time_to_close_seconds": 0.0},
+    )
+
+    assert schedule["market_start_ts"] == start_ts
+    assert schedule["market_end_ts"] == start_ts + 300_000
+    assert schedule["source_type"] == "canonical_market_slug_schedule"
+    assert schedule["warning_reason_codes"] == [
+        "market_schedule_backfilled_from_canonical_slug"
+    ]
+    assert schedule["provenance"]["provenance_valid"] is True
+    assert _trace_time_to_close_seconds(
+        decision_ts=decision_ts,
+        market_end_ts=schedule["market_end_ts"],
+        micro={"time_to_close_seconds": 0.0},
+    ) == pytest.approx(200.0)
+
+
+def test_trace_market_schedule_rejects_drifting_provider_times_in_favor_of_slug() -> None:
+    start_ts = 1_700_001_000_000
+    schedule = _trace_market_schedule(
+        provider_row={
+            "slug": "btc-updown-5m-1700001000",
+            "market_start_ts": start_ts + 25_000,
+            "market_end_ts": start_ts + 325_000,
+        },
+        decision_ts=start_ts + 50_000,
+        micro={"time_to_close_seconds": 0.0},
+    )
+
+    assert schedule["market_start_ts"] == start_ts
+    assert schedule["market_end_ts"] == start_ts + 300_000
+    assert schedule["source_type"] == "canonical_market_slug_schedule"
+    assert schedule["warning_reason_codes"] == [
+        "provider_market_schedule_mismatch_canonical_slug"
+    ]
 
 
 def test_fresh_provider_row_uses_market_start_btc_proxy_when_price_to_beat_missing() -> None:
