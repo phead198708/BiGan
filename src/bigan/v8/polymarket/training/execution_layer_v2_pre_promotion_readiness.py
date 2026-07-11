@@ -400,13 +400,32 @@ def finalize_pre_promotion_readiness_goal(
         ),
     )
     fit_path = goal_dir / "fit_report.json"
+    fit_summary = {
+        "fit_metrics": calibration_payload.get("fit_metrics"),
+        "fit_coefficients_hash": calibration_payload.get("fit_coefficients_hash"),
+        "coefficients_finite_and_bounded": calibration_payload.get(
+            "coefficients_finite_and_bounded"
+        ),
+        "coefficient_stability_metrics": calibration_payload.get(
+            "coefficient_stability_metrics"
+        ),
+        "threshold_selection_source": calibration_payload.get(
+            "threshold_selection_source"
+        ),
+        "uses_validation_labels_for_fitting": calibration_payload.get(
+            "uses_validation_labels_for_fitting"
+        ),
+        "uses_validation_labels_for_threshold_selection": calibration_payload.get(
+            "uses_validation_labels_for_threshold_selection"
+        ),
+    }
     _write_json(
         fit_path,
         _bundle_report_payload(
             "bigan-v8-pre-promotion-fit-report-v1",
             expected_config_hash,
             calibration_source,
-            calibration_payload.get("fit", {}),
+            fit_summary,
             "fit_not_run",
         ),
     )

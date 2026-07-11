@@ -65,6 +65,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev impor
 )
 from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev_calibration import (
     ExecutionLayerV2RegimeConditionedEVCalibrationConfig,
+    _validation_coverage_gate,
     regime_conditioned_ev_v2_calibration_row_identity,
     run_execution_layer_v2_regime_conditioned_ev_calibration,
     validate_regime_conditioned_ev_v2_calibration_rows,
@@ -1518,6 +1519,37 @@ def test_regime_conditioned_ev_v2_calibration_protocol_and_future_shadow(
     assert result.manifest["source_model_candidate_eligible"] is False
     assert result.manifest["freeze_ready"] is False
     assert result.manifest["promotion_evidence_eligible"] is False
+
+
+def test_regime_conditioned_ev_v2_missing_validation_family_fails_closed() -> None:
+    rows = [
+        {
+            "selected_side": "UP" if index % 2 == 0 else "DOWN",
+            "action_family": "HOLD_TO_SETTLEMENT",
+            "resolved_outcome": "UP" if index % 2 == 0 else "DOWN",
+            "market_id": f"market-{index}",
+        }
+        for index in range(10)
+    ]
+
+    report = _validation_coverage_gate(
+        rows,
+        min_rows_per_side=2,
+        min_rows_per_action_family=2,
+        min_rows_per_resolved_outcome=2,
+        min_markets_per_category=2,
+    )
+
+    assert report["action_family_counts"]["SELL_BEFORE_CLOSE"] == 0
+    assert report["action_family_unique_market_counts"]["SELL_BEFORE_CLOSE"] == 0
+    assert report["action_family_coverage_passed"] is False
+    assert report["coverage_gate_passed"] is False
+    assert "validation_action_family_coverage_gate_failed" in report[
+        "blocking_reason_codes"
+    ]
+    assert "validation_action_family_market_coverage_gate_failed" in report[
+        "blocking_reason_codes"
+    ]
 
 
 def test_regime_conditioned_ev_v2_validation_labels_do_not_change_fit(

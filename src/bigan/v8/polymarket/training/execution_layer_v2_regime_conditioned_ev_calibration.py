@@ -1473,12 +1473,30 @@ def _validation_coverage_gate(
     min_rows_per_resolved_outcome: int,
     min_markets_per_category: int,
 ) -> dict[str, Any]:
-    side_counts = Counter(row["selected_side"] for row in validation_rows)
-    family_counts = Counter(row["action_family"] for row in validation_rows)
-    outcome_counts = Counter(row["resolved_outcome"] for row in validation_rows)
-    side_market_counts = _unique_market_counts(validation_rows, "selected_side")
-    family_market_counts = _unique_market_counts(validation_rows, "action_family")
-    outcome_market_counts = _unique_market_counts(validation_rows, "resolved_outcome")
+    side_counts = _counts_with_required_values(
+        Counter(row["selected_side"] for row in validation_rows),
+        V2_REQUIRED_VALIDATION_SIDES,
+    )
+    family_counts = _counts_with_required_values(
+        Counter(row["action_family"] for row in validation_rows),
+        V2_REQUIRED_VALIDATION_ACTION_FAMILIES,
+    )
+    outcome_counts = _counts_with_required_values(
+        Counter(row["resolved_outcome"] for row in validation_rows),
+        V2_REQUIRED_VALIDATION_RESOLVED_OUTCOMES,
+    )
+    side_market_counts = _counts_with_required_values(
+        _unique_market_counts(validation_rows, "selected_side"),
+        V2_REQUIRED_VALIDATION_SIDES,
+    )
+    family_market_counts = _counts_with_required_values(
+        _unique_market_counts(validation_rows, "action_family"),
+        V2_REQUIRED_VALIDATION_ACTION_FAMILIES,
+    )
+    outcome_market_counts = _counts_with_required_values(
+        _unique_market_counts(validation_rows, "resolved_outcome"),
+        V2_REQUIRED_VALIDATION_RESOLVED_OUTCOMES,
+    )
     side_passed = all(
         side_counts[value] >= min_rows_per_side
         for value in V2_REQUIRED_VALIDATION_SIDES
@@ -1539,6 +1557,16 @@ def _validation_coverage_gate(
             and outcome_market_passed
         ),
         "blocking_reason_codes": reasons,
+    }
+
+
+def _counts_with_required_values(
+    counts: dict[str, int] | Counter[str],
+    required_values: tuple[str, ...],
+) -> dict[str, int]:
+    return {
+        key: int(counts.get(key, 0))
+        for key in sorted(set(counts) | set(required_values))
     }
 
 
