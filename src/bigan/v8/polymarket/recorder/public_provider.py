@@ -153,7 +153,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
         timeout_seconds: float = 15.0,
         http_timeout_seconds: float | None = None,
         orderbook_snapshot_interval_seconds: float = 1.0,
-        seed_rest_orderbooks_before_stream: bool = True,
+        seed_rest_orderbooks_before_stream: bool = False,
         current_time_ms: int | None = None,
         fetch_json: Callable[[str], Any] | None = None,
         orderbook_source: PolymarketOrderBookSource | None = None,
@@ -169,6 +169,10 @@ class PolymarketPublicHTTPRealCorpusProvider:
             raise ValueError("http_timeout_seconds must be positive")
         if orderbook_snapshot_interval_seconds <= 0:
             raise ValueError("orderbook_snapshot_interval_seconds must be positive")
+        if seed_rest_orderbooks_before_stream:
+            raise ValueError(
+                "pre-stream REST orderbook seeding is disabled; REST is fallback-only"
+            )
         source_order = tuple(dict.fromkeys(source.strip().lower() for source in btc_feature_source_order))
         unsupported_sources = set(source_order) - {"coinbase", "kraken", "binance"}
         if unsupported_sources:
@@ -237,11 +241,78 @@ class PolymarketPublicHTTPRealCorpusProvider:
         config: PolymarketRealCorpusRecorderConfig,
     ) -> list[dict[str, Any]]:
         if self.orderbook_source is not None:
-            rows = self._orderbook_rows_from_stream_source(markets, config)
-            if rows:
+            try:
+                rows = self._orderbook_rows_from_stream_source(markets, config)
+                if not rows:
+                    rows = self._orderbook_rows_from_source(markets)
+            except RealCorpusPublicProviderError as exc:
+                return self._rest_orderbook_fallback(
+                    markets,
+                    reason_codes=exc.reason_codes,
+                )
+
+            rows = _annotate_orderbook_rows(
+                rows,
+                source_type="polymarket_clob_websocket",
+                rest_fallback=False,
+                fallback_reason_codes=(),
+            )
+            expected_token_ids = set(_token_ids_for_markets(markets))
+            observed_token_ids = {str(row.get("token_id") or "") for row in rows}
+            missing_token_ids = expected_token_ids - observed_token_ids
+            if not missing_token_ids:
                 return rows
-            return self._orderbook_rows_from_source(markets)
+
+            fallback_rows = self._rest_orderbook_fallback(
+                markets,
+                reason_codes=("polymarket_clob_ws_missing_token_orderbook",),
+            )
+            rows.extend(
+                row
+                for row in fallback_rows
+                if str(row.get("token_id") or "") in missing_token_ids
+            )
+            remaining_missing_token_ids = expected_token_ids - {
+                str(row.get("token_id") or "") for row in rows
+            }
+            if remaining_missing_token_ids:
+                raise RealCorpusPublicProviderError(
+                    "WebSocket orderbook rows and REST fallback did not cover all tokens.",
+                    reason_codes=(
+                        "polymarket_clob_ws_and_rest_orderbook_coverage_incomplete",
+                    ),
+                )
+            return _with_orderbook_collection_end(rows)
         return self._orderbook_rows_from_rest(markets)
+
+    def _rest_orderbook_fallback(
+        self,
+        markets: list[dict[str, Any]],
+        *,
+        reason_codes: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        try:
+            rows = self._raw_orderbook_rows_from_rest(markets)
+        except RealCorpusPublicProviderError as exc:
+            raise RealCorpusPublicProviderError(
+                "WebSocket orderbook collection and REST fallback both failed.",
+                reason_codes=tuple(dict.fromkeys((*reason_codes, *exc.reason_codes))),
+            ) from exc
+        if not rows:
+            raise RealCorpusPublicProviderError(
+                "WebSocket orderbook collection failed and REST fallback was empty.",
+                reason_codes=tuple(
+                    dict.fromkeys((*reason_codes, "polymarket_clob_rest_fallback_empty"))
+                ),
+            )
+        return _with_orderbook_collection_end(
+            _annotate_orderbook_rows(
+                rows,
+                source_type="polymarket_clob_rest_fallback",
+                rest_fallback=True,
+                fallback_reason_codes=reason_codes,
+            )
+        )
 
     def _orderbook_rows_from_stream_source(
         self,
@@ -253,11 +324,6 @@ class PolymarketPublicHTTPRealCorpusProvider:
         if not callable(snapshot_getter):
             return []
         rows: list[dict[str, Any]] = []
-        if self.seed_rest_orderbooks_before_stream and isinstance(
-            self.orderbook_source,
-            PolymarketCLOBWebSocketOrderBookSource,
-        ):
-            rows.extend(self._raw_orderbook_rows_from_rest(markets))
         snapshots = snapshot_getter(_token_ids_for_markets(markets))
         for payloads in snapshots:
             for market in markets:
@@ -300,7 +366,14 @@ class PolymarketPublicHTTPRealCorpusProvider:
         return _with_orderbook_collection_end(rows)
 
     def _orderbook_rows_from_rest(self, markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return _with_orderbook_collection_end(self._raw_orderbook_rows_from_rest(markets))
+        return _with_orderbook_collection_end(
+            _annotate_orderbook_rows(
+                self._raw_orderbook_rows_from_rest(markets),
+                source_type="polymarket_clob_rest_explicit",
+                rest_fallback=False,
+                fallback_reason_codes=(),
+            )
+        )
 
     def _raw_orderbook_rows_from_rest(self, markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -1237,6 +1310,24 @@ def _with_orderbook_collection_end(rows: list[dict[str, Any]]) -> list[dict[str,
         return []
     collection_end_ts = max(int(row.get("available_at_ts") or row["ts"]) for row in rows)
     return [dict(row, collection_end_ts=collection_end_ts) for row in rows]
+
+
+def _annotate_orderbook_rows(
+    rows: list[dict[str, Any]],
+    *,
+    source_type: str,
+    rest_fallback: bool,
+    fallback_reason_codes: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            **row,
+            "orderbook_source_type": source_type,
+            "orderbook_rest_fallback_used": rest_fallback,
+            "orderbook_fallback_reason_codes": list(fallback_reason_codes),
+        }
+        for row in rows
+    ]
 
 
 def _decode_market_ws_payloads(raw: bytes | str) -> list[dict[str, Any]]:

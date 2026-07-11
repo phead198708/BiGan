@@ -264,6 +264,15 @@ def _run_incremental_read_only_provider_fresh_loop(
             "public_data_collection_reason_codes": reason_codes,
             "public_market_count": public_report.get("public_market_count"),
             "public_orderbook_row_count": orderbook_count,
+            "orderbook_source_type_distribution": public_report.get(
+                "orderbook_source_type_distribution", {}
+            ),
+            "orderbook_rest_fallback_row_count": int(
+                public_report.get("orderbook_rest_fallback_row_count") or 0
+            ),
+            "orderbook_fallback_reason_distribution": public_report.get(
+                "orderbook_fallback_reason_distribution", {}
+            ),
             "public_trade_row_count": public_report.get("public_trade_row_count"),
             "public_btc_feature_candle_row_count": public_report.get(
                 "public_btc_feature_candle_row_count"
@@ -893,6 +902,25 @@ def _aggregate_public_collection_report(
     provider_class = (
         public_reports[-1].get("public_provider_class") if public_reports else None
     )
+    orderbook_source_counter: Counter[str] = Counter()
+    orderbook_fallback_reason_counter: Counter[str] = Counter()
+    for report in public_reports:
+        orderbook_source_counter.update(
+            {
+                str(source): int(count)
+                for source, count in (
+                    report.get("orderbook_source_type_distribution") or {}
+                ).items()
+            }
+        )
+        orderbook_fallback_reason_counter.update(
+            {
+                str(reason): int(count)
+                for reason, count in (
+                    report.get("orderbook_fallback_reason_distribution") or {}
+                ).items()
+            }
+        )
     return {
         "public_data_source": O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
         "public_data_collection_mode": "read_only_public_provider_live_polling",
@@ -921,6 +949,16 @@ def _aggregate_public_collection_report(
         "public_orderbook_row_count": sum(
             int(report.get("public_orderbook_row_count") or 0)
             for report in public_reports
+        ),
+        "orderbook_source_type_distribution": dict(
+            sorted(orderbook_source_counter.items())
+        ),
+        "orderbook_rest_fallback_row_count": sum(
+            int(report.get("orderbook_rest_fallback_row_count") or 0)
+            for report in public_reports
+        ),
+        "orderbook_fallback_reason_distribution": dict(
+            sorted(orderbook_fallback_reason_counter.items())
         ),
         "public_trade_row_count": sum(
             int(report.get("public_trade_row_count") or 0) for report in public_reports

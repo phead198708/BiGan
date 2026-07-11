@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import urllib.parse
 
+import pytest
+
 from bigan.v8.polymarket import (
     PolymarketCLOBWebSocketOrderBookSource,
     PolymarketPublicHTTPRealCorpusProvider,
     PolymarketRealCorpusRecorderConfig,
 )
+from bigan.v8.polymarket.recorder.public_provider import RealCorpusPublicProviderError
 
 
 def test_public_http_provider_normalizes_public_market_rows_without_fake_resolution() -> None:
@@ -236,6 +239,13 @@ def test_public_http_provider_configures_default_websocket_snapshot_interval() -
 
     assert isinstance(provider.orderbook_source, PolymarketCLOBWebSocketOrderBookSource)
     assert provider.orderbook_source.snapshot_interval_seconds == 2.5
+
+
+def test_public_http_provider_rejects_pre_stream_rest_seed() -> None:
+    with pytest.raises(ValueError, match="REST is fallback-only"):
+        PolymarketPublicHTTPRealCorpusProvider(
+            seed_rest_orderbooks_before_stream=True,
+        )
 
 
 def test_public_http_provider_separates_http_and_orderbook_timeouts() -> None:
@@ -470,11 +480,14 @@ def test_public_http_provider_prefers_stream_orderbook_snapshots_when_available(
     }
 
 
-def test_public_http_provider_seeds_rest_book_before_websocket_snapshots() -> None:
+def test_public_http_provider_uses_websocket_without_rest_seed() -> None:
     orderbook_source = FakeWebSocketStreamOrderBookSource()
     provider = PolymarketPublicHTTPRealCorpusProvider(
         current_time_ms=1_700_001_000_000,
-        fetch_json=FakePublicFetch(include_reference_prices=True),
+        fetch_json=FakePublicFetch(
+            include_reference_prices=True,
+            fail_clob_books=True,
+        ),
         orderbook_source=orderbook_source,
     )
     config = PolymarketRealCorpusRecorderConfig(
@@ -488,12 +501,72 @@ def test_public_http_provider_seeds_rest_book_before_websocket_snapshots() -> No
     books = provider.orderbook_rows(markets, config)
 
     assert orderbook_source.requested_token_ids == ("up-token", "down-token")
-    assert len(books) == 4
-    assert {row["available_at_ts"] for row in books} == {
-        1_700_000_000_000,
-        1_700_000_059_100,
-    }
+    assert len(books) == 2
+    assert {row["available_at_ts"] for row in books} == {1_700_000_059_100}
     assert {row["collection_end_ts"] for row in books} == {1_700_000_059_100}
+    assert {row["orderbook_source_type"] for row in books} == {
+        "polymarket_clob_websocket"
+    }
+    assert all(row["orderbook_rest_fallback_used"] is False for row in books)
+
+
+def test_public_http_provider_uses_rest_only_after_websocket_failure() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=FakePublicFetch(include_reference_prices=True),
+        orderbook_source=FailingWebSocketStreamOrderBookSource(),
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    books = provider.orderbook_rows(markets, config)
+
+    assert len(books) == 2
+    assert {row["orderbook_source_type"] for row in books} == {
+        "polymarket_clob_rest_fallback"
+    }
+    assert all(row["orderbook_rest_fallback_used"] is True for row in books)
+    assert all(
+        row["orderbook_fallback_reason_codes"]
+        == ["polymarket_clob_ws_orderbook_collection_failed"]
+        for row in books
+    )
+
+
+def test_public_http_provider_rest_fallback_only_fills_missing_ws_token() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=FakePublicFetch(include_reference_prices=True),
+        orderbook_source=PartialWebSocketStreamOrderBookSource(),
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    books = provider.orderbook_rows(markets, config)
+
+    assert len(books) == 2
+    by_outcome = {row["outcome"]: row for row in books}
+    assert by_outcome["UP"]["orderbook_source_type"] == (
+        "polymarket_clob_websocket"
+    )
+    assert by_outcome["UP"]["orderbook_rest_fallback_used"] is False
+    assert by_outcome["DOWN"]["orderbook_source_type"] == (
+        "polymarket_clob_rest_fallback"
+    )
+    assert by_outcome["DOWN"]["orderbook_rest_fallback_used"] is True
+    assert by_outcome["DOWN"]["orderbook_fallback_reason_codes"] == [
+        "polymarket_clob_ws_missing_token_orderbook"
+    ]
 
 
 class FakePublicFetch:
@@ -754,6 +827,31 @@ class FakeWebSocketStreamOrderBookSource(PolymarketCLOBWebSocketOrderBookSource)
                     timestamp="1700000059000",
                     receive_time=1_700_000_059_100,
                 ),
+            }
+        ]
+
+
+class FailingWebSocketStreamOrderBookSource(FakeWebSocketStreamOrderBookSource):
+    def book_payload_snapshots(self, token_ids: tuple[str, ...]) -> list[dict[str, dict]]:
+        self.requested_token_ids = token_ids
+        raise RealCorpusPublicProviderError(
+            "pytest websocket failure",
+            reason_codes=("polymarket_clob_ws_orderbook_collection_failed",),
+        )
+
+
+class PartialWebSocketStreamOrderBookSource(FakeWebSocketStreamOrderBookSource):
+    def book_payload_snapshots(self, token_ids: tuple[str, ...]) -> list[dict[str, dict]]:
+        self.requested_token_ids = token_ids
+        return [
+            {
+                "up-token": _book_payload(
+                    token_id="up-token",
+                    bid=0.57,
+                    ask=0.59,
+                    timestamp="1700000059000",
+                    receive_time=1_700_000_059_100,
+                )
             }
         ]
 

@@ -879,6 +879,9 @@ def _snapshot_fixture_collection_report(
             {str(row.get("market_id")) for cycle in cycles for row in cycle}
         ),
         "public_orderbook_row_count": None,
+        "orderbook_source_type_distribution": {},
+        "orderbook_rest_fallback_row_count": 0,
+        "orderbook_fallback_reason_distribution": {},
         "public_trade_row_count": None,
         "public_btc_feature_candle_row_count": None,
         "public_feature_row_count": row_count,
@@ -933,6 +936,9 @@ def _collect_read_only_public_provider_cycles(
             "public_data_row_count": 0,
             "public_market_count": 0,
             "public_orderbook_row_count": 0,
+            "orderbook_source_type_distribution": {},
+            "orderbook_rest_fallback_row_count": 0,
+            "orderbook_fallback_reason_distribution": {},
             "public_trade_row_count": 0,
             "public_btc_feature_candle_row_count": 0,
             "public_feature_row_count": 0,
@@ -996,6 +1002,15 @@ def _collect_read_only_public_provider_cycles(
         exception_message = None
 
     cycles = _partition_public_rows(rows, config.max_cycles)
+    orderbook_source_counter = Counter(
+        str(row.get("orderbook_source_type") or "unknown") for row in orderbooks
+    )
+    orderbook_fallback_reason_counter: Counter[str] = Counter()
+    for row in orderbooks:
+        orderbook_fallback_reason_counter.update(
+            str(reason)
+            for reason in row.get("orderbook_fallback_reason_codes") or []
+        )
     report = {
         **base_report,
         "paper_fresh_provider_collection_failed": collection_failed,
@@ -1004,6 +1019,15 @@ def _collect_read_only_public_provider_cycles(
         "public_data_row_count": len(rows),
         "public_market_count": len(markets),
         "public_orderbook_row_count": len(orderbooks),
+        "orderbook_source_type_distribution": dict(
+            sorted(orderbook_source_counter.items())
+        ),
+        "orderbook_rest_fallback_row_count": sum(
+            1 for row in orderbooks if row.get("orderbook_rest_fallback_used") is True
+        ),
+        "orderbook_fallback_reason_distribution": dict(
+            sorted(orderbook_fallback_reason_counter.items())
+        ),
         "public_trade_row_count": len(trades),
         "public_btc_feature_candle_row_count": len(btc_candles),
         "public_feature_row_count": len(rows),
