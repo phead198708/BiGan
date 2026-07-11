@@ -50,6 +50,10 @@ from bigan.v8.polymarket.training.execution_layer_v2_policy_replay import (
     run_execution_layer_v2_policy_replay_from_settlement_csv,
     run_execution_layer_v2_regime_entry_edge_replay,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_pre_promotion_readiness import (
+    ExecutionLayerV2PrePromotionGoalConfig,
+    initialize_pre_promotion_readiness_goal,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev import (
     CURRENT_75_ROW_REPLAY_RUN_ID,
     LATEST_ONE_HOUR_RECONCILED_RUN_ID,
@@ -2189,6 +2193,69 @@ def test_trace_market_schedule_rejects_drifting_provider_times_in_favor_of_slug(
     assert schedule["warning_reason_codes"] == [
         "provider_market_schedule_mismatch_canonical_slug"
     ]
+
+
+def test_pre_promotion_goal_initialization_freezes_gates_and_exclusions(
+    tmp_path,
+) -> None:
+    evidence_root = tmp_path / "evidence"
+    explicit_run = (
+        evidence_root
+        / "execution-layer-v2-regime-entry-edge-replay-20260710T123338Z"
+    )
+    shadow_run = evidence_root / "test-future-shadow-inspected"
+    explicit_run.mkdir(parents=True)
+    shadow_run.mkdir(parents=True)
+    (explicit_run / "manifest.json").write_text(
+        '{"run_id":"excluded"}\n', encoding="utf-8"
+    )
+    (shadow_run / "rows.jsonl").write_text('{"market_id":"m1"}\n', encoding="utf-8")
+
+    result = initialize_pre_promotion_readiness_goal(
+        ExecutionLayerV2PrePromotionGoalConfig(
+            run_id="pre-promotion-goal-test",
+            output_dir=tmp_path / "runs",
+            evidence_root=evidence_root,
+            created_at="2026-07-11T12:00:00Z",
+            starting_commit="1" * 40,
+        )
+    )
+    configuration = json.loads(
+        result.goal_configuration_path.read_text(encoding="utf-8")
+    )
+    exclusions = json.loads(
+        result.excluded_evidence_manifest_path.read_text(encoding="utf-8")
+    )
+    state = json.loads(result.goal_state_path.read_text(encoding="utf-8"))
+
+    assert result.goal_configuration_sha256 == hashlib.sha256(
+        result.goal_configuration_path.read_bytes()
+    ).hexdigest()
+    assert result.goal_configuration_sha256_path.read_text(
+        encoding="utf-8"
+    ).strip() == result.goal_configuration_sha256
+    assert configuration["min_fit_rows"] == 100
+    assert configuration["min_validation_rows"] == 30
+    assert configuration["min_relative_mae_improvement"] == pytest.approx(0.05)
+    assert configuration["min_relative_mse_improvement"] == pytest.approx(0.05)
+    assert configuration["bootstrap_samples"] == 1_000
+    assert configuration["required_future_shadow_window_count"] == 2
+    assert configuration["promotion_evidence_stage_started"] is False
+    assert configuration["promotion_evidence_eligible"] is False
+    assert configuration["live_evidence_allowed"] is False
+    assert configuration["v8_execution_handoff_allowed"] is False
+    assert exclusions["excluded_run_count"] == 2
+    assert {row["run_id"] for row in exclusions["excluded_runs"]} == {
+        explicit_run.name,
+        shadow_run.name,
+    }
+    assert all(row["run_tree_sha256"] for row in exclusions["excluded_runs"])
+    assert state["goal_status"] == "IN_PROGRESS"
+    assert state["next_phase"] == "phase_1_collect_strict_causal_historical_corpus"
+    assert state["source_model_candidate_eligible"] is False
+    assert state["freeze_ready"] is False
+    assert state["#134_resume_allowed"] is False
+    assert state["#146_start_allowed"] is False
 
 
 def test_fresh_provider_row_uses_market_start_btc_proxy_when_price_to_beat_missing() -> None:
