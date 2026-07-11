@@ -7809,6 +7809,11 @@ def test_o_v8_paper_fresh_score_decomposition_provider_components(
     assert up_hts["book_staleness_term_used"] is False
     assert up_hts["time_to_close_term_used"] is False
     assert up_hts["canonical_frozen_o_scorer_used"] is False
+    assert len(_read_jsonl(result.artifact_paths["raw_polymarket_markets"])) == 1
+    assert len(_read_jsonl(result.artifact_paths["raw_polymarket_orderbooks"])) == 2
+    assert len(_read_jsonl(result.artifact_paths["raw_polymarket_trades"])) == 1
+    assert len(_read_jsonl(result.artifact_paths["raw_btc_feature_candles"])) == 1
+    assert result.artifact_hashes["raw_polymarket_orderbooks"]
     assert result.manifest["v8_execution_handoff_allowed"] is False
 
 

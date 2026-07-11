@@ -298,6 +298,7 @@ def run_polymarket_o_v8_paper_fresh_loop(
     public_data = _resolve_public_data_cycles(config, unlock_evidence)
     public_cycles = public_data["public_data_cycles"]
     public_data_collection_report = public_data["public_data_collection_report"]
+    raw_provider_payloads = public_data["raw_provider_payloads"]
     canonical_context = _fresh_canonical_scorer_context(
         config=config,
         unlock_evidence=unlock_evidence,
@@ -526,6 +527,12 @@ def run_polymarket_o_v8_paper_fresh_loop(
         / "execution_layer_v2_paper_remap_report.json",
         "execution_layer_v2_paper_remap_summary": output_dir
         / "execution_layer_v2_paper_remap_report.md",
+        "raw_polymarket_markets": output_dir / "raw_polymarket_markets.jsonl",
+        "raw_polymarket_orderbooks": output_dir
+        / "raw_polymarket_orderbooks.jsonl",
+        "raw_polymarket_trades": output_dir / "raw_polymarket_trades.jsonl",
+        "raw_btc_feature_candles": output_dir
+        / "raw_btc_feature_candles.jsonl",
         "manifest": output_dir / "o_v8_paper_fresh_loop_manifest.json",
     }
     _write_json(artifact_paths["fresh_loop_run_report"], run_report)
@@ -670,6 +677,22 @@ def run_polymarket_o_v8_paper_fresh_loop(
         _execution_layer_v2_paper_remap_md(
             execution_layer_v2_paper_remap_report
         ),
+    )
+    _write_jsonl(
+        artifact_paths["raw_polymarket_markets"],
+        raw_provider_payloads["markets"],
+    )
+    _write_jsonl(
+        artifact_paths["raw_polymarket_orderbooks"],
+        raw_provider_payloads["orderbooks"],
+    )
+    _write_jsonl(
+        artifact_paths["raw_polymarket_trades"],
+        raw_provider_payloads["trades"],
+    )
+    _write_jsonl(
+        artifact_paths["raw_btc_feature_candles"],
+        raw_provider_payloads["btc_feature_candles"],
     )
 
     artifact_hashes = {
@@ -828,6 +851,7 @@ def _resolve_public_data_cycles(
                 cycles=cycles,
                 unlock_evidence=unlock_evidence,
             ),
+            "raw_provider_payloads": _empty_raw_provider_payloads(),
         }
     return _collect_read_only_public_provider_cycles(
         config=config,
@@ -918,6 +942,7 @@ def _collect_read_only_public_provider_cycles(
         return {
             "public_data_cycles": [[] for _ in range(config.max_cycles)],
             "public_data_collection_report": report,
+            "raw_provider_payloads": _empty_raw_provider_payloads(),
         }
 
     recorder_config = PolymarketRealCorpusRecorderConfig(
@@ -988,6 +1013,21 @@ def _collect_read_only_public_provider_cycles(
     return {
         "public_data_cycles": cycles,
         "public_data_collection_report": report,
+        "raw_provider_payloads": {
+            "markets": [dict(row) for row in markets],
+            "orderbooks": [dict(row) for row in orderbooks],
+            "trades": [dict(row) for row in trades],
+            "btc_feature_candles": [dict(row) for row in btc_candles],
+        },
+    }
+
+
+def _empty_raw_provider_payloads() -> dict[str, list[dict[str, Any]]]:
+    return {
+        "markets": [],
+        "orderbooks": [],
+        "trades": [],
+        "btc_feature_candles": [],
     }
 
 

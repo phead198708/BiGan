@@ -171,6 +171,10 @@ def _run_incremental_read_only_provider_fresh_loop(
     all_fills: list[dict[str, Any]] = []
     all_ledger_rows: list[dict[str, Any]] = []
     all_remap_rows: list[dict[str, Any]] = []
+    all_raw_market_rows: list[dict[str, Any]] = []
+    all_raw_orderbook_rows: list[dict[str, Any]] = []
+    all_raw_trade_rows: list[dict[str, Any]] = []
+    all_raw_btc_candle_rows: list[dict[str, Any]] = []
     cycle_status_rows: list[dict[str, Any]] = []
     cycle_results: list[Any] = []
     reason_counter: Counter[str] = Counter()
@@ -224,10 +228,26 @@ def _run_incremental_read_only_provider_fresh_loop(
         cycle_intents = _read_jsonl(cycle_result.artifact_paths["fresh_order_intent_log"])
         cycle_fills = _read_jsonl(cycle_result.artifact_paths["fresh_fill_log"])
         cycle_ledger_rows = _read_jsonl(cycle_result.artifact_paths["fresh_ledger_log"])
+        cycle_raw_market_rows = _read_jsonl(
+            cycle_result.artifact_paths["raw_polymarket_markets"]
+        )
+        cycle_raw_orderbook_rows = _read_jsonl(
+            cycle_result.artifact_paths["raw_polymarket_orderbooks"]
+        )
+        cycle_raw_trade_rows = _read_jsonl(
+            cycle_result.artifact_paths["raw_polymarket_trades"]
+        )
+        cycle_raw_btc_candle_rows = _read_jsonl(
+            cycle_result.artifact_paths["raw_btc_feature_candles"]
+        )
         all_trace_rows.extend(cycle_trace_rows)
         all_intents.extend(cycle_intents)
         all_fills.extend(cycle_fills)
         all_ledger_rows.extend(cycle_ledger_rows)
+        all_raw_market_rows.extend(cycle_raw_market_rows)
+        all_raw_orderbook_rows.extend(cycle_raw_orderbook_rows)
+        all_raw_trade_rows.extend(cycle_raw_trade_rows)
+        all_raw_btc_candle_rows.extend(cycle_raw_btc_candle_rows)
         all_remap_rows.extend(
             cycle_result.execution_layer_v2_paper_remap_report.get("remap_rows", [])
         )
@@ -269,6 +289,11 @@ def _run_incremental_read_only_provider_fresh_loop(
             intents=all_intents,
             fills=all_fills,
             ledger_rows=all_ledger_rows,
+            trace_rows=all_trace_rows,
+            raw_market_rows=all_raw_market_rows,
+            raw_orderbook_rows=all_raw_orderbook_rows,
+            raw_trade_rows=all_raw_trade_rows,
+            raw_btc_candle_rows=all_raw_btc_candle_rows,
         )
 
         if consecutive_orderbook_failures >= max_consecutive_failures:
@@ -327,6 +352,12 @@ def _run_incremental_read_only_provider_fresh_loop(
         "signal_trace_report": aggregate_dir / "o_v8_paper_fresh_signal_trace.json",
         "runtime_safety_report": aggregate_dir
         / "o_v8_paper_fresh_runtime_safety_report.json",
+        "raw_polymarket_markets": aggregate_dir / "raw_polymarket_markets.jsonl",
+        "raw_polymarket_orderbooks": aggregate_dir
+        / "raw_polymarket_orderbooks.jsonl",
+        "raw_polymarket_trades": aggregate_dir / "raw_polymarket_trades.jsonl",
+        "raw_btc_feature_candles": aggregate_dir
+        / "raw_btc_feature_candles.jsonl",
     }
     _write_jsonl(artifact_paths["fresh_order_intent_log"], all_intents)
     _write_jsonl(artifact_paths["fresh_fill_log"], all_fills)
@@ -335,6 +366,10 @@ def _run_incremental_read_only_provider_fresh_loop(
     _write_json(artifact_paths["execution_layer_v2_paper_remap_report"], remap_report)
     _write_json(artifact_paths["signal_trace_report"], signal_trace_report)
     _write_json(artifact_paths["runtime_safety_report"], runtime_safety_report)
+    _write_jsonl(artifact_paths["raw_polymarket_markets"], all_raw_market_rows)
+    _write_jsonl(artifact_paths["raw_polymarket_orderbooks"], all_raw_orderbook_rows)
+    _write_jsonl(artifact_paths["raw_polymarket_trades"], all_raw_trade_rows)
+    _write_jsonl(artifact_paths["raw_btc_feature_candles"], all_raw_btc_candle_rows)
     artifact_hashes = {
         name: _sha256_file(path)
         for name, path in sorted(artifact_paths.items())
@@ -455,6 +490,19 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         fills=fills,
         ledger_rows=ledger_rows,
         settlement_rows=settlement_rows,
+        trace_rows=trace_rows,
+        raw_market_rows=_read_optional_jsonl(
+            fresh_result.artifact_paths.get("raw_polymarket_markets")
+        ),
+        raw_orderbook_rows=_read_optional_jsonl(
+            fresh_result.artifact_paths.get("raw_polymarket_orderbooks")
+        ),
+        raw_trade_rows=_read_optional_jsonl(
+            fresh_result.artifact_paths.get("raw_polymarket_trades")
+        ),
+        raw_btc_candle_rows=_read_optional_jsonl(
+            fresh_result.artifact_paths.get("raw_btc_feature_candles")
+        ),
     )
     round_coverage = _round_coverage_report(
         run_id=config.run_id,
@@ -1284,13 +1332,31 @@ def _write_per_round_bet_artifacts(
     intents: list[dict[str, Any]],
     fills: list[dict[str, Any]],
     ledger_rows: list[dict[str, Any]],
+    trace_rows: list[dict[str, Any]] | None = None,
+    raw_market_rows: list[dict[str, Any]] | None = None,
+    raw_orderbook_rows: list[dict[str, Any]] | None = None,
+    raw_trade_rows: list[dict[str, Any]] | None = None,
+    raw_btc_candle_rows: list[dict[str, Any]] | None = None,
 ) -> None:
+    trace_rows = trace_rows or []
+    raw_market_rows = raw_market_rows or []
+    raw_orderbook_rows = raw_orderbook_rows or []
+    raw_trade_rows = raw_trade_rows or []
+    raw_btc_candle_rows = raw_btc_candle_rows or []
     rounds_dir = goal_dir / "round_artifacts"
     market_ids = sorted(
         {
-            str(row.get("market_id"))
-            for row in [*intents, *fills, *ledger_rows]
-            if row.get("market_id")
+            _artifact_market_id(row)
+            for row in [
+                *intents,
+                *fills,
+                *ledger_rows,
+                *trace_rows,
+                *raw_market_rows,
+                *raw_orderbook_rows,
+                *raw_trade_rows,
+            ]
+            if _artifact_market_id(row)
         }
     )
     for market_id in market_ids:
@@ -1307,6 +1373,71 @@ def _write_per_round_bet_artifacts(
             market_dir / "paper_ledger.jsonl",
             [row for row in ledger_rows if str(row.get("market_id")) == market_id],
         )
+        market_trace_rows = _rows_for_market(trace_rows, market_id)
+        market_raw_rows = _rows_for_market(raw_market_rows, market_id)
+        _write_jsonl(market_dir / "signal_trace.jsonl", market_trace_rows)
+        _write_jsonl(market_dir / "raw_polymarket_markets.jsonl", market_raw_rows)
+        _write_jsonl(
+            market_dir / "raw_polymarket_orderbooks.jsonl",
+            _rows_for_market(raw_orderbook_rows, market_id),
+        )
+        _write_jsonl(
+            market_dir / "raw_polymarket_trades.jsonl",
+            _rows_for_market(raw_trade_rows, market_id),
+        )
+        _write_jsonl(
+            market_dir / "raw_btc_feature_candles.jsonl",
+            _btc_candles_for_market(
+                raw_btc_candle_rows,
+                market_rows=market_raw_rows,
+                trace_rows=market_trace_rows,
+            ),
+        )
+
+
+def _artifact_market_id(row: dict[str, Any]) -> str:
+    return str(row.get("market_id") or row.get("condition_id") or "")
+
+
+def _rows_for_market(
+    rows: list[dict[str, Any]], market_id: str
+) -> list[dict[str, Any]]:
+    return [row for row in rows if _artifact_market_id(row) == market_id]
+
+
+def _btc_candles_for_market(
+    rows: list[dict[str, Any]],
+    *,
+    market_rows: list[dict[str, Any]],
+    trace_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    starts = [
+        _float(row.get("market_start_ts"))
+        for row in [*market_rows, *trace_rows]
+        if row.get("market_start_ts") is not None
+    ]
+    decisions = [
+        _float(row.get("decision_ts"))
+        for row in trace_rows
+        if row.get("decision_ts") is not None
+    ]
+    if not starts or not decisions:
+        return []
+    lower_bound = min(starts) - 120_000.0
+    upper_bound = max(decisions)
+    selected: list[dict[str, Any]] = []
+    for row in rows:
+        available_at_ts = row.get("available_at_ts")
+        source_ts = (
+            available_at_ts
+            if available_at_ts is not None
+            else row.get("close_time", row.get("ts"))
+        )
+        if source_ts is None:
+            continue
+        if lower_bound <= _float(source_ts) <= upper_bound:
+            selected.append(row)
+    return selected
 
 
 def _settlement_pnl_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1363,19 +1494,38 @@ def _write_per_round_artifacts(
     fills: list[dict[str, Any]],
     ledger_rows: list[dict[str, Any]],
     settlement_rows: list[dict[str, Any]],
+    trace_rows: list[dict[str, Any]],
+    raw_market_rows: list[dict[str, Any]],
+    raw_orderbook_rows: list[dict[str, Any]],
+    raw_trade_rows: list[dict[str, Any]],
+    raw_btc_candle_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     _write_per_round_bet_artifacts(
         goal_dir=goal_dir,
         intents=intents,
         fills=fills,
         ledger_rows=ledger_rows,
+        trace_rows=trace_rows,
+        raw_market_rows=raw_market_rows,
+        raw_orderbook_rows=raw_orderbook_rows,
+        raw_trade_rows=raw_trade_rows,
+        raw_btc_candle_rows=raw_btc_candle_rows,
     )
     rounds_dir = goal_dir / "round_artifacts"
     market_ids = sorted(
         {
-            str(row.get("market_id"))
-            for row in [*intents, *fills, *ledger_rows, *settlement_rows]
-            if row.get("market_id")
+            _artifact_market_id(row)
+            for row in [
+                *intents,
+                *fills,
+                *ledger_rows,
+                *settlement_rows,
+                *trace_rows,
+                *raw_market_rows,
+                *raw_orderbook_rows,
+                *raw_trade_rows,
+            ]
+            if _artifact_market_id(row)
         }
     )
     round_rows: list[dict[str, Any]] = []
@@ -1411,6 +1561,14 @@ def _write_per_round_artifacts(
             "paper_fills": market_dir / "paper_fills.jsonl",
             "paper_ledger": market_dir / "paper_ledger.jsonl",
             "round_outcome": outcome_path,
+            "signal_trace": market_dir / "signal_trace.jsonl",
+            "raw_polymarket_markets": market_dir
+            / "raw_polymarket_markets.jsonl",
+            "raw_polymarket_orderbooks": market_dir
+            / "raw_polymarket_orderbooks.jsonl",
+            "raw_polymarket_trades": market_dir / "raw_polymarket_trades.jsonl",
+            "raw_btc_feature_candles": market_dir
+            / "raw_btc_feature_candles.jsonl",
         }
         row = {
             "market_id": market_id,
@@ -1424,6 +1582,15 @@ def _write_per_round_artifacts(
             ),
             "paper_fill_count": sum(
                 1 for fill in fills if str(fill.get("market_id")) == market_id
+            ),
+            "signal_trace_row_count": len(_rows_for_market(trace_rows, market_id)),
+            "raw_market_row_count": len(_rows_for_market(raw_market_rows, market_id)),
+            "raw_orderbook_row_count": len(
+                _rows_for_market(raw_orderbook_rows, market_id)
+            ),
+            "raw_trade_row_count": len(_rows_for_market(raw_trade_rows, market_id)),
+            "raw_btc_feature_candle_row_count": len(
+                _read_jsonl(paths["raw_btc_feature_candles"])
             ),
             **pnl_summary,
             "artifact_paths": {
@@ -1449,6 +1616,14 @@ def _write_per_round_artifacts(
         ),
         "per_round_outcome_artifact_count": sum(
             1 for row in round_rows if row["round_outcome_artifact_exists"]
+        ),
+        "per_round_raw_orderbook_artifact_count": sum(
+            1
+            for row in round_rows
+            if row["artifact_paths"].get("raw_polymarket_orderbooks")
+        ),
+        "per_round_signal_trace_artifact_count": sum(
+            1 for row in round_rows if row["artifact_paths"].get("signal_trace")
         ),
         "settled_pnl": sum(_float(row["settled_pnl"]) for row in round_rows),
         "unresolved_pnl": sum(_float(row["unresolved_pnl"]) for row in round_rows),
@@ -2929,6 +3104,10 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _read_optional_jsonl(path: Path | None) -> list[dict[str, Any]]:
+    return _read_jsonl(path) if path is not None else []
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

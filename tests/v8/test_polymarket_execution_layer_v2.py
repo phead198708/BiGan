@@ -31,6 +31,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal import (
     ExecutionLayerV2OneHourRemapPaperGoalConfig,
     _missing_bet_round_classifications,
     _settlement_resolution_report,
+    _write_per_round_artifacts,
     run_execution_layer_v2_one_hour_remap_paper_goal,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_policy_replay import (
@@ -2886,6 +2887,86 @@ def test_execution_layer_v2_one_hour_goal_remap_success_with_positive_settlement
     )
     assert round_outcome["settled_pnl"] == pytest.approx(0.25)
     assert round_outcome["pnl_by_side"] == {"UP": pytest.approx(0.25)}
+
+
+def test_execution_layer_v2_round_artifacts_preserve_raw_book_and_trace(
+    tmp_path,
+) -> None:
+    market_id = "round-raw-evidence"
+    market_start_ts = 3_000_000
+    decision_ts = 3_060_000
+    manifest = _write_per_round_artifacts(
+        goal_dir=tmp_path,
+        intents=[{"market_id": market_id, "paper_only": True}],
+        fills=[{"market_id": market_id, "paper_only": True}],
+        ledger_rows=[{"market_id": market_id, "paper_only": True}],
+        settlement_rows=[],
+        trace_rows=[
+            {
+                "market_id": market_id,
+                "decision_ts": decision_ts,
+                "market_start_ts": market_start_ts,
+                "spread_bps": 200.0,
+                "book_staleness_ms": 0.0,
+                "queue_fill_proxy": 1.0,
+                "paper_only": True,
+            }
+        ],
+        raw_market_rows=[
+            {
+                "market_id": market_id,
+                "condition_id": market_id,
+                "market_start_ts": market_start_ts,
+                "market_end_ts": 3_300_000,
+                "paper_only": True,
+            }
+        ],
+        raw_orderbook_rows=[
+            {
+                "market_id": market_id,
+                "outcome": "UP",
+                "ts": decision_ts,
+                "bid_price": 0.60,
+                "ask_price": 0.62,
+            },
+            {
+                "market_id": market_id,
+                "outcome": "DOWN",
+                "ts": decision_ts,
+                "bid_price": 0.38,
+                "ask_price": 0.40,
+            },
+        ],
+        raw_trade_rows=[
+            {"market_id": market_id, "ts": 3_050_000, "price": 0.61}
+        ],
+        raw_btc_candle_rows=[
+            {
+                "ts": market_start_ts,
+                "available_at_ts": 3_050_000,
+                "close_price": 65_000.0,
+            }
+        ],
+    )
+
+    round_row = manifest["round_artifact_rows"][0]
+    assert round_row["signal_trace_row_count"] == 1
+    assert round_row["raw_market_row_count"] == 1
+    assert round_row["raw_orderbook_row_count"] == 2
+    assert round_row["raw_trade_row_count"] == 1
+    assert round_row["raw_btc_feature_candle_row_count"] == 1
+    assert set(round_row["artifact_hashes"]) >= {
+        "signal_trace",
+        "raw_polymarket_markets",
+        "raw_polymarket_orderbooks",
+        "raw_polymarket_trades",
+        "raw_btc_feature_candles",
+    }
+    assert len(
+        _read_jsonl(Path(round_row["artifact_paths"]["raw_polymarket_orderbooks"]))
+    ) == 2
+    assert manifest["per_round_raw_orderbook_artifact_count"] == 1
+    assert manifest["per_round_signal_trace_artifact_count"] == 1
 
 
 def test_execution_layer_v2_one_hour_goal_reports_missing_round_bet_fail_closed(
