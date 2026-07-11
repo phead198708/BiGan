@@ -8006,6 +8006,8 @@ def test_o_v8_paper_fresh_signal_trace_canonical_time_windows(
         p_up=0.82,
     )
     early_row["microstructure_snapshot"]["time_to_close_seconds"] = 260.0
+    early_row["market_start_ts"] = early_row["decision_ts"] - 40_000
+    early_row["market_end_ts"] = early_row["decision_ts"] + 260_000
     hts_allowed_row = _paper_fresh_public_row(
         index=1,
         market_id="fresh-trace-hts",
@@ -8014,6 +8016,8 @@ def test_o_v8_paper_fresh_signal_trace_canonical_time_windows(
         p_up=0.83,
     )
     hts_allowed_row["microstructure_snapshot"]["time_to_close_seconds"] = 180.0
+    hts_allowed_row["market_start_ts"] = hts_allowed_row["decision_ts"] - 120_000
+    hts_allowed_row["market_end_ts"] = hts_allowed_row["decision_ts"] + 180_000
     sbc_only_row = _paper_fresh_public_row(
         index=4,
         market_id="fresh-trace-sbc-only",
@@ -8022,6 +8026,8 @@ def test_o_v8_paper_fresh_signal_trace_canonical_time_windows(
         p_up=0.84,
     )
     sbc_only_row["microstructure_snapshot"]["time_to_close_seconds"] = 90.0
+    sbc_only_row["market_start_ts"] = sbc_only_row["decision_ts"] - 210_000
+    sbc_only_row["market_end_ts"] = sbc_only_row["decision_ts"] + 90_000
     final_row = _paper_fresh_public_row(
         index=2,
         market_id="fresh-trace-final",
@@ -8030,6 +8036,8 @@ def test_o_v8_paper_fresh_signal_trace_canonical_time_windows(
         p_up=0.85,
     )
     final_row["microstructure_snapshot"]["time_to_close_seconds"] = 45.0
+    final_row["market_start_ts"] = final_row["decision_ts"] - 255_000
+    final_row["market_end_ts"] = final_row["decision_ts"] + 45_000
 
     result = run_polymarket_o_v8_paper_fresh_loop(
         PolymarketOV8PaperFreshLoopConfig(
