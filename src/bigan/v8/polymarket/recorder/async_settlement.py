@@ -58,6 +58,7 @@ from bigan.v8.polymarket.storage import (
 ASYNC_SETTLEMENT_SCHEMA_VERSION = "bigan-v8-polymarket-async-settlement-v1"
 PENDING_CAPTURE_PHASE = "polymarket_pending_round_capture"
 PENDING_FINALIZATION_PHASE = "polymarket_pending_round_finalization"
+PROVIDER_RAW_DIRNAME = "provider_raw"
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +103,8 @@ def capture_polymarket_pending_round(
             )
         shutil.rmtree(run_dir)
     config.raw_dir.mkdir(parents=True)
+    provider_raw_dir = run_dir / PROVIDER_RAW_DIRNAME
+    provider_raw_dir.mkdir(parents=True)
 
     provider_failures = _provider_safety_failures(public_provider)
     market_candidates: list[dict[str, Any]] = []
@@ -133,6 +136,15 @@ def capture_polymarket_pending_round(
             failures=provider_failures,
             callback=lambda: public_provider.btc_feature_candle_rows(market_candidates, config),
         )
+
+    provider_raw_payloads = _provider_raw_payloads(
+        market_rows=market_candidates,
+        orderbook_rows=book_candidates,
+        trade_rows=trade_candidates,
+        btc_candle_rows=candle_candidates,
+    )
+    _sort_raw_payloads(provider_raw_payloads)
+    _write_raw_files(provider_raw_dir, provider_raw_payloads)
 
     raw_payloads = empty_raw_payloads()
     rejected_rows: list[dict[str, Any]] = list(provider_failures)
@@ -181,17 +193,24 @@ def capture_polymarket_pending_round(
 
     _sort_raw_payloads(raw_payloads)
     _write_raw_files(config.raw_dir, raw_payloads)
-    artifact_paths = _pending_capture_paths(run_dir, config.raw_dir)
+    artifact_paths = _pending_capture_paths(
+        run_dir,
+        config.raw_dir,
+        provider_raw_dir,
+    )
     _write_jsonl(artifact_paths["pending_round_rejected_rows"], rejected_rows)
     report = _pending_capture_report(
         config=config,
         raw_payloads=raw_payloads,
+        provider_raw_payloads=provider_raw_payloads,
         rejected_rows=rejected_rows,
         provider_failures=provider_failures,
     )
     manifest = _pending_capture_manifest(
         config=config,
         raw_payloads=raw_payloads,
+        provider_raw_payloads=provider_raw_payloads,
+        provider_raw_dir=provider_raw_dir,
         report=report,
     )
     _write_json(artifact_paths["pending_round_capture_report"], report)
@@ -225,7 +244,9 @@ def finalize_polymarket_pending_round(
     capture_manifest = _read_json(manifest_path)
     config = _config_from_manifest(capture_manifest)
     raw_dir = resolved_run_dir / "raw"
+    provider_raw_dir = resolved_run_dir / PROVIDER_RAW_DIRNAME
     raw_payloads = _read_raw_payloads(raw_dir)
+    provider_raw_payloads = _read_raw_payloads(provider_raw_dir)
     market_rows = raw_payloads["raw_polymarket_markets.jsonl"]
     rejected_rows: list[dict[str, Any]] = []
     resolution_rows: list[dict[str, Any]] = []
@@ -241,6 +262,14 @@ def finalize_polymarket_pending_round(
         resolution_candidates = _preferred_resolution_candidates(
             existing_resolution_candidates=existing_resolution_candidates,
             provider_resolution_candidates=provider_resolution_candidates,
+        )
+        provider_raw_payloads["raw_polymarket_resolutions.jsonl"] = (
+            _preferred_resolution_candidates(
+                existing_resolution_candidates=provider_raw_payloads[
+                    "raw_polymarket_resolutions.jsonl"
+                ],
+                provider_resolution_candidates=provider_resolution_candidates,
+            )
         )
         for market in market_rows:
             resolution, reasons = validate_resolution_row(
@@ -265,6 +294,8 @@ def finalize_polymarket_pending_round(
     raw_payloads["raw_polymarket_resolutions.jsonl"] = resolution_rows
     _sort_raw_payloads(raw_payloads)
     _write_raw_files(raw_dir, raw_payloads)
+    _sort_raw_payloads(provider_raw_payloads)
+    _write_raw_files(provider_raw_dir, provider_raw_payloads)
     round_artifact_evidence = _finalize_pending_round_lifecycle_artifacts(
         config=config,
         run_dir=resolved_run_dir,
@@ -318,11 +349,16 @@ def finalize_polymarket_pending_round(
         except Exception as exc:  # noqa: BLE001
             phase2_error = str(exc)
 
-    artifact_paths = _pending_finalization_paths(resolved_run_dir, raw_dir)
+    artifact_paths = _pending_finalization_paths(
+        resolved_run_dir,
+        raw_dir,
+        provider_raw_dir,
+    )
     _write_jsonl(artifact_paths["pending_round_finalization_rejected_rows"], rejected_rows)
     report = _pending_finalization_report(
         config=config,
         raw_payloads=raw_payloads,
+        provider_raw_payloads=provider_raw_payloads,
         rejected_rows=rejected_rows,
         phase2_result=phase2_result,
         phase2_error=phase2_error,
@@ -332,6 +368,8 @@ def finalize_polymarket_pending_round(
     finalization_manifest = _pending_finalization_manifest(
         config=config,
         raw_payloads=raw_payloads,
+        provider_raw_payloads=provider_raw_payloads,
+        provider_raw_dir=provider_raw_dir,
         report=report,
         phase2_result=phase2_result,
         exported_training_corpus_dir=exported_training_corpus_dir,
@@ -358,16 +396,25 @@ def finalize_polymarket_pending_round(
     )
 
 
-def _pending_capture_paths(run_dir: Path, raw_dir: Path) -> dict[str, Path]:
+def _pending_capture_paths(
+    run_dir: Path,
+    raw_dir: Path,
+    provider_raw_dir: Path,
+) -> dict[str, Path]:
     return {
         "pending_round_capture_manifest": run_dir / "pending_round_capture_manifest.json",
         "pending_round_capture_report": run_dir / "pending_round_capture_report.json",
         "pending_round_rejected_rows": run_dir / "pending_round_rejected_rows.jsonl",
         **{filename: raw_dir / filename for filename in RAW_CORPUS_FILENAMES},
+        **_provider_raw_artifact_paths(provider_raw_dir),
     }
 
 
-def _pending_finalization_paths(run_dir: Path, raw_dir: Path) -> dict[str, Path]:
+def _pending_finalization_paths(
+    run_dir: Path,
+    raw_dir: Path,
+    provider_raw_dir: Path,
+) -> dict[str, Path]:
     return {
         "pending_round_finalization_manifest": (
             run_dir / "pending_round_finalization_manifest.json"
@@ -378,6 +425,14 @@ def _pending_finalization_paths(run_dir: Path, raw_dir: Path) -> dict[str, Path]
         ),
         **_pending_round_lifecycle_paths(run_dir),
         **{filename: raw_dir / filename for filename in RAW_CORPUS_FILENAMES},
+        **_provider_raw_artifact_paths(provider_raw_dir),
+    }
+
+
+def _provider_raw_artifact_paths(provider_raw_dir: Path) -> dict[str, Path]:
+    return {
+        f"provider_{filename.removesuffix('.jsonl')}": provider_raw_dir / filename
+        for filename in RAW_CORPUS_FILENAMES
     }
 
 
@@ -747,11 +802,25 @@ def _pending_capture_report(
     *,
     config: PolymarketRealCorpusRecorderConfig,
     raw_payloads: dict[str, list[dict[str, Any]]],
+    provider_raw_payloads: dict[str, list[dict[str, Any]]],
     rejected_rows: list[dict[str, Any]],
     provider_failures: list[dict[str, Any]],
 ) -> dict[str, Any]:
     market_count = len(raw_payloads["raw_polymarket_markets.jsonl"])
     reject_counts = _reject_counts(rejected_rows)
+    provider_raw_orderbooks = provider_raw_payloads[
+        "raw_polymarket_orderbooks.jsonl"
+    ]
+    source_type_counts = Counter(
+        str(row.get("orderbook_source_type") or "unknown")
+        for row in provider_raw_orderbooks
+    )
+    fallback_reason_counts: Counter[str] = Counter()
+    for row in provider_raw_orderbooks:
+        fallback_reason_counts.update(
+            str(reason)
+            for reason in row.get("orderbook_fallback_reason_codes") or []
+        )
     return {
         "schema_version": ASYNC_SETTLEMENT_SCHEMA_VERSION,
         "phase": PENDING_CAPTURE_PHASE,
@@ -766,6 +835,24 @@ def _pending_capture_report(
         "resolution_provider_called": False,
         "raw_polymarket_market_count": market_count,
         "raw_orderbook_row_count": len(raw_payloads["raw_polymarket_orderbooks.jsonl"]),
+        "provider_raw_orderbook_snapshot_count": len(
+            provider_raw_orderbooks
+        ),
+        "training_sampled_orderbook_row_count": len(
+            raw_payloads["raw_polymarket_orderbooks.jsonl"]
+        ),
+        "provider_raw_artifacts_preserved": True,
+        "provider_raw_orderbook_source_type_distribution": dict(
+            sorted(source_type_counts.items())
+        ),
+        "provider_raw_orderbook_rest_fallback_row_count": sum(
+            1
+            for row in provider_raw_orderbooks
+            if row.get("orderbook_rest_fallback_used") is True
+        ),
+        "provider_raw_orderbook_fallback_reason_distribution": dict(
+            sorted(fallback_reason_counts.items())
+        ),
         "raw_trade_row_count": len(raw_payloads["raw_polymarket_trades.jsonl"]),
         "raw_btc_candle_row_count": len(raw_payloads["raw_binance_btcusdt_klines.jsonl"]),
         "raw_resolution_count": 0,
@@ -789,6 +876,8 @@ def _pending_capture_manifest(
     *,
     config: PolymarketRealCorpusRecorderConfig,
     raw_payloads: dict[str, list[dict[str, Any]]],
+    provider_raw_payloads: dict[str, list[dict[str, Any]]],
+    provider_raw_dir: Path,
     report: dict[str, Any],
 ) -> dict[str, Any]:
     raw_paths = {filename: config.raw_dir / filename for filename in RAW_CORPUS_FILENAMES}
@@ -804,6 +893,17 @@ def _pending_capture_manifest(
         "raw_artifact_row_counts": {
             filename: len(raw_payloads[filename]) for filename in RAW_CORPUS_FILENAMES
         },
+        "provider_raw_artifact_hashes": {
+            filename: _sha256_file(provider_raw_dir / filename)
+            for filename in RAW_CORPUS_FILENAMES
+            if (provider_raw_dir / filename).exists()
+        },
+        "provider_raw_artifact_row_counts": {
+            filename: len(provider_raw_payloads[filename])
+            for filename in RAW_CORPUS_FILENAMES
+        },
+        "provider_raw_artifacts_preserved": True,
+        "training_raw_is_validated_sampled_view": True,
         "pending_resolution": report["pending_resolution"],
         "capture_status": report["capture_status"],
         "resolution_provider_called": False,
@@ -815,6 +915,7 @@ def _pending_finalization_report(
     *,
     config: PolymarketRealCorpusRecorderConfig,
     raw_payloads: dict[str, list[dict[str, Any]]],
+    provider_raw_payloads: dict[str, list[dict[str, Any]]],
     rejected_rows: list[dict[str, Any]],
     phase2_result: Any,
     phase2_error: str | None,
@@ -838,6 +939,16 @@ def _pending_finalization_report(
         "pending_resolution": status == "pending_resolution",
         "raw_polymarket_market_count": market_count,
         "raw_orderbook_row_count": len(raw_payloads["raw_polymarket_orderbooks.jsonl"]),
+        "provider_raw_orderbook_snapshot_count": len(
+            provider_raw_payloads["raw_polymarket_orderbooks.jsonl"]
+        ),
+        "training_sampled_orderbook_row_count": len(
+            raw_payloads["raw_polymarket_orderbooks.jsonl"]
+        ),
+        "provider_raw_resolution_row_count": len(
+            provider_raw_payloads["raw_polymarket_resolutions.jsonl"]
+        ),
+        "provider_raw_artifacts_preserved": True,
         "raw_trade_row_count": len(raw_payloads["raw_polymarket_trades.jsonl"]),
         "raw_btc_candle_row_count": len(raw_payloads["raw_binance_btcusdt_klines.jsonl"]),
         "raw_resolution_count": resolution_count,
@@ -878,6 +989,8 @@ def _pending_finalization_manifest(
     *,
     config: PolymarketRealCorpusRecorderConfig,
     raw_payloads: dict[str, list[dict[str, Any]]],
+    provider_raw_payloads: dict[str, list[dict[str, Any]]],
+    provider_raw_dir: Path,
     report: dict[str, Any],
     phase2_result: Any,
     exported_training_corpus_dir: Path | None,
@@ -895,6 +1008,17 @@ def _pending_finalization_manifest(
         "raw_artifact_row_counts": {
             filename: len(raw_payloads[filename]) for filename in RAW_CORPUS_FILENAMES
         },
+        "provider_raw_artifact_hashes": {
+            filename: _sha256_file(provider_raw_dir / filename)
+            for filename in RAW_CORPUS_FILENAMES
+            if (provider_raw_dir / filename).exists()
+        },
+        "provider_raw_artifact_row_counts": {
+            filename: len(provider_raw_payloads[filename])
+            for filename in RAW_CORPUS_FILENAMES
+        },
+        "provider_raw_artifacts_preserved": True,
+        "training_raw_is_validated_sampled_view": True,
         "finalization_status": report["finalization_status"],
         "pending_resolution": report["pending_resolution"],
         "phase2_corpus_built": phase2_result is not None,
@@ -931,6 +1055,25 @@ def _config_from_manifest(manifest: dict[str, Any]) -> PolymarketRealCorpusRecor
 
 def _read_raw_payloads(raw_dir: Path) -> dict[str, list[dict[str, Any]]]:
     return {filename: _read_jsonl(raw_dir / filename) for filename in RAW_CORPUS_FILENAMES}
+
+
+def _provider_raw_payloads(
+    *,
+    market_rows: list[dict[str, Any]],
+    orderbook_rows: list[dict[str, Any]],
+    trade_rows: list[dict[str, Any]],
+    btc_candle_rows: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    payloads = empty_raw_payloads()
+    payloads["raw_polymarket_markets.jsonl"] = [dict(row) for row in market_rows]
+    payloads["raw_polymarket_orderbooks.jsonl"] = [
+        dict(row) for row in orderbook_rows
+    ]
+    payloads["raw_polymarket_trades.jsonl"] = [dict(row) for row in trade_rows]
+    payloads["raw_binance_btcusdt_klines.jsonl"] = [
+        dict(row) for row in btc_candle_rows
+    ]
+    return payloads
 
 
 def _write_raw_files(raw_dir: Path, raw_payloads: dict[str, list[dict[str, Any]]]) -> None:

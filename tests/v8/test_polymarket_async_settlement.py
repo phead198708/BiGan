@@ -40,10 +40,23 @@ def test_pending_capture_does_not_call_resolution_or_export(tmp_path: Path) -> N
     assert result.report["resolution_provider_called"] is False
     assert result.report["raw_polymarket_market_count"] == 1
     assert result.report["raw_orderbook_row_count"] > 0
+    assert result.report["provider_raw_orderbook_snapshot_count"] >= result.report[
+        "training_sampled_orderbook_row_count"
+    ]
+    assert result.report["provider_raw_artifacts_preserved"] is True
     assert result.report["raw_resolution_count"] == 0
     assert result.report["training_eligible"] is False
     assert result.report["exported_training_corpus_dir"] is None
     assert (result.raw_dir / "raw_polymarket_resolutions.jsonl").read_text() == ""
+    provider_raw_books = result.artifact_paths["provider_raw_polymarket_orderbooks"]
+    assert provider_raw_books.exists()
+    assert len(_read_jsonl(provider_raw_books)) == result.report[
+        "provider_raw_orderbook_snapshot_count"
+    ]
+    assert result.manifest["provider_raw_artifact_hashes"][
+        "raw_polymarket_orderbooks.jsonl"
+    ]
+    assert result.manifest["training_raw_is_validated_sampled_view"] is True
 
 
 def test_pending_capture_explains_orderbook_rejection_without_raw_book_dump(
@@ -68,6 +81,9 @@ def test_pending_capture_explains_orderbook_rejection_without_raw_book_dump(
     assert detail["valid_book_rows_by_outcome"]["DOWN"] == 0
     assert detail["explanation"] == "No valid DOWN orderbook rows were available for this market."
     assert "raw_rows" not in detail
+    assert len(
+        _read_jsonl(result.artifact_paths["provider_raw_polymarket_orderbooks"])
+    ) > 0
 
 
 def test_pending_finalization_waits_for_resolution_before_export(tmp_path: Path) -> None:
@@ -106,6 +122,13 @@ def test_pending_finalization_waits_for_resolution_before_export(tmp_path: Path)
     assert finalized.report["pending_resolution"] is False
     assert finalized.report["training_eligible"] is True
     assert finalized.report["raw_resolution_count"] == 1
+    assert finalized.report["provider_raw_resolution_row_count"] == 1
+    assert finalized.report["provider_raw_artifacts_preserved"] is True
+    assert len(
+        _read_jsonl(
+            finalized.artifact_paths["provider_raw_polymarket_resolutions"]
+        )
+    ) == 1
     assert finalized.exported_training_corpus_dir is not None
     assert finalized.exported_training_corpus_dir.name.startswith("btc-updown-5m-")
     assert (finalized.exported_training_corpus_dir / "polymarket_label_rows.jsonl").exists()

@@ -119,6 +119,27 @@ def run_polymarket_async_round_collector_cli(
                             "raw_polymarket_market_count"
                         ],
                         "raw_orderbook_row_count": capture.report["raw_orderbook_row_count"],
+                        "provider_raw_orderbook_snapshot_count": capture.report[
+                            "provider_raw_orderbook_snapshot_count"
+                        ],
+                        "training_sampled_orderbook_row_count": capture.report[
+                            "training_sampled_orderbook_row_count"
+                        ],
+                        "provider_raw_orderbook_source_type_distribution": (
+                            capture.report[
+                                "provider_raw_orderbook_source_type_distribution"
+                            ]
+                        ),
+                        "provider_raw_orderbook_rest_fallback_row_count": (
+                            capture.report[
+                                "provider_raw_orderbook_rest_fallback_row_count"
+                            ]
+                        ),
+                        "provider_raw_orderbook_fallback_reason_distribution": (
+                            capture.report[
+                                "provider_raw_orderbook_fallback_reason_distribution"
+                            ]
+                        ),
                         "raw_trade_row_count": capture.report["raw_trade_row_count"],
                         "raw_btc_candle_row_count": capture.report["raw_btc_candle_row_count"],
                         "reject_reason_counts": capture.report["reject_reason_counts"],
@@ -296,6 +317,14 @@ def _summary(
         "capture_count": len(captures),
         "capture_pending_resolution_count": sum(
             1 for item in captures if item.get("pending_resolution") is True
+        ),
+        "provider_raw_orderbook_snapshot_count": sum(
+            int(item.get("provider_raw_orderbook_snapshot_count") or 0)
+            for item in captures
+        ),
+        "training_sampled_orderbook_row_count": sum(
+            int(item.get("training_sampled_orderbook_row_count") or 0)
+            for item in captures
         ),
         "finalization_attempt_count": len(finalizations),
         "exported_round_count": len(exported),
