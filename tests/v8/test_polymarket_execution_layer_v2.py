@@ -51,7 +51,9 @@ from bigan.v8.polymarket.training.execution_layer_v2_policy_replay import (
     run_execution_layer_v2_regime_entry_edge_replay,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_pre_promotion_readiness import (
+    ExecutionLayerV2PrePromotionFinalizationConfig,
     ExecutionLayerV2PrePromotionGoalConfig,
+    finalize_pre_promotion_readiness_goal,
     initialize_pre_promotion_readiness_goal,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev import (
@@ -2256,6 +2258,81 @@ def test_pre_promotion_goal_initialization_freezes_gates_and_exclusions(
     assert state["freeze_ready"] is False
     assert state["#134_resume_allowed"] is False
     assert state["#146_start_allowed"] is False
+
+
+def test_pre_promotion_goal_finalizer_seals_blocked_bundle_without_artifact(
+    tmp_path,
+) -> None:
+    result = initialize_pre_promotion_readiness_goal(
+        ExecutionLayerV2PrePromotionGoalConfig(
+            run_id="pre-promotion-finalizer-test",
+            output_dir=tmp_path / "runs",
+            evidence_root=tmp_path / "evidence",
+            created_at="2026-07-11T12:00:00Z",
+            starting_commit="1" * 40,
+        )
+    )
+    collection = tmp_path / "collection"
+    collection.mkdir()
+    (collection / "one_hour_remap_paper_goal_report.json").write_text(
+        json.dumps(
+            {"complete_round_count": 2, "paper_fill_count": 4, "paper_only": True}
+        ),
+        encoding="utf-8",
+    )
+    reconciliation = tmp_path / "reconciliation"
+    reconciliation.mkdir()
+    (reconciliation / "clob_settlement_reconciliation_report.json").write_text(
+        json.dumps(
+            {
+                "unresolved_fill_count_after": 0,
+                "original_source_artifacts_mutated": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "execution_layer_v2_regime_conditioned_ev_v2_corpus_manifest.json").write_text(
+        json.dumps({"corpus_sha256": "2" * 64}), encoding="utf-8"
+    )
+    (corpus / "execution_layer_v2_regime_conditioned_ev_v2_corpus_quality_report.json").write_text(
+        json.dumps(
+            {
+                "eligible_row_count": 12,
+                "excluded_row_count": 1,
+                "unique_market_count": 4,
+                "readiness_blocking_reason_codes": ["minimum_protocol_smoke_not_met"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    finalized = finalize_pre_promotion_readiness_goal(
+        ExecutionLayerV2PrePromotionFinalizationConfig(
+            goal_dir=result.goal_dir,
+            historical_collection_dirs=(collection,),
+            outcome_reconciliation_dirs=(reconciliation,),
+            calibration_corpus_dir=corpus,
+            stop_reason_codes=("configured_data_window_budget_reached",),
+            resumable_next_command="collect-one-more-window",
+        )
+    )
+    report = json.loads(finalized.readiness_report_path.read_text(encoding="utf-8"))
+    manifest = json.loads(finalized.readiness_manifest_path.read_text(encoding="utf-8"))
+
+    assert finalized.final_state == "PRE_PROMOTION_BLOCKED"
+    assert finalized.pre_promotion_readiness_complete is False
+    assert report["promotion_evidence_stage_started"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["live_evidence_allowed"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+    assert "minimum_protocol_smoke_not_met" in report["blocking_reason_codes"]
+    assert not (result.goal_dir / "frozen_diagnostic_artifact.json").exists()
+    assert manifest["manifest_self_hash_embedded"] is False
+    assert hashlib.sha256(finalized.readiness_manifest_path.read_bytes()).hexdigest() == (
+        finalized.readiness_manifest_sha256_path.read_text(encoding="utf-8").strip()
+    )
 
 
 def test_fresh_provider_row_uses_market_start_btc_proxy_when_price_to_beat_missing() -> None:
