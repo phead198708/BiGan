@@ -2371,6 +2371,10 @@ def test_pre_promotion_goal_finalizer_seals_blocked_bundle_without_artifact(
     assert hashlib.sha256(finalized.readiness_manifest_path.read_bytes()).hexdigest() == (
         finalized.readiness_manifest_sha256_path.read_text(encoding="utf-8").strip()
     )
+    assert all(
+        hashlib.sha256(Path(row["path"]).read_bytes()).hexdigest() == row["sha256"]
+        for row in manifest["artifacts"]
+    )
 
 
 def test_fresh_provider_row_uses_market_start_btc_proxy_when_price_to_beat_missing() -> None:

@@ -552,6 +552,30 @@ def finalize_pre_promotion_readiness_goal(
         _readiness_markdown(readiness_report), encoding="utf-8"
     )
 
+    state = {
+        "schema_version": PRE_PROMOTION_GOAL_STATE_SCHEMA_VERSION,
+        "goal_configuration_sha256": expected_config_hash,
+        "current_phase": "phase_9_pre_promotion_readiness_bundle_complete",
+        "completed_phases": [
+            "phase_0_audit_and_goal_configuration",
+            "phase_1_historical_collection",
+            "phase_2_official_outcome_reconciliation",
+            "phase_3_calibration_corpus",
+            "phase_4_split",
+            "phase_5_fit_validation",
+            "phase_9_pre_promotion_readiness_bundle",
+        ],
+        "next_phase": (
+            "promotion_evidence_not_started" if readiness_complete else "resume_blocker"
+        ),
+        "resumable": not readiness_complete,
+        "goal_status": final_state,
+        "blocking_reason_codes": sorted(blockers),
+        **_safety_fields(),
+    }
+    state["state_id"] = canonical_json_sha256(state)
+    _write_json(goal_dir / "pre_promotion_goal_state.json", state)
+
     artifact_paths = sorted(
         path
         for path in goal_dir.iterdir()
@@ -591,29 +615,6 @@ def finalize_pre_promotion_readiness_goal(
         _sha256_file(readiness_manifest_path) + "\n", encoding="utf-8"
     )
 
-    state = {
-        "schema_version": PRE_PROMOTION_GOAL_STATE_SCHEMA_VERSION,
-        "goal_configuration_sha256": expected_config_hash,
-        "current_phase": "phase_9_pre_promotion_readiness_bundle_complete",
-        "completed_phases": [
-            "phase_0_audit_and_goal_configuration",
-            "phase_1_historical_collection",
-            "phase_2_official_outcome_reconciliation",
-            "phase_3_calibration_corpus",
-            "phase_4_split",
-            "phase_5_fit_validation",
-            "phase_9_pre_promotion_readiness_bundle",
-        ],
-        "next_phase": (
-            "promotion_evidence_not_started" if readiness_complete else "resume_blocker"
-        ),
-        "resumable": not readiness_complete,
-        "goal_status": final_state,
-        "blocking_reason_codes": sorted(blockers),
-        **_safety_fields(),
-    }
-    state["state_id"] = canonical_json_sha256(state)
-    _write_json(goal_dir / "pre_promotion_goal_state.json", state)
     return ExecutionLayerV2PrePromotionFinalizationResult(
         goal_dir=goal_dir,
         readiness_report_path=readiness_report_path,
@@ -622,6 +623,8 @@ def finalize_pre_promotion_readiness_goal(
         final_state=final_state,
         pre_promotion_readiness_complete=readiness_complete,
     )
+
+
 def _excluded_evidence_manifest(
     *,
     evidence_root: Path,
