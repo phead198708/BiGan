@@ -283,6 +283,7 @@ def finalize_pre_promotion_readiness_goal(
         raise ValueError("frozen goal configuration hash mismatch")
     if not exclusion_path.is_file():
         raise FileNotFoundError("excluded evidence manifest is missing")
+    goal_configuration = _load_json(goal_configuration_path)
 
     collection_rows = [
         _phase_directory_evidence(path, "one_hour_remap_paper_goal_report.json")
@@ -343,6 +344,9 @@ def finalize_pre_promotion_readiness_goal(
     )
     corpus_payload = _load_json(corpus_source) if corpus_source else {}
     corpus_report = _load_json(corpus_report_source) if corpus_report_source else {}
+    goal_corpus_gate_blockers = _goal_corpus_gate_blockers(
+        goal_configuration, corpus_report
+    )
     corpus_bundle_payload = {
         "schema_version": "bigan-v8-pre-promotion-calibration-corpus-manifest-v1",
         "goal_configuration_sha256": expected_config_hash,
@@ -352,9 +356,10 @@ def finalize_pre_promotion_readiness_goal(
         "rejected_row_count": int(corpus_report.get("excluded_row_count", 0)),
         "unique_market_count": int(corpus_report.get("unique_market_count", 0)),
         "corpus_sha256": corpus_payload.get("corpus_sha256"),
-        "readiness_blocking_reason_codes": corpus_report.get(
+        "builder_advisory_readiness_reason_codes": corpus_report.get(
             "readiness_blocking_reason_codes", ["calibration_corpus_not_available"]
         ),
+        "goal_corpus_gate_blocking_reason_codes": goal_corpus_gate_blockers,
         **_safety_fields(),
     }
     corpus_bundle_payload["manifest_id"] = canonical_json_sha256(
@@ -464,7 +469,7 @@ def finalize_pre_promotion_readiness_goal(
     )
 
     blockers = set(config.stop_reason_codes)
-    blockers.update(corpus_bundle_payload["readiness_blocking_reason_codes"])
+    blockers.update(goal_corpus_gate_blockers)
     blockers.update(calibration_payload.get("blocking_reason_codes", []))
     if unresolved_condition_count:
         blockers.add("unresolved_official_settlements_remaining")
@@ -757,6 +762,32 @@ def _bundle_report_payload(
     }
     payload["report_id"] = canonical_json_sha256(payload)
     return payload
+
+
+def _goal_corpus_gate_blockers(
+    goal_configuration: dict[str, Any],
+    corpus_report: dict[str, Any],
+) -> list[str]:
+    blockers = []
+    if not corpus_report:
+        return ["calibration_corpus_not_available"]
+    if int(corpus_report.get("eligible_row_count", 0)) < int(
+        goal_configuration["minimum_total_calibration_rows"]
+    ):
+        blockers.append("minimum_goal_calibration_row_support_not_met")
+    if int(corpus_report.get("unique_market_count", 0)) < int(
+        goal_configuration["minimum_total_calibration_markets"]
+    ):
+        blockers.append("minimum_goal_calibration_market_support_not_met")
+    provenance = corpus_report.get("provenance_coverage", {})
+    if int(provenance.get("violation_count", 0)):
+        blockers.append("calibration_corpus_provenance_violation")
+    deduplication = corpus_report.get("deduplication", {})
+    if int(deduplication.get("conflicting_identity_count", 0)):
+        blockers.append("calibration_corpus_conflicting_identity")
+    if corpus_report.get("incremental_full_rebuild_hash_match") is not True:
+        blockers.append("calibration_corpus_rebuild_hash_mismatch")
+    return blockers
 
 
 def _passed_gate_names(*payloads: dict[str, Any]) -> list[str]:

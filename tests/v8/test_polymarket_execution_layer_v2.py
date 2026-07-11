@@ -2302,6 +2302,7 @@ def test_pre_promotion_goal_finalizer_seals_blocked_bundle_without_artifact(
                 "eligible_row_count": 12,
                 "excluded_row_count": 1,
                 "unique_market_count": 4,
+                "incremental_full_rebuild_hash_match": True,
                 "readiness_blocking_reason_codes": ["minimum_protocol_smoke_not_met"],
             }
         ),
@@ -2327,7 +2328,12 @@ def test_pre_promotion_goal_finalizer_seals_blocked_bundle_without_artifact(
     assert report["promotion_evidence_eligible"] is False
     assert report["live_evidence_allowed"] is False
     assert report["v8_execution_handoff_allowed"] is False
-    assert "minimum_protocol_smoke_not_met" in report["blocking_reason_codes"]
+    assert "minimum_goal_calibration_row_support_not_met" in report[
+        "blocking_reason_codes"
+    ]
+    assert "minimum_goal_calibration_market_support_not_met" in report[
+        "blocking_reason_codes"
+    ]
     assert not (result.goal_dir / "frozen_diagnostic_artifact.json").exists()
     assert manifest["manifest_self_hash_embedded"] is False
     assert hashlib.sha256(finalized.readiness_manifest_path.read_bytes()).hexdigest() == (
