@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from bigan.v8.polymarket.recorder.public_provider import RealCorpusPublicProviderError
+from bigan.v8.polymarket.recorder.public_provider import (
+    PolymarketPublicHTTPRealCorpusProvider,
+    RealCorpusPublicProviderError,
+)
 from bigan.v8.polymarket.training.execution_layer_v2 import (
     EXECUTION_LAYER_V2_BASELINE_NAME,
     ExecutionLayerV2BacktestConfig,
@@ -30,6 +33,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_historical_outcome_reconcil
 from bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal import (
     ONE_HOUR_REMAP_PAPER_GOAL_SCHEMA_VERSION,
     ExecutionLayerV2OneHourRemapPaperGoalConfig,
+    _clob_resolution_rows_for_markets,
     _missing_bet_round_classifications,
     _raw_evidence_completeness_report,
     _settlement_resolution_report,
@@ -3499,6 +3503,133 @@ def test_execution_layer_v2_one_hour_goal_settlement_resolution_times_out_fail_c
     assert report["paper_only"] is True
     assert report["capital_at_risk"] is False
     assert report["v8_execution_handoff_allowed"] is False
+
+
+def test_one_hour_settlement_accumulates_concurrent_clob_results_by_condition(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def _fake_clob_resolution_rows(*, market_rows, timeout_seconds):
+        assert timeout_seconds > 0.0
+        market_ids = tuple(sorted(str(row["market_id"]) for row in market_rows))
+        calls.append(market_ids)
+        resolved_market_id = "market-a" if len(calls) == 1 else "market-b"
+        rows = [
+            {
+                "market_id": resolved_market_id,
+                "condition_id": resolved_market_id,
+                "resolution_status": "normal",
+                "resolved_outcome": "UP" if resolved_market_id == "market-a" else "DOWN",
+                "payout_up": 1.0 if resolved_market_id == "market-a" else 0.0,
+                "payout_down": 0.0 if resolved_market_id == "market-a" else 1.0,
+                "resolution_source_type": "polymarket_clob_read_only_settlement",
+                "paper_only": True,
+                "capital_at_risk": False,
+            }
+        ]
+        failures = []
+        if len(calls) == 1:
+            failures.append(
+                {
+                    "market_id": "market-b",
+                    "condition_id": "market-b",
+                    "reason_code": "settlement_resolution_market_not_closed",
+                }
+            )
+        return rows, failures
+
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal."
+        "_clob_resolution_rows_for_markets",
+        _fake_clob_resolution_rows,
+    )
+    provider = PolymarketPublicHTTPRealCorpusProvider(fetch_json=lambda _url: {})
+    fills = [
+        {
+            "paper_fresh_order_intent_id": f"intent-{suffix}",
+            "market_id": f"market-{suffix}",
+            "execution_guarded_side": "UP" if suffix == "a" else "DOWN",
+            "paper_fill_price": 0.60,
+            "filled_size": 0.20,
+            "total_execution_cost": 0.0,
+            "paper_only": True,
+            "capital_at_risk": False,
+        }
+        for suffix in ("a", "b")
+    ]
+    trace_rows = [
+        {
+            "market_id": f"market-{suffix}",
+            "condition_id": f"market-{suffix}",
+            "slug": f"btc-updown-5m-{suffix}",
+            "market_family": "btc_updown_5m",
+            "market_start_ts": 1_000_000,
+            "market_end_ts": 1_300_000,
+            "up_token_id": f"up-{suffix}",
+            "down_token_id": f"down-{suffix}",
+            "reference_price_source": "polymarket_official_btc_usd_reference",
+        }
+        for suffix in ("a", "b")
+    ]
+
+    report = _settlement_resolution_report(
+        config=ExecutionLayerV2OneHourRemapPaperGoalConfig(
+            run_id="concurrent-clob-settlement",
+            output_dir=tmp_path / "runs",
+            public_provider=provider,
+            settlement_poll_max_wait_seconds=0.05,
+            settlement_poll_interval_seconds=0.001,
+        ),
+        fills=fills,
+        trace_rows=trace_rows,
+        settlement_evaluation_rows=[],
+    )
+
+    assert calls == [("market-a", "market-b"), ("market-b",)]
+    assert report["settlement_resolution_query_mode"] == "concurrent_clob_condition_id"
+    assert report["resolved_market_count"] == 2
+    assert report["unresolved_market_count"] == 0
+    assert report["resolved_fill_count"] == 2
+    assert report["unresolved_fill_count_after_poll"] == 0
+    assert report["settlement_resolution_failure_reason_distribution"] == {
+        "settlement_resolution_market_not_closed": 1
+    }
+    assert report["paper_only"] is True
+    assert report["capital_at_risk"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+
+
+def test_clob_settlement_keeps_not_closed_market_fail_closed(monkeypatch) -> None:
+    def _fake_market(*, market_row, timeout_seconds):
+        assert market_row["market_id"] == "market-not-closed"
+        assert timeout_seconds == 1.0
+        return None, "settlement_resolution_market_not_closed"
+
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal."
+        "_clob_resolution_row_for_market",
+        _fake_market,
+    )
+    rows, failures = _clob_resolution_rows_for_markets(
+        market_rows=[
+            {
+                "market_id": "market-not-closed",
+                "condition_id": "condition-not-closed",
+            }
+        ],
+        timeout_seconds=1.0,
+    )
+
+    assert rows == []
+    assert failures == [
+        {
+            "market_id": "market-not-closed",
+            "condition_id": "condition-not-closed",
+            "reason_code": "settlement_resolution_market_not_closed",
+        }
+    ]
 
 
 def test_execution_layer_v2_one_hour_goal_stops_after_consecutive_orderbook_failures(

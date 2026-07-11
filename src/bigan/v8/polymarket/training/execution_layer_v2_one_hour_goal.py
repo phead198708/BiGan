@@ -7,7 +7,10 @@ import queue
 import shutil
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,6 +59,8 @@ ONE_HOUR_REMAP_SETTLEMENT_RESOLUTION_SCHEMA_VERSION = (
 ONE_HOUR_RAW_EVIDENCE_COMPLETENESS_SCHEMA_VERSION = (
     "bigan-v8-polymarket-execution-layer-v2-raw-evidence-completeness-v1"
 )
+POLYMARKET_CLOB_MARKET_ENDPOINT = "https://clob.polymarket.com/markets/{condition_id}"
+SETTLEMENT_CLOB_MAX_WORKERS = 8
 
 GUARD_JUSTIFIED_NO_BET_ALLOWED_BLOCKER_CATEGORIES = {
     "time_to_close",
@@ -2764,6 +2769,13 @@ def _settlement_resolution_report(
     provider_read_only = bool(getattr(provider, "read_only", False)) if provider else False
     provider_safe = _settlement_provider_safe(provider) if provider is not None else False
     attempt_count = 0
+    resolution_failures: list[dict[str, Any]] = []
+    resolutions_by_market: dict[str, dict[str, Any]] = {}
+    query_mode = (
+        "concurrent_clob_condition_id"
+        if isinstance(provider, PolymarketPublicHTTPRealCorpusProvider)
+        else "provider_resolution_rows"
+    )
     if not unresolved_fills:
         reason_codes.append("settlement_poll_skipped_no_unresolved_fills")
     elif not market_rows:
@@ -2776,17 +2788,33 @@ def _settlement_resolution_report(
         deadline = time.monotonic() + config.settlement_poll_max_wait_seconds
         while True:
             attempt_count += 1
+            unresolved_market_rows = [
+                row
+                for row in market_rows
+                if str(row.get("market_id")) not in resolutions_by_market
+            ]
             request_timeout = min(
                 config.settlement_poll_interval_seconds,
                 max(0.001, deadline - time.monotonic()),
             )
             try:
-                resolution_rows = _provider_resolution_rows_with_timeout(
-                    provider=provider,
-                    market_rows=market_rows,
-                    recorder_config=_settlement_recorder_config(config=config),
-                    timeout_seconds=request_timeout,
-                )
+                if isinstance(provider, PolymarketPublicHTTPRealCorpusProvider):
+                    attempt_rows, attempt_failures = (
+                        _clob_resolution_rows_for_markets(
+                            market_rows=unresolved_market_rows,
+                            timeout_seconds=request_timeout,
+                        )
+                    )
+                    resolution_failures.extend(
+                        {**row, "attempt": attempt_count} for row in attempt_failures
+                    )
+                else:
+                    attempt_rows = _provider_resolution_rows_with_timeout(
+                        provider=provider,
+                        market_rows=unresolved_market_rows,
+                        recorder_config=_settlement_recorder_config(config=config),
+                        timeout_seconds=request_timeout,
+                    )
             except RealCorpusPublicProviderError as exc:
                 reason_codes.extend(
                     ["settlement_resolution_provider_error", *list(exc.reason_codes)]
@@ -2808,15 +2836,18 @@ def _settlement_resolution_report(
                     ]
                 )
                 break
-            by_market = {
-                str(row.get("market_id")): dict(row)
-                for row in resolution_rows
-                if _resolved_outcome_from_resolution(row) in {"UP", "DOWN"}
-            }
-            if by_market:
+            for row in attempt_rows:
+                market_id = str(row.get("market_id") or "")
+                if market_id and _resolved_outcome_from_resolution(row) in {"UP", "DOWN"}:
+                    resolutions_by_market[market_id] = dict(row)
+            resolution_rows = [
+                resolutions_by_market[market_id]
+                for market_id in sorted(resolutions_by_market)
+            ]
+            if resolutions_by_market:
                 evaluation_rows = _settlement_evaluation_rows_from_resolutions(
                     fills=unresolved_fills,
-                    resolutions_by_market=by_market,
+                    resolutions_by_market=resolutions_by_market,
                 )
             if len(evaluation_rows) >= len(unresolved_fills):
                 reason_codes.append("settlement_resolution_all_fills_resolved")
@@ -2849,8 +2880,21 @@ def _settlement_resolution_report(
         "settlement_provider_class": provider_class,
         "settlement_provider_read_only": provider_read_only,
         "settlement_provider_safety_passed": provider_safe,
+        "settlement_resolution_query_mode": query_mode,
+        "settlement_resolution_endpoint_template": (
+            POLYMARKET_CLOB_MARKET_ENDPOINT
+            if query_mode == "concurrent_clob_condition_id"
+            else None
+        ),
+        "settlement_resolution_max_workers": (
+            SETTLEMENT_CLOB_MAX_WORKERS
+            if query_mode == "concurrent_clob_condition_id"
+            else 1
+        ),
         "unresolved_fill_count_before_poll": len(unresolved_fills),
         "settlement_market_metadata_count": len(market_rows),
+        "resolved_market_count": len(resolutions_by_market),
+        "unresolved_market_count": len(market_rows) - len(resolutions_by_market),
         "raw_resolution_row_count": len(resolution_rows),
         "settlement_evaluation_row_count": len(evaluation_rows),
         "resolved_fill_count": len(evaluation_rows),
@@ -2858,6 +2902,16 @@ def _settlement_resolution_report(
         "unresolved_paper_fresh_order_intent_ids": unresolved_fill_ids,
         "settlement_evaluation_rows": evaluation_rows,
         "resolution_rows": resolution_rows,
+        "settlement_resolution_failure_count": len(resolution_failures),
+        "settlement_resolution_failure_reason_distribution": dict(
+            sorted(
+                Counter(
+                    str(row.get("reason_code") or "settlement_resolution_unknown_failure")
+                    for row in resolution_failures
+                ).items()
+            )
+        ),
+        "settlement_resolution_failures": resolution_failures,
         "settlement_resolution_reason_codes": sorted(set(reason_codes)),
         "uses_settlement_pnl_for_decision_time_logic": False,
         "uses_oracle_actions_or_future_returns_for_decision_time_logic": False,
@@ -2900,6 +2954,133 @@ def _provider_resolution_rows_with_timeout(
     if kind == "exception":
         raise payload
     return list(payload)
+
+
+def _clob_resolution_rows_for_markets(
+    *,
+    market_rows: list[dict[str, Any]],
+    timeout_seconds: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Fetch official CLOB outcomes independently so one market cannot lose a batch."""
+
+    if not market_rows:
+        return [], []
+    rows: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(
+        max_workers=min(SETTLEMENT_CLOB_MAX_WORKERS, len(market_rows))
+    ) as pool:
+        futures = {
+            pool.submit(
+                _clob_resolution_row_for_market,
+                market_row=market_row,
+                timeout_seconds=timeout_seconds,
+            ): market_row
+            for market_row in market_rows
+        }
+        for future in as_completed(futures):
+            market_row = futures[future]
+            market_id = str(market_row.get("market_id") or "")
+            condition_id = str(
+                market_row.get("condition_id") or market_row.get("market_id") or ""
+            )
+            try:
+                row, reason_code = future.result()
+            except Exception as exc:  # pragma: no cover - defensive network boundary
+                row = None
+                reason_code = f"settlement_resolution_clob_unexpected_{exc.__class__.__name__}"
+            if row is not None:
+                rows.append(row)
+            else:
+                failures.append(
+                    {
+                        "market_id": market_id,
+                        "condition_id": condition_id,
+                        "reason_code": reason_code
+                        or "settlement_resolution_clob_unknown_failure",
+                    }
+                )
+    return (
+        sorted(rows, key=lambda row: str(row.get("market_id") or "")),
+        sorted(
+            failures,
+            key=lambda row: (str(row.get("market_id") or ""), row["reason_code"]),
+        ),
+    )
+
+
+def _clob_resolution_row_for_market(
+    *,
+    market_row: dict[str, Any],
+    timeout_seconds: float,
+) -> tuple[dict[str, Any] | None, str | None]:
+    market_id = str(market_row.get("market_id") or "")
+    condition_id = str(
+        market_row.get("condition_id") or market_row.get("market_id") or ""
+    )
+    if not market_id or not condition_id:
+        return None, "settlement_resolution_missing_condition_id"
+    request = urllib.request.Request(
+        POLYMARKET_CLOB_MARKET_ENDPOINT.format(condition_id=condition_id),
+        headers={"User-Agent": "bigan-v8-paper-read-only-settlement/1.0"},
+        method="GET",
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=max(0.001, timeout_seconds)) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except TimeoutError:
+        return None, "settlement_resolution_http_timeout"
+    except urllib.error.HTTPError as exc:
+        return None, f"settlement_resolution_clob_http_status_{exc.code}"
+    except urllib.error.URLError as exc:
+        if isinstance(getattr(exc, "reason", None), TimeoutError) or "timed out" in str(
+            exc
+        ).lower():
+            return None, "settlement_resolution_http_timeout"
+        return None, "settlement_resolution_clob_network_error"
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, "settlement_resolution_clob_invalid_json"
+    if not isinstance(payload, dict):
+        return None, "settlement_resolution_clob_response_not_object"
+    if payload.get("closed") is not True:
+        return None, "settlement_resolution_market_not_closed"
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, list):
+        return None, "settlement_resolution_winner_tokens_missing"
+    winners = [token for token in tokens if isinstance(token, dict) and token.get("winner") is True]
+    if len(winners) != 1:
+        return None, "settlement_resolution_winner_not_available"
+    winner = winners[0]
+    winner_token_id = str(winner.get("token_id") or winner.get("asset_id") or "")
+    outcome = str(winner.get("outcome") or "").strip().upper()
+    if winner_token_id == str(market_row.get("up_token_id") or ""):
+        outcome = "UP"
+    elif winner_token_id == str(market_row.get("down_token_id") or ""):
+        outcome = "DOWN"
+    if outcome not in {"UP", "DOWN"}:
+        return None, "settlement_resolution_winner_outcome_invalid"
+    observed_at_ts = time.time() * 1000.0
+    return (
+        {
+            "market_id": market_id,
+            "condition_id": condition_id,
+            "reference_price_source": market_row.get("reference_price_source"),
+            "resolution_status": "normal",
+            "resolved_outcome": outcome,
+            "payout_up": 1.0 if outcome == "UP" else 0.0,
+            "payout_down": 1.0 if outcome == "DOWN" else 0.0,
+            "resolution_source_type": "polymarket_clob_read_only_settlement",
+            "outcome_observed_at_ts": observed_at_ts,
+            "outcome_observation_time_source": "provider_response_clock",
+            "raw_resolution_sha256": canonical_json_sha256(payload),
+            "paper_only": True,
+            "capital_at_risk": False,
+            "polymarket_write_enabled": False,
+            "wallet_signing_enabled": False,
+        },
+        None,
+    )
 
 
 def _settlement_provider_safe(provider: Any) -> bool:
