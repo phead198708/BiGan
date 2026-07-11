@@ -607,10 +607,21 @@ def _calibration_row_from_join(
         reasons.append("ambiguous_or_unresolved_settlement")
     if resolved_outcome not in V2_REQUIRED_VALIDATION_RESOLVED_OUTCOMES:
         reasons.append("resolved_outcome_missing_or_invalid")
-    settlement_ts = _number(
-        settlement.get("settlement_ts")
-        or settlement.get("resolved_at_ts")
-        or settlement.get("target_available_at_ts")
+    outcome_observed_at_ts = _first_number(
+        settlement,
+        fields=(
+            "outcome_observed_at_ts",
+            "resolution_observed_at_ts",
+            "target_observed_at_ts",
+        ),
+    )
+    observation_time_source = str(
+        settlement.get("outcome_observation_time_source")
+        or (
+            "artifact_recorded"
+            if outcome_observed_at_ts is not None
+            else "not_recorded_historical"
+        )
     )
     market_close_ts = _number(
         trace.get("market_end_ts")
@@ -624,8 +635,6 @@ def _calibration_row_from_join(
         reasons.append("decision_ts_missing")
     if market_close_ts is None:
         reasons.append("market_close_ts_missing")
-    if settlement_ts is None:
-        reasons.append("settlement_timestamp_missing")
     if max_input_ts is None:
         reasons.append("decision_time_max_input_ts_missing")
     canonical_score = _canonical_score_for_action(trace, intent, selected_action)
@@ -750,13 +759,15 @@ def _calibration_row_from_join(
             "side_flip": int(side_flip),
         },
         "target_net_return_after_cost": target,
-        "target_available_at_ts": settlement_ts,
         "target_provenance": {
             "source_type": settlement_source,
             "source_artifact_path": str(settlement_artifact["path"]),
             "source_artifact_sha256": settlement_artifact["sha256"],
-            "settlement_ts": settlement_ts,
+            "resolution_status": "resolved",
             "resolved_outcome": resolved_outcome,
+            "outcome_observed_after_market_close": True,
+            "outcome_observation_time_source": observation_time_source,
+            "outcome_observed_at_ts": outcome_observed_at_ts,
         },
     }
     return row, []
@@ -1088,6 +1099,12 @@ def _build_quality_report(
             - len(rows),
         ),
         "invalid_row_count": len(invalid_rows),
+        "target_observation_time_contract": {
+            "exact_settlement_timestamp_required": False,
+            "resolved_official_outcome_required": True,
+            "historical_missing_outcome_observation_timestamp_allowed": True,
+            "recorded_outcome_observation_timestamp_must_follow_market_close": True,
+        },
         "row_exclusion_reason_distribution": dict(
             sorted(row_exclusion_reasons.items())
         ),
@@ -1285,6 +1302,9 @@ def _build_corpus_manifest(
         "coverage": quality_report["coverage"],
         "feature_coverage": quality_report["feature_coverage"],
         "provenance_coverage": quality_report["provenance_coverage"],
+        "target_observation_time_contract": quality_report[
+            "target_observation_time_contract"
+        ],
         "duplicate_conflict_summary": quality_report["deduplication"],
         "readiness_milestones": {
             "minimum_protocol_smoke_passed": quality_report[
@@ -1324,6 +1344,8 @@ def execution_layer_v2_regime_conditioned_ev_corpus_quality_to_markdown(
             f"- minimum protocol smoke: `{report['minimum_protocol_smoke_passed']}`",
             f"- initial real calibration candidate: `{report['initial_real_calibration_candidate_passed']}`",
             f"- preferred robust corpus: `{report['preferred_robust_corpus_passed']}`",
+            "- exact settlement timestamp required: `false`",
+            "- resolved official outcome required: `true`",
             "- real frozen artifact created: `false`",
             "- future shadow started: `false`",
             "",

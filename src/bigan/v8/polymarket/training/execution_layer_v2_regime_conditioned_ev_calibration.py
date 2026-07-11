@@ -98,7 +98,6 @@ _CALIBRATION_ROW_FIELDS = {
     "action_family",
     "decision_time_features",
     "target_net_return_after_cost",
-    "target_available_at_ts",
     "target_provenance",
 }
 _GROUP_WEIGHTS: dict[str, dict[str, float]] = {
@@ -436,6 +435,9 @@ def run_execution_layer_v2_regime_conditioned_ev_calibration(
         "calibration_row_schema_sha256": split_report[
             "calibration_row_schema_sha256"
         ],
+        "target_observation_time_contract": split_report[
+            "target_observation_time_contract"
+        ],
         "leakage_checks_passed": split_report["leakage_checks_passed"],
         "validation_improved_over_constant_and_legacy": calibration_report[
             "validation_improved_over_constant_and_legacy"
@@ -541,7 +543,6 @@ def _normalize_calibration_rows(
         max_input_ts = _finite_float(row.get("max_input_ts"))
         market_close_ts = _finite_float(row.get("market_close_ts"))
         target = _finite_float(row.get("target_net_return_after_cost"))
-        target_available_at_ts = _finite_float(row.get("target_available_at_ts"))
         target_provenance = row.get("target_provenance")
         source_intent_id = str(row.get("source_intent_id") or "")
         source_fill_id = str(row.get("source_fill_id") or "")
@@ -566,8 +567,6 @@ def _normalize_calibration_rows(
             runtime_reason_codes.append("market_close_ts_not_after_decision_ts")
         if target is None:
             runtime_reason_codes.append("target_net_return_after_cost_invalid")
-        if target_available_at_ts is None:
-            runtime_reason_codes.append("target_available_at_ts_invalid")
         if not isinstance(target_provenance, dict):
             runtime_reason_codes.append("target_provenance_missing")
             target_provenance = {}
@@ -601,28 +600,43 @@ def _normalize_calibration_rows(
                 runtime_reason_codes.append(
                     "target_provenance_source_artifact_sha256_mismatch"
                 )
-        settlement_ts = _finite_float(target_provenance.get("settlement_ts"))
+        resolution_status = str(
+            target_provenance.get("resolution_status") or ""
+        ).lower()
         resolved_outcome = str(
             target_provenance.get("resolved_outcome") or ""
         ).upper()
-        if settlement_ts is None:
-            runtime_reason_codes.append("target_provenance_settlement_ts_invalid")
-        elif market_close_ts is not None and settlement_ts < market_close_ts:
-            runtime_reason_codes.append("settlement_ts_before_market_close_ts")
+        outcome_observed_at_ts = _finite_float(
+            target_provenance.get("outcome_observed_at_ts")
+        )
+        observation_time_source = str(
+            target_provenance.get("outcome_observation_time_source") or ""
+        )
+        if resolution_status != "resolved":
+            runtime_reason_codes.append("target_resolution_status_not_resolved")
         if resolved_outcome not in V2_REQUIRED_VALIDATION_RESOLVED_OUTCOMES:
             runtime_reason_codes.append("resolved_outcome_invalid")
-        if (
-            target_available_at_ts is not None
-            and market_close_ts is not None
-            and target_available_at_ts < market_close_ts
-        ):
-            runtime_reason_codes.append("target_available_before_market_close")
-        if (
-            target_available_at_ts is not None
-            and settlement_ts is not None
-            and target_available_at_ts < settlement_ts
-        ):
-            runtime_reason_codes.append("target_available_before_settlement")
+        if target_provenance.get("outcome_observed_after_market_close") is not True:
+            runtime_reason_codes.append(
+                "outcome_observed_after_market_close_not_verified"
+            )
+        if observation_time_source not in {
+            "provider_response_clock",
+            "artifact_recorded",
+            "not_recorded_historical",
+        }:
+            runtime_reason_codes.append("outcome_observation_time_source_invalid")
+        if outcome_observed_at_ts is not None:
+            if market_close_ts is not None and outcome_observed_at_ts < market_close_ts:
+                runtime_reason_codes.append("outcome_observed_before_market_close")
+            if observation_time_source == "not_recorded_historical":
+                runtime_reason_codes.append(
+                    "outcome_observation_timestamp_source_inconsistent"
+                )
+        elif observation_time_source != "not_recorded_historical":
+            runtime_reason_codes.append(
+                "outcome_observation_timestamp_missing_for_recorded_source"
+            )
 
         missing = [
             feature
@@ -772,7 +786,6 @@ def _normalize_calibration_rows(
                     feature: float(features[feature]) for feature in V2_REQUIRED_FEATURES
                 },
                 "target_net_return_after_cost": float(target),
-                "target_available_at_ts": target_available_at_ts,
                 "target_provenance": target_provenance,
                 "resolved_outcome": resolved_outcome,
             }
@@ -982,6 +995,12 @@ def _build_split_report(
         "calibration_row_schema_sha256": _sha256_file(
             V2_CALIBRATION_ROW_SCHEMA_PATH
         ),
+        "target_observation_time_contract": {
+            "exact_settlement_timestamp_required": False,
+            "resolved_official_outcome_required": True,
+            "historical_missing_outcome_observation_timestamp_allowed": True,
+            "recorded_outcome_observation_timestamp_must_follow_market_close": True,
+        },
         "approved_target_provenance_sources": list(
             V2_APPROVED_TARGET_PROVENANCE_SOURCES
         ),

@@ -9,7 +9,7 @@
     "source_lineage", "market_id", "decision_ts", "max_input_ts", "market_close_ts",
     "selected_side", "selected_action", "action_family",
     "decision_time_features", "target_net_return_after_cost",
-    "target_available_at_ts", "target_provenance"
+    "target_provenance"
   ],
   "properties": {
     "source_run_id": {"type": "string", "minLength": 1},
@@ -89,10 +89,13 @@
       "additionalProperties": false
     },
     "target_net_return_after_cost": {"type": "number"},
-    "target_available_at_ts": {"type": "number"},
     "target_provenance": {
       "type": "object",
-      "required": ["source_type", "source_artifact_path", "source_artifact_sha256", "settlement_ts", "resolved_outcome"],
+      "required": [
+        "source_type", "source_artifact_path", "source_artifact_sha256",
+        "resolution_status", "resolved_outcome",
+        "outcome_observed_after_market_close", "outcome_observation_time_source"
+      ],
       "properties": {
         "source_type": {
           "enum": [
@@ -103,8 +106,16 @@
         },
         "source_artifact_path": {"type": "string", "minLength": 1},
         "source_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "settlement_ts": {"type": "number"},
-        "resolved_outcome": {"enum": ["UP", "DOWN"]}
+        "resolution_status": {"const": "resolved"},
+        "resolved_outcome": {"enum": ["UP", "DOWN"]},
+        "outcome_observed_after_market_close": {"const": true},
+        "outcome_observation_time_source": {
+          "enum": [
+            "provider_response_clock", "artifact_recorded",
+            "not_recorded_historical"
+          ]
+        },
+        "outcome_observed_at_ts": {"type": ["number", "null"]}
       },
       "additionalProperties": false
     }

@@ -50,6 +50,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev_calib
     ExecutionLayerV2RegimeConditionedEVCalibrationConfig,
     regime_conditioned_ev_v2_calibration_row_identity,
     run_execution_layer_v2_regime_conditioned_ev_calibration,
+    validate_regime_conditioned_ev_v2_calibration_rows,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev_corpus import (
     ExecutionLayerV2RegimeConditionedEVCorpusConfig,
@@ -1582,7 +1583,9 @@ def test_regime_conditioned_ev_v2_strict_row_validation_fails_closed(
     features["queue_fill_proxy"] = 1.1
     features["cumulative_market_exposure_before_entry"] = -0.1
     rows[1]["target_provenance"]["source_type"] = "unapproved_write_provider"
-    rows[1]["target_available_at_ts"] = rows[1]["market_close_ts"] - 1
+    rows[1]["target_provenance"]["outcome_observed_at_ts"] = (
+        rows[1]["market_close_ts"] - 1
+    )
     rows[2]["decision_time_features"][
         "selected_side_probability_minus_execution_price"
     ] += 0.01
@@ -1617,13 +1620,60 @@ def test_regime_conditioned_ev_v2_strict_row_validation_fails_closed(
     assert reasons[
         "target_provenance_source_not_approved_read_only_settlement"
     ] == 1
-    assert reasons["target_available_before_market_close"] == 1
+    assert reasons["outcome_observed_before_market_close"] == 1
     assert reasons[
         "selected_side_probability_minus_execution_price_mismatch"
     ] >= 1
     assert result.calibration_report["artifact_created"] is False
     assert result.calibration_report["final_artifact_eligibility_reason_codes"]
     assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def test_regime_conditioned_ev_v2_accepts_resolved_historical_outcome_without_timestamp(
+    tmp_path,
+) -> None:
+    rows = _regime_conditioned_ev_v2_calibration_rows()
+    _attach_regime_conditioned_ev_v2_target_source(rows, tmp_path)
+    for row in rows:
+        provenance = row["target_provenance"]
+        provenance.pop("outcome_observed_at_ts")
+        provenance["outcome_observation_time_source"] = "not_recorded_historical"
+
+    normalized, invalid, excluded = validate_regime_conditioned_ev_v2_calibration_rows(
+        rows,
+        source_root=tmp_path,
+        probability_price_tolerance=1e-9,
+    )
+
+    assert len(normalized) == len(rows)
+    assert invalid == []
+    assert excluded == []
+    assert all(
+        row["target_provenance"]["resolution_status"] == "resolved"
+        for row in normalized
+    )
+    input_path = tmp_path / "historical-outcome-without-observation-time.jsonl"
+    _write_jsonl(input_path, rows)
+    result = run_execution_layer_v2_regime_conditioned_ev_calibration(
+        ExecutionLayerV2RegimeConditionedEVCalibrationConfig(
+            run_id="historical-outcome-without-observation-time",
+            input_path=input_path,
+            output_dir=tmp_path / "runs",
+            min_fit_rows=16,
+            min_validation_rows=8,
+            min_fit_markets=4,
+            min_validation_markets=2,
+        )
+    )
+    assert result.split_report["target_observation_time_contract"] == {
+        "exact_settlement_timestamp_required": False,
+        "historical_missing_outcome_observation_timestamp_allowed": True,
+        "recorded_outcome_observation_timestamp_must_follow_market_close": True,
+        "resolved_official_outcome_required": True,
+    }
+    assert result.manifest["target_observation_time_contract"] == result.split_report[
+        "target_observation_time_contract"
+    ]
 
 
 def test_regime_conditioned_ev_v2_statistical_gates_fail_closed(
@@ -1722,6 +1772,12 @@ def test_regime_conditioned_ev_v2_corpus_builder_ingests_and_excludes(
         "SELL_BEFORE_CLOSE": 4,
     }
     assert report["provenance_coverage"]["violation_count"] == 0
+    assert report["target_observation_time_contract"][
+        "exact_settlement_timestamp_required"
+    ] is False
+    assert result.manifest["target_observation_time_contract"] == report[
+        "target_observation_time_contract"
+    ]
     assert report["incremental_full_rebuild_hash_match"] is True
     assert report["minimum_protocol_smoke_passed"] is False
     assert report["real_frozen_artifact_created"] is False
@@ -3733,7 +3789,8 @@ def _write_regime_ev_corpus_source_run(
                     None if unresolved else ("UP" if index % 2 == 0 else "DOWN")
                 ),
                 "settlement_pnl": 0.01 * (index + 1) + settlement_pnl_offset,
-                "settlement_ts": decision_ts + 350,
+                "outcome_observed_at_ts": decision_ts + 350,
+                "outcome_observation_time_source": "artifact_recorded",
                 "settlement_evaluation_row_hash": hashlib.sha256(
                     f"settlement-{run_id}-{index}-{settlement_pnl_offset}".encode()
                 ).hexdigest(),
@@ -3855,10 +3912,13 @@ def _attach_regime_conditioned_ev_v2_target_source(
             "source_type": "polymarket_clob_read_only_settlement",
             "source_artifact_path": source_path.name,
             "source_artifact_sha256": source_hash,
-            "settlement_ts": row["market_close_ts"] + 50,
+            "resolution_status": "resolved",
             "resolved_outcome": (
                 "UP" if (int(row["decision_ts"]) // 10) % 2 == 0 else "DOWN"
             ),
+            "outcome_observed_after_market_close": True,
+            "outcome_observation_time_source": "artifact_recorded",
+            "outcome_observed_at_ts": row["market_close_ts"] + 50,
         }
 
 
@@ -3945,13 +4005,15 @@ def _regime_conditioned_ev_v2_calibration_row(
             "side_flip": int(side_flip),
         },
         "target_net_return_after_cost": target,
-        "target_available_at_ts": decision_ts + 300,
         "target_provenance": {
             "source_type": "polymarket_clob_read_only_settlement",
             "source_artifact_path": f"historical/{source_run_id}.jsonl",
             "source_artifact_sha256": "c" * 64,
-            "settlement_ts": decision_ts + 250,
+            "resolution_status": "resolved",
             "resolved_outcome": "UP" if row_index % 2 == 0 else "DOWN",
+            "outcome_observed_after_market_close": True,
+            "outcome_observation_time_source": "artifact_recorded",
+            "outcome_observed_at_ts": decision_ts + 300,
         },
     }
 
