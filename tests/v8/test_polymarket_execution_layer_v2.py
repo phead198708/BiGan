@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from bigan.v8.polymarket.recorder.public_provider import RealCorpusPublicProviderError
 from bigan.v8.polymarket.training.execution_layer_v2 import (
     EXECUTION_LAYER_V2_BASELINE_NAME,
     ExecutionLayerV2BacktestConfig,
@@ -3525,10 +3526,10 @@ def test_execution_layer_v2_one_hour_goal_stops_after_consecutive_orderbook_fail
     assert report["provider_fail_fast_stop_triggered"] is True
     assert report["max_consecutive_orderbook_failure_rounds"] == 1
     assert report["consecutive_orderbook_failure_count_at_stop"] == 1
-    assert "orderbook_collection_failed_consecutive_limit" in report[
+    assert "decision_critical_provider_failure_consecutive_limit" in report[
         "goal_failure_reason_codes"
     ]
-    assert "consecutive_orderbook_collection_failures_exceeded_limit" in report[
+    assert "consecutive_decision_critical_provider_failures_exceeded_limit" in report[
         "provider_fail_fast_reason_codes"
     ]
     assert report["complete_round_count"] == 0
@@ -3543,6 +3544,46 @@ def test_execution_layer_v2_one_hour_goal_stops_after_consecutive_orderbook_fail
     )
     assert status_rows[0]["orderbook_failure"] is True
     assert status_rows[0]["public_orderbook_row_count"] == 0
+
+
+def test_execution_layer_v2_trade_http_failure_is_optional_degradation(
+    tmp_path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    result = run_execution_layer_v2_one_hour_remap_paper_goal(
+        ExecutionLayerV2OneHourRemapPaperGoalConfig(
+            run_id="one-hour-goal-optional-trade-timeout",
+            output_dir=tmp_path / "runs",
+            duration_seconds=1,
+            poll_interval_seconds=0.0,
+            allow_short_diagnostic_run=True,
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_provider=_TradeTimeoutProvider(),
+            max_consecutive_orderbook_failure_rounds=1,
+        )
+    )
+
+    status_rows = _read_jsonl(
+        result.output_dir
+        / "incremental_fresh_loop"
+        / "provider_cycle_status.jsonl"
+    )
+    assert len(status_rows) == 1
+    status = status_rows[0]
+    assert status["decision_critical_provider_failure"] is False
+    assert status["decision_optional_provider_failure"] is True
+    assert status["orderbook_failure"] is False
+    assert status["public_feature_row_count"] == 1
+    assert status["public_trade_row_count"] == 0
+    assert status["consecutive_orderbook_failure_count"] == 0
+    assert status["public_data_degradation_reason_codes"] == [
+        "read_only_public_http_timeout"
+    ]
+    assert status["provider_stage_statuses"]["trade_collection"][
+        "decision_critical"
+    ] is False
+    assert result.goal_report["provider_fail_fast_stop_triggered"] is False
 
 
 def _write_settlement_csv(path, rows: list[dict[str, object]]) -> None:
@@ -3770,6 +3811,48 @@ class _NoOrderbookProvider:
                 "source": "pytest",
             }
         ]
+
+
+class _TradeTimeoutProvider(_NoOrderbookProvider):
+    def orderbook_rows(self, markets, config):
+        del config
+        common = {
+            "market_id": markets[0]["market_id"],
+            "ts": 1_010_000,
+            "available_at_ts": 1_010_000,
+            "bid_size": 2.0,
+            "ask_size": 2.0,
+            "liquidity_depth": 4.0,
+        }
+        return [
+            {
+                **common,
+                "token_id": "up-token",
+                "outcome": "UP",
+                "bid_price": 0.60,
+                "ask_price": 0.62,
+                "mid_price": 0.61,
+            },
+            {
+                **common,
+                "token_id": "down-token",
+                "outcome": "DOWN",
+                "bid_price": 0.38,
+                "ask_price": 0.40,
+                "mid_price": 0.39,
+            },
+        ]
+
+    def trade_rows(self, markets, config):
+        del markets, config
+        raise RealCorpusPublicProviderError(
+            "pytest optional trade HTTP timeout",
+            reason_codes=("read_only_public_http_timeout",),
+        )
+
+    def resolution_rows(self, markets, config):
+        del markets, config
+        return []
 
 
 class _SlowResolutionProvider:

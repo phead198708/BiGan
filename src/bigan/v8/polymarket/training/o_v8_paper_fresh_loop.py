@@ -958,48 +958,115 @@ def _collect_read_only_public_provider_cycles(
         mock_public_data=False,
         build_phase2_corpus=False,
     )
-    try:
-        markets = provider.market_rows(recorder_config)
-        orderbooks = provider.orderbook_rows(markets, recorder_config)
-        trades = provider.trade_rows(markets, recorder_config)
-        btc_candles = provider.btc_feature_candle_rows(markets, recorder_config)
-        rows = _fresh_public_rows_from_provider_payloads(
-            run_id=config.run_id,
-            markets=markets,
-            orderbooks=orderbooks,
-            trades=trades,
-            btc_candles=btc_candles,
+    stage_statuses: dict[str, dict[str, Any]] = {}
+    markets = _call_public_provider_stage(
+        stage_name="market_discovery",
+        decision_critical=True,
+        callback=lambda: provider.market_rows(recorder_config),
+        stage_statuses=stage_statuses,
+    )
+    if markets:
+        orderbooks = _call_public_provider_stage(
+            stage_name="orderbook_collection",
+            decision_critical=True,
+            callback=lambda: provider.orderbook_rows(markets, recorder_config),
+            stage_statuses=stage_statuses,
         )
-        reason_codes: list[str] = []
-        collection_failed = False
-        if not rows:
-            collection_failed = True
-            reason_codes.append("read_only_public_provider_no_decision_feature_rows")
-    except RealCorpusPublicProviderError as exc:
-        markets = []
-        orderbooks = []
-        trades = []
-        btc_candles = []
-        rows = []
-        collection_failed = True
-        reason_codes = list(exc.reason_codes) or [
-            "read_only_public_provider_collection_failed"
-        ]
-        exception_type = exc.__class__.__name__
-        exception_message = str(exc)
-    except Exception as exc:  # noqa: BLE001
-        markets = []
-        orderbooks = []
-        trades = []
-        btc_candles = []
-        rows = []
-        collection_failed = True
-        reason_codes = ["read_only_public_provider_collection_failed"]
-        exception_type = exc.__class__.__name__
-        exception_message = str(exc)
+        trades = _call_public_provider_stage(
+            stage_name="trade_collection",
+            decision_critical=False,
+            callback=lambda: provider.trade_rows(markets, recorder_config),
+            stage_statuses=stage_statuses,
+        )
+        btc_candles = _call_public_provider_stage(
+            stage_name="btc_feature_candle_collection",
+            decision_critical=True,
+            callback=lambda: provider.btc_feature_candle_rows(
+                markets, recorder_config
+            ),
+            stage_statuses=stage_statuses,
+        )
     else:
-        exception_type = None
-        exception_message = None
+        orderbooks = []
+        trades = []
+        btc_candles = []
+        for stage_name, decision_critical in (
+            ("orderbook_collection", True),
+            ("trade_collection", False),
+            ("btc_feature_candle_collection", True),
+        ):
+            stage_statuses[stage_name] = {
+                "stage_name": stage_name,
+                "decision_critical": decision_critical,
+                "attempted": False,
+                "passed": False,
+                "row_count": 0,
+                "reason_codes": ["provider_stage_skipped_missing_markets"],
+                "exception_type": None,
+                "exception_message": None,
+            }
+    rows = _fresh_public_rows_from_provider_payloads(
+        run_id=config.run_id,
+        markets=markets,
+        orderbooks=orderbooks,
+        trades=trades,
+        btc_candles=btc_candles,
+    )
+    stage_statuses["decision_feature_build"] = {
+        "stage_name": "decision_feature_build",
+        "decision_critical": True,
+        "attempted": True,
+        "passed": bool(rows),
+        "row_count": len(rows),
+        "reason_codes": []
+        if rows
+        else ["read_only_public_provider_no_decision_feature_rows"],
+        "exception_type": None,
+        "exception_message": None,
+    }
+    collection_failed = not rows
+    critical_stage_failures = [
+        status
+        for status in stage_statuses.values()
+        if status["decision_critical"] is True and status["passed"] is not True
+    ]
+    optional_stage_failures = [
+        status
+        for status in stage_statuses.values()
+        if status["decision_critical"] is False and status["passed"] is not True
+    ]
+    reason_codes = sorted(
+        {
+            str(reason)
+            for status in critical_stage_failures
+            for reason in status["reason_codes"]
+        }
+    )
+    degradation_reason_codes = sorted(
+        {
+            str(reason)
+            for status in optional_stage_failures
+            for reason in status["reason_codes"]
+        }
+    )
+    first_critical_exception = next(
+        (
+            status
+            for status in critical_stage_failures
+            if status.get("exception_type")
+        ),
+        None,
+    )
+    exception_type = (
+        None
+        if first_critical_exception is None
+        else first_critical_exception["exception_type"]
+    )
+    exception_message = (
+        None
+        if first_critical_exception is None
+        else first_critical_exception["exception_message"]
+    )
 
     cycles = _partition_public_rows(rows, config.max_cycles)
     orderbook_source_counter = Counter(
@@ -1015,6 +1082,11 @@ def _collect_read_only_public_provider_cycles(
         **base_report,
         "paper_fresh_provider_collection_failed": collection_failed,
         "public_data_collection_reason_codes": sorted(set(reason_codes)),
+        "public_data_degraded": bool(optional_stage_failures),
+        "public_data_degradation_reason_codes": degradation_reason_codes,
+        "provider_stage_statuses": stage_statuses,
+        "decision_critical_provider_failure": collection_failed,
+        "decision_optional_provider_failure": bool(optional_stage_failures),
         "public_data_cycle_count": len(cycles),
         "public_data_row_count": len(rows),
         "public_market_count": len(markets),
@@ -1044,6 +1116,58 @@ def _collect_read_only_public_provider_cycles(
             "btc_feature_candles": [dict(row) for row in btc_candles],
         },
     }
+
+
+def _call_public_provider_stage(
+    *,
+    stage_name: str,
+    decision_critical: bool,
+    callback: Any,
+    stage_statuses: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    try:
+        rows = callback()
+    except RealCorpusPublicProviderError as exc:
+        reason_codes = list(exc.reason_codes) or [
+            f"{stage_name}_public_provider_failed"
+        ]
+        stage_statuses[stage_name] = {
+            "stage_name": stage_name,
+            "decision_critical": decision_critical,
+            "attempted": True,
+            "passed": False,
+            "row_count": 0,
+            "reason_codes": reason_codes,
+            "exception_type": exc.__class__.__name__,
+            "exception_message": str(exc),
+        }
+        return []
+    except Exception as exc:  # noqa: BLE001
+        stage_statuses[stage_name] = {
+            "stage_name": stage_name,
+            "decision_critical": decision_critical,
+            "attempted": True,
+            "passed": False,
+            "row_count": 0,
+            "reason_codes": [f"{stage_name}_public_provider_failed"],
+            "exception_type": exc.__class__.__name__,
+            "exception_message": str(exc),
+        }
+        return []
+    normalized_rows = [dict(row) for row in rows]
+    stage_statuses[stage_name] = {
+        "stage_name": stage_name,
+        "decision_critical": decision_critical,
+        "attempted": True,
+        "passed": bool(normalized_rows),
+        "row_count": len(normalized_rows),
+        "reason_codes": []
+        if normalized_rows
+        else [f"{stage_name}_returned_no_rows"],
+        "exception_type": None,
+        "exception_message": None,
+    }
+    return normalized_rows
 
 
 def _empty_raw_provider_payloads() -> dict[str, list[dict[str, Any]]]:

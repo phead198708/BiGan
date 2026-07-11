@@ -182,6 +182,7 @@ def _run_incremental_read_only_provider_fresh_loop(
     cycle_status_rows: list[dict[str, Any]] = []
     cycle_results: list[Any] = []
     reason_counter: Counter[str] = Counter()
+    degradation_reason_counter: Counter[str] = Counter()
     block_counter: Counter[str] = Counter()
     consecutive_orderbook_failures = 0
     max_consecutive_failures = config.max_consecutive_orderbook_failure_rounds
@@ -219,14 +220,21 @@ def _run_incremental_read_only_provider_fresh_loop(
         ]
         orderbook_count = int(public_report.get("public_orderbook_row_count") or 0)
         feature_count = int(public_report.get("public_feature_row_count") or 0)
-        orderbook_failure = orderbook_count <= 0 or feature_count <= 0
-        if orderbook_failure:
+        decision_critical_failure = bool(
+            public_report.get("decision_critical_provider_failure")
+        ) or feature_count <= 0
+        orderbook_failure = decision_critical_failure
+        if decision_critical_failure:
             consecutive_orderbook_failures += 1
         else:
             consecutive_orderbook_failures = 0
 
         reason_codes = list(public_report.get("public_data_collection_reason_codes") or [])
         reason_counter.update(reason_codes)
+        degradation_reason_codes = list(
+            public_report.get("public_data_degradation_reason_codes") or []
+        )
+        degradation_reason_counter.update(degradation_reason_codes)
         block_counter.update(
             cycle_result.fresh_loop_run_report.get("block_reason_distribution") or {}
         )
@@ -265,9 +273,17 @@ def _run_incremental_read_only_provider_fresh_loop(
                 "paper_fresh_provider_collection_failed"
             ],
             "orderbook_failure": orderbook_failure,
+            "decision_critical_provider_failure": decision_critical_failure,
+            "decision_optional_provider_failure": bool(
+                public_report.get("decision_optional_provider_failure")
+            ),
             "consecutive_orderbook_failure_count": consecutive_orderbook_failures,
             "max_consecutive_orderbook_failure_rounds": max_consecutive_failures,
             "public_data_collection_reason_codes": reason_codes,
+            "public_data_degradation_reason_codes": degradation_reason_codes,
+            "provider_stage_statuses": public_report.get(
+                "provider_stage_statuses", {}
+            ),
             "public_market_count": public_report.get("public_market_count"),
             "public_orderbook_row_count": orderbook_count,
             "orderbook_source_type_distribution": public_report.get(
@@ -314,7 +330,7 @@ def _run_incremental_read_only_provider_fresh_loop(
         if consecutive_orderbook_failures >= max_consecutive_failures:
             fail_fast_stop_triggered = True
             fail_fast_reason_codes = [
-                "consecutive_orderbook_collection_failures_exceeded_limit"
+                "consecutive_decision_critical_provider_failures_exceeded_limit"
             ]
             break
         if cycle_index < max_cycles - 1 and config.poll_interval_seconds > 0.0:
@@ -329,6 +345,7 @@ def _run_incremental_read_only_provider_fresh_loop(
         cycle_status_rows=cycle_status_rows,
         cycle_results=cycle_results,
         reason_counter=reason_counter,
+        degradation_reason_counter=degradation_reason_counter,
         fail_fast_stop_triggered=fail_fast_stop_triggered,
         fail_fast_reason_codes=fail_fast_reason_codes,
     )
@@ -944,6 +961,7 @@ def _aggregate_public_collection_report(
     cycle_status_rows: list[dict[str, Any]],
     cycle_results: list[Any],
     reason_counter: Counter[str],
+    degradation_reason_counter: Counter[str],
     fail_fast_stop_triggered: bool,
     fail_fast_reason_codes: list[str],
 ) -> dict[str, Any]:
@@ -1003,6 +1021,17 @@ def _aggregate_public_collection_report(
         "public_data_collection_reason_codes": reason_codes,
         "public_data_collection_reason_distribution": dict(
             sorted(reason_counter.items())
+        ),
+        "public_data_degradation_reason_distribution": dict(
+            sorted(degradation_reason_counter.items())
+        ),
+        "decision_optional_provider_failure_cycle_count": sum(
+            bool(row.get("decision_optional_provider_failure"))
+            for row in cycle_status_rows
+        ),
+        "decision_critical_provider_failure_cycle_count": sum(
+            bool(row.get("decision_critical_provider_failure"))
+            for row in cycle_status_rows
         ),
         "public_data_cycle_count": len(cycle_status_rows),
         "public_data_row_count": sum(
@@ -3082,7 +3111,7 @@ def _one_hour_goal_report(
         fresh_result.fresh_loop_run_report.get("provider_fail_fast_stop_triggered")
     )
     if provider_fail_fast_stop_triggered:
-        blockers.append("orderbook_collection_failed_consecutive_limit")
+        blockers.append("decision_critical_provider_failure_consecutive_limit")
     final_success = blockers == []
     report = {
         "schema_version": ONE_HOUR_REMAP_PAPER_GOAL_SCHEMA_VERSION,
@@ -3175,6 +3204,21 @@ def _one_hour_goal_report(
         "provider_fail_fast_stop_triggered": provider_fail_fast_stop_triggered,
         "provider_fail_fast_reason_codes": fresh_result.fresh_loop_run_report.get(
             "provider_fail_fast_reason_codes", []
+        ),
+        "decision_critical_provider_failure_cycle_count": (
+            fresh_result.fresh_loop_run_report.get("public_data_collection_report", {}).get(
+                "decision_critical_provider_failure_cycle_count", 0
+            )
+        ),
+        "decision_optional_provider_failure_cycle_count": (
+            fresh_result.fresh_loop_run_report.get("public_data_collection_report", {}).get(
+                "decision_optional_provider_failure_cycle_count", 0
+            )
+        ),
+        "public_data_degradation_reason_distribution": (
+            fresh_result.fresh_loop_run_report.get("public_data_collection_report", {}).get(
+                "public_data_degradation_reason_distribution", {}
+            )
         ),
         "max_consecutive_orderbook_failure_rounds": (
             fresh_result.fresh_loop_run_report.get(
