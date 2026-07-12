@@ -1,0 +1,1127 @@
+"""Immutable remediation workflow for the v8 pre-promotion boundary."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import statistics
+import subprocess
+from collections import Counter, defaultdict
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev import (
+    REGIME_CONDITIONED_EV_V2_FEATURE_GROUPS,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev_calibration import (
+    V2_REQUIRED_FEATURES,
+    _chronological_market_split,
+    _feature_value_for_model,
+    _fit_feature_transforms,
+    _group_scores,
+    _market_level_metrics,
+    _predict_matrix,
+    _regression_metrics,
+    _ridge_fit,
+)
+
+REMEDIATION_CONFIG_SCHEMA_VERSION = (
+    "bigan-v8-execution-layer-v2-pre-promotion-remediation-config-v1"
+)
+REMEDIATION_EXCLUSION_SCHEMA_VERSION = (
+    "bigan-v8-execution-layer-v2-pre-promotion-remediation-exclusions-v1"
+)
+REMEDIATION_STATE_SCHEMA_VERSION = (
+    "bigan-v8-execution-layer-v2-pre-promotion-remediation-state-v1"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLayerV2PrePromotionRemediationConfig:
+    run_id: str
+    output_dir: Path | str
+    repository_root: Path | str
+    created_at: str
+    starting_branch: str
+    starting_commit: str
+    prior_blocked_bundle_dir: Path | str
+    prior_corpus_rows_path: Path | str
+    prior_split_report_path: Path | str
+    prior_calibration_report_path: Path | str
+    maximum_wall_clock_seconds: int = 21_600
+    collection_window_seconds: int = 3_600
+    maximum_collection_windows: int = 4
+    collection_poll_interval_seconds: float = 60.0
+    settlement_max_wait_seconds: float = 600.0
+    settlement_poll_interval_seconds: float = 15.0
+    minimum_total_calibration_rows: int = 150
+    minimum_total_calibration_markets: int = 30
+    minimum_development_fit_rows: int = 100
+    minimum_development_fit_markets: int = 20
+    minimum_fresh_validation_rows: int = 30
+    minimum_fresh_validation_markets: int = 10
+    minimum_validation_rows_per_side: int = 5
+    minimum_validation_rows_per_action_family: int = 5
+    minimum_validation_rows_per_resolved_outcome: int = 5
+    minimum_validation_markets_per_category: int = 2
+    minimum_relative_mae_improvement: float = 0.05
+    minimum_relative_mse_improvement: float = 0.05
+    bootstrap_samples: int = 1_000
+    bootstrap_confidence_level: float = 0.95
+    minimum_bootstrap_improvement_lower_bound: float = 0.0
+    maximum_absolute_coefficient: float = 2.0
+    maximum_lomo_coefficient_absolute_deviation: float = 0.50
+    minimum_lomo_coefficient_sign_agreement: float = 0.75
+    maximum_candidate_count: int = 6
+    development_grouped_fold_count: int = 3
+    candidate_complexity_penalty_per_parameter: float = 0.0001
+    statistical_random_seed: int = 17_029
+    required_future_shadow_window_count: int = 2
+    future_shadow_window_seconds: int = 1_800
+    minimum_future_shadow_rows: int = 30
+    minimum_future_shadow_markets: int = 10
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        if self.minimum_total_calibration_rows < 150:
+            raise ValueError("existing corpus smoke requires at least 150 rows")
+        if self.maximum_candidate_count > 6:
+            raise ValueError("candidate search must remain bounded to at most 6")
+        datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
+        for field in (
+            "maximum_wall_clock_seconds",
+            "collection_window_seconds",
+            "maximum_collection_windows",
+            "minimum_total_calibration_rows",
+            "minimum_total_calibration_markets",
+            "minimum_development_fit_rows",
+            "minimum_development_fit_markets",
+            "minimum_fresh_validation_rows",
+            "minimum_fresh_validation_markets",
+            "maximum_candidate_count",
+            "required_future_shadow_window_count",
+        ):
+            if int(getattr(self, field)) <= 0:
+                raise ValueError(f"{field} must be positive")
+        for field in (
+            "output_dir",
+            "repository_root",
+            "prior_blocked_bundle_dir",
+            "prior_corpus_rows_path",
+            "prior_split_report_path",
+            "prior_calibration_report_path",
+        ):
+            object.__setattr__(self, field, Path(getattr(self, field)).resolve())
+
+    @property
+    def goal_dir(self) -> Path:
+        return Path(self.output_dir) / self.run_id / "pre_promotion_readiness"
+
+    def frozen_payload(self) -> dict[str, Any]:
+        payload = asdict(self)
+        for field in (
+            "output_dir",
+            "repository_root",
+            "prior_blocked_bundle_dir",
+            "prior_corpus_rows_path",
+            "prior_split_report_path",
+            "prior_calibration_report_path",
+        ):
+            payload[field] = str(payload[field])
+        payload.update(
+            {
+                "schema_version": REMEDIATION_CONFIG_SCHEMA_VERSION,
+                "candidate_development_data": "prior_140_row_corpus_only",
+                "candidate_search_allowed_model_families": [
+                    "five_group_ridge",
+                    "reduced_group_ridge",
+                    "standardized_feature_ridge",
+                    "selected_side_probability_minus_price_baseline",
+                ],
+                "candidate_search_allowed_regularization_values": [0.1, 1.0],
+                "candidate_search_allowed_transforms": [
+                    "fit_only_standardization_clip_3",
+                    "predeclared_group_weighted_aggregate",
+                    "identity_single_feature",
+                ],
+                "candidate_ranking_rule": (
+                    "grouped_market_cv_mse_then_mae_then_parameter_count_then_name"
+                ),
+                "candidate_selection_uses_fresh_validation": False,
+                "fresh_validation_evaluated_exactly_once": True,
+                "split_order": [
+                    "development_fit",
+                    "fresh_unseen_validation",
+                    "future_unseen_shadow_reserved",
+                ],
+                "market_condition_run_and_row_disjoint_required": True,
+                "chronological_split_required": True,
+                "no_validation_or_shadow_tuning": True,
+                "subtract_execution_cost": False,
+                "target_semantics": "settled_net_return_after_execution_cost",
+                "stop_conditions": [
+                    "PRE_PROMOTION_READY",
+                    "configured_wall_clock_budget_reached",
+                    "configured_data_window_budget_reached",
+                    "candidate_or_validation_hard_gate_failed",
+                    "public_provider_fail_closed",
+                ],
+                **safety_fields(),
+            }
+        )
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLayerV2PrePromotionRemediationInitializationResult:
+    goal_dir: Path
+    configuration_path: Path
+    configuration_sha256_path: Path
+    exclusions_path: Path
+    exclusions_sha256_path: Path
+    state_path: Path
+    state_sha256_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLayerV2CandidateDevelopmentResult:
+    diagnosis_path: Path
+    diagnosis_markdown_path: Path
+    development_manifest_path: Path
+    candidate_protocol_path: Path
+    candidate_protocol_sha256_path: Path
+    candidate_report_path: Path
+    selected_contract_path: Path
+    selected_contract_sha256_path: Path
+    selected_candidate_name: str
+
+
+def initialize_pre_promotion_remediation_goal(
+    config: ExecutionLayerV2PrePromotionRemediationConfig,
+) -> ExecutionLayerV2PrePromotionRemediationInitializationResult:
+    goal_dir = config.goal_dir
+    if goal_dir.exists():
+        raise FileExistsError(f"immutable remediation goal already exists: {goal_dir}")
+    for path in (
+        Path(config.prior_blocked_bundle_dir),
+        Path(config.prior_corpus_rows_path),
+        Path(config.prior_split_report_path),
+        Path(config.prior_calibration_report_path),
+    ):
+        if not path.exists():
+            raise FileNotFoundError(path)
+    goal_dir.mkdir(parents=True)
+
+    configuration_path = goal_dir / "initial_goal_configuration.json"
+    _write_json(configuration_path, config.frozen_payload())
+    configuration_hash = sha256_file(configuration_path)
+    configuration_hash_path = goal_dir / "initial_goal_configuration.sha256"
+    configuration_hash_path.write_text(configuration_hash + "\n", encoding="utf-8")
+
+    exclusions = _build_initial_exclusions(config, configuration_hash)
+    exclusions_path = goal_dir / "initial_excluded_evidence_manifest.json"
+    _write_json(exclusions_path, exclusions)
+    exclusions_hash = sha256_file(exclusions_path)
+    exclusions_hash_path = goal_dir / "initial_excluded_evidence_manifest.sha256"
+    exclusions_hash_path.write_text(exclusions_hash + "\n", encoding="utf-8")
+
+    repository_root = Path(config.repository_root)
+    working_tree_rows = _git_status_rows(repository_root)
+    state = {
+        "schema_version": REMEDIATION_STATE_SCHEMA_VERSION,
+        "run_id": config.run_id,
+        "starting_branch": config.starting_branch,
+        "starting_commit": config.starting_commit,
+        "actual_head_at_initialization": _git(repository_root, "rev-parse", "HEAD"),
+        "starting_commit_verified": (
+            _git(repository_root, "rev-parse", "HEAD") == config.starting_commit
+        ),
+        "working_tree_clean": not working_tree_rows,
+        "working_tree_status_rows": working_tree_rows,
+        "tracked_working_tree_clean": not any(
+            not row.startswith("?? ") for row in working_tree_rows
+        ),
+        "relevant_source_tree_sha256": _relevant_source_tree_hash(repository_root),
+        "goal_configuration_sha256": configuration_hash,
+        "excluded_evidence_manifest_sha256": exclusions_hash,
+        "prior_blocked_bundle_manifest_sha256": exclusions[
+            "prior_blocked_bundle_manifest_sha256"
+        ],
+        "created_at": config.created_at,
+        "current_phase": "phase_0_immutable_audit_foundation_complete",
+        "goal_status": "IN_PROGRESS",
+        "resumable": True,
+        **safety_fields(),
+    }
+    state["state_id"] = canonical_json_sha256(state)
+    state_path = goal_dir / "initial_goal_state.json"
+    _write_json(state_path, state)
+    state_hash_path = goal_dir / "initial_goal_state.sha256"
+    state_hash_path.write_text(sha256_file(state_path) + "\n", encoding="utf-8")
+    return ExecutionLayerV2PrePromotionRemediationInitializationResult(
+        goal_dir=goal_dir,
+        configuration_path=configuration_path,
+        configuration_sha256_path=configuration_hash_path,
+        exclusions_path=exclusions_path,
+        exclusions_sha256_path=exclusions_hash_path,
+        state_path=state_path,
+        state_sha256_path=state_hash_path,
+    )
+
+
+def diagnose_and_select_remediation_candidate(
+    *,
+    goal_dir: Path | str,
+) -> ExecutionLayerV2CandidateDevelopmentResult:
+    goal_dir = Path(goal_dir).resolve()
+    configuration_path = goal_dir / "initial_goal_configuration.json"
+    configuration_hash_path = goal_dir / "initial_goal_configuration.sha256"
+    exclusions_path = goal_dir / "initial_excluded_evidence_manifest.json"
+    _verify_immutable_file(configuration_path, configuration_hash_path)
+    configuration = _load_json(configuration_path)
+    exclusions = _load_json(exclusions_path)
+    rows = _load_jsonl(Path(configuration["prior_corpus_rows_path"]))
+    split_report = _load_json(Path(configuration["prior_split_report_path"]))
+    calibration_report = _load_json(Path(configuration["prior_calibration_report_path"]))
+
+    fit_rows, validation_rows, split_reasons = _chronological_market_split(
+        rows,
+        validation_fraction=0.25,
+        min_fit_rows=100,
+        min_validation_rows=30,
+        min_fit_markets=20,
+        min_validation_markets=10,
+    )
+    if split_reasons:
+        raise ValueError(f"prior split cannot be reproduced: {split_reasons}")
+    diagnosis = _previous_candidate_diagnosis(
+        rows=rows,
+        fit_rows=fit_rows,
+        validation_rows=validation_rows,
+        split_report=split_report,
+        calibration_report=calibration_report,
+        exclusions=exclusions,
+    )
+    diagnosis_path = goal_dir / "previous_candidate_diagnosis.json"
+    _write_json(diagnosis_path, diagnosis)
+    diagnosis_markdown_path = goal_dir / "previous_candidate_diagnosis.md"
+    diagnosis_markdown_path.write_text(
+        _diagnosis_markdown(diagnosis), encoding="utf-8"
+    )
+
+    development_manifest = {
+        "schema_version": "bigan-v8-pre-promotion-development-evidence-v1",
+        "source_corpus_path": configuration["prior_corpus_rows_path"],
+        "source_corpus_sha256": sha256_file(Path(configuration["prior_corpus_rows_path"])),
+        "row_count": len(rows),
+        "market_count": len({row["market_id"] for row in rows}),
+        "source_run_ids": sorted({row["source_run_id"] for row in rows}),
+        "market_ids": sorted({row["market_id"] for row in rows}),
+        "development_evidence_only": True,
+        "unseen_validation_eligible": False,
+        "future_shadow_eligible": False,
+        "promotion_evidence_eligible": False,
+        "prior_negative_evidence_preserved": True,
+        "diagnosis_report": _descriptor(diagnosis_path),
+        **safety_fields(),
+    }
+    development_manifest["manifest_id"] = canonical_json_sha256(
+        development_manifest
+    )
+    development_manifest_path = goal_dir / "development_evidence_manifest.json"
+    _write_json(development_manifest_path, development_manifest)
+
+    candidates = _candidate_specifications()
+    if len(candidates) > int(configuration["maximum_candidate_count"]):
+        raise ValueError("candidate count exceeds frozen maximum")
+    protocol = {
+        "schema_version": "bigan-v8-pre-promotion-candidate-search-protocol-v1",
+        "goal_configuration_sha256": sha256_file(configuration_path),
+        "development_evidence_manifest_sha256": sha256_file(
+            development_manifest_path
+        ),
+        "candidate_count": len(candidates),
+        "maximum_candidate_count": configuration["maximum_candidate_count"],
+        "candidates": candidates,
+        "grouping_unit": "source_run_id",
+        "grouped_fold_count": configuration["development_grouped_fold_count"],
+        "ranking_rule": configuration["candidate_ranking_rule"],
+        "complexity_penalty_per_parameter": configuration[
+            "candidate_complexity_penalty_per_parameter"
+        ],
+        "selection_data": "prior_development_evidence_only",
+        "uses_fresh_validation": False,
+        "uses_future_shadow": False,
+        "open_ended_search": False,
+        **safety_fields(),
+    }
+    protocol["protocol_id"] = canonical_json_sha256(protocol)
+    protocol_path = goal_dir / "candidate_search_protocol.json"
+    _write_json(protocol_path, protocol)
+    protocol_hash_path = goal_dir / "candidate_search_protocol.sha256"
+    protocol_hash_path.write_text(sha256_file(protocol_path) + "\n", encoding="utf-8")
+
+    evaluations = [
+        _evaluate_development_candidate(
+            rows,
+            candidate,
+            complexity_penalty=float(
+                configuration["candidate_complexity_penalty_per_parameter"]
+            ),
+        )
+        for candidate in candidates
+    ]
+    eligible = [row for row in evaluations if row["development_gate_passed"]]
+    ranked = sorted(
+        eligible or evaluations,
+        key=lambda row: (
+            row["selection_score"],
+            row["grouped_cv_market_mae"],
+            row["parameter_count"],
+            row["candidate_name"],
+        ),
+    )
+    selected = ranked[0]
+    report = {
+        "schema_version": "bigan-v8-pre-promotion-candidate-development-report-v1",
+        "candidate_search_protocol_sha256": sha256_file(protocol_path),
+        "development_evidence_manifest_sha256": sha256_file(
+            development_manifest_path
+        ),
+        "candidate_evaluations": evaluations,
+        "ranked_candidate_names": [row["candidate_name"] for row in ranked],
+        "selected_candidate_name": selected["candidate_name"],
+        "selected_candidate_development_gate_passed": selected[
+            "development_gate_passed"
+        ],
+        "selection_rule_applied": protocol["ranking_rule"],
+        "fresh_validation_rows_read": 0,
+        "uses_fresh_validation_for_selection": False,
+        "uses_future_shadow_for_selection": False,
+        **safety_fields(),
+    }
+    report["report_id"] = canonical_json_sha256(report)
+    report_path = goal_dir / "candidate_development_report.json"
+    _write_json(report_path, report)
+
+    selected_spec = next(
+        candidate
+        for candidate in candidates
+        if candidate["candidate_name"] == selected["candidate_name"]
+    )
+    contract = {
+        "schema_version": "bigan-v8-pre-promotion-selected-candidate-contract-v1",
+        "candidate_search_protocol_sha256": sha256_file(protocol_path),
+        "candidate_development_report_sha256": sha256_file(report_path),
+        "candidate_name": selected["candidate_name"],
+        "candidate_specification": selected_spec,
+        "development_metrics": selected,
+        "feature_contract": {
+            "decision_time_only": True,
+            "required_features": selected_spec["features"],
+            "max_input_ts_must_not_exceed_decision_ts": True,
+            "forbidden_fields": [
+                "settlement",
+                "outcome",
+                "pnl",
+                "oracle_action",
+                "future_return",
+                "future_price",
+            ],
+        },
+        "preprocessing_contract": selected_spec["transform"],
+        "target_semantics": "settled_net_return_after_execution_cost",
+        "subtract_execution_cost": False,
+        "immutable_after_hash": True,
+        "uses_fresh_validation_for_selection": False,
+        **safety_fields(),
+    }
+    contract["contract_id"] = canonical_json_sha256(contract)
+    contract_path = goal_dir / "selected_candidate_contract.json"
+    _write_json(contract_path, contract)
+    contract_hash_path = goal_dir / "selected_candidate_contract.sha256"
+    contract_hash_path.write_text(sha256_file(contract_path) + "\n", encoding="utf-8")
+    return ExecutionLayerV2CandidateDevelopmentResult(
+        diagnosis_path=diagnosis_path,
+        diagnosis_markdown_path=diagnosis_markdown_path,
+        development_manifest_path=development_manifest_path,
+        candidate_protocol_path=protocol_path,
+        candidate_protocol_sha256_path=protocol_hash_path,
+        candidate_report_path=report_path,
+        selected_contract_path=contract_path,
+        selected_contract_sha256_path=contract_hash_path,
+        selected_candidate_name=selected["candidate_name"],
+    )
+
+
+def _build_initial_exclusions(
+    config: ExecutionLayerV2PrePromotionRemediationConfig,
+    configuration_hash: str,
+) -> dict[str, Any]:
+    prior_bundle = Path(config.prior_blocked_bundle_dir)
+    prior_manifest = prior_bundle / "pre_promotion_readiness_manifest.json"
+    prior_rows = _load_jsonl(Path(config.prior_corpus_rows_path))
+    prior_run_ids = sorted({str(row["source_run_id"]) for row in prior_rows})
+    prior_market_ids = sorted({str(row["market_id"]) for row in prior_rows})
+    artifacts = [
+        {
+            "path": str(path.resolve()),
+            "sha256": sha256_file(path),
+        }
+        for path in sorted(prior_bundle.iterdir())
+        if path.is_file()
+    ]
+    payload = {
+        "schema_version": REMEDIATION_EXCLUSION_SCHEMA_VERSION,
+        "goal_configuration_sha256": configuration_hash,
+        "prior_blocked_bundle_path": str(prior_bundle),
+        "prior_blocked_bundle_manifest_path": str(prior_manifest),
+        "prior_blocked_bundle_manifest_sha256": sha256_file(prior_manifest),
+        "prior_development_corpus_path": str(Path(config.prior_corpus_rows_path)),
+        "prior_development_corpus_sha256": sha256_file(
+            Path(config.prior_corpus_rows_path)
+        ),
+        "prior_evidence_row_count": len(prior_rows),
+        "prior_evidence_market_count": len(prior_market_ids),
+        "prior_evidence_run_ids": prior_run_ids,
+        "prior_evidence_market_ids": prior_market_ids,
+        "development_evidence_only": True,
+        "unseen_validation_eligible": False,
+        "future_shadow_eligible": False,
+        "promotion_evidence_eligible": False,
+        "prior_evidence_usage_contract": {
+            "development_evidence_only": True,
+            "candidate_diagnosis_allowed": True,
+            "candidate_development_allowed": True,
+            "unseen_validation_eligible": False,
+            "future_shadow_eligible": False,
+            "promotion_evidence_eligible": False,
+        },
+        "prior_bundle_artifacts": artifacts,
+        "excluded_run_name_fragments": [
+            "future-shadow",
+            "future_holdout",
+            "post-freeze",
+            "schedule-debug",
+            "settlement-debug",
+        ],
+        **safety_fields(),
+    }
+    payload["manifest_id"] = canonical_json_sha256(payload)
+    return payload
+
+
+def _previous_candidate_diagnosis(
+    *,
+    rows: list[dict[str, Any]],
+    fit_rows: list[dict[str, Any]],
+    validation_rows: list[dict[str, Any]],
+    split_report: dict[str, Any],
+    calibration_report: dict[str, Any],
+    exclusions: dict[str, Any],
+) -> dict[str, Any]:
+    transforms = _fit_feature_transforms(fit_rows)
+    fit_x = [_group_scores(row, transforms) for row in fit_rows]
+    validation_x = [_group_scores(row, transforms) for row in validation_rows]
+    fit_y = [float(row["target_net_return_after_cost"]) for row in fit_rows]
+    coefficients = _ridge_fit(fit_x, fit_y, 1.0)
+    predictions = _predict_matrix(validation_x, coefficients)
+    residual_rows = [
+        {
+            **row,
+            "prediction": prediction,
+            "residual": float(row["target_net_return_after_cost"]) - prediction,
+            "absolute_error": abs(
+                float(row["target_net_return_after_cost"]) - prediction
+            ),
+            "squared_error": (
+                float(row["target_net_return_after_cost"]) - prediction
+            )
+            ** 2,
+        }
+        for row, prediction in zip(validation_rows, predictions, strict=True)
+    ]
+    targets = [float(row["target_net_return_after_cost"]) for row in validation_rows]
+    prediction_variance = statistics.pvariance(predictions) if len(predictions) > 1 else 0.0
+    target_variance = statistics.pvariance(targets) if len(targets) > 1 else 0.0
+    group_contributions = {}
+    group_names = list(REGIME_CONDITIONED_EV_V2_FEATURE_GROUPS)
+    for index, group_name in enumerate(group_names, start=1):
+        values = [abs(coefficients[index] * vector[index - 1]) for vector in validation_x]
+        group_contributions[group_name] = {
+            "coefficient": coefficients[index],
+            "mean_absolute_contribution": sum(values) / len(values),
+            "max_absolute_contribution": max(values),
+        }
+    concentration = {
+        "by_side": _residual_summary(residual_rows, lambda row: row["selected_side"]),
+        "by_action_family": _residual_summary(
+            residual_rows, lambda row: row["action_family"]
+        ),
+        "by_market_horizon": _residual_summary(
+            residual_rows, lambda row: _market_horizon(row)
+        ),
+        "by_execution_price_band": _residual_summary(
+            residual_rows,
+            lambda row: _numeric_bucket(
+                row["decision_time_features"]["execution_price"],
+                (0.3, 0.5, 0.7, 0.9),
+            ),
+        ),
+        "by_time_to_close_band": _residual_summary(
+            residual_rows,
+            lambda row: _numeric_bucket(
+                row["decision_time_features"]["time_to_close_seconds"],
+                (60.0, 120.0, 240.0, 360.0),
+            ),
+        ),
+        "by_entry_index": _residual_summary(
+            residual_rows,
+            lambda row: str(int(row["decision_time_features"]["entry_index_within_market"])),
+        ),
+        "by_same_side_reentry": _residual_summary(
+            residual_rows,
+            lambda row: str(int(row["decision_time_features"]["same_side_reentry"])),
+        ),
+        "by_side_flip": _residual_summary(
+            residual_rows,
+            lambda row: str(int(row["decision_time_features"]["side_flip"])),
+        ),
+        "by_market": _residual_summary(residual_rows, lambda row: row["market_id"]),
+        "by_run": _residual_summary(residual_rows, lambda row: row["source_run_id"]),
+    }
+    full_sbc = [row for row in rows if row["action_family"] == "SELL_BEFORE_CLOSE"]
+    validation_market_ids = {row["market_id"] for row in validation_rows}
+    sbc_by_run = Counter(row["source_run_id"] for row in full_sbc)
+    diagnosis = {
+        "schema_version": "bigan-v8-previous-candidate-diagnosis-v1",
+        "development_evidence_only": True,
+        "unseen_validation_eligible": False,
+        "future_shadow_eligible": False,
+        "promotion_evidence_eligible": False,
+        "prior_negative_result_preserved": True,
+        "prior_split_reproduced": bool(
+            len(fit_rows) == int(split_report["fit_row_count"])
+            and len(validation_rows) == int(split_report["validation_row_count"])
+        ),
+        "fit_row_count": len(fit_rows),
+        "validation_row_count": len(validation_rows),
+        "validation_metrics": _regression_metrics(targets, predictions),
+        "prediction_dispersion": {
+            "prediction_variance": prediction_variance,
+            "target_variance": target_variance,
+            "prediction_to_target_variance_ratio": (
+                prediction_variance / target_variance if target_variance else None
+            ),
+            "classification": (
+                "over_shrunk"
+                if prediction_variance < target_variance * 0.75
+                else "over_dispersed"
+                if prediction_variance > target_variance * 1.25
+                else "similar_dispersion"
+            ),
+        },
+        "feature_group_contribution_diagnostics": group_contributions,
+        "coefficient_stability_from_prior_report": calibration_report.get(
+            "coefficient_stability_metrics"
+        ),
+        "residual_concentration": concentration,
+        "top_squared_error_rows": [
+            _diagnostic_residual_row(row)
+            for row in sorted(
+                residual_rows, key=lambda row: row["squared_error"], reverse=True
+            )[:10]
+        ],
+        "largest_market_error_share": _largest_market_error_share(residual_rows),
+        "sell_before_close_absence_diagnosis": {
+            "full_corpus_sell_before_close_row_count": len(full_sbc),
+            "full_corpus_sell_before_close_market_count": len(
+                {row["market_id"] for row in full_sbc}
+            ),
+            "sell_before_close_rows_by_run": dict(sorted(sbc_by_run.items())),
+            "validation_sell_before_close_row_count": sum(
+                row["action_family"] == "SELL_BEFORE_CLOSE"
+                for row in validation_rows
+            ),
+            "validation_sell_before_close_market_count": len(
+                {
+                    row["market_id"]
+                    for row in full_sbc
+                    if row["market_id"] in validation_market_ids
+                }
+            ),
+            "chronological_split_caused_zero_validation_coverage": bool(
+                full_sbc
+                and not any(
+                    row["action_family"] == "SELL_BEFORE_CLOSE"
+                    for row in validation_rows
+                )
+            ),
+            "candidate_corpus_contains_realized_fills_only": True,
+            "non_selected_counterfactuals_used_as_targets": False,
+            "natural_policy_action_distribution_is_sparse": len(full_sbc) < 10,
+            "diagnostic_reason_codes": [
+                "realized_sell_before_close_fill_support_sparse",
+                "sell_before_close_rows_occurred_before_frozen_validation_boundary",
+                "chronological_split_correctly_did_not_rebalance_after_outcome_inspection",
+            ],
+        },
+        "baseline_comparison_from_prior_report": {
+            "fit_metrics": calibration_report.get("fit_metrics"),
+            "market_level_metrics": calibration_report.get("market_level_metrics"),
+            "relative_baseline_improvements": calibration_report.get(
+                "relative_baseline_improvements"
+            ),
+        },
+        "why_mse_worsened_despite_mae_improvement": (
+            "a small number of large residuals outweighed broad small absolute-error "
+            "improvements; validation candidate MSE exceeded both baselines"
+        ),
+        "excluded_evidence_manifest_id": exclusions["manifest_id"],
+        **safety_fields(),
+    }
+    diagnosis["report_id"] = canonical_json_sha256(diagnosis)
+    return diagnosis
+
+
+def _candidate_specifications() -> list[dict[str, Any]]:
+    all_features = list(V2_REQUIRED_FEATURES)
+    return [
+        {
+            "candidate_name": "five_group_ridge_alpha_1",
+            "model_family": "five_group_ridge",
+            "ridge_alpha": 1.0,
+            "features": all_features,
+            "groups": list(REGIME_CONDITIONED_EV_V2_FEATURE_GROUPS),
+            "transform": "fit_only_standardization_clip_3_group_aggregate",
+        },
+        {
+            "candidate_name": "five_group_ridge_alpha_0_1",
+            "model_family": "five_group_ridge",
+            "ridge_alpha": 0.1,
+            "features": all_features,
+            "groups": list(REGIME_CONDITIONED_EV_V2_FEATURE_GROUPS),
+            "transform": "fit_only_standardization_clip_3_group_aggregate",
+        },
+        {
+            "candidate_name": "reduced_score_value_exposure_ridge_alpha_1",
+            "model_family": "reduced_group_ridge",
+            "ridge_alpha": 1.0,
+            "features": [
+                *REGIME_CONDITIONED_EV_V2_FEATURE_GROUPS[
+                    "canonical_o_score_and_action_margin"
+                ],
+                *REGIME_CONDITIONED_EV_V2_FEATURE_GROUPS["market_price_value"],
+                *REGIME_CONDITIONED_EV_V2_FEATURE_GROUPS["pre_entry_exposure_state"],
+            ],
+            "groups": [
+                "canonical_o_score_and_action_margin",
+                "market_price_value",
+                "pre_entry_exposure_state",
+            ],
+            "transform": "fit_only_standardization_clip_3_group_aggregate",
+        },
+        {
+            "candidate_name": "reduced_score_value_ridge_alpha_0_1",
+            "model_family": "reduced_group_ridge",
+            "ridge_alpha": 0.1,
+            "features": [
+                *REGIME_CONDITIONED_EV_V2_FEATURE_GROUPS[
+                    "canonical_o_score_and_action_margin"
+                ],
+                *REGIME_CONDITIONED_EV_V2_FEATURE_GROUPS["market_price_value"],
+            ],
+            "groups": [
+                "canonical_o_score_and_action_margin",
+                "market_price_value",
+            ],
+            "transform": "fit_only_standardization_clip_3_group_aggregate",
+        },
+        {
+            "candidate_name": "standardized_feature_ridge_alpha_1",
+            "model_family": "standardized_feature_ridge",
+            "ridge_alpha": 1.0,
+            "features": all_features,
+            "groups": [],
+            "transform": "fit_only_standardization_clip_3_each_feature",
+        },
+        {
+            "candidate_name": "selected_side_probability_minus_price_baseline",
+            "model_family": "selected_side_probability_minus_price_baseline",
+            "ridge_alpha": 1.0,
+            "features": ["selected_side_probability_minus_execution_price"],
+            "groups": [],
+            "transform": "identity_single_feature",
+        },
+    ]
+
+
+def _evaluate_development_candidate(
+    rows: list[dict[str, Any]],
+    candidate: dict[str, Any],
+    *,
+    complexity_penalty: float,
+) -> dict[str, Any]:
+    run_ids = sorted({row["source_run_id"] for row in rows})
+    folds = []
+    all_validation_rows: list[dict[str, Any]] = []
+    all_targets: list[float] = []
+    all_predictions: list[float] = []
+    coefficient_rows: list[list[float]] = []
+    for held_out_run_id in run_ids:
+        fit_rows = [row for row in rows if row["source_run_id"] != held_out_run_id]
+        validation_rows = [row for row in rows if row["source_run_id"] == held_out_run_id]
+        if not fit_rows or not validation_rows:
+            continue
+        model = _fit_candidate(fit_rows, candidate)
+        predictions = _predict_candidate(validation_rows, candidate, model)
+        targets = [float(row["target_net_return_after_cost"]) for row in validation_rows]
+        coefficient_rows.append(model["coefficients"])
+        folds.append(
+            {
+                "held_out_run_id": held_out_run_id,
+                "fit_row_count": len(fit_rows),
+                "validation_row_count": len(validation_rows),
+                "validation_market_count": len(
+                    {row["market_id"] for row in validation_rows}
+                ),
+                "row_metrics": _regression_metrics(targets, predictions),
+                "market_metrics": _market_level_metrics(
+                    validation_rows, targets, predictions
+                ),
+            }
+        )
+        all_validation_rows.extend(validation_rows)
+        all_targets.extend(targets)
+        all_predictions.extend(predictions)
+    row_metrics = _regression_metrics(all_targets, all_predictions)
+    market_metrics = _market_level_metrics(
+        all_validation_rows, all_targets, all_predictions
+    )
+    parameter_count = len(coefficient_rows[0]) if coefficient_rows else 0
+    max_fold_mse = max(fold["market_metrics"]["mse"] for fold in folds)
+    max_coefficient_deviation = _coefficient_deviation(coefficient_rows)
+    development_gate_passed = bool(
+        len(folds) >= 3
+        and math.isfinite(market_metrics["mse"])
+        and max_coefficient_deviation <= 1.0
+    )
+    return {
+        "candidate_name": candidate["candidate_name"],
+        "model_family": candidate["model_family"],
+        "fold_count": len(folds),
+        "folds": folds,
+        "grouped_cv_row_mae": row_metrics["mae"],
+        "grouped_cv_row_mse": row_metrics["mse"],
+        "grouped_cv_market_mae": market_metrics["mae"],
+        "grouped_cv_market_mse": market_metrics["mse"],
+        "worst_fold_market_mse": max_fold_mse,
+        "parameter_count": parameter_count,
+        "complexity_penalty": parameter_count * complexity_penalty,
+        "selection_score": market_metrics["mse"]
+        + parameter_count * complexity_penalty,
+        "max_cross_fold_coefficient_deviation": max_coefficient_deviation,
+        "development_gate_passed": development_gate_passed,
+        "side_coverage": dict(Counter(row["selected_side"] for row in rows)),
+        "action_family_coverage": dict(
+            Counter(row["action_family"] for row in rows)
+        ),
+        "resolved_outcome_coverage": dict(
+            Counter(row["target_provenance"]["resolved_outcome"] for row in rows)
+        ),
+    }
+
+
+def _fit_candidate(
+    rows: list[dict[str, Any]], candidate: dict[str, Any]
+) -> dict[str, Any]:
+    model_family = candidate["model_family"]
+    targets = [float(row["target_net_return_after_cost"]) for row in rows]
+    if model_family in {"five_group_ridge", "reduced_group_ridge"}:
+        transforms = _fit_feature_transforms(rows)
+        all_groups = list(REGIME_CONDITIONED_EV_V2_FEATURE_GROUPS)
+        indices = [all_groups.index(group) for group in candidate["groups"]]
+        matrix = [
+            [score[index] for index in indices]
+            for score in (_group_scores(row, transforms) for row in rows)
+        ]
+    elif model_family == "standardized_feature_ridge":
+        transforms = _fit_feature_transforms(rows)
+        matrix = [
+            [
+                _normalized_feature_value(row, feature, transforms)
+                for feature in candidate["features"]
+            ]
+            for row in rows
+        ]
+        indices = []
+    else:
+        transforms = {}
+        matrix = [
+            [
+                float(
+                    row["decision_time_features"][
+                        "selected_side_probability_minus_execution_price"
+                    ]
+                )
+            ]
+            for row in rows
+        ]
+        indices = []
+    return {
+        "coefficients": _ridge_fit(matrix, targets, float(candidate["ridge_alpha"])),
+        "transforms": transforms,
+        "group_indices": indices,
+    }
+
+
+def _predict_candidate(
+    rows: list[dict[str, Any]],
+    candidate: dict[str, Any],
+    model: dict[str, Any],
+) -> list[float]:
+    model_family = candidate["model_family"]
+    if model_family in {"five_group_ridge", "reduced_group_ridge"}:
+        matrix = [
+            [score[index] for index in model["group_indices"]]
+            for score in (
+                _group_scores(row, model["transforms"]) for row in rows
+            )
+        ]
+    elif model_family == "standardized_feature_ridge":
+        matrix = [
+            [
+                _normalized_feature_value(row, feature, model["transforms"])
+                for feature in candidate["features"]
+            ]
+            for row in rows
+        ]
+    else:
+        matrix = [
+            [
+                float(
+                    row["decision_time_features"][
+                        "selected_side_probability_minus_execution_price"
+                    ]
+                )
+            ]
+            for row in rows
+        ]
+    return _predict_matrix(matrix, model["coefficients"])
+
+
+def _normalized_feature_value(
+    row: dict[str, Any],
+    feature: str,
+    transforms: dict[str, dict[str, float]],
+) -> float:
+    transform = transforms[feature]
+    normalized = (
+        _feature_value_for_model(row, feature) - transform["center"]
+    ) / transform["scale"]
+    return max(transform["clip_min"], min(transform["clip_max"], normalized))
+
+
+def _coefficient_deviation(rows: list[list[float]]) -> float:
+    if len(rows) < 2:
+        return math.inf
+    return max(
+        max(values) - min(values)
+        for values in zip(*rows, strict=True)
+    )
+
+
+def _residual_summary(
+    rows: list[dict[str, Any]], key_function: Any
+) -> dict[str, dict[str, float | int]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(key_function(row))].append(row)
+    return {
+        key: {
+            "row_count": len(values),
+            "mae": sum(row["absolute_error"] for row in values) / len(values),
+            "mse": sum(row["squared_error"] for row in values) / len(values),
+            "mean_residual": sum(row["residual"] for row in values) / len(values),
+            "target_sum": sum(
+                float(row["target_net_return_after_cost"]) for row in values
+            ),
+        }
+        for key, values in sorted(grouped.items())
+    }
+
+
+def _diagnostic_residual_row(row: dict[str, Any]) -> dict[str, Any]:
+    features = row["decision_time_features"]
+    return {
+        "market_id": row["market_id"],
+        "source_run_id": row["source_run_id"],
+        "decision_ts": row["decision_ts"],
+        "selected_side": row["selected_side"],
+        "selected_action": row["selected_action"],
+        "action_family": row["action_family"],
+        "execution_price": features["execution_price"],
+        "time_to_close_seconds": features["time_to_close_seconds"],
+        "entry_index_within_market": features["entry_index_within_market"],
+        "same_side_reentry": features["same_side_reentry"],
+        "side_flip": features["side_flip"],
+        "target": row["target_net_return_after_cost"],
+        "prediction": row["prediction"],
+        "residual": row["residual"],
+        "squared_error": row["squared_error"],
+    }
+
+
+def _largest_market_error_share(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    by_market: dict[str, float] = defaultdict(float)
+    for row in rows:
+        by_market[row["market_id"]] += row["squared_error"]
+    total = sum(by_market.values())
+    market_id, value = max(by_market.items(), key=lambda item: item[1])
+    return {
+        "market_id": market_id,
+        "squared_error_sum": value,
+        "share_of_validation_squared_error": value / total if total else 0.0,
+        "single_market_dominance_detected": bool(total and value / total > 0.30),
+    }
+
+
+def _market_horizon(row: dict[str, Any]) -> str:
+    source = str(row.get("source_run_id") or "")
+    return "5m" if "5m" in source or "pre-promotion" in source else "unknown"
+
+
+def _numeric_bucket(value: float, boundaries: tuple[float, ...]) -> str:
+    numeric = float(value)
+    lower = "-inf"
+    for boundary in boundaries:
+        if numeric < boundary:
+            return f"[{lower},{boundary})"
+        lower = str(boundary)
+    return f"[{lower},inf)"
+
+
+def _diagnosis_markdown(report: dict[str, Any]) -> str:
+    dispersion = report["prediction_dispersion"]
+    sbc = report["sell_before_close_absence_diagnosis"]
+    market = report["largest_market_error_share"]
+    return "\n".join(
+        [
+            "# Previous Regime-Conditioned EV Candidate Diagnosis",
+            "",
+            "This report is development evidence only and is not unseen validation or promotion evidence.",
+            "",
+            "## Findings",
+            "",
+            f"- Prediction dispersion: `{dispersion['classification']}`",
+            f"- Prediction/target variance ratio: `{dispersion['prediction_to_target_variance_ratio']}`",
+            f"- Largest market squared-error share: `{market['share_of_validation_squared_error']}`",
+            f"- Validation SELL_BEFORE_CLOSE rows: `{sbc['validation_sell_before_close_row_count']}`",
+            f"- Full-corpus SELL_BEFORE_CLOSE rows: `{sbc['full_corpus_sell_before_close_row_count']}`",
+            "- MSE worsened because a small number of large errors outweighed small broad MAE gains.",
+            "- The chronological split was preserved; no outcome-aware rebalancing was performed.",
+            "",
+        ]
+    )
+
+
+def _descriptor(path: Path) -> dict[str, str]:
+    return {"path": str(path.resolve()), "sha256": sha256_file(path)}
+
+
+def _verify_immutable_file(path: Path, hash_path: Path) -> None:
+    if not path.is_file() or not hash_path.is_file():
+        raise FileNotFoundError(path)
+    expected = hash_path.read_text(encoding="utf-8").strip()
+    if sha256_file(path) != expected:
+        raise ValueError(f"immutable artifact hash mismatch: {path}")
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"expected JSON object: {path}")
+    return payload
+
+
+def safety_fields() -> dict[str, Any]:
+    return {
+        "diagnostic_only": True,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "promotion_evidence_stage_started": False,
+        "live_evidence_stage_started": False,
+        "live_evidence_allowed": False,
+        "v8_execution_handoff_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+    }
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _git(root: Path, *args: str) -> str:
+    return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+
+
+def _git_status_rows(root: Path) -> list[str]:
+    output = _git(root, "status", "--porcelain")
+    return output.splitlines() if output else []
+
+
+def _relevant_source_tree_hash(root: Path) -> str:
+    tracked = _git(
+        root,
+        "ls-files",
+        "src/bigan/v8/polymarket",
+        "examples/v8",
+        "tests/v8",
+    ).splitlines()
+    return canonical_json_sha256(
+        [
+            {"path": relative, "sha256": sha256_file(root / relative)}
+            for relative in sorted(tracked)
+            if (root / relative).is_file()
+        ]
+    )
+
+
+__all__ = [
+    "ExecutionLayerV2CandidateDevelopmentResult",
+    "ExecutionLayerV2PrePromotionRemediationConfig",
+    "ExecutionLayerV2PrePromotionRemediationInitializationResult",
+    "diagnose_and_select_remediation_candidate",
+    "initialize_pre_promotion_remediation_goal",
+    "safety_fields",
+    "sha256_file",
+    "utc_now_iso",
+]

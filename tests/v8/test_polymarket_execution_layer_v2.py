@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import subprocess
 import time
 from pathlib import Path
 
@@ -55,6 +56,11 @@ from bigan.v8.polymarket.training.execution_layer_v2_pre_promotion_readiness imp
     ExecutionLayerV2PrePromotionGoalConfig,
     finalize_pre_promotion_readiness_goal,
     initialize_pre_promotion_readiness_goal,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_pre_promotion_remediation import (
+    ExecutionLayerV2PrePromotionRemediationConfig,
+    _candidate_specifications,
+    initialize_pre_promotion_remediation_goal,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev import (
     CURRENT_75_ROW_REPLAY_RUN_ID,
@@ -2374,6 +2380,93 @@ def test_pre_promotion_goal_finalizer_seals_blocked_bundle_without_artifact(
     assert all(
         hashlib.sha256(Path(row["path"]).read_bytes()).hexdigest() == row["sha256"]
         for row in manifest["artifacts"]
+    )
+
+
+def test_pre_promotion_remediation_initialization_is_immutable_and_uses_150_rows(
+    tmp_path,
+) -> None:
+    prior_bundle = tmp_path / "prior-bundle"
+    prior_bundle.mkdir()
+    (prior_bundle / "pre_promotion_readiness_manifest.json").write_text(
+        json.dumps({"final_state": "PRE_PROMOTION_BLOCKED"}), encoding="utf-8"
+    )
+    prior_rows = tmp_path / "prior-rows.jsonl"
+    prior_rows.write_text(
+        json.dumps(
+            {
+                "source_run_id": "prior-development-run",
+                "market_id": "prior-market",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    prior_split = tmp_path / "prior-split.json"
+    prior_split.write_text("{}\n", encoding="utf-8")
+    prior_calibration = tmp_path / "prior-calibration.json"
+    prior_calibration.write_text("{}\n", encoding="utf-8")
+    head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], text=True
+    ).strip()
+
+    result = initialize_pre_promotion_remediation_goal(
+        ExecutionLayerV2PrePromotionRemediationConfig(
+            run_id="remediation-initialization-test",
+            output_dir=tmp_path / "runs",
+            repository_root=Path.cwd(),
+            created_at="2026-07-12T03:00:00Z",
+            starting_branch="codex/v8-pre-promotion-readiness-goal",
+            starting_commit=head,
+            prior_blocked_bundle_dir=prior_bundle,
+            prior_corpus_rows_path=prior_rows,
+            prior_split_report_path=prior_split,
+            prior_calibration_report_path=prior_calibration,
+        )
+    )
+    config = json.loads(result.configuration_path.read_text(encoding="utf-8"))
+    exclusions = json.loads(result.exclusions_path.read_text(encoding="utf-8"))
+    state = json.loads(result.state_path.read_text(encoding="utf-8"))
+
+    assert config["minimum_total_calibration_rows"] == 150
+    assert config["maximum_candidate_count"] == 6
+    assert config["required_future_shadow_window_count"] == 2
+    assert exclusions["development_evidence_only"] is True
+    assert exclusions["unseen_validation_eligible"] is False
+    assert state["starting_commit_verified"] is True
+    assert state["promotion_evidence_stage_started"] is False
+    assert hashlib.sha256(result.configuration_path.read_bytes()).hexdigest() == (
+        result.configuration_sha256_path.read_text(encoding="utf-8").strip()
+    )
+    with pytest.raises(FileExistsError):
+        initialize_pre_promotion_remediation_goal(
+            ExecutionLayerV2PrePromotionRemediationConfig(
+                run_id="remediation-initialization-test",
+                output_dir=tmp_path / "runs",
+                repository_root=Path.cwd(),
+                created_at="2026-07-12T03:00:00Z",
+                starting_branch="codex/v8-pre-promotion-readiness-goal",
+                starting_commit=head,
+                prior_blocked_bundle_dir=prior_bundle,
+                prior_corpus_rows_path=prior_rows,
+                prior_split_report_path=prior_split,
+                prior_calibration_report_path=prior_calibration,
+            )
+        )
+
+
+def test_pre_promotion_candidate_search_is_bounded_and_decision_time_only() -> None:
+    candidates = _candidate_specifications()
+
+    assert len(candidates) == 6
+    assert len({row["candidate_name"] for row in candidates}) == 6
+    assert all(
+        not any(
+            forbidden in feature
+            for forbidden in ("settlement", "outcome", "pnl", "future", "oracle")
+        )
+        for row in candidates
+        for feature in row["features"]
     )
 
 
