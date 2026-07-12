@@ -28,6 +28,7 @@ def main() -> None:
     initialize.add_argument("--output-dir", type=Path, default=Path("examples/v8/polymarket_runs"))
     initialize.add_argument("--repository-root", type=Path, default=Path("."))
     initialize.add_argument("--created-at", default=None)
+    initialize.add_argument("--additional-excluded-run-id", action="append", default=[])
     develop = subparsers.add_parser("develop")
     develop.add_argument("--goal-dir", required=True, type=Path)
     validate = subparsers.add_parser("validate-round")
@@ -53,6 +54,7 @@ def main() -> None:
                 prior_blocked_bundle_dir=args.prior_blocked_bundle_dir,
                 inspected_rows_path=args.inspected_rows_path,
                 created_at=args.created_at or utc_now_iso(),
+                additional_excluded_run_ids=tuple(args.additional_excluded_run_id),
             )
         )
     elif args.command == "develop":

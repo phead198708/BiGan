@@ -60,6 +60,7 @@ class EstimandReformulationConfig:
     prior_blocked_bundle_dir: Path | str
     inspected_rows_path: Path | str
     created_at: str
+    additional_excluded_run_ids: tuple[str, ...] = ()
     maximum_total_validation_collection_windows: int = 12
     validation_collection_window_seconds: int = 3600
     maximum_wall_clock_seconds: int = 43_200
@@ -131,6 +132,9 @@ class EstimandReformulationConfig:
                 "previous_direct_return_regression_route_not_assumed_valid": True,
                 "full_content_row_hashes_required": True,
                 "immutable_internal_rows_only": True,
+                "additional_excluded_run_ids": list(
+                    self.additional_excluded_run_ids
+                ),
                 **safety_fields(),
             }
         )
@@ -197,6 +201,7 @@ def initialize_estimand_reformulation_goal(
             {row.get("condition_id", row["market_id"]) for row in normalized}
         ),
         "all_inspected_run_ids": sorted({row["source_run_id"] for row in normalized}),
+        "additional_excluded_run_ids": list(config.additional_excluded_run_ids),
         "usage": {
             "lineage": "development",
             "development_evidence_only": True,
@@ -943,12 +948,12 @@ def _candidate_specs() -> list[dict[str, Any]]:
     return [
         {**common, "candidate_name": "raw_selected_side_market_probability", "model_family": "identity_probability", "features": ["selected_side_probability"], "regularization": None, "parameter_count": 0, "monotonicity": "identity", "selectable_for_confirmatory_validation": False, "diagnostic_baseline_only": True},
         {**common, "candidate_name": "constant_development_win_rate", "model_family": "weighted_constant_probability", "features": [], "regularization": None, "parameter_count": 1, "monotonicity": "constant", "selectable_for_confirmatory_validation": False, "diagnostic_baseline_only": True},
-        {**common, "candidate_name": "platt_selected_side_probability", "model_family": "regularized_logistic", "features": ["logit_selected_side_probability"], "regularization": 1.0, "parameter_count": 2, "monotonicity": "positive_probability_slope", "selectable_for_confirmatory_validation": True},
-        {**common, "candidate_name": "beta_selected_side_probability", "model_family": "regularized_logistic", "features": ["log_selected_side_probability", "log_one_minus_selected_side_probability"], "regularization": 1.0, "parameter_count": 3, "monotonicity": "bounded_beta_calibration", "selectable_for_confirmatory_validation": True},
-        {**common, "candidate_name": "logistic_probability_o_score_margin", "model_family": "regularized_logistic", "features": ["logit_selected_side_probability", "canonical_o_action_score", "action_score_margin"], "regularization": 2.0, "parameter_count": 4, "monotonicity": "positive_probability_slope", "selectable_for_confirmatory_validation": True},
-        {**common, "candidate_name": "side_partially_pooled_logistic", "model_family": "regularized_logistic", "features": ["logit_selected_side_probability", "selected_side_down"], "regularization": 2.0, "parameter_count": 3, "monotonicity": "positive_probability_slope", "selectable_for_confirmatory_validation": True},
-        {**common, "candidate_name": "side_horizon_partially_pooled_logistic", "model_family": "regularized_logistic", "features": ["logit_selected_side_probability", "selected_side_down", "horizon_15m"], "regularization": 3.0, "parameter_count": 4, "monotonicity": "positive_probability_slope", "selectable_for_confirmatory_validation": True},
-        {**common, "candidate_name": "monotonic_quadratic_probability", "model_family": "regularized_logistic", "features": ["selected_side_probability", "selected_side_probability_squared"], "regularization": 3.0, "parameter_count": 3, "monotonicity": "bounded_low_degree_checked_on_grid", "selectable_for_confirmatory_validation": True},
+        {**common, "candidate_name": "platt_selected_side_probability", "model_family": "regularized_logistic", "features": ["logit_selected_side_probability"], "regularization": 10.0, "regularization_prior": [0.0, 1.0], "parameter_count": 2, "monotonicity": "positive_probability_slope", "selectable_for_confirmatory_validation": True},
+        {**common, "candidate_name": "beta_selected_side_probability", "model_family": "regularized_logistic", "features": ["log_selected_side_probability", "log_one_minus_selected_side_probability"], "regularization": 10.0, "regularization_prior": [0.0, 1.0, -1.0], "parameter_count": 3, "monotonicity": "bounded_beta_calibration", "selectable_for_confirmatory_validation": True},
+        {**common, "candidate_name": "logistic_probability_o_score_margin", "model_family": "regularized_logistic", "features": ["logit_selected_side_probability", "canonical_o_action_score", "action_score_margin"], "regularization": 10.0, "regularization_prior": [0.0, 1.0, 0.0, 0.0], "parameter_count": 4, "monotonicity": "positive_probability_slope", "selectable_for_confirmatory_validation": True},
+        {**common, "candidate_name": "side_partially_pooled_logistic", "model_family": "regularized_logistic", "features": ["logit_selected_side_probability", "selected_side_down"], "regularization": 10.0, "regularization_prior": [0.0, 1.0, 0.0], "parameter_count": 3, "monotonicity": "positive_probability_slope", "selectable_for_confirmatory_validation": True},
+        {**common, "candidate_name": "side_horizon_partially_pooled_logistic", "model_family": "regularized_logistic", "features": ["logit_selected_side_probability", "selected_side_down", "horizon_15m"], "regularization": 10.0, "regularization_prior": [0.0, 1.0, 0.0, 0.0], "parameter_count": 4, "monotonicity": "positive_probability_slope", "selectable_for_confirmatory_validation": True},
+        {**common, "candidate_name": "monotonic_quadratic_probability", "model_family": "regularized_logistic", "features": ["selected_side_probability", "selected_side_probability_squared"], "regularization": 10.0, "regularization_prior": [-2.0, 4.0, 0.0], "parameter_count": 3, "monotonicity": "bounded_low_degree_checked_on_grid", "selectable_for_confirmatory_validation": True},
     ]
 
 
@@ -1010,7 +1015,13 @@ def _fit_contract(rows: list[dict[str, Any]], spec: dict[str, Any]) -> dict[str,
         probability = sum(weight * target for weight, target in zip(weights, targets, strict=True)) / sum(weights)
         return {"candidate_name": spec["candidate_name"], "model_family": spec["model_family"], "parameters": [probability], "features": [], "probability_bounds": spec["probability_bounds"]}
     matrix = [[1.0, *[_feature(row, name) for name in spec["features"]]] for row in rows]
-    parameters = _fit_weighted_logistic(matrix, targets, weights, float(spec["regularization"]))
+    parameters = _fit_weighted_logistic(
+        matrix,
+        targets,
+        weights,
+        float(spec["regularization"]),
+        prior=[float(value) for value in spec["regularization_prior"]],
+    )
     if "positive_probability_slope" in spec["monotonicity"] and len(parameters) > 1:
         parameters[1] = max(parameters[1], 0.0)
     parameters = [min(max(value, -8.0), 8.0) for value in parameters]
@@ -1057,9 +1068,19 @@ def _feature(row: dict[str, Any], name: str) -> float:
     return float(features[name])
 
 
-def _fit_weighted_logistic(matrix: list[list[float]], targets: list[float], weights: list[float], regularization: float) -> list[float]:
+def _fit_weighted_logistic(
+    matrix: list[list[float]],
+    targets: list[float],
+    weights: list[float],
+    regularization: float,
+    *,
+    prior: list[float] | None = None,
+) -> list[float]:
     size = len(matrix[0])
-    parameters = [0.0] * size
+    prior = list(prior or [0.0] * size)
+    if len(prior) != size:
+        raise ValueError("logistic regularization prior size mismatch")
+    parameters = prior[:]
     for _ in range(80):
         gradient = [0.0] * size
         hessian = [[0.0] * size for _ in range(size)]
@@ -1071,7 +1092,7 @@ def _fit_weighted_logistic(matrix: list[list[float]], targets: list[float], weig
                 for j in range(size):
                     hessian[i][j] += weight * variance * vector[i] * vector[j]
         for i in range(1, size):
-            gradient[i] += regularization * parameters[i]
+            gradient[i] += regularization * (parameters[i] - prior[i])
             hessian[i][i] += regularization
         hessian[0][0] += 1e-8
         step = _solve_linear(hessian, gradient)
