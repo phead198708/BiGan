@@ -60,6 +60,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_pre_promotion_readiness imp
 from bigan.v8.polymarket.training.execution_layer_v2_pre_promotion_remediation import (
     ExecutionLayerV2PrePromotionRemediationConfig,
     _candidate_specifications,
+    evaluate_remediation_candidate_once,
     initialize_pre_promotion_remediation_goal,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev import (
@@ -2468,6 +2469,43 @@ def test_pre_promotion_candidate_search_is_bounded_and_decision_time_only() -> N
         for row in candidates
         for feature in row["features"]
     )
+
+
+def test_pre_promotion_fresh_validation_cannot_run_when_split_gate_failed(
+    tmp_path,
+) -> None:
+    goal_dir = tmp_path / "goal"
+    goal_dir.mkdir()
+    artifacts = {
+        "initial_goal_configuration.json": {
+            "prior_corpus_rows_path": str(tmp_path / "unused.jsonl")
+        },
+        "initial_excluded_evidence_manifest.json": {},
+        "selected_candidate_contract.json": {"candidate_specification": {}},
+        "fresh_split_manifest.json": {
+            "fresh_split_gate_passed": False,
+            "blocking_reason_codes": ["validation_action_family_coverage_gate_failed"],
+        },
+    }
+    hash_names = {
+        "initial_goal_configuration.json": "initial_goal_configuration.sha256",
+        "initial_excluded_evidence_manifest.json": (
+            "initial_excluded_evidence_manifest.sha256"
+        ),
+        "selected_candidate_contract.json": "selected_candidate_contract.sha256",
+        "fresh_split_manifest.json": "fresh_split_manifest.sha256",
+    }
+    for name, payload in artifacts.items():
+        path = goal_dir / name
+        path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        (goal_dir / hash_names[name]).write_text(
+            hashlib.sha256(path.read_bytes()).hexdigest() + "\n", encoding="utf-8"
+        )
+
+    with pytest.raises(ValueError, match="validation evaluation is forbidden"):
+        evaluate_remediation_candidate_once(goal_dir=goal_dir)
+
+    assert not (goal_dir / "fresh_validation_evaluation_started.json").exists()
 
 
 def test_fresh_provider_row_uses_market_start_btc_proxy_when_price_to_beat_missing() -> None:

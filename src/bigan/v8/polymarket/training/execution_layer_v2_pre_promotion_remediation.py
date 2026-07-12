@@ -23,10 +23,12 @@ from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev_calib
     _feature_value_for_model,
     _fit_feature_transforms,
     _group_scores,
+    _market_bootstrap_improvement_intervals,
     _market_level_metrics,
     _predict_matrix,
     _regression_metrics,
     _ridge_fit,
+    _validation_coverage_gate,
 )
 
 REMEDIATION_CONFIG_SCHEMA_VERSION = (
@@ -199,6 +201,27 @@ class ExecutionLayerV2CandidateDevelopmentResult:
     selected_contract_path: Path
     selected_contract_sha256_path: Path
     selected_candidate_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLayerV2FreshSplitResult:
+    corpus_dir: Path
+    accepted_rows_path: Path
+    rejected_rows_path: Path
+    corpus_manifest_path: Path
+    split_manifest_path: Path
+    split_manifest_sha256_path: Path
+    leakage_report_path: Path
+    fresh_validation_gate_passed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLayerV2FreshValidationResult:
+    fit_report_path: Path
+    validation_report_path: Path
+    artifact_path: Path | None
+    artifact_sha256_path: Path | None
+    artifact_eligible: bool
 
 
 def initialize_pre_promotion_remediation_goal(
@@ -456,6 +479,540 @@ def diagnose_and_select_remediation_candidate(
         selected_contract_path=contract_path,
         selected_contract_sha256_path=contract_hash_path,
         selected_candidate_name=selected["candidate_name"],
+    )
+
+
+def freeze_remediation_fresh_split(
+    *,
+    goal_dir: Path | str,
+    fresh_corpus_rows_path: Path | str,
+    fresh_corpus_quality_report_path: Path | str,
+) -> ExecutionLayerV2FreshSplitResult:
+    goal_dir = Path(goal_dir).resolve()
+    configuration_path = goal_dir / "initial_goal_configuration.json"
+    configuration_hash_path = goal_dir / "initial_goal_configuration.sha256"
+    exclusions_path = goal_dir / "initial_excluded_evidence_manifest.json"
+    exclusions_hash_path = goal_dir / "initial_excluded_evidence_manifest.sha256"
+    candidate_contract_path = goal_dir / "selected_candidate_contract.json"
+    candidate_contract_hash_path = goal_dir / "selected_candidate_contract.sha256"
+    for path, hash_path in (
+        (configuration_path, configuration_hash_path),
+        (exclusions_path, exclusions_hash_path),
+        (candidate_contract_path, candidate_contract_hash_path),
+    ):
+        _verify_immutable_file(path, hash_path)
+    config = _load_json(configuration_path)
+    exclusions = _load_json(exclusions_path)
+    development_rows = _load_jsonl(Path(config["prior_corpus_rows_path"]))
+    fresh_rows = _load_jsonl(Path(fresh_corpus_rows_path).resolve())
+    fresh_quality = _load_json(Path(fresh_corpus_quality_report_path).resolve())
+    development_identities = {row["row_identity"] for row in development_rows}
+    development_markets = {row["market_id"] for row in development_rows}
+    development_runs = {row["source_run_id"] for row in development_rows}
+    fresh_identities = {row["row_identity"] for row in fresh_rows}
+    fresh_markets = {row["market_id"] for row in fresh_rows}
+    fresh_runs = {row["source_run_id"] for row in fresh_rows}
+    overlap = {
+        "row_identity_overlap": sorted(development_identities & fresh_identities),
+        "market_id_overlap": sorted(development_markets & fresh_markets),
+        "source_run_id_overlap": sorted(development_runs & fresh_runs),
+    }
+    chronology_passed = bool(
+        development_rows
+        and fresh_rows
+        and max(float(row["decision_ts"]) for row in development_rows)
+        < min(float(row["decision_ts"]) for row in fresh_rows)
+    )
+    causality_violations = [
+        row["row_identity"]
+        for row in [*development_rows, *fresh_rows]
+        if float(row["max_input_ts"]) > float(row["decision_ts"])
+    ]
+    excluded_markets = set(exclusions["prior_evidence_market_ids"])
+    exclusion_contract_passed = bool(
+        development_markets <= excluded_markets
+        and not (fresh_markets & excluded_markets)
+    )
+    validation_coverage = _validation_coverage_gate(
+        fresh_rows,
+        min_rows_per_side=int(config["minimum_validation_rows_per_side"]),
+        min_rows_per_action_family=int(
+            config["minimum_validation_rows_per_action_family"]
+        ),
+        min_rows_per_resolved_outcome=int(
+            config["minimum_validation_rows_per_resolved_outcome"]
+        ),
+        min_markets_per_category=int(
+            config["minimum_validation_markets_per_category"]
+        ),
+    )
+    support_passed = bool(
+        len(development_rows) >= int(config["minimum_development_fit_rows"])
+        and len(development_markets)
+        >= int(config["minimum_development_fit_markets"])
+        and len(fresh_rows) >= int(config["minimum_fresh_validation_rows"])
+        and len(fresh_markets)
+        >= int(config["minimum_fresh_validation_markets"])
+        and len(development_rows) + len(fresh_rows)
+        >= int(config["minimum_total_calibration_rows"])
+        and len(development_markets | fresh_markets)
+        >= int(config["minimum_total_calibration_markets"])
+    )
+    split_gate_passed = bool(
+        support_passed
+        and validation_coverage["coverage_gate_passed"]
+        and chronology_passed
+        and exclusion_contract_passed
+        and not any(overlap.values())
+        and not causality_violations
+    )
+    blockers = []
+    if not support_passed:
+        blockers.append("fresh_split_minimum_support_not_met")
+    blockers.extend(validation_coverage["blocking_reason_codes"])
+    if not chronology_passed:
+        blockers.append("fresh_split_chronology_failed")
+    if any(overlap.values()):
+        blockers.append("fresh_split_identity_overlap_detected")
+    if not exclusion_contract_passed:
+        blockers.append("excluded_prior_evidence_entered_fresh_validation")
+    if causality_violations:
+        blockers.append("fresh_split_feature_timestamp_causality_violation")
+
+    corpus_dir = goal_dir / "versioned_calibration_corpus"
+    if corpus_dir.exists():
+        raise FileExistsError(f"fresh split already frozen: {corpus_dir}")
+    corpus_dir.mkdir()
+    accepted_path = corpus_dir / "accepted_calibration_rows.jsonl"
+    accepted_path.write_text(
+        "".join(
+            json.dumps(row, sort_keys=True) + "\n"
+            for row in [*development_rows, *fresh_rows]
+        ),
+        encoding="utf-8",
+    )
+    rejected_path = corpus_dir / "rejected_calibration_rows.jsonl"
+    rejected_path.write_text("", encoding="utf-8")
+    lineage_path = corpus_dir / "calibration_row_lineage.jsonl"
+    lineage_path.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "row_identity": row["row_identity"],
+                    "market_id": row["market_id"],
+                    "source_run_id": row["source_run_id"],
+                    "lineage": lineage,
+                },
+                sort_keys=True,
+            )
+            + "\n"
+            for lineage, rows in (
+                ("development", development_rows),
+                ("fresh_validation_candidate", fresh_rows),
+            )
+            for row in rows
+        ),
+        encoding="utf-8",
+    )
+    validation_report = {
+        "schema_version": "bigan-v8-remediation-calibration-row-validation-v1",
+        "accepted_row_count": len(development_rows) + len(fresh_rows),
+        "rejected_row_count": 0,
+        "schema_runtime_validation_agreement_passed": fresh_quality.get(
+            "schema_runtime_validation_agreement_passed", True
+        ),
+        "provenance_violation_count": fresh_quality.get(
+            "provenance_coverage", {}
+        ).get("violation_count", 0),
+        "causality_violation_count": len(causality_violations),
+        "rejection_reason_distribution": {},
+        **safety_fields(),
+    }
+    validation_report_path = corpus_dir / "calibration_row_validation_report.json"
+    _write_json(validation_report_path, validation_report)
+    quality_path = corpus_dir / "calibration_corpus_quality_report.json"
+    _write_json(
+        quality_path,
+        {
+            "schema_version": "bigan-v8-remediation-corpus-quality-v1",
+            "development_row_count": len(development_rows),
+            "fresh_validation_row_count": len(fresh_rows),
+            "total_row_count": len(development_rows) + len(fresh_rows),
+            "development_market_count": len(development_markets),
+            "fresh_validation_market_count": len(fresh_markets),
+            "total_market_count": len(development_markets | fresh_markets),
+            "fresh_validation_coverage": validation_coverage,
+            "incremental_full_rebuild_hash_match": fresh_quality.get(
+                "incremental_full_rebuild_hash_match"
+            ),
+            "split_gate_passed": split_gate_passed,
+            "blocking_reason_codes": sorted(set(blockers)),
+            **safety_fields(),
+        },
+    )
+    corpus_manifest = {
+        "schema_version": "bigan-v8-remediation-calibration-corpus-manifest-v1",
+        "goal_configuration_sha256": sha256_file(configuration_path),
+        "selected_candidate_contract_sha256": sha256_file(
+            candidate_contract_path
+        ),
+        "development_source": _descriptor(Path(config["prior_corpus_rows_path"])),
+        "fresh_validation_source": _descriptor(Path(fresh_corpus_rows_path)),
+        "fresh_quality_source": _descriptor(Path(fresh_corpus_quality_report_path)),
+        "accepted_rows": _descriptor(accepted_path),
+        "rejected_rows": _descriptor(rejected_path),
+        "row_lineage": _descriptor(lineage_path),
+        "row_validation_report": _descriptor(validation_report_path),
+        "quality_report": _descriptor(quality_path),
+        "total_row_count": len(development_rows) + len(fresh_rows),
+        "total_market_count": len(development_markets | fresh_markets),
+        **safety_fields(),
+    }
+    corpus_manifest["manifest_id"] = canonical_json_sha256(corpus_manifest)
+    corpus_manifest_path = corpus_dir / "calibration_corpus_manifest.json"
+    _write_json(corpus_manifest_path, corpus_manifest)
+
+    split_manifest = {
+        "schema_version": "bigan-v8-remediation-fresh-split-manifest-v1",
+        "goal_configuration_sha256": sha256_file(configuration_path),
+        "selected_candidate_contract_sha256": sha256_file(
+            candidate_contract_path
+        ),
+        "calibration_corpus_manifest_sha256": sha256_file(corpus_manifest_path),
+        "development_fit": _split_partition_summary(development_rows),
+        "fresh_unseen_validation": _split_partition_summary(fresh_rows),
+        "future_unseen_shadow_reserved": {
+            "status": "reserved_not_collected_before_artifact_freeze",
+            "row_count": 0,
+            "market_count": 0,
+        },
+        "fresh_validation_coverage": validation_coverage,
+        "overlap_checks": overlap,
+        "chronology_passed": chronology_passed,
+        "exclusion_contract_passed": exclusion_contract_passed,
+        "feature_timestamp_causality_violation_count": len(causality_violations),
+        "fresh_split_gate_passed": split_gate_passed,
+        "blocking_reason_codes": sorted(set(blockers)),
+        "validation_outcomes_used_for_candidate_selection": False,
+        "validation_outcomes_used_for_split_adjustment": False,
+        **safety_fields(),
+    }
+    split_manifest["split_id"] = canonical_json_sha256(split_manifest)
+    split_path = goal_dir / "fresh_split_manifest.json"
+    _write_json(split_path, split_manifest)
+    split_hash_path = goal_dir / "fresh_split_manifest.sha256"
+    split_hash_path.write_text(sha256_file(split_path) + "\n", encoding="utf-8")
+    leakage_report = {
+        "schema_version": "bigan-v8-remediation-split-leakage-report-v1",
+        "fresh_split_manifest_sha256": sha256_file(split_path),
+        "chronology_passed": chronology_passed,
+        "market_disjointness_passed": not overlap["market_id_overlap"],
+        "run_disjointness_passed": not overlap["source_run_id_overlap"],
+        "economic_row_disjointness_passed": not overlap["row_identity_overlap"],
+        "excluded_evidence_check_passed": exclusion_contract_passed,
+        "feature_timestamp_causality_passed": not causality_violations,
+        "validation_labels_used_for_fitting": False,
+        "validation_labels_used_for_threshold_selection": False,
+        "future_shadow_contamination": False,
+        "leakage_checks_passed": bool(
+            chronology_passed
+            and exclusion_contract_passed
+            and not any(overlap.values())
+            and not causality_violations
+        ),
+        **safety_fields(),
+    }
+    leakage_report["report_id"] = canonical_json_sha256(leakage_report)
+    leakage_path = goal_dir / "split_leakage_report.json"
+    _write_json(leakage_path, leakage_report)
+    return ExecutionLayerV2FreshSplitResult(
+        corpus_dir=corpus_dir,
+        accepted_rows_path=accepted_path,
+        rejected_rows_path=rejected_path,
+        corpus_manifest_path=corpus_manifest_path,
+        split_manifest_path=split_path,
+        split_manifest_sha256_path=split_hash_path,
+        leakage_report_path=leakage_path,
+        fresh_validation_gate_passed=split_gate_passed,
+    )
+
+
+def evaluate_remediation_candidate_once(
+    *,
+    goal_dir: Path | str,
+) -> ExecutionLayerV2FreshValidationResult:
+    goal_dir = Path(goal_dir).resolve()
+    configuration_path = goal_dir / "initial_goal_configuration.json"
+    configuration_hash_path = goal_dir / "initial_goal_configuration.sha256"
+    exclusions_path = goal_dir / "initial_excluded_evidence_manifest.json"
+    exclusions_hash_path = goal_dir / "initial_excluded_evidence_manifest.sha256"
+    candidate_path = goal_dir / "selected_candidate_contract.json"
+    candidate_hash_path = goal_dir / "selected_candidate_contract.sha256"
+    split_path = goal_dir / "fresh_split_manifest.json"
+    split_hash_path = goal_dir / "fresh_split_manifest.sha256"
+    for path, hash_path in (
+        (configuration_path, configuration_hash_path),
+        (exclusions_path, exclusions_hash_path),
+        (candidate_path, candidate_hash_path),
+        (split_path, split_hash_path),
+    ):
+        _verify_immutable_file(path, hash_path)
+    config = _load_json(configuration_path)
+    candidate_contract = _load_json(candidate_path)
+    split = _load_json(split_path)
+    if split.get("fresh_split_gate_passed") is not True:
+        raise ValueError("fresh split gate failed; validation evaluation is forbidden")
+    evaluation_marker = goal_dir / "fresh_validation_evaluation_started.json"
+    if evaluation_marker.exists():
+        raise FileExistsError("fresh validation evaluation is exactly-once")
+    marker = {
+        "schema_version": "bigan-v8-fresh-validation-exactly-once-marker-v1",
+        "started_at": utc_now_iso(),
+        "selected_candidate_contract_sha256": sha256_file(candidate_path),
+        "fresh_split_manifest_sha256": sha256_file(split_path),
+        "evaluation_attempt_number": 1,
+        **safety_fields(),
+    }
+    marker["marker_id"] = canonical_json_sha256(marker)
+    _write_json(evaluation_marker, marker)
+
+    development_rows = _load_jsonl(Path(config["prior_corpus_rows_path"]))
+    fresh_source = Path(
+        _load_json(
+            goal_dir
+            / "versioned_calibration_corpus"
+            / "calibration_corpus_manifest.json"
+        )["fresh_validation_source"]["path"]
+    )
+    validation_rows = _load_jsonl(fresh_source)
+    blockers = list(split["blocking_reason_codes"])
+    candidate_spec = candidate_contract["candidate_specification"]
+    model = _fit_candidate(development_rows, candidate_spec)
+    candidate_predictions = _predict_candidate(
+        validation_rows, candidate_spec, model
+    )
+    fit_targets = [float(row["target_net_return_after_cost"]) for row in development_rows]
+    validation_targets = [
+        float(row["target_net_return_after_cost"]) for row in validation_rows
+    ]
+    constant_predictions = [sum(fit_targets) / len(fit_targets)] * len(
+        validation_rows
+    )
+    legacy_fit_matrix = [
+        [float(row["decision_time_features"]["canonical_o_action_score"])]
+        for row in development_rows
+    ]
+    legacy_validation_matrix = [
+        [float(row["decision_time_features"]["canonical_o_action_score"])]
+        for row in validation_rows
+    ]
+    legacy_coefficients = _ridge_fit(legacy_fit_matrix, fit_targets, 1.0)
+    legacy_predictions = _predict_matrix(
+        legacy_validation_matrix, legacy_coefficients
+    )
+    probability_minus_price_predictions = [
+        float(
+            row["decision_time_features"][
+                "selected_side_probability_minus_execution_price"
+            ]
+        )
+        for row in validation_rows
+    ]
+    prediction_sets = {
+        "candidate": candidate_predictions,
+        "constant_baseline": constant_predictions,
+        "legacy_o_score_baseline": legacy_predictions,
+        "selected_side_probability_minus_execution_price_baseline": (
+            probability_minus_price_predictions
+        ),
+    }
+    row_metrics = {
+        name: _regression_metrics(validation_targets, predictions)
+        for name, predictions in prediction_sets.items()
+    }
+    market_metrics = {
+        name: _market_level_metrics(
+            validation_rows, validation_targets, predictions
+        )
+        for name, predictions in prediction_sets.items()
+    }
+    relative_improvements = _all_baseline_relative_improvements(
+        row_metrics,
+        market_metrics,
+        minimum_mae=float(config["minimum_relative_mae_improvement"]),
+        minimum_mse=float(config["minimum_relative_mse_improvement"]),
+    )
+    bootstrap = _market_bootstrap_improvement_intervals(
+        validation_rows,
+        validation_targets,
+        candidate_predictions=candidate_predictions,
+        baseline_predictions={
+            name: predictions
+            for name, predictions in prediction_sets.items()
+            if name != "candidate"
+        },
+        samples=int(config["bootstrap_samples"]),
+        confidence_level=float(config["bootstrap_confidence_level"]),
+        minimum_lower_bound=float(
+            config["minimum_bootstrap_improvement_lower_bound"]
+        ),
+        random_seed=int(config["statistical_random_seed"]),
+    )
+    stability = _selected_candidate_lomo_stability(
+        development_rows,
+        candidate_spec,
+        model["coefficients"],
+        max_deviation=float(
+            config["maximum_lomo_coefficient_absolute_deviation"]
+        ),
+        min_sign_agreement=float(
+            config["minimum_lomo_coefficient_sign_agreement"]
+        ),
+    )
+    finite_bounded = all(
+        math.isfinite(value)
+        and abs(value) <= float(config["maximum_absolute_coefficient"])
+        for value in model["coefficients"]
+    )
+    if not relative_improvements["all_row_and_market_gates_passed"]:
+        blockers.append("fresh_validation_relative_improvement_gate_failed")
+    if not bootstrap["confidence_gate_passed"]:
+        blockers.append("fresh_validation_market_bootstrap_gate_failed")
+    if not stability["stability_gate_passed"]:
+        blockers.append("fresh_validation_coefficient_stability_gate_failed")
+    if not finite_bounded:
+        blockers.append("fresh_validation_coefficients_not_finite_and_bounded")
+    blockers = sorted(set(blockers))
+    artifact_eligible = not blockers
+
+    fit_report = {
+        "schema_version": "bigan-v8-remediation-selected-candidate-fit-report-v1",
+        "selected_candidate_contract_sha256": sha256_file(candidate_path),
+        "fresh_split_manifest_sha256": sha256_file(split_path),
+        "development_fit_row_count": len(development_rows),
+        "development_fit_market_count": len(
+            {row["market_id"] for row in development_rows}
+        ),
+        "candidate_specification": candidate_spec,
+        "coefficients": model["coefficients"],
+        "coefficient_hash": canonical_json_sha256(model["coefficients"]),
+        "feature_transforms": model["transforms"],
+        "coefficient_stability": stability,
+        "coefficients_finite_and_bounded": finite_bounded,
+        "uses_validation_labels_for_fitting": False,
+        "uses_validation_labels_for_threshold_selection": False,
+        "subtract_execution_cost": False,
+        **safety_fields(),
+    }
+    fit_report["report_id"] = canonical_json_sha256(fit_report)
+    fit_path = goal_dir / "fit_report.json"
+    _write_json(fit_path, fit_report)
+
+    residual_rows = [
+        {
+            **row,
+            "prediction": prediction,
+            "residual": target - prediction,
+            "absolute_error": abs(target - prediction),
+            "squared_error": (target - prediction) ** 2,
+        }
+        for row, target, prediction in zip(
+            validation_rows,
+            validation_targets,
+            candidate_predictions,
+            strict=True,
+        )
+    ]
+    validation_report = {
+        "schema_version": "bigan-v8-remediation-fresh-validation-report-v1",
+        "selected_candidate_contract_sha256": sha256_file(candidate_path),
+        "fresh_split_manifest_sha256": sha256_file(split_path),
+        "evaluation_attempt_number": 1,
+        "fresh_validation_row_count": len(validation_rows),
+        "fresh_validation_market_count": len(
+            {row["market_id"] for row in validation_rows}
+        ),
+        "row_level_metrics": row_metrics,
+        "market_level_metrics": market_metrics,
+        "relative_baseline_improvements": relative_improvements,
+        "market_bootstrap_confidence_intervals": bootstrap,
+        "coefficient_stability": stability,
+        "validation_coverage": split["fresh_validation_coverage"],
+        "calibration_slope_intercept": _calibration_slope_intercept(
+            candidate_predictions, validation_targets
+        ),
+        "residual_diagnostics": {
+            "by_side": _residual_summary(
+                residual_rows, lambda row: row["selected_side"]
+            ),
+            "by_action_family": _residual_summary(
+                residual_rows, lambda row: row["action_family"]
+            ),
+            "by_market_horizon": _residual_summary(
+                residual_rows, lambda row: _market_horizon(row)
+            ),
+            "by_execution_price_band": _residual_summary(
+                residual_rows,
+                lambda row: _numeric_bucket(
+                    row["decision_time_features"]["execution_price"],
+                    (0.3, 0.5, 0.7, 0.9),
+                ),
+            ),
+            "by_time_to_close_band": _residual_summary(
+                residual_rows,
+                lambda row: _numeric_bucket(
+                    row["decision_time_features"]["time_to_close_seconds"],
+                    (60.0, 120.0, 240.0, 360.0),
+                ),
+            ),
+        },
+        "all_frozen_gates_passed": artifact_eligible,
+        "artifact_eligible": artifact_eligible,
+        "blocking_reason_codes": blockers,
+        "validation_labels_used_for_fitting": False,
+        "validation_labels_used_for_threshold_selection": False,
+        "candidate_or_split_mutated_after_evaluation": False,
+        **safety_fields(),
+    }
+    validation_report["report_id"] = canonical_json_sha256(validation_report)
+    validation_path = goal_dir / "fresh_validation_report.json"
+    _write_json(validation_path, validation_report)
+
+    artifact_path = None
+    artifact_hash_path = None
+    if artifact_eligible:
+        artifact = {
+            "schema_version": "bigan-v8-frozen-remediation-regime-ev-v1",
+            "artifact_name": "execution_layer_v2_frozen_remediation_regime_ev_v1",
+            "frozen": True,
+            "decision_time_safe": True,
+            "goal_configuration_sha256": sha256_file(configuration_path),
+            "selected_candidate_contract_sha256": sha256_file(candidate_path),
+            "fresh_split_manifest_sha256": sha256_file(split_path),
+            "fit_report_sha256": sha256_file(fit_path),
+            "fresh_validation_report_sha256": sha256_file(validation_path),
+            "candidate_specification": candidate_spec,
+            "coefficients": model["coefficients"],
+            "feature_transforms": model["transforms"],
+            "target_semantics": "settled_net_return_after_execution_cost",
+            "subtract_execution_cost": False,
+            "statistical_eligibility_passed": True,
+            "future_unseen_shadow_required": True,
+            **safety_fields(),
+        }
+        artifact["artifact_id"] = canonical_json_sha256(artifact)
+        artifact_path = goal_dir / "frozen_diagnostic_artifact.json"
+        _write_json(artifact_path, artifact)
+        artifact_hash_path = goal_dir / "frozen_diagnostic_artifact.sha256"
+        artifact_hash_path.write_text(
+            sha256_file(artifact_path) + "\n", encoding="utf-8"
+        )
+    return ExecutionLayerV2FreshValidationResult(
+        fit_report_path=fit_path,
+        validation_report_path=validation_path,
+        artifact_path=artifact_path,
+        artifact_sha256_path=artifact_hash_path,
+        artifact_eligible=artifact_eligible,
     )
 
 
@@ -927,6 +1484,142 @@ def _normalized_feature_value(
     return max(transform["clip_min"], min(transform["clip_max"], normalized))
 
 
+def _split_partition_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "row_count": len(rows),
+        "market_count": len({row["market_id"] for row in rows}),
+        "market_ids": sorted({row["market_id"] for row in rows}),
+        "condition_ids": sorted({row["market_id"] for row in rows}),
+        "source_run_ids": sorted({row["source_run_id"] for row in rows}),
+        "min_decision_ts": min(float(row["decision_ts"]) for row in rows),
+        "max_decision_ts": max(float(row["decision_ts"]) for row in rows),
+        "dataset_hash": canonical_json_sha256(
+            sorted(row["row_identity"] for row in rows)
+        ),
+        "side_coverage": dict(sorted(Counter(row["selected_side"] for row in rows).items())),
+        "action_family_coverage": dict(
+            sorted(Counter(row["action_family"] for row in rows).items())
+        ),
+        "resolved_outcome_coverage": dict(
+            sorted(
+                Counter(
+                    row["target_provenance"]["resolved_outcome"] for row in rows
+                ).items()
+            )
+        ),
+    }
+
+
+def _all_baseline_relative_improvements(
+    row_metrics: dict[str, dict[str, Any]],
+    market_metrics: dict[str, dict[str, Any]],
+    *,
+    minimum_mae: float,
+    minimum_mse: float,
+) -> dict[str, Any]:
+    comparisons = {}
+    candidate_row = row_metrics["candidate"]
+    candidate_market = market_metrics["candidate"]
+    for baseline_name in row_metrics:
+        if baseline_name == "candidate":
+            continue
+        baseline_row = row_metrics[baseline_name]
+        baseline_market = market_metrics[baseline_name]
+        row_mae = _relative_improvement(baseline_row["mae"], candidate_row["mae"])
+        row_mse = _relative_improvement(baseline_row["mse"], candidate_row["mse"])
+        market_mae = _relative_improvement(
+            baseline_market["mae"], candidate_market["mae"]
+        )
+        market_mse = _relative_improvement(
+            baseline_market["mse"], candidate_market["mse"]
+        )
+        comparisons[baseline_name] = {
+            "row_mae_relative_improvement": row_mae,
+            "row_mse_relative_improvement": row_mse,
+            "market_mae_relative_improvement": market_mae,
+            "market_mse_relative_improvement": market_mse,
+            "passed": bool(
+                row_mae >= minimum_mae
+                and row_mse >= minimum_mse
+                and market_mae >= minimum_mae
+                and market_mse >= minimum_mse
+            ),
+        }
+    return {
+        "minimum_relative_mae_improvement": minimum_mae,
+        "minimum_relative_mse_improvement": minimum_mse,
+        "comparisons": comparisons,
+        "all_row_and_market_gates_passed": all(
+            row["passed"] for row in comparisons.values()
+        ),
+    }
+
+
+def _relative_improvement(baseline: float, candidate: float) -> float:
+    return (baseline - candidate) / baseline if baseline > 0.0 else 0.0
+
+
+def _selected_candidate_lomo_stability(
+    rows: list[dict[str, Any]],
+    candidate: dict[str, Any],
+    full_coefficients: list[float],
+    *,
+    max_deviation: float,
+    min_sign_agreement: float,
+) -> dict[str, Any]:
+    coefficients = []
+    by_market = {}
+    for market_id in sorted({row["market_id"] for row in rows}):
+        subset = [row for row in rows if row["market_id"] != market_id]
+        fitted = _fit_candidate(subset, candidate)["coefficients"]
+        coefficients.append(fitted)
+        by_market[market_id] = {
+            "max_absolute_deviation": max(
+                abs(value - full)
+                for value, full in zip(fitted, full_coefficients, strict=True)
+            )
+        }
+    maximum = max(
+        value["max_absolute_deviation"] for value in by_market.values()
+    )
+    sign_checks = []
+    for row in coefficients:
+        for value, full in zip(row[1:], full_coefficients[1:], strict=True):
+            sign_checks.append(
+                abs(value) <= max_deviation
+                if abs(full) <= 1e-12
+                else (value > 0.0) == (full > 0.0)
+            )
+    agreement = sum(sign_checks) / len(sign_checks) if sign_checks else 1.0
+    return {
+        "method": "leave_one_market_out",
+        "replicate_count": len(coefficients),
+        "max_absolute_deviation": maximum,
+        "max_absolute_deviation_allowed": max_deviation,
+        "coefficient_sign_agreement_rate": agreement,
+        "minimum_sign_agreement_required": min_sign_agreement,
+        "stability_gate_passed": bool(
+            maximum <= max_deviation and agreement >= min_sign_agreement
+        ),
+        "by_omitted_market": by_market,
+    }
+
+
+def _calibration_slope_intercept(
+    predictions: list[float], targets: list[float]
+) -> dict[str, float | None]:
+    if len(predictions) < 2 or statistics.pvariance(predictions) <= 1e-15:
+        return {"slope": None, "intercept": None}
+    mean_prediction = statistics.mean(predictions)
+    mean_target = statistics.mean(targets)
+    covariance = sum(
+        (prediction - mean_prediction) * (target - mean_target)
+        for prediction, target in zip(predictions, targets, strict=True)
+    ) / len(predictions)
+    slope = covariance / statistics.pvariance(predictions)
+    return {"slope": slope, "intercept": mean_target - slope * mean_prediction}
+
+
 def _coefficient_deviation(rows: list[list[float]]) -> float:
     if len(rows) < 2:
         return math.inf
@@ -1117,9 +1810,13 @@ def _relevant_source_tree_hash(root: Path) -> str:
 
 __all__ = [
     "ExecutionLayerV2CandidateDevelopmentResult",
+    "ExecutionLayerV2FreshSplitResult",
+    "ExecutionLayerV2FreshValidationResult",
     "ExecutionLayerV2PrePromotionRemediationConfig",
     "ExecutionLayerV2PrePromotionRemediationInitializationResult",
     "diagnose_and_select_remediation_candidate",
+    "evaluate_remediation_candidate_once",
+    "freeze_remediation_fresh_split",
     "initialize_pre_promotion_remediation_goal",
     "safety_fields",
     "sha256_file",
