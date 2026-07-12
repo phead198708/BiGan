@@ -128,6 +128,56 @@ def test_invalid_sbc_full_scope_fails_until_separate_estimand_exists(
         )
 
 
+def test_disjoint_validation_is_evaluated_exactly_once(tmp_path: Path) -> None:
+    development_path = _write_fixture_rows(
+        tmp_path / "development", row_count=120, market_count=40
+    )
+    result = initialize_estimand_reformulation_goal(
+        EstimandReformulationConfig(
+            run_id="exactly-once-test",
+            output_dir=tmp_path / "runs",
+            repository_root=Path.cwd(),
+            prior_blocked_bundle_dir=_prior_bundle(tmp_path),
+            inspected_rows_path=development_path,
+            created_at="2026-07-12T07:00:00Z",
+            bootstrap_samples=20,
+        )
+    )
+    develop_probability_candidates(result["goal_dir"])
+    fresh_path = _write_fixture_rows(
+        tmp_path / "fresh",
+        row_count=80,
+        market_count=25,
+        sbc_row_count=0,
+        market_prefix="fresh-market",
+        condition_prefix="fresh-condition",
+        run_prefix="fresh-run",
+        decision_start=1_790_000_000_000,
+    )
+    evaluation = freeze_and_evaluate_validation_round(
+        result["goal_dir"],
+        round_number=1,
+        fresh_rows_path=fresh_path,
+    )
+    report = _json(
+        result["goal_dir"]
+        / "round_1"
+        / "round_1_fresh_validation_report.json"
+    )
+    assert evaluation["split_gate_passed"] is True
+    assert evaluation["evaluated"] is True
+    assert report["evaluation_attempt_number"] == 1
+    assert report["uses_validation_labels_for_tuning"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["promotion_evidence_eligible"] is False
+    with pytest.raises(FileExistsError, match="already frozen"):
+        freeze_and_evaluate_validation_round(
+            result["goal_dir"],
+            round_number=1,
+            fresh_rows_path=fresh_path,
+        )
+
+
 def _write_fixture_rows(
     tmp_path: Path,
     *,
@@ -135,7 +185,12 @@ def _write_fixture_rows(
     market_count: int,
     sbc_row_count: int = 8,
     sbc_market_count: int = 8,
+    market_prefix: str = "market",
+    condition_prefix: str = "condition",
+    run_prefix: str = "run",
+    decision_start: int = 1_780_000_000_000,
 ) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     source = tmp_path / "source.jsonl"
     source.write_text('{"source":"read-only-settlement"}\n', encoding="utf-8")
     source_hash = _sha256(source)
@@ -149,13 +204,15 @@ def _write_fixture_rows(
         outcome = "UP" if market_index % 3 else "DOWN"
         family = "SELL_BEFORE_CLOSE" if is_sbc else "HOLD_TO_SETTLEMENT"
         action = f"BUY_{side}_{family}"
-        decision_ts = 1_780_000_000_000 + index * 1000
+        decision_ts = decision_start + index * 1000
         rows.append(
             {
-                "row_identity": hashlib.sha256(f"row-{index}".encode()).hexdigest(),
-                "market_id": f"market-{market_index:03d}",
-                "condition_id": f"condition-{market_index:03d}",
-                "source_run_id": f"run-{index // 60}",
+                "row_identity": hashlib.sha256(
+                    f"{run_prefix}-row-{index}".encode()
+                ).hexdigest(),
+                "market_id": f"{market_prefix}-{market_index:03d}",
+                "condition_id": f"{condition_prefix}-{market_index:03d}",
+                "source_run_id": f"{run_prefix}-{index // 40}",
                 "source_fill_id": f"fill-{index}",
                 "source_intent_id": f"intent-{index}",
                 "decision_ts": decision_ts,
