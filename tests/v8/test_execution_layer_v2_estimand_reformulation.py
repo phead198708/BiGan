@@ -178,6 +178,50 @@ def test_disjoint_validation_is_evaluated_exactly_once(tmp_path: Path) -> None:
         )
 
 
+def test_additional_excluded_run_fails_closed_before_prediction(
+    tmp_path: Path,
+) -> None:
+    development_path = _write_fixture_rows(
+        tmp_path / "development-excluded", row_count=120, market_count=40
+    )
+    result = initialize_estimand_reformulation_goal(
+        EstimandReformulationConfig(
+            run_id="excluded-run-test",
+            output_dir=tmp_path / "runs",
+            repository_root=Path.cwd(),
+            prior_blocked_bundle_dir=_prior_bundle(tmp_path),
+            inspected_rows_path=development_path,
+            created_at="2026-07-12T07:00:00Z",
+            additional_excluded_run_ids=("excluded-fresh-run-0",),
+            bootstrap_samples=20,
+        )
+    )
+    develop_probability_candidates(result["goal_dir"])
+    fresh_path = _write_fixture_rows(
+        tmp_path / "fresh-excluded",
+        row_count=80,
+        market_count=25,
+        sbc_row_count=0,
+        market_prefix="excluded-fresh-market",
+        condition_prefix="excluded-fresh-condition",
+        run_prefix="excluded-fresh-run",
+        decision_start=1_790_000_000_000,
+    )
+    evaluation = freeze_and_evaluate_validation_round(
+        result["goal_dir"], round_number=1, fresh_rows_path=fresh_path
+    )
+    leakage = _json(
+        result["goal_dir"] / "round_1" / "round_1_leakage_report.json"
+    )
+    assert evaluation["evaluated"] is False
+    assert leakage["overlap"]["excluded_source_run_ids"] == [
+        "excluded-fresh-run-0"
+    ]
+    assert not (
+        result["goal_dir"] / "round_1" / "round_1_evaluation_started.json"
+    ).exists()
+
+
 def _write_fixture_rows(
     tmp_path: Path,
     *,

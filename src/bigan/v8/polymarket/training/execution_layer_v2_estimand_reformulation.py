@@ -1382,6 +1382,13 @@ def _overlap_report(development: list[dict[str, Any]], validation: list[dict[str
         "row_identities": sorted(values(development, "row_identity") & values(validation, "row_identity")),
         "excluded_market_ids": sorted(set(excluded["all_inspected_market_ids"]) & values(validation, "market_id")),
         "excluded_row_identities": sorted(set(excluded["all_inspected_row_identities"]) & values(validation, "row_identity")),
+        "excluded_source_run_ids": sorted(
+            (
+                set(excluded["all_inspected_run_ids"])
+                | set(excluded.get("additional_excluded_run_ids", []))
+            )
+            & values(validation, "source_run_id")
+        ),
     }
 
 
