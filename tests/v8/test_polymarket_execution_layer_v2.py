@@ -61,6 +61,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_pre_promotion_remediation i
     ExecutionLayerV2PrePromotionRemediationConfig,
     ExecutionLayerV2RemediationFinalizationConfig,
     _candidate_specifications,
+    _rows_with_resolved_outcome,
     evaluate_remediation_candidate_once,
     finalize_pre_promotion_remediation_goal,
     initialize_pre_promotion_remediation_goal,
@@ -2508,6 +2509,24 @@ def test_pre_promotion_fresh_validation_cannot_run_when_split_gate_failed(
         evaluate_remediation_candidate_once(goal_dir=goal_dir)
 
     assert not (goal_dir / "fresh_validation_evaluation_started.json").exists()
+
+
+def test_pre_promotion_fresh_coverage_maps_official_nested_outcome() -> None:
+    rows = [
+        {
+            "market_id": "condition-1",
+            "target_provenance": {
+                "resolved_outcome": "DOWN",
+                "source_type": "polymarket_clob_read_only_settlement",
+            },
+        }
+    ]
+
+    mapped = _rows_with_resolved_outcome(rows)
+
+    assert mapped[0]["resolved_outcome"] == "DOWN"
+    assert "resolved_outcome" not in rows[0]
+    assert mapped[0]["target_provenance"] == rows[0]["target_provenance"]
 
 
 def test_pre_promotion_remediation_finalizer_hashes_final_state(tmp_path) -> None:

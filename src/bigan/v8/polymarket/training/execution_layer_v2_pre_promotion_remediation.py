@@ -570,8 +570,9 @@ def freeze_remediation_fresh_split(
         development_markets <= excluded_markets
         and not (fresh_markets & excluded_markets)
     )
+    coverage_rows = _rows_with_resolved_outcome(fresh_rows)
     validation_coverage = _validation_coverage_gate(
-        fresh_rows,
+        coverage_rows,
         min_rows_per_side=int(config["minimum_validation_rows_per_side"]),
         min_rows_per_action_family=int(
             config["minimum_validation_rows_per_action_family"]
@@ -1809,6 +1810,18 @@ def _split_partition_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
             )
         ),
     }
+
+
+def _rows_with_resolved_outcome(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            **row,
+            "resolved_outcome": row["target_provenance"]["resolved_outcome"],
+        }
+        for row in rows
+    ]
 
 
 def _all_baseline_relative_improvements(
