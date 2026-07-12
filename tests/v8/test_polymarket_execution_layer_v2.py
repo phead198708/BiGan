@@ -59,8 +59,10 @@ from bigan.v8.polymarket.training.execution_layer_v2_pre_promotion_readiness imp
 )
 from bigan.v8.polymarket.training.execution_layer_v2_pre_promotion_remediation import (
     ExecutionLayerV2PrePromotionRemediationConfig,
+    ExecutionLayerV2RemediationFinalizationConfig,
     _candidate_specifications,
     evaluate_remediation_candidate_once,
+    finalize_pre_promotion_remediation_goal,
     initialize_pre_promotion_remediation_goal,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_regime_conditioned_ev import (
@@ -2506,6 +2508,70 @@ def test_pre_promotion_fresh_validation_cannot_run_when_split_gate_failed(
         evaluate_remediation_candidate_once(goal_dir=goal_dir)
 
     assert not (goal_dir / "fresh_validation_evaluation_started.json").exists()
+
+
+def test_pre_promotion_remediation_finalizer_hashes_final_state(tmp_path) -> None:
+    goal_dir = tmp_path / "goal"
+    goal_dir.mkdir()
+    head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], text=True
+    ).strip()
+    prior_manifest = tmp_path / "prior-manifest.json"
+    prior_manifest.write_text("{}\n", encoding="utf-8")
+    immutable = {
+        "initial_goal_configuration.json": {
+            "repository_root": str(Path.cwd()),
+            "starting_commit": head,
+        },
+        "initial_excluded_evidence_manifest.json": {
+            "prior_blocked_bundle_manifest_path": str(prior_manifest),
+            "prior_blocked_bundle_manifest_sha256": hashlib.sha256(
+                prior_manifest.read_bytes()
+            ).hexdigest(),
+        },
+        "initial_goal_state.json": {
+            "starting_commit": head,
+            "actual_head_at_initialization": head,
+        },
+        "candidate_search_protocol.json": {"candidate_count": 1},
+        "selected_candidate_contract.json": {"candidate_name": "fixture"},
+    }
+    hash_names = {
+        "initial_goal_configuration.json": "initial_goal_configuration.sha256",
+        "initial_excluded_evidence_manifest.json": (
+            "initial_excluded_evidence_manifest.sha256"
+        ),
+        "initial_goal_state.json": "initial_goal_state.sha256",
+        "candidate_search_protocol.json": "candidate_search_protocol.sha256",
+        "selected_candidate_contract.json": "selected_candidate_contract.sha256",
+    }
+    for name, payload in immutable.items():
+        path = goal_dir / name
+        path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        (goal_dir / hash_names[name]).write_text(
+            hashlib.sha256(path.read_bytes()).hexdigest() + "\n", encoding="utf-8"
+        )
+
+    result = finalize_pre_promotion_remediation_goal(
+        ExecutionLayerV2RemediationFinalizationConfig(
+            goal_dir=goal_dir,
+            stop_reason_codes=("fixture_blocker",),
+        )
+    )
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+
+    assert result.final_state == "PRE_PROMOTION_BLOCKED"
+    assert report["promotion_evidence_stage_started"] is False
+    assert report["live_evidence_allowed"] is False
+    assert "fixture_blocker" in report["blocking_reason_codes"]
+    assert all(
+        hashlib.sha256(Path(row["path"]).read_bytes()).hexdigest() == row["sha256"]
+        for row in manifest["artifacts"]
+    )
+    assert hashlib.sha256(result.manifest_path.read_bytes()).hexdigest() == (
+        result.manifest_sha256_path.read_text(encoding="utf-8").strip()
+    )
 
 
 def test_fresh_provider_row_uses_market_start_btc_proxy_when_price_to_beat_missing() -> None:

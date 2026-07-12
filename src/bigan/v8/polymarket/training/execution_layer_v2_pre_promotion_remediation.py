@@ -224,6 +224,43 @@ class ExecutionLayerV2FreshValidationResult:
     artifact_eligible: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionLayerV2RemediationFinalizationConfig:
+    goal_dir: Path | str
+    historical_collection_dirs: tuple[Path | str, ...] = ()
+    outcome_reconciliation_dirs: tuple[Path | str, ...] = ()
+    fresh_corpus_manifest_path: Path | str | None = None
+    stop_reason_codes: tuple[str, ...] = ()
+    resumable_next_command: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "goal_dir", Path(self.goal_dir).resolve())
+        object.__setattr__(
+            self,
+            "historical_collection_dirs",
+            tuple(Path(path).resolve() for path in self.historical_collection_dirs),
+        )
+        object.__setattr__(
+            self,
+            "outcome_reconciliation_dirs",
+            tuple(Path(path).resolve() for path in self.outcome_reconciliation_dirs),
+        )
+        if self.fresh_corpus_manifest_path is not None:
+            object.__setattr__(
+                self,
+                "fresh_corpus_manifest_path",
+                Path(self.fresh_corpus_manifest_path).resolve(),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLayerV2RemediationFinalizationResult:
+    final_state: str
+    report_path: Path
+    manifest_path: Path
+    manifest_sha256_path: Path
+
+
 def initialize_pre_promotion_remediation_goal(
     config: ExecutionLayerV2PrePromotionRemediationConfig,
 ) -> ExecutionLayerV2PrePromotionRemediationInitializationResult:
@@ -1016,6 +1053,270 @@ def evaluate_remediation_candidate_once(
     )
 
 
+def finalize_pre_promotion_remediation_goal(
+    config: ExecutionLayerV2RemediationFinalizationConfig,
+) -> ExecutionLayerV2RemediationFinalizationResult:
+    goal_dir = Path(config.goal_dir)
+    initial_files = {
+        "configuration": (
+            goal_dir / "initial_goal_configuration.json",
+            goal_dir / "initial_goal_configuration.sha256",
+        ),
+        "exclusions": (
+            goal_dir / "initial_excluded_evidence_manifest.json",
+            goal_dir / "initial_excluded_evidence_manifest.sha256",
+        ),
+        "state": (
+            goal_dir / "initial_goal_state.json",
+            goal_dir / "initial_goal_state.sha256",
+        ),
+        "candidate_protocol": (
+            goal_dir / "candidate_search_protocol.json",
+            goal_dir / "candidate_search_protocol.sha256",
+        ),
+        "candidate_contract": (
+            goal_dir / "selected_candidate_contract.json",
+            goal_dir / "selected_candidate_contract.sha256",
+        ),
+    }
+    immutable_checks = {}
+    for name, (path, hash_path) in initial_files.items():
+        try:
+            _verify_immutable_file(path, hash_path)
+            immutable_checks[name] = True
+        except (FileNotFoundError, ValueError):
+            immutable_checks[name] = False
+    configuration = _load_json(initial_files["configuration"][0])
+    initial_state = _load_json(initial_files["state"][0])
+    exclusions = _load_json(initial_files["exclusions"][0])
+    repository_root = Path(configuration["repository_root"])
+    starting_commit_verified = bool(
+        configuration["starting_commit"] == initial_state["starting_commit"]
+        and initial_state["actual_head_at_initialization"]
+        == configuration["starting_commit"]
+    )
+    prior_manifest_path = Path(exclusions["prior_blocked_bundle_manifest_path"])
+    prior_bundle_hash_verified = bool(
+        prior_manifest_path.is_file()
+        and sha256_file(prior_manifest_path)
+        == exclusions["prior_blocked_bundle_manifest_sha256"]
+    )
+    collection_rows = [
+        _phase_run_descriptor(path, "one_hour_remap_paper_goal_report.json")
+        for path in config.historical_collection_dirs
+    ]
+    reconciliation_rows = [
+        _phase_run_descriptor(path, "clob_settlement_reconciliation_report.json")
+        for path in config.outcome_reconciliation_dirs
+    ]
+    historical_manifest = {
+        "schema_version": "bigan-v8-remediation-historical-collection-manifest-v1",
+        "collection_window_count": len(collection_rows),
+        "collection_windows": collection_rows,
+        "complete_round_count": sum(
+            int(row["report"].get("complete_round_count", 0))
+            for row in collection_rows
+        ),
+        "paper_fill_count": sum(
+            int(row["report"].get("paper_fill_count", 0))
+            for row in collection_rows
+        ),
+        **safety_fields(),
+    }
+    historical_manifest["manifest_id"] = canonical_json_sha256(historical_manifest)
+    historical_path = goal_dir / "historical_collection_manifest.json"
+    _write_json(historical_path, historical_manifest)
+    unresolved = sum(
+        int(row["report"].get("unresolved_fill_count_after", 0))
+        for row in reconciliation_rows
+    )
+    reconciliation_manifest = {
+        "schema_version": "bigan-v8-remediation-outcome-reconciliation-manifest-v1",
+        "reconciliation_run_count": len(reconciliation_rows),
+        "reconciliation_runs": reconciliation_rows,
+        "unresolved_fill_count_after": unresolved,
+        "original_source_artifacts_immutable": all(
+            row["report"].get("original_source_artifacts_mutated") is False
+            for row in reconciliation_rows
+        ),
+        **safety_fields(),
+    }
+    reconciliation_manifest["manifest_id"] = canonical_json_sha256(
+        reconciliation_manifest
+    )
+    reconciliation_path = goal_dir / "outcome_reconciliation_manifest.json"
+    _write_json(reconciliation_path, reconciliation_manifest)
+
+    if config.fresh_corpus_manifest_path is not None:
+        corpus_source = Path(config.fresh_corpus_manifest_path)
+        corpus_wrapper = {
+            "schema_version": "bigan-v8-remediation-final-corpus-manifest-v1",
+            "source_manifest": _descriptor(corpus_source),
+            "source_manifest_payload": _load_json(corpus_source),
+            **safety_fields(),
+        }
+    else:
+        corpus_wrapper = {
+            "schema_version": "bigan-v8-remediation-final-corpus-manifest-v1",
+            "status": "not_available_fail_closed",
+            "blocking_reason_codes": ["fresh_calibration_corpus_not_available"],
+            **safety_fields(),
+        }
+    corpus_wrapper["manifest_id"] = canonical_json_sha256(corpus_wrapper)
+    corpus_path = goal_dir / "calibration_corpus_manifest.json"
+    _write_json(corpus_path, corpus_wrapper)
+
+    split_path = goal_dir / "fresh_split_manifest.json"
+    split_payload = _load_json(split_path) if split_path.is_file() else {}
+    validation_path = goal_dir / "fresh_validation_report.json"
+    validation_payload = _load_json(validation_path) if validation_path.is_file() else {}
+    artifact_path = goal_dir / "frozen_diagnostic_artifact.json"
+    artifact_hash_path = goal_dir / "frozen_diagnostic_artifact.sha256"
+    artifact_valid = bool(
+        artifact_path.is_file()
+        and artifact_hash_path.is_file()
+        and sha256_file(artifact_path)
+        == artifact_hash_path.read_text(encoding="utf-8").strip()
+        and validation_payload.get("artifact_eligible") is True
+    )
+    shadow_manifest_path = goal_dir / "future_shadow_manifest.json"
+    shadow_evaluation_path = goal_dir / "future_shadow_evaluation_report.json"
+    shadow_payload = (
+        _load_json(shadow_evaluation_path)
+        if shadow_evaluation_path.is_file()
+        else {}
+    )
+    shadow_complete = bool(
+        shadow_manifest_path.is_file()
+        and shadow_evaluation_path.is_file()
+        and shadow_payload.get("future_shadow_all_gates_passed") is True
+    )
+    finalization_checks = {
+        "goal_configuration_hash_unchanged": immutable_checks["configuration"],
+        "initial_exclusion_manifest_hash_unchanged": immutable_checks["exclusions"],
+        "initial_state_hash_unchanged": immutable_checks["state"],
+        "candidate_search_protocol_hash_unchanged": immutable_checks[
+            "candidate_protocol"
+        ],
+        "selected_candidate_contract_hash_unchanged": immutable_checks[
+            "candidate_contract"
+        ],
+        "starting_commit_verified": starting_commit_verified,
+        "prior_blocked_bundle_manifest_hash_verified": prior_bundle_hash_verified,
+        "fresh_split_gate_passed": split_payload.get("fresh_split_gate_passed") is True,
+        "fresh_validation_all_gates_passed": validation_payload.get(
+            "all_frozen_gates_passed"
+        )
+        is True,
+        "frozen_diagnostic_artifact_valid": artifact_valid,
+        "required_future_shadow_complete": shadow_complete,
+        "unresolved_settlement_count_zero": unresolved == 0,
+    }
+    blockers = set(config.stop_reason_codes)
+    blockers.update(split_payload.get("blocking_reason_codes", []))
+    blockers.update(validation_payload.get("blocking_reason_codes", []))
+    blockers.update(
+        f"finalization_check_failed:{name}"
+        for name, passed in finalization_checks.items()
+        if not passed
+    )
+    ready = all(finalization_checks.values()) and not blockers
+    final_state = "PRE_PROMOTION_READY" if ready else "PRE_PROMOTION_BLOCKED"
+    commits = _git(
+        repository_root,
+        "rev-list",
+        "--reverse",
+        f"{configuration['starting_commit']}..HEAD",
+    ).splitlines()
+    report = {
+        "schema_version": "bigan-v8-pre-promotion-remediation-readiness-report-v1",
+        "final_state": final_state,
+        "pre_promotion_readiness_complete": ready,
+        "goal_configuration_sha256": sha256_file(
+            initial_files["configuration"][0]
+        ),
+        "selected_candidate_contract_sha256": sha256_file(
+            initial_files["candidate_contract"][0]
+        ),
+        "historical_collection_summary": {
+            "window_count": len(collection_rows),
+            "complete_round_count": historical_manifest["complete_round_count"],
+            "paper_fill_count": historical_manifest["paper_fill_count"],
+        },
+        "outcome_reconciliation_summary": {
+            "run_count": len(reconciliation_rows),
+            "unresolved_fill_count_after": unresolved,
+        },
+        "fresh_split_summary": split_payload,
+        "fresh_validation_summary": validation_payload,
+        "frozen_diagnostic_artifact_created": artifact_valid,
+        "future_shadow_complete": shadow_complete,
+        "finalization_verification": finalization_checks,
+        "code_changes_used_for_final_candidate": {
+            "starting_commit": configuration["starting_commit"],
+            "final_head": _git(repository_root, "rev-parse", "HEAD"),
+            "commit_ids": commits,
+            "relevant_source_tree_sha256": _relevant_source_tree_hash(
+                repository_root
+            ),
+        },
+        "blocking_reason_codes": sorted(blockers),
+        "resumable_next_command": config.resumable_next_command,
+        **safety_fields(),
+    }
+    report["report_id"] = canonical_json_sha256(report)
+    report_path = goal_dir / "pre_promotion_readiness_report.json"
+    _write_json(report_path, report)
+    markdown_path = goal_dir / "pre_promotion_readiness_report.md"
+    markdown_path.write_text(_remediation_markdown(report), encoding="utf-8")
+    state = {
+        "schema_version": "bigan-v8-pre-promotion-remediation-final-state-v1",
+        "final_state": final_state,
+        "pre_promotion_readiness_complete": ready,
+        "resumable": not ready,
+        "blocking_reason_codes": sorted(blockers),
+        **safety_fields(),
+    }
+    state["state_id"] = canonical_json_sha256(state)
+    state_path = goal_dir / "pre_promotion_goal_state.json"
+    _write_json(state_path, state)
+
+    manifest_path = goal_dir / "pre_promotion_readiness_manifest.json"
+    manifest_hash_path = goal_dir / "pre_promotion_readiness_manifest.sha256"
+    artifact_files = sorted(
+        path
+        for path in goal_dir.rglob("*")
+        if path.is_file()
+        and path not in {manifest_path, manifest_hash_path}
+    )
+    manifest = {
+        "schema_version": "bigan-v8-pre-promotion-remediation-manifest-v1",
+        "final_state": final_state,
+        "pre_promotion_readiness_complete": ready,
+        "artifact_count": len(artifact_files),
+        "artifacts": [
+            {
+                "path": str(path.resolve()),
+                "relative_path": str(path.relative_to(goal_dir)),
+                "sha256": sha256_file(path),
+            }
+            for path in artifact_files
+        ],
+        "manifest_self_hash_embedded": False,
+        "manifest_hash_descriptor_external": True,
+        **safety_fields(),
+    }
+    manifest["manifest_id"] = canonical_json_sha256(manifest)
+    _write_json(manifest_path, manifest)
+    manifest_hash_path.write_text(sha256_file(manifest_path) + "\n", encoding="utf-8")
+    return ExecutionLayerV2RemediationFinalizationResult(
+        final_state=final_state,
+        report_path=report_path,
+        manifest_path=manifest_path,
+        manifest_sha256_path=manifest_hash_path,
+    )
+
+
 def _build_initial_exclusions(
     config: ExecutionLayerV2PrePromotionRemediationConfig,
     configuration_hash: str,
@@ -1727,6 +2028,50 @@ def _descriptor(path: Path) -> dict[str, str]:
     return {"path": str(path.resolve()), "sha256": sha256_file(path)}
 
 
+def _phase_run_descriptor(path: Path, report_name: str) -> dict[str, Any]:
+    report_path = path / report_name
+    if not report_path.is_file():
+        matches = sorted(path.rglob(report_name)) if path.is_dir() else []
+        report_path = matches[0] if matches else report_path
+    report = _load_json(report_path) if report_path.is_file() else {}
+    manifests = sorted(path.rglob("*manifest*.json")) if path.is_dir() else []
+    return {
+        "run_dir": str(path),
+        "report": report,
+        "report_artifact": _descriptor(report_path) if report_path.is_file() else None,
+        "manifest_artifacts": [_descriptor(item) for item in manifests],
+    }
+
+
+def _remediation_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# v8 Pre-Promotion Remediation Readiness",
+        "",
+        f"- Final state: `{report['final_state']}`",
+        f"- Pre-promotion readiness complete: `{str(report['pre_promotion_readiness_complete']).lower()}`",
+        "- Promotion evidence stage started: `false`",
+        "- Promotion evidence eligible: `false`",
+        "- Live evidence stage started: `false`",
+        "- Live evidence allowed: `false`",
+        "- v8 execution handoff allowed: `false`",
+        "",
+        "## Blocking Reasons",
+        "",
+    ]
+    blockers = report["blocking_reason_codes"]
+    lines.extend(f"- `{reason}`" for reason in blockers)
+    if not blockers:
+        lines.append("- None")
+    lines.extend(
+        [
+            "",
+            "This bundle stops before promotion evidence and does not authorize paper/live writes, wallet signing, capital, freeze, promotion, or handoff.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _verify_immutable_file(path: Path, hash_path: Path) -> None:
     if not path.is_file() or not hash_path.is_file():
         raise FileNotFoundError(path)
@@ -1812,10 +2157,13 @@ __all__ = [
     "ExecutionLayerV2CandidateDevelopmentResult",
     "ExecutionLayerV2FreshSplitResult",
     "ExecutionLayerV2FreshValidationResult",
+    "ExecutionLayerV2RemediationFinalizationConfig",
+    "ExecutionLayerV2RemediationFinalizationResult",
     "ExecutionLayerV2PrePromotionRemediationConfig",
     "ExecutionLayerV2PrePromotionRemediationInitializationResult",
     "diagnose_and_select_remediation_candidate",
     "evaluate_remediation_candidate_once",
+    "finalize_pre_promotion_remediation_goal",
     "freeze_remediation_fresh_split",
     "initialize_pre_promotion_remediation_goal",
     "safety_fields",
