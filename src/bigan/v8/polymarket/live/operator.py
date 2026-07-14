@@ -2085,6 +2085,7 @@ def _finalize_round_artifacts(
     run_reason_codes: tuple[str, ...],
     status: str,
     recommendation: str,
+    chainlink_prices: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     round_id = _round_id(market)
     round_dir = rounds_root / round_id
@@ -2138,6 +2139,7 @@ def _finalize_round_artifacts(
             book_coverage=book_coverage,
             model_manifest=model_manifest,
             model_manifest_sha256=model_manifest_sha256,
+            chainlink_prices=chainlink_prices or [],
         )
 
     round_summary = _round_summary(
@@ -2258,6 +2260,7 @@ def _write_training_raw_bundle(
     book_coverage: dict[str, Any],
     model_manifest: dict[str, Any],
     model_manifest_sha256: str,
+    chainlink_prices: list[dict[str, Any]],
 ) -> str:
     training_raw_dir.mkdir(parents=True, exist_ok=True)
     paths = {
@@ -2267,6 +2270,7 @@ def _write_training_raw_bundle(
         "raw_binance_btcusdt_klines": training_raw_dir / "raw_binance_btcusdt_klines.jsonl",
         "raw_polymarket_resolutions": training_raw_dir / "raw_polymarket_resolutions.jsonl",
     }
+    chainlink_path = training_raw_dir / "raw_polymarket_chainlink_prices.jsonl"
     _write_jsonl(paths["raw_polymarket_markets"], [_training_market_row(market)])
     _write_jsonl(
         paths["raw_polymarket_orderbooks"],
@@ -2287,7 +2291,21 @@ def _write_training_raw_bundle(
         paths["raw_polymarket_resolutions"],
         [_training_resolution_row(market=market, candle=candle, settlement=settlement)],
     )
+    _write_jsonl(
+        chainlink_path,
+        sorted(
+            [dict(row) for row in chainlink_prices],
+            key=lambda row: (
+                int(row.get("source_ts") or 0),
+                int(row.get("available_at_ts") or 0),
+                float(row.get("price") or 0.0),
+            ),
+        ),
+    )
     artifact_hashes = {path.name: _sha256_file(path) for path in sorted(paths.values())}
+    supplemental_artifact_hashes = {
+        chainlink_path.name: _sha256_file(chainlink_path)
+    }
     manifest = {
         "schema_version": "bigan-v8-polymarket-live-round-training-raw-v1",
         "phase": "polymarket_live_round_training_raw",
@@ -2305,6 +2323,10 @@ def _write_training_raw_bundle(
         "source_model_run_id": _model_run_id(model_manifest),
         "source_model_manifest_sha256": model_manifest_sha256,
         "source_collection_mode": "mock_live" if config.mock_live else "live_readonly",
+        "raw_chainlink_price_row_count": len(chainlink_prices),
+        "chainlink_decision_time_evidence_available": bool(chainlink_prices),
+        "chainlink_feature_builder_integration_required": True,
+        "supplemental_decision_time_artifact_hashes": supplemental_artifact_hashes,
         "live_polymarket_data": not config.mock_live,
         "live_btc_reference_data": not config.mock_live,
         "live_binance_reference_data": not config.mock_live,

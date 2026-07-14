@@ -18,7 +18,9 @@ if str(SRC) not in sys.path:
 
 from bigan.v8.polymarket import (  # noqa: E402
     DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
+    DEFAULT_POLYMARKET_RTDS_URL,
     V8_TRAINING_CORPUS_ROOT,
+    PolymarketChainlinkRTDSCollector,
     PolymarketPublicHTTPRealCorpusProvider,
     PolymarketRealCorpusRecorderConfig,
     capture_polymarket_pending_round,
@@ -41,6 +43,8 @@ def run_polymarket_async_round_collector_cli(
     training_corpus_root: Path | str = V8_TRAINING_CORPUS_ROOT,
     clob_ws_url: str = DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
     max_round_start_lag_seconds: float = 30.0,
+    chainlink_rtds_url: str = DEFAULT_POLYMARKET_RTDS_URL,
+    chainlink_rtds_warmup_seconds: float = 5.0,
     overwrite_existing: bool = False,
 ) -> dict[str, Any]:
     if round_count <= 0:
@@ -55,6 +59,8 @@ def run_polymarket_async_round_collector_cli(
         raise ValueError("settlement_grace_seconds must be non-negative")
     if max_round_start_lag_seconds < 0:
         raise ValueError("max_round_start_lag_seconds must be non-negative")
+    if chainlink_rtds_warmup_seconds < 0:
+        raise ValueError("chainlink_rtds_warmup_seconds must be non-negative")
 
     root = Path(output_dir).expanduser().resolve()
     batch_dir = root / batch_id
@@ -64,6 +70,12 @@ def run_polymarket_async_round_collector_cli(
     captures: list[dict[str, Any]] = []
     finalizations: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
+    chainlink_collector = PolymarketChainlinkRTDSCollector(url=chainlink_rtds_url)
+    chainlink_collector.start()
+    if chainlink_rtds_warmup_seconds:
+        chainlink_collector.wait_for_rows(
+            timeout_seconds=chainlink_rtds_warmup_seconds
+        )
 
     def finalizer_loop() -> None:
         while not stop_event.is_set():
@@ -107,7 +119,11 @@ def run_polymarket_async_round_collector_cli(
                 mock_public_data=False,
                 overwrite_existing=overwrite_existing,
             )
-            capture = capture_polymarket_pending_round(config, public_provider=provider)
+            capture = capture_polymarket_pending_round(
+                config,
+                public_provider=provider,
+                chainlink_rtds_collector=chainlink_collector,
+            )
             with lock:
                 captures.append(
                     {
@@ -142,6 +158,12 @@ def run_polymarket_async_round_collector_cli(
                         ),
                         "raw_trade_row_count": capture.report["raw_trade_row_count"],
                         "raw_btc_candle_row_count": capture.report["raw_btc_candle_row_count"],
+                        "raw_chainlink_price_row_count": capture.report[
+                            "raw_chainlink_price_row_count"
+                        ],
+                        "chainlink_capture_reason_codes": capture.report[
+                            "chainlink_capture_reason_codes"
+                        ],
                         "reject_reason_counts": capture.report["reject_reason_counts"],
                     }
                 )
@@ -153,6 +175,7 @@ def run_polymarket_async_round_collector_cli(
     finally:
         stop_event.set()
         finalizer.join(timeout=max(1.0, settlement_poll_interval_seconds))
+        chainlink_collector.stop()
 
     _finalize_pending_once(
         output_dir=root,
@@ -165,6 +188,9 @@ def run_polymarket_async_round_collector_cli(
         lock=lock,
     )
     summary = _summary(batch_id, captures, finalizations, errors)
+    summary["chainlink_rtds_collection_report"] = (
+        chainlink_collector.collection_report()
+    )
     summary_path = batch_dir / "batch_summary.json"
     _write_json(summary_path, summary)
     summary["batch_summary_path"] = str(summary_path)
@@ -326,6 +352,15 @@ def _summary(
             int(item.get("training_sampled_orderbook_row_count") or 0)
             for item in captures
         ),
+        "raw_chainlink_price_row_count": sum(
+            int(item.get("raw_chainlink_price_row_count") or 0)
+            for item in captures
+        ),
+        "chainlink_covered_capture_count": sum(
+            1
+            for item in captures
+            if int(item.get("raw_chainlink_price_row_count") or 0) > 0
+        ),
         "finalization_attempt_count": len(finalizations),
         "exported_round_count": len(exported),
         "pending_resolution_count": len(pending),
@@ -406,6 +441,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--training-corpus-root", default=str(V8_TRAINING_CORPUS_ROOT))
     parser.add_argument("--clob-ws-url", default=DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL)
     parser.add_argument("--max-round-start-lag-seconds", type=float, default=30.0)
+    parser.add_argument("--chainlink-rtds-url", default=DEFAULT_POLYMARKET_RTDS_URL)
+    parser.add_argument("--chainlink-rtds-warmup-seconds", type=float, default=5.0)
     parser.add_argument(
         "--finalize-only",
         action="store_true",
@@ -436,6 +473,9 @@ def main(argv: list[str] | None = None) -> int:
             settlement_grace_seconds=args.settlement_grace_seconds,
             training_corpus_root=args.training_corpus_root,
             clob_ws_url=args.clob_ws_url,
+            max_round_start_lag_seconds=args.max_round_start_lag_seconds,
+            chainlink_rtds_url=args.chainlink_rtds_url,
+            chainlink_rtds_warmup_seconds=args.chainlink_rtds_warmup_seconds,
             overwrite_existing=args.overwrite_existing,
         )
     print(json.dumps(summary, indent=2, sort_keys=True))

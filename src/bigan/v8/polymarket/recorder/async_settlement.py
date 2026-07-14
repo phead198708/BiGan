@@ -28,6 +28,13 @@ from bigan.v8.polymarket.live.contracts import (
     PolymarketLiveTrade,
 )
 from bigan.v8.polymarket.recorder.btc_reference import validate_btc_feature_candles
+from bigan.v8.polymarket.recorder.chainlink_rtds import (
+    CHAINLINK_RTDS_COLLECTION_REPORT_FILENAME,
+    CHAINLINK_RTDS_CORPUS_FILENAME,
+    CHAINLINK_RTDS_CORPUS_MANIFEST_FILENAME,
+    CHAINLINK_RTDS_RAW_FILENAME,
+    ChainlinkRTDSSnapshotSource,
+)
 from bigan.v8.polymarket.recorder.contracts import (
     POLYMARKET_REAL_CORPUS_RECORDER_SCHEMA_VERSION,
     PolymarketRealCorpusRecorderConfig,
@@ -59,6 +66,7 @@ ASYNC_SETTLEMENT_SCHEMA_VERSION = "bigan-v8-polymarket-async-settlement-v1"
 PENDING_CAPTURE_PHASE = "polymarket_pending_round_capture"
 PENDING_FINALIZATION_PHASE = "polymarket_pending_round_finalization"
 PROVIDER_RAW_DIRNAME = "provider_raw"
+CHAINLINK_RTDS_LOOKBACK_MS = 120_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +99,7 @@ def capture_polymarket_pending_round(
     config: PolymarketRealCorpusRecorderConfig,
     *,
     public_provider: PolymarketRealCorpusPublicProvider,
+    chainlink_rtds_collector: ChainlinkRTDSSnapshotSource | None = None,
 ) -> PendingRoundCaptureResult:
     """Capture one round's market facts without waiting for delayed settlement."""
 
@@ -111,6 +120,8 @@ def capture_polymarket_pending_round(
     book_candidates: list[dict[str, Any]] = []
     trade_candidates: list[dict[str, Any]] = []
     candle_candidates: list[dict[str, Any]] = []
+    chainlink_candidates: list[dict[str, Any]] = []
+    chainlink_collection_report = _empty_chainlink_collection_report()
     if not provider_failures:
         market_candidates = _call_provider_stage(
             provider="polymarket_gamma",
@@ -136,6 +147,14 @@ def capture_polymarket_pending_round(
             failures=provider_failures,
             callback=lambda: public_provider.btc_feature_candle_rows(market_candidates, config),
         )
+        if chainlink_rtds_collector is not None:
+            chainlink_candidates = chainlink_rtds_collector.rows()
+            chainlink_collection_report = chainlink_rtds_collector.collection_report()
+
+    provider_chainlink_rows, provider_chainlink_reasons = _causal_chainlink_rows_for_markets(
+        rows=chainlink_candidates,
+        markets=market_candidates,
+    )
 
     provider_raw_payloads = _provider_raw_payloads(
         market_rows=market_candidates,
@@ -145,6 +164,7 @@ def capture_polymarket_pending_round(
     )
     _sort_raw_payloads(provider_raw_payloads)
     _write_raw_files(provider_raw_dir, provider_raw_payloads)
+    _write_jsonl(provider_raw_dir / CHAINLINK_RTDS_RAW_FILENAME, provider_chainlink_rows)
 
     raw_payloads = empty_raw_payloads()
     rejected_rows: list[dict[str, Any]] = list(provider_failures)
@@ -191,8 +211,25 @@ def capture_polymarket_pending_round(
     else:
         raw_payloads["raw_binance_btcusdt_klines.jsonl"].extend(candles)
 
+    raw_chainlink_rows, raw_chainlink_reasons = _causal_chainlink_rows_for_markets(
+        rows=chainlink_candidates,
+        markets=accepted_markets,
+    )
+
     _sort_raw_payloads(raw_payloads)
     _write_raw_files(config.raw_dir, raw_payloads)
+    _write_jsonl(config.raw_dir / CHAINLINK_RTDS_RAW_FILENAME, raw_chainlink_rows)
+    _write_json(
+        run_dir / CHAINLINK_RTDS_COLLECTION_REPORT_FILENAME,
+        _round_chainlink_collection_report(
+            collection_report=chainlink_collection_report,
+            raw_rows=raw_chainlink_rows,
+            accepted_markets=accepted_markets,
+            reason_codes=sorted(
+                set(provider_chainlink_reasons + raw_chainlink_reasons)
+            ),
+        ),
+    )
     artifact_paths = _pending_capture_paths(
         run_dir,
         config.raw_dir,
@@ -205,6 +242,11 @@ def capture_polymarket_pending_round(
         provider_raw_payloads=provider_raw_payloads,
         rejected_rows=rejected_rows,
         provider_failures=provider_failures,
+        raw_chainlink_rows=raw_chainlink_rows,
+        provider_chainlink_rows=provider_chainlink_rows,
+        chainlink_reason_codes=sorted(
+            set(provider_chainlink_reasons + raw_chainlink_reasons)
+        ),
     )
     manifest = _pending_capture_manifest(
         config=config,
@@ -212,6 +254,8 @@ def capture_polymarket_pending_round(
         provider_raw_payloads=provider_raw_payloads,
         provider_raw_dir=provider_raw_dir,
         report=report,
+        raw_chainlink_rows=raw_chainlink_rows,
+        provider_chainlink_rows=provider_chainlink_rows,
     )
     _write_json(artifact_paths["pending_round_capture_report"], report)
     _write_json(artifact_paths["pending_round_capture_manifest"], manifest)
@@ -247,6 +291,10 @@ def finalize_polymarket_pending_round(
     provider_raw_dir = resolved_run_dir / PROVIDER_RAW_DIRNAME
     raw_payloads = _read_raw_payloads(raw_dir)
     provider_raw_payloads = _read_raw_payloads(provider_raw_dir)
+    raw_chainlink_rows = _read_jsonl(raw_dir / CHAINLINK_RTDS_RAW_FILENAME)
+    provider_chainlink_rows = _read_jsonl(
+        provider_raw_dir / CHAINLINK_RTDS_RAW_FILENAME
+    )
     market_rows = raw_payloads["raw_polymarket_markets.jsonl"]
     rejected_rows: list[dict[str, Any]] = []
     resolution_rows: list[dict[str, Any]] = []
@@ -300,6 +348,7 @@ def finalize_polymarket_pending_round(
         config=config,
         run_dir=resolved_run_dir,
         raw_payloads=raw_payloads,
+        raw_chainlink_rows=raw_chainlink_rows,
         finalization_reason_codes=tuple(
             sorted({reason for row in rejected_rows for reason in row.get("reject_reasons", [])})
         ),
@@ -308,6 +357,7 @@ def finalize_polymarket_pending_round(
     corpus_dir = None
     phase2_result = None
     exported_training_corpus_dir = None
+    chainlink_corpus_evidence = _empty_chainlink_corpus_evidence()
     phase2_error = None
     if market_rows and len(resolution_rows) == len(market_rows):
         try:
@@ -322,6 +372,11 @@ def finalize_polymarket_pending_round(
                 )
             )
             corpus_dir = phase2_result.output_dir
+            chainlink_corpus_evidence = _attach_chainlink_evidence_to_corpus(
+                corpus_dir=corpus_dir,
+                raw_rows=raw_chainlink_rows,
+                config=config,
+            )
             round_slug = round_corpus_id_from_corpus_dir(corpus_dir)
             exported_training_corpus_dir = export_trainable_corpus(
                 corpus_dir=corpus_dir,
@@ -340,6 +395,7 @@ def finalize_polymarket_pending_round(
                     ),
                     "real_historical_corpus_used": True,
                     "manual_live_evidence_eligible": True,
+                    "chainlink_decision_time_evidence": chainlink_corpus_evidence,
                     "mock_public_data_used": False,
                     "synthetic_public_data_used": False,
                     "synthetic_corpus_used": False,
@@ -364,6 +420,9 @@ def finalize_polymarket_pending_round(
         phase2_error=phase2_error,
         exported_training_corpus_dir=exported_training_corpus_dir,
         round_artifact_evidence=round_artifact_evidence,
+        raw_chainlink_rows=raw_chainlink_rows,
+        provider_chainlink_rows=provider_chainlink_rows,
+        chainlink_corpus_evidence=chainlink_corpus_evidence,
     )
     finalization_manifest = _pending_finalization_manifest(
         config=config,
@@ -374,6 +433,9 @@ def finalize_polymarket_pending_round(
         phase2_result=phase2_result,
         exported_training_corpus_dir=exported_training_corpus_dir,
         round_artifact_evidence=round_artifact_evidence,
+        raw_chainlink_rows=raw_chainlink_rows,
+        provider_chainlink_rows=provider_chainlink_rows,
+        chainlink_corpus_evidence=chainlink_corpus_evidence,
     )
     _write_json(artifact_paths["pending_round_finalization_report"], report)
     _write_json(artifact_paths["pending_round_finalization_manifest"], finalization_manifest)
@@ -405,6 +467,10 @@ def _pending_capture_paths(
         "pending_round_capture_manifest": run_dir / "pending_round_capture_manifest.json",
         "pending_round_capture_report": run_dir / "pending_round_capture_report.json",
         "pending_round_rejected_rows": run_dir / "pending_round_rejected_rows.jsonl",
+        "raw_polymarket_chainlink_prices": raw_dir / CHAINLINK_RTDS_RAW_FILENAME,
+        "polymarket_chainlink_rtds_collection_report": (
+            run_dir / CHAINLINK_RTDS_COLLECTION_REPORT_FILENAME
+        ),
         **{filename: raw_dir / filename for filename in RAW_CORPUS_FILENAMES},
         **_provider_raw_artifact_paths(provider_raw_dir),
     }
@@ -423,6 +489,10 @@ def _pending_finalization_paths(
         "pending_round_finalization_rejected_rows": (
             run_dir / "pending_round_finalization_rejected_rows.jsonl"
         ),
+        "raw_polymarket_chainlink_prices": raw_dir / CHAINLINK_RTDS_RAW_FILENAME,
+        "polymarket_chainlink_rtds_collection_report": (
+            run_dir / CHAINLINK_RTDS_COLLECTION_REPORT_FILENAME
+        ),
         **_pending_round_lifecycle_paths(run_dir),
         **{filename: raw_dir / filename for filename in RAW_CORPUS_FILENAMES},
         **_provider_raw_artifact_paths(provider_raw_dir),
@@ -433,6 +503,10 @@ def _provider_raw_artifact_paths(provider_raw_dir: Path) -> dict[str, Path]:
     return {
         f"provider_{filename.removesuffix('.jsonl')}": provider_raw_dir / filename
         for filename in RAW_CORPUS_FILENAMES
+    } | {
+        "provider_raw_polymarket_chainlink_prices": (
+            provider_raw_dir / CHAINLINK_RTDS_RAW_FILENAME
+        )
     }
 
 
@@ -450,6 +524,7 @@ def _finalize_pending_round_lifecycle_artifacts(
     config: PolymarketRealCorpusRecorderConfig,
     run_dir: Path,
     raw_payloads: dict[str, list[dict[str, Any]]],
+    raw_chainlink_rows: list[dict[str, Any]],
     finalization_reason_codes: tuple[str, ...],
 ) -> dict[str, Any]:
     markets = raw_payloads["raw_polymarket_markets.jsonl"]
@@ -513,6 +588,10 @@ def _finalize_pending_round_lifecycle_artifacts(
             run_reason_codes=finalization_reason_codes,
             status=status,
             recommendation=recommendation,
+            chainlink_prices=_chainlink_rows_for_market(
+                rows=raw_chainlink_rows,
+                market=market_row,
+            ),
         )
         round_summaries.append(finalized["round_summary"])
         index_row = finalized["index_row"]
@@ -798,6 +877,169 @@ def _preferred_resolution_candidates(
     ]
 
 
+def _causal_chainlink_rows_for_markets(
+    *,
+    rows: list[dict[str, Any]],
+    markets: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if not markets:
+        return [], ["chainlink_rtds_no_market_window"] if rows else []
+    window_start = min(int(row["market_start_ts"]) for row in markets)
+    window_end = max(int(row["market_end_ts"]) for row in markets)
+    accepted: dict[tuple[int, float], dict[str, Any]] = {}
+    reason_codes: set[str] = set()
+    for row in rows:
+        source_ts = _positive_int(row.get("source_ts"))
+        available_at_ts = _positive_int(row.get("available_at_ts"))
+        price = _positive_float(row.get("price"))
+        if source_ts is None or available_at_ts is None or price is None:
+            reason_codes.add("chainlink_rtds_invalid_raw_row")
+            continue
+        if source_ts > available_at_ts:
+            reason_codes.add("chainlink_rtds_timestamp_causality_violation")
+            continue
+        if source_ts < window_start - CHAINLINK_RTDS_LOOKBACK_MS:
+            continue
+        if source_ts > window_end:
+            continue
+        if available_at_ts > window_end:
+            reason_codes.add("chainlink_rtds_post_close_availability_excluded")
+            continue
+        if row.get("source_type") != "polymarket_rtds_chainlink":
+            reason_codes.add("chainlink_rtds_source_type_invalid")
+            continue
+        if any(
+            row.get(field_name) is not expected
+            for field_name, expected in safety_fields().items()
+        ):
+            reason_codes.add("chainlink_rtds_safety_contract_invalid")
+            continue
+        accepted[(source_ts, price)] = dict(row)
+    normalized = sorted(
+        accepted.values(),
+        key=lambda row: (
+            int(row["source_ts"]),
+            int(row["available_at_ts"]),
+            float(row["price"]),
+        ),
+    )
+    if not normalized:
+        reason_codes.add("chainlink_rtds_round_rows_unavailable")
+    for market in markets:
+        market_start_ts = int(market["market_start_ts"])
+        if not any(int(row["source_ts"]) <= market_start_ts for row in normalized):
+            reason_codes.add("chainlink_rtds_market_start_reference_unavailable")
+    return normalized, sorted(reason_codes)
+
+
+def _chainlink_rows_for_market(
+    *,
+    rows: list[dict[str, Any]],
+    market: dict[str, Any],
+) -> list[dict[str, Any]]:
+    selected, _ = _causal_chainlink_rows_for_markets(rows=rows, markets=[market])
+    return selected
+
+
+def _round_chainlink_collection_report(
+    *,
+    collection_report: dict[str, Any],
+    raw_rows: list[dict[str, Any]],
+    accepted_markets: list[dict[str, Any]],
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    covered_market_count = sum(
+        1
+        for market in accepted_markets
+        if any(
+            int(row["source_ts"]) <= int(market["market_start_ts"])
+            for row in raw_rows
+        )
+    )
+    return {
+        **collection_report,
+        "report_scope": "round_causal_window",
+        "accepted_market_count": len(accepted_markets),
+        "round_raw_price_row_count": len(raw_rows),
+        "market_start_reference_covered_market_count": covered_market_count,
+        "market_start_reference_missing_market_count": (
+            len(accepted_markets) - covered_market_count
+        ),
+        "round_reason_codes": reason_codes,
+        "timestamp_causality_violation_count": sum(
+            1
+            for row in raw_rows
+            if int(row["source_ts"]) > int(row["available_at_ts"])
+        ),
+        "read_only": True,
+        **safety_fields(),
+    }
+
+
+def _empty_chainlink_collection_report() -> dict[str, Any]:
+    return {
+        "report_type": "polymarket_chainlink_rtds_collection",
+        "source_type": "polymarket_rtds_chainlink",
+        "raw_price_row_count": 0,
+        "decision_critical": False,
+        "fail_closed_when_feature_unavailable": True,
+        "read_only": True,
+        **safety_fields(),
+    }
+
+
+def _attach_chainlink_evidence_to_corpus(
+    *,
+    corpus_dir: Path,
+    raw_rows: list[dict[str, Any]],
+    config: PolymarketRealCorpusRecorderConfig,
+) -> dict[str, Any]:
+    if not raw_rows:
+        return _empty_chainlink_corpus_evidence()
+    evidence_path = corpus_dir / CHAINLINK_RTDS_CORPUS_FILENAME
+    _write_jsonl(evidence_path, raw_rows)
+    manifest = {
+        "schema_version": "bigan-v8-polymarket-chainlink-decision-time-evidence-v1",
+        "source_run_id": config.run_id,
+        "source_type": "polymarket_rtds_chainlink",
+        "decision_time_only": True,
+        "row_count": len(raw_rows),
+        "evidence_path": CHAINLINK_RTDS_CORPUS_FILENAME,
+        "evidence_sha256": _sha256_file(evidence_path),
+        "timestamp_causality_violation_count": sum(
+            1
+            for row in raw_rows
+            if int(row["source_ts"]) > int(row["available_at_ts"])
+        ),
+        "feature_builder_integration_required": True,
+        "read_only": True,
+        **safety_fields(),
+    }
+    manifest_path = corpus_dir / CHAINLINK_RTDS_CORPUS_MANIFEST_FILENAME
+    _write_json(manifest_path, manifest)
+    return {
+        "attached": True,
+        "row_count": len(raw_rows),
+        "evidence_filename": CHAINLINK_RTDS_CORPUS_FILENAME,
+        "evidence_sha256": manifest["evidence_sha256"],
+        "manifest_filename": CHAINLINK_RTDS_CORPUS_MANIFEST_FILENAME,
+        "manifest_sha256": _sha256_file(manifest_path),
+        "feature_builder_integration_required": True,
+    }
+
+
+def _empty_chainlink_corpus_evidence() -> dict[str, Any]:
+    return {
+        "attached": False,
+        "row_count": 0,
+        "evidence_filename": None,
+        "evidence_sha256": None,
+        "manifest_filename": None,
+        "manifest_sha256": None,
+        "feature_builder_integration_required": True,
+    }
+
+
 def _pending_capture_report(
     *,
     config: PolymarketRealCorpusRecorderConfig,
@@ -805,6 +1047,9 @@ def _pending_capture_report(
     provider_raw_payloads: dict[str, list[dict[str, Any]]],
     rejected_rows: list[dict[str, Any]],
     provider_failures: list[dict[str, Any]],
+    raw_chainlink_rows: list[dict[str, Any]],
+    provider_chainlink_rows: list[dict[str, Any]],
+    chainlink_reason_codes: list[str],
 ) -> dict[str, Any]:
     market_count = len(raw_payloads["raw_polymarket_markets.jsonl"])
     reject_counts = _reject_counts(rejected_rows)
@@ -855,6 +1100,14 @@ def _pending_capture_report(
         ),
         "raw_trade_row_count": len(raw_payloads["raw_polymarket_trades.jsonl"]),
         "raw_btc_candle_row_count": len(raw_payloads["raw_binance_btcusdt_klines.jsonl"]),
+        "raw_chainlink_price_row_count": len(raw_chainlink_rows),
+        "provider_raw_chainlink_price_row_count": len(provider_chainlink_rows),
+        "chainlink_timestamp_causality_violation_count": sum(
+            1
+            for row in raw_chainlink_rows
+            if int(row.get("source_ts") or 0) > int(row.get("available_at_ts") or 0)
+        ),
+        "chainlink_capture_reason_codes": chainlink_reason_codes,
         "raw_resolution_count": 0,
         "rejected_row_count": len(rejected_rows),
         "reject_reason_counts": reject_counts,
@@ -879,6 +1132,8 @@ def _pending_capture_manifest(
     provider_raw_payloads: dict[str, list[dict[str, Any]]],
     provider_raw_dir: Path,
     report: dict[str, Any],
+    raw_chainlink_rows: list[dict[str, Any]],
+    provider_chainlink_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     raw_paths = {filename: config.raw_dir / filename for filename in RAW_CORPUS_FILENAMES}
     return {
@@ -902,6 +1157,17 @@ def _pending_capture_manifest(
             filename: len(provider_raw_payloads[filename])
             for filename in RAW_CORPUS_FILENAMES
         },
+        "chainlink_raw_artifact_sha256": _optional_sha256_file(
+            config.raw_dir / CHAINLINK_RTDS_RAW_FILENAME
+        ),
+        "chainlink_raw_artifact_row_count": len(raw_chainlink_rows),
+        "provider_chainlink_raw_artifact_sha256": _optional_sha256_file(
+            provider_raw_dir / CHAINLINK_RTDS_RAW_FILENAME
+        ),
+        "provider_chainlink_raw_artifact_row_count": len(provider_chainlink_rows),
+        "chainlink_collection_report_sha256": _optional_sha256_file(
+            config.run_dir / CHAINLINK_RTDS_COLLECTION_REPORT_FILENAME
+        ),
         "provider_raw_artifacts_preserved": True,
         "training_raw_is_validated_sampled_view": True,
         "pending_resolution": report["pending_resolution"],
@@ -921,6 +1187,9 @@ def _pending_finalization_report(
     phase2_error: str | None,
     exported_training_corpus_dir: Path | None,
     round_artifact_evidence: dict[str, Any],
+    raw_chainlink_rows: list[dict[str, Any]],
+    provider_chainlink_rows: list[dict[str, Any]],
+    chainlink_corpus_evidence: dict[str, Any],
 ) -> dict[str, Any]:
     market_count = len(raw_payloads["raw_polymarket_markets.jsonl"])
     resolution_count = len(raw_payloads["raw_polymarket_resolutions.jsonl"])
@@ -951,6 +1220,9 @@ def _pending_finalization_report(
         "provider_raw_artifacts_preserved": True,
         "raw_trade_row_count": len(raw_payloads["raw_polymarket_trades.jsonl"]),
         "raw_btc_candle_row_count": len(raw_payloads["raw_binance_btcusdt_klines.jsonl"]),
+        "raw_chainlink_price_row_count": len(raw_chainlink_rows),
+        "provider_raw_chainlink_price_row_count": len(provider_chainlink_rows),
+        "chainlink_corpus_evidence": chainlink_corpus_evidence,
         "raw_resolution_count": resolution_count,
         "rejected_row_count": len(rejected_rows),
         "reject_reason_counts": _reject_counts(rejected_rows),
@@ -995,6 +1267,9 @@ def _pending_finalization_manifest(
     phase2_result: Any,
     exported_training_corpus_dir: Path | None,
     round_artifact_evidence: dict[str, Any],
+    raw_chainlink_rows: list[dict[str, Any]],
+    provider_chainlink_rows: list[dict[str, Any]],
+    chainlink_corpus_evidence: dict[str, Any],
 ) -> dict[str, Any]:
     raw_paths = {filename: config.raw_dir / filename for filename in RAW_CORPUS_FILENAMES}
     return {
@@ -1017,6 +1292,18 @@ def _pending_finalization_manifest(
             filename: len(provider_raw_payloads[filename])
             for filename in RAW_CORPUS_FILENAMES
         },
+        "chainlink_raw_artifact_sha256": _optional_sha256_file(
+            config.raw_dir / CHAINLINK_RTDS_RAW_FILENAME
+        ),
+        "chainlink_raw_artifact_row_count": len(raw_chainlink_rows),
+        "provider_chainlink_raw_artifact_sha256": _optional_sha256_file(
+            provider_raw_dir / CHAINLINK_RTDS_RAW_FILENAME
+        ),
+        "provider_chainlink_raw_artifact_row_count": len(provider_chainlink_rows),
+        "chainlink_collection_report_sha256": _optional_sha256_file(
+            config.run_dir / CHAINLINK_RTDS_COLLECTION_REPORT_FILENAME
+        ),
+        "chainlink_corpus_evidence": chainlink_corpus_evidence,
         "provider_raw_artifacts_preserved": True,
         "training_raw_is_validated_sampled_view": True,
         "finalization_status": report["finalization_status"],
@@ -1130,6 +1417,26 @@ def _reject_counts(rejected_rows: list[dict[str, Any]]) -> dict[str, int]:
         for reason in row.get("reject_reasons", []):
             counts[str(reason)] += 1
     return dict(sorted(counts.items()))
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _positive_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0.0 else None
+
+
+def _optional_sha256_file(path: Path) -> str | None:
+    return _sha256_file(path) if path.exists() else None
 
 
 def _read_json(path: Path) -> dict[str, Any]:

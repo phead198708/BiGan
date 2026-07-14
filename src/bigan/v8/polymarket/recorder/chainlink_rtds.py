@@ -7,7 +7,7 @@ import json
 import threading
 import time
 from collections import Counter, deque
-from typing import Any
+from typing import Any, Protocol
 
 import websockets
 
@@ -20,6 +20,22 @@ POLYMARKET_RTDS_CHAINLINK_SYMBOL = "btc/usd"
 CHAINLINK_RTDS_RAW_ROW_SCHEMA_VERSION = (
     "bigan-v8-polymarket-chainlink-rtds-raw-price-v1"
 )
+CHAINLINK_RTDS_RAW_FILENAME = "raw_polymarket_chainlink_prices.jsonl"
+CHAINLINK_RTDS_COLLECTION_REPORT_FILENAME = (
+    "polymarket_chainlink_rtds_collection_report.json"
+)
+CHAINLINK_RTDS_CORPUS_FILENAME = "polymarket_chainlink_prices.jsonl"
+CHAINLINK_RTDS_CORPUS_MANIFEST_FILENAME = (
+    "polymarket_chainlink_decision_time_evidence_manifest.json"
+)
+
+
+class ChainlinkRTDSSnapshotSource(Protocol):
+    """Read-only snapshot boundary used by round-scoped collectors."""
+
+    def rows(self) -> list[dict[str, Any]]: ...
+
+    def collection_report(self) -> dict[str, Any]: ...
 
 
 class ChainlinkRTDSMessageError(ValueError):

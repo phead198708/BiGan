@@ -16,6 +16,11 @@ from bigan.v8.polymarket.recorder import (
     finalize_polymarket_pending_round,
 )
 from bigan.v8.polymarket.recorder.btc_reference import mock_btc_feature_candle_rows
+from bigan.v8.polymarket.recorder.chainlink_rtds import (
+    CHAINLINK_RTDS_CORPUS_FILENAME,
+    CHAINLINK_RTDS_CORPUS_MANIFEST_FILENAME,
+    CHAINLINK_RTDS_RAW_FILENAME,
+)
 from bigan.v8.polymarket.recorder.market_discovery import discover_mock_market_rows
 from bigan.v8.polymarket.recorder.orderbook_state import (
     mock_orderbook_rows,
@@ -57,6 +62,102 @@ def test_pending_capture_does_not_call_resolution_or_export(tmp_path: Path) -> N
         "raw_polymarket_orderbooks.jsonl"
     ]
     assert result.manifest["training_raw_is_validated_sampled_view"] is True
+
+
+def test_pending_round_persists_causal_chainlink_evidence_through_export(
+    tmp_path: Path,
+) -> None:
+    provider = AsyncSettlementFakeProvider(resolved=True)
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="pending-chainlink-round",
+        output_dir=tmp_path,
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+    market = provider.market_rows(config)[0]
+    market_start_ts = int(market["market_start_ts"])
+    market_end_ts = int(market["market_end_ts"])
+    collector = AsyncSettlementFakeChainlinkCollector(
+        rows=[
+            _chainlink_row(market_start_ts - 1_000, 65_000.0),
+            _chainlink_row(market_start_ts + 60_000, 65_025.0),
+            _chainlink_row(market_end_ts + 1_000, 99_999.0),
+        ]
+    )
+
+    capture = capture_polymarket_pending_round(
+        config,
+        public_provider=provider,
+        chainlink_rtds_collector=collector,
+    )
+
+    assert capture.report["raw_chainlink_price_row_count"] == 2
+    assert capture.report["chainlink_timestamp_causality_violation_count"] == 0
+    assert capture.manifest["chainlink_raw_artifact_row_count"] == 2
+    assert capture.manifest["chainlink_raw_artifact_sha256"]
+    raw_rows = _read_jsonl(capture.raw_dir / CHAINLINK_RTDS_RAW_FILENAME)
+    assert [row["price"] for row in raw_rows] == [65_000.0, 65_025.0]
+
+    finalized = finalize_polymarket_pending_round(
+        capture.run_dir,
+        public_provider=provider,
+        destination_root=tmp_path / "training_root",
+        overwrite_existing=True,
+    )
+
+    assert finalized.report["finalization_status"] == "exported"
+    assert finalized.report["raw_chainlink_price_row_count"] == 2
+    assert finalized.report["chainlink_corpus_evidence"]["attached"] is True
+    rounds_index = _read_jsonl(finalized.artifact_paths["rounds_index"])
+    training_raw_dir = finalized.run_dir / rounds_index[0]["training_raw_dir"]
+    assert len(_read_jsonl(training_raw_dir / CHAINLINK_RTDS_RAW_FILENAME)) == 2
+    training_manifest = _read_json(training_raw_dir / "round_training_manifest.json")
+    assert training_manifest["raw_chainlink_price_row_count"] == 2
+    assert training_manifest["supplemental_decision_time_artifact_hashes"][
+        CHAINLINK_RTDS_RAW_FILENAME
+    ]
+    assert finalized.exported_training_corpus_dir is not None
+    assert len(
+        _read_jsonl(
+            finalized.exported_training_corpus_dir / CHAINLINK_RTDS_CORPUS_FILENAME
+        )
+    ) == 2
+    evidence_manifest = _read_json(
+        finalized.exported_training_corpus_dir
+        / CHAINLINK_RTDS_CORPUS_MANIFEST_FILENAME
+    )
+    assert evidence_manifest["decision_time_only"] is True
+    assert evidence_manifest["timestamp_causality_violation_count"] == 0
+
+
+def test_pending_round_rejects_noncausal_chainlink_rows_without_blocking_core_capture(
+    tmp_path: Path,
+) -> None:
+    provider = AsyncSettlementFakeProvider(resolved=False)
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="pending-invalid-chainlink",
+        output_dir=tmp_path,
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+    market = provider.market_rows(config)[0]
+    source_ts = int(market["market_start_ts"])
+    invalid = _chainlink_row(source_ts, 65_000.0)
+    invalid["available_at_ts"] = source_ts - 1
+
+    capture = capture_polymarket_pending_round(
+        config,
+        public_provider=provider,
+        chainlink_rtds_collector=AsyncSettlementFakeChainlinkCollector(
+            rows=[invalid]
+        ),
+    )
+
+    assert capture.report["capture_status"] == "pending_resolution"
+    assert capture.report["raw_chainlink_price_row_count"] == 0
+    assert "chainlink_rtds_timestamp_causality_violation" in capture.report[
+        "chainlink_capture_reason_codes"
+    ]
 
 
 def test_pending_capture_explains_orderbook_rejection_without_raw_book_dump(
@@ -384,6 +485,24 @@ class AsyncSettlementTwoRoundProvider(AsyncSettlementFakeProvider):
         return [_as_real_public_market_row(row) for row in discover_mock_market_rows(config)[:2]]
 
 
+class AsyncSettlementFakeChainlinkCollector:
+    def __init__(self, *, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def rows(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self._rows]
+
+    def collection_report(self) -> dict[str, Any]:
+        return {
+            "report_type": "polymarket_chainlink_rtds_collection",
+            "source_type": "polymarket_rtds_chainlink",
+            "raw_price_row_count": len(self._rows),
+            "read_only": True,
+            "paper_only": True,
+            "capital_at_risk": False,
+        }
+
+
 def _as_real_public_market_row(row: dict[str, Any]) -> dict[str, Any]:
     market = dict(row)
     market["raw_market_sha256"] = canonical_json_sha256(
@@ -395,6 +514,21 @@ def _as_real_public_market_row(row: dict[str, Any]) -> dict[str, Any]:
     )
     market["raw_public_payload"] = {"mock_public_data": False}
     return market
+
+
+def _chainlink_row(source_ts: int, price: float) -> dict[str, Any]:
+    return {
+        "source_type": "polymarket_rtds_chainlink",
+        "source_ts": source_ts,
+        "available_at_ts": source_ts,
+        "price": price,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "broker_exchange_write_enabled": False,
+        "live_exchange_write_enabled": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

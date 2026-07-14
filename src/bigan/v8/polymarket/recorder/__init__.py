@@ -9,6 +9,14 @@ from bigan.v8.polymarket.recorder.async_settlement import (
     capture_polymarket_pending_round,
     finalize_polymarket_pending_round,
 )
+from bigan.v8.polymarket.recorder.chainlink_rtds import (
+    CHAINLINK_RTDS_COLLECTION_REPORT_FILENAME,
+    CHAINLINK_RTDS_CORPUS_FILENAME,
+    CHAINLINK_RTDS_CORPUS_MANIFEST_FILENAME,
+    CHAINLINK_RTDS_RAW_FILENAME,
+    DEFAULT_POLYMARKET_RTDS_URL,
+    PolymarketChainlinkRTDSCollector,
+)
 from bigan.v8.polymarket.recorder.contracts import (
     DEFAULT_BTC_FEATURE_CANDLE_SOURCE,
     DEFAULT_OFFICIAL_SETTLEMENT_REFERENCE_SOURCE,
@@ -42,9 +50,15 @@ __all__ = [
     "POLYMARKET_REAL_CORPUS_RECORDER_PHASE",
     "POLYMARKET_REAL_CORPUS_RECORDER_SCHEMA_VERSION",
     "DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL",
+    "DEFAULT_POLYMARKET_RTDS_URL",
+    "CHAINLINK_RTDS_COLLECTION_REPORT_FILENAME",
+    "CHAINLINK_RTDS_CORPUS_FILENAME",
+    "CHAINLINK_RTDS_CORPUS_MANIFEST_FILENAME",
+    "CHAINLINK_RTDS_RAW_FILENAME",
     "PendingRoundCaptureResult",
     "PendingRoundFinalizationResult",
     "PolymarketCLOBWebSocketOrderBookSource",
+    "PolymarketChainlinkRTDSCollector",
     "PolymarketOrderBookSource",
     "PolymarketRealCorpusRecorderConfig",
     "PolymarketRealCorpusRecorderResult",
