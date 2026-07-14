@@ -24,8 +24,15 @@ from bigan.v8.polymarket.training.execution_layer_v2_hts_residual_edge import (
 )
 from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
     PINNED_ISSUE_160_MANIFEST_SHA256,
+    _fresh_public_ranking_row_from_canonical,
     _fresh_public_row_from_provider_feature_context,
     score_frozen_o_decision_rows,
+)
+from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking import (
+    _v8_apply_simulated_order_to_state,
+    _v8_execution_guard_config,
+    _v8_execution_guard_decision,
+    _v8_initial_runtime_state,
 )
 
 SCHEMA_PREFIX = "bigan-v8-hts-residual-development-corpus"
@@ -43,6 +50,7 @@ HTS_ACTIONS = {
     "BUY_UP_HOLD_TO_SETTLEMENT",
     "BUY_DOWN_HOLD_TO_SETTLEMENT",
 }
+FROZEN_OOF_PNL_ENTRY_EDGE_THRESHOLD = 0.02
 FORBIDDEN_DECISION_FIELDS = {
     "resolved_outcome",
     "settlement_pnl",
@@ -487,6 +495,7 @@ def run_hts_residual_development_forward_oof(
                 rows,
                 spec,
                 minimum_training_runs=minimum_training_runs,
+                include_prediction_rows=True,
             )
             for spec in _protocol_candidate_specs(protocol)
         ]
@@ -504,6 +513,31 @@ def run_hts_residual_development_forward_oof(
             support=support,
             protocol=protocol,
         )
+
+    pnl_prediction_rows = [
+        row
+        for candidate in candidate_reports
+        for row in candidate.pop("_forward_oof_prediction_rows", [])
+    ]
+    pnl_report, pnl_rows = _forward_oof_pnl_comparison(
+        prediction_rows=pnl_prediction_rows,
+        selected_candidate_name=(
+            str(selected["candidate_name"]) if selected is not None else None
+        ),
+        protocol_hash=protocol_hash,
+        run_id=config.run_id,
+    )
+    pnl_rows_path = output_dir / "hts_residual_development_forward_oof_pnl_rows.jsonl"
+    _write_jsonl(pnl_rows_path, pnl_rows)
+    pnl_report_path = (
+        output_dir
+        / "hts_residual_development_forward_oof_pnl_comparison_report.json"
+    )
+    _write_json(pnl_report_path, pnl_report)
+    pnl_markdown_path = (
+        output_dir / "hts_residual_development_forward_oof_pnl_comparison_report.md"
+    )
+    _write_text(pnl_markdown_path, _forward_oof_pnl_markdown(pnl_report))
 
     combined_rows_path = output_dir / "hts_residual_development_oof_rows.jsonl"
     _write_jsonl(combined_rows_path, rows)
@@ -526,6 +560,21 @@ def run_hts_residual_development_forward_oof(
         "selected_candidate_contract": selected_contract,
         "development_candidate_gate": gate,
         "development_candidate_gate_passed": gate["passed"],
+        "pnl_comparison_diagnostic": {
+            "status": pnl_report["status"],
+            "selected_candidate_name": pnl_report["selected_candidate_name"],
+            "selected_candidate_pnl_improved_vs_raw_baseline": pnl_report[
+                "selected_candidate_pnl_improved_vs_raw_baseline"
+            ],
+            "pnl_used_for_candidate_ranking": False,
+            "pnl_used_for_threshold_tuning": False,
+            "development_candidate_gate_unchanged": True,
+        },
+        "pnl_comparison_artifacts": {
+            "report": _descriptor(pnl_report_path),
+            "markdown": _descriptor(pnl_markdown_path),
+            "rows": _descriptor(pnl_rows_path),
+        },
         "candidate_freeze_review_allowed": gate["passed"],
         "candidate_frozen": False,
         "confirmatory_validation_started": False,
@@ -554,6 +603,9 @@ def run_hts_residual_development_forward_oof(
         "run_id": config.run_id,
         "report": _descriptor(report_path),
         "combined_rows": _descriptor(combined_rows_path),
+        "pnl_comparison_report": _descriptor(pnl_report_path),
+        "pnl_comparison_markdown": _descriptor(pnl_markdown_path),
+        "pnl_comparison_rows": _descriptor(pnl_rows_path),
         "protocol": _descriptor(Path(config.protocol_path)),
         "development_candidate_gate_passed": gate["passed"],
         "candidate_frozen": False,
@@ -571,8 +623,628 @@ def run_hts_residual_development_forward_oof(
         "output_dir": output_dir,
         "report_path": report_path,
         "manifest_path": manifest_path,
+        "pnl_comparison_report_path": pnl_report_path,
+        "pnl_comparison_rows_path": pnl_rows_path,
         "manifest_sha256": _sha256_file(manifest_path),
         "report": report,
+    }
+
+
+def _forward_oof_pnl_comparison(
+    *,
+    prediction_rows: list[dict[str, Any]],
+    selected_candidate_name: str | None,
+    protocol_hash: str,
+    run_id: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    guard_config = _v8_execution_guard_config()
+    contract = {
+        "contract_id": "hts_residual_forward_oof_execution_bet_pnl_v1",
+        "entry_edge_formula": (
+            "predicted_probability - execution_price - "
+            "decision_time_expected_execution_cost_per_unit"
+        ),
+        "entry_edge_threshold": FROZEN_OOF_PNL_ENTRY_EDGE_THRESHOLD,
+        "entry_edge_threshold_source": (
+            "preexisting_execution_layer_v2_entry_ev_threshold_default"
+        ),
+        "execution_guard_config": guard_config,
+        "execution_guard_config_sha256": canonical_json_sha256(guard_config),
+        "bet_size_source": "frozen_v8_execution_guard_proposed_order_size",
+        "realized_bet_pnl_formula": (
+            "guard_proposed_order_size_contracts * "
+            "guarded_action_target_net_pnl_per_contract"
+        ),
+        "cost_basis_formula": (
+            "guard_proposed_order_size_contracts * "
+            "(execution_price + execution_cost_per_contract)"
+        ),
+        "pnl_unit_contract": "absolute_usd_like_pnl_per_prediction_contract",
+        "guard_proposed_order_size_semantics": "prediction_contract_count",
+        "threshold_frozen_before_oof_pnl_evaluation": True,
+        "pnl_used_for_candidate_ranking": False,
+        "pnl_used_for_threshold_tuning": False,
+        "outcome_fields_used_for_selection": False,
+        "outcome_fields_used_for_evaluation_only": True,
+    }
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in prediction_rows:
+        grouped[str(row["candidate_name"])].append(row)
+
+    comparison_rows: list[dict[str, Any]] = []
+    candidate_comparisons: list[dict[str, Any]] = []
+    baseline_metrics: dict[str, Any] | None = None
+    baseline_replay_rows: list[dict[str, Any]] | None = None
+    expected_identities: set[str] | None = None
+    for candidate_name in sorted(grouped):
+        source_rows = sorted(
+            grouped[candidate_name],
+            key=lambda row: (
+                int(row["decision_ts"]),
+                str(row["market_id"]),
+                str(row["row_identity"]),
+            ),
+        )
+        identities = {str(row["row_identity"]) for row in source_rows}
+        if expected_identities is None:
+            expected_identities = identities
+        elif identities != expected_identities:
+            raise ValueError("candidate OOF PnL row identities do not match")
+        if baseline_replay_rows is None:
+            baseline_replay_rows = _frozen_execution_bet_replay(
+                source_rows,
+                policy_name="raw_market_probability_baseline",
+                probability_field="raw_baseline_probability",
+                guard_config=guard_config,
+            )
+            comparison_rows.extend(baseline_replay_rows)
+        observed_baseline = _oof_execution_bet_metrics(baseline_replay_rows)
+        if baseline_metrics is None:
+            baseline_metrics = observed_baseline
+        elif observed_baseline != baseline_metrics:
+            raise ValueError("raw baseline OOF PnL metrics differ across candidates")
+        candidate_replay_rows = _frozen_execution_bet_replay(
+            source_rows,
+            policy_name=candidate_name,
+            probability_field="candidate_probability",
+            guard_config=guard_config,
+        )
+        comparison_rows.extend(candidate_replay_rows)
+        candidate_metrics = _oof_execution_bet_metrics(candidate_replay_rows)
+        candidate_comparisons.append(
+            {
+                "candidate_name": candidate_name,
+                "candidate_policy_metrics": candidate_metrics,
+                "pnl_delta_vs_raw_baseline": (
+                    candidate_metrics["settled_pnl_sum"]
+                    - observed_baseline["settled_pnl_sum"]
+                ),
+                "execution_bet_count_delta_vs_raw_baseline": (
+                    candidate_metrics["execution_bet_count"]
+                    - observed_baseline["execution_bet_count"]
+                ),
+                "candidate_pnl_improved_vs_raw_baseline": (
+                    candidate_metrics["settled_pnl_sum"]
+                    > observed_baseline["settled_pnl_sum"]
+                ),
+                "candidate_probability_used_for_expected_net_return_gate": True,
+                "frozen_execution_guard_applied_after_model_signal": True,
+                "target_net_return_used_for_selection": False,
+            }
+        )
+
+    baseline_metrics = baseline_metrics or _empty_oof_execution_bet_metrics()
+    selected_comparison = next(
+        (
+            row
+            for row in candidate_comparisons
+            if row["candidate_name"] == selected_candidate_name
+        ),
+        None,
+    )
+    report = {
+        "schema_version": f"{SCHEMA_PREFIX}-forward-oof-pnl-comparison-v1",
+        "run_id": run_id,
+        "status": (
+            "DEVELOPMENT_OOF_PNL_DIAGNOSTIC_COMPLETE"
+            if prediction_rows
+            else "DEVELOPMENT_OOF_PNL_DIAGNOSTIC_BLOCKED_NO_PREDICTIONS"
+        ),
+        "protocol_sha256": protocol_hash,
+        "pnl_diagnostic_contract": contract,
+        "pnl_diagnostic_contract_sha256": canonical_json_sha256(contract),
+        "selected_candidate_name": selected_candidate_name,
+        "oof_prediction_row_count": len(prediction_rows),
+        "unique_oof_row_count": len(expected_identities or set()),
+        "raw_market_probability_baseline_policy_metrics": baseline_metrics,
+        "candidate_comparisons": candidate_comparisons,
+        "selected_candidate_comparison": selected_comparison,
+        "selected_candidate_pnl_improved_vs_raw_baseline": bool(
+            selected_comparison
+            and selected_comparison["candidate_pnl_improved_vs_raw_baseline"]
+        ),
+        "raw_market_probability_used_as_direct_fair_value_ev_in_diagnostic_baseline": True,
+        "raw_market_probability_direct_fair_value_execution_eligible": False,
+        "explicit_decision_time_cost_field_available_for_selection": True,
+        "execution_guard_applied_to_model_signal_candidates": True,
+        "execution_bet_pnl_is_primary_comparison_metric": True,
+        "execution_pnl_diagnostic_conclusion": (
+            "no_policy_reached_frozen_execution_edge_threshold"
+            if baseline_metrics["execution_bet_count"] == 0
+            and all(
+                row["candidate_policy_metrics"]["execution_bet_count"] == 0
+                for row in candidate_comparisons
+            )
+            else "accepted_bet_pnl_available_for_diagnostic_comparison"
+        ),
+        "realized_target_includes_phase2_cost_model": True,
+        "models_frozen_order_sizing_and_runtime_exposure": True,
+        "models_actual_exchange_fills": False,
+        "development_candidate_gate_unchanged": True,
+        "pnl_used_for_candidate_ranking": False,
+        "pnl_used_for_threshold_tuning": False,
+        "confirmatory_validation_started": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    return report, comparison_rows
+
+
+def _frozen_execution_bet_replay(
+    source_rows: list[dict[str, Any]],
+    *,
+    policy_name: str,
+    probability_field: str,
+    guard_config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    state = _v8_initial_runtime_state(guard_config)
+    market_close_by_open_position: dict[str, int] = {}
+    replay_rows: list[dict[str, Any]] = []
+    ordered_rows = sorted(
+        source_rows,
+        key=lambda row: (
+            int(row["decision_ts"]),
+            str(row["market_id"]),
+            str(row["row_identity"]),
+        ),
+    )
+    for index, row in enumerate(ordered_rows, start=1):
+        _release_closed_simulated_positions(
+            state=state,
+            market_close_by_open_position=market_close_by_open_position,
+            decision_ts=int(row["decision_ts"]),
+        )
+        probability = float(row[probability_field])
+        expected_net_pnl_per_contract = (
+            probability
+            - float(row["execution_price"])
+            - float(row["decision_time_expected_execution_cost_per_unit"])
+        )
+        signal_passed = (
+            expected_net_pnl_per_contract >= FROZEN_OOF_PNL_ENTRY_EDGE_THRESHOLD
+        )
+        handoff = dict(row.get("execution_handoff_context") or {})
+        blocking_reason_codes: list[str] = []
+        guard_row: dict[str, Any] | None = None
+        if not signal_passed:
+            blocking_reason_codes.append(
+                "model_expected_net_return_below_frozen_threshold"
+            )
+        elif not handoff:
+            blocking_reason_codes.append("execution_handoff_context_missing")
+        else:
+            guard_row = _v8_execution_guard_decision(
+                handoff,
+                guard_config=guard_config,
+                runtime_state=state,
+                runtime_mode="simulated_runtime_state",
+            )
+            blocking_reason_codes.extend(
+                guard_row["execution_blocking_reason_codes"]
+            )
+        guard_order_allowed = bool(guard_row and guard_row["order_allowed"])
+        order_allowed = guard_order_allowed
+        guarded_action = (
+            str(guard_row["execution_guarded_action"])
+            if guard_row is not None
+            else None
+        )
+        proposed_size = (
+            float(guard_row["proposed_order_size"]) if order_allowed else 0.0
+        )
+        target_by_action = dict(
+            row.get("evaluation_target_net_pnl_per_contract_by_action") or {}
+        )
+        components_by_action = dict(
+            row.get("evaluation_target_pnl_components_by_action") or {}
+        )
+        guarded_target = target_by_action.get(guarded_action)
+        source_selected_target = target_by_action.get(str(row["selected_action"]))
+        target_available = isinstance(guarded_target, int | float) and math.isfinite(
+            float(guarded_target)
+        )
+        guarded_components = dict(components_by_action.get(guarded_action) or {})
+        component_values = {
+            name: guarded_components.get(name)
+            for name in (
+                "gross_pnl_per_contract",
+                "fees_per_contract",
+                "slippage_per_contract",
+                "liquidity_impact_per_contract",
+                "execution_cost_per_contract",
+                "net_pnl_per_contract",
+            )
+        }
+        component_values_available = all(
+            isinstance(value, int | float) and math.isfinite(float(value))
+            for value in component_values.values()
+        )
+        simulated_order_id = None
+        gross_pnl = None
+        execution_cost = None
+        settled_pnl = None
+        if order_allowed and target_available and component_values_available:
+            simulated_order_id = f"{policy_name}-bet-{index:06d}"
+            gross_pnl = proposed_size * float(
+                component_values["gross_pnl_per_contract"]
+            )
+            execution_cost = proposed_size * float(
+                component_values["execution_cost_per_contract"]
+            )
+            settled_pnl = proposed_size * float(guarded_target)
+            _v8_apply_simulated_order_to_state(
+                state=state,
+                decision=guard_row,
+                simulated_order_id=simulated_order_id,
+            )
+            market_close_by_open_position[str(row["market_id"])] = int(
+                row["market_close_ts"]
+            )
+        elif order_allowed:
+            if not target_available:
+                blocking_reason_codes.append(
+                    "guarded_action_net_pnl_per_contract_target_missing"
+                )
+            if not component_values_available:
+                blocking_reason_codes.append(
+                    "guarded_action_pnl_components_missing"
+                )
+            order_allowed = False
+            proposed_size = 0.0
+        replay_rows.append(
+            {
+                "policy_name": policy_name,
+                "candidate_name": row.get("candidate_name"),
+                "row_identity": str(row["row_identity"]),
+                "market_id": str(row["market_id"]),
+                "source_run_id": str(row["source_run_id"]),
+                "decision_ts": int(row["decision_ts"]),
+                "market_close_ts": int(row["market_close_ts"]),
+                "source_selected_action": str(row["selected_action"]),
+                "source_selected_side": str(row["selected_side"]),
+                "model_probability": probability,
+                "model_probability_source_field": probability_field,
+                "execution_price": float(row["execution_price"]),
+                "decision_time_expected_execution_cost_per_unit": float(
+                    row["decision_time_expected_execution_cost_per_unit"]
+                ),
+                "model_expected_net_pnl_per_contract": (
+                    expected_net_pnl_per_contract
+                ),
+                "model_entry_edge": expected_net_pnl_per_contract,
+                "model_signal_passed": signal_passed,
+                "execution_guard_evaluated": guard_row is not None,
+                "execution_guard_order_allowed": guard_order_allowed,
+                "execution_guarded_action": guarded_action,
+                "execution_guarded_side": (
+                    guard_row.get("execution_guarded_side") if guard_row else None
+                ),
+                "execution_order_allowed": order_allowed,
+                "simulated_order_id": simulated_order_id,
+                "paper_bet_contract_size": proposed_size,
+                "paper_bet_entry_cost_basis": (
+                    proposed_size
+                    * (
+                        float(row["execution_price"])
+                        + float(component_values["execution_cost_per_contract"])
+                    )
+                    if order_allowed
+                    else 0.0
+                ),
+                "guarded_action_target_net_pnl_per_contract": (
+                    float(guarded_target) if target_available else None
+                ),
+                "source_selected_action_target_net_pnl_per_contract": (
+                    float(source_selected_target)
+                    if isinstance(source_selected_target, int | float)
+                    and math.isfinite(float(source_selected_target))
+                    else None
+                ),
+                "guarded_action_gross_pnl_per_contract": (
+                    float(component_values["gross_pnl_per_contract"])
+                    if component_values_available
+                    else None
+                ),
+                "guarded_action_execution_cost_per_contract": (
+                    float(component_values["execution_cost_per_contract"])
+                    if component_values_available
+                    else None
+                ),
+                "gross_pnl": gross_pnl,
+                "execution_cost": execution_cost,
+                "settled_pnl": settled_pnl,
+                "settlement_target_available": (
+                    target_available and component_values_available
+                ),
+                "execution_blocking_reason_codes": sorted(
+                    set(blocking_reason_codes)
+                ),
+                "execution_guard_reason_codes": (
+                    list(guard_row["execution_guard_reason_codes"])
+                    if guard_row
+                    else []
+                ),
+                "source_o_score_mutated": False,
+                "source_ranking_mutated": False,
+                "selection_uses_outcome_fields": False,
+                "outcome_aware_evaluation_only": True,
+                "promotion_evidence_eligible": False,
+                "paper_only": True,
+                "capital_at_risk": False,
+            }
+        )
+    return replay_rows
+
+
+def _release_closed_simulated_positions(
+    *,
+    state: dict[str, Any],
+    market_close_by_open_position: dict[str, int],
+    decision_ts: int,
+) -> None:
+    closed_markets = sorted(
+        market_id
+        for market_id, close_ts in market_close_by_open_position.items()
+        if close_ts <= decision_ts
+    )
+    for market_id in closed_markets:
+        position = state["open_position_by_market_id"].pop(market_id, None)
+        market_close_by_open_position.pop(market_id, None)
+        if not isinstance(position, dict):
+            continue
+        side = str(position.get("side") or "NONE")
+        notional = float(position.get("notional") or 0.0)
+        state["open_position_by_market_side"].pop(f"{market_id}|{side}", None)
+        state["current_market_exposure_by_market_id"].pop(market_id, None)
+        state["current_side_exposure_by_side"][side] = max(
+            0.0,
+            float(state["current_side_exposure_by_side"].get(side) or 0.0)
+            - notional,
+        )
+        state["current_total_exposure"] = max(
+            0.0, float(state.get("current_total_exposure") or 0.0) - notional
+        )
+
+
+def _oof_execution_bet_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    bets = [row for row in rows if row["execution_order_allowed"] is True]
+    settled = [row for row in bets if row["settled_pnl"] is not None]
+    pnl_values = [float(row["settled_pnl"]) for row in settled]
+    pnl_sum = sum(pnl_values)
+    cost_basis = sum(float(row["paper_bet_entry_cost_basis"]) for row in bets)
+    contract_size = sum(float(row["paper_bet_contract_size"]) for row in bets)
+    gross_pnl_sum = sum(float(row["gross_pnl"]) for row in settled)
+    execution_cost_sum = sum(float(row["execution_cost"]) for row in settled)
+    market_pnl: dict[str, float] = defaultdict(float)
+    for row in settled:
+        market_pnl[str(row["market_id"])] += float(row["settled_pnl"])
+    equity = 0.0
+    peak = 0.0
+    maximum_drawdown = 0.0
+    for row in sorted(
+        settled,
+        key=lambda row: (
+            int(row["market_close_ts"]),
+            str(row["market_id"]),
+            str(row["simulated_order_id"]),
+        ),
+    ):
+        pnl = float(row["settled_pnl"])
+        equity += pnl
+        peak = max(peak, equity)
+        maximum_drawdown = max(maximum_drawdown, peak - equity)
+    blockers = Counter(
+        reason
+        for row in rows
+        for reason in row["execution_blocking_reason_codes"]
+    )
+    model_edges = [float(row["model_entry_edge"]) for row in rows]
+    selected_action_targets = [
+        float(row["source_selected_action_target_net_pnl_per_contract"])
+        for row in rows
+        if row["source_selected_action_target_net_pnl_per_contract"] is not None
+    ]
+    return {
+        "source_decision_count": len(rows),
+        "model_signal_candidate_count": sum(row["model_signal_passed"] for row in rows),
+        "execution_guard_evaluated_count": sum(
+            row["execution_guard_evaluated"] for row in rows
+        ),
+        "execution_guard_passed_count": sum(
+            row["execution_guard_order_allowed"] for row in rows
+        ),
+        "execution_bet_count": len(bets),
+        "settled_bet_count": len(settled),
+        "unresolved_bet_count": len(bets) - len(settled),
+        "bet_market_count": len({str(row["market_id"]) for row in bets}),
+        "contract_size_sum": contract_size,
+        "cost_basis": cost_basis,
+        "gross_pnl_sum": gross_pnl_sum,
+        "execution_cost_sum": execution_cost_sum,
+        "settled_pnl_sum": pnl_sum,
+        "pnl_accounting_reconciled": math.isclose(
+            pnl_sum,
+            gross_pnl_sum - execution_cost_sum,
+            rel_tol=1e-9,
+            abs_tol=1e-12,
+        ),
+        "roi_on_cost_basis": pnl_sum / cost_basis if cost_basis > 0.0 else 0.0,
+        "mean_pnl_per_bet": pnl_sum / len(settled) if settled else 0.0,
+        "win_count": sum(value > 0.0 for value in pnl_values),
+        "loss_count": sum(value < 0.0 for value in pnl_values),
+        "flat_count": sum(value == 0.0 for value in pnl_values),
+        "win_rate": (
+            sum(value > 0.0 for value in pnl_values) / len(settled)
+            if settled
+            else 0.0
+        ),
+        "maximum_drawdown": maximum_drawdown,
+        "max_drawdown_ordering": "market_close_ts_market_id_simulated_order_id",
+        "profitable_market_count": sum(value > 0.0 for value in market_pnl.values()),
+        "losing_market_count": sum(value < 0.0 for value in market_pnl.values()),
+        "model_entry_edge_summary": _numeric_distribution(model_edges),
+        "model_entry_edge_threshold": FROZEN_OOF_PNL_ENTRY_EDGE_THRESHOLD,
+        "nonnegative_model_entry_edge_count": sum(
+            value >= 0.0 for value in model_edges
+        ),
+        "within_one_cent_of_entry_threshold_count": sum(
+            value >= FROZEN_OOF_PNL_ENTRY_EDGE_THRESHOLD - 0.01
+            for value in model_edges
+        ),
+        "source_selected_action_target_diagnostic": {
+            "evaluation_only": True,
+            "target_available_count": len(selected_action_targets),
+            "positive_count": sum(value > 0.0 for value in selected_action_targets),
+            "negative_count": sum(value < 0.0 for value in selected_action_targets),
+            "flat_count": sum(value == 0.0 for value in selected_action_targets),
+            "net_pnl_per_contract_sum": sum(selected_action_targets),
+            "positive_net_pnl_per_contract_sum": sum(
+                value for value in selected_action_targets if value > 0.0
+            ),
+            "negative_net_pnl_per_contract_sum": sum(
+                value for value in selected_action_targets if value < 0.0
+            ),
+        },
+        "pnl_by_side": _oof_execution_pnl_group_summary(
+            settled, "execution_guarded_side"
+        ),
+        "pnl_by_action": _oof_execution_pnl_group_summary(
+            settled, "execution_guarded_action"
+        ),
+        "execution_blocking_reason_distribution": dict(sorted(blockers.items())),
+        "bet_row_identity_set_sha256": canonical_json_sha256(
+            sorted(str(row["row_identity"]) for row in bets)
+        ),
+    }
+
+
+def _empty_oof_execution_bet_metrics() -> dict[str, Any]:
+    return {
+        "source_decision_count": 0,
+        "model_signal_candidate_count": 0,
+        "execution_guard_evaluated_count": 0,
+        "execution_guard_passed_count": 0,
+        "execution_bet_count": 0,
+        "settled_bet_count": 0,
+        "unresolved_bet_count": 0,
+        "bet_market_count": 0,
+        "contract_size_sum": 0.0,
+        "cost_basis": 0.0,
+        "gross_pnl_sum": 0.0,
+        "execution_cost_sum": 0.0,
+        "settled_pnl_sum": 0.0,
+        "pnl_accounting_reconciled": True,
+        "roi_on_cost_basis": 0.0,
+        "mean_pnl_per_bet": 0.0,
+        "win_count": 0,
+        "loss_count": 0,
+        "flat_count": 0,
+        "win_rate": 0.0,
+        "maximum_drawdown": 0.0,
+        "max_drawdown_ordering": "market_close_ts_market_id_simulated_order_id",
+        "profitable_market_count": 0,
+        "losing_market_count": 0,
+        "model_entry_edge_summary": _numeric_distribution([]),
+        "model_entry_edge_threshold": FROZEN_OOF_PNL_ENTRY_EDGE_THRESHOLD,
+        "nonnegative_model_entry_edge_count": 0,
+        "within_one_cent_of_entry_threshold_count": 0,
+        "source_selected_action_target_diagnostic": {
+            "evaluation_only": True,
+            "target_available_count": 0,
+            "positive_count": 0,
+            "negative_count": 0,
+            "flat_count": 0,
+            "net_pnl_per_contract_sum": 0.0,
+            "positive_net_pnl_per_contract_sum": 0.0,
+            "negative_net_pnl_per_contract_sum": 0.0,
+        },
+        "pnl_by_side": {},
+        "pnl_by_action": {},
+        "execution_blocking_reason_distribution": {},
+        "bet_row_identity_set_sha256": canonical_json_sha256([]),
+    }
+
+
+def _oof_execution_pnl_group_summary(
+    rows: list[dict[str, Any]], field: str
+) -> dict[str, dict[str, float | int]]:
+    grouped: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row[field])].append(
+            float(row["settled_pnl"])
+        )
+    return {
+        name: {
+            "bet_count": len(values),
+            "settled_pnl_sum": sum(values),
+            "mean_pnl_per_bet": sum(values) / len(values),
+            "win_rate": sum(value > 0.0 for value in values) / len(values),
+        }
+        for name, values in sorted(grouped.items())
+    }
+
+
+def _numeric_distribution(values: list[float]) -> dict[str, float | int | None]:
+    if not values:
+        return {
+            "count": 0,
+            "minimum": None,
+            "p10": None,
+            "median": None,
+            "p90": None,
+            "p95": None,
+            "maximum": None,
+            "mean": None,
+        }
+    return {
+        "count": len(values),
+        "minimum": min(values),
+        "p10": _quantile(values, 0.10),
+        "median": _quantile(values, 0.50),
+        "p90": _quantile(values, 0.90),
+        "p95": _quantile(values, 0.95),
+        "maximum": max(values),
+        "mean": sum(values) / len(values),
+    }
+
+
+def _evaluation_pnl_components(label: dict[str, Any]) -> dict[str, float]:
+    fees = float(label.get("fees") or 0.0)
+    slippage = float(label.get("slippage") or 0.0)
+    liquidity_impact = float(label.get("liquidity_impact") or 0.0)
+    execution_cost = fees + slippage + liquidity_impact
+    net_pnl = float(label["total_net_pnl_per_notional"])
+    return {
+        "gross_pnl_per_contract": net_pnl + execution_cost,
+        "fees_per_contract": fees,
+        "slippage_per_contract": slippage,
+        "liquidity_impact_per_contract": liquidity_impact,
+        "execution_cost_per_contract": execution_cost,
+        "net_pnl_per_contract": net_pnl,
     }
 
 
@@ -1087,6 +1759,19 @@ def _residual_row(
         if str(row["action"]) != action
     )
     label = target["selected_action_labels"][action]
+    canonical_ranking = [
+        _fresh_public_ranking_row_from_canonical(row)
+        for row in sorted(
+            group_scored_rows,
+            key=lambda row: (
+                int(row.get("canonical_rank") or 999),
+                str(row.get("action") or ""),
+            ),
+        )
+    ]
+    selected_ranking = next(
+        row for row in canonical_ranking if row["selected_action"] == action
+    )
     features = {
         "canonical_o_action_score": selected_score,
         "action_score_margin": selected_score - second_best_score,
@@ -1135,6 +1820,46 @@ def _residual_row(
         if target["resolved_outcome"] == side
         else 0,
         "target_net_return_after_cost": float(label["total_net_return"]),
+        "evaluation_target_net_return_after_cost_by_action": {
+            action_name: float(action_label["total_net_return"])
+            for action_name, action_label in sorted(
+                target["selected_action_labels"].items()
+            )
+        },
+        "evaluation_target_net_pnl_per_contract_by_action": {
+            action_name: float(action_label["total_net_pnl_per_notional"])
+            for action_name, action_label in sorted(
+                target["selected_action_labels"].items()
+            )
+        },
+        "evaluation_target_pnl_components_by_action": {
+            action_name: _evaluation_pnl_components(action_label)
+            for action_name, action_label in sorted(
+                target["selected_action_labels"].items()
+            )
+        },
+        "execution_handoff_context": {
+            "decision_group_id": public_row.get("decision_group_id"),
+            "market_id": str(public_row["market_id"]),
+            "decision_ts": decision_ts,
+            "selected_action": action,
+            "selected_side": side,
+            "selected_action_family": "HOLD_TO_SETTLEMENT",
+            "full_5_action_ranking": canonical_ranking,
+            "corrected_model_score": selected_score,
+            "raw_model_score": selected.get("canonical_raw_model_score"),
+            "high_score_flag": bool(selected.get("high_score_flag")),
+            "p_up": float(public_row["p_up"]),
+            "p_down": float(public_row["p_down"]),
+            "p_up_action_disagreement": bool(
+                selected.get("p_up_action_disagreement")
+            ),
+            "microstructure_snapshot": selected_ranking[
+                "microstructure_snapshot"
+            ],
+            "reference_price_feature_provenance": chainlink_provenance,
+            "decision_time_feature_max_input_ts": max_input_ts,
+        },
         "target_outcome_available_only_post_resolution": True,
         "target_provenance": {
             "source_type": "phase2_official_read_only_resolution",
@@ -1359,6 +2084,61 @@ def _forward_oof_markdown(report: dict[str, Any]) -> str:
                 )
             )
         lines.append("")
+    return "\n".join(lines)
+
+
+def _forward_oof_pnl_markdown(report: dict[str, Any]) -> str:
+    baseline = report["raw_market_probability_baseline_policy_metrics"]
+    lines = [
+        "# HTS Residual Forward OOF Execution-Bet PnL Diagnostic",
+        "",
+        f"- status: `{report['status']}`",
+        f"- selected candidate: `{report['selected_candidate_name']}`",
+        "- diagnostic conclusion: "
+        f"`{report['execution_pnl_diagnostic_conclusion']}`",
+        "- path: `OOF probability -> frozen EV threshold -> frozen execution guard "
+        "-> simulated paper bet -> settlement net PnL`",
+        "- outcomes used for selection: `false`",
+        "- PnL used for tuning/ranking: `false`",
+        "- development calibration gate changed: `false`",
+        "- promotion/paper/live unlock: `false`",
+        "",
+        "| policy | signal candidates | guard-passed bets | cost basis | "
+        "settled PnL | ROI | max drawdown |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+        "| raw market probability baseline | {signals} | {bets} | {cost:.6f} | "
+        "{pnl:.6f} | {roi:.6f} | {drawdown:.6f} |".format(
+            signals=baseline["model_signal_candidate_count"],
+            bets=baseline["execution_bet_count"],
+            cost=baseline["cost_basis"],
+            pnl=baseline["settled_pnl_sum"],
+            roi=baseline["roi_on_cost_basis"],
+            drawdown=baseline["maximum_drawdown"],
+        ),
+    ]
+    for comparison in report["candidate_comparisons"]:
+        metrics = comparison["candidate_policy_metrics"]
+        lines.append(
+            "| {name} | {signals} | {bets} | {cost:.6f} | {pnl:.6f} | "
+            "{roi:.6f} | {drawdown:.6f} |".format(
+                name=comparison["candidate_name"],
+                signals=metrics["model_signal_candidate_count"],
+                bets=metrics["execution_bet_count"],
+                cost=metrics["cost_basis"],
+                pnl=metrics["settled_pnl_sum"],
+                roi=metrics["roi_on_cost_basis"],
+                drawdown=metrics["maximum_drawdown"],
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "This is an outcome-aware development diagnostic on deterministic "
+            "simulated paper bets. It is not actual exchange-fill PnL and is not "
+            "promotion evidence.",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 

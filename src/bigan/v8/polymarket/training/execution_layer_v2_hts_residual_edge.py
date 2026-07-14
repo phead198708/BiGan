@@ -627,6 +627,7 @@ def _evaluate_candidate_oof(
     spec: dict[str, Any],
     *,
     minimum_training_runs: int,
+    include_prediction_rows: bool = False,
 ) -> dict[str, Any]:
     runs = sorted(
         {str(row["source_run_id"]) for row in rows},
@@ -739,7 +740,7 @@ def _evaluate_candidate_oof(
         ),
     }
     stability = _parameter_stability(parameter_sets)
-    return {
+    report = {
         "candidate_name": spec["candidate_name"],
         "candidate_specification": spec,
         "forward_oof_fold_count": len(fold_reports),
@@ -785,6 +786,48 @@ def _evaluate_candidate_oof(
         "prior_failed_validation_labels_reclassified_as_development": True,
         "confirmatory_evidence": False,
     }
+    if include_prediction_rows:
+        report["_forward_oof_prediction_rows"] = [
+            {
+                "candidate_name": spec["candidate_name"],
+                "row_identity": str(row["row_identity"]),
+                "market_id": str(row["market_id"]),
+                "source_run_id": str(row["source_run_id"]),
+                "decision_ts": int(row["decision_ts"]),
+                "market_close_ts": int(row["market_close_ts"]),
+                "selected_action": str(row["selected_action"]),
+                "selected_side": str(row["selected_side"]),
+                "execution_price": float(
+                    row["decision_time_features"]["execution_price"]
+                ),
+                "raw_baseline_probability": _selected_probability(row),
+                "candidate_probability": prediction,
+                "decision_time_expected_execution_cost_per_unit": float(
+                    row["decision_time_expected_execution_cost_per_unit"]
+                ),
+                "target_net_return_after_cost": float(
+                    row["target_net_return_after_cost"]
+                ),
+                "evaluation_target_net_return_after_cost_by_action": dict(
+                    row.get("evaluation_target_net_return_after_cost_by_action") or {}
+                ),
+                "evaluation_target_net_pnl_per_contract_by_action": dict(
+                    row.get("evaluation_target_net_pnl_per_contract_by_action")
+                    or {}
+                ),
+                "evaluation_target_pnl_components_by_action": dict(
+                    row.get("evaluation_target_pnl_components_by_action") or {}
+                ),
+                "execution_handoff_context": dict(
+                    row.get("execution_handoff_context") or {}
+                ),
+                "selected_side_win_target": int(row["selected_side_win_target"]),
+                "target_used_for_selection": False,
+                "outcome_aware_evaluation_only": True,
+            }
+            for row, prediction in zip(oof_rows, oof_predictions, strict=True)
+        ]
+    return report
 
 
 def _development_candidate_gate(

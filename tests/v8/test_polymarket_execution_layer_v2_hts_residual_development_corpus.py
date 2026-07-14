@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import bigan.v8.polymarket.training.execution_layer_v2_hts_residual_confirmatory as confirmatory_module
+import bigan.v8.polymarket.training.execution_layer_v2_hts_residual_development_corpus as development_corpus_module
 from bigan.v8.polymarket.training.execution_layer_v2_hts_residual_confirmatory import (
     HTSResidualCandidateFreezeConfig,
     HTSResidualConfirmatoryEvaluationConfig,
@@ -301,6 +302,62 @@ def test_forward_oof_uses_frozen_protocol_and_never_auto_freezes(
     assert report["source_model_candidate_eligible"] is False
     assert report["freeze_ready"] is False
     assert report["promotion_evidence_eligible"] is False
+    pnl = json.loads(result["pnl_comparison_report_path"].read_text())
+    assert pnl["status"] == "DEVELOPMENT_OOF_PNL_DIAGNOSTIC_COMPLETE"
+    expected_oof_rows = report["candidate_reports"][0]["forward_oof_row_count"]
+    assert expected_oof_rows == 1
+    assert pnl["unique_oof_row_count"] == expected_oof_rows
+    assert len(pnl["candidate_comparisons"]) == 3
+    assert pnl["pnl_used_for_candidate_ranking"] is False
+    assert pnl["pnl_used_for_threshold_tuning"] is False
+    assert pnl["development_candidate_gate_unchanged"] is True
+    assert pnl["execution_pnl_diagnostic_conclusion"] in {
+        "no_policy_reached_frozen_execution_edge_threshold",
+        "accepted_bet_pnl_available_for_diagnostic_comparison",
+    }
+    assert pnl["source_model_candidate_eligible"] is False
+    assert pnl["freeze_ready"] is False
+    assert pnl["promotion_evidence_eligible"] is False
+    assert pnl["#134_resume_allowed"] is False
+    assert pnl["#146_start_allowed"] is False
+    policy_metrics = [
+        pnl["raw_market_probability_baseline_policy_metrics"],
+        *[
+            candidate["candidate_policy_metrics"]
+            for candidate in pnl["candidate_comparisons"]
+        ],
+    ]
+    assert all(metrics["pnl_accounting_reconciled"] for metrics in policy_metrics)
+    assert all(
+        metrics["model_entry_edge_summary"]["count"] == 1
+        for metrics in policy_metrics
+    )
+    assert all(
+        metrics["source_selected_action_target_diagnostic"]["evaluation_only"]
+        is True
+        for metrics in policy_metrics
+    )
+    assert all(
+        metrics["execution_bet_count"] <= metrics["execution_guard_passed_count"]
+        for metrics in policy_metrics
+    )
+    pnl_rows = _read_jsonl(result["pnl_comparison_rows_path"])
+    assert len(pnl_rows) == expected_oof_rows * 4
+    assert all(row["selection_uses_outcome_fields"] is False for row in pnl_rows)
+    assert all(row["source_o_score_mutated"] is False for row in pnl_rows)
+    assert all(row["source_ranking_mutated"] is False for row in pnl_rows)
+    assert all(
+        row["settled_pnl"] is None
+        or row["execution_guard_order_allowed"] is True
+        for row in pnl_rows
+    )
+    manifest = json.loads(result["manifest_path"].read_text())
+    assert manifest["pnl_comparison_report"]["sha256"] == _sha256(
+        result["pnl_comparison_report_path"]
+    )
+    assert manifest["pnl_comparison_rows"]["sha256"] == _sha256(
+        result["pnl_comparison_rows_path"]
+    )
 
 
 def test_forward_oof_rejects_row_protocol_lineage_mismatch(tmp_path: Path) -> None:
@@ -340,6 +397,53 @@ def test_forward_oof_rejects_row_protocol_lineage_mismatch(tmp_path: Path) -> No
                 development_corpus_manifest_paths=(corpus_manifest_path,),
             )
         )
+
+
+def test_forward_oof_pnl_requires_full_execution_guard_pass() -> None:
+    row = _development_row(0, protocol_sha256="a" * 64)
+    handoff = dict(row["execution_handoff_context"])
+    handoff["microstructure_snapshot"] = {
+        **handoff["microstructure_snapshot"],
+        "spread_bps": 1_500.0,
+    }
+    source_row = {
+        "candidate_name": "high-edge-unsafe-spread",
+        "row_identity": row["row_identity"],
+        "market_id": row["market_id"],
+        "source_run_id": row["source_run_id"],
+        "decision_ts": row["decision_ts"],
+        "market_close_ts": row["market_close_ts"],
+        "selected_action": row["selected_action"],
+        "selected_side": row["selected_side"],
+        "execution_price": row["decision_time_features"]["execution_price"],
+        "candidate_probability": 0.95,
+        "decision_time_expected_execution_cost_per_unit": 0.01,
+        "evaluation_target_net_pnl_per_contract_by_action": row[
+            "evaluation_target_net_pnl_per_contract_by_action"
+        ],
+        "evaluation_target_pnl_components_by_action": row[
+            "evaluation_target_pnl_components_by_action"
+        ],
+        "execution_handoff_context": handoff,
+    }
+
+    replay_rows = development_corpus_module._frozen_execution_bet_replay(
+        [source_row],
+        policy_name="high-edge-unsafe-spread",
+        probability_field="candidate_probability",
+        guard_config=development_corpus_module._v8_execution_guard_config(),
+    )
+
+    assert len(replay_rows) == 1
+    replay = replay_rows[0]
+    assert replay["model_signal_passed"] is True
+    assert replay["execution_guard_evaluated"] is True
+    assert replay["execution_guard_order_allowed"] is False
+    assert replay["execution_order_allowed"] is False
+    assert replay["settled_pnl"] is None
+    assert "execution_spread_too_wide" in replay[
+        "execution_blocking_reason_codes"
+    ]
 
 
 def test_confirmatory_input_freeze_and_evaluation_are_exactly_once(
@@ -641,6 +745,9 @@ def _development_row(index: int, *, protocol_sha256: str) -> dict:
     side = "UP" if index % 2 == 0 else "DOWN"
     outcome = "UP" if index in {0, 3} else "DOWN"
     probability = 0.62 if side == "UP" else 0.58
+    selected_action = f"BUY_{side}_HOLD_TO_SETTLEMENT"
+    decision_ts = 2_000_000 + index * 300_000
+    target_net_return = 0.4 if side == outcome else -1.0
     features = {
         "canonical_o_action_score": 0.2 + index * 0.01,
         "action_score_margin": 0.05,
@@ -651,8 +758,8 @@ def _development_row(index: int, *, protocol_sha256: str) -> dict:
         "chainlink_momentum_120s": 0.0008,
         "chainlink_realized_volatility_120s": 0.0002,
         "selected_side_probability": probability,
-        "execution_price": probability - 0.01,
-        "selected_side_probability_minus_execution_price": 0.01,
+        "execution_price": probability - 0.05,
+        "selected_side_probability_minus_execution_price": 0.05,
         "spread_bps": 100.0,
         "queue_fill_proxy": 0.9,
         "book_staleness_ms": 100.0,
@@ -668,13 +775,78 @@ def _development_row(index: int, *, protocol_sha256: str) -> dict:
         "market_id": f"market-{index}",
         "condition_id": f"condition-{index}",
         "market_slug": f"btc-updown-5m-{index}",
-        "decision_ts": 2_000_000 + index * 300_000,
+        "decision_ts": decision_ts,
+        "market_close_ts": decision_ts + 180_000,
         "max_input_ts": 1_999_900 + index * 300_000,
-        "selected_action": f"BUY_{side}_HOLD_TO_SETTLEMENT",
+        "selected_action": selected_action,
         "selected_side": side,
         "action_family": "HOLD_TO_SETTLEMENT",
         "decision_time_features": features,
         "selected_side_win_target": int(side == outcome),
+        "target_net_return_after_cost": target_net_return,
+        "evaluation_target_net_return_after_cost_by_action": {
+            selected_action: target_net_return,
+        },
+        "evaluation_target_net_pnl_per_contract_by_action": {
+            selected_action: target_net_return,
+        },
+        "evaluation_target_pnl_components_by_action": {
+            selected_action: {
+                "gross_pnl_per_contract": target_net_return + 0.01,
+                "fees_per_contract": 0.002,
+                "slippage_per_contract": 0.005,
+                "liquidity_impact_per_contract": 0.003,
+                "execution_cost_per_contract": 0.01,
+                "net_pnl_per_contract": target_net_return,
+            }
+        },
+        "execution_handoff_context": {
+            "decision_group_id": f"group-{index}",
+            "market_id": f"market-{index}",
+            "decision_ts": decision_ts,
+            "selected_action": selected_action,
+            "selected_side": side,
+            "selected_action_family": "HOLD_TO_SETTLEMENT",
+            "full_5_action_ranking": [
+                {
+                    "selected_action": selected_action,
+                    "selected_side": side,
+                    "selected_action_family": "HOLD_TO_SETTLEMENT",
+                    "corrected_model_score": 0.5,
+                    "microstructure_snapshot": {
+                        "entry_ask": probability - 0.05,
+                        "spread_bps": 100.0,
+                        "book_staleness_ms": 100.0,
+                        "queue_fill_proxy": 0.9,
+                        "time_to_close_seconds": 180.0,
+                    },
+                },
+                {
+                    "selected_action": "NO_TRADE",
+                    "selected_side": "NONE",
+                    "selected_action_family": "NO_TRADE",
+                    "corrected_model_score": 0.2,
+                    "microstructure_snapshot": {},
+                },
+            ],
+            "corrected_model_score": 0.5,
+            "raw_model_score": 0.4,
+            "high_score_flag": True,
+            "p_up": probability if side == "UP" else 1.0 - probability,
+            "p_down": 1.0 - probability if side == "UP" else probability,
+            "p_up_action_disagreement": False,
+            "microstructure_snapshot": {
+                "entry_ask": probability - 0.05,
+                "spread_bps": 100.0,
+                "book_staleness_ms": 100.0,
+                "queue_fill_proxy": 0.9,
+                "time_to_close_seconds": 180.0,
+            },
+            "reference_price_feature_provenance": {
+                "provenance_valid": True,
+            },
+            "decision_time_feature_max_input_ts": decision_ts - 100,
+        },
         "target_provenance": {"resolved_outcome": outcome},
         "source_run_id": f"run-{index}",
         "source_lineage": {
@@ -811,6 +983,12 @@ def _phase2_corpus(
             "decision_ts": decision_ts,
             "action": action,
             "total_net_return": 0.4 if action == "BUY_UP_HOLD_TO_SETTLEMENT" else 0.0,
+            "total_net_pnl_per_notional": (
+                0.2 if action == "BUY_UP_HOLD_TO_SETTLEMENT" else 0.0
+            ),
+            "fees": 0.0,
+            "slippage": 0.0,
+            "liquidity_impact": 0.0,
         }
         for action in (
             "BUY_UP_SELL_BEFORE_CLOSE",
