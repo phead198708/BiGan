@@ -1,0 +1,129 @@
+{
+  "schema_version": "bigan-v8-execution-layer-v2-pnl-aligned-action-value-protocol-v1",
+  "candidate_name": "pnl_aligned_action_conditioned_net_value_v1",
+  "frozen": true,
+  "decision_time_safe": true,
+  "historical_fit_only": true,
+  "artifact_frozen_before_future_evaluation": true,
+  "uses_current_oof_pnl_for_hyperparameter_selection": false,
+  "uses_validation_labels_for_tuning": false,
+  "uses_future_holdout_labels_for_fitting": false,
+  "primary_target": "total_net_pnl_per_notional",
+  "target_usage": "historical_supervised_fit_only",
+  "actions": [
+    "BUY_UP_HOLD_TO_SETTLEMENT",
+    "BUY_DOWN_HOLD_TO_SETTLEMENT",
+    "BUY_UP_SELL_BEFORE_CLOSE",
+    "BUY_DOWN_SELL_BEFORE_CLOSE",
+    "NO_TRADE"
+  ],
+  "feature_columns": [
+    "canonical_o_action_score",
+    "canonical_o_raw_score",
+    "canonical_action_rank",
+    "canonical_score_gap_from_best",
+    "selected_side_probability",
+    "execution_price",
+    "selected_side_probability_minus_execution_price",
+    "btc_anchor_direction_signal",
+    "chainlink_realized_volatility_120s",
+    "spread_bps",
+    "queue_fill_proxy",
+    "book_staleness_ms",
+    "time_to_close_seconds",
+    "cumulative_market_exposure_before_entry",
+    "same_side_reentry",
+    "side_flip",
+    "action_buy_up",
+    "action_buy_down",
+    "action_hold_to_settlement",
+    "action_sell_before_close",
+    "action_no_trade"
+  ],
+  "independent_feature_groups": {
+    "canonical_o_ranking": [
+      "canonical_o_action_score",
+      "canonical_o_raw_score",
+      "canonical_action_rank",
+      "canonical_score_gap_from_best"
+    ],
+    "btc_anchor_direction": [
+      "btc_anchor_direction_signal"
+    ],
+    "market_price_value": [
+      "selected_side_probability",
+      "execution_price",
+      "selected_side_probability_minus_execution_price"
+    ],
+    "execution_quality": [
+      "spread_bps",
+      "queue_fill_proxy",
+      "book_staleness_ms",
+      "time_to_close_seconds",
+      "chainlink_realized_volatility_120s"
+    ],
+    "pre_entry_exposure": [
+      "cumulative_market_exposure_before_entry",
+      "same_side_reentry",
+      "side_flip"
+    ],
+    "action_identity": [
+      "action_buy_up",
+      "action_buy_down",
+      "action_hold_to_settlement",
+      "action_sell_before_close",
+      "action_no_trade"
+    ]
+  },
+  "market_implied_probability_used_as_direct_fair_value_ev": false,
+  "market_implied_probability_used_as_conditioning_feature": true,
+  "market_implied_probability_used_as_regime_direction_vote": false,
+  "btc_anchor_direction_formula": "side_sign * mean(chainlink_reference_distance_at_decision, chainlink_momentum_60s)",
+  "xgboost_config": {
+    "objective": "reg:squarederror",
+    "eval_metric": "rmse",
+    "num_boost_round": 120,
+    "max_depth": 2,
+    "eta": 0.03,
+    "min_child_weight": 20.0,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "lambda": 25.0,
+    "alpha": 2.0,
+    "seed": 20260715,
+    "nthread": 1,
+    "verbosity": 0
+  },
+  "frozen_execution_contract": {
+    "entry_edge_threshold": 0.02,
+    "entry_edge_threshold_source": "preexisting_execution_layer_v2_entry_ev_threshold_default",
+    "execution_guard_mutation_allowed": false,
+    "order_sizing_mutation_allowed": false
+  },
+  "future_evidence_gates": {
+    "minimum_unique_market_count": 30,
+    "minimum_accepted_bet_count": 30,
+    "minimum_accepted_bet_count_per_side": 10,
+    "both_sides_required": true,
+    "candidate_net_pnl_must_be_positive": true,
+    "candidate_net_pnl_must_exceed_frozen_baseline": true,
+    "candidate_roi_must_be_positive": true,
+    "zero_provenance_violations_required": true,
+    "zero_forbidden_decision_field_violations_required": true,
+    "zero_missing_runtime_fields_required": true,
+    "market_bootstrap_interval_required": true,
+    "largest_winner_removal_sensitivity_required": true
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}
