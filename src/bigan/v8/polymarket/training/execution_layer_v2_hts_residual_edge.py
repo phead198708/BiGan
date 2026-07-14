@@ -1128,6 +1128,36 @@ def _raw_feature(row: dict[str, Any], name: str) -> float:
             float(features["btc_momentum"])
             + float(features["reference_price_to_beat_distance_at_decision"])
         )
+    if name == "chainlink_anchor_alignment":
+        side_sign = 1.0 if row["selected_side"] == "UP" else -1.0
+        values = sorted(
+            float(features[field])
+            for field in (
+                "chainlink_momentum_30s",
+                "chainlink_momentum_60s",
+                "chainlink_momentum_120s",
+                "reference_price_to_beat_distance_at_decision",
+            )
+        )
+        return side_sign * statistics.median(values)
+    if name == "chainlink_anchor_overextension_abs":
+        return abs(float(features["reference_price_to_beat_distance_at_decision"]))
+    if name == "log1p_spread_bps":
+        return math.log1p(max(float(features["spread_bps"]), 0.0))
+    if name == "queue_fill_shortfall":
+        return 1.0 - min(max(float(features["queue_fill_proxy"]), 0.0), 1.0)
+    if name == "log1p_book_staleness_ms":
+        return math.log1p(max(float(features["book_staleness_ms"]), 0.0))
+    if name == "late_window_pressure":
+        return max(0.0, 120.0 - float(features["time_to_close_seconds"])) / 120.0
+    if name == "anchor_alignment_x_price_value":
+        return _raw_feature(row, "chainlink_anchor_alignment") * float(
+            features["selected_side_probability_minus_execution_price"]
+        )
+    if name == "spread_x_staleness_quality_penalty":
+        return _raw_feature(row, "log1p_spread_bps") * _raw_feature(
+            row, "log1p_book_staleness_ms"
+        )
     if name == "log_time_to_close_seconds":
         return math.log1p(max(float(features["time_to_close_seconds"]), 0.0))
     return float(features[name])

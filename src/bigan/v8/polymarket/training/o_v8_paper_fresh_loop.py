@@ -309,6 +309,97 @@ class PolymarketOV8PaperFreshLoopResult:
     manifest: dict[str, Any]
 
 
+def score_frozen_o_decision_rows(
+    *,
+    run_id: str,
+    decision_rows: list[dict[str, Any]],
+    paper_candidate_unlock_dir: Path | str,
+    expected_paper_candidate_unlock_manifest_sha256: str = (
+        PINNED_ISSUE_160_MANIFEST_SHA256
+    ),
+    canonical_o_source_manifest_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Score normalized rows with the pinned O scorer without executing orders."""
+
+    config = PolymarketOV8PaperFreshLoopConfig(
+        run_id=run_id,
+        output_dir=Path("."),
+        paper_candidate_unlock_dir=paper_candidate_unlock_dir,
+        public_data_source=O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE,
+        public_data_cycles=(tuple(dict(row) for row in decision_rows),),
+        canonical_o_source_manifest_path=canonical_o_source_manifest_path,
+        expected_paper_candidate_unlock_manifest_sha256=(
+            expected_paper_candidate_unlock_manifest_sha256
+        ),
+    )
+    forbidden_rows = _rows_with_forbidden_fields(decision_rows)
+    unlock_evidence = _verify_paper_candidate_unlock(config)
+    canonical_context = _fresh_canonical_scorer_context(
+        config=config,
+        unlock_evidence=unlock_evidence,
+    )
+    collection_report = {
+        "public_data_source": O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE,
+        "public_market_count": len(
+            {str(row.get("market_id") or "") for row in decision_rows}
+        ),
+    }
+    mapping_report, action_rows = _fresh_canonical_feature_mapping_report(
+        config=config,
+        public_cycles=[list(decision_rows)],
+        public_data_collection_report=collection_report,
+        canonical_context=canonical_context,
+    )
+    if forbidden_rows:
+        mapping_report = {
+            **mapping_report,
+            "canonical_feature_mapping_complete": False,
+            "canonical_feature_mapping_blocking_reason_codes": sorted(
+                {
+                    *mapping_report[
+                        "canonical_feature_mapping_blocking_reason_codes"
+                    ],
+                    "forbidden_outcome_field_present_in_decision_rows",
+                }
+            ),
+            "forbidden_outcome_row_count": len(forbidden_rows),
+        }
+    scorer_report = _fresh_canonical_scorer_report(
+        config=config,
+        canonical_context=canonical_context,
+        canonical_feature_mapping_report=mapping_report,
+        canonical_action_rows=action_rows,
+    )
+    return {
+        "run_id": run_id,
+        "decision_row_count": len(decision_rows),
+        "paper_candidate_unlock_verified": unlock_evidence[
+            "paper_candidate_unlock_verified"
+        ],
+        "paper_candidate_unlock_blocking_reason_codes": unlock_evidence[
+            "paper_candidate_unlock_blocking_reason_codes"
+        ],
+        "canonical_context": canonical_context,
+        "canonical_feature_mapping_report": mapping_report,
+        "canonical_scorer_report": scorer_report,
+        "scoring_passed": (
+            unlock_evidence["paper_candidate_unlock_verified"] is True
+            and mapping_report["canonical_feature_mapping_complete"] is True
+            and scorer_report["canonical_frozen_o_scorer_used"] is True
+        ),
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+    }
+
+
 def run_polymarket_o_v8_paper_fresh_loop(
     config: PolymarketOV8PaperFreshLoopConfig,
 ) -> PolymarketOV8PaperFreshLoopResult:
