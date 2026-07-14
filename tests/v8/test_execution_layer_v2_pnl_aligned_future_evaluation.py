@@ -9,7 +9,9 @@ import pytest
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_future_evaluation import (
     PnLAlignedFutureDecisionInputConfig,
+    PnLAlignedFutureSettlementTargetConfig,
     build_pnl_aligned_future_outcome_blind_decision_inputs,
+    build_pnl_aligned_future_settled_evaluation_targets,
     evaluate_pnl_aligned_future_accepted_bets,
     validate_pnl_aligned_future_evaluation_protocol,
 )
@@ -356,6 +358,174 @@ def test_future_decision_input_rejects_feature_hash_tamper(tmp_path: Path) -> No
         )
 
 
+def test_settlement_targets_load_post_shadow_exactly_once(tmp_path: Path) -> None:
+    freeze_path = _collection_freeze(tmp_path, expected_round_count=1)
+    corpus_dir = _outcome_blind_phase2_corpus(
+        tmp_path,
+        market_id="settled-market",
+        market_start_ts=2_000_000,
+    )
+    _add_settlement_artifacts(corpus_dir, resolved_outcome="UP")
+    decision_result = build_pnl_aligned_future_outcome_blind_decision_inputs(
+        PnLAlignedFutureDecisionInputConfig(
+            run_id="settled-decision-input",
+            output_dir=tmp_path / "runs",
+            collection_freeze_manifest_path=freeze_path,
+            expected_collection_freeze_manifest_sha256=_sha256(freeze_path),
+            source_corpus_dirs=(corpus_dir,),
+            paper_candidate_unlock_dir=UNLOCK_DIR,
+        )
+    )
+    shadow_path = _shadow_manifest(tmp_path, decision_result)
+
+    result = build_pnl_aligned_future_settled_evaluation_targets(
+        PnLAlignedFutureSettlementTargetConfig(
+            run_id="settlement-targets",
+            output_dir=tmp_path / "target-runs",
+            shadow_manifest_path=shadow_path,
+            expected_shadow_manifest_sha256=_sha256(shadow_path),
+        )
+    )
+
+    assert result["report"]["status"] == "SETTLED_EVALUATION_TARGETS_READY"
+    assert result["report"]["identity_reconciliation_passed"] is True
+    assert result["report"]["settled_target_count"] == 1
+    assert result["report"]["settled_market_count"] == 1
+    assert result["report"]["future_results_used_for_tuning"] is False
+    assert result["report"]["promotion_evidence_eligible"] is False
+    target = result["targets"][0]
+    assert set(target["evaluation_target_net_pnl_per_contract_by_action"]) == set(ACTIONS)
+    assert set(target["evaluation_target_pnl_components_by_action"]) == set(ACTIONS)
+    assert target["resolved_outcome"] == "UP"
+    assert target["outcome_used_for_shadow_selection"] is False
+    marker = shadow_path.parent / "pnl_aligned_future_outcome_reconciliation_started.json"
+    assert marker.exists()
+
+    with pytest.raises(ValueError, match="already started"):
+        build_pnl_aligned_future_settled_evaluation_targets(
+            PnLAlignedFutureSettlementTargetConfig(
+                run_id="settlement-targets-second-attempt",
+                output_dir=tmp_path / "target-runs",
+                shadow_manifest_path=shadow_path,
+                expected_shadow_manifest_sha256=_sha256(shadow_path),
+            )
+        )
+
+
+def test_settlement_target_identity_mismatch_fails_before_marker(
+    tmp_path: Path,
+) -> None:
+    freeze_path = _collection_freeze(tmp_path, expected_round_count=1)
+    corpus_dir = _outcome_blind_phase2_corpus(
+        tmp_path,
+        market_id="identity-market",
+        market_start_ts=2_000_000,
+    )
+    _add_settlement_artifacts(corpus_dir, resolved_outcome="DOWN")
+    decision_result = build_pnl_aligned_future_outcome_blind_decision_inputs(
+        PnLAlignedFutureDecisionInputConfig(
+            run_id="identity-decision-input",
+            output_dir=tmp_path / "runs",
+            collection_freeze_manifest_path=freeze_path,
+            expected_collection_freeze_manifest_sha256=_sha256(freeze_path),
+            source_corpus_dirs=(corpus_dir,),
+            paper_candidate_unlock_dir=UNLOCK_DIR,
+        )
+    )
+    shadow_path = _shadow_manifest(
+        tmp_path,
+        decision_result,
+        baseline_identity="wrong-source-row-identity",
+        shadow_dir_name="identity-shadow",
+    )
+
+    with pytest.raises(ValueError, match="identities do not match"):
+        build_pnl_aligned_future_settled_evaluation_targets(
+            PnLAlignedFutureSettlementTargetConfig(
+                run_id="identity-targets",
+                output_dir=tmp_path / "target-runs",
+                shadow_manifest_path=shadow_path,
+                expected_shadow_manifest_sha256=_sha256(shadow_path),
+            )
+        )
+    assert not (
+        shadow_path.parent / "pnl_aligned_future_outcome_reconciliation_started.json"
+    ).exists()
+
+
+def test_settlement_targets_fail_closed_for_unresolved_official_outcome(
+    tmp_path: Path,
+) -> None:
+    freeze_path = _collection_freeze(tmp_path, expected_round_count=1)
+    corpus_dir = _outcome_blind_phase2_corpus(
+        tmp_path,
+        market_id="unresolved-market",
+        market_start_ts=2_000_000,
+    )
+    _add_settlement_artifacts(corpus_dir, resolved_outcome="PENDING")
+    decision_result = build_pnl_aligned_future_outcome_blind_decision_inputs(
+        PnLAlignedFutureDecisionInputConfig(
+            run_id="unresolved-decision-input",
+            output_dir=tmp_path / "runs",
+            collection_freeze_manifest_path=freeze_path,
+            expected_collection_freeze_manifest_sha256=_sha256(freeze_path),
+            source_corpus_dirs=(corpus_dir,),
+            paper_candidate_unlock_dir=UNLOCK_DIR,
+        )
+    )
+    shadow_path = _shadow_manifest(tmp_path, decision_result)
+
+    with pytest.raises(ValueError, match="official resolved outcome is unavailable"):
+        build_pnl_aligned_future_settled_evaluation_targets(
+            PnLAlignedFutureSettlementTargetConfig(
+                run_id="unresolved-targets",
+                output_dir=tmp_path / "target-runs",
+                shadow_manifest_path=shadow_path,
+                expected_shadow_manifest_sha256=_sha256(shadow_path),
+            )
+        )
+    assert (shadow_path.parent / "pnl_aligned_future_outcome_reconciliation_started.json").exists()
+
+
+def test_settlement_targets_fail_closed_for_incomplete_action_grid(tmp_path: Path) -> None:
+    freeze_path = _collection_freeze(tmp_path, expected_round_count=1)
+    corpus_dir = _outcome_blind_phase2_corpus(
+        tmp_path,
+        market_id="incomplete-grid-market",
+        market_start_ts=2_000_000,
+    )
+    _add_settlement_artifacts(corpus_dir, resolved_outcome="UP")
+    label_path = corpus_dir / "polymarket_label_rows.jsonl"
+    labels = [json.loads(line) for line in label_path.read_text().splitlines() if line]
+    _write_jsonl(label_path, labels[:-1])
+    manifest_path = corpus_dir / "polymarket_corpus_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["normalized_artifact_hashes"]["label_rows"] = _sha256(label_path)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    decision_result = build_pnl_aligned_future_outcome_blind_decision_inputs(
+        PnLAlignedFutureDecisionInputConfig(
+            run_id="incomplete-grid-decision-input",
+            output_dir=tmp_path / "runs",
+            collection_freeze_manifest_path=freeze_path,
+            expected_collection_freeze_manifest_sha256=_sha256(freeze_path),
+            source_corpus_dirs=(corpus_dir,),
+            paper_candidate_unlock_dir=UNLOCK_DIR,
+        )
+    )
+    shadow_path = _shadow_manifest(tmp_path, decision_result)
+
+    with pytest.raises(ValueError, match="action target grid is incomplete"):
+        build_pnl_aligned_future_settled_evaluation_targets(
+            PnLAlignedFutureSettlementTargetConfig(
+                run_id="incomplete-grid-targets",
+                output_dir=tmp_path / "target-runs",
+                shadow_manifest_path=shadow_path,
+                expected_shadow_manifest_sha256=_sha256(shadow_path),
+            )
+        )
+    assert (shadow_path.parent / "pnl_aligned_future_outcome_reconciliation_started.json").exists()
+
+
 def _collection_freeze(
     tmp_path: Path,
     *,
@@ -485,6 +655,86 @@ def _outcome_blind_phase2_corpus(
     return corpus_dir
 
 
+def _add_settlement_artifacts(corpus_dir: Path, *, resolved_outcome: str) -> None:
+    feature_row = json.loads(
+        (corpus_dir / "polymarket_feature_rows.jsonl").read_text().splitlines()[0]
+    )
+    market_id = str(feature_row["market_id"])
+    decision_ts = int(feature_row["decision_ts"])
+    raw_resolution_sha256 = "a" * 64
+    labels = []
+    for index, action in enumerate(ACTIONS):
+        net_pnl = 0.0 if action == "NO_TRADE" else 0.05 + index * 0.01
+        labels.append(
+            {
+                "market_id": market_id,
+                "decision_ts": decision_ts,
+                "action": action,
+                "total_net_pnl_per_notional": net_pnl,
+                "fees": 0.001,
+                "slippage": 0.002,
+                "liquidity_impact": 0.001,
+                "resolved_outcome": resolved_outcome,
+                "raw_resolution_sha256": raw_resolution_sha256,
+            }
+        )
+    resolutions = [
+        {
+            "market_id": market_id,
+            "resolved_outcome": resolved_outcome,
+            "resolution_status": "normal",
+            "raw_resolution_sha256": raw_resolution_sha256,
+            "resolution_rule_sha256": "b" * 64,
+        }
+    ]
+    label_path = corpus_dir / "polymarket_label_rows.jsonl"
+    resolution_path = corpus_dir / "polymarket_resolution_events.jsonl"
+    _write_jsonl(label_path, labels)
+    _write_jsonl(resolution_path, resolutions)
+    manifest_path = corpus_dir / "polymarket_corpus_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["normalized_artifact_hashes"]["label_rows"] = _sha256(label_path)
+    manifest["normalized_artifact_hashes"]["resolution_events"] = _sha256(resolution_path)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+
+def _shadow_manifest(
+    tmp_path: Path,
+    decision_result: dict,
+    *,
+    baseline_identity: str | None = None,
+    shadow_dir_name: str = "shadow",
+) -> Path:
+    shadow_dir = tmp_path / shadow_dir_name
+    shadow_dir.mkdir()
+    decision = decision_result["decision_rows"][0]
+    source_identity = str(decision["row_identity"])
+    candidate_path = shadow_dir / "candidate.jsonl"
+    baseline_path = shadow_dir / "baseline.jsonl"
+    _write_jsonl(candidate_path, [{"source_row_identity": source_identity}])
+    _write_jsonl(
+        baseline_path,
+        [
+            {
+                "source_row_identity": baseline_identity
+                if baseline_identity is not None
+                else source_identity
+            }
+        ],
+    )
+    manifest_path = shadow_dir / "shadow_manifest.json"
+    manifest = {
+        "decision_input_manifest": _descriptor(decision_result["manifest_path"]),
+        "input_decision_rows": _descriptor(decision_result["decision_rows_path"]),
+        "candidate_shadow_rows": _descriptor(candidate_path),
+        "baseline_shadow_rows": _descriptor(baseline_path),
+        "future_outcome_targets_loaded": False,
+        "outcome_reconciliation_started": False,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return manifest_path
+
+
 def _chainlink_row(source_ts: int, price: float) -> dict:
     return {
         "source_ts": source_ts,
@@ -495,6 +745,10 @@ def _chainlink_row(source_ts: int, price: float) -> dict:
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+
+
+def _descriptor(path: Path) -> dict[str, str]:
+    return {"path": str(path.resolve()), "sha256": _sha256(path)}
 
 
 def _protocol() -> dict:

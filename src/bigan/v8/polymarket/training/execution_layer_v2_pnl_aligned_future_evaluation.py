@@ -18,6 +18,7 @@ from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training.contracts import compact_safety_fields
 from bigan.v8.polymarket.training.execution_layer_v2_hts_residual_development_corpus import (
     PHASE2_MARKET_PROBABILITY_MAPPING_RULE_ID,
+    _evaluation_pnl_components,
     _forbidden_decision_fields,
     _phase2_feature_to_public_row,
     _side_depth_imbalance,
@@ -46,6 +47,9 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
 EVALUATION_SCHEMA_VERSION = "bigan-v8-execution-layer-v2-pnl-aligned-future-evaluation-protocol-v1"
 REPORT_SCHEMA_VERSION = "bigan-v8-execution-layer-v2-pnl-aligned-future-accepted-bet-report-v1"
 DECISION_INPUT_SCHEMA_VERSION = "bigan-v8-execution-layer-v2-pnl-aligned-future-decision-input-v1"
+SETTLEMENT_TARGET_SCHEMA_VERSION = (
+    "bigan-v8-execution-layer-v2-pnl-aligned-future-settlement-target-v1"
+)
 PROHIBITED_FUTURE_OUTCOME_ARTIFACT_NAMES = (
     "polymarket_label_rows.jsonl",
     "polymarket_resolution_events.jsonl",
@@ -143,6 +147,24 @@ class PnLAlignedFutureDecisionInputConfig:
                 "canonical_o_source_manifest_path",
                 Path(self.canonical_o_source_manifest_path),
             )
+
+
+@dataclass(frozen=True, slots=True)
+class PnLAlignedFutureSettlementTargetConfig:
+    """Post-shadow inputs for exactly-once future settlement targets."""
+
+    run_id: str
+    output_dir: Path | str
+    shadow_manifest_path: Path | str
+    expected_shadow_manifest_sha256: str
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        if not _is_sha256(self.expected_shadow_manifest_sha256):
+            raise ValueError("expected_shadow_manifest_sha256 must be a SHA-256 digest")
+        object.__setattr__(self, "output_dir", Path(self.output_dir))
+        object.__setattr__(self, "shadow_manifest_path", Path(self.shadow_manifest_path))
 
 
 def validate_pnl_aligned_future_evaluation_protocol(
@@ -893,6 +915,290 @@ def _future_input_rejection(
     }
 
 
+def build_pnl_aligned_future_settled_evaluation_targets(
+    config: PnLAlignedFutureSettlementTargetConfig,
+) -> dict[str, Any]:
+    """Load post-close targets exactly once after frozen shadows exist."""
+
+    shadow_path = config.shadow_manifest_path.resolve()
+    if _sha256_file(shadow_path) != config.expected_shadow_manifest_sha256:
+        raise ValueError("shadow manifest SHA-256 mismatch")
+    shadow_manifest = _load_json(shadow_path)
+    if not (
+        shadow_manifest.get("future_outcome_targets_loaded") is False
+        and shadow_manifest.get("outcome_reconciliation_started") is False
+    ):
+        raise ValueError("shadow manifest is not outcome blind")
+    decision_input_descriptor = _verified_descriptor(
+        shadow_manifest.get("decision_input_manifest"),
+        name="decision_input_manifest",
+    )
+    decision_input_manifest = _load_json(Path(decision_input_descriptor["path"]))
+    if not (
+        decision_input_manifest.get("future_outcome_targets_loaded") is False
+        and decision_input_manifest.get("outcome_reconciliation_started") is False
+    ):
+        raise ValueError("decision input manifest is not outcome blind")
+    decision_rows_descriptor = _verified_descriptor(
+        decision_input_manifest.get("decision_rows"), name="decision_rows"
+    )
+    if decision_rows_descriptor != _verified_descriptor(
+        shadow_manifest.get("input_decision_rows"), name="shadow_input_decision_rows"
+    ):
+        raise ValueError("shadow decision-input lineage mismatch")
+    candidate_descriptor = _verified_descriptor(
+        shadow_manifest.get("candidate_shadow_rows"), name="candidate_shadow_rows"
+    )
+    baseline_descriptor = _verified_descriptor(
+        shadow_manifest.get("baseline_shadow_rows"), name="baseline_shadow_rows"
+    )
+    decision_rows = _load_jsonl(Path(decision_rows_descriptor["path"]))
+    candidate_rows = _load_jsonl(Path(candidate_descriptor["path"]))
+    baseline_rows = _load_jsonl(Path(baseline_descriptor["path"]))
+    decision_ids = [str(row["row_identity"]) for row in decision_rows]
+    candidate_ids = [str(row["source_row_identity"]) for row in candidate_rows]
+    baseline_ids = [str(row["source_row_identity"]) for row in baseline_rows]
+    if not (
+        len(decision_ids) == len(set(decision_ids))
+        and len(candidate_ids) == len(set(candidate_ids))
+        and len(baseline_ids) == len(set(baseline_ids))
+        and set(decision_ids) == set(candidate_ids) == set(baseline_ids)
+    ):
+        raise ValueError("shadow and decision-input identities do not match")
+    reconciliation_started_ts = int(time.time() * 1000)
+    if not decision_rows or any(
+        int(row["market_close_ts"]) >= reconciliation_started_ts for row in decision_rows
+    ):
+        raise ValueError("settlement target loading attempted before all markets closed")
+    output_dir = config.output_dir / config.run_id
+    if output_dir.exists():
+        raise FileExistsError(f"settlement target output directory exists: {output_dir}")
+    marker_path = shadow_path.parent / "pnl_aligned_future_outcome_reconciliation_started.json"
+    if marker_path.exists():
+        raise ValueError("outcome reconciliation already started for this shadow")
+
+    corpus_preflight: dict[str, dict[str, Any]] = {}
+    for row in decision_rows:
+        lineage = dict(row.get("source_lineage") or {})
+        corpus_dir = Path(str(lineage.get("source_corpus_dir") or ""))
+        if not corpus_dir.is_dir():
+            raise ValueError("decision row source corpus directory is missing")
+        corpus_manifest_path = corpus_dir / "polymarket_corpus_manifest.json"
+        feature_path = corpus_dir / "polymarket_feature_rows.jsonl"
+        label_path = corpus_dir / "polymarket_label_rows.jsonl"
+        resolution_path = corpus_dir / "polymarket_resolution_events.jsonl"
+        if not label_path.is_file() or not resolution_path.is_file():
+            raise ValueError("post-close target artifacts are missing")
+        if (
+            not corpus_manifest_path.is_file()
+            or _sha256_file(corpus_manifest_path) != lineage.get("source_corpus_manifest_sha256")
+            or not feature_path.is_file()
+            or _sha256_file(feature_path) != lineage.get("source_feature_rows_sha256")
+        ):
+            raise ValueError("decision row source corpus lineage mismatch")
+        corpus_preflight[str(corpus_dir)] = {
+            "corpus_dir": corpus_dir,
+            "corpus_manifest_path": corpus_manifest_path,
+            "feature_path": feature_path,
+            "label_path": label_path,
+            "resolution_path": resolution_path,
+        }
+
+    marker = {
+        "schema_version": f"{SETTLEMENT_TARGET_SCHEMA_VERSION}-start-marker",
+        "run_id": config.run_id,
+        "reconciliation_started_ts": reconciliation_started_ts,
+        "shadow_manifest": _descriptor(shadow_path),
+        "decision_identity_count": len(decision_ids),
+        "future_outcome_targets_loaded_before_marker": False,
+        "outcome_reconciliation_started": True,
+        "exactly_once": True,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "v8_execution_handoff_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    _write_json_exclusive(marker_path, marker)
+
+    labels_by_decision: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
+    resolution_by_market: dict[str, dict[str, Any]] = {}
+    source_target_artifacts: list[dict[str, Any]] = []
+    for entry in corpus_preflight.values():
+        corpus_manifest = _load_json(entry["corpus_manifest_path"])
+        normalized_hashes = dict(corpus_manifest.get("normalized_artifact_hashes") or {})
+        label_path = entry["label_path"]
+        resolution_path = entry["resolution_path"]
+        if normalized_hashes.get("label_rows") != _sha256_file(label_path):
+            raise ValueError("Phase 2 label artifact hash mismatch after marker")
+        if normalized_hashes.get("resolution_events") != _sha256_file(resolution_path):
+            raise ValueError("Phase 2 resolution artifact hash mismatch after marker")
+        labels = _load_jsonl(label_path)
+        resolutions = _load_jsonl(resolution_path)
+        for label in labels:
+            labels_by_decision[(str(label["market_id"]), int(label["decision_ts"]))].append(label)
+        for resolution in resolutions:
+            market_id = str(resolution["market_id"])
+            if market_id in resolution_by_market:
+                raise ValueError("duplicate official resolution row")
+            resolution_by_market[market_id] = resolution
+        source_target_artifacts.append(
+            {
+                "source_corpus_dir": str(entry["corpus_dir"]),
+                "corpus_manifest": _descriptor(entry["corpus_manifest_path"]),
+                "feature_rows": _descriptor(entry["feature_path"]),
+                "label_rows": _descriptor(label_path),
+                "resolution_events": _descriptor(resolution_path),
+            }
+        )
+
+    targets: list[dict[str, Any]] = []
+    for decision in decision_rows:
+        market_id = str(decision["market_id"])
+        decision_ts = int(decision["decision_ts"])
+        labels = labels_by_decision.get((market_id, decision_ts), [])
+        labels_by_action = {str(row.get("action") or ""): row for row in labels}
+        if len(labels) != len(REQUIRED_ACTIONS) or set(labels_by_action) != set(REQUIRED_ACTIONS):
+            raise ValueError("settled evaluation action target grid is incomplete")
+        resolution = resolution_by_market.get(market_id)
+        if resolution is None or resolution.get("resolved_outcome") not in {
+            "UP",
+            "DOWN",
+        }:
+            raise ValueError("official resolved outcome is unavailable")
+        resolved_outcome = str(resolution["resolved_outcome"])
+        if any(
+            label.get("resolved_outcome") != resolved_outcome
+            or label.get("raw_resolution_sha256") != resolution.get("raw_resolution_sha256")
+            for label in labels
+        ):
+            raise ValueError("label and official resolution provenance mismatch")
+        target_values = {
+            action: float(labels_by_action[action]["total_net_pnl_per_notional"])
+            for action in REQUIRED_ACTIONS
+        }
+        components = {
+            action: _evaluation_pnl_components(labels_by_action[action])
+            for action in REQUIRED_ACTIONS
+        }
+        if any(
+            not math.isfinite(value)
+            for value in [
+                *target_values.values(),
+                *(
+                    value
+                    for action_components in components.values()
+                    for value in action_components.values()
+                ),
+            ]
+        ):
+            raise ValueError("settled evaluation target contains non-finite values")
+        target = {
+            "schema_version": SETTLEMENT_TARGET_SCHEMA_VERSION,
+            "row_identity": str(decision["row_identity"]),
+            "market_id": market_id,
+            "decision_ts": decision_ts,
+            "market_close_ts": int(decision["market_close_ts"]),
+            "resolved_outcome": resolved_outcome,
+            "evaluation_target_net_pnl_per_contract_by_action": dict(sorted(target_values.items())),
+            "evaluation_target_pnl_components_by_action": dict(sorted(components.items())),
+            "official_resolution_provenance": {
+                "resolution_status": resolution.get("resolution_status"),
+                "raw_resolution_sha256": resolution.get("raw_resolution_sha256"),
+                "resolution_rule_sha256": resolution.get("resolution_rule_sha256"),
+                "source_type": "phase2_official_read_only_resolution",
+            },
+            "target_available_only_after_market_close": True,
+            "outcome_used_for_evaluation_only": True,
+            "outcome_used_for_shadow_selection": False,
+            "future_results_used_for_tuning": False,
+            "future_results_used_for_unlock": False,
+            "source_model_candidate_eligible": False,
+            "freeze_ready": False,
+            "promotion_evidence_eligible": False,
+            "v8_execution_handoff_allowed": False,
+            "#134_resume_allowed": False,
+            "#146_start_allowed": False,
+            **compact_safety_fields(),
+        }
+        target["target_row_sha256"] = canonical_json_sha256(target)
+        targets.append(target)
+    targets.sort(
+        key=lambda row: (
+            int(row["decision_ts"]),
+            str(row["market_id"]),
+            str(row["row_identity"]),
+        )
+    )
+    if {str(row["row_identity"]) for row in targets} != set(decision_ids):
+        raise ValueError("settlement targets do not reconcile to shadow identities")
+
+    output_dir.mkdir(parents=True, exist_ok=False)
+    target_path = output_dir / "pnl_aligned_future_settled_evaluation_targets.jsonl"
+    report_path = output_dir / "pnl_aligned_future_settlement_target_report.json"
+    _write_jsonl(target_path, targets)
+    report = {
+        "schema_version": f"{SETTLEMENT_TARGET_SCHEMA_VERSION}-report",
+        "run_id": config.run_id,
+        "status": "SETTLED_EVALUATION_TARGETS_READY",
+        "shadow_manifest_sha256": config.expected_shadow_manifest_sha256,
+        "identity_reconciliation_passed": True,
+        "settled_target_count": len(targets),
+        "settled_market_count": len({str(row["market_id"]) for row in targets}),
+        "complete_5_action_target_grid_count": len(targets),
+        "all_targets_loaded_after_market_close": True,
+        "source_target_artifacts": source_target_artifacts,
+        "reconciliation_start_marker": _descriptor(marker_path),
+        "future_outcome_targets_loaded": True,
+        "outcome_reconciliation_started": True,
+        "outcome_used_for_shadow_selection": False,
+        "future_results_used_for_tuning": False,
+        "future_results_used_for_unlock": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "v8_execution_handoff_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    _write_json(report_path, report)
+    manifest = {
+        "schema_version": f"{SETTLEMENT_TARGET_SCHEMA_VERSION}-manifest",
+        "run_id": config.run_id,
+        "shadow_manifest": _descriptor(shadow_path),
+        "decision_input_manifest": decision_input_descriptor,
+        "settled_evaluation_targets": _descriptor(target_path),
+        "settlement_target_report": _descriptor(report_path),
+        "reconciliation_start_marker": _descriptor(marker_path),
+        "identity_reconciliation_passed": True,
+        "future_outcome_targets_loaded": True,
+        "outcome_reconciliation_started": True,
+        "future_results_used_for_tuning": False,
+        "future_results_used_for_unlock": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "v8_execution_handoff_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    manifest_path = output_dir / "pnl_aligned_future_settlement_target_manifest.json"
+    _write_json(manifest_path, manifest)
+    return {
+        "output_dir": output_dir,
+        "target_path": target_path,
+        "report_path": report_path,
+        "manifest_path": manifest_path,
+        "manifest_sha256": _sha256_file(manifest_path),
+        "targets": targets,
+        "report": report,
+    }
+
+
 def run_pnl_aligned_future_outcome_blind_shadow_comparison(
     *,
     model_dir: Path | str,
@@ -1494,6 +1800,11 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
+
+
+def _write_json_exclusive(path: Path, payload: dict[str, Any]) -> None:
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
