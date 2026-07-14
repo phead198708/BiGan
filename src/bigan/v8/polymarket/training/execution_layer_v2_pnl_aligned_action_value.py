@@ -781,6 +781,10 @@ def run_pnl_aligned_action_value_outcome_blind_shadow(
         selected = ranked[0]
         selected_action = str(selected["action"])
         predicted_value = float(selected["predicted_net_pnl_per_contract"])
+        selected_handoff = dict(selected["execution_handoff_context"])
+        selected_microstructure = dict(
+            selected_handoff.get("microstructure_snapshot") or {}
+        )
         signal_passed = selected_action != "NO_TRADE" and predicted_value >= threshold
         blocking_reason_codes: list[str] = []
         guard_row: dict[str, Any] | None = None
@@ -814,6 +818,7 @@ def run_pnl_aligned_action_value_outcome_blind_shadow(
             )
         replay_row = {
             "decision_index": index,
+            "source_row_identity": str(selected["source_row_identity"]),
             "market_id": market_id,
             "decision_ts": decision_ts,
             "market_close_ts": int(selected["market_close_ts"]),
@@ -821,6 +826,9 @@ def run_pnl_aligned_action_value_outcome_blind_shadow(
             "selected_side": selected["side"],
             "selected_action_family": selected["action_family"],
             "predicted_net_pnl_per_contract": predicted_value,
+            "selected_execution_price": float(
+                selected_microstructure.get("entry_ask") or 0.0
+            ),
             "frozen_entry_edge_threshold": threshold,
             "model_signal_passed": signal_passed,
             "execution_guard_evaluated": guard_row is not None,

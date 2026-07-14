@@ -16,10 +16,19 @@ from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_action_value im
     run_pnl_aligned_action_value_outcome_blind_shadow,
     validate_pnl_aligned_action_value_protocol,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_future_evaluation import (
+    PnLAlignedFutureEvaluationFreezeConfig,
+    freeze_pnl_aligned_future_evaluation,
+    run_pnl_aligned_future_outcome_blind_shadow_comparison,
+)
 
 PROTOCOL_PATH = Path(
     "examples/v8/polymarket_configs/"
     "execution_layer_v2_pnl_aligned_action_value_v1.json"
+)
+EVALUATION_PROTOCOL_PATH = Path(
+    "examples/v8/polymarket_configs/"
+    "execution_layer_v2_pnl_aligned_future_evaluation_v1.json"
 )
 ACTIONS = (
     "BUY_UP_HOLD_TO_SETTLEMENT",
@@ -189,6 +198,22 @@ def test_fit_freezes_research_artifact_and_predicts_outcome_blind_grid(
     assert shadow_report["promotion_evidence_eligible"] is False
     assert shadow_report["v8_execution_handoff_allowed"] is False
 
+    comparison_rows, comparison_report = (
+        run_pnl_aligned_future_outcome_blind_shadow_comparison(
+            model_dir=result["run_dir"],
+            decision_rows=[_source_row(10, include_targets=False)],
+        )
+    )
+    assert comparison_report["status"] == "OUTCOME_BLIND_COMPARISON_SHADOW_COMPLETE"
+    assert comparison_report["candidate_baseline_identity_match"] is True
+    assert len(comparison_rows["candidate"]) == 1
+    assert len(comparison_rows["baseline"]) == 1
+    assert comparison_rows["candidate"][0]["source_row_identity"] == "row-10"
+    assert comparison_rows["baseline"][0]["source_row_identity"] == "row-10"
+    assert comparison_rows["baseline"][0]["outcome_fields_used"] is False
+    assert comparison_report["future_outcome_targets_loaded"] is False
+    assert comparison_report["promotion_evidence_eligible"] is False
+
     freeze = freeze_pnl_aligned_future_collection(
         PnLAlignedFutureCollectionFreezeConfig(
             run_id="future-freeze",
@@ -216,6 +241,26 @@ def test_fit_freezes_research_artifact_and_predicts_outcome_blind_grid(
     assert freeze_manifest["collection_started"] is False
     assert freeze_manifest["source_model_candidate_eligible"] is False
     assert freeze_manifest["promotion_evidence_eligible"] is False
+
+    evaluation_freeze = freeze_pnl_aligned_future_evaluation(
+        PnLAlignedFutureEvaluationFreezeConfig(
+            run_id="future-evaluation-freeze",
+            output_dir=tmp_path / "evaluation",
+            evaluation_protocol_path=EVALUATION_PROTOCOL_PATH,
+            expected_evaluation_protocol_sha256=_sha256(EVALUATION_PROTOCOL_PATH),
+            collection_freeze_manifest_path=freeze["manifest_path"],
+            expected_collection_freeze_manifest_sha256=freeze["manifest_sha256"],
+            model_dir=result["run_dir"],
+            git_commit="b" * 40,
+        )
+    )
+    evaluation_manifest = evaluation_freeze["manifest"]
+    assert evaluation_manifest["git_commit"] == "b" * 40
+    assert evaluation_manifest["future_outcome_targets_loaded"] is False
+    assert evaluation_manifest["shadow_decisions_generated"] is False
+    assert evaluation_manifest["outcome_reconciliation_started"] is False
+    assert evaluation_manifest["exactly_once_evaluation_required"] is True
+    assert evaluation_manifest["promotion_evidence_eligible"] is False
 
 
 def _protocol() -> dict:
