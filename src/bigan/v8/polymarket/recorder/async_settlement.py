@@ -391,29 +391,30 @@ def finalize_polymarket_pending_round(
                 config=config,
             )
             round_slug = round_corpus_id_from_corpus_dir(corpus_dir)
-            exported_training_corpus_dir = export_trainable_corpus(
+            export_provenance = {
+                "source": PENDING_FINALIZATION_PHASE,
+                "run_id": config.run_id,
+                "round_slug": round_slug,
+                "corpus_id": round_slug,
+                "round_scoped_export": True,
+                "pending_capture_manifest_path": str(manifest_path),
+                "phase2_corpus_manifest_sha256": phase2_result.artifact_hashes.get(
+                    "corpus_manifest"
+                ),
+                "real_historical_corpus_used": True,
+                "manual_live_evidence_eligible": True,
+                "chainlink_decision_time_evidence": chainlink_corpus_evidence,
+                "mock_public_data_used": False,
+                "synthetic_public_data_used": False,
+                "synthetic_corpus_used": False,
+                **safety_fields(),
+            }
+            exported_training_corpus_dir = _export_or_reuse_matching_corpus(
                 corpus_dir=corpus_dir,
                 corpus_id=round_slug,
                 destination_root=destination_root,
                 overwrite_existing=overwrite_existing,
-                provenance={
-                    "source": PENDING_FINALIZATION_PHASE,
-                    "run_id": config.run_id,
-                    "round_slug": round_slug,
-                    "corpus_id": round_slug,
-                    "round_scoped_export": True,
-                    "pending_capture_manifest_path": str(manifest_path),
-                    "phase2_corpus_manifest_sha256": phase2_result.artifact_hashes.get(
-                        "corpus_manifest"
-                    ),
-                    "real_historical_corpus_used": True,
-                    "manual_live_evidence_eligible": True,
-                    "chainlink_decision_time_evidence": chainlink_corpus_evidence,
-                    "mock_public_data_used": False,
-                    "synthetic_public_data_used": False,
-                    "synthetic_corpus_used": False,
-                    **safety_fields(),
-                },
+                provenance=export_provenance,
             )
         except Exception as exc:  # noqa: BLE001
             phase2_error = str(exc)
@@ -1134,6 +1135,57 @@ def _attach_chainlink_evidence_to_corpus(
         "manifest_sha256": _sha256_file(manifest_path),
         "feature_builder_integration_required": True,
     }
+
+
+def _export_or_reuse_matching_corpus(
+    *,
+    corpus_dir: Path,
+    corpus_id: str,
+    destination_root: Path | str,
+    overwrite_existing: bool,
+    provenance: dict[str, Any],
+) -> Path:
+    root = Path(destination_root).expanduser().resolve()
+    target = root / "polymarket" / corpus_id
+    if target.exists() and not overwrite_existing:
+        provenance_path = target / "training_corpus_provenance.json"
+        corpus_manifest_path = target / "polymarket_corpus_manifest.json"
+        if provenance_path.exists() and corpus_manifest_path.exists():
+            existing = _read_json(provenance_path)
+            expected_chainlink = provenance.get("chainlink_decision_time_evidence") or {}
+            existing_chainlink = existing.get("chainlink_decision_time_evidence") or {}
+            lineage_matches = (
+                existing.get("source") == provenance.get("source")
+                and existing.get("run_id") == provenance.get("run_id")
+                and existing.get("phase2_corpus_manifest_sha256")
+                == provenance.get("phase2_corpus_manifest_sha256")
+                and existing_chainlink.get("evidence_sha256")
+                == expected_chainlink.get("evidence_sha256")
+                and _sha256_file(corpus_manifest_path)
+                == provenance.get("phase2_corpus_manifest_sha256")
+            )
+            chainlink_filename = expected_chainlink.get("evidence_filename")
+            if chainlink_filename:
+                chainlink_path = target / str(chainlink_filename)
+                lineage_matches = (
+                    lineage_matches
+                    and chainlink_path.exists()
+                    and _sha256_file(chainlink_path)
+                    == expected_chainlink.get("evidence_sha256")
+                )
+            if lineage_matches:
+                return target
+        raise FileExistsError(
+            "existing training corpus does not match this finalized round lineage: "
+            f"{target}"
+        )
+    return export_trainable_corpus(
+        corpus_dir=corpus_dir,
+        corpus_id=corpus_id,
+        provenance=provenance,
+        destination_root=root,
+        overwrite_existing=overwrite_existing,
+    )
 
 
 def _empty_chainlink_corpus_evidence() -> dict[str, Any]:

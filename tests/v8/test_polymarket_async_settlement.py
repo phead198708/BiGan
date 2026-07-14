@@ -299,7 +299,7 @@ def test_pending_finalization_waits_for_resolution_before_export(tmp_path: Path)
         capture.run_dir,
         public_provider=provider,
         destination_root=tmp_path / "training_root",
-        overwrite_existing=True,
+        overwrite_existing=False,
     )
 
     assert provider.resolution_calls == 3
