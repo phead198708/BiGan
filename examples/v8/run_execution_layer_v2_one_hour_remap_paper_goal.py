@@ -36,6 +36,7 @@ def main() -> None:
     parser.add_argument("--poll-interval-seconds", type=float, default=60.0)
     parser.add_argument("--settlement-poll-max-wait-seconds", type=float, default=600.0)
     parser.add_argument("--settlement-poll-interval-seconds", type=float, default=15.0)
+    parser.add_argument("--chainlink-rtds-warmup-seconds", type=float, default=5.0)
     parser.add_argument(
         "--max-consecutive-orderbook-failure-rounds",
         type=int,
@@ -86,6 +87,7 @@ def main() -> None:
             ),
             frozen_ev_calibration_artifact_path=args.frozen_ev_calibration_artifact,
             canonical_o_source_manifest_path=args.canonical_o_source_manifest,
+            chainlink_rtds_warmup_seconds=args.chainlink_rtds_warmup_seconds,
             settlement_poll_max_wait_seconds=args.settlement_poll_max_wait_seconds,
             settlement_poll_interval_seconds=args.settlement_poll_interval_seconds,
             max_consecutive_orderbook_failure_rounds=(
@@ -114,6 +116,18 @@ def main() -> None:
     print(f"settlement_evaluation_row_count={report['settlement_evaluation_row_count']}")
     print(f"settlement_resolution_reason_codes={report['settlement_resolution_reason_codes']}")
     print(f"provider_fail_fast_stop_triggered={str(report['provider_fail_fast_stop_triggered']).lower()}")
+    print(
+        "chainlink_rtds_raw_price_row_count="
+        f"{report['chainlink_rtds_raw_price_row_count']}"
+    )
+    print(
+        "chainlink_rtds_timestamp_causality_violation_count="
+        f"{report['chainlink_rtds_timestamp_causality_violation_count']}"
+    )
+    print(
+        "markets_with_complete_chainlink_reference_provenance="
+        f"{report['markets_with_complete_chainlink_reference_provenance']}"
+    )
     print(f"provider_fail_fast_reason_codes={report['provider_fail_fast_reason_codes']}")
     print(
         "consecutive_orderbook_failure_count_at_stop="

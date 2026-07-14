@@ -166,6 +166,18 @@ _FALSE_SAFETY_FIELDS = (
     "#146_start_allowed",
 )
 
+_CHAINLINK_DECISION_TIME_FIELDS = (
+    "chainlink_price_at_decision",
+    "chainlink_reference_price_at_market_start",
+    "chainlink_reference_distance_at_decision",
+    "chainlink_momentum_30s",
+    "chainlink_momentum_60s",
+    "chainlink_momentum_120s",
+    "chainlink_realized_volatility_120s",
+    "chainlink_vs_btc_feature_price_gap",
+    "chainlink_regime_feature_provenance",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PolymarketOV8PaperFreshLoopConfig:
@@ -180,6 +192,7 @@ class PolymarketOV8PaperFreshLoopConfig:
     public_data_cycles: tuple[tuple[dict[str, Any], ...], ...] | None = None
     public_data_source: str = O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER
     public_provider: Any | None = None
+    chainlink_rtds_price_rows: tuple[dict[str, Any], ...] = ()
     initial_paper_position_rows: tuple[dict[str, Any], ...] = ()
     canonical_o_source_manifest_path: Path | str | None = None
     frozen_ev_calibration_artifact_path: Path | str | None = None
@@ -225,6 +238,12 @@ class PolymarketOV8PaperFreshLoopConfig:
                 self,
                 "initial_paper_position_rows",
                 tuple(dict(row) for row in self.initial_paper_position_rows),
+            )
+        if not isinstance(self.chainlink_rtds_price_rows, tuple):
+            object.__setattr__(
+                self,
+                "chainlink_rtds_price_rows",
+                tuple(dict(row) for row in self.chainlink_rtds_price_rows),
             )
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         object.__setattr__(
@@ -535,6 +554,10 @@ def run_polymarket_o_v8_paper_fresh_loop(
         "raw_polymarket_trades": output_dir / "raw_polymarket_trades.jsonl",
         "raw_btc_feature_candles": output_dir
         / "raw_btc_feature_candles.jsonl",
+        "raw_polymarket_chainlink_prices": output_dir
+        / "raw_polymarket_chainlink_prices.jsonl",
+        "chainlink_rtds_collection_report": output_dir
+        / "chainlink_rtds_collection_report.json",
         "manifest": output_dir / "o_v8_paper_fresh_loop_manifest.json",
     }
     _write_json(artifact_paths["fresh_loop_run_report"], run_report)
@@ -695,6 +718,33 @@ def run_polymarket_o_v8_paper_fresh_loop(
     _write_jsonl(
         artifact_paths["raw_btc_feature_candles"],
         raw_provider_payloads["btc_feature_candles"],
+    )
+    _write_jsonl(
+        artifact_paths["raw_polymarket_chainlink_prices"],
+        raw_provider_payloads["chainlink_rtds_prices"],
+    )
+    _write_json(
+        artifact_paths["chainlink_rtds_collection_report"],
+        {
+            "report_type": "polymarket_chainlink_rtds_fresh_loop_context",
+            "source_type": "polymarket_rtds_chainlink",
+            "raw_price_row_count": len(
+                raw_provider_payloads["chainlink_rtds_prices"]
+            ),
+            "timestamp_causality_violation_count": sum(
+                1
+                for row in raw_provider_payloads["chainlink_rtds_prices"]
+                if row.get("timestamp_causality_valid") is not True
+            ),
+            "collector_lifecycle_owned_by_parent_runner": True,
+            "decision_critical": False,
+            "fail_closed_when_feature_unavailable": True,
+            "paper_only": True,
+            "capital_at_risk": False,
+            "polymarket_write_enabled": False,
+            "wallet_signing_enabled": False,
+            "v8_execution_handoff_allowed": False,
+        },
     )
 
     artifact_hashes = {
@@ -1013,6 +1063,9 @@ def _collect_read_only_public_provider_cycles(
         orderbooks=orderbooks,
         trades=trades,
         btc_candles=btc_candles,
+        chainlink_rtds_prices=[
+            dict(row) for row in config.chainlink_rtds_price_rows
+        ],
     )
     stage_statuses["decision_feature_build"] = {
         "stage_name": "decision_feature_build",
@@ -1104,6 +1157,11 @@ def _collect_read_only_public_provider_cycles(
         ),
         "public_trade_row_count": len(trades),
         "public_btc_feature_candle_row_count": len(btc_candles),
+        "public_chainlink_rtds_price_row_count": len(
+            config.chainlink_rtds_price_rows
+        ),
+        "chainlink_rtds_feature_available": bool(config.chainlink_rtds_price_rows),
+        "chainlink_rtds_decision_critical": False,
         "public_feature_row_count": len(rows),
         "provider_exception_type": exception_type,
         "provider_exception_message": exception_message,
@@ -1116,6 +1174,9 @@ def _collect_read_only_public_provider_cycles(
             "orderbooks": [dict(row) for row in orderbooks],
             "trades": [dict(row) for row in trades],
             "btc_feature_candles": [dict(row) for row in btc_candles],
+            "chainlink_rtds_prices": [
+                dict(row) for row in config.chainlink_rtds_price_rows
+            ],
         },
     }
 
@@ -1178,6 +1239,7 @@ def _empty_raw_provider_payloads() -> dict[str, list[dict[str, Any]]]:
         "orderbooks": [],
         "trades": [],
         "btc_feature_candles": [],
+        "chainlink_rtds_prices": [],
     }
 
 
@@ -1216,11 +1278,19 @@ def _fresh_public_rows_from_provider_payloads(
     orderbooks: list[dict[str, Any]],
     trades: list[dict[str, Any]],
     btc_candles: list[dict[str, Any]],
+    chainlink_rtds_prices: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     del trades
     markets_by_id = {str(market.get("market_id")): dict(market) for market in markets}
     books_by_market = _latest_public_books_by_market(orderbooks)
     candles = sorted(btc_candles, key=lambda row: int(row.get("available_at_ts") or row.get("ts") or 0))
+    chainlink_prices = sorted(
+        chainlink_rtds_prices or [],
+        key=lambda row: (
+            int(row.get("available_at_ts") or 0),
+            int(row.get("source_ts") or 0),
+        ),
+    )
     rows: list[dict[str, Any]] = []
     for market_id, pair in sorted(books_by_market.items()):
         market = markets_by_id.get(market_id)
@@ -1228,10 +1298,27 @@ def _fresh_public_rows_from_provider_payloads(
             continue
         up = pair["UP"]
         down = pair["DOWN"]
-        decision_ts = max(
+        book_decision_ts = max(
             _book_available_at(up),
             _book_available_at(down),
             int(market.get("market_start_ts") or 0),
+        )
+        latest_chainlink = _latest_chainlink_price_available_at(
+            chainlink_prices,
+            available_at_or_before=max(
+                book_decision_ts,
+                max(
+                    (
+                        int(row.get("available_at_ts") or 0)
+                        for row in chainlink_prices
+                    ),
+                    default=0,
+                ),
+            ),
+        )
+        decision_ts = max(
+            book_decision_ts,
+            int((latest_chainlink or {}).get("available_at_ts") or 0),
         )
         market_end_ts = int(market.get("market_end_ts") or 0)
         if decision_ts <= 0 or market_end_ts <= decision_ts:
@@ -1253,6 +1340,7 @@ def _fresh_public_rows_from_provider_payloads(
                 down=down,
                 candle=candle,
                 reference_candle=reference_candle,
+                chainlink_rtds_prices=chainlink_prices,
                 decision_ts=decision_ts,
             )
         )
@@ -1288,6 +1376,21 @@ def _latest_public_btc_candle(
     return latest
 
 
+def _latest_chainlink_price_available_at(
+    rows: list[dict[str, Any]],
+    *,
+    available_at_or_before: int,
+) -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    for row in rows:
+        available_at = int(row.get("available_at_ts") or 0)
+        if available_at <= available_at_or_before:
+            latest = dict(row)
+        if available_at > available_at_or_before:
+            break
+    return latest
+
+
 def _market_start_reference_public_btc_candle(
     candles: list[dict[str, Any]],
     *,
@@ -1316,6 +1419,7 @@ def _fresh_public_row_from_provider_feature_context(
     down: dict[str, Any],
     candle: dict[str, Any],
     reference_candle: dict[str, Any] | None = None,
+    chainlink_rtds_prices: list[dict[str, Any]] | None = None,
     decision_ts: int,
 ) -> dict[str, Any]:
     p_up = _public_p_up(up=up, down=down)
@@ -1336,6 +1440,7 @@ def _fresh_public_row_from_provider_feature_context(
         market=market,
         candle=candle,
         reference_candle=reference_candle,
+        chainlink_rtds_prices=chainlink_rtds_prices or [],
         decision_ts=decision_ts,
         ranking=ranking,
         selected_action=selected_action,
@@ -1445,12 +1550,32 @@ def _fresh_public_row_from_provider_feature_context(
             "side_specific_action_score_margin": regime_features.get(
                 "side_specific_action_score_margin"
             ),
+            "chainlink_price_at_decision": regime_features.get(
+                "chainlink_price_at_decision"
+            ),
+            "chainlink_reference_price_at_market_start": regime_features.get(
+                "chainlink_reference_price_at_market_start"
+            ),
+            "chainlink_reference_distance_at_decision": regime_features.get(
+                "chainlink_reference_distance_at_decision"
+            ),
+            "chainlink_momentum_30s": regime_features.get("chainlink_momentum_30s"),
+            "chainlink_momentum_60s": regime_features.get("chainlink_momentum_60s"),
+            "chainlink_momentum_120s": regime_features.get(
+                "chainlink_momentum_120s"
+            ),
+            "chainlink_realized_volatility_120s": regime_features.get(
+                "chainlink_realized_volatility_120s"
+            ),
+            "chainlink_vs_btc_feature_price_gap": regime_features.get(
+                "chainlink_vs_btc_feature_price_gap"
+            ),
             "max_input_ts": max_input_ts,
         },
         "public_data_source": O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
         "public_provider_row_index": row_index,
         "public_provider_feature_builder_rule_id": (
-            "public_provider_market_orderbook_trade_btc_to_decision_features_v1"
+            "public_provider_market_orderbook_btc_chainlink_to_decision_features_v2"
         ),
         "paper_only": True,
         "capital_at_risk": False,
@@ -1656,6 +1781,7 @@ def _provider_decision_time_regime_features(
     market: dict[str, Any],
     candle: dict[str, Any],
     reference_candle: dict[str, Any] | None,
+    chainlink_rtds_prices: list[dict[str, Any]],
     decision_ts: int,
     ranking: list[dict[str, Any]],
     selected_action: str,
@@ -1663,6 +1789,12 @@ def _provider_decision_time_regime_features(
     btc_momentum, btc_provenance = _provider_btc_momentum_feature(
         candle=candle,
         decision_ts=decision_ts,
+    )
+    chainlink_features = _provider_chainlink_regime_features(
+        rows=chainlink_rtds_prices,
+        market_start_ts=int(market.get("market_start_ts") or 0),
+        decision_ts=decision_ts,
+        comparison_btc_price=_float(candle.get("close_price")),
     )
     (
         reference_price_to_beat,
@@ -1672,6 +1804,7 @@ def _provider_decision_time_regime_features(
         market=market,
         candle=candle,
         reference_candle=reference_candle,
+        chainlink_features=chainlink_features,
         decision_ts=decision_ts,
     )
     time_since_start, time_provenance = _provider_time_since_market_start_feature(
@@ -1706,6 +1839,7 @@ def _provider_decision_time_regime_features(
         "reference_price_to_beat_at_decision": reference_price_to_beat,
         "reference_price_to_beat_distance_at_decision": reference_distance,
         "reference_price_to_beat_distance_provenance": reference_provenance,
+        **chainlink_features,
         "time_since_market_start_seconds": time_since_start,
         "time_since_market_start_provenance": time_provenance,
         "action_score_margin": margin_features["action_score_margin"],
@@ -1786,6 +1920,7 @@ def _provider_reference_distance_feature(
     market: dict[str, Any],
     candle: dict[str, Any],
     reference_candle: dict[str, Any] | None,
+    chainlink_features: dict[str, Any],
     decision_ts: int,
 ) -> tuple[float | None, float | None, dict[str, Any]]:
     reference = _float(
@@ -1800,6 +1935,37 @@ def _provider_reference_distance_feature(
         "raw_polymarket_markets.reference_price_start",
         "raw_polymarket_markets.reference_price_at_start",
     ]
+    current_price = _float(candle.get("close_price"))
+    current_source_timestamp = int(
+        candle.get("available_at_ts") or candle.get("ts") or 0
+    )
+    chainlink_reference = _float(
+        chainlink_features.get("chainlink_reference_price_at_market_start")
+    )
+    chainlink_current = _float(
+        chainlink_features.get("chainlink_price_at_decision")
+    )
+    chainlink_provenance = dict(
+        chainlink_features.get("chainlink_regime_feature_provenance") or {}
+    )
+    if reference <= 0.0 and chainlink_reference > 0.0 and chainlink_current > 0.0:
+        reference = chainlink_reference
+        current_price = chainlink_current
+        reference_source_timestamp = int(
+            chainlink_provenance.get("max_input_ts") or 0
+        )
+        current_source_timestamp = reference_source_timestamp
+        reference_source_type = "polymarket_rtds_chainlink_market_start_proxy"
+        source_fields_used.extend(
+            [
+                "raw_polymarket_chainlink_prices.price",
+                "raw_polymarket_chainlink_prices.source_ts",
+                "raw_polymarket_chainlink_prices.available_at_ts",
+            ]
+        )
+        reference_warning_reason_codes.append(
+            "official_price_to_beat_metadata_unavailable_chainlink_rtds_market_start_proxy_used"
+        )
     if reference <= 0.0 and reference_candle is not None:
         reference = _float(reference_candle.get("close_price"))
         reference_source_timestamp = int(
@@ -1819,8 +1985,8 @@ def _provider_reference_distance_feature(
         reference_warning_reason_codes.append(
             "official_polymarket_price_to_beat_unavailable_btc_feature_candle_proxy_used"
         )
-    close_price = _float(candle.get("close_price"))
-    candle_ts = int(candle.get("available_at_ts") or candle.get("ts") or 0)
+    close_price = current_price
+    candle_ts = current_source_timestamp
     reason_codes: list[str] = []
     if candle_ts > decision_ts:
         reason_codes.append("btc_candle_not_decision_time_available")
@@ -1844,6 +2010,145 @@ def _provider_reference_distance_feature(
         "unavailable_reason_codes": reason_codes,
         "warning_reason_codes": reference_warning_reason_codes,
     }
+
+
+def _provider_chainlink_regime_features(
+    *,
+    rows: list[dict[str, Any]],
+    market_start_ts: int,
+    decision_ts: int,
+    comparison_btc_price: float,
+) -> dict[str, Any]:
+    causal_rows = [
+        dict(row)
+        for row in rows
+        if int(row.get("available_at_ts") or 0) <= decision_ts
+        and int(row.get("source_ts") or 0) <= int(row.get("available_at_ts") or 0)
+        and _float(row.get("price")) > 0.0
+    ]
+    causal_rows.sort(
+        key=lambda row: (
+            int(row.get("source_ts") or 0),
+            int(row.get("available_at_ts") or 0),
+        )
+    )
+    current = causal_rows[-1] if causal_rows else None
+    reference_candidates = [
+        row
+        for row in causal_rows
+        if market_start_ts > 0 and int(row.get("source_ts") or 0) <= market_start_ts
+    ]
+    reference = reference_candidates[-1] if reference_candidates else None
+    unavailable_reason_codes: list[str] = []
+    if current is None:
+        unavailable_reason_codes.append("chainlink_rtds_current_price_unavailable")
+    if reference is None:
+        unavailable_reason_codes.append(
+            "chainlink_rtds_market_start_reference_unavailable"
+        )
+    current_price = _float((current or {}).get("price")) or None
+    reference_price = _float((reference or {}).get("price")) or None
+    distance = (
+        (float(current_price) - float(reference_price)) / float(reference_price)
+        if current_price is not None and reference_price is not None
+        else None
+    )
+    momentum_by_horizon: dict[str, float | None] = {}
+    if current is None:
+        momentum_by_horizon = {
+            "30s": None,
+            "60s": None,
+            "120s": None,
+        }
+    else:
+        current_source_ts = int(current["source_ts"])
+        for horizon_seconds in (30, 60, 120):
+            baseline = _latest_chainlink_source_row_at_or_before(
+                causal_rows,
+                source_ts=current_source_ts - horizon_seconds * 1000,
+            )
+            baseline_price = _float((baseline or {}).get("price"))
+            momentum_by_horizon[f"{horizon_seconds}s"] = (
+                (float(current_price) - baseline_price) / baseline_price
+                if current_price is not None and baseline_price > 0.0
+                else None
+            )
+    recent_rows = []
+    if current is not None:
+        lower_bound = int(current["source_ts"]) - 120_000
+        recent_rows = [row for row in causal_rows if int(row["source_ts"]) >= lower_bound]
+    returns = [
+        (_float(right.get("price")) - _float(left.get("price")))
+        / _float(left.get("price"))
+        for left, right in zip(recent_rows, recent_rows[1:], strict=False)
+        if _float(left.get("price")) > 0.0
+    ]
+    realized_volatility = (
+        (sum(value * value for value in returns) / len(returns)) ** 0.5
+        if returns
+        else None
+    )
+    max_input_ts = max(
+        (
+            int(row.get("available_at_ts") or 0)
+            for row in (current, reference)
+            if row is not None
+        ),
+        default=0,
+    )
+    provenance_valid = (
+        not unavailable_reason_codes
+        and max_input_ts > 0
+        and max_input_ts <= decision_ts
+    )
+    return {
+        "chainlink_price_at_decision": current_price,
+        "chainlink_reference_price_at_market_start": reference_price,
+        "chainlink_reference_distance_at_decision": distance,
+        "chainlink_momentum_30s": momentum_by_horizon["30s"],
+        "chainlink_momentum_60s": momentum_by_horizon["60s"],
+        "chainlink_momentum_120s": momentum_by_horizon["120s"],
+        "chainlink_realized_volatility_120s": realized_volatility,
+        "chainlink_vs_btc_feature_price_gap": (
+            (float(current_price) - comparison_btc_price) / comparison_btc_price
+            if current_price is not None and comparison_btc_price > 0.0
+            else None
+        ),
+        "chainlink_regime_feature_provenance": {
+            "provenance_valid": provenance_valid,
+            "decision_ts": decision_ts,
+            "max_input_ts": max_input_ts,
+            "current_source_ts": (current or {}).get("source_ts"),
+            "reference_source_ts": (reference or {}).get("source_ts"),
+            "source_fields_used": [
+                "raw_polymarket_chainlink_prices.price",
+                "raw_polymarket_chainlink_prices.source_ts",
+                "raw_polymarket_chainlink_prices.available_at_ts",
+            ],
+            "source_field_name": "polymarket_rtds_chainlink_btc_usd",
+            "source_timestamp": max_input_ts,
+            "unavailable_reason_codes": unavailable_reason_codes,
+            "warning_reason_codes": [
+                "market_start_value_is_same_source_decision_time_proxy_not_embedded_market_price_to_beat"
+            ]
+            if reference is not None
+            else [],
+        },
+    }
+
+
+def _latest_chainlink_source_row_at_or_before(
+    rows: list[dict[str, Any]],
+    *,
+    source_ts: int,
+) -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    for row in rows:
+        if int(row.get("source_ts") or 0) <= source_ts:
+            latest = row
+        else:
+            break
+    return latest
 
 
 def _provider_time_since_market_start_feature(
@@ -3213,6 +3518,21 @@ def _fresh_provider_feature_coverage_report(
         )
         is not True
     ]
+    chainlink_available_rows = [
+        row for row in rows if row.get("chainlink_price_at_decision") is not None
+    ]
+    chainlink_reference_rows = [
+        row
+        for row in rows
+        if row.get("chainlink_reference_price_at_market_start") is not None
+    ]
+    chainlink_missing_reasons = Counter(
+        str(reason)
+        for row in rows
+        for reason in (
+            row.get("chainlink_regime_feature_provenance") or {}
+        ).get("unavailable_reason_codes", [])
+    )
     sparse = len(rows) < max(5, len(public_cycles))
     report = {
         "schema_version": O_V8_PAPER_FRESH_PROVIDER_FEATURE_COVERAGE_SCHEMA_VERSION,
@@ -3256,6 +3576,33 @@ def _fresh_provider_feature_coverage_report(
         "public_btc_feature_candle_row_count": public_data_collection_report[
             "public_btc_feature_candle_row_count"
         ],
+        "public_chainlink_rtds_price_row_count": int(
+            public_data_collection_report.get("public_chainlink_rtds_price_row_count")
+            or 0
+        ),
+        "chainlink_price_at_decision_available_count": len(
+            chainlink_available_rows
+        ),
+        "chainlink_market_start_reference_available_count": len(
+            chainlink_reference_rows
+        ),
+        "chainlink_reference_distance_available_count": sum(
+            1
+            for row in rows
+            if row.get("chainlink_reference_distance_at_decision") is not None
+        ),
+        "chainlink_feature_provenance_violation_count": sum(
+            1
+            for row in rows
+            if row.get("chainlink_price_at_decision") is not None
+            and (row.get("chainlink_regime_feature_provenance") or {}).get(
+                "provenance_valid"
+            )
+            is not True
+        ),
+        "chainlink_feature_missing_reason_distribution": dict(
+            sorted(chainlink_missing_reasons.items())
+        ),
         "sparse_provider_row_flag": sparse,
         "sparse_provider_row_reason_codes": [
             "provider_feature_rows_below_minimum_diagnostic_density"
@@ -4502,6 +4849,7 @@ def _fresh_signal_trace_report(
                 "decision_time_regime_feature_max_input_ts",
                 provider_row.get("decision_time_regime_feature_max_input_ts"),
             ),
+            **_chainlink_decision_time_field_payload(guard_row, provider_row),
             "execution_guarded_action": guard_row.get("execution_guarded_action"),
             "execution_guarded_side": guard_row.get("execution_guarded_side"),
             "execution_guarded_family": guard_row.get("execution_guarded_family"),
@@ -6313,6 +6661,24 @@ def _fresh_loop_manifest(
         "sparse_provider_row_flag": provider_feature_coverage_report[
             "sparse_provider_row_flag"
         ],
+        "public_chainlink_rtds_price_row_count": provider_feature_coverage_report[
+            "public_chainlink_rtds_price_row_count"
+        ],
+        "chainlink_price_at_decision_available_count": (
+            provider_feature_coverage_report[
+                "chainlink_price_at_decision_available_count"
+            ]
+        ),
+        "chainlink_market_start_reference_available_count": (
+            provider_feature_coverage_report[
+                "chainlink_market_start_reference_available_count"
+            ]
+        ),
+        "chainlink_feature_provenance_violation_count": (
+            provider_feature_coverage_report[
+                "chainlink_feature_provenance_violation_count"
+            ]
+        ),
         "paper_fresh_loop_enabled": run_report["paper_fresh_loop_enabled"],
         "paper_fresh_loop_mode": run_report["paper_fresh_loop_mode"],
         "paper_fresh_loop_cycle_count": run_report["paper_fresh_loop_cycle_count"],
@@ -6402,6 +6768,25 @@ def _fresh_loop_manifest(
         **compact_safety_fields(),
     }
     return _with_report_id(manifest, "o_v8_paper_fresh_loop_manifest_id")
+
+
+def _chainlink_decision_time_field_payload(
+    *rows: dict[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for field_name in _CHAINLINK_DECISION_TIME_FIELDS:
+        value: Any = None
+        for row in rows:
+            if row.get(field_name) is not None:
+                value = row[field_name]
+                break
+        payload[field_name] = (
+            dict(value)
+            if field_name == "chainlink_regime_feature_provenance"
+            and isinstance(value, dict)
+            else value
+        )
+    return payload
 
 
 def _guard_input_from_public_row(
@@ -6494,6 +6879,7 @@ def _guard_input_from_public_row(
             "decision_time_regime_feature_max_input_ts",
             public_row.get("decision_time_feature_max_input_ts", decision_ts),
         ),
+        **_chainlink_decision_time_field_payload(public_row),
     }
 
 def _resolve_unlock_artifact_path(unlock_dir: Path, raw_path: str) -> Path:
@@ -6598,6 +6984,7 @@ def _fresh_order_intent_from_guard_row(
         "decision_time_regime_feature_max_input_ts": guard_row.get(
             "decision_time_regime_feature_max_input_ts"
         ),
+        **_chainlink_decision_time_field_payload(guard_row),
         "pre_decision_exposure_state": guard_row.get("pre_decision_exposure_state"),
         "post_decision_exposure_state": guard_row.get("post_decision_exposure_state"),
         "execution_guard_reason_codes": guard_row.get("execution_guard_reason_codes", []),
@@ -6673,6 +7060,7 @@ def _fresh_paper_fills_from_intents(
             "decision_time_regime_feature_max_input_ts": intent.get(
                 "decision_time_regime_feature_max_input_ts"
             ),
+            **_chainlink_decision_time_field_payload(intent),
             "spread_cost": spread_cost,
             "fee_cost": 0.0,
             "slippage_cost": 0.0,

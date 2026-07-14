@@ -17,6 +17,9 @@ from types import SimpleNamespace
 from typing import Any
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.recorder.chainlink_rtds import (
+    PolymarketChainlinkRTDSCollector,
+)
 from bigan.v8.polymarket.recorder.contracts import PolymarketRealCorpusRecorderConfig
 from bigan.v8.polymarket.recorder.public_provider import (
     PolymarketPublicHTTPRealCorpusProvider,
@@ -99,6 +102,43 @@ DEFAULT_FROZEN_EV_CALIBRATION_ARTIFACT = Path(
 )
 
 
+class _UnavailableChainlinkRTDSCollector:
+    """No-op collector used when a custom provider has no matching RTDS clock."""
+
+    def start(self) -> None:
+        return None
+
+    def wait_for_rows(self, *, timeout_seconds: float) -> bool:
+        del timeout_seconds
+        return False
+
+    def stop(self) -> None:
+        return None
+
+    def rows(self) -> list[dict[str, Any]]:
+        return []
+
+    def collection_report(self) -> dict[str, Any]:
+        return {
+            "report_type": "polymarket_chainlink_rtds_collection",
+            "source_type": "polymarket_rtds_chainlink",
+            "raw_price_row_count": 0,
+            "timestamp_causality_violation_count": 0,
+            "invalid_reason_distribution": {},
+            "decision_critical": False,
+            "fail_closed_when_feature_unavailable": True,
+            "collection_status": "not_started_custom_provider_requires_explicit_collector",
+            "collection_reason_codes": [
+                "chainlink_rtds_custom_provider_collector_not_configured"
+            ],
+            "paper_only": True,
+            "capital_at_risk": False,
+            "polymarket_write_enabled": False,
+            "wallet_signing_enabled": False,
+            "v8_execution_handoff_allowed": False,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionLayerV2OneHourRemapPaperGoalConfig:
     """Configuration for the one-hour paper-only remap goal runner."""
@@ -117,6 +157,8 @@ class ExecutionLayerV2OneHourRemapPaperGoalConfig:
     canonical_o_source_manifest_path: Path | str | None = None
     public_data_cycles: tuple[tuple[dict[str, Any], ...], ...] | None = None
     public_provider: Any | None = None
+    chainlink_rtds_collector: Any | None = None
+    chainlink_rtds_warmup_seconds: float = 5.0
     settlement_evaluation_rows: tuple[dict[str, Any], ...] = ()
     settlement_poll_max_wait_seconds: float = 600.0
     settlement_poll_interval_seconds: float = 15.0
@@ -139,6 +181,8 @@ class ExecutionLayerV2OneHourRemapPaperGoalConfig:
             raise ValueError("settlement_poll_interval_seconds must be positive")
         if self.max_consecutive_orderbook_failure_rounds <= 0:
             raise ValueError("max_consecutive_orderbook_failure_rounds must be positive")
+        if self.chainlink_rtds_warmup_seconds < 0.0:
+            raise ValueError("chainlink_rtds_warmup_seconds must be non-negative")
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         object.__setattr__(
             self, "paper_candidate_unlock_dir", Path(self.paper_candidate_unlock_dir)
@@ -203,6 +247,7 @@ def _run_incremental_read_only_provider_fresh_loop(
     all_raw_orderbook_rows: list[dict[str, Any]] = []
     all_raw_trade_rows: list[dict[str, Any]] = []
     all_raw_btc_candle_rows: list[dict[str, Any]] = []
+    all_raw_chainlink_price_rows_by_key: dict[tuple[int, float], dict[str, Any]] = {}
     cycle_status_rows: list[dict[str, Any]] = []
     cycle_results: list[Any] = []
     reason_counter: Counter[str] = Counter()
@@ -213,155 +258,201 @@ def _run_incremental_read_only_provider_fresh_loop(
     fail_fast_stop_triggered = False
     fail_fast_reason_codes: list[str] = []
 
-    for cycle_index in range(max_cycles):
-        if cycle_index > 0 and time.monotonic() >= collection_deadline_monotonic:
-            break
-        cycle_run_id = f"{base_fresh_loop_config.run_id}-cycle-{cycle_index + 1:06d}"
-        cycle_config = PolymarketOV8PaperFreshLoopConfig(
-            run_id=cycle_run_id,
-            output_dir=cycle_output_dir,
-            paper_candidate_unlock_dir=config.paper_candidate_unlock_dir,
-            expected_paper_candidate_unlock_manifest_sha256=(
-                config.expected_paper_candidate_unlock_manifest_sha256
-            ),
-            loop_mode="single_cycle",
-            max_cycles=1,
-            sleep_seconds=0.0,
-            public_data_cycles=None,
-            public_data_source=O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
-            public_provider=config.public_provider,
-            canonical_o_source_manifest_path=config.canonical_o_source_manifest_path,
-            frozen_ev_calibration_artifact_path=(
-                config.frozen_ev_calibration_artifact_path
-            ),
-            overwrite_existing=config.overwrite_existing,
+    chainlink_collector = (
+        config.chainlink_rtds_collector
+        or (
+            PolymarketChainlinkRTDSCollector()
+            if config.public_provider is None
+            else _UnavailableChainlinkRTDSCollector()
         )
-        cycle_result = run_polymarket_o_v8_paper_fresh_loop(cycle_config)
-        cycle_results.append(cycle_result)
-
-        public_report = cycle_result.fresh_loop_run_report[
-            "public_data_collection_report"
-        ]
-        orderbook_count = int(public_report.get("public_orderbook_row_count") or 0)
-        feature_count = int(public_report.get("public_feature_row_count") or 0)
-        decision_critical_failure = bool(
-            public_report.get("decision_critical_provider_failure")
-        ) or feature_count <= 0
-        orderbook_failure = decision_critical_failure
-        if decision_critical_failure:
-            consecutive_orderbook_failures += 1
-        else:
-            consecutive_orderbook_failures = 0
-
-        reason_codes = list(public_report.get("public_data_collection_reason_codes") or [])
-        reason_counter.update(reason_codes)
-        degradation_reason_codes = list(
-            public_report.get("public_data_degradation_reason_codes") or []
-        )
-        degradation_reason_counter.update(degradation_reason_codes)
-        block_counter.update(
-            cycle_result.fresh_loop_run_report.get("block_reason_distribution") or {}
-        )
-        cycle_trace_rows = list(cycle_result.signal_trace_report.get("trace_rows") or [])
-        cycle_intents = _read_jsonl(cycle_result.artifact_paths["fresh_order_intent_log"])
-        cycle_fills = _read_jsonl(cycle_result.artifact_paths["fresh_fill_log"])
-        cycle_ledger_rows = _read_jsonl(cycle_result.artifact_paths["fresh_ledger_log"])
-        cycle_raw_market_rows = _read_jsonl(
-            cycle_result.artifact_paths["raw_polymarket_markets"]
-        )
-        cycle_raw_orderbook_rows = _read_jsonl(
-            cycle_result.artifact_paths["raw_polymarket_orderbooks"]
-        )
-        cycle_raw_trade_rows = _read_jsonl(
-            cycle_result.artifact_paths["raw_polymarket_trades"]
-        )
-        cycle_raw_btc_candle_rows = _read_jsonl(
-            cycle_result.artifact_paths["raw_btc_feature_candles"]
-        )
-        all_trace_rows.extend(cycle_trace_rows)
-        all_intents.extend(cycle_intents)
-        all_fills.extend(cycle_fills)
-        all_ledger_rows.extend(cycle_ledger_rows)
-        all_raw_market_rows.extend(cycle_raw_market_rows)
-        all_raw_orderbook_rows.extend(cycle_raw_orderbook_rows)
-        all_raw_trade_rows.extend(cycle_raw_trade_rows)
-        all_raw_btc_candle_rows.extend(cycle_raw_btc_candle_rows)
-        all_remap_rows.extend(
-            cycle_result.execution_layer_v2_paper_remap_report.get("remap_rows", [])
-        )
-
-        cycle_status = {
-            "cycle_index": cycle_index,
-            "cycle_run_id": cycle_run_id,
-            "provider_collection_failed": public_report[
-                "paper_fresh_provider_collection_failed"
-            ],
-            "orderbook_failure": orderbook_failure,
-            "decision_critical_provider_failure": decision_critical_failure,
-            "decision_optional_provider_failure": bool(
-                public_report.get("decision_optional_provider_failure")
-            ),
-            "consecutive_orderbook_failure_count": consecutive_orderbook_failures,
-            "max_consecutive_orderbook_failure_rounds": max_consecutive_failures,
-            "public_data_collection_reason_codes": reason_codes,
-            "public_data_degradation_reason_codes": degradation_reason_codes,
-            "provider_stage_statuses": public_report.get(
-                "provider_stage_statuses", {}
-            ),
-            "public_market_count": public_report.get("public_market_count"),
-            "public_orderbook_row_count": orderbook_count,
-            "orderbook_source_type_distribution": public_report.get(
-                "orderbook_source_type_distribution", {}
-            ),
-            "orderbook_rest_fallback_row_count": int(
-                public_report.get("orderbook_rest_fallback_row_count") or 0
-            ),
-            "orderbook_fallback_reason_distribution": public_report.get(
-                "orderbook_fallback_reason_distribution", {}
-            ),
-            "public_trade_row_count": public_report.get("public_trade_row_count"),
-            "public_btc_feature_candle_row_count": public_report.get(
-                "public_btc_feature_candle_row_count"
-            ),
-            "public_feature_row_count": feature_count,
-            "signal_trace_row_count": len(cycle_trace_rows),
-            "paper_intent_count": len(cycle_intents),
-            "paper_fill_count": len(cycle_fills),
-            "paper_only": True,
-            "capital_at_risk": False,
-            "polymarket_write_enabled": False,
-            "wallet_signing_enabled": False,
-            "v8_execution_handoff_allowed": False,
-        }
-        cycle_status_rows.append(cycle_status)
-        _write_jsonl(
-            aggregate_dir / "provider_cycle_status.jsonl",
-            cycle_status_rows,
-        )
-
-        _write_per_round_bet_artifacts(
-            goal_dir=goal_dir,
-            intents=all_intents,
-            fills=all_fills,
-            ledger_rows=all_ledger_rows,
-            trace_rows=all_trace_rows,
-            raw_market_rows=all_raw_market_rows,
-            raw_orderbook_rows=all_raw_orderbook_rows,
-            raw_trade_rows=all_raw_trade_rows,
-            raw_btc_candle_rows=all_raw_btc_candle_rows,
-        )
-
-        if consecutive_orderbook_failures >= max_consecutive_failures:
-            fail_fast_stop_triggered = True
-            fail_fast_reason_codes = [
-                "consecutive_decision_critical_provider_failures_exceeded_limit"
-            ]
-            break
-        if cycle_index < max_cycles - 1 and config.poll_interval_seconds > 0.0:
-            remaining_seconds = collection_deadline_monotonic - time.monotonic()
-            if remaining_seconds <= 0.0:
+    )
+    chainlink_collector.start()
+    chainlink_collector.wait_for_rows(timeout_seconds=config.chainlink_rtds_warmup_seconds)
+    try:
+        for cycle_index in range(max_cycles):
+            if cycle_index > 0 and time.monotonic() >= collection_deadline_monotonic:
                 break
-            time.sleep(min(config.poll_interval_seconds, remaining_seconds))
+            cycle_run_id = f"{base_fresh_loop_config.run_id}-cycle-{cycle_index + 1:06d}"
+            cycle_config = PolymarketOV8PaperFreshLoopConfig(
+                run_id=cycle_run_id,
+                output_dir=cycle_output_dir,
+                paper_candidate_unlock_dir=config.paper_candidate_unlock_dir,
+                expected_paper_candidate_unlock_manifest_sha256=(
+                    config.expected_paper_candidate_unlock_manifest_sha256
+                ),
+                loop_mode="single_cycle",
+                max_cycles=1,
+                sleep_seconds=0.0,
+                public_data_cycles=None,
+                public_data_source=O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
+                public_provider=config.public_provider,
+                chainlink_rtds_price_rows=tuple(chainlink_collector.rows()),
+                canonical_o_source_manifest_path=config.canonical_o_source_manifest_path,
+                frozen_ev_calibration_artifact_path=(
+                    config.frozen_ev_calibration_artifact_path
+                ),
+                overwrite_existing=config.overwrite_existing,
+            )
+            cycle_result = run_polymarket_o_v8_paper_fresh_loop(cycle_config)
+            cycle_results.append(cycle_result)
+
+            public_report = cycle_result.fresh_loop_run_report[
+                "public_data_collection_report"
+            ]
+            orderbook_count = int(public_report.get("public_orderbook_row_count") or 0)
+            feature_count = int(public_report.get("public_feature_row_count") or 0)
+            decision_critical_failure = bool(
+                public_report.get("decision_critical_provider_failure")
+            ) or feature_count <= 0
+            orderbook_failure = decision_critical_failure
+            if decision_critical_failure:
+                consecutive_orderbook_failures += 1
+            else:
+                consecutive_orderbook_failures = 0
+
+            reason_codes = list(
+                public_report.get("public_data_collection_reason_codes") or []
+            )
+            reason_counter.update(reason_codes)
+            degradation_reason_codes = list(
+                public_report.get("public_data_degradation_reason_codes") or []
+            )
+            degradation_reason_counter.update(degradation_reason_codes)
+            block_counter.update(
+                cycle_result.fresh_loop_run_report.get("block_reason_distribution") or {}
+            )
+            cycle_trace_rows = list(
+                cycle_result.signal_trace_report.get("trace_rows") or []
+            )
+            cycle_intents = _read_jsonl(
+                cycle_result.artifact_paths["fresh_order_intent_log"]
+            )
+            cycle_fills = _read_jsonl(cycle_result.artifact_paths["fresh_fill_log"])
+            cycle_ledger_rows = _read_jsonl(
+                cycle_result.artifact_paths["fresh_ledger_log"]
+            )
+            cycle_raw_market_rows = _read_jsonl(
+                cycle_result.artifact_paths["raw_polymarket_markets"]
+            )
+            cycle_raw_orderbook_rows = _read_jsonl(
+                cycle_result.artifact_paths["raw_polymarket_orderbooks"]
+            )
+            cycle_raw_trade_rows = _read_jsonl(
+                cycle_result.artifact_paths["raw_polymarket_trades"]
+            )
+            cycle_raw_btc_candle_rows = _read_jsonl(
+                cycle_result.artifact_paths["raw_btc_feature_candles"]
+            )
+            cycle_raw_chainlink_price_rows = _read_jsonl(
+                cycle_result.artifact_paths["raw_polymarket_chainlink_prices"]
+            )
+            all_trace_rows.extend(cycle_trace_rows)
+            all_intents.extend(cycle_intents)
+            all_fills.extend(cycle_fills)
+            all_ledger_rows.extend(cycle_ledger_rows)
+            all_raw_market_rows.extend(cycle_raw_market_rows)
+            all_raw_orderbook_rows.extend(cycle_raw_orderbook_rows)
+            all_raw_trade_rows.extend(cycle_raw_trade_rows)
+            all_raw_btc_candle_rows.extend(cycle_raw_btc_candle_rows)
+            _merge_chainlink_price_rows(
+                all_raw_chainlink_price_rows_by_key,
+                cycle_raw_chainlink_price_rows,
+            )
+            all_remap_rows.extend(
+                cycle_result.execution_layer_v2_paper_remap_report.get(
+                    "remap_rows", []
+                )
+            )
+
+            cycle_status = {
+                "cycle_index": cycle_index,
+                "cycle_run_id": cycle_run_id,
+                "provider_collection_failed": public_report[
+                    "paper_fresh_provider_collection_failed"
+                ],
+                "orderbook_failure": orderbook_failure,
+                "decision_critical_provider_failure": decision_critical_failure,
+                "decision_optional_provider_failure": bool(
+                    public_report.get("decision_optional_provider_failure")
+                ),
+                "consecutive_orderbook_failure_count": consecutive_orderbook_failures,
+                "max_consecutive_orderbook_failure_rounds": max_consecutive_failures,
+                "public_data_collection_reason_codes": reason_codes,
+                "public_data_degradation_reason_codes": degradation_reason_codes,
+                "provider_stage_statuses": public_report.get(
+                    "provider_stage_statuses", {}
+                ),
+                "public_market_count": public_report.get("public_market_count"),
+                "public_orderbook_row_count": orderbook_count,
+                "orderbook_source_type_distribution": public_report.get(
+                    "orderbook_source_type_distribution", {}
+                ),
+                "orderbook_rest_fallback_row_count": int(
+                    public_report.get("orderbook_rest_fallback_row_count") or 0
+                ),
+                "orderbook_fallback_reason_distribution": public_report.get(
+                    "orderbook_fallback_reason_distribution", {}
+                ),
+                "public_trade_row_count": public_report.get("public_trade_row_count"),
+                "public_btc_feature_candle_row_count": public_report.get(
+                    "public_btc_feature_candle_row_count"
+                ),
+                "public_chainlink_rtds_price_row_count": len(
+                    cycle_raw_chainlink_price_rows
+                ),
+                "public_feature_row_count": feature_count,
+                "signal_trace_row_count": len(cycle_trace_rows),
+                "paper_intent_count": len(cycle_intents),
+                "paper_fill_count": len(cycle_fills),
+                "paper_only": True,
+                "capital_at_risk": False,
+                "polymarket_write_enabled": False,
+                "wallet_signing_enabled": False,
+                "v8_execution_handoff_allowed": False,
+            }
+            cycle_status_rows.append(cycle_status)
+            _write_jsonl(
+                aggregate_dir / "provider_cycle_status.jsonl",
+                cycle_status_rows,
+            )
+
+            _write_per_round_bet_artifacts(
+                goal_dir=goal_dir,
+                intents=all_intents,
+                fills=all_fills,
+                ledger_rows=all_ledger_rows,
+                trace_rows=all_trace_rows,
+                raw_market_rows=all_raw_market_rows,
+                raw_orderbook_rows=all_raw_orderbook_rows,
+                raw_trade_rows=all_raw_trade_rows,
+                raw_btc_candle_rows=all_raw_btc_candle_rows,
+                raw_chainlink_price_rows=_dedupe_chainlink_price_rows(
+                    list(all_raw_chainlink_price_rows_by_key.values())
+                ),
+            )
+
+            if consecutive_orderbook_failures >= max_consecutive_failures:
+                fail_fast_stop_triggered = True
+                fail_fast_reason_codes = [
+                    "consecutive_decision_critical_provider_failures_exceeded_limit"
+                ]
+                break
+            if cycle_index < max_cycles - 1 and config.poll_interval_seconds > 0.0:
+                remaining_seconds = collection_deadline_monotonic - time.monotonic()
+                if remaining_seconds <= 0.0:
+                    break
+                time.sleep(min(config.poll_interval_seconds, remaining_seconds))
+    finally:
+        chainlink_collector.stop()
+
+    _merge_chainlink_price_rows(
+        all_raw_chainlink_price_rows_by_key,
+        chainlink_collector.rows(),
+    )
+    all_raw_chainlink_price_rows = _dedupe_chainlink_price_rows(
+        list(all_raw_chainlink_price_rows_by_key.values())
+    )
+    chainlink_collection_report = chainlink_collector.collection_report()
 
     attempted_cycle_count = len(cycle_status_rows)
     aggregate_public_report = _aggregate_public_collection_report(
@@ -372,6 +463,12 @@ def _run_incremental_read_only_provider_fresh_loop(
         degradation_reason_counter=degradation_reason_counter,
         fail_fast_stop_triggered=fail_fast_stop_triggered,
         fail_fast_reason_codes=fail_fast_reason_codes,
+    )
+    aggregate_public_report["chainlink_rtds_collection_report"] = (
+        chainlink_collection_report
+    )
+    aggregate_public_report["public_chainlink_rtds_price_row_count"] = len(
+        all_raw_chainlink_price_rows
     )
     remap_report = _aggregate_incremental_remap_report(
         run_id=base_fresh_loop_config.run_id,
@@ -417,6 +514,10 @@ def _run_incremental_read_only_provider_fresh_loop(
         "raw_polymarket_trades": aggregate_dir / "raw_polymarket_trades.jsonl",
         "raw_btc_feature_candles": aggregate_dir
         / "raw_btc_feature_candles.jsonl",
+        "raw_polymarket_chainlink_prices": aggregate_dir
+        / "raw_polymarket_chainlink_prices.jsonl",
+        "chainlink_rtds_collection_report": aggregate_dir
+        / "chainlink_rtds_collection_report.json",
     }
     _write_jsonl(artifact_paths["fresh_order_intent_log"], all_intents)
     _write_jsonl(artifact_paths["fresh_fill_log"], all_fills)
@@ -429,6 +530,14 @@ def _run_incremental_read_only_provider_fresh_loop(
     _write_jsonl(artifact_paths["raw_polymarket_orderbooks"], all_raw_orderbook_rows)
     _write_jsonl(artifact_paths["raw_polymarket_trades"], all_raw_trade_rows)
     _write_jsonl(artifact_paths["raw_btc_feature_candles"], all_raw_btc_candle_rows)
+    _write_jsonl(
+        artifact_paths["raw_polymarket_chainlink_prices"],
+        all_raw_chainlink_price_rows,
+    )
+    _write_json(
+        artifact_paths["chainlink_rtds_collection_report"],
+        chainlink_collection_report,
+    )
     artifact_hashes = {
         name: _sha256_file(path)
         for name, path in sorted(artifact_paths.items())
@@ -557,6 +666,9 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
     raw_btc_candle_rows = _read_optional_jsonl(
         fresh_result.artifact_paths.get("raw_btc_feature_candles")
     )
+    raw_chainlink_price_rows = _read_optional_jsonl(
+        fresh_result.artifact_paths.get("raw_polymarket_chainlink_prices")
+    )
     round_artifacts = _write_per_round_artifacts(
         goal_dir=goal_dir,
         intents=intents,
@@ -568,6 +680,7 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         raw_orderbook_rows=raw_orderbook_rows,
         raw_trade_rows=raw_trade_rows,
         raw_btc_candle_rows=raw_btc_candle_rows,
+        raw_chainlink_price_rows=raw_chainlink_price_rows,
     )
     raw_evidence_completeness = _raw_evidence_completeness_report(
         run_id=config.run_id,
@@ -577,6 +690,7 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         raw_orderbook_rows=raw_orderbook_rows,
         raw_trade_rows=raw_trade_rows,
         raw_btc_candle_rows=raw_btc_candle_rows,
+        raw_chainlink_price_rows=raw_chainlink_price_rows,
         round_artifacts=round_artifacts,
         aggregate_artifact_paths=fresh_result.artifact_paths,
     )
@@ -638,6 +752,12 @@ def run_execution_layer_v2_one_hour_remap_paper_goal(
         "paper_fresh_loop_manifest": fresh_result.artifact_paths["manifest"],
         "paper_remap_report": fresh_result.artifact_paths[
             "execution_layer_v2_paper_remap_report"
+        ],
+        "raw_polymarket_chainlink_prices": fresh_result.artifact_paths[
+            "raw_polymarket_chainlink_prices"
+        ],
+        "chainlink_rtds_collection_report": fresh_result.artifact_paths[
+            "chainlink_rtds_collection_report"
         ],
     }
     _write_jsonl(artifact_paths["paper_intent_log"], intents)
@@ -1493,12 +1613,14 @@ def _write_per_round_bet_artifacts(
     raw_orderbook_rows: list[dict[str, Any]] | None = None,
     raw_trade_rows: list[dict[str, Any]] | None = None,
     raw_btc_candle_rows: list[dict[str, Any]] | None = None,
+    raw_chainlink_price_rows: list[dict[str, Any]] | None = None,
 ) -> None:
     trace_rows = trace_rows or []
     raw_market_rows = raw_market_rows or []
     raw_orderbook_rows = raw_orderbook_rows or []
     raw_trade_rows = raw_trade_rows or []
     raw_btc_candle_rows = raw_btc_candle_rows or []
+    raw_chainlink_price_rows = raw_chainlink_price_rows or []
     rounds_dir = goal_dir / "round_artifacts"
     market_ids = sorted(
         {
@@ -1549,6 +1671,14 @@ def _write_per_round_bet_artifacts(
                 trace_rows=market_trace_rows,
             ),
         )
+        _write_jsonl(
+            market_dir / "raw_polymarket_chainlink_prices.jsonl",
+            _chainlink_prices_for_market(
+                raw_chainlink_price_rows,
+                market_rows=market_raw_rows,
+                trace_rows=market_trace_rows,
+            ),
+        )
 
 
 def _artifact_market_id(row: dict[str, Any]) -> str:
@@ -1594,6 +1724,68 @@ def _btc_candles_for_market(
         if lower_bound <= _float(source_ts) <= upper_bound:
             selected.append(row)
     return selected
+
+
+def _chainlink_prices_for_market(
+    rows: list[dict[str, Any]],
+    *,
+    market_rows: list[dict[str, Any]],
+    trace_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    starts = [
+        _float(row.get("market_start_ts"))
+        for row in [*market_rows, *trace_rows]
+        if row.get("market_start_ts") is not None
+    ]
+    decisions = [
+        _float(row.get("decision_ts"))
+        for row in trace_rows
+        if row.get("decision_ts") is not None
+    ]
+    if not starts or not decisions:
+        return []
+    lower_source_ts = min(starts) - 120_000.0
+    upper_source_ts = max(decisions)
+    upper_available_at_ts = max(decisions)
+    return [
+        dict(row)
+        for row in rows
+        if lower_source_ts <= _float(row.get("source_ts")) <= upper_source_ts
+        and _float(row.get("available_at_ts")) <= upper_available_at_ts
+    ]
+
+
+def _dedupe_chainlink_price_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_key: dict[tuple[int, float], dict[str, Any]] = {}
+    for row in rows:
+        key = (int(row.get("source_ts") or 0), _float(row.get("price")))
+        previous = by_key.get(key)
+        if previous is None or int(row.get("available_at_ts") or 0) < int(
+            previous.get("available_at_ts") or 0
+        ):
+            by_key[key] = dict(row)
+    return sorted(
+        by_key.values(),
+        key=lambda row: (
+            int(row.get("source_ts") or 0),
+            int(row.get("available_at_ts") or 0),
+        ),
+    )
+
+
+def _merge_chainlink_price_rows(
+    by_key: dict[tuple[int, float], dict[str, Any]],
+    rows: list[dict[str, Any]],
+) -> None:
+    for row in rows:
+        key = (int(row.get("source_ts") or 0), _float(row.get("price")))
+        previous = by_key.get(key)
+        if previous is None or int(row.get("available_at_ts") or 0) < int(
+            previous.get("available_at_ts") or 0
+        ):
+            by_key[key] = dict(row)
 
 
 def _settlement_pnl_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1655,6 +1847,7 @@ def _write_per_round_artifacts(
     raw_orderbook_rows: list[dict[str, Any]],
     raw_trade_rows: list[dict[str, Any]],
     raw_btc_candle_rows: list[dict[str, Any]],
+    raw_chainlink_price_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     _write_per_round_bet_artifacts(
         goal_dir=goal_dir,
@@ -1666,6 +1859,7 @@ def _write_per_round_artifacts(
         raw_orderbook_rows=raw_orderbook_rows,
         raw_trade_rows=raw_trade_rows,
         raw_btc_candle_rows=raw_btc_candle_rows,
+        raw_chainlink_price_rows=raw_chainlink_price_rows,
     )
     rounds_dir = goal_dir / "round_artifacts"
     market_ids = sorted(
@@ -1725,6 +1919,8 @@ def _write_per_round_artifacts(
             "raw_polymarket_trades": market_dir / "raw_polymarket_trades.jsonl",
             "raw_btc_feature_candles": market_dir
             / "raw_btc_feature_candles.jsonl",
+            "raw_polymarket_chainlink_prices": market_dir
+            / "raw_polymarket_chainlink_prices.jsonl",
         }
         row = {
             "market_id": market_id,
@@ -1747,6 +1943,9 @@ def _write_per_round_artifacts(
             "raw_trade_row_count": len(_rows_for_market(raw_trade_rows, market_id)),
             "raw_btc_feature_candle_row_count": len(
                 _read_jsonl(paths["raw_btc_feature_candles"])
+            ),
+            "raw_chainlink_price_row_count": len(
+                _read_jsonl(paths["raw_polymarket_chainlink_prices"])
             ),
             **pnl_summary,
             "artifact_paths": {
@@ -1781,6 +1980,9 @@ def _write_per_round_artifacts(
         ),
         "per_round_signal_trace_artifact_count": sum(
             1 for row in round_rows if row["artifact_paths"].get("signal_trace")
+        ),
+        "per_round_chainlink_covered_market_count": sum(
+            1 for row in round_rows if int(row["raw_chainlink_price_row_count"]) > 0
         ),
         "settled_pnl": sum(_float(row["settled_pnl"]) for row in round_rows),
         "unresolved_pnl": sum(_float(row["unresolved_pnl"]) for row in round_rows),
@@ -1830,9 +2032,11 @@ def _raw_evidence_completeness_report(
     raw_orderbook_rows: list[dict[str, Any]],
     raw_trade_rows: list[dict[str, Any]],
     raw_btc_candle_rows: list[dict[str, Any]],
+    raw_chainlink_price_rows: list[dict[str, Any]] | None = None,
     round_artifacts: dict[str, Any],
     aggregate_artifact_paths: dict[str, Path],
 ) -> dict[str, Any]:
+    raw_chainlink_price_rows = raw_chainlink_price_rows or []
     bet_market_ids = {
         _artifact_market_id(row) for row in intents if _artifact_market_id(row)
     }
@@ -1860,6 +2064,11 @@ def _raw_evidence_completeness_report(
             market_rows=market_raw,
             trace_rows=market_trace,
         )
+        market_chainlink_prices = _chainlink_prices_for_market(
+            raw_chainlink_price_rows,
+            market_rows=market_raw,
+            trace_rows=market_trace,
+        )
         reasons: list[str] = []
         if not round_row:
             reasons.append("round_artifact_directory_missing")
@@ -1877,6 +2086,7 @@ def _raw_evidence_completeness_report(
         reconstructable_decision_count = 0
         source_timestamp_violation_count = 0
         complete_reference_provenance_count = 0
+        complete_chainlink_provenance_count = 0
         decision_rows: list[dict[str, Any]] = []
         for trace in market_trace:
             decision_ts = _float(trace.get("decision_ts"))
@@ -1892,6 +2102,12 @@ def _raw_evidence_completeness_report(
                 row
                 for row in market_candles
                 if _source_available_ts(row) <= decision_ts
+            ]
+            causal_chainlink_prices = [
+                row
+                for row in market_chainlink_prices
+                if _source_available_ts(row) <= decision_ts
+                and _float(row.get("source_ts")) <= decision_ts
             ]
             regime_max_input_ts = trace.get(
                 "decision_time_regime_feature_max_input_ts"
@@ -1920,6 +2136,18 @@ def _raw_evidence_completeness_report(
             )
             if reference_complete:
                 complete_reference_provenance_count += 1
+            chainlink_provenance = trace.get(
+                "chainlink_regime_feature_provenance"
+            ) or {}
+            chainlink_complete = bool(
+                trace.get("chainlink_price_at_decision") is not None
+                and trace.get("chainlink_reference_price_at_market_start") is not None
+                and chainlink_provenance.get("provenance_valid") is True
+                and _float(chainlink_provenance.get("max_input_ts")) <= decision_ts
+                and causal_chainlink_prices
+            )
+            if chainlink_complete:
+                complete_chainlink_provenance_count += 1
             reconstructable = bool(
                 {"UP", "DOWN"}.issubset(causal_book_outcomes)
                 and causal_candles
@@ -1934,7 +2162,11 @@ def _raw_evidence_completeness_report(
                     "causal_book_outcomes": sorted(causal_book_outcomes),
                     "causal_book_row_count": len(causal_books),
                     "causal_btc_candle_row_count": len(causal_candles),
+                    "causal_chainlink_price_row_count": len(
+                        causal_chainlink_prices
+                    ),
                     "reference_provenance_complete": reference_complete,
+                    "chainlink_provenance_complete": chainlink_complete,
                     "source_timestamp_violation_count": len(violations),
                     "decision_time_features_reconstructable": reconstructable,
                 }
@@ -1952,6 +2184,7 @@ def _raw_evidence_completeness_report(
             "raw_polymarket_orderbooks",
             "raw_polymarket_trades",
             "raw_btc_feature_candles",
+            "raw_polymarket_chainlink_prices",
             "paper_bets",
             "paper_fills",
             "paper_ledger",
@@ -1979,9 +2212,13 @@ def _raw_evidence_completeness_report(
                 "raw_orderbook_row_count": len(market_books),
                 "raw_trade_row_count": len(market_trades),
                 "raw_btc_candle_row_count": len(market_candles),
+                "raw_chainlink_price_row_count": len(market_chainlink_prices),
                 "reconstructable_decision_count": reconstructable_decision_count,
                 "complete_reference_provenance_count": (
                     complete_reference_provenance_count
+                ),
+                "complete_chainlink_provenance_count": (
+                    complete_chainlink_provenance_count
                 ),
                 "source_timestamp_violation_count": (
                     source_timestamp_violation_count
@@ -2001,6 +2238,7 @@ def _raw_evidence_completeness_report(
         "raw_polymarket_orderbooks",
         "raw_polymarket_trades",
         "raw_btc_feature_candles",
+        "raw_polymarket_chainlink_prices",
         "signal_trace_report",
         "fresh_order_intent_log",
         "fresh_fill_log",
@@ -2035,6 +2273,15 @@ def _raw_evidence_completeness_report(
         "markets_with_complete_btc_reference_provenance": sum(
             row["signal_trace_row_count"] > 0
             and row["complete_reference_provenance_count"]
+            == row["signal_trace_row_count"]
+            for row in market_rows
+        ),
+        "markets_with_raw_chainlink_rows": sum(
+            int(row["raw_chainlink_price_row_count"]) > 0 for row in market_rows
+        ),
+        "markets_with_complete_chainlink_reference_provenance": sum(
+            row["signal_trace_row_count"] > 0
+            and row["complete_chainlink_provenance_count"]
             == row["signal_trace_row_count"]
             for row in market_rows
         ),
@@ -2089,6 +2336,10 @@ def _raw_evidence_completeness_md(report: dict[str, Any]) -> str:
         f"`{report['markets_with_raw_orderbook_rows']}`",
         "- markets_with_complete_btc_reference_provenance: "
         f"`{report['markets_with_complete_btc_reference_provenance']}`",
+        "- markets_with_raw_chainlink_rows: "
+        f"`{report['markets_with_raw_chainlink_rows']}`",
+        "- markets_with_complete_chainlink_reference_provenance: "
+        f"`{report['markets_with_complete_chainlink_reference_provenance']}`",
         "- evidence_complete_market_count: "
         f"`{report['evidence_complete_market_count']}`",
         "- markets_missing_required_evidence_count: "
@@ -2098,14 +2349,15 @@ def _raw_evidence_completeness_md(report: dict[str, Any]) -> str:
         "",
         "## Markets",
         "",
-        "| market_id | bet | trace | books | trades | BTC | complete | reasons |",
-        "|---|---:|---:|---:|---:|---:|---:|---|",
+        "| market_id | bet | trace | books | trades | BTC | Chainlink | complete | reasons |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in report["market_evidence_rows"]:
         lines.append(
             f"| {row['market_id']} | {int(row['paper_bet_created'])} | "
             f"{row['signal_trace_row_count']} | {row['raw_orderbook_row_count']} | "
             f"{row['raw_trade_row_count']} | {row['raw_btc_candle_row_count']} | "
+            f"{row['raw_chainlink_price_row_count']} | "
             f"{int(row['raw_evidence_complete'])} | "
             f"{', '.join(row['evidence_completeness_reason_codes']) or '-'} |"
         )
@@ -3845,6 +4097,12 @@ def _one_hour_goal_report(
     round_artifacts: dict[str, Any],
     raw_evidence_completeness: dict[str, Any],
 ) -> dict[str, Any]:
+    public_collection_report = dict(
+        fresh_result.fresh_loop_run_report.get("public_data_collection_report") or {}
+    )
+    chainlink_collection_report = dict(
+        public_collection_report.get("chainlink_rtds_collection_report") or {}
+    )
     settled_pnl = sum(_float(row.get("settlement_pnl")) for row in settlement_rows)
     unresolved_pnl = sum(_float(row.get("unresolved_pnl")) for row in settlement_rows)
     unresolved_count = sum(
@@ -3889,6 +4147,24 @@ def _one_hour_goal_report(
         "uses_read_only_public_provider_only": (
             fresh_result.manifest["paper_fresh_loop_public_data_source"]
             == O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER
+        ),
+        "chainlink_rtds_collection_report": chainlink_collection_report,
+        "chainlink_rtds_raw_price_row_count": int(
+            public_collection_report.get("public_chainlink_rtds_price_row_count")
+            or chainlink_collection_report.get("raw_price_row_count")
+            or 0
+        ),
+        "chainlink_rtds_timestamp_causality_violation_count": int(
+            chainlink_collection_report.get("timestamp_causality_violation_count")
+            or 0
+        ),
+        "markets_with_raw_chainlink_rows": raw_evidence_completeness[
+            "markets_with_raw_chainlink_rows"
+        ],
+        "markets_with_complete_chainlink_reference_provenance": (
+            raw_evidence_completeness[
+                "markets_with_complete_chainlink_reference_provenance"
+            ]
         ),
         "frozen_ev_calibration_artifact_path": str(
             config.frozen_ev_calibration_artifact_path
@@ -4111,6 +4387,18 @@ def _one_hour_goal_manifest(
         "raw_evidence_incomplete_market_count": raw_evidence_completeness[
             "markets_missing_required_evidence_count"
         ],
+        "chainlink_rtds_raw_price_row_count": goal_report[
+            "chainlink_rtds_raw_price_row_count"
+        ],
+        "chainlink_rtds_timestamp_causality_violation_count": goal_report[
+            "chainlink_rtds_timestamp_causality_violation_count"
+        ],
+        "markets_with_raw_chainlink_rows": goal_report[
+            "markets_with_raw_chainlink_rows"
+        ],
+        "markets_with_complete_chainlink_reference_provenance": goal_report[
+            "markets_with_complete_chainlink_reference_provenance"
+        ],
         "paper_fresh_loop_manifest_id": fresh_manifest[
             "o_v8_paper_fresh_loop_manifest_id"
         ],
@@ -4243,6 +4531,11 @@ def _one_hour_goal_md(report: dict[str, Any]) -> str:
             f"- provider_fail_fast_stop_triggered: `{report['provider_fail_fast_stop_triggered']}`",
             f"- max_consecutive_orderbook_failure_rounds: `{report['max_consecutive_orderbook_failure_rounds']}`",
             f"- consecutive_orderbook_failure_count_at_stop: `{report['consecutive_orderbook_failure_count_at_stop']}`",
+            f"- chainlink_rtds_raw_price_row_count: `{report['chainlink_rtds_raw_price_row_count']}`",
+            "- chainlink_rtds_timestamp_causality_violation_count: "
+            f"`{report['chainlink_rtds_timestamp_causality_violation_count']}`",
+            "- markets_with_complete_chainlink_reference_provenance: "
+            f"`{report['markets_with_complete_chainlink_reference_provenance']}`",
             f"- per_round_async_artifact_flush_enabled: `{report['per_round_async_artifact_flush_enabled']}`",
             f"- per_round_bet_artifact_count: `{report['per_round_bet_artifact_count']}`",
             f"- per_round_outcome_artifact_count: `{report['per_round_outcome_artifact_count']}`",
