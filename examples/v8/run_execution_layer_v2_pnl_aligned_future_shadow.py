@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_future_evaluation import (
+    materialize_pnl_aligned_future_action_value_predictions,
     run_pnl_aligned_future_outcome_blind_shadow_comparison,
 )
 
@@ -73,10 +74,17 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=False)
     candidate_path = run_dir / "pnl_aligned_future_candidate_shadow_rows.jsonl"
     baseline_path = run_dir / "pnl_aligned_future_baseline_shadow_rows.jsonl"
+    prediction_path = run_dir / "pnl_aligned_future_candidate_action_value_predictions.jsonl"
     _write_jsonl(candidate_path, rows["candidate"])
     _write_jsonl(baseline_path, rows["baseline"])
+    predictions = materialize_pnl_aligned_future_action_value_predictions(rows["candidate"])
+    _write_jsonl(prediction_path, predictions)
     report["candidate_shadow_rows"] = _descriptor(candidate_path)
     report["baseline_shadow_rows"] = _descriptor(baseline_path)
+    report["candidate_action_value_predictions"] = _descriptor(prediction_path)
+    report["candidate_action_value_prediction_count"] = len(predictions)
+    report["candidate_action_value_predictions_per_decision"] = 5
+    report["candidate_action_value_predictions_outcome_blind"] = True
     report_path = run_dir / "pnl_aligned_future_shadow_comparison_report.json"
     _write_json(report_path, report)
     manifest = {
@@ -87,6 +95,10 @@ def main() -> None:
         "input_decision_rows": _descriptor(decision_rows_path),
         "candidate_shadow_rows": _descriptor(candidate_path),
         "baseline_shadow_rows": _descriptor(baseline_path),
+        "candidate_action_value_predictions": _descriptor(prediction_path),
+        "candidate_action_value_prediction_count": len(predictions),
+        "candidate_action_value_predictions_per_decision": 5,
+        "candidate_action_value_predictions_outcome_blind": True,
         "shadow_report": _descriptor(report_path),
         "future_outcome_targets_loaded": False,
         "outcome_reconciliation_started": False,

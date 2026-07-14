@@ -15,6 +15,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_future_evaluati
     build_pnl_aligned_future_outcome_blind_decision_inputs,
     build_pnl_aligned_future_settled_evaluation_targets,
     evaluate_pnl_aligned_future_accepted_bets,
+    materialize_pnl_aligned_future_action_value_predictions,
     validate_pnl_aligned_future_evaluation_protocol,
 )
 
@@ -44,6 +45,42 @@ def test_future_evaluation_protocol_is_frozen_and_non_tunable() -> None:
     drifted["frozen_entry_edge_threshold"] = 0.0
     with pytest.raises(ValueError, match="threshold"):
         validate_pnl_aligned_future_evaluation_protocol(drifted)
+
+
+def test_action_value_prediction_materialization_is_complete_and_deterministic() -> None:
+    shadow = _candidate_shadow_row()
+    first = materialize_pnl_aligned_future_action_value_predictions([shadow])
+    second = materialize_pnl_aligned_future_action_value_predictions([shadow])
+
+    assert first == second
+    assert len(first) == 5
+    assert {row["action"] for row in first} == set(ACTIONS)
+    assert {row["model_rank"] for row in first} == {1, 2, 3, 4, 5}
+    assert sum(row["selected_by_frozen_model"] for row in first) == 1
+    assert all(row["outcome_fields_used"] is False for row in first)
+    assert all(row["model_rescored_for_artifact"] is False for row in first)
+    assert all(len(row["prediction_row_sha256"]) == 64 for row in first)
+
+
+@pytest.mark.parametrize("mutation", ["incomplete", "duplicate_rank", "selected_mismatch"])
+def test_action_value_prediction_materialization_rejects_invalid_grid(mutation: str) -> None:
+    shadow = _candidate_shadow_row()
+    if mutation == "incomplete":
+        shadow["full_5_action_model_ranking"].pop()
+    elif mutation == "duplicate_rank":
+        shadow["full_5_action_model_ranking"][-1]["rank"] = 1
+    else:
+        shadow["selected_action"] = "BUY_DOWN_HOLD_TO_SETTLEMENT"
+
+    with pytest.raises(ValueError, match="ranking is incomplete or inconsistent"):
+        materialize_pnl_aligned_future_action_value_predictions([shadow])
+
+
+def test_action_value_prediction_materialization_rejects_outcome_fields() -> None:
+    shadow = _candidate_shadow_row()
+    shadow["full_5_action_model_ranking"][0]["resolved_outcome"] = "UP"
+    with pytest.raises(ValueError, match="forbidden outcome fields"):
+        materialize_pnl_aligned_future_action_value_predictions([shadow])
 
 
 def test_accepted_bet_evaluation_reconciles_market_pnl_and_stays_blocked(
@@ -670,6 +707,49 @@ def test_settlement_target_identity_mismatch_fails_before_marker(
     ).exists()
 
 
+def test_settlement_target_rejects_prediction_artifact_drift_before_marker(
+    tmp_path: Path,
+) -> None:
+    freeze_path = _collection_freeze(tmp_path, expected_round_count=1)
+    corpus_dir = _outcome_blind_phase2_corpus(
+        tmp_path,
+        market_id="prediction-drift-market",
+        market_start_ts=2_000_000,
+    )
+    _add_settlement_artifacts(corpus_dir, resolved_outcome="UP")
+    decision_result = build_pnl_aligned_future_outcome_blind_decision_inputs(
+        PnLAlignedFutureDecisionInputConfig(
+            run_id="prediction-drift-decision-input",
+            output_dir=tmp_path / "runs",
+            collection_freeze_manifest_path=freeze_path,
+            expected_collection_freeze_manifest_sha256=_sha256(freeze_path),
+            source_corpus_dirs=(corpus_dir,),
+            paper_candidate_unlock_dir=UNLOCK_DIR,
+        )
+    )
+    shadow_path = _shadow_manifest(tmp_path, decision_result)
+    shadow = json.loads(shadow_path.read_text())
+    prediction_path = Path(shadow["candidate_action_value_predictions"]["path"])
+    predictions = [json.loads(line) for line in prediction_path.read_text().splitlines()]
+    predictions[0]["predicted_net_pnl_per_contract"] += 1.0
+    _write_jsonl(prediction_path, predictions)
+    shadow["candidate_action_value_predictions"] = _descriptor(prediction_path)
+    shadow_path.write_text(json.dumps(shadow, indent=2, sort_keys=True) + "\n")
+
+    with pytest.raises(ValueError, match="differs from frozen shadow"):
+        build_pnl_aligned_future_settled_evaluation_targets(
+            PnLAlignedFutureSettlementTargetConfig(
+                run_id="prediction-drift-targets",
+                output_dir=tmp_path / "target-runs",
+                shadow_manifest_path=shadow_path,
+                expected_shadow_manifest_sha256=_sha256(shadow_path),
+            )
+        )
+    assert not (
+        shadow_path.parent / "pnl_aligned_future_outcome_reconciliation_started.json"
+    ).exists()
+
+
 def test_settlement_targets_fail_closed_for_unresolved_official_outcome(
     tmp_path: Path,
 ) -> None:
@@ -741,6 +821,38 @@ def test_settlement_targets_fail_closed_for_incomplete_action_grid(tmp_path: Pat
             )
         )
     assert (shadow_path.parent / "pnl_aligned_future_outcome_reconciliation_started.json").exists()
+
+
+def _candidate_shadow_row() -> dict:
+    ranking = []
+    for rank, action in enumerate(ACTIONS, start=1):
+        side = "UP" if "BUY_UP" in action else "DOWN" if "BUY_DOWN" in action else "NONE"
+        family = (
+            "HOLD_TO_SETTLEMENT"
+            if action.endswith("HOLD_TO_SETTLEMENT")
+            else "SELL_BEFORE_CLOSE"
+            if action.endswith("SELL_BEFORE_CLOSE")
+            else "NO_TRADE"
+        )
+        ranking.append(
+            {
+                "rank": rank,
+                "action": action,
+                "side": side,
+                "action_family": family,
+                "predicted_net_pnl_per_contract": 0.1 - rank * 0.01,
+            }
+        )
+    return {
+        "source_row_identity": "prediction-row",
+        "market_id": "prediction-market",
+        "decision_ts": 2_000_000,
+        "market_close_ts": 2_300_000,
+        "selected_action": ACTIONS[0],
+        "full_5_action_model_ranking": ranking,
+        "outcome_fields_used": False,
+        "realized_pnl_used": False,
+    }
 
 
 def _collection_freeze(
@@ -987,7 +1099,16 @@ def _shadow_manifest(
     source_identity = str(decision["row_identity"])
     candidate_path = shadow_dir / "candidate.jsonl"
     baseline_path = shadow_dir / "baseline.jsonl"
-    _write_jsonl(candidate_path, [{"source_row_identity": source_identity}])
+    candidate_row = _candidate_shadow_row()
+    candidate_row.update(
+        {
+            "source_row_identity": source_identity,
+            "market_id": decision["market_id"],
+            "decision_ts": decision["decision_ts"],
+            "market_close_ts": decision["market_close_ts"],
+        }
+    )
+    _write_jsonl(candidate_path, [candidate_row])
     _write_jsonl(
         baseline_path,
         [
@@ -998,12 +1119,18 @@ def _shadow_manifest(
             }
         ],
     )
+    prediction_path = shadow_dir / "predictions.jsonl"
+    _write_jsonl(
+        prediction_path,
+        materialize_pnl_aligned_future_action_value_predictions([candidate_row]),
+    )
     manifest_path = shadow_dir / "shadow_manifest.json"
     manifest = {
         "decision_input_manifest": _descriptor(decision_result["manifest_path"]),
         "input_decision_rows": _descriptor(decision_result["decision_rows_path"]),
         "candidate_shadow_rows": _descriptor(candidate_path),
         "baseline_shadow_rows": _descriptor(baseline_path),
+        "candidate_action_value_predictions": _descriptor(prediction_path),
         "future_outcome_targets_loaded": False,
         "outcome_reconciliation_started": False,
     }

@@ -1307,9 +1307,19 @@ def build_pnl_aligned_future_settled_evaluation_targets(
     baseline_descriptor = _verified_descriptor(
         shadow_manifest.get("baseline_shadow_rows"), name="baseline_shadow_rows"
     )
+    prediction_descriptor = _verified_descriptor(
+        shadow_manifest.get("candidate_action_value_predictions"),
+        name="candidate_action_value_predictions",
+    )
     decision_rows = _load_jsonl(Path(decision_rows_descriptor["path"]))
     candidate_rows = _load_jsonl(Path(candidate_descriptor["path"]))
     baseline_rows = _load_jsonl(Path(baseline_descriptor["path"]))
+    prediction_rows = _load_jsonl(Path(prediction_descriptor["path"]))
+    expected_prediction_rows = materialize_pnl_aligned_future_action_value_predictions(
+        candidate_rows
+    )
+    if prediction_rows != expected_prediction_rows:
+        raise ValueError("candidate action-value prediction artifact differs from frozen shadow")
     decision_ids = [str(row["row_identity"]) for row in decision_rows]
     candidate_ids = [str(row["source_row_identity"]) for row in candidate_rows]
     baseline_ids = [str(row["source_row_identity"]) for row in baseline_rows]
@@ -1505,6 +1515,7 @@ def build_pnl_aligned_future_settled_evaluation_targets(
         "complete_5_action_target_grid_count": len(targets),
         "all_targets_loaded_after_market_close": True,
         "source_target_artifacts": source_target_artifacts,
+        "candidate_action_value_predictions": prediction_descriptor,
         "reconciliation_start_marker": _descriptor(marker_path),
         "future_outcome_targets_loaded": True,
         "outcome_reconciliation_started": True,
@@ -1525,6 +1536,7 @@ def build_pnl_aligned_future_settled_evaluation_targets(
         "run_id": config.run_id,
         "shadow_manifest": _descriptor(shadow_path),
         "decision_input_manifest": decision_input_descriptor,
+        "candidate_action_value_predictions": prediction_descriptor,
         "settled_evaluation_targets": _descriptor(target_path),
         "settlement_target_report": _descriptor(report_path),
         "reconciliation_start_marker": _descriptor(marker_path),
@@ -1599,6 +1611,88 @@ def run_pnl_aligned_future_outcome_blind_shadow_comparison(
         **compact_safety_fields(),
     }
     return {"candidate": candidate_rows, "baseline": baseline_rows}, report
+
+
+def materialize_pnl_aligned_future_action_value_predictions(
+    candidate_shadow_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Expand frozen candidate rankings without rescoring or using outcomes."""
+
+    forbidden = sorted(
+        {field for row in candidate_shadow_rows for field in _find_forbidden_fields(row)}
+    )
+    if forbidden:
+        raise ValueError("candidate shadow rows contain forbidden outcome fields")
+    predictions: list[dict[str, Any]] = []
+    identities: set[str] = set()
+    for shadow in candidate_shadow_rows:
+        identity = str(shadow.get("source_row_identity") or "")
+        if not identity or identity in identities:
+            raise ValueError("candidate shadow identity missing or duplicated")
+        identities.add(identity)
+        ranking = [dict(row) for row in shadow.get("full_5_action_model_ranking") or []]
+        actions = [str(row.get("action") or "") for row in ranking]
+        ranks = [int(row.get("rank") or 0) for row in ranking]
+        selected_action = str(shadow.get("selected_action") or "")
+        if not (
+            len(ranking) == len(REQUIRED_ACTIONS)
+            and set(actions) == set(REQUIRED_ACTIONS)
+            and len(actions) == len(set(actions))
+            and set(ranks) == set(range(1, len(REQUIRED_ACTIONS) + 1))
+            and len(ranks) == len(set(ranks))
+            and next(
+                (str(row["action"]) for row in ranking if int(row["rank"]) == 1),
+                None,
+            )
+            == selected_action
+        ):
+            raise ValueError("candidate shadow five-action ranking is incomplete or inconsistent")
+        for ranked in ranking:
+            value = float(ranked["predicted_net_pnl_per_contract"])
+            if not math.isfinite(value):
+                raise ValueError("candidate action-value prediction is non-finite")
+            action = str(ranked["action"])
+            row = {
+                "schema_version": (
+                    "bigan-v8-execution-layer-v2-pnl-aligned-future-action-value-prediction-v1"
+                ),
+                "source_row_identity": identity,
+                "market_id": str(shadow["market_id"]),
+                "decision_ts": int(shadow["decision_ts"]),
+                "market_close_ts": int(shadow["market_close_ts"]),
+                "action": action,
+                "side": str(ranked["side"]),
+                "action_family": str(ranked["action_family"]),
+                "model_rank": int(ranked["rank"]),
+                "predicted_net_pnl_per_contract": value,
+                "selected_action": selected_action,
+                "selected_by_frozen_model": action == selected_action,
+                "model_rescored_for_artifact": False,
+                "outcome_fields_used": False,
+                "realized_pnl_used": False,
+                "source_o_score_mutated": False,
+                "source_ranking_mutated": False,
+                "source_model_candidate_eligible": False,
+                "freeze_ready": False,
+                "promotion_evidence_eligible": False,
+                "v8_execution_handoff_allowed": False,
+                "#134_resume_allowed": False,
+                "#146_start_allowed": False,
+                **compact_safety_fields(),
+            }
+            row["prediction_row_sha256"] = canonical_json_sha256(row)
+            predictions.append(row)
+    predictions.sort(
+        key=lambda row: (
+            int(row["decision_ts"]),
+            str(row["market_id"]),
+            str(row["source_row_identity"]),
+            int(row["model_rank"]),
+        )
+    )
+    if len(predictions) != len(candidate_shadow_rows) * len(REQUIRED_ACTIONS):
+        raise ValueError("candidate action-value prediction row count mismatch")
+    return predictions
 
 
 def evaluate_pnl_aligned_future_accepted_bets(
