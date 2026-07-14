@@ -411,6 +411,7 @@ def freeze_hts_residual_confirmatory_input(
     prediction_attempted = False
     scoring_passed = False
     scorer_context_verified = False
+    hts_selection_score_hashes_verified = False
     hts_selection_rows: list[dict[str, Any]] = []
     hts_selected_market_ids: set[str] = set()
     hts_selected_source_run_ids: set[str] = set()
@@ -467,10 +468,17 @@ def freeze_hts_residual_confirmatory_input(
             hts_selection_identity_sha256 = canonical_json_sha256(
                 hts_selection_rows
             )
+            hts_selection_score_hashes_verified = bool(hts_selection_rows) and all(
+                _is_sha256(str(row.get("canonical_scored_action_row_hash") or ""))
+                for row in hts_selection_rows
+            )
     checks.update(
         {
             "outcome_blind_prediction_passed": scoring_passed,
             "frozen_o_scorer_context_verified": scorer_context_verified,
+            "outcome_blind_hts_selection_score_hashes_verified": (
+                hts_selection_score_hashes_verified
+            ),
             "minimum_input_hts_market_count_met": len(hts_selected_market_ids)
             >= int(protocol["minimum_input_hts_market_count"]),
             "minimum_input_hts_source_run_count_met": len(
@@ -505,6 +513,9 @@ def freeze_hts_residual_confirmatory_input(
         ),
         "frozen_o_scorer_context_verified": (
             "confirmatory_frozen_o_scorer_context_mismatch"
+        ),
+        "outcome_blind_hts_selection_score_hashes_verified": (
+            "confirmatory_frozen_o_selection_score_hash_missing"
         ),
         "minimum_input_hts_market_count_met": (
             "insufficient_outcome_blind_hts_market_support"
@@ -545,6 +556,9 @@ def freeze_hts_residual_confirmatory_input(
         "outcome_blind_prediction_attempted": prediction_attempted,
         "outcome_blind_prediction_passed": scoring_passed,
         "frozen_o_scorer_context_verified": scorer_context_verified,
+        "outcome_blind_hts_selection_score_hashes_verified": (
+            hts_selection_score_hashes_verified
+        ),
         "outcome_blind_hts_selected_row_count": len(hts_selection_rows),
         "outcome_blind_hts_selected_market_count": len(
             hts_selected_market_ids
@@ -668,9 +682,22 @@ def evaluate_hts_residual_confirmatory_once(
     )
     if scoring["scoring_passed"] is not True:
         raise ValueError("frozen O scorer failed during confirmatory evaluation")
+    evaluation_context = dict(scoring.get("canonical_context") or {})
+    if not (
+        evaluation_context.get("source_manifest_sha256")
+        == freeze_manifest.get("frozen_o_source_manifest_sha256")
+        and evaluation_context.get("ranking_objective_report_sha256")
+        == freeze_manifest.get("frozen_o_ranking_report_sha256")
+    ):
+        raise ValueError("confirmatory frozen O scorer context mismatch")
     confirmatory_selection_rows = _outcome_blind_hts_selection_rows(
         scoring, public_rows
     )
+    if not confirmatory_selection_rows or not all(
+        _is_sha256(str(row.get("canonical_scored_action_row_hash") or ""))
+        for row in confirmatory_selection_rows
+    ):
+        raise ValueError("confirmatory frozen O selection score hash missing")
     confirmatory_selection_hash = canonical_json_sha256(
         confirmatory_selection_rows
     )
@@ -850,6 +877,8 @@ def evaluate_hts_residual_confirmatory_once(
         "source_corpus_audits": audits,
         "source_decision_row_count": len(public_rows),
         "selected_action_distribution": dict(sorted(selected_counts.items())),
+        "frozen_o_scorer_context_verified": True,
+        "outcome_blind_hts_selection_score_hashes_verified": True,
         "outcome_blind_input_selection_hash_verified": True,
         "outcome_blind_input_selection_identity_sha256": (
             confirmatory_selection_hash

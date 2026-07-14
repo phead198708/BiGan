@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import bigan.v8.polymarket.training.execution_layer_v2_hts_residual_confirmatory as confirmatory_module
 from bigan.v8.polymarket.training.execution_layer_v2_hts_residual_confirmatory import (
     HTSResidualCandidateFreezeConfig,
     HTSResidualConfirmatoryEvaluationConfig,
@@ -298,6 +299,12 @@ def test_confirmatory_input_freeze_and_evaluation_are_exactly_once(
     assert frozen_input["manifest"]["outcome_blind_prediction_attempted"] is True
     assert frozen_input["manifest"]["outcome_blind_prediction_passed"] is True
     assert frozen_input["manifest"]["frozen_o_scorer_context_verified"] is True
+    assert (
+        frozen_input["manifest"][
+            "outcome_blind_hts_selection_score_hashes_verified"
+        ]
+        is True
+    )
     assert frozen_input["manifest"]["outcome_blind_hts_selected_market_count"] == 1
 
     evaluation_config = HTSResidualConfirmatoryEvaluationConfig(
@@ -309,11 +316,63 @@ def test_confirmatory_input_freeze_and_evaluation_are_exactly_once(
     assert report["status"] == "PRE_PROMOTION_BLOCKED"
     assert report["confirmatory_labels_used_for_fitting"] is False
     assert report["confirmatory_labels_used_for_evaluation_only"] is True
+    assert report["frozen_o_scorer_context_verified"] is True
+    assert report["outcome_blind_hts_selection_score_hashes_verified"] is True
     assert report["pre_promotion_ready"] is False
     assert report["source_model_candidate_eligible"] is False
     assert report["capital_at_risk"] is False
     with pytest.raises(FileExistsError, match="exactly-once"):
         evaluate_hts_residual_confirmatory_once(evaluation_config)
+
+
+def test_confirmatory_evaluation_rejects_frozen_o_context_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate_freeze(tmp_path)
+    source_root = tmp_path / "context-drift-source"
+    source_root.mkdir()
+    corpus = _phase2_corpus(
+        source_root,
+        market_id="context-drift-market",
+        corpus_id="context-drift-corpus",
+        market_start_ts=5_500_000,
+    )
+    frozen_input = freeze_hts_residual_confirmatory_input(
+        HTSResidualConfirmatoryInputConfig(
+            run_id="context-drift-input",
+            output_dir=tmp_path / "runs",
+            candidate_freeze_manifest_path=candidate["manifest_path"],
+            source_corpus_dirs=(corpus,),
+            paper_candidate_unlock_dir=UNLOCK_DIR,
+        )
+    )
+    original_scorer = confirmatory_module.score_frozen_o_decision_rows
+
+    def _drifted_scorer(*args: object, **kwargs: object) -> dict:
+        result = original_scorer(*args, **kwargs)
+        result["canonical_context"] = {
+            **result["canonical_context"],
+            "source_manifest_sha256": "f" * 64,
+        }
+        return result
+
+    monkeypatch.setattr(
+        confirmatory_module,
+        "score_frozen_o_decision_rows",
+        _drifted_scorer,
+    )
+    with pytest.raises(ValueError, match="frozen O scorer context mismatch"):
+        evaluate_hts_residual_confirmatory_once(
+            HTSResidualConfirmatoryEvaluationConfig(
+                confirmatory_input_manifest_path=frozen_input["manifest_path"],
+                paper_candidate_unlock_dir=UNLOCK_DIR,
+            )
+        )
+    assert (
+        frozen_input["output_dir"]
+        / "hts_residual_confirmatory_evaluation_started.json"
+    ).exists()
 
 
 def test_confirmatory_input_overlap_blocks_before_evaluation_marker(
