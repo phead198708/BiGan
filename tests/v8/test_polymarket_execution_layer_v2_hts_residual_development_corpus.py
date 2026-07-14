@@ -65,7 +65,11 @@ def test_builds_causal_post_protocol_development_rows_fail_closed(
     assert set(report["residual_chainlink_feature_coverage"].values()) == {1}
     assert report["chainlink_feature_coverage_scope"] == "residual_hts_rows"
     assert report["residual_market_count"] == 1
-    assert report["forward_oof_evaluation_ready"] is True
+    assert report["forward_oof_evaluation_ready"] is False
+    assert report["development_support"]["checks"]["minimum_market_count_met"] is True
+    assert "missing_selected_side_support" in report[
+        "forward_oof_blocking_reason_codes"
+    ]
     assert report["candidate_fit_attempted"] is False
     assert report["confirmatory_validation_started"] is False
     assert report["source_model_candidate_eligible"] is False
@@ -409,6 +413,9 @@ def _protocol(collection_not_before_ts: int, minimum_markets: int) -> dict:
         "excluded_smoke_corpus_ids": [],
         "development_evaluation_support": {
             "minimum_market_count": minimum_markets,
+            "minimum_source_run_count": 1,
+            "both_selected_sides_required": True,
+            "both_resolved_outcomes_required": True,
         },
     }
 

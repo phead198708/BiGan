@@ -242,11 +242,12 @@ def build_hts_residual_development_corpus(
     minimum_markets = int(protocol["development_evaluation_support"][
         "minimum_market_count"
     ])
+    development_support = _development_support(residual_rows, protocol)
     report = {
         "schema_version": f"{SCHEMA_PREFIX}-report-v1",
         "run_id": config.run_id,
         "status": "DEVELOPMENT_CORPUS_READY"
-        if market_count >= minimum_markets
+        if development_support["passed"]
         else "DEVELOPMENT_CORPUS_SUPPORT_INSUFFICIENT",
         "protocol_path": str(Path(config.protocol_path).resolve()),
         "protocol_sha256": protocol_hash,
@@ -302,7 +303,11 @@ def build_hts_residual_development_corpus(
         "chainlink_feature_coverage_scope": "residual_hts_rows",
         "chainlink_feature_coverage": _chainlink_feature_coverage(residual_rows),
         "minimum_development_market_count": minimum_markets,
-        "forward_oof_evaluation_ready": market_count >= minimum_markets,
+        "development_support": development_support,
+        "forward_oof_evaluation_ready": development_support["passed"],
+        "forward_oof_blocking_reason_codes": development_support[
+            "blocking_reason_codes"
+        ],
         "candidate_fit_attempted": False,
         "candidate_selected": False,
         "confirmatory_validation_started": False,
@@ -1227,6 +1232,7 @@ def _report_markdown(report: dict[str, Any]) -> str:
             f"- decision rows: `{report['source_decision_row_count']}`",
             f"- residual rows / markets: `{report['residual_row_count']}` / `{report['residual_market_count']}`",
             f"- forward OOF ready: `{str(report['forward_oof_evaluation_ready']).lower()}`",
+            f"- forward OOF blockers: `{report['forward_oof_blocking_reason_codes']}`",
             f"- feature causality violations: `{report['feature_causality_violation_count']}`",
             f"- source Chainlink coverage: `{report['source_chainlink_feature_coverage']}`",
             f"- residual Chainlink coverage: `{report['residual_chainlink_feature_coverage']}`",
