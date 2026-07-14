@@ -16,6 +16,13 @@ import numpy as np
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training.contracts import compact_safety_fields
+from bigan.v8.polymarket.training.execution_layer_v2_hts_residual_development_corpus import (
+    PHASE2_MARKET_PROBABILITY_MAPPING_RULE_ID,
+    _forbidden_decision_fields,
+    _phase2_feature_to_public_row,
+    _side_depth_imbalance,
+    _side_feature,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_action_value import (
     FORBIDDEN_DECISION_FIELDS,
     REQUIRED_ACTIONS,
@@ -24,6 +31,11 @@ from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_action_value im
     run_pnl_aligned_action_value_outcome_blind_shadow,
     validate_pnl_aligned_action_value_protocol,
 )
+from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
+    PINNED_ISSUE_160_MANIFEST_SHA256,
+    _fresh_public_ranking_row_from_canonical,
+    score_frozen_o_decision_rows,
+)
 from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking import (
     _v8_apply_simulated_order_to_state,
     _v8_execution_guard_config,
@@ -31,11 +43,14 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     _v8_initial_runtime_state,
 )
 
-EVALUATION_SCHEMA_VERSION = (
-    "bigan-v8-execution-layer-v2-pnl-aligned-future-evaluation-protocol-v1"
-)
-REPORT_SCHEMA_VERSION = (
-    "bigan-v8-execution-layer-v2-pnl-aligned-future-accepted-bet-report-v1"
+EVALUATION_SCHEMA_VERSION = "bigan-v8-execution-layer-v2-pnl-aligned-future-evaluation-protocol-v1"
+REPORT_SCHEMA_VERSION = "bigan-v8-execution-layer-v2-pnl-aligned-future-accepted-bet-report-v1"
+DECISION_INPUT_SCHEMA_VERSION = "bigan-v8-execution-layer-v2-pnl-aligned-future-decision-input-v1"
+PROHIBITED_FUTURE_OUTCOME_ARTIFACT_NAMES = (
+    "polymarket_label_rows.jsonl",
+    "polymarket_resolution_events.jsonl",
+    "polymarket_settlement_events.jsonl",
+    "current_clob_condition_settlement_pnl_rows.csv",
 )
 
 
@@ -69,15 +84,65 @@ class PnLAlignedFutureEvaluationFreezeConfig:
         ):
             raise ValueError("git_commit must be a 40-character hex digest")
         object.__setattr__(self, "output_dir", Path(self.output_dir))
-        object.__setattr__(
-            self, "evaluation_protocol_path", Path(self.evaluation_protocol_path)
-        )
+        object.__setattr__(self, "evaluation_protocol_path", Path(self.evaluation_protocol_path))
         object.__setattr__(
             self,
             "collection_freeze_manifest_path",
             Path(self.collection_freeze_manifest_path),
         )
         object.__setattr__(self, "model_dir", Path(self.model_dir))
+
+
+@dataclass(frozen=True, slots=True)
+class PnLAlignedFutureDecisionInputConfig:
+    """Frozen inputs for outcome-blind Phase 2 decision-row construction."""
+
+    run_id: str
+    output_dir: Path | str
+    collection_freeze_manifest_path: Path | str
+    expected_collection_freeze_manifest_sha256: str
+    source_corpus_dirs: tuple[Path | str, ...]
+    paper_candidate_unlock_dir: Path | str
+    expected_unlock_manifest_sha256: str = PINNED_ISSUE_160_MANIFEST_SHA256
+    canonical_o_source_manifest_path: Path | str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        for name, value in (
+            (
+                "expected_collection_freeze_manifest_sha256",
+                self.expected_collection_freeze_manifest_sha256,
+            ),
+            (
+                "expected_unlock_manifest_sha256",
+                self.expected_unlock_manifest_sha256,
+            ),
+        ):
+            if not _is_sha256(value):
+                raise ValueError(f"{name} must be a SHA-256 digest")
+        if not self.source_corpus_dirs:
+            raise ValueError("source_corpus_dirs must not be empty")
+        object.__setattr__(self, "output_dir", Path(self.output_dir))
+        object.__setattr__(
+            self,
+            "collection_freeze_manifest_path",
+            Path(self.collection_freeze_manifest_path),
+        )
+        object.__setattr__(
+            self,
+            "source_corpus_dirs",
+            tuple(Path(path) for path in self.source_corpus_dirs),
+        )
+        object.__setattr__(
+            self, "paper_candidate_unlock_dir", Path(self.paper_candidate_unlock_dir)
+        )
+        if self.canonical_o_source_manifest_path is not None:
+            object.__setattr__(
+                self,
+                "canonical_o_source_manifest_path",
+                Path(self.canonical_o_source_manifest_path),
+            )
 
 
 def validate_pnl_aligned_future_evaluation_protocol(
@@ -104,8 +169,7 @@ def validate_pnl_aligned_future_evaluation_protocol(
         is False,
         "cost_rule": protocol.get("decision_time_execution_cost_rule_id")
         == "spread_queue_staleness_cost_proxy_v1",
-        "threshold": float(protocol.get("frozen_entry_edge_threshold") or -1.0)
-        == 0.02,
+        "threshold": float(protocol.get("frozen_entry_edge_threshold") or -1.0) == 0.02,
         "bootstrap": (
             int(bootstrap.get("resample_count") or 0) == 2000
             and int(bootstrap.get("seed") or 0) == 20260715
@@ -118,30 +182,20 @@ def validate_pnl_aligned_future_evaluation_protocol(
             and int(gates.get("minimum_accepted_bet_count_per_side") or 0) == 10
             and gates.get("all_accepted_bets_must_be_settled") is True
         ),
-        "outcomes_not_selection": protocol.get("outcome_fields_used_for_shadow_selection")
-        is False,
-        "outcomes_evaluation_only": protocol.get("outcome_fields_used_for_evaluation_only")
-        is True,
-        "no_future_feature_tuning": protocol.get(
-            "uses_future_outcomes_for_feature_selection"
-        )
+        "outcomes_not_selection": protocol.get("outcome_fields_used_for_shadow_selection") is False,
+        "outcomes_evaluation_only": protocol.get("outcome_fields_used_for_evaluation_only") is True,
+        "no_future_feature_tuning": protocol.get("uses_future_outcomes_for_feature_selection")
         is False,
         "no_future_hyperparameter_tuning": protocol.get(
             "uses_future_outcomes_for_hyperparameter_selection"
         )
         is False,
-        "no_future_threshold_tuning": protocol.get(
-            "uses_future_outcomes_for_threshold_selection"
-        )
+        "no_future_threshold_tuning": protocol.get("uses_future_outcomes_for_threshold_selection")
         is False,
-        "no_future_guard_tuning": protocol.get(
-            "uses_future_outcomes_for_guard_or_sizing_selection"
-        )
+        "no_future_guard_tuning": protocol.get("uses_future_outcomes_for_guard_or_sizing_selection")
         is False,
-        "no_source_score_mutation": protocol.get("source_o_score_mutation_allowed")
-        is False,
-        "no_source_ranking_mutation": protocol.get("source_ranking_mutation_allowed")
-        is False,
+        "no_source_score_mutation": protocol.get("source_o_score_mutation_allowed") is False,
+        "no_source_ranking_mutation": protocol.get("source_ranking_mutation_allowed") is False,
         "safety": (
             safety.get("paper_only") is True
             and safety.get("capital_at_risk") is False
@@ -169,10 +223,7 @@ def freeze_pnl_aligned_future_evaluation(
     collection_freeze_path = config.collection_freeze_manifest_path.resolve()
     if _sha256_file(protocol_path) != config.expected_evaluation_protocol_sha256:
         raise ValueError("future evaluation protocol SHA-256 mismatch")
-    if (
-        _sha256_file(collection_freeze_path)
-        != config.expected_collection_freeze_manifest_sha256
-    ):
+    if _sha256_file(collection_freeze_path) != config.expected_collection_freeze_manifest_sha256:
         raise ValueError("collection freeze manifest SHA-256 mismatch")
     protocol = _load_json(protocol_path)
     validate_pnl_aligned_future_evaluation_protocol(protocol)
@@ -192,15 +243,16 @@ def freeze_pnl_aligned_future_evaluation(
         guard_config
     ):
         raise ValueError("collection freeze execution guard hash mismatch")
-    if collection_freeze.get("model_config_or_threshold_mutation_after_freeze_allowed") is not False:
+    if (
+        collection_freeze.get("model_config_or_threshold_mutation_after_freeze_allowed")
+        is not False
+    ):
         raise ValueError("collection freeze mutation policy is not fail closed")
 
     output_dir = config.output_dir / config.run_id
     output_dir.mkdir(parents=True, exist_ok=False)
     manifest = {
-        "schema_version": (
-            "bigan-v8-execution-layer-v2-pnl-aligned-future-evaluation-freeze-v1"
-        ),
+        "schema_version": ("bigan-v8-execution-layer-v2-pnl-aligned-future-evaluation-freeze-v1"),
         "run_id": config.run_id,
         "freeze_created_ts": int(time.time() * 1000),
         "git_commit": config.git_commit.lower(),
@@ -212,9 +264,7 @@ def freeze_pnl_aligned_future_evaluation(
         "model_protocol": fit_manifest["protocol"],
         "execution_guard_config": guard_config,
         "execution_guard_config_sha256": canonical_json_sha256(guard_config),
-        "minimum_future_window_start_ts": collection_freeze[
-            "minimum_future_window_start_ts"
-        ],
+        "minimum_future_window_start_ts": collection_freeze["minimum_future_window_start_ts"],
         "prior_market_ids_sha256": collection_freeze["prior_market_ids_sha256"],
         "future_outcome_targets_loaded": False,
         "shadow_decisions_generated": False,
@@ -240,6 +290,609 @@ def freeze_pnl_aligned_future_evaluation(
     }
 
 
+def build_pnl_aligned_future_outcome_blind_decision_inputs(
+    config: PnLAlignedFutureDecisionInputConfig,
+) -> dict[str, Any]:
+    """Build future source rows without opening any outcome-bearing artifact."""
+
+    freeze_path = config.collection_freeze_manifest_path.resolve()
+    if _sha256_file(freeze_path) != config.expected_collection_freeze_manifest_sha256:
+        raise ValueError("collection freeze manifest SHA-256 mismatch")
+    collection_freeze = _load_json(freeze_path)
+    if not (
+        collection_freeze.get("future_collection_outcome_blind") is True
+        and collection_freeze.get("future_window_must_be_strictly_later") is True
+        and collection_freeze.get("future_market_ids_must_be_disjoint") is True
+        and collection_freeze.get("model_config_or_threshold_mutation_after_freeze_allowed")
+        is False
+    ):
+        raise ValueError("collection freeze is not outcome-blind and fail-closed")
+    historical_descriptor = _verified_descriptor(
+        collection_freeze.get("historical_development_rows"),
+        name="historical_development_rows",
+    )
+    historical_rows = _load_jsonl(Path(historical_descriptor["path"]))
+    prior_market_ids = sorted({str(row["market_id"]) for row in historical_rows})
+    if (
+        len(prior_market_ids) != int(collection_freeze["prior_market_count"])
+        or canonical_json_sha256(prior_market_ids) != collection_freeze["prior_market_ids_sha256"]
+        or max(int(row["decision_ts"]) for row in historical_rows)
+        != int(collection_freeze["max_prior_decision_ts"])
+    ):
+        raise ValueError("collection freeze historical lineage mismatch")
+
+    public_rows: list[dict[str, Any]] = []
+    corpus_audits: list[dict[str, Any]] = []
+    rejected_rows: list[dict[str, Any]] = []
+    for corpus_dir in sorted(path.resolve() for path in config.source_corpus_dirs):
+        audit, rows, rejected = _load_outcome_blind_phase2_feature_corpus(
+            corpus_dir=corpus_dir,
+            prior_market_ids=set(prior_market_ids),
+            minimum_future_window_start_ts=int(collection_freeze["minimum_future_window_start_ts"]),
+        )
+        corpus_audits.append(audit)
+        public_rows.extend(rows)
+        rejected_rows.extend(rejected)
+
+    duplicate_decisions = sorted(
+        key
+        for key, count in Counter(
+            (str(row["market_id"]), int(row["decision_ts"])) for row in public_rows
+        ).items()
+        if count > 1
+    )
+    scoring = (
+        score_frozen_o_decision_rows(
+            run_id=f"{config.run_id}-frozen-o-scoring",
+            decision_rows=public_rows,
+            paper_candidate_unlock_dir=config.paper_candidate_unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=(
+                config.expected_unlock_manifest_sha256
+            ),
+            canonical_o_source_manifest_path=config.canonical_o_source_manifest_path,
+        )
+        if public_rows and not duplicate_decisions
+        else {
+            "scoring_passed": False,
+            "canonical_scorer_report": {
+                "canonical_scored_action_rows": [],
+                "canonical_selected_decision_rows": [],
+            },
+        }
+    )
+    decision_rows: list[dict[str, Any]] = []
+    if scoring["scoring_passed"] and not duplicate_decisions:
+        scored_by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for scored in scoring["canonical_scorer_report"]["canonical_scored_action_rows"]:
+            scored_by_group[str(scored["decision_group_id"])].append(scored)
+        public_by_decision = {
+            (str(row["market_id"]), int(row["decision_ts"])): row for row in public_rows
+        }
+        for selected in scoring["canonical_scorer_report"]["canonical_selected_decision_rows"]:
+            key = (str(selected["market_id"]), int(selected["decision_ts"]))
+            decision_rows.append(
+                _outcome_blind_future_decision_row(
+                    selected=selected,
+                    group_scored_rows=scored_by_group[str(selected["decision_group_id"])],
+                    public_row=public_by_decision[key],
+                    collection_freeze_id=str(collection_freeze["collection_freeze_id"]),
+                )
+            )
+    decision_rows.sort(
+        key=lambda row: (
+            int(row["decision_ts"]),
+            str(row["market_id"]),
+            str(row["row_identity"]),
+        )
+    )
+
+    forbidden_fields = sorted(
+        {field for row in decision_rows for field in _find_forbidden_fields(row)}
+    )
+    causality_violations = [
+        str(row["row_identity"])
+        for row in decision_rows
+        if int(row["max_input_ts"]) > int(row["decision_ts"])
+    ]
+    source_market_ids = sorted({str(row["market_id"]) for row in public_rows})
+    expected_round_count = int(collection_freeze["expected_round_count"])
+    blocking_reason_codes: list[str] = []
+    if len(config.source_corpus_dirs) != expected_round_count:
+        blocking_reason_codes.append("future_source_corpus_count_mismatch")
+    if len(source_market_ids) != expected_round_count:
+        blocking_reason_codes.append("future_unique_market_count_mismatch")
+    if rejected_rows:
+        blocking_reason_codes.append("future_source_rows_rejected")
+    if duplicate_decisions:
+        blocking_reason_codes.append("duplicate_future_decision_identity")
+    if not scoring["scoring_passed"]:
+        blocking_reason_codes.append("frozen_o_scoring_failed")
+    if len(decision_rows) != len(public_rows):
+        blocking_reason_codes.append("future_decision_row_count_mismatch")
+    if forbidden_fields:
+        blocking_reason_codes.append("forbidden_outcome_field_present")
+    if causality_violations:
+        blocking_reason_codes.append("future_decision_feature_causality_violation")
+    blocking_reason_codes = sorted(set(blocking_reason_codes))
+    canonical_context = dict(scoring.get("canonical_context") or {})
+    canonical_o_lineage = {
+        "source_manifest_path": canonical_context.get("source_manifest_path"),
+        "source_manifest_sha256": canonical_context.get("source_manifest_sha256"),
+        "ranking_objective_report_path": canonical_context.get("ranking_objective_report_path"),
+        "ranking_objective_report_sha256": canonical_context.get("ranking_objective_report_sha256"),
+        "feature_schema_hash": canonical_context.get("feature_schema_hash"),
+        "ranking_correction_config_hash": canonical_context.get("ranking_correction_config_hash"),
+        "ranking_correction_config_hash_verified": canonical_context.get(
+            "ranking_correction_config_hash_verified"
+        ),
+        "canonical_inputs_available": canonical_context.get("canonical_inputs_available"),
+    }
+
+    output_dir = config.output_dir / config.run_id
+    output_dir.mkdir(parents=True, exist_ok=False)
+    decision_rows_path = output_dir / "pnl_aligned_future_decision_rows.jsonl"
+    rejected_rows_path = output_dir / "pnl_aligned_future_rejected_rows.jsonl"
+    access_audit_path = output_dir / "pnl_aligned_future_input_access_audit.json"
+    report_path = output_dir / "pnl_aligned_future_decision_input_report.json"
+    _write_jsonl(decision_rows_path, decision_rows)
+    _write_jsonl(rejected_rows_path, rejected_rows)
+    input_access_audit = {
+        "schema_version": f"{DECISION_INPUT_SCHEMA_VERSION}-access-audit",
+        "permitted_artifact_names_opened": sorted(
+            {name for audit in corpus_audits for name in audit["permitted_artifact_names_opened"]}
+        ),
+        "prohibited_future_outcome_artifact_names": list(PROHIBITED_FUTURE_OUTCOME_ARTIFACT_NAMES),
+        "prohibited_future_outcome_artifacts_present_but_not_opened": sorted(
+            {
+                name
+                for audit in corpus_audits
+                for name in audit["prohibited_future_outcome_artifacts_present_but_not_opened"]
+            }
+        ),
+        "prohibited_future_outcome_artifact_read_count": 0,
+        "label_rows_required": False,
+        "resolution_events_required": False,
+        "future_outcome_targets_loaded": False,
+        "forbidden_decision_field_violation_count": len(forbidden_fields),
+        "forbidden_decision_fields": forbidden_fields,
+        "feature_max_input_ts_violation_count": len(causality_violations),
+        "feature_max_input_ts_violations": causality_violations,
+        "outcome_blind_input_access_passed": not forbidden_fields and not causality_violations,
+        **compact_safety_fields(),
+    }
+    _write_json(access_audit_path, input_access_audit)
+    report = {
+        "schema_version": f"{DECISION_INPUT_SCHEMA_VERSION}-report",
+        "run_id": config.run_id,
+        "status": (
+            "OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY"
+            if not blocking_reason_codes
+            else "BLOCKED_FAIL_CLOSED"
+        ),
+        "collection_freeze_id": collection_freeze["collection_freeze_id"],
+        "collection_freeze_manifest_sha256": (config.expected_collection_freeze_manifest_sha256),
+        "expected_round_count": expected_round_count,
+        "source_corpus_count": len(config.source_corpus_dirs),
+        "source_unique_market_count": len(source_market_ids),
+        "source_decision_count": len(public_rows),
+        "outcome_blind_decision_row_count": len(decision_rows),
+        "source_corpus_audits": corpus_audits,
+        "rejected_row_count": len(rejected_rows),
+        "rejected_reason_distribution": dict(
+            sorted(Counter(row["reason_code"] for row in rejected_rows).items())
+        ),
+        "duplicate_decision_identities": [
+            {"market_id": market_id, "decision_ts": decision_ts}
+            for market_id, decision_ts in duplicate_decisions
+        ],
+        "frozen_o_scoring_passed": scoring["scoring_passed"],
+        "frozen_o_source_lineage": canonical_o_lineage,
+        "complete_5_action_ranking_count": sum(
+            {
+                row["selected_action"]
+                for row in decision["execution_handoff_context"]["full_5_action_ranking"]
+            }
+            == set(REQUIRED_ACTIONS)
+            for decision in decision_rows
+        ),
+        "future_window_time_validation_passed": all(
+            int(row["decision_ts"]) >= int(collection_freeze["minimum_future_window_start_ts"])
+            for row in decision_rows
+        ),
+        "future_market_disjointness_passed": not (set(source_market_ids) & set(prior_market_ids)),
+        "future_outcome_targets_loaded": False,
+        "outcome_reconciliation_started": False,
+        "outcome_blind_input_access_passed": input_access_audit[
+            "outcome_blind_input_access_passed"
+        ],
+        "blocking_reason_codes": blocking_reason_codes,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "v8_execution_handoff_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    _write_json(report_path, report)
+    manifest = {
+        "schema_version": f"{DECISION_INPUT_SCHEMA_VERSION}-manifest",
+        "run_id": config.run_id,
+        "collection_freeze_manifest": _descriptor(freeze_path),
+        "source_corpora": [
+            {
+                "corpus_id": audit["corpus_id"],
+                "corpus_dir": audit["corpus_dir"],
+                "corpus_manifest_sha256": audit["corpus_manifest_sha256"],
+                "feature_rows_sha256": audit["feature_rows_sha256"],
+                "market_metadata_sha256": audit["market_metadata_sha256"],
+                "chainlink_evidence_sha256": audit["chainlink_evidence_sha256"],
+            }
+            for audit in corpus_audits
+        ],
+        "frozen_o_source_lineage": canonical_o_lineage,
+        "decision_rows": _descriptor(decision_rows_path),
+        "rejected_rows": _descriptor(rejected_rows_path),
+        "input_access_audit": _descriptor(access_audit_path),
+        "decision_input_report": _descriptor(report_path),
+        "future_outcome_targets_loaded": False,
+        "outcome_reconciliation_started": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "v8_execution_handoff_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    manifest_path = output_dir / "pnl_aligned_future_decision_input_manifest.json"
+    _write_json(manifest_path, manifest)
+    return {
+        "output_dir": output_dir,
+        "decision_rows_path": decision_rows_path,
+        "access_audit_path": access_audit_path,
+        "report_path": report_path,
+        "manifest_path": manifest_path,
+        "manifest_sha256": _sha256_file(manifest_path),
+        "decision_rows": decision_rows,
+        "report": report,
+    }
+
+
+def _load_outcome_blind_phase2_feature_corpus(
+    *,
+    corpus_dir: Path,
+    prior_market_ids: set[str],
+    minimum_future_window_start_ts: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    permitted_names = (
+        "polymarket_corpus_manifest.json",
+        "polymarket_feature_rows.jsonl",
+        "polymarket_market_metadata.jsonl",
+        "polymarket_chainlink_prices.jsonl",
+        "polymarket_chainlink_decision_time_evidence_manifest.json",
+        "training_corpus_provenance.json",
+    )
+    missing = sorted(name for name in permitted_names if not (corpus_dir / name).is_file())
+    if missing:
+        raise ValueError(f"missing outcome-blind Phase 2 artifacts in {corpus_dir}: {missing}")
+    manifest_path = corpus_dir / "polymarket_corpus_manifest.json"
+    feature_path = corpus_dir / "polymarket_feature_rows.jsonl"
+    metadata_path = corpus_dir / "polymarket_market_metadata.jsonl"
+    chainlink_path = corpus_dir / "polymarket_chainlink_prices.jsonl"
+    chainlink_manifest_path = (
+        corpus_dir / "polymarket_chainlink_decision_time_evidence_manifest.json"
+    )
+    provenance_path = corpus_dir / "training_corpus_provenance.json"
+    corpus_manifest = _load_json(manifest_path)
+    normalized_hashes = dict(corpus_manifest.get("normalized_artifact_hashes") or {})
+    for key, path in (
+        ("feature_rows", feature_path),
+        ("market_metadata", metadata_path),
+    ):
+        if normalized_hashes.get(key) != _sha256_file(path):
+            raise ValueError(f"Phase 2 normalized artifact hash mismatch: {path.name}")
+    chainlink_manifest = _load_json(chainlink_manifest_path)
+    if chainlink_manifest.get("evidence_sha256") != _sha256_file(chainlink_path):
+        raise ValueError("Chainlink evidence SHA-256 mismatch")
+    if chainlink_manifest.get("timestamp_causality_violation_count") != 0:
+        raise ValueError("Chainlink evidence reports timestamp causality violations")
+
+    features = _load_jsonl(feature_path)
+    metadata_rows = _load_jsonl(metadata_path)
+    chainlink_rows = _load_jsonl(chainlink_path)
+    provenance = _load_json(provenance_path)
+    corpus_id = str(provenance.get("corpus_id") or corpus_dir.name)
+    source_run_id = str(provenance.get("run_id") or corpus_id)
+    metadata_by_market = {str(row["market_id"]): row for row in metadata_rows}
+    rows: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    lineage = {
+        "source_corpus_dir": str(corpus_dir),
+        "source_corpus_manifest_sha256": _sha256_file(manifest_path),
+        "source_feature_rows_sha256": _sha256_file(feature_path),
+        "source_market_metadata_sha256": _sha256_file(metadata_path),
+        "source_chainlink_evidence_sha256": _sha256_file(chainlink_path),
+        "market_probability_mapping_rule_id": (PHASE2_MARKET_PROBABILITY_MAPPING_RULE_ID),
+        "outcome_artifact_read_count": 0,
+    }
+    for feature_row in features:
+        market_id = str(feature_row.get("market_id") or "")
+        decision_ts = int(feature_row.get("decision_ts") or 0)
+        reasons: list[str] = []
+        if market_id in prior_market_ids:
+            reasons.append("future_market_overlaps_historical_fit")
+        if decision_ts < minimum_future_window_start_ts:
+            reasons.append("decision_before_frozen_future_window")
+        if int(feature_row.get("max_input_ts") or 0) > decision_ts:
+            reasons.append("phase2_feature_causality_violation")
+        metadata = metadata_by_market.get(market_id)
+        if metadata is None:
+            reasons.append("market_metadata_missing")
+        elif not (
+            int(metadata.get("market_start_ts") or 0)
+            < decision_ts
+            < int(metadata.get("market_end_ts") or 0)
+        ):
+            reasons.append("invalid_decision_time_market_schedule")
+        if reasons:
+            rejected.extend(
+                _future_input_rejection(market_id, decision_ts, reason)
+                for reason in sorted(reasons)
+            )
+            continue
+        public_row = _phase2_feature_to_public_row(
+            run_id=source_run_id,
+            row_index=len(rows),
+            feature_row=feature_row,
+            market=dict(metadata),
+            chainlink_rows=chainlink_rows,
+        )
+        mapping = dict(public_row.get("market_probability_mapping_provenance") or {})
+        if (
+            public_row.get("market_probability_mapping_rule_id")
+            != PHASE2_MARKET_PROBABILITY_MAPPING_RULE_ID
+            or mapping.get("provenance_valid") is not True
+        ):
+            rejected.append(
+                _future_input_rejection(
+                    market_id,
+                    decision_ts,
+                    "market_probability_mapping_contract_violation",
+                )
+            )
+            continue
+        required_chainlink_fields = (
+            "chainlink_price_at_decision",
+            "chainlink_reference_price_at_market_start",
+            "chainlink_reference_distance_at_decision",
+            "chainlink_momentum_30s",
+            "chainlink_momentum_60s",
+            "chainlink_momentum_120s",
+            "chainlink_realized_volatility_120s",
+        )
+        missing_chainlink = sorted(
+            field
+            for field in required_chainlink_fields
+            if not isinstance(public_row.get(field), int | float)
+            or not math.isfinite(float(public_row[field]))
+        )
+        chainlink_provenance = dict(public_row.get("chainlink_regime_feature_provenance") or {})
+        if missing_chainlink or chainlink_provenance.get("provenance_valid") is not True:
+            rejected.append(
+                _future_input_rejection(
+                    market_id,
+                    decision_ts,
+                    "complete_causal_chainlink_feature_block_missing",
+                    missing_fields=missing_chainlink,
+                )
+            )
+            continue
+        if _forbidden_decision_fields(public_row):
+            rejected.append(
+                _future_input_rejection(
+                    market_id,
+                    decision_ts,
+                    "forbidden_decision_field_present",
+                )
+            )
+            continue
+        if int(public_row["decision_time_feature_max_input_ts"]) > decision_ts:
+            rejected.append(
+                _future_input_rejection(
+                    market_id,
+                    decision_ts,
+                    "joined_feature_causality_violation",
+                )
+            )
+            continue
+        public_row["future_source_run_id"] = source_run_id
+        public_row["future_source_lineage"] = dict(lineage)
+        rows.append(public_row)
+    audit = {
+        "corpus_id": corpus_id,
+        "corpus_dir": str(corpus_dir),
+        "corpus_manifest_sha256": lineage["source_corpus_manifest_sha256"],
+        "feature_rows_sha256": lineage["source_feature_rows_sha256"],
+        "market_metadata_sha256": lineage["source_market_metadata_sha256"],
+        "chainlink_evidence_sha256": lineage["source_chainlink_evidence_sha256"],
+        "feature_row_count": len(features),
+        "outcome_blind_public_row_count": len(rows),
+        "rejected_row_count": len(rejected),
+        "permitted_artifact_names_opened": list(permitted_names),
+        "prohibited_future_outcome_artifact_names": list(PROHIBITED_FUTURE_OUTCOME_ARTIFACT_NAMES),
+        "prohibited_future_outcome_artifacts_present_but_not_opened": sorted(
+            name
+            for name in PROHIBITED_FUTURE_OUTCOME_ARTIFACT_NAMES
+            if (corpus_dir / name).is_file()
+        ),
+        "prohibited_future_outcome_artifact_read_count": 0,
+        "label_rows_required": False,
+        "resolution_events_required": False,
+        "phase2_feature_and_metadata_hashes_verified": True,
+        "chainlink_hash_and_causality_verified": True,
+        "paper_only": True,
+        "capital_at_risk": False,
+    }
+    return audit, rows, rejected
+
+
+def _outcome_blind_future_decision_row(
+    *,
+    selected: dict[str, Any],
+    group_scored_rows: list[dict[str, Any]],
+    public_row: dict[str, Any],
+    collection_freeze_id: str,
+) -> dict[str, Any]:
+    actions = {str(row.get("action") or "") for row in group_scored_rows}
+    if actions != set(REQUIRED_ACTIONS):
+        raise ValueError("frozen O scorer did not produce a complete five-action grid")
+    action = str(selected["action"])
+    side = "UP" if "BUY_UP" in action else "DOWN" if "BUY_DOWN" in action else "NONE"
+    family = _family(action)
+    ranking = [
+        _fresh_public_ranking_row_from_canonical(row)
+        for row in sorted(
+            group_scored_rows,
+            key=lambda row: (
+                int(row.get("canonical_rank") or 999),
+                str(row.get("action") or ""),
+            ),
+        )
+    ]
+    selected_ranking = next(row for row in ranking if row["selected_action"] == action)
+    selected_score = float(selected["canonical_corrected_model_score"])
+    second_best_score = max(
+        float(row["canonical_corrected_model_score"])
+        for row in group_scored_rows
+        if str(row["action"]) != action
+    )
+    micro = dict(selected_ranking["microstructure_snapshot"])
+    probability = (
+        float(public_row["p_up"])
+        if side == "UP"
+        else float(public_row["p_down"])
+        if side == "DOWN"
+        else 0.0
+    )
+    chainlink_provenance = dict(public_row.get("chainlink_regime_feature_provenance") or {})
+    decision_ts = int(public_row["decision_ts"])
+    max_input_ts = max(
+        int(public_row["decision_time_feature_max_input_ts"]),
+        int(chainlink_provenance.get("max_input_ts") or 0),
+        int(selected.get("canonical_feature_mapping_max_input_ts") or 0),
+    )
+    source_lineage = dict(public_row["future_source_lineage"])
+    features = {
+        "canonical_o_action_score": selected_score,
+        "action_score_margin": selected_score - second_best_score,
+        "btc_momentum": float(public_row["chainlink_momentum_60s"]),
+        "reference_price_to_beat_distance_at_decision": float(
+            public_row["chainlink_reference_distance_at_decision"]
+        ),
+        "chainlink_momentum_30s": float(public_row["chainlink_momentum_30s"]),
+        "chainlink_momentum_60s": float(public_row["chainlink_momentum_60s"]),
+        "chainlink_momentum_120s": float(public_row["chainlink_momentum_120s"]),
+        "chainlink_realized_volatility_120s": float(
+            public_row["chainlink_realized_volatility_120s"]
+        ),
+        "selected_side_probability": probability,
+        "execution_price": float(micro.get("entry_ask") or 0.0),
+        "selected_side_probability_minus_execution_price": probability
+        - float(micro.get("entry_ask") or 0.0),
+        "spread_bps": float(micro.get("spread_bps") or 0.0),
+        "queue_fill_proxy": float(micro.get("queue_fill_proxy") or 0.0),
+        "book_staleness_ms": float(micro.get("book_staleness_ms") or 0.0),
+        "time_to_close_seconds": float(micro.get("time_to_close_seconds") or 0.0),
+        "side_book_depth_imbalance": (
+            _side_depth_imbalance(public_row, side) if side in {"UP", "DOWN"} else 0.0
+        ),
+        "side_book_update_count_1m": (
+            _side_feature(public_row, side, "recent_book_update_count_1m")
+            if side in {"UP", "DOWN"}
+            else 0.0
+        ),
+        "side_recent_spread_stability_1m": (
+            _side_feature(public_row, side, "recent_spread_stability_1m")
+            if side in {"UP", "DOWN"}
+            else 0.0
+        ),
+        "cumulative_market_exposure_before_entry": 0.0,
+        "same_side_reentry": 0.0,
+        "side_flip": 0.0,
+    }
+    row = {
+        "schema_version": DECISION_INPUT_SCHEMA_VERSION,
+        "market_id": str(public_row["market_id"]),
+        "condition_id": str(public_row["condition_id"]),
+        "market_slug": str(public_row["slug"]),
+        "decision_ts": decision_ts,
+        "market_close_ts": int(public_row["market_end_ts"]),
+        "max_input_ts": max_input_ts,
+        "selected_action": action,
+        "selected_side": side,
+        "action_family": family,
+        "decision_time_features": features,
+        "execution_handoff_context": {
+            "decision_group_id": public_row["decision_group_id"],
+            "market_id": str(public_row["market_id"]),
+            "decision_ts": decision_ts,
+            "selected_action": action,
+            "selected_side": side,
+            "selected_action_family": family,
+            "full_5_action_ranking": ranking,
+            "corrected_model_score": selected_score,
+            "raw_model_score": selected.get("canonical_raw_model_score"),
+            "high_score_flag": bool(selected.get("high_score_flag")),
+            "p_up": float(public_row["p_up"]),
+            "p_down": float(public_row["p_down"]),
+            "p_up_action_disagreement": bool(selected.get("p_up_action_disagreement")),
+            "microstructure_snapshot": micro,
+            "reference_price_feature_provenance": chainlink_provenance,
+            "decision_time_feature_max_input_ts": max_input_ts,
+        },
+        "source_run_id": str(public_row["future_source_run_id"]),
+        "source_lineage": source_lineage,
+        "collection_freeze_id": collection_freeze_id,
+        "future_outcome_targets_loaded": False,
+        "target_used_as_decision_input": False,
+        "source_o_score_mutated": False,
+        "source_ranking_mutated": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "v8_execution_handoff_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    row["row_identity"] = canonical_json_sha256(
+        {
+            "market_id": row["market_id"],
+            "decision_ts": decision_ts,
+            "source_run_id": row["source_run_id"],
+            "source_feature_rows_sha256": source_lineage["source_feature_rows_sha256"],
+            "collection_freeze_id": collection_freeze_id,
+        }
+    )
+    row["row_content_sha256"] = canonical_json_sha256(row)
+    return row
+
+
+def _future_input_rejection(
+    market_id: str,
+    decision_ts: int,
+    reason_code: str,
+    **details: Any,
+) -> dict[str, Any]:
+    return {
+        "market_id": market_id,
+        "decision_ts": decision_ts,
+        "reason_code": reason_code,
+        **details,
+    }
+
+
 def run_pnl_aligned_future_outcome_blind_shadow_comparison(
     *,
     model_dir: Path | str,
@@ -257,9 +910,7 @@ def run_pnl_aligned_future_outcome_blind_shadow_comparison(
     )
     candidate_ids = {str(row["source_row_identity"]) for row in candidate_rows}
     baseline_ids = {str(row["source_row_identity"]) for row in baseline_rows}
-    identity_match = candidate_ids == baseline_ids and len(candidate_ids) == len(
-        decision_rows
-    )
+    identity_match = candidate_ids == baseline_ids and len(candidate_ids) == len(decision_rows)
     status = (
         "OUTCOME_BLIND_COMPARISON_SHADOW_COMPLETE"
         if identity_match
@@ -268,9 +919,7 @@ def run_pnl_aligned_future_outcome_blind_shadow_comparison(
         else "BLOCKED_FAIL_CLOSED"
     )
     report = {
-        "schema_version": (
-            "bigan-v8-execution-layer-v2-pnl-aligned-future-shadow-comparison-v1"
-        ),
+        "schema_version": ("bigan-v8-execution-layer-v2-pnl-aligned-future-shadow-comparison-v1"),
         "status": status,
         "decision_count": len(decision_rows),
         "candidate_shadow_report": candidate_report,
@@ -302,16 +951,13 @@ def evaluate_pnl_aligned_future_accepted_bets(
     """Reconcile frozen shadows to post-close targets exactly once."""
 
     validate_pnl_aligned_future_evaluation_protocol(evaluation_protocol)
-    prior_rows_path = Path(
-        str(collection_freeze_manifest["historical_development_rows"]["path"])
-    )
-    if _sha256_file(prior_rows_path) != collection_freeze_manifest[
-        "historical_development_rows"
-    ]["sha256"]:
+    prior_rows_path = Path(str(collection_freeze_manifest["historical_development_rows"]["path"]))
+    if (
+        _sha256_file(prior_rows_path)
+        != collection_freeze_manifest["historical_development_rows"]["sha256"]
+    ):
         raise ValueError("historical lineage rows descriptor mismatch")
-    prior_market_ids = {
-        str(row["market_id"]) for row in _load_jsonl(prior_rows_path)
-    }
+    prior_market_ids = {str(row["market_id"]) for row in _load_jsonl(prior_rows_path)}
     targets_by_identity = _settled_targets_by_identity(settled_evaluation_rows)
     candidate_ids = {str(row["source_row_identity"]) for row in candidate_shadow_rows}
     baseline_ids = {str(row["source_row_identity"]) for row in baseline_shadow_rows}
@@ -328,11 +974,7 @@ def evaluate_pnl_aligned_future_accepted_bets(
         {str(row["market_id"]) for row in all_shadow_rows} & prior_market_ids
     )
     shadow_forbidden = sorted(
-        {
-            field
-            for row in all_shadow_rows
-            for field in _find_forbidden_fields(row)
-        }
+        {field for row in all_shadow_rows for field in _find_forbidden_fields(row)}
     )
     if not identity_match:
         raise ValueError("candidate, baseline, and target identities do not match")
@@ -375,32 +1017,25 @@ def evaluate_pnl_aligned_future_accepted_bets(
     )
     gates = dict(evaluation_protocol["future_evidence_gates"])
     checks = {
-        "minimum_unique_market_count_met": candidate_metrics[
-            "accepted_unique_market_count"
-        ]
+        "minimum_unique_market_count_met": candidate_metrics["accepted_unique_market_count"]
         >= int(gates["minimum_unique_market_count"]),
         "minimum_accepted_bet_count_met": candidate_metrics["accepted_bet_count"]
         >= int(gates["minimum_accepted_bet_count"]),
-        "minimum_up_accepted_bet_count_met": candidate_metrics[
-            "accepted_bet_count_by_side"
-        ].get("UP", 0)
+        "minimum_up_accepted_bet_count_met": candidate_metrics["accepted_bet_count_by_side"].get(
+            "UP", 0
+        )
         >= int(gates["minimum_accepted_bet_count_per_side"]),
-        "minimum_down_accepted_bet_count_met": candidate_metrics[
-            "accepted_bet_count_by_side"
-        ].get("DOWN", 0)
+        "minimum_down_accepted_bet_count_met": candidate_metrics["accepted_bet_count_by_side"].get(
+            "DOWN", 0
+        )
         >= int(gates["minimum_accepted_bet_count_per_side"]),
-        "all_accepted_bets_settled": candidate_metrics["unresolved_accepted_bet_count"]
-        == 0,
+        "all_accepted_bets_settled": candidate_metrics["unresolved_accepted_bet_count"] == 0,
         "candidate_net_pnl_positive": candidate_metrics["settled_net_pnl_sum"] > 0.0,
         "candidate_roi_positive": candidate_metrics["roi"] > 0.0,
-        "candidate_net_pnl_exceeds_baseline": candidate_metrics[
-            "settled_net_pnl_sum"
-        ]
+        "candidate_net_pnl_exceeds_baseline": candidate_metrics["settled_net_pnl_sum"]
         > baseline_metrics["settled_net_pnl_sum"],
         "market_bootstrap_interval_reported": bootstrap["reported"],
-        "largest_winner_removal_reported": candidate_metrics[
-            "largest_winner_removal"
-        ]["reported"],
+        "largest_winner_removal_reported": candidate_metrics["largest_winner_removal"]["reported"],
         "zero_forbidden_shadow_fields": not shadow_forbidden,
         "future_window_strictly_later": not future_boundary_violations,
         "future_markets_disjoint": not overlapping_markets,
@@ -432,9 +1067,7 @@ def evaluate_pnl_aligned_future_accepted_bets(
         "forbidden_shadow_field_violation_count": len(shadow_forbidden),
         "candidate_policy_metrics": candidate_metrics,
         "baseline_policy_metrics": baseline_metrics,
-        "candidate_minus_baseline_net_pnl": candidate_metrics[
-            "settled_net_pnl_sum"
-        ]
+        "candidate_minus_baseline_net_pnl": candidate_metrics["settled_net_pnl_sum"]
         - baseline_metrics["settled_net_pnl_sum"],
         "market_level_candidate_minus_baseline_pnl": market_delta,
         "market_bootstrap_interval": bootstrap,
@@ -610,10 +1243,7 @@ def _decision_time_execution_cost(micro: dict[str, Any]) -> float:
     staleness = max(float(micro.get("book_staleness_ms") or 0.0), 0.0)
     return min(
         0.05,
-        0.001
-        + spread
-        + (1.0 - queue) * 0.002
-        + min(staleness / 1000.0, 1.0) * 0.001,
+        0.001 + spread + (1.0 - queue) * 0.002 + min(staleness / 1000.0, 1.0) * 0.001,
     )
 
 
@@ -627,9 +1257,7 @@ def _settled_targets_by_identity(
             raise ValueError("settled evaluation row identity missing or duplicated")
         targets = dict(row.get("evaluation_target_net_pnl_per_contract_by_action") or {})
         components = dict(row.get("evaluation_target_pnl_components_by_action") or {})
-        if set(targets) != set(REQUIRED_ACTIONS) or set(components) != set(
-            REQUIRED_ACTIONS
-        ):
+        if set(targets) != set(REQUIRED_ACTIONS) or set(components) != set(REQUIRED_ACTIONS):
             raise ValueError("settled evaluation action target grid is incomplete")
         result[identity] = row
     return result
@@ -641,10 +1269,9 @@ def _reconcile_shadow_row(
     shadow_row: dict[str, Any],
     target_row: dict[str, Any],
 ) -> dict[str, Any]:
-    if (
-        str(shadow_row["market_id"]) != str(target_row["market_id"])
-        or int(shadow_row["decision_ts"]) != int(target_row["decision_ts"])
-    ):
+    if str(shadow_row["market_id"]) != str(target_row["market_id"]) or int(
+        shadow_row["decision_ts"]
+    ) != int(target_row["decision_ts"]):
         raise ValueError("shadow and target row provenance mismatch")
     accepted = shadow_row.get("execution_guard_order_allowed") is True
     action = str(shadow_row.get("execution_guarded_action") or "")
@@ -657,20 +1284,18 @@ def _reconcile_shadow_row(
         "execution_cost_per_contract",
         "net_pnl_per_contract",
     )
-    settled = accepted and _finite(target) and all(
-        _finite(component.get(name)) for name in required_components
+    settled = (
+        accepted
+        and _finite(target)
+        and all(_finite(component.get(name)) for name in required_components)
     )
     size = float(shadow_row.get("proposed_order_size") or 0.0) if accepted else 0.0
     entry_price = float(shadow_row.get("selected_execution_price") or 0.0)
     gross_pnl = size * float(component["gross_pnl_per_contract"]) if settled else None
-    execution_cost = (
-        size * float(component["execution_cost_per_contract"]) if settled else None
-    )
+    execution_cost = size * float(component["execution_cost_per_contract"]) if settled else None
     net_pnl = size * float(target) if settled else None
     cost_basis = (
-        size * (entry_price + float(component["execution_cost_per_contract"]))
-        if settled
-        else 0.0
+        size * (entry_price + float(component["execution_cost_per_contract"])) if settled else 0.0
     )
     return {
         "policy_name": policy_name,
@@ -686,9 +1311,7 @@ def _reconcile_shadow_row(
         "paper_bet_contract_size": size,
         "execution_price": entry_price,
         "settlement_target_available": settled,
-        "guarded_action_target_net_pnl_per_contract": float(target)
-        if settled
-        else None,
+        "guarded_action_target_net_pnl_per_contract": float(target) if settled else None,
         "gross_pnl": gross_pnl,
         "execution_cost": execution_cost,
         "cost_basis": cost_basis,
@@ -801,9 +1424,7 @@ def _market_bootstrap_interval(
         }
     rng = random.Random(int(config["seed"]))
     sample_count = int(config["resample_count"])
-    estimates = [
-        sum(rng.choice(values) for _ in values) for _ in range(sample_count)
-    ]
+    estimates = [sum(rng.choice(values) for _ in values) for _ in range(sample_count)]
     alpha = (1.0 - float(config["confidence_level"])) / 2.0
     return {
         "reported": True,
@@ -864,9 +1485,7 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
 
 
@@ -877,14 +1496,19 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True, allow_nan=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _is_sha256(value: str) -> bool:
-    return len(value) == 64 and all(
-        char in "0123456789abcdef" for char in value.lower()
-    )
+    return len(value) == 64 and all(char in "0123456789abcdef" for char in value.lower())
 
 
 def _finite(value: Any) -> bool:

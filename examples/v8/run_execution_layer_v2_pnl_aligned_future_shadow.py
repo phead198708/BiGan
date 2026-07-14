@@ -19,7 +19,8 @@ def main() -> None:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output-dir", type=Path, default=Path("examples/v8/polymarket_runs"))
     parser.add_argument("--model-dir", required=True, type=Path)
-    parser.add_argument("--decision-rows-jsonl", required=True, type=Path)
+    parser.add_argument("--decision-input-manifest", required=True, type=Path)
+    parser.add_argument("--expected-decision-input-manifest-sha256", required=True)
     parser.add_argument("--evaluation-freeze-manifest", required=True, type=Path)
     parser.add_argument("--expected-evaluation-freeze-manifest-sha256", required=True)
     args = parser.parse_args()
@@ -28,12 +29,40 @@ def main() -> None:
     freeze = _load_json(args.evaluation_freeze_manifest)
     if freeze.get("future_outcome_targets_loaded") is not False:
         raise SystemExit("evaluation freeze is not outcome blind")
-    fit_manifest = _load_json(
-        args.model_dir / "pnl_aligned_action_value_fit_manifest.json"
-    )
+    fit_manifest = _load_json(args.model_dir / "pnl_aligned_action_value_fit_manifest.json")
     if fit_manifest.get("model") != freeze.get("model"):
         raise SystemExit("model lineage differs from evaluation freeze")
-    decision_rows = _load_jsonl(args.decision_rows_jsonl)
+    if _sha256(args.decision_input_manifest) != args.expected_decision_input_manifest_sha256:
+        raise SystemExit("decision input manifest SHA-256 mismatch")
+    decision_input_manifest = _load_json(args.decision_input_manifest)
+    if decision_input_manifest.get("future_outcome_targets_loaded") is not False:
+        raise SystemExit("decision input manifest is not outcome blind")
+    if decision_input_manifest.get("outcome_reconciliation_started") is not False:
+        raise SystemExit("decision input manifest already started reconciliation")
+    if decision_input_manifest.get("collection_freeze_manifest") != freeze.get(
+        "collection_freeze_manifest"
+    ):
+        raise SystemExit("decision input collection-freeze lineage mismatch")
+    decision_rows_descriptor = _verified_descriptor(
+        decision_input_manifest.get("decision_rows"), name="decision_rows"
+    )
+    input_access_descriptor = _verified_descriptor(
+        decision_input_manifest.get("input_access_audit"), name="input_access_audit"
+    )
+    report_descriptor = _verified_descriptor(
+        decision_input_manifest.get("decision_input_report"),
+        name="decision_input_report",
+    )
+    access_audit = _load_json(Path(input_access_descriptor["path"]))
+    input_report = _load_json(Path(report_descriptor["path"]))
+    if not (
+        access_audit.get("outcome_blind_input_access_passed") is True
+        and access_audit.get("prohibited_future_outcome_artifact_read_count") == 0
+        and input_report.get("status") == "OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY"
+    ):
+        raise SystemExit("decision input provenance failed closed before prediction")
+    decision_rows_path = Path(decision_rows_descriptor["path"])
+    decision_rows = _load_jsonl(decision_rows_path)
     rows, report = run_pnl_aligned_future_outcome_blind_shadow_comparison(
         model_dir=args.model_dir,
         decision_rows=decision_rows,
@@ -51,12 +80,11 @@ def main() -> None:
     report_path = run_dir / "pnl_aligned_future_shadow_comparison_report.json"
     _write_json(report_path, report)
     manifest = {
-        "schema_version": (
-            "bigan-v8-execution-layer-v2-pnl-aligned-future-shadow-manifest-v1"
-        ),
+        "schema_version": ("bigan-v8-execution-layer-v2-pnl-aligned-future-shadow-manifest-v1"),
         "run_id": args.run_id,
         "evaluation_freeze_manifest": _descriptor(args.evaluation_freeze_manifest),
-        "input_decision_rows": _descriptor(args.decision_rows_jsonl),
+        "decision_input_manifest": _descriptor(args.decision_input_manifest),
+        "input_decision_rows": _descriptor(decision_rows_path),
         "candidate_shadow_rows": _descriptor(candidate_path),
         "baseline_shadow_rows": _descriptor(baseline_path),
         "shadow_report": _descriptor(report_path),
@@ -95,9 +123,7 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
 
 
@@ -111,6 +137,14 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def _descriptor(path: Path) -> dict[str, str]:
     return {"path": str(path.resolve()), "sha256": _sha256(path)}
+
+
+def _verified_descriptor(value: object, *, name: str) -> dict[str, str]:
+    descriptor = dict(value) if isinstance(value, dict) else {}
+    path = Path(str(descriptor.get("path") or ""))
+    if not path.is_file() or descriptor.get("sha256") != _sha256(path):
+        raise SystemExit(f"{name} descriptor hash mismatch")
+    return {"path": str(path), "sha256": str(descriptor["sha256"])}
 
 
 def _sha256(path: Path) -> str:
