@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,6 +72,29 @@ class PnLAlignedActionValueFitConfig:
             "historical_corpus_manifest_path",
             Path(self.historical_corpus_manifest_path),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class PnLAlignedFutureCollectionFreezeConfig:
+    """Inputs for freezing a future, market-disjoint collection window."""
+
+    run_id: str
+    output_dir: Path | str
+    model_dir: Path | str
+    git_commit: str
+    expected_round_count: int = 30
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        if len(self.git_commit) != 40 or any(
+            char not in "0123456789abcdef" for char in self.git_commit.lower()
+        ):
+            raise ValueError("git_commit must be a 40-character hex digest")
+        if self.expected_round_count < 30:
+            raise ValueError("expected_round_count must be at least 30")
+        object.__setattr__(self, "output_dir", Path(self.output_dir))
+        object.__setattr__(self, "model_dir", Path(self.model_dir))
 
 
 def fit_frozen_pnl_aligned_action_value_model(
@@ -235,6 +259,137 @@ def fit_frozen_pnl_aligned_action_value_model(
         "manifest_path": manifest_path,
         "manifest_sha256": _sha256_file(manifest_path),
         "report": report,
+    }
+
+
+def freeze_pnl_aligned_future_collection(
+    config: PnLAlignedFutureCollectionFreezeConfig,
+) -> dict[str, Any]:
+    """Freeze model and historical lineage before future public-data collection."""
+
+    model_dir = config.model_dir.resolve()
+    fit_manifest_path = model_dir / "pnl_aligned_action_value_fit_manifest.json"
+    fit_manifest = _load_json(fit_manifest_path)
+    model_descriptor = dict(fit_manifest.get("model") or {})
+    protocol_descriptor = dict(fit_manifest.get("protocol") or {})
+    historical_manifest_descriptor = dict(
+        fit_manifest.get("historical_corpus_manifest") or {}
+    )
+    for name, descriptor in (
+        ("model", model_descriptor),
+        ("protocol", protocol_descriptor),
+        ("historical_corpus_manifest", historical_manifest_descriptor),
+    ):
+        path = Path(str(descriptor.get("path") or ""))
+        if not path.is_file() or descriptor.get("sha256") != _sha256_file(path):
+            raise ValueError(f"frozen {name} descriptor hash mismatch")
+    protocol = _load_json(Path(protocol_descriptor["path"]))
+    validate_pnl_aligned_action_value_protocol(protocol)
+    model_contract = dict(fit_manifest.get("model_contract") or {})
+    expected_model_contract = {
+        "model_sha256": model_descriptor.get("sha256"),
+        "protocol_sha256": protocol_descriptor.get("sha256"),
+        "historical_fit_dataset_hash": fit_manifest.get(
+            "historical_fit_dataset_hash"
+        ),
+        "historical_fit_only": True,
+        "uses_validation_labels_for_tuning": False,
+        "uses_future_holdout_labels_for_fitting": False,
+        "current_oof_pnl_used_for_hyperparameter_selection": False,
+        "future_unseen_evaluation_required": True,
+    }
+    model_contract_mismatches = sorted(
+        key
+        for key, expected in expected_model_contract.items()
+        if model_contract.get(key) != expected
+    )
+    if model_contract_mismatches:
+        raise ValueError(
+            "frozen model contract mismatch: " + ", ".join(model_contract_mismatches)
+        )
+    if not (
+        fit_manifest.get("research_artifact_frozen") is True
+        and fit_manifest.get("future_unseen_evaluation_required") is True
+        and fit_manifest.get("source_model_candidate_eligible") is False
+        and fit_manifest.get("freeze_ready") is False
+        and fit_manifest.get("promotion_evidence_eligible") is False
+        and fit_manifest.get("v8_execution_handoff_allowed") is False
+    ):
+        raise ValueError("fit manifest safety or future-evaluation contract mismatch")
+    historical_manifest = _load_json(Path(historical_manifest_descriptor["path"]))
+    historical_rows_descriptor = dict(
+        historical_manifest.get("development_rows") or {}
+    )
+    historical_rows_path = Path(str(historical_rows_descriptor.get("path") or ""))
+    if (
+        not historical_rows_path.is_file()
+        or historical_rows_descriptor.get("sha256")
+        != _sha256_file(historical_rows_path)
+    ):
+        raise ValueError("historical rows descriptor hash mismatch")
+    historical_rows = _load_jsonl(historical_rows_path)
+    if not historical_rows:
+        raise ValueError("historical rows must not be empty")
+    prior_market_ids = sorted({str(row["market_id"]) for row in historical_rows})
+    max_prior_decision_ts = max(int(row["decision_ts"]) for row in historical_rows)
+    freeze_created_ts = int(time.time() * 1000)
+    execution_guard_config = _v8_execution_guard_config()
+    output_dir = config.output_dir / config.run_id
+    output_dir.mkdir(parents=True, exist_ok=False)
+    manifest = {
+        "schema_version": f"{SCHEMA_PREFIX}-future-collection-freeze-v1",
+        "run_id": config.run_id,
+        "freeze_created_ts": freeze_created_ts,
+        "git_commit": config.git_commit.lower(),
+        "fit_manifest": _descriptor(fit_manifest_path),
+        "fit_manifest_sha256": _sha256_file(fit_manifest_path),
+        "model": model_descriptor,
+        "model_contract": model_contract,
+        "protocol": protocol_descriptor,
+        "frozen_execution_contract": protocol["frozen_execution_contract"],
+        "frozen_execution_contract_sha256": canonical_json_sha256(
+            protocol["frozen_execution_contract"]
+        ),
+        "execution_guard_config": execution_guard_config,
+        "execution_guard_config_sha256": canonical_json_sha256(
+            execution_guard_config
+        ),
+        "historical_corpus_manifest": historical_manifest_descriptor,
+        "historical_development_rows": _descriptor(historical_rows_path),
+        "historical_fit_dataset_hash": fit_manifest[
+            "historical_fit_dataset_hash"
+        ],
+        "prior_market_count": len(prior_market_ids),
+        "prior_market_ids_sha256": canonical_json_sha256(prior_market_ids),
+        "max_prior_decision_ts": max_prior_decision_ts,
+        "minimum_future_window_start_ts": max(
+            max_prior_decision_ts + 1,
+            freeze_created_ts + 1,
+        ),
+        "expected_round_count": config.expected_round_count,
+        "future_window_must_be_strictly_later": True,
+        "future_market_ids_must_be_disjoint": True,
+        "future_collection_outcome_blind": True,
+        "model_config_or_threshold_mutation_after_freeze_allowed": False,
+        "future_evidence_gates": protocol["future_evidence_gates"],
+        "collection_started": False,
+        "future_evaluation_started": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "v8_execution_handoff_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    manifest["collection_freeze_id"] = canonical_json_sha256(manifest)
+    manifest_path = output_dir / "pnl_aligned_future_collection_freeze_manifest.json"
+    _write_json(manifest_path, manifest)
+    return {
+        "output_dir": output_dir,
+        "manifest_path": manifest_path,
+        "manifest_sha256": _sha256_file(manifest_path),
+        "manifest": manifest,
     }
 
 

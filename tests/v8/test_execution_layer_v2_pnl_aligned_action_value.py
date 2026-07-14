@@ -8,8 +8,10 @@ import pytest
 
 from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_action_value import (
     PnLAlignedActionValueFitConfig,
+    PnLAlignedFutureCollectionFreezeConfig,
     build_pnl_aligned_action_conditioned_rows,
     fit_frozen_pnl_aligned_action_value_model,
+    freeze_pnl_aligned_future_collection,
     predict_frozen_pnl_aligned_action_values,
     run_pnl_aligned_action_value_outcome_blind_shadow,
     validate_pnl_aligned_action_value_protocol,
@@ -186,6 +188,34 @@ def test_fit_freezes_research_artifact_and_predicts_outcome_blind_grid(
     assert shadow_report["source_model_candidate_eligible"] is False
     assert shadow_report["promotion_evidence_eligible"] is False
     assert shadow_report["v8_execution_handoff_allowed"] is False
+
+    freeze = freeze_pnl_aligned_future_collection(
+        PnLAlignedFutureCollectionFreezeConfig(
+            run_id="future-freeze",
+            output_dir=tmp_path / "future",
+            model_dir=result["run_dir"],
+            git_commit="a" * 40,
+            expected_round_count=30,
+        )
+    )
+    freeze_manifest = freeze["manifest"]
+    assert freeze_manifest["git_commit"] == "a" * 40
+    assert freeze_manifest["prior_market_count"] == 6
+    assert freeze_manifest["expected_round_count"] == 30
+    assert len(freeze_manifest["execution_guard_config_sha256"]) == 64
+    assert len(freeze_manifest["frozen_execution_contract_sha256"]) == 64
+    assert freeze_manifest["model_contract"]["model_sha256"] == freeze_manifest[
+        "model"
+    ]["sha256"]
+    assert freeze_manifest["minimum_future_window_start_ts"] > freeze_manifest[
+        "max_prior_decision_ts"
+    ]
+    assert freeze_manifest["future_window_must_be_strictly_later"] is True
+    assert freeze_manifest["future_market_ids_must_be_disjoint"] is True
+    assert freeze_manifest["model_config_or_threshold_mutation_after_freeze_allowed"] is False
+    assert freeze_manifest["collection_started"] is False
+    assert freeze_manifest["source_model_candidate_eligible"] is False
+    assert freeze_manifest["promotion_evidence_eligible"] is False
 
 
 def _protocol() -> dict:
