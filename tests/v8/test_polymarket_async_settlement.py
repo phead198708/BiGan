@@ -160,6 +160,47 @@ def test_pending_round_rejects_noncausal_chainlink_rows_without_blocking_core_ca
     ]
 
 
+def test_pending_finalization_completes_payout_only_resolution_from_chainlink(
+    tmp_path: Path,
+) -> None:
+    provider = AsyncSettlementPayoutOnlyProvider(resolved=True)
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="pending-payout-only-resolution",
+        output_dir=tmp_path,
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+    market = provider.market_rows(config)[0]
+    start_ts = int(market["market_start_ts"])
+    end_ts = int(market["market_end_ts"])
+    capture = capture_polymarket_pending_round(
+        config,
+        public_provider=provider,
+        chainlink_rtds_collector=AsyncSettlementFakeChainlinkCollector(
+            rows=[
+                _chainlink_row(start_ts - 1_000, 65_000.0),
+                _chainlink_row(end_ts - 1_000, 65_025.0),
+            ]
+        ),
+    )
+
+    finalized = finalize_polymarket_pending_round(
+        capture.run_dir,
+        public_provider=provider,
+        destination_root=tmp_path / "training_root",
+        overwrite_existing=True,
+    )
+
+    assert finalized.report["finalization_status"] == "exported"
+    resolution = _read_jsonl(
+        finalized.raw_dir / "raw_polymarket_resolutions.jsonl"
+    )[0]
+    assert resolution["reference_price_start"] == 65_000.0
+    assert resolution["reference_price_end"] == 65_025.0
+    assert resolution["reference_price_pair_completed_from_chainlink_rtds"] is True
+    assert resolution["resolved_outcome"] == "UP"
+
+
 def test_pending_capture_explains_orderbook_rejection_without_raw_book_dump(
     tmp_path: Path,
 ) -> None:
@@ -474,6 +515,36 @@ class AsyncSettlementMissingBookProvider(AsyncSettlementFakeProvider):
             row
             for row in mock_orderbook_rows(markets, config)
             if row.get("outcome") == "UP"
+        ]
+
+
+class AsyncSettlementPayoutOnlyProvider(AsyncSettlementFakeProvider):
+    def resolution_rows(
+        self,
+        markets: list[dict[str, Any]],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> list[dict[str, Any]]:
+        del config
+        self.resolution_calls += 1
+        if not self.resolved:
+            return []
+        return [
+            {
+                "market_id": market["market_id"],
+                "reference_price_source": market["reference_price_source"],
+                "resolution_status": "normal",
+                "resolved_outcome": "UP",
+                "payout_up": 1.0,
+                "payout_down": 0.0,
+                "raw_resolution_text": "Official payout is available before references.",
+                "paper_only": True,
+                "capital_at_risk": False,
+                "broker_exchange_write_enabled": False,
+                "live_exchange_write_enabled": False,
+                "polymarket_write_enabled": False,
+                "wallet_signing_enabled": False,
+            }
+            for market in markets
         ]
 
 

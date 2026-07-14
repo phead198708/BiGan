@@ -70,6 +70,7 @@ def run_polymarket_async_round_collector_cli(
     captures: list[dict[str, Any]] = []
     finalizations: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
+    capture_threads: list[threading.Thread] = []
     chainlink_collector = PolymarketChainlinkRTDSCollector(url=chainlink_rtds_url)
     chainlink_collector.start()
     if chainlink_rtds_warmup_seconds:
@@ -98,13 +99,14 @@ def run_polymarket_async_round_collector_cli(
     )
     finalizer.start()
 
-    try:
-        for index in range(1, round_count + 1):
-            _sleep_until_round_start_window(
-                market_family=market_family,
-                max_round_start_lag_seconds=max_round_start_lag_seconds,
-            )
-            run_id = f"{batch_id}-round{index:02d}-{_utc_stamp()}"
+    def capture_round(
+        *,
+        index: int,
+        run_id: str,
+        scheduled_round_start_epoch_seconds: float,
+    ) -> None:
+        capture_started_epoch_seconds = time.time()
+        try:
             provider = PolymarketPublicHTTPRealCorpusProvider(
                 max_markets=1,
                 clob_ws_url=clob_ws_url,
@@ -124,50 +126,114 @@ def run_polymarket_async_round_collector_cli(
                 public_provider=provider,
                 chainlink_rtds_collector=chainlink_collector,
             )
+        except Exception as exc:  # noqa: BLE001
             with lock:
-                captures.append(
+                errors.append(
                     {
-                        "run_id": run_id,
-                        "run_dir": str(capture.run_dir),
-                        "capture_status": capture.report["capture_status"],
-                        "pending_resolution": capture.report["pending_resolution"],
-                        "raw_polymarket_market_count": capture.report[
-                            "raw_polymarket_market_count"
-                        ],
-                        "raw_orderbook_row_count": capture.report["raw_orderbook_row_count"],
-                        "provider_raw_orderbook_snapshot_count": capture.report[
-                            "provider_raw_orderbook_snapshot_count"
-                        ],
-                        "training_sampled_orderbook_row_count": capture.report[
-                            "training_sampled_orderbook_row_count"
-                        ],
-                        "provider_raw_orderbook_source_type_distribution": (
-                            capture.report[
-                                "provider_raw_orderbook_source_type_distribution"
-                            ]
-                        ),
-                        "provider_raw_orderbook_rest_fallback_row_count": (
-                            capture.report[
-                                "provider_raw_orderbook_rest_fallback_row_count"
-                            ]
-                        ),
-                        "provider_raw_orderbook_fallback_reason_distribution": (
-                            capture.report[
-                                "provider_raw_orderbook_fallback_reason_distribution"
-                            ]
-                        ),
-                        "raw_trade_row_count": capture.report["raw_trade_row_count"],
-                        "raw_btc_candle_row_count": capture.report["raw_btc_candle_row_count"],
-                        "raw_chainlink_price_row_count": capture.report[
-                            "raw_chainlink_price_row_count"
-                        ],
-                        "chainlink_capture_reason_codes": capture.report[
-                            "chainlink_capture_reason_codes"
-                        ],
-                        "reject_reason_counts": capture.report["reject_reason_counts"],
+                        "run_dir": str(root / run_id),
+                        "error": str(exc),
+                        "stage": "round_capture",
                     }
                 )
-            _write_json(batch_dir / "batch_progress.json", _summary(batch_id, captures, finalizations, errors))
+                _write_json(
+                    batch_dir / "batch_progress.json",
+                    _summary(batch_id, captures, finalizations, errors),
+                )
+            return
+        with lock:
+            captures.append(
+                {
+                    "round_index": index,
+                    "run_id": run_id,
+                    "run_dir": str(capture.run_dir),
+                    "scheduled_round_start_ts": int(
+                        scheduled_round_start_epoch_seconds * 1000
+                    ),
+                    "capture_thread_started_at_ts": int(
+                        capture_started_epoch_seconds * 1000
+                    ),
+                    "capture_start_lag_seconds": (
+                        capture_started_epoch_seconds
+                        - scheduled_round_start_epoch_seconds
+                    ),
+                    "capture_status": capture.report["capture_status"],
+                    "pending_resolution": capture.report["pending_resolution"],
+                    "raw_polymarket_market_count": capture.report[
+                        "raw_polymarket_market_count"
+                    ],
+                    "raw_orderbook_row_count": capture.report[
+                        "raw_orderbook_row_count"
+                    ],
+                    "provider_raw_orderbook_snapshot_count": capture.report[
+                        "provider_raw_orderbook_snapshot_count"
+                    ],
+                    "training_sampled_orderbook_row_count": capture.report[
+                        "training_sampled_orderbook_row_count"
+                    ],
+                    "provider_raw_orderbook_source_type_distribution": (
+                        capture.report[
+                            "provider_raw_orderbook_source_type_distribution"
+                        ]
+                    ),
+                    "provider_raw_orderbook_rest_fallback_row_count": (
+                        capture.report[
+                            "provider_raw_orderbook_rest_fallback_row_count"
+                        ]
+                    ),
+                    "provider_raw_orderbook_fallback_reason_distribution": (
+                        capture.report[
+                            "provider_raw_orderbook_fallback_reason_distribution"
+                        ]
+                    ),
+                    "raw_trade_row_count": capture.report["raw_trade_row_count"],
+                    "raw_btc_candle_row_count": capture.report[
+                        "raw_btc_candle_row_count"
+                    ],
+                    "raw_chainlink_price_row_count": capture.report[
+                        "raw_chainlink_price_row_count"
+                    ],
+                    "chainlink_capture_reason_codes": capture.report[
+                        "chainlink_capture_reason_codes"
+                    ],
+                    "reject_reason_counts": capture.report["reject_reason_counts"],
+                }
+            )
+            captures.sort(key=lambda item: int(item.get("round_index") or 0))
+            _write_json(
+                batch_dir / "batch_progress.json",
+                _summary(batch_id, captures, finalizations, errors),
+            )
+
+    try:
+        previous_round_start_epoch_seconds: float | None = None
+        for index in range(1, round_count + 1):
+            scheduled_round_start_epoch_seconds = _sleep_until_round_start_window(
+                market_family=market_family,
+                max_round_start_lag_seconds=max_round_start_lag_seconds,
+                previous_round_start_epoch_seconds=(
+                    previous_round_start_epoch_seconds
+                ),
+            )
+            run_id = f"{batch_id}-round{index:02d}-{_utc_stamp()}"
+            capture_thread = threading.Thread(
+                target=capture_round,
+                kwargs={
+                    "index": index,
+                    "run_id": run_id,
+                    "scheduled_round_start_epoch_seconds": (
+                        scheduled_round_start_epoch_seconds
+                    ),
+                },
+                name=f"{batch_id}-capture-{index:04d}",
+                daemon=True,
+            )
+            capture_thread.start()
+            capture_threads.append(capture_thread)
+            previous_round_start_epoch_seconds = (
+                scheduled_round_start_epoch_seconds
+            )
+        for capture_thread in capture_threads:
+            capture_thread.join()
         if settlement_grace_seconds:
             deadline = time.monotonic() + settlement_grace_seconds
             while time.monotonic() < deadline:
@@ -388,14 +454,48 @@ def _sleep_until_round_start_window(
     *,
     market_family: str,
     max_round_start_lag_seconds: float,
-) -> None:
-    sleep_seconds = _round_start_alignment_sleep_seconds(
+    previous_round_start_epoch_seconds: float | None = None,
+) -> float:
+    now_epoch_seconds = time.time()
+    scheduled_round_start_epoch_seconds = _scheduled_round_start_epoch_seconds(
         market_family=market_family,
         max_round_start_lag_seconds=max_round_start_lag_seconds,
-        now_epoch_seconds=time.time(),
+        now_epoch_seconds=now_epoch_seconds,
+        previous_round_start_epoch_seconds=previous_round_start_epoch_seconds,
+    )
+    sleep_seconds = max(
+        0.0, scheduled_round_start_epoch_seconds - now_epoch_seconds
     )
     if sleep_seconds > 0:
         time.sleep(sleep_seconds)
+    return scheduled_round_start_epoch_seconds
+
+
+def _scheduled_round_start_epoch_seconds(
+    *,
+    market_family: str,
+    max_round_start_lag_seconds: float,
+    now_epoch_seconds: float,
+    previous_round_start_epoch_seconds: float | None,
+) -> float:
+    horizon_seconds = BTC_UPDOWN_MARKET_HORIZONS_MS[market_family] / 1000.0
+    current_round_start = now_epoch_seconds - (now_epoch_seconds % horizon_seconds)
+    elapsed = now_epoch_seconds - current_round_start
+    if previous_round_start_epoch_seconds is None:
+        return (
+            current_round_start
+            if elapsed <= max_round_start_lag_seconds
+            else current_round_start + horizon_seconds
+        )
+    next_after_previous = previous_round_start_epoch_seconds + horizon_seconds
+    if current_round_start > previous_round_start_epoch_seconds:
+        current_or_next = (
+            current_round_start
+            if elapsed <= max_round_start_lag_seconds
+            else current_round_start + horizon_seconds
+        )
+        return max(next_after_previous, current_or_next)
+    return next_after_previous
 
 
 def _round_start_alignment_sleep_seconds(

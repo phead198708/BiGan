@@ -7,6 +7,7 @@ from pathlib import Path
 
 from examples.v8.run_polymarket_async_round_collector import (
     _round_start_alignment_sleep_seconds,
+    _scheduled_round_start_epoch_seconds,
     main,
 )
 
@@ -31,6 +32,35 @@ def test_round_start_alignment_waits_when_started_late_in_round() -> None:
         )
         == 54.0
     )
+
+
+def test_round_capture_schedule_advances_one_boundary_while_prior_capture_runs() -> None:
+    first_start = _scheduled_round_start_epoch_seconds(
+        market_family="btc_updown_5m",
+        max_round_start_lag_seconds=30.0,
+        now_epoch_seconds=600.0 + 12.0,
+        previous_round_start_epoch_seconds=None,
+    )
+    second_start = _scheduled_round_start_epoch_seconds(
+        market_family="btc_updown_5m",
+        max_round_start_lag_seconds=30.0,
+        now_epoch_seconds=600.0 + 13.0,
+        previous_round_start_epoch_seconds=first_start,
+    )
+
+    assert first_start == 600.0
+    assert second_start == 900.0
+
+
+def test_round_capture_schedule_targets_next_boundary_before_prior_capture_finishes() -> None:
+    second_start = _scheduled_round_start_epoch_seconds(
+        market_family="btc_updown_5m",
+        max_round_start_lag_seconds=30.0,
+        now_epoch_seconds=899.5,
+        previous_round_start_epoch_seconds=600.0,
+    )
+
+    assert second_start == 900.0
 
 
 def test_finalize_only_cli_accepts_shared_collector_args(tmp_path: Path) -> None:

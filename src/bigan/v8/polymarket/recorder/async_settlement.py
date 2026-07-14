@@ -328,7 +328,20 @@ def finalize_polymarket_pending_round(
                 rejected_rows.append(_rejected_market(market, reasons))
                 continue
             if resolution is not None:
-                resolution_rows.append(resolution)
+                completed_resolution, completion_reasons = (
+                    _complete_resolution_reference_prices(
+                        market=market,
+                        resolution=resolution,
+                        chainlink_rows=raw_chainlink_rows,
+                    )
+                )
+                if completion_reasons:
+                    rejected_rows.append(
+                        _rejected_market(market, completion_reasons)
+                    )
+                    continue
+                if completed_resolution is not None:
+                    resolution_rows.append(completed_resolution)
     else:
         rejected_rows.append(
             {
@@ -877,6 +890,97 @@ def _preferred_resolution_candidates(
     ]
 
 
+def _complete_resolution_reference_prices(
+    *,
+    market: dict[str, Any],
+    resolution: dict[str, Any],
+    chainlink_rows: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    start = _positive_float(resolution.get("reference_price_start"))
+    end = _positive_float(resolution.get("reference_price_end"))
+    if start is not None and end is not None:
+        return dict(resolution), []
+
+    market_start_ts = int(market["market_start_ts"])
+    market_end_ts = int(market["market_end_ts"])
+    settlement_ts = int(market.get("settlement_ts") or market_end_ts)
+    start_row = _latest_chainlink_row_at_or_before(
+        rows=chainlink_rows,
+        source_ts=market_start_ts,
+        available_at_ts=settlement_ts,
+    )
+    end_row = _latest_chainlink_row_at_or_before(
+        rows=chainlink_rows,
+        source_ts=market_end_ts,
+        available_at_ts=settlement_ts,
+    )
+    reasons: list[str] = []
+    if start is None and start_row is None:
+        reasons.append("pending_reference_price_start")
+    if end is None and end_row is None:
+        reasons.append("pending_reference_price_end")
+    if reasons:
+        return None, reasons
+
+    completed = dict(resolution)
+    if start is None and start_row is not None:
+        completed["reference_price_start"] = float(start_row["price"])
+        completed["reference_price_start_source_type"] = (
+            "polymarket_rtds_chainlink_market_start"
+        )
+        completed["reference_price_start_source_ts"] = int(start_row["source_ts"])
+        completed["reference_price_start_available_at_ts"] = int(
+            start_row["available_at_ts"]
+        )
+    if end is None and end_row is not None:
+        completed["reference_price_end"] = float(end_row["price"])
+        completed["reference_price_end_source_type"] = (
+            "polymarket_rtds_chainlink_market_end"
+        )
+        completed["reference_price_end_source_ts"] = int(end_row["source_ts"])
+        completed["reference_price_end_available_at_ts"] = int(
+            end_row["available_at_ts"]
+        )
+    completed["reference_price_pair_completed_from_chainlink_rtds"] = True
+    completed["reference_price_pair_completion_max_input_ts"] = max(
+        int(completed.get("reference_price_start_available_at_ts") or 0),
+        int(completed.get("reference_price_end_available_at_ts") or 0),
+    )
+    expected_outcome = (
+        "UP"
+        if float(completed["reference_price_end"])
+        >= float(completed["reference_price_start"])
+        else "DOWN"
+    )
+    resolved_outcome = str(completed.get("resolved_outcome") or "").upper()
+    if resolved_outcome in {"UP", "DOWN"} and resolved_outcome != expected_outcome:
+        return None, ["chainlink_reference_direction_mismatch_official_outcome"]
+    return completed, []
+
+
+def _latest_chainlink_row_at_or_before(
+    *,
+    rows: list[dict[str, Any]],
+    source_ts: int,
+    available_at_ts: int,
+) -> dict[str, Any] | None:
+    candidates = [
+        row
+        for row in rows
+        if int(row.get("source_ts") or 0) <= source_ts
+        and int(row.get("available_at_ts") or 0) <= available_at_ts
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda row: (
+            int(row["source_ts"]),
+            int(row["available_at_ts"]),
+        ),
+    )
+
+
 def _causal_chainlink_rows_for_markets(
     *,
     rows: list[dict[str, Any]],
@@ -886,6 +990,10 @@ def _causal_chainlink_rows_for_markets(
         return [], ["chainlink_rtds_no_market_window"] if rows else []
     window_start = min(int(row["market_start_ts"]) for row in markets)
     window_end = max(int(row["market_end_ts"]) for row in markets)
+    availability_window_end = max(
+        int(row.get("settlement_ts") or row["market_end_ts"])
+        for row in markets
+    )
     accepted: dict[tuple[int, float], dict[str, Any]] = {}
     reason_codes: set[str] = set()
     for row in rows:
@@ -902,8 +1010,8 @@ def _causal_chainlink_rows_for_markets(
             continue
         if source_ts > window_end:
             continue
-        if available_at_ts > window_end:
-            reason_codes.add("chainlink_rtds_post_close_availability_excluded")
+        if available_at_ts > availability_window_end:
+            reason_codes.add("chainlink_rtds_post_settlement_window_excluded")
             continue
         if row.get("source_type") != "polymarket_rtds_chainlink":
             reason_codes.add("chainlink_rtds_source_type_invalid")
