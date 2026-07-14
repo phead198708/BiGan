@@ -9,6 +9,7 @@ from pathlib import Path
 from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_future_evaluation import (
     PnLAlignedFutureDecisionInputConfig,
     build_pnl_aligned_future_outcome_blind_decision_inputs,
+    load_pnl_aligned_future_collection_handoff_source_dirs,
 )
 
 DEFAULT_UNLOCK_DIR = Path(
@@ -22,11 +23,28 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("examples/v8/polymarket_runs"))
     parser.add_argument("--collection-freeze-manifest", required=True, type=Path)
     parser.add_argument("--expected-collection-freeze-manifest-sha256", required=True)
-    parser.add_argument("--source-corpus-dir", action="append", required=True, type=Path)
+    parser.add_argument("--source-corpus-dir", action="append", type=Path)
+    parser.add_argument("--collection-handoff-manifest", type=Path)
+    parser.add_argument("--expected-collection-handoff-manifest-sha256")
     parser.add_argument("--paper-candidate-unlock-dir", type=Path, default=DEFAULT_UNLOCK_DIR)
     parser.add_argument("--expected-unlock-manifest-sha256")
     parser.add_argument("--canonical-o-source-manifest-path", type=Path)
     args = parser.parse_args()
+    handoff_requested = args.collection_handoff_manifest is not None
+    if handoff_requested != bool(args.expected_collection_handoff_manifest_sha256):
+        parser.error("collection handoff manifest and SHA-256 must be provided together")
+    if handoff_requested and args.source_corpus_dir:
+        parser.error("do not combine collection handoff with explicit source corpus directories")
+    if not handoff_requested and not args.source_corpus_dir:
+        parser.error("provide a collection handoff or at least one source corpus directory")
+    source_corpus_dirs = (
+        load_pnl_aligned_future_collection_handoff_source_dirs(
+            args.collection_handoff_manifest,
+            expected_sha256=args.expected_collection_handoff_manifest_sha256,
+        )
+        if handoff_requested
+        else tuple(args.source_corpus_dir)
+    )
     kwargs = {}
     if args.expected_unlock_manifest_sha256:
         kwargs["expected_unlock_manifest_sha256"] = args.expected_unlock_manifest_sha256
@@ -38,9 +56,13 @@ def main() -> None:
             expected_collection_freeze_manifest_sha256=(
                 args.expected_collection_freeze_manifest_sha256
             ),
-            source_corpus_dirs=tuple(args.source_corpus_dir),
+            source_corpus_dirs=source_corpus_dirs,
             paper_candidate_unlock_dir=args.paper_candidate_unlock_dir,
             canonical_o_source_manifest_path=args.canonical_o_source_manifest_path,
+            collection_handoff_manifest_path=args.collection_handoff_manifest,
+            expected_collection_handoff_manifest_sha256=(
+                args.expected_collection_handoff_manifest_sha256
+            ),
             **kwargs,
         )
     )

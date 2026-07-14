@@ -47,6 +47,9 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
 EVALUATION_SCHEMA_VERSION = "bigan-v8-execution-layer-v2-pnl-aligned-future-evaluation-protocol-v1"
 REPORT_SCHEMA_VERSION = "bigan-v8-execution-layer-v2-pnl-aligned-future-accepted-bet-report-v1"
 DECISION_INPUT_SCHEMA_VERSION = "bigan-v8-execution-layer-v2-pnl-aligned-future-decision-input-v1"
+COLLECTION_HANDOFF_SCHEMA_VERSION = (
+    "bigan-v8-execution-layer-v2-pnl-aligned-future-collection-handoff-v1"
+)
 SETTLEMENT_TARGET_SCHEMA_VERSION = (
     "bigan-v8-execution-layer-v2-pnl-aligned-future-settlement-target-v1"
 )
@@ -109,6 +112,8 @@ class PnLAlignedFutureDecisionInputConfig:
     paper_candidate_unlock_dir: Path | str
     expected_unlock_manifest_sha256: str = PINNED_ISSUE_160_MANIFEST_SHA256
     canonical_o_source_manifest_path: Path | str | None = None
+    collection_handoff_manifest_path: Path | str | None = None
+    expected_collection_handoff_manifest_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -127,6 +132,14 @@ class PnLAlignedFutureDecisionInputConfig:
                 raise ValueError(f"{name} must be a SHA-256 digest")
         if not self.source_corpus_dirs:
             raise ValueError("source_corpus_dirs must not be empty")
+        if (self.collection_handoff_manifest_path is None) != (
+            self.expected_collection_handoff_manifest_sha256 is None
+        ):
+            raise ValueError("collection handoff path and SHA-256 must be provided together")
+        if self.expected_collection_handoff_manifest_sha256 is not None and not _is_sha256(
+            self.expected_collection_handoff_manifest_sha256
+        ):
+            raise ValueError("expected_collection_handoff_manifest_sha256 must be a SHA-256 digest")
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         object.__setattr__(
             self,
@@ -147,6 +160,46 @@ class PnLAlignedFutureDecisionInputConfig:
                 "canonical_o_source_manifest_path",
                 Path(self.canonical_o_source_manifest_path),
             )
+        if self.collection_handoff_manifest_path is not None:
+            object.__setattr__(
+                self,
+                "collection_handoff_manifest_path",
+                Path(self.collection_handoff_manifest_path),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PnLAlignedFutureCollectionHandoffConfig:
+    """Outcome-blind provenance gate from collector batch to O scoring."""
+
+    run_id: str
+    output_dir: Path | str
+    batch_progress_path: Path | str
+    expected_batch_progress_sha256: str
+    collection_freeze_manifest_path: Path | str
+    expected_collection_freeze_manifest_sha256: str
+    training_corpus_root: Path | str
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        for name, value in (
+            ("expected_batch_progress_sha256", self.expected_batch_progress_sha256),
+            (
+                "expected_collection_freeze_manifest_sha256",
+                self.expected_collection_freeze_manifest_sha256,
+            ),
+        ):
+            if not _is_sha256(value):
+                raise ValueError(f"{name} must be a SHA-256 digest")
+        object.__setattr__(self, "output_dir", Path(self.output_dir))
+        object.__setattr__(self, "batch_progress_path", Path(self.batch_progress_path))
+        object.__setattr__(
+            self,
+            "collection_freeze_manifest_path",
+            Path(self.collection_freeze_manifest_path),
+        )
+        object.__setattr__(self, "training_corpus_root", Path(self.training_corpus_root))
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +365,291 @@ def freeze_pnl_aligned_future_evaluation(
     }
 
 
+def build_pnl_aligned_future_collection_handoff(
+    config: PnLAlignedFutureCollectionHandoffConfig,
+) -> dict[str, Any]:
+    """Freeze the exact completed collector batch without opening outcomes."""
+
+    batch_path = config.batch_progress_path.resolve()
+    freeze_path = config.collection_freeze_manifest_path.resolve()
+    if _sha256_file(batch_path) != config.expected_batch_progress_sha256:
+        raise ValueError("collector batch progress SHA-256 mismatch")
+    if _sha256_file(freeze_path) != config.expected_collection_freeze_manifest_sha256:
+        raise ValueError("collection freeze manifest SHA-256 mismatch")
+    batch = _load_json(batch_path)
+    collection_freeze = _load_json(freeze_path)
+    if not (
+        collection_freeze.get("future_collection_outcome_blind") is True
+        and collection_freeze.get("future_window_must_be_strictly_later") is True
+        and collection_freeze.get("future_market_ids_must_be_disjoint") is True
+        and collection_freeze.get("model_config_or_threshold_mutation_after_freeze_allowed")
+        is False
+    ):
+        raise ValueError("collection freeze is not outcome-blind and fail-closed")
+    historical_descriptor = _verified_descriptor(
+        collection_freeze.get("historical_development_rows"),
+        name="historical_development_rows",
+    )
+    historical_rows = _load_jsonl(Path(historical_descriptor["path"]))
+    prior_market_ids = {str(row["market_id"]) for row in historical_rows}
+    expected_round_count = int(collection_freeze["expected_round_count"])
+    captures = [dict(row) for row in batch.get("captures") or []]
+    finalizations = [dict(row) for row in batch.get("finalizations") or []]
+    errors = [dict(row) for row in batch.get("errors") or []]
+    blockers: list[str] = []
+    if batch.get("paper_only") is not True or batch.get("capital_at_risk") is not False:
+        blockers.append("collector_batch_safety_contract_failed")
+    if int(batch.get("capture_count") or 0) != len(captures):
+        blockers.append("collector_reported_capture_count_mismatch")
+    if len(captures) != expected_round_count:
+        blockers.append("collector_capture_count_incomplete")
+    if int(batch.get("error_count") or 0) != len(errors) or errors:
+        blockers.append("collector_batch_errors_present")
+    if int(batch.get("pending_resolution_count") or 0) != 0:
+        blockers.append("collector_pending_resolution_present")
+    capture_run_ids = [str(row.get("run_id") or "") for row in captures]
+    capture_round_indices = [int(row.get("round_index") or 0) for row in captures]
+    if len(capture_run_ids) != len(set(capture_run_ids)) or any(
+        not value for value in capture_run_ids
+    ):
+        blockers.append("collector_duplicate_or_missing_capture_run_id")
+    if sorted(capture_round_indices) != list(range(1, expected_round_count + 1)):
+        blockers.append("collector_round_index_coverage_incomplete")
+    for capture in captures:
+        if capture.get("capture_start_boundary_validation_passed") is not True:
+            blockers.append("collector_capture_start_boundary_failed")
+        if int(capture.get("raw_polymarket_market_count") or 0) != 1:
+            blockers.append("collector_market_row_coverage_failed")
+        if int(capture.get("provider_raw_orderbook_snapshot_count") or 0) <= 0:
+            blockers.append("collector_raw_orderbook_coverage_failed")
+        if int(capture.get("training_sampled_orderbook_row_count") or 0) <= 0:
+            blockers.append("collector_sampled_orderbook_coverage_failed")
+        if int(capture.get("raw_chainlink_price_row_count") or 0) <= 0:
+            blockers.append("collector_chainlink_coverage_failed")
+        if capture.get("reject_reason_counts"):
+            blockers.append("collector_capture_rejections_present")
+
+    exported = [row for row in finalizations if row.get("finalization_status") == "exported"]
+    if int(batch.get("exported_round_count") or 0) != len(exported):
+        blockers.append("collector_reported_export_count_mismatch")
+    if len(finalizations) != expected_round_count or len(exported) != expected_round_count:
+        blockers.append("collector_export_count_incomplete")
+    for finalization in finalizations:
+        if not (
+            finalization.get("finalization_status") == "exported"
+            and finalization.get("pending_resolution") is False
+            and finalization.get("training_eligible") is True
+            and int(finalization.get("raw_resolution_count") or 0) > 0
+            and not finalization.get("reject_reason_counts")
+        ):
+            blockers.append("collector_finalization_not_exported_and_eligible")
+    finalization_run_ids = [str(row.get("run_id") or "") for row in finalizations]
+    if len(finalization_run_ids) != len(set(finalization_run_ids)) or any(
+        not value for value in finalization_run_ids
+    ):
+        blockers.append("collector_duplicate_or_missing_finalization_run_id")
+    if set(capture_run_ids) != set(finalization_run_ids):
+        blockers.append("collector_capture_finalization_identity_mismatch")
+
+    training_root = config.training_corpus_root.expanduser().resolve()
+    exported_paths = [
+        Path(str(row.get("exported_training_corpus_dir") or "")).expanduser().resolve()
+        for row in exported
+        if row.get("exported_training_corpus_dir")
+    ]
+    if len(exported_paths) != len(exported):
+        blockers.append("collector_exported_corpus_path_missing")
+    if len(exported_paths) != len(set(exported_paths)):
+        blockers.append("collector_duplicate_exported_corpus_path")
+    safe_paths: list[Path] = []
+    for path in sorted(set(exported_paths)):
+        if not path.is_relative_to(training_root):
+            blockers.append("collector_exported_corpus_outside_training_root")
+        elif not path.is_dir():
+            blockers.append("collector_exported_corpus_directory_missing")
+        else:
+            safe_paths.append(path)
+
+    source_corpora: list[dict[str, Any]] = []
+    source_market_ids: list[str] = []
+    corpus_audits: list[dict[str, Any]] = []
+    for corpus_dir in safe_paths:
+        audit, public_rows, rejected = _load_outcome_blind_phase2_feature_corpus(
+            corpus_dir=corpus_dir,
+            prior_market_ids=prior_market_ids,
+            minimum_future_window_start_ts=int(collection_freeze["minimum_future_window_start_ts"]),
+        )
+        corpus_audits.append(audit)
+        market_ids = sorted({str(row["market_id"]) for row in public_rows})
+        if rejected:
+            blockers.append("collector_exported_corpus_feature_rows_rejected")
+        if len(market_ids) != 1 or not public_rows:
+            blockers.append("collector_exported_corpus_market_coverage_failed")
+        source_market_ids.extend(market_ids)
+        source_corpora.append(
+            {
+                "source_corpus_dir": str(corpus_dir),
+                "market_ids": market_ids,
+                "outcome_blind_decision_source_row_count": len(public_rows),
+                "corpus_manifest": _descriptor(corpus_dir / "polymarket_corpus_manifest.json"),
+                "feature_rows": _descriptor(corpus_dir / "polymarket_feature_rows.jsonl"),
+                "market_metadata": _descriptor(corpus_dir / "polymarket_market_metadata.jsonl"),
+                "chainlink_prices": _descriptor(corpus_dir / "polymarket_chainlink_prices.jsonl"),
+                "chainlink_manifest": _descriptor(
+                    corpus_dir / "polymarket_chainlink_decision_time_evidence_manifest.json"
+                ),
+                "training_corpus_provenance": _descriptor(
+                    corpus_dir / "training_corpus_provenance.json"
+                ),
+            }
+        )
+    if len(source_corpora) != expected_round_count:
+        blockers.append("collection_handoff_corpus_count_mismatch")
+    if len(source_market_ids) != len(set(source_market_ids)):
+        blockers.append("collection_handoff_duplicate_market_identity")
+    if len(set(source_market_ids)) != expected_round_count:
+        blockers.append("collection_handoff_unique_market_count_mismatch")
+    blockers = sorted(set(blockers))
+    status = "OUTCOME_BLIND_COLLECTION_HANDOFF_READY" if not blockers else "BLOCKED_FAIL_CLOSED"
+
+    output_dir = config.output_dir / config.run_id
+    output_dir.mkdir(parents=True, exist_ok=False)
+    access_audit_path = output_dir / "pnl_aligned_future_collection_handoff_access_audit.json"
+    report_path = output_dir / "pnl_aligned_future_collection_handoff_report.json"
+    access_audit = {
+        "schema_version": f"{COLLECTION_HANDOFF_SCHEMA_VERSION}-access-audit",
+        "permitted_artifact_names_opened": sorted(
+            {name for audit in corpus_audits for name in audit["permitted_artifact_names_opened"]}
+        ),
+        "prohibited_future_outcome_artifact_names": list(PROHIBITED_FUTURE_OUTCOME_ARTIFACT_NAMES),
+        "prohibited_future_outcome_artifacts_present_but_not_opened": sorted(
+            {
+                f"{audit['corpus_dir']}/{name}"
+                for audit in corpus_audits
+                for name in audit["prohibited_future_outcome_artifacts_present_but_not_opened"]
+            }
+        ),
+        "prohibited_future_outcome_artifact_read_count": 0,
+        "outcome_blind_input_access_passed": True,
+        "paper_only": True,
+        "capital_at_risk": False,
+    }
+    _write_json(access_audit_path, access_audit)
+    report = {
+        "schema_version": f"{COLLECTION_HANDOFF_SCHEMA_VERSION}-report",
+        "run_id": config.run_id,
+        "status": status,
+        "blocking_reason_codes": blockers,
+        "expected_round_count": expected_round_count,
+        "capture_count": len(captures),
+        "exported_round_count": len(exported),
+        "source_corpus_count": len(source_corpora),
+        "source_unique_market_count": len(set(source_market_ids)),
+        "collector_error_count": len(errors),
+        "collector_pending_resolution_count": int(batch.get("pending_resolution_count") or 0),
+        "capture_start_boundary_validation_passed": all(
+            row.get("capture_start_boundary_validation_passed") is True for row in captures
+        ),
+        "outcome_blind_input_access_passed": True,
+        "future_outcome_targets_loaded": False,
+        "outcome_reconciliation_started": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "v8_execution_handoff_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    _write_json(report_path, report)
+    manifest = {
+        "schema_version": f"{COLLECTION_HANDOFF_SCHEMA_VERSION}-manifest",
+        "run_id": config.run_id,
+        "status": status,
+        "collection_handoff_ready": not blockers,
+        "blocking_reason_codes": blockers,
+        "batch_progress": _descriptor(batch_path),
+        "collection_freeze_manifest": _descriptor(freeze_path),
+        "training_corpus_root": str(training_root),
+        "expected_round_count": expected_round_count,
+        "source_corpus_dirs": [row["source_corpus_dir"] for row in source_corpora],
+        "source_corpora": source_corpora,
+        "source_market_ids_sha256": canonical_json_sha256(sorted(source_market_ids)),
+        "collection_handoff_access_audit": _descriptor(access_audit_path),
+        "collection_handoff_report": _descriptor(report_path),
+        "future_outcome_targets_loaded": False,
+        "outcome_reconciliation_started": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "v8_execution_handoff_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+        **compact_safety_fields(),
+    }
+    manifest_path = output_dir / "pnl_aligned_future_collection_handoff_manifest.json"
+    _write_json(manifest_path, manifest)
+    return {
+        "output_dir": output_dir,
+        "access_audit_path": access_audit_path,
+        "report_path": report_path,
+        "manifest_path": manifest_path,
+        "manifest_sha256": _sha256_file(manifest_path),
+        "manifest": manifest,
+        "report": report,
+    }
+
+
+def load_pnl_aligned_future_collection_handoff_source_dirs(
+    path: Path | str,
+    *,
+    expected_sha256: str,
+) -> tuple[Path, ...]:
+    """Verify a ready collection handoff and return its exact corpus set."""
+
+    handoff_path = Path(path).resolve()
+    if _sha256_file(handoff_path) != expected_sha256:
+        raise ValueError("collection handoff manifest SHA-256 mismatch")
+    handoff = _load_json(handoff_path)
+    if not (
+        handoff.get("status") == "OUTCOME_BLIND_COLLECTION_HANDOFF_READY"
+        and handoff.get("collection_handoff_ready") is True
+        and handoff.get("blocking_reason_codes") == []
+        and handoff.get("future_outcome_targets_loaded") is False
+        and handoff.get("outcome_reconciliation_started") is False
+    ):
+        raise ValueError("collection handoff manifest is not ready")
+    access_descriptor = _verified_descriptor(
+        handoff.get("collection_handoff_access_audit"),
+        name="collection_handoff_access_audit",
+    )
+    access = _load_json(Path(access_descriptor["path"]))
+    if not (
+        access.get("outcome_blind_input_access_passed") is True
+        and access.get("prohibited_future_outcome_artifact_read_count") == 0
+    ):
+        raise ValueError("collection handoff outcome-blind access audit failed")
+    source_corpora = [dict(row) for row in handoff.get("source_corpora") or []]
+    source_dirs = tuple(Path(str(row["source_corpus_dir"])).resolve() for row in source_corpora)
+    if [str(path) for path in source_dirs] != handoff.get("source_corpus_dirs"):
+        raise ValueError("collection handoff source corpus directory set mismatch")
+    if len(source_dirs) != int(handoff.get("expected_round_count") or 0):
+        raise ValueError("collection handoff source corpus count mismatch")
+    for row, corpus_dir in zip(source_corpora, source_dirs, strict=True):
+        if not corpus_dir.is_dir():
+            raise ValueError("collection handoff source corpus directory is missing")
+        for name in (
+            "corpus_manifest",
+            "feature_rows",
+            "market_metadata",
+            "chainlink_prices",
+            "chainlink_manifest",
+            "training_corpus_provenance",
+        ):
+            _verified_descriptor(row.get(name), name=f"collection_handoff_{name}")
+    return source_dirs
+
+
 def build_pnl_aligned_future_outcome_blind_decision_inputs(
     config: PnLAlignedFutureDecisionInputConfig,
 ) -> dict[str, Any]:
@@ -342,6 +680,19 @@ def build_pnl_aligned_future_outcome_blind_decision_inputs(
         != int(collection_freeze["max_prior_decision_ts"])
     ):
         raise ValueError("collection freeze historical lineage mismatch")
+    collection_handoff_descriptor: dict[str, str] | None = None
+    if config.collection_handoff_manifest_path is not None:
+        handoff_path = config.collection_handoff_manifest_path.resolve()
+        handoff_source_dirs = load_pnl_aligned_future_collection_handoff_source_dirs(
+            handoff_path,
+            expected_sha256=str(config.expected_collection_handoff_manifest_sha256),
+        )
+        if tuple(path.resolve() for path in config.source_corpus_dirs) != handoff_source_dirs:
+            raise ValueError("decision input source corpus set differs from collection handoff")
+        handoff = _load_json(handoff_path)
+        if handoff.get("collection_freeze_manifest") != _descriptor(freeze_path):
+            raise ValueError("collection handoff freeze lineage mismatch")
+        collection_handoff_descriptor = _descriptor(handoff_path)
 
     public_rows: list[dict[str, Any]] = []
     corpus_audits: list[dict[str, Any]] = []
@@ -496,6 +847,8 @@ def build_pnl_aligned_future_outcome_blind_decision_inputs(
         "expected_round_count": expected_round_count,
         "source_corpus_count": len(config.source_corpus_dirs),
         "source_unique_market_count": len(source_market_ids),
+        "collection_handoff_manifest": collection_handoff_descriptor,
+        "collection_handoff_verified": collection_handoff_descriptor is not None,
         "source_decision_count": len(public_rows),
         "outcome_blind_decision_row_count": len(decision_rows),
         "source_corpus_audits": corpus_audits,
@@ -541,6 +894,8 @@ def build_pnl_aligned_future_outcome_blind_decision_inputs(
         "schema_version": f"{DECISION_INPUT_SCHEMA_VERSION}-manifest",
         "run_id": config.run_id,
         "collection_freeze_manifest": _descriptor(freeze_path),
+        "collection_handoff_manifest": collection_handoff_descriptor,
+        "collection_handoff_verified": collection_handoff_descriptor is not None,
         "source_corpora": [
             {
                 "corpus_id": audit["corpus_id"],
