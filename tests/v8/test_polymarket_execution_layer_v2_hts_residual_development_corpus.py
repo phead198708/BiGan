@@ -6,11 +6,22 @@ from pathlib import Path
 
 import pytest
 
+from bigan.v8.polymarket.training.execution_layer_v2_hts_residual_confirmatory import (
+    HTSResidualCandidateFreezeConfig,
+    HTSResidualConfirmatoryEvaluationConfig,
+    HTSResidualConfirmatoryInputConfig,
+    evaluate_hts_residual_confirmatory_once,
+    freeze_hts_residual_candidate,
+    freeze_hts_residual_confirmatory_input,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_hts_residual_development_corpus import (
     HTSResidualDevelopmentCorpusConfig,
     HTSResidualForwardOOFConfig,
     build_hts_residual_development_corpus,
     run_hts_residual_development_forward_oof,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_hts_residual_edge import (
+    fit_residual_offset_contract,
 )
 
 UNLOCK_DIR = Path(
@@ -211,6 +222,145 @@ def test_forward_oof_rejects_row_protocol_lineage_mismatch(tmp_path: Path) -> No
         )
 
 
+def test_confirmatory_input_freeze_and_evaluation_are_exactly_once(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate_freeze(tmp_path)
+    source_root = tmp_path / "confirmatory-source"
+    source_root.mkdir()
+    corpus = _phase2_corpus(
+        source_root,
+        market_id="confirmatory-market",
+        corpus_id="confirmatory-corpus",
+        market_start_ts=5_500_000,
+    )
+    frozen_input = freeze_hts_residual_confirmatory_input(
+        HTSResidualConfirmatoryInputConfig(
+            run_id="confirmatory-input",
+            output_dir=tmp_path / "runs",
+            candidate_freeze_manifest_path=candidate["manifest_path"],
+            source_corpus_dirs=(corpus,),
+        )
+    )
+    assert frozen_input["manifest"]["input_gate_passed"] is True
+    assert frozen_input["manifest"]["outcome_values_inspected_during_input_freeze"] is False
+
+    evaluation_config = HTSResidualConfirmatoryEvaluationConfig(
+        confirmatory_input_manifest_path=frozen_input["manifest_path"],
+        paper_candidate_unlock_dir=UNLOCK_DIR,
+    )
+    result = evaluate_hts_residual_confirmatory_once(evaluation_config)
+    report = result["report"]
+    assert report["status"] == "PRE_PROMOTION_BLOCKED"
+    assert report["confirmatory_labels_used_for_fitting"] is False
+    assert report["confirmatory_labels_used_for_evaluation_only"] is True
+    assert report["pre_promotion_ready"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["capital_at_risk"] is False
+    with pytest.raises(FileExistsError, match="exactly-once"):
+        evaluate_hts_residual_confirmatory_once(evaluation_config)
+
+
+def test_confirmatory_input_overlap_blocks_before_evaluation_marker(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate_freeze(tmp_path)
+    source_root = tmp_path / "overlap-source"
+    source_root.mkdir()
+    corpus = _phase2_corpus(
+        source_root,
+        market_id="market-0",
+        corpus_id="overlap-corpus",
+        market_start_ts=5_500_000,
+    )
+    frozen_input = freeze_hts_residual_confirmatory_input(
+        HTSResidualConfirmatoryInputConfig(
+            run_id="overlap-input",
+            output_dir=tmp_path / "runs",
+            candidate_freeze_manifest_path=candidate["manifest_path"],
+            source_corpus_dirs=(corpus,),
+        )
+    )
+    manifest = frozen_input["manifest"]
+    assert manifest["input_gate_passed"] is False
+    assert "confirmatory_market_overlap_detected" in manifest["blocking_reason_codes"]
+    with pytest.raises(ValueError, match="input gate did not pass"):
+        evaluate_hts_residual_confirmatory_once(
+            HTSResidualConfirmatoryEvaluationConfig(
+                confirmatory_input_manifest_path=frozen_input["manifest_path"],
+                paper_candidate_unlock_dir=UNLOCK_DIR,
+            )
+        )
+    assert not (
+        frozen_input["output_dir"]
+        / "hts_residual_confirmatory_evaluation_started.json"
+    ).exists()
+
+
+def test_confirmatory_source_tamper_fails_before_exactly_once_marker(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate_freeze(tmp_path)
+    source_root = tmp_path / "tamper-source"
+    source_root.mkdir()
+    corpus = _phase2_corpus(
+        source_root,
+        market_id="tamper-market",
+        corpus_id="tamper-corpus",
+        market_start_ts=5_500_000,
+    )
+    frozen_input = freeze_hts_residual_confirmatory_input(
+        HTSResidualConfirmatoryInputConfig(
+            run_id="tamper-input",
+            output_dir=tmp_path / "runs",
+            candidate_freeze_manifest_path=candidate["manifest_path"],
+            source_corpus_dirs=(corpus,),
+        )
+    )
+    with (corpus / "polymarket_label_rows.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write("{}\n")
+    with pytest.raises(ValueError, match="descriptor hash mismatch"):
+        evaluate_hts_residual_confirmatory_once(
+            HTSResidualConfirmatoryEvaluationConfig(
+                confirmatory_input_manifest_path=frozen_input["manifest_path"],
+                paper_candidate_unlock_dir=UNLOCK_DIR,
+            )
+        )
+    assert not (
+        frozen_input["output_dir"]
+        / "hts_residual_confirmatory_evaluation_started.json"
+    ).exists()
+
+
+def test_confirmatory_input_duplicate_market_is_fail_closed(tmp_path: Path) -> None:
+    candidate = _candidate_freeze(tmp_path)
+    source_root = tmp_path / "duplicate-market-source"
+    source_root.mkdir()
+    corpora = tuple(
+        _phase2_corpus(
+            source_root,
+            market_id="duplicate-market",
+            corpus_id=f"duplicate-corpus-{index}",
+            market_start_ts=5_500_000 + index * 300_000,
+        )
+        for index in range(2)
+    )
+    frozen_input = freeze_hts_residual_confirmatory_input(
+        HTSResidualConfirmatoryInputConfig(
+            run_id="duplicate-market-input",
+            output_dir=tmp_path / "runs",
+            candidate_freeze_manifest_path=candidate["manifest_path"],
+            source_corpus_dirs=corpora,
+        )
+    )
+    manifest = frozen_input["manifest"]
+    assert manifest["input_gate_passed"] is False
+    assert manifest["duplicate_source_market_ids"] == ["duplicate-market"]
+    assert (
+        "duplicate_confirmatory_source_market" in manifest["blocking_reason_codes"]
+    )
+
+
 def _protocol(collection_not_before_ts: int, minimum_markets: int) -> dict:
     return {
         "schema_version": "bigan-v8-hts-residual-development-protocol-v2",
@@ -262,6 +412,7 @@ def _development_row(index: int, *, protocol_sha256: str) -> dict:
         "selected_side": side,
         "action_family": "HOLD_TO_SETTLEMENT",
         "decision_time_features": features,
+        "selected_side_win_target": int(side == outcome),
         "target_provenance": {"resolved_outcome": outcome},
         "source_run_id": f"run-{index}",
         "source_lineage": {
@@ -273,17 +424,76 @@ def _development_row(index: int, *, protocol_sha256: str) -> dict:
     }
 
 
+def _candidate_freeze(tmp_path: Path) -> dict:
+    protocol_path = tmp_path / "development-protocol.json"
+    _write_json(protocol_path, {"frozen": True})
+    protocol_sha256 = _sha256(protocol_path)
+    rows = [
+        _development_row(index, protocol_sha256=protocol_sha256)
+        for index in range(4)
+    ]
+    rows_path = tmp_path / "development-rows.jsonl"
+    _write_jsonl(rows_path, rows)
+    spec = {
+        "candidate_name": "hts_residual_chainlink_rank_anchor_offset",
+        "feature_names": [
+            "canonical_o_action_score",
+            "action_score_margin",
+            "chainlink_anchor_alignment",
+        ],
+        "maximum_absolute_residual_coefficient": 3.0,
+        "regularization": 35.0,
+        "probability_bounds": [0.01, 0.99],
+    }
+    contract = fit_residual_offset_contract(rows, spec)
+    report_path = tmp_path / "development-oof-report.json"
+    _write_json(
+        report_path,
+        {
+            "development_candidate_gate_passed": True,
+            "selected_candidate_name": spec["candidate_name"],
+            "selected_candidate_contract": contract,
+        },
+    )
+    manifest_path = tmp_path / "development-oof-manifest.json"
+    _write_json(
+        manifest_path,
+        {
+            "development_candidate_gate_passed": True,
+            "report": {"path": str(report_path), "sha256": _sha256(report_path)},
+            "combined_rows": {"path": str(rows_path), "sha256": _sha256(rows_path)},
+            "protocol": {
+                "path": str(protocol_path),
+                "sha256": protocol_sha256,
+            },
+        },
+    )
+    return freeze_hts_residual_candidate(
+        HTSResidualCandidateFreezeConfig(
+            run_id="candidate-freeze",
+            output_dir=tmp_path / "runs",
+            development_oof_manifest_path=manifest_path,
+            freeze_created_at="1970-01-01T01:06:40+00:00",
+            freeze_created_ts=4_000_000,
+            minimum_confirmatory_market_count=1,
+            minimum_confirmatory_source_run_count=1,
+            minimum_input_source_market_count=1,
+            bootstrap_samples=20,
+        )
+    )
+
+
 def _phase2_corpus(
     root: Path,
     *,
     market_id: str,
     corpus_id: str = "post-protocol-corpus",
+    market_start_ts: int = 2_000_000,
 ) -> Path:
     corpus_dir = root / corpus_id
     corpus_dir.mkdir()
-    market_start_ts = 2_000_000
-    decision_ts = 2_060_000
-    market_end_ts = 2_300_000
+    decision_ts = market_start_ts + 60_000
+    market_end_ts = market_start_ts + 300_000
     features = {
         "btc_mid_price": 65_130.0,
         "btc_return_1m": 0.001,
