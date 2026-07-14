@@ -75,9 +75,7 @@ def run_polymarket_async_round_collector_cli(
     chainlink_collector = PolymarketChainlinkRTDSCollector(url=chainlink_rtds_url)
     chainlink_collector.start()
     if chainlink_rtds_warmup_seconds:
-        chainlink_collector.wait_for_rows(
-            timeout_seconds=chainlink_rtds_warmup_seconds
-        )
+        chainlink_collector.wait_for_rows(timeout_seconds=chainlink_rtds_warmup_seconds)
 
     def finalizer_loop() -> None:
         while not stop_event.is_set():
@@ -149,28 +147,18 @@ def run_polymarket_async_round_collector_cli(
                     "round_index": index,
                     "run_id": run_id,
                     "run_dir": str(capture.run_dir),
-                    "scheduled_round_start_ts": int(
-                        scheduled_round_start_epoch_seconds * 1000
-                    ),
-                    "capture_thread_started_at_ts": int(
-                        capture_started_epoch_seconds * 1000
-                    ),
+                    "scheduled_round_start_ts": int(scheduled_round_start_epoch_seconds * 1000),
+                    "capture_thread_started_at_ts": int(capture_started_epoch_seconds * 1000),
                     "capture_start_lag_seconds": (
-                        capture_started_epoch_seconds
-                        - scheduled_round_start_epoch_seconds
+                        capture_started_epoch_seconds - scheduled_round_start_epoch_seconds
                     ),
                     "capture_start_boundary_validation_passed": (
-                        capture_started_epoch_seconds
-                        >= scheduled_round_start_epoch_seconds
+                        capture_started_epoch_seconds >= scheduled_round_start_epoch_seconds
                     ),
                     "capture_status": capture.report["capture_status"],
                     "pending_resolution": capture.report["pending_resolution"],
-                    "raw_polymarket_market_count": capture.report[
-                        "raw_polymarket_market_count"
-                    ],
-                    "raw_orderbook_row_count": capture.report[
-                        "raw_orderbook_row_count"
-                    ],
+                    "raw_polymarket_market_count": capture.report["raw_polymarket_market_count"],
+                    "raw_orderbook_row_count": capture.report["raw_orderbook_row_count"],
                     "provider_raw_orderbook_snapshot_count": capture.report[
                         "provider_raw_orderbook_snapshot_count"
                     ],
@@ -178,24 +166,16 @@ def run_polymarket_async_round_collector_cli(
                         "training_sampled_orderbook_row_count"
                     ],
                     "provider_raw_orderbook_source_type_distribution": (
-                        capture.report[
-                            "provider_raw_orderbook_source_type_distribution"
-                        ]
+                        capture.report["provider_raw_orderbook_source_type_distribution"]
                     ),
                     "provider_raw_orderbook_rest_fallback_row_count": (
-                        capture.report[
-                            "provider_raw_orderbook_rest_fallback_row_count"
-                        ]
+                        capture.report["provider_raw_orderbook_rest_fallback_row_count"]
                     ),
                     "provider_raw_orderbook_fallback_reason_distribution": (
-                        capture.report[
-                            "provider_raw_orderbook_fallback_reason_distribution"
-                        ]
+                        capture.report["provider_raw_orderbook_fallback_reason_distribution"]
                     ),
                     "raw_trade_row_count": capture.report["raw_trade_row_count"],
-                    "raw_btc_candle_row_count": capture.report[
-                        "raw_btc_candle_row_count"
-                    ],
+                    "raw_btc_candle_row_count": capture.report["raw_btc_candle_row_count"],
                     "raw_chainlink_price_row_count": capture.report[
                         "raw_chainlink_price_row_count"
                     ],
@@ -217,9 +197,7 @@ def run_polymarket_async_round_collector_cli(
             scheduled_round_start_epoch_seconds = _sleep_until_round_start_window(
                 market_family=market_family,
                 max_round_start_lag_seconds=max_round_start_lag_seconds,
-                previous_round_start_epoch_seconds=(
-                    previous_round_start_epoch_seconds
-                ),
+                previous_round_start_epoch_seconds=(previous_round_start_epoch_seconds),
             )
             run_id = f"{batch_id}-round{index:02d}-{_utc_stamp()}"
             capture_thread = threading.Thread(
@@ -227,18 +205,14 @@ def run_polymarket_async_round_collector_cli(
                 kwargs={
                     "index": index,
                     "run_id": run_id,
-                    "scheduled_round_start_epoch_seconds": (
-                        scheduled_round_start_epoch_seconds
-                    ),
+                    "scheduled_round_start_epoch_seconds": (scheduled_round_start_epoch_seconds),
                 },
                 name=f"{batch_id}-capture-{index:04d}",
                 daemon=True,
             )
             capture_thread.start()
             capture_threads.append(capture_thread)
-            previous_round_start_epoch_seconds = (
-                scheduled_round_start_epoch_seconds
-            )
+            previous_round_start_epoch_seconds = scheduled_round_start_epoch_seconds
         for capture_thread in capture_threads:
             capture_thread.join()
         if settlement_grace_seconds:
@@ -261,9 +235,7 @@ def run_polymarket_async_round_collector_cli(
         lock=lock,
     )
     summary = _summary(batch_id, captures, finalizations, errors)
-    summary["chainlink_rtds_collection_report"] = (
-        chainlink_collector.collection_report()
-    )
+    summary["chainlink_rtds_collection_report"] = chainlink_collector.collection_report()
     summary_path = batch_dir / "batch_summary.json"
     _write_json(summary_path, summary)
     summary["batch_summary_path"] = str(summary_path)
@@ -287,9 +259,21 @@ def run_polymarket_async_finalizer_cli(
     root = Path(output_dir).expanduser().resolve()
     batch_dir = root / batch_id
     batch_dir.mkdir(parents=True, exist_ok=True)
+    progress_path = batch_dir / "batch_progress.json"
     lock = threading.Lock()
-    finalizations: list[dict[str, Any]] = []
-    errors: list[dict[str, str]] = []
+    if progress_path.is_file():
+        previous = _read_json(progress_path)
+        if previous.get("batch_id") != batch_id:
+            raise ValueError("existing batch progress identity mismatch")
+        if previous.get("paper_only") is not True or previous.get("capital_at_risk") is not False:
+            raise ValueError("existing batch progress safety contract failed")
+        captures = [dict(row) for row in previous.get("captures") or []]
+        finalizations = [dict(row) for row in previous.get("finalizations") or []]
+        errors = [dict(row) for row in previous.get("errors") or []]
+    else:
+        captures = []
+        finalizations = []
+        errors = []
     deadline = time.monotonic() + settlement_grace_seconds
     while True:
         _finalize_pending_once(
@@ -297,10 +281,14 @@ def run_polymarket_async_finalizer_cli(
             destination_root=Path(training_corpus_root),
             clob_ws_url=clob_ws_url,
             overwrite_existing=overwrite_existing,
-            batch_id_prefix=None,
+            batch_id_prefix=batch_id,
             finalizations=finalizations,
             errors=errors,
             lock=lock,
+        )
+        _write_json_atomic(
+            progress_path,
+            _summary(batch_id, captures, finalizations, errors),
         )
         if settlement_grace_seconds <= 0 or time.monotonic() >= deadline:
             break
@@ -315,9 +303,7 @@ def run_polymarket_async_finalizer_cli(
             1 for item in finalizations if item.get("finalization_status") == "exported"
         ),
         "pending_resolution_count": sum(
-            1
-            for item in finalizations
-            if item.get("finalization_status") == "pending_resolution"
+            1 for item in finalizations if item.get("finalization_status") == "pending_resolution"
         ),
         "error_count": len(errors),
         "finalizations": finalizations,
@@ -341,15 +327,11 @@ def _finalize_pending_once(
     lock: threading.Lock,
 ) -> None:
     seen_exported = {
-        item["run_id"]
-        for item in finalizations
-        if item.get("finalization_status") == "exported"
+        item["run_id"] for item in finalizations if item.get("finalization_status") == "exported"
     }
     for manifest_path in sorted(output_dir.glob("*/pending_round_capture_manifest.json")):
         run_dir = manifest_path.parent
-        if batch_id_prefix is not None and not run_dir.name.startswith(
-            f"{batch_id_prefix}-round"
-        ):
+        if batch_id_prefix is not None and not run_dir.name.startswith(f"{batch_id_prefix}-round"):
             continue
         if run_dir.name in seen_exported:
             continue
@@ -386,9 +368,7 @@ def _finalize_pending_once(
                     "finalization_status": result.report["finalization_status"],
                     "pending_resolution": result.report["pending_resolution"],
                     "training_eligible": result.report["training_eligible"],
-                    "exported_training_corpus_dir": result.report[
-                        "exported_training_corpus_dir"
-                    ],
+                    "exported_training_corpus_dir": result.report["exported_training_corpus_dir"],
                     "raw_resolution_count": result.report["raw_resolution_count"],
                     "reject_reason_counts": result.report["reject_reason_counts"],
                 },
@@ -401,13 +381,9 @@ def _summary(
     finalizations: list[dict[str, Any]],
     errors: list[dict[str, str]],
 ) -> dict[str, Any]:
-    exported = [
-        item for item in finalizations if item.get("finalization_status") == "exported"
-    ]
+    exported = [item for item in finalizations if item.get("finalization_status") == "exported"]
     pending = [
-        item
-        for item in finalizations
-        if item.get("finalization_status") == "pending_resolution"
+        item for item in finalizations if item.get("finalization_status") == "pending_resolution"
     ]
     return {
         "batch_id": batch_id,
@@ -418,21 +394,16 @@ def _summary(
             1 for item in captures if item.get("pending_resolution") is True
         ),
         "provider_raw_orderbook_snapshot_count": sum(
-            int(item.get("provider_raw_orderbook_snapshot_count") or 0)
-            for item in captures
+            int(item.get("provider_raw_orderbook_snapshot_count") or 0) for item in captures
         ),
         "training_sampled_orderbook_row_count": sum(
-            int(item.get("training_sampled_orderbook_row_count") or 0)
-            for item in captures
+            int(item.get("training_sampled_orderbook_row_count") or 0) for item in captures
         ),
         "raw_chainlink_price_row_count": sum(
-            int(item.get("raw_chainlink_price_row_count") or 0)
-            for item in captures
+            int(item.get("raw_chainlink_price_row_count") or 0) for item in captures
         ),
         "chainlink_covered_capture_count": sum(
-            1
-            for item in captures
-            if int(item.get("raw_chainlink_price_row_count") or 0) > 0
+            1 for item in captures if int(item.get("raw_chainlink_price_row_count") or 0) > 0
         ),
         "finalization_attempt_count": len(finalizations),
         "exported_round_count": len(exported),
@@ -470,9 +441,7 @@ def _sleep_until_round_start_window(
         now_epoch_seconds=now_epoch_seconds,
         previous_round_start_epoch_seconds=previous_round_start_epoch_seconds,
     )
-    sleep_seconds = max(
-        0.0, scheduled_round_start_epoch_seconds - now_epoch_seconds
-    )
+    sleep_seconds = max(0.0, scheduled_round_start_epoch_seconds - now_epoch_seconds)
     if sleep_seconds > 0:
         time.sleep(sleep_seconds)
     return scheduled_round_start_epoch_seconds
@@ -544,6 +513,12 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         json.dumps(payload, indent=2, sort_keys=True, allow_nan=False),
         encoding="utf-8",
     )
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
+    _write_json(temporary, payload)
+    temporary.replace(path)
 
 
 def main(argv: list[str] | None = None) -> int:

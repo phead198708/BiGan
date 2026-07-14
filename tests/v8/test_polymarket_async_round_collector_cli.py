@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
+import examples.v8.run_polymarket_async_round_collector as collector_module
 from examples.v8.run_polymarket_async_round_collector import (
+    _finalize_pending_once,
     _round_start_alignment_sleep_seconds,
     _scheduled_round_start_epoch_seconds,
     _wait_until_scheduled_round_start,
     main,
+    run_polymarket_async_finalizer_cli,
 )
 
 
@@ -100,3 +105,147 @@ def test_finalize_only_cli_accepts_shared_collector_args(tmp_path: Path) -> None
     assert summary["finalize_only"] is True
     assert summary["finalization_attempt_count"] == 0
     assert summary["error_count"] == 0
+
+
+def test_finalize_only_merges_into_authoritative_batch_progress(
+    tmp_path: Path, monkeypatch
+) -> None:
+    batch_id = "merge-finalizer"
+    batch_dir = tmp_path / batch_id
+    batch_dir.mkdir()
+    progress_path = batch_dir / "batch_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "batch_id": batch_id,
+                "paper_only": True,
+                "capital_at_risk": False,
+                "captures": [{"run_id": f"{batch_id}-round01"}],
+                "finalizations": [
+                    {
+                        "run_id": f"{batch_id}-round01",
+                        "finalization_status": "pending_resolution",
+                    }
+                ],
+                "errors": [],
+            }
+        )
+    )
+    observed_prefixes: list[str | None] = []
+
+    def fake_finalize_pending_once(**kwargs) -> None:
+        observed_prefixes.append(kwargs["batch_id_prefix"])
+        kwargs["finalizations"][:] = [
+            {
+                "run_id": f"{batch_id}-round01",
+                "finalization_status": "exported",
+                "pending_resolution": False,
+                "training_eligible": True,
+                "exported_training_corpus_dir": str(tmp_path / "corpus"),
+                "raw_resolution_count": 1,
+                "reject_reason_counts": {},
+            }
+        ]
+
+    monkeypatch.setattr(
+        collector_module,
+        "_finalize_pending_once",
+        fake_finalize_pending_once,
+    )
+    summary = run_polymarket_async_finalizer_cli(
+        batch_id=batch_id,
+        output_dir=tmp_path,
+    )
+
+    progress = json.loads(progress_path.read_text())
+    assert observed_prefixes == [batch_id]
+    assert progress["capture_count"] == 1
+    assert progress["captures"] == [{"run_id": f"{batch_id}-round01"}]
+    assert progress["exported_round_count"] == 1
+    assert progress["pending_resolution_count"] == 0
+    assert summary["exported_round_count"] == 1
+
+
+def test_finalize_only_preserves_pending_without_official_outcome(
+    tmp_path: Path, monkeypatch
+) -> None:
+    batch_id = "pending-finalizer"
+    batch_dir = tmp_path / batch_id
+    batch_dir.mkdir()
+    progress_path = batch_dir / "batch_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "batch_id": batch_id,
+                "paper_only": True,
+                "capital_at_risk": False,
+                "captures": [{"run_id": f"{batch_id}-round01"}],
+                "finalizations": [
+                    {
+                        "run_id": f"{batch_id}-round01",
+                        "finalization_status": "pending_resolution",
+                        "pending_resolution": True,
+                    }
+                ],
+                "errors": [],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "_finalize_pending_once",
+        lambda **kwargs: None,
+    )
+
+    run_polymarket_async_finalizer_cli(batch_id=batch_id, output_dir=tmp_path)
+
+    progress = json.loads(progress_path.read_text())
+    assert progress["exported_round_count"] == 0
+    assert progress["pending_resolution_count"] == 1
+    assert progress["finalizations"][0]["finalization_status"] == "pending_resolution"
+
+
+def test_finalize_pending_once_scopes_scan_to_requested_batch(tmp_path: Path, monkeypatch) -> None:
+    matching = tmp_path / "scoped-batch-round01"
+    unrelated = tmp_path / "other-batch-round01"
+    for run_dir in (matching, unrelated):
+        run_dir.mkdir()
+        (run_dir / "pending_round_capture_manifest.json").write_text(
+            json.dumps({"pending_resolution": True})
+        )
+    finalized_dirs: list[Path] = []
+
+    def fake_finalize(run_dir, **kwargs):
+        finalized_dirs.append(Path(run_dir))
+        return SimpleNamespace(
+            report={
+                "finalization_status": "exported",
+                "pending_resolution": False,
+                "training_eligible": True,
+                "exported_training_corpus_dir": str(tmp_path / "corpus"),
+                "raw_resolution_count": 1,
+                "reject_reason_counts": {},
+            }
+        )
+
+    monkeypatch.setattr(
+        collector_module,
+        "finalize_polymarket_pending_round",
+        fake_finalize,
+    )
+    finalizations: list[dict] = []
+    errors: list[dict] = []
+    _finalize_pending_once(
+        output_dir=tmp_path,
+        destination_root=tmp_path / "training",
+        clob_ws_url="wss://example.invalid",
+        overwrite_existing=False,
+        batch_id_prefix="scoped-batch",
+        finalizations=finalizations,
+        errors=errors,
+        lock=threading.Lock(),
+    )
+
+    assert finalized_dirs == [matching]
+    assert [row["run_id"] for row in finalizations] == [matching.name]
+    assert errors == []
