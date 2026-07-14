@@ -248,6 +248,7 @@ def _run_incremental_read_only_provider_fresh_loop(
     all_raw_trade_rows: list[dict[str, Any]] = []
     all_raw_btc_candle_rows: list[dict[str, Any]] = []
     all_raw_chainlink_price_rows_by_key: dict[tuple[int, float], dict[str, Any]] = {}
+    persisted_chainlink_price_keys: set[tuple[int, float]] = set()
     cycle_status_rows: list[dict[str, Any]] = []
     cycle_results: list[Any] = []
     reason_counter: Counter[str] = Counter()
@@ -273,6 +274,15 @@ def _run_incremental_read_only_provider_fresh_loop(
             if cycle_index > 0 and time.monotonic() >= collection_deadline_monotonic:
                 break
             cycle_run_id = f"{base_fresh_loop_config.run_id}-cycle-{cycle_index + 1:06d}"
+            chainlink_context_rows = chainlink_collector.rows()
+            chainlink_new_rows = [
+                row
+                for row in chainlink_context_rows
+                if _chainlink_price_key(row) not in persisted_chainlink_price_keys
+            ]
+            persisted_chainlink_price_keys.update(
+                _chainlink_price_key(row) for row in chainlink_new_rows
+            )
             cycle_config = PolymarketOV8PaperFreshLoopConfig(
                 run_id=cycle_run_id,
                 output_dir=cycle_output_dir,
@@ -286,7 +296,8 @@ def _run_incremental_read_only_provider_fresh_loop(
                 public_data_cycles=None,
                 public_data_source=O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
                 public_provider=config.public_provider,
-                chainlink_rtds_price_rows=tuple(chainlink_collector.rows()),
+                chainlink_rtds_price_rows=tuple(chainlink_context_rows),
+                chainlink_rtds_persist_price_rows=tuple(chainlink_new_rows),
                 canonical_o_source_manifest_path=config.canonical_o_source_manifest_path,
                 frozen_ev_calibration_artifact_path=(
                     config.frozen_ev_calibration_artifact_path
@@ -1760,7 +1771,7 @@ def _dedupe_chainlink_price_rows(
 ) -> list[dict[str, Any]]:
     by_key: dict[tuple[int, float], dict[str, Any]] = {}
     for row in rows:
-        key = (int(row.get("source_ts") or 0), _float(row.get("price")))
+        key = _chainlink_price_key(row)
         previous = by_key.get(key)
         if previous is None or int(row.get("available_at_ts") or 0) < int(
             previous.get("available_at_ts") or 0
@@ -1780,12 +1791,16 @@ def _merge_chainlink_price_rows(
     rows: list[dict[str, Any]],
 ) -> None:
     for row in rows:
-        key = (int(row.get("source_ts") or 0), _float(row.get("price")))
+        key = _chainlink_price_key(row)
         previous = by_key.get(key)
         if previous is None or int(row.get("available_at_ts") or 0) < int(
             previous.get("available_at_ts") or 0
         ):
             by_key[key] = dict(row)
+
+
+def _chainlink_price_key(row: dict[str, Any]) -> tuple[int, float]:
+    return (int(row.get("source_ts") or 0), _float(row.get("price")))
 
 
 def _settlement_pnl_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:

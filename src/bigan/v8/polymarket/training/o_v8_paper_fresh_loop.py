@@ -193,6 +193,7 @@ class PolymarketOV8PaperFreshLoopConfig:
     public_data_source: str = O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER
     public_provider: Any | None = None
     chainlink_rtds_price_rows: tuple[dict[str, Any], ...] = ()
+    chainlink_rtds_persist_price_rows: tuple[dict[str, Any], ...] | None = None
     initial_paper_position_rows: tuple[dict[str, Any], ...] = ()
     canonical_o_source_manifest_path: Path | str | None = None
     frozen_ev_calibration_artifact_path: Path | str | None = None
@@ -244,6 +245,14 @@ class PolymarketOV8PaperFreshLoopConfig:
                 self,
                 "chainlink_rtds_price_rows",
                 tuple(dict(row) for row in self.chainlink_rtds_price_rows),
+            )
+        if self.chainlink_rtds_persist_price_rows is not None and not isinstance(
+            self.chainlink_rtds_persist_price_rows, tuple
+        ):
+            object.__setattr__(
+                self,
+                "chainlink_rtds_persist_price_rows",
+                tuple(dict(row) for row in self.chainlink_rtds_persist_price_rows),
             )
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         object.__setattr__(
@@ -1067,6 +1076,11 @@ def _collect_read_only_public_provider_cycles(
             dict(row) for row in config.chainlink_rtds_price_rows
         ],
     )
+    persisted_chainlink_rows = (
+        [dict(row) for row in config.chainlink_rtds_persist_price_rows]
+        if config.chainlink_rtds_persist_price_rows is not None
+        else [dict(row) for row in config.chainlink_rtds_price_rows]
+    )
     stage_statuses["decision_feature_build"] = {
         "stage_name": "decision_feature_build",
         "decision_critical": True,
@@ -1160,6 +1174,9 @@ def _collect_read_only_public_provider_cycles(
         "public_chainlink_rtds_price_row_count": len(
             config.chainlink_rtds_price_rows
         ),
+        "public_chainlink_rtds_persisted_price_row_count": len(
+            persisted_chainlink_rows
+        ),
         "chainlink_rtds_feature_available": bool(config.chainlink_rtds_price_rows),
         "chainlink_rtds_decision_critical": False,
         "public_feature_row_count": len(rows),
@@ -1174,9 +1191,7 @@ def _collect_read_only_public_provider_cycles(
             "orderbooks": [dict(row) for row in orderbooks],
             "trades": [dict(row) for row in trades],
             "btc_feature_candles": [dict(row) for row in btc_candles],
-            "chainlink_rtds_prices": [
-                dict(row) for row in config.chainlink_rtds_price_rows
-            ],
+            "chainlink_rtds_prices": persisted_chainlink_rows,
         },
     }
 
