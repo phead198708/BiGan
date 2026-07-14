@@ -45,6 +45,9 @@ def test_builds_causal_post_protocol_development_rows_fail_closed(
 
     report = result["report"]
     assert report["feature_causality_violation_count"] == 0
+    assert set(report["source_chainlink_feature_coverage"].values()) == {1}
+    assert set(report["residual_chainlink_feature_coverage"].values()) == {1}
+    assert report["chainlink_feature_coverage_scope"] == "residual_hts_rows"
     assert report["residual_market_count"] == 1
     assert report["forward_oof_evaluation_ready"] is True
     assert report["candidate_fit_attempted"] is False

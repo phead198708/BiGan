@@ -276,6 +276,13 @@ def build_hts_residual_development_corpus(
             int(row["max_input_ts"]) > int(row["decision_ts"])
             for row in residual_rows
         ),
+        "source_chainlink_feature_coverage": _source_chainlink_feature_coverage(
+            public_rows
+        ),
+        "residual_chainlink_feature_coverage": _chainlink_feature_coverage(
+            residual_rows
+        ),
+        "chainlink_feature_coverage_scope": "residual_hts_rows",
         "chainlink_feature_coverage": _chainlink_feature_coverage(residual_rows),
         "minimum_development_market_count": minimum_markets,
         "forward_oof_evaluation_ready": market_count >= minimum_markets,
@@ -1073,6 +1080,30 @@ def _chainlink_feature_coverage(rows: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def _source_chainlink_feature_coverage(
+    rows: list[dict[str, Any]],
+) -> dict[str, int]:
+    source_fields = {
+        "chainlink_momentum_30s": "chainlink_momentum_30s",
+        "chainlink_momentum_60s": "chainlink_momentum_60s",
+        "chainlink_momentum_120s": "chainlink_momentum_120s",
+        "chainlink_realized_volatility_120s": (
+            "chainlink_realized_volatility_120s"
+        ),
+        "reference_price_to_beat_distance_at_decision": (
+            "chainlink_reference_distance_at_decision"
+        ),
+    }
+    return {
+        report_field: sum(
+            isinstance(row.get(source_field), int | float)
+            and math.isfinite(float(row[source_field]))
+            for row in rows
+        )
+        for report_field, source_field in source_fields.items()
+    }
+
+
 def _validate_protocol(protocol: dict[str, Any]) -> None:
     if protocol.get("schema_version") != (
         "bigan-v8-hts-residual-development-protocol-v2"
@@ -1108,6 +1139,8 @@ def _report_markdown(report: dict[str, Any]) -> str:
             f"- residual rows / markets: `{report['residual_row_count']}` / `{report['residual_market_count']}`",
             f"- forward OOF ready: `{str(report['forward_oof_evaluation_ready']).lower()}`",
             f"- feature causality violations: `{report['feature_causality_violation_count']}`",
+            f"- source Chainlink coverage: `{report['source_chainlink_feature_coverage']}`",
+            f"- residual Chainlink coverage: `{report['residual_chainlink_feature_coverage']}`",
             f"- rejected reasons: `{report['rejected_reason_distribution']}`",
             "- candidate fit attempted: `false`",
             "- confirmatory validation started: `false`",
