@@ -15,6 +15,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_future_evaluati
     build_pnl_aligned_future_outcome_blind_decision_inputs,
     build_pnl_aligned_future_settled_evaluation_targets,
     evaluate_pnl_aligned_future_accepted_bets,
+    load_pnl_aligned_future_collection_handoff_source_dirs,
     materialize_pnl_aligned_future_action_value_predictions,
     validate_pnl_aligned_future_evaluation_protocol,
 )
@@ -512,6 +513,279 @@ def test_collection_handoff_rejects_corpus_hash_tamper(tmp_path: Path) -> None:
         )
 
 
+def test_collection_handoff_selects_28_valid_plus_2_later_replacements(
+    tmp_path: Path,
+) -> None:
+    freeze_path = _collection_freeze(tmp_path, expected_round_count=30)
+    original_corpora = [
+        _outcome_blind_phase2_corpus(
+            tmp_path,
+            market_id=f"original-market-{index:02d}",
+            market_start_ts=2_000_000 + index * 300_000,
+        )
+        for index in range(1, 31)
+    ]
+    original_batch = _collector_batch_progress(
+        tmp_path,
+        corpus_dirs=original_corpora,
+        blocked_indices={12, 14},
+        omit_finalization_indices={12, 14},
+    )
+    replacement_corpora = [
+        _outcome_blind_phase2_corpus(
+            tmp_path,
+            market_id=f"replacement-market-{index:02d}",
+            market_start_ts=11_500_000 + index * 300_000,
+        )
+        for index in range(1, 3)
+    ]
+    for corpus_dir in replacement_corpora:
+        (corpus_dir / "polymarket_label_rows.jsonl").write_text("outcome-decoy\n")
+    replacement_batch = _collector_batch_progress(tmp_path, corpus_dirs=replacement_corpora)
+
+    handoff = build_pnl_aligned_future_collection_handoff(
+        PnLAlignedFutureCollectionHandoffConfig(
+            run_id="multi-batch-replacement-handoff",
+            output_dir=tmp_path / "handoff-runs",
+            batch_progress_path=original_batch,
+            expected_batch_progress_sha256=_sha256(original_batch),
+            additional_batch_progress_paths=(replacement_batch,),
+            additional_expected_batch_progress_sha256=(_sha256(replacement_batch),),
+            collection_freeze_manifest_path=freeze_path,
+            expected_collection_freeze_manifest_sha256=_sha256(freeze_path),
+            training_corpus_root=tmp_path,
+        )
+    )
+
+    assert handoff["report"]["status"] == "OUTCOME_BLIND_COLLECTION_HANDOFF_READY"
+    assert handoff["report"]["batch_count"] == 2
+    assert handoff["report"]["capture_count"] == 32
+    assert handoff["report"]["capture_quality_eligible_count"] == 30
+    assert handoff["report"]["source_unique_market_count"] == 30
+    selection = json.loads(handoff["selection_audit_path"].read_text())
+    assert selection["selection_uses_outcome_value"] is False
+    assert selection["selection_uses_realized_pnl"] is False
+    assert selection["selected_market_count"] == 30
+    assert selection["excluded_capture_count"] == 2
+    assert {
+        row["run_id"] for row in selection["excluded_rows"]
+    } == {
+        "collector-batch00-round12",
+        "collector-batch00-round14",
+    }
+    assert [row["selection_rank"] for row in selection["selected_rows"]] == list(
+        range(1, 31)
+    )
+    assert [row["scheduled_round_start_ts"] for row in selection["selected_rows"]] == sorted(
+        row["scheduled_round_start_ts"] for row in selection["selected_rows"]
+    )
+    assert selection["selected_rows"][-2]["market_id"] == "replacement-market-01"
+    assert selection["selected_rows"][-1]["market_id"] == "replacement-market-02"
+    access = json.loads(handoff["access_audit_path"].read_text())
+    assert access["prohibited_future_outcome_artifact_read_count"] == 0
+    assert len(access["prohibited_future_outcome_artifacts_present_but_not_opened"]) == 2
+
+
+def test_collection_handoff_multi_batch_insufficient_valid_support_fails_closed(
+    tmp_path: Path,
+) -> None:
+    freeze_path = _collection_freeze(tmp_path, expected_round_count=3)
+    original_corpora = [
+        _outcome_blind_phase2_corpus(
+            tmp_path,
+            market_id=f"insufficient-original-{index}",
+            market_start_ts=2_000_000 + index * 300_000,
+        )
+        for index in range(1, 4)
+    ]
+    original_batch = _collector_batch_progress(
+        tmp_path,
+        corpus_dirs=original_corpora,
+        blocked_indices={3},
+        omit_finalization_indices={3},
+    )
+
+    handoff = build_pnl_aligned_future_collection_handoff(
+        PnLAlignedFutureCollectionHandoffConfig(
+            run_id="insufficient-multi-batch-handoff",
+            output_dir=tmp_path / "handoff-runs",
+            batch_progress_path=original_batch,
+            expected_batch_progress_sha256=_sha256(original_batch),
+            collection_freeze_manifest_path=freeze_path,
+            expected_collection_freeze_manifest_sha256=_sha256(freeze_path),
+            training_corpus_root=tmp_path,
+        )
+    )
+
+    assert handoff["report"]["status"] == "BLOCKED_FAIL_CLOSED"
+    assert handoff["report"]["source_unique_market_count"] == 2
+    assert "collection_handoff_unique_market_count_mismatch" in handoff["report"][
+        "blocking_reason_codes"
+    ]
+
+
+def test_collection_handoff_rejects_cross_batch_duplicate_market_identity(
+    tmp_path: Path,
+) -> None:
+    freeze_path = _collection_freeze(tmp_path, expected_round_count=2)
+    original_corpus = _outcome_blind_phase2_corpus(
+        tmp_path,
+        market_id="cross-batch-duplicate-market",
+        market_start_ts=2_000_000,
+    )
+    original_batch = _collector_batch_progress(tmp_path, corpus_dirs=[original_corpus])
+    replacement_root = tmp_path / "replacement"
+    replacement_root.mkdir()
+    duplicate_corpus = _outcome_blind_phase2_corpus(
+        replacement_root,
+        market_id="cross-batch-duplicate-market",
+        market_start_ts=2_600_000,
+    )
+    replacement_batch = _collector_batch_progress(tmp_path, corpus_dirs=[duplicate_corpus])
+
+    handoff = build_pnl_aligned_future_collection_handoff(
+        PnLAlignedFutureCollectionHandoffConfig(
+            run_id="duplicate-market-multi-batch-handoff",
+            output_dir=tmp_path / "handoff-runs",
+            batch_progress_path=original_batch,
+            expected_batch_progress_sha256=_sha256(original_batch),
+            additional_batch_progress_paths=(replacement_batch,),
+            additional_expected_batch_progress_sha256=(_sha256(replacement_batch),),
+            collection_freeze_manifest_path=freeze_path,
+            expected_collection_freeze_manifest_sha256=_sha256(freeze_path),
+            training_corpus_root=tmp_path,
+        )
+    )
+
+    assert handoff["report"]["status"] == "BLOCKED_FAIL_CLOSED"
+    assert "collection_handoff_duplicate_market_identity" in handoff["report"][
+        "blocking_reason_codes"
+    ]
+    assert handoff["report"]["source_unique_market_count"] == 1
+
+
+def test_collection_handoff_rejects_additional_batch_hash_tamper(tmp_path: Path) -> None:
+    freeze_path = _collection_freeze(tmp_path, expected_round_count=2)
+    corpora = [
+        _outcome_blind_phase2_corpus(
+            tmp_path,
+            market_id=f"additional-hash-{index}",
+            market_start_ts=2_000_000 + index * 300_000,
+        )
+        for index in range(1, 3)
+    ]
+    original_batch = _collector_batch_progress(tmp_path, corpus_dirs=[corpora[0]])
+    replacement_batch = _collector_batch_progress(tmp_path, corpus_dirs=[corpora[1]])
+
+    with pytest.raises(ValueError, match="batch progress SHA-256 mismatch"):
+        build_pnl_aligned_future_collection_handoff(
+            PnLAlignedFutureCollectionHandoffConfig(
+                run_id="additional-batch-hash-tamper",
+                output_dir=tmp_path / "handoff-runs",
+                batch_progress_path=original_batch,
+                expected_batch_progress_sha256=_sha256(original_batch),
+                additional_batch_progress_paths=(replacement_batch,),
+                additional_expected_batch_progress_sha256=("a" * 64,),
+                collection_freeze_manifest_path=freeze_path,
+                expected_collection_freeze_manifest_sha256=_sha256(freeze_path),
+                training_corpus_root=tmp_path,
+            )
+        )
+
+
+def test_collection_handoff_consumer_rejects_selection_audit_tamper(tmp_path: Path) -> None:
+    freeze_path = _collection_freeze(tmp_path, expected_round_count=1)
+    corpus_dir = _outcome_blind_phase2_corpus(
+        tmp_path,
+        market_id="selection-audit-tamper",
+        market_start_ts=2_000_000,
+    )
+    batch_path = _collector_batch_progress(tmp_path, corpus_dirs=[corpus_dir])
+    handoff = build_pnl_aligned_future_collection_handoff(
+        PnLAlignedFutureCollectionHandoffConfig(
+            run_id="selection-audit-tamper-handoff",
+            output_dir=tmp_path / "handoff-runs",
+            batch_progress_path=batch_path,
+            expected_batch_progress_sha256=_sha256(batch_path),
+            collection_freeze_manifest_path=freeze_path,
+            expected_collection_freeze_manifest_sha256=_sha256(freeze_path),
+            training_corpus_root=tmp_path,
+        )
+    )
+    with handoff["selection_audit_path"].open("a") as handle:
+        handle.write(" ")
+
+    with pytest.raises(ValueError, match="selection_audit descriptor hash mismatch"):
+        load_pnl_aligned_future_collection_handoff_source_dirs(
+            handoff["manifest_path"],
+            expected_sha256=handoff["manifest_sha256"],
+        )
+
+
+def test_collection_handoff_rejects_replacement_not_strictly_later(
+    tmp_path: Path,
+) -> None:
+    freeze_path = _collection_freeze(tmp_path, expected_round_count=2)
+    original_corpus = _outcome_blind_phase2_corpus(
+        tmp_path,
+        market_id="replacement-boundary-original",
+        market_start_ts=2_000_000,
+    )
+    replacement_corpus = _outcome_blind_phase2_corpus(
+        tmp_path,
+        market_id="replacement-boundary-invalid",
+        market_start_ts=1_900_000,
+    )
+    original_batch = _collector_batch_progress(tmp_path, corpus_dirs=[original_corpus])
+    replacement_batch = _collector_batch_progress(tmp_path, corpus_dirs=[replacement_corpus])
+
+    handoff = build_pnl_aligned_future_collection_handoff(
+        PnLAlignedFutureCollectionHandoffConfig(
+            run_id="replacement-boundary-handoff",
+            output_dir=tmp_path / "handoff-runs",
+            batch_progress_path=original_batch,
+            expected_batch_progress_sha256=_sha256(original_batch),
+            additional_batch_progress_paths=(replacement_batch,),
+            additional_expected_batch_progress_sha256=(_sha256(replacement_batch),),
+            collection_freeze_manifest_path=freeze_path,
+            expected_collection_freeze_manifest_sha256=_sha256(freeze_path),
+            training_corpus_root=tmp_path,
+        )
+    )
+
+    assert handoff["report"]["status"] == "BLOCKED_FAIL_CLOSED"
+    assert "replacement_capture_not_strictly_later_than_original_batch" in handoff["report"][
+        "blocking_reason_codes"
+    ]
+    assert handoff["report"]["replacement_strictly_later_validation_passed"] is False
+
+
+def test_collection_handoff_rejects_outcome_field_in_batch_progress(tmp_path: Path) -> None:
+    freeze_path = _collection_freeze(tmp_path, expected_round_count=1)
+    corpus_dir = _outcome_blind_phase2_corpus(
+        tmp_path,
+        market_id="batch-outcome-decoy",
+        market_start_ts=2_000_000,
+    )
+    batch_path = _collector_batch_progress(tmp_path, corpus_dirs=[corpus_dir])
+    batch = json.loads(batch_path.read_text())
+    batch["resolved_outcome"] = "UP"
+    batch_path.write_text(json.dumps(batch, indent=2, sort_keys=True) + "\n")
+
+    with pytest.raises(ValueError, match="contains forbidden outcome fields"):
+        build_pnl_aligned_future_collection_handoff(
+            PnLAlignedFutureCollectionHandoffConfig(
+                run_id="batch-outcome-decoy-handoff",
+                output_dir=tmp_path / "handoff-runs",
+                batch_progress_path=batch_path,
+                expected_batch_progress_sha256=_sha256(batch_path),
+                collection_freeze_manifest_path=freeze_path,
+                expected_collection_freeze_manifest_sha256=_sha256(freeze_path),
+                training_corpus_root=tmp_path,
+            )
+        )
+
+
 def test_future_decision_input_rejects_historical_market_overlap(
     tmp_path: Path,
 ) -> None:
@@ -989,24 +1263,44 @@ def _collector_batch_progress(
     *,
     corpus_dirs: list[Path],
     pending_indices: set[int] | None = None,
+    blocked_indices: set[int] | None = None,
+    omit_finalization_indices: set[int] | None = None,
 ) -> Path:
     pending_indices = pending_indices or set()
+    blocked_indices = blocked_indices or set()
+    omit_finalization_indices = omit_finalization_indices or set()
+    batch_ordinal = len(list(root.glob("batch-progress-*.json")))
     captures = []
     finalizations = []
     for index, corpus_dir in enumerate(corpus_dirs, start=1):
-        run_id = f"collector-batch-round{index:02d}"
+        run_id = f"collector-batch{batch_ordinal:02d}-round{index:02d}"
+        metadata = json.loads(
+            (corpus_dir / "polymarket_market_metadata.jsonl").read_text().splitlines()[0]
+        )
         captures.append(
             {
                 "run_id": run_id,
                 "round_index": index,
+                "capture_status": (
+                    "blocked_fail_closed" if index in blocked_indices else "pending_resolution"
+                ),
+                "scheduled_round_start_ts": int(metadata["market_start_ts"]),
                 "capture_start_boundary_validation_passed": True,
-                "raw_polymarket_market_count": 1,
-                "provider_raw_orderbook_snapshot_count": 100,
-                "training_sampled_orderbook_row_count": 8,
-                "raw_chainlink_price_row_count": 100,
-                "reject_reason_counts": {},
+                "raw_polymarket_market_count": 0 if index in blocked_indices else 1,
+                "provider_raw_orderbook_snapshot_count": (
+                    0 if index in blocked_indices else 100
+                ),
+                "training_sampled_orderbook_row_count": 0 if index in blocked_indices else 8,
+                "raw_chainlink_price_row_count": 0 if index in blocked_indices else 100,
+                "reject_reason_counts": (
+                    {"read_only_public_http_timeout": 1}
+                    if index in blocked_indices
+                    else {}
+                ),
             }
         )
+        if index in omit_finalization_indices:
+            continue
         pending = index in pending_indices
         finalizations.append(
             {
@@ -1020,7 +1314,7 @@ def _collector_batch_progress(
             }
         )
     exported_count = sum(row["finalization_status"] == "exported" for row in finalizations)
-    batch_path = root / f"batch-progress-{len(list(root.glob('batch-progress-*.json')))}.json"
+    batch_path = root / f"batch-progress-{batch_ordinal}.json"
     batch_path.write_text(
         json.dumps(
             {

@@ -59,6 +59,7 @@ PROHIBITED_FUTURE_OUTCOME_ARTIFACT_NAMES = (
     "polymarket_settlement_events.jsonl",
     "current_clob_condition_settlement_pnl_rows.csv",
 )
+NON_BLOCKING_CAPTURE_WARNING_REASON_CODES = frozenset({"read_only_public_http_timeout"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +180,8 @@ class PnLAlignedFutureCollectionHandoffConfig:
     collection_freeze_manifest_path: Path | str
     expected_collection_freeze_manifest_sha256: str
     training_corpus_root: Path | str
+    additional_batch_progress_paths: tuple[Path | str, ...] = ()
+    additional_expected_batch_progress_sha256: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -192,8 +195,22 @@ class PnLAlignedFutureCollectionHandoffConfig:
         ):
             if not _is_sha256(value):
                 raise ValueError(f"{name} must be a SHA-256 digest")
+        if len(self.additional_batch_progress_paths) != len(
+            self.additional_expected_batch_progress_sha256
+        ):
+            raise ValueError("additional batch progress paths and SHA-256 values must align")
+        for value in self.additional_expected_batch_progress_sha256:
+            if not _is_sha256(value):
+                raise ValueError(
+                    "additional_expected_batch_progress_sha256 must contain SHA-256 digests"
+                )
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         object.__setattr__(self, "batch_progress_path", Path(self.batch_progress_path))
+        object.__setattr__(
+            self,
+            "additional_batch_progress_paths",
+            tuple(Path(path) for path in self.additional_batch_progress_paths),
+        )
         object.__setattr__(
             self,
             "collection_freeze_manifest_path",
@@ -368,15 +385,11 @@ def freeze_pnl_aligned_future_evaluation(
 def build_pnl_aligned_future_collection_handoff(
     config: PnLAlignedFutureCollectionHandoffConfig,
 ) -> dict[str, Any]:
-    """Freeze the exact completed collector batch without opening outcomes."""
+    """Select the earliest complete future markets across hash-pinned batches."""
 
-    batch_path = config.batch_progress_path.resolve()
     freeze_path = config.collection_freeze_manifest_path.resolve()
-    if _sha256_file(batch_path) != config.expected_batch_progress_sha256:
-        raise ValueError("collector batch progress SHA-256 mismatch")
     if _sha256_file(freeze_path) != config.expected_collection_freeze_manifest_sha256:
         raise ValueError("collection freeze manifest SHA-256 mismatch")
-    batch = _load_json(batch_path)
     collection_freeze = _load_json(freeze_path)
     if not (
         collection_freeze.get("future_collection_outcome_blind") is True
@@ -393,87 +406,268 @@ def build_pnl_aligned_future_collection_handoff(
     historical_rows = _load_jsonl(Path(historical_descriptor["path"]))
     prior_market_ids = {str(row["market_id"]) for row in historical_rows}
     expected_round_count = int(collection_freeze["expected_round_count"])
-    captures = [dict(row) for row in batch.get("captures") or []]
-    finalizations = [dict(row) for row in batch.get("finalizations") or []]
-    errors = [dict(row) for row in batch.get("errors") or []]
-    blockers: list[str] = []
-    if batch.get("paper_only") is not True or batch.get("capital_at_risk") is not False:
-        blockers.append("collector_batch_safety_contract_failed")
-    if int(batch.get("capture_count") or 0) != len(captures):
-        blockers.append("collector_reported_capture_count_mismatch")
-    if len(captures) != expected_round_count:
-        blockers.append("collector_capture_count_incomplete")
-    if int(batch.get("error_count") or 0) != len(errors) or errors:
-        blockers.append("collector_batch_errors_present")
-    if int(batch.get("pending_resolution_count") or 0) != 0:
-        blockers.append("collector_pending_resolution_present")
-    capture_run_ids = [str(row.get("run_id") or "") for row in captures]
-    capture_round_indices = [int(row.get("round_index") or 0) for row in captures]
-    if len(capture_run_ids) != len(set(capture_run_ids)) or any(
-        not value for value in capture_run_ids
-    ):
-        blockers.append("collector_duplicate_or_missing_capture_run_id")
-    if sorted(capture_round_indices) != list(range(1, expected_round_count + 1)):
-        blockers.append("collector_round_index_coverage_incomplete")
-    for capture in captures:
-        if capture.get("capture_start_boundary_validation_passed") is not True:
-            blockers.append("collector_capture_start_boundary_failed")
-        if int(capture.get("raw_polymarket_market_count") or 0) != 1:
-            blockers.append("collector_market_row_coverage_failed")
-        if int(capture.get("provider_raw_orderbook_snapshot_count") or 0) <= 0:
-            blockers.append("collector_raw_orderbook_coverage_failed")
-        if int(capture.get("training_sampled_orderbook_row_count") or 0) <= 0:
-            blockers.append("collector_sampled_orderbook_coverage_failed")
-        if int(capture.get("raw_chainlink_price_row_count") or 0) <= 0:
-            blockers.append("collector_chainlink_coverage_failed")
-        if capture.get("reject_reason_counts"):
-            blockers.append("collector_capture_rejections_present")
 
-    exported = [row for row in finalizations if row.get("finalization_status") == "exported"]
-    if int(batch.get("exported_round_count") or 0) != len(exported):
-        blockers.append("collector_reported_export_count_mismatch")
-    if len(finalizations) != expected_round_count or len(exported) != expected_round_count:
-        blockers.append("collector_export_count_incomplete")
-    for finalization in finalizations:
-        if not (
-            finalization.get("finalization_status") == "exported"
-            and finalization.get("pending_resolution") is False
-            and finalization.get("training_eligible") is True
-            and int(finalization.get("raw_resolution_count") or 0) > 0
-            and not finalization.get("reject_reason_counts")
-        ):
-            blockers.append("collector_finalization_not_exported_and_eligible")
-    finalization_run_ids = [str(row.get("run_id") or "") for row in finalizations]
-    if len(finalization_run_ids) != len(set(finalization_run_ids)) or any(
-        not value for value in finalization_run_ids
-    ):
-        blockers.append("collector_duplicate_or_missing_finalization_run_id")
-    if set(capture_run_ids) != set(finalization_run_ids):
-        blockers.append("collector_capture_finalization_identity_mismatch")
-
-    training_root = config.training_corpus_root.expanduser().resolve()
-    exported_paths = [
-        Path(str(row.get("exported_training_corpus_dir") or "")).expanduser().resolve()
-        for row in exported
-        if row.get("exported_training_corpus_dir")
+    batch_inputs = [
+        (config.batch_progress_path.resolve(), config.expected_batch_progress_sha256),
+        *[
+            (path.resolve(), expected_sha256)
+            for path, expected_sha256 in zip(
+                config.additional_batch_progress_paths,
+                config.additional_expected_batch_progress_sha256,
+                strict=True,
+            )
+        ],
     ]
-    if len(exported_paths) != len(exported):
-        blockers.append("collector_exported_corpus_path_missing")
+    if len({path for path, _ in batch_inputs}) != len(batch_inputs):
+        raise ValueError("collector batch progress inputs must be unique")
+    batches: list[dict[str, Any]] = []
+    for batch_ordinal, (batch_path, expected_sha256) in enumerate(batch_inputs):
+        if _sha256_file(batch_path) != expected_sha256:
+            raise ValueError("collector batch progress SHA-256 mismatch")
+        batch = _load_json(batch_path)
+        forbidden_fields = sorted(_find_forbidden_fields(batch))
+        if forbidden_fields:
+            raise ValueError(
+                "collector batch progress contains forbidden outcome fields: "
+                + ", ".join(forbidden_fields)
+            )
+        batches.append(
+            {
+                "batch_ordinal": batch_ordinal,
+                "batch_id": str(batch.get("batch_id") or ""),
+                "path": batch_path,
+                "descriptor": _descriptor(batch_path),
+                "payload": batch,
+            }
+        )
+
+    blockers: list[str] = []
+    training_root = config.training_corpus_root.expanduser().resolve()
+    capture_rows: list[dict[str, Any]] = []
+    finalization_rows: list[dict[str, Any]] = []
+    excluded_rows: list[dict[str, Any]] = []
+    batch_summaries: list[dict[str, Any]] = []
+    all_errors: list[dict[str, Any]] = []
+    batch_ids = [str(row["batch_id"]) for row in batches]
+    if any(not batch_id for batch_id in batch_ids) or len(batch_ids) != len(set(batch_ids)):
+        blockers.append("collector_duplicate_or_missing_batch_id")
+
+    for batch_record in batches:
+        batch = dict(batch_record["payload"])
+        captures = [dict(row) for row in batch.get("captures") or []]
+        finalizations = [dict(row) for row in batch.get("finalizations") or []]
+        errors = [dict(row) for row in batch.get("errors") or []]
+        exported = [
+            row for row in finalizations if row.get("finalization_status") == "exported"
+        ]
+        if batch.get("paper_only") is not True or batch.get("capital_at_risk") is not False:
+            blockers.append("collector_batch_safety_contract_failed")
+        if int(batch.get("capture_count") or 0) != len(captures):
+            blockers.append("collector_reported_capture_count_mismatch")
+        if int(batch.get("error_count") or 0) != len(errors):
+            blockers.append("collector_reported_error_count_mismatch")
+        if int(batch.get("exported_round_count") or 0) != len(exported):
+            blockers.append("collector_reported_export_count_mismatch")
+        capture_run_ids = [str(row.get("run_id") or "") for row in captures]
+        finalization_run_ids = [str(row.get("run_id") or "") for row in finalizations]
+        if any(not value for value in capture_run_ids) or len(capture_run_ids) != len(
+            set(capture_run_ids)
+        ):
+            blockers.append("collector_duplicate_or_missing_capture_run_id")
+        if any(not value for value in finalization_run_ids) or len(finalization_run_ids) != len(
+            set(finalization_run_ids)
+        ):
+            blockers.append("collector_duplicate_or_missing_finalization_run_id")
+        round_indices = [int(row.get("round_index") or 0) for row in captures]
+        if sorted(round_indices) != list(range(1, len(captures) + 1)):
+            blockers.append("collector_round_index_coverage_incomplete")
+        for row in captures:
+            capture_rows.append(
+                {
+                    **row,
+                    "source_batch_id": batch_record["batch_id"],
+                    "source_batch_ordinal": batch_record["batch_ordinal"],
+                    "source_batch_progress_sha256": batch_record["descriptor"]["sha256"],
+                }
+            )
+        for row in finalizations:
+            finalization_rows.append(
+                {
+                    **row,
+                    "source_batch_id": batch_record["batch_id"],
+                    "source_batch_ordinal": batch_record["batch_ordinal"],
+                }
+            )
+        for row in errors:
+            all_errors.append(
+                {
+                    **row,
+                    "source_batch_id": batch_record["batch_id"],
+                    "source_batch_ordinal": batch_record["batch_ordinal"],
+                }
+            )
+        batch_summaries.append(
+            {
+                "batch_id": batch_record["batch_id"],
+                "batch_ordinal": batch_record["batch_ordinal"],
+                "batch_progress": batch_record["descriptor"],
+                "capture_count": len(captures),
+                "exported_round_count": len(exported),
+                "pending_resolution_count": int(batch.get("pending_resolution_count") or 0),
+                "error_count": len(errors),
+            }
+        )
+
+    capture_run_ids = [str(row.get("run_id") or "") for row in capture_rows]
+    if len(capture_run_ids) != len(set(capture_run_ids)):
+        blockers.append("collector_duplicate_capture_run_id_across_batches")
+    finalization_run_ids = [str(row.get("run_id") or "") for row in finalization_rows]
+    if len(finalization_run_ids) != len(set(finalization_run_ids)):
+        blockers.append("collector_duplicate_finalization_run_id_across_batches")
+    finalization_by_run_id = {
+        str(row.get("run_id") or ""): row for row in finalization_rows
+    }
+    exported_paths = [
+        Path(str(row.get("exported_training_corpus_dir"))).expanduser().resolve()
+        for row in finalization_rows
+        if row.get("finalization_status") == "exported"
+        and row.get("exported_training_corpus_dir")
+    ]
     if len(exported_paths) != len(set(exported_paths)):
         blockers.append("collector_duplicate_exported_corpus_path")
-    safe_paths: list[Path] = []
-    for path in sorted(set(exported_paths)):
-        if not path.is_relative_to(training_root):
-            blockers.append("collector_exported_corpus_outside_training_root")
-        elif not path.is_dir():
-            blockers.append("collector_exported_corpus_directory_missing")
-        else:
-            safe_paths.append(path)
 
+    primary_scheduled_ts = [
+        int(row.get("scheduled_round_start_ts") or 0)
+        for row in capture_rows
+        if int(row.get("source_batch_ordinal") or 0) == 0
+    ]
+    primary_max_scheduled_ts = max(primary_scheduled_ts, default=0)
+    quality_candidates: list[dict[str, Any]] = []
+    for capture in capture_rows:
+        reasons: list[str] = []
+        warning_reasons: list[str] = []
+        if capture.get("capture_start_boundary_validation_passed") is not True:
+            reasons.append("collector_capture_start_boundary_failed")
+        if int(capture.get("raw_polymarket_market_count") or 0) != 1:
+            reasons.append("collector_market_row_coverage_failed")
+        if int(capture.get("provider_raw_orderbook_snapshot_count") or 0) <= 0:
+            reasons.append("collector_raw_orderbook_coverage_failed")
+        if int(capture.get("training_sampled_orderbook_row_count") or 0) <= 0:
+            reasons.append("collector_sampled_orderbook_coverage_failed")
+        if int(capture.get("raw_chainlink_price_row_count") or 0) <= 0:
+            reasons.append("collector_chainlink_coverage_failed")
+        for reason, count in sorted(dict(capture.get("reject_reason_counts") or {}).items()):
+            if int(count or 0) > 0:
+                if reason in NON_BLOCKING_CAPTURE_WARNING_REASON_CODES:
+                    warning_reasons.append(f"collector_capture_warning_{reason}")
+                else:
+                    reasons.append(f"collector_capture_reject_{reason}")
+        if capture.get("capture_status") == "blocked_fail_closed":
+            if reasons or not warning_reasons:
+                reasons.append("collector_capture_status_blocked_fail_closed")
+            else:
+                warning_reasons.append(
+                    "collector_capture_status_blocked_with_complete_decision_inputs"
+                )
+        scheduled_ts = int(capture.get("scheduled_round_start_ts") or 0)
+        if scheduled_ts <= 0:
+            reasons.append("collector_capture_chronology_missing")
+        if (
+            int(capture.get("source_batch_ordinal") or 0) > 0
+            and scheduled_ts <= primary_max_scheduled_ts
+        ):
+            reasons.append("replacement_capture_not_strictly_later_than_original_batch")
+            blockers.append("replacement_capture_not_strictly_later_than_original_batch")
+        audit_row = {
+            "source_batch_id": capture.get("source_batch_id"),
+            "source_batch_ordinal": capture.get("source_batch_ordinal"),
+            "run_id": str(capture.get("run_id") or ""),
+            "round_index": int(capture.get("round_index") or 0),
+            "scheduled_round_start_ts": scheduled_ts,
+            "capture_quality_eligible": not reasons,
+            "reason_codes": sorted(set(reasons)),
+            "warning_reason_codes": sorted(set(warning_reasons)),
+        }
+        if reasons:
+            excluded_rows.append(audit_row)
+        else:
+            quality_candidates.append({**capture, "selection_audit": audit_row})
+
+    quality_candidates.sort(
+        key=lambda row: (
+            int(row.get("scheduled_round_start_ts") or 0),
+            str(row.get("run_id") or ""),
+            str(row.get("source_batch_progress_sha256") or ""),
+        )
+    )
     source_corpora: list[dict[str, Any]] = []
     source_market_ids: list[str] = []
     corpus_audits: list[dict[str, Any]] = []
-    for corpus_dir in safe_paths:
+    selected_rows: list[dict[str, Any]] = []
+    selected_paths: set[Path] = set()
+    selection_sequence_blocked = False
+    for candidate in quality_candidates:
+        if len(source_corpora) >= expected_round_count:
+            excluded_rows.append(
+                {
+                    **candidate["selection_audit"],
+                    "reason_codes": ["selection_target_already_met"],
+                }
+            )
+            continue
+        run_id = str(candidate.get("run_id") or "")
+        finalization = finalization_by_run_id.get(run_id)
+        finalization_reasons: list[str] = []
+        if finalization is None:
+            finalization_reasons.append("collector_candidate_finalization_missing")
+        else:
+            if finalization.get("finalization_status") != "exported":
+                finalization_reasons.append("collector_candidate_finalization_not_exported")
+            if finalization.get("pending_resolution") is not False:
+                finalization_reasons.append("collector_candidate_resolution_pending")
+            if finalization.get("training_eligible") is not True:
+                finalization_reasons.append("collector_candidate_training_ineligible")
+            if int(finalization.get("raw_resolution_count") or 0) <= 0:
+                finalization_reasons.append("collector_candidate_resolution_unavailable")
+            if finalization.get("reject_reason_counts"):
+                finalization_reasons.append("collector_candidate_finalization_rejected")
+            if not finalization.get("exported_training_corpus_dir"):
+                finalization_reasons.append("collector_exported_corpus_path_missing")
+        if finalization_reasons:
+            excluded_rows.append(
+                {
+                    **candidate["selection_audit"],
+                    "reason_codes": sorted(set(finalization_reasons)),
+                }
+            )
+            blockers.extend(
+                (
+                    "collector_pending_resolution_present",
+                    "collector_export_count_incomplete",
+                    "collector_selection_sequence_blocked_by_unfinalized_candidate",
+                )
+            )
+            selection_sequence_blocked = True
+            break
+        corpus_dir = Path(
+            str(finalization["exported_training_corpus_dir"])
+        ).expanduser().resolve()
+        path_reasons: list[str] = []
+        if not corpus_dir.is_relative_to(training_root):
+            path_reasons.append("collector_exported_corpus_outside_training_root")
+        elif not corpus_dir.is_dir():
+            path_reasons.append("collector_exported_corpus_directory_missing")
+        if corpus_dir in selected_paths:
+            path_reasons.append("collector_duplicate_exported_corpus_path")
+        if path_reasons:
+            excluded_rows.append(
+                {
+                    **candidate["selection_audit"],
+                    "reason_codes": sorted(set(path_reasons)),
+                }
+            )
+            blockers.extend(path_reasons)
+            continue
         audit, public_rows, rejected = _load_outcome_blind_phase2_feature_corpus(
             corpus_dir=corpus_dir,
             prior_market_ids=prior_market_ids,
@@ -481,13 +675,45 @@ def build_pnl_aligned_future_collection_handoff(
         )
         corpus_audits.append(audit)
         market_ids = sorted({str(row["market_id"]) for row in public_rows})
+        corpus_reasons: list[str] = []
         if rejected:
-            blockers.append("collector_exported_corpus_feature_rows_rejected")
+            corpus_reasons.append("collector_exported_corpus_feature_rows_rejected")
         if len(market_ids) != 1 or not public_rows:
-            blockers.append("collector_exported_corpus_market_coverage_failed")
+            corpus_reasons.append("collector_exported_corpus_market_coverage_failed")
+        if corpus_reasons:
+            excluded_rows.append(
+                {
+                    **candidate["selection_audit"],
+                    "reason_codes": sorted(set(corpus_reasons)),
+                    "outcome_blind_feature_rejection_reason_codes": sorted(
+                        {str(row.get("reason_code") or "") for row in rejected}
+                    ),
+                }
+            )
+            continue
+        market_id = market_ids[0]
+        if market_id in source_market_ids:
+            excluded_rows.append(
+                {
+                    **candidate["selection_audit"],
+                    "market_id": market_id,
+                    "reason_codes": ["collector_duplicate_market_identity"],
+                }
+            )
+            blockers.append("collection_handoff_duplicate_market_identity")
+            continue
+        selected_paths.add(corpus_dir)
         source_market_ids.extend(market_ids)
         source_corpora.append(
             {
+                "selection_rank": len(source_corpora) + 1,
+                "source_batch_id": candidate.get("source_batch_id"),
+                "source_batch_ordinal": candidate.get("source_batch_ordinal"),
+                "capture_run_id": run_id,
+                "capture_round_index": int(candidate.get("round_index") or 0),
+                "scheduled_round_start_ts": int(
+                    candidate.get("scheduled_round_start_ts") or 0
+                ),
                 "source_corpus_dir": str(corpus_dir),
                 "market_ids": market_ids,
                 "outcome_blind_decision_source_row_count": len(public_rows),
@@ -503,21 +729,93 @@ def build_pnl_aligned_future_collection_handoff(
                 ),
             }
         )
+        selected_rows.append(
+            {
+                **candidate["selection_audit"],
+                "market_id": market_id,
+                "selection_rank": len(source_corpora),
+                "source_corpus_dir": str(corpus_dir),
+                "source_corpus_manifest_sha256": source_corpora[-1]["corpus_manifest"][
+                    "sha256"
+                ],
+                "reason_codes": [],
+                "selected": True,
+            }
+        )
     if len(source_corpora) != expected_round_count:
         blockers.append("collection_handoff_corpus_count_mismatch")
-    if len(source_market_ids) != len(set(source_market_ids)):
-        blockers.append("collection_handoff_duplicate_market_identity")
     if len(set(source_market_ids)) != expected_round_count:
         blockers.append("collection_handoff_unique_market_count_mismatch")
+    if len(source_corpora) < expected_round_count and not selection_sequence_blocked:
+        blockers.append("collector_export_count_incomplete")
     blockers = sorted(set(blockers))
     status = "OUTCOME_BLIND_COLLECTION_HANDOFF_READY" if not blockers else "BLOCKED_FAIL_CLOSED"
 
     output_dir = config.output_dir / config.run_id
     output_dir.mkdir(parents=True, exist_ok=False)
     access_audit_path = output_dir / "pnl_aligned_future_collection_handoff_access_audit.json"
+    selection_audit_path = output_dir / "pnl_aligned_future_collection_handoff_selection_audit.json"
     report_path = output_dir / "pnl_aligned_future_collection_handoff_report.json"
+    exclusion_reason_distribution = dict(
+        sorted(
+            Counter(
+                reason
+                for row in excluded_rows
+                for reason in row.get("reason_codes") or []
+            ).items()
+        )
+    )
+    selected_warning_reason_distribution = dict(
+        sorted(
+            Counter(
+                reason
+                for row in selected_rows
+                for reason in row.get("warning_reason_codes") or []
+            ).items()
+        )
+    )
+    excluded_warning_reason_distribution = dict(
+        sorted(
+            Counter(
+                reason
+                for row in excluded_rows
+                for reason in row.get("warning_reason_codes") or []
+            ).items()
+        )
+    )
+    selection_audit = {
+        "schema_version": f"{COLLECTION_HANDOFF_SCHEMA_VERSION}-selection-audit-v2",
+        "selection_policy": "earliest_capture_quality_valid_unique_markets_chronological_v1",
+        "selection_uses_outcome_value": False,
+        "selection_uses_realized_pnl": False,
+        "selection_uses_oracle_action": False,
+        "selection_uses_resolution_availability_only": True,
+        "selection_uses_resolved_outcome_value": False,
+        "non_blocking_capture_warning_reason_codes": sorted(
+            NON_BLOCKING_CAPTURE_WARNING_REASON_CODES
+        ),
+        "expected_selected_market_count": expected_round_count,
+        "attempted_capture_count": len(capture_rows),
+        "capture_quality_eligible_count": len(quality_candidates),
+        "selected_market_count": len(selected_rows),
+        "excluded_capture_count": len(excluded_rows),
+        "selected_rows": selected_rows,
+        "excluded_rows": excluded_rows,
+        "exclusion_reason_distribution": exclusion_reason_distribution,
+        "selected_non_blocking_warning_reason_distribution": (
+            selected_warning_reason_distribution
+        ),
+        "excluded_non_blocking_warning_reason_distribution": (
+            excluded_warning_reason_distribution
+        ),
+        "replacement_strictly_later_boundary_ts": primary_max_scheduled_ts,
+        "paper_only": True,
+        "capital_at_risk": False,
+    }
+    _write_json(selection_audit_path, selection_audit)
     access_audit = {
         "schema_version": f"{COLLECTION_HANDOFF_SCHEMA_VERSION}-access-audit",
+        "batch_progress_inputs_opened": [row["descriptor"] for row in batches],
         "permitted_artifact_names_opened": sorted(
             {name for audit in corpus_audits for name in audit["permitted_artifact_names_opened"]}
         ),
@@ -541,14 +839,39 @@ def build_pnl_aligned_future_collection_handoff(
         "status": status,
         "blocking_reason_codes": blockers,
         "expected_round_count": expected_round_count,
-        "capture_count": len(captures),
-        "exported_round_count": len(exported),
+        "batch_count": len(batches),
+        "batch_summaries": batch_summaries,
+        "capture_count": len(capture_rows),
+        "capture_quality_eligible_count": len(quality_candidates),
+        "excluded_capture_count": len(excluded_rows),
+        "excluded_capture_reason_distribution": exclusion_reason_distribution,
+        "selected_non_blocking_capture_warning_reason_distribution": (
+            selected_warning_reason_distribution
+        ),
+        "excluded_non_blocking_capture_warning_reason_distribution": (
+            excluded_warning_reason_distribution
+        ),
+        "exported_round_count": sum(
+            1 for row in finalization_rows if row.get("finalization_status") == "exported"
+        ),
         "source_corpus_count": len(source_corpora),
         "source_unique_market_count": len(set(source_market_ids)),
-        "collector_error_count": len(errors),
-        "collector_pending_resolution_count": int(batch.get("pending_resolution_count") or 0),
+        "collector_error_count": len(all_errors),
+        "collector_pending_resolution_count": sum(
+            int(row["pending_resolution_count"]) for row in batch_summaries
+        ),
         "capture_start_boundary_validation_passed": all(
-            row.get("capture_start_boundary_validation_passed") is True for row in captures
+            row.get("capture_start_boundary_validation_passed") is True
+            for row in capture_rows
+        ),
+        "selected_capture_start_boundary_validation_passed": all(
+            row.get("capture_start_boundary_validation_passed") is True
+            for row in quality_candidates
+        ),
+        "replacement_strictly_later_validation_passed": not any(
+            "replacement_capture_not_strictly_later_than_original_batch"
+            in (row.get("reason_codes") or [])
+            for row in excluded_rows
         ),
         "outcome_blind_input_access_passed": True,
         "future_outcome_targets_loaded": False,
@@ -568,7 +891,9 @@ def build_pnl_aligned_future_collection_handoff(
         "status": status,
         "collection_handoff_ready": not blockers,
         "blocking_reason_codes": blockers,
-        "batch_progress": _descriptor(batch_path),
+        "batch_progress": batches[0]["descriptor"],
+        "batch_progress_inputs": [row["descriptor"] for row in batches],
+        "batch_summaries": batch_summaries,
         "collection_freeze_manifest": _descriptor(freeze_path),
         "training_corpus_root": str(training_root),
         "expected_round_count": expected_round_count,
@@ -576,6 +901,7 @@ def build_pnl_aligned_future_collection_handoff(
         "source_corpora": source_corpora,
         "source_market_ids_sha256": canonical_json_sha256(sorted(source_market_ids)),
         "collection_handoff_access_audit": _descriptor(access_audit_path),
+        "collection_handoff_selection_audit": _descriptor(selection_audit_path),
         "collection_handoff_report": _descriptor(report_path),
         "future_outcome_targets_loaded": False,
         "outcome_reconciliation_started": False,
@@ -592,6 +918,7 @@ def build_pnl_aligned_future_collection_handoff(
     return {
         "output_dir": output_dir,
         "access_audit_path": access_audit_path,
+        "selection_audit_path": selection_audit_path,
         "report_path": report_path,
         "manifest_path": manifest_path,
         "manifest_sha256": _sha256_file(manifest_path),
@@ -629,12 +956,43 @@ def load_pnl_aligned_future_collection_handoff_source_dirs(
         and access.get("prohibited_future_outcome_artifact_read_count") == 0
     ):
         raise ValueError("collection handoff outcome-blind access audit failed")
+    batch_descriptors = list(handoff.get("batch_progress_inputs") or [])
+    if not batch_descriptors:
+        batch_descriptors = [handoff.get("batch_progress")]
+    for index, descriptor in enumerate(batch_descriptors):
+        _verified_descriptor(descriptor, name=f"collection_handoff_batch_progress_{index}")
+    selection_descriptor = _verified_descriptor(
+        handoff.get("collection_handoff_selection_audit"),
+        name="collection_handoff_selection_audit",
+    )
+    selection = _load_json(Path(selection_descriptor["path"]))
+    if not (
+        selection.get("selection_uses_outcome_value") is False
+        and selection.get("selection_uses_realized_pnl") is False
+        and selection.get("selection_uses_oracle_action") is False
+        and selection.get("selection_uses_resolution_availability_only") is True
+        and selection.get("selection_uses_resolved_outcome_value") is False
+        and selection.get("non_blocking_capture_warning_reason_codes")
+        == sorted(NON_BLOCKING_CAPTURE_WARNING_REASON_CODES)
+        and int(selection.get("selected_market_count") or 0)
+        == int(handoff.get("expected_round_count") or 0)
+    ):
+        raise ValueError("collection handoff selection audit failed")
     source_corpora = [dict(row) for row in handoff.get("source_corpora") or []]
     source_dirs = tuple(Path(str(row["source_corpus_dir"])).resolve() for row in source_corpora)
     if [str(path) for path in source_dirs] != handoff.get("source_corpus_dirs"):
         raise ValueError("collection handoff source corpus directory set mismatch")
     if len(source_dirs) != int(handoff.get("expected_round_count") or 0):
         raise ValueError("collection handoff source corpus count mismatch")
+    selected_rows = [dict(row) for row in selection.get("selected_rows") or []]
+    if [str(row.get("source_corpus_dir") or "") for row in selected_rows] != [
+        str(path) for path in source_dirs
+    ]:
+        raise ValueError("collection handoff selection corpus identity mismatch")
+    if [str(row.get("market_id") or "") for row in selected_rows] != [
+        str((row.get("market_ids") or [""])[0]) for row in source_corpora
+    ]:
+        raise ValueError("collection handoff selection market identity mismatch")
     for row, corpus_dir in zip(source_corpora, source_dirs, strict=True):
         if not corpus_dir.is_dir():
             raise ValueError("collection handoff source corpus directory is missing")
