@@ -29,6 +29,9 @@ from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
 )
 
 SCHEMA_PREFIX = "bigan-v8-hts-residual-development-corpus"
+PHASE2_MARKET_PROBABILITY_MAPPING_RULE_ID = (
+    "phase2_complementary_book_midpoint_ratio_v1"
+)
 REQUIRED_ACTIONS = {
     "BUY_UP_SELL_BEFORE_CLOSE",
     "BUY_DOWN_SELL_BEFORE_CLOSE",
@@ -275,6 +278,20 @@ def build_hts_residual_development_corpus(
         "feature_causality_violation_count": sum(
             int(row["max_input_ts"]) > int(row["decision_ts"])
             for row in residual_rows
+        ),
+        "market_probability_mapping_rule_id": (
+            PHASE2_MARKET_PROBABILITY_MAPPING_RULE_ID
+        ),
+        "market_probability_mapping_provenance_valid_count": sum(
+            (row.get("market_probability_mapping_provenance") or {}).get(
+                "provenance_valid"
+            )
+            is True
+            for row in public_rows
+        ),
+        "market_probability_mapping_violation_count": sum(
+            row["reason_code"] == "market_probability_mapping_contract_violation"
+            for row in rejected
         ),
         "source_chainlink_feature_coverage": _source_chainlink_feature_coverage(
             public_rows
@@ -745,6 +762,33 @@ def _load_verified_phase2_corpus(
             market=metadata,
             chainlink_rows=chainlink_rows,
         )
+        mapping_provenance = dict(
+            public_row.get("market_probability_mapping_provenance") or {}
+        )
+        expected_mapping_rule = str(
+            (protocol.get("market_probability_mapping_contract") or {}).get(
+                "rule_id"
+            )
+            or PHASE2_MARKET_PROBABILITY_MAPPING_RULE_ID
+        )
+        if (
+            public_row.get("market_probability_mapping_rule_id")
+            != expected_mapping_rule
+            or mapping_provenance.get("provenance_valid") is not True
+        ):
+            rejected.append(
+                _rejection(
+                    market_id,
+                    decision_ts,
+                    "market_probability_mapping_contract_violation",
+                    expected_rule_id=expected_mapping_rule,
+                    observed_rule_id=public_row.get(
+                        "market_probability_mapping_rule_id"
+                    ),
+                    mapping_provenance=mapping_provenance,
+                )
+            )
+            continue
         required_chainlink_fields = (
             "chainlink_price_at_decision",
             "chainlink_reference_price_at_market_start",
@@ -866,6 +910,37 @@ def _phase2_feature_to_public_row(
         chainlink_rtds_prices=chainlink_rows,
         decision_ts=decision_ts,
     )
+    up_mid = float(up["mid_price"])
+    down_mid = float(down["mid_price"])
+    midpoint_sum = up_mid + down_mid
+    expected_p_up = up_mid / midpoint_sum if midpoint_sum > 0.0 else 0.5
+    mapping_max_input_ts = max(
+        int(up["available_at_ts"]), int(down["available_at_ts"])
+    )
+    observed_p_up = float(public_row["p_up"])
+    public_row["market_probability_mapping_rule_id"] = (
+        PHASE2_MARKET_PROBABILITY_MAPPING_RULE_ID
+    )
+    public_row["market_probability_mapping_provenance"] = {
+        "rule_id": PHASE2_MARKET_PROBABILITY_MAPPING_RULE_ID,
+        "source_fields_used": [
+            "polymarket_feature_rows.features.up_bid",
+            "polymarket_feature_rows.features.up_ask",
+            "polymarket_feature_rows.features.down_bid",
+            "polymarket_feature_rows.features.down_ask",
+        ],
+        "formula": "up_midpoint / (up_midpoint + down_midpoint)",
+        "up_midpoint": up_mid,
+        "down_midpoint": down_mid,
+        "decision_ts": decision_ts,
+        "max_input_ts": mapping_max_input_ts,
+        "provenance_valid": bool(
+            midpoint_sum > 0.0
+            and mapping_max_input_ts <= decision_ts
+            and abs(observed_p_up - expected_p_up) <= 1e-12
+        ),
+        "uses_settlement_or_future_fields": False,
+    }
     public_row["phase2_features"] = features
     public_row["phase2_feature_max_input_ts"] = int(
         feature_row.get("max_input_ts") or 0
@@ -881,10 +956,13 @@ def _phase2_book(
     features: dict[str, Any], side: str, decision_ts: int
 ) -> dict[str, Any]:
     staleness = max(int(float(features.get(f"{side}_book_staleness_ms") or 0)), 0)
+    bid = float(features[f"{side}_bid"])
+    ask = float(features[f"{side}_ask"])
     return {
         "outcome": side.upper(),
-        "bid_price": float(features[f"{side}_bid"]),
-        "ask_price": float(features[f"{side}_ask"]),
+        "bid_price": bid,
+        "ask_price": ask,
+        "mid_price": (bid + ask) / 2.0,
         "bid_size": float(features.get(f"{side}_bid_size") or 0.0),
         "ask_size": float(features.get(f"{side}_ask_size") or 0.0),
         "liquidity_depth": float(features.get(f"{side}_liquidity_depth") or 0.0),
@@ -993,6 +1071,9 @@ def _residual_row(
             ],
             "source_feature_rows_sha256": target["source_feature_rows_sha256"],
             "source_label_rows_sha256": target["source_label_rows_sha256"],
+            "market_probability_mapping_rule_id": public_row[
+                "market_probability_mapping_rule_id"
+            ],
             "frozen_development_protocol_sha256": protocol_hash,
             "frozen_o_scored_action_row_sha256": selected[
                 "canonical_scored_action_row_hash"
@@ -1105,9 +1186,11 @@ def _source_chainlink_feature_coverage(
 
 
 def _validate_protocol(protocol: dict[str, Any]) -> None:
-    if protocol.get("schema_version") != (
-        "bigan-v8-hts-residual-development-protocol-v2"
-    ):
+    schema_version = protocol.get("schema_version")
+    if schema_version not in {
+        "bigan-v8-hts-residual-development-protocol-v2",
+        "bigan-v8-hts-residual-development-protocol-v3",
+    }:
         raise ValueError("unsupported residual development protocol")
     if protocol.get("protocol_frozen_before_new_development_collection") is not True:
         raise ValueError("development protocol is not frozen")
@@ -1115,6 +1198,12 @@ def _validate_protocol(protocol: dict[str, Any]) -> None:
         raise ValueError("development protocol permits validation-label tuning")
     if protocol.get("future_confirmatory_validation_start_allowed") is not False:
         raise ValueError("development protocol unexpectedly unlocks confirmatory data")
+    if schema_version.endswith("-v3"):
+        mapping = dict(protocol.get("market_probability_mapping_contract") or {})
+        if mapping.get("rule_id") != PHASE2_MARKET_PROBABILITY_MAPPING_RULE_ID:
+            raise ValueError("development protocol market-probability rule mismatch")
+        if mapping.get("uses_future_or_settlement_fields") is not False:
+            raise ValueError("market-probability mapping permits future fields")
 
 
 def _rejection(

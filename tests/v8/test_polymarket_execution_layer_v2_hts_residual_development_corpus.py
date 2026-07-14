@@ -33,6 +33,11 @@ def test_builds_causal_post_protocol_development_rows_fail_closed(
     tmp_path: Path,
 ) -> None:
     protocol = _protocol(collection_not_before_ts=1_000_000, minimum_markets=1)
+    protocol["schema_version"] = "bigan-v8-hts-residual-development-protocol-v3"
+    protocol["market_probability_mapping_contract"] = {
+        "rule_id": "phase2_complementary_book_midpoint_ratio_v1",
+        "uses_future_or_settlement_fields": False,
+    }
     protocol_path = tmp_path / "protocol.json"
     _write_json(protocol_path, protocol)
     prior_path = tmp_path / "prior.jsonl"
@@ -75,6 +80,39 @@ def test_builds_causal_post_protocol_development_rows_fail_closed(
     assert rows[0]["target_provenance"]["outcome_used_as_decision_input"] is False
     assert rows[0]["chainlink_feature_provenance"]["provenance_valid"] is True
     assert rows[0]["decision_time_features"]["action_score_margin"] >= 0.0
+    assert rows[0]["decision_time_features"]["selected_side_probability"] == 0.65
+    assert rows[0]["source_lineage"]["market_probability_mapping_rule_id"] == (
+        "phase2_complementary_book_midpoint_ratio_v1"
+    )
+    assert report["market_probability_mapping_provenance_valid_count"] == 1
+    assert report["market_probability_mapping_violation_count"] == 0
+
+
+def test_v3_protocol_rejects_market_probability_mapping_drift(tmp_path: Path) -> None:
+    protocol = _protocol(collection_not_before_ts=1_000_000, minimum_markets=1)
+    protocol["schema_version"] = "bigan-v8-hts-residual-development-protocol-v3"
+    protocol["market_probability_mapping_contract"] = {
+        "rule_id": "unexpected_mapping",
+        "uses_future_or_settlement_fields": False,
+    }
+    protocol_path = tmp_path / "invalid-v3-protocol.json"
+    _write_json(protocol_path, protocol)
+    prior_path = tmp_path / "prior.jsonl"
+    _write_jsonl(prior_path, [])
+    corpus_dir = _phase2_corpus(tmp_path, market_id="new-market")
+
+    with pytest.raises(ValueError, match="market-probability rule mismatch"):
+        build_hts_residual_development_corpus(
+            HTSResidualDevelopmentCorpusConfig(
+                run_id="invalid-v3-build",
+                output_dir=tmp_path / "runs",
+                protocol_path=protocol_path,
+                expected_protocol_sha256=_sha256(protocol_path),
+                source_corpus_dirs=(corpus_dir,),
+                prior_development_rows_path=prior_path,
+                paper_candidate_unlock_dir=UNLOCK_DIR,
+            )
+        )
 
 
 def test_excludes_protocol_named_smoke_corpus(tmp_path: Path) -> None:

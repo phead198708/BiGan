@@ -13,7 +13,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_hts_residual_development_co
 
 DEFAULT_PROTOCOL = Path(
     "examples/v8/polymarket_configs/"
-    "execution_layer_v2_hts_residual_development_protocol_v2.json"
+    "execution_layer_v2_hts_residual_development_protocol_v3.json"
 )
 
 
