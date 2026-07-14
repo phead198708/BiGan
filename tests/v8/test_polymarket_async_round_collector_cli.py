@@ -8,6 +8,7 @@ from pathlib import Path
 from examples.v8.run_polymarket_async_round_collector import (
     _round_start_alignment_sleep_seconds,
     _scheduled_round_start_epoch_seconds,
+    _wait_until_scheduled_round_start,
     main,
 )
 
@@ -61,6 +62,21 @@ def test_round_capture_schedule_targets_next_boundary_before_prior_capture_finis
     )
 
     assert second_start == 900.0
+
+
+def test_capture_worker_waits_again_when_spawned_before_scheduled_boundary() -> None:
+    observed_times = iter((899.952, 900.0))
+    sleep_calls: list[float] = []
+
+    started_at = _wait_until_scheduled_round_start(
+        900.0,
+        now_fn=lambda: next(observed_times),
+        sleep_fn=sleep_calls.append,
+    )
+
+    assert started_at == 900.0
+    assert len(sleep_calls) == 1
+    assert abs(sleep_calls[0] - 0.048) < 1e-9
 
 
 def test_finalize_only_cli_accepts_shared_collector_args(tmp_path: Path) -> None:

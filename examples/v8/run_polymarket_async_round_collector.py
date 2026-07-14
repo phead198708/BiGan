@@ -7,6 +7,7 @@ import json
 import sys
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -105,7 +106,9 @@ def run_polymarket_async_round_collector_cli(
         run_id: str,
         scheduled_round_start_epoch_seconds: float,
     ) -> None:
-        capture_started_epoch_seconds = time.time()
+        capture_started_epoch_seconds = _wait_until_scheduled_round_start(
+            scheduled_round_start_epoch_seconds
+        )
         try:
             provider = PolymarketPublicHTTPRealCorpusProvider(
                 max_markets=1,
@@ -155,6 +158,10 @@ def run_polymarket_async_round_collector_cli(
                     "capture_start_lag_seconds": (
                         capture_started_epoch_seconds
                         - scheduled_round_start_epoch_seconds
+                    ),
+                    "capture_start_boundary_validation_passed": (
+                        capture_started_epoch_seconds
+                        >= scheduled_round_start_epoch_seconds
                     ),
                     "capture_status": capture.report["capture_status"],
                     "pending_resolution": capture.report["pending_resolution"],
@@ -469,6 +476,22 @@ def _sleep_until_round_start_window(
     if sleep_seconds > 0:
         time.sleep(sleep_seconds)
     return scheduled_round_start_epoch_seconds
+
+
+def _wait_until_scheduled_round_start(
+    scheduled_round_start_epoch_seconds: float,
+    *,
+    now_fn: Callable[[], float] = time.time,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> float:
+    """Prevent an early-woken worker from querying before its market boundary."""
+
+    while True:
+        now_epoch_seconds = now_fn()
+        remaining_seconds = scheduled_round_start_epoch_seconds - now_epoch_seconds
+        if remaining_seconds <= 0:
+            return now_epoch_seconds
+        sleep_fn(remaining_seconds)
 
 
 def _scheduled_round_start_epoch_seconds(
