@@ -128,6 +128,75 @@ def test_v3_protocol_rejects_market_probability_mapping_drift(tmp_path: Path) ->
         )
 
 
+def test_development_build_skips_chainlink_ineligible_source_corpus(
+    tmp_path: Path,
+) -> None:
+    protocol = _protocol(collection_not_before_ts=1_000_000, minimum_markets=1)
+    protocol["schema_version"] = "bigan-v8-hts-residual-development-protocol-v3"
+    protocol["market_probability_mapping_contract"] = {
+        "rule_id": "phase2_complementary_book_midpoint_ratio_v1",
+        "uses_future_or_settlement_fields": False,
+    }
+    protocol_path = tmp_path / "chainlink-skip-protocol.json"
+    _write_json(protocol_path, protocol)
+    prior_path = tmp_path / "chainlink-skip-prior.jsonl"
+    _write_jsonl(prior_path, [])
+    valid_root = tmp_path / "valid-source"
+    invalid_root = tmp_path / "invalid-source"
+    valid_root.mkdir()
+    invalid_root.mkdir()
+    valid_corpus = _phase2_corpus(
+        valid_root,
+        market_id="valid-market",
+        corpus_id="valid-corpus",
+    )
+    invalid_corpus = _phase2_corpus(
+        invalid_root,
+        market_id="invalid-market",
+        corpus_id="invalid-corpus",
+        market_start_ts=2_300_000,
+    )
+    (invalid_corpus / "polymarket_chainlink_prices.jsonl").unlink()
+    (
+        invalid_corpus
+        / "polymarket_chainlink_decision_time_evidence_manifest.json"
+    ).unlink()
+
+    result = build_hts_residual_development_corpus(
+        HTSResidualDevelopmentCorpusConfig(
+            run_id="chainlink-ineligible-skip",
+            output_dir=tmp_path / "runs",
+            protocol_path=protocol_path,
+            expected_protocol_sha256=_sha256(protocol_path),
+            source_corpus_dirs=(valid_corpus, invalid_corpus),
+            prior_development_rows_path=prior_path,
+            paper_candidate_unlock_dir=UNLOCK_DIR,
+        )
+    )
+
+    report = result["report"]
+    assert report["source_corpus_count"] == 2
+    assert report["source_corpus_residual_eligible_count"] == 1
+    assert report["source_corpus_residual_ineligible_count"] == 1
+    assert report["source_corpus_ineligible_reason_distribution"] == {
+        "chainlink_evidence_file_missing": 1,
+        "chainlink_evidence_manifest_missing": 1,
+    }
+    assert report["residual_market_count"] == 1
+    assert report["rejected_reason_distribution"][
+        "source_corpus_chainlink_evidence_unavailable"
+    ] == 1
+    invalid_audit = next(
+        audit
+        for audit in report["source_corpus_audits"]
+        if audit["corpus_id"] == "invalid-corpus"
+    )
+    assert invalid_audit["source_corpus_residual_eligible"] is False
+    assert invalid_audit["chainlink_hash_verified"] is False
+    assert report["candidate_fit_attempted"] is False
+    assert report["confirmatory_validation_started"] is False
+
+
 def test_excludes_protocol_named_smoke_corpus(tmp_path: Path) -> None:
     protocol = _protocol(collection_not_before_ts=1_000_000, minimum_markets=1)
     protocol["excluded_smoke_corpus_ids"] = ["excluded-smoke"]

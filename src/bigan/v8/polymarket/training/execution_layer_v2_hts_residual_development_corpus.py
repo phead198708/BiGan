@@ -150,6 +150,33 @@ def build_hts_residual_development_corpus(
     corpus_audits: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for corpus_dir in sorted(Path(path) for path in config.source_corpus_dirs):
+        preflight = _residual_source_chainlink_preflight(corpus_dir)
+        if preflight["source_corpus_residual_eligible"] is not True:
+            corpus_audits.append(preflight)
+            feature_path = corpus_dir / "polymarket_feature_rows.jsonl"
+            feature_rows = _load_jsonl(feature_path) if feature_path.exists() else []
+            if feature_rows:
+                rejected.extend(
+                    _rejection(
+                        str(row.get("market_id") or ""),
+                        int(row.get("decision_ts") or 0),
+                        "source_corpus_chainlink_evidence_unavailable",
+                        source_corpus_dir=str(corpus_dir.resolve()),
+                        source_reason_codes=preflight["reason_codes"],
+                    )
+                    for row in feature_rows
+                )
+            else:
+                rejected.append(
+                    _rejection(
+                        "",
+                        0,
+                        "source_corpus_chainlink_evidence_unavailable",
+                        source_corpus_dir=str(corpus_dir.resolve()),
+                        source_reason_codes=preflight["reason_codes"],
+                    )
+                )
+            continue
         audit, corpus_public_rows, corpus_targets, corpus_rejections = (
             _load_verified_phase2_corpus(
                 corpus_dir=corpus_dir,
@@ -253,6 +280,24 @@ def build_hts_residual_development_corpus(
         "protocol_sha256": protocol_hash,
         "protocol_frozen_before_included_rows": True,
         "source_corpus_count": len(config.source_corpus_dirs),
+        "source_corpus_residual_eligible_count": sum(
+            audit.get("source_corpus_residual_eligible") is True
+            for audit in corpus_audits
+        ),
+        "source_corpus_residual_ineligible_count": sum(
+            audit.get("source_corpus_residual_eligible") is not True
+            for audit in corpus_audits
+        ),
+        "source_corpus_ineligible_reason_distribution": dict(
+            sorted(
+                Counter(
+                    reason
+                    for audit in corpus_audits
+                    if audit.get("source_corpus_residual_eligible") is not True
+                    for reason in audit.get("reason_codes", [])
+                ).items()
+            )
+        ),
         "source_corpus_audits": corpus_audits,
         "source_decision_row_count": len(public_rows),
         "selected_action_distribution": dict(sorted(selected_action_counts.items())),
@@ -858,6 +903,8 @@ def _load_verified_phase2_corpus(
     audit = {
         "corpus_id": corpus_id,
         "corpus_dir": str(corpus_dir.resolve()),
+        "source_corpus_residual_eligible": True,
+        "reason_codes": [],
         "phase2_corpus_manifest_sha256": _sha256_file(
             corpus_dir / "polymarket_corpus_manifest.json"
         ),
@@ -873,6 +920,37 @@ def _load_verified_phase2_corpus(
         "capital_at_risk": False,
     }
     return audit, public_rows, targets, rejected
+
+
+def _residual_source_chainlink_preflight(corpus_dir: Path) -> dict[str, Any]:
+    chainlink_path = corpus_dir / "polymarket_chainlink_prices.jsonl"
+    manifest_path = (
+        corpus_dir / "polymarket_chainlink_decision_time_evidence_manifest.json"
+    )
+    reason_codes: list[str] = []
+    if not chainlink_path.exists():
+        reason_codes.append("chainlink_evidence_file_missing")
+    elif chainlink_path.stat().st_size == 0:
+        reason_codes.append("chainlink_evidence_file_empty")
+    if not manifest_path.exists():
+        reason_codes.append("chainlink_evidence_manifest_missing")
+    return {
+        "corpus_id": corpus_dir.name,
+        "corpus_dir": str(corpus_dir.resolve()),
+        "source_corpus_residual_eligible": not reason_codes,
+        "reason_codes": reason_codes,
+        "chainlink_evidence_path": str(chainlink_path.resolve()),
+        "chainlink_evidence_file_exists": chainlink_path.exists(),
+        "chainlink_evidence_file_nonempty": (
+            chainlink_path.exists() and chainlink_path.stat().st_size > 0
+        ),
+        "chainlink_evidence_manifest_path": str(manifest_path.resolve()),
+        "chainlink_evidence_manifest_exists": manifest_path.exists(),
+        "phase2_normalized_hashes_verified": False,
+        "chainlink_hash_verified": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+    }
 
 
 def _phase2_feature_to_public_row(
