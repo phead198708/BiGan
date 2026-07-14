@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -14,7 +15,9 @@ from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training.contracts import safety_fields
 from bigan.v8.polymarket.training.execution_layer_v2_hts_residual_development_corpus import (
     HTS_ACTIONS,
+    PHASE2_MARKET_PROBABILITY_MAPPING_RULE_ID,
     _load_verified_phase2_corpus,
+    _phase2_feature_to_public_row,
     _residual_row,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_hts_residual_edge import (
@@ -60,6 +63,8 @@ class HTSResidualCandidateFreezeConfig:
     minimum_confirmatory_market_count: int = 283
     minimum_confirmatory_source_run_count: int = 24
     minimum_input_source_market_count: int = 283
+    minimum_input_hts_market_count: int = 283
+    both_input_selected_sides_required: bool = True
     minimum_relative_brier_improvement: float = 0.03
     minimum_relative_log_loss_improvement: float = 0.03
     bootstrap_samples: int = 10_000
@@ -75,6 +80,8 @@ class HTSResidualCandidateFreezeConfig:
             raise ValueError("minimum_confirmatory_source_run_count must be positive")
         if self.minimum_input_source_market_count <= 0:
             raise ValueError("minimum_input_source_market_count must be positive")
+        if self.minimum_input_hts_market_count <= 0:
+            raise ValueError("minimum_input_hts_market_count must be positive")
         if self.bootstrap_samples <= 0:
             raise ValueError("bootstrap_samples must be positive")
         if not 0.0 < self.bootstrap_confidence_level < 1.0:
@@ -95,6 +102,9 @@ class HTSResidualConfirmatoryInputConfig:
     output_dir: Path | str
     candidate_freeze_manifest_path: Path | str
     source_corpus_dirs: tuple[Path | str, ...]
+    paper_candidate_unlock_dir: Path | str
+    expected_unlock_manifest_sha256: str = PINNED_ISSUE_160_MANIFEST_SHA256
+    canonical_o_source_manifest_path: Path | str | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -102,6 +112,11 @@ class HTSResidualConfirmatoryInputConfig:
         if not self.source_corpus_dirs:
             raise ValueError("source_corpus_dirs must not be empty")
         object.__setattr__(self, "output_dir", Path(self.output_dir))
+        object.__setattr__(
+            self,
+            "paper_candidate_unlock_dir",
+            Path(self.paper_candidate_unlock_dir),
+        )
         object.__setattr__(
             self,
             "candidate_freeze_manifest_path",
@@ -112,6 +127,12 @@ class HTSResidualConfirmatoryInputConfig:
             "source_corpus_dirs",
             tuple(Path(path) for path in self.source_corpus_dirs),
         )
+        if self.canonical_o_source_manifest_path is not None:
+            object.__setattr__(
+                self,
+                "canonical_o_source_manifest_path",
+                Path(self.canonical_o_source_manifest_path),
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +173,16 @@ def freeze_hts_residual_candidate(
         raise FileExistsError(f"output directory already exists: {output_dir}")
     development_manifest_path = Path(config.development_oof_manifest_path).resolve()
     development_manifest = _load_json(development_manifest_path)
+    frozen_o_source_manifest_sha256 = str(
+        development_manifest.get("frozen_o_source_manifest_sha256") or ""
+    )
+    frozen_o_ranking_report_sha256 = str(
+        development_manifest.get("frozen_o_ranking_report_sha256") or ""
+    )
+    if not _is_sha256(frozen_o_source_manifest_sha256) or not _is_sha256(
+        frozen_o_ranking_report_sha256
+    ):
+        raise ValueError("development manifest frozen O scorer lineage is missing")
     report_descriptor = _verified_descriptor(development_manifest["report"])
     rows_descriptor = _verified_descriptor(development_manifest["combined_rows"])
     protocol_descriptor = _verified_descriptor(development_manifest["protocol"])
@@ -187,6 +218,8 @@ def freeze_hts_residual_candidate(
         "development_oof_report_sha256": report_descriptor["sha256"],
         "development_rows_sha256": rows_descriptor["sha256"],
         "development_protocol_sha256": protocol_descriptor["sha256"],
+        "frozen_o_source_manifest_sha256": frozen_o_source_manifest_sha256,
+        "frozen_o_ranking_report_sha256": frozen_o_ranking_report_sha256,
         "confirmatory_outcomes_used_for_fitting": False,
         **_blocked_safety(),
     }
@@ -206,6 +239,10 @@ def freeze_hts_residual_candidate(
         "prior_market_ids_sha256": canonical_json_sha256(prior_market_ids),
         "minimum_input_source_market_count": (
             config.minimum_input_source_market_count
+        ),
+        "minimum_input_hts_market_count": config.minimum_input_hts_market_count,
+        "both_input_selected_sides_required": (
+            config.both_input_selected_sides_required
         ),
         "minimum_confirmatory_market_count": (
             config.minimum_confirmatory_market_count
@@ -248,6 +285,8 @@ def freeze_hts_residual_candidate(
         "development_report": report_descriptor,
         "development_rows": rows_descriptor,
         "development_protocol": protocol_descriptor,
+        "frozen_o_source_manifest_sha256": frozen_o_source_manifest_sha256,
+        "frozen_o_ranking_report_sha256": frozen_o_ranking_report_sha256,
         "frozen_candidate": _descriptor(contract_path),
         "confirmatory_protocol": _descriptor(confirmatory_protocol_path),
         "confirmatory_collection_started": False,
@@ -269,6 +308,8 @@ def freeze_hts_residual_candidate(
         "confirmatory_protocol": _descriptor(confirmatory_protocol_path),
         "development_manifest": _descriptor(development_manifest_path),
         "development_rows": rows_descriptor,
+        "frozen_o_source_manifest_sha256": frozen_o_source_manifest_sha256,
+        "frozen_o_ranking_report_sha256": frozen_o_ranking_report_sha256,
         "candidate_frozen": True,
         "confirmatory_evaluation_started": False,
         "pre_promotion_ready": False,
@@ -320,6 +361,7 @@ def freeze_hts_residual_confirmatory_input(
     source_descriptors: list[dict[str, Any]] = []
     source_market_ids: set[str] = set()
     source_market_occurrences: Counter[str] = Counter()
+    source_decision_occurrences: Counter[str] = Counter()
     decision_timestamps: list[int] = []
     causality_violations: list[str] = []
     overlap_market_ids: set[str] = set()
@@ -330,6 +372,7 @@ def freeze_hts_residual_confirmatory_input(
         for row in _load_jsonl(corpus_dir / "polymarket_feature_rows.jsonl"):
             market_id = str(row["market_id"])
             decision_ts = int(row["decision_ts"])
+            source_decision_occurrences[f"{market_id}|{decision_ts}"] += 1
             source_market_ids.add(market_id)
             decision_timestamps.append(decision_ts)
             if market_id in prior_market_ids:
@@ -347,7 +390,12 @@ def freeze_hts_residual_confirmatory_input(
         for market_id, count in source_market_occurrences.items()
         if count > 1
     )
-    checks = {
+    duplicate_source_decision_ids = sorted(
+        identity
+        for identity, count in source_decision_occurrences.items()
+        if count > 1
+    )
+    checks: dict[str, bool] = {
         "minimum_input_source_market_count_met": len(source_market_ids)
         >= int(protocol["minimum_input_source_market_count"]),
         "strict_chronology_passed": strictly_later,
@@ -355,8 +403,87 @@ def freeze_hts_residual_confirmatory_input(
         "feature_causality_passed": not causality_violations,
         "source_corpus_uniqueness_passed": not duplicate_source_corpus_dirs,
         "source_market_uniqueness_passed": not duplicate_source_market_ids,
+        "source_decision_uniqueness_passed": not duplicate_source_decision_ids,
         "source_hashes_verified": True,
     }
+    outcome_blind_public_rows: list[dict[str, Any]] = []
+    outcome_blind_construction_rejections: list[dict[str, Any]] = []
+    prediction_attempted = False
+    scoring_passed = False
+    scorer_context_verified = False
+    hts_selection_rows: list[dict[str, Any]] = []
+    hts_selected_market_ids: set[str] = set()
+    hts_selected_source_run_ids: set[str] = set()
+    hts_selected_side_counts: Counter[str] = Counter()
+    hts_selection_identity_sha256: str | None = None
+    if all(checks.values()):
+        (
+            outcome_blind_public_rows,
+            outcome_blind_construction_rejections,
+        ) = _build_outcome_blind_confirmatory_public_rows(
+            source_descriptors=source_descriptors,
+        )
+        checks["outcome_blind_feature_construction_passed"] = not (
+            outcome_blind_construction_rejections
+        )
+    else:
+        checks["outcome_blind_feature_construction_passed"] = False
+
+    if all(checks.values()):
+        prediction_attempted = True
+        scoring = score_frozen_o_decision_rows(
+            run_id=f"{config.run_id}-outcome-blind-input-freeze",
+            decision_rows=outcome_blind_public_rows,
+            paper_candidate_unlock_dir=config.paper_candidate_unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=(
+                config.expected_unlock_manifest_sha256
+            ),
+            canonical_o_source_manifest_path=(
+                config.canonical_o_source_manifest_path
+            ),
+        )
+        scoring_passed = scoring["scoring_passed"] is True
+        context = dict(scoring.get("canonical_context") or {})
+        scorer_context_verified = bool(
+            scoring_passed
+            and context.get("source_manifest_sha256")
+            == freeze_manifest.get("frozen_o_source_manifest_sha256")
+            and context.get("ranking_objective_report_sha256")
+            == freeze_manifest.get("frozen_o_ranking_report_sha256")
+        )
+        if scoring_passed:
+            hts_selection_rows = _outcome_blind_hts_selection_rows(
+                scoring, outcome_blind_public_rows
+            )
+            hts_selected_market_ids = {
+                str(row["market_id"]) for row in hts_selection_rows
+            }
+            hts_selected_source_run_ids = {
+                str(row["source_run_id"]) for row in hts_selection_rows
+            }
+            hts_selected_side_counts.update(
+                str(row["selected_side"]) for row in hts_selection_rows
+            )
+            hts_selection_identity_sha256 = canonical_json_sha256(
+                hts_selection_rows
+            )
+    checks.update(
+        {
+            "outcome_blind_prediction_passed": scoring_passed,
+            "frozen_o_scorer_context_verified": scorer_context_verified,
+            "minimum_input_hts_market_count_met": len(hts_selected_market_ids)
+            >= int(protocol["minimum_input_hts_market_count"]),
+            "minimum_input_hts_source_run_count_met": len(
+                hts_selected_source_run_ids
+            )
+            >= int(protocol["minimum_confirmatory_source_run_count"]),
+            "both_input_selected_sides_present": (
+                set(hts_selected_side_counts) == {"UP", "DOWN"}
+                if protocol.get("both_input_selected_sides_required") is True
+                else True
+            ),
+        }
+    )
     reason_by_check = {
         "minimum_input_source_market_count_met": (
             "insufficient_confirmatory_input_market_support"
@@ -366,7 +493,28 @@ def freeze_hts_residual_confirmatory_input(
         "feature_causality_passed": "confirmatory_feature_causality_violation",
         "source_corpus_uniqueness_passed": "duplicate_confirmatory_source_corpus",
         "source_market_uniqueness_passed": "duplicate_confirmatory_source_market",
+        "source_decision_uniqueness_passed": (
+            "duplicate_confirmatory_source_decision"
+        ),
         "source_hashes_verified": "confirmatory_source_hash_verification_failed",
+        "outcome_blind_feature_construction_passed": (
+            "confirmatory_outcome_blind_feature_construction_failed"
+        ),
+        "outcome_blind_prediction_passed": (
+            "confirmatory_outcome_blind_frozen_o_scoring_failed"
+        ),
+        "frozen_o_scorer_context_verified": (
+            "confirmatory_frozen_o_scorer_context_mismatch"
+        ),
+        "minimum_input_hts_market_count_met": (
+            "insufficient_outcome_blind_hts_market_support"
+        ),
+        "minimum_input_hts_source_run_count_met": (
+            "insufficient_outcome_blind_hts_source_run_support"
+        ),
+        "both_input_selected_sides_present": (
+            "missing_outcome_blind_selected_side_support"
+        ),
     }
     input_gate_passed = all(checks.values())
     manifest = {
@@ -388,7 +536,29 @@ def freeze_hts_residual_confirmatory_input(
         "overlap_market_ids": sorted(overlap_market_ids),
         "duplicate_source_corpus_dirs": duplicate_source_corpus_dirs,
         "duplicate_source_market_ids": duplicate_source_market_ids,
+        "duplicate_source_decision_ids": duplicate_source_decision_ids,
         "feature_causality_violation_ids": sorted(causality_violations),
+        "outcome_blind_feature_row_count": len(outcome_blind_public_rows),
+        "outcome_blind_feature_construction_rejections": (
+            outcome_blind_construction_rejections
+        ),
+        "outcome_blind_prediction_attempted": prediction_attempted,
+        "outcome_blind_prediction_passed": scoring_passed,
+        "frozen_o_scorer_context_verified": scorer_context_verified,
+        "outcome_blind_hts_selected_row_count": len(hts_selection_rows),
+        "outcome_blind_hts_selected_market_count": len(
+            hts_selected_market_ids
+        ),
+        "outcome_blind_hts_selected_source_run_count": len(
+            hts_selected_source_run_ids
+        ),
+        "outcome_blind_hts_selected_side_counts": dict(
+            sorted(hts_selected_side_counts.items())
+        ),
+        "outcome_blind_hts_selection_rows": hts_selection_rows,
+        "outcome_blind_hts_selection_identity_sha256": (
+            hts_selection_identity_sha256
+        ),
         "input_gate_checks": checks,
         "input_gate_passed": input_gate_passed,
         "blocking_reason_codes": [
@@ -483,6 +653,10 @@ def evaluate_hts_residual_confirmatory_once(
         public_rows.extend(source_public)
         targets.update(source_targets)
         rejected.extend(source_rejected)
+    for row in public_rows:
+        key = (str(row["market_id"]), int(row["decision_ts"]))
+        if key in targets:
+            row["source_run_id"] = str(targets[key]["source_run_id"])
     scoring = score_frozen_o_decision_rows(
         run_id=f"{input_manifest['run_id']}-confirmatory-frozen-o",
         decision_rows=public_rows,
@@ -494,6 +668,16 @@ def evaluate_hts_residual_confirmatory_once(
     )
     if scoring["scoring_passed"] is not True:
         raise ValueError("frozen O scorer failed during confirmatory evaluation")
+    confirmatory_selection_rows = _outcome_blind_hts_selection_rows(
+        scoring, public_rows
+    )
+    confirmatory_selection_hash = canonical_json_sha256(
+        confirmatory_selection_rows
+    )
+    if confirmatory_selection_hash != input_manifest.get(
+        "outcome_blind_hts_selection_identity_sha256"
+    ):
+        raise ValueError("confirmatory frozen O selection identity mismatch")
 
     scored_by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for scored in scoring["canonical_scorer_report"]["canonical_scored_action_rows"]:
@@ -666,6 +850,10 @@ def evaluate_hts_residual_confirmatory_once(
         "source_corpus_audits": audits,
         "source_decision_row_count": len(public_rows),
         "selected_action_distribution": dict(sorted(selected_counts.items())),
+        "outcome_blind_input_selection_hash_verified": True,
+        "outcome_blind_input_selection_identity_sha256": (
+            confirmatory_selection_hash
+        ),
         "confirmatory_row_count": len(confirmatory_rows),
         "confirmatory_market_count": len(
             {str(row["market_id"]) for row in confirmatory_rows}
@@ -758,9 +946,191 @@ def _confirmatory_support(
     }
 
 
+def _build_outcome_blind_confirmatory_public_rows(
+    *, source_descriptors: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    public_rows: list[dict[str, Any]] = []
+    rejections: list[dict[str, Any]] = []
+    required_chainlink_fields = (
+        "chainlink_price_at_decision",
+        "chainlink_reference_price_at_market_start",
+        "chainlink_reference_distance_at_decision",
+        "chainlink_momentum_30s",
+        "chainlink_momentum_60s",
+        "chainlink_momentum_120s",
+        "chainlink_realized_volatility_120s",
+    )
+    for source in source_descriptors:
+        feature_rows = _load_jsonl(Path(source["feature_rows"]["path"]))
+        metadata_rows = _load_jsonl(Path(source["market_metadata"]["path"]))
+        chainlink_rows = _load_jsonl(Path(source["chainlink_prices"]["path"]))
+        provenance = _load_json(Path(source["training_provenance"]["path"]))
+        if _forbidden_outcome_fields_present(
+            [feature_rows, metadata_rows, chainlink_rows, provenance]
+        ):
+            rejections.append(
+                {
+                    "source_corpus_dir": source["corpus_dir"],
+                    "reason_code": "forbidden_outcome_field_in_input_freeze_source",
+                }
+            )
+            continue
+        metadata_by_market = {
+            str(row["market_id"]): row for row in metadata_rows
+        }
+        for row_index, feature_row in enumerate(feature_rows):
+            market_id = str(feature_row["market_id"])
+            decision_ts = int(feature_row["decision_ts"])
+            market = metadata_by_market.get(market_id)
+            if market is None:
+                rejections.append(
+                    {
+                        "market_id": market_id,
+                        "decision_ts": decision_ts,
+                        "reason_code": "confirmatory_market_metadata_missing",
+                    }
+                )
+                continue
+            try:
+                public_row = _phase2_feature_to_public_row(
+                    run_id=str(
+                        provenance.get("run_id")
+                        or provenance.get("corpus_id")
+                        or Path(source["corpus_dir"]).name
+                    ),
+                    row_index=row_index,
+                    feature_row=feature_row,
+                    market=market,
+                    chainlink_rows=chainlink_rows,
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                rejections.append(
+                    {
+                        "market_id": market_id,
+                        "decision_ts": decision_ts,
+                        "reason_code": (
+                            "confirmatory_decision_time_feature_construction_error"
+                        ),
+                        "error": str(exc),
+                    }
+                )
+                continue
+            chainlink_provenance = dict(
+                public_row.get("chainlink_regime_feature_provenance") or {}
+            )
+            missing_chainlink = [
+                field
+                for field in required_chainlink_fields
+                if not isinstance(public_row.get(field), int | float)
+                or not math.isfinite(float(public_row[field]))
+            ]
+            mapping_provenance = dict(
+                public_row.get("market_probability_mapping_provenance") or {}
+            )
+            reasons = []
+            if missing_chainlink or chainlink_provenance.get("provenance_valid") is not True:
+                reasons.append("confirmatory_causal_chainlink_features_missing")
+            if (
+                public_row.get("market_probability_mapping_rule_id")
+                != PHASE2_MARKET_PROBABILITY_MAPPING_RULE_ID
+                or mapping_provenance.get("provenance_valid") is not True
+            ):
+                reasons.append("confirmatory_market_probability_mapping_invalid")
+            if int(public_row["decision_time_feature_max_input_ts"]) > decision_ts:
+                reasons.append("confirmatory_joined_feature_causality_violation")
+            if reasons:
+                rejections.extend(
+                    {
+                        "market_id": market_id,
+                        "decision_ts": decision_ts,
+                        "reason_code": reason,
+                        "missing_chainlink_fields": missing_chainlink,
+                    }
+                    for reason in reasons
+                )
+                continue
+            public_row["source_run_id"] = str(
+                provenance.get("run_id")
+                or provenance.get("corpus_id")
+                or Path(source["corpus_dir"]).name
+            )
+            public_rows.append(public_row)
+    public_rows.sort(
+        key=lambda row: (int(row["decision_ts"]), str(row["market_id"]))
+    )
+    return public_rows, rejections
+
+
+def _outcome_blind_hts_selection_rows(
+    scoring: dict[str, Any], public_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    source_by_key = {
+        (str(row["market_id"]), int(row["decision_ts"])): str(row["source_run_id"])
+        for row in public_rows
+    }
+    rows = []
+    for selected in scoring["canonical_scorer_report"][
+        "canonical_selected_decision_rows"
+    ]:
+        action = str(selected["action"])
+        if action not in HTS_ACTIONS:
+            continue
+        market_id = str(selected["market_id"])
+        decision_ts = int(selected["decision_ts"])
+        rows.append(
+            {
+                "market_id": market_id,
+                "decision_ts": decision_ts,
+                "selected_action": action,
+                "selected_side": "UP" if "BUY_UP" in action else "DOWN",
+                "source_run_id": source_by_key[(market_id, decision_ts)],
+                "canonical_scored_action_row_hash": selected.get(
+                    "canonical_scored_action_row_hash"
+                ),
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            int(row["decision_ts"]),
+            str(row["market_id"]),
+            str(row["selected_action"]),
+        ),
+    )
+
+
+def _forbidden_outcome_fields_present(payload: Any) -> list[str]:
+    forbidden = {
+        "resolved_outcome",
+        "settlement_pnl",
+        "settlement_return",
+        "settlement_payout",
+        "oracle_action",
+        "future_return",
+        "selected_side_win_target",
+        "target_net_return_after_cost",
+        "total_net_return",
+    }
+    found: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if str(key) in forbidden:
+                    found.add(str(key))
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(payload)
+    return sorted(found)
+
+
 def _freeze_source_corpus_without_outcomes(corpus_dir: Path) -> dict[str, Any]:
     required = (
         "polymarket_corpus_manifest.json",
+        "polymarket_corpus_summary.json",
         "polymarket_feature_rows.jsonl",
         "polymarket_label_rows.jsonl",
         "polymarket_market_metadata.jsonl",
@@ -775,6 +1145,7 @@ def _freeze_source_corpus_without_outcomes(corpus_dir: Path) -> dict[str, Any]:
     corpus_manifest = _load_json(corpus_dir / "polymarket_corpus_manifest.json")
     hashes = dict(corpus_manifest.get("normalized_artifact_hashes") or {})
     expected = {
+        "corpus_summary": "polymarket_corpus_summary.json",
         "feature_rows": "polymarket_feature_rows.jsonl",
         "label_rows": "polymarket_label_rows.jsonl",
         "market_metadata": "polymarket_market_metadata.jsonl",
@@ -792,10 +1163,39 @@ def _freeze_source_corpus_without_outcomes(corpus_dir: Path) -> dict[str, Any]:
         raise ValueError("confirmatory Chainlink hash mismatch")
     feature_rows = _load_jsonl(corpus_dir / "polymarket_feature_rows.jsonl")
     market_ids = sorted({str(row["market_id"]) for row in feature_rows})
+    corpus_summary = _load_json(corpus_dir / "polymarket_corpus_summary.json")
+    resolution_hashes = dict(corpus_summary.get("resolution_hashes") or {})
+    target_structure_checks = {
+        "summary_market_count_matches": int(corpus_summary.get("market_count") or 0)
+        == len(market_ids),
+        "summary_feature_row_count_matches": int(
+            corpus_summary.get("feature_row_count") or 0
+        )
+        == len(feature_rows),
+        "complete_5_action_label_count_reported": int(
+            corpus_summary.get("label_row_count") or 0
+        )
+        == len(feature_rows) * 5,
+        "resolution_hash_coverage_complete": set(resolution_hashes) == set(market_ids)
+        and all(_is_sha256(str(value)) for value in resolution_hashes.values()),
+        "sell_before_close_label_gate_passed": (
+            corpus_summary.get("sell_before_close_label_gate_passed") is True
+        ),
+    }
+    if not all(target_structure_checks.values()):
+        raise ValueError(
+            "confirmatory source outcome-blind target structure is incomplete: "
+            + ",".join(
+                name for name, passed in target_structure_checks.items() if not passed
+            )
+        )
     return {
         "corpus_dir": str(corpus_dir),
         "corpus_manifest": _descriptor(
             corpus_dir / "polymarket_corpus_manifest.json"
+        ),
+        "corpus_summary": _descriptor(
+            corpus_dir / "polymarket_corpus_summary.json"
         ),
         "feature_rows": _descriptor(corpus_dir / "polymarket_feature_rows.jsonl"),
         "label_rows": _descriptor(corpus_dir / "polymarket_label_rows.jsonl"),
@@ -817,6 +1217,8 @@ def _freeze_source_corpus_without_outcomes(corpus_dir: Path) -> dict[str, Any]:
         "source_market_ids": market_ids,
         "source_market_count": len(market_ids),
         "feature_row_count": len(feature_rows),
+        "outcome_blind_target_structure_checks": target_structure_checks,
+        "outcome_blind_target_structure_verified": True,
         "target_artifact_values_parsed": False,
     }
 
@@ -826,6 +1228,7 @@ def _verify_confirmatory_source_descriptors(
 ) -> None:
     descriptor_names = (
         "corpus_manifest",
+        "corpus_summary",
         "feature_rows",
         "label_rows",
         "market_metadata",
@@ -881,6 +1284,10 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -952,6 +1359,9 @@ def _input_markdown(manifest: dict[str, Any]) -> str:
             "# HTS Residual Confirmatory Input Freeze",
             "",
             f"- source markets: `{manifest['source_market_count']}`",
+            f"- outcome-blind HTS markets: `{manifest['outcome_blind_hts_selected_market_count']}`",
+            f"- outcome-blind selected sides: `{manifest['outcome_blind_hts_selected_side_counts']}`",
+            f"- frozen O context verified: `{str(manifest['frozen_o_scorer_context_verified']).lower()}`",
             f"- input gate passed: `{str(manifest['input_gate_passed']).lower()}`",
             f"- blocking reasons: `{manifest['blocking_reason_codes']}`",
             "- outcome values inspected during input freeze: `false`",

@@ -24,6 +24,7 @@ def _parser() -> argparse.ArgumentParser:
         "--minimum-confirmatory-source-run-count", type=int, default=24
     )
     parser.add_argument("--minimum-input-source-market-count", type=int, default=283)
+    parser.add_argument("--minimum-input-hts-market-count", type=int, default=283)
     parser.add_argument("--minimum-relative-brier-improvement", type=float, default=0.03)
     parser.add_argument(
         "--minimum-relative-log-loss-improvement", type=float, default=0.03
@@ -46,6 +47,7 @@ def main() -> None:
                 args.minimum_confirmatory_source_run_count
             ),
             minimum_input_source_market_count=args.minimum_input_source_market_count,
+            minimum_input_hts_market_count=args.minimum_input_hts_market_count,
             minimum_relative_brier_improvement=(
                 args.minimum_relative_brier_improvement
             ),

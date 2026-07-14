@@ -11,6 +11,10 @@ from bigan.v8.polymarket.training.execution_layer_v2_hts_residual_confirmatory i
     freeze_hts_residual_confirmatory_input,
 )
 
+DEFAULT_UNLOCK_DIR = Path(
+    "examples/v8/polymarket_runs/o-v8-paper-candidate-unlock-20260703T073000Z"
+)
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
@@ -20,6 +24,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--candidate-freeze-manifest", required=True, type=Path)
     parser.add_argument("--source-corpus-dir", action="append", required=True, type=Path)
+    parser.add_argument(
+        "--paper-candidate-unlock-dir", type=Path, default=DEFAULT_UNLOCK_DIR
+    )
+    parser.add_argument("--canonical-o-source-manifest-path", type=Path)
     return parser
 
 
@@ -31,6 +39,8 @@ def main() -> None:
             output_dir=args.output_dir,
             candidate_freeze_manifest_path=args.candidate_freeze_manifest,
             source_corpus_dirs=tuple(args.source_corpus_dir),
+            paper_candidate_unlock_dir=args.paper_candidate_unlock_dir,
+            canonical_o_source_manifest_path=args.canonical_o_source_manifest_path,
         )
     )
     manifest = result["manifest"]
@@ -39,6 +49,10 @@ def main() -> None:
     print(f"manifest_sha256={result['manifest_sha256']}")
     print(f"source_market_count={manifest['source_market_count']}")
     print(f"input_gate_passed={str(manifest['input_gate_passed']).lower()}")
+    print(
+        "outcome_blind_hts_selected_market_count="
+        f"{manifest['outcome_blind_hts_selected_market_count']}"
+    )
     print("outcome_values_inspected_during_input_freeze=false")
     print("confirmatory_evaluation_started=false")
     print("pre_promotion_ready=false")

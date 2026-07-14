@@ -27,6 +27,14 @@ from bigan.v8.polymarket.training.execution_layer_v2_hts_residual_edge import (
 UNLOCK_DIR = Path(
     "examples/v8/polymarket_runs/o-v8-paper-candidate-unlock-20260703T073000Z"
 )
+CANONICAL_O_SOURCE_MANIFEST = Path(
+    "examples/v8/polymarket_runs/"
+    "o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/"
+    "o_replay_aligned_source_ranking_manifest.json"
+)
+CANONICAL_O_RANKING_REPORT = (
+    CANONICAL_O_SOURCE_MANIFEST.parent / "o_source_ranking_objective_report.json"
+)
 
 
 def test_builds_causal_post_protocol_development_rows_fail_closed(
@@ -282,10 +290,15 @@ def test_confirmatory_input_freeze_and_evaluation_are_exactly_once(
             output_dir=tmp_path / "runs",
             candidate_freeze_manifest_path=candidate["manifest_path"],
             source_corpus_dirs=(corpus,),
+            paper_candidate_unlock_dir=UNLOCK_DIR,
         )
     )
     assert frozen_input["manifest"]["input_gate_passed"] is True
     assert frozen_input["manifest"]["outcome_values_inspected_during_input_freeze"] is False
+    assert frozen_input["manifest"]["outcome_blind_prediction_attempted"] is True
+    assert frozen_input["manifest"]["outcome_blind_prediction_passed"] is True
+    assert frozen_input["manifest"]["frozen_o_scorer_context_verified"] is True
+    assert frozen_input["manifest"]["outcome_blind_hts_selected_market_count"] == 1
 
     evaluation_config = HTSResidualConfirmatoryEvaluationConfig(
         confirmatory_input_manifest_path=frozen_input["manifest_path"],
@@ -321,11 +334,13 @@ def test_confirmatory_input_overlap_blocks_before_evaluation_marker(
             output_dir=tmp_path / "runs",
             candidate_freeze_manifest_path=candidate["manifest_path"],
             source_corpus_dirs=(corpus,),
+            paper_candidate_unlock_dir=UNLOCK_DIR,
         )
     )
     manifest = frozen_input["manifest"]
     assert manifest["input_gate_passed"] is False
     assert "confirmatory_market_overlap_detected" in manifest["blocking_reason_codes"]
+    assert manifest["outcome_blind_prediction_attempted"] is False
     with pytest.raises(ValueError, match="input gate did not pass"):
         evaluate_hts_residual_confirmatory_once(
             HTSResidualConfirmatoryEvaluationConfig(
@@ -357,6 +372,7 @@ def test_confirmatory_source_tamper_fails_before_exactly_once_marker(
             output_dir=tmp_path / "runs",
             candidate_freeze_manifest_path=candidate["manifest_path"],
             source_corpus_dirs=(corpus,),
+            paper_candidate_unlock_dir=UNLOCK_DIR,
         )
     )
     with (corpus / "polymarket_label_rows.jsonl").open("a", encoding="utf-8") as handle:
@@ -393,6 +409,7 @@ def test_confirmatory_input_duplicate_market_is_fail_closed(tmp_path: Path) -> N
             output_dir=tmp_path / "runs",
             candidate_freeze_manifest_path=candidate["manifest_path"],
             source_corpus_dirs=corpora,
+            paper_candidate_unlock_dir=UNLOCK_DIR,
         )
     )
     manifest = frozen_input["manifest"]
@@ -401,6 +418,78 @@ def test_confirmatory_input_duplicate_market_is_fail_closed(tmp_path: Path) -> N
     assert (
         "duplicate_confirmatory_source_market" in manifest["blocking_reason_codes"]
     )
+
+
+def test_confirmatory_input_requires_outcome_blind_hts_support(tmp_path: Path) -> None:
+    candidate = _candidate_freeze(tmp_path, minimum_input_hts_market_count=2)
+    source_root = tmp_path / "insufficient-hts-source"
+    source_root.mkdir()
+    corpus = _phase2_corpus(
+        source_root,
+        market_id="single-hts-market",
+        corpus_id="single-hts-corpus",
+        market_start_ts=5_500_000,
+    )
+    frozen_input = freeze_hts_residual_confirmatory_input(
+        HTSResidualConfirmatoryInputConfig(
+            run_id="insufficient-hts-input",
+            output_dir=tmp_path / "runs",
+            candidate_freeze_manifest_path=candidate["manifest_path"],
+            source_corpus_dirs=(corpus,),
+            paper_candidate_unlock_dir=UNLOCK_DIR,
+        )
+    )
+    manifest = frozen_input["manifest"]
+    assert manifest["outcome_blind_prediction_attempted"] is True
+    assert manifest["outcome_blind_hts_selected_market_count"] == 1
+    assert manifest["input_gate_passed"] is False
+    assert (
+        "insufficient_outcome_blind_hts_market_support"
+        in manifest["blocking_reason_codes"]
+    )
+
+
+def test_confirmatory_input_rejects_incomplete_outcome_blind_target_structure(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate_freeze(tmp_path)
+    source_root = tmp_path / "incomplete-target-source"
+    source_root.mkdir()
+    corpus = _phase2_corpus(
+        source_root,
+        market_id="incomplete-target-market",
+        corpus_id="incomplete-target-corpus",
+        market_start_ts=5_500_000,
+    )
+    summary_path = corpus / "polymarket_corpus_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["label_row_count"] = 4
+    _write_json(summary_path, summary)
+    manifest_path = corpus / "polymarket_corpus_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["normalized_artifact_hashes"]["corpus_summary"] = _sha256(
+        summary_path
+    )
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(
+        ValueError,
+        match="outcome-blind target structure is incomplete",
+    ):
+        freeze_hts_residual_confirmatory_input(
+            HTSResidualConfirmatoryInputConfig(
+                run_id="incomplete-target-input",
+                output_dir=tmp_path / "runs",
+                candidate_freeze_manifest_path=candidate["manifest_path"],
+                source_corpus_dirs=(corpus,),
+                paper_candidate_unlock_dir=UNLOCK_DIR,
+            )
+        )
+
+
+def test_candidate_freeze_requires_frozen_o_scorer_lineage(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="frozen O scorer lineage is missing"):
+        _candidate_freeze(tmp_path, include_frozen_o_lineage=False)
 
 
 def _protocol(collection_not_before_ts: int, minimum_markets: int) -> dict:
@@ -469,7 +558,12 @@ def _development_row(index: int, *, protocol_sha256: str) -> dict:
     }
 
 
-def _candidate_freeze(tmp_path: Path) -> dict:
+def _candidate_freeze(
+    tmp_path: Path,
+    *,
+    minimum_input_hts_market_count: int = 1,
+    include_frozen_o_lineage: bool = True,
+) -> dict:
     protocol_path = tmp_path / "development-protocol.json"
     _write_json(protocol_path, {"frozen": True})
     protocol_sha256 = _sha256(protocol_path)
@@ -501,18 +595,27 @@ def _candidate_freeze(tmp_path: Path) -> dict:
         },
     )
     manifest_path = tmp_path / "development-oof-manifest.json"
-    _write_json(
-        manifest_path,
-        {
-            "development_candidate_gate_passed": True,
-            "report": {"path": str(report_path), "sha256": _sha256(report_path)},
-            "combined_rows": {"path": str(rows_path), "sha256": _sha256(rows_path)},
-            "protocol": {
-                "path": str(protocol_path),
-                "sha256": protocol_sha256,
-            },
+    manifest = {
+        "development_candidate_gate_passed": True,
+        "report": {"path": str(report_path), "sha256": _sha256(report_path)},
+        "combined_rows": {"path": str(rows_path), "sha256": _sha256(rows_path)},
+        "protocol": {
+            "path": str(protocol_path),
+            "sha256": protocol_sha256,
         },
-    )
+    }
+    if include_frozen_o_lineage:
+        manifest.update(
+            {
+                "frozen_o_source_manifest_sha256": _sha256(
+                    CANONICAL_O_SOURCE_MANIFEST
+                ),
+                "frozen_o_ranking_report_sha256": _sha256(
+                    CANONICAL_O_RANKING_REPORT
+                ),
+            }
+        )
+    _write_json(manifest_path, manifest)
     return freeze_hts_residual_candidate(
         HTSResidualCandidateFreezeConfig(
             run_id="candidate-freeze",
@@ -523,6 +626,8 @@ def _candidate_freeze(tmp_path: Path) -> dict:
             minimum_confirmatory_market_count=1,
             minimum_confirmatory_source_run_count=1,
             minimum_input_source_market_count=1,
+            minimum_input_hts_market_count=minimum_input_hts_market_count,
+            both_input_selected_sides_required=False,
             bootstrap_samples=20,
         )
     )
@@ -617,7 +722,20 @@ def _phase2_corpus(
     _write_jsonl(corpus_dir / "polymarket_market_metadata.jsonl", metadata)
     _write_jsonl(corpus_dir / "polymarket_resolution_events.jsonl", resolutions)
     _write_jsonl(corpus_dir / "polymarket_chainlink_prices.jsonl", chainlink_rows)
+    _write_json(
+        corpus_dir / "polymarket_corpus_summary.json",
+        {
+            "market_count": 1,
+            "feature_row_count": len(feature_rows),
+            "label_row_count": len(label_rows),
+            "resolution_hashes": {market_id: "b" * 64},
+            "sell_before_close_label_gate_passed": True,
+        },
+    )
     normalized_hashes = {
+        "corpus_summary": _sha256(
+            corpus_dir / "polymarket_corpus_summary.json"
+        ),
         "feature_rows": _sha256(corpus_dir / "polymarket_feature_rows.jsonl"),
         "label_rows": _sha256(corpus_dir / "polymarket_label_rows.jsonl"),
         "market_metadata": _sha256(corpus_dir / "polymarket_market_metadata.jsonl"),
