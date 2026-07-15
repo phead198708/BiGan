@@ -390,6 +390,11 @@ def finalize_polymarket_pending_round(
                 raw_rows=raw_chainlink_rows,
                 config=config,
             )
+            if raw_chainlink_rows and not chainlink_corpus_evidence.get("attached"):
+                raise ValueError(
+                    "Chainlink decision-time feature integration failed: "
+                    + ", ".join(chainlink_corpus_evidence.get("reason_codes") or [])
+                )
             round_slug = round_corpus_id_from_corpus_dir(corpus_dir)
             export_provenance = {
                 "source": PENDING_FINALIZATION_PHASE,
@@ -1106,34 +1111,46 @@ def _attach_chainlink_evidence_to_corpus(
     if not raw_rows:
         return _empty_chainlink_corpus_evidence()
     evidence_path = corpus_dir / CHAINLINK_RTDS_CORPUS_FILENAME
-    _write_jsonl(evidence_path, raw_rows)
-    manifest = {
-        "schema_version": "bigan-v8-polymarket-chainlink-decision-time-evidence-v1",
-        "source_run_id": config.run_id,
-        "source_type": "polymarket_rtds_chainlink",
-        "decision_time_only": True,
-        "row_count": len(raw_rows),
-        "evidence_path": CHAINLINK_RTDS_CORPUS_FILENAME,
-        "evidence_sha256": _sha256_file(evidence_path),
-        "timestamp_causality_violation_count": sum(
-            1
-            for row in raw_rows
-            if int(row["source_ts"]) > int(row["available_at_ts"])
-        ),
-        "feature_builder_integration_required": True,
-        "read_only": True,
-        **safety_fields(),
-    }
     manifest_path = corpus_dir / CHAINLINK_RTDS_CORPUS_MANIFEST_FILENAME
-    _write_json(manifest_path, manifest)
+    if not evidence_path.is_file() or not manifest_path.is_file():
+        return {
+            **_empty_chainlink_corpus_evidence(),
+            "reason_codes": ["chainlink_feature_builder_artifacts_missing"],
+        }
+    manifest = _read_json(manifest_path)
+    evidence_sha256 = _sha256_file(evidence_path)
+    reasons = []
+    if manifest.get("source_type") != "polymarket_rtds_chainlink":
+        reasons.append("chainlink_feature_source_type_invalid")
+    if manifest.get("decision_time_only") is not True:
+        reasons.append("chainlink_feature_decision_time_contract_failed")
+    if int(manifest.get("row_count") or 0) != len(raw_rows):
+        reasons.append("chainlink_feature_row_count_mismatch")
+    if manifest.get("evidence_sha256") != evidence_sha256:
+        reasons.append("chainlink_feature_evidence_sha256_mismatch")
+    if manifest.get("feature_builder_integration_passed") is not True:
+        reasons.append("chainlink_feature_builder_integration_failed")
+    if manifest.get("feature_builder_integration_required") is not False:
+        reasons.append("chainlink_feature_builder_integration_still_required")
+    if int(manifest.get("timestamp_causality_violation_count") or 0) != 0:
+        reasons.append("chainlink_feature_timestamp_causality_violation")
     return {
-        "attached": True,
+        "attached": not reasons,
+        "source_run_id": config.run_id,
         "row_count": len(raw_rows),
         "evidence_filename": CHAINLINK_RTDS_CORPUS_FILENAME,
-        "evidence_sha256": manifest["evidence_sha256"],
+        "evidence_sha256": evidence_sha256,
         "manifest_filename": CHAINLINK_RTDS_CORPUS_MANIFEST_FILENAME,
         "manifest_sha256": _sha256_file(manifest_path),
-        "feature_builder_integration_required": True,
+        "feature_builder_integration_passed": not reasons,
+        "feature_builder_integration_required": bool(reasons),
+        "integrated_feature_row_count": int(
+            manifest.get("integrated_feature_row_count") or 0
+        ),
+        "missing_or_invalid_feature_row_count": int(
+            manifest.get("missing_or_invalid_feature_row_count") or 0
+        ),
+        "reason_codes": sorted(set(reasons)),
     }
 
 
@@ -1196,7 +1213,11 @@ def _empty_chainlink_corpus_evidence() -> dict[str, Any]:
         "evidence_sha256": None,
         "manifest_filename": None,
         "manifest_sha256": None,
+        "feature_builder_integration_passed": False,
         "feature_builder_integration_required": True,
+        "integrated_feature_row_count": 0,
+        "missing_or_invalid_feature_row_count": 0,
+        "reason_codes": ["chainlink_decision_time_evidence_unavailable"],
     }
 
 

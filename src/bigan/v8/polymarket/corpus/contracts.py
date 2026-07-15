@@ -33,6 +33,10 @@ RAW_CORPUS_FILENAMES: tuple[str, ...] = (
     "raw_polymarket_resolutions.jsonl",
 )
 
+OPTIONAL_RAW_CORPUS_FILENAMES: tuple[str, ...] = (
+    "raw_polymarket_chainlink_prices.jsonl",
+)
+
 NORMALIZED_CORPUS_FILENAMES: tuple[str, ...] = (
     "polymarket_market_rules.jsonl",
     "polymarket_market_metadata.jsonl",
@@ -332,6 +336,42 @@ class BinanceBTCCandle:
             raise ValueError("low_price must cover open/close")
         if self.volume < 0.0:
             raise ValueError("volume must be non-negative")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class PolymarketChainlinkPrice:
+    """Decision-time available Polymarket RTDS Chainlink BTC/USD price."""
+
+    source_ts: int
+    available_at_ts: int
+    price: float
+    source_type: str = "polymarket_rtds_chainlink"
+    symbol: str = "btc/usd"
+    read_only: bool = True
+    paper_only: bool = True
+    capital_at_risk: bool = False
+    broker_exchange_write_enabled: bool = False
+    live_exchange_write_enabled: bool = False
+    polymarket_write_enabled: bool = False
+    wallet_signing_enabled: bool = False
+
+    def __post_init__(self) -> None:
+        if self.source_ts <= 0:
+            raise ValueError("Chainlink source_ts must be positive")
+        if self.available_at_ts < self.source_ts:
+            raise ValueError("Chainlink available_at_ts cannot precede source_ts")
+        if self.price <= 0.0 or not math.isfinite(self.price):
+            raise ValueError("Chainlink price must be positive and finite")
+        if self.source_type != "polymarket_rtds_chainlink":
+            raise ValueError("unsupported Chainlink source_type")
+        if self.symbol.lower() != "btc/usd":
+            raise ValueError("unsupported Chainlink symbol")
+        if self.read_only is not True:
+            raise ValueError("Chainlink corpus evidence must be read-only")
+        _validate_safety_boundary(self)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

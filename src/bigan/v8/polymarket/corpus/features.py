@@ -6,6 +6,7 @@ from statistics import pstdev
 
 from bigan.v8.polymarket.corpus.contracts import (
     BinanceBTCCandle,
+    PolymarketChainlinkPrice,
     PolymarketCorpusBookSnapshot,
     PolymarketCorpusBuildConfig,
     PolymarketCorpusFeatureRow,
@@ -20,6 +21,7 @@ def build_polymarket_corpus_feature_rows(
     book_snapshots: tuple[PolymarketCorpusBookSnapshot, ...],
     trades: tuple[PolymarketCorpusTrade, ...],
     btc_candles: tuple[BinanceBTCCandle, ...],
+    chainlink_prices: tuple[PolymarketChainlinkPrice, ...] = (),
     config: PolymarketCorpusBuildConfig,
 ) -> tuple[PolymarketCorpusFeatureRow, ...]:
     """Build strictly point-in-time feature rows for configured markets."""
@@ -27,6 +29,9 @@ def build_polymarket_corpus_feature_rows(
     snapshots_by_market = _snapshots_by_market(book_snapshots)
     trades_by_market = _trades_by_market(trades)
     candles = tuple(sorted(btc_candles, key=lambda item: item.ts))
+    chainlink = tuple(
+        sorted(chainlink_prices, key=lambda item: (item.source_ts, item.available_at_ts))
+    )
     rows: list[PolymarketCorpusFeatureRow] = []
     for market in sorted(markets, key=lambda item: (item.market_start_ts, item.market_id)):
         if market.market_family not in config.market_families:
@@ -56,6 +61,7 @@ def build_polymarket_corpus_feature_rows(
                     market_trades=market_trades,
                     candles=candles,
                     current_candle=candle,
+                    chainlink_prices=chainlink,
                 )
             )
     if not rows:
@@ -74,19 +80,28 @@ def _feature_row(
     market_trades: tuple[PolymarketCorpusTrade, ...],
     candles: tuple[BinanceBTCCandle, ...],
     current_candle: BinanceBTCCandle,
+    chainlink_prices: tuple[PolymarketChainlinkPrice, ...],
 ) -> PolymarketCorpusFeatureRow:
-    reference_context = _reference_price_to_beat_context(
+    reference_context = _chainlink_reference_price_context(
         market=market,
-        candles=candles,
+        chainlink_prices=chainlink_prices,
         decision_ts=decision_ts,
+    ) or _reference_price_to_beat_context(
+        market=market, candles=candles, decision_ts=decision_ts
     )
     reference_price_to_beat = (
         float(reference_context["reference_price_to_beat"])
         if reference_context is not None
         else None
     )
+    reference_current_price = (
+        float(reference_context["current_price_at_decision"])
+        if reference_context is not None
+        and reference_context.get("current_price_at_decision") is not None
+        else current_candle.close_price
+    )
     reference_distance = (
-        (current_candle.close_price - reference_price_to_beat) / reference_price_to_beat
+        (reference_current_price - reference_price_to_beat) / reference_price_to_beat
         if reference_price_to_beat is not None and reference_price_to_beat > 0.0
         else None
     )
@@ -117,6 +132,27 @@ def _feature_row(
         "btc_mid_price": current_candle.close_price,
         "reference_price_to_beat": reference_price_to_beat,
         "reference_price_to_beat_distance_at_decision": reference_distance,
+        "chainlink_price_at_decision": (
+            reference_current_price
+            if reference_context is not None
+            and reference_context.get("source_type")
+            == "polymarket_rtds_chainlink_market_start"
+            else None
+        ),
+        "chainlink_reference_price_at_market_start": (
+            reference_price_to_beat
+            if reference_context is not None
+            and reference_context.get("source_type")
+            == "polymarket_rtds_chainlink_market_start"
+            else None
+        ),
+        "chainlink_reference_distance_at_decision": (
+            reference_distance
+            if reference_context is not None
+            and reference_context.get("source_type")
+            == "polymarket_rtds_chainlink_market_start"
+            else None
+        ),
         "btc_return_10s": _return(candles, decision_ts=decision_ts, lookback_ms=10_000),
         "btc_return_30s": _return(candles, decision_ts=decision_ts, lookback_ms=30_000),
         "btc_return_1m": _return(candles, decision_ts=decision_ts, lookback_ms=60_000),
@@ -215,6 +251,9 @@ def _feature_row(
         down_snapshot.ts,
         current_candle.ts,
         int(reference_context["max_input_ts"]) if reference_context else 0,
+        int(reference_context.get("current_source_ts") or 0)
+        if reference_context
+        else 0,
         max_trade_ts,
     )
     available_at_ts = max(
@@ -222,6 +261,9 @@ def _feature_row(
         down_snapshot.available_at_ts,
         current_candle.available_at_ts,
         int(reference_context["available_at_ts"]) if reference_context else 0,
+        int(reference_context.get("current_available_at_ts") or 0)
+        if reference_context
+        else 0,
         max_trade_ts,
     )
     provenance = {
@@ -240,28 +282,37 @@ def _feature_row(
             "input_start_ts": int(reference_context["input_start_ts"]),
             "input_end_ts": max(
                 int(reference_context["input_end_ts"]),
-                current_candle.ts,
+                int(reference_context.get("current_source_ts") or current_candle.ts),
             ),
             "available_at_ts": max(
                 int(reference_context["available_at_ts"]),
-                current_candle.available_at_ts,
+                int(
+                    reference_context.get("current_available_at_ts")
+                    or current_candle.available_at_ts
+                ),
             ),
             "lookback_ms": max(0, decision_ts - int(reference_context["input_start_ts"])),
             "source_fields_used": "|".join(
                 (
                     str(reference_context["source_fields_used"]),
-                    "polymarket_btc_reference_candles.close_price_at_decision",
+                    str(
+                        reference_context.get("current_source_fields_used")
+                        or "polymarket_btc_reference_candles.close_price_at_decision"
+                    ),
                 )
             ),
             "max_input_ts": max(
                 int(reference_context["max_input_ts"]),
-                current_candle.ts,
+                int(reference_context.get("current_source_ts") or current_candle.ts),
             ),
             "decision_ts": decision_ts,
             "provenance_valid": (
                 max(
                     int(reference_context["available_at_ts"]),
-                    current_candle.available_at_ts,
+                    int(
+                        reference_context.get("current_available_at_ts")
+                        or current_candle.available_at_ts
+                    ),
                 )
                 <= decision_ts
             ),
@@ -277,6 +328,16 @@ def _feature_row(
         provenance["reference_price_to_beat_distance_at_decision"] = (
             reference_provenance
         )
+        if (
+            reference_context.get("source_type")
+            == "polymarket_rtds_chainlink_market_start"
+        ):
+            for feature_name in (
+                "chainlink_price_at_decision",
+                "chainlink_reference_price_at_market_start",
+                "chainlink_reference_distance_at_decision",
+            ):
+                provenance[feature_name] = dict(reference_provenance)
     return PolymarketCorpusFeatureRow(
         market_id=market.market_id,
         condition_id=market.condition_id,
@@ -403,6 +464,46 @@ def _reference_price_to_beat_context(
         "max_input_ts": prior.ts,
         "source_fields_used": "polymarket_btc_reference_candles.close_price_before_market_start",
         "source_type": "prior_available_reference_candle_close_price",
+    }
+
+
+def _chainlink_reference_price_context(
+    *,
+    market: PolymarketCorpusMarket,
+    chainlink_prices: tuple[PolymarketChainlinkPrice, ...],
+    decision_ts: int,
+) -> dict[str, float | int | str] | None:
+    reference_rows = [
+        row
+        for row in chainlink_prices
+        if row.source_ts <= market.market_start_ts
+        and row.available_at_ts <= decision_ts
+    ]
+    current_rows = [
+        row
+        for row in chainlink_prices
+        if row.source_ts <= decision_ts and row.available_at_ts <= decision_ts
+    ]
+    if not reference_rows or not current_rows:
+        return None
+    reference = reference_rows[-1]
+    current = current_rows[-1]
+    return {
+        "reference_price_to_beat": reference.price,
+        "current_price_at_decision": current.price,
+        "input_start_ts": reference.source_ts,
+        "input_end_ts": reference.source_ts,
+        "available_at_ts": reference.available_at_ts,
+        "max_input_ts": reference.source_ts,
+        "current_source_ts": current.source_ts,
+        "current_available_at_ts": current.available_at_ts,
+        "source_fields_used": (
+            "raw_polymarket_chainlink_prices.price_at_or_before_market_start"
+        ),
+        "current_source_fields_used": (
+            "raw_polymarket_chainlink_prices.price_at_or_before_decision"
+        ),
+        "source_type": "polymarket_rtds_chainlink_market_start",
     }
 
 

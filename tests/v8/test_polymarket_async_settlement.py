@@ -128,6 +128,19 @@ def test_pending_round_persists_causal_chainlink_evidence_through_export(
     )
     assert evidence_manifest["decision_time_only"] is True
     assert evidence_manifest["timestamp_causality_violation_count"] == 0
+    assert evidence_manifest["feature_builder_integration_passed"] is True
+    assert evidence_manifest["feature_builder_integration_required"] is False
+    feature_rows = _read_jsonl(
+        finalized.exported_training_corpus_dir / "polymarket_feature_rows.jsonl"
+    )
+    assert evidence_manifest["integrated_feature_row_count"] == len(feature_rows)
+    assert all(
+        row["feature_provenance"][
+            "reference_price_to_beat_distance_at_decision"
+        ]["reference_price_to_beat_source"]
+        == "polymarket_rtds_chainlink_market_start"
+        for row in feature_rows
+    )
 
 
 def test_pending_round_rejects_noncausal_chainlink_rows_without_blocking_core_capture(
@@ -590,6 +603,7 @@ def _as_real_public_market_row(row: dict[str, Any]) -> dict[str, Any]:
 def _chainlink_row(source_ts: int, price: float) -> dict[str, Any]:
     return {
         "source_type": "polymarket_rtds_chainlink",
+        "symbol": "btc/usd",
         "source_ts": source_ts,
         "available_at_ts": source_ts,
         "price": price,

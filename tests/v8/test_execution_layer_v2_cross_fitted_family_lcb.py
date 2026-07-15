@@ -326,12 +326,46 @@ def test_role_assignment_excludes_prior_market_and_fails_closed(
     assert report["source_model_candidate_eligible"] is False
 
 
+def test_role_assignment_rejects_chainlink_capture_with_proxy_reference_feature(
+    tmp_path: Path,
+) -> None:
+    fixture = _role_assignment_fixture(
+        tmp_path,
+        market_count=90,
+        proxy_reference_index=23,
+    )
+    result = assign_cross_fitted_family_lcb_roles(
+        CrossFittedFamilyLCBRoleAssignmentConfig(
+            run_id="issue172-chainlink-proxy-reference",
+            output_dir=tmp_path / "role-runs",
+            precollection_freeze_manifest_path=fixture["freeze_path"],
+            expected_precollection_freeze_manifest_sha256=_sha256(
+                fixture["freeze_path"]
+            ),
+            batch_progress_pins=(
+                (fixture["batch_path"], _sha256(fixture["batch_path"])),
+            ),
+            training_corpus_root=fixture["training_root"],
+        )
+    )
+
+    report = result["report"]
+    assert report["role_assignment_ready"] is False
+    assert report["selected_market_count"] == 89
+    assert report["excluded_reason_distribution"][
+        "feature_reference_distance_not_chainlink_sourced"
+    ] == 1
+    assert report["source_model_candidate_eligible"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+
+
 def _role_assignment_fixture(
     tmp_path: Path,
     *,
     market_count: int,
     missing_chainlink_index: int | None = None,
     prior_overlap_index: int | None = None,
+    proxy_reference_index: int | None = None,
 ) -> dict[str, Path]:
     registry = tmp_path / "prior_registry.json"
     _write_json(
@@ -373,6 +407,11 @@ def _role_assignment_fixture(
         corpus_dir = training_root / "polymarket" / market_id
         corpus_dir.mkdir(parents=True)
         feature_path = corpus_dir / "polymarket_feature_rows.jsonl"
+        reference_source = (
+            "market_start_reference_candle_open_price"
+            if index == proxy_reference_index
+            else "polymarket_rtds_chainlink_market_start"
+        )
         _write_jsonl(
             feature_path,
             [
@@ -380,19 +419,120 @@ def _role_assignment_fixture(
                     "market_id": market_id,
                     "decision_ts": decision_ts,
                     "max_input_ts": decision_ts - 1,
-                    "features": {"up_bid": 0.45, "up_ask": 0.46},
+                    "features": {
+                        "up_bid": 0.45,
+                        "up_ask": 0.46,
+                        "reference_price_to_beat_distance_at_decision": 0.001,
+                    },
+                    "feature_provenance": {
+                        "reference_price_to_beat_distance_at_decision": {
+                            "source": "polymarket_corpus",
+                            "source_fields_used": (
+                                "polymarket_btc_reference_candles."
+                                "open_price_at_market_start|"
+                                "polymarket_btc_reference_candles."
+                                "close_price_at_decision"
+                                if index == proxy_reference_index
+                                else "raw_polymarket_chainlink_prices."
+                                "price_at_or_before_market_start|"
+                                "raw_polymarket_chainlink_prices."
+                                "price_at_or_before_decision"
+                            ),
+                            "max_input_ts": decision_ts - 1,
+                            "available_at_ts": decision_ts - 1,
+                            "decision_ts": decision_ts,
+                            "provenance_valid": True,
+                            "reference_price_to_beat_source": reference_source,
+                        }
+                    },
                 }
             ],
         )
+        chainlink_path = corpus_dir / "polymarket_chainlink_prices.jsonl"
+        _write_jsonl(
+            chainlink_path,
+            [
+                {
+                    "source_ts": decision_ts - 1,
+                    "available_at_ts": decision_ts - 1,
+                    "price": 65_000.0,
+                    "source_type": "polymarket_rtds_chainlink",
+                    "symbol": "btc/usd",
+                    "read_only": True,
+                    "paper_only": True,
+                    "capital_at_risk": False,
+                }
+            ],
+        )
+        chainlink_manifest_path = (
+            corpus_dir / "polymarket_chainlink_decision_time_evidence_manifest.json"
+        )
+        chainlink_integration_passed = index != proxy_reference_index
+        chainlink_manifest = {
+            "schema_version": (
+                "bigan-v8-polymarket-chainlink-decision-time-evidence-v2"
+            ),
+            "source_type": "polymarket_rtds_chainlink",
+            "decision_time_only": True,
+            "row_count": 1,
+            "evidence_path": chainlink_path.name,
+            "evidence_sha256": _sha256(chainlink_path),
+            "feature_row_count": 1,
+            "integrated_feature_row_count": int(chainlink_integration_passed),
+            "missing_or_invalid_feature_row_count": int(
+                not chainlink_integration_passed
+            ),
+            "feature_reference_source_distribution": {reference_source: 1},
+            "feature_integration_reason_distribution": (
+                {}
+                if chainlink_integration_passed
+                else {"reference_distance_not_sourced_from_chainlink": 1}
+            ),
+            "timestamp_causality_violation_count": 0,
+            "feature_builder_integration_passed": chainlink_integration_passed,
+            "feature_builder_integration_required": not chainlink_integration_passed,
+            "read_only": True,
+            "paper_only": True,
+            "capital_at_risk": False,
+            "broker_exchange_write_enabled": False,
+            "live_exchange_write_enabled": False,
+            "polymarket_write_enabled": False,
+            "wallet_signing_enabled": False,
+        }
+        _write_json(chainlink_manifest_path, chainlink_manifest)
         _write_json(
             corpus_dir / "polymarket_corpus_manifest.json",
             {
                 "schema_version": "bigan-v8-polymarket-corpus-v3",
                 "normalized_artifact_hashes": {
-                    "feature_rows": _sha256(feature_path)
+                    "feature_rows": _sha256(feature_path),
+                    "chainlink_prices": _sha256(chainlink_path),
+                    "chainlink_decision_time_evidence_manifest": _sha256(
+                        chainlink_manifest_path
+                    ),
                 },
+                "chainlink_decision_time_feature_integration": chainlink_manifest,
                 "paper_only": True,
                 "capital_at_risk": False,
+            },
+        )
+        _write_json(
+            corpus_dir / "training_corpus_provenance.json",
+            {
+                "chainlink_decision_time_evidence": {
+                    "attached": chainlink_integration_passed,
+                    "row_count": 1,
+                    "evidence_filename": chainlink_path.name,
+                    "evidence_sha256": _sha256(chainlink_path),
+                    "manifest_filename": chainlink_manifest_path.name,
+                    "manifest_sha256": _sha256(chainlink_manifest_path),
+                    "feature_builder_integration_passed": (
+                        chainlink_integration_passed
+                    ),
+                    "feature_builder_integration_required": (
+                        not chainlink_integration_passed
+                    ),
+                }
             },
         )
         # This must remain unreadable by the outcome-blind role assignment stage.

@@ -211,6 +211,17 @@ def validate_cross_fitted_family_lcb_feature_contract(
         "decision_time_safe": contract.get("decision_time_safe") is True,
         "feature_source": contract.get("feature_source")
         == "phase2_polymarket_feature_rows_only",
+        "chainlink_reference_source": contract.get(
+            "reference_price_to_beat_distance_source"
+        )
+        == "polymarket_rtds_chainlink"
+        and contract.get("chainlink_reference_feature_required") is True,
+        "cex_candles_momentum_only": contract.get(
+            "btc_candle_features_are_independent_momentum_only"
+        )
+        is True
+        and contract.get("btc_candle_features_may_not_supply_price_to_beat")
+        is True,
         "target": contract.get("target_field") == "total_net_pnl_per_notional",
         "cost_aware_target": contract.get(
             "target_includes_fees_slippage_and_liquidity_impact"
@@ -783,11 +794,22 @@ def _outcome_blind_corpus_role_audit(
 ) -> dict[str, Any]:
     manifest_path = corpus_dir / "polymarket_corpus_manifest.json"
     feature_path = corpus_dir / "polymarket_feature_rows.jsonl"
+    chainlink_path = corpus_dir / "polymarket_chainlink_prices.jsonl"
+    chainlink_manifest_path = (
+        corpus_dir / "polymarket_chainlink_decision_time_evidence_manifest.json"
+    )
+    training_provenance_path = corpus_dir / "training_corpus_provenance.json"
     reasons: list[str] = []
     if not manifest_path.is_file():
         reasons.append("corpus_manifest_missing")
     if not feature_path.is_file():
         reasons.append("feature_rows_missing")
+    if not chainlink_path.is_file():
+        reasons.append("chainlink_feature_evidence_missing")
+    if not chainlink_manifest_path.is_file():
+        reasons.append("chainlink_feature_evidence_manifest_missing")
+    if not training_provenance_path.is_file():
+        reasons.append("training_corpus_provenance_missing")
     if reasons:
         return {
             "market_id": "",
@@ -796,6 +818,9 @@ def _outcome_blind_corpus_role_audit(
             "decision_row_count": 0,
             "corpus_manifest": None,
             "feature_rows": None,
+            "chainlink_feature_evidence": None,
+            "chainlink_feature_evidence_manifest": None,
+            "training_corpus_provenance": None,
             "reason_codes": reasons,
         }
     manifest = _load_json(manifest_path)
@@ -808,6 +833,62 @@ def _outcome_blind_corpus_role_audit(
     if expected_feature_sha != _sha256_file(feature_path):
         reasons.append("feature_rows_sha256_mismatch")
     features = _load_jsonl(feature_path)
+    chainlink_rows = _load_jsonl(chainlink_path)
+    chainlink_manifest = _load_json(chainlink_manifest_path)
+    training_provenance = _load_json(training_provenance_path)
+    normalized_hashes = manifest.get("normalized_artifact_hashes") or {}
+    if str(normalized_hashes.get("chainlink_prices") or "") != _sha256_file(
+        chainlink_path
+    ):
+        reasons.append("chainlink_feature_evidence_sha256_mismatch")
+    if str(
+        normalized_hashes.get("chainlink_decision_time_evidence_manifest") or ""
+    ) != _sha256_file(chainlink_manifest_path):
+        reasons.append("chainlink_feature_evidence_manifest_sha256_mismatch")
+    manifest_integration = manifest.get(
+        "chainlink_decision_time_feature_integration"
+    ) or {}
+    if manifest_integration != chainlink_manifest:
+        reasons.append("chainlink_feature_integration_manifest_mismatch")
+    if chainlink_manifest.get("source_type") != "polymarket_rtds_chainlink":
+        reasons.append("chainlink_feature_source_type_invalid")
+    if not chainlink_rows:
+        reasons.append("chainlink_feature_evidence_empty")
+    if int(chainlink_manifest.get("row_count") or 0) != len(chainlink_rows):
+        reasons.append("chainlink_feature_evidence_row_count_mismatch")
+    if chainlink_manifest.get("evidence_sha256") != _sha256_file(chainlink_path):
+        reasons.append("chainlink_manifest_evidence_sha256_mismatch")
+    if any(not _valid_chainlink_role_evidence_row(row) for row in chainlink_rows):
+        reasons.append("chainlink_feature_evidence_row_invalid")
+    if chainlink_manifest.get("decision_time_only") is not True:
+        reasons.append("chainlink_feature_decision_time_contract_failed")
+    if chainlink_manifest.get("feature_builder_integration_passed") is not True:
+        reasons.append("chainlink_feature_builder_integration_failed")
+    if chainlink_manifest.get("feature_builder_integration_required") is not False:
+        reasons.append("chainlink_feature_builder_integration_still_required")
+    if int(chainlink_manifest.get("timestamp_causality_violation_count") or 0) != 0:
+        reasons.append("chainlink_feature_timestamp_causality_violation")
+    if int(chainlink_manifest.get("integrated_feature_row_count") or 0) != len(
+        features
+    ):
+        reasons.append("chainlink_feature_row_coverage_incomplete")
+    if int(chainlink_manifest.get("missing_or_invalid_feature_row_count") or 0) != 0:
+        reasons.append("chainlink_feature_row_integration_invalid")
+    provenance_chainlink = training_provenance.get(
+        "chainlink_decision_time_evidence"
+    ) or {}
+    if provenance_chainlink.get("attached") is not True:
+        reasons.append("training_provenance_chainlink_not_attached")
+    if provenance_chainlink.get("feature_builder_integration_passed") is not True:
+        reasons.append("training_provenance_chainlink_integration_failed")
+    if provenance_chainlink.get("feature_builder_integration_required") is not False:
+        reasons.append("training_provenance_chainlink_integration_still_required")
+    if provenance_chainlink.get("evidence_sha256") != _sha256_file(chainlink_path):
+        reasons.append("training_provenance_chainlink_evidence_sha256_mismatch")
+    if provenance_chainlink.get("manifest_sha256") != _sha256_file(
+        chainlink_manifest_path
+    ):
+        reasons.append("training_provenance_chainlink_manifest_sha256_mismatch")
     feature_forbidden = sorted(
         {
             field
@@ -828,6 +909,36 @@ def _outcome_blind_corpus_role_audit(
         for row in features
     ):
         reasons.append("feature_timestamp_causality_violation")
+    for row in features:
+        provenance = (row.get("feature_provenance") or {}).get(
+            "reference_price_to_beat_distance_at_decision"
+        ) or {}
+        source_fields = str(provenance.get("source_fields_used") or "")
+        if provenance.get("reference_price_to_beat_source") != (
+            "polymarket_rtds_chainlink_market_start"
+        ):
+            reasons.append("feature_reference_distance_not_chainlink_sourced")
+        if (
+            "raw_polymarket_chainlink_prices.price_at_or_before_market_start"
+            not in source_fields
+            or "raw_polymarket_chainlink_prices.price_at_or_before_decision"
+            not in source_fields
+        ):
+            reasons.append("feature_chainlink_source_fields_incomplete")
+        if provenance.get("provenance_valid") is not True:
+            reasons.append("feature_chainlink_provenance_invalid")
+        if int(provenance.get("max_input_ts") or 0) > int(
+            row.get("decision_ts") or 0
+        ):
+            reasons.append("feature_chainlink_max_input_after_decision")
+        if int(provenance.get("available_at_ts") or 0) > int(
+            row.get("decision_ts") or 0
+        ):
+            reasons.append("feature_chainlink_available_after_decision")
+        if (row.get("features") or {}).get(
+            "reference_price_to_beat_distance_at_decision"
+        ) is None:
+            reasons.append("feature_chainlink_reference_distance_missing")
     if decision_timestamps and min(decision_timestamps) < minimum_decision_ts:
         reasons.append("feature_not_strictly_later_than_precollection_freeze")
     market_id = next(iter(market_ids), "")
@@ -840,6 +951,14 @@ def _outcome_blind_corpus_role_audit(
         "decision_row_count": len(features),
         "corpus_manifest": _descriptor(manifest_path),
         "feature_rows": _descriptor(feature_path),
+        "chainlink_feature_evidence": _descriptor(chainlink_path),
+        "chainlink_feature_evidence_manifest": _descriptor(
+            chainlink_manifest_path
+        ),
+        "training_corpus_provenance": _descriptor(training_provenance_path),
+        "chainlink_feature_integration_passed": not any(
+            "chainlink" in reason for reason in reasons
+        ),
         "reason_codes": sorted(set(reasons)),
     }
 
@@ -852,6 +971,22 @@ def _role_for_rank(selection_rank: int) -> str:
     if selection_rank <= 90:
         return "confirmatory_validation"
     raise ValueError("selection rank is outside the frozen 90-market role plan")
+
+
+def _valid_chainlink_role_evidence_row(row: dict[str, Any]) -> bool:
+    try:
+        price = float(row.get("price") or 0.0)
+        source_ts = int(row.get("source_ts") or 0)
+        available_at_ts = int(row.get("available_at_ts") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        row.get("source_type") == "polymarket_rtds_chainlink"
+        and str(row.get("symbol") or "").lower() == "btc/usd"
+        and price > 0.0
+        and source_ts > 0
+        and source_ts <= available_at_ts
+    )
 
 
 def _role_assignment_markdown(report: dict[str, Any]) -> str:

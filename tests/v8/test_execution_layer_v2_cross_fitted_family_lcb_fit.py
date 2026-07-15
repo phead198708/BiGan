@@ -39,6 +39,12 @@ def test_feature_contract_is_frozen_causal_and_not_direct_market_ev() -> None:
     assert contract["market_implied_probability_used_as_direct_fair_value_ev"] is False
     assert contract["uses_confirmatory_validation_labels_for_tuning"] is False
     assert contract["target_includes_fees_slippage_and_liquidity_impact"] is True
+    assert contract["reference_price_to_beat_distance_source"] == (
+        "polymarket_rtds_chainlink"
+    )
+    assert contract["chainlink_reference_feature_required"] is True
+    assert contract["btc_candle_features_are_independent_momentum_only"] is True
+    assert contract["btc_candle_features_may_not_supply_price_to_beat"] is True
 
     invalid = json.loads(json.dumps(contract))
     invalid["market_implied_probability_used_as_direct_fair_value_ev"] = True
