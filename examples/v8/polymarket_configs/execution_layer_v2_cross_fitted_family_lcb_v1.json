@@ -19,7 +19,7 @@
     "market_family": "btc_updown_5m",
     "orderbook_source_priority": "clob_websocket_primary_rest_fallback",
     "orderbook_snapshot_interval_seconds": 30.0,
-    "public_provider_timeout_seconds": 20.0,
+    "public_provider_timeout_seconds": 330.0,
     "public_provider_http_timeout_seconds": 5.0,
     "settlement_poll_interval_seconds": 15.0,
     "settlement_grace_seconds": 1200.0,

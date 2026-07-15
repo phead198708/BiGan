@@ -24,6 +24,8 @@ def test_cross_fitted_family_lcb_protocol_is_frozen_and_safe() -> None:
     assert protocol["role_assignment"]["target_valid_market_count"] == 90
     assert protocol["cross_fit_protocol"]["fold_count"] == 5
     assert protocol["conformal_lcb_protocol"]["affine_calibration_enabled"] is False
+    assert protocol["collector_contract"]["public_provider_timeout_seconds"] == 330.0
+    assert protocol["collector_contract"]["public_provider_http_timeout_seconds"] == 5.0
     assert protocol["uses_prior_validation_or_future_labels_for_tuning"] is False
     assert protocol["safety"]["v8_execution_handoff_allowed"] is False
 
@@ -31,6 +33,11 @@ def test_cross_fitted_family_lcb_protocol_is_frozen_and_safe() -> None:
     drifted["role_assignment"]["development_train_market_count"] = 39
     with pytest.raises(ValueError, match="role_total"):
         validate_cross_fitted_family_lcb_protocol(drifted)
+
+    short_window = json.loads(json.dumps(protocol))
+    short_window["collector_contract"]["public_provider_timeout_seconds"] = 20.0
+    with pytest.raises(ValueError, match="full_round_ws_collection_window"):
+        validate_cross_fitted_family_lcb_protocol(short_window)
 
 
 def test_freeze_precollection_roles_and_prior_market_exclusions(tmp_path: Path) -> None:

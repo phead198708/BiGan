@@ -106,6 +106,12 @@ def validate_cross_fitted_family_lcb_protocol(protocol: dict[str, Any]) -> None:
         >= int(roles.get("initial_capture_attempt_count") or 0),
         "ws_first": collector.get("orderbook_source_priority")
         == "clob_websocket_primary_rest_fallback",
+        "full_round_ws_collection_window": float(
+            collector.get("public_provider_timeout_seconds") or 0.0
+        )
+        >= 300.0
+        and float(collector.get("public_provider_timeout_seconds") or 0.0)
+        > float(collector.get("public_provider_http_timeout_seconds") or 0.0),
         "external_training_root": collector.get("training_corpus_root")
         == "/Volumes/PHILIPS/v8",
         "raw_evidence": collector.get("per_round_raw_evidence_required") is True,
