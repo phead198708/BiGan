@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from bigan.v8.polymarket.training.contracts import compact_safety_fields
 
 SCHEMA_PREFIX = "bigan-v8-execution-layer-v2-cross-fitted-family-lcb"
 PROTOCOL_SCHEMA_VERSION = f"{SCHEMA_PREFIX}-protocol-v1"
+FEATURE_CONTRACT_SCHEMA_VERSION = f"{SCHEMA_PREFIX}-feature-contract-v1"
 FORBIDDEN_REGISTRY_FIELDS = {
     "accepted_bet_net_pnl",
     "evaluation_target_net_pnl_per_contract_by_action",
@@ -39,6 +41,8 @@ class CrossFittedFamilyLCBPrecollectionFreezeConfig:
     output_dir: Path | str
     protocol_path: Path | str
     expected_protocol_sha256: str
+    feature_contract_path: Path | str
+    expected_feature_contract_sha256: str
     git_commit: str
     prior_market_registry_pins: tuple[tuple[Path | str, str], ...]
     prior_evidence_artifact_pins: tuple[tuple[Path | str, str], ...]
@@ -48,6 +52,10 @@ class CrossFittedFamilyLCBPrecollectionFreezeConfig:
         if not self.run_id.strip():
             raise ValueError("run_id is required")
         _require_sha256(self.expected_protocol_sha256, name="protocol SHA-256")
+        _require_sha256(
+            self.expected_feature_contract_sha256,
+            name="feature contract SHA-256",
+        )
         if len(self.git_commit) != 40 or any(
             char not in "0123456789abcdef" for char in self.git_commit.lower()
         ):
@@ -58,6 +66,11 @@ class CrossFittedFamilyLCBPrecollectionFreezeConfig:
         object.__setattr__(self, "protocol_path", Path(self.protocol_path))
         object.__setattr__(
             self,
+            "feature_contract_path",
+            Path(self.feature_contract_path),
+        )
+        object.__setattr__(
+            self,
             "prior_market_registry_pins",
             _normalize_pins(self.prior_market_registry_pins, name="market registry"),
         )
@@ -66,6 +79,38 @@ class CrossFittedFamilyLCBPrecollectionFreezeConfig:
             "prior_evidence_artifact_pins",
             _normalize_pins(self.prior_evidence_artifact_pins, name="prior evidence"),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class CrossFittedFamilyLCBRoleAssignmentConfig:
+    """Hash-pinned collector inputs for outcome-blind market role assignment."""
+
+    run_id: str
+    output_dir: Path | str
+    precollection_freeze_manifest_path: Path | str
+    expected_precollection_freeze_manifest_sha256: str
+    batch_progress_pins: tuple[tuple[Path | str, str], ...]
+    training_corpus_root: Path | str = Path("/Volumes/PHILIPS/v8")
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        _require_sha256(
+            self.expected_precollection_freeze_manifest_sha256,
+            name="precollection freeze manifest SHA-256",
+        )
+        object.__setattr__(self, "output_dir", Path(self.output_dir))
+        object.__setattr__(
+            self,
+            "precollection_freeze_manifest_path",
+            Path(self.precollection_freeze_manifest_path),
+        )
+        object.__setattr__(
+            self,
+            "batch_progress_pins",
+            _normalize_pins(self.batch_progress_pins, name="batch progress"),
+        )
+        object.__setattr__(self, "training_corpus_root", Path(self.training_corpus_root))
 
 
 def validate_cross_fitted_family_lcb_protocol(protocol: dict[str, Any]) -> None:
@@ -147,6 +192,67 @@ def validate_cross_fitted_family_lcb_protocol(protocol: dict[str, Any]) -> None:
         raise ValueError("invalid cross-fitted family LCB protocol: " + ", ".join(failed))
 
 
+def validate_cross_fitted_family_lcb_feature_contract(
+    contract: dict[str, Any],
+    *,
+    expected_parent_protocol_sha256: str,
+) -> None:
+    """Fail closed on feature/target semantics that could leak or drift."""
+
+    feature_columns = list(contract.get("feature_columns") or [])
+    checks = {
+        "schema_version": contract.get("schema_version")
+        == FEATURE_CONTRACT_SCHEMA_VERSION,
+        "candidate_name": contract.get("candidate_name")
+        == "market_grouped_cross_fitted_family_lcb_v1",
+        "parent_protocol": contract.get("parent_protocol_sha256")
+        == expected_parent_protocol_sha256,
+        "frozen": contract.get("frozen") is True,
+        "decision_time_safe": contract.get("decision_time_safe") is True,
+        "feature_source": contract.get("feature_source")
+        == "phase2_polymarket_feature_rows_only",
+        "target": contract.get("target_field") == "total_net_pnl_per_notional",
+        "cost_aware_target": contract.get(
+            "target_includes_fees_slippage_and_liquidity_impact"
+        )
+        is True,
+        "role_before_labels": contract.get(
+            "role_assignment_must_complete_before_label_access"
+        )
+        is True,
+        "no_confirmatory_tuning": contract.get(
+            "uses_confirmatory_validation_labels_for_tuning"
+        )
+        is False,
+        "no_prior_future_tuning": contract.get(
+            "uses_prior_or_future_evidence_for_tuning"
+        )
+        is False,
+        "market_probability_semantics": contract.get(
+            "market_implied_probability_used_as_conditioning_feature"
+        )
+        is True
+        and contract.get("market_implied_probability_used_as_direct_fair_value_ev")
+        is False,
+        "feature_columns": bool(feature_columns)
+        and len(feature_columns) == len(set(feature_columns)),
+        "safety": contract.get("paper_only") is True
+        and contract.get("capital_at_risk") is False
+        and contract.get("polymarket_write_enabled") is False
+        and contract.get("wallet_signing_enabled") is False
+        and contract.get("v8_execution_handoff_allowed") is False
+        and contract.get("source_model_candidate_eligible") is False
+        and contract.get("freeze_ready") is False
+        and contract.get("promotion_evidence_eligible") is False,
+    }
+    failed = sorted(name for name, passed in checks.items() if not passed)
+    if failed:
+        raise ValueError(
+            "invalid cross-fitted family LCB feature contract: "
+            + ", ".join(failed)
+        )
+
+
 def freeze_cross_fitted_family_lcb_precollection(
     config: CrossFittedFamilyLCBPrecollectionFreezeConfig,
 ) -> dict[str, Any]:
@@ -156,6 +262,17 @@ def freeze_cross_fitted_family_lcb_precollection(
     _verify_pin(protocol_path, config.expected_protocol_sha256, name="protocol")
     protocol = _load_json(protocol_path)
     validate_cross_fitted_family_lcb_protocol(protocol)
+    feature_contract_path = config.feature_contract_path.resolve()
+    _verify_pin(
+        feature_contract_path,
+        config.expected_feature_contract_sha256,
+        name="feature contract",
+    )
+    feature_contract = _load_json(feature_contract_path)
+    validate_cross_fitted_family_lcb_feature_contract(
+        feature_contract,
+        expected_parent_protocol_sha256=config.expected_protocol_sha256,
+    )
 
     registry_descriptors = []
     prior_market_ids: set[str] = set()
@@ -239,6 +356,7 @@ def freeze_cross_fitted_family_lcb_precollection(
         "freeze_created_ts": created_ts,
         "git_commit": config.git_commit.lower(),
         "protocol": _descriptor(protocol_path),
+        "feature_contract": _descriptor(feature_contract_path),
         "prior_evidence_exclusion_registry": _descriptor(exclusion_path),
         "candidate_name": protocol["candidate_name"],
         "role_assignment_method": roles["method"],
@@ -298,6 +416,470 @@ def freeze_cross_fitted_family_lcb_precollection(
         "descriptor_sha256": _sha256_file(descriptor_path),
         "manifest": manifest,
     }
+
+
+def assign_cross_fitted_family_lcb_roles(
+    config: CrossFittedFamilyLCBRoleAssignmentConfig,
+) -> dict[str, Any]:
+    """Assign the earliest 40/20/30 quality-valid markets without reading labels."""
+
+    freeze_path = config.precollection_freeze_manifest_path.resolve()
+    _verify_pin(
+        freeze_path,
+        config.expected_precollection_freeze_manifest_sha256,
+        name="precollection freeze manifest",
+    )
+    freeze = _load_json(freeze_path)
+    protocol_descriptor = _verified_descriptor(
+        freeze.get("protocol"), name="frozen protocol"
+    )
+    protocol = _load_json(Path(protocol_descriptor["path"]))
+    validate_cross_fitted_family_lcb_protocol(protocol)
+    feature_contract_descriptor = _verified_descriptor(
+        freeze.get("feature_contract"), name="frozen feature contract"
+    )
+    validate_cross_fitted_family_lcb_feature_contract(
+        _load_json(Path(feature_contract_descriptor["path"])),
+        expected_parent_protocol_sha256=protocol_descriptor["sha256"],
+    )
+    exclusion_descriptor = _verified_descriptor(
+        freeze.get("prior_evidence_exclusion_registry"),
+        name="prior evidence exclusion registry",
+    )
+    exclusion_registry = _load_json(Path(exclusion_descriptor["path"]))
+    prior_market_ids = {
+        str(value) for value in exclusion_registry.get("prior_market_ids") or []
+    }
+    if not prior_market_ids or "" in prior_market_ids:
+        raise ValueError("prior market exclusion registry is incomplete")
+    if canonical_json_sha256(sorted(prior_market_ids)) != exclusion_registry.get(
+        "prior_market_ids_sha256"
+    ):
+        raise ValueError("prior market exclusion registry identity mismatch")
+
+    target_count = int(freeze.get("target_valid_market_count") or 0)
+    maximum_attempts = int(freeze.get("maximum_total_capture_attempt_count") or 0)
+    minimum_decision_ts = int(freeze.get("minimum_collection_decision_ts") or 0)
+    if target_count != 90 or maximum_attempts < target_count or minimum_decision_ts <= 0:
+        raise ValueError("precollection role freeze contract is incomplete")
+
+    batch_rows: list[dict[str, Any]] = []
+    batch_descriptors: list[dict[str, str]] = []
+    blocking_reasons: list[str] = []
+    for batch_ordinal, (path, expected_sha256) in enumerate(
+        config.batch_progress_pins
+    ):
+        resolved = path.resolve()
+        _verify_pin(resolved, expected_sha256, name="batch progress")
+        batch = _load_json(resolved)
+        forbidden = sorted(_find_fields(batch, FORBIDDEN_REGISTRY_FIELDS))
+        if forbidden:
+            raise ValueError(
+                "batch progress contains forbidden outcome fields: "
+                + ", ".join(forbidden)
+            )
+        captures = [dict(row) for row in batch.get("captures") or []]
+        finalizations = [dict(row) for row in batch.get("finalizations") or []]
+        errors = [dict(row) for row in batch.get("errors") or []]
+        if batch.get("paper_only") is not True or batch.get("capital_at_risk") is not False:
+            blocking_reasons.append("collector_batch_safety_contract_failed")
+        if int(batch.get("capture_count") or 0) != len(captures):
+            blocking_reasons.append("collector_capture_count_mismatch")
+        if int(batch.get("error_count") or 0) != len(errors):
+            blocking_reasons.append("collector_error_count_mismatch")
+        finalization_by_run_id = {
+            str(row.get("run_id") or ""): row for row in finalizations
+        }
+        if "" in finalization_by_run_id:
+            blocking_reasons.append("collector_finalization_run_id_missing")
+        for capture in captures:
+            batch_rows.append(
+                {
+                    **capture,
+                    "source_batch_ordinal": batch_ordinal,
+                    "source_batch_id": str(batch.get("batch_id") or ""),
+                    "source_batch_progress_sha256": expected_sha256,
+                    "finalization": finalization_by_run_id.get(
+                        str(capture.get("run_id") or "")
+                    ),
+                }
+            )
+        batch_descriptors.append(_descriptor(resolved))
+    if len(batch_rows) > maximum_attempts:
+        blocking_reasons.append("maximum_capture_attempt_count_exceeded")
+    run_ids = [str(row.get("run_id") or "") for row in batch_rows]
+    if any(not value for value in run_ids) or len(run_ids) != len(set(run_ids)):
+        blocking_reasons.append("collector_duplicate_or_missing_capture_run_id")
+
+    batch_rows.sort(
+        key=lambda row: (
+            int(row.get("scheduled_round_start_ts") or 0),
+            int(row.get("source_batch_ordinal") or 0),
+            int(row.get("round_index") or 0),
+            str(row.get("run_id") or ""),
+        )
+    )
+    selected: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    selected_market_ids: set[str] = set()
+    selected_corpus_dirs: set[Path] = set()
+    selection_sequence_blocked = False
+    training_root = config.training_corpus_root.expanduser().resolve()
+    for capture in batch_rows:
+        audit = _capture_quality_audit(capture)
+        if audit["reason_codes"]:
+            excluded.append(audit)
+            continue
+        finalization = capture.get("finalization")
+        finalization_reasons = _finalization_quality_reasons(finalization)
+        if finalization_reasons:
+            audit["reason_codes"] = finalization_reasons
+            excluded.append(audit)
+            selection_sequence_blocked = True
+            blocking_reasons.append("earliest_quality_capture_not_finalized")
+            break
+        corpus_dir = Path(
+            str(finalization["exported_training_corpus_dir"])
+        ).expanduser().resolve()
+        corpus_reasons: list[str] = []
+        if not corpus_dir.is_relative_to(training_root):
+            corpus_reasons.append("exported_corpus_outside_training_root")
+        elif not corpus_dir.is_dir():
+            corpus_reasons.append("exported_corpus_directory_missing")
+        if corpus_dir in selected_corpus_dirs:
+            corpus_reasons.append("duplicate_exported_corpus_path")
+        corpus_audit: dict[str, Any] | None = None
+        if not corpus_reasons:
+            corpus_audit = _outcome_blind_corpus_role_audit(
+                corpus_dir=corpus_dir,
+                prior_market_ids=prior_market_ids,
+                minimum_decision_ts=minimum_decision_ts,
+            )
+            corpus_reasons.extend(corpus_audit["reason_codes"])
+        if corpus_reasons:
+            audit["reason_codes"] = sorted(set(corpus_reasons))
+            excluded.append(audit)
+            continue
+        assert corpus_audit is not None
+        market_id = str(corpus_audit["market_id"])
+        if market_id in selected_market_ids:
+            audit["reason_codes"] = ["duplicate_market_identity"]
+            excluded.append(audit)
+            continue
+        if len(selected) >= target_count:
+            audit["reason_codes"] = ["selection_target_already_met"]
+            excluded.append(audit)
+            continue
+        selection_rank = len(selected) + 1
+        role = _role_for_rank(selection_rank)
+        selected_market_ids.add(market_id)
+        selected_corpus_dirs.add(corpus_dir)
+        selected.append(
+            {
+                **audit,
+                "selected": True,
+                "selection_rank": selection_rank,
+                "role": role,
+                "market_id": market_id,
+                "minimum_decision_ts": corpus_audit["minimum_decision_ts"],
+                "maximum_decision_ts": corpus_audit["maximum_decision_ts"],
+                "decision_row_count": corpus_audit["decision_row_count"],
+                "source_corpus_dir": str(corpus_dir),
+                "corpus_manifest": corpus_audit["corpus_manifest"],
+                "feature_rows": corpus_audit["feature_rows"],
+                "labels_or_outcomes_opened_for_role_assignment": False,
+                "reason_codes": [],
+            }
+        )
+
+    if len(selected) != target_count:
+        blocking_reasons.append("insufficient_quality_valid_unique_market_support")
+    role_counts = Counter(str(row["role"]) for row in selected)
+    expected_role_counts = {
+        "development_train": 40,
+        "development_calibration": 20,
+        "confirmatory_validation": 30,
+    }
+    if dict(role_counts) != expected_role_counts:
+        blocking_reasons.append("role_market_count_mismatch")
+    role_market_sets = {
+        role: {str(row["market_id"]) for row in selected if row["role"] == role}
+        for role in expected_role_counts
+    }
+    role_overlap = (
+        role_market_sets["development_train"]
+        & role_market_sets["development_calibration"]
+    ) | (
+        role_market_sets["development_train"]
+        & role_market_sets["confirmatory_validation"]
+    ) | (
+        role_market_sets["development_calibration"]
+        & role_market_sets["confirmatory_validation"]
+    )
+    if role_overlap:
+        blocking_reasons.append("role_market_overlap_detected")
+    prior_overlap = selected_market_ids & prior_market_ids
+    if prior_overlap:
+        blocking_reasons.append("prior_market_overlap_detected")
+    blocking_reasons = sorted(set(blocking_reasons))
+    role_assignment_ready = not blocking_reasons
+
+    run_dir = config.output_dir / config.run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+    selected_path = run_dir / "cross_fitted_family_lcb_role_assignment_rows.jsonl"
+    excluded_path = run_dir / "cross_fitted_family_lcb_role_assignment_excluded_rows.jsonl"
+    _write_jsonl(selected_path, selected)
+    _write_jsonl(excluded_path, excluded)
+    report = {
+        "schema_version": f"{SCHEMA_PREFIX}-role-assignment-report-v1",
+        "run_id": config.run_id,
+        "status": (
+            "OUTCOME_BLIND_ROLE_ASSIGNMENT_READY"
+            if role_assignment_ready
+            else "BLOCKED_FAIL_CLOSED"
+        ),
+        "role_assignment_ready": role_assignment_ready,
+        "blocking_reason_codes": blocking_reasons,
+        "attempted_capture_count": len(batch_rows),
+        "selected_market_count": len(selected),
+        "excluded_capture_count": len(excluded),
+        "role_market_counts": dict(sorted(role_counts.items())),
+        "role_market_overlap_count": len(role_overlap),
+        "prior_market_overlap_count": len(prior_overlap),
+        "selection_sequence_blocked": selection_sequence_blocked,
+        "excluded_reason_distribution": dict(
+            sorted(
+                Counter(
+                    reason
+                    for row in excluded
+                    for reason in row.get("reason_codes") or []
+                ).items()
+            )
+        ),
+        "role_assignment_method": freeze["role_assignment_method"],
+        "role_assignment_uses_outcomes": False,
+        "role_assignment_uses_settlement_pnl": False,
+        "role_assignment_uses_oracle_actions": False,
+        "labels_or_outcomes_opened_for_role_assignment": False,
+        "model_fit_started": False,
+        "confirmatory_validation_started": False,
+        "feature_contract_frozen_before_collection": True,
+        **_blocked_safety_fields(),
+    }
+    report_path = run_dir / "cross_fitted_family_lcb_role_assignment_report.json"
+    _write_json(report_path, report)
+    markdown_path = run_dir / "cross_fitted_family_lcb_role_assignment_report.md"
+    _write_text(markdown_path, _role_assignment_markdown(report))
+    manifest = {
+        "schema_version": f"{SCHEMA_PREFIX}-role-assignment-manifest-v1",
+        "run_id": config.run_id,
+        "role_assignment_ready": role_assignment_ready,
+        "blocking_reason_codes": blocking_reasons,
+        "precollection_freeze_manifest": _descriptor(freeze_path),
+        "protocol": protocol_descriptor,
+        "feature_contract": feature_contract_descriptor,
+        "prior_evidence_exclusion_registry": exclusion_descriptor,
+        "batch_progress_inputs": batch_descriptors,
+        "selected_rows": _descriptor(selected_path),
+        "excluded_rows": _descriptor(excluded_path),
+        "report": _descriptor(report_path),
+        "role_market_counts": dict(sorted(role_counts.items())),
+        "selected_market_ids_sha256": canonical_json_sha256(
+            sorted(selected_market_ids)
+        ),
+        "labels_or_outcomes_opened_for_role_assignment": False,
+        "model_fit_started": False,
+        "confirmatory_validation_started": False,
+        **_blocked_safety_fields(),
+    }
+    manifest["role_assignment_id"] = canonical_json_sha256(manifest)
+    manifest_path = run_dir / "role_assignment_manifest.json"
+    _write_json(manifest_path, manifest)
+    return {
+        "run_dir": run_dir,
+        "selected_rows_path": selected_path,
+        "excluded_rows_path": excluded_path,
+        "report_path": report_path,
+        "manifest_path": manifest_path,
+        "manifest_sha256": _sha256_file(manifest_path),
+        "report": report,
+        "manifest": manifest,
+    }
+
+
+def _capture_quality_audit(capture: dict[str, Any]) -> dict[str, Any]:
+    reasons: list[str] = []
+    if capture.get("capture_start_boundary_validation_passed") is not True:
+        reasons.append("capture_start_boundary_failed")
+    if int(capture.get("scheduled_round_start_ts") or 0) <= 0:
+        reasons.append("capture_chronology_missing")
+    if int(capture.get("raw_polymarket_market_count") or 0) != 1:
+        reasons.append("market_row_coverage_failed")
+    if int(capture.get("provider_raw_orderbook_snapshot_count") or 0) <= 0:
+        reasons.append("provider_orderbook_snapshot_coverage_failed")
+    if int(capture.get("training_sampled_orderbook_row_count") or 0) <= 0:
+        reasons.append("sampled_orderbook_coverage_failed")
+    if int(capture.get("raw_btc_candle_row_count") or 0) <= 0:
+        reasons.append("btc_candle_coverage_failed")
+    if int(capture.get("raw_chainlink_price_row_count") or 0) <= 0:
+        reasons.append("chainlink_rtds_coverage_failed")
+    for reason, count in sorted(dict(capture.get("reject_reason_counts") or {}).items()):
+        if int(count or 0) > 0:
+            reasons.append(f"capture_reject_{reason}")
+    return {
+        "source_batch_id": capture.get("source_batch_id"),
+        "source_batch_ordinal": capture.get("source_batch_ordinal"),
+        "source_batch_progress_sha256": capture.get(
+            "source_batch_progress_sha256"
+        ),
+        "capture_run_id": str(capture.get("run_id") or ""),
+        "capture_round_index": int(capture.get("round_index") or 0),
+        "scheduled_round_start_ts": int(
+            capture.get("scheduled_round_start_ts") or 0
+        ),
+        "capture_status": capture.get("capture_status"),
+        "provider_raw_orderbook_snapshot_count": int(
+            capture.get("provider_raw_orderbook_snapshot_count") or 0
+        ),
+        "training_sampled_orderbook_row_count": int(
+            capture.get("training_sampled_orderbook_row_count") or 0
+        ),
+        "raw_btc_candle_row_count": int(
+            capture.get("raw_btc_candle_row_count") or 0
+        ),
+        "raw_chainlink_price_row_count": int(
+            capture.get("raw_chainlink_price_row_count") or 0
+        ),
+        "reason_codes": sorted(set(reasons)),
+    }
+
+
+def _finalization_quality_reasons(
+    finalization: dict[str, Any] | None,
+) -> list[str]:
+    if finalization is None:
+        return ["capture_finalization_missing"]
+    reasons: list[str] = []
+    if finalization.get("finalization_status") != "exported":
+        reasons.append("capture_finalization_not_exported")
+    if finalization.get("pending_resolution") is not False:
+        reasons.append("capture_resolution_pending")
+    if finalization.get("training_eligible") is not True:
+        reasons.append("capture_training_ineligible")
+    if int(finalization.get("raw_resolution_count") or 0) <= 0:
+        reasons.append("capture_resolution_evidence_unavailable")
+    if dict(finalization.get("reject_reason_counts") or {}):
+        reasons.append("capture_finalization_rejected")
+    if not finalization.get("exported_training_corpus_dir"):
+        reasons.append("exported_corpus_path_missing")
+    return sorted(set(reasons))
+
+
+def _outcome_blind_corpus_role_audit(
+    *,
+    corpus_dir: Path,
+    prior_market_ids: set[str],
+    minimum_decision_ts: int,
+) -> dict[str, Any]:
+    manifest_path = corpus_dir / "polymarket_corpus_manifest.json"
+    feature_path = corpus_dir / "polymarket_feature_rows.jsonl"
+    reasons: list[str] = []
+    if not manifest_path.is_file():
+        reasons.append("corpus_manifest_missing")
+    if not feature_path.is_file():
+        reasons.append("feature_rows_missing")
+    if reasons:
+        return {
+            "market_id": "",
+            "minimum_decision_ts": 0,
+            "maximum_decision_ts": 0,
+            "decision_row_count": 0,
+            "corpus_manifest": None,
+            "feature_rows": None,
+            "reason_codes": reasons,
+        }
+    manifest = _load_json(manifest_path)
+    manifest_forbidden = sorted(_find_fields(manifest, FORBIDDEN_REGISTRY_FIELDS))
+    if manifest_forbidden:
+        reasons.append("corpus_manifest_contains_outcome_value")
+    expected_feature_sha = str(
+        (manifest.get("normalized_artifact_hashes") or {}).get("feature_rows") or ""
+    )
+    if expected_feature_sha != _sha256_file(feature_path):
+        reasons.append("feature_rows_sha256_mismatch")
+    features = _load_jsonl(feature_path)
+    feature_forbidden = sorted(
+        {
+            field
+            for row in features
+            for field in _find_fields(row, FORBIDDEN_REGISTRY_FIELDS)
+        }
+    )
+    if feature_forbidden:
+        reasons.append("feature_rows_contain_outcome_value")
+    market_ids = {str(row.get("market_id") or "") for row in features}
+    if len(market_ids) != 1 or "" in market_ids:
+        reasons.append("feature_market_identity_incomplete")
+    decision_timestamps = [int(row.get("decision_ts") or 0) for row in features]
+    if not decision_timestamps or any(value <= 0 for value in decision_timestamps):
+        reasons.append("feature_decision_timestamp_incomplete")
+    if any(
+        int(row.get("max_input_ts") or 0) > int(row.get("decision_ts") or 0)
+        for row in features
+    ):
+        reasons.append("feature_timestamp_causality_violation")
+    if decision_timestamps and min(decision_timestamps) < minimum_decision_ts:
+        reasons.append("feature_not_strictly_later_than_precollection_freeze")
+    market_id = next(iter(market_ids), "")
+    if market_id in prior_market_ids:
+        reasons.append("feature_market_overlaps_prior_evidence")
+    return {
+        "market_id": market_id,
+        "minimum_decision_ts": min(decision_timestamps, default=0),
+        "maximum_decision_ts": max(decision_timestamps, default=0),
+        "decision_row_count": len(features),
+        "corpus_manifest": _descriptor(manifest_path),
+        "feature_rows": _descriptor(feature_path),
+        "reason_codes": sorted(set(reasons)),
+    }
+
+
+def _role_for_rank(selection_rank: int) -> str:
+    if 1 <= selection_rank <= 40:
+        return "development_train"
+    if selection_rank <= 60:
+        return "development_calibration"
+    if selection_rank <= 90:
+        return "confirmatory_validation"
+    raise ValueError("selection rank is outside the frozen 90-market role plan")
+
+
+def _role_assignment_markdown(report: dict[str, Any]) -> str:
+    role_counts = report["role_market_counts"]
+    return "\n".join(
+        [
+            "# #172 Outcome-Blind Role Assignment",
+            "",
+            f"- status: `{report['status']}`",
+            f"- selected markets: `{report['selected_market_count']}`",
+            f"- train markets: `{role_counts.get('development_train', 0)}`",
+            f"- calibration markets: `{role_counts.get('development_calibration', 0)}`",
+            f"- confirmatory markets: `{role_counts.get('confirmatory_validation', 0)}`",
+            "- labels or outcomes opened for role assignment: `false`",
+            "- model fit started: `false`",
+            "- paper/live/handoff unlock: `false`",
+            "",
+        ]
+    )
+
+
+def _verified_descriptor(payload: Any, *, name: str) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        raise ValueError(f"{name} descriptor is missing")
+    path = Path(str(payload.get("path") or "")).resolve()
+    expected_sha256 = str(payload.get("sha256") or "")
+    _verify_pin(path, expected_sha256, name=name)
+    return {"path": str(path), "sha256": expected_sha256.lower()}
 
 
 def _extract_market_ids(payload: Any) -> set[str]:
@@ -383,6 +965,7 @@ def _freeze_markdown(manifest: dict[str, Any]) -> str:
             f"- candidate: `{manifest['candidate_name']}`",
             f"- target valid markets: `{manifest['target_valid_market_count']}`",
             "- roles: `40 train / 20 calibration / 30 confirmatory`",
+            f"- frozen feature contract SHA-256: `{manifest['feature_contract']['sha256']}`",
             f"- prior excluded markets: `{len(_load_json(Path(manifest['prior_evidence_exclusion_registry']['path']))['prior_market_ids'])}`",
             "- role assignment uses outcomes: `false`",
             "- model fit started: `false`",
@@ -435,9 +1018,31 @@ def _load_json_or_jsonl(path: Path) -> Any:
     return _load_json(path)
 
 
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError(f"expected JSON object at {path}:{line_number}")
+            rows.append(row)
+    return rows
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.write_text(
+        "".join(
+            json.dumps(row, sort_keys=True, allow_nan=False) + "\n" for row in rows
+        ),
         encoding="utf-8",
     )
 

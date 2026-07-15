@@ -15,6 +15,10 @@ DEFAULT_PROTOCOL = Path(
     "examples/v8/polymarket_configs/"
     "execution_layer_v2_cross_fitted_family_lcb_v1.json"
 )
+DEFAULT_FEATURE_CONTRACT = Path(
+    "examples/v8/polymarket_configs/"
+    "execution_layer_v2_cross_fitted_family_lcb_feature_contract_v1.json"
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -25,6 +29,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--protocol-path", type=Path, default=DEFAULT_PROTOCOL)
     parser.add_argument("--expected-protocol-sha256", required=True)
+    parser.add_argument(
+        "--feature-contract-path", type=Path, default=DEFAULT_FEATURE_CONTRACT
+    )
+    parser.add_argument("--expected-feature-contract-sha256", required=True)
     parser.add_argument("--git-commit", required=True)
     parser.add_argument(
         "--prior-market-registry-pin",
@@ -60,6 +68,8 @@ def main() -> None:
             output_dir=args.output_dir,
             protocol_path=args.protocol_path,
             expected_protocol_sha256=args.expected_protocol_sha256,
+            feature_contract_path=args.feature_contract_path,
+            expected_feature_contract_sha256=args.expected_feature_contract_sha256,
             git_commit=args.git_commit,
             prior_market_registry_pins=_pins(args.prior_market_registry_pin),
             prior_evidence_artifact_pins=_pins(args.prior_evidence_artifact_pin),

@@ -8,6 +8,8 @@ import pytest
 
 from bigan.v8.polymarket.training.execution_layer_v2_cross_fitted_family_lcb import (
     CrossFittedFamilyLCBPrecollectionFreezeConfig,
+    CrossFittedFamilyLCBRoleAssignmentConfig,
+    assign_cross_fitted_family_lcb_roles,
     freeze_cross_fitted_family_lcb_precollection,
     validate_cross_fitted_family_lcb_protocol,
 )
@@ -15,6 +17,10 @@ from bigan.v8.polymarket.training.execution_layer_v2_cross_fitted_family_lcb imp
 PROTOCOL_PATH = Path(
     "examples/v8/polymarket_configs/"
     "execution_layer_v2_cross_fitted_family_lcb_v1.json"
+)
+FEATURE_CONTRACT_PATH = Path(
+    "examples/v8/polymarket_configs/"
+    "execution_layer_v2_cross_fitted_family_lcb_feature_contract_v1.json"
 )
 
 
@@ -88,6 +94,8 @@ def test_freeze_precollection_roles_and_prior_market_exclusions(tmp_path: Path) 
             output_dir=tmp_path / "runs",
             protocol_path=PROTOCOL_PATH,
             expected_protocol_sha256=_sha256(PROTOCOL_PATH),
+            feature_contract_path=FEATURE_CONTRACT_PATH,
+            expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
             git_commit="a" * 40,
             prior_market_registry_pins=(
                 (historical_registry, _sha256(historical_registry)),
@@ -124,6 +132,10 @@ def test_freeze_precollection_roles_and_prior_market_exclusions(tmp_path: Path) 
     ]
     assert manifest["minimum_collection_decision_ts"] > 16_700_000
     assert manifest["role_assignment_outcome_blind"] is True
+    assert manifest["feature_contract"] == {
+        "path": str(FEATURE_CONTRACT_PATH.resolve()),
+        "sha256": _sha256(FEATURE_CONTRACT_PATH),
+    }
     assert manifest["collection_started"] is False
     assert manifest["model_fit_started"] is False
     assert manifest["source_model_candidate_eligible"] is False
@@ -155,6 +167,8 @@ def test_precollection_freeze_rejects_outcome_registry_and_hash_tamper(
         output_dir=tmp_path / "runs",
         protocol_path=PROTOCOL_PATH,
         expected_protocol_sha256=_sha256(PROTOCOL_PATH),
+        feature_contract_path=FEATURE_CONTRACT_PATH,
+        expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
         git_commit="b" * 40,
         prior_market_registry_pins=((registry, _sha256(registry)),),
         prior_evidence_artifact_pins=((evidence, _sha256(evidence)),),
@@ -176,6 +190,8 @@ def test_precollection_freeze_rejects_outcome_registry_and_hash_tamper(
         output_dir=tmp_path / "runs",
         protocol_path=PROTOCOL_PATH,
         expected_protocol_sha256=_sha256(PROTOCOL_PATH),
+        feature_contract_path=FEATURE_CONTRACT_PATH,
+        expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
         git_commit="c" * 40,
         prior_market_registry_pins=((clean_registry, "0" * 64),),
         prior_evidence_artifact_pins=((evidence, _sha256(evidence)),),
@@ -183,6 +199,255 @@ def test_precollection_freeze_rejects_outcome_registry_and_hash_tamper(
     )
     with pytest.raises(ValueError, match="SHA-256 mismatch"):
         freeze_cross_fitted_family_lcb_precollection(tampered)
+
+
+def test_assigns_frozen_roles_without_opening_labels_or_outcomes(
+    tmp_path: Path,
+) -> None:
+    fixture = _role_assignment_fixture(tmp_path, market_count=90)
+    result = assign_cross_fitted_family_lcb_roles(
+        CrossFittedFamilyLCBRoleAssignmentConfig(
+            run_id="issue172-role-assignment",
+            output_dir=tmp_path / "role-runs",
+            precollection_freeze_manifest_path=fixture["freeze_path"],
+            expected_precollection_freeze_manifest_sha256=_sha256(
+                fixture["freeze_path"]
+            ),
+            batch_progress_pins=(
+                (fixture["batch_path"], _sha256(fixture["batch_path"])),
+            ),
+            training_corpus_root=fixture["training_root"],
+        )
+    )
+
+    report = result["report"]
+    assert report["status"] == "OUTCOME_BLIND_ROLE_ASSIGNMENT_READY"
+    assert report["role_assignment_ready"] is True
+    assert report["selected_market_count"] == 90
+    assert report["role_market_counts"] == {
+        "confirmatory_validation": 30,
+        "development_calibration": 20,
+        "development_train": 40,
+    }
+    assert report["role_assignment_uses_outcomes"] is False
+    assert report["labels_or_outcomes_opened_for_role_assignment"] is False
+    assert report["source_model_candidate_eligible"] is False
+    assert report["freeze_ready"] is False
+    assert report["promotion_evidence_eligible"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+    assert result["manifest"]["feature_contract"] == {
+        "path": str(FEATURE_CONTRACT_PATH.resolve()),
+        "sha256": _sha256(FEATURE_CONTRACT_PATH),
+    }
+    assert result["manifest_path"].name == "role_assignment_manifest.json"
+    rows = [
+        json.loads(line)
+        for line in result["selected_rows_path"].read_text().splitlines()
+    ]
+    assert [row["role"] for row in rows[:40]] == ["development_train"] * 40
+    assert [row["role"] for row in rows[40:60]] == [
+        "development_calibration"
+    ] * 20
+    assert [row["role"] for row in rows[60:]] == [
+        "confirmatory_validation"
+    ] * 30
+    assert all(
+        row["labels_or_outcomes_opened_for_role_assignment"] is False
+        for row in rows
+    )
+
+
+def test_role_assignment_fails_closed_when_chainlink_capture_is_missing(
+    tmp_path: Path,
+) -> None:
+    fixture = _role_assignment_fixture(
+        tmp_path,
+        market_count=90,
+        missing_chainlink_index=17,
+    )
+    result = assign_cross_fitted_family_lcb_roles(
+        CrossFittedFamilyLCBRoleAssignmentConfig(
+            run_id="issue172-chainlink-gap",
+            output_dir=tmp_path / "role-runs",
+            precollection_freeze_manifest_path=fixture["freeze_path"],
+            expected_precollection_freeze_manifest_sha256=_sha256(
+                fixture["freeze_path"]
+            ),
+            batch_progress_pins=(
+                (fixture["batch_path"], _sha256(fixture["batch_path"])),
+            ),
+            training_corpus_root=fixture["training_root"],
+        )
+    )
+
+    report = result["report"]
+    assert report["role_assignment_ready"] is False
+    assert report["selected_market_count"] == 89
+    assert "insufficient_quality_valid_unique_market_support" in report[
+        "blocking_reason_codes"
+    ]
+    assert report["excluded_reason_distribution"] == {
+        "chainlink_rtds_coverage_failed": 1
+    }
+    assert report["source_model_candidate_eligible"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+
+
+def test_role_assignment_excludes_prior_market_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    fixture = _role_assignment_fixture(
+        tmp_path,
+        market_count=90,
+        prior_overlap_index=8,
+    )
+    result = assign_cross_fitted_family_lcb_roles(
+        CrossFittedFamilyLCBRoleAssignmentConfig(
+            run_id="issue172-prior-overlap",
+            output_dir=tmp_path / "role-runs",
+            precollection_freeze_manifest_path=fixture["freeze_path"],
+            expected_precollection_freeze_manifest_sha256=_sha256(
+                fixture["freeze_path"]
+            ),
+            batch_progress_pins=(
+                (fixture["batch_path"], _sha256(fixture["batch_path"])),
+            ),
+            training_corpus_root=fixture["training_root"],
+        )
+    )
+
+    report = result["report"]
+    assert report["role_assignment_ready"] is False
+    assert report["selected_market_count"] == 89
+    assert report["prior_market_overlap_count"] == 0
+    assert report["excluded_reason_distribution"] == {
+        "feature_market_overlaps_prior_evidence": 1
+    }
+    assert report["source_model_candidate_eligible"] is False
+
+
+def _role_assignment_fixture(
+    tmp_path: Path,
+    *,
+    market_count: int,
+    missing_chainlink_index: int | None = None,
+    prior_overlap_index: int | None = None,
+) -> dict[str, Path]:
+    registry = tmp_path / "prior_registry.json"
+    _write_json(
+        registry,
+        {
+            "market_ids": [f"prior-{index:03d}" for index in range(95)],
+            "maximum_decision_ts": 10_000_000,
+        },
+    )
+    evidence = tmp_path / "prior_evidence.json"
+    _write_json(evidence, {"status": "rejected"})
+    freeze = freeze_cross_fitted_family_lcb_precollection(
+        CrossFittedFamilyLCBPrecollectionFreezeConfig(
+            run_id="issue172-freeze",
+            output_dir=tmp_path / "freeze-runs",
+            protocol_path=PROTOCOL_PATH,
+            expected_protocol_sha256=_sha256(PROTOCOL_PATH),
+            feature_contract_path=FEATURE_CONTRACT_PATH,
+            expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
+            git_commit="d" * 40,
+            prior_market_registry_pins=((registry, _sha256(registry)),),
+            prior_evidence_artifact_pins=((evidence, _sha256(evidence)),),
+            expected_prior_unique_market_count=95,
+        )
+    )
+    freeze_path = freeze["manifest_path"]
+    minimum_decision_ts = int(freeze["manifest"]["minimum_collection_decision_ts"])
+    training_root = tmp_path / "training"
+    captures = []
+    finalizations = []
+    for index in range(market_count):
+        run_id = f"capture-{index + 1:03d}"
+        market_id = (
+            "prior-000"
+            if index == prior_overlap_index
+            else f"new-market-{index + 1:03d}"
+        )
+        decision_ts = minimum_decision_ts + (index + 1) * 300_000
+        corpus_dir = training_root / "polymarket" / market_id
+        corpus_dir.mkdir(parents=True)
+        feature_path = corpus_dir / "polymarket_feature_rows.jsonl"
+        _write_jsonl(
+            feature_path,
+            [
+                {
+                    "market_id": market_id,
+                    "decision_ts": decision_ts,
+                    "max_input_ts": decision_ts - 1,
+                    "features": {"up_bid": 0.45, "up_ask": 0.46},
+                }
+            ],
+        )
+        _write_json(
+            corpus_dir / "polymarket_corpus_manifest.json",
+            {
+                "schema_version": "bigan-v8-polymarket-corpus-v3",
+                "normalized_artifact_hashes": {
+                    "feature_rows": _sha256(feature_path)
+                },
+                "paper_only": True,
+                "capital_at_risk": False,
+            },
+        )
+        # This must remain unreadable by the outcome-blind role assignment stage.
+        (corpus_dir / "polymarket_label_rows.jsonl").write_text(
+            "not-json-and-must-not-be-opened\n",
+            encoding="utf-8",
+        )
+        captures.append(
+            {
+                "run_id": run_id,
+                "round_index": index + 1,
+                "scheduled_round_start_ts": decision_ts - 60_000,
+                "capture_start_boundary_validation_passed": True,
+                "capture_status": "pending_resolution",
+                "raw_polymarket_market_count": 1,
+                "provider_raw_orderbook_snapshot_count": 8,
+                "training_sampled_orderbook_row_count": 4,
+                "raw_btc_candle_row_count": 12,
+                "raw_chainlink_price_row_count": (
+                    0 if index == missing_chainlink_index else 20
+                ),
+                "reject_reason_counts": {},
+            }
+        )
+        finalizations.append(
+            {
+                "run_id": run_id,
+                "finalization_status": "exported",
+                "pending_resolution": False,
+                "training_eligible": True,
+                "raw_resolution_count": 1,
+                "reject_reason_counts": {},
+                "exported_training_corpus_dir": str(corpus_dir),
+            }
+        )
+    batch_path = tmp_path / "batch_progress.json"
+    _write_json(
+        batch_path,
+        {
+            "batch_id": "issue172-batch01",
+            "capture_count": len(captures),
+            "error_count": 0,
+            "exported_round_count": len(finalizations),
+            "captures": captures,
+            "finalizations": finalizations,
+            "errors": [],
+            "paper_only": True,
+            "capital_at_risk": False,
+        },
+    )
+    return {
+        "freeze_path": freeze_path,
+        "batch_path": batch_path,
+        "training_root": training_root,
+    }
 
 
 def _sha256(path: Path) -> str:
