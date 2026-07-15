@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_future_evaluation as evaluation_module
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_future_evaluation import (
     PnLAlignedFutureCollectionHandoffConfig,
@@ -1058,6 +1059,92 @@ def test_settlement_targets_fail_closed_for_unresolved_official_outcome(
     assert (shadow_path.parent / "pnl_aligned_future_outcome_reconciliation_started.json").exists()
 
 
+def test_settlement_targets_accept_official_unknown_50_50(tmp_path: Path) -> None:
+    freeze_path = _collection_freeze(tmp_path, expected_round_count=1)
+    corpus_dir = _outcome_blind_phase2_corpus(
+        tmp_path,
+        market_id="unknown-fifty-fifty-market",
+        market_start_ts=2_000_000,
+    )
+    _add_settlement_artifacts(corpus_dir, resolved_outcome="UNKNOWN_50_50")
+    decision_result = build_pnl_aligned_future_outcome_blind_decision_inputs(
+        PnLAlignedFutureDecisionInputConfig(
+            run_id="unknown-fifty-fifty-decision-input",
+            output_dir=tmp_path / "runs",
+            collection_freeze_manifest_path=freeze_path,
+            expected_collection_freeze_manifest_sha256=_sha256(freeze_path),
+            source_corpus_dirs=(corpus_dir,),
+            paper_candidate_unlock_dir=UNLOCK_DIR,
+        )
+    )
+    shadow_path = _shadow_manifest(tmp_path, decision_result)
+
+    result = build_pnl_aligned_future_settled_evaluation_targets(
+        PnLAlignedFutureSettlementTargetConfig(
+            run_id="unknown-fifty-fifty-targets",
+            output_dir=tmp_path / "target-runs",
+            shadow_manifest_path=shadow_path,
+            expected_shadow_manifest_sha256=_sha256(shadow_path),
+        )
+    )
+
+    assert result["report"]["status"] == "SETTLED_EVALUATION_TARGETS_READY"
+    assert result["targets"][0]["resolved_outcome"] == "UNKNOWN_50_50"
+    assert result["targets"][0]["official_resolution_provenance"][
+        "resolution_status"
+    ] == "unknown_50_50"
+
+
+def test_settlement_targets_resume_same_hash_pinned_start_marker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    freeze_path = _collection_freeze(tmp_path, expected_round_count=1)
+    corpus_dir = _outcome_blind_phase2_corpus(
+        tmp_path,
+        market_id="resumable-target-market",
+        market_start_ts=2_000_000,
+    )
+    _add_settlement_artifacts(corpus_dir, resolved_outcome="DOWN")
+    decision_result = build_pnl_aligned_future_outcome_blind_decision_inputs(
+        PnLAlignedFutureDecisionInputConfig(
+            run_id="resumable-target-decision-input",
+            output_dir=tmp_path / "runs",
+            collection_freeze_manifest_path=freeze_path,
+            expected_collection_freeze_manifest_sha256=_sha256(freeze_path),
+            source_corpus_dirs=(corpus_dir,),
+            paper_candidate_unlock_dir=UNLOCK_DIR,
+        )
+    )
+    shadow_path = _shadow_manifest(tmp_path, decision_result)
+    config = PnLAlignedFutureSettlementTargetConfig(
+        run_id="resumable-targets",
+        output_dir=tmp_path / "target-runs",
+        shadow_manifest_path=shadow_path,
+        expected_shadow_manifest_sha256=_sha256(shadow_path),
+    )
+    original_validator = evaluation_module._valid_official_evaluation_resolution
+    monkeypatch.setattr(
+        evaluation_module,
+        "_valid_official_evaluation_resolution",
+        lambda resolution: False,
+    )
+    with pytest.raises(ValueError, match="official resolved outcome is unavailable"):
+        build_pnl_aligned_future_settled_evaluation_targets(config)
+    marker_path = shadow_path.parent / "pnl_aligned_future_outcome_reconciliation_started.json"
+    marker_sha256 = _sha256(marker_path)
+    monkeypatch.setattr(
+        evaluation_module,
+        "_valid_official_evaluation_resolution",
+        original_validator,
+    )
+
+    result = build_pnl_aligned_future_settled_evaluation_targets(config)
+
+    assert result["report"]["reconciliation_start_marker_reused"] is True
+    assert _sha256(marker_path) == marker_sha256
+    assert result["targets"][0]["resolved_outcome"] == "DOWN"
+
+
 def test_settlement_targets_fail_closed_for_incomplete_action_grid(tmp_path: Path) -> None:
     freeze_path = _collection_freeze(tmp_path, expected_round_count=1)
     corpus_dir = _outcome_blind_phase2_corpus(
@@ -1364,7 +1451,23 @@ def _add_settlement_artifacts(corpus_dir: Path, *, resolved_outcome: str) -> Non
         {
             "market_id": market_id,
             "resolved_outcome": resolved_outcome,
-            "resolution_status": "normal",
+            "resolution_status": (
+                "unknown_50_50" if resolved_outcome == "UNKNOWN_50_50" else "normal"
+            ),
+            "payout_up": (
+                1.0
+                if resolved_outcome == "UP"
+                else 0.5
+                if resolved_outcome == "UNKNOWN_50_50"
+                else 0.0
+            ),
+            "payout_down": (
+                1.0
+                if resolved_outcome == "DOWN"
+                else 0.5
+                if resolved_outcome == "UNKNOWN_50_50"
+                else 0.0
+            ),
             "raw_resolution_sha256": raw_resolution_sha256,
             "resolution_rule_sha256": "b" * 64,
         }

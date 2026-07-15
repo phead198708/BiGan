@@ -1628,6 +1628,20 @@ def _future_input_rejection(
     }
 
 
+def _valid_official_evaluation_resolution(resolution: dict[str, Any]) -> bool:
+    outcome = str(resolution.get("resolved_outcome") or "")
+    status = str(resolution.get("resolution_status") or "")
+    payout_up = resolution.get("payout_up")
+    payout_down = resolution.get("payout_down")
+    if outcome == "UP":
+        return status == "normal" and payout_up == 1.0 and payout_down == 0.0
+    if outcome == "DOWN":
+        return status == "normal" and payout_up == 0.0 and payout_down == 1.0
+    if outcome == "UNKNOWN_50_50":
+        return status == "unknown_50_50" and payout_up == 0.5 and payout_down == 0.5
+    return False
+
+
 def build_pnl_aligned_future_settled_evaluation_targets(
     config: PnLAlignedFutureSettlementTargetConfig,
 ) -> dict[str, Any]:
@@ -1697,8 +1711,6 @@ def build_pnl_aligned_future_settled_evaluation_targets(
     if output_dir.exists():
         raise FileExistsError(f"settlement target output directory exists: {output_dir}")
     marker_path = shadow_path.parent / "pnl_aligned_future_outcome_reconciliation_started.json"
-    if marker_path.exists():
-        raise ValueError("outcome reconciliation already started for this shadow")
 
     corpus_preflight: dict[str, dict[str, Any]] = {}
     for row in decision_rows:
@@ -1727,24 +1739,44 @@ def build_pnl_aligned_future_settled_evaluation_targets(
             "resolution_path": resolution_path,
         }
 
-    marker = {
-        "schema_version": f"{SETTLEMENT_TARGET_SCHEMA_VERSION}-start-marker",
-        "run_id": config.run_id,
-        "reconciliation_started_ts": reconciliation_started_ts,
-        "shadow_manifest": _descriptor(shadow_path),
-        "decision_identity_count": len(decision_ids),
-        "future_outcome_targets_loaded_before_marker": False,
-        "outcome_reconciliation_started": True,
-        "exactly_once": True,
-        "source_model_candidate_eligible": False,
-        "freeze_ready": False,
-        "promotion_evidence_eligible": False,
-        "v8_execution_handoff_allowed": False,
-        "#134_resume_allowed": False,
-        "#146_start_allowed": False,
-        **compact_safety_fields(),
-    }
-    _write_json_exclusive(marker_path, marker)
+    marker_reused = False
+    if marker_path.exists():
+        marker = _load_json(marker_path)
+        if not (
+            marker.get("schema_version")
+            == f"{SETTLEMENT_TARGET_SCHEMA_VERSION}-start-marker"
+            and marker.get("run_id") == config.run_id
+            and marker.get("shadow_manifest") == _descriptor(shadow_path)
+            and int(marker.get("decision_identity_count") or 0) == len(decision_ids)
+            and marker.get("future_outcome_targets_loaded_before_marker") is False
+            and marker.get("outcome_reconciliation_started") is True
+            and marker.get("exactly_once") is True
+            and marker.get("paper_only") is True
+            and marker.get("capital_at_risk") is False
+            and marker.get("polymarket_write_enabled") is False
+            and marker.get("wallet_signing_enabled") is False
+        ):
+            raise ValueError("outcome reconciliation already started for this shadow")
+        marker_reused = True
+    else:
+        marker = {
+            "schema_version": f"{SETTLEMENT_TARGET_SCHEMA_VERSION}-start-marker",
+            "run_id": config.run_id,
+            "reconciliation_started_ts": reconciliation_started_ts,
+            "shadow_manifest": _descriptor(shadow_path),
+            "decision_identity_count": len(decision_ids),
+            "future_outcome_targets_loaded_before_marker": False,
+            "outcome_reconciliation_started": True,
+            "exactly_once": True,
+            "source_model_candidate_eligible": False,
+            "freeze_ready": False,
+            "promotion_evidence_eligible": False,
+            "v8_execution_handoff_allowed": False,
+            "#134_resume_allowed": False,
+            "#146_start_allowed": False,
+            **compact_safety_fields(),
+        }
+        _write_json_exclusive(marker_path, marker)
 
     labels_by_decision: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
     resolution_by_market: dict[str, dict[str, Any]] = {}
@@ -1786,10 +1818,7 @@ def build_pnl_aligned_future_settled_evaluation_targets(
         if len(labels) != len(REQUIRED_ACTIONS) or set(labels_by_action) != set(REQUIRED_ACTIONS):
             raise ValueError("settled evaluation action target grid is incomplete")
         resolution = resolution_by_market.get(market_id)
-        if resolution is None or resolution.get("resolved_outcome") not in {
-            "UP",
-            "DOWN",
-        }:
+        if resolution is None or not _valid_official_evaluation_resolution(resolution):
             raise ValueError("official resolved outcome is unavailable")
         resolved_outcome = str(resolution["resolved_outcome"])
         if any(
@@ -1875,6 +1904,7 @@ def build_pnl_aligned_future_settled_evaluation_targets(
         "source_target_artifacts": source_target_artifacts,
         "candidate_action_value_predictions": prediction_descriptor,
         "reconciliation_start_marker": _descriptor(marker_path),
+        "reconciliation_start_marker_reused": marker_reused,
         "future_outcome_targets_loaded": True,
         "outcome_reconciliation_started": True,
         "outcome_used_for_shadow_selection": False,
@@ -1898,6 +1928,7 @@ def build_pnl_aligned_future_settled_evaluation_targets(
         "settled_evaluation_targets": _descriptor(target_path),
         "settlement_target_report": _descriptor(report_path),
         "reconciliation_start_marker": _descriptor(marker_path),
+        "reconciliation_start_marker_reused": marker_reused,
         "identity_reconciliation_passed": True,
         "future_outcome_targets_loaded": True,
         "outcome_reconciliation_started": True,
