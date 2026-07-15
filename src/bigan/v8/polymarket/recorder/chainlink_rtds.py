@@ -46,6 +46,10 @@ class ChainlinkRTDSMessageError(ValueError):
         self.reason_code = reason_code
 
 
+class ChainlinkRTDSStaleStreamError(ConnectionError):
+    """Raised when an open RTDS socket stops yielding valid price rows."""
+
+
 def parse_chainlink_rtds_message(
     raw_message: str | bytes,
     *,
@@ -154,6 +158,7 @@ class PolymarketChainlinkRTDSCollector:
         receive_poll_seconds: float = 1.0,
         ping_interval_seconds: float = 5.0,
         reconnect_delay_seconds: float = 1.0,
+        stale_reconnect_seconds: float = 15.0,
     ) -> None:
         if max_rows <= 0:
             raise ValueError("max_rows must be positive")
@@ -162,6 +167,7 @@ class PolymarketChainlinkRTDSCollector:
             receive_poll_seconds,
             ping_interval_seconds,
             reconnect_delay_seconds,
+            stale_reconnect_seconds,
         ) <= 0.0:
             raise ValueError("RTDS timeout and interval values must be positive")
         self.url = url
@@ -170,6 +176,7 @@ class PolymarketChainlinkRTDSCollector:
         self.receive_poll_seconds = receive_poll_seconds
         self.ping_interval_seconds = ping_interval_seconds
         self.reconnect_delay_seconds = reconnect_delay_seconds
+        self.stale_reconnect_seconds = stale_reconnect_seconds
         self._rows: deque[dict[str, Any]] = deque(maxlen=max_rows)
         self._row_keys: set[tuple[int, float]] = set()
         self._lock = threading.Lock()
@@ -179,10 +186,15 @@ class PolymarketChainlinkRTDSCollector:
         self._stopped_at_ts: int | None = None
         self._connection_count = 0
         self._reconnect_count = 0
+        self._stale_reconnect_count = 0
         self._message_count = 0
         self._invalid_reason_counter: Counter[str] = Counter()
         self._last_error_type: str | None = None
         self._last_error_message: str | None = None
+        self._active_connection_opened_at_ts: int | None = None
+        self._last_price_row_received_at_ts: int | None = None
+        self._last_price_row_source_ts: int | None = None
+        self._last_price_row_available_at_ts: int | None = None
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -221,6 +233,20 @@ class PolymarketChainlinkRTDSCollector:
     def collection_report(self) -> dict[str, Any]:
         rows = self.rows()
         thread_alive = self._thread is not None and self._thread.is_alive()
+        now_ms = _now_ms()
+        freshness_reference_ts = (
+            self._last_price_row_received_at_ts
+            or self._active_connection_opened_at_ts
+        )
+        current_staleness_ms = (
+            max(0, now_ms - freshness_reference_ts)
+            if freshness_reference_ts is not None
+            else None
+        )
+        price_stream_stale = (
+            current_staleness_ms is not None
+            and current_staleness_ms >= int(self.stale_reconnect_seconds * 1000)
+        )
         return {
             "report_type": "polymarket_chainlink_rtds_collection",
             "source_type": "polymarket_rtds_chainlink",
@@ -232,6 +258,8 @@ class PolymarketChainlinkRTDSCollector:
             "collector_thread_alive": thread_alive,
             "connection_count": self._connection_count,
             "reconnect_count": self._reconnect_count,
+            "stale_reconnect_count": self._stale_reconnect_count,
+            "stale_reconnect_seconds": self.stale_reconnect_seconds,
             "message_count": self._message_count,
             "raw_price_row_count": len(rows),
             "min_source_ts": min((int(row["source_ts"]) for row in rows), default=None),
@@ -247,6 +275,16 @@ class PolymarketChainlinkRTDSCollector:
             ),
             "last_error_type": self._last_error_type,
             "last_error_message": self._last_error_message,
+            "active_connection_opened_at_ts": self._active_connection_opened_at_ts,
+            "last_price_row_received_at_ts": self._last_price_row_received_at_ts,
+            "last_price_row_source_ts": self._last_price_row_source_ts,
+            "last_price_row_available_at_ts": self._last_price_row_available_at_ts,
+            "current_price_stream_staleness_ms": current_staleness_ms,
+            "price_stream_stale": price_stream_stale,
+            "price_stream_fresh": (
+                self._last_price_row_received_at_ts is not None
+                and not price_stream_stale
+            ),
             "decision_critical": False,
             "fail_closed_when_feature_unavailable": True,
             "read_only": True,
@@ -270,6 +308,9 @@ class PolymarketChainlinkRTDSCollector:
                     max_size=2**22,
                 ) as ws:
                     self._connection_count += 1
+                    connection_opened_monotonic = time.monotonic()
+                    last_price_row_monotonic = connection_opened_monotonic
+                    self._active_connection_opened_at_ts = _now_ms()
                     await ws.send(json.dumps(_subscription_payload(), separators=(",", ":")))
                     next_ping = time.monotonic() + self.ping_interval_seconds
                     while not self._stop_event.is_set():
@@ -281,24 +322,41 @@ class PolymarketChainlinkRTDSCollector:
                             raw = None
                         if raw is not None:
                             self._message_count += 1
-                            self._accept_message(raw)
-                        if time.monotonic() >= next_ping:
+                            if self._accept_message(raw) > 0:
+                                last_price_row_monotonic = time.monotonic()
+                        now_monotonic = time.monotonic()
+                        if now_monotonic >= next_ping:
                             await ws.send("PING")
                             next_ping = time.monotonic() + self.ping_interval_seconds
+                        if _price_stream_is_stale(
+                            now_monotonic=now_monotonic,
+                            last_price_row_monotonic=last_price_row_monotonic,
+                            stale_reconnect_seconds=self.stale_reconnect_seconds,
+                        ):
+                            raise ChainlinkRTDSStaleStreamError(
+                                "Chainlink RTDS socket is open but the price stream "
+                                f"has been silent for {self.stale_reconnect_seconds:g}s"
+                            )
             except Exception as exc:  # noqa: BLE001
                 self._record_error(exc)
                 self._reconnect_count += 1
+                if isinstance(exc, ChainlinkRTDSStaleStreamError):
+                    self._stale_reconnect_count += 1
                 await _sleep_until_stopped(
                     self._stop_event, self.reconnect_delay_seconds
                 )
+            finally:
+                self._active_connection_opened_at_ts = None
 
-    def _accept_message(self, raw: str | bytes) -> None:
+    def _accept_message(self, raw: str | bytes) -> int:
         try:
             rows = parse_chainlink_rtds_message(raw, received_at_ts=_now_ms())
         except ChainlinkRTDSMessageError as exc:
             self._invalid_reason_counter[exc.reason_code] += 1
             self._record_error(exc)
-            return
+            return 0
+        if not rows:
+            return 0
         with self._lock:
             for row in rows:
                 key = (int(row["source_ts"]), float(row["price"]))
@@ -311,6 +369,15 @@ class PolymarketChainlinkRTDSCollector:
                     )
                 self._rows.append(row)
                 self._row_keys.add(key)
+            latest = max(rows, key=lambda row: int(row["received_at_ts"]))
+            self._last_price_row_received_at_ts = int(latest["received_at_ts"])
+            self._last_price_row_source_ts = max(
+                int(row["source_ts"]) for row in rows
+            )
+            self._last_price_row_available_at_ts = max(
+                int(row["available_at_ts"]) for row in rows
+            )
+        return len(rows)
 
     def _record_error(self, exc: Exception) -> None:
         self._last_error_type = exc.__class__.__name__
@@ -335,6 +402,15 @@ def _subscription_payload() -> dict[str, Any]:
 
 async def _sleep_until_stopped(stop_event: threading.Event, seconds: float) -> None:
     await asyncio.to_thread(stop_event.wait, seconds)
+
+
+def _price_stream_is_stale(
+    *,
+    now_monotonic: float,
+    last_price_row_monotonic: float,
+    stale_reconnect_seconds: float,
+) -> bool:
+    return now_monotonic - last_price_row_monotonic >= stale_reconnect_seconds
 
 
 def _positive_int(value: Any) -> int | None:

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
 
+from bigan.v8.polymarket.recorder import chainlink_rtds as chainlink_rtds_module
 from bigan.v8.polymarket.recorder.chainlink_rtds import (
     CHAINLINK_RTDS_RAW_ROW_SCHEMA_VERSION,
     ChainlinkRTDSMessageError,
     PolymarketChainlinkRTDSCollector,
+    _price_stream_is_stale,
     parse_chainlink_rtds_message,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_one_hour_goal import (
@@ -226,6 +229,86 @@ def test_chainlink_collector_deduplicates_replayed_snapshot_rows() -> None:
     assert len(collector.rows()) == 1
     assert collector.collection_report()["raw_price_row_count"] == 1
     assert collector.collection_report()["timestamp_causality_violation_count"] == 0
+
+
+def test_chainlink_price_stream_staleness_boundary_is_deterministic() -> None:
+    assert _price_stream_is_stale(
+        now_monotonic=14.999,
+        last_price_row_monotonic=0.0,
+        stale_reconnect_seconds=15.0,
+    ) is False
+    assert _price_stream_is_stale(
+        now_monotonic=15.0,
+        last_price_row_monotonic=0.0,
+        stale_reconnect_seconds=15.0,
+    ) is True
+
+
+def test_chainlink_collector_reconnects_silent_open_price_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collector = PolymarketChainlinkRTDSCollector(
+        max_rows=10,
+        receive_poll_seconds=0.001,
+        ping_interval_seconds=0.001,
+        reconnect_delay_seconds=0.001,
+        stale_reconnect_seconds=0.005,
+    )
+    payload = json.dumps(
+        {
+            "payload": {
+                "symbol": "btc/usd",
+                "timestamp": 3_003_000,
+                "value": 65_020.0,
+            },
+            "timestamp": 3_003_500,
+            "topic": "crypto_prices_chainlink",
+            "type": "update",
+        }
+    )
+    connection_index = 0
+
+    class FakeSocket:
+        def __init__(self, index: int) -> None:
+            self.index = index
+
+        async def send(self, _payload: str) -> None:
+            return None
+
+        async def recv(self) -> str:
+            if self.index == 1:
+                await asyncio.sleep(0.002)
+                raise TimeoutError
+            collector._stop_event.set()
+            return payload
+
+    class FakeConnection:
+        def __init__(self, index: int) -> None:
+            self.socket = FakeSocket(index)
+
+        async def __aenter__(self) -> FakeSocket:
+            return self.socket
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    def fake_connect(*_args: object, **_kwargs: object) -> FakeConnection:
+        nonlocal connection_index
+        connection_index += 1
+        return FakeConnection(connection_index)
+
+    monkeypatch.setattr(chainlink_rtds_module.websockets, "connect", fake_connect)
+
+    asyncio.run(collector._run())
+
+    report = collector.collection_report()
+    assert report["connection_count"] == 2
+    assert report["reconnect_count"] == 1
+    assert report["stale_reconnect_count"] == 1
+    assert report["stale_reconnect_seconds"] == 0.005
+    assert report["raw_price_row_count"] == 1
+    assert report["last_price_row_source_ts"] == 3_003_000
+    assert report["last_error_type"] == "ChainlinkRTDSStaleStreamError"
 
 
 def _chainlink_row(

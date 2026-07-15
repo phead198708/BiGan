@@ -47,6 +47,7 @@ def run_polymarket_async_round_collector_cli(
     max_round_start_lag_seconds: float = 30.0,
     chainlink_rtds_url: str = DEFAULT_POLYMARKET_RTDS_URL,
     chainlink_rtds_warmup_seconds: float = 5.0,
+    chainlink_rtds_stale_reconnect_seconds: float = 15.0,
     overwrite_existing: bool = False,
 ) -> dict[str, Any]:
     if round_count <= 0:
@@ -63,6 +64,8 @@ def run_polymarket_async_round_collector_cli(
         raise ValueError("max_round_start_lag_seconds must be non-negative")
     if chainlink_rtds_warmup_seconds < 0:
         raise ValueError("chainlink_rtds_warmup_seconds must be non-negative")
+    if chainlink_rtds_stale_reconnect_seconds <= 0:
+        raise ValueError("chainlink_rtds_stale_reconnect_seconds must be positive")
 
     root = Path(output_dir).expanduser().resolve()
     batch_dir = root / batch_id
@@ -73,7 +76,10 @@ def run_polymarket_async_round_collector_cli(
     finalizations: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     capture_threads: list[threading.Thread] = []
-    chainlink_collector = PolymarketChainlinkRTDSCollector(url=chainlink_rtds_url)
+    chainlink_collector = PolymarketChainlinkRTDSCollector(
+        url=chainlink_rtds_url,
+        stale_reconnect_seconds=chainlink_rtds_stale_reconnect_seconds,
+    )
     chainlink_collector.start()
     if chainlink_rtds_warmup_seconds:
         chainlink_collector.wait_for_rows(timeout_seconds=chainlink_rtds_warmup_seconds)
@@ -183,6 +189,26 @@ def run_polymarket_async_round_collector_cli(
                     "chainlink_capture_reason_codes": capture.report[
                         "chainlink_capture_reason_codes"
                     ],
+                    "chainlink_rtds_price_stream_fresh": capture.report[
+                        "chainlink_rtds_price_stream_fresh"
+                    ],
+                    "chainlink_rtds_price_stream_stale": capture.report[
+                        "chainlink_rtds_price_stream_stale"
+                    ],
+                    "chainlink_rtds_stale_reconnect_seconds": capture.report[
+                        "chainlink_rtds_stale_reconnect_seconds"
+                    ],
+                    "chainlink_rtds_stale_reconnect_count": capture.report[
+                        "chainlink_rtds_stale_reconnect_count"
+                    ],
+                    "chainlink_rtds_last_price_row_received_at_ts": capture.report[
+                        "chainlink_rtds_last_price_row_received_at_ts"
+                    ],
+                    "chainlink_rtds_current_price_stream_staleness_ms": (
+                        capture.report[
+                            "chainlink_rtds_current_price_stream_staleness_ms"
+                        ]
+                    ),
                     "reject_reason_counts": capture.report["reject_reason_counts"],
                 }
             )
@@ -497,6 +523,18 @@ def _summary(
         "chainlink_covered_capture_count": sum(
             1 for item in captures if int(item.get("raw_chainlink_price_row_count") or 0) > 0
         ),
+        "chainlink_fresh_capture_count": sum(
+            1
+            for item in captures
+            if item.get("chainlink_rtds_price_stream_fresh") is True
+        ),
+        "chainlink_rtds_stale_reconnect_count": max(
+            (
+                int(item.get("chainlink_rtds_stale_reconnect_count") or 0)
+                for item in captures
+            ),
+            default=0,
+        ),
         "finalization_attempt_count": len(finalizations),
         "exported_round_count": len(exported),
         "pending_resolution_count": len(pending),
@@ -642,6 +680,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--chainlink-rtds-url", default=DEFAULT_POLYMARKET_RTDS_URL)
     parser.add_argument("--chainlink-rtds-warmup-seconds", type=float, default=5.0)
     parser.add_argument(
+        "--chainlink-rtds-stale-reconnect-seconds",
+        type=float,
+        default=15.0,
+    )
+    parser.add_argument(
         "--finalize-only",
         action="store_true",
         help="Only scan pending round captures and try settlement finalization.",
@@ -674,6 +717,9 @@ def main(argv: list[str] | None = None) -> int:
             max_round_start_lag_seconds=args.max_round_start_lag_seconds,
             chainlink_rtds_url=args.chainlink_rtds_url,
             chainlink_rtds_warmup_seconds=args.chainlink_rtds_warmup_seconds,
+            chainlink_rtds_stale_reconnect_seconds=(
+                args.chainlink_rtds_stale_reconnect_seconds
+            ),
             overwrite_existing=args.overwrite_existing,
         )
     print(json.dumps(summary, indent=2, sort_keys=True))

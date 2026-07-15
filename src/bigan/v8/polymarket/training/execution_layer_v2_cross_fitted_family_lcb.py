@@ -161,6 +161,12 @@ def validate_cross_fitted_family_lcb_protocol(protocol: dict[str, Any]) -> None:
         == "/Volumes/PHILIPS/v8",
         "raw_evidence": collector.get("per_round_raw_evidence_required") is True,
         "async_settlement": collector.get("asynchronous_settlement_required") is True,
+        "chainlink_freshness_watchdog": float(
+            collector.get("chainlink_rtds_stale_reconnect_seconds") or 0.0
+        )
+        > 0.0
+        and float(collector.get("chainlink_rtds_warmup_seconds") or 0.0)
+        >= float(collector.get("chainlink_rtds_stale_reconnect_seconds") or 0.0),
         "cross_fit": int(cross_fit.get("fold_count") or 0) == 5
         and cross_fit.get("group_key") == "market_id"
         and cross_fit.get("fit_split") == "development_train_only",

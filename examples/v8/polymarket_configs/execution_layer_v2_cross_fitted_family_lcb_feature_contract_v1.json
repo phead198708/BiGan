@@ -1,7 +1,7 @@
 {
   "schema_version": "bigan-v8-execution-layer-v2-cross-fitted-family-lcb-feature-contract-v1",
   "candidate_name": "market_grouped_cross_fitted_family_lcb_v1",
-  "parent_protocol_sha256": "4113f8bf43237b8468d8e0739a2caff7c538e67959a084fd71f2179016416f94",
+  "parent_protocol_sha256": "4f7bbb77ff6e738ed7e17dfcd0fc41e79400963e9258574e9bf364ce8b3605e0",
   "frozen": true,
   "decision_time_safe": true,
   "feature_source": "phase2_polymarket_feature_rows_only",

@@ -93,6 +93,11 @@ def test_pending_round_persists_causal_chainlink_evidence_through_export(
 
     assert capture.report["raw_chainlink_price_row_count"] == 2
     assert capture.report["chainlink_timestamp_causality_violation_count"] == 0
+    assert capture.report["chainlink_rtds_price_stream_fresh"] is True
+    assert capture.report["chainlink_rtds_price_stream_stale"] is False
+    assert capture.report["chainlink_rtds_stale_reconnect_seconds"] == 15.0
+    assert capture.report["chainlink_rtds_stale_reconnect_count"] == 2
+    assert capture.report["chainlink_rtds_last_price_row_received_at_ts"] == 3_000_000
     assert capture.manifest["chainlink_raw_artifact_row_count"] == 2
     assert capture.manifest["chainlink_raw_artifact_sha256"]
     raw_rows = _read_jsonl(capture.raw_dir / CHAINLINK_RTDS_RAW_FILENAME)
@@ -581,6 +586,12 @@ class AsyncSettlementFakeChainlinkCollector:
             "report_type": "polymarket_chainlink_rtds_collection",
             "source_type": "polymarket_rtds_chainlink",
             "raw_price_row_count": len(self._rows),
+            "price_stream_fresh": True,
+            "price_stream_stale": False,
+            "stale_reconnect_seconds": 15.0,
+            "stale_reconnect_count": 2,
+            "last_price_row_received_at_ts": 3_000_000,
+            "current_price_stream_staleness_ms": 500,
             "read_only": True,
             "paper_only": True,
             "capital_at_risk": False,

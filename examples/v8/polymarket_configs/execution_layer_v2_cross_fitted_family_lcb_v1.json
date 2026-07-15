@@ -24,6 +24,7 @@
     "settlement_poll_interval_seconds": 15.0,
     "settlement_grace_seconds": 1200.0,
     "chainlink_rtds_warmup_seconds": 60.0,
+    "chainlink_rtds_stale_reconnect_seconds": 15.0,
     "training_corpus_root": "/Volumes/PHILIPS/v8",
     "per_round_raw_evidence_required": true,
     "asynchronous_settlement_required": true

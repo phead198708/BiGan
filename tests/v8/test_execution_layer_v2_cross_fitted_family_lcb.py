@@ -32,6 +32,9 @@ def test_cross_fitted_family_lcb_protocol_is_frozen_and_safe() -> None:
     assert protocol["conformal_lcb_protocol"]["affine_calibration_enabled"] is False
     assert protocol["collector_contract"]["public_provider_timeout_seconds"] == 330.0
     assert protocol["collector_contract"]["public_provider_http_timeout_seconds"] == 5.0
+    assert protocol["collector_contract"][
+        "chainlink_rtds_stale_reconnect_seconds"
+    ] == 15.0
     assert protocol["uses_prior_validation_or_future_labels_for_tuning"] is False
     assert protocol["safety"]["v8_execution_handoff_allowed"] is False
 
@@ -44,6 +47,13 @@ def test_cross_fitted_family_lcb_protocol_is_frozen_and_safe() -> None:
     short_window["collector_contract"]["public_provider_timeout_seconds"] = 20.0
     with pytest.raises(ValueError, match="full_round_ws_collection_window"):
         validate_cross_fitted_family_lcb_protocol(short_window)
+
+    no_chainlink_watchdog = json.loads(json.dumps(protocol))
+    no_chainlink_watchdog["collector_contract"][
+        "chainlink_rtds_stale_reconnect_seconds"
+    ] = 0.0
+    with pytest.raises(ValueError, match="chainlink_freshness_watchdog"):
+        validate_cross_fitted_family_lcb_protocol(no_chainlink_watchdog)
 
 
 def test_freeze_precollection_roles_and_prior_market_exclusions(tmp_path: Path) -> None:

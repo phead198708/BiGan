@@ -244,6 +244,7 @@ def capture_polymarket_pending_round(
         provider_failures=provider_failures,
         raw_chainlink_rows=raw_chainlink_rows,
         provider_chainlink_rows=provider_chainlink_rows,
+        chainlink_collection_report=chainlink_collection_report,
         chainlink_reason_codes=sorted(
             set(provider_chainlink_reasons + raw_chainlink_reasons)
         ),
@@ -1230,6 +1231,7 @@ def _pending_capture_report(
     provider_failures: list[dict[str, Any]],
     raw_chainlink_rows: list[dict[str, Any]],
     provider_chainlink_rows: list[dict[str, Any]],
+    chainlink_collection_report: dict[str, Any],
     chainlink_reason_codes: list[str],
 ) -> dict[str, Any]:
     market_count = len(raw_payloads["raw_polymarket_markets.jsonl"])
@@ -1289,6 +1291,24 @@ def _pending_capture_report(
             if int(row.get("source_ts") or 0) > int(row.get("available_at_ts") or 0)
         ),
         "chainlink_capture_reason_codes": chainlink_reason_codes,
+        "chainlink_rtds_price_stream_fresh": chainlink_collection_report.get(
+            "price_stream_fresh"
+        ),
+        "chainlink_rtds_price_stream_stale": chainlink_collection_report.get(
+            "price_stream_stale"
+        ),
+        "chainlink_rtds_stale_reconnect_seconds": chainlink_collection_report.get(
+            "stale_reconnect_seconds"
+        ),
+        "chainlink_rtds_stale_reconnect_count": int(
+            chainlink_collection_report.get("stale_reconnect_count") or 0
+        ),
+        "chainlink_rtds_last_price_row_received_at_ts": (
+            chainlink_collection_report.get("last_price_row_received_at_ts")
+        ),
+        "chainlink_rtds_current_price_stream_staleness_ms": (
+            chainlink_collection_report.get("current_price_stream_staleness_ms")
+        ),
         "raw_resolution_count": 0,
         "rejected_row_count": len(rejected_rows),
         "reject_reason_counts": reject_counts,

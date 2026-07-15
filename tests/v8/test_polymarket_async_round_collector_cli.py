@@ -13,6 +13,7 @@ from examples.v8.run_polymarket_async_round_collector import (
     _finalize_pending_once,
     _round_start_alignment_sleep_seconds,
     _scheduled_round_start_epoch_seconds,
+    _summary,
     _wait_until_scheduled_round_start,
     main,
     run_polymarket_async_finalizer_cli,
@@ -68,6 +69,30 @@ def test_round_capture_schedule_targets_next_boundary_before_prior_capture_finis
     )
 
     assert second_start == 900.0
+
+
+def test_batch_summary_reports_chainlink_freshness_watchdog_without_double_counting() -> None:
+    summary = _summary(
+        "chainlink-watchdog",
+        [
+            {
+                "raw_chainlink_price_row_count": 20,
+                "chainlink_rtds_price_stream_fresh": True,
+                "chainlink_rtds_stale_reconnect_count": 1,
+            },
+            {
+                "raw_chainlink_price_row_count": 22,
+                "chainlink_rtds_price_stream_fresh": True,
+                "chainlink_rtds_stale_reconnect_count": 2,
+            },
+        ],
+        [],
+        [],
+    )
+
+    assert summary["chainlink_covered_capture_count"] == 2
+    assert summary["chainlink_fresh_capture_count"] == 2
+    assert summary["chainlink_rtds_stale_reconnect_count"] == 2
 
 
 def test_capture_worker_waits_again_when_spawned_before_scheduled_boundary() -> None:
