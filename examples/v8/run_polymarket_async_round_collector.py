@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import threading
@@ -342,6 +343,24 @@ def _finalize_pending_once(
         if finalization_report_path.exists():
             previous = _read_json(finalization_report_path)
             if previous.get("finalization_status") == "exported":
+                try:
+                    recovered = _recover_existing_exported_finalization(
+                        run_dir=run_dir,
+                        destination_root=destination_root,
+                        report=previous,
+                    )
+                except ValueError as exc:
+                    with lock:
+                        errors.append(
+                            {
+                                "run_dir": str(run_dir),
+                                "error": str(exc),
+                                "stage": "existing_exported_finalization_recovery",
+                            }
+                        )
+                    continue
+                with lock:
+                    _upsert_by_run_id(finalizations, recovered)
                 continue
         try:
             provider = PolymarketPublicHTTPRealCorpusProvider(
@@ -373,6 +392,79 @@ def _finalize_pending_once(
                     "reject_reason_counts": result.report["reject_reason_counts"],
                 },
             )
+
+
+def _recover_existing_exported_finalization(
+    *,
+    run_dir: Path,
+    destination_root: Path,
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    manifest_path = run_dir / "pending_round_finalization_manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError("existing exported finalization manifest is missing")
+    manifest = _read_json(manifest_path)
+    expected = {
+        "run_id": run_dir.name,
+        "finalization_status": "exported",
+        "pending_resolution": False,
+        "training_eligible": True,
+    }
+    for name, value in expected.items():
+        if report.get(name) != value:
+            raise ValueError(f"existing exported finalization report {name} mismatch")
+    for name, value in (
+        ("run_id", run_dir.name),
+        ("finalization_status", "exported"),
+        ("pending_resolution", False),
+    ):
+        if manifest.get(name) != value:
+            raise ValueError(f"existing exported finalization manifest {name} mismatch")
+    for payload_name, payload in (("report", report), ("manifest", manifest)):
+        if not (
+            payload.get("paper_only") is True
+            and payload.get("capital_at_risk") is False
+            and payload.get("polymarket_write_enabled") is False
+            and payload.get("wallet_signing_enabled") is False
+        ):
+            raise ValueError(f"existing exported finalization {payload_name} safety mismatch")
+    if int(report.get("raw_resolution_count") or 0) <= 0:
+        raise ValueError("existing exported finalization resolution evidence is missing")
+    if report.get("reject_reason_counts"):
+        raise ValueError("existing exported finalization contains reject reasons")
+    exported_value = str(report.get("exported_training_corpus_dir") or "")
+    if exported_value != str(manifest.get("exported_training_corpus_dir") or ""):
+        raise ValueError("existing exported finalization corpus path mismatch")
+    exported_dir = Path(exported_value).expanduser().resolve()
+    if not exported_dir.is_relative_to(destination_root.expanduser().resolve()):
+        raise ValueError("existing exported finalization corpus is outside destination root")
+    local_manifest_path = run_dir / "phase2_corpus" / "polymarket_corpus_manifest.json"
+    exported_manifest_path = exported_dir / "polymarket_corpus_manifest.json"
+    if not local_manifest_path.is_file() or not exported_manifest_path.is_file():
+        raise ValueError("existing exported corpus manifest is missing")
+    local_sha256 = _sha256_file(local_manifest_path)
+    exported_sha256 = _sha256_file(exported_manifest_path)
+    expected_sha256 = str(report.get("phase2_corpus_manifest_sha256") or "")
+    if manifest.get("phase2_corpus_manifest_sha256") != expected_sha256:
+        raise ValueError("existing exported finalization manifest hash lineage mismatch")
+    if not expected_sha256 or local_sha256 != expected_sha256 or exported_sha256 != expected_sha256:
+        raise ValueError("existing exported corpus manifest hash mismatch")
+    return {
+        "run_id": run_dir.name,
+        "run_dir": str(run_dir),
+        "finalization_status": "exported",
+        "pending_resolution": False,
+        "training_eligible": True,
+        "exported_training_corpus_dir": str(exported_dir),
+        "raw_resolution_count": int(report["raw_resolution_count"]),
+        "reject_reason_counts": {},
+        "recovered_from_existing_exported_report": True,
+        "existing_finalization_report_sha256": _sha256_file(
+            run_dir / "pending_round_finalization_report.json"
+        ),
+        "existing_finalization_manifest_sha256": _sha256_file(manifest_path),
+        "exported_corpus_manifest_sha256": expected_sha256,
+    }
 
 
 def _summary(
@@ -422,6 +514,14 @@ def _upsert_by_run_id(items: list[dict[str, Any]], item: dict[str, Any]) -> None
             items[index] = item
             return
     items.append(item)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _utc_stamp() -> str:

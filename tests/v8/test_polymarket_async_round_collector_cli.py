@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from pathlib import Path
@@ -249,3 +250,150 @@ def test_finalize_pending_once_scopes_scan_to_requested_batch(tmp_path: Path, mo
     assert finalized_dirs == [matching]
     assert [row["run_id"] for row in finalizations] == [matching.name]
     assert errors == []
+
+
+def test_finalize_pending_once_recovers_hash_verified_existing_export(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_dir, destination_root = _existing_exported_finalization_fixture(
+        tmp_path,
+        run_id="recovery-batch-round01",
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "finalize_polymarket_pending_round",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("provider retry must not run for an existing export")
+        ),
+    )
+    finalizations = [
+        {
+            "run_id": run_dir.name,
+            "finalization_status": "pending_resolution",
+            "pending_resolution": True,
+        }
+    ]
+    errors: list[dict] = []
+
+    _finalize_pending_once(
+        output_dir=tmp_path,
+        destination_root=destination_root,
+        clob_ws_url="wss://example.invalid",
+        overwrite_existing=False,
+        batch_id_prefix="recovery-batch",
+        finalizations=finalizations,
+        errors=errors,
+        lock=threading.Lock(),
+    )
+
+    assert errors == []
+    assert len(finalizations) == 1
+    assert finalizations[0]["finalization_status"] == "exported"
+    assert finalizations[0]["pending_resolution"] is False
+    assert finalizations[0]["training_eligible"] is True
+    assert finalizations[0]["recovered_from_existing_exported_report"] is True
+    assert finalizations[0]["exported_corpus_manifest_sha256"] == _sha256(
+        destination_root / "polymarket" / "market-1" / "polymarket_corpus_manifest.json"
+    )
+
+
+def test_finalize_pending_once_rejects_tampered_existing_export(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_dir, destination_root = _existing_exported_finalization_fixture(
+        tmp_path,
+        run_id="tamper-batch-round01",
+    )
+    exported_manifest = (
+        destination_root / "polymarket" / "market-1" / "polymarket_corpus_manifest.json"
+    )
+    exported_manifest.write_text('{"tampered":true}\n')
+    monkeypatch.setattr(
+        collector_module,
+        "finalize_polymarket_pending_round",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("provider retry must not overwrite a failed recovery")
+        ),
+    )
+    finalizations = [
+        {
+            "run_id": run_dir.name,
+            "finalization_status": "pending_resolution",
+            "pending_resolution": True,
+        }
+    ]
+    errors: list[dict] = []
+
+    _finalize_pending_once(
+        output_dir=tmp_path,
+        destination_root=destination_root,
+        clob_ws_url="wss://example.invalid",
+        overwrite_existing=False,
+        batch_id_prefix="tamper-batch",
+        finalizations=finalizations,
+        errors=errors,
+        lock=threading.Lock(),
+    )
+
+    assert finalizations[0]["finalization_status"] == "pending_resolution"
+    assert len(errors) == 1
+    assert errors[0]["stage"] == "existing_exported_finalization_recovery"
+    assert errors[0]["error"] == "existing exported corpus manifest hash mismatch"
+    assert json.loads(
+        (run_dir / "pending_round_finalization_report.json").read_text()
+    )["finalization_status"] == "exported"
+
+
+def _existing_exported_finalization_fixture(
+    root: Path,
+    *,
+    run_id: str,
+) -> tuple[Path, Path]:
+    run_dir = root / run_id
+    run_dir.mkdir()
+    (run_dir / "pending_round_capture_manifest.json").write_text(
+        json.dumps({"pending_resolution": True})
+    )
+    local_corpus = run_dir / "phase2_corpus"
+    local_corpus.mkdir()
+    destination_root = root / "training"
+    exported_corpus = destination_root / "polymarket" / "market-1"
+    exported_corpus.mkdir(parents=True)
+    manifest_payload = '{"schema_version":"test-corpus"}\n'
+    local_manifest = local_corpus / "polymarket_corpus_manifest.json"
+    exported_manifest = exported_corpus / "polymarket_corpus_manifest.json"
+    local_manifest.write_text(manifest_payload)
+    exported_manifest.write_text(manifest_payload)
+    manifest_sha256 = _sha256(local_manifest)
+    report = {
+        "run_id": run_id,
+        "finalization_status": "exported",
+        "pending_resolution": False,
+        "training_eligible": True,
+        "raw_resolution_count": 1,
+        "reject_reason_counts": {},
+        "exported_training_corpus_dir": str(exported_corpus),
+        "phase2_corpus_manifest_sha256": manifest_sha256,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    manifest = {
+        "run_id": run_id,
+        "finalization_status": "exported",
+        "pending_resolution": False,
+        "exported_training_corpus_dir": str(exported_corpus),
+        "phase2_corpus_manifest_sha256": manifest_sha256,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
+    (run_dir / "pending_round_finalization_report.json").write_text(json.dumps(report))
+    (run_dir / "pending_round_finalization_manifest.json").write_text(json.dumps(manifest))
+    return run_dir, destination_root
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
