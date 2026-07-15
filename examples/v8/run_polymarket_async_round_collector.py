@@ -164,6 +164,16 @@ def run_polymarket_async_round_collector_cli(
                     ),
                     "capture_status": capture.report["capture_status"],
                     "pending_resolution": capture.report["pending_resolution"],
+                    "market_family": market_family,
+                    "orderbook_snapshot_interval_seconds": (
+                        orderbook_snapshot_interval_seconds
+                    ),
+                    "public_provider_timeout_seconds": (
+                        public_provider_timeout_seconds
+                    ),
+                    "public_provider_http_timeout_seconds": (
+                        public_provider_http_timeout_seconds
+                    ),
                     "raw_polymarket_market_count": capture.report["raw_polymarket_market_count"],
                     "raw_orderbook_row_count": capture.report["raw_orderbook_row_count"],
                     "provider_raw_orderbook_snapshot_count": capture.report[
