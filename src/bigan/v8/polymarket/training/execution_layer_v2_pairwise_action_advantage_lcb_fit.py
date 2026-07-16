@@ -1129,21 +1129,47 @@ def _cross_fit_training_predictions(
         )
     ordered_markets = sorted(market_first_ts, key=lambda value: (market_first_ts[value], value))
     fold_count = int(model_protocol["fold_count"])
+    initial_training_market_count = int(model_protocol["initial_training_market_count"])
+    validation_market_count_per_fold = int(model_protocol["validation_market_count_per_fold"])
+    expected_oof_market_count = int(model_protocol["expected_oof_market_count"])
     if len(ordered_markets) != ROLE_MARKET_COUNTS["development_train"] or fold_count != 5:
         raise ValueError("cross-fit requires exactly 90 markets and five folds")
-    markets_per_fold = len(ordered_markets) // fold_count
+    if model_protocol.get("fold_assignment") != (
+        "chronological_expanding_window_prior_markets_only"
+    ):
+        raise ValueError("cross-fit requires chronological expanding-window folds")
+    if model_protocol.get("future_market_labels_excluded_from_each_fold") is not True:
+        raise ValueError("cross-fit must exclude future market labels from every fold")
+    if (
+        initial_training_market_count + fold_count * validation_market_count_per_fold
+        != len(ordered_markets)
+        or fold_count * validation_market_count_per_fold != expected_oof_market_count
+    ):
+        raise ValueError("cross-fit warmup and validation windows do not cover 90 markets")
     fold_market_groups = [
-        ordered_markets[index * markets_per_fold : (index + 1) * markets_per_fold]
+        ordered_markets[
+            initial_training_market_count
+            + index * validation_market_count_per_fold : initial_training_market_count
+            + (index + 1) * validation_market_count_per_fold
+        ]
         for index in range(fold_count)
     ]
     oof_rows: list[dict[str, Any]] = []
     fold_reports: list[dict[str, Any]] = []
     xgb_protocol = _xgb_model_protocol(model_protocol)
     for fold_index, validation_markets in enumerate(fold_market_groups, start=1):
+        validation_start_index = (
+            initial_training_market_count + (fold_index - 1) * validation_market_count_per_fold
+        )
         validation_set = set(validation_markets)
-        training_markets = {market for market in ordered_markets if market not in validation_set}
+        training_market_list = ordered_markets[:validation_start_index]
+        training_markets = set(training_market_list)
         fit_rows = [row for row in rows if str(row["market_id"]) in training_markets]
         validation_rows = [row for row in rows if str(row["market_id"]) in validation_set]
+        training_max_decision_ts = max(int(row["decision_ts"]) for row in fit_rows)
+        validation_min_decision_ts = min(int(row["decision_ts"]) for row in validation_rows)
+        if training_max_decision_ts >= validation_min_decision_ts:
+            raise ValueError("cross-fit training markets are not strictly earlier than validation")
         booster = _train_pairwise_ranker(
             fit_rows,
             feature_columns=feature_columns,
@@ -1173,43 +1199,52 @@ def _cross_fit_training_predictions(
                 "fold_index": fold_index,
                 "training_market_count": len(training_markets),
                 "validation_market_count": len(validation_markets),
-                "training_market_ids_sha256": canonical_json_sha256(sorted(training_markets)),
+                "training_market_ids_sha256": canonical_json_sha256(training_market_list),
                 "validation_market_ids": validation_markets,
                 "validation_market_ids_sha256": canonical_json_sha256(validation_markets),
                 "market_overlap_count": 0,
+                "training_max_decision_ts": training_max_decision_ts,
+                "validation_min_decision_ts": validation_min_decision_ts,
+                "training_strictly_precedes_validation": True,
+                "future_market_label_access_count": 0,
                 "ranking_metrics": _decision_group_ranking_metrics(
                     validation_rows,
                     predictions,
                 ),
             }
         )
-    if len(oof_rows) != len(rows):
+    expected_oof_action_row_count = expected_oof_market_count * len(REQUIRED_ACTIONS)
+    if len(oof_rows) != expected_oof_action_row_count:
         raise ValueError("cross-fit OOF prediction coverage is incomplete")
     if len({str(row["action_row_sha256"]) for row in oof_rows}) != len(oof_rows):
         raise ValueError("cross-fit OOF prediction identities are duplicated")
+    oof_predictions_by_row = {
+        str(row["action_row_sha256"]): float(row["oof_raw_prediction"]) for row in oof_rows
+    }
+    oof_source_rows = [
+        row for row in rows if str(row["action_row_sha256"]) in oof_predictions_by_row
+    ]
     return {
-        "method": "five_fold_chronological_contiguous_market_grouped_oof",
+        "method": "five_fold_chronological_expanding_window_market_grouped_oof",
         "objective": "rank:pairwise",
         "decision_group_key": "market_id_decision_ts",
         "fold_count": fold_count,
         "market_count": len(ordered_markets),
         "decision_group_count": len(rows) // len(REQUIRED_ACTIONS),
+        "initial_training_only_market_count": initial_training_market_count,
+        "oof_market_count": expected_oof_market_count,
+        "oof_decision_group_count": len(oof_source_rows) // len(REQUIRED_ACTIONS),
         "action_row_count": len(rows),
         "oof_prediction_count": len(oof_rows),
         "oof_prediction_coverage_complete": True,
+        "all_development_train_markets_have_oof_predictions": False,
+        "initial_training_markets_excluded_from_oof": True,
+        "future_market_label_access_violation_count": 0,
+        "training_window": "expanding_prior_markets_only",
         "fold_reports": fold_reports,
         "ranking_metrics": _decision_group_ranking_metrics(
-            rows,
-            [
-                float(
-                    next(
-                        value["oof_raw_prediction"]
-                        for value in oof_rows
-                        if value["action_row_sha256"] == row["action_row_sha256"]
-                    )
-                )
-                for row in rows
-            ],
+            oof_source_rows,
+            [oof_predictions_by_row[str(row["action_row_sha256"])] for row in oof_source_rows],
         ),
         "oof_predictions": oof_rows,
         "uses_development_calibration_labels": False,

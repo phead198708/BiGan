@@ -193,7 +193,16 @@ def validate_pairwise_action_advantage_lcb_protocol(protocol: dict[str, Any]) ->
         >= float(collector.get("chainlink_rtds_stale_reconnect_seconds") or 0.0),
         "cross_fit": int(cross_fit.get("fold_count") or 0) == 5
         and cross_fit.get("group_key") == "market_id"
-        and cross_fit.get("fit_split") == "development_train_only",
+        and cross_fit.get("fit_split") == "development_train_only"
+        and cross_fit.get("fold_assignment") == "chronological_expanding_window_prior_markets_only"
+        and int(cross_fit.get("initial_training_market_count") or 0) == 15
+        and int(cross_fit.get("validation_market_count_per_fold") or 0) == 15
+        and int(cross_fit.get("expected_oof_market_count") or 0) == 75
+        and int(cross_fit.get("initial_training_market_count") or 0)
+        + int(cross_fit.get("fold_count") or 0)
+        * int(cross_fit.get("validation_market_count_per_fold") or 0)
+        == ROLE_MARKET_COUNTS["development_train"]
+        and cross_fit.get("future_market_labels_excluded_from_each_fold") is True,
         "deterministic_model": cross_fit.get("objective") == "rank:pairwise"
         and cross_fit.get("fixed_model_family")
         == "deterministic_market_grouped_xgboost_pairwise_ranker"

@@ -55,6 +55,10 @@ def test_issue175_protocol_freezes_roles_pairwise_objective_and_quarantine() -> 
         "confirmatory_validation": 60,
     }
     assert protocol["cross_fit_protocol"]["objective"] == "rank:pairwise"
+    assert protocol["cross_fit_protocol"]["fold_assignment"] == (
+        "chronological_expanding_window_prior_markets_only"
+    )
+    assert protocol["cross_fit_protocol"]["future_market_labels_excluded_from_each_fold"] is True
     assert (
         protocol["action_advantage_lcb_protocol"]["forced_action_side_or_family_quota_enabled"]
         is False
@@ -254,7 +258,7 @@ def test_pairwise_ranking_metrics_are_true_decision_point_scoped() -> None:
     assert metrics["mean_regret"] == 0.0
 
 
-def test_pairwise_cross_fit_covers_all_actions_and_markets() -> None:
+def test_pairwise_cross_fit_uses_strictly_prior_markets_only() -> None:
     rows = []
     for market_index in range(90):
         market_rows = _decision_rows(
@@ -275,8 +279,30 @@ def test_pairwise_cross_fit_covers_all_actions_and_markets() -> None:
     assert report["objective"] == "rank:pairwise"
     assert report["market_count"] == 90
     assert report["decision_group_count"] == 90
-    assert report["oof_prediction_count"] == 450
+    assert report["initial_training_only_market_count"] == 15
+    assert report["oof_market_count"] == 75
+    assert report["oof_decision_group_count"] == 75
+    assert report["oof_prediction_count"] == 375
     assert report["oof_prediction_coverage_complete"] is True
+    assert report["all_development_train_markets_have_oof_predictions"] is False
+    assert report["initial_training_markets_excluded_from_oof"] is True
+    assert report["future_market_label_access_violation_count"] == 0
+    assert [fold["training_market_count"] for fold in report["fold_reports"]] == [
+        15,
+        30,
+        45,
+        60,
+        75,
+    ]
+    assert all(
+        fold["training_strictly_precedes_validation"] is True
+        and fold["training_max_decision_ts"] < fold["validation_min_decision_ts"]
+        and fold["future_market_label_access_count"] == 0
+        for fold in report["fold_reports"]
+    )
+    oof_market_ids = {row["market_id"] for row in report["oof_predictions"]}
+    assert not ({f"train-{index:03d}" for index in range(15)} & oof_market_ids)
+    assert len(oof_market_ids) == 75
     assert report["uses_confirmatory_validation_labels"] is False
     assert report["uses_issue174_confirmatory_labels"] is False
 
