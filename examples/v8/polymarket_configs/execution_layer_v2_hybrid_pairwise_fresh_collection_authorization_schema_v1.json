@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigan-v8-hybrid-pairwise-fresh-collection-authorization-v1",
+  "title": "BiGan v8 Hybrid Pairwise Fresh Collection Authorization",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "issue_number",
+    "authorized",
+    "authorization_created_at_ts",
+    "read_only_public_provider",
+    "collector_execution_authorized",
+    "hybrid_precollection_freeze",
+    "final_prior_lineage_quarantine",
+    "collector_script_sha256",
+    "collector_git_commit",
+    "collection_plan",
+    "collection_output_dir",
+    "market_identity_cache_path",
+    "paper_only",
+    "capital_at_risk",
+    "broker_exchange_write_enabled",
+    "live_exchange_write_enabled",
+    "polymarket_write_enabled",
+    "wallet_signing_enabled",
+    "source_model_candidate_eligible",
+    "freeze_ready",
+    "promotion_evidence_eligible",
+    "v8_execution_handoff_allowed",
+    "#134_resume_allowed",
+    "#146_start_allowed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "bigan-v8-hybrid-pairwise-fresh-collection-authorization-v1"
+    },
+    "issue_number": {
+      "const": 185
+    },
+    "authorized": {
+      "const": true
+    },
+    "authorization_created_at_ts": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "read_only_public_provider": {
+      "const": true
+    },
+    "collector_execution_authorized": {
+      "const": true
+    },
+    "hybrid_precollection_freeze": {
+      "$ref": "#/$defs/artifact_descriptor"
+    },
+    "final_prior_lineage_quarantine": {
+      "$ref": "#/$defs/artifact_descriptor"
+    },
+    "collector_script_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "collector_git_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "collection_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "market_family",
+        "initial_capture_attempt_count",
+        "maximum_total_capture_attempt_count"
+      ],
+      "properties": {
+        "market_family": {
+          "const": "btc_updown_5m"
+        },
+        "initial_capture_attempt_count": {
+          "const": 120
+        },
+        "maximum_total_capture_attempt_count": {
+          "const": 150
+        }
+      }
+    },
+    "collection_output_dir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "market_identity_cache_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "batch_id_prefix": {
+      "type": "string",
+      "minLength": 1
+    },
+    "paper_only": {
+      "const": true
+    },
+    "capital_at_risk": {
+      "const": false
+    },
+    "broker_exchange_write_enabled": {
+      "const": false
+    },
+    "live_exchange_write_enabled": {
+      "const": false
+    },
+    "polymarket_write_enabled": {
+      "const": false
+    },
+    "wallet_signing_enabled": {
+      "const": false
+    },
+    "source_model_candidate_eligible": {
+      "const": false
+    },
+    "freeze_ready": {
+      "const": false
+    },
+    "promotion_evidence_eligible": {
+      "const": false
+    },
+    "v8_execution_handoff_allowed": {
+      "const": false
+    },
+    "#134_resume_allowed": {
+      "const": false
+    },
+    "#146_start_allowed": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifact_descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}
