@@ -1228,7 +1228,11 @@ def _extract_market_ids(payload: Any) -> set[str]:
         for key, value in payload.items():
             if key == "market_id" and isinstance(value, str):
                 market_ids.add(value)
-            elif key == "market_ids" and isinstance(value, list):
+            elif key in {
+                "market_ids",
+                "prior_market_ids",
+                "selected_market_ids",
+            } and isinstance(value, list):
                 market_ids.update(str(item) for item in value)
             else:
                 market_ids.update(_extract_market_ids(value))

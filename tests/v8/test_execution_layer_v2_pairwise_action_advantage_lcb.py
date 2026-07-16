@@ -29,6 +29,9 @@ from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_l
 from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_action_value import (
     REQUIRED_ACTIONS,
 )
+from examples.v8.build_execution_layer_v2_pairwise_action_advantage_quarantine_registry import (
+    build_quarantine_registry,
+)
 
 PROTOCOL_PATH = Path(
     "examples/v8/polymarket_configs/execution_layer_v2_pairwise_action_advantage_lcb_v1.json"
@@ -144,6 +147,89 @@ def test_issue175_precollection_freeze_pins_quarantine_and_role_plan(
     ]
     assert manifest["collection_started"] is False
     assert manifest["source_model_candidate_eligible"] is False
+
+
+def test_issue175_quarantine_registry_includes_raw_capture_identity_without_outcomes(
+    tmp_path: Path,
+) -> None:
+    prior = tmp_path / "prior.json"
+    prior.write_text(
+        json.dumps(
+            {
+                "prior_market_ids": ["prior-a"],
+                "maximum_prior_decision_ts": 1_000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assignment = tmp_path / "assignment.jsonl"
+    assignment.write_text(
+        json.dumps(
+            {
+                "market_id": "assigned-b",
+                "maximum_decision_ts": 2_000,
+                "labels_or_outcomes_opened_for_assignment": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    capture_run = tmp_path / "capture"
+    raw_dir = capture_run / "raw"
+    raw_dir.mkdir(parents=True)
+    raw_market = raw_dir / "raw_polymarket_markets.jsonl"
+    raw_market.write_text(
+        json.dumps(
+            {
+                "market_id": "overflow-c",
+                "market_start_ts": 3_000,
+                "market_end_ts": 4_000,
+                "paper_only": True,
+                "capital_at_risk": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    batch = tmp_path / "batch.json"
+    batch.write_text(
+        json.dumps(
+            {
+                "batch_id": "batch",
+                "capture_count": 1,
+                "captures": [
+                    {
+                        "run_id": "capture",
+                        "run_dir": str(capture_run),
+                        "scheduled_round_start_ts": 3_000,
+                    }
+                ],
+                "paper_only": True,
+                "capital_at_risk": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = build_quarantine_registry(
+        run_id="issue175-quarantine",
+        output_dir=tmp_path / "runs",
+        created_at_ts=5_000,
+        source_registry_pins=((prior, _sha256(prior)),),
+        assignment_rows_pins=((assignment, _sha256(assignment)),),
+        batch_progress_pins=((batch, _sha256(batch)),),
+    )
+    registry = result["registry"]
+
+    assert registry["prior_market_ids"] == [
+        "assigned-b",
+        "overflow-c",
+        "prior-a",
+    ]
+    assert registry["maximum_prior_decision_ts"] == 4_000
+    assert registry["outcome_label_or_pnl_artifacts_opened"] is False
+    assert registry["resolution_artifacts_opened"] is False
+    assert registry["missing_capture_market_identity_count"] == 0
+    assert registry["source_model_candidate_eligible"] is False
 
 
 def test_pairwise_decision_groups_require_all_five_actions() -> None:
