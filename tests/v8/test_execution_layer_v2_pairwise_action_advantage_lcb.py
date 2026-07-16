@@ -241,6 +241,80 @@ def test_issue175_quarantine_registry_includes_raw_capture_identity_without_outc
     assert registry["source_model_candidate_eligible"] is False
 
 
+def test_issue175_quarantine_registry_falls_back_when_normalized_market_file_is_empty(
+    tmp_path: Path,
+) -> None:
+    prior = tmp_path / "prior.json"
+    prior.write_text(
+        json.dumps(
+            {
+                "prior_market_ids": ["prior-a"],
+                "maximum_prior_decision_ts": 1_000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    capture_run = tmp_path / "capture"
+    raw_dir = capture_run / "raw"
+    provider_raw_dir = capture_run / "provider_raw"
+    raw_dir.mkdir(parents=True)
+    provider_raw_dir.mkdir(parents=True)
+    (raw_dir / "raw_polymarket_markets.jsonl").write_text("", encoding="utf-8")
+    provider_market_path = provider_raw_dir / "raw_polymarket_markets.jsonl"
+    provider_market_path.write_text(
+        json.dumps(
+            {
+                "market_id": "provider-overflow-b",
+                "market_start_ts": 2_000,
+                "market_end_ts": 3_000,
+                "paper_only": True,
+                "capital_at_risk": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    batch = tmp_path / "batch.json"
+    batch.write_text(
+        json.dumps(
+            {
+                "batch_id": "batch",
+                "capture_count": 1,
+                "captures": [
+                    {
+                        "run_id": "capture",
+                        "run_dir": str(capture_run),
+                        "scheduled_round_start_ts": 2_000,
+                        "capture_status": "blocked_fail_closed",
+                    }
+                ],
+                "paper_only": True,
+                "capital_at_risk": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = build_quarantine_registry(
+        run_id="issue175-provider-fallback-quarantine",
+        output_dir=tmp_path / "runs",
+        created_at_ts=4_000,
+        source_registry_pins=((prior, _sha256(prior)),),
+        assignment_rows_pins=(),
+        batch_progress_pins=((batch, _sha256(batch)),),
+    )
+    registry = result["registry"]
+
+    assert registry["prior_market_ids"] == ["prior-a", "provider-overflow-b"]
+    provider_entry = next(
+        row for row in registry["market_entries"] if row["market_id"] == "provider-overflow-b"
+    )
+    assert provider_entry["source_paths"] == [str(provider_market_path.resolve())]
+    assert registry["missing_capture_market_identity_count"] == 0
+    assert registry["outcome_label_or_pnl_artifacts_opened"] is False
+    assert registry["resolution_artifacts_opened"] is False
+
+
 def test_pairwise_decision_groups_require_all_five_actions() -> None:
     rows = _decision_rows(market_id="market-a", decision_ts=1_000)
     _validate_complete_decision_groups(rows)

@@ -104,15 +104,24 @@ def build_quarantine_registry(
         for capture in captures:
             capture_count += 1
             run_dir = Path(str(capture.get("run_dir") or "")).resolve()
-            market_path = run_dir / "raw" / "raw_polymarket_markets.jsonl"
-            if not market_path.is_file():
-                market_path = run_dir / "provider_raw" / "raw_polymarket_markets.jsonl"
-            if not market_path.is_file():
-                missing_capture_market_identity_count += 1
-                continue
-            market_rows = _load_json_or_jsonl(market_path)
-            market_ids = _extract_market_ids(market_rows)
-            if not market_ids:
+            market_path: Path | None = None
+            market_rows: list[Any] = []
+            market_ids: set[str] = set()
+            for candidate_path in (
+                run_dir / "raw" / "raw_polymarket_markets.jsonl",
+                run_dir / "provider_raw" / "raw_polymarket_markets.jsonl",
+            ):
+                if not candidate_path.is_file():
+                    continue
+                candidate_rows = _load_json_or_jsonl(candidate_path)
+                candidate_market_ids = _extract_market_ids(candidate_rows)
+                if not candidate_market_ids:
+                    continue
+                market_path = candidate_path
+                market_rows = candidate_rows
+                market_ids = candidate_market_ids
+                break
+            if market_path is None or not market_ids:
                 missing_capture_market_identity_count += 1
                 continue
             capture_market_count += len(market_ids)
