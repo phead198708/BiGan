@@ -9,12 +9,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import xgboost as xgb
+
 from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.training.execution_layer_v2_execution_compatible_mean_lcb import (
+    FORBIDDEN_REGISTRY_FIELDS,
+    _capture_quality_audit,
+    _execution_compatibility_audit,
+    _finalization_quality_reasons,
+    _find_fields,
+    _outcome_blind_corpus_role_audit,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_execution_compatible_mean_lcb_fit import (
     TRADE_FAMILIES,
     _blocked_safety_fields,
     _cross_fit_training_predictions,
     _descriptor,
+    _load_corpus_action_rows,
     _load_json,
     _load_jsonl,
     _market_grouped_mean_residual_ci,
@@ -32,6 +43,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_execution_compatible_mean_l
 )
 from bigan.v8.polymarket.training.execution_layer_v2_hierarchical_action_value import (
     _accepted_bet_metrics,
+    _market_robustness,
     _train_family_booster,
 )
 
@@ -99,6 +111,81 @@ class HierarchicalSideFamilyLCBFreezeConfig:
             "issue173_development_fit_freeze_path",
         ):
             object.__setattr__(self, field, Path(getattr(self, field)))
+
+
+@dataclass(frozen=True, slots=True)
+class HierarchicalSideFamilyLCBConfirmatoryAssignmentConfig:
+    """Pinned collector evidence for outcome-blind fresh assignment."""
+
+    run_id: str
+    output_dir: Path | str
+    precollection_freeze_manifest_path: Path | str
+    expected_precollection_freeze_manifest_sha256: str
+    batch_progress_pins: tuple[tuple[Path | str, str], ...]
+    training_corpus_root: Path | str = Path("/Volumes/PHILIPS/v8")
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        _require_sha256(
+            self.expected_precollection_freeze_manifest_sha256,
+            name="precollection freeze manifest SHA-256",
+        )
+        if not self.batch_progress_pins:
+            raise ValueError("at least one batch progress pin is required")
+        normalized = []
+        for path, sha256 in self.batch_progress_pins:
+            _require_sha256(sha256, name="batch progress SHA-256")
+            normalized.append((Path(path), sha256.lower()))
+        object.__setattr__(self, "output_dir", Path(self.output_dir))
+        object.__setattr__(
+            self,
+            "precollection_freeze_manifest_path",
+            Path(self.precollection_freeze_manifest_path),
+        )
+        object.__setattr__(self, "batch_progress_pins", tuple(normalized))
+        object.__setattr__(self, "training_corpus_root", Path(self.training_corpus_root))
+
+
+@dataclass(frozen=True, slots=True)
+class HierarchicalSideFamilyLCBConfirmatoryEvaluationConfig:
+    """Frozen inputs for the single fresh confirmatory label access."""
+
+    run_id: str
+    output_dir: Path | str
+    development_candidate_freeze_manifest_path: Path | str
+    expected_development_candidate_freeze_manifest_sha256: str
+    confirmatory_assignment_manifest_path: Path | str
+    expected_confirmatory_assignment_manifest_sha256: str
+    evaluation_implementation_git_commit: str
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        _require_sha256(
+            self.expected_development_candidate_freeze_manifest_sha256,
+            name="development candidate freeze SHA-256",
+        )
+        _require_sha256(
+            self.expected_confirmatory_assignment_manifest_sha256,
+            name="confirmatory assignment manifest SHA-256",
+        )
+        if len(self.evaluation_implementation_git_commit) != 40 or any(
+            char not in "0123456789abcdef"
+            for char in self.evaluation_implementation_git_commit.lower()
+        ):
+            raise ValueError("evaluation implementation commit must be a full SHA-1")
+        object.__setattr__(self, "output_dir", Path(self.output_dir))
+        object.__setattr__(
+            self,
+            "development_candidate_freeze_manifest_path",
+            Path(self.development_candidate_freeze_manifest_path),
+        )
+        object.__setattr__(
+            self,
+            "confirmatory_assignment_manifest_path",
+            Path(self.confirmatory_assignment_manifest_path),
+        )
 
 
 def validate_hierarchical_side_family_lcb_protocol(
@@ -563,6 +650,558 @@ def freeze_hierarchical_side_family_lcb_candidate(
         "training_report": training_report,
         "precollection_manifest": precollection,
     }
+
+
+def assign_hierarchical_side_family_lcb_confirmatory(
+    config: HierarchicalSideFamilyLCBConfirmatoryAssignmentConfig,
+) -> dict[str, Any]:
+    """Assign the earliest 60 fresh execution-compatible markets outcome-blind."""
+
+    precollection_path = config.precollection_freeze_manifest_path.resolve()
+    _verify_pin(
+        precollection_path,
+        config.expected_precollection_freeze_manifest_sha256,
+        name="#174 precollection freeze",
+    )
+    precollection = _load_json(precollection_path)
+    if (
+        precollection.get("collection_ready") is not True
+        or precollection.get("collection_started") is not False
+        or precollection.get("fresh_confirmatory_labels_opened") is not False
+    ):
+        raise ValueError("#174 precollection freeze is not ready and outcome-blind")
+    protocol_descriptor = _verified_descriptor(precollection.get("protocol"), name="#174 protocol")
+    protocol = _load_json(Path(protocol_descriptor["path"]))
+    validate_hierarchical_side_family_lcb_protocol(protocol)
+    development_freeze_descriptor = _verified_descriptor(
+        precollection.get("development_candidate_freeze"),
+        name="#174 development candidate freeze",
+    )
+    development_freeze = _load_json(Path(development_freeze_descriptor["path"]))
+    if (
+        development_freeze.get("development_freeze_gate_passed") is not True
+        or development_freeze.get(
+            "candidate_configuration_frozen_before_fresh_confirmatory_collection"
+        )
+        is not True
+    ):
+        raise ValueError("#174 development candidate was not frozen")
+    prior_descriptor = _verified_descriptor(
+        precollection.get("prior_market_exclusion_registry"),
+        name="#174 prior market exclusion registry",
+    )
+    prior_registry = _load_json(Path(prior_descriptor["path"]))
+    prior_market_ids = {str(value) for value in prior_registry.get("prior_market_ids") or []}
+    if not prior_market_ids or canonical_json_sha256(
+        sorted(prior_market_ids)
+    ) != prior_registry.get("prior_market_ids_sha256"):
+        raise ValueError("#174 prior market exclusion registry is invalid")
+    minimum_decision_ts = int(precollection["minimum_collection_decision_ts"])
+    collector_contract = dict(precollection["collector_contract"])
+    maximum_attempts = int(precollection["maximum_total_capture_attempt_count"])
+    target_count = int(precollection["target_valid_unique_market_count"])
+    if target_count != FRESH_CONFIRMATORY_MARKET_COUNT:
+        raise ValueError("#174 confirmatory target count drifted")
+
+    capture_rows: list[dict[str, Any]] = []
+    batch_descriptors: list[dict[str, str]] = []
+    blocking_reasons: list[str] = []
+    for batch_ordinal, (path, expected_sha256) in enumerate(config.batch_progress_pins):
+        resolved = path.resolve()
+        _verify_pin(resolved, expected_sha256, name="#174 batch progress")
+        batch = _load_json(resolved)
+        forbidden = sorted(_find_fields(batch, FORBIDDEN_REGISTRY_FIELDS))
+        if forbidden:
+            raise ValueError(
+                "batch progress contains forbidden outcome values: " + ", ".join(forbidden)
+            )
+        captures = [dict(row) for row in batch.get("captures") or []]
+        finalizations = [dict(row) for row in batch.get("finalizations") or []]
+        if int(batch.get("capture_count") or 0) != len(captures):
+            blocking_reasons.append("collector_capture_count_mismatch")
+        if batch.get("paper_only") is not True or batch.get("capital_at_risk") is not False:
+            blocking_reasons.append("collector_safety_contract_failed")
+        finalization_by_run = {str(row.get("run_id") or ""): row for row in finalizations}
+        for capture in captures:
+            capture_rows.append(
+                {
+                    **capture,
+                    "source_batch_id": str(batch.get("batch_id") or ""),
+                    "source_batch_ordinal": batch_ordinal,
+                    "source_batch_progress_sha256": expected_sha256,
+                    "finalization": finalization_by_run.get(str(capture.get("run_id") or "")),
+                }
+            )
+        batch_descriptors.append(_descriptor(resolved))
+    if len(capture_rows) > maximum_attempts:
+        blocking_reasons.append("maximum_capture_attempt_count_exceeded")
+    run_ids = [str(row.get("run_id") or "") for row in capture_rows]
+    if any(not value for value in run_ids) or len(run_ids) != len(set(run_ids)):
+        blocking_reasons.append("collector_duplicate_or_missing_capture_run_id")
+    capture_rows.sort(
+        key=lambda row: (
+            int(row.get("scheduled_round_start_ts") or 0),
+            int(row.get("source_batch_ordinal") or 0),
+            int(row.get("round_index") or 0),
+            str(row.get("run_id") or ""),
+        )
+    )
+
+    selected: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    selected_market_ids: set[str] = set()
+    selected_corpus_dirs: set[Path] = set()
+    training_root = config.training_corpus_root.expanduser().resolve()
+    for capture in capture_rows:
+        capture_audit = _capture_quality_audit(
+            capture,
+            collector_contract=collector_contract,
+        )
+        if capture_audit["reason_codes"]:
+            excluded.append(capture_audit)
+            continue
+        finalization = capture.get("finalization")
+        finalization_reasons = _finalization_quality_reasons(finalization)
+        if finalization_reasons:
+            capture_audit["reason_codes"] = finalization_reasons
+            excluded.append(capture_audit)
+            blocking_reasons.append("earliest_quality_capture_not_finalized")
+            break
+        corpus_dir = Path(str(finalization["exported_training_corpus_dir"])).expanduser().resolve()
+        reasons: list[str] = []
+        if not corpus_dir.is_relative_to(training_root):
+            reasons.append("exported_corpus_outside_training_root")
+        elif not corpus_dir.is_dir():
+            reasons.append("exported_corpus_directory_missing")
+        if corpus_dir in selected_corpus_dirs:
+            reasons.append("duplicate_exported_corpus_path")
+        corpus_audit: dict[str, Any] | None = None
+        execution_audit: dict[str, Any] | None = None
+        if not reasons:
+            corpus_audit = _outcome_blind_corpus_role_audit(
+                corpus_dir=corpus_dir,
+                prior_market_ids=prior_market_ids,
+                minimum_decision_ts=minimum_decision_ts,
+            )
+            reasons.extend(corpus_audit["reason_codes"])
+        if not reasons:
+            execution_audit = _execution_compatibility_audit(
+                corpus_dir=corpus_dir,
+                collector_contract=collector_contract,
+            )
+            reasons.extend(execution_audit["blocking_reason_codes"])
+        if reasons:
+            capture_audit["reason_codes"] = sorted(set(reasons))
+            excluded.append(capture_audit)
+            continue
+        assert corpus_audit is not None
+        assert execution_audit is not None
+        market_id = str(corpus_audit["market_id"])
+        if market_id in selected_market_ids:
+            capture_audit["reason_codes"] = ["duplicate_market_identity"]
+            excluded.append(capture_audit)
+            continue
+        if len(selected) >= target_count:
+            capture_audit["reason_codes"] = ["selection_target_already_met"]
+            excluded.append(capture_audit)
+            continue
+        selection_rank = len(selected) + 1
+        selected_market_ids.add(market_id)
+        selected_corpus_dirs.add(corpus_dir)
+        selected.append(
+            {
+                **capture_audit,
+                "selected": True,
+                "selection_rank": selection_rank,
+                "role": "fresh_confirmatory_validation",
+                "market_id": market_id,
+                "minimum_decision_ts": corpus_audit["minimum_decision_ts"],
+                "maximum_decision_ts": corpus_audit["maximum_decision_ts"],
+                "decision_row_count": corpus_audit["decision_row_count"],
+                "source_corpus_dir": str(corpus_dir),
+                "corpus_manifest": corpus_audit["corpus_manifest"],
+                "feature_rows": corpus_audit["feature_rows"],
+                "execution_compatibility_audit": execution_audit,
+                "execution_compatibility_validated_before_label_access": True,
+                "labels_or_outcomes_opened_for_assignment": False,
+                "reason_codes": [],
+            }
+        )
+    if len(selected) != target_count:
+        blocking_reasons.append("insufficient_fresh_quality_valid_unique_market_support")
+    if selected_market_ids & prior_market_ids:
+        blocking_reasons.append("fresh_confirmatory_prior_market_overlap")
+    blocking_reasons = sorted(set(blocking_reasons))
+    ready = not blocking_reasons
+
+    run_dir = config.output_dir / config.run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+    selected_path = run_dir / "fresh_confirmatory_assignment_rows.jsonl"
+    excluded_path = run_dir / "fresh_confirmatory_assignment_excluded_rows.jsonl"
+    _write_jsonl(selected_path, selected)
+    _write_jsonl(excluded_path, excluded)
+    reason_distribution = dict(
+        sorted(
+            Counter(reason for row in excluded for reason in row.get("reason_codes") or []).items()
+        )
+    )
+    report = {
+        "schema_version": f"{SCHEMA_PREFIX}-fresh-confirmatory-assignment-report-v1",
+        "run_id": config.run_id,
+        "status": (
+            "OUTCOME_BLIND_FRESH_CONFIRMATORY_ASSIGNMENT_READY" if ready else "BLOCKED_FAIL_CLOSED"
+        ),
+        "assignment_ready": ready,
+        "target_market_count": target_count,
+        "selected_market_count": len(selected),
+        "selected_decision_row_count": sum(int(row["decision_row_count"]) for row in selected),
+        "excluded_capture_count": len(excluded),
+        "excluded_reason_distribution": reason_distribution,
+        "blocking_reason_codes": blocking_reasons,
+        "selected_market_ids_sha256": canonical_json_sha256(sorted(selected_market_ids)),
+        "prior_market_overlap_count": len(selected_market_ids & prior_market_ids),
+        "execution_compatibility_validated_before_label_access": True,
+        "labels_or_outcomes_opened_for_assignment": False,
+        "uses_issue173_confirmatory_labels_for_tuning": False,
+        "uses_future_confirmatory_labels_for_tuning": False,
+        **_blocked_safety_fields(),
+    }
+    report_path = run_dir / "fresh_confirmatory_assignment_report.json"
+    _write_json(report_path, report)
+    manifest = {
+        "schema_version": f"{SCHEMA_PREFIX}-fresh-confirmatory-assignment-manifest-v1",
+        "run_id": config.run_id,
+        "precollection_freeze_manifest": _descriptor(precollection_path),
+        "development_candidate_freeze": development_freeze_descriptor,
+        "protocol": protocol_descriptor,
+        "prior_market_exclusion_registry": prior_descriptor,
+        "batch_progress_inputs": batch_descriptors,
+        "selected_rows": _descriptor(selected_path),
+        "excluded_rows": _descriptor(excluded_path),
+        "report": _descriptor(report_path),
+        "assignment_ready": ready,
+        "selected_market_count": len(selected),
+        "blocking_reason_codes": blocking_reasons,
+        "labels_or_outcomes_opened_for_assignment": False,
+        "confirmatory_evaluation_started": False,
+        **_blocked_safety_fields(),
+    }
+    manifest["fresh_confirmatory_assignment_id"] = canonical_json_sha256(manifest)
+    manifest_path = run_dir / "fresh_confirmatory_assignment_manifest.json"
+    _write_json(manifest_path, manifest)
+    return {
+        "run_dir": run_dir,
+        "selected_rows_path": selected_path,
+        "excluded_rows_path": excluded_path,
+        "report_path": report_path,
+        "manifest_path": manifest_path,
+        "manifest_sha256": _sha256_file(manifest_path),
+        "report": report,
+        "manifest": manifest,
+    }
+
+
+def evaluate_hierarchical_side_family_lcb_confirmatory(
+    config: HierarchicalSideFamilyLCBConfirmatoryEvaluationConfig,
+) -> dict[str, Any]:
+    """Open fresh labels exactly once after all candidate inputs are frozen."""
+
+    development_freeze_path = config.development_candidate_freeze_manifest_path.resolve()
+    assignment_path = config.confirmatory_assignment_manifest_path.resolve()
+    _verify_pin(
+        development_freeze_path,
+        config.expected_development_candidate_freeze_manifest_sha256,
+        name="#174 development candidate freeze",
+    )
+    _verify_pin(
+        assignment_path,
+        config.expected_confirmatory_assignment_manifest_sha256,
+        name="#174 confirmatory assignment manifest",
+    )
+    development_freeze = _load_json(development_freeze_path)
+    assignment = _load_json(assignment_path)
+    if (
+        development_freeze.get("development_freeze_gate_passed") is not True
+        or development_freeze.get(
+            "candidate_configuration_frozen_before_fresh_confirmatory_collection"
+        )
+        is not True
+    ):
+        raise ValueError("development candidate is not frozen")
+    if (
+        assignment.get("assignment_ready") is not True
+        or assignment.get("labels_or_outcomes_opened_for_assignment") is not False
+        or assignment.get("confirmatory_evaluation_started") is not False
+    ):
+        raise ValueError("fresh confirmatory assignment is not outcome-blind and ready")
+    protocol_descriptor = _verified_descriptor(
+        development_freeze.get("protocol"), name="#174 protocol"
+    )
+    protocol = _load_json(Path(protocol_descriptor["path"]))
+    validate_hierarchical_side_family_lcb_protocol(protocol)
+    feature_descriptor = _verified_descriptor(
+        development_freeze.get("feature_contract"), name="#174 feature contract"
+    )
+    feature_contract = _load_json(Path(feature_descriptor["path"]))
+    validate_hierarchical_side_family_lcb_feature_contract(
+        feature_contract,
+        expected_parent_protocol_sha256=protocol_descriptor["sha256"],
+    )
+    hierarchy_descriptor = _verified_descriptor(
+        development_freeze.get("hierarchical_calibration_artifact"),
+        name="#174 hierarchical calibration artifact",
+    )
+    hierarchy_artifact = _load_json(Path(hierarchy_descriptor["path"]))
+    selected_descriptor = _verified_descriptor(
+        assignment.get("selected_rows"), name="#174 confirmatory assignment rows"
+    )
+    assignment_rows = _load_jsonl(Path(selected_descriptor["path"]))
+    _validate_fresh_confirmatory_assignment_rows(assignment_rows)
+    prior_descriptor = _verified_descriptor(
+        assignment.get("prior_market_exclusion_registry"),
+        name="#174 prior market registry",
+    )
+    prior_market_ids = {
+        str(value) for value in _load_json(Path(prior_descriptor["path"]))["prior_market_ids"]
+    }
+    fresh_market_ids = {str(row["market_id"]) for row in assignment_rows}
+    if fresh_market_ids & prior_market_ids:
+        raise ValueError("fresh confirmatory markets overlap prior evidence")
+
+    boosters: dict[str, xgb.Booster] = {}
+    for family in TRADE_FAMILIES:
+        descriptor = _verified_descriptor(
+            development_freeze["models"].get(family),
+            name=f"#174 {family} model",
+        )
+        booster = xgb.Booster()
+        booster.load_model(descriptor["path"])
+        boosters[family] = booster
+
+    feature_columns = tuple(feature_contract["feature_columns"])
+    action_rows: list[dict[str, Any]] = []
+    corpus_audits: list[dict[str, Any]] = []
+    for row in assignment_rows:
+        rows, audit = _load_corpus_action_rows(
+            Path(str(row["source_corpus_dir"])).resolve(),
+            role_row=row,
+            feature_columns=feature_columns,
+        )
+        if audit["blocking_reason_codes"]:
+            raise ValueError(
+                "fresh confirmatory materialization failed: "
+                + ", ".join(audit["blocking_reason_codes"])
+            )
+        action_rows.extend(rows)
+        corpus_audits.append(audit)
+    action_rows.sort(
+        key=lambda row: (
+            int(row["decision_ts"]),
+            str(row["market_id"]),
+            str(row["action"]),
+        )
+    )
+    if len({str(row["market_id"]) for row in action_rows}) != 60:
+        raise ValueError("fresh confirmatory action-row market coverage is incomplete")
+
+    run_dir = config.output_dir / config.run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+    action_rows_path = run_dir / "fresh_confirmatory_action_rows.jsonl"
+    _write_jsonl(action_rows_path, action_rows)
+    raw_predictions = _predict_role_rows(
+        action_rows,
+        boosters=boosters,
+        feature_columns=feature_columns,
+    )
+    scored_predictions = _apply_hierarchical_lcb_scores(
+        raw_predictions,
+        artifact=hierarchy_artifact,
+    )
+    prediction_path = run_dir / "fresh_confirmatory_predictions.jsonl"
+    _write_jsonl(prediction_path, scored_predictions)
+    threshold = float(protocol["frozen_execution_contract"]["entry_edge_threshold"])
+    candidate_replay = _run_policy_replay(
+        scored_predictions,
+        score_field="hierarchical_expected_mean_lcb_net_return",
+        policy_name=CANDIDATE_NAME,
+        entry_threshold=threshold,
+    )
+    baseline_replay = _run_policy_replay(
+        scored_predictions,
+        score_field="raw_family_expected_net_return",
+        policy_name="frozen_uncertainty_unadjusted_family_model_baseline",
+        entry_threshold=threshold,
+    )
+    candidate_path = run_dir / "fresh_confirmatory_candidate_replay.jsonl"
+    baseline_path = run_dir / "fresh_confirmatory_baseline_replay.jsonl"
+    _write_jsonl(candidate_path, candidate_replay)
+    _write_jsonl(baseline_path, baseline_replay)
+    candidate_metrics = _accepted_bet_metrics(candidate_replay)
+    baseline_metrics = _accepted_bet_metrics(baseline_replay)
+    robustness = _market_robustness(candidate_replay, baseline_replay)
+    gate = _fresh_confirmatory_gate(
+        protocol=protocol,
+        action_rows=action_rows,
+        candidate_replay=candidate_replay,
+        candidate_metrics=candidate_metrics,
+        baseline_metrics=baseline_metrics,
+        robustness=robustness,
+        corpus_audits=corpus_audits,
+    )
+    report = {
+        "schema_version": f"{SCHEMA_PREFIX}-fresh-confirmatory-report-v1",
+        "run_id": config.run_id,
+        "candidate_name": CANDIDATE_NAME,
+        "evaluation_implementation_git_commit": (config.evaluation_implementation_git_commit),
+        "development_candidate_freeze": _descriptor(development_freeze_path),
+        "fresh_confirmatory_assignment": _descriptor(assignment_path),
+        "candidate_metrics": candidate_metrics,
+        "baseline_metrics": baseline_metrics,
+        "candidate_minus_baseline_net_pnl": float(candidate_metrics["net_pnl_sum"])
+        - float(baseline_metrics["net_pnl_sum"]),
+        "market_robustness_diagnostics": robustness,
+        "confirmatory_gate_passed": gate["passed"],
+        "confirmatory_gate_checks": gate["checks"],
+        "confirmatory_gate_blocking_reason_codes": gate["reason_codes"],
+        "confirmatory_labels_used_for_report_only": True,
+        "confirmatory_labels_used_for_tuning": False,
+        "candidate_frozen_for_future_evaluation": False,
+        "future_collection_allowed": False,
+        **_blocked_safety_fields(),
+    }
+    report_path = run_dir / "fresh_confirmatory_validation_report.json"
+    _write_json(report_path, report)
+    manifest = {
+        "schema_version": f"{SCHEMA_PREFIX}-fresh-confirmatory-bundle-manifest-v1",
+        "run_id": config.run_id,
+        "candidate_name": CANDIDATE_NAME,
+        "evaluation_implementation_git_commit": (config.evaluation_implementation_git_commit),
+        "development_candidate_freeze": _descriptor(development_freeze_path),
+        "fresh_confirmatory_assignment": _descriptor(assignment_path),
+        "action_rows": _descriptor(action_rows_path),
+        "predictions": _descriptor(prediction_path),
+        "candidate_replay": _descriptor(candidate_path),
+        "baseline_replay": _descriptor(baseline_path),
+        "validation_report": _descriptor(report_path),
+        "confirmatory_gate_passed": gate["passed"],
+        "confirmatory_gate_blocking_reason_codes": gate["reason_codes"],
+        "confirmatory_labels_used_for_tuning": False,
+        "candidate_frozen_for_future_evaluation": False,
+        "future_collection_allowed": False,
+        **_blocked_safety_fields(),
+    }
+    manifest["fresh_confirmatory_bundle_id"] = canonical_json_sha256(manifest)
+    manifest_path = run_dir / "fresh_confirmatory_bundle_manifest.json"
+    _write_json(manifest_path, manifest)
+    return {
+        "run_dir": run_dir,
+        "report_path": report_path,
+        "manifest_path": manifest_path,
+        "manifest_sha256": _sha256_file(manifest_path),
+        "report": report,
+        "manifest": manifest,
+    }
+
+
+def _validate_fresh_confirmatory_assignment_rows(rows: list[dict[str, Any]]) -> None:
+    if len(rows) != FRESH_CONFIRMATORY_MARKET_COUNT:
+        raise ValueError("fresh confirmatory assignment must contain 60 markets")
+    market_ids = [str(row.get("market_id") or "") for row in rows]
+    if any(not value for value in market_ids) or len(market_ids) != len(set(market_ids)):
+        raise ValueError("fresh confirmatory market identities are incomplete")
+    if [int(row.get("selection_rank") or 0) for row in rows] != list(
+        range(1, FRESH_CONFIRMATORY_MARKET_COUNT + 1)
+    ):
+        raise ValueError("fresh confirmatory selection ranks are incomplete")
+    if any(
+        str(row.get("role") or "") != "fresh_confirmatory_validation"
+        or row.get("execution_compatibility_validated_before_label_access") is not True
+        or row.get("labels_or_outcomes_opened_for_assignment") is not False
+        for row in rows
+    ):
+        raise ValueError("fresh confirmatory assignment contract failed")
+
+
+def _fresh_confirmatory_gate(
+    *,
+    protocol: dict[str, Any],
+    action_rows: list[dict[str, Any]],
+    candidate_replay: list[dict[str, Any]],
+    candidate_metrics: dict[str, Any],
+    baseline_metrics: dict[str, Any],
+    robustness: dict[str, Any],
+    corpus_audits: list[dict[str, Any]],
+) -> dict[str, Any]:
+    gates = dict(protocol["confirmatory_validation_gates"])
+    side_counts = dict(candidate_metrics["accepted_bet_count_by_side"])
+    family_counts = dict(candidate_metrics["accepted_bet_count_by_family"])
+    bootstrap = dict(robustness["market_bootstrap_interval_95"])
+    checks = {
+        "confirmatory_unique_market_support": len({str(row["market_id"]) for row in action_rows})
+        == int(gates["required_unique_market_count"]),
+        "accepted_bet_support": int(candidate_metrics["accepted_bet_count"])
+        >= int(gates["minimum_accepted_bet_count"]),
+        "accepted_unique_market_support": int(candidate_metrics["accepted_unique_market_count"])
+        >= int(gates["minimum_accepted_unique_market_count"]),
+        "accepted_side_support": all(
+            int(side_counts.get(side, 0)) >= int(gates["minimum_accepted_bet_count_per_side"])
+            for side in ("UP", "DOWN")
+        ),
+        "accepted_family_support": all(
+            int(family_counts.get(family, 0)) >= int(gates["minimum_accepted_bet_count_per_family"])
+            for family in TRADE_FAMILIES
+        ),
+        "candidate_net_pnl_positive": float(candidate_metrics["net_pnl_sum"]) > 0.0,
+        "candidate_roi_positive": float(candidate_metrics["roi"]) > 0.0,
+        "candidate_better_than_frozen_baseline": float(candidate_metrics["net_pnl_sum"])
+        > float(baseline_metrics["net_pnl_sum"]),
+        "candidate_minus_baseline_bootstrap_lower_bound_positive": bootstrap.get("reported") is True
+        and float(bootstrap.get("lower") or 0.0) > 0.0,
+        "all_accepted_bets_settled": all(
+            row["settlement_resolved_for_report_only"] is True
+            for row in candidate_replay
+            if row["execution_guard_order_allowed"] is True
+        ),
+        "zero_missing_runtime_fields": all(
+            row["required_runtime_fields_present"] is True for row in candidate_replay
+        ),
+        "zero_provenance_violations": all(
+            int(row["max_input_ts"]) <= int(row["decision_ts"])
+            and row["reference_price_feature_provenance"].get("provenance_valid") is True
+            for row in action_rows
+            if row["action"] != "NO_TRADE"
+        ),
+        "zero_forbidden_inference_fields": all(
+            row["target_used_as_decision_input"] is False
+            and row["outcome_fields_used_as_decision_input"] is False
+            for row in action_rows
+        ),
+        "zero_materialization_causality_violations": all(
+            int(audit["feature_causality_violation_count"]) == 0 for audit in corpus_audits
+        ),
+        "leave_one_market_out_reported": robustness["leave_one_market_out"]["reported"] is True,
+        "largest_winner_removal_reported": robustness["largest_winner_removal"]["reported"] is True,
+    }
+    reason_map = {
+        "confirmatory_unique_market_support": "insufficient_confirmatory_unique_market_support",
+        "accepted_bet_support": "insufficient_confirmatory_accepted_bet_support",
+        "accepted_unique_market_support": "insufficient_confirmatory_unique_market_accepted_bet_support",
+        "accepted_side_support": "insufficient_confirmatory_side_support",
+        "accepted_family_support": "insufficient_confirmatory_family_support",
+        "candidate_net_pnl_positive": "confirmatory_candidate_net_pnl_not_positive",
+        "candidate_roi_positive": "confirmatory_candidate_roi_not_positive",
+        "candidate_better_than_frozen_baseline": "confirmatory_candidate_not_better_than_baseline",
+        "candidate_minus_baseline_bootstrap_lower_bound_positive": "confirmatory_candidate_minus_baseline_bootstrap_lower_bound_not_positive",
+        "all_accepted_bets_settled": "confirmatory_accepted_bet_settlement_incomplete",
+        "zero_missing_runtime_fields": "confirmatory_runtime_fields_missing",
+        "zero_provenance_violations": "confirmatory_provenance_violation",
+        "zero_forbidden_inference_fields": "confirmatory_forbidden_inference_field_violation",
+        "zero_materialization_causality_violations": "confirmatory_materialization_causality_violation",
+        "leave_one_market_out_reported": "confirmatory_leave_one_market_out_missing",
+        "largest_winner_removal_reported": "confirmatory_largest_winner_removal_missing",
+    }
+    reasons = [reason_map[name] for name, passed in checks.items() if not passed]
+    return {"passed": not reasons, "checks": checks, "reason_codes": reasons}
 
 
 def _validate_development_and_quarantine_rows(

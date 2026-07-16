@@ -11,8 +11,10 @@ from bigan.v8.polymarket.training.execution_layer_v2_hierarchical_side_family_lc
     CANDIDATE_NAME,
     _apply_hierarchical_lcb_scores,
     _development_freeze_gate,
+    _fresh_confirmatory_gate,
     _hierarchical_lcb_artifact,
     _validate_development_and_quarantine_rows,
+    _validate_fresh_confirmatory_assignment_rows,
     validate_hierarchical_side_family_lcb_feature_contract,
     validate_hierarchical_side_family_lcb_protocol,
 )
@@ -178,6 +180,96 @@ def test_development_gate_fails_closed_on_quarantine_access_or_unsupported_famil
     )
     assert gate["passed"] is False
     assert "issue173_confirmatory_evidence_access_violation" in gate["reason_codes"]
+
+
+def test_fresh_confirmatory_assignment_rows_are_exact_and_outcome_blind() -> None:
+    rows = [
+        {
+            "market_id": f"fresh-{index}",
+            "selection_rank": index + 1,
+            "role": "fresh_confirmatory_validation",
+            "execution_compatibility_validated_before_label_access": True,
+            "labels_or_outcomes_opened_for_assignment": False,
+        }
+        for index in range(60)
+    ]
+    _validate_fresh_confirmatory_assignment_rows(rows)
+
+    rows[-1]["labels_or_outcomes_opened_for_assignment"] = True
+    with pytest.raises(ValueError, match="assignment contract failed"):
+        _validate_fresh_confirmatory_assignment_rows(rows)
+
+
+def test_fresh_confirmatory_gate_requires_positive_market_bootstrap_lower_bound() -> None:
+    protocol = _load_json(PROTOCOL_PATH)
+    action_rows = [
+        {
+            "market_id": f"fresh-{index}",
+            "action": "BUY_UP_HOLD_TO_SETTLEMENT",
+            "decision_ts": 2_000_000_000_000 + index,
+            "max_input_ts": 2_000_000_000_000 + index,
+            "reference_price_feature_provenance": {"provenance_valid": True},
+            "target_used_as_decision_input": False,
+            "outcome_fields_used_as_decision_input": False,
+        }
+        for index in range(60)
+    ]
+    candidate_replay = [
+        {
+            "execution_guard_order_allowed": True,
+            "settlement_resolved_for_report_only": True,
+            "required_runtime_fields_present": True,
+        }
+        for _ in range(30)
+    ]
+    candidate_metrics = {
+        "accepted_bet_count": 30,
+        "accepted_unique_market_count": 30,
+        "accepted_bet_count_by_side": {"UP": 15, "DOWN": 15},
+        "accepted_bet_count_by_family": {
+            "HOLD_TO_SETTLEMENT": 15,
+            "SELL_BEFORE_CLOSE": 15,
+        },
+        "net_pnl_sum": 1.0,
+        "roi": 0.2,
+    }
+    baseline_metrics = {"net_pnl_sum": 0.5}
+    robustness = {
+        "market_bootstrap_interval_95": {
+            "reported": True,
+            "lower": 0.01,
+            "upper": 0.8,
+        },
+        "leave_one_market_out": {"reported": True},
+        "largest_winner_removal": {"reported": True},
+    }
+    audits = [{"feature_causality_violation_count": 0} for _ in range(60)]
+    passed = _fresh_confirmatory_gate(
+        protocol=protocol,
+        action_rows=action_rows,
+        candidate_replay=candidate_replay,
+        candidate_metrics=candidate_metrics,
+        baseline_metrics=baseline_metrics,
+        robustness=robustness,
+        corpus_audits=audits,
+    )
+    assert passed["passed"] is True
+
+    robustness["market_bootstrap_interval_95"]["lower"] = -0.01
+    blocked = _fresh_confirmatory_gate(
+        protocol=protocol,
+        action_rows=action_rows,
+        candidate_replay=candidate_replay,
+        candidate_metrics=candidate_metrics,
+        baseline_metrics=baseline_metrics,
+        robustness=robustness,
+        corpus_audits=audits,
+    )
+    assert blocked["passed"] is False
+    assert (
+        "confirmatory_candidate_minus_baseline_bootstrap_lower_bound_not_positive"
+        in blocked["reason_codes"]
+    )
 
 
 def _calibration_rows() -> list[dict]:
