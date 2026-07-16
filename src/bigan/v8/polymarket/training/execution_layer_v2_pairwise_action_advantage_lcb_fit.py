@@ -1217,11 +1217,21 @@ def _cross_fit_training_predictions(
                 ),
             }
         )
-    expected_oof_action_row_count = expected_oof_market_count * len(REQUIRED_ACTIONS)
+    oof_market_ids = {
+        market_id for market_group in fold_market_groups for market_id in market_group
+    }
+    expected_oof_source_rows = [
+        row for row in rows if str(row["market_id"]) in oof_market_ids
+    ]
+    expected_oof_action_row_count = len(expected_oof_source_rows)
     if len(oof_rows) != expected_oof_action_row_count:
         raise ValueError("cross-fit OOF prediction coverage is incomplete")
     if len({str(row["action_row_sha256"]) for row in oof_rows}) != len(oof_rows):
         raise ValueError("cross-fit OOF prediction identities are duplicated")
+    if {str(row["action_row_sha256"]) for row in oof_rows} != {
+        str(row["action_row_sha256"]) for row in expected_oof_source_rows
+    }:
+        raise ValueError("cross-fit OOF prediction identities are incomplete")
     oof_predictions_by_row = {
         str(row["action_row_sha256"]): float(row["oof_raw_prediction"]) for row in oof_rows
     }

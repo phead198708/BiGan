@@ -622,6 +622,38 @@ def test_pairwise_cross_fit_uses_strictly_prior_markets_only() -> None:
     assert report["uses_issue174_confirmatory_labels"] is False
 
 
+def test_pairwise_cross_fit_covers_multiple_decision_groups_per_market() -> None:
+    rows = []
+    for market_index in range(90):
+        for decision_offset in (0, 100):
+            market_rows = _decision_rows(
+                market_id=f"train-{market_index:03d}",
+                decision_ts=1_000 + market_index * 1_000 + decision_offset,
+            )
+            for action_index, row in enumerate(market_rows):
+                row["decision_time_features"] = {
+                    "execution_price": float(action_index) / 10.0
+                }
+            rows.extend(market_rows)
+    model_protocol = dict(_load_json(PROTOCOL_PATH)["cross_fit_protocol"])
+    model_protocol["num_boost_round"] = 3
+
+    report = _cross_fit_training_predictions(
+        rows,
+        feature_columns=("execution_price",),
+        model_protocol=model_protocol,
+    )
+
+    assert report["market_count"] == 90
+    assert report["decision_group_count"] == 180
+    assert report["oof_market_count"] == 75
+    assert report["oof_decision_group_count"] == 150
+    assert report["oof_prediction_count"] == 750
+    assert len(report["oof_predictions"]) == 750
+    assert len({row["action_row_sha256"] for row in report["oof_predictions"]}) == 750
+    assert report["future_market_label_access_violation_count"] == 0
+
+
 def test_action_advantage_calibration_is_deterministic_and_no_trade_anchored() -> None:
     protocol = _load_json(PROTOCOL_PATH)
     train_oof = []
