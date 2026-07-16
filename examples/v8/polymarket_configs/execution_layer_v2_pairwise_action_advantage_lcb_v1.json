@@ -97,9 +97,9 @@
     "bootstrap_seed": 20260716,
     "minimum_calibration_unique_markets_per_group": 10,
     "minimum_calibration_unique_markets_per_action": 20,
-    "shrinkage_formula": "w_group_ci_plus_one_minus_w_action_ci",
+    "shrinkage_formula": "w_group_target_mean_lcb_plus_one_minus_w_action_target_mean_lcb",
     "shrinkage_prior_market_count": 10,
-    "insufficient_group_support_fallback": "action_level_mean_residual_upper_confidence_bound",
+    "insufficient_group_support_fallback": "action_level_target_mean_lcb",
     "affine_calibration_enabled": false,
     "individual_outcome_quantile_subtraction_enabled": false,
     "forced_action_side_or_family_quota_enabled": false

@@ -240,6 +240,13 @@ def test_action_advantage_calibration_is_deterministic_and_no_trade_anchored() -
     )
     assert canonical_json_sha256(first) == canonical_json_sha256(second)
     assert set(first["actions"]) == set(REQUIRED_ACTIONS)
+    assert first["method"] == ("market_grouped_bootstrap_conditional_action_return_lcb")
+    assert first["decision_score_formula"] == ("action_x_oof_score_bucket_target_mean_lcb")
+    assert all(
+        "calibrated_action_expected_net_return" in group
+        and "action_return_lower_confidence_bound" in group
+        for group in first["calibration_groups"].values()
+    )
     assert first["uses_issue174_confirmatory_labels_for_tuning"] is False
 
     scored = _apply_action_advantage_lcb_scores(calibration, lcb_artifact=first)

@@ -1407,7 +1407,7 @@ def _action_advantage_lcb_artifact(
             float(np.quantile(oof_scores, 2.0 / 3.0, method="linear")),
         ]
         rows = [row for row in calibration_predictions if row["action"] == action]
-        action_stats = _market_grouped_mean_residual_ci(
+        action_stats = _market_grouped_target_mean_lcb(
             rows,
             confidence_level=confidence_level,
             bootstrap_resample_count=bootstrap_resample_count,
@@ -1420,9 +1420,9 @@ def _action_advantage_lcb_artifact(
             "calibration_unique_market_count": action_stats["unique_market_count"],
             "train_oof_score_tertile_boundaries": boundaries,
             "score_bucket_boundaries_source": ("development_train_oof_predictions_only"),
-            "mean_residual": action_stats["mean_residual"],
-            "mean_residual_upper_confidence_bound": action_stats[
-                "mean_residual_upper_confidence_bound"
+            "target_mean": action_stats["target_mean"],
+            "target_mean_lower_confidence_bound": action_stats[
+                "target_mean_lower_confidence_bound"
             ],
             "market_grouped_bootstrap": action_stats,
             "raw_metrics": _regression_metrics(
@@ -1436,7 +1436,7 @@ def _action_advantage_lcb_artifact(
                 for row in rows
                 if _score_bucket(float(row["raw_pairwise_rank_score"]), boundaries) == bucket_name
             ]
-            group_stats = _market_grouped_mean_residual_ci(
+            group_stats = _market_grouped_target_mean_lcb(
                 bucket_rows,
                 confidence_level=confidence_level,
                 bootstrap_resample_count=bootstrap_resample_count,
@@ -1447,20 +1447,26 @@ def _action_advantage_lcb_artifact(
                 weight = group_stats["unique_market_count"] / (
                     group_stats["unique_market_count"] + shrinkage_prior_markets
                 )
-                calibrated_mean_residual = weight * float(group_stats["mean_residual"]) + (
+                calibrated_expected_net_return = weight * float(group_stats["target_mean"]) + (
                     1.0 - weight
-                ) * float(action_stats["mean_residual"])
-                penalty = weight * float(group_stats["mean_residual_upper_confidence_bound"]) + (
-                    1.0 - weight
-                ) * float(action_stats["mean_residual_upper_confidence_bound"])
-                penalty_source = "shrunken_group_and_action_mean_residual_ci"
+                ) * float(action_stats["target_mean"])
+                action_return_lcb = weight * float(
+                    group_stats["target_mean_lower_confidence_bound"]
+                ) + (1.0 - weight) * float(action_stats["target_mean_lower_confidence_bound"])
+                estimate_source = "shrunken_group_and_action_target_mean_lcb"
             else:
                 weight = 0.0
-                calibrated_mean_residual = float(action_stats["mean_residual"])
-                penalty = float(action_stats["mean_residual_upper_confidence_bound"])
-                penalty_source = "action_level_mean_residual_ci_fallback"
-            if not math.isfinite(penalty):
-                raise ValueError("action-advantage residual penalty must be finite")
+                calibrated_expected_net_return = float(action_stats["target_mean"])
+                action_return_lcb = float(action_stats["target_mean_lower_confidence_bound"])
+                estimate_source = "action_level_target_mean_lcb_fallback"
+            if not all(
+                math.isfinite(value)
+                for value in (
+                    calibrated_expected_net_return,
+                    action_return_lcb,
+                )
+            ):
+                raise ValueError("action-advantage target estimates must be finite")
             key = f"{action}|{bucket_name}"
             calibration_groups[key] = {
                 "action": action,
@@ -1469,17 +1475,18 @@ def _action_advantage_lcb_artifact(
                 "calibration_unique_market_count": group_stats["unique_market_count"],
                 "minimum_required_unique_markets": minimum_group_markets,
                 "group_support_passed": support_passed,
-                "group_mean_residual": group_stats["mean_residual"],
-                "group_mean_residual_upper_confidence_bound": group_stats[
-                    "mean_residual_upper_confidence_bound"
+                "group_target_mean": group_stats["target_mean"],
+                "group_target_mean_lower_confidence_bound": group_stats[
+                    "target_mean_lower_confidence_bound"
                 ],
-                "action_mean_residual_upper_confidence_bound": action_stats[
-                    "mean_residual_upper_confidence_bound"
+                "action_target_mean": action_stats["target_mean"],
+                "action_target_mean_lower_confidence_bound": action_stats[
+                    "target_mean_lower_confidence_bound"
                 ],
                 "shrinkage_group_weight": weight,
-                "calibrated_mean_residual": calibrated_mean_residual,
-                "expected_mean_residual_upper_confidence_bound": penalty,
-                "penalty_source": penalty_source,
+                "calibrated_action_expected_net_return": calibrated_expected_net_return,
+                "action_return_lower_confidence_bound": action_return_lcb,
+                "estimate_source": estimate_source,
                 "market_grouped_bootstrap": group_stats,
             }
     artifact = {
@@ -1487,10 +1494,8 @@ def _action_advantage_lcb_artifact(
         "candidate_name": protocol["candidate_name"],
         "source_split": "development_calibration_only",
         "estimand": "conditional_cost_aware_action_advantage",
-        "method": "market_grouped_bootstrap_mean_residual_upper_confidence_bound",
-        "decision_score_formula": (
-            "raw_pairwise_rank_score - action_advantage_residual_upper_confidence_bound"
-        ),
+        "method": "market_grouped_bootstrap_conditional_action_return_lcb",
+        "decision_score_formula": "action_x_oof_score_bucket_target_mean_lcb",
         "advantage_against_no_trade_required": True,
         "advantage_against_runner_up_required": True,
         "confidence_level": confidence_level,
@@ -1514,31 +1519,26 @@ def _action_advantage_lcb_artifact(
     return artifact
 
 
-def _market_grouped_mean_residual_ci(
+def _market_grouped_target_mean_lcb(
     rows: list[dict[str, Any]],
     *,
     confidence_level: float,
     bootstrap_resample_count: int,
     seed: int,
 ) -> dict[str, Any]:
-    residuals_by_market: dict[str, list[float]] = defaultdict(list)
+    targets_by_market: dict[str, list[float]] = defaultdict(list)
     for row in rows:
-        residuals_by_market[str(row["market_id"])].append(
-            float(row["raw_pairwise_rank_score"]) - float(row["target_net_pnl_per_contract"])
-        )
+        targets_by_market[str(row["market_id"])].append(float(row["target_net_pnl_per_contract"]))
     market_means = np.asarray(
-        [
-            float(np.mean(residuals_by_market[market_id]))
-            for market_id in sorted(residuals_by_market)
-        ],
+        [float(np.mean(targets_by_market[market_id])) for market_id in sorted(targets_by_market)],
         dtype=np.float64,
     )
     if market_means.size == 0:
         return {
             "reported": False,
             "unique_market_count": 0,
-            "mean_residual": None,
-            "mean_residual_upper_confidence_bound": None,
+            "target_mean": None,
+            "target_mean_lower_confidence_bound": None,
             "bootstrap_resample_count": bootstrap_resample_count,
             "bootstrap_seed": seed,
         }
@@ -1549,15 +1549,21 @@ def _market_grouped_mean_residual_ci(
         replace=True,
     )
     bootstrap_means = sampled.mean(axis=1)
-    upper = float(np.quantile(bootstrap_means, confidence_level, method="higher"))
-    mean_residual = float(market_means.mean())
-    if not math.isfinite(mean_residual) or not math.isfinite(upper):
-        raise ValueError("market-grouped mean residual CI is not finite")
+    lower = float(
+        np.quantile(
+            bootstrap_means,
+            1.0 - confidence_level,
+            method="lower",
+        )
+    )
+    target_mean = float(market_means.mean())
+    if not math.isfinite(target_mean) or not math.isfinite(lower):
+        raise ValueError("market-grouped target mean LCB is not finite")
     return {
         "reported": True,
         "unique_market_count": int(market_means.size),
-        "mean_residual": mean_residual,
-        "mean_residual_upper_confidence_bound": upper,
+        "target_mean": target_mean,
+        "target_mean_lower_confidence_bound": lower,
         "confidence_level": confidence_level,
         "bootstrap_resample_count": bootstrap_resample_count,
         "bootstrap_seed": seed,
@@ -1586,21 +1592,17 @@ def _apply_action_advantage_lcb_scores(
         boundaries = list(lcb_artifact["actions"][action]["train_oof_score_tertile_boundaries"])
         bucket = _score_bucket(raw_score, boundaries)
         group = lcb_artifact["calibration_groups"][f"{action}|{bucket}"]
-        mean_residual = float(group["calibrated_mean_residual"])
-        penalty = float(group["expected_mean_residual_upper_confidence_bound"])
-        penalty_source = str(group["penalty_source"])
-        calibrated_score = raw_score - mean_residual
-        lcb_score = raw_score - penalty
+        calibrated_score = float(group["calibrated_action_expected_net_return"])
+        lcb_score = float(group["action_return_lower_confidence_bound"])
+        estimate_source = str(group["estimate_source"])
         if action == "NO_TRADE":
             calibrated_score = 0.0
             lcb_score = 0.0
-            penalty_source = "frozen_no_trade_zero_anchor"
+            estimate_source = "frozen_no_trade_zero_anchor"
         updated = {
             **row,
             "action_advantage_lcb_score_bucket": bucket,
-            "calibrated_mean_residual": mean_residual,
-            "expected_mean_residual_upper_confidence_bound": penalty,
-            "action_advantage_lcb_penalty_source": penalty_source,
+            "action_advantage_lcb_estimate_source": estimate_source,
             "calibrated_action_expected_net_return": calibrated_score,
             "action_advantage_lcb_net_return": lcb_score,
             "ranking_score_source": (
