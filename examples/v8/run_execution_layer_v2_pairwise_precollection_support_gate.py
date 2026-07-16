@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Run the outcome-blind bounded pairwise precollection support gate."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from bigan.v8.polymarket.training.execution_layer_v2_pairwise_precollection_support import (  # noqa: E402
+    PairwisePrecollectionSupportGateConfig,
+    run_pairwise_precollection_support_gate,
+)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument(
+        "--output-dir",
+        default="examples/v8/polymarket_runs",
+    )
+    parser.add_argument(
+        "--precollection-freeze-manifest",
+        required=True,
+    )
+    parser.add_argument(
+        "--precollection-freeze-manifest-sha256",
+        required=True,
+    )
+    parser.add_argument(
+        "--batch-progress-pin",
+        action="append",
+        required=True,
+        metavar="PATH=SHA256",
+    )
+    parser.add_argument(
+        "--training-corpus-root",
+        default="/Volumes/PHILIPS/v8",
+    )
+    return parser
+
+
+def _pins(
+    values: list[str],
+) -> tuple[tuple[Path, str], ...]:
+    pins = []
+    for value in values:
+        path, separator, digest = value.rpartition("=")
+        if not separator or not path or not digest:
+            raise ValueError("batch progress pins must use PATH=SHA256")
+        pins.append((Path(path), digest))
+    return tuple(pins)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    result = run_pairwise_precollection_support_gate(
+        PairwisePrecollectionSupportGateConfig(
+            run_id=args.run_id,
+            output_dir=args.output_dir,
+            precollection_freeze_manifest_path=(
+                args.precollection_freeze_manifest
+            ),
+            expected_precollection_freeze_manifest_sha256=(
+                args.precollection_freeze_manifest_sha256
+            ),
+            batch_progress_pins=_pins(args.batch_progress_pin),
+            training_corpus_root=args.training_corpus_root,
+        )
+    )
+    report = result["report"]
+    print(
+        json.dumps(
+            {
+                "run_id": args.run_id,
+                "status": report["status"],
+                "attempted_capture_count": report[
+                    "attempted_capture_count"
+                ],
+                "selected_market_count": report[
+                    "selected_market_count"
+                ],
+                "continuation_allowed": report[
+                    "continuation_allowed"
+                ],
+                "continuation_attempt_count": report[
+                    "continuation_attempt_count"
+                ],
+                "blocking_reason_codes": report[
+                    "blocking_reason_codes"
+                ],
+                "report_path": str(result["report_path"]),
+                "report_sha256": result["report_sha256"],
+                "manifest_path": str(result["manifest_path"]),
+                "manifest_sha256": result["manifest_sha256"],
+                "labels_or_outcomes_opened_for_continuation": False,
+                "paper_only": True,
+                "capital_at_risk": False,
+                "v8_execution_handoff_allowed": False,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0 if not report["blocking_reason_codes"] else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
