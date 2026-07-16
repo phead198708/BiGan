@@ -1180,8 +1180,8 @@ def _cross_fit_training_predictions(
             validation_rows,
             feature_columns=feature_columns,
         )
-        for row, prediction in zip(validation_rows, predictions, strict=True):
-            oof_rows.append(
+        fold_oof_rows = _attach_group_normalized_rank_features(
+            [
                 {
                     "fold_index": fold_index,
                     "market_id": row["market_id"],
@@ -1193,7 +1193,11 @@ def _cross_fit_training_predictions(
                     "oof_raw_prediction": prediction,
                     "target_net_pnl_per_contract": row["target_net_pnl_per_contract"],
                 }
-            )
+                for row, prediction in zip(validation_rows, predictions, strict=True)
+            ],
+            score_field="oof_raw_prediction",
+        )
+        oof_rows.extend(fold_oof_rows)
         fold_reports.append(
             {
                 "fold_index": fold_index,
@@ -1401,15 +1405,79 @@ def _predict_role_rows(
     scores = _predict_ranker(booster, rows, feature_columns=feature_columns)
     output = []
     for row, raw_prediction in zip(rows, scores, strict=True):
-        prediction = {
-            **row,
-            "raw_pairwise_rank_score": raw_prediction,
-            "ranking_score_source": "model_predicted_pairwise_rank_score",
-            "target_used_as_decision_input": False,
-            "outcome_fields_used_as_decision_input": False,
-        }
+        output.append(
+            {
+                **row,
+                "raw_pairwise_rank_score": raw_prediction,
+                "ranking_score_source": "model_predicted_pairwise_rank_score",
+                "target_used_as_decision_input": False,
+                "outcome_fields_used_as_decision_input": False,
+            }
+        )
+    normalized = _attach_group_normalized_rank_features(
+        output,
+        score_field="raw_pairwise_rank_score",
+    )
+    for prediction in normalized:
         prediction["prediction_sha256"] = canonical_json_sha256(prediction)
-        output.append(prediction)
+    return normalized
+
+
+def _attach_group_normalized_rank_features(
+    rows: list[dict[str, Any]],
+    *,
+    score_field: str,
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[(str(row["market_id"]), int(row["decision_ts"]))].append(row)
+    output: list[dict[str, Any]] = []
+    for group_key in sorted(grouped, key=lambda value: (value[1], value[0])):
+        group = grouped[group_key]
+        if {str(row["action"]) for row in group} != set(REQUIRED_ACTIONS):
+            raise ValueError("group-normalized rank features require a complete five-action grid")
+        scored = [(row, float(row[score_field])) for row in group]
+        if not all(math.isfinite(score) for _, score in scored):
+            raise ValueError("pairwise rank scores must be finite")
+        ranked = sorted(scored, key=lambda item: (-item[1], str(item[0]["action"])))
+        score_min = min(score for _, score in scored)
+        score_max = max(score for _, score in scored)
+        score_range = score_max - score_min
+        denominator = score_range if score_range > 1e-12 else 1.0
+        no_trade_score = next(score for row, score in scored if str(row["action"]) == "NO_TRADE")
+        rank_by_action = {str(row["action"]): rank for rank, (row, _) in enumerate(ranked, start=1)}
+        score_by_action = {str(row["action"]): score for row, score in scored}
+        for row, score in scored:
+            action = str(row["action"])
+            best_alternative_score = max(
+                candidate_score
+                for candidate_action, candidate_score in score_by_action.items()
+                if candidate_action != action
+            )
+            action_rank = rank_by_action[action]
+            output.append(
+                {
+                    **row,
+                    "pairwise_action_rank": action_rank,
+                    "pairwise_rank_percentile": (
+                        (len(REQUIRED_ACTIONS) - action_rank) / (len(REQUIRED_ACTIONS) - 1)
+                    ),
+                    "pairwise_group_normalized_rank_score": (
+                        (score - score_min) / denominator if score_range > 1e-12 else 0.0
+                    ),
+                    "pairwise_group_score_range": score_range,
+                    "pairwise_normalized_margin_vs_no_trade": (
+                        (score - no_trade_score) / denominator if score_range > 1e-12 else 0.0
+                    ),
+                    "pairwise_normalized_margin_vs_best_alternative": (
+                        (score - best_alternative_score) / denominator
+                        if score_range > 1e-12
+                        else 0.0
+                    ),
+                    "pairwise_rank_normalization_scope": "market_id_decision_ts_five_action_group",
+                    "raw_rank_score_cross_model_comparison_allowed": False,
+                }
+            )
     return output
 
 
@@ -1431,7 +1499,7 @@ def _action_advantage_lcb_artifact(
     calibration_groups: dict[str, Any] = {}
     for action_index, action in enumerate(REQUIRED_ACTIONS):
         oof_scores = sorted(
-            float(row["oof_raw_prediction"])
+            float(row["pairwise_group_normalized_rank_score"])
             for row in train_oof_predictions
             if row["action"] == action
         )
@@ -1453,23 +1521,29 @@ def _action_advantage_lcb_artifact(
         actions[action] = {
             "calibration_row_count": len(rows),
             "calibration_unique_market_count": action_stats["unique_market_count"],
-            "train_oof_score_tertile_boundaries": boundaries,
-            "score_bucket_boundaries_source": ("development_train_oof_predictions_only"),
+            "train_oof_group_normalized_score_tertile_boundaries": boundaries,
+            "score_bucket_boundaries_source": (
+                "development_train_oof_group_normalized_rank_scores_only"
+            ),
             "target_mean": action_stats["target_mean"],
             "target_mean_lower_confidence_bound": action_stats[
                 "target_mean_lower_confidence_bound"
             ],
             "market_grouped_bootstrap": action_stats,
-            "raw_metrics": _regression_metrics(
+            "group_normalized_rank_metrics": _regression_metrics(
                 [float(row["target_net_pnl_per_contract"]) for row in rows],
-                [float(row["raw_pairwise_rank_score"]) for row in rows],
+                [float(row["pairwise_group_normalized_rank_score"]) for row in rows],
             ),
         }
         for bucket_index, bucket_name in enumerate(("low", "middle", "high")):
             bucket_rows = [
                 row
                 for row in rows
-                if _score_bucket(float(row["raw_pairwise_rank_score"]), boundaries) == bucket_name
+                if _score_bucket(
+                    float(row["pairwise_group_normalized_rank_score"]),
+                    boundaries,
+                )
+                == bucket_name
             ]
             group_stats = _market_grouped_target_mean_lcb(
                 bucket_rows,
@@ -1530,14 +1604,19 @@ def _action_advantage_lcb_artifact(
         "source_split": "development_calibration_only",
         "estimand": "conditional_cost_aware_action_advantage",
         "method": "market_grouped_bootstrap_conditional_action_return_lcb",
-        "decision_score_formula": "action_x_oof_score_bucket_target_mean_lcb",
+        "decision_score_formula": (
+            "action_x_oof_group_normalized_rank_score_bucket_target_mean_lcb"
+        ),
         "advantage_against_no_trade_required": True,
         "advantage_against_runner_up_required": True,
         "confidence_level": confidence_level,
         "bootstrap_unit": "market_id",
         "bootstrap_resample_count": bootstrap_resample_count,
         "bootstrap_seed": bootstrap_seed,
-        "score_bucket_boundaries_source": ("development_train_oof_predictions_only"),
+        "score_bucket_boundaries_source": (
+            "development_train_oof_group_normalized_rank_scores_only"
+        ),
+        "raw_rank_score_cross_model_comparison_allowed": False,
         "shrinkage_formula": lcb_protocol["shrinkage_formula"],
         "insufficient_group_support_fallback": lcb_protocol["insufficient_group_support_fallback"],
         "individual_outcome_quantile_subtraction_enabled": False,
@@ -1623,9 +1702,11 @@ def _apply_action_advantage_lcb_scores(
     output = []
     for row in predictions:
         action = str(row["action"])
-        raw_score = float(row["raw_pairwise_rank_score"])
-        boundaries = list(lcb_artifact["actions"][action]["train_oof_score_tertile_boundaries"])
-        bucket = _score_bucket(raw_score, boundaries)
+        normalized_score = float(row["pairwise_group_normalized_rank_score"])
+        boundaries = list(
+            lcb_artifact["actions"][action]["train_oof_group_normalized_score_tertile_boundaries"]
+        )
+        bucket = _score_bucket(normalized_score, boundaries)
         group = lcb_artifact["calibration_groups"][f"{action}|{bucket}"]
         calibrated_score = float(group["calibrated_action_expected_net_return"])
         lcb_score = float(group["action_return_lower_confidence_bound"])

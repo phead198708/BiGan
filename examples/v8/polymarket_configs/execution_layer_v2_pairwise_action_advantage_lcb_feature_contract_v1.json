@@ -1,7 +1,7 @@
 {
   "schema_version": "bigan-v8-execution-layer-v2-pairwise-action-advantage-lcb-feature-contract-v1",
   "candidate_name": "market_grouped_pairwise_action_advantage_lcb_v1",
-  "parent_protocol_sha256": "c31d7410dc16f77f867cbb2f75fccef3dd279837e3a2be7eb97e46792672b3ab",
+  "parent_protocol_sha256": "b12f593f2b7fbfefab95e5a7cb32105a2ac611ee25c2794cd493f8dfe80bf3a8",
   "frozen": true,
   "decision_time_safe": true,
   "feature_source": "phase2_polymarket_feature_rows_only",

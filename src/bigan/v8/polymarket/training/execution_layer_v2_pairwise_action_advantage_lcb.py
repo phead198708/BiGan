@@ -213,9 +213,10 @@ def validate_pairwise_action_advantage_lcb_protocol(protocol: dict[str, Any]) ->
         "calibration_only_action_advantage_lcb": advantage.get("source_split")
         == "development_calibration_only"
         and advantage.get("estimand") == "conditional_cost_aware_action_advantage"
-        and advantage.get("grouping") == "action_x_train_oof_rank_margin_tertile"
+        and advantage.get("grouping") == "action_x_train_oof_group_normalized_rank_score_tertile"
         and advantage.get("score_bucket_boundaries_source")
-        == "development_train_oof_predictions_only"
+        == "development_train_oof_group_normalized_rank_scores_only"
+        and advantage.get("raw_rank_score_cross_model_comparison_allowed") is False
         and advantage.get("bootstrap_unit") == "market_id"
         and int(advantage.get("bootstrap_resample_count") or 0) >= 1_000
         and isinstance(advantage.get("bootstrap_seed"), int)

@@ -19,6 +19,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_l
 from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_lcb_fit import (
     _action_advantage_lcb_artifact,
     _apply_action_advantage_lcb_scores,
+    _attach_group_normalized_rank_features,
     _cross_fit_training_predictions,
     _decision_group_ranking_metrics,
     _development_freeze_gate,
@@ -59,6 +60,10 @@ def test_issue175_protocol_freezes_roles_pairwise_objective_and_quarantine() -> 
         "chronological_expanding_window_prior_markets_only"
     )
     assert protocol["cross_fit_protocol"]["future_market_labels_excluded_from_each_fold"] is True
+    assert (
+        protocol["action_advantage_lcb_protocol"]["raw_rank_score_cross_model_comparison_allowed"]
+        is False
+    )
     assert (
         protocol["action_advantage_lcb_protocol"]["forced_action_side_or_family_quota_enabled"]
         is False
@@ -318,14 +323,20 @@ def test_action_advantage_calibration_is_deterministic_and_no_trade_anchored() -
         )
         for action_index, row in enumerate(rows):
             row["raw_pairwise_rank_score"] = -0.2 + action_index * 0.1
-            calibration.append(row)
+        calibration.extend(
+            _attach_group_normalized_rank_features(
+                rows,
+                score_field="raw_pairwise_rank_score",
+            )
+        )
     for market_index in range(90):
         rows = _decision_rows(
             market_id=f"train-{market_index:03d}",
             decision_ts=1_000 + market_index,
         )
+        oof_group = []
         for action_index, row in enumerate(rows):
-            train_oof.append(
+            oof_group.append(
                 {
                     "market_id": row["market_id"],
                     "decision_ts": row["decision_ts"],
@@ -337,6 +348,12 @@ def test_action_advantage_calibration_is_deterministic_and_no_trade_anchored() -
                     "target_net_pnl_per_contract": row["target_net_pnl_per_contract"],
                 }
             )
+        train_oof.extend(
+            _attach_group_normalized_rank_features(
+                oof_group,
+                score_field="oof_raw_prediction",
+            )
+        )
 
     first = _action_advantage_lcb_artifact(
         calibration,
@@ -353,7 +370,9 @@ def test_action_advantage_calibration_is_deterministic_and_no_trade_anchored() -
     assert canonical_json_sha256(first) == canonical_json_sha256(second)
     assert set(first["actions"]) == set(REQUIRED_ACTIONS)
     assert first["method"] == ("market_grouped_bootstrap_conditional_action_return_lcb")
-    assert first["decision_score_formula"] == ("action_x_oof_score_bucket_target_mean_lcb")
+    assert first["decision_score_formula"] == (
+        "action_x_oof_group_normalized_rank_score_bucket_target_mean_lcb"
+    )
     assert all(
         "calibrated_action_expected_net_return" in group
         and "action_return_lower_confidence_bound" in group
@@ -365,6 +384,39 @@ def test_action_advantage_calibration_is_deterministic_and_no_trade_anchored() -
     no_trade = next(row for row in scored if row["action"] == "NO_TRADE")
     assert no_trade["calibrated_action_expected_net_return"] == 0.0
     assert no_trade["action_advantage_lcb_net_return"] == 0.0
+
+
+def test_group_normalized_rank_features_are_invariant_to_positive_affine_score_scale() -> None:
+    first = _decision_rows(market_id="market-a", decision_ts=1_000)
+    second = _decision_rows(market_id="market-a", decision_ts=1_000)
+    for index, row in enumerate(first):
+        row["raw_pairwise_rank_score"] = -0.4 + index * 0.17
+    for index, row in enumerate(second):
+        row["raw_pairwise_rank_score"] = 12.0 + 7.0 * (-0.4 + index * 0.17)
+
+    normalized_first = _attach_group_normalized_rank_features(
+        first,
+        score_field="raw_pairwise_rank_score",
+    )
+    normalized_second = _attach_group_normalized_rank_features(
+        second,
+        score_field="raw_pairwise_rank_score",
+    )
+    first_by_action = {row["action"]: row for row in normalized_first}
+    second_by_action = {row["action"]: row for row in normalized_second}
+
+    for action in REQUIRED_ACTIONS:
+        assert (
+            first_by_action[action]["pairwise_action_rank"]
+            == second_by_action[action]["pairwise_action_rank"]
+        )
+        assert first_by_action[action]["pairwise_group_normalized_rank_score"] == pytest.approx(
+            second_by_action[action]["pairwise_group_normalized_rank_score"]
+        )
+        assert first_by_action[action]["pairwise_normalized_margin_vs_no_trade"] == pytest.approx(
+            second_by_action[action]["pairwise_normalized_margin_vs_no_trade"]
+        )
+        assert first_by_action[action]["raw_rank_score_cross_model_comparison_allowed"] is False
 
 
 def test_development_gate_blocks_before_confirmatory_when_support_is_missing() -> None:
