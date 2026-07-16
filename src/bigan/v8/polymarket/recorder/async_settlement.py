@@ -62,7 +62,7 @@ from bigan.v8.polymarket.storage import (
     round_corpus_id_from_corpus_dir,
 )
 
-ASYNC_SETTLEMENT_SCHEMA_VERSION = "bigan-v8-polymarket-async-settlement-v1"
+ASYNC_SETTLEMENT_SCHEMA_VERSION = "bigan-v8-polymarket-async-settlement-v2"
 PENDING_CAPTURE_PHASE = "polymarket_pending_round_capture"
 PENDING_FINALIZATION_PHASE = "polymarket_pending_round_finalization"
 PROVIDER_RAW_DIRNAME = "provider_raw"
@@ -100,9 +100,12 @@ def capture_polymarket_pending_round(
     *,
     public_provider: PolymarketRealCorpusPublicProvider,
     chainlink_rtds_collector: ChainlinkRTDSSnapshotSource | None = None,
+    feature_enrichment_max_attempts: int = 40,
 ) -> PendingRoundCaptureResult:
     """Capture one round's market facts without waiting for delayed settlement."""
 
+    if feature_enrichment_max_attempts <= 0:
+        raise ValueError("feature_enrichment_max_attempts must be positive")
     run_dir = config.run_dir
     if run_dir.exists():
         if not config.overwrite_existing:
@@ -166,8 +169,18 @@ def capture_polymarket_pending_round(
     _write_raw_files(provider_raw_dir, provider_raw_payloads)
     _write_jsonl(provider_raw_dir / CHAINLINK_RTDS_RAW_FILENAME, provider_chainlink_rows)
 
+    feature_provider_failures = [
+        row
+        for row in provider_failures
+        if row.get("provider_stage") == "feature_candle_collection"
+    ]
+    fatal_provider_failures = [
+        row
+        for row in provider_failures
+        if row.get("provider_stage") != "feature_candle_collection"
+    ]
     raw_payloads = empty_raw_payloads()
-    rejected_rows: list[dict[str, Any]] = list(provider_failures)
+    rejected_rows: list[dict[str, Any]] = list(fatal_provider_failures)
     accepted_markets: list[dict[str, Any]] = []
     for market in market_candidates:
         market_reasons = _validate_market_row(market)
@@ -203,12 +216,39 @@ def capture_polymarket_pending_round(
     candles, candle_reasons = validate_btc_feature_candles(
         candle_candidates if accepted_markets else []
     )
-    if candle_reasons:
+    (
+        candles,
+        post_market_close_candle_count,
+        _,
+    ) = _causal_feature_candles_for_markets(
+        rows=candles,
+        markets=accepted_markets,
+    )
+    if accepted_markets and not candles:
+        candle_reasons = sorted(
+            {*candle_reasons, "missing_btc_feature_candles"}
+        )
+    pending_feature_enrichment = _feature_enrichment_can_retry(
+        accepted_markets=accepted_markets,
+        candle_reasons=candle_reasons,
+        feature_provider_failures=feature_provider_failures,
+    )
+    feature_enrichment_reason_codes = sorted(
+        {
+            *candle_reasons,
+            *(
+                reason
+                for row in feature_provider_failures
+                for reason in row.get("reject_reasons", [])
+            ),
+        }
+    )
+    if candle_reasons and not pending_feature_enrichment:
         for market in accepted_markets:
             rejected_rows.append(_rejected_market(market, candle_reasons))
         raw_payloads = empty_raw_payloads()
         accepted_markets = []
-    else:
+    elif not candle_reasons:
         raw_payloads["raw_binance_btcusdt_klines.jsonl"].extend(candles)
 
     raw_chainlink_rows, raw_chainlink_reasons = _causal_chainlink_rows_for_markets(
@@ -248,6 +288,17 @@ def capture_polymarket_pending_round(
         chainlink_reason_codes=sorted(
             set(provider_chainlink_reasons + raw_chainlink_reasons)
         ),
+        feature_enrichment_warning_reason_codes=(
+            ["feature_enrichment_post_market_close_candle_rejected"]
+            if post_market_close_candle_count
+            else []
+        ),
+        feature_enrichment_post_market_close_candle_rejected_count=(
+            post_market_close_candle_count
+        ),
+        pending_feature_enrichment=pending_feature_enrichment,
+        feature_enrichment_reason_codes=feature_enrichment_reason_codes,
+        feature_enrichment_max_attempts=feature_enrichment_max_attempts,
     )
     manifest = _pending_capture_manifest(
         config=config,
@@ -257,6 +308,17 @@ def capture_polymarket_pending_round(
         report=report,
         raw_chainlink_rows=raw_chainlink_rows,
         provider_chainlink_rows=provider_chainlink_rows,
+        feature_enrichment_warning_reason_codes=(
+            ["feature_enrichment_post_market_close_candle_rejected"]
+            if post_market_close_candle_count
+            else []
+        ),
+        feature_enrichment_post_market_close_candle_rejected_count=(
+            post_market_close_candle_count
+        ),
+        pending_feature_enrichment=pending_feature_enrichment,
+        feature_enrichment_reason_codes=feature_enrichment_reason_codes,
+        feature_enrichment_max_attempts=feature_enrichment_max_attempts,
     )
     _write_json(artifact_paths["pending_round_capture_report"], report)
     _write_json(artifact_paths["pending_round_capture_manifest"], manifest)
@@ -296,6 +358,35 @@ def finalize_polymarket_pending_round(
     provider_chainlink_rows = _read_jsonl(
         provider_raw_dir / CHAINLINK_RTDS_RAW_FILENAME
     )
+    feature_enrichment_report = _read_json_or_empty(
+        resolved_run_dir / "pending_round_feature_enrichment_report.json"
+    )
+    if capture_manifest.get("pending_feature_enrichment") is True:
+        feature_enrichment_report = _attempt_pending_feature_enrichment(
+            run_dir=resolved_run_dir,
+            config=config,
+            public_provider=public_provider,
+            raw_payloads=raw_payloads,
+            provider_raw_payloads=provider_raw_payloads,
+            raw_chainlink_rows=raw_chainlink_rows,
+            provider_chainlink_rows=provider_chainlink_rows,
+            capture_manifest=capture_manifest,
+        )
+        capture_manifest = _read_json(manifest_path)
+        raw_payloads = _read_raw_payloads(raw_dir)
+        provider_raw_payloads = _read_raw_payloads(provider_raw_dir)
+        if feature_enrichment_report["feature_enrichment_status"] != "recovered":
+            return _pending_feature_enrichment_finalization_result(
+                run_dir=resolved_run_dir,
+                raw_dir=raw_dir,
+                provider_raw_dir=provider_raw_dir,
+                config=config,
+                raw_payloads=raw_payloads,
+                provider_raw_payloads=provider_raw_payloads,
+                raw_chainlink_rows=raw_chainlink_rows,
+                provider_chainlink_rows=provider_chainlink_rows,
+                feature_enrichment_report=feature_enrichment_report,
+            )
     market_rows = raw_payloads["raw_polymarket_markets.jsonl"]
     rejected_rows: list[dict[str, Any]] = []
     resolution_rows: list[dict[str, Any]] = []
@@ -443,6 +534,7 @@ def finalize_polymarket_pending_round(
         raw_chainlink_rows=raw_chainlink_rows,
         provider_chainlink_rows=provider_chainlink_rows,
         chainlink_corpus_evidence=chainlink_corpus_evidence,
+        feature_enrichment_report=feature_enrichment_report,
     )
     finalization_manifest = _pending_finalization_manifest(
         config=config,
@@ -456,6 +548,7 @@ def finalize_polymarket_pending_round(
         raw_chainlink_rows=raw_chainlink_rows,
         provider_chainlink_rows=provider_chainlink_rows,
         chainlink_corpus_evidence=chainlink_corpus_evidence,
+        feature_enrichment_report=feature_enrichment_report,
     )
     _write_json(artifact_paths["pending_round_finalization_report"], report)
     _write_json(artifact_paths["pending_round_finalization_manifest"], finalization_manifest)
@@ -478,6 +571,401 @@ def finalize_polymarket_pending_round(
     )
 
 
+def _attempt_pending_feature_enrichment(
+    *,
+    run_dir: Path,
+    config: PolymarketRealCorpusRecorderConfig,
+    public_provider: PolymarketRealCorpusPublicProvider,
+    raw_payloads: dict[str, list[dict[str, Any]]],
+    provider_raw_payloads: dict[str, list[dict[str, Any]]],
+    raw_chainlink_rows: list[dict[str, Any]],
+    provider_chainlink_rows: list[dict[str, Any]],
+    capture_manifest: dict[str, Any],
+) -> dict[str, Any]:
+    report_path = run_dir / "pending_round_feature_enrichment_report.json"
+    manifest_path = (
+        run_dir / "pending_round_feature_enrichment_manifest.json"
+    )
+    capture_report_path = run_dir / "pending_round_capture_report.json"
+    capture_manifest_path = run_dir / "pending_round_capture_manifest.json"
+    capture_report = _read_json(capture_report_path)
+    previous_attempt_count = int(
+        capture_manifest.get("feature_enrichment_attempt_count") or 0
+    )
+    attempt_count = previous_attempt_count + 1
+    max_attempts = int(
+        capture_manifest.get("feature_enrichment_max_attempts") or 0
+    )
+    if max_attempts <= 0:
+        max_attempts = 1
+    market_rows = raw_payloads["raw_polymarket_markets.jsonl"]
+    failures: list[dict[str, Any]] = []
+    candle_candidates = _call_provider_stage(
+        provider="btc_reference",
+        provider_stage="feature_candle_enrichment",
+        failures=failures,
+        callback=lambda: public_provider.btc_feature_candle_rows(
+            market_rows,
+            config,
+        ),
+    )
+    candles, candle_reasons = validate_btc_feature_candles(
+        candle_candidates
+    )
+    (
+        candles,
+        post_market_close_candle_count,
+        max_market_end_ts,
+    ) = _causal_feature_candles_for_markets(
+        rows=candles,
+        markets=market_rows,
+    )
+    blocking_reason_codes = sorted(
+        {
+            *candle_reasons,
+            *(
+                str(reason)
+                for row in failures
+                for reason in row.get("reject_reasons", [])
+            ),
+            *(
+                ["missing_btc_feature_candles"]
+                if not candles
+                else []
+            ),
+        }
+    )
+    warning_reason_codes = (
+        ["feature_enrichment_post_market_close_candle_rejected"]
+        if post_market_close_candle_count
+        else []
+    )
+    recovered = bool(
+        market_rows
+        and candles
+        and not failures
+        and not candle_reasons
+    )
+    exhausted = not recovered and attempt_count >= max_attempts
+    status = (
+        "recovered"
+        if recovered
+        else "blocked_fail_closed"
+        if exhausted
+        else "pending_feature_enrichment"
+    )
+    source_counts = Counter(str(row.get("source") or "unknown") for row in candles)
+    max_available_at_ts = max(
+        (
+            int(
+                row.get("available_at_ts")
+                or row.get("close_time")
+                or 0
+            )
+            for row in candles
+        ),
+        default=0,
+    )
+    if recovered:
+        raw_payloads["raw_binance_btcusdt_klines.jsonl"] = [
+            dict(row) for row in candles
+        ]
+        provider_raw_payloads[
+            "raw_binance_btcusdt_klines.jsonl"
+        ] = [dict(row) for row in candle_candidates]
+        _sort_raw_payloads(raw_payloads)
+        _write_raw_files(config.raw_dir, raw_payloads)
+        _sort_raw_payloads(provider_raw_payloads)
+        _write_raw_files(run_dir / PROVIDER_RAW_DIRNAME, provider_raw_payloads)
+
+    report = {
+        "schema_version": ASYNC_SETTLEMENT_SCHEMA_VERSION,
+        "phase": "polymarket_pending_round_feature_enrichment",
+        "run_id": config.run_id,
+        "feature_enrichment_status": status,
+        "feature_enrichment_attempt_count": attempt_count,
+        "feature_enrichment_max_attempts": max_attempts,
+        "feature_enrichment_recovered": recovered,
+        "feature_enrichment_exhausted": exhausted,
+        "feature_enrichment_reason_codes": (
+            [] if recovered else blocking_reason_codes
+        ),
+        "feature_enrichment_warning_reason_codes": warning_reason_codes,
+        "feature_enrichment_source_distribution": dict(
+            sorted(source_counts.items())
+        ),
+        "feature_enrichment_candle_row_count": len(candles),
+        "feature_enrichment_provider_candle_row_count": len(
+            candle_candidates
+        ),
+        "feature_enrichment_post_market_close_candle_rejected_count": (
+            post_market_close_candle_count
+        ),
+        "feature_enrichment_candle_max_available_at_ts": (
+            max_available_at_ts
+        ),
+        "feature_enrichment_market_end_ts": max_market_end_ts,
+        "feature_enrichment_accepted_causality_violation_count": 0,
+        "feature_enrichment_rejected_causality_violation_count": (
+            post_market_close_candle_count
+        ),
+        "feature_enrichment_causality_validation_passed": (
+            bool(candles)
+            and all(
+                int(
+                    row.get("available_at_ts")
+                    or row.get("close_time")
+                    or 0
+                )
+                <= max_market_end_ts
+                for row in candles
+            )
+        ),
+        "resolution_provider_called": False,
+        "outcome_or_pnl_fields_accessed": False,
+        **safety_fields(),
+    }
+    _write_json(report_path, report)
+    enrichment_manifest = {
+        "schema_version": ASYNC_SETTLEMENT_SCHEMA_VERSION,
+        "phase": "polymarket_pending_round_feature_enrichment",
+        "run_id": config.run_id,
+        "report_path": str(report_path),
+        "report_sha256": _sha256_file(report_path),
+        "raw_artifact_hashes": {
+            filename: _sha256_file(config.raw_dir / filename)
+            for filename in RAW_CORPUS_FILENAMES
+            if (config.raw_dir / filename).exists()
+        },
+        "provider_raw_artifact_hashes": {
+            filename: _sha256_file(
+                run_dir / PROVIDER_RAW_DIRNAME / filename
+            )
+            for filename in RAW_CORPUS_FILENAMES
+            if (run_dir / PROVIDER_RAW_DIRNAME / filename).exists()
+        },
+        "feature_enrichment_status": status,
+        "feature_enrichment_attempt_count": attempt_count,
+        "feature_enrichment_recovered": recovered,
+        "resolution_provider_called": False,
+        "outcome_or_pnl_fields_accessed": False,
+        **safety_fields(),
+    }
+    _write_json(manifest_path, enrichment_manifest)
+
+    capture_report.update(
+        {
+            "pending_feature_enrichment": not recovered
+            and not exhausted,
+            "pending_resolution": recovered,
+            "capture_status": (
+                "pending_resolution"
+                if recovered
+                else "blocked_fail_closed"
+                if exhausted
+                else "pending_feature_enrichment"
+            ),
+            "feature_enrichment_attempt_count": attempt_count,
+            "feature_enrichment_recovered": recovered,
+            "feature_enrichment_reason_codes": (
+                [] if recovered else blocking_reason_codes
+            ),
+            "feature_enrichment_warning_reason_codes": warning_reason_codes,
+            "raw_btc_candle_row_count": len(
+                raw_payloads[
+                    "raw_binance_btcusdt_klines.jsonl"
+                ]
+            ),
+            "public_collection_reason_codes": (
+                [] if recovered else blocking_reason_codes
+            ),
+        }
+    )
+    _write_json(capture_report_path, capture_report)
+    capture_manifest.update(
+        {
+            "pending_feature_enrichment": not recovered
+            and not exhausted,
+            "pending_resolution": recovered,
+            "capture_status": capture_report["capture_status"],
+            "feature_enrichment_attempt_count": attempt_count,
+            "feature_enrichment_reason_codes": (
+                [] if recovered else blocking_reason_codes
+            ),
+            "feature_enrichment_warning_reason_codes": warning_reason_codes,
+            "feature_enrichment_recovered": recovered,
+            "training_raw_is_validated_sampled_view": recovered,
+            "raw_artifact_hashes": {
+                filename: _sha256_file(config.raw_dir / filename)
+                for filename in RAW_CORPUS_FILENAMES
+                if (config.raw_dir / filename).exists()
+            },
+            "raw_artifact_row_counts": {
+                filename: len(raw_payloads[filename])
+                for filename in RAW_CORPUS_FILENAMES
+            },
+            "provider_raw_artifact_hashes": {
+                filename: _sha256_file(
+                    run_dir / PROVIDER_RAW_DIRNAME / filename
+                )
+                for filename in RAW_CORPUS_FILENAMES
+                if (
+                    run_dir / PROVIDER_RAW_DIRNAME / filename
+                ).exists()
+            },
+            "provider_raw_artifact_row_counts": {
+                filename: len(provider_raw_payloads[filename])
+                for filename in RAW_CORPUS_FILENAMES
+            },
+            "feature_enrichment_report_sha256": _sha256_file(
+                report_path
+            ),
+            "feature_enrichment_manifest_sha256": _sha256_file(
+                manifest_path
+            ),
+        }
+    )
+    _write_json(capture_manifest_path, capture_manifest)
+    return report
+
+
+def _pending_feature_enrichment_finalization_result(
+    *,
+    run_dir: Path,
+    raw_dir: Path,
+    provider_raw_dir: Path,
+    config: PolymarketRealCorpusRecorderConfig,
+    raw_payloads: dict[str, list[dict[str, Any]]],
+    provider_raw_payloads: dict[str, list[dict[str, Any]]],
+    raw_chainlink_rows: list[dict[str, Any]],
+    provider_chainlink_rows: list[dict[str, Any]],
+    feature_enrichment_report: dict[str, Any],
+) -> PendingRoundFinalizationResult:
+    status = str(
+        feature_enrichment_report["feature_enrichment_status"]
+    )
+    pending = status == "pending_feature_enrichment"
+    reason_codes = list(
+        feature_enrichment_report.get(
+            "feature_enrichment_reason_codes"
+        )
+        or []
+    )
+    artifact_paths = _pending_finalization_paths(
+        run_dir,
+        raw_dir,
+        provider_raw_dir,
+    )
+    report = {
+        "schema_version": ASYNC_SETTLEMENT_SCHEMA_VERSION,
+        "phase": PENDING_FINALIZATION_PHASE,
+        "run_id": config.run_id,
+        "finalization_status": status,
+        "pending_feature_enrichment": pending,
+        "pending_resolution": False,
+        "feature_enrichment_recovered": False,
+        "feature_enrichment_attempt_count": int(
+            feature_enrichment_report.get(
+                "feature_enrichment_attempt_count"
+            )
+            or 0
+        ),
+        "feature_enrichment_reason_codes": reason_codes,
+        "feature_enrichment_warning_reason_codes": list(
+            feature_enrichment_report.get(
+                "feature_enrichment_warning_reason_codes"
+            )
+            or []
+        ),
+        "feature_enrichment_post_market_close_candle_rejected_count": int(
+            feature_enrichment_report.get(
+                "feature_enrichment_post_market_close_candle_rejected_count"
+            )
+            or 0
+        ),
+        "resolution_provider_called": False,
+        "raw_polymarket_market_count": len(
+            raw_payloads["raw_polymarket_markets.jsonl"]
+        ),
+        "raw_orderbook_row_count": len(
+            raw_payloads["raw_polymarket_orderbooks.jsonl"]
+        ),
+        "raw_trade_row_count": len(
+            raw_payloads["raw_polymarket_trades.jsonl"]
+        ),
+        "raw_btc_candle_row_count": len(
+            raw_payloads["raw_binance_btcusdt_klines.jsonl"]
+        ),
+        "raw_chainlink_price_row_count": len(raw_chainlink_rows),
+        "provider_raw_chainlink_price_row_count": len(
+            provider_chainlink_rows
+        ),
+        "raw_resolution_count": 0,
+        "reject_reason_counts": dict.fromkeys(
+            sorted(set(reason_codes)),
+            1,
+        ),
+        "training_eligible": False,
+        "phase2_corpus_built": False,
+        "phase2_error": None,
+        "exported_training_corpus_dir": None,
+        "outcome_or_pnl_fields_accessed": False,
+        **safety_fields(),
+    }
+    _write_json(
+        artifact_paths["pending_round_finalization_report"],
+        report,
+    )
+    manifest = {
+        "schema_version": ASYNC_SETTLEMENT_SCHEMA_VERSION,
+        "phase": PENDING_FINALIZATION_PHASE,
+        "run_id": config.run_id,
+        "report_path": str(
+            artifact_paths["pending_round_finalization_report"]
+        ),
+        "report_sha256": _sha256_file(
+            artifact_paths["pending_round_finalization_report"]
+        ),
+        "feature_enrichment_report_path": str(
+            artifact_paths[
+                "pending_round_feature_enrichment_report"
+            ]
+        ),
+        "feature_enrichment_report_sha256": _sha256_file(
+            artifact_paths[
+                "pending_round_feature_enrichment_report"
+            ]
+        ),
+        "finalization_status": status,
+        "pending_feature_enrichment": pending,
+        "pending_resolution": False,
+        "resolution_provider_called": False,
+        "training_eligible": False,
+        "exported_training_corpus_dir": None,
+        "outcome_or_pnl_fields_accessed": False,
+        **safety_fields(),
+    }
+    _write_json(
+        artifact_paths["pending_round_finalization_manifest"],
+        manifest,
+    )
+    artifact_hashes = {
+        name: _sha256_file(path)
+        for name, path in sorted(artifact_paths.items())
+        if path.exists()
+    }
+    return PendingRoundFinalizationResult(
+        run_dir=run_dir,
+        raw_dir=raw_dir,
+        corpus_dir=None,
+        exported_training_corpus_dir=None,
+        artifact_paths=artifact_paths,
+        artifact_hashes=artifact_hashes,
+        manifest=manifest,
+        report=report,
+    )
+
+
 def _pending_capture_paths(
     run_dir: Path,
     raw_dir: Path,
@@ -487,6 +975,12 @@ def _pending_capture_paths(
         "pending_round_capture_manifest": run_dir / "pending_round_capture_manifest.json",
         "pending_round_capture_report": run_dir / "pending_round_capture_report.json",
         "pending_round_rejected_rows": run_dir / "pending_round_rejected_rows.jsonl",
+        "pending_round_feature_enrichment_report": (
+            run_dir / "pending_round_feature_enrichment_report.json"
+        ),
+        "pending_round_feature_enrichment_manifest": (
+            run_dir / "pending_round_feature_enrichment_manifest.json"
+        ),
         "raw_polymarket_chainlink_prices": raw_dir / CHAINLINK_RTDS_RAW_FILENAME,
         "polymarket_chainlink_rtds_collection_report": (
             run_dir / CHAINLINK_RTDS_COLLECTION_REPORT_FILENAME
@@ -508,6 +1002,12 @@ def _pending_finalization_paths(
         "pending_round_finalization_report": run_dir / "pending_round_finalization_report.json",
         "pending_round_finalization_rejected_rows": (
             run_dir / "pending_round_finalization_rejected_rows.jsonl"
+        ),
+        "pending_round_feature_enrichment_report": (
+            run_dir / "pending_round_feature_enrichment_report.json"
+        ),
+        "pending_round_feature_enrichment_manifest": (
+            run_dir / "pending_round_feature_enrichment_manifest.json"
         ),
         "raw_polymarket_chainlink_prices": raw_dir / CHAINLINK_RTDS_RAW_FILENAME,
         "polymarket_chainlink_rtds_collection_report": (
@@ -1233,6 +1733,11 @@ def _pending_capture_report(
     provider_chainlink_rows: list[dict[str, Any]],
     chainlink_collection_report: dict[str, Any],
     chainlink_reason_codes: list[str],
+    feature_enrichment_warning_reason_codes: list[str],
+    feature_enrichment_post_market_close_candle_rejected_count: int,
+    pending_feature_enrichment: bool,
+    feature_enrichment_reason_codes: list[str],
+    feature_enrichment_max_attempts: int,
 ) -> dict[str, Any]:
     market_count = len(raw_payloads["raw_polymarket_markets.jsonl"])
     reject_counts = _reject_counts(rejected_rows)
@@ -1244,6 +1749,8 @@ def _pending_capture_report(
         for row in provider_raw_markets
     )
     market_identity_fallback_reason_counts: Counter[str] = Counter()
+    clob_revalidation_attempt_counts: Counter[str] = Counter()
+    clob_revalidation_retry_reason_counts: Counter[str] = Counter()
     for row in provider_raw_markets:
         market_identity_fallback_reason_counts.update(
             str(reason)
@@ -1252,6 +1759,17 @@ def _pending_capture_report(
             )
             or []
         )
+        revalidation = dict(
+            row.get("market_identity_clob_revalidation") or {}
+        )
+        if revalidation:
+            clob_revalidation_attempt_counts.update(
+                [str(int(revalidation.get("attempt_count") or 0))]
+            )
+            clob_revalidation_retry_reason_counts.update(
+                str(reason)
+                for reason in revalidation.get("retry_reason_codes") or []
+            )
     provider_raw_orderbooks = provider_raw_payloads[
         "raw_polymarket_orderbooks.jsonl"
     ]
@@ -1270,11 +1788,24 @@ def _pending_capture_report(
         "phase": PENDING_CAPTURE_PHASE,
         "run_id": config.run_id,
         "market_families": list(config.market_families),
-        "pending_resolution": market_count > 0,
+        "pending_feature_enrichment": pending_feature_enrichment,
+        "pending_resolution": market_count > 0 and not pending_feature_enrichment,
         "capture_status": (
-            "blocked_fail_closed"
+            "pending_feature_enrichment"
+            if pending_feature_enrichment
+            else "blocked_fail_closed"
             if provider_failures or market_count == 0
             else "pending_resolution"
+        ),
+        "feature_enrichment_attempt_count": 0,
+        "feature_enrichment_max_attempts": feature_enrichment_max_attempts,
+        "feature_enrichment_recovered": False,
+        "feature_enrichment_reason_codes": feature_enrichment_reason_codes,
+        "feature_enrichment_warning_reason_codes": (
+            feature_enrichment_warning_reason_codes
+        ),
+        "feature_enrichment_post_market_close_candle_rejected_count": (
+            feature_enrichment_post_market_close_candle_rejected_count
         ),
         "resolution_provider_called": False,
         "raw_polymarket_market_count": market_count,
@@ -1299,6 +1830,33 @@ def _pending_capture_report(
             1
             for row in provider_raw_markets
             if row.get("market_identity_clob_revalidation_passed") is True
+        ),
+        "market_identity_clob_revalidation_retry_succeeded_market_count": sum(
+            1
+            for row in provider_raw_markets
+            if int(
+                dict(
+                    row.get("market_identity_clob_revalidation") or {}
+                ).get("attempt_count")
+                or 0
+            )
+            > 1
+            and row.get("market_identity_clob_revalidation_passed") is True
+        ),
+        "market_identity_clob_revalidation_attempt_distribution": dict(
+            sorted(clob_revalidation_attempt_counts.items())
+        ),
+        "market_identity_clob_revalidation_retry_reason_distribution": dict(
+            sorted(clob_revalidation_retry_reason_counts.items())
+        ),
+        "market_identity_clob_revalidation_identity_relaxation_count": sum(
+            1
+            for row in provider_raw_markets
+            if dict(
+                row.get("market_identity_clob_revalidation") or {}
+            ).get("retry_policy_relaxed_identity_checks")
+            is not False
+            and row.get("market_identity_cache_fallback_used") is True
         ),
         "market_identity_live_orderbook_validation_required": True,
         "raw_orderbook_row_count": len(raw_payloads["raw_polymarket_orderbooks.jsonl"]),
@@ -1374,6 +1932,11 @@ def _pending_capture_manifest(
     report: dict[str, Any],
     raw_chainlink_rows: list[dict[str, Any]],
     provider_chainlink_rows: list[dict[str, Any]],
+    feature_enrichment_warning_reason_codes: list[str],
+    feature_enrichment_post_market_close_candle_rejected_count: int,
+    pending_feature_enrichment: bool,
+    feature_enrichment_reason_codes: list[str],
+    feature_enrichment_max_attempts: int,
 ) -> dict[str, Any]:
     raw_paths = {filename: config.raw_dir / filename for filename in RAW_CORPUS_FILENAMES}
     return {
@@ -1409,7 +1972,18 @@ def _pending_capture_manifest(
             config.run_dir / CHAINLINK_RTDS_COLLECTION_REPORT_FILENAME
         ),
         "provider_raw_artifacts_preserved": True,
-        "training_raw_is_validated_sampled_view": True,
+        "training_raw_is_validated_sampled_view": not pending_feature_enrichment,
+        "pending_feature_enrichment": pending_feature_enrichment,
+        "feature_enrichment_attempt_count": 0,
+        "feature_enrichment_max_attempts": feature_enrichment_max_attempts,
+        "feature_enrichment_recovered": False,
+        "feature_enrichment_reason_codes": feature_enrichment_reason_codes,
+        "feature_enrichment_warning_reason_codes": (
+            feature_enrichment_warning_reason_codes
+        ),
+        "feature_enrichment_post_market_close_candle_rejected_count": (
+            feature_enrichment_post_market_close_candle_rejected_count
+        ),
         "pending_resolution": report["pending_resolution"],
         "capture_status": report["capture_status"],
         "resolution_provider_called": False,
@@ -1430,6 +2004,7 @@ def _pending_finalization_report(
     raw_chainlink_rows: list[dict[str, Any]],
     provider_chainlink_rows: list[dict[str, Any]],
     chainlink_corpus_evidence: dict[str, Any],
+    feature_enrichment_report: dict[str, Any],
 ) -> dict[str, Any]:
     market_count = len(raw_payloads["raw_polymarket_markets.jsonl"])
     resolution_count = len(raw_payloads["raw_polymarket_resolutions.jsonl"])
@@ -1445,7 +2020,46 @@ def _pending_finalization_report(
         "phase": PENDING_FINALIZATION_PHASE,
         "run_id": config.run_id,
         "finalization_status": status,
+        "pending_feature_enrichment": False,
         "pending_resolution": status == "pending_resolution",
+        "feature_enrichment_recovered": bool(
+            feature_enrichment_report.get("feature_enrichment_recovered")
+        ),
+        "feature_enrichment_attempt_count": int(
+            feature_enrichment_report.get("feature_enrichment_attempt_count")
+            or 0
+        ),
+        "feature_enrichment_source_distribution": dict(
+            feature_enrichment_report.get(
+                "feature_enrichment_source_distribution"
+            )
+            or {}
+        ),
+        "feature_enrichment_reason_codes": list(
+            feature_enrichment_report.get("feature_enrichment_reason_codes")
+            or []
+        ),
+        "feature_enrichment_warning_reason_codes": list(
+            feature_enrichment_report.get(
+                "feature_enrichment_warning_reason_codes"
+            )
+            or []
+        ),
+        "feature_enrichment_post_market_close_candle_rejected_count": int(
+            feature_enrichment_report.get(
+                "feature_enrichment_post_market_close_candle_rejected_count"
+            )
+            or 0
+        ),
+        "feature_enrichment_causality_validation_passed": (
+            feature_enrichment_report.get(
+                "feature_enrichment_causality_validation_passed"
+            )
+            is True
+            if feature_enrichment_report
+            else True
+        ),
+        "resolution_provider_called": market_count > 0,
         "raw_polymarket_market_count": market_count,
         "raw_orderbook_row_count": len(raw_payloads["raw_polymarket_orderbooks.jsonl"]),
         "provider_raw_orderbook_snapshot_count": len(
@@ -1510,6 +2124,7 @@ def _pending_finalization_manifest(
     raw_chainlink_rows: list[dict[str, Any]],
     provider_chainlink_rows: list[dict[str, Any]],
     chainlink_corpus_evidence: dict[str, Any],
+    feature_enrichment_report: dict[str, Any],
 ) -> dict[str, Any]:
     raw_paths = {filename: config.raw_dir / filename for filename in RAW_CORPUS_FILENAMES}
     return {
@@ -1547,7 +2162,56 @@ def _pending_finalization_manifest(
         "provider_raw_artifacts_preserved": True,
         "training_raw_is_validated_sampled_view": True,
         "finalization_status": report["finalization_status"],
+        "pending_feature_enrichment": False,
         "pending_resolution": report["pending_resolution"],
+        "feature_enrichment_recovered": report[
+            "feature_enrichment_recovered"
+        ],
+        "feature_enrichment_attempt_count": report[
+            "feature_enrichment_attempt_count"
+        ],
+        "feature_enrichment_source_distribution": report[
+            "feature_enrichment_source_distribution"
+        ],
+        "feature_enrichment_post_market_close_candle_rejected_count": report[
+            "feature_enrichment_post_market_close_candle_rejected_count"
+        ],
+        "feature_enrichment_causality_validation_passed": report[
+            "feature_enrichment_causality_validation_passed"
+        ],
+        "feature_enrichment_report_path": (
+            str(
+                config.run_dir
+                / "pending_round_feature_enrichment_report.json"
+            )
+            if feature_enrichment_report
+            else None
+        ),
+        "feature_enrichment_report_sha256": (
+            _optional_sha256_file(
+                config.run_dir
+                / "pending_round_feature_enrichment_report.json"
+            )
+            if feature_enrichment_report
+            else None
+        ),
+        "feature_enrichment_manifest_path": (
+            str(
+                config.run_dir
+                / "pending_round_feature_enrichment_manifest.json"
+            )
+            if feature_enrichment_report
+            else None
+        ),
+        "feature_enrichment_manifest_sha256": (
+            _optional_sha256_file(
+                config.run_dir
+                / "pending_round_feature_enrichment_manifest.json"
+            )
+            if feature_enrichment_report
+            else None
+        ),
+        "resolution_provider_called": report["resolution_provider_called"],
         "phase2_corpus_built": phase2_result is not None,
         "phase2_corpus_dir": None if phase2_result is None else str(phase2_result.output_dir),
         "phase2_corpus_manifest_sha256": report["phase2_corpus_manifest_sha256"],
@@ -1657,6 +2321,56 @@ def _reject_counts(rejected_rows: list[dict[str, Any]]) -> dict[str, int]:
         for reason in row.get("reject_reasons", []):
             counts[str(reason)] += 1
     return dict(sorted(counts.items()))
+
+
+def _feature_enrichment_can_retry(
+    *,
+    accepted_markets: list[dict[str, Any]],
+    candle_reasons: list[str],
+    feature_provider_failures: list[dict[str, Any]],
+) -> bool:
+    if not accepted_markets or set(candle_reasons) != {
+        "missing_btc_feature_candles"
+    }:
+        return False
+    allowed_reason_codes = {
+        "btc_feature_candle_sources_unavailable",
+        "read_only_public_http_timeout",
+        "read_only_public_http_transport_error",
+        "read_only_public_http_server_error",
+    }
+    observed_reason_codes = {
+        str(reason)
+        for row in feature_provider_failures
+        for reason in row.get("reject_reasons", [])
+    }
+    return not observed_reason_codes or observed_reason_codes <= (
+        allowed_reason_codes
+    )
+
+
+def _causal_feature_candles_for_markets(
+    *,
+    rows: list[dict[str, Any]],
+    markets: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int, int]:
+    max_market_end_ts = max(
+        (int(row.get("market_end_ts") or 0) for row in markets),
+        default=0,
+    )
+    if max_market_end_ts <= 0:
+        return [], len(rows), max_market_end_ts
+    accepted = [
+        row
+        for row in rows
+        if int(
+            row.get("available_at_ts")
+            or row.get("close_time")
+            or 0
+        )
+        <= max_market_end_ts
+    ]
+    return accepted, len(rows) - len(accepted), max_market_end_ts
 
 
 def _positive_int(value: Any) -> int | None:

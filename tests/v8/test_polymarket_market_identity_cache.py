@@ -189,6 +189,38 @@ def test_provider_uses_cache_only_after_gamma_timeout_and_clob_revalidation(
     assert rows[0]["capital_at_risk"] is False
 
 
+def test_provider_retries_transient_clob_identity_timeout_without_relaxing_identity(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "cache.json"
+    cache = GammaMarketIdentityCache(cache_path, max_age_seconds=3_600)
+    _store(
+        cache,
+        payload=_gamma_payload(MARKET_SLUG),
+        fetched_at_ts=MARKET_START_TS - 60_000,
+    )
+    fetch = GammaFailureClobFetch(transient_clob_timeout_count=1)
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=MARKET_START_TS + 1_000,
+        fetch_json=fetch,
+        market_identity_cache_path=cache_path,
+        market_identity_cache_max_age_seconds=3_600,
+        clob_identity_revalidation_max_attempts=3,
+        clob_identity_revalidation_retry_seconds=0.0,
+    )
+
+    rows = provider.market_rows(_config(tmp_path))
+
+    assert fetch.clob_calls == 2
+    revalidation = rows[0]["market_identity_clob_revalidation"]
+    assert revalidation["attempt_count"] == 2
+    assert revalidation["retry_reason_codes"] == [
+        "read_only_public_http_timeout"
+    ]
+    assert revalidation["retry_policy_relaxed_identity_checks"] is False
+    assert rows[0]["market_identity_clob_revalidation_passed"] is True
+
+
 def test_provider_fails_closed_when_gamma_times_out_and_cache_is_missing(
     tmp_path: Path,
 ) -> None:
@@ -216,11 +248,13 @@ def test_provider_fails_closed_when_cached_token_mapping_disagrees_with_clob(
         payload=_gamma_payload(MARKET_SLUG),
         fetched_at_ts=MARKET_START_TS - 60_000,
     )
+    fetch = GammaFailureClobFetch(down_token_id="wrong-down-token")
     provider = PolymarketPublicHTTPRealCorpusProvider(
         current_time_ms=MARKET_START_TS + 1_000,
-        fetch_json=GammaFailureClobFetch(down_token_id="wrong-down-token"),
+        fetch_json=fetch,
         market_identity_cache_path=cache_path,
         market_identity_cache_max_age_seconds=3_600,
+        clob_identity_revalidation_retry_seconds=0.0,
     )
 
     with pytest.raises(RealCorpusPublicProviderError) as error:
@@ -229,6 +263,7 @@ def test_provider_fails_closed_when_cached_token_mapping_disagrees_with_clob(
     assert error.value.reason_codes == (
         "gamma_market_identity_cache_clob_token_mismatch",
     )
+    assert fetch.clob_calls == 1
 
 
 def test_provider_prefetches_deterministic_future_slugs_before_market_start(
@@ -358,8 +393,15 @@ def _gamma_payload(slug: str) -> dict:
 
 
 class GammaFailureClobFetch:
-    def __init__(self, *, down_token_id: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        down_token_id: str | None = None,
+        transient_clob_timeout_count: int = 0,
+    ) -> None:
         self.down_token_id = down_token_id
+        self.transient_clob_timeout_count = transient_clob_timeout_count
+        self.clob_calls = 0
 
     def __call__(self, url: str):
         parsed = urllib.parse.urlparse(url)
@@ -369,6 +411,12 @@ class GammaFailureClobFetch:
                 reason_codes=("read_only_public_http_timeout",),
             )
         if "clob.polymarket.com" in parsed.netloc:
+            self.clob_calls += 1
+            if self.clob_calls <= self.transient_clob_timeout_count:
+                raise RealCorpusPublicProviderError(
+                    "CLOB timed out.",
+                    reason_codes=("read_only_public_http_timeout",),
+                )
             payload = _gamma_payload(MARKET_SLUG)
             up_token_id, expected_down_token_id = json.loads(
                 payload["clobTokenIds"]

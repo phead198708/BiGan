@@ -53,6 +53,9 @@ def run_polymarket_async_round_collector_cli(
     market_identity_cache_path: Path | str | None = None,
     gamma_market_identity_prefetch_round_count: int = 12,
     market_identity_cache_max_age_seconds: float = 7_200.0,
+    clob_identity_revalidation_max_attempts: int = 3,
+    clob_identity_revalidation_retry_seconds: float = 0.25,
+    feature_enrichment_max_attempts: int = 40,
     overwrite_existing: bool = False,
 ) -> dict[str, Any]:
     if round_count <= 0:
@@ -85,6 +88,16 @@ def run_polymarket_async_round_collector_cli(
         )
     if market_identity_cache_max_age_seconds <= 0:
         raise ValueError("market_identity_cache_max_age_seconds must be positive")
+    if clob_identity_revalidation_max_attempts <= 0:
+        raise ValueError(
+            "clob_identity_revalidation_max_attempts must be positive"
+        )
+    if clob_identity_revalidation_retry_seconds < 0:
+        raise ValueError(
+            "clob_identity_revalidation_retry_seconds must be non-negative"
+        )
+    if feature_enrichment_max_attempts <= 0:
+        raise ValueError("feature_enrichment_max_attempts must be positive")
 
     root = Path(output_dir).expanduser().resolve()
     resolved_market_identity_cache_path = (
@@ -119,6 +132,10 @@ def run_polymarket_async_round_collector_cli(
                 finalizations=finalizations,
                 errors=errors,
                 lock=lock,
+                captures=captures,
+                public_provider_http_timeout_seconds=(
+                    public_provider_http_timeout_seconds
+                ),
             )
             stop_event.wait(settlement_poll_interval_seconds)
 
@@ -158,6 +175,12 @@ def run_polymarket_async_round_collector_cli(
                 gamma_market_identity_prefetch_round_count=(
                     gamma_market_identity_prefetch_round_count
                 ),
+                clob_identity_revalidation_max_attempts=(
+                    clob_identity_revalidation_max_attempts
+                ),
+                clob_identity_revalidation_retry_seconds=(
+                    clob_identity_revalidation_retry_seconds
+                ),
             )
             config = PolymarketRealCorpusRecorderConfig(
                 run_id=run_id,
@@ -170,6 +193,9 @@ def run_polymarket_async_round_collector_cli(
                 config,
                 public_provider=provider,
                 chainlink_rtds_collector=chainlink_collector,
+                feature_enrichment_max_attempts=(
+                    feature_enrichment_max_attempts
+                ),
             )
             market_identity_cache_report = (
                 provider.market_identity_cache_report()
@@ -203,7 +229,32 @@ def run_polymarket_async_round_collector_cli(
                         capture_started_epoch_seconds >= scheduled_round_start_epoch_seconds
                     ),
                     "capture_status": capture.report["capture_status"],
+                    "pending_feature_enrichment": capture.report[
+                        "pending_feature_enrichment"
+                    ],
                     "pending_resolution": capture.report["pending_resolution"],
+                    "feature_enrichment_attempt_count": capture.report[
+                        "feature_enrichment_attempt_count"
+                    ],
+                    "feature_enrichment_max_attempts": capture.report[
+                        "feature_enrichment_max_attempts"
+                    ],
+                    "feature_enrichment_recovered": capture.report[
+                        "feature_enrichment_recovered"
+                    ],
+                    "feature_enrichment_reason_codes": capture.report[
+                        "feature_enrichment_reason_codes"
+                    ],
+                    "feature_enrichment_warning_reason_codes": (
+                        capture.report[
+                            "feature_enrichment_warning_reason_codes"
+                        ]
+                    ),
+                    "feature_enrichment_post_market_close_candle_rejected_count": (
+                        capture.report[
+                            "feature_enrichment_post_market_close_candle_rejected_count"
+                        ]
+                    ),
                     "market_family": market_family,
                     "orderbook_snapshot_interval_seconds": (
                         orderbook_snapshot_interval_seconds
@@ -229,6 +280,12 @@ def run_polymarket_async_round_collector_cli(
                     ),
                     "gamma_market_identity_prefetch_round_count": (
                         gamma_market_identity_prefetch_round_count
+                    ),
+                    "clob_identity_revalidation_max_attempts": (
+                        clob_identity_revalidation_max_attempts
+                    ),
+                    "clob_identity_revalidation_retry_seconds": (
+                        clob_identity_revalidation_retry_seconds
                     ),
                     "market_identity_cache_report": (
                         market_identity_cache_report
@@ -257,6 +314,26 @@ def run_polymarket_async_round_collector_cli(
                     "market_identity_clob_revalidation_passed_count": (
                         capture.report[
                             "market_identity_clob_revalidation_passed_count"
+                        ]
+                    ),
+                    "market_identity_clob_revalidation_retry_succeeded_market_count": (
+                        capture.report[
+                            "market_identity_clob_revalidation_retry_succeeded_market_count"
+                        ]
+                    ),
+                    "market_identity_clob_revalidation_attempt_distribution": (
+                        capture.report[
+                            "market_identity_clob_revalidation_attempt_distribution"
+                        ]
+                    ),
+                    "market_identity_clob_revalidation_retry_reason_distribution": (
+                        capture.report[
+                            "market_identity_clob_revalidation_retry_reason_distribution"
+                        ]
+                    ),
+                    "market_identity_clob_revalidation_identity_relaxation_count": (
+                        capture.report[
+                            "market_identity_clob_revalidation_identity_relaxation_count"
                         ]
                     ),
                     "raw_orderbook_row_count": capture.report["raw_orderbook_row_count"],
@@ -354,6 +431,10 @@ def run_polymarket_async_round_collector_cli(
         finalizations=finalizations,
         errors=errors,
         lock=lock,
+        captures=captures,
+        public_provider_http_timeout_seconds=(
+            public_provider_http_timeout_seconds
+        ),
     )
     summary = _summary(batch_id, captures, finalizations, errors)
     summary["chainlink_rtds_collection_report"] = chainlink_collector.collection_report()
@@ -371,12 +452,15 @@ def run_polymarket_async_finalizer_cli(
     settlement_grace_seconds: float = 0.0,
     training_corpus_root: Path | str = V8_TRAINING_CORPUS_ROOT,
     clob_ws_url: str = DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
+    public_provider_http_timeout_seconds: float = 15.0,
     overwrite_existing: bool = False,
 ) -> dict[str, Any]:
     if settlement_poll_interval_seconds <= 0:
         raise ValueError("settlement_poll_interval_seconds must be positive")
     if settlement_grace_seconds < 0:
         raise ValueError("settlement_grace_seconds must be non-negative")
+    if public_provider_http_timeout_seconds <= 0:
+        raise ValueError("public_provider_http_timeout_seconds must be positive")
     root = Path(output_dir).expanduser().resolve()
     batch_dir = root / batch_id
     batch_dir.mkdir(parents=True, exist_ok=True)
@@ -406,6 +490,10 @@ def run_polymarket_async_finalizer_cli(
             finalizations=finalizations,
             errors=errors,
             lock=lock,
+            captures=captures,
+            public_provider_http_timeout_seconds=(
+                public_provider_http_timeout_seconds
+            ),
         )
         _write_json_atomic(
             progress_path,
@@ -425,6 +513,16 @@ def run_polymarket_async_finalizer_cli(
         ),
         "pending_resolution_count": sum(
             1 for item in finalizations if item.get("finalization_status") == "pending_resolution"
+        ),
+        "pending_feature_enrichment_count": sum(
+            1
+            for item in finalizations
+            if item.get("finalization_status") == "pending_feature_enrichment"
+        ),
+        "feature_enrichment_recovered_count": sum(
+            1
+            for item in finalizations
+            if item.get("feature_enrichment_recovered") is True
         ),
         "error_count": len(errors),
         "finalizations": finalizations,
@@ -446,6 +544,8 @@ def _finalize_pending_once(
     finalizations: list[dict[str, Any]],
     errors: list[dict[str, str]],
     lock: threading.Lock,
+    captures: list[dict[str, Any]] | None = None,
+    public_provider_http_timeout_seconds: float = 15.0,
 ) -> None:
     seen_exported = {
         item["run_id"] for item in finalizations if item.get("finalization_status") == "exported"
@@ -457,7 +557,10 @@ def _finalize_pending_once(
         if run_dir.name in seen_exported:
             continue
         capture_manifest = _read_json(manifest_path)
-        if not capture_manifest.get("pending_resolution"):
+        if not (
+            capture_manifest.get("pending_resolution")
+            or capture_manifest.get("pending_feature_enrichment")
+        ):
             continue
         finalization_report_path = run_dir / "pending_round_finalization_report.json"
         if finalization_report_path.exists():
@@ -487,6 +590,7 @@ def _finalize_pending_once(
                 max_markets=1,
                 clob_ws_url=clob_ws_url,
                 timeout_seconds=15.0,
+                http_timeout_seconds=public_provider_http_timeout_seconds,
             )
             result = finalize_polymarket_pending_round(
                 run_dir,
@@ -499,19 +603,104 @@ def _finalize_pending_once(
                 errors.append({"run_dir": str(run_dir), "error": str(exc)})
             continue
         with lock:
+            if captures is not None:
+                _apply_feature_enrichment_result_to_capture(
+                    captures,
+                    run_id=run_dir.name,
+                    report=result.report,
+                )
             _upsert_by_run_id(
                 finalizations,
                 {
                     "run_id": run_dir.name,
                     "run_dir": str(run_dir),
                     "finalization_status": result.report["finalization_status"],
+                    "pending_feature_enrichment": result.report.get(
+                        "pending_feature_enrichment",
+                        False,
+                    ),
                     "pending_resolution": result.report["pending_resolution"],
+                    "feature_enrichment_attempt_count": int(
+                        result.report.get("feature_enrichment_attempt_count")
+                        or 0
+                    ),
+                    "feature_enrichment_recovered": (
+                        result.report.get("feature_enrichment_recovered")
+                        is True
+                    ),
+                    "feature_enrichment_reason_codes": list(
+                        result.report.get("feature_enrichment_reason_codes")
+                        or []
+                    ),
+                    "feature_enrichment_warning_reason_codes": list(
+                        result.report.get(
+                            "feature_enrichment_warning_reason_codes"
+                        )
+                        or []
+                    ),
+                    "feature_enrichment_post_market_close_candle_rejected_count": int(
+                        result.report.get(
+                            "feature_enrichment_post_market_close_candle_rejected_count"
+                        )
+                        or 0
+                    ),
+                    "raw_btc_candle_row_count": int(
+                        result.report.get("raw_btc_candle_row_count") or 0
+                    ),
                     "training_eligible": result.report["training_eligible"],
                     "exported_training_corpus_dir": result.report["exported_training_corpus_dir"],
                     "raw_resolution_count": result.report["raw_resolution_count"],
                     "reject_reason_counts": result.report["reject_reason_counts"],
                 },
             )
+
+
+def _apply_feature_enrichment_result_to_capture(
+    captures: list[dict[str, Any]],
+    *,
+    run_id: str,
+    report: dict[str, Any],
+) -> None:
+    for capture in captures:
+        if capture.get("run_id") != run_id:
+            continue
+        capture.update(
+            {
+                "capture_status": (
+                    "pending_resolution"
+                    if report.get("feature_enrichment_recovered") is True
+                    else report.get("finalization_status")
+                ),
+                "pending_feature_enrichment": report.get(
+                    "pending_feature_enrichment",
+                    False,
+                ),
+                "pending_resolution": report.get("pending_resolution") is True,
+                "feature_enrichment_attempt_count": int(
+                    report.get("feature_enrichment_attempt_count") or 0
+                ),
+                "feature_enrichment_recovered": (
+                    report.get("feature_enrichment_recovered") is True
+                ),
+                "feature_enrichment_reason_codes": list(
+                    report.get("feature_enrichment_reason_codes") or []
+                ),
+                "feature_enrichment_warning_reason_codes": list(
+                    report.get("feature_enrichment_warning_reason_codes")
+                    or []
+                ),
+                "feature_enrichment_post_market_close_candle_rejected_count": int(
+                    report.get(
+                        "feature_enrichment_post_market_close_candle_rejected_count"
+                    )
+                    or 0
+                ),
+                "raw_btc_candle_row_count": int(
+                    report.get("raw_btc_candle_row_count") or 0
+                ),
+            }
+        )
+        return
 
 
 def _recover_existing_exported_finalization(
@@ -597,8 +786,15 @@ def _summary(
     pending = [
         item for item in finalizations if item.get("finalization_status") == "pending_resolution"
     ]
+    pending_feature_enrichment = [
+        item
+        for item in finalizations
+        if item.get("finalization_status") == "pending_feature_enrichment"
+    ]
     market_identity_source_distribution: dict[str, int] = {}
     market_identity_fallback_reason_distribution: dict[str, int] = {}
+    clob_revalidation_attempt_distribution: dict[str, int] = {}
+    clob_revalidation_retry_reason_distribution: dict[str, int] = {}
     for capture in captures:
         for name, count in dict(
             capture.get(
@@ -618,6 +814,26 @@ def _summary(
                 market_identity_fallback_reason_distribution.get(str(name), 0)
                 + int(count)
             )
+        for name, count in dict(
+            capture.get(
+                "market_identity_clob_revalidation_attempt_distribution"
+            )
+            or {}
+        ).items():
+            clob_revalidation_attempt_distribution[str(name)] = (
+                clob_revalidation_attempt_distribution.get(str(name), 0)
+                + int(count)
+            )
+        for name, count in dict(
+            capture.get(
+                "market_identity_clob_revalidation_retry_reason_distribution"
+            )
+            or {}
+        ).items():
+            clob_revalidation_retry_reason_distribution[str(name)] = (
+                clob_revalidation_retry_reason_distribution.get(str(name), 0)
+                + int(count)
+            )
     return {
         "batch_id": batch_id,
         "paper_only": True,
@@ -625,6 +841,16 @@ def _summary(
         "capture_count": len(captures),
         "capture_pending_resolution_count": sum(
             1 for item in captures if item.get("pending_resolution") is True
+        ),
+        "capture_pending_feature_enrichment_count": sum(
+            1
+            for item in captures
+            if item.get("pending_feature_enrichment") is True
+        ),
+        "feature_enrichment_recovered_capture_count": sum(
+            1
+            for item in captures
+            if item.get("feature_enrichment_recovered") is True
         ),
         "market_identity_source_type_distribution": dict(
             sorted(market_identity_source_distribution.items())
@@ -648,6 +874,30 @@ def _summary(
         "market_identity_clob_revalidation_passed_count": sum(
             int(
                 item.get("market_identity_clob_revalidation_passed_count")
+                or 0
+            )
+            for item in captures
+        ),
+        "market_identity_clob_revalidation_retry_succeeded_market_count": sum(
+            int(
+                item.get(
+                    "market_identity_clob_revalidation_retry_succeeded_market_count"
+                )
+                or 0
+            )
+            for item in captures
+        ),
+        "market_identity_clob_revalidation_attempt_distribution": dict(
+            sorted(clob_revalidation_attempt_distribution.items())
+        ),
+        "market_identity_clob_revalidation_retry_reason_distribution": dict(
+            sorted(clob_revalidation_retry_reason_distribution.items())
+        ),
+        "market_identity_clob_revalidation_identity_relaxation_count": sum(
+            int(
+                item.get(
+                    "market_identity_clob_revalidation_identity_relaxation_count"
+                )
                 or 0
             )
             for item in captures
@@ -679,6 +929,23 @@ def _summary(
         "finalization_attempt_count": len(finalizations),
         "exported_round_count": len(exported),
         "pending_resolution_count": len(pending),
+        "pending_feature_enrichment_count": len(
+            pending_feature_enrichment
+        ),
+        "feature_enrichment_recovered_count": sum(
+            1
+            for item in finalizations
+            if item.get("feature_enrichment_recovered") is True
+        ),
+        "feature_enrichment_post_market_close_candle_rejected_count": sum(
+            int(
+                item.get(
+                    "feature_enrichment_post_market_close_candle_rejected_count"
+                )
+                or 0
+            )
+            for item in captures
+        ),
         "error_count": len(errors),
         "captures": captures,
         "finalizations": finalizations,
@@ -854,6 +1121,21 @@ def main(argv: list[str] | None = None) -> int:
         default=7_200.0,
     )
     parser.add_argument(
+        "--clob-identity-revalidation-max-attempts",
+        type=int,
+        default=3,
+    )
+    parser.add_argument(
+        "--clob-identity-revalidation-retry-seconds",
+        type=float,
+        default=0.25,
+    )
+    parser.add_argument(
+        "--feature-enrichment-max-attempts",
+        type=int,
+        default=40,
+    )
+    parser.add_argument(
         "--finalize-only",
         action="store_true",
         help="Only scan pending round captures and try settlement finalization.",
@@ -868,6 +1150,9 @@ def main(argv: list[str] | None = None) -> int:
             settlement_grace_seconds=args.settlement_grace_seconds,
             training_corpus_root=args.training_corpus_root,
             clob_ws_url=args.clob_ws_url,
+            public_provider_http_timeout_seconds=(
+                args.public_provider_http_timeout_seconds
+            ),
             overwrite_existing=args.overwrite_existing,
         )
     else:
@@ -901,6 +1186,15 @@ def main(argv: list[str] | None = None) -> int:
             ),
             market_identity_cache_max_age_seconds=(
                 args.market_identity_cache_max_age_seconds
+            ),
+            clob_identity_revalidation_max_attempts=(
+                args.clob_identity_revalidation_max_attempts
+            ),
+            clob_identity_revalidation_retry_seconds=(
+                args.clob_identity_revalidation_retry_seconds
+            ),
+            feature_enrichment_max_attempts=(
+                args.feature_enrichment_max_attempts
             ),
             overwrite_existing=args.overwrite_existing,
         )

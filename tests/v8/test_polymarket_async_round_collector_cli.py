@@ -136,6 +136,32 @@ def test_batch_summary_aggregates_market_identity_cache_evidence() -> None:
     assert summary["market_identity_clob_revalidation_passed_count"] == 1
 
 
+def test_batch_summary_reports_feature_enrichment_recovery() -> None:
+    summary = _summary(
+        "feature-enrichment",
+        [
+            {
+                "pending_feature_enrichment": False,
+                "pending_resolution": True,
+                "feature_enrichment_recovered": True,
+                "raw_btc_candle_row_count": 20,
+            }
+        ],
+        [
+            {
+                "finalization_status": "pending_resolution",
+                "feature_enrichment_recovered": True,
+            }
+        ],
+        [],
+    )
+
+    assert summary["capture_pending_feature_enrichment_count"] == 0
+    assert summary["feature_enrichment_recovered_capture_count"] == 1
+    assert summary["feature_enrichment_recovered_count"] == 1
+    assert summary["pending_feature_enrichment_count"] == 0
+
+
 def test_capture_worker_waits_again_when_spawned_before_scheduled_boundary() -> None:
     observed_times = iter((899.952, 900.0))
     sleep_calls: list[float] = []
@@ -315,6 +341,80 @@ def test_finalize_pending_once_scopes_scan_to_requested_batch(tmp_path: Path, mo
 
     assert finalized_dirs == [matching]
     assert [row["run_id"] for row in finalizations] == [matching.name]
+    assert errors == []
+
+
+def test_finalize_pending_once_scans_pending_feature_enrichment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "feature-batch-round01"
+    run_dir.mkdir()
+    (run_dir / "pending_round_capture_manifest.json").write_text(
+        json.dumps(
+            {
+                "pending_feature_enrichment": True,
+                "pending_resolution": False,
+            }
+        )
+    )
+    finalized_dirs: list[Path] = []
+
+    def fake_finalize(run_dir_value, **kwargs):
+        finalized_dirs.append(Path(run_dir_value))
+        return SimpleNamespace(
+            report={
+                "finalization_status": "pending_resolution",
+                "pending_feature_enrichment": False,
+                "pending_resolution": True,
+                "feature_enrichment_attempt_count": 1,
+                "feature_enrichment_recovered": True,
+                "feature_enrichment_reason_codes": [],
+                "raw_btc_candle_row_count": 20,
+                "training_eligible": False,
+                "exported_training_corpus_dir": None,
+                "raw_resolution_count": 0,
+                "reject_reason_counts": {"missing_resolution": 1},
+            }
+        )
+
+    monkeypatch.setattr(
+        collector_module,
+        "finalize_polymarket_pending_round",
+        fake_finalize,
+    )
+    captures = [
+        {
+            "run_id": run_dir.name,
+            "capture_status": "pending_feature_enrichment",
+            "pending_feature_enrichment": True,
+            "pending_resolution": False,
+            "feature_enrichment_recovered": False,
+            "raw_btc_candle_row_count": 0,
+        }
+    ]
+    finalizations: list[dict] = []
+    errors: list[dict] = []
+
+    _finalize_pending_once(
+        output_dir=tmp_path,
+        destination_root=tmp_path / "training",
+        clob_ws_url="wss://example.invalid",
+        overwrite_existing=False,
+        batch_id_prefix="feature-batch",
+        finalizations=finalizations,
+        errors=errors,
+        lock=threading.Lock(),
+        captures=captures,
+        public_provider_http_timeout_seconds=3.0,
+    )
+
+    assert finalized_dirs == [run_dir]
+    assert captures[0]["feature_enrichment_recovered"] is True
+    assert captures[0]["raw_btc_candle_row_count"] == 20
+    assert captures[0]["capture_status"] == "pending_resolution"
+    assert finalizations[0]["feature_enrichment_recovered"] is True
+    assert finalizations[0]["pending_resolution"] is True
     assert errors == []
 
 

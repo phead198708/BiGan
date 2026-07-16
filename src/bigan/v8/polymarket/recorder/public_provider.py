@@ -173,6 +173,8 @@ class PolymarketPublicHTTPRealCorpusProvider:
         market_identity_cache_path: Path | str | None = None,
         market_identity_cache_max_age_seconds: float = 7_200.0,
         gamma_market_identity_prefetch_round_count: int = 0,
+        clob_identity_revalidation_max_attempts: int = 3,
+        clob_identity_revalidation_retry_seconds: float = 0.25,
     ) -> None:
         if max_markets <= 0:
             raise ValueError("max_markets must be positive")
@@ -195,6 +197,14 @@ class PolymarketPublicHTTPRealCorpusProvider:
         if gamma_market_identity_prefetch_round_count < 0:
             raise ValueError(
                 "gamma_market_identity_prefetch_round_count must be non-negative"
+            )
+        if clob_identity_revalidation_max_attempts <= 0:
+            raise ValueError(
+                "clob_identity_revalidation_max_attempts must be positive"
+            )
+        if clob_identity_revalidation_retry_seconds < 0:
+            raise ValueError(
+                "clob_identity_revalidation_retry_seconds must be non-negative"
             )
         if seed_rest_orderbooks_before_stream:
             raise ValueError(
@@ -234,6 +244,12 @@ class PolymarketPublicHTTPRealCorpusProvider:
         self._fetch_json = fetch_json
         self.gamma_market_identity_prefetch_round_count = (
             gamma_market_identity_prefetch_round_count
+        )
+        self.clob_identity_revalidation_max_attempts = (
+            clob_identity_revalidation_max_attempts
+        )
+        self.clob_identity_revalidation_retry_seconds = (
+            clob_identity_revalidation_retry_seconds
         )
         self._last_gamma_market_identity_prefetch_report: dict[str, Any] = {
             "prefetch_enabled": False,
@@ -1201,20 +1217,40 @@ class PolymarketPublicHTTPRealCorpusProvider:
         market: dict[str, Any],
     ) -> dict[str, Any]:
         condition_id = str(market["condition_id"])
-        try:
-            payload = self._get_json(f"{self.clob_market_endpoint}/{condition_id}")
-        except RealCorpusPublicProviderError as exc:
-            raise RealCorpusPublicProviderError(
-                "Cached Gamma identity could not be revalidated through CLOB.",
-                reason_codes=tuple(
-                    dict.fromkeys(
-                        (
-                            *exc.reason_codes,
-                            "gamma_market_identity_cache_clob_revalidation_failed",
-                        )
+        payload: Any = None
+        retry_reason_codes: list[str] = []
+        attempt_count = 0
+        for attempt_count in range(
+            1,
+            self.clob_identity_revalidation_max_attempts + 1,
+        ):
+            try:
+                payload = self._get_json(
+                    f"{self.clob_market_endpoint}/{condition_id}"
+                )
+                break
+            except RealCorpusPublicProviderError as exc:
+                retry_reason_codes.extend(exc.reason_codes)
+                if (
+                    not _gamma_cache_fallback_allowed(exc.reason_codes)
+                    or attempt_count
+                    >= self.clob_identity_revalidation_max_attempts
+                ):
+                    raise RealCorpusPublicProviderError(
+                        "Cached Gamma identity could not be revalidated through CLOB.",
+                        reason_codes=tuple(
+                            dict.fromkeys(
+                                (
+                                    *retry_reason_codes,
+                                    "gamma_market_identity_cache_clob_revalidation_failed",
+                                )
+                            )
+                        ),
+                    ) from exc
+                if self.clob_identity_revalidation_retry_seconds:
+                    time.sleep(
+                        self.clob_identity_revalidation_retry_seconds
                     )
-                ),
-            ) from exc
         if not isinstance(payload, dict):
             raise RealCorpusPublicProviderError(
                 "CLOB market identity payload is invalid.",
@@ -1267,6 +1303,9 @@ class PolymarketPublicHTTPRealCorpusProvider:
             "up_token_id": market["up_token_id"],
             "down_token_id": market["down_token_id"],
             "clob_market_payload_sha256": canonical_json_sha256(payload),
+            "attempt_count": attempt_count,
+            "retry_reason_codes": list(dict.fromkeys(retry_reason_codes)),
+            "retry_policy_relaxed_identity_checks": False,
         }
 
     def _fetch_gamma_market_payloads(self, slug: str) -> list[dict[str, Any]]:

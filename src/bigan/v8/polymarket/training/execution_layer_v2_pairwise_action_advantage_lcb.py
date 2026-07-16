@@ -211,6 +211,20 @@ def validate_pairwise_action_advantage_lcb_protocol(protocol: dict[str, Any]) ->
         is True
         and collector.get("market_identity_cache_clob_revalidation_required")
         is True
+        and int(
+            collector.get(
+                "market_identity_cache_clob_revalidation_max_attempts"
+            )
+            or 0
+        )
+        == 3
+        and float(
+            collector.get(
+                "market_identity_cache_clob_revalidation_retry_seconds"
+            )
+            or -1.0
+        )
+        == 0.25
         and collector.get(
             "market_identity_cache_live_orderbook_validation_required"
         )
@@ -228,7 +242,28 @@ def validate_pairwise_action_advantage_lcb_protocol(protocol: dict[str, Any]) ->
         },
         "external_training_root": collector.get("training_corpus_root") == "/Volumes/PHILIPS/v8",
         "raw_evidence": collector.get("per_round_raw_evidence_required") is True,
-        "async_settlement": collector.get("asynchronous_settlement_required") is True,
+        "async_settlement": collector.get("asynchronous_settlement_required")
+        is True
+        and collector.get("pending_feature_enrichment_state_required")
+        is True
+        and int(collector.get("feature_enrichment_max_attempts") or 0)
+        == 40
+        and collector.get(
+            "feature_enrichment_preserves_raw_market_book_trade_chainlink"
+        )
+        is True
+        and collector.get(
+            "feature_enrichment_blocks_resolution_until_recovered"
+        )
+        is True
+        and collector.get(
+            "feature_enrichment_runs_without_blocking_next_round_capture"
+        )
+        is True
+        and collector.get(
+            "feature_enrichment_post_market_close_candles_forbidden"
+        )
+        is True,
         "execution_compatible_collection": float(
             collector.get("orderbook_snapshot_interval_seconds") or 0.0
         )
@@ -676,6 +711,7 @@ def assign_pairwise_action_advantage_lcb_roles(
         audit = _capture_quality_audit(
             capture,
             collector_contract=collector_contract,
+            finalization=capture.get("finalization"),
         )
         if audit["reason_codes"]:
             excluded.append(audit)
@@ -908,8 +944,18 @@ def _capture_quality_audit(
     capture: dict[str, Any],
     *,
     collector_contract: dict[str, Any],
+    finalization: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     reasons: list[str] = []
+    enrichment_recovered = (
+        finalization is not None
+        and finalization.get("feature_enrichment_recovered") is True
+    )
+    effective_raw_btc_candle_row_count = (
+        int(finalization.get("raw_btc_candle_row_count") or 0)
+        if enrichment_recovered
+        else int(capture.get("raw_btc_candle_row_count") or 0)
+    )
     if capture.get("capture_start_boundary_validation_passed") is not True:
         reasons.append("capture_start_boundary_failed")
     if int(capture.get("scheduled_round_start_ts") or 0) <= 0:
@@ -920,7 +966,7 @@ def _capture_quality_audit(
         reasons.append("provider_orderbook_snapshot_coverage_failed")
     if int(capture.get("training_sampled_orderbook_row_count") or 0) <= 0:
         reasons.append("sampled_orderbook_coverage_failed")
-    if int(capture.get("raw_btc_candle_row_count") or 0) <= 0:
+    if effective_raw_btc_candle_row_count <= 0:
         reasons.append("btc_candle_coverage_failed")
     if int(capture.get("raw_chainlink_price_row_count") or 0) <= 0:
         reasons.append("chainlink_rtds_coverage_failed")
@@ -978,6 +1024,40 @@ def _capture_quality_audit(
         reasons.append("collector_market_identity_cache_age_contract_failed")
     if not str(capture.get("market_identity_cache_path") or ""):
         reasons.append("collector_market_identity_cache_path_missing")
+    if int(
+        capture.get("clob_identity_revalidation_max_attempts") or 0
+    ) != int(
+        collector_contract[
+            "market_identity_cache_clob_revalidation_max_attempts"
+        ]
+    ):
+        reasons.append(
+            "collector_clob_identity_revalidation_attempt_contract_failed"
+        )
+    if float(
+        capture.get("clob_identity_revalidation_retry_seconds") or -1.0
+    ) != float(
+        collector_contract[
+            "market_identity_cache_clob_revalidation_retry_seconds"
+        ]
+    ):
+        reasons.append(
+            "collector_clob_identity_revalidation_retry_contract_failed"
+        )
+    if int(
+        capture.get("feature_enrichment_max_attempts") or 0
+    ) != int(collector_contract["feature_enrichment_max_attempts"]):
+        reasons.append("collector_feature_enrichment_attempt_contract_failed")
+    if (
+        capture.get("pending_feature_enrichment") is True
+        and not enrichment_recovered
+    ):
+        reasons.append("collector_feature_enrichment_not_recovered")
+    if enrichment_recovered and (
+        finalization.get("pending_feature_enrichment") is True
+        or int(finalization.get("raw_btc_candle_row_count") or 0) <= 0
+    ):
+        reasons.append("collector_feature_enrichment_recovery_invalid")
     identity_source_distribution = dict(
         capture.get(
             "provider_raw_market_identity_source_type_distribution"
@@ -1035,7 +1115,16 @@ def _capture_quality_audit(
         "training_sampled_orderbook_row_count": int(
             capture.get("training_sampled_orderbook_row_count") or 0
         ),
-        "raw_btc_candle_row_count": int(capture.get("raw_btc_candle_row_count") or 0),
+        "raw_btc_candle_row_count": effective_raw_btc_candle_row_count,
+        "capture_raw_btc_candle_row_count": int(
+            capture.get("raw_btc_candle_row_count") or 0
+        ),
+        "feature_enrichment_recovered": enrichment_recovered,
+        "feature_enrichment_attempt_count": int(
+            (finalization or {}).get("feature_enrichment_attempt_count")
+            or capture.get("feature_enrichment_attempt_count")
+            or 0
+        ),
         "raw_chainlink_price_row_count": int(capture.get("raw_chainlink_price_row_count") or 0),
         "orderbook_snapshot_interval_seconds": float(
             capture.get("orderbook_snapshot_interval_seconds") or 0.0
@@ -1060,6 +1149,15 @@ def _capture_quality_audit(
         ),
         "gamma_market_identity_prefetch_round_count": int(
             capture.get("gamma_market_identity_prefetch_round_count") or 0
+        ),
+        "clob_identity_revalidation_max_attempts": int(
+            capture.get("clob_identity_revalidation_max_attempts") or 0
+        ),
+        "clob_identity_revalidation_retry_seconds": float(
+            capture.get("clob_identity_revalidation_retry_seconds") or 0.0
+        ),
+        "feature_enrichment_max_attempts": int(
+            capture.get("feature_enrichment_max_attempts") or 0
         ),
         "market_identity_cache_max_age_seconds": float(
             capture.get("market_identity_cache_max_age_seconds") or 0.0

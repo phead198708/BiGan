@@ -111,6 +111,31 @@ def test_issue175_protocol_freezes_roles_pairwise_objective_and_quarantine() -> 
     )
     assert (
         protocol["collector_contract"][
+            "market_identity_cache_clob_revalidation_max_attempts"
+        ]
+        == 3
+    )
+    assert (
+        protocol["collector_contract"][
+            "market_identity_cache_clob_revalidation_retry_seconds"
+        ]
+        == 0.25
+    )
+    assert (
+        protocol["collector_contract"][
+            "pending_feature_enrichment_state_required"
+        ]
+        is True
+    )
+    assert protocol["collector_contract"]["feature_enrichment_max_attempts"] == 40
+    assert (
+        protocol["collector_contract"][
+            "feature_enrichment_blocks_resolution_until_recovered"
+        ]
+        is True
+    )
+    assert (
+        protocol["collector_contract"][
             "market_identity_cache_live_orderbook_validation_required"
         ]
         is True
@@ -178,6 +203,10 @@ def test_issue177_capture_quality_requires_causal_identity_cache_provenance() ->
         "gamma_market_identity_prefetch_round_count": 12,
         "market_identity_cache_max_age_seconds": 7_200.0,
         "market_identity_cache_path": "/tmp/cache.json",
+        "clob_identity_revalidation_max_attempts": 3,
+        "clob_identity_revalidation_retry_seconds": 0.25,
+        "feature_enrichment_max_attempts": 40,
+        "pending_feature_enrichment": False,
         "provider_raw_market_identity_source_type_distribution": {
             "gamma_prefetch_cache_fallback": 1
         },
@@ -210,6 +239,29 @@ def test_issue177_capture_quality_requires_causal_identity_cache_provenance() ->
         "collector_market_identity_clob_revalidation_failed"
         in blocked["reason_codes"]
     )
+
+    pending_enrichment = dict(capture)
+    pending_enrichment.update(
+        {
+            "capture_status": "pending_feature_enrichment",
+            "pending_feature_enrichment": True,
+            "raw_btc_candle_row_count": 0,
+        }
+    )
+    recovered = _capture_quality_audit(
+        pending_enrichment,
+        collector_contract=collector_contract,
+        finalization={
+            "feature_enrichment_recovered": True,
+            "feature_enrichment_attempt_count": 2,
+            "pending_feature_enrichment": False,
+            "raw_btc_candle_row_count": 20,
+        },
+    )
+    assert recovered["reason_codes"] == []
+    assert recovered["capture_raw_btc_candle_row_count"] == 0
+    assert recovered["raw_btc_candle_row_count"] == 20
+    assert recovered["feature_enrichment_recovered"] is True
 
 
 def test_issue175_precollection_freeze_pins_quarantine_and_role_plan(
