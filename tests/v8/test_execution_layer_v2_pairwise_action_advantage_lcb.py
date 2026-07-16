@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -121,6 +122,12 @@ def test_issue175_precollection_freeze_pins_quarantine_and_role_plan(
     )
     evidence = tmp_path / "issue174-confirmatory.json"
     evidence.write_text('{"confirmatory_gate_passed":false}\n', encoding="utf-8")
+    current_git_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     result = freeze_pairwise_action_advantage_lcb_precollection(
         PairwiseActionAdvantageLCBPrecollectionFreezeConfig(
             run_id="issue175-freeze",
@@ -129,7 +136,7 @@ def test_issue175_precollection_freeze_pins_quarantine_and_role_plan(
             expected_protocol_sha256=_sha256(PROTOCOL_PATH),
             feature_contract_path=FEATURE_CONTRACT_PATH,
             expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
-            git_commit="a" * 40,
+            git_commit=current_git_head,
             prior_market_registry_pins=((prior, _sha256(prior)),),
             prior_evidence_artifact_pins=((evidence, _sha256(evidence)),),
             expected_prior_unique_market_count=2,
@@ -155,7 +162,24 @@ def test_issue175_precollection_freeze_pins_quarantine_and_role_plan(
         },
     ]
     assert manifest["collection_started"] is False
+    assert manifest["git_commit_current_head_verified"] is True
     assert manifest["source_model_candidate_eligible"] is False
+
+    with pytest.raises(ValueError, match="does not match the current HEAD"):
+        freeze_pairwise_action_advantage_lcb_precollection(
+            PairwiseActionAdvantageLCBPrecollectionFreezeConfig(
+                run_id="issue175-freeze-wrong-commit",
+                output_dir=tmp_path / "runs",
+                protocol_path=PROTOCOL_PATH,
+                expected_protocol_sha256=_sha256(PROTOCOL_PATH),
+                feature_contract_path=FEATURE_CONTRACT_PATH,
+                expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
+                git_commit="0" * 40,
+                prior_market_registry_pins=((prior, _sha256(prior)),),
+                prior_evidence_artifact_pins=((evidence, _sha256(evidence)),),
+                expected_prior_unique_market_count=2,
+            )
+        )
 
 
 def test_issue175_quarantine_registry_includes_raw_capture_identity_without_outcomes(

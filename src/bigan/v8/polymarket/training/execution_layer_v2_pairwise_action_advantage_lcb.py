@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import subprocess
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -343,6 +344,11 @@ def freeze_pairwise_action_advantage_lcb_precollection(
     """Freeze data roles, exclusions, and collector/model contracts before collection."""
 
     protocol_path = config.protocol_path.resolve()
+    current_git_head = _git_head_for_path(protocol_path)
+    if config.git_commit.lower() != current_git_head:
+        raise ValueError(
+            "git_commit does not match the current HEAD for the frozen protocol repository"
+        )
     _verify_pin(protocol_path, config.expected_protocol_sha256, name="protocol")
     protocol = _load_json(protocol_path)
     validate_pairwise_action_advantage_lcb_protocol(protocol)
@@ -436,6 +442,7 @@ def freeze_pairwise_action_advantage_lcb_precollection(
         "run_id": config.run_id,
         "freeze_created_ts": created_ts,
         "git_commit": config.git_commit.lower(),
+        "git_commit_current_head_verified": True,
         "protocol": _descriptor(protocol_path),
         "feature_contract": _descriptor(feature_contract_path),
         "prior_evidence_exclusion_registry": _descriptor(exclusion_path),
@@ -493,6 +500,23 @@ def freeze_pairwise_action_advantage_lcb_precollection(
         "descriptor_sha256": _sha256_file(descriptor_path),
         "manifest": manifest,
     }
+
+
+def _git_head_for_path(path: Path) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(path.parent), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("unable to resolve current Git HEAD for precollection freeze") from exc
+    head = completed.stdout.strip().lower()
+    if len(head) != 40 or any(char not in "0123456789abcdef" for char in head):
+        raise ValueError("current Git HEAD is not a 40-character hex digest")
+    return head
 
 
 def assign_pairwise_action_advantage_lcb_roles(
