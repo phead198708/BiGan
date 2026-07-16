@@ -153,6 +153,8 @@ class PolymarketPublicHTTPRealCorpusProvider:
         timeout_seconds: float = 15.0,
         http_timeout_seconds: float | None = None,
         orderbook_snapshot_interval_seconds: float = 1.0,
+        orderbook_ws_initial_complete_book_timeout_seconds: float = 15.0,
+        rest_fallback_collection_seconds: float = 0.0,
         seed_rest_orderbooks_before_stream: bool = False,
         current_time_ms: int | None = None,
         fetch_json: Callable[[str], Any] | None = None,
@@ -169,6 +171,12 @@ class PolymarketPublicHTTPRealCorpusProvider:
             raise ValueError("http_timeout_seconds must be positive")
         if orderbook_snapshot_interval_seconds <= 0:
             raise ValueError("orderbook_snapshot_interval_seconds must be positive")
+        if orderbook_ws_initial_complete_book_timeout_seconds <= 0:
+            raise ValueError(
+                "orderbook_ws_initial_complete_book_timeout_seconds must be positive"
+            )
+        if rest_fallback_collection_seconds < 0:
+            raise ValueError("rest_fallback_collection_seconds must be non-negative")
         if seed_rest_orderbooks_before_stream:
             raise ValueError(
                 "pre-stream REST orderbook seeding is disabled; REST is fallback-only"
@@ -198,6 +206,10 @@ class PolymarketPublicHTTPRealCorpusProvider:
         self.timeout_seconds = timeout_seconds
         self.http_timeout_seconds = timeout_seconds if http_timeout_seconds is None else http_timeout_seconds
         self.orderbook_snapshot_interval_seconds = orderbook_snapshot_interval_seconds
+        self.orderbook_ws_initial_complete_book_timeout_seconds = (
+            orderbook_ws_initial_complete_book_timeout_seconds
+        )
+        self.rest_fallback_collection_seconds = rest_fallback_collection_seconds
         self.seed_rest_orderbooks_before_stream = seed_rest_orderbooks_before_stream
         self.current_time_ms = current_time_ms
         self._fetch_json = fetch_json
@@ -210,6 +222,9 @@ class PolymarketPublicHTTPRealCorpusProvider:
                 ws_url=clob_ws_url,
                 timeout_seconds=timeout_seconds,
                 snapshot_interval_seconds=orderbook_snapshot_interval_seconds,
+                initial_complete_book_timeout_seconds=(
+                    orderbook_ws_initial_complete_book_timeout_seconds
+                ),
             )
 
     def market_rows(
@@ -267,11 +282,17 @@ class PolymarketPublicHTTPRealCorpusProvider:
                 markets,
                 reason_codes=("polymarket_clob_ws_missing_token_orderbook",),
             )
-            rows.extend(
-                row
-                for row in fallback_rows
-                if str(row.get("token_id") or "") in missing_token_ids
-            )
+            if self.rest_fallback_collection_seconds > 0:
+                # Synchronized REST snapshots establish new complete paired
+                # timestamps without backdating a missing token onto an
+                # earlier partial WebSocket observation.
+                rows.extend(fallback_rows)
+            else:
+                rows.extend(
+                    row
+                    for row in fallback_rows
+                    if str(row.get("token_id") or "") in missing_token_ids
+                )
             remaining_missing_token_ids = expected_token_ids - {
                 str(row.get("token_id") or "") for row in rows
             }
@@ -291,18 +312,32 @@ class PolymarketPublicHTTPRealCorpusProvider:
         *,
         reason_codes: tuple[str, ...],
     ) -> list[dict[str, Any]]:
+        fallback_reason_codes = list(reason_codes)
         try:
-            rows = self._raw_orderbook_rows_from_rest(markets)
+            if self.rest_fallback_collection_seconds > 0:
+                rows, collection_reason_codes = (
+                    self._raw_orderbook_rows_from_rest_window(markets)
+                )
+                fallback_reason_codes.extend(collection_reason_codes)
+            else:
+                rows = self._raw_orderbook_rows_from_rest(markets)
         except RealCorpusPublicProviderError as exc:
             raise RealCorpusPublicProviderError(
                 "WebSocket orderbook collection and REST fallback both failed.",
-                reason_codes=tuple(dict.fromkeys((*reason_codes, *exc.reason_codes))),
+                reason_codes=tuple(
+                    dict.fromkeys((*fallback_reason_codes, *exc.reason_codes))
+                ),
             ) from exc
         if not rows:
             raise RealCorpusPublicProviderError(
                 "WebSocket orderbook collection failed and REST fallback was empty.",
                 reason_codes=tuple(
-                    dict.fromkeys((*reason_codes, "polymarket_clob_rest_fallback_empty"))
+                    dict.fromkeys(
+                        (
+                            *fallback_reason_codes,
+                            "polymarket_clob_rest_fallback_empty",
+                        )
+                    )
                 ),
             )
         return _with_orderbook_collection_end(
@@ -310,9 +345,71 @@ class PolymarketPublicHTTPRealCorpusProvider:
                 rows,
                 source_type="polymarket_clob_rest_fallback",
                 rest_fallback=True,
-                fallback_reason_codes=reason_codes,
+                fallback_reason_codes=tuple(dict.fromkeys(fallback_reason_codes)),
             )
         )
+
+    def _raw_orderbook_rows_from_rest_window(
+        self,
+        markets: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+        if not markets:
+            return [], ()
+        market_end_ts = min(int(market["market_end_ts"]) for market in markets)
+        remaining_market_ms = market_end_ts - self._current_time_ms()
+        if remaining_market_ms <= 0:
+            raise RealCorpusPublicProviderError(
+                "REST orderbook fallback cannot start after the market closed.",
+                reason_codes=("polymarket_clob_rest_fallback_market_closed",),
+            )
+        collection_seconds = min(
+            self.rest_fallback_collection_seconds,
+            remaining_market_ms / 1000.0,
+        )
+        deadline = time.monotonic() + collection_seconds
+        rows: list[dict[str, Any]] = []
+        failure_reason_codes: list[str] = []
+        snapshot_index = 0
+        while True:
+            snapshot_index += 1
+            request_started_at_ts = self._current_time_ms()
+            try:
+                snapshot_rows = self._raw_orderbook_rows_from_rest(markets)
+            except RealCorpusPublicProviderError as exc:
+                failure_reason_codes.extend(exc.reason_codes)
+                snapshot_rows = []
+            observed_at_ts = self._current_time_ms()
+            if observed_at_ts >= market_end_ts:
+                failure_reason_codes.append(
+                    "polymarket_clob_rest_fallback_snapshot_after_market_close"
+                )
+                break
+            for row in snapshot_rows:
+                available_at_ts = max(
+                    int(row.get("available_at_ts") or row["ts"]),
+                    observed_at_ts,
+                )
+                rows.append(
+                    {
+                        **row,
+                        "available_at_ts": available_at_ts,
+                        "rest_fallback_snapshot_index": snapshot_index,
+                        "rest_fallback_request_started_at_ts": (
+                            request_started_at_ts
+                        ),
+                        "rest_fallback_observed_at_ts": observed_at_ts,
+                    }
+                )
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                break
+            time.sleep(
+                min(
+                    self.orderbook_snapshot_interval_seconds,
+                    remaining_seconds,
+                )
+            )
+        return rows, tuple(dict.fromkeys(failure_reason_codes))
 
     def _orderbook_rows_from_stream_source(
         self,
@@ -776,7 +873,10 @@ class PolymarketPublicHTTPRealCorpusProvider:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=self.http_timeout_seconds,
+            ) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except Exception:
             return {}
@@ -1022,17 +1122,25 @@ class PolymarketCLOBWebSocketOrderBookSource:
         ws_url: str = DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
         timeout_seconds: float = 15.0,
         snapshot_interval_seconds: float = 1.0,
+        initial_complete_book_timeout_seconds: float = 15.0,
         custom_feature_enabled: bool = True,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         if snapshot_interval_seconds <= 0:
             raise ValueError("snapshot_interval_seconds must be positive")
+        if initial_complete_book_timeout_seconds <= 0:
+            raise ValueError(
+                "initial_complete_book_timeout_seconds must be positive"
+            )
         if not ws_url.strip():
             raise ValueError("ws_url is required")
         self.ws_url = ws_url
         self.timeout_seconds = timeout_seconds
         self.snapshot_interval_seconds = snapshot_interval_seconds
+        self.initial_complete_book_timeout_seconds = (
+            initial_complete_book_timeout_seconds
+        )
         self.custom_feature_enabled = custom_feature_enabled
         self._last_market_resolution_payloads: dict[str, dict[str, Any]] = {}
 
@@ -1158,17 +1266,35 @@ class PolymarketCLOBWebSocketOrderBookSource:
         fallback_payloads: dict[str, dict[str, Any]] = {}
         resolution_payloads: dict[str, dict[str, Any]] = {}
         snapshots: list[dict[str, dict[str, Any]]] = []
-        deadline = time.monotonic() + self.timeout_seconds
-        next_snapshot_at = time.monotonic()
+        started_at = time.monotonic()
+        deadline = started_at + self.timeout_seconds
+        initial_complete_book_deadline = min(
+            deadline,
+            started_at + self.initial_complete_book_timeout_seconds,
+        )
+        next_snapshot_at = started_at
         connection_error: Exception | None = None
+        complete_book_observed = False
         while time.monotonic() < deadline:
+            active_deadline = (
+                deadline
+                if complete_book_observed
+                else initial_complete_book_deadline
+            )
+            if time.monotonic() >= active_deadline:
+                break
             try:
+                open_timeout = max(
+                    0.001,
+                    min(10.0, active_deadline - time.monotonic()),
+                )
                 async with websockets.connect(
                     self.ws_url,
                     ping_interval=None,
                     ping_timeout=None,
                     close_timeout=5,
                     max_size=2**24,
+                    open_timeout=open_timeout,
                 ) as ws:
                     await ws.send(
                         orjson.dumps(
@@ -1180,8 +1306,18 @@ class PolymarketCLOBWebSocketOrderBookSource:
                         )
                     )
                     while time.monotonic() < deadline:
+                        active_deadline = (
+                            deadline
+                            if complete_book_observed
+                            else initial_complete_book_deadline
+                        )
+                        if time.monotonic() >= active_deadline:
+                            break
                         now = time.monotonic()
-                        timeout = max(0.001, min(deadline, next_snapshot_at) - now)
+                        timeout = max(
+                            0.001,
+                            min(active_deadline, next_snapshot_at) - now,
+                        )
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
                         except TimeoutError:
@@ -1201,6 +1337,8 @@ class PolymarketCLOBWebSocketOrderBookSource:
                             merged = dict(fallback_payloads)
                             merged.update(book_payloads)
                             if merged:
+                                if target_tokens.issubset(merged):
+                                    complete_book_observed = True
                                 observation_time_ms = int(time.time() * 1000)
                                 snapshots.append(
                                     _observed_snapshot_payloads(
@@ -1214,17 +1352,29 @@ class PolymarketCLOBWebSocketOrderBookSource:
                             )
             except Exception as exc:  # noqa: BLE001
                 connection_error = exc
-                await _sleep_until_reconnect(deadline)
+                reconnect_deadline = (
+                    deadline
+                    if complete_book_observed
+                    else initial_complete_book_deadline
+                )
+                await _sleep_until_reconnect(reconnect_deadline)
 
         if not snapshots:
             if connection_error is not None:
                 raise RealCorpusPublicProviderError(
-                    f"CLOB websocket orderbook snapshot collection failed: {connection_error}",
-                    reason_codes=("polymarket_clob_ws_orderbook_collection_failed",),
+                    "CLOB websocket did not establish a complete initial orderbook "
+                    f"before the bounded timeout: {connection_error}",
+                    reason_codes=(
+                        "polymarket_clob_ws_initial_complete_book_timeout",
+                        "polymarket_clob_ws_orderbook_collection_failed",
+                    ),
                 ) from connection_error
             raise RealCorpusPublicProviderError(
-                "CLOB websocket emitted no orderbook snapshots before timeout.",
-                reason_codes=("polymarket_clob_ws_no_orderbooks",),
+                "CLOB websocket emitted no complete initial orderbook before timeout.",
+                reason_codes=(
+                    "polymarket_clob_ws_initial_complete_book_timeout",
+                    "polymarket_clob_ws_no_orderbooks",
+                ),
             )
         return snapshots, resolution_payloads
 

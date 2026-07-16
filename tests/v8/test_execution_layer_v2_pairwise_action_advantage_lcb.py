@@ -69,6 +69,24 @@ def test_issue175_protocol_freezes_roles_pairwise_objective_and_quarantine() -> 
         protocol["action_advantage_lcb_protocol"]["forced_action_side_or_family_quota_enabled"]
         is False
     )
+    assert (
+        protocol["collector_contract"][
+            "orderbook_ws_initial_complete_book_timeout_seconds"
+        ]
+        == 15.0
+    )
+    assert (
+        protocol["collector_contract"][
+            "rest_orderbook_fallback_collection_seconds"
+        ]
+        == 330.0
+    )
+    assert (
+        protocol["collector_contract"][
+            "rest_orderbook_fallback_stops_at_market_close"
+        ]
+        is True
+    )
     assert protocol["safety"]["v8_execution_handoff_allowed"] is False
 
     drifted = json.loads(json.dumps(protocol))

@@ -174,6 +174,19 @@ def validate_pairwise_action_advantage_lcb_protocol(protocol: dict[str, Any]) ->
         >= 300.0
         and float(collector.get("public_provider_timeout_seconds") or 0.0)
         > float(collector.get("public_provider_http_timeout_seconds") or 0.0),
+        "bounded_causal_rest_fallback": float(
+            collector.get(
+                "orderbook_ws_initial_complete_book_timeout_seconds"
+            )
+            or 0.0
+        )
+        == 15.0
+        and float(
+            collector.get("rest_orderbook_fallback_collection_seconds") or 0.0
+        )
+        >= 300.0
+        and collector.get("rest_orderbook_fallback_stops_at_market_close")
+        is True,
         "external_training_root": collector.get("training_corpus_root") == "/Volumes/PHILIPS/v8",
         "raw_evidence": collector.get("per_round_raw_evidence_required") is True,
         "async_settlement": collector.get("asynchronous_settlement_required") is True,
@@ -884,6 +897,32 @@ def _capture_quality_audit(
         collector_contract["public_provider_http_timeout_seconds"]
     ):
         reasons.append("collector_public_provider_http_timeout_contract_failed")
+    if float(
+        capture.get("orderbook_ws_initial_complete_book_timeout_seconds")
+        or 0.0
+    ) != float(
+        collector_contract[
+            "orderbook_ws_initial_complete_book_timeout_seconds"
+        ]
+    ):
+        reasons.append(
+            "collector_ws_initial_complete_book_timeout_contract_failed"
+        )
+    if float(
+        capture.get("rest_orderbook_fallback_collection_seconds") or 0.0
+    ) != float(
+        collector_contract["rest_orderbook_fallback_collection_seconds"]
+    ):
+        reasons.append(
+            "collector_rest_orderbook_fallback_collection_contract_failed"
+        )
+    if (
+        capture.get("rest_orderbook_fallback_stops_at_market_close")
+        is not True
+    ):
+        reasons.append(
+            "collector_rest_orderbook_fallback_market_close_contract_failed"
+        )
     for reason, count in sorted(dict(capture.get("reject_reason_counts") or {}).items()):
         if int(count or 0) > 0:
             reasons.append(f"capture_reject_{reason}")
@@ -911,6 +950,18 @@ def _capture_quality_audit(
         ),
         "public_provider_http_timeout_seconds": float(
             capture.get("public_provider_http_timeout_seconds") or 0.0
+        ),
+        "orderbook_ws_initial_complete_book_timeout_seconds": float(
+            capture.get(
+                "orderbook_ws_initial_complete_book_timeout_seconds"
+            )
+            or 0.0
+        ),
+        "rest_orderbook_fallback_collection_seconds": float(
+            capture.get("rest_orderbook_fallback_collection_seconds") or 0.0
+        ),
+        "rest_orderbook_fallback_stops_at_market_close": (
+            capture.get("rest_orderbook_fallback_stops_at_market_close") is True
         ),
         "reason_codes": sorted(set(reasons)),
     }

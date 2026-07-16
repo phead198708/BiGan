@@ -40,6 +40,8 @@ def run_polymarket_async_round_collector_cli(
     public_provider_timeout_seconds: float = 330.0,
     public_provider_http_timeout_seconds: float = 15.0,
     orderbook_snapshot_interval_seconds: float = 1.0,
+    orderbook_ws_initial_complete_book_timeout_seconds: float = 15.0,
+    rest_orderbook_fallback_collection_seconds: float = 330.0,
     settlement_poll_interval_seconds: float = 15.0,
     settlement_grace_seconds: float = 0.0,
     training_corpus_root: Path | str = V8_TRAINING_CORPUS_ROOT,
@@ -56,6 +58,14 @@ def run_polymarket_async_round_collector_cli(
         raise ValueError("public_provider_timeout_seconds must be positive")
     if public_provider_http_timeout_seconds <= 0:
         raise ValueError("public_provider_http_timeout_seconds must be positive")
+    if orderbook_ws_initial_complete_book_timeout_seconds <= 0:
+        raise ValueError(
+            "orderbook_ws_initial_complete_book_timeout_seconds must be positive"
+        )
+    if rest_orderbook_fallback_collection_seconds <= 0:
+        raise ValueError(
+            "rest_orderbook_fallback_collection_seconds must be positive"
+        )
     if settlement_poll_interval_seconds <= 0:
         raise ValueError("settlement_poll_interval_seconds must be positive")
     if settlement_grace_seconds < 0:
@@ -121,6 +131,12 @@ def run_polymarket_async_round_collector_cli(
                 timeout_seconds=public_provider_timeout_seconds,
                 http_timeout_seconds=public_provider_http_timeout_seconds,
                 orderbook_snapshot_interval_seconds=orderbook_snapshot_interval_seconds,
+                orderbook_ws_initial_complete_book_timeout_seconds=(
+                    orderbook_ws_initial_complete_book_timeout_seconds
+                ),
+                rest_fallback_collection_seconds=(
+                    rest_orderbook_fallback_collection_seconds
+                ),
             )
             config = PolymarketRealCorpusRecorderConfig(
                 run_id=run_id,
@@ -174,6 +190,13 @@ def run_polymarket_async_round_collector_cli(
                     "public_provider_http_timeout_seconds": (
                         public_provider_http_timeout_seconds
                     ),
+                    "orderbook_ws_initial_complete_book_timeout_seconds": (
+                        orderbook_ws_initial_complete_book_timeout_seconds
+                    ),
+                    "rest_orderbook_fallback_collection_seconds": (
+                        rest_orderbook_fallback_collection_seconds
+                    ),
+                    "rest_orderbook_fallback_stops_at_market_close": True,
                     "raw_polymarket_market_count": capture.report["raw_polymarket_market_count"],
                     "raw_orderbook_row_count": capture.report["raw_orderbook_row_count"],
                     "provider_raw_orderbook_snapshot_count": capture.report[
@@ -682,6 +705,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--public-provider-timeout-seconds", type=float, default=330.0)
     parser.add_argument("--public-provider-http-timeout-seconds", type=float, default=15.0)
     parser.add_argument("--orderbook-snapshot-interval-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--orderbook-ws-initial-complete-book-timeout-seconds",
+        type=float,
+        default=15.0,
+    )
+    parser.add_argument(
+        "--rest-orderbook-fallback-collection-seconds",
+        type=float,
+        default=330.0,
+    )
     parser.add_argument("--settlement-poll-interval-seconds", type=float, default=15.0)
     parser.add_argument("--settlement-grace-seconds", type=float, default=0.0)
     parser.add_argument("--training-corpus-root", default=str(V8_TRAINING_CORPUS_ROOT))
@@ -720,6 +753,12 @@ def main(argv: list[str] | None = None) -> int:
             public_provider_timeout_seconds=args.public_provider_timeout_seconds,
             public_provider_http_timeout_seconds=args.public_provider_http_timeout_seconds,
             orderbook_snapshot_interval_seconds=args.orderbook_snapshot_interval_seconds,
+            orderbook_ws_initial_complete_book_timeout_seconds=(
+                args.orderbook_ws_initial_complete_book_timeout_seconds
+            ),
+            rest_orderbook_fallback_collection_seconds=(
+                args.rest_orderbook_fallback_collection_seconds
+            ),
             settlement_poll_interval_seconds=args.settlement_poll_interval_seconds,
             settlement_grace_seconds=args.settlement_grace_seconds,
             training_corpus_root=args.training_corpus_root,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.parse
 
 import pytest
@@ -254,12 +255,16 @@ def test_public_http_provider_separates_http_and_orderbook_timeouts() -> None:
         fetch_json=FakePublicFetch(include_reference_prices=False),
         timeout_seconds=330.0,
         http_timeout_seconds=15.0,
+        orderbook_ws_initial_complete_book_timeout_seconds=5.0,
+        rest_fallback_collection_seconds=300.0,
     )
 
     assert provider.timeout_seconds == 330.0
     assert provider.http_timeout_seconds == 15.0
     assert isinstance(provider.orderbook_source, PolymarketCLOBWebSocketOrderBookSource)
     assert provider.orderbook_source.timeout_seconds == 330.0
+    assert provider.orderbook_source.initial_complete_book_timeout_seconds == 5.0
+    assert provider.rest_fallback_collection_seconds == 300.0
 
 
 def test_public_http_provider_falls_back_to_kraken_feature_candles() -> None:
@@ -429,6 +434,70 @@ def test_websocket_orderbook_source_keeps_partial_snapshots_after_disconnect(mon
     assert resolutions["0xcondition"]["winning_asset_id"] == "up-token"
 
 
+def test_websocket_orderbook_source_returns_partial_coverage_at_initial_deadline(
+    monkeypatch,
+) -> None:
+    source = PolymarketCLOBWebSocketOrderBookSource(
+        timeout_seconds=1.0,
+        snapshot_interval_seconds=0.001,
+        initial_complete_book_timeout_seconds=0.02,
+    )
+    websocket = FakeDisconnectingWebSocket(
+        [
+            json.dumps(
+                {
+                    "asset_id": "up-token",
+                    "market": "0xcondition",
+                    "timestamp": "1700000000000",
+                    "hash": "up-book-hash",
+                    "bids": [{"price": "0.56", "size": "100"}],
+                    "asks": [{"price": "0.58", "size": "120"}],
+                }
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.recorder.public_provider.websockets.connect",
+        lambda *args, **kwargs: websocket,
+    )
+
+    started_at = time.monotonic()
+    snapshots = source.book_payload_snapshots(("up-token", "down-token"))
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.25
+    assert snapshots
+    assert all(set(snapshot) == {"up-token"} for snapshot in snapshots)
+
+
+def test_websocket_orderbook_source_fails_at_bounded_initial_deadline(
+    monkeypatch,
+) -> None:
+    source = PolymarketCLOBWebSocketOrderBookSource(
+        timeout_seconds=1.0,
+        snapshot_interval_seconds=0.001,
+        initial_complete_book_timeout_seconds=0.02,
+    )
+
+    def fail_connect(*args, **kwargs):
+        raise TimeoutError("pytest connect timeout")
+
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.recorder.public_provider.websockets.connect",
+        fail_connect,
+    )
+
+    started_at = time.monotonic()
+    with pytest.raises(RealCorpusPublicProviderError) as exc_info:
+        source.book_payload_snapshots(("up-token", "down-token"))
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.25
+    assert "polymarket_clob_ws_initial_complete_book_timeout" in (
+        exc_info.value.reason_codes
+    )
+
+
 def test_public_http_provider_uses_websocket_market_resolved_event() -> None:
     provider = PolymarketPublicHTTPRealCorpusProvider(
         current_time_ms=1_700_001_000_000,
@@ -535,6 +604,58 @@ def test_public_http_provider_uses_rest_only_after_websocket_failure() -> None:
         row["orderbook_fallback_reason_codes"]
         == ["polymarket_clob_ws_orderbook_collection_failed"]
         for row in books
+    )
+
+
+def test_public_http_provider_collects_causal_rest_fallback_snapshots_after_ws_failure() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=SequencedRestFallbackFetch(),
+        orderbook_source=FailingWebSocketStreamOrderBookSource(),
+        orderbook_snapshot_interval_seconds=0.005,
+        rest_fallback_collection_seconds=0.021,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    books = provider.orderbook_rows(markets, config)
+
+    assert len(books) >= 6
+    assert len({row["rest_fallback_snapshot_index"] for row in books}) >= 3
+    assert {row["outcome"] for row in books} == {"UP", "DOWN"}
+    assert {row["orderbook_source_type"] for row in books} == {
+        "polymarket_clob_rest_fallback"
+    }
+    assert all(row["orderbook_rest_fallback_used"] is True for row in books)
+    assert max(row["available_at_ts"] for row in books) <= markets[0]["market_end_ts"]
+
+
+def test_public_http_provider_does_not_start_streaming_rest_fallback_after_close() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_300_001,
+        market_slugs=("btc-updown-5m-1700001000",),
+        fetch_json=FakePublicFetch(include_reference_prices=True),
+        orderbook_source=FailingWebSocketStreamOrderBookSource(),
+        rest_fallback_collection_seconds=1.0,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    with pytest.raises(RealCorpusPublicProviderError) as exc_info:
+        provider.orderbook_rows(markets, config)
+
+    assert "polymarket_clob_rest_fallback_market_closed" in (
+        exc_info.value.reason_codes
     )
 
 
@@ -732,6 +853,37 @@ class FakePublicFetch:
                 [1_699_999_160_000, "65005", "65020", "65000", "65012", "11"],
             ]
         raise AssertionError(f"unexpected url: {url}")
+
+
+class SequencedRestFallbackFetch(FakePublicFetch):
+    def __init__(self) -> None:
+        super().__init__(include_reference_prices=True)
+        self.book_call_count = 0
+
+    def __call__(self, url: str):
+        parsed = urllib.parse.urlparse(url)
+        query = urllib.parse.parse_qs(parsed.query)
+        if "clob.polymarket.com" in parsed.netloc and parsed.path == "/book":
+            token_id = query["token_id"][0]
+            snapshot_index = self.book_call_count // 2
+            self.book_call_count += 1
+            observed_at = 1_700_001_000_100 + snapshot_index * 10
+            if token_id == "up-token":
+                return _book_payload(
+                    token_id=token_id,
+                    bid=0.56,
+                    ask=0.58,
+                    timestamp=str(observed_at),
+                    receive_time=observed_at,
+                )
+            return _book_payload(
+                token_id=token_id,
+                bid=0.42,
+                ask=0.44,
+                timestamp=str(observed_at),
+                receive_time=observed_at,
+            )
+        return super().__call__(url)
 
 
 class DeferredResolutionFetch(FakePublicFetch):
