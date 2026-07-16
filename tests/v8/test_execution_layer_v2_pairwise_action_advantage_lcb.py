@@ -12,6 +12,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_l
     CANDIDATE_NAME,
     ROLE_MARKET_COUNTS,
     PairwiseActionAdvantageLCBPrecollectionFreezeConfig,
+    _capture_quality_audit,
     _role_for_rank,
     freeze_pairwise_action_advantage_lcb_precollection,
     validate_pairwise_action_advantage_lcb_feature_contract,
@@ -87,11 +88,45 @@ def test_issue175_protocol_freezes_roles_pairwise_objective_and_quarantine() -> 
         ]
         is True
     )
+    assert protocol["collector_contract"]["market_identity_source_priority"] == (
+        "gamma_primary_causal_prefetch_cache_fallback"
+    )
+    assert (
+        protocol["collector_contract"][
+            "gamma_market_identity_prefetch_round_count"
+        ]
+        == 12
+    )
+    assert (
+        protocol["collector_contract"][
+            "market_identity_cache_fetched_before_market_start_required"
+        ]
+        is True
+    )
+    assert (
+        protocol["collector_contract"][
+            "market_identity_cache_clob_revalidation_required"
+        ]
+        is True
+    )
+    assert (
+        protocol["collector_contract"][
+            "market_identity_cache_live_orderbook_validation_required"
+        ]
+        is True
+    )
     assert protocol["safety"]["v8_execution_handoff_allowed"] is False
 
     drifted = json.loads(json.dumps(protocol))
     drifted["uses_issue174_confirmatory_labels_for_tuning"] = True
     with pytest.raises(ValueError, match="issue174_quarantined"):
+        validate_pairwise_action_advantage_lcb_protocol(drifted)
+
+    drifted = json.loads(json.dumps(protocol))
+    drifted["collector_contract"][
+        "market_identity_cache_clob_revalidation_required"
+    ] = False
+    with pytest.raises(ValueError, match="causal_gamma_market_identity_cache"):
         validate_pairwise_action_advantage_lcb_protocol(drifted)
 
 
@@ -122,6 +157,59 @@ def test_issue175_role_assignment_is_exact_90_45_60() -> None:
     ]
     with pytest.raises(ValueError, match="195-market"):
         _role_for_rank(196)
+
+
+def test_issue177_capture_quality_requires_causal_identity_cache_provenance() -> None:
+    collector_contract = _load_json(PROTOCOL_PATH)["collector_contract"]
+    capture = {
+        "capture_start_boundary_validation_passed": True,
+        "scheduled_round_start_ts": 1_700_001_000_000,
+        "raw_polymarket_market_count": 1,
+        "provider_raw_orderbook_snapshot_count": 20,
+        "training_sampled_orderbook_row_count": 8,
+        "raw_btc_candle_row_count": 20,
+        "raw_chainlink_price_row_count": 200,
+        "orderbook_snapshot_interval_seconds": 1.0,
+        "public_provider_timeout_seconds": 330.0,
+        "public_provider_http_timeout_seconds": 5.0,
+        "orderbook_ws_initial_complete_book_timeout_seconds": 15.0,
+        "rest_orderbook_fallback_collection_seconds": 330.0,
+        "rest_orderbook_fallback_stops_at_market_close": True,
+        "gamma_market_identity_prefetch_round_count": 12,
+        "market_identity_cache_max_age_seconds": 7_200.0,
+        "market_identity_cache_path": "/tmp/cache.json",
+        "provider_raw_market_identity_source_type_distribution": {
+            "gamma_prefetch_cache_fallback": 1
+        },
+        "market_identity_cache_fallback_market_count": 1,
+        "market_identity_cache_fallback_reason_distribution": {
+            "read_only_public_http_timeout": 1
+        },
+        "market_identity_cache_provenance_violation_count": 0,
+        "market_identity_clob_revalidation_passed_count": 1,
+        "market_identity_cache_report": {
+            "cache_enabled": True,
+            "cache_payload_sha256": "a" * 64,
+        },
+        "reject_reason_counts": {},
+    }
+
+    audit = _capture_quality_audit(
+        capture,
+        collector_contract=collector_contract,
+    )
+
+    assert audit["reason_codes"] == []
+    drifted = dict(capture)
+    drifted["market_identity_clob_revalidation_passed_count"] = 0
+    blocked = _capture_quality_audit(
+        drifted,
+        collector_contract=collector_contract,
+    )
+    assert (
+        "collector_market_identity_clob_revalidation_failed"
+        in blocked["reason_codes"]
+    )
 
 
 def test_issue175_precollection_freeze_pins_quarantine_and_role_plan(
@@ -355,6 +443,60 @@ def test_issue175_quarantine_registry_falls_back_when_normalized_market_file_is_
     assert registry["missing_capture_market_identity_count"] == 0
     assert registry["outcome_label_or_pnl_artifacts_opened"] is False
     assert registry["resolution_artifacts_opened"] is False
+
+
+def test_issue177_quarantine_registry_ignores_explicit_empty_fail_closed_capture(
+    tmp_path: Path,
+) -> None:
+    prior = tmp_path / "prior.json"
+    prior.write_text(
+        json.dumps(
+            {
+                "market_id": "prior-market",
+                "decision_ts": 1_000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    batch = tmp_path / "batch.json"
+    batch.write_text(
+        json.dumps(
+            {
+                "batch_id": "batch",
+                "capture_count": 1,
+                "captures": [
+                    {
+                        "run_id": "capture",
+                        "run_dir": str(tmp_path / "missing-run"),
+                        "scheduled_round_start_ts": 2_000,
+                        "capture_status": "blocked_fail_closed",
+                        "raw_polymarket_market_count": 0,
+                        "reject_reason_counts": {
+                            "read_only_public_http_timeout": 1
+                        },
+                    }
+                ],
+                "paper_only": True,
+                "capital_at_risk": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = build_quarantine_registry(
+        run_id="issue177-empty-fail-closed",
+        output_dir=tmp_path / "runs",
+        created_at_ts=3_000,
+        source_registry_pins=((prior, _sha256(prior)),),
+        assignment_rows_pins=(),
+        batch_progress_pins=((batch, _sha256(batch)),),
+    )
+
+    registry = result["registry"]
+    assert registry["prior_unique_market_count"] == 1
+    assert registry["empty_fail_closed_capture_count"] == 1
+    assert registry["missing_capture_market_identity_count"] == 0
+    assert registry["outcome_label_or_pnl_artifacts_opened"] is False
 
 
 def test_pairwise_decision_groups_require_all_five_actions() -> None:

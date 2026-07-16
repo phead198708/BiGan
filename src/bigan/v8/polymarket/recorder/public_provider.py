@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 import orjson
@@ -28,6 +30,11 @@ from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.corpus import BTC_UPDOWN_MARKET_HORIZONS_MS
 from bigan.v8.polymarket.corpus.contracts import safety_fields
 from bigan.v8.polymarket.recorder.contracts import PolymarketRealCorpusRecorderConfig
+from bigan.v8.polymarket.recorder.market_identity_cache import (
+    GAMMA_MARKET_IDENTITY_CACHE_FALLBACK_SOURCE_TYPE,
+    GammaMarketIdentityCache,
+    GammaMarketIdentityCacheError,
+)
 
 BTC_UPDOWN_SLUG_PATTERN = re.compile(r"^btc-updown-(5m|15m|1h)-(\d+)$")
 BTC_UPDOWN_FAMILY_BY_SLUG = {
@@ -46,6 +53,9 @@ BTC_FEATURE_SOURCE_COINBASE = "coinbase_btc_usd"
 BTC_FEATURE_SOURCE_KRAKEN = "kraken_xbt_usd"
 BTC_FEATURE_SOURCE_BINANCE = "binance_btcusdt"
 DEFAULT_BTC_FEATURE_SOURCE_ORDER = ("coinbase", "kraken", "binance")
+GAMMA_PRIMARY_MARKET_IDENTITY_SOURCE_TYPE = "gamma_primary"
+_ACTIVE_GAMMA_PREFETCH_CACHE_PATHS: set[str] = set()
+_ACTIVE_GAMMA_PREFETCH_LOCK = threading.Lock()
 
 
 class RealCorpusPublicProviderError(RuntimeError):
@@ -160,6 +170,9 @@ class PolymarketPublicHTTPRealCorpusProvider:
         fetch_json: Callable[[str], Any] | None = None,
         orderbook_source: PolymarketOrderBookSource | None = None,
         use_rest_orderbooks: bool = False,
+        market_identity_cache_path: Path | str | None = None,
+        market_identity_cache_max_age_seconds: float = 7_200.0,
+        gamma_market_identity_prefetch_round_count: int = 0,
     ) -> None:
         if max_markets <= 0:
             raise ValueError("max_markets must be positive")
@@ -177,6 +190,12 @@ class PolymarketPublicHTTPRealCorpusProvider:
             )
         if rest_fallback_collection_seconds < 0:
             raise ValueError("rest_fallback_collection_seconds must be non-negative")
+        if market_identity_cache_max_age_seconds <= 0:
+            raise ValueError("market_identity_cache_max_age_seconds must be positive")
+        if gamma_market_identity_prefetch_round_count < 0:
+            raise ValueError(
+                "gamma_market_identity_prefetch_round_count must be non-negative"
+            )
         if seed_rest_orderbooks_before_stream:
             raise ValueError(
                 "pre-stream REST orderbook seeding is disabled; REST is fallback-only"
@@ -213,6 +232,25 @@ class PolymarketPublicHTTPRealCorpusProvider:
         self.seed_rest_orderbooks_before_stream = seed_rest_orderbooks_before_stream
         self.current_time_ms = current_time_ms
         self._fetch_json = fetch_json
+        self.gamma_market_identity_prefetch_round_count = (
+            gamma_market_identity_prefetch_round_count
+        )
+        self._last_gamma_market_identity_prefetch_report: dict[str, Any] = {
+            "prefetch_enabled": False,
+            "requested_slug_count": 0,
+            "stored_slug_count": 0,
+            "reason_codes": ["gamma_market_identity_prefetch_not_run"],
+            **safety_fields(),
+        }
+        self.market_identity_cache = (
+            None
+            if market_identity_cache_path is None
+            else GammaMarketIdentityCache(
+                market_identity_cache_path,
+                max_age_seconds=market_identity_cache_max_age_seconds,
+                current_time_ms=current_time_ms,
+            )
+        )
         if orderbook_source is not None:
             self.orderbook_source = orderbook_source
         elif use_rest_orderbooks:
@@ -232,23 +270,176 @@ class PolymarketPublicHTTPRealCorpusProvider:
         config: PolymarketRealCorpusRecorderConfig,
     ) -> list[dict[str, Any]]:
         slugs = self.market_slugs or self._discover_current_btc_updown_slugs(config)
-        rows = []
+        rows: list[dict[str, Any]] = []
+        primary_success = False
         for slug in slugs[: self.max_markets]:
-            payloads = self._fetch_gamma_market_payloads(slug)
-            rows.extend(
-                row
-                for row in (
-                    self._normalize_gamma_market_payload(payload, config)
-                    for payload in payloads
+            fetched_at_ts = self._current_time_ms()
+            fallback_reason_codes: tuple[str, ...] = ()
+            try:
+                payloads = self._fetch_gamma_market_payloads(slug)
+            except RealCorpusPublicProviderError as exc:
+                if not _gamma_cache_fallback_allowed(exc.reason_codes):
+                    raise
+                payloads = []
+                fallback_reason_codes = exc.reason_codes
+            if payloads:
+                normalized = [
+                    row
+                    for row in (
+                        self._normalize_gamma_market_payload(payload, config)
+                        for payload in payloads
+                    )
+                    if row is not None and row["slug"] == slug
+                ]
+                if len(normalized) > 1:
+                    raise RealCorpusPublicProviderError(
+                        "Gamma returned multiple identities for one exact slug.",
+                        reason_codes=("gamma_market_identity_ambiguous",),
+                    )
+                if len(normalized) == 1:
+                    primary_success = True
+                    rows.extend(
+                        _annotate_market_identity(
+                            row,
+                            source_type=GAMMA_PRIMARY_MARKET_IDENTITY_SOURCE_TYPE,
+                            fetched_at_ts=fetched_at_ts,
+                            cache_fallback=False,
+                            fallback_reason_codes=(),
+                            cache_entry_sha256=None,
+                            cache_age_ms=None,
+                            clob_validation=None,
+                        )
+                        for row in normalized
+                    )
+                    continue
+                fallback_reason_codes = (
+                    "real_public_collection_empty_market_discovery",
                 )
-                if row is not None
+            elif not fallback_reason_codes:
+                fallback_reason_codes = (
+                    "real_public_collection_empty_market_discovery",
+                )
+            rows.append(
+                self._market_row_from_identity_cache(
+                    slug=slug,
+                    config=config,
+                    decision_ts=self._current_time_ms(),
+                    fallback_reason_codes=fallback_reason_codes,
+                )
             )
         if not rows:
             raise RealCorpusPublicProviderError(
                 "No BTC UP/DOWN Gamma markets could be normalized from public data.",
                 reason_codes=("real_public_collection_empty_market_discovery",),
             )
+        if primary_success:
+            self._start_gamma_market_identity_prefetch(
+                config=config,
+                base_slugs=slugs,
+            )
         return rows[: self.max_markets]
+
+    def prefetch_gamma_market_identities(
+        self,
+        *,
+        config: PolymarketRealCorpusRecorderConfig,
+        base_slugs: tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        """Synchronously prefetch deterministic future slugs for diagnostics/tests."""
+
+        cache = self.market_identity_cache
+        requested_count = self.gamma_market_identity_prefetch_round_count
+        if cache is None or requested_count <= 0:
+            report = {
+                "prefetch_enabled": False,
+                "requested_slug_count": 0,
+                "stored_slug_count": 0,
+                "reason_codes": ["gamma_market_identity_prefetch_disabled"],
+                **safety_fields(),
+            }
+            self._last_gamma_market_identity_prefetch_report = report
+            return report
+        current_slugs = base_slugs or self._discover_current_btc_updown_slugs(config)
+        future_slugs = self._future_btc_updown_slugs(
+            config=config,
+            base_slugs=current_slugs,
+            round_count=requested_count,
+        )
+        stored_slugs: list[str] = []
+        reason_codes: list[str] = []
+        for slug in future_slugs:
+            try:
+                payloads = self._fetch_gamma_market_payloads(slug)
+            except RealCorpusPublicProviderError as exc:
+                reason_codes.extend(exc.reason_codes)
+                break
+            if not payloads:
+                reason_codes.append("gamma_market_identity_prefetch_empty")
+                break
+            fetched_at_ts = self._current_time_ms()
+            normalized_rows = [
+                row
+                for row in (
+                    self._normalize_gamma_market_payload(
+                        payload,
+                        config,
+                        allow_future_market=True,
+                    )
+                    for payload in payloads
+                )
+                if row is not None and row["slug"] == slug
+            ]
+            if len(normalized_rows) != 1:
+                reason_codes.append(
+                    "gamma_market_identity_prefetch_not_exactly_one_market"
+                )
+                break
+            row = normalized_rows[0]
+            try:
+                cache.store_prefetched_payload(
+                    payload=dict(row["raw_public_payload"]),
+                    slug=row["slug"],
+                    market_family=row["market_family"],
+                    market_start_ts=int(row["market_start_ts"]),
+                    market_end_ts=int(row["market_end_ts"]),
+                    condition_id=row["condition_id"],
+                    up_token_id=row["up_token_id"],
+                    down_token_id=row["down_token_id"],
+                    reference_price_source=row["reference_price_source"],
+                    settlement_rule=row["settlement_rule"],
+                    fetched_at_ts=fetched_at_ts,
+                    source_endpoint=self.gamma_markets_endpoint,
+                )
+            except GammaMarketIdentityCacheError as exc:
+                reason_codes.extend(exc.reason_codes)
+                break
+            stored_slugs.append(slug)
+        report = {
+            "prefetch_enabled": True,
+            "requested_slug_count": len(future_slugs),
+            "stored_slug_count": len(stored_slugs),
+            "stored_slugs": stored_slugs,
+            "reason_codes": sorted(set(reason_codes)),
+            "cache_report": cache.report(),
+            **safety_fields(),
+        }
+        self._last_gamma_market_identity_prefetch_report = report
+        return report
+
+    def market_identity_cache_report(self) -> dict[str, Any]:
+        if self.market_identity_cache is None:
+            return {
+                "cache_enabled": False,
+                "cache_path": None,
+                "cache_entry_count": 0,
+                **safety_fields(),
+            }
+        report = self.market_identity_cache.report()
+        report["cache_enabled"] = True
+        report["last_prefetch_report"] = dict(
+            self._last_gamma_market_identity_prefetch_report
+        )
+        return report
 
     def orderbook_rows(
         self,
@@ -834,6 +1025,250 @@ class PolymarketPublicHTTPRealCorpusProvider:
             slugs.append(f"btc-updown-{horizon_name}-{start_epoch_seconds}")
         return tuple(slugs)
 
+    def _future_btc_updown_slugs(
+        self,
+        *,
+        config: PolymarketRealCorpusRecorderConfig,
+        base_slugs: tuple[str, ...],
+        round_count: int,
+    ) -> tuple[str, ...]:
+        family_by_base_slug: dict[str, str] = {}
+        for slug in base_slugs:
+            match = BTC_UPDOWN_SLUG_PATTERN.match(slug)
+            if match is None:
+                continue
+            family = BTC_UPDOWN_FAMILY_BY_SLUG[match.group(1)]
+            if family in config.market_families:
+                family_by_base_slug[slug] = family
+        rows: list[str] = []
+        for slug, family in family_by_base_slug.items():
+            match = BTC_UPDOWN_SLUG_PATTERN.match(slug)
+            if match is None:
+                continue
+            start_seconds = int(match.group(2))
+            horizon_seconds = BTC_UPDOWN_MARKET_HORIZONS_MS[family] // 1000
+            horizon_name = BTC_UPDOWN_SLUG_HORIZON_BY_FAMILY[family]
+            rows.extend(
+                f"btc-updown-{horizon_name}-{start_seconds + offset * horizon_seconds}"
+                for offset in range(1, round_count + 1)
+            )
+        return tuple(dict.fromkeys(rows))
+
+    def _start_gamma_market_identity_prefetch(
+        self,
+        *,
+        config: PolymarketRealCorpusRecorderConfig,
+        base_slugs: tuple[str, ...],
+    ) -> None:
+        cache = self.market_identity_cache
+        if (
+            cache is None
+            or self.gamma_market_identity_prefetch_round_count <= 0
+            or self.market_slugs
+        ):
+            return
+        cache_key = str(cache.path)
+        with _ACTIVE_GAMMA_PREFETCH_LOCK:
+            if cache_key in _ACTIVE_GAMMA_PREFETCH_CACHE_PATHS:
+                return
+            _ACTIVE_GAMMA_PREFETCH_CACHE_PATHS.add(cache_key)
+
+        def worker() -> None:
+            try:
+                self.prefetch_gamma_market_identities(
+                    config=config,
+                    base_slugs=base_slugs,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._last_gamma_market_identity_prefetch_report = {
+                    "prefetch_enabled": True,
+                    "requested_slug_count": (
+                        self.gamma_market_identity_prefetch_round_count
+                    ),
+                    "stored_slug_count": 0,
+                    "reason_codes": [
+                        "gamma_market_identity_prefetch_unexpected_error"
+                    ],
+                    "details": str(exc),
+                    **safety_fields(),
+                }
+            finally:
+                with _ACTIVE_GAMMA_PREFETCH_LOCK:
+                    _ACTIVE_GAMMA_PREFETCH_CACHE_PATHS.discard(cache_key)
+
+        threading.Thread(
+            target=worker,
+            name="gamma-market-identity-prefetch",
+            daemon=True,
+        ).start()
+
+    def _market_row_from_identity_cache(
+        self,
+        *,
+        slug: str,
+        config: PolymarketRealCorpusRecorderConfig,
+        decision_ts: int,
+        fallback_reason_codes: tuple[str, ...],
+    ) -> dict[str, Any]:
+        cache = self.market_identity_cache
+        if cache is None:
+            raise RealCorpusPublicProviderError(
+                "Gamma market discovery failed and no identity cache is configured.",
+                reason_codes=tuple(
+                    dict.fromkeys(
+                        (
+                            *fallback_reason_codes,
+                            "gamma_market_identity_cache_not_configured",
+                        )
+                    )
+                ),
+            )
+        match = BTC_UPDOWN_SLUG_PATTERN.match(slug)
+        if match is None:
+            raise RealCorpusPublicProviderError(
+                "Gamma cache fallback received an unsupported market slug.",
+                reason_codes=("gamma_market_identity_cache_slug_mismatch",),
+            )
+        family = BTC_UPDOWN_FAMILY_BY_SLUG[match.group(1)]
+        start_ts = int(match.group(2)) * 1000
+        end_ts = start_ts + BTC_UPDOWN_MARKET_HORIZONS_MS[family]
+        try:
+            entry = cache.lookup(
+                slug=slug,
+                decision_ts=decision_ts,
+                expected_market_family=family,
+                expected_market_start_ts=start_ts,
+                expected_market_end_ts=end_ts,
+            )
+        except GammaMarketIdentityCacheError as exc:
+            raise RealCorpusPublicProviderError(
+                "Gamma market discovery failed and cache fallback was rejected.",
+                reason_codes=tuple(
+                    dict.fromkeys((*fallback_reason_codes, *exc.reason_codes))
+                ),
+            ) from exc
+        row = self._normalize_gamma_market_payload(
+            dict(entry["identity_payload"]),
+            config,
+        )
+        if row is None or row["slug"] != slug:
+            raise RealCorpusPublicProviderError(
+                "Gamma cache payload could not normalize to the current market.",
+                reason_codes=tuple(
+                    dict.fromkeys(
+                        (
+                            *fallback_reason_codes,
+                            "gamma_market_identity_cache_normalization_failed",
+                        )
+                    )
+                ),
+            )
+        cached_identity = (
+            str(entry["condition_id"]),
+            str(entry["up_token_id"]),
+            str(entry["down_token_id"]),
+            int(entry["market_start_ts"]),
+            int(entry["market_end_ts"]),
+        )
+        normalized_identity = (
+            str(row["condition_id"]),
+            str(row["up_token_id"]),
+            str(row["down_token_id"]),
+            int(row["market_start_ts"]),
+            int(row["market_end_ts"]),
+        )
+        if normalized_identity != cached_identity:
+            raise RealCorpusPublicProviderError(
+                "Gamma cache entry fields disagree with its raw payload.",
+                reason_codes=(
+                    "gamma_market_identity_cache_payload_identity_mismatch",
+                ),
+            )
+        clob_validation = self._validate_cached_identity_against_clob(row)
+        return _annotate_market_identity(
+            row,
+            source_type=GAMMA_MARKET_IDENTITY_CACHE_FALLBACK_SOURCE_TYPE,
+            fetched_at_ts=int(entry["fetched_at_ts"]),
+            cache_fallback=True,
+            fallback_reason_codes=fallback_reason_codes,
+            cache_entry_sha256=str(entry["cache_entry_sha256"]),
+            cache_age_ms=int(entry["cache_age_ms"]),
+            clob_validation=clob_validation,
+        )
+
+    def _validate_cached_identity_against_clob(
+        self,
+        market: dict[str, Any],
+    ) -> dict[str, Any]:
+        condition_id = str(market["condition_id"])
+        try:
+            payload = self._get_json(f"{self.clob_market_endpoint}/{condition_id}")
+        except RealCorpusPublicProviderError as exc:
+            raise RealCorpusPublicProviderError(
+                "Cached Gamma identity could not be revalidated through CLOB.",
+                reason_codes=tuple(
+                    dict.fromkeys(
+                        (
+                            *exc.reason_codes,
+                            "gamma_market_identity_cache_clob_revalidation_failed",
+                        )
+                    )
+                ),
+            ) from exc
+        if not isinstance(payload, dict):
+            raise RealCorpusPublicProviderError(
+                "CLOB market identity payload is invalid.",
+                reason_codes=(
+                    "gamma_market_identity_cache_clob_revalidation_failed",
+                    "gamma_market_identity_cache_invalid_clob_market_payload",
+                ),
+            )
+        payload_condition_id = str(
+            payload.get("condition_id")
+            or payload.get("conditionId")
+            or payload.get("market")
+            or ""
+        )
+        if payload_condition_id and payload_condition_id != condition_id:
+            raise RealCorpusPublicProviderError(
+                "Cached Gamma condition id disagrees with CLOB.",
+                reason_codes=(
+                    "gamma_market_identity_cache_clob_condition_mismatch",
+                ),
+            )
+        payload_slug = str(
+            payload.get("market_slug") or payload.get("slug") or ""
+        )
+        if payload_slug and payload_slug != market["slug"]:
+            raise RealCorpusPublicProviderError(
+                "Cached Gamma slug disagrees with CLOB.",
+                reason_codes=("gamma_market_identity_cache_clob_slug_mismatch",),
+            )
+        token_by_outcome = _clob_token_by_up_down_outcome(payload.get("tokens"))
+        if token_by_outcome is None:
+            raise RealCorpusPublicProviderError(
+                "CLOB market identity lacks an exact UP/DOWN token mapping.",
+                reason_codes=(
+                    "gamma_market_identity_cache_clob_tokens_missing",
+                ),
+            )
+        if (
+            token_by_outcome["UP"] != market["up_token_id"]
+            or token_by_outcome["DOWN"] != market["down_token_id"]
+        ):
+            raise RealCorpusPublicProviderError(
+                "Cached Gamma token ids disagree with CLOB.",
+                reason_codes=("gamma_market_identity_cache_clob_token_mismatch",),
+            )
+        return {
+            "passed": True,
+            "condition_id": condition_id,
+            "slug": market["slug"],
+            "up_token_id": market["up_token_id"],
+            "down_token_id": market["down_token_id"],
+            "clob_market_payload_sha256": canonical_json_sha256(payload),
+        }
+
     def _fetch_gamma_market_payloads(self, slug: str) -> list[dict[str, Any]]:
         params = urllib.parse.urlencode({"slug": slug})
         payload = self._get_json(f"{self.gamma_markets_endpoint}?{params}")
@@ -889,6 +1324,8 @@ class PolymarketPublicHTTPRealCorpusProvider:
         self,
         payload: dict[str, Any],
         config: PolymarketRealCorpusRecorderConfig,
+        *,
+        allow_future_market: bool = False,
     ) -> dict[str, Any] | None:
         slug = str(payload.get("slug") or payload.get("market_slug") or "")
         match = BTC_UPDOWN_SLUG_PATTERN.match(slug)
@@ -901,7 +1338,11 @@ class PolymarketPublicHTTPRealCorpusProvider:
         horizon_ms = BTC_UPDOWN_MARKET_HORIZONS_MS[family]
         end_ts = start_ts + horizon_ms
         now_ms = self._current_time_ms()
-        if not self.market_slugs and not (start_ts <= now_ms < end_ts):
+        if (
+            not allow_future_market
+            and not self.market_slugs
+            and not (start_ts <= now_ms < end_ts)
+        ):
             return None
         outcomes = _json_list(payload.get("outcomes"))
         token_ids = _json_list(payload.get("clobTokenIds"))
@@ -1089,6 +1530,17 @@ class PolymarketPublicHTTPRealCorpusProvider:
                 "Read-only public HTTP request timed out.",
                 reason_codes=("read_only_public_http_timeout",),
             ) from exc
+        except urllib.error.HTTPError as exc:
+            status = int(getattr(exc, "code", 0) or 0)
+            reason_code = (
+                "read_only_public_http_server_error"
+                if status >= 500
+                else "read_only_public_http_error"
+            )
+            raise RealCorpusPublicProviderError(
+                f"Read-only public HTTP request failed with status {status}.",
+                reason_codes=(reason_code,),
+            ) from exc
         except urllib.error.URLError as exc:
             reason = getattr(exc, "reason", None)
             if isinstance(reason, TimeoutError) or "timed out" in str(exc).lower():
@@ -1096,7 +1548,10 @@ class PolymarketPublicHTTPRealCorpusProvider:
                     "Read-only public HTTP request timed out.",
                     reason_codes=("read_only_public_http_timeout",),
                 ) from exc
-            raise
+            raise RealCorpusPublicProviderError(
+                "Read-only public HTTP transport failed.",
+                reason_codes=("read_only_public_http_transport_error",),
+            ) from exc
 
     def _current_time_ms(self) -> int:
         return self.current_time_ms if self.current_time_ms is not None else int(time.time() * 1000)
@@ -1480,6 +1935,49 @@ def _annotate_orderbook_rows(
     ]
 
 
+def _annotate_market_identity(
+    row: dict[str, Any],
+    *,
+    source_type: str,
+    fetched_at_ts: int,
+    cache_fallback: bool,
+    fallback_reason_codes: tuple[str, ...],
+    cache_entry_sha256: str | None,
+    cache_age_ms: int | None,
+    clob_validation: dict[str, Any] | None,
+) -> dict[str, Any]:
+    annotated = {
+        **row,
+        "market_identity_source_type": source_type,
+        "market_identity_fetched_at_ts": fetched_at_ts,
+        "market_identity_cache_fallback_used": cache_fallback,
+        "market_identity_cache_fallback_reason_codes": list(
+            fallback_reason_codes
+        ),
+        "market_identity_cache_entry_sha256": cache_entry_sha256,
+        "market_identity_cache_age_ms": cache_age_ms,
+        "market_identity_cache_provenance_valid": True,
+        "market_identity_clob_revalidation_required": cache_fallback,
+        "market_identity_clob_revalidation_passed": (
+            bool(clob_validation and clob_validation.get("passed"))
+            if cache_fallback
+            else None
+        ),
+        "market_identity_clob_revalidation": clob_validation,
+        "market_identity_live_orderbook_validation_required": True,
+    }
+    return annotated
+
+
+def _gamma_cache_fallback_allowed(reason_codes: tuple[str, ...]) -> bool:
+    allowed = {
+        "read_only_public_http_timeout",
+        "read_only_public_http_transport_error",
+        "read_only_public_http_server_error",
+    }
+    return bool(set(reason_codes) & allowed)
+
+
 def _decode_market_ws_payloads(raw: bytes | str) -> list[dict[str, Any]]:
     raw_bytes = raw if isinstance(raw, bytes) else raw.encode("utf-8")
     stripped = raw_bytes.strip()
@@ -1639,6 +2137,32 @@ def _token_by_up_down_outcome(
         elif normalized == "DOWN":
             token_by_outcome["DOWN"] = str(token_id)
     return token_by_outcome if set(token_by_outcome) == {"UP", "DOWN"} else None
+
+
+def _clob_token_by_up_down_outcome(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, list):
+        return None
+    outcomes: list[str] = []
+    token_ids: list[str] = []
+    for token in value:
+        if not isinstance(token, dict):
+            continue
+        outcome = str(
+            token.get("outcome")
+            or token.get("name")
+            or token.get("label")
+            or ""
+        )
+        token_id = str(
+            token.get("token_id")
+            or token.get("tokenId")
+            or token.get("asset_id")
+            or ""
+        )
+        if outcome and token_id:
+            outcomes.append(outcome)
+            token_ids.append(token_id)
+    return _token_by_up_down_outcome(outcomes=outcomes, token_ids=token_ids)
 
 
 def _settlement_ts(payload: dict[str, Any], *, default: int) -> int:

@@ -48,6 +48,9 @@ def test_public_http_provider_normalizes_public_market_rows_without_fake_resolut
     assert markets[0]["reference_price_start"] == 65000.0
     assert markets[0]["reference_price_at_start"] == 65000.0
     assert markets[0]["reference_price_start_source_type"] == "gamma_market_payload"
+    assert markets[0]["market_identity_source_type"] == "gamma_primary"
+    assert markets[0]["market_identity_cache_fallback_used"] is False
+    assert markets[0]["market_identity_cache_provenance_valid"] is True
     assert markets[0]["up_token_id"] == "up-token"
     assert markets[0]["down_token_id"] == "down-token"
     assert len(books) == 2

@@ -187,6 +187,45 @@ def validate_pairwise_action_advantage_lcb_protocol(protocol: dict[str, Any]) ->
         >= 300.0
         and collector.get("rest_orderbook_fallback_stops_at_market_close")
         is True,
+        "causal_gamma_market_identity_cache": collector.get(
+            "market_identity_source_priority"
+        )
+        == "gamma_primary_causal_prefetch_cache_fallback"
+        and int(
+            collector.get("gamma_market_identity_prefetch_round_count") or 0
+        )
+        == 12
+        and float(
+            collector.get("market_identity_cache_max_age_seconds") or 0.0
+        )
+        == 7_200.0
+        and collector.get(
+            "market_identity_cache_exact_slug_window_required"
+        )
+        is True
+        and collector.get(
+            "market_identity_cache_fetched_before_market_start_required"
+        )
+        is True
+        and collector.get("market_identity_cache_immutable_hash_required")
+        is True
+        and collector.get("market_identity_cache_clob_revalidation_required")
+        is True
+        and collector.get(
+            "market_identity_cache_live_orderbook_validation_required"
+        )
+        is True
+        and set(collector.get("market_identity_cache_forbidden_fields") or [])
+        == {
+            "resolved_outcome",
+            "outcomePrices",
+            "payout_up",
+            "payout_down",
+            "settlement_pnl",
+            "realized_pnl",
+            "oracle_action",
+            "future_return",
+        },
         "external_training_root": collector.get("training_corpus_root") == "/Volumes/PHILIPS/v8",
         "raw_evidence": collector.get("per_round_raw_evidence_required") is True,
         "async_settlement": collector.get("asynchronous_settlement_required") is True,
@@ -923,6 +962,62 @@ def _capture_quality_audit(
         reasons.append(
             "collector_rest_orderbook_fallback_market_close_contract_failed"
         )
+    if int(
+        capture.get("gamma_market_identity_prefetch_round_count") or -1
+    ) != int(
+        collector_contract["gamma_market_identity_prefetch_round_count"]
+    ):
+        reasons.append(
+            "collector_gamma_market_identity_prefetch_contract_failed"
+        )
+    if float(
+        capture.get("market_identity_cache_max_age_seconds") or 0.0
+    ) != float(
+        collector_contract["market_identity_cache_max_age_seconds"]
+    ):
+        reasons.append("collector_market_identity_cache_age_contract_failed")
+    if not str(capture.get("market_identity_cache_path") or ""):
+        reasons.append("collector_market_identity_cache_path_missing")
+    identity_source_distribution = dict(
+        capture.get(
+            "provider_raw_market_identity_source_type_distribution"
+        )
+        or {}
+    )
+    if (
+        sum(int(value or 0) for value in identity_source_distribution.values())
+        != 1
+        or set(identity_source_distribution)
+        - {"gamma_primary", "gamma_prefetch_cache_fallback"}
+    ):
+        reasons.append("collector_market_identity_source_contract_failed")
+    cache_fallback_market_count = int(
+        capture.get("market_identity_cache_fallback_market_count") or 0
+    )
+    cache_provenance_violation_count = int(
+        capture.get("market_identity_cache_provenance_violation_count") or 0
+    )
+    clob_revalidation_passed_count = int(
+        capture.get("market_identity_clob_revalidation_passed_count") or 0
+    )
+    if cache_provenance_violation_count != 0:
+        reasons.append("collector_market_identity_cache_provenance_failed")
+    if (
+        cache_fallback_market_count not in {0, 1}
+        or clob_revalidation_passed_count != cache_fallback_market_count
+    ):
+        reasons.append("collector_market_identity_clob_revalidation_failed")
+    cache_report = dict(capture.get("market_identity_cache_report") or {})
+    cache_payload_sha256 = str(cache_report.get("cache_payload_sha256") or "")
+    if (
+        cache_report.get("cache_enabled") is not True
+        or len(cache_payload_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in cache_payload_sha256.lower()
+        )
+    ):
+        reasons.append("collector_market_identity_cache_report_failed")
     for reason, count in sorted(dict(capture.get("reject_reason_counts") or {}).items()):
         if int(count or 0) > 0:
             reasons.append(f"capture_reject_{reason}")
@@ -963,6 +1058,28 @@ def _capture_quality_audit(
         "rest_orderbook_fallback_stops_at_market_close": (
             capture.get("rest_orderbook_fallback_stops_at_market_close") is True
         ),
+        "gamma_market_identity_prefetch_round_count": int(
+            capture.get("gamma_market_identity_prefetch_round_count") or 0
+        ),
+        "market_identity_cache_max_age_seconds": float(
+            capture.get("market_identity_cache_max_age_seconds") or 0.0
+        ),
+        "market_identity_cache_path": capture.get(
+            "market_identity_cache_path"
+        ),
+        "provider_raw_market_identity_source_type_distribution": (
+            identity_source_distribution
+        ),
+        "market_identity_cache_fallback_market_count": (
+            cache_fallback_market_count
+        ),
+        "market_identity_cache_provenance_violation_count": (
+            cache_provenance_violation_count
+        ),
+        "market_identity_clob_revalidation_passed_count": (
+            clob_revalidation_passed_count
+        ),
+        "market_identity_cache_report": cache_report,
         "reason_codes": sorted(set(reasons)),
     }
 

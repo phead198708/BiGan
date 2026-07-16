@@ -1236,6 +1236,22 @@ def _pending_capture_report(
 ) -> dict[str, Any]:
     market_count = len(raw_payloads["raw_polymarket_markets.jsonl"])
     reject_counts = _reject_counts(rejected_rows)
+    provider_raw_markets = provider_raw_payloads[
+        "raw_polymarket_markets.jsonl"
+    ]
+    market_identity_source_counts = Counter(
+        str(row.get("market_identity_source_type") or "unknown")
+        for row in provider_raw_markets
+    )
+    market_identity_fallback_reason_counts: Counter[str] = Counter()
+    for row in provider_raw_markets:
+        market_identity_fallback_reason_counts.update(
+            str(reason)
+            for reason in row.get(
+                "market_identity_cache_fallback_reason_codes"
+            )
+            or []
+        )
     provider_raw_orderbooks = provider_raw_payloads[
         "raw_polymarket_orderbooks.jsonl"
     ]
@@ -1262,6 +1278,29 @@ def _pending_capture_report(
         ),
         "resolution_provider_called": False,
         "raw_polymarket_market_count": market_count,
+        "provider_raw_market_identity_source_type_distribution": dict(
+            sorted(market_identity_source_counts.items())
+        ),
+        "market_identity_cache_fallback_market_count": sum(
+            1
+            for row in provider_raw_markets
+            if row.get("market_identity_cache_fallback_used") is True
+        ),
+        "market_identity_cache_fallback_reason_distribution": dict(
+            sorted(market_identity_fallback_reason_counts.items())
+        ),
+        "market_identity_cache_provenance_violation_count": sum(
+            1
+            for row in provider_raw_markets
+            if row.get("market_identity_cache_fallback_used") is True
+            and row.get("market_identity_cache_provenance_valid") is not True
+        ),
+        "market_identity_clob_revalidation_passed_count": sum(
+            1
+            for row in provider_raw_markets
+            if row.get("market_identity_clob_revalidation_passed") is True
+        ),
+        "market_identity_live_orderbook_validation_required": True,
         "raw_orderbook_row_count": len(raw_payloads["raw_polymarket_orderbooks.jsonl"]),
         "provider_raw_orderbook_snapshot_count": len(
             provider_raw_orderbooks

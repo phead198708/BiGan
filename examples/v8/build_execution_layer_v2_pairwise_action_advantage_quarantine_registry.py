@@ -83,6 +83,7 @@ def build_quarantine_registry(
     capture_count = 0
     capture_market_count = 0
     missing_capture_market_identity_count = 0
+    empty_fail_closed_capture_count = 0
     for path, expected_sha256 in batch_progress_pins:
         resolved = path.resolve()
         _verify_pin(resolved, expected_sha256, name="#175 batch progress")
@@ -122,6 +123,16 @@ def build_quarantine_registry(
                 market_ids = candidate_market_ids
                 break
             if market_path is None or not market_ids:
+                if (
+                    capture.get("capture_status") == "blocked_fail_closed"
+                    and int(
+                        capture.get("raw_polymarket_market_count") or 0
+                    )
+                    == 0
+                    and bool(capture.get("reject_reason_counts"))
+                ):
+                    empty_fail_closed_capture_count += 1
+                    continue
                 missing_capture_market_identity_count += 1
                 continue
             capture_market_count += len(market_ids)
@@ -176,6 +187,9 @@ def build_quarantine_registry(
         ),
         "capture_count": capture_count,
         "capture_market_count": capture_market_count,
+        "empty_fail_closed_capture_count": (
+            empty_fail_closed_capture_count
+        ),
         "missing_capture_market_identity_count": 0,
         "prior_unique_market_count": len(market_ids),
         "prior_market_ids": market_ids,
@@ -255,6 +269,9 @@ def main() -> None:
                 "prior_unique_market_count": result["registry"]["prior_unique_market_count"],
                 "prior_market_ids_sha256": result["registry"]["prior_market_ids_sha256"],
                 "maximum_prior_decision_ts": result["registry"]["maximum_prior_decision_ts"],
+                "empty_fail_closed_capture_count": result["registry"][
+                    "empty_fail_closed_capture_count"
+                ],
                 "registry_path": str(result["registry_path"]),
                 "registry_sha256": result["registry_sha256"],
                 "descriptor_path": str(result["descriptor_path"]),

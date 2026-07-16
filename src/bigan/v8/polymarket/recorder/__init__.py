@@ -28,6 +28,13 @@ from bigan.v8.polymarket.recorder.contracts import (
     PolymarketRealCorpusRecorderConfig,
     PolymarketRealCorpusRecorderResult,
 )
+from bigan.v8.polymarket.recorder.market_identity_cache import (
+    GAMMA_MARKET_IDENTITY_CACHE_FALLBACK_SOURCE_TYPE,
+    GAMMA_MARKET_IDENTITY_CACHE_SCHEMA_VERSION,
+    GAMMA_MARKET_IDENTITY_CACHE_SOURCE_TYPE,
+    GammaMarketIdentityCache,
+    GammaMarketIdentityCacheError,
+)
 from bigan.v8.polymarket.recorder.operator import record_polymarket_real_corpus
 from bigan.v8.polymarket.recorder.public_provider import (
     DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
@@ -62,6 +69,11 @@ __all__ = [
     "PolymarketOrderBookSource",
     "PolymarketRealCorpusRecorderConfig",
     "PolymarketRealCorpusRecorderResult",
+    "GAMMA_MARKET_IDENTITY_CACHE_FALLBACK_SOURCE_TYPE",
+    "GAMMA_MARKET_IDENTITY_CACHE_SCHEMA_VERSION",
+    "GAMMA_MARKET_IDENTITY_CACHE_SOURCE_TYPE",
+    "GammaMarketIdentityCache",
+    "GammaMarketIdentityCacheError",
     "PolymarketPublicHTTPRealCorpusProvider",
     "PolymarketRealCorpusPublicProvider",
     "RealCorpusPublicProviderError",

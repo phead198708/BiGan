@@ -50,6 +50,9 @@ def run_polymarket_async_round_collector_cli(
     chainlink_rtds_url: str = DEFAULT_POLYMARKET_RTDS_URL,
     chainlink_rtds_warmup_seconds: float = 5.0,
     chainlink_rtds_stale_reconnect_seconds: float = 15.0,
+    market_identity_cache_path: Path | str | None = None,
+    gamma_market_identity_prefetch_round_count: int = 12,
+    market_identity_cache_max_age_seconds: float = 7_200.0,
     overwrite_existing: bool = False,
 ) -> dict[str, Any]:
     if round_count <= 0:
@@ -76,8 +79,19 @@ def run_polymarket_async_round_collector_cli(
         raise ValueError("chainlink_rtds_warmup_seconds must be non-negative")
     if chainlink_rtds_stale_reconnect_seconds <= 0:
         raise ValueError("chainlink_rtds_stale_reconnect_seconds must be positive")
+    if gamma_market_identity_prefetch_round_count < 0:
+        raise ValueError(
+            "gamma_market_identity_prefetch_round_count must be non-negative"
+        )
+    if market_identity_cache_max_age_seconds <= 0:
+        raise ValueError("market_identity_cache_max_age_seconds must be positive")
 
     root = Path(output_dir).expanduser().resolve()
+    resolved_market_identity_cache_path = (
+        root / "gamma_market_identity_cache.json"
+        if market_identity_cache_path is None
+        else Path(market_identity_cache_path).expanduser().resolve()
+    )
     batch_dir = root / batch_id
     batch_dir.mkdir(parents=True, exist_ok=True)
     stop_event = threading.Event()
@@ -137,6 +151,13 @@ def run_polymarket_async_round_collector_cli(
                 rest_fallback_collection_seconds=(
                     rest_orderbook_fallback_collection_seconds
                 ),
+                market_identity_cache_path=resolved_market_identity_cache_path,
+                market_identity_cache_max_age_seconds=(
+                    market_identity_cache_max_age_seconds
+                ),
+                gamma_market_identity_prefetch_round_count=(
+                    gamma_market_identity_prefetch_round_count
+                ),
             )
             config = PolymarketRealCorpusRecorderConfig(
                 run_id=run_id,
@@ -149,6 +170,9 @@ def run_polymarket_async_round_collector_cli(
                 config,
                 public_provider=provider,
                 chainlink_rtds_collector=chainlink_collector,
+            )
+            market_identity_cache_report = (
+                provider.market_identity_cache_report()
             )
         except Exception as exc:  # noqa: BLE001
             with lock:
@@ -197,7 +221,44 @@ def run_polymarket_async_round_collector_cli(
                         rest_orderbook_fallback_collection_seconds
                     ),
                     "rest_orderbook_fallback_stops_at_market_close": True,
+                    "market_identity_cache_path": str(
+                        resolved_market_identity_cache_path
+                    ),
+                    "market_identity_cache_max_age_seconds": (
+                        market_identity_cache_max_age_seconds
+                    ),
+                    "gamma_market_identity_prefetch_round_count": (
+                        gamma_market_identity_prefetch_round_count
+                    ),
+                    "market_identity_cache_report": (
+                        market_identity_cache_report
+                    ),
                     "raw_polymarket_market_count": capture.report["raw_polymarket_market_count"],
+                    "provider_raw_market_identity_source_type_distribution": (
+                        capture.report[
+                            "provider_raw_market_identity_source_type_distribution"
+                        ]
+                    ),
+                    "market_identity_cache_fallback_market_count": (
+                        capture.report[
+                            "market_identity_cache_fallback_market_count"
+                        ]
+                    ),
+                    "market_identity_cache_fallback_reason_distribution": (
+                        capture.report[
+                            "market_identity_cache_fallback_reason_distribution"
+                        ]
+                    ),
+                    "market_identity_cache_provenance_violation_count": (
+                        capture.report[
+                            "market_identity_cache_provenance_violation_count"
+                        ]
+                    ),
+                    "market_identity_clob_revalidation_passed_count": (
+                        capture.report[
+                            "market_identity_clob_revalidation_passed_count"
+                        ]
+                    ),
                     "raw_orderbook_row_count": capture.report["raw_orderbook_row_count"],
                     "provider_raw_orderbook_snapshot_count": capture.report[
                         "provider_raw_orderbook_snapshot_count"
@@ -536,6 +597,27 @@ def _summary(
     pending = [
         item for item in finalizations if item.get("finalization_status") == "pending_resolution"
     ]
+    market_identity_source_distribution: dict[str, int] = {}
+    market_identity_fallback_reason_distribution: dict[str, int] = {}
+    for capture in captures:
+        for name, count in dict(
+            capture.get(
+                "provider_raw_market_identity_source_type_distribution"
+            )
+            or {}
+        ).items():
+            market_identity_source_distribution[str(name)] = (
+                market_identity_source_distribution.get(str(name), 0)
+                + int(count)
+            )
+        for name, count in dict(
+            capture.get("market_identity_cache_fallback_reason_distribution")
+            or {}
+        ).items():
+            market_identity_fallback_reason_distribution[str(name)] = (
+                market_identity_fallback_reason_distribution.get(str(name), 0)
+                + int(count)
+            )
     return {
         "batch_id": batch_id,
         "paper_only": True,
@@ -543,6 +625,32 @@ def _summary(
         "capture_count": len(captures),
         "capture_pending_resolution_count": sum(
             1 for item in captures if item.get("pending_resolution") is True
+        ),
+        "market_identity_source_type_distribution": dict(
+            sorted(market_identity_source_distribution.items())
+        ),
+        "market_identity_cache_fallback_market_count": sum(
+            int(item.get("market_identity_cache_fallback_market_count") or 0)
+            for item in captures
+        ),
+        "market_identity_cache_fallback_reason_distribution": dict(
+            sorted(market_identity_fallback_reason_distribution.items())
+        ),
+        "market_identity_cache_provenance_violation_count": sum(
+            int(
+                item.get(
+                    "market_identity_cache_provenance_violation_count"
+                )
+                or 0
+            )
+            for item in captures
+        ),
+        "market_identity_clob_revalidation_passed_count": sum(
+            int(
+                item.get("market_identity_clob_revalidation_passed_count")
+                or 0
+            )
+            for item in captures
         ),
         "provider_raw_orderbook_snapshot_count": sum(
             int(item.get("provider_raw_orderbook_snapshot_count") or 0) for item in captures
@@ -728,6 +836,24 @@ def main(argv: list[str] | None = None) -> int:
         default=15.0,
     )
     parser.add_argument(
+        "--market-identity-cache-path",
+        default=None,
+        help=(
+            "Shared causal Gamma identity cache path; defaults to "
+            "<output-dir>/gamma_market_identity_cache.json."
+        ),
+    )
+    parser.add_argument(
+        "--gamma-market-identity-prefetch-round-count",
+        type=int,
+        default=12,
+    )
+    parser.add_argument(
+        "--market-identity-cache-max-age-seconds",
+        type=float,
+        default=7_200.0,
+    )
+    parser.add_argument(
         "--finalize-only",
         action="store_true",
         help="Only scan pending round captures and try settlement finalization.",
@@ -768,6 +894,13 @@ def main(argv: list[str] | None = None) -> int:
             chainlink_rtds_warmup_seconds=args.chainlink_rtds_warmup_seconds,
             chainlink_rtds_stale_reconnect_seconds=(
                 args.chainlink_rtds_stale_reconnect_seconds
+            ),
+            market_identity_cache_path=args.market_identity_cache_path,
+            gamma_market_identity_prefetch_round_count=(
+                args.gamma_market_identity_prefetch_round_count
+            ),
+            market_identity_cache_max_age_seconds=(
+                args.market_identity_cache_max_age_seconds
             ),
             overwrite_existing=args.overwrite_existing,
         )

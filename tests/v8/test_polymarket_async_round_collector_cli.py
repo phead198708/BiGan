@@ -95,6 +95,47 @@ def test_batch_summary_reports_chainlink_freshness_watchdog_without_double_count
     assert summary["chainlink_rtds_stale_reconnect_count"] == 2
 
 
+def test_batch_summary_aggregates_market_identity_cache_evidence() -> None:
+    summary = _summary(
+        "identity-cache",
+        [
+            {
+                "provider_raw_market_identity_source_type_distribution": {
+                    "gamma_primary": 1
+                },
+                "market_identity_cache_fallback_market_count": 0,
+                "market_identity_cache_fallback_reason_distribution": {},
+                "market_identity_cache_provenance_violation_count": 0,
+                "market_identity_clob_revalidation_passed_count": 0,
+            },
+            {
+                "provider_raw_market_identity_source_type_distribution": {
+                    "gamma_prefetch_cache_fallback": 1
+                },
+                "market_identity_cache_fallback_market_count": 1,
+                "market_identity_cache_fallback_reason_distribution": {
+                    "read_only_public_http_timeout": 1
+                },
+                "market_identity_cache_provenance_violation_count": 0,
+                "market_identity_clob_revalidation_passed_count": 1,
+            },
+        ],
+        [],
+        [],
+    )
+
+    assert summary["market_identity_source_type_distribution"] == {
+        "gamma_prefetch_cache_fallback": 1,
+        "gamma_primary": 1,
+    }
+    assert summary["market_identity_cache_fallback_market_count"] == 1
+    assert summary["market_identity_cache_fallback_reason_distribution"] == {
+        "read_only_public_http_timeout": 1
+    }
+    assert summary["market_identity_cache_provenance_violation_count"] == 0
+    assert summary["market_identity_clob_revalidation_passed_count"] == 1
+
+
 def test_capture_worker_waits_again_when_spawned_before_scheduled_boundary() -> None:
     observed_times = iter((899.952, 900.0))
     sleep_calls: list[float] = []

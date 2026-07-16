@@ -449,6 +449,21 @@ def _raw_market_row(market: dict[str, Any]) -> dict[str, Any]:
         row["reference_price_start_source_type"] = market[
             "reference_price_start_source_type"
         ]
+    for field_name in (
+        "market_identity_source_type",
+        "market_identity_fetched_at_ts",
+        "market_identity_cache_fallback_used",
+        "market_identity_cache_fallback_reason_codes",
+        "market_identity_cache_entry_sha256",
+        "market_identity_cache_age_ms",
+        "market_identity_cache_provenance_valid",
+        "market_identity_clob_revalidation_required",
+        "market_identity_clob_revalidation_passed",
+        "market_identity_clob_revalidation",
+        "market_identity_live_orderbook_validation_required",
+    ):
+        if field_name in market:
+            row[field_name] = market[field_name]
     return row
 
 
@@ -466,6 +481,20 @@ def _recorder_report(
         for reason in row.get("reject_reasons", []):
             reject_counts[reason] += 1
     market_count = len(raw_payloads["raw_polymarket_markets.jsonl"])
+    raw_market_rows = raw_payloads["raw_polymarket_markets.jsonl"]
+    market_identity_source_counts = Counter(
+        str(row.get("market_identity_source_type") or "unknown")
+        for row in raw_market_rows
+    )
+    market_identity_fallback_reason_counts: Counter[str] = Counter()
+    for row in raw_market_rows:
+        market_identity_fallback_reason_counts.update(
+            str(reason)
+            for reason in row.get(
+                "market_identity_cache_fallback_reason_codes"
+            )
+            or []
+        )
     phase2_corpus_manifest_sha256 = None
     if phase2_result is not None:
         phase2_corpus_manifest_sha256 = phase2_result.artifact_hashes.get("corpus_manifest")
@@ -517,6 +546,28 @@ def _recorder_report(
         "synthetic_public_data_used": config.mock_public_data,
         "synthetic_corpus_used": config.mock_public_data,
         "raw_polymarket_market_count": market_count,
+        "market_identity_source_type_distribution": dict(
+            sorted(market_identity_source_counts.items())
+        ),
+        "market_identity_cache_fallback_market_count": sum(
+            1
+            for row in raw_market_rows
+            if row.get("market_identity_cache_fallback_used") is True
+        ),
+        "market_identity_cache_fallback_reason_distribution": dict(
+            sorted(market_identity_fallback_reason_counts.items())
+        ),
+        "market_identity_cache_provenance_violation_count": sum(
+            1
+            for row in raw_market_rows
+            if row.get("market_identity_cache_fallback_used") is True
+            and row.get("market_identity_cache_provenance_valid") is not True
+        ),
+        "market_identity_clob_revalidation_passed_count": sum(
+            1
+            for row in raw_market_rows
+            if row.get("market_identity_clob_revalidation_passed") is True
+        ),
         "raw_orderbook_row_count": len(raw_payloads["raw_polymarket_orderbooks.jsonl"]),
         "raw_trade_row_count": len(raw_payloads["raw_polymarket_trades.jsonl"]),
         "raw_btc_candle_row_count": len(raw_payloads["raw_binance_btcusdt_klines.jsonl"]),
