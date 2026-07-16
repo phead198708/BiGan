@@ -1,0 +1,87 @@
+{
+  "schema_version": "bigan-v8-execution-layer-v2-hybrid-pairwise-fresh-calibration-protocol-v1",
+  "candidate_lineage": "historical_train_fresh_calibration_pairwise_action_advantage_lcb_v1",
+  "frozen": true,
+  "decision_time_safe": true,
+  "source_pairwise_protocol_sha256": "ee7b6cc7812cd81f0e0bb70460ba91446e260bbf76860db5fb933c7e31375777",
+  "source_feature_contract_sha256": "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959",
+  "historical_development_registry": {
+    "descriptor_sha256": "4f89272a266d556a8b498d635b3ca1958f7d801b6eae5988237918c9a8edd557",
+    "selected_market_count": 90,
+    "selected_market_ids_sha256": "db38c7f1a4a2e541659f87b16d2aadbda6a97faaeb5094164943cfa2afe0e76e"
+  },
+  "historical_ranker_freeze": {
+    "descriptor_sha256": "668aab97a552dd3a5c5420393dfcdda59a38e3b85ced123efc5e3e490bac5e33",
+    "freeze_id": "9ef1a058764fed647e4609464417e1dc9f59b823d59884b16d62093821102e1f",
+    "model_sha256": "d79adcd1ca05d81af6594faba883f5107f97144f740eff64e5985675688647cd",
+    "dataset_hash": "ffcb4f242b9fdb292170221766b02962565e1f78eb7d1c62eea5036527689fb4",
+    "oof_dataset_hash": "2135ce88420e0a8c5478eea35eb0ae83dc8e3881c9a2f065ef9f115169c8db5d",
+    "split_hash": "28f63c476fc91d9d4c936b8f8b4911e10257639570cf29fef3de74000c45b991",
+    "model_config_hash": "2acd743d4cc3038088c87fa2a8d6134aac6a71e5e75ecc9285110e82a78d4cef",
+    "fresh_calibration_required": true,
+    "rank_scores_execution_eligible": false
+  },
+  "source_contract_hashes": {
+    "collector_contract_sha256": "45ec64a786173a2c3385a30ef7fa9df8551010c660e4e038b7474398e5332906",
+    "action_advantage_lcb_protocol_sha256": "03d1d1e4a3fd7ff1322c45e902a54cf91a49de7f18f84cd642674b5bdec03818",
+    "development_freeze_gates_sha256": "2bf87e3e15a69c5156cd6237ff9a0278a2d8cb13c917468ec384443b96aa45de",
+    "confirmatory_validation_gates_sha256": "3e1daf44881f19e5abf68560b40485de1c3486b5292d5f1582c27306820faf51",
+    "frozen_execution_contract_sha256": "ac85089ec35782fe74532a0bb0dc532ce684aff0e5d1fab79b6c48a9fc960e23"
+  },
+  "fresh_role_plan": [
+    {
+      "role": "fresh_development_calibration",
+      "valid_market_rank_start": 1,
+      "valid_market_rank_end": 45
+    },
+    {
+      "role": "fresh_confirmatory_validation",
+      "valid_market_rank_start": 46,
+      "valid_market_rank_end": 105
+    }
+  ],
+  "collection_plan": {
+    "target_valid_unique_market_count": 105,
+    "initial_capture_attempt_count": 120,
+    "maximum_total_capture_attempt_count": 150,
+    "role_assignment": "earliest_quality_valid_unique_markets_chronological_outcome_blind",
+    "replacement_only_for_pre_label_capture_quality_failure": true,
+    "bounded_continuation_only_for_support_shortfall": true,
+    "active_issue175_through_issue179_markets_must_be_quarantined": true
+  },
+  "calibration_contract": {
+    "ranker_retraining_allowed": false,
+    "ranker_score_mutation_allowed": false,
+    "fresh_calibration_market_count": 45,
+    "action_advantage_lcb_only": true,
+    "development_gate_must_pass_before_confirmatory_label_access": true,
+    "uses_confirmatory_labels_for_tuning": false,
+    "uses_current_oof_or_validation_metrics_for_tuning": false
+  },
+  "confirmatory_contract": {
+    "fresh_confirmatory_market_count": 60,
+    "one_shot": true,
+    "retry_or_reselection_from_results_allowed": false,
+    "threshold_or_gate_change_from_results_allowed": false
+  },
+  "readiness_contract": {
+    "final_prior_lineage_quarantine_required": true,
+    "active_prior_lineage_must_be_complete": true,
+    "historical_training_markets_must_be_in_prior_quarantine": true,
+    "future_decision_ts_strictly_after_model_and_prior_lineage_freeze": true,
+    "labels_or_outcomes_allowed_for_readiness": false,
+    "collection_start_command_allowed_from_readiness_report": false
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}
