@@ -48,6 +48,19 @@ ROLE_MARKET_COUNTS = {
     "development_calibration": 45,
     "confirmatory_validation": 60,
 }
+TARGET_MARKET_COUNT = sum(ROLE_MARKET_COUNTS.values())
+SUPPLEMENTAL_SUPPORT_MANIFEST_SCHEMA_VERSION = (
+    "bigan-v8-pairwise-supplemental-support-gate-manifest-v1"
+)
+SUPPLEMENTAL_SUPPORT_REPORT_SCHEMA_VERSION = (
+    "bigan-v8-pairwise-supplemental-support-gate-report-v1"
+)
+CORE_SUPPORT_MANIFEST_SCHEMA_VERSION = (
+    "bigan-v8-pairwise-precollection-continuation-manifest-v1"
+)
+CORE_SUPPORT_REPORT_SCHEMA_VERSION = (
+    "bigan-v8-pairwise-precollection-support-gate-v1"
+)
 RANK_MODEL_FILENAME = "pairwise_action_advantage_ranker.xgb.json"
 FORBIDDEN_DECISION_FIELDS = {
     "future_return",
@@ -68,6 +81,8 @@ class PairwiseActionAdvantageLCBFitConfig:
 
     run_id: str
     output_dir: Path | str
+    support_gate_manifest_path: Path | str
+    expected_support_gate_manifest_sha256: str
     role_assignment_manifest_path: Path | str
     expected_role_assignment_manifest_sha256: str
     feature_contract_path: Path | str
@@ -77,6 +92,10 @@ class PairwiseActionAdvantageLCBFitConfig:
         if not self.run_id.strip():
             raise ValueError("run_id is required")
         _require_sha256(
+            self.expected_support_gate_manifest_sha256,
+            name="support gate manifest SHA-256",
+        )
+        _require_sha256(
             self.expected_role_assignment_manifest_sha256,
             name="role assignment manifest SHA-256",
         )
@@ -85,6 +104,11 @@ class PairwiseActionAdvantageLCBFitConfig:
             name="feature contract SHA-256",
         )
         object.__setattr__(self, "output_dir", Path(self.output_dir))
+        object.__setattr__(
+            self,
+            "support_gate_manifest_path",
+            Path(self.support_gate_manifest_path),
+        )
         object.__setattr__(
             self,
             "role_assignment_manifest_path",
@@ -98,6 +122,14 @@ def fit_pairwise_action_advantage_lcb(
 ) -> dict[str, Any]:
     """Fit on 90 markets, calibrate on 45, and evaluate once on 60."""
 
+    support_manifest_path = config.support_gate_manifest_path.resolve()
+    _verify_pin(
+        support_manifest_path,
+        config.expected_support_gate_manifest_sha256,
+        name="supplemental support gate manifest",
+    )
+    support_manifest = _load_json(support_manifest_path)
+
     role_manifest_path = config.role_assignment_manifest_path.resolve()
     _verify_pin(
         role_manifest_path,
@@ -105,6 +137,15 @@ def fit_pairwise_action_advantage_lcb(
         name="role assignment manifest",
     )
     role_manifest = _load_json(role_manifest_path)
+    support_lineage_audit = _validate_support_gate_lineage(
+        support_manifest=support_manifest,
+        support_manifest_path=support_manifest_path,
+        role_manifest=role_manifest,
+        role_manifest_path=role_manifest_path,
+        expected_role_manifest_sha256=(
+            config.expected_role_assignment_manifest_sha256
+        ),
+    )
     if role_manifest.get("role_assignment_ready") is not True:
         raise ValueError("role assignment is not ready")
     if role_manifest.get("labels_or_outcomes_opened_for_role_assignment") is not False:
@@ -145,19 +186,51 @@ def fit_pairwise_action_advantage_lcb(
     )
     role_rows = _load_jsonl(Path(selected_descriptor["path"]))
     _validate_role_rows(role_rows)
+    selected_market_ids = {str(row["market_id"]) for row in role_rows}
+    if canonical_json_sha256(sorted(selected_market_ids)) != str(
+        role_manifest.get("selected_market_ids_sha256") or ""
+    ):
+        raise ValueError("role assignment selected-market hash mismatch")
     exclusion_descriptor = _verified_descriptor(
         role_manifest.get("prior_evidence_exclusion_registry"),
         name="prior evidence exclusion registry",
     )
     exclusion_registry = _load_json(Path(exclusion_descriptor["path"]))
     prior_market_ids = {str(value) for value in exclusion_registry.get("prior_market_ids") or []}
-    selected_market_ids = {str(row["market_id"]) for row in role_rows}
     prior_market_overlap = selected_market_ids & prior_market_ids
     if prior_market_overlap:
         raise ValueError("role assignment overlaps prior evidence")
 
     run_dir = config.output_dir / config.run_id
     run_dir.mkdir(parents=True, exist_ok=False)
+    pre_label_audit = {
+        "schema_version": f"{SCHEMA_PREFIX}-pre-label-access-lineage-audit-v1",
+        "run_id": config.run_id,
+        "candidate_name": protocol["candidate_name"],
+        **support_lineage_audit,
+        "role_assignment_manifest": _descriptor(role_manifest_path),
+        "role_assignment_selected_rows": selected_descriptor,
+        "execution_compatible_feature_coverage_report": (
+            compatibility_descriptor
+        ),
+        "target_market_count": TARGET_MARKET_COUNT,
+        "role_market_counts": dict(ROLE_MARKET_COUNTS),
+        "selected_market_count": len(selected_market_ids),
+        "role_assignment_completed_before_label_access": True,
+        "execution_compatibility_validated_before_label_access": True,
+        "label_artifacts_opened_before_pre_label_audit": False,
+        "settlement_outcomes_opened_before_pre_label_audit": False,
+        "pnl_fields_opened_before_pre_label_audit": False,
+        "prediction_attempted_before_pre_label_audit": False,
+        "pre_label_access_validation_passed": True,
+        **_blocked_safety_fields(),
+    }
+    pre_label_audit_path = run_dir / "pre_label_access_lineage_audit.json"
+    _write_json(pre_label_audit_path, pre_label_audit)
+    _write_text(
+        run_dir / "pre_label_access_lineage_audit.md",
+        _pre_label_access_markdown(pre_label_audit),
+    )
     feature_columns = tuple(feature_contract["feature_columns"])
     development_roles = ("development_train", "development_calibration")
     action_rows_by_role, corpus_audits = _materialize_role_action_rows(
@@ -229,6 +302,8 @@ def fit_pairwise_action_advantage_lcb(
         "run_id": config.run_id,
         "candidate_name": protocol["candidate_name"],
         "protocol": protocol_descriptor,
+        "support_gate_manifest": _descriptor(support_manifest_path),
+        "pre_label_access_lineage_audit": _descriptor(pre_label_audit_path),
         "feature_contract": _descriptor(feature_contract_path),
         "role_assignment_manifest": _descriptor(role_manifest_path),
         "development_action_rows": {
@@ -344,6 +419,8 @@ def fit_pairwise_action_advantage_lcb(
         "schema_version": f"{SCHEMA_PREFIX}-training-report-v1",
         "run_id": config.run_id,
         "candidate_name": protocol["candidate_name"],
+        "support_gate_manifest": _descriptor(support_manifest_path),
+        "pre_label_access_lineage_audit": _descriptor(pre_label_audit_path),
         "feature_columns": list(feature_columns),
         "cross_fit": cross_fit,
         "model": _descriptor(model_path),
@@ -401,6 +478,8 @@ def fit_pairwise_action_advantage_lcb(
             "run_id": config.run_id,
             "candidate_name": protocol["candidate_name"],
             "protocol": protocol_descriptor,
+            "support_gate_manifest": _descriptor(support_manifest_path),
+            "pre_label_access_lineage_audit": _descriptor(pre_label_audit_path),
             "feature_contract": _descriptor(feature_contract_path),
             "role_assignment_manifest": _descriptor(role_manifest_path),
             "model": _descriptor(model_path),
@@ -424,6 +503,7 @@ def fit_pairwise_action_advantage_lcb(
         _write_json(blocked_manifest_path, blocked_manifest)
         return {
             "run_dir": run_dir,
+            "pre_label_access_lineage_audit_path": pre_label_audit_path,
             "development_fit_freeze_manifest_path": development_fit_freeze_path,
             "development_gate_report_path": development_gate_report_path,
             "freeze_manifest_path": blocked_manifest_path,
@@ -594,12 +674,53 @@ def fit_pairwise_action_advantage_lcb(
         run_dir / "confirmatory_validation_report.md",
         _validation_markdown(validation_report),
     )
+    accepted_bet_pnl_report = {
+        "schema_version": f"{SCHEMA_PREFIX}-confirmatory-accepted-bet-pnl-report-v1",
+        "run_id": config.run_id,
+        "candidate_name": protocol["candidate_name"],
+        "evaluation_scope": (
+            "frozen_execution_guard_accepted_bets_after_full_costs"
+        ),
+        "candidate_metrics": candidate_metrics,
+        "candidate_accepted_bet_diagnostics": _accepted_bet_diagnostics(
+            candidate_replay
+        ),
+        "baseline_metrics": baseline_metrics,
+        "baseline_accepted_bet_diagnostics": _accepted_bet_diagnostics(
+            baseline_replay
+        ),
+        "candidate_minus_baseline_net_pnl": (
+            candidate_metrics["net_pnl_sum"] - baseline_metrics["net_pnl_sum"]
+        ),
+        "market_robustness_diagnostics": robustness,
+        "confirmatory_gate_passed": confirmatory_gate["passed"],
+        "confirmatory_gate_blocking_reason_codes": confirmatory_gate[
+            "reason_codes"
+        ],
+        "full_cost_aware_target_used_for_report_only": True,
+        "confirmatory_labels_used_for_tuning": False,
+        "execution_guard_mutated": False,
+        "order_sizing_mutated": False,
+        "cost_model_mutated": False,
+        "future_unseen_holdout_required": True,
+        **_blocked_safety_fields(),
+    }
+    accepted_bet_pnl_report_path = (
+        run_dir / "confirmatory_accepted_bet_pnl_report.json"
+    )
+    _write_json(accepted_bet_pnl_report_path, accepted_bet_pnl_report)
+    _write_text(
+        run_dir / "confirmatory_accepted_bet_pnl_report.md",
+        _accepted_bet_pnl_markdown(accepted_bet_pnl_report),
+    )
 
     freeze_manifest = {
         "schema_version": f"{SCHEMA_PREFIX}-candidate-freeze-manifest-v1",
         "run_id": config.run_id,
         "candidate_name": protocol["candidate_name"],
         "protocol": protocol_descriptor,
+        "support_gate_manifest": _descriptor(support_manifest_path),
+        "pre_label_access_lineage_audit": _descriptor(pre_label_audit_path),
         "feature_contract": _descriptor(feature_contract_path),
         "role_assignment_manifest": _descriptor(role_manifest_path),
         "split_manifest": _descriptor(split_manifest_path),
@@ -612,6 +733,9 @@ def fit_pairwise_action_advantage_lcb(
         "training_report": _descriptor(training_report_path),
         "leakage_and_role_audit": _descriptor(leakage_audit_path),
         "confirmatory_validation_report": _descriptor(validation_report_path),
+        "confirmatory_accepted_bet_pnl_report": _descriptor(
+            accepted_bet_pnl_report_path
+        ),
         "candidate_frozen_for_future_evaluation": confirmatory_gate["passed"],
         "future_collection_allowed": confirmatory_gate["passed"],
         "future_unseen_evaluation_required": True,
@@ -624,6 +748,7 @@ def fit_pairwise_action_advantage_lcb(
     }
     freeze_manifest["research_candidate_hash"] = canonical_json_sha256(
         {
+            "support_gate": freeze_manifest["support_gate_manifest"]["sha256"],
             "protocol": protocol_descriptor["sha256"],
             "feature_contract": freeze_manifest["feature_contract"]["sha256"],
             "role_assignment": freeze_manifest["role_assignment_manifest"]["sha256"],
@@ -636,12 +761,14 @@ def fit_pairwise_action_advantage_lcb(
     _write_json(freeze_manifest_path, freeze_manifest)
     return {
         "run_dir": run_dir,
+        "pre_label_access_lineage_audit_path": pre_label_audit_path,
         "split_manifest_path": split_manifest_path,
         "development_fit_freeze_manifest_path": development_fit_freeze_path,
         "training_report_path": training_report_path,
         "calibration_report_path": calibration_report_path,
         "leakage_audit_path": leakage_audit_path,
         "validation_report_path": validation_report_path,
+        "accepted_bet_pnl_report_path": accepted_bet_pnl_report_path,
         "freeze_manifest_path": freeze_manifest_path,
         "freeze_manifest_sha256": _sha256_file(freeze_manifest_path),
         "validation_report": validation_report,
@@ -650,16 +777,52 @@ def fit_pairwise_action_advantage_lcb(
 
 
 def _validate_role_rows(rows: list[dict[str, Any]]) -> None:
-    if len(rows) != 120:
-        raise ValueError("role assignment must contain exactly 120 markets")
+    if len(rows) != TARGET_MARKET_COUNT:
+        raise ValueError(
+            f"role assignment must contain exactly {TARGET_MARKET_COUNT} markets"
+        )
     market_ids = [str(row.get("market_id") or "") for row in rows]
     if any(not value for value in market_ids) or len(market_ids) != len(set(market_ids)):
         raise ValueError("role assignment market identities are incomplete")
-    if [int(row.get("selection_rank") or 0) for row in rows] != list(range(1, 121)):
+    if [int(row.get("selection_rank") or 0) for row in rows] != list(
+        range(1, TARGET_MARKET_COUNT + 1)
+    ):
         raise ValueError("role assignment selection ranks are incomplete")
     counts = Counter(str(row.get("role") or "") for row in rows)
     if dict(counts) != ROLE_MARKET_COUNTS:
-        raise ValueError("role assignment market counts do not match 60/30/30")
+        raise ValueError("role assignment market counts do not match 90/45/60")
+    expected_roles = [
+        (
+            "development_train"
+            if rank <= ROLE_MARKET_COUNTS["development_train"]
+            else "development_calibration"
+            if rank
+            <= ROLE_MARKET_COUNTS["development_train"]
+            + ROLE_MARKET_COUNTS["development_calibration"]
+            else "confirmatory_validation"
+        )
+        for rank in range(1, TARGET_MARKET_COUNT + 1)
+    ]
+    if [str(row.get("role") or "") for row in rows] != expected_roles:
+        raise ValueError("role assignment does not follow frozen rank boundaries")
+    minimum_decision_timestamps = [
+        int(row.get("minimum_decision_ts") or 0) for row in rows
+    ]
+    if any(value <= 0 for value in minimum_decision_timestamps) or any(
+        current <= previous
+        for previous, current in zip(
+            minimum_decision_timestamps,
+            minimum_decision_timestamps[1:],
+            strict=False,
+        )
+    ):
+        raise ValueError("role assignment chronology is incomplete or non-increasing")
+    if any(
+        int(row.get("maximum_decision_ts") or 0)
+        < int(row.get("minimum_decision_ts") or 0)
+        for row in rows
+    ):
+        raise ValueError("role assignment decision window is invalid")
     if any(
         row.get("execution_compatibility_validated_before_label_access") is not True for row in rows
     ):
@@ -672,9 +835,170 @@ def _validate_execution_compatibility_report(report: dict[str, Any]) -> None:
     if (
         report.get("execution_compatibility_validated_before_label_access") is not True
         or int(report.get("selected_market_failure_count", -1)) != 0
-        or int(report.get("selected_market_count") or 0) != 120
+        or int(report.get("selected_market_count") or 0) != TARGET_MARKET_COUNT
+        or report.get("labels_or_outcomes_opened") is not False
     ):
         raise ValueError("execution compatibility did not pass before label access")
+
+
+def _validate_support_gate_lineage(
+    *,
+    support_manifest: dict[str, Any],
+    support_manifest_path: Path,
+    role_manifest: dict[str, Any],
+    role_manifest_path: Path,
+    expected_role_manifest_sha256: str,
+) -> dict[str, Any]:
+    """Prove #188 support and role lineage before any target file is opened."""
+
+    support_report_descriptor = _verified_descriptor(
+        support_manifest.get("report"),
+        name="supplemental support gate report",
+    )
+    support_report = _load_json(Path(support_report_descriptor["path"]))
+    core_manifest_descriptor = _verified_descriptor(
+        support_manifest.get("core_support_gate_manifest"),
+        name="core support gate manifest",
+    )
+    core_manifest = _load_json(Path(core_manifest_descriptor["path"]))
+    core_report_descriptor = _verified_descriptor(
+        core_manifest.get("support_gate_report"),
+        name="core support gate report",
+    )
+    core_report = _load_json(Path(core_report_descriptor["path"]))
+    linked_role_descriptor = _verified_descriptor(
+        core_manifest.get("role_assignment_manifest"),
+        name="support-linked role assignment manifest",
+    )
+    role_report_descriptor = _verified_descriptor(
+        role_manifest.get("report"),
+        name="role assignment report",
+    )
+    role_report = _load_json(Path(role_report_descriptor["path"]))
+
+    blockers: list[str] = []
+    if support_manifest.get("schema_version") != (
+        SUPPLEMENTAL_SUPPORT_MANIFEST_SCHEMA_VERSION
+    ):
+        blockers.append("supplemental_support_manifest_schema_invalid")
+    if support_report.get("schema_version") != (
+        SUPPLEMENTAL_SUPPORT_REPORT_SCHEMA_VERSION
+    ):
+        blockers.append("supplemental_support_report_schema_invalid")
+    if core_manifest.get("schema_version") != CORE_SUPPORT_MANIFEST_SCHEMA_VERSION:
+        blockers.append("core_support_manifest_schema_invalid")
+    if core_report.get("schema_version") != CORE_SUPPORT_REPORT_SCHEMA_VERSION:
+        blockers.append("core_support_report_schema_invalid")
+    if support_manifest.get("supplemental_support_target_ready") is not True:
+        blockers.append("supplemental_support_target_not_ready")
+    if support_manifest.get("blocking_reason_codes") not in ([], None):
+        blockers.append("supplemental_support_manifest_has_blockers")
+    if int(support_manifest.get("selected_market_count") or 0) != TARGET_MARKET_COUNT:
+        blockers.append("supplemental_support_market_count_mismatch")
+    if dict(support_manifest.get("role_market_counts") or {}) != ROLE_MARKET_COUNTS:
+        blockers.append("supplemental_support_role_counts_mismatch")
+    if support_manifest.get("continuation_allowed") is not False:
+        blockers.append("supplemental_support_continuation_not_closed")
+    if support_manifest.get("labels_or_outcomes_opened_for_support_gate") is not False:
+        blockers.append("supplemental_support_opened_labels_or_outcomes")
+    if support_report.get("status") != (
+        "OUTCOME_BLIND_SUPPLEMENTAL_SUPPORT_TARGET_READY"
+    ):
+        blockers.append("supplemental_support_report_not_ready")
+    if support_report.get("supplemental_support_target_ready") is not True:
+        blockers.append("supplemental_support_report_target_not_ready")
+    if support_report.get("blocking_reason_codes") not in ([], None):
+        blockers.append("supplemental_support_report_has_blockers")
+    if int(support_report.get("selected_market_count") or 0) != TARGET_MARKET_COUNT:
+        blockers.append("supplemental_support_report_market_count_mismatch")
+    if dict(support_report.get("role_market_counts") or {}) != ROLE_MARKET_COUNTS:
+        blockers.append("supplemental_support_report_role_counts_mismatch")
+    if core_report.get("status") != "OUTCOME_BLIND_SUPPORT_TARGET_READY":
+        blockers.append("core_support_gate_not_ready")
+    if int(core_report.get("selected_market_count") or 0) != TARGET_MARKET_COUNT:
+        blockers.append("core_support_market_count_mismatch")
+    if core_report.get("blocking_reason_codes") not in ([], None):
+        blockers.append("core_support_gate_has_blockers")
+    if core_report.get("continuation_allowed") is not False:
+        blockers.append("core_support_continuation_not_closed")
+    if core_report.get("labels_or_outcomes_opened_for_continuation") is not False:
+        blockers.append("core_support_opened_labels_or_outcomes")
+    if (
+        Path(linked_role_descriptor["path"]).resolve()
+        != role_manifest_path.resolve()
+        or linked_role_descriptor["sha256"]
+        != expected_role_manifest_sha256.lower()
+    ):
+        blockers.append("support_gate_role_manifest_lineage_mismatch")
+    if role_manifest.get("role_assignment_ready") is not True:
+        blockers.append("role_assignment_not_ready")
+    if role_manifest.get("blocking_reason_codes") not in ([], None):
+        blockers.append("role_assignment_has_blockers")
+    if dict(role_manifest.get("role_market_counts") or {}) != ROLE_MARKET_COUNTS:
+        blockers.append("role_assignment_role_counts_mismatch")
+    if role_manifest.get("labels_or_outcomes_opened_for_role_assignment") is not False:
+        blockers.append("role_assignment_opened_labels_or_outcomes")
+    if role_report.get("role_assignment_ready") is not True:
+        blockers.append("role_assignment_report_not_ready")
+    if role_report.get("blocking_reason_codes") not in ([], None):
+        blockers.append("role_assignment_report_has_blockers")
+    if int(role_report.get("selected_market_count") or 0) != TARGET_MARKET_COUNT:
+        blockers.append("role_assignment_report_market_count_mismatch")
+    if dict(role_report.get("role_market_counts") or {}) != ROLE_MARKET_COUNTS:
+        blockers.append("role_assignment_report_role_counts_mismatch")
+    if int(role_report.get("role_market_overlap_count") or 0) != 0:
+        blockers.append("role_assignment_report_role_overlap")
+    if int(role_report.get("prior_market_overlap_count") or 0) != 0:
+        blockers.append("role_assignment_report_prior_overlap")
+    if role_report.get("labels_or_outcomes_opened_for_role_assignment") is not False:
+        blockers.append("role_assignment_report_opened_labels_or_outcomes")
+    if (
+        role_report.get("execution_compatibility_validated_before_label_access")
+        is not True
+    ):
+        blockers.append("role_assignment_report_execution_compatibility_invalid")
+    for name, payload in (
+        ("supplemental_support_manifest", support_manifest),
+        ("supplemental_support_report", support_report),
+        ("core_support_manifest", core_manifest),
+        ("core_support_report", core_report),
+        ("role_assignment_manifest", role_manifest),
+        ("role_assignment_report", role_report),
+    ):
+        if not _safety_contract_blocked(payload):
+            blockers.append(f"{name}_safety_contract_failed")
+    if blockers:
+        raise ValueError(
+            "pre-label support lineage validation failed: "
+            + ", ".join(sorted(set(blockers)))
+        )
+    return {
+        "support_gate_manifest": _descriptor(support_manifest_path),
+        "supplemental_support_gate_report": support_report_descriptor,
+        "core_support_gate_manifest": core_manifest_descriptor,
+        "core_support_gate_report": core_report_descriptor,
+        "support_gate_role_assignment_manifest": linked_role_descriptor,
+        "role_assignment_report": role_report_descriptor,
+        "support_gate_lineage_hash_verified": True,
+        "supplemental_support_target_ready": True,
+        "support_gate_blocking_reason_codes": [],
+        "labels_or_outcomes_opened_for_support_or_role_assignment": False,
+    }
+
+
+def _safety_contract_blocked(payload: dict[str, Any]) -> bool:
+    return (
+        payload.get("paper_only") is True
+        and payload.get("capital_at_risk") is False
+        and payload.get("polymarket_write_enabled", False) is False
+        and payload.get("wallet_signing_enabled", False) is False
+        and payload.get("source_model_candidate_eligible", False) is False
+        and payload.get("freeze_ready", False) is False
+        and payload.get("promotion_evidence_eligible", False) is False
+        and payload.get("v8_execution_handoff_allowed", False) is False
+        and payload.get("#134_resume_allowed", False) is False
+        and payload.get("#146_start_allowed", False) is False
+    )
 
 
 def _materialize_role_action_rows(
@@ -2040,6 +2364,51 @@ def _confirmatory_gate(
     return {"passed": not reasons, "checks": checks, "reason_codes": reasons}
 
 
+def _accepted_bet_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    accepted = [row for row in rows if row["execution_guard_order_allowed"]]
+    chronological = sorted(
+        accepted,
+        key=lambda row: (
+            int(row.get("decision_ts") or 0),
+            str(row.get("market_id") or ""),
+            str(row.get("selected_action") or ""),
+        ),
+    )
+    cumulative = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for row in chronological:
+        cumulative += float(row["accepted_bet_net_pnl"])
+        peak = max(peak, cumulative)
+        max_drawdown = max(max_drawdown, peak - cumulative)
+
+    def _pnl_by(field: str) -> dict[str, float]:
+        values: dict[str, float] = defaultdict(float)
+        for row in accepted:
+            values[str(row.get(field) or "UNKNOWN")] += float(
+                row["accepted_bet_net_pnl"]
+            )
+        return dict(sorted(values.items()))
+
+    market_pnl = _pnl_by("market_id")
+    return {
+        "accepted_bet_count": len(accepted),
+        "accepted_unique_market_count": len(market_pnl),
+        "net_pnl_by_side": _pnl_by("selected_side"),
+        "net_pnl_by_family": _pnl_by("selected_action_family"),
+        "net_pnl_by_action": _pnl_by("selected_action"),
+        "net_pnl_by_market": market_pnl,
+        "chronological_sort_fields": [
+            "decision_ts",
+            "market_id",
+            "selected_action",
+        ],
+        "max_drawdown_ordering": "chronological_decision_time",
+        "max_drawdown": max_drawdown,
+        "terminal_cumulative_net_pnl": cumulative,
+    }
+
+
 def _training_markdown(report: dict[str, Any]) -> str:
     return "\n".join(
         [
@@ -2050,6 +2419,24 @@ def _training_markdown(report: dict[str, Any]) -> str:
             f"- calibration markets: `{report['calibration_market_count']}`",
             f"- cross-fit folds: `{report['cross_fit']['fold_count']}`",
             "- confirmatory labels used for tuning: `false`",
+            "- paper/live/handoff unlock: `false`",
+            "",
+        ]
+    )
+
+
+def _pre_label_access_markdown(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# #189 Pairwise Pre-Label Access Lineage Audit",
+            "",
+            f"- audit passed: `{str(report['pre_label_access_validation_passed']).lower()}`",
+            f"- selected markets: `{report['selected_market_count']}`",
+            f"- role counts: `{report['role_market_counts']}`",
+            f"- support target ready: `{str(report['supplemental_support_target_ready']).lower()}`",
+            f"- support lineage hash verified: `{str(report['support_gate_lineage_hash_verified']).lower()}`",
+            "- labels/outcomes/PnL opened before audit: `false`",
+            "- prediction attempted before audit: `false`",
             "- paper/live/handoff unlock: `false`",
             "",
         ]
@@ -2100,6 +2487,30 @@ def _validation_markdown(report: dict[str, Any]) -> str:
             f"- candidate net PnL: `{candidate['net_pnl_sum']:.12f}`",
             f"- baseline net PnL: `{baseline['net_pnl_sum']:.12f}`",
             f"- blockers: `{report['confirmatory_gate_blocking_reason_codes']}`",
+            "- confirmatory labels used for tuning: `false`",
+            "- future unseen holdout required: `true`",
+            "- paper/live/handoff unlock: `false`",
+            "",
+        ]
+    )
+
+
+def _accepted_bet_pnl_markdown(report: dict[str, Any]) -> str:
+    candidate = report["candidate_metrics"]
+    diagnostics = report["candidate_accepted_bet_diagnostics"]
+    return "\n".join(
+        [
+            "# #189 Confirmatory Accepted-Bet Cost-Aware PnL",
+            "",
+            f"- evaluation scope: `{report['evaluation_scope']}`",
+            f"- accepted bets: `{candidate['accepted_bet_count']}`",
+            f"- accepted markets: `{candidate['accepted_unique_market_count']}`",
+            f"- cost basis: `{candidate['cost_basis_sum']:.12f}`",
+            f"- net PnL: `{candidate['net_pnl_sum']:.12f}`",
+            f"- ROI: `{candidate['roi']:.12f}`",
+            f"- max drawdown: `{diagnostics['max_drawdown']:.12f}`",
+            f"- PnL by side: `{diagnostics['net_pnl_by_side']}`",
+            f"- PnL by family: `{diagnostics['net_pnl_by_family']}`",
             "- confirmatory labels used for tuning: `false`",
             "- future unseen holdout required: `true`",
             "- paper/live/handoff unlock: `false`",

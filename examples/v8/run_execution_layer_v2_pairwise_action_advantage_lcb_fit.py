@@ -27,6 +27,8 @@ def run_fit(
     *,
     run_id: str,
     output_dir: Path | str,
+    support_gate_manifest: Path | str,
+    support_gate_manifest_sha256: str,
     role_assignment_manifest: Path | str,
     role_assignment_manifest_sha256: str,
     feature_contract: Path | str,
@@ -36,6 +38,10 @@ def run_fit(
         PairwiseActionAdvantageLCBFitConfig(
             run_id=run_id,
             output_dir=output_dir,
+            support_gate_manifest_path=support_gate_manifest,
+            expected_support_gate_manifest_sha256=(
+                support_gate_manifest_sha256
+            ),
             role_assignment_manifest_path=role_assignment_manifest,
             expected_role_assignment_manifest_sha256=(role_assignment_manifest_sha256),
             feature_contract_path=feature_contract,
@@ -75,6 +81,14 @@ def run_fit(
             "candidate_frozen_for_future_evaluation", False
         ),
         "future_collection_allowed": report.get("future_collection_allowed", False),
+        "pre_label_access_lineage_audit_path": str(
+            result["pre_label_access_lineage_audit_path"]
+        ),
+        "confirmatory_accepted_bet_pnl_report_path": (
+            None
+            if result.get("accepted_bet_pnl_report_path") is None
+            else str(result["accepted_bet_pnl_report_path"])
+        ),
         "freeze_manifest_path": str(result["freeze_manifest_path"]),
         "freeze_manifest_sha256": result["freeze_manifest_sha256"],
         "source_model_candidate_eligible": False,
@@ -90,6 +104,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output-dir", default="examples/v8/polymarket_runs")
+    parser.add_argument("--support-gate-manifest", required=True)
+    parser.add_argument("--support-gate-manifest-sha256", required=True)
     parser.add_argument("--role-assignment-manifest", required=True)
     parser.add_argument("--role-assignment-manifest-sha256", required=True)
     parser.add_argument("--feature-contract", default=str(DEFAULT_FEATURE_CONTRACT))
@@ -98,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
     summary = run_fit(
         run_id=args.run_id,
         output_dir=args.output_dir,
+        support_gate_manifest=args.support_gate_manifest,
+        support_gate_manifest_sha256=args.support_gate_manifest_sha256,
         role_assignment_manifest=args.role_assignment_manifest,
         role_assignment_manifest_sha256=args.role_assignment_manifest_sha256,
         feature_contract=args.feature_contract,

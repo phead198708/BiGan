@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_lcb_fit as pairwise_fit_module
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_lcb import (
     CANDIDATE_NAME,
@@ -19,6 +20,8 @@ from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_l
     validate_pairwise_action_advantage_lcb_protocol,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_lcb_fit import (
+    PairwiseActionAdvantageLCBFitConfig,
+    _accepted_bet_diagnostics,
     _action_advantage_lcb_artifact,
     _apply_action_advantage_lcb_scores,
     _attach_group_normalized_rank_features,
@@ -28,6 +31,10 @@ from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_l
     _pairwise_relevance_labels,
     _run_policy_replay,
     _validate_complete_decision_groups,
+    _validate_execution_compatibility_report,
+    _validate_role_rows,
+    _validate_support_gate_lineage,
+    fit_pairwise_action_advantage_lcb,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_action_value import (
     REQUIRED_ACTIONS,
@@ -622,6 +629,234 @@ def test_pairwise_cross_fit_uses_strictly_prior_markets_only() -> None:
     assert report["uses_issue174_confirmatory_labels"] is False
 
 
+def test_pairwise_fit_requires_exact_frozen_195_market_role_contract() -> None:
+    rows = []
+    for index in range(195):
+        rows.append(
+            {
+                "market_id": f"market-{index:03d}",
+                "selection_rank": index + 1,
+                "role": (
+                    "development_train"
+                    if index < 90
+                    else "development_calibration"
+                    if index < 135
+                    else "confirmatory_validation"
+                ),
+                "minimum_decision_ts": 1_000_000 + index * 300_000,
+                "maximum_decision_ts": 1_000_100 + index * 300_000,
+                "labels_or_outcomes_opened_for_role_assignment": False,
+                "execution_compatibility_validated_before_label_access": True,
+            }
+        )
+
+    _validate_role_rows(rows)
+    with pytest.raises(ValueError, match="exactly 195"):
+        _validate_role_rows(rows[:120])
+
+    _validate_execution_compatibility_report(
+        {
+            "execution_compatibility_validated_before_label_access": True,
+            "selected_market_failure_count": 0,
+            "selected_market_count": 195,
+            "labels_or_outcomes_opened": False,
+        }
+    )
+    with pytest.raises(ValueError, match="before label access"):
+        _validate_execution_compatibility_report(
+            {
+                "execution_compatibility_validated_before_label_access": True,
+                "selected_market_failure_count": 0,
+                "selected_market_count": 120,
+                "labels_or_outcomes_opened": False,
+            }
+        )
+
+
+def test_pairwise_fit_support_lineage_is_hash_pinned_and_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    safety = {
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "v8_execution_handoff_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+    }
+    role_report_path = tmp_path / "role_report.json"
+    _write_json(
+        role_report_path,
+        {
+            "role_assignment_ready": True,
+            "blocking_reason_codes": [],
+            "selected_market_count": 195,
+            "role_market_counts": {
+                "development_train": 90,
+                "development_calibration": 45,
+                "confirmatory_validation": 60,
+            },
+            "role_market_overlap_count": 0,
+            "prior_market_overlap_count": 0,
+            "labels_or_outcomes_opened_for_role_assignment": False,
+            "execution_compatibility_validated_before_label_access": True,
+            **safety,
+        },
+    )
+    role_manifest_path = tmp_path / "role_manifest.json"
+    role_manifest = {
+        "role_assignment_ready": True,
+        "blocking_reason_codes": [],
+        "role_market_counts": {
+            "development_train": 90,
+            "development_calibration": 45,
+            "confirmatory_validation": 60,
+        },
+        "report": _file_descriptor(role_report_path),
+        "labels_or_outcomes_opened_for_role_assignment": False,
+        **safety,
+    }
+    _write_json(role_manifest_path, role_manifest)
+    role_descriptor = _file_descriptor(role_manifest_path)
+
+    core_report_path = tmp_path / "core_report.json"
+    _write_json(
+        core_report_path,
+        {
+            "schema_version": (
+                "bigan-v8-pairwise-precollection-support-gate-v1"
+            ),
+            "status": "OUTCOME_BLIND_SUPPORT_TARGET_READY",
+            "selected_market_count": 195,
+            "blocking_reason_codes": [],
+            "continuation_allowed": False,
+            "labels_or_outcomes_opened_for_continuation": False,
+            **safety,
+        },
+    )
+    core_manifest_path = tmp_path / "core_manifest.json"
+    _write_json(
+        core_manifest_path,
+        {
+            "schema_version": (
+                "bigan-v8-pairwise-precollection-continuation-manifest-v1"
+            ),
+            "support_gate_report": _file_descriptor(core_report_path),
+            "role_assignment_manifest": role_descriptor,
+            **safety,
+        },
+    )
+    supplemental_report_path = tmp_path / "supplemental_report.json"
+    supplemental_report = {
+        "schema_version": (
+            "bigan-v8-pairwise-supplemental-support-gate-report-v1"
+        ),
+        "status": "OUTCOME_BLIND_SUPPLEMENTAL_SUPPORT_TARGET_READY",
+        "supplemental_support_target_ready": True,
+        "selected_market_count": 195,
+        "role_market_counts": {
+            "development_train": 90,
+            "development_calibration": 45,
+            "confirmatory_validation": 60,
+        },
+        "blocking_reason_codes": [],
+        **safety,
+    }
+    _write_json(supplemental_report_path, supplemental_report)
+    support_manifest_path = tmp_path / "supplemental_manifest.json"
+    support_manifest = {
+        "schema_version": (
+            "bigan-v8-pairwise-supplemental-support-gate-manifest-v1"
+        ),
+        "report": _file_descriptor(supplemental_report_path),
+        "core_support_gate_manifest": _file_descriptor(core_manifest_path),
+        "supplemental_support_target_ready": True,
+        "selected_market_count": 195,
+        "role_market_counts": {
+            "development_train": 90,
+            "development_calibration": 45,
+            "confirmatory_validation": 60,
+        },
+        "blocking_reason_codes": [],
+        "continuation_allowed": False,
+        "labels_or_outcomes_opened_for_support_gate": False,
+        **safety,
+    }
+    _write_json(support_manifest_path, support_manifest)
+
+    audit = _validate_support_gate_lineage(
+        support_manifest=support_manifest,
+        support_manifest_path=support_manifest_path,
+        role_manifest=role_manifest,
+        role_manifest_path=role_manifest_path,
+        expected_role_manifest_sha256=role_descriptor["sha256"],
+    )
+    assert audit["support_gate_lineage_hash_verified"] is True
+    assert audit["supplemental_support_target_ready"] is True
+    assert audit["labels_or_outcomes_opened_for_support_or_role_assignment"] is False
+
+    blocked = json.loads(json.dumps(support_manifest))
+    blocked["supplemental_support_target_ready"] = False
+    with pytest.raises(ValueError, match="supplemental_support_target_not_ready"):
+        _validate_support_gate_lineage(
+            support_manifest=blocked,
+            support_manifest_path=support_manifest_path,
+            role_manifest=role_manifest,
+            role_manifest_path=role_manifest_path,
+            expected_role_manifest_sha256=role_descriptor["sha256"],
+        )
+
+    _write_json(support_manifest_path, blocked)
+    forbidden_calls = {"jsonl": 0, "prediction": 0}
+
+    def _forbidden_jsonl_read(_path: Path) -> list[dict]:
+        forbidden_calls["jsonl"] += 1
+        raise AssertionError("JSONL/label access must not occur after support failure")
+
+    def _forbidden_prediction(*_args: object, **_kwargs: object) -> list[dict]:
+        forbidden_calls["prediction"] += 1
+        raise AssertionError("prediction must not occur after support failure")
+
+    monkeypatch.setattr(pairwise_fit_module, "_load_jsonl", _forbidden_jsonl_read)
+    monkeypatch.setattr(pairwise_fit_module, "_predict_role_rows", _forbidden_prediction)
+    with pytest.raises(ValueError, match="supplemental_support_target_not_ready"):
+        fit_pairwise_action_advantage_lcb(
+            PairwiseActionAdvantageLCBFitConfig(
+                run_id="blocked-before-label-access",
+                output_dir=tmp_path / "runs",
+                support_gate_manifest_path=support_manifest_path,
+                expected_support_gate_manifest_sha256=_sha256(
+                    support_manifest_path
+                ),
+                role_assignment_manifest_path=role_manifest_path,
+                expected_role_assignment_manifest_sha256=role_descriptor[
+                    "sha256"
+                ],
+                feature_contract_path=FEATURE_CONTRACT_PATH,
+                expected_feature_contract_sha256=_sha256(
+                    FEATURE_CONTRACT_PATH
+                ),
+            )
+        )
+    assert forbidden_calls == {"jsonl": 0, "prediction": 0}
+
+    wrong_role_path = tmp_path / "wrong_role_manifest.json"
+    _write_json(wrong_role_path, role_manifest)
+    with pytest.raises(ValueError, match="support_gate_role_manifest_lineage_mismatch"):
+        _validate_support_gate_lineage(
+            support_manifest=support_manifest,
+            support_manifest_path=support_manifest_path,
+            role_manifest=role_manifest,
+            role_manifest_path=wrong_role_path,
+            expected_role_manifest_sha256=_sha256(wrong_role_path),
+        )
+
+
 def test_action_advantage_calibration_is_deterministic_and_no_trade_anchored() -> None:
     protocol = _load_json(PROTOCOL_PATH)
     train_oof = []
@@ -821,6 +1056,50 @@ def test_runner_up_advantage_gate_fails_closed_without_mutating_scores() -> None
     assert replay[0]["capital_at_risk"] is False
 
 
+def test_confirmatory_accepted_bet_diagnostics_use_chronological_net_pnl() -> None:
+    rows = [
+        {
+            "market_id": "market-b",
+            "decision_ts": 2_000,
+            "selected_action": "BUY_DOWN_HOLD_TO_SETTLEMENT",
+            "selected_action_family": "HOLD_TO_SETTLEMENT",
+            "selected_side": "DOWN",
+            "execution_guard_order_allowed": True,
+            "accepted_bet_net_pnl": -0.3,
+        },
+        {
+            "market_id": "market-a",
+            "decision_ts": 1_000,
+            "selected_action": "BUY_UP_SELL_BEFORE_CLOSE",
+            "selected_action_family": "SELL_BEFORE_CLOSE",
+            "selected_side": "UP",
+            "execution_guard_order_allowed": True,
+            "accepted_bet_net_pnl": 0.2,
+        },
+        {
+            "market_id": "market-c",
+            "decision_ts": 3_000,
+            "selected_action": "BUY_UP_HOLD_TO_SETTLEMENT",
+            "selected_action_family": "HOLD_TO_SETTLEMENT",
+            "selected_side": "UP",
+            "execution_guard_order_allowed": False,
+            "accepted_bet_net_pnl": 10.0,
+        },
+    ]
+
+    report = _accepted_bet_diagnostics(rows)
+    assert report["accepted_bet_count"] == 2
+    assert report["accepted_unique_market_count"] == 2
+    assert report["terminal_cumulative_net_pnl"] == pytest.approx(-0.1)
+    assert report["max_drawdown"] == pytest.approx(0.3)
+    assert report["max_drawdown_ordering"] == "chronological_decision_time"
+    assert report["net_pnl_by_side"] == {"DOWN": -0.3, "UP": 0.2}
+    assert report["net_pnl_by_family"] == {
+        "HOLD_TO_SETTLEMENT": -0.3,
+        "SELL_BEFORE_CLOSE": 0.2,
+    }
+
+
 def _decision_rows(*, market_id: str, decision_ts: int) -> list[dict]:
     rows = []
     targets = {
@@ -882,6 +1161,17 @@ def _decision_rows(*, market_id: str, decision_ts: int) -> list[dict]:
 
 def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _file_descriptor(path: Path) -> dict[str, str]:
+    return {"path": str(path.resolve()), "sha256": _sha256(path)}
 
 
 def _sha256(path: Path) -> str:
