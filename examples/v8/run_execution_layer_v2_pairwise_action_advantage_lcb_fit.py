@@ -33,6 +33,8 @@ def run_fit(
     role_assignment_manifest_sha256: str,
     feature_contract: Path | str,
     feature_contract_sha256: str,
+    future_holdout_pre_registration_manifest: Path | str,
+    future_holdout_pre_registration_manifest_sha256: str,
 ) -> dict:
     result = fit_pairwise_action_advantage_lcb(
         PairwiseActionAdvantageLCBFitConfig(
@@ -46,6 +48,12 @@ def run_fit(
             expected_role_assignment_manifest_sha256=(role_assignment_manifest_sha256),
             feature_contract_path=feature_contract,
             expected_feature_contract_sha256=feature_contract_sha256,
+            future_holdout_pre_registration_manifest_path=(
+                future_holdout_pre_registration_manifest
+            ),
+            expected_future_holdout_pre_registration_manifest_sha256=(
+                future_holdout_pre_registration_manifest_sha256
+            ),
         )
     )
     report = result["validation_report"]
@@ -80,7 +88,12 @@ def run_fit(
         "candidate_frozen_for_future_evaluation": report.get(
             "candidate_frozen_for_future_evaluation", False
         ),
-        "future_collection_allowed": report.get("future_collection_allowed", False),
+        "candidate_agnostic_future_raw_collection_allowed": report.get(
+            "candidate_agnostic_future_raw_collection_allowed", True
+        ),
+        "candidate_specific_future_evaluation_allowed": report.get(
+            "candidate_specific_future_evaluation_allowed", False
+        ),
         "pre_label_access_lineage_audit_path": str(
             result["pre_label_access_lineage_audit_path"]
         ),
@@ -110,6 +123,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--role-assignment-manifest-sha256", required=True)
     parser.add_argument("--feature-contract", default=str(DEFAULT_FEATURE_CONTRACT))
     parser.add_argument("--feature-contract-sha256", required=True)
+    parser.add_argument("--future-holdout-pre-registration-manifest", required=True)
+    parser.add_argument(
+        "--future-holdout-pre-registration-manifest-sha256",
+        required=True,
+    )
     args = parser.parse_args(argv)
     summary = run_fit(
         run_id=args.run_id,
@@ -120,6 +138,12 @@ def main(argv: list[str] | None = None) -> int:
         role_assignment_manifest_sha256=args.role_assignment_manifest_sha256,
         feature_contract=args.feature_contract,
         feature_contract_sha256=args.feature_contract_sha256,
+        future_holdout_pre_registration_manifest=(
+            args.future_holdout_pre_registration_manifest
+        ),
+        future_holdout_pre_registration_manifest_sha256=(
+            args.future_holdout_pre_registration_manifest_sha256
+        ),
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0 if summary["confirmatory_gate_passed"] else 2

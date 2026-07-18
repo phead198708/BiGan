@@ -9,6 +9,9 @@ import pytest
 
 import bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_lcb_fit as pairwise_fit_module
 from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.training.execution_layer_v2_pairwise_accepted_bet_power import (
+    run_pairwise_accepted_bet_power_analysis,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_lcb import (
     CANDIDATE_NAME,
     ROLE_MARKET_COUNTS,
@@ -36,6 +39,18 @@ from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_l
     _validate_support_gate_lineage,
     fit_pairwise_action_advantage_lcb,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_pairwise_future_unseen_holdout import (
+    MAXIMUM_CAPTURE_ATTEMPT_COUNT,
+    MINIMUM_ACCEPTED_BET_COUNT,
+    TARGET_VALID_MARKET_COUNT,
+    PairwiseFutureUnseenCollectionFreezeConfig,
+    PairwiseFutureUnseenHoldoutPreRegistrationConfig,
+    create_pairwise_future_unseen_collection_freeze,
+    create_pairwise_future_unseen_holdout_pre_registration,
+    load_and_validate_pairwise_future_unseen_collection_freeze,
+    validate_pairwise_future_unseen_holdout_pre_registration_manifest,
+    validate_pairwise_future_unseen_holdout_protocol,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_action_value import (
     REQUIRED_ACTIONS,
 )
@@ -49,6 +64,14 @@ PROTOCOL_PATH = Path(
 FEATURE_CONTRACT_PATH = Path(
     "examples/v8/polymarket_configs/"
     "execution_layer_v2_pairwise_action_advantage_lcb_feature_contract_v1.json"
+)
+FUTURE_HOLDOUT_PROTOCOL_PATH = Path(
+    "examples/v8/polymarket_configs/"
+    "execution_layer_v2_pairwise_future_unseen_holdout_v1.json"
+)
+POWER_DESIGN_PATH = Path(
+    "examples/v8/polymarket_configs/"
+    "execution_layer_v2_pairwise_accepted_bet_power_v1.json"
 )
 
 
@@ -176,6 +199,158 @@ def test_issue175_feature_contract_is_decision_time_only_and_complete_grid() -> 
     assert contract["uses_issue174_confirmatory_labels_for_tuning"] is False
     assert contract["settlement_or_outcome_fields_allowed_as_decision_inputs"] is False
     assert "action_no_trade" in contract["feature_columns"]
+
+
+def test_issue190_future_holdout_protocol_freezes_outcome_blind_sequential_stop() -> None:
+    protocol = _load_json(FUTURE_HOLDOUT_PROTOCOL_PATH)
+
+    validate_pairwise_future_unseen_holdout_protocol(protocol)
+
+    collection = protocol["collection_protocol"]
+    assert collection["target_valid_market_count"] == TARGET_VALID_MARKET_COUNT == 220
+    assert (
+        collection["maximum_capture_attempt_count"]
+        == MAXIMUM_CAPTURE_ATTEMPT_COUNT
+        == 340
+    )
+    assert protocol["accepted_bet_support_gates"][
+        "minimum_accepted_unique_market_count"
+    ] == MINIMUM_ACCEPTED_BET_COUNT == 88
+    assert protocol["prospective_power_analysis_contract"][
+        "uses_current_oof_validation_or_confirmatory_pnl"
+    ] is False
+    assert collection["stop_when_target_valid_market_count_reached"] is True
+    assert collection["selection_is_outcome_blind"] is True
+    assert collection["dynamic_extension_allowed"] is False
+    assert protocol["collection_may_run_in_parallel_with_confirmatory_evaluation"] is True
+    assert protocol["uses_confirmatory_results_to_control_collection"] is False
+    assert protocol["uses_holdout_outcomes_to_control_collection"] is False
+
+    drifted = json.loads(json.dumps(protocol))
+    drifted["collection_protocol"]["dynamic_extension_allowed"] = True
+    with pytest.raises(ValueError, match="dynamic_extension_allowed"):
+        validate_pairwise_future_unseen_holdout_protocol(drifted)
+
+    drifted = json.loads(json.dumps(protocol))
+    drifted["collection_protocol"]["maximum_capture_attempt_count"] = 120
+    with pytest.raises(ValueError, match="maximum_capture_attempt_count"):
+        validate_pairwise_future_unseen_holdout_protocol(drifted)
+
+
+def test_issue190_pre_registration_is_hash_pinned_and_safety_blocked(
+    tmp_path: Path,
+) -> None:
+    result = _create_future_holdout_pre_registration(tmp_path)
+    manifest = _load_json(result["manifest_path"])
+
+    audit = validate_pairwise_future_unseen_holdout_pre_registration_manifest(
+        manifest,
+        expected_candidate_protocol_path=PROTOCOL_PATH.resolve(),
+        expected_candidate_protocol_sha256=_sha256(PROTOCOL_PATH),
+        expected_feature_contract_path=FEATURE_CONTRACT_PATH.resolve(),
+        expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
+    )
+
+    assert audit["future_holdout_pre_registration_ready"] is True
+    assert audit["future_holdout_collection_control_is_outcome_blind"] is True
+    assert manifest["collection_may_run_before_issue189_confirmatory_result"] is True
+    assert manifest["minimum_accepted_unique_market_count"] == 88
+    assert manifest["collection_sizing_derived_from_prospective_power_analysis"] is True
+    assert audit["future_holdout_minimum_accepted_unique_market_count"] == 88
+    assert audit["future_holdout_power_analysis_manifest"]["sha256"] == manifest[
+        "power_analysis_manifest"
+    ]["sha256"]
+    assert manifest["holdout_labels_or_outcomes_opened_before_pre_registration"] is False
+    assert manifest["source_model_candidate_eligible"] is False
+    assert manifest["promotion_evidence_eligible"] is False
+    assert manifest["#134_resume_allowed"] is False
+    assert manifest["#146_start_allowed"] is False
+
+    drifted = json.loads(json.dumps(manifest))
+    drifted["collection_control_uses_model_scores_bets_or_pnl"] = True
+    with pytest.raises(ValueError, match="collection_control"):
+        validate_pairwise_future_unseen_holdout_pre_registration_manifest(
+            drifted,
+            expected_candidate_protocol_path=PROTOCOL_PATH.resolve(),
+            expected_candidate_protocol_sha256=_sha256(PROTOCOL_PATH),
+            expected_feature_contract_path=FEATURE_CONTRACT_PATH.resolve(),
+            expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
+        )
+
+    drifted = json.loads(json.dumps(manifest))
+    drifted["power_analysis_manifest"]["sha256"] = "f" * 64
+    drifted["pre_registration_manifest_id"] = canonical_json_sha256(
+        {
+            key: value
+            for key, value in drifted.items()
+            if key != "pre_registration_manifest_id"
+        }
+    )
+    with pytest.raises(ValueError, match="power_analysis_manifest"):
+        validate_pairwise_future_unseen_holdout_pre_registration_manifest(
+            drifted,
+            expected_candidate_protocol_path=PROTOCOL_PATH.resolve(),
+            expected_candidate_protocol_sha256=_sha256(PROTOCOL_PATH),
+            expected_feature_contract_path=FEATURE_CONTRACT_PATH.resolve(),
+            expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
+        )
+
+
+def test_issue190_collection_freeze_binds_terminal_source_boundary(
+    tmp_path: Path,
+) -> None:
+    pre_registration = _create_future_holdout_pre_registration(tmp_path)
+    support_path = _create_terminal_source_support_manifest(tmp_path)
+    result = create_pairwise_future_unseen_collection_freeze(
+        PairwiseFutureUnseenCollectionFreezeConfig(
+            run_id="issue190-test-collection-freeze",
+            output_dir=tmp_path / "collection-freezes",
+            collection_freeze_created_ts=1_900_000_000_000,
+            pre_registration_manifest_path=pre_registration["manifest_path"],
+            expected_pre_registration_manifest_sha256=pre_registration[
+                "manifest_sha256"
+            ],
+            source_support_gate_manifest_path=support_path,
+            expected_source_support_gate_manifest_sha256=_sha256(support_path),
+            builder_git_commit="b" * 40,
+        )
+    )
+
+    manifest, audit = load_and_validate_pairwise_future_unseen_collection_freeze(
+        Path(result["manifest_path"]),
+        result["manifest_sha256"],
+    )
+
+    assert manifest["source_selected_market_count"] == 195
+    assert manifest["target_valid_market_count"] == 220
+    assert manifest["maximum_capture_attempt_count"] == 340
+    assert manifest["minimum_accepted_unique_market_count"] == 88
+    assert manifest["collection_sizing_derived_from_prospective_power_analysis"] is True
+    assert manifest["collection_control_is_outcome_blind"] is True
+    assert audit["minimum_collection_decision_ts"] > manifest[
+        "source_max_decision_ts"
+    ]
+    assert manifest["labels_or_outcomes_opened_for_collection_freeze"] is False
+    assert manifest["promotion_evidence_eligible"] is False
+
+    drifted = json.loads(json.dumps(manifest))
+    drifted["minimum_collection_decision_ts"] = manifest[
+        "source_max_decision_ts"
+    ]
+    drifted["collection_freeze_manifest_id"] = canonical_json_sha256(
+        {
+            key: value
+            for key, value in drifted.items()
+            if key != "collection_freeze_manifest_id"
+        }
+    )
+    drifted_path = tmp_path / "drifted_collection_freeze.json"
+    _write_json(drifted_path, drifted)
+    with pytest.raises(ValueError, match="minimum_time_invalid"):
+        load_and_validate_pairwise_future_unseen_collection_freeze(
+            drifted_path,
+            _sha256(drifted_path),
+        )
 
 
 def test_issue175_role_assignment_is_exact_90_45_60() -> None:
@@ -708,6 +883,16 @@ def test_pairwise_fit_support_lineage_is_hash_pinned_and_fail_closed(
             **safety,
         },
     )
+    compatibility_report_path = tmp_path / "execution_compatibility_report.json"
+    _write_json(
+        compatibility_report_path,
+        {
+            "execution_compatibility_validated_before_label_access": True,
+            "selected_market_failure_count": 0,
+            "selected_market_count": 195,
+            "labels_or_outcomes_opened": False,
+        },
+    )
     role_manifest_path = tmp_path / "role_manifest.json"
     role_manifest = {
         "role_assignment_ready": True,
@@ -718,6 +903,11 @@ def test_pairwise_fit_support_lineage_is_hash_pinned_and_fail_closed(
             "confirmatory_validation": 60,
         },
         "report": _file_descriptor(role_report_path),
+        "protocol": _file_descriptor(PROTOCOL_PATH),
+        "feature_contract": _file_descriptor(FEATURE_CONTRACT_PATH),
+        "execution_compatible_feature_coverage_report": _file_descriptor(
+            compatibility_report_path
+        ),
         "labels_or_outcomes_opened_for_role_assignment": False,
         **safety,
     }
@@ -840,6 +1030,47 @@ def test_pairwise_fit_support_lineage_is_hash_pinned_and_fail_closed(
                 feature_contract_path=FEATURE_CONTRACT_PATH,
                 expected_feature_contract_sha256=_sha256(
                     FEATURE_CONTRACT_PATH
+                ),
+                future_holdout_pre_registration_manifest_path=(
+                    support_manifest_path
+                ),
+                expected_future_holdout_pre_registration_manifest_sha256=(
+                    _sha256(support_manifest_path)
+                ),
+            )
+        )
+    assert forbidden_calls == {"jsonl": 0, "prediction": 0}
+
+    _write_json(support_manifest_path, support_manifest)
+    pre_registration = _create_future_holdout_pre_registration(tmp_path)
+    pre_registration_path = Path(pre_registration["manifest_path"])
+    invalid_pre_registration = _load_json(pre_registration_path)
+    invalid_pre_registration[
+        "collection_control_uses_model_scores_bets_or_pnl"
+    ] = True
+    _write_json(pre_registration_path, invalid_pre_registration)
+    with pytest.raises(ValueError, match="collection_control"):
+        fit_pairwise_action_advantage_lcb(
+            PairwiseActionAdvantageLCBFitConfig(
+                run_id="holdout-blocked-before-label-access",
+                output_dir=tmp_path / "runs",
+                support_gate_manifest_path=support_manifest_path,
+                expected_support_gate_manifest_sha256=_sha256(
+                    support_manifest_path
+                ),
+                role_assignment_manifest_path=role_manifest_path,
+                expected_role_assignment_manifest_sha256=role_descriptor[
+                    "sha256"
+                ],
+                feature_contract_path=FEATURE_CONTRACT_PATH,
+                expected_feature_contract_sha256=_sha256(
+                    FEATURE_CONTRACT_PATH
+                ),
+                future_holdout_pre_registration_manifest_path=(
+                    pre_registration_path
+                ),
+                expected_future_holdout_pre_registration_manifest_sha256=(
+                    _sha256(pre_registration_path)
                 ),
             )
         )
@@ -1098,6 +1329,127 @@ def test_confirmatory_accepted_bet_diagnostics_use_chronological_net_pnl() -> No
         "HOLD_TO_SETTLEMENT": -0.3,
         "SELL_BEFORE_CLOSE": 0.2,
     }
+
+
+def _create_future_holdout_pre_registration(tmp_path: Path) -> dict:
+    power = run_pairwise_accepted_bet_power_analysis(
+        run_id="issue190-test-power-analysis",
+        output_dir=tmp_path / "power-analysis",
+        design_path=POWER_DESIGN_PATH,
+        expected_design_sha256=_sha256(POWER_DESIGN_PATH),
+    )
+    return create_pairwise_future_unseen_holdout_pre_registration(
+        PairwiseFutureUnseenHoldoutPreRegistrationConfig(
+            run_id="issue190-test-preregistration",
+            output_dir=tmp_path / "future-holdout-freezes",
+            pre_registration_created_ts=1_784_343_000_000,
+            holdout_protocol_path=FUTURE_HOLDOUT_PROTOCOL_PATH,
+            expected_holdout_protocol_sha256=_sha256(
+                FUTURE_HOLDOUT_PROTOCOL_PATH
+            ),
+            candidate_protocol_path=PROTOCOL_PATH,
+            expected_candidate_protocol_sha256=_sha256(PROTOCOL_PATH),
+            feature_contract_path=FEATURE_CONTRACT_PATH,
+            expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
+            power_analysis_manifest_path=power["manifest_path"],
+            expected_power_analysis_manifest_sha256=power["manifest_sha256"],
+            builder_git_commit="a" * 40,
+        )
+    )
+
+
+def _create_terminal_source_support_manifest(tmp_path: Path) -> Path:
+    safety = {
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "v8_execution_handoff_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+    }
+    rows = [
+        {
+            "market_id": f"source-{index:03d}",
+            "selection_rank": index + 1,
+            "role": (
+                "development_train"
+                if index < 90
+                else "development_calibration"
+                if index < 135
+                else "confirmatory_validation"
+            ),
+            "minimum_decision_ts": 1_800_000_000_000 + index * 300_000,
+            "maximum_decision_ts": 1_800_000_001_000 + index * 300_000,
+            "labels_or_outcomes_opened_for_role_assignment": False,
+        }
+        for index in range(195)
+    ]
+    selected_path = tmp_path / "terminal_source_selected_rows.jsonl"
+    selected_path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    prior_ids = ["prior-market-a", "prior-market-b"]
+    prior_path = tmp_path / "terminal_source_prior_registry.json"
+    _write_json(
+        prior_path,
+        {
+            "prior_market_ids": prior_ids,
+            "prior_market_ids_sha256": canonical_json_sha256(prior_ids),
+        },
+    )
+    role_path = tmp_path / "terminal_source_role_manifest.json"
+    _write_json(
+        role_path,
+        {
+            "role_assignment_ready": True,
+            "role_market_counts": {
+                "development_train": 90,
+                "development_calibration": 45,
+                "confirmatory_validation": 60,
+            },
+            "blocking_reason_codes": [],
+            "labels_or_outcomes_opened_for_role_assignment": False,
+            "selected_rows": _file_descriptor(selected_path),
+            "prior_evidence_exclusion_registry": _file_descriptor(prior_path),
+            **safety,
+        },
+    )
+    core_path = tmp_path / "terminal_source_core_manifest.json"
+    _write_json(
+        core_path,
+        {
+            "schema_version": (
+                "bigan-v8-pairwise-precollection-continuation-manifest-v1"
+            ),
+            "role_assignment_manifest": _file_descriptor(role_path),
+            **safety,
+        },
+    )
+    support_path = tmp_path / "terminal_source_support_manifest.json"
+    _write_json(
+        support_path,
+        {
+            "schema_version": (
+                "bigan-v8-pairwise-supplemental-support-gate-manifest-v1"
+            ),
+            "supplemental_support_target_ready": True,
+            "selected_market_count": 195,
+            "role_market_counts": {
+                "development_train": 90,
+                "development_calibration": 45,
+                "confirmatory_validation": 60,
+            },
+            "blocking_reason_codes": [],
+            "core_support_gate_manifest": _file_descriptor(core_path),
+            **safety,
+        },
+    )
+    return support_path
 
 
 def _decision_rows(*, market_id: str, decision_ts: int) -> list[dict]:

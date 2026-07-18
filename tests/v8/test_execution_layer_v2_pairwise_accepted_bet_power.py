@@ -8,6 +8,7 @@ import pytest
 
 from bigan.v8.polymarket.training.execution_layer_v2_pairwise_accepted_bet_power import (
     detectable_standardized_effect_size,
+    load_and_validate_pairwise_accepted_bet_power_analysis_manifest,
     required_independent_market_count,
     run_pairwise_accepted_bet_power_analysis,
     validate_pairwise_accepted_bet_power_design,
@@ -78,6 +79,36 @@ def test_power_report_recommends_materially_more_support_than_current_design(
     assert report["source_model_candidate_eligible"] is False
     assert report["promotion_evidence_eligible"] is False
     assert first["report_sha256"] == second["report_sha256"]
+
+    _, audit = load_and_validate_pairwise_accepted_bet_power_analysis_manifest(
+        first["manifest_path"],
+        first["manifest_sha256"],
+    )
+    assert audit["required_accepted_unique_market_count"] == 88
+    assert audit["recommended_quality_valid_market_count"] == 220
+    assert audit["recommended_maximum_capture_attempt_count"] == 340
+    assert audit["uses_current_oof_validation_or_confirmatory_pnl"] is False
+
+
+def test_power_manifest_validation_fails_closed_on_result_dependent_drift(
+    tmp_path: Path,
+) -> None:
+    result = run_pairwise_accepted_bet_power_analysis(
+        run_id="power-drift",
+        output_dir=tmp_path,
+        design_path=DESIGN_PATH,
+        expected_design_sha256=_sha256(DESIGN_PATH),
+    )
+    manifest = json.loads(Path(result["manifest_path"]).read_text(encoding="utf-8"))
+    manifest["result_dependent_extension_allowed"] = True
+    drifted = tmp_path / "drifted-power-manifest.json"
+    drifted.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="result_dependent_extension_allowed"):
+        load_and_validate_pairwise_accepted_bet_power_analysis_manifest(
+            drifted,
+            _sha256(drifted),
+        )
 
 
 def test_current_30_accepted_market_design_only_detects_large_effect() -> None:

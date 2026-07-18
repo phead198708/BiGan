@@ -8,6 +8,7 @@ import json
 import sys
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +30,15 @@ from bigan.v8.polymarket import (  # noqa: E402
     finalize_polymarket_pending_round,
 )
 from bigan.v8.polymarket.corpus import BTC_UPDOWN_MARKET_HORIZONS_MS  # noqa: E402
+from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_lcb import (  # noqa: E402
+    _capture_quality_audit,
+    _load_json,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_pairwise_future_unseen_holdout import (  # noqa: E402
+    MAXIMUM_CAPTURE_ATTEMPT_COUNT,
+    TARGET_VALID_MARKET_COUNT,
+    load_and_validate_pairwise_future_unseen_collection_freeze,
+)
 
 
 def run_polymarket_async_round_collector_cli(
@@ -56,6 +66,9 @@ def run_polymarket_async_round_collector_cli(
     clob_identity_revalidation_max_attempts: int = 3,
     clob_identity_revalidation_retry_seconds: float = 0.25,
     feature_enrichment_max_attempts: int = 40,
+    outcome_blind_quality_stop_target: int | None = None,
+    future_holdout_collection_freeze_manifest: Path | str | None = None,
+    future_holdout_collection_freeze_manifest_sha256: str | None = None,
     overwrite_existing: bool = False,
 ) -> dict[str, Any]:
     if round_count <= 0:
@@ -98,6 +111,62 @@ def run_polymarket_async_round_collector_cli(
         )
     if feature_enrichment_max_attempts <= 0:
         raise ValueError("feature_enrichment_max_attempts must be positive")
+
+    quality_control_state: dict[str, Any] | None = None
+    quality_collector_contract: dict[str, Any] | None = None
+    minimum_collection_decision_ts: int | None = None
+    if outcome_blind_quality_stop_target is not None:
+        if outcome_blind_quality_stop_target != TARGET_VALID_MARKET_COUNT:
+            raise ValueError(
+                "outcome_blind_quality_stop_target must match the frozen target"
+            )
+        if round_count != MAXIMUM_CAPTURE_ATTEMPT_COUNT:
+            raise ValueError("round_count must match the frozen maximum attempt count")
+        if (
+            future_holdout_collection_freeze_manifest is None
+            or not future_holdout_collection_freeze_manifest_sha256
+        ):
+            raise ValueError(
+                "future holdout collection freeze manifest and SHA-256 are required"
+            )
+        collection_freeze_path = Path(
+            future_holdout_collection_freeze_manifest
+        ).expanduser().resolve()
+        collection_freeze, collection_freeze_audit = (
+            load_and_validate_pairwise_future_unseen_collection_freeze(
+                collection_freeze_path,
+                future_holdout_collection_freeze_manifest_sha256,
+            )
+        )
+        minimum_collection_decision_ts = int(
+            collection_freeze_audit["minimum_collection_decision_ts"]
+        )
+        candidate_protocol = _load_json(
+            Path(str(collection_freeze["candidate_protocol"]["path"]))
+        )
+        quality_collector_contract = dict(candidate_protocol["collector_contract"])
+        quality_control_state = {
+            "outcome_blind_quality_stop_enabled": True,
+            "outcome_blind_quality_stop_target": TARGET_VALID_MARKET_COUNT,
+            "maximum_capture_attempt_count": MAXIMUM_CAPTURE_ATTEMPT_COUNT,
+            "future_holdout_collection_freeze_manifest": {
+                "path": str(collection_freeze_path),
+                "sha256": future_holdout_collection_freeze_manifest_sha256.lower(),
+            },
+            "minimum_collection_decision_ts": minimum_collection_decision_ts,
+            "strictly_later_than_source_boundary_enforced": True,
+            "quality_stop_inputs": "capture_quality_and_provenance_only",
+            "uses_model_scores_for_collection_control": False,
+            "uses_accepted_bet_count_for_collection_control": False,
+            "labels_or_outcomes_opened_for_collection_control": False,
+            "settlement_pnl_opened_for_collection_control": False,
+            "outcome_blind_quality_valid_capture_count": 0,
+            "outcome_blind_quality_valid_capture_run_ids": [],
+            "outcome_blind_quality_excluded_capture_count": 0,
+            "outcome_blind_quality_exclusion_reason_distribution": {},
+            "quality_target_reached": False,
+            "collection_stop_reason": "frozen_maximum_not_yet_reached",
+        }
 
     root = Path(output_dir).expanduser().resolve()
     resolved_market_identity_cache_path = (
@@ -211,7 +280,13 @@ def run_polymarket_async_round_collector_cli(
                 )
                 _write_json(
                     batch_dir / "batch_progress.json",
-                    _summary(batch_id, captures, finalizations, errors),
+                    _summary(
+                        batch_id,
+                        captures,
+                        finalizations,
+                        errors,
+                        quality_control_state=quality_control_state,
+                    ),
                 )
             return
         with lock:
@@ -384,9 +459,23 @@ def run_polymarket_async_round_collector_cli(
                 }
             )
             captures.sort(key=lambda item: int(item.get("round_index") or 0))
+            if quality_control_state is not None:
+                quality_control_state.update(
+                    _outcome_blind_quality_control_snapshot(
+                        captures,
+                        collector_contract=quality_collector_contract or {},
+                        target_count=outcome_blind_quality_stop_target or 0,
+                    )
+                )
             _write_json(
                 batch_dir / "batch_progress.json",
-                _summary(batch_id, captures, finalizations, errors),
+                _summary(
+                    batch_id,
+                    captures,
+                    finalizations,
+                    errors,
+                    quality_control_state=quality_control_state,
+                ),
             )
 
     try:
@@ -397,6 +486,42 @@ def run_polymarket_async_round_collector_cli(
                 max_round_start_lag_seconds=max_round_start_lag_seconds,
                 previous_round_start_epoch_seconds=(previous_round_start_epoch_seconds),
             )
+            while (
+                minimum_collection_decision_ts is not None
+                and int(scheduled_round_start_epoch_seconds * 1000)
+                < minimum_collection_decision_ts
+            ):
+                scheduled_round_start_epoch_seconds = _sleep_until_round_start_window(
+                    market_family=market_family,
+                    max_round_start_lag_seconds=max_round_start_lag_seconds,
+                    previous_round_start_epoch_seconds=(
+                        scheduled_round_start_epoch_seconds
+                    ),
+                )
+            if quality_control_state is not None:
+                with lock:
+                    quality_control_state.update(
+                        _outcome_blind_quality_control_snapshot(
+                            captures,
+                            collector_contract=quality_collector_contract or {},
+                            target_count=outcome_blind_quality_stop_target or 0,
+                        )
+                    )
+                    if quality_control_state["quality_target_reached"]:
+                        quality_control_state["collection_stop_reason"] = (
+                            "outcome_blind_quality_target_reached"
+                        )
+                        _write_json(
+                            batch_dir / "batch_progress.json",
+                            _summary(
+                                batch_id,
+                                captures,
+                                finalizations,
+                                errors,
+                                quality_control_state=quality_control_state,
+                            ),
+                        )
+                        break
             run_id = f"{batch_id}-round{index:02d}-{_utc_stamp()}"
             capture_thread = threading.Thread(
                 target=capture_round,
@@ -436,7 +561,29 @@ def run_polymarket_async_round_collector_cli(
             public_provider_http_timeout_seconds
         ),
     )
-    summary = _summary(batch_id, captures, finalizations, errors)
+    if quality_control_state is not None:
+        quality_control_state.update(
+            _outcome_blind_quality_control_snapshot(
+                captures,
+                collector_contract=quality_collector_contract or {},
+                target_count=outcome_blind_quality_stop_target or 0,
+            )
+        )
+        if quality_control_state["quality_target_reached"]:
+            quality_control_state["collection_stop_reason"] = (
+                "outcome_blind_quality_target_reached"
+            )
+        else:
+            quality_control_state["collection_stop_reason"] = (
+                "frozen_maximum_capture_attempt_count_reached_without_target"
+            )
+    summary = _summary(
+        batch_id,
+        captures,
+        finalizations,
+        errors,
+        quality_control_state=quality_control_state,
+    )
     summary["chainlink_rtds_collection_report"] = chainlink_collector.collection_report()
     summary_path = batch_dir / "batch_summary.json"
     _write_json(summary_path, summary)
@@ -776,11 +923,62 @@ def _recover_existing_exported_finalization(
     }
 
 
+def _outcome_blind_quality_control_snapshot(
+    captures: list[dict[str, Any]],
+    *,
+    collector_contract: dict[str, Any],
+    target_count: int,
+) -> dict[str, Any]:
+    """Count only causal capture-quality evidence; never inspect final outcomes."""
+
+    ordered = sorted(
+        captures,
+        key=lambda row: (
+            int(row.get("scheduled_round_start_ts") or 0),
+            int(row.get("round_index") or 0),
+            str(row.get("run_id") or ""),
+        ),
+    )
+    valid: list[dict[str, Any]] = []
+    exclusions: Counter[str] = Counter()
+    seen_boundaries: set[int] = set()
+    for capture in ordered:
+        audit = _capture_quality_audit(
+            capture,
+            collector_contract=collector_contract,
+            finalization=None,
+        )
+        boundary = int(capture.get("scheduled_round_start_ts") or 0)
+        reasons = list(audit["reason_codes"])
+        if boundary in seen_boundaries:
+            reasons.append("duplicate_scheduled_round_start")
+        if boundary > 0:
+            seen_boundaries.add(boundary)
+        if reasons:
+            exclusions.update(sorted(set(reasons)))
+            continue
+        valid.append(capture)
+    selected = valid[:target_count]
+    return {
+        "outcome_blind_quality_valid_capture_count": len(valid),
+        "outcome_blind_quality_valid_capture_run_ids": [
+            str(row.get("run_id") or "") for row in selected
+        ],
+        "outcome_blind_quality_excluded_capture_count": len(ordered) - len(valid),
+        "outcome_blind_quality_exclusion_reason_distribution": dict(
+            sorted(exclusions.items())
+        ),
+        "quality_target_reached": len(valid) >= target_count,
+    }
+
+
 def _summary(
     batch_id: str,
     captures: list[dict[str, Any]],
     finalizations: list[dict[str, Any]],
     errors: list[dict[str, str]],
+    *,
+    quality_control_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     exported = [item for item in finalizations if item.get("finalization_status") == "exported"]
     pending = [
@@ -834,7 +1032,7 @@ def _summary(
                 clob_revalidation_retry_reason_distribution.get(str(name), 0)
                 + int(count)
             )
-    return {
+    summary = {
         "batch_id": batch_id,
         "paper_only": True,
         "capital_at_risk": False,
@@ -951,6 +1149,9 @@ def _summary(
         "finalizations": finalizations,
         "errors": errors,
     }
+    if quality_control_state is not None:
+        summary.update(dict(quality_control_state))
+    return summary
 
 
 def _upsert_by_run_id(items: list[dict[str, Any]], item: dict[str, Any]) -> None:
@@ -1136,6 +1337,23 @@ def main(argv: list[str] | None = None) -> int:
         default=40,
     )
     parser.add_argument(
+        "--outcome-blind-quality-stop-target",
+        type=int,
+        default=None,
+        help=(
+            "Optional frozen quality-valid capture target. Requires the #190 "
+            "collection freeze manifest and stops before the next round boundary."
+        ),
+    )
+    parser.add_argument(
+        "--future-holdout-collection-freeze-manifest",
+        default=None,
+    )
+    parser.add_argument(
+        "--future-holdout-collection-freeze-manifest-sha256",
+        default=None,
+    )
+    parser.add_argument(
         "--finalize-only",
         action="store_true",
         help="Only scan pending round captures and try settlement finalization.",
@@ -1195,6 +1413,15 @@ def main(argv: list[str] | None = None) -> int:
             ),
             feature_enrichment_max_attempts=(
                 args.feature_enrichment_max_attempts
+            ),
+            outcome_blind_quality_stop_target=(
+                args.outcome_blind_quality_stop_target
+            ),
+            future_holdout_collection_freeze_manifest=(
+                args.future_holdout_collection_freeze_manifest
+            ),
+            future_holdout_collection_freeze_manifest_sha256=(
+                args.future_holdout_collection_freeze_manifest_sha256
             ),
             overwrite_existing=args.overwrite_existing,
         )

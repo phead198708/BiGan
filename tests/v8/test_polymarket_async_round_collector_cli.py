@@ -8,16 +8,88 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import examples.v8.run_polymarket_async_round_collector as collector_module
 from examples.v8.run_polymarket_async_round_collector import (
     _finalize_pending_once,
+    _outcome_blind_quality_control_snapshot,
     _round_start_alignment_sleep_seconds,
     _scheduled_round_start_epoch_seconds,
     _summary,
     _wait_until_scheduled_round_start,
     main,
     run_polymarket_async_finalizer_cli,
+    run_polymarket_async_round_collector_cli,
 )
+
+
+def test_outcome_blind_quality_stop_uses_capture_quality_only_and_deduplicates(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        collector_module,
+        "_capture_quality_audit",
+        lambda capture, **_kwargs: {
+            "reason_codes": list(capture.get("quality_reason_codes") or [])
+        },
+    )
+    captures = [
+        {
+            "run_id": "later-valid",
+            "round_index": 3,
+            "scheduled_round_start_ts": 900,
+        },
+        {
+            "run_id": "first-valid",
+            "round_index": 1,
+            "scheduled_round_start_ts": 300,
+        },
+        {
+            "run_id": "duplicate-boundary",
+            "round_index": 2,
+            "scheduled_round_start_ts": 300,
+        },
+        {
+            "run_id": "bad-book",
+            "round_index": 4,
+            "scheduled_round_start_ts": 1_200,
+            "quality_reason_codes": ["provider_orderbook_snapshot_coverage_failed"],
+        },
+    ]
+
+    snapshot = _outcome_blind_quality_control_snapshot(
+        captures,
+        collector_contract={},
+        target_count=2,
+    )
+
+    assert snapshot["quality_target_reached"] is True
+    assert snapshot["outcome_blind_quality_valid_capture_count"] == 2
+    assert snapshot["outcome_blind_quality_valid_capture_run_ids"] == [
+        "first-valid",
+        "later-valid",
+    ]
+    assert snapshot["outcome_blind_quality_excluded_capture_count"] == 2
+    assert snapshot["outcome_blind_quality_exclusion_reason_distribution"] == {
+        "duplicate_scheduled_round_start": 1,
+        "provider_orderbook_snapshot_coverage_failed": 1,
+    }
+
+
+def test_outcome_blind_quality_stop_requires_pinned_preregistration(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="future holdout collection freeze manifest and SHA-256 are required",
+    ):
+        run_polymarket_async_round_collector_cli(
+            batch_id="missing-preregistration",
+            output_dir=tmp_path,
+            round_count=340,
+            outcome_blind_quality_stop_target=220,
+        )
 
 
 def test_round_start_alignment_does_not_sleep_inside_start_window() -> None:

@@ -26,6 +26,9 @@ from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_l
     validate_pairwise_action_advantage_lcb_feature_contract,
     validate_pairwise_action_advantage_lcb_protocol,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_pairwise_future_unseen_holdout import (
+    load_and_validate_pairwise_future_unseen_holdout_pre_registration,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_action_value import (
     REQUIRED_ACTIONS,
 )
@@ -87,6 +90,8 @@ class PairwiseActionAdvantageLCBFitConfig:
     expected_role_assignment_manifest_sha256: str
     feature_contract_path: Path | str
     expected_feature_contract_sha256: str
+    future_holdout_pre_registration_manifest_path: Path | str
+    expected_future_holdout_pre_registration_manifest_sha256: str
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -103,6 +108,10 @@ class PairwiseActionAdvantageLCBFitConfig:
             self.expected_feature_contract_sha256,
             name="feature contract SHA-256",
         )
+        _require_sha256(
+            self.expected_future_holdout_pre_registration_manifest_sha256,
+            name="future holdout pre-registration manifest SHA-256",
+        )
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         object.__setattr__(
             self,
@@ -115,6 +124,11 @@ class PairwiseActionAdvantageLCBFitConfig:
             Path(self.role_assignment_manifest_path),
         )
         object.__setattr__(self, "feature_contract_path", Path(self.feature_contract_path))
+        object.__setattr__(
+            self,
+            "future_holdout_pre_registration_manifest_path",
+            Path(self.future_holdout_pre_registration_manifest_path),
+        )
 
 
 def fit_pairwise_action_advantage_lcb(
@@ -181,6 +195,21 @@ def fit_pairwise_action_advantage_lcb(
         feature_contract,
         expected_parent_protocol_sha256=protocol_descriptor["sha256"],
     )
+    future_holdout_pre_registration_path = (
+        config.future_holdout_pre_registration_manifest_path.resolve()
+    )
+    _, future_holdout_lineage_audit = (
+        load_and_validate_pairwise_future_unseen_holdout_pre_registration(
+            future_holdout_pre_registration_path,
+            config.expected_future_holdout_pre_registration_manifest_sha256,
+            expected_candidate_protocol_path=Path(protocol_descriptor["path"]),
+            expected_candidate_protocol_sha256=protocol_descriptor["sha256"],
+            expected_feature_contract_path=feature_contract_path,
+            expected_feature_contract_sha256=(
+                config.expected_feature_contract_sha256
+            ),
+        )
+    )
     selected_descriptor = _verified_descriptor(
         role_manifest.get("selected_rows"), name="role assignment rows"
     )
@@ -208,6 +237,7 @@ def fit_pairwise_action_advantage_lcb(
         "run_id": config.run_id,
         "candidate_name": protocol["candidate_name"],
         **support_lineage_audit,
+        **future_holdout_lineage_audit,
         "role_assignment_manifest": _descriptor(role_manifest_path),
         "role_assignment_selected_rows": selected_descriptor,
         "execution_compatible_feature_coverage_report": (
@@ -303,6 +333,9 @@ def fit_pairwise_action_advantage_lcb(
         "candidate_name": protocol["candidate_name"],
         "protocol": protocol_descriptor,
         "support_gate_manifest": _descriptor(support_manifest_path),
+        "future_holdout_pre_registration_manifest": _descriptor(
+            future_holdout_pre_registration_path
+        ),
         "pre_label_access_lineage_audit": _descriptor(pre_label_audit_path),
         "feature_contract": _descriptor(feature_contract_path),
         "role_assignment_manifest": _descriptor(role_manifest_path),
@@ -420,6 +453,9 @@ def fit_pairwise_action_advantage_lcb(
         "run_id": config.run_id,
         "candidate_name": protocol["candidate_name"],
         "support_gate_manifest": _descriptor(support_manifest_path),
+        "future_holdout_pre_registration_manifest": _descriptor(
+            future_holdout_pre_registration_path
+        ),
         "pre_label_access_lineage_audit": _descriptor(pre_label_audit_path),
         "feature_columns": list(feature_columns),
         "cross_fit": cross_fit,
@@ -479,6 +515,9 @@ def fit_pairwise_action_advantage_lcb(
             "candidate_name": protocol["candidate_name"],
             "protocol": protocol_descriptor,
             "support_gate_manifest": _descriptor(support_manifest_path),
+            "future_holdout_pre_registration_manifest": _descriptor(
+                future_holdout_pre_registration_path
+            ),
             "pre_label_access_lineage_audit": _descriptor(pre_label_audit_path),
             "feature_contract": _descriptor(feature_contract_path),
             "role_assignment_manifest": _descriptor(role_manifest_path),
@@ -493,7 +532,8 @@ def fit_pairwise_action_advantage_lcb(
             "confirmatory_evaluation_started": False,
             "confirmatory_labels_opened": False,
             "candidate_frozen_for_future_evaluation": False,
-            "future_collection_allowed": False,
+            "candidate_agnostic_future_raw_collection_allowed": True,
+            "candidate_specific_future_evaluation_allowed": False,
             "uses_confirmatory_validation_labels_for_tuning": False,
             "uses_issue174_confirmatory_labels_for_tuning": False,
             **_blocked_safety_fields(),
@@ -665,7 +705,8 @@ def fit_pairwise_action_advantage_lcb(
         "confirmatory_labels_used_for_report_only": True,
         "confirmatory_labels_used_for_tuning": False,
         "candidate_frozen_for_future_evaluation": confirmatory_gate["passed"],
-        "future_collection_allowed": confirmatory_gate["passed"],
+        "candidate_agnostic_future_raw_collection_allowed": True,
+        "candidate_specific_future_evaluation_allowed": confirmatory_gate["passed"],
         **_blocked_safety_fields(),
     }
     validation_report_path = run_dir / "confirmatory_validation_report.json"
@@ -720,6 +761,9 @@ def fit_pairwise_action_advantage_lcb(
         "candidate_name": protocol["candidate_name"],
         "protocol": protocol_descriptor,
         "support_gate_manifest": _descriptor(support_manifest_path),
+        "future_holdout_pre_registration_manifest": _descriptor(
+            future_holdout_pre_registration_path
+        ),
         "pre_label_access_lineage_audit": _descriptor(pre_label_audit_path),
         "feature_contract": _descriptor(feature_contract_path),
         "role_assignment_manifest": _descriptor(role_manifest_path),
@@ -737,7 +781,8 @@ def fit_pairwise_action_advantage_lcb(
             accepted_bet_pnl_report_path
         ),
         "candidate_frozen_for_future_evaluation": confirmatory_gate["passed"],
-        "future_collection_allowed": confirmatory_gate["passed"],
+        "candidate_agnostic_future_raw_collection_allowed": True,
+        "candidate_specific_future_evaluation_allowed": confirmatory_gate["passed"],
         "future_unseen_evaluation_required": True,
         "confirmatory_gate_passed": confirmatory_gate["passed"],
         "confirmatory_gate_blocking_reason_codes": confirmatory_gate["reason_codes"],
@@ -749,6 +794,9 @@ def fit_pairwise_action_advantage_lcb(
     freeze_manifest["research_candidate_hash"] = canonical_json_sha256(
         {
             "support_gate": freeze_manifest["support_gate_manifest"]["sha256"],
+            "future_holdout_pre_registration": freeze_manifest[
+                "future_holdout_pre_registration_manifest"
+            ]["sha256"],
             "protocol": protocol_descriptor["sha256"],
             "feature_contract": freeze_manifest["feature_contract"]["sha256"],
             "role_assignment": freeze_manifest["role_assignment_manifest"]["sha256"],
@@ -2435,6 +2483,9 @@ def _pre_label_access_markdown(report: dict[str, Any]) -> str:
             f"- role counts: `{report['role_market_counts']}`",
             f"- support target ready: `{str(report['supplemental_support_target_ready']).lower()}`",
             f"- support lineage hash verified: `{str(report['support_gate_lineage_hash_verified']).lower()}`",
+            f"- future holdout pre-registration ready: `{str(report['future_holdout_pre_registration_ready']).lower()}`",
+            f"- future quality-valid target / max attempts: `{report['future_holdout_target_valid_market_count']}/{report['future_holdout_maximum_capture_attempt_count']}`",
+            "- future collection controlled by outcomes/model/PnL: `false`",
             "- labels/outcomes/PnL opened before audit: `false`",
             "- prediction attempted before audit: `false`",
             "- paper/live/handoff unlock: `false`",

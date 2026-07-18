@@ -22,6 +22,9 @@ from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_l
 DESIGN_SCHEMA_VERSION = "bigan-v8-pairwise-accepted-bet-power-design-v1"
 REPORT_SCHEMA_VERSION = "bigan-v8-pairwise-accepted-bet-power-analysis-report-v1"
 MANIFEST_SCHEMA_VERSION = "bigan-v8-pairwise-accepted-bet-power-analysis-manifest-v1"
+RECOMMENDED_REQUIRED_ACCEPTED_UNIQUE_MARKET_COUNT = 88
+RECOMMENDED_QUALITY_VALID_MARKET_COUNT = 220
+RECOMMENDED_MAXIMUM_CAPTURE_ATTEMPT_COUNT = 340
 
 
 def run_pairwise_accepted_bet_power_analysis(
@@ -203,6 +206,125 @@ def validate_pairwise_accepted_bet_power_design(design: dict[str, Any]) -> None:
         blockers.append("safety")
     if blockers:
         raise ValueError("power design validation failed: " + ", ".join(blockers))
+
+
+def load_and_validate_pairwise_accepted_bet_power_analysis_manifest(
+    path: Path | str,
+    expected_sha256: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Verify the prospective power artifact before it controls collection sizing."""
+
+    path = Path(path).resolve()
+    _verify_pin(path, expected_sha256, name="accepted-bet power analysis manifest")
+    manifest = _load_json(path)
+    blockers: list[str] = []
+    if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+        blockers.append("power_analysis_manifest_schema_invalid")
+    expected_manifest_id = canonical_json_sha256(
+        {
+            key: value
+            for key, value in manifest.items()
+            if key != "power_analysis_manifest_id"
+        }
+    )
+    if manifest.get("power_analysis_manifest_id") != expected_manifest_id:
+        blockers.append("power_analysis_manifest_id_mismatch")
+    expected_values = {
+        "power_analysis_ready": True,
+        "recommended_quality_valid_market_count": (
+            RECOMMENDED_QUALITY_VALID_MARKET_COUNT
+        ),
+        "recommended_maximum_capture_attempt_count": (
+            RECOMMENDED_MAXIMUM_CAPTURE_ATTEMPT_COUNT
+        ),
+        "uses_current_oof_validation_or_confirmatory_pnl": False,
+        "uses_realized_candidate_pnl_for_design": False,
+        "result_dependent_extension_allowed": False,
+        "blocking_reason_codes": [],
+        **_blocked_safety_fields(),
+    }
+    blockers.extend(
+        f"power_analysis_manifest_{key}_invalid"
+        for key, value in expected_values.items()
+        if manifest.get(key) != value
+    )
+
+    descriptors: dict[str, dict[str, str]] = {}
+    for field in ("design", "report", "markdown"):
+        descriptor = manifest.get(field)
+        try:
+            if not isinstance(descriptor, dict):
+                raise ValueError("descriptor must be an object")
+            descriptor_path = Path(str(descriptor.get("path") or "")).resolve()
+            descriptor_sha256 = str(descriptor.get("sha256") or "")
+            _verify_pin(
+                descriptor_path,
+                descriptor_sha256,
+                name=f"accepted-bet power {field}",
+            )
+            descriptors[field] = {
+                "path": str(descriptor_path),
+                "sha256": descriptor_sha256.lower(),
+            }
+        except (OSError, TypeError, ValueError) as exc:
+            blockers.append(f"power_analysis_{field}_descriptor_invalid:{exc}")
+
+    report: dict[str, Any] = {}
+    if "design" in descriptors:
+        try:
+            validate_pairwise_accepted_bet_power_design(
+                _load_json(Path(descriptors["design"]["path"]))
+            )
+        except ValueError as exc:
+            blockers.append(f"power_analysis_design_invalid:{exc}")
+    if "report" in descriptors:
+        report = _load_json(Path(descriptors["report"]["path"]))
+        report_expected = {
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "power_analysis_ready": True,
+            "recommended_required_accepted_unique_market_count": (
+                RECOMMENDED_REQUIRED_ACCEPTED_UNIQUE_MARKET_COUNT
+            ),
+            "recommended_quality_valid_market_count": (
+                RECOMMENDED_QUALITY_VALID_MARKET_COUNT
+            ),
+            "recommended_maximum_capture_attempt_count": (
+                RECOMMENDED_MAXIMUM_CAPTURE_ATTEMPT_COUNT
+            ),
+            "uses_current_oof_validation_or_confirmatory_pnl": False,
+            "uses_realized_candidate_pnl_for_design": False,
+            "result_dependent_extension_allowed": False,
+            "blocking_reason_codes": [],
+            **_blocked_safety_fields(),
+        }
+        blockers.extend(
+            f"power_analysis_report_{key}_invalid"
+            for key, value in report_expected.items()
+            if report.get(key) != value
+        )
+        if report.get("design") != descriptors.get("design"):
+            blockers.append("power_analysis_report_design_lineage_mismatch")
+
+    if blockers:
+        raise ValueError(
+            "accepted-bet power analysis manifest validation failed: "
+            + ", ".join(sorted(set(blockers)))
+        )
+    return manifest, {
+        "power_analysis_manifest": _descriptor(path),
+        "power_analysis_report": descriptors["report"],
+        "power_analysis_ready": True,
+        "required_accepted_unique_market_count": (
+            RECOMMENDED_REQUIRED_ACCEPTED_UNIQUE_MARKET_COUNT
+        ),
+        "recommended_quality_valid_market_count": (
+            RECOMMENDED_QUALITY_VALID_MARKET_COUNT
+        ),
+        "recommended_maximum_capture_attempt_count": (
+            RECOMMENDED_MAXIMUM_CAPTURE_ATTEMPT_COUNT
+        ),
+        "uses_current_oof_validation_or_confirmatory_pnl": False,
+    }
 
 
 def required_independent_market_count(
