@@ -1,0 +1,53 @@
+{
+  "schema_version": "bigan-v8-side-only-accepted-bet-power-design-v1",
+  "frozen": true,
+  "one_sided_alpha": 0.05,
+  "target_power": 0.9,
+  "simulation_repetitions": 256,
+  "bootstrap_repetitions": 256,
+  "monte_carlo_confidence_level": 0.95,
+  "random_seed": 205,
+  "accepted_unique_market_support_grid": [60, 88, 120, 160, 220, 320],
+  "standardized_effect_size_scenarios": [0.2, 0.35, 0.5],
+  "market_pnl_distribution_scenarios": ["normal", "student_t_df5"],
+  "up_market_fraction_scenarios": [0.35, 0.5, 0.65],
+  "execution_acceptance_rate_scenarios": [0.4, 0.5, 0.6],
+  "capture_quality_rate_scenarios": [0.65, 0.7, 0.73],
+  "minimum_side_support": 10,
+  "side_robustness_inflation_factor": 1.25,
+  "candidate_pnl_and_delta_correlation": 0.5,
+  "hard_gate_components": [
+    "total_candidate_post_cost_pnl_positive",
+    "buy_up_post_cost_pnl_positive",
+    "buy_down_post_cost_pnl_positive",
+    "candidate_minus_matched_baseline_positive",
+    "market_grouped_bootstrap_delta_lcb_positive",
+    "largest_winning_market_removed_pnl_positive"
+  ],
+  "planning_scenario": {
+    "standardized_effect_size": 0.35,
+    "description": "prospective_minimum_relevant_effect_not_fitted_from_results"
+  },
+  "current_204_reference": {
+    "quality_valid_market_count": 220,
+    "minimum_accepted_unique_market_count": 88,
+    "minimum_side_market_count": 10,
+    "outcomes_used_for_this_design": false,
+    "changes_allowed": false
+  },
+  "uses_204_outcomes_for_planning": false,
+  "uses_current_oof_validation_or_confirmatory_pnl": false,
+  "uses_realized_candidate_pnl_for_design": false,
+  "changes_204_gate": false,
+  "result_dependent_extension_allowed": false,
+  "paper_only": true,
+  "capital_at_risk": false,
+  "polymarket_write_enabled": false,
+  "wallet_signing_enabled": false,
+  "source_model_candidate_eligible": false,
+  "freeze_ready": false,
+  "promotion_evidence_eligible": false,
+  "v8_execution_handoff_allowed": false,
+  "#134_resume_allowed": false,
+  "#146_start_allowed": false
+}
