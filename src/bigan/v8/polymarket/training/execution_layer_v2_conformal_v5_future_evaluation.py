@@ -18,6 +18,9 @@ from bigan.v8.polymarket.training.execution_layer_v2_guard_compatible_conformal_
     CANDIDATE_NAME,
     validate_guard_compatible_conformal_net_return_v5_profile,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_lcb import (
+    _blocked_safety_fields as _collector_source_blocked_safety_fields,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_persistent_outcome_blind_collector import (
     WINDOW_MANIFEST_SCHEMA_VERSION,
     load_and_validate_persistent_outcome_blind_index,
@@ -1060,9 +1063,11 @@ def _selected_window_blockers(
     if any(
         row.get(field) != expected
         for row in selected_rows
-        for field, expected in _blocked_safety_fields().items()
+        for field, expected in _collector_source_blocked_safety_fields().items()
     ):
         blockers.append("selected_row_safety_invalid")
+    if any(row.get("paper_candidate_allowed") not in (None, False) for row in selected_rows):
+        blockers.append("selected_row_paper_candidate_allowed_invalid")
     return sorted(set(blockers))
 
 
@@ -1081,17 +1086,8 @@ def _find_nonempty_fields(value: Any, fields: frozenset[str]) -> list[str]:
 
 def _blocked_safety_fields() -> dict[str, Any]:
     return {
-        "paper_only": True,
-        "capital_at_risk": False,
-        "polymarket_write_enabled": False,
-        "wallet_signing_enabled": False,
-        "source_model_candidate_eligible": False,
-        "freeze_ready": False,
-        "promotion_evidence_eligible": False,
-        "v8_execution_handoff_allowed": False,
+        **_collector_source_blocked_safety_fields(),
         "paper_candidate_allowed": False,
-        "#134_resume_allowed": False,
-        "#146_start_allowed": False,
     }
 
 

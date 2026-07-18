@@ -325,3 +325,104 @@ def test_selected_window_rejects_forbidden_outcome_fields() -> None:
         profile=profile,
     )
     assert "selected_rows_contain_forbidden_target_fields" in blockers
+
+
+def test_selected_window_accepts_frozen_collector_safety_schema() -> None:
+    profile = _profile()
+    boundary = {
+        "minimum_collection_decision_ts": 2_000,
+        "prior_market_ids": [],
+        "prior_slugs": [],
+        "prior_source_row_hashes": [],
+    }
+    rows = [
+        {
+            "market_id": f"future-{index}",
+            "slug": f"future-slug-{index}",
+            "source_row_hash": f"source-{index}",
+            "entry_sha256": f"entry-{index}",
+            "scheduled_round_start_ts": 2_001 + index,
+            "collector_git_commit": profile["issue_192_collection"]["collector_commit"],
+            "capture_quality_valid": True,
+            "labels_outcomes_or_pnl_opened": False,
+            **{
+                key: value
+                for key, value in profile["safety"].items()
+                if key != "paper_candidate_allowed"
+            },
+        }
+        for index in range(220)
+    ]
+    blockers = _selected_window_blockers(
+        selected_rows=rows,
+        index_rows=copy.deepcopy(rows),
+        boundary=boundary,
+        profile=profile,
+    )
+    assert blockers == []
+
+
+def test_selected_window_rejects_positive_paper_candidate_source_flag() -> None:
+    profile = _profile()
+    boundary = {
+        "minimum_collection_decision_ts": 2_000,
+        "prior_market_ids": [],
+        "prior_slugs": [],
+        "prior_source_row_hashes": [],
+    }
+    rows = [
+        {
+            "market_id": f"future-{index}",
+            "slug": f"future-slug-{index}",
+            "source_row_hash": f"source-{index}",
+            "entry_sha256": f"entry-{index}",
+            "scheduled_round_start_ts": 2_001 + index,
+            "collector_git_commit": profile["issue_192_collection"]["collector_commit"],
+            "capture_quality_valid": True,
+            "labels_outcomes_or_pnl_opened": False,
+            **profile["safety"],
+        }
+        for index in range(220)
+    ]
+    index_rows = copy.deepcopy(rows)
+    rows[0]["paper_candidate_allowed"] = True
+    blockers = _selected_window_blockers(
+        selected_rows=rows,
+        index_rows=index_rows,
+        boundary=boundary,
+        profile=profile,
+    )
+    assert "selected_row_paper_candidate_allowed_invalid" in blockers
+
+
+def test_selected_window_rejects_mutated_collector_safety_flag() -> None:
+    profile = _profile()
+    boundary = {
+        "minimum_collection_decision_ts": 2_000,
+        "prior_market_ids": [],
+        "prior_slugs": [],
+        "prior_source_row_hashes": [],
+    }
+    rows = [
+        {
+            "market_id": f"future-{index}",
+            "slug": f"future-slug-{index}",
+            "source_row_hash": f"source-{index}",
+            "entry_sha256": f"entry-{index}",
+            "scheduled_round_start_ts": 2_001 + index,
+            "collector_git_commit": profile["issue_192_collection"]["collector_commit"],
+            "capture_quality_valid": True,
+            "labels_outcomes_or_pnl_opened": False,
+            **profile["safety"],
+        }
+        for index in range(220)
+    ]
+    index_rows = copy.deepcopy(rows)
+    rows[-1]["capital_at_risk"] = True
+    blockers = _selected_window_blockers(
+        selected_rows=rows,
+        index_rows=index_rows,
+        boundary=boundary,
+        profile=profile,
+    )
+    assert "selected_row_safety_invalid" in blockers
