@@ -1551,6 +1551,7 @@ def _cross_fit_training_predictions(
     ]
     oof_rows: list[dict[str, Any]] = []
     fold_reports: list[dict[str, Any]] = []
+    expected_oof_rows: list[dict[str, Any]] = []
     xgb_protocol = _xgb_model_protocol(model_protocol)
     for fold_index, validation_markets in enumerate(fold_market_groups, start=1):
         validation_start_index = (
@@ -1592,6 +1593,16 @@ def _cross_fit_training_predictions(
             ],
             score_field="oof_raw_prediction",
         )
+        fold_coverage = _oof_prediction_coverage_reconciliation(
+            validation_rows,
+            fold_oof_rows,
+        )
+        if not fold_coverage["oof_prediction_identity_reconciliation_passed"]:
+            raise ValueError(
+                "cross-fit fold OOF prediction coverage is incomplete: "
+                + ", ".join(fold_coverage["oof_prediction_coverage_reason_codes"])
+            )
+        expected_oof_rows.extend(validation_rows)
         oof_rows.extend(fold_oof_rows)
         fold_reports.append(
             {
@@ -1606,17 +1617,34 @@ def _cross_fit_training_predictions(
                 "validation_min_decision_ts": validation_min_decision_ts,
                 "training_strictly_precedes_validation": True,
                 "future_market_label_access_count": 0,
+                "expected_oof_decision_group_count": fold_coverage[
+                    "expected_oof_decision_group_count"
+                ],
+                "actual_oof_decision_group_count": fold_coverage[
+                    "actual_oof_decision_group_count"
+                ],
+                "expected_oof_action_row_count": fold_coverage[
+                    "expected_oof_action_row_count"
+                ],
+                "actual_oof_action_row_count": fold_coverage[
+                    "actual_oof_action_row_count"
+                ],
+                "oof_prediction_identity_reconciliation_passed": True,
                 "ranking_metrics": _decision_group_ranking_metrics(
                     validation_rows,
                     predictions,
                 ),
             }
         )
-    expected_oof_action_row_count = expected_oof_market_count * len(REQUIRED_ACTIONS)
-    if len(oof_rows) != expected_oof_action_row_count:
-        raise ValueError("cross-fit OOF prediction coverage is incomplete")
-    if len({str(row["action_row_sha256"]) for row in oof_rows}) != len(oof_rows):
-        raise ValueError("cross-fit OOF prediction identities are duplicated")
+    coverage = _oof_prediction_coverage_reconciliation(
+        expected_oof_rows,
+        oof_rows,
+    )
+    if not coverage["oof_prediction_identity_reconciliation_passed"]:
+        raise ValueError(
+            "cross-fit OOF prediction coverage is incomplete: "
+            + ", ".join(coverage["oof_prediction_coverage_reason_codes"])
+        )
     oof_predictions_by_row = {
         str(row["action_row_sha256"]): float(row["oof_raw_prediction"]) for row in oof_rows
     }
@@ -1632,10 +1660,11 @@ def _cross_fit_training_predictions(
         "decision_group_count": len(rows) // len(REQUIRED_ACTIONS),
         "initial_training_only_market_count": initial_training_market_count,
         "oof_market_count": expected_oof_market_count,
-        "oof_decision_group_count": len(oof_source_rows) // len(REQUIRED_ACTIONS),
+        "oof_decision_group_count": coverage["actual_oof_decision_group_count"],
         "action_row_count": len(rows),
         "oof_prediction_count": len(oof_rows),
         "oof_prediction_coverage_complete": True,
+        **coverage,
         "all_development_train_markets_have_oof_predictions": False,
         "initial_training_markets_excluded_from_oof": True,
         "future_market_label_access_violation_count": 0,
@@ -1649,6 +1678,99 @@ def _cross_fit_training_predictions(
         "uses_development_calibration_labels": False,
         "uses_confirmatory_validation_labels": False,
         "uses_issue174_confirmatory_labels": False,
+    }
+
+
+def _oof_prediction_coverage_reconciliation(
+    expected_rows: list[dict[str, Any]],
+    actual_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Reconcile OOF identities at the true market/decision/action granularity."""
+
+    _validate_complete_decision_groups(expected_rows)
+    expected_identity_counts = Counter(
+        str(row["action_row_sha256"]) for row in expected_rows
+    )
+    actual_identity_counts = Counter(
+        str(row["action_row_sha256"]) for row in actual_rows
+    )
+    expected_identities = set(expected_identity_counts)
+    actual_identities = set(actual_identity_counts)
+    missing_identities = sorted(expected_identities - actual_identities)
+    unexpected_identities = sorted(actual_identities - expected_identities)
+    duplicate_expected_identities = sorted(
+        identity for identity, count in expected_identity_counts.items() if count != 1
+    )
+    duplicate_actual_identities = sorted(
+        identity for identity, count in actual_identity_counts.items() if count != 1
+    )
+    expected_markets = {str(row["market_id"]) for row in expected_rows}
+    actual_markets = {str(row["market_id"]) for row in actual_rows}
+    expected_groups = {
+        (str(row["market_id"]), int(row["decision_ts"])) for row in expected_rows
+    }
+    actual_groups = {
+        (str(row["market_id"]), int(row["decision_ts"])) for row in actual_rows
+    }
+    actual_group_actions: dict[tuple[str, int], list[str]] = defaultdict(list)
+    for row in actual_rows:
+        actual_group_actions[
+            (str(row["market_id"]), int(row["decision_ts"]))
+        ].append(str(row["action"]))
+    incomplete_actual_groups = sorted(
+        group
+        for group, actions in actual_group_actions.items()
+        if len(actions) != len(REQUIRED_ACTIONS)
+        or set(actions) != set(REQUIRED_ACTIONS)
+    )
+    reason_codes: list[str] = []
+    if missing_identities:
+        reason_codes.append("oof_prediction_identities_missing")
+    if unexpected_identities:
+        reason_codes.append("oof_prediction_identities_unexpected")
+    if duplicate_expected_identities:
+        reason_codes.append("expected_oof_prediction_identities_duplicated")
+    if duplicate_actual_identities:
+        reason_codes.append("actual_oof_prediction_identities_duplicated")
+    if expected_markets != actual_markets:
+        reason_codes.append("oof_prediction_market_coverage_mismatch")
+    if expected_groups != actual_groups:
+        reason_codes.append("oof_prediction_decision_group_coverage_mismatch")
+    if incomplete_actual_groups:
+        reason_codes.append("oof_prediction_action_grid_incomplete")
+    return {
+        "expected_oof_market_count": len(expected_markets),
+        "actual_oof_market_count": len(actual_markets),
+        "expected_oof_decision_group_count": len(expected_groups),
+        "actual_oof_decision_group_count": len(actual_groups),
+        "expected_oof_action_row_count": len(expected_rows),
+        "actual_oof_action_row_count": len(actual_rows),
+        "missing_oof_prediction_identity_count": len(missing_identities),
+        "missing_oof_prediction_identities_sha256": canonical_json_sha256(
+            missing_identities
+        ),
+        "unexpected_oof_prediction_identity_count": len(unexpected_identities),
+        "unexpected_oof_prediction_identities_sha256": canonical_json_sha256(
+            unexpected_identities
+        ),
+        "duplicate_expected_oof_prediction_identity_count": len(
+            duplicate_expected_identities
+        ),
+        "duplicate_expected_oof_prediction_identities_sha256": canonical_json_sha256(
+            duplicate_expected_identities
+        ),
+        "duplicate_actual_oof_prediction_identity_count": len(
+            duplicate_actual_identities
+        ),
+        "duplicate_actual_oof_prediction_identities_sha256": canonical_json_sha256(
+            duplicate_actual_identities
+        ),
+        "incomplete_oof_decision_group_count": len(incomplete_actual_groups),
+        "incomplete_oof_decision_groups_sha256": canonical_json_sha256(
+            [[market_id, decision_ts] for market_id, decision_ts in incomplete_actual_groups]
+        ),
+        "oof_prediction_coverage_reason_codes": reason_codes,
+        "oof_prediction_identity_reconciliation_passed": not reason_codes,
     }
 
 

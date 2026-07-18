@@ -31,6 +31,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_l
     _cross_fit_training_predictions,
     _decision_group_ranking_metrics,
     _development_freeze_gate,
+    _oof_prediction_coverage_reconciliation,
     _pairwise_relevance_labels,
     _run_policy_replay,
     _validate_complete_decision_groups,
@@ -890,6 +891,91 @@ def test_pairwise_cross_fit_uses_strictly_prior_markets_only() -> None:
     assert len(oof_market_ids) == 75
     assert report["uses_confirmatory_validation_labels"] is False
     assert report["uses_issue174_confirmatory_labels"] is False
+
+
+def test_pairwise_cross_fit_reconciles_multiple_decision_points_per_market() -> None:
+    rows = []
+    for market_index in range(90):
+        for decision_index in range(4):
+            market_rows = _decision_rows(
+                market_id=f"train-{market_index:03d}",
+                decision_ts=1_000 + market_index * 10 + decision_index,
+            )
+            for action_index, row in enumerate(market_rows):
+                row["decision_time_features"] = {
+                    "execution_price": float(action_index) / 10.0
+                }
+            rows.extend(market_rows)
+    model_protocol = dict(_load_json(PROTOCOL_PATH)["cross_fit_protocol"])
+    model_protocol["num_boost_round"] = 3
+
+    report = _cross_fit_training_predictions(
+        rows,
+        feature_columns=("execution_price",),
+        model_protocol=model_protocol,
+    )
+
+    assert report["market_count"] == 90
+    assert report["decision_group_count"] == 360
+    assert report["oof_market_count"] == 75
+    assert report["expected_oof_market_count"] == 75
+    assert report["actual_oof_market_count"] == 75
+    assert report["expected_oof_decision_group_count"] == 300
+    assert report["actual_oof_decision_group_count"] == 300
+    assert report["oof_decision_group_count"] == 300
+    assert report["expected_oof_action_row_count"] == 1_500
+    assert report["actual_oof_action_row_count"] == 1_500
+    assert report["oof_prediction_count"] == 1_500
+    assert report["missing_oof_prediction_identity_count"] == 0
+    assert report["unexpected_oof_prediction_identity_count"] == 0
+    assert report["duplicate_actual_oof_prediction_identity_count"] == 0
+    assert report["incomplete_oof_decision_group_count"] == 0
+    assert report["oof_prediction_identity_reconciliation_passed"] is True
+    assert [
+        fold["expected_oof_decision_group_count"]
+        for fold in report["fold_reports"]
+    ] == [60, 60, 60, 60, 60]
+    assert [
+        fold["expected_oof_action_row_count"] for fold in report["fold_reports"]
+    ] == [300, 300, 300, 300, 300]
+
+
+def test_pairwise_oof_identity_reconciliation_fails_closed_on_identity_drift() -> None:
+    expected = _decision_rows(market_id="market-a", decision_ts=1_000)
+    expected += _decision_rows(market_id="market-a", decision_ts=2_000)
+
+    complete = _oof_prediction_coverage_reconciliation(expected, list(expected))
+    assert complete["oof_prediction_identity_reconciliation_passed"] is True
+
+    missing = _oof_prediction_coverage_reconciliation(expected, expected[:-1])
+    assert missing["oof_prediction_identity_reconciliation_passed"] is False
+    assert missing["missing_oof_prediction_identity_count"] == 1
+    assert "oof_prediction_identities_missing" in missing[
+        "oof_prediction_coverage_reason_codes"
+    ]
+    assert "oof_prediction_action_grid_incomplete" in missing[
+        "oof_prediction_coverage_reason_codes"
+    ]
+
+    duplicated = _oof_prediction_coverage_reconciliation(
+        expected,
+        [*expected, dict(expected[0])],
+    )
+    assert duplicated["oof_prediction_identity_reconciliation_passed"] is False
+    assert duplicated["duplicate_actual_oof_prediction_identity_count"] == 1
+    assert "actual_oof_prediction_identities_duplicated" in duplicated[
+        "oof_prediction_coverage_reason_codes"
+    ]
+
+    unexpected_rows = [dict(row) for row in expected]
+    unexpected_rows[0]["action_row_sha256"] = "f" * 64
+    unexpected = _oof_prediction_coverage_reconciliation(expected, unexpected_rows)
+    assert unexpected["oof_prediction_identity_reconciliation_passed"] is False
+    assert unexpected["missing_oof_prediction_identity_count"] == 1
+    assert unexpected["unexpected_oof_prediction_identity_count"] == 1
+    assert "oof_prediction_identities_unexpected" in unexpected[
+        "oof_prediction_coverage_reason_codes"
+    ]
 
 
 def test_pairwise_fit_requires_exact_frozen_195_market_role_contract() -> None:
