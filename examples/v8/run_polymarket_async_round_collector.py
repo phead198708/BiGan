@@ -291,7 +291,16 @@ def run_polymarket_async_round_collector_cli(
             with lock:
                 errors.append(
                     {
+                        "round_index": index,
+                        "run_id": run_id,
                         "run_dir": str(root / run_id),
+                        "scheduled_round_start_ts": int(
+                            scheduled_round_start_epoch_seconds * 1000
+                        ),
+                        "capture_thread_started_at_ts": int(
+                            capture_started_epoch_seconds * 1000
+                        ),
+                        "error_type": type(exc).__name__,
                         "error": str(exc),
                         "stage": "round_capture",
                     }
@@ -611,6 +620,12 @@ def run_polymarket_async_round_collector_cli(
     summary["settlement_finalizer_started"] = finalizer is not None
     summary["resolution_provider_called"] = finalizer is not None
     summary["training_corpus_export_attempted"] = finalizer is not None
+    summary["labels_or_outcomes_opened_during_collection"] = (
+        False if outcome_blind_collection_only else None
+    )
+    summary["settlement_pnl_opened_during_collection"] = (
+        False if outcome_blind_collection_only else None
+    )
     summary_path = batch_dir / "batch_summary.json"
     _write_json(summary_path, summary)
     summary["batch_summary_path"] = str(summary_path)
