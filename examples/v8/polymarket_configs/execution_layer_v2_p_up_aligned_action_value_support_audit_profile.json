@@ -1,0 +1,72 @@
+{
+  "schema_version": "bigan-v8-p-up-aligned-action-value-support-audit-profile-v1",
+  "audit_name": "p_up_aligned_execution_compatible_action_value_support",
+  "frozen": true,
+  "parent_issue_200_commit": "128f25fb45c88805228b5aec3491144777668348",
+  "parent_issue_200_manifest_sha256": "2544f2f38c56be4428e677375a7d098b3dfb4150fb9bbb0e57ff8b57521a28e7",
+  "parent_issue_198_candidate_manifest_sha256": "194065421bf9a6415a90abab51c4aecaa705d8738a7decd92e29e48a0980ada5",
+  "role_assignment_manifest_sha256": "517fa7cab370d75364cab9f37e45f7a8d1fc0ba8e36221b52367e725a002f470",
+  "role_assignment_rows_sha256": "5b123b094227996d982fa76a4e4d2ca1d38f6b3272f91c5be610bcfe65b27097",
+  "feature_contract_sha256": "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959",
+  "development_train_target_rows_sha256": "87043afcc52afd9f12e0108316f4c16c096da23a82d74d002995a74634802ac3",
+  "execution_guard_config_sha256": "28ce77dabb69bb6add37e821b205c0d7655484e674deabb3689e18bbce79b708",
+  "allowed_role": "development_train",
+  "expected_market_count": 90,
+  "expected_decision_group_count": 360,
+  "expected_action_row_count": 1800,
+  "required_actions": [
+    "BUY_UP_HOLD_TO_SETTLEMENT",
+    "BUY_DOWN_HOLD_TO_SETTLEMENT",
+    "BUY_UP_SELL_BEFORE_CLOSE",
+    "BUY_DOWN_SELL_BEFORE_CLOSE",
+    "NO_TRADE"
+  ],
+  "static_guard_probe": {
+    "runtime_state": "fresh_empty_valid_simulated_state_per_action",
+    "ranking_contract": "selected_action_ranked_first_with_fixed_margin_for_execution_compatibility_probe_only",
+    "ranking_score_used_as_model_evidence": false,
+    "guard_config_mutation_allowed": false,
+    "exposure_policy_mutation_allowed": false,
+    "sizing_mutation_allowed": false
+  },
+  "bootstrap": {
+    "unit": "market_id",
+    "resample_count": 2000,
+    "confidence_level": 0.95,
+    "seed": 21080721,
+    "prospective_target_power": 0.8,
+    "prospective_maximum_market_count": 100000
+  },
+  "access_sequence": {
+    "pre_label_audit_required": true,
+    "feature_only_universe_freeze_before_target_access_required": true,
+    "development_train_targets_may_be_opened_after_universe_freeze": true,
+    "development_calibration_files_may_be_opened": false,
+    "confirmatory_files_may_be_opened": false,
+    "issue_190_or_192_future_files_may_be_opened": false,
+    "future_accepted_bet_pnl_may_be_opened": false
+  },
+  "mutation_contract": {
+    "model_training_allowed": false,
+    "hyperparameter_search_allowed": false,
+    "threshold_search_allowed": false,
+    "bucket_change_allowed": false,
+    "cost_model_change_allowed": false,
+    "execution_guard_change_allowed": false,
+    "sizing_change_allowed": false,
+    "new_candidate_fit_allowed": false
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "paper_candidate_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}
