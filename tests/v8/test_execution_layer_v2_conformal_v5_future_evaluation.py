@@ -148,6 +148,28 @@ def test_negative_supported_side_fails_closed() -> None:
     assert "supported_side_post_cost_pnl_gate_failed" in report["future_gate_blocking_reason_codes"]
 
 
+def test_matched_baseline_is_evaluated_separately_on_the_same_market_window() -> None:
+    candidate_rows = _passing_rows()
+    baseline_rows = []
+    for row in candidate_rows:
+        baseline = copy.deepcopy(row)
+        baseline.pop("matched_baseline_net_pnl")
+        baseline["accepted_bet_net_pnl"] = 0.001
+        baseline_rows.append(baseline)
+    report = build_conformal_v5_side_only_future_pnl_gate(
+        candidate_rows,
+        matched_baseline_evaluation_rows=baseline_rows,
+        evaluation_market_ids=[f"market-{index:03d}" for index in range(100)],
+        profile=_profile(),
+        decision_freeze_sha256="c" * 64,
+    )
+    assert report["future_gate_passed"] is True
+    assert report["matched_baseline_evaluated_separately_on_same_frozen_window"] is True
+    assert report["matched_baseline_guard_accepted_bet_count"] == 88
+    assert report["comparison_market_count"] == 100
+    assert report["candidate_minus_matched_baseline_post_cost_net_pnl"] > 0.0
+
+
 def test_selected_window_rejects_wrong_collector_commit_before_prediction() -> None:
     profile = _profile()
     boundary = {

@@ -525,6 +525,10 @@ def bind_conformal_v5_future_window_before_prediction(
         "candidate_manifest": prereg["candidate_manifest"],
         "candidate_model": prereg["candidate_model"],
         "candidate_calibration_artifact": prereg["candidate_calibration_artifact"],
+        "candidate_fit_profile": prereg["candidate_fit_profile"],
+        "matched_baseline_manifest": prereg["matched_baseline_manifest"],
+        "matched_baseline_model": prereg["matched_baseline_model"],
+        "matched_baseline_fit_profile": prereg["matched_baseline_fit_profile"],
         "window_manifest": _descriptor(window_path),
         "collector_index": index_descriptor,
         "selected_rows": selected_descriptor,
@@ -558,6 +562,8 @@ def build_conformal_v5_side_only_future_pnl_gate(
     *,
     profile: dict[str, Any],
     decision_freeze_sha256: str,
+    matched_baseline_evaluation_rows: list[dict[str, Any]] | None = None,
+    evaluation_market_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Evaluate frozen accepted bets by side; action/family remain diagnostics."""
 
@@ -566,15 +572,39 @@ def build_conformal_v5_side_only_future_pnl_gate(
     gates = dict(profile["support_and_pnl_gates"])
     accepted = [row for row in evaluation_rows if row.get("execution_guard_order_allowed") is True]
     accepted_markets = sorted({str(row.get("market_id") or "") for row in accepted})
-    candidate_by_market = dict.fromkeys(accepted_markets, 0.0)
-    baseline_by_market = dict.fromkeys(accepted_markets, 0.0)
+    separate_baseline_rows = matched_baseline_evaluation_rows is not None
+    baseline_accepted = [
+        row
+        for row in matched_baseline_evaluation_rows or []
+        if row.get("execution_guard_order_allowed") is True
+    ]
+    comparison_market_ids = sorted(
+        set(evaluation_market_ids or [])
+        or {str(row.get("market_id") or "") for row in accepted + baseline_accepted}
+        or set(accepted_markets)
+    )
+    accepted_or_baseline_market_ids = {
+        str(row.get("market_id") or "") for row in accepted + baseline_accepted
+    }
+    if (
+        "" in comparison_market_ids
+        or "" in accepted_or_baseline_market_ids
+        or not accepted_or_baseline_market_ids.issubset(comparison_market_ids)
+    ):
+        raise ValueError("candidate/baseline evaluation market identity mismatch")
+    candidate_by_market = dict.fromkeys(comparison_market_ids, 0.0)
+    baseline_by_market = dict.fromkeys(comparison_market_ids, 0.0)
     for row in accepted:
         market_id = str(row.get("market_id") or "")
         candidate_by_market[market_id] += float(row["accepted_bet_net_pnl"])
-        baseline_by_market[market_id] += float(row["matched_baseline_net_pnl"])
+        if not separate_baseline_rows:
+            baseline_by_market[market_id] += float(row["matched_baseline_net_pnl"])
+    for row in baseline_accepted:
+        market_id = str(row.get("market_id") or "")
+        baseline_by_market[market_id] += float(row["accepted_bet_net_pnl"])
     delta_by_market = {
         market_id: candidate_by_market[market_id] - baseline_by_market[market_id]
-        for market_id in accepted_markets
+        for market_id in comparison_market_ids
     }
     bootstrap = _market_bootstrap_interval(
         list(delta_by_market.values()),
@@ -626,7 +656,7 @@ def build_conformal_v5_side_only_future_pnl_gate(
         and row.get("feature_causality_violation") is False
         and row.get("provenance_violation") is False
         and row.get("runtime_state_violation") is False
-        for row in accepted
+        for row in accepted + baseline_accepted
     )
     checks = {
         "minimum_guard_accepted_bet_support": len(accepted)
@@ -681,6 +711,9 @@ def build_conformal_v5_side_only_future_pnl_gate(
         "candidate_post_cost_net_pnl": candidate_pnl,
         "matched_baseline_post_cost_net_pnl": baseline_pnl,
         "candidate_minus_matched_baseline_post_cost_net_pnl": delta_pnl,
+        "matched_baseline_evaluated_separately_on_same_frozen_window": (separate_baseline_rows),
+        "matched_baseline_guard_accepted_bet_count": len(baseline_accepted),
+        "comparison_market_count": len(comparison_market_ids),
         "candidate_minus_baseline_market_bootstrap": bootstrap,
         "largest_winning_market_pnl": largest_winner,
         "largest_winner_removed_candidate_pnl": largest_winner_removed_pnl,
