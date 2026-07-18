@@ -80,12 +80,27 @@ def test_profile_freezes_195_source_markets_and_side_only_gate() -> None:
     assert gates["pnl_hard_gate_aggregation"] == "selected_side_buy_up_buy_down_only"
     assert gates["action_and_action_family_pnl_diagnostic_only"] is True
     assert gates["minimum_guard_accepted_unique_market_count"] == 88
+    baseline = profile["frozen_matched_market_baseline"]
+    assert baseline["candidate_name"] == "guard_compatible_direct_net_return_v4"
+    assert baseline["selection_method"] == ("guard_compatible_direct_predicted_net_return_argmax")
+    assert baseline["future_outcomes_used_to_select_baseline"] is False
 
 
 def test_profile_rejects_action_level_hard_gate() -> None:
     profile = _profile()
     profile["support_and_pnl_gates"]["action_and_action_family_pnl_diagnostic_only"] = False
     with pytest.raises(ValueError, match="side_only"):
+        validate_conformal_v5_future_evaluation_profile(profile)
+
+
+def test_profile_rejects_result_selected_or_unpinned_matched_baseline() -> None:
+    profile = _profile()
+    profile["frozen_matched_market_baseline"]["future_outcomes_used_to_select_baseline"] = True
+    profile["frozen_matched_market_baseline"]["model_sha256"] = "invalid"
+    with pytest.raises(
+        ValueError,
+        match="baseline_identity.*baseline_not_market_implied_or_result_selected",
+    ):
         validate_conformal_v5_future_evaluation_profile(profile)
 
 

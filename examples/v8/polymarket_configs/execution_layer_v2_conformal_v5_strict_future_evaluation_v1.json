@@ -30,6 +30,18 @@
     "result_dependent_extension_allowed": false,
     "labels_outcomes_or_pnl_opened_for_selection": false
   },
+  "frozen_matched_market_baseline": {
+    "candidate_name": "guard_compatible_direct_net_return_v4",
+    "candidate_manifest_sha256": "51e0e94b187159b6d77e0aaaf7b998cbf4d20f8ffa83bd5410064002b66a3d74",
+    "model_sha256": "9057c2bb46cbcde44d3de5acd768625665c5d584aac085b35439eeb7c0c06e1a",
+    "fit_profile_sha256": "ffb392b9620de0b6931b059e17dacc84d166d01f85b33994df1012ae54ff9fa1",
+    "selection_method": "guard_compatible_direct_predicted_net_return_argmax",
+    "minimum_selected_score_exclusive": 0.0,
+    "same_feature_grid_as_candidate": true,
+    "same_cost_sizing_guard_exposure_and_position_management": true,
+    "market_implied_probability_used_as_fair_value_ev": false,
+    "future_outcomes_used_to_select_baseline": false
+  },
   "prediction_and_settlement_sequence": {
     "candidate_binding_before_feature_materialization": true,
     "window_binding_before_feature_materialization": true,

@@ -71,6 +71,8 @@ class ConformalV5FuturePreRegistrationConfig:
     expected_evaluation_profile_sha256: str
     candidate_manifest_path: Path | str
     expected_candidate_manifest_sha256: str
+    baseline_manifest_path: Path | str
+    expected_baseline_manifest_sha256: str
     collector_protocol_path: Path | str
     expected_collector_protocol_sha256: str
     builder_git_commit: str
@@ -83,6 +85,7 @@ class ConformalV5FuturePreRegistrationConfig:
         for field in (
             "expected_evaluation_profile_sha256",
             "expected_candidate_manifest_sha256",
+            "expected_baseline_manifest_sha256",
             "expected_collector_protocol_sha256",
         ):
             _require_sha256(str(getattr(self, field)), name=field)
@@ -93,6 +96,7 @@ class ConformalV5FuturePreRegistrationConfig:
             "output_dir",
             "evaluation_profile_path",
             "candidate_manifest_path",
+            "baseline_manifest_path",
             "collector_protocol_path",
         ):
             object.__setattr__(self, field, Path(getattr(self, field)))
@@ -136,6 +140,7 @@ def validate_conformal_v5_future_evaluation_profile(profile: dict[str, Any]) -> 
 
     candidate = dict(profile.get("issue_203_candidate") or {})
     collection = dict(profile.get("issue_192_collection") or {})
+    baseline = dict(profile.get("frozen_matched_market_baseline") or {})
     sequence = dict(profile.get("prediction_and_settlement_sequence") or {})
     execution = dict(profile.get("frozen_execution") or {})
     gates = dict(profile.get("support_and_pnl_gates") or {})
@@ -174,6 +179,26 @@ def validate_conformal_v5_future_evaluation_profile(profile: dict[str, Any]) -> 
         == "earliest_quality_valid_strictly_later_disjoint_rows",
         "outcome_blind_selection": collection.get("result_dependent_extension_allowed") is False
         and collection.get("labels_outcomes_or_pnl_opened_for_selection") is False,
+        "baseline_identity": baseline.get("candidate_name")
+        == "guard_compatible_direct_net_return_v4"
+        and all(
+            _is_sha256(baseline.get(field))
+            for field in (
+                "candidate_manifest_sha256",
+                "model_sha256",
+                "fit_profile_sha256",
+            )
+        ),
+        "baseline_rule": baseline.get("selection_method")
+        == "guard_compatible_direct_predicted_net_return_argmax"
+        and float(baseline.get("minimum_selected_score_exclusive", -1.0)) == 0.0,
+        "baseline_matched_execution": baseline.get("same_feature_grid_as_candidate") is True
+        and baseline.get("same_cost_sizing_guard_exposure_and_position_management") is True,
+        "baseline_not_market_implied_or_result_selected": baseline.get(
+            "market_implied_probability_used_as_fair_value_ev"
+        )
+        is False
+        and baseline.get("future_outcomes_used_to_select_baseline") is False,
         "access_sequence": all(
             sequence.get(field) is True
             for field in (
@@ -220,16 +245,38 @@ def pre_register_conformal_v5_future_evaluation(
 
     profile_path = config.evaluation_profile_path.resolve()
     candidate_path = config.candidate_manifest_path.resolve()
+    baseline_path = config.baseline_manifest_path.resolve()
     collector_path = config.collector_protocol_path.resolve()
     _verify_pin(profile_path, config.expected_evaluation_profile_sha256, "evaluation profile")
     _verify_pin(candidate_path, config.expected_candidate_manifest_sha256, "candidate manifest")
+    _verify_pin(baseline_path, config.expected_baseline_manifest_sha256, "baseline manifest")
     _verify_pin(collector_path, config.expected_collector_protocol_sha256, "collector protocol")
     profile = _load_json(profile_path)
     validate_conformal_v5_future_evaluation_profile(profile)
+    if (
+        config.expected_candidate_manifest_sha256
+        != profile["issue_203_candidate"]["candidate_manifest_sha256"]
+    ):
+        raise ValueError("candidate manifest pin does not match evaluation profile")
+    if (
+        config.expected_baseline_manifest_sha256
+        != profile["frozen_matched_market_baseline"]["candidate_manifest_sha256"]
+    ):
+        raise ValueError("baseline manifest pin does not match evaluation profile")
+    if (
+        config.expected_collector_protocol_sha256
+        != profile["issue_192_collection"]["collector_protocol_sha256"]
+    ):
+        raise ValueError("collector protocol pin does not match evaluation profile")
     collector = _load_json(collector_path)
     validate_persistent_outcome_blind_collector_protocol(collector)
     candidate = _load_json(candidate_path)
     lineage = _validate_candidate_lineage(candidate, profile=profile)
+    baseline_lineage = _validate_baseline_lineage(
+        _load_json(baseline_path),
+        profile=profile,
+        candidate_fit_profile=lineage["fit_profile"],
+    )
     if collector.get("labels_outcomes_or_pnl_opened") is not False:
         raise ValueError("collector protocol outcome sealing is invalid")
 
@@ -244,6 +291,7 @@ def pre_register_conformal_v5_future_evaluation(
         "run_id": config.run_id,
         "preregistration_created_ts": config.preregistration_created_ts,
         "candidate_manifest": _descriptor(candidate_path),
+        "matched_baseline_manifest": _descriptor(baseline_path),
         "evaluation_profile": _descriptor(profile_path),
         "collector_protocol": _descriptor(collector_path),
         "candidate_lineage_hashes_verified": True,
@@ -301,6 +349,9 @@ def pre_register_conformal_v5_future_evaluation(
         "builder_git_commit": config.builder_git_commit,
         "preregistration_created_ts": config.preregistration_created_ts,
         "candidate_name": CANDIDATE_NAME,
+        "matched_baseline_candidate_name": profile["frozen_matched_market_baseline"][
+            "candidate_name"
+        ],
         "candidate_freeze_created_ts": candidate_freeze_ts,
         "minimum_collection_decision_ts": minimum_collection_ts,
         "max_prior_decision_ts": max_prior_decision_ts,
@@ -346,6 +397,9 @@ def pre_register_conformal_v5_future_evaluation(
         "candidate_future_protocol": lineage["future_protocol"],
         "role_assignment_manifest": lineage["role_assignment_manifest"],
         "role_assignment_rows": lineage["role_assignment_rows"],
+        "matched_baseline_manifest": _descriptor(baseline_path),
+        "matched_baseline_model": baseline_lineage["model"],
+        "matched_baseline_fit_profile": baseline_lineage["fit_profile"],
         "collector_protocol": _descriptor(collector_path),
         "source_boundary_manifest": _descriptor(boundary_path),
         "pre_label_access_audit": _descriptor(prelabel_path),
@@ -744,6 +798,86 @@ def _validate_candidate_lineage(
         raise ValueError("role assignment rows hash mismatch")
     descriptors["role_assignment_rows"] = rows
     return descriptors
+
+
+def _validate_baseline_lineage(
+    baseline: dict[str, Any],
+    *,
+    profile: dict[str, Any],
+    candidate_fit_profile: dict[str, str],
+) -> dict[str, dict[str, str]]:
+    expected = dict(profile["frozen_matched_market_baseline"])
+    checks = {
+        "candidate_name": baseline.get("candidate_name") == expected["candidate_name"],
+        "research_candidate_frozen": baseline.get("research_candidate_frozen") is True,
+        "development_gate_passed": baseline.get("development_gate_passed") is True,
+        "future_evaluation_allowed": baseline.get("candidate_specific_future_evaluation_allowed")
+        is True,
+        "strictly_later_required": baseline.get("strictly_later_persistent_window_required")
+        is True,
+        "no_result_driven_changes": baseline.get("result_driven_rerun_or_parameter_change_allowed")
+        is False,
+        "no_current_or_future_tuning": baseline.get(
+            "current_oof_validation_or_future_pnl_used_for_tuning"
+        )
+        is False,
+        "no_future_files_opened": baseline.get("issue_190_or_192_future_files_opened") is False,
+        "guard_unchanged": baseline.get("guard_cost_threshold_sizing_or_exposure_mutated") is False,
+        "safety": all(
+            baseline.get(field) == value for field, value in _blocked_safety_fields().items()
+        ),
+    }
+    blockers = [name for name, passed in checks.items() if not passed]
+    if blockers:
+        raise ValueError("matched baseline lineage validation failed: " + ", ".join(blockers))
+
+    model = _verified_descriptor(baseline["model"], "matched baseline model")
+    fit_profile = _verified_descriptor(baseline["fit_profile"], "matched baseline fit profile")
+    if model["sha256"] != expected["model_sha256"]:
+        raise ValueError("matched baseline model hash mismatch")
+    if fit_profile["sha256"] != expected["fit_profile_sha256"]:
+        raise ValueError("matched baseline fit profile hash mismatch")
+
+    fit_payload = _load_json(Path(fit_profile["path"]))
+    candidate_fit = _load_json(Path(candidate_fit_profile["path"]))
+    decision_rule = dict(fit_payload.get("decision_rule") or {})
+    development_gate = dict(fit_payload.get("development_gate") or {})
+    fit_checks = {
+        "candidate_name": fit_payload.get("candidate_name") == expected["candidate_name"],
+        "frozen": fit_payload.get("frozen") is True,
+        "five_action_grid": fit_payload.get("required_actions") == list(EXPECTED_ACTIONS),
+        "selection_method": decision_rule.get("method")
+        == "guard_compatible_mask_before_direct_net_return_argmax",
+        "minimum_score": float(
+            decision_rule.get("minimum_selected_predicted_net_return_exclusive", -1.0)
+        )
+        == float(expected["minimum_selected_score_exclusive"]),
+        "side_only_gate": development_gate.get("pnl_hard_gate_aggregation")
+        == "selected_side_buy_up_buy_down_only",
+        "action_family_diagnostic": development_gate.get(
+            "action_and_action_family_pnl_diagnostic_only"
+        )
+        is True,
+        "market_implied_not_fair_value": expected.get(
+            "market_implied_probability_used_as_fair_value_ev"
+        )
+        is False,
+    }
+    fit_checks["execution_guard_hash_matches_candidate"] = fit_payload.get(
+        "execution_guard_config_sha256"
+    ) == candidate_fit.get("execution_guard_config_sha256")
+    fit_checks["feature_contract_matches_candidate"] = fit_payload.get(
+        "feature_contract_sha256"
+    ) == candidate_fit.get("feature_contract_sha256")
+    fit_checks["role_assignment_matches_candidate"] = fit_payload.get(
+        "role_assignment_manifest_sha256"
+    ) == candidate_fit.get("role_assignment_manifest_sha256") and fit_payload.get(
+        "role_assignment_rows_sha256"
+    ) == candidate_fit.get("role_assignment_rows_sha256")
+    fit_blockers = [name for name, passed in fit_checks.items() if not passed]
+    if fit_blockers:
+        raise ValueError("matched baseline fit profile invalid: " + ", ".join(fit_blockers))
+    return {"model": model, "fit_profile": fit_profile}
 
 
 def _validate_prior_role_rows(rows: list[dict[str, Any]], *, profile: dict[str, Any]) -> None:
