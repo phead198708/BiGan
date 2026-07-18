@@ -9,6 +9,7 @@ import pytest
 
 from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_evaluation import (
     _candidate_fit_profile_from_preregistered_lineage,
+    _minimum_future_collection_ts,
     _selected_window_blockers,
     _window_binding_blockers,
     build_conformal_v5_side_only_future_pnl_gate,
@@ -90,6 +91,17 @@ def test_profile_freezes_195_source_markets_and_side_only_gate() -> None:
     assert baseline["candidate_name"] == "guard_compatible_direct_net_return_v4"
     assert baseline["selection_method"] == ("guard_compatible_direct_predicted_net_return_argmax")
     assert baseline["future_outcomes_used_to_select_baseline"] is False
+
+
+def test_future_collection_starts_after_latest_preregistration_amendment() -> None:
+    assert (
+        _minimum_future_collection_ts(
+            max_prior_decision_ts=1_000,
+            candidate_freeze_ts=2_000,
+            preregistration_created_ts=3_000,
+        )
+        == 3_001
+    )
 
 
 def test_missing_redundant_prereg_fit_profile_uses_pinned_candidate_lineage(

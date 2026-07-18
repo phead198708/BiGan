@@ -321,12 +321,18 @@ def pre_register_conformal_v5_future_evaluation(
     prior_source_row_hashes = sorted(canonical_json_sha256(row) for row in role_rows)
     max_prior_decision_ts = max(int(row["maximum_decision_ts"]) for row in role_rows)
     candidate_freeze_ts = int(profile["issue_203_candidate"]["candidate_freeze_created_ts"])
-    minimum_collection_ts = max(max_prior_decision_ts + 1, candidate_freeze_ts + 1)
+    minimum_collection_ts = _minimum_future_collection_ts(
+        max_prior_decision_ts=max_prior_decision_ts,
+        candidate_freeze_ts=candidate_freeze_ts,
+        preregistration_created_ts=config.preregistration_created_ts,
+    )
     source_boundary = {
         "schema_version": SOURCE_BOUNDARY_SCHEMA_VERSION,
         "minimum_collection_decision_ts": minimum_collection_ts,
         "max_prior_decision_ts": max_prior_decision_ts,
         "candidate_freeze_created_ts": candidate_freeze_ts,
+        "preregistration_created_ts": config.preregistration_created_ts,
+        "collection_must_start_after_preregistration": True,
         "prior_market_ids": prior_market_ids,
         "prior_slugs": prior_slugs,
         "prior_source_row_hashes": prior_source_row_hashes,
@@ -353,6 +359,7 @@ def pre_register_conformal_v5_future_evaluation(
             "candidate_name"
         ],
         "candidate_freeze_created_ts": candidate_freeze_ts,
+        "collection_must_start_after_preregistration": True,
         "minimum_collection_decision_ts": minimum_collection_ts,
         "max_prior_decision_ts": max_prior_decision_ts,
         "prior_market_count": len(prior_market_ids),
@@ -406,6 +413,7 @@ def pre_register_conformal_v5_future_evaluation(
         "pre_label_access_audit": _descriptor(prelabel_path),
         "report": _descriptor(report_path),
         "candidate_freeze_created_ts": candidate_freeze_ts,
+        "collection_must_start_after_preregistration": True,
         "minimum_collection_decision_ts": minimum_collection_ts,
         "prior_market_count": len(prior_market_ids),
         "target_quality_valid_market_count": 220,
@@ -433,6 +441,19 @@ def pre_register_conformal_v5_future_evaluation(
         "manifest_path": manifest_path,
         "manifest_sha256": _sha256_file(manifest_path),
     }
+
+
+def _minimum_future_collection_ts(
+    *,
+    max_prior_decision_ts: int,
+    candidate_freeze_ts: int,
+    preregistration_created_ts: int,
+) -> int:
+    return max(
+        max_prior_decision_ts,
+        candidate_freeze_ts,
+        preregistration_created_ts,
+    ) + 1
 
 
 def bind_conformal_v5_future_window_before_prediction(

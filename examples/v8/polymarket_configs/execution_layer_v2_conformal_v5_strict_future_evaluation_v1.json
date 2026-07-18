@@ -20,7 +20,7 @@
     "source_market_count": 195
   },
   "issue_192_collection": {
-    "collector_commit": "0aa45da27b2eea0460caba04badccb346f35bfa5",
+    "collector_commit": "26c92d133c928d4570afe0db4df518da4d68e39c",
     "collector_protocol_sha256": "2343f8247b2c1441e694b2975bccec7ae2448db5e5a5c916c3a02def49d44843",
     "eligible_collection": "issue_192_strictly_later_persistent_window_only",
     "issue_190_collection_eligible": false,
