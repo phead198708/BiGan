@@ -25,6 +25,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_evaluat
     FORBIDDEN_TARGET_FIELDS,
     PREREG_MANIFEST_SCHEMA_VERSION,
     _blocked_safety_fields,
+    _candidate_fit_profile_from_preregistered_lineage,
     _descriptor,
     _find_nonempty_fields,
     _is_git_sha,
@@ -157,7 +158,6 @@ def freeze_conformal_v5_future_predictions(
         "candidate_manifest",
         "candidate_model",
         "candidate_calibration_artifact",
-        "candidate_fit_profile",
         "matched_baseline_manifest",
         "matched_baseline_model",
         "matched_baseline_fit_profile",
@@ -167,6 +167,12 @@ def freeze_conformal_v5_future_predictions(
     profile_descriptor = _verified_descriptor(prereg["evaluation_profile"], "evaluation profile")
     profile = _load_json(Path(profile_descriptor["path"]))
     validate_conformal_v5_future_evaluation_profile(profile)
+    expected_candidate_fit_profile = _candidate_fit_profile_from_preregistered_lineage(
+        prereg,
+        profile=profile,
+    )
+    if binding.get("candidate_fit_profile") != expected_candidate_fit_profile:
+        raise ValueError("binding/preregistered candidate fit profile lineage mismatch")
 
     feature_contract = _load_json(feature_contract_path)
     validate_pairwise_action_advantage_lcb_feature_contract(

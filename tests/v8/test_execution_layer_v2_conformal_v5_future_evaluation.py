@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
 from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_evaluation import (
+    _candidate_fit_profile_from_preregistered_lineage,
     _selected_window_blockers,
     build_conformal_v5_side_only_future_pnl_gate,
     validate_conformal_v5_future_evaluation_profile,
@@ -84,6 +86,39 @@ def test_profile_freezes_195_source_markets_and_side_only_gate() -> None:
     assert baseline["candidate_name"] == "guard_compatible_direct_net_return_v4"
     assert baseline["selection_method"] == ("guard_compatible_direct_predicted_net_return_argmax")
     assert baseline["future_outcomes_used_to_select_baseline"] is False
+
+
+def test_missing_redundant_prereg_fit_profile_uses_pinned_candidate_lineage(
+    tmp_path: Path,
+) -> None:
+    fit_path = tmp_path / "fit-profile.json"
+    fit_path.write_text("{}\n", encoding="utf-8")
+    fit_descriptor = {
+        "path": str(fit_path),
+        "sha256": hashlib.sha256(fit_path.read_bytes()).hexdigest(),
+    }
+    candidate_path = tmp_path / "candidate.json"
+    candidate_path.write_text(
+        json.dumps({"fit_profile": fit_descriptor}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    prereg = {
+        "candidate_manifest": {
+            "path": str(candidate_path),
+            "sha256": hashlib.sha256(candidate_path.read_bytes()).hexdigest(),
+        }
+    }
+    profile = _profile()
+    profile["issue_203_candidate"]["fit_profile_sha256"] = fit_descriptor["sha256"]
+
+    resolved = _candidate_fit_profile_from_preregistered_lineage(prereg, profile=profile)
+
+    assert resolved == fit_descriptor
+    assert "candidate_fit_profile" not in prereg
+
+    prereg["candidate_fit_profile"] = {"path": "wrong", "sha256": "0" * 64}
+    with pytest.raises(ValueError, match="ambiguous preregistered"):
+        _candidate_fit_profile_from_preregistered_lineage(prereg, profile=profile)
 
 
 def test_profile_rejects_action_level_hard_gate() -> None:

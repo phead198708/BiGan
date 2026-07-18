@@ -393,6 +393,7 @@ def pre_register_conformal_v5_future_evaluation(
         "evaluation_profile": _descriptor(profile_path),
         "candidate_manifest": _descriptor(candidate_path),
         "candidate_model": lineage["model"],
+        "candidate_fit_profile": lineage["fit_profile"],
         "candidate_calibration_artifact": lineage["calibration_artifact"],
         "candidate_future_protocol": lineage["future_protocol"],
         "role_assignment_manifest": lineage["role_assignment_manifest"],
@@ -451,6 +452,10 @@ def bind_conformal_v5_future_window_before_prediction(
     profile_path = Path(_verified_descriptor(prereg["evaluation_profile"], "profile")["path"])
     profile = _load_json(profile_path)
     validate_conformal_v5_future_evaluation_profile(profile)
+    candidate_fit_profile = _candidate_fit_profile_from_preregistered_lineage(
+        prereg,
+        profile=profile,
+    )
     boundary_path = Path(
         _verified_descriptor(prereg["source_boundary_manifest"], "source boundary")["path"]
     )
@@ -525,7 +530,7 @@ def bind_conformal_v5_future_window_before_prediction(
         "candidate_manifest": prereg["candidate_manifest"],
         "candidate_model": prereg["candidate_model"],
         "candidate_calibration_artifact": prereg["candidate_calibration_artifact"],
-        "candidate_fit_profile": prereg["candidate_fit_profile"],
+        "candidate_fit_profile": candidate_fit_profile,
         "matched_baseline_manifest": prereg["matched_baseline_manifest"],
         "matched_baseline_model": prereg["matched_baseline_model"],
         "matched_baseline_fit_profile": prereg["matched_baseline_fit_profile"],
@@ -555,6 +560,27 @@ def bind_conformal_v5_future_window_before_prediction(
         "manifest_path": manifest_path,
         "manifest_sha256": _sha256_file(manifest_path),
     }
+
+
+def _candidate_fit_profile_from_preregistered_lineage(
+    prereg: dict[str, Any],
+    *,
+    profile: dict[str, Any],
+) -> dict[str, str]:
+    candidate_descriptor = _verified_descriptor(
+        prereg["candidate_manifest"], "preregistered candidate manifest"
+    )
+    candidate = _load_json(Path(candidate_descriptor["path"]))
+    fit_profile = _verified_descriptor(
+        candidate["fit_profile"], "preregistered candidate fit profile"
+    )
+    expected_sha256 = str(profile["issue_203_candidate"]["fit_profile_sha256"])
+    if fit_profile["sha256"] != expected_sha256:
+        raise ValueError("preregistered candidate fit profile hash mismatch")
+    explicit = prereg.get("candidate_fit_profile")
+    if explicit is not None and explicit != fit_profile:
+        raise ValueError("ambiguous preregistered candidate fit profile lineage")
+    return fit_profile
 
 
 def build_conformal_v5_side_only_future_pnl_gate(
