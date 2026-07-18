@@ -181,6 +181,12 @@ def test_batch_summary_reports_chainlink_freshness_watchdog_without_double_count
     assert summary["chainlink_covered_capture_count"] == 2
     assert summary["chainlink_fresh_capture_count"] == 2
     assert summary["chainlink_rtds_stale_reconnect_count"] == 2
+    assert summary["paper_only"] is True
+    assert summary["capital_at_risk"] is False
+    assert summary["polymarket_write_enabled"] is False
+    assert summary["wallet_signing_enabled"] is False
+    assert summary["live_exchange_write_enabled"] is False
+    assert summary["broker_exchange_write_enabled"] is False
 
 
 def test_batch_summary_aggregates_market_identity_cache_evidence() -> None:

@@ -1085,6 +1085,10 @@ def _summary(
         "batch_id": batch_id,
         "paper_only": True,
         "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "live_exchange_write_enabled": False,
+        "broker_exchange_write_enabled": False,
         "capture_count": len(captures),
         "capture_pending_resolution_count": sum(
             1 for item in captures if item.get("pending_resolution") is True

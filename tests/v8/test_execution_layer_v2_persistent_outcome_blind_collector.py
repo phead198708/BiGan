@@ -17,6 +17,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_persistent_outcome_blind_co
     validate_persistent_outcome_blind_collector_protocol,
 )
 from examples.v8 import run_execution_layer_v2_persistent_outcome_blind_collector as service_module
+from examples.v8.run_polymarket_async_round_collector import _summary as _collector_batch_summary
 from examples.v8.write_execution_layer_v2_persistent_outcome_blind_launchd_plist import (
     write_launchd_plist,
 )
@@ -56,6 +57,35 @@ def test_protocol_is_outcome_blind_and_raw_is_not_direct_training_corpus() -> No
         "source_row_hash",
     ]
     _assert_safety(protocol)
+
+
+def test_real_collector_batch_summary_contract_indexes_without_safety_schema_gap(
+    tmp_path: Path,
+) -> None:
+    capture = _capture_fixture(tmp_path, boundary=2_000, market_id="market-2")
+    summary = _collector_batch_summary("batch-real-shape", [capture], [], [])
+    summary.update(
+        {
+            "outcome_blind_collection_only": True,
+            "settlement_finalizer_started": False,
+            "resolution_provider_called": False,
+            "training_corpus_export_attempted": False,
+            "labels_or_outcomes_opened_during_collection": False,
+            "settlement_pnl_opened_during_collection": False,
+        }
+    )
+    batch_path = tmp_path / "batch-real-shape-summary.json"
+    batch_path.write_text(json.dumps(summary, sort_keys=True), encoding="utf-8")
+
+    result = _index_batch(
+        tmp_path,
+        run_id="index-real-shape",
+        index_path=tmp_path / "state" / "index.jsonl",
+        batch_path=batch_path,
+    )
+
+    assert result["report"]["batch_capture_count"] == 1
+    assert result["report"]["quality_valid_index_entry_count"] == 1
 
 
 def test_index_is_hash_chained_idempotent_and_retains_failed_attempts(
