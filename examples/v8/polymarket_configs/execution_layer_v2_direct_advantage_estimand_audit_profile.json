@@ -1,0 +1,87 @@
+{
+  "schema_version": "bigan-v8-direct-advantage-estimand-audit-profile-v1",
+  "audit_name": "direct_advantage_v2_oracle_comparator_and_support_capacity",
+  "frozen": true,
+  "parent_issue": 198,
+  "parent_commit": "f1b91465e468bbe200edc97586c3ec61d864c9de",
+  "parent_protocol_sha256": "7043c58deb6e844da248c5aa25d72039111d94f66003fce1a4c9aa5225ad0fff",
+  "parent_fit_profile_sha256": "871f79dc6359dabef8a5c5e2e1c58227b5a34781baad0413a7f84f72452a97b3",
+  "source_calibration_artifact_sha256": "e228e269c517295713cb96f90b97eeafcfcea3cdac3ebf244f945c278b36fcab",
+  "source_internal_oof_predictions_sha256": "fc0902adecaf955e3e58c24b0d2fd0f83ef94573a1b65dae94956903e450c402",
+  "source_training_report_sha256": "e069f8ae064d2134772e0364d696ad94962551fc2d001e5abcc986469503ccb9",
+  "source_pre_label_audit_sha256": "b8ce5e5ed69066144044c431f07f4428d992536f02d43b7aedc020e0ae30f9ed",
+  "allowed_role": "development_train",
+  "expected_oof_market_count": 75,
+  "expected_decision_group_count": 300,
+  "expected_action_row_count": 1500,
+  "required_actions": [
+    "BUY_UP_HOLD_TO_SETTLEMENT",
+    "BUY_DOWN_HOLD_TO_SETTLEMENT",
+    "BUY_UP_SELL_BEFORE_CLOSE",
+    "BUY_DOWN_SELL_BEFORE_CLOSE",
+    "NO_TRADE"
+  ],
+  "estimand_gate_order": [
+    "absolute_post_cost_net_return",
+    "advantage_vs_no_trade",
+    "advantage_vs_best_alternative"
+  ],
+  "estimand_thresholds": {
+    "absolute_post_cost_net_return": 0.0,
+    "advantage_vs_no_trade": 0.0,
+    "advantage_vs_best_alternative": 0.0
+  },
+  "strict_comparison_estimands": [
+    "advantage_vs_no_trade",
+    "advantage_vs_best_alternative"
+  ],
+  "bootstrap": {
+    "unit": "market_id",
+    "resample_count": 2000,
+    "confidence_level": 0.95,
+    "seed": 20980719
+  },
+  "prospective_power": {
+    "method": "normal_approximation_from_development_market_means",
+    "target_power": 0.8,
+    "maximum_reported_market_count": 100000,
+    "used_for_threshold_or_model_tuning": false
+  },
+  "selector_contract": {
+    "raw_selector": "frozen_pairwise_group_normalized_rank_score_argmax",
+    "strict_selector": "frozen_all_three_direct_lcb_checks_then_argmax",
+    "two_safety_estimand_selector_diagnostic_only": true,
+    "selector_or_score_mutation_allowed": false
+  },
+  "evidence_scope": {
+    "development_train_targets_may_be_opened_after_pre_label_audit": true,
+    "development_calibration_files_may_be_opened": false,
+    "confirmatory_files_may_be_opened": false,
+    "issue_189_oof_or_validation_files_may_be_opened": false,
+    "issue_190_or_192_future_labels_may_be_opened": false,
+    "accepted_bet_pnl_may_be_opened": false,
+    "future_window_may_be_consumed": false
+  },
+  "mutation_contract": {
+    "hyperparameter_search_enabled": false,
+    "threshold_mutation_allowed": false,
+    "bucket_mutation_allowed": false,
+    "cost_model_mutation_allowed": false,
+    "execution_guard_mutation_allowed": false,
+    "sizing_mutation_allowed": false,
+    "new_candidate_fit_allowed": false
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "paper_candidate_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}
