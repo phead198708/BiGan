@@ -10,8 +10,12 @@ import pytest
 from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_evaluation import (
     _candidate_fit_profile_from_preregistered_lineage,
     _selected_window_blockers,
+    _window_binding_blockers,
     build_conformal_v5_side_only_future_pnl_gate,
     validate_conformal_v5_future_evaluation_profile,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_persistent_outcome_blind_collector import (
+    WINDOW_MANIFEST_SCHEMA_VERSION,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -126,6 +130,46 @@ def test_profile_rejects_action_level_hard_gate() -> None:
     profile["support_and_pnl_gates"]["action_and_action_family_pnl_diagnostic_only"] = False
     with pytest.raises(ValueError, match="side_only"):
         validate_conformal_v5_future_evaluation_profile(profile)
+
+
+def test_window_binding_requires_immutable_collector_index_snapshot() -> None:
+    profile = _profile()
+    boundary_descriptor = {"path": "/frozen/boundary.json", "sha256": "a" * 64}
+    prereg = {"source_boundary_manifest": boundary_descriptor}
+    boundary = {"minimum_collection_decision_ts": 2_000}
+    window = {
+        "schema_version": WINDOW_MANIFEST_SCHEMA_VERSION,
+        "window_freeze_ready": True,
+        "labels_outcomes_or_pnl_opened_for_selection": False,
+        "target_valid_market_count": 220,
+        "maximum_scan_count": 340,
+        "selected_market_count": 220,
+        "selected_window_start_ts": 2_000,
+        "source_boundary_manifest": boundary_descriptor,
+        "protocol": {"sha256": profile["issue_192_collection"]["collector_protocol_sha256"]},
+        "blocking_reason_codes": [],
+        **profile["safety"],
+    }
+
+    blockers = _window_binding_blockers(
+        prereg=prereg,
+        profile=profile,
+        boundary=boundary,
+        window=window,
+    )
+    assert "window_collector_index_snapshot_not_immutable" in blockers
+
+    window["collector_index_snapshot_immutable"] = True
+    window["window_selection_used_immutable_index_snapshot"] = True
+    assert (
+        _window_binding_blockers(
+            prereg=prereg,
+            profile=profile,
+            boundary=boundary,
+            window=window,
+        )
+        == []
+    )
 
 
 def test_profile_rejects_result_selected_or_unpinned_matched_baseline() -> None:

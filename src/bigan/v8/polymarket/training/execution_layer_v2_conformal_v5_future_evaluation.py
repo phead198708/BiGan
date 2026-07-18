@@ -971,6 +971,11 @@ def _window_binding_blockers(
         blockers.append("window_freeze_not_ready")
     if window.get("labels_outcomes_or_pnl_opened_for_selection") is not False:
         blockers.append("window_selection_outcome_sealing_invalid")
+    if (
+        window.get("collector_index_snapshot_immutable") is not True
+        or window.get("window_selection_used_immutable_index_snapshot") is not True
+    ):
+        blockers.append("window_collector_index_snapshot_not_immutable")
     if window.get("target_valid_market_count") != collection["target_quality_valid_market_count"]:
         blockers.append("window_target_count_mismatch")
     if window.get("maximum_scan_count") != collection["maximum_index_scan_count"]:

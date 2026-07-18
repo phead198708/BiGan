@@ -34,8 +34,8 @@ INDEX_ENTRY_SCHEMA_VERSION = "bigan-v8-persistent-outcome-blind-round-index-entr
 BATCH_REPORT_SCHEMA_VERSION = "bigan-v8-persistent-outcome-blind-batch-report-v1"
 BATCH_MANIFEST_SCHEMA_VERSION = "bigan-v8-persistent-outcome-blind-batch-manifest-v1"
 STATE_SCHEMA_VERSION = "bigan-v8-persistent-outcome-blind-collector-state-v1"
-WINDOW_REPORT_SCHEMA_VERSION = "bigan-v8-outcome-blind-window-freeze-report-v1"
-WINDOW_MANIFEST_SCHEMA_VERSION = "bigan-v8-outcome-blind-window-freeze-manifest-v1"
+WINDOW_REPORT_SCHEMA_VERSION = "bigan-v8-outcome-blind-window-freeze-report-v2"
+WINDOW_MANIFEST_SCHEMA_VERSION = "bigan-v8-outcome-blind-window-freeze-manifest-v2"
 SOURCE_BOUNDARY_SCHEMA_VERSION = "bigan-v8-outcome-blind-source-boundary-v1"
 ZERO_SHA256 = "0" * 64
 FORBIDDEN_RAW_FIELDS = {
@@ -467,13 +467,19 @@ def freeze_outcome_blind_window(
     )
     protocol = _load_json(protocol_path)
     validate_persistent_outcome_blind_collector_protocol(protocol)
-    rows = load_and_validate_persistent_outcome_blind_index(index_path)
     boundary = _load_json(boundary_path)
     _validate_source_boundary_manifest(
         boundary,
         path=boundary_path,
         expected_sha256=config.expected_source_boundary_manifest_sha256,
     )
+    run_dir = config.output_dir / config.run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+    index_snapshot_path = run_dir / "persistent_outcome_blind_round_index_snapshot.jsonl"
+    index_snapshot_path.write_bytes(index_path.read_bytes())
+    if _sha256_file(index_snapshot_path) != config.expected_index_sha256:
+        raise ValueError("collector index changed while immutable snapshot was created")
+    rows = load_and_validate_persistent_outcome_blind_index(index_snapshot_path)
     minimum_ts, prior_market_ids, prior_slugs, prior_row_hashes = _boundary_references(boundary)
     ordered_after_boundary = [
         row for row in rows if int(row.get("scheduled_round_start_ts") or 0) >= minimum_ts
@@ -542,8 +548,6 @@ def freeze_outcome_blind_window(
             "prior_source_row_hashes": sorted(prior_row_hashes),
         }
     )
-    run_dir = config.output_dir / config.run_id
-    run_dir.mkdir(parents=True, exist_ok=False)
     selected_path = run_dir / "outcome_blind_window_selected_rows.jsonl"
     _write_jsonl(selected_path, selected)
     report = {
@@ -564,6 +568,9 @@ def freeze_outcome_blind_window(
         "selected_window_start_ts": selected_start_ts,
         "selected_window_end_ts": selected_end_ts,
         "prior_reference_hash": prior_reference_hash,
+        "collector_index_snapshot_sha256": _sha256_file(index_snapshot_path),
+        "collector_index_snapshot_immutable": True,
+        "window_selection_used_immutable_index_snapshot": True,
         "selected_market_ids_sha256": canonical_json_sha256(
             [str(row["market_id"]) for row in selected]
         ),
@@ -591,7 +598,11 @@ def freeze_outcome_blind_window(
         "builder_git_commit": config.builder_git_commit,
         "source_boundary_schema_version": boundary["schema_version"],
         "protocol": _descriptor(protocol_path),
-        "index": _descriptor(index_path),
+        "index": _descriptor(index_snapshot_path),
+        "source_index_pin_at_freeze": {
+            "path": str(index_path),
+            "sha256": config.expected_index_sha256,
+        },
         "source_boundary_manifest": _descriptor(boundary_path),
         "selected_rows": _descriptor(selected_path),
         "report": _descriptor(report_path),
@@ -601,6 +612,8 @@ def freeze_outcome_blind_window(
         "selected_window_start_ts": selected_start_ts,
         "selected_window_end_ts": selected_end_ts,
         "prior_reference_hash": prior_reference_hash,
+        "collector_index_snapshot_immutable": True,
+        "window_selection_used_immutable_index_snapshot": True,
         "window_freeze_ready": ready,
         "labels_outcomes_or_pnl_opened_for_selection": False,
         "blocking_reason_codes": blockers,
@@ -612,6 +625,8 @@ def freeze_outcome_blind_window(
     return {
         "run_dir": run_dir,
         "selected_rows_path": selected_path,
+        "index_snapshot_path": index_snapshot_path,
+        "index_snapshot_sha256": _sha256_file(index_snapshot_path),
         "report_path": report_path,
         "report_sha256": _sha256_file(report_path),
         "manifest_path": manifest_path,
@@ -1118,6 +1133,7 @@ def _window_markdown(report: dict[str, Any]) -> str:
             f"- selected / target: `{report['selected_market_count']}/{report['target_valid_market_count']}`",
             f"- scanned / cap: `{report['scanned_entry_count']}/{report['maximum_scan_count']}`",
             f"- minimum decision timestamp: `{report['minimum_collection_decision_ts']}`",
+            "- immutable collector-index snapshot: `true`",
             f"- blockers: `{report['blocking_reason_codes']}`",
             "- labels/outcomes/PnL opened for selection: `false`",
             "- paper/live/handoff unlock: `false`",
