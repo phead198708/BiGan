@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -697,20 +698,46 @@ def validate_pairwise_future_unseen_holdout_pre_registration_manifest(
             )
         except (TypeError, ValueError) as exc:
             blockers.append(f"future_holdout_{field}_descriptor_invalid:{exc}")
+    frozen_config_lineage_audit: dict[str, Any] = {}
     candidate_descriptor = descriptors.get("candidate_protocol")
-    if candidate_descriptor is not None and (
-        Path(candidate_descriptor["path"]).resolve()
-        != expected_candidate_protocol_path.resolve()
-        or candidate_descriptor["sha256"] != expected_candidate_protocol_sha256.lower()
-    ):
-        blockers.append("future_holdout_candidate_protocol_lineage_mismatch")
+    if candidate_descriptor is not None:
+        try:
+            frozen_config_lineage_audit.update(
+                _validate_content_addressed_frozen_json_lineage(
+                    descriptor=candidate_descriptor,
+                    expected_path=expected_candidate_protocol_path,
+                    expected_sha256=expected_candidate_protocol_sha256,
+                    name="candidate_protocol",
+                    semantic_validator=validate_pairwise_action_advantage_lcb_protocol,
+                )
+            )
+        except ValueError as exc:
+            blockers.append(
+                f"future_holdout_candidate_protocol_lineage_mismatch:{exc}"
+            )
     feature_descriptor = descriptors.get("feature_contract")
-    if feature_descriptor is not None and (
-        Path(feature_descriptor["path"]).resolve()
-        != expected_feature_contract_path.resolve()
-        or feature_descriptor["sha256"] != expected_feature_contract_sha256.lower()
-    ):
-        blockers.append("future_holdout_feature_contract_lineage_mismatch")
+    if feature_descriptor is not None:
+        try:
+            frozen_config_lineage_audit.update(
+                _validate_content_addressed_frozen_json_lineage(
+                    descriptor=feature_descriptor,
+                    expected_path=expected_feature_contract_path,
+                    expected_sha256=expected_feature_contract_sha256,
+                    name="feature_contract",
+                    semantic_validator=lambda payload: (
+                        validate_pairwise_action_advantage_lcb_feature_contract(
+                            payload,
+                            expected_parent_protocol_sha256=(
+                                expected_candidate_protocol_sha256
+                            ),
+                        )
+                    ),
+                )
+            )
+        except ValueError as exc:
+            blockers.append(
+                f"future_holdout_feature_contract_lineage_mismatch:{exc}"
+            )
     holdout_descriptor = descriptors.get("holdout_protocol")
     if holdout_descriptor is not None:
         try:
@@ -754,6 +781,45 @@ def validate_pairwise_future_unseen_holdout_pre_registration_manifest(
         "future_holdout_maximum_capture_attempt_count": MAXIMUM_CAPTURE_ATTEMPT_COUNT,
         "future_holdout_collection_control_is_outcome_blind": True,
         "future_holdout_labels_or_outcomes_opened": False,
+        **frozen_config_lineage_audit,
+    }
+
+
+def _validate_content_addressed_frozen_json_lineage(
+    *,
+    descriptor: dict[str, str],
+    expected_path: Path,
+    expected_sha256: str,
+    name: str,
+    semantic_validator: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Prove immutable config identity without treating a worktree path as identity."""
+
+    descriptor_path = Path(descriptor["path"]).resolve()
+    expected_path = expected_path.resolve()
+    expected_sha256 = expected_sha256.lower()
+    _verify_pin(
+        expected_path,
+        expected_sha256,
+        name=f"expected {name}",
+    )
+    if descriptor["sha256"] != expected_sha256:
+        raise ValueError(f"{name}_sha256_mismatch")
+    descriptor_payload = _load_json(descriptor_path)
+    expected_payload = _load_json(expected_path)
+    semantic_validator(descriptor_payload)
+    semantic_validator(expected_payload)
+    if canonical_json_sha256(descriptor_payload) != canonical_json_sha256(
+        expected_payload
+    ):
+        raise ValueError(f"{name}_canonical_content_mismatch")
+    prefix = f"future_holdout_{name}"
+    path_equal = descriptor_path == expected_path
+    return {
+        f"{prefix}_path_equal": path_equal,
+        f"{prefix}_sha256_equal": True,
+        f"{prefix}_semantic_validation_passed": True,
+        f"{prefix}_content_addressed_cross_worktree_equivalent": not path_equal,
     }
 
 

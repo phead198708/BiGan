@@ -186,14 +186,29 @@ def fit_pairwise_action_advantage_lcb(
         config.expected_feature_contract_sha256,
         name="feature contract",
     )
-    if str(feature_contract_path) != frozen_feature_descriptor["path"]:
-        raise ValueError("feature contract path does not match precollection freeze")
     if config.expected_feature_contract_sha256.lower() != frozen_feature_descriptor["sha256"]:
         raise ValueError("feature contract SHA-256 does not match precollection freeze")
     feature_contract = _load_json(feature_contract_path)
     validate_pairwise_action_advantage_lcb_feature_contract(
         feature_contract,
         expected_parent_protocol_sha256=protocol_descriptor["sha256"],
+    )
+    frozen_feature_contract = _load_json(
+        Path(frozen_feature_descriptor["path"])
+    )
+    validate_pairwise_action_advantage_lcb_feature_contract(
+        frozen_feature_contract,
+        expected_parent_protocol_sha256=protocol_descriptor["sha256"],
+    )
+    if canonical_json_sha256(feature_contract) != canonical_json_sha256(
+        frozen_feature_contract
+    ):
+        raise ValueError(
+            "feature contract canonical content does not match precollection freeze"
+        )
+    feature_contract_path_equal = (
+        feature_contract_path
+        == Path(frozen_feature_descriptor["path"]).resolve()
     )
     future_holdout_pre_registration_path = (
         config.future_holdout_pre_registration_manifest_path.resolve()
@@ -242,6 +257,14 @@ def fit_pairwise_action_advantage_lcb(
         "role_assignment_selected_rows": selected_descriptor,
         "execution_compatible_feature_coverage_report": (
             compatibility_descriptor
+        ),
+        "feature_contract_path_equal_to_precollection_freeze": (
+            feature_contract_path_equal
+        ),
+        "feature_contract_sha256_equal_to_precollection_freeze": True,
+        "feature_contract_semantic_validation_passed": True,
+        "feature_contract_content_addressed_cross_worktree_equivalent": (
+            not feature_contract_path_equal
         ),
         "target_market_count": TARGET_MARKET_COUNT,
         "role_market_counts": dict(ROLE_MARKET_COUNTS),

@@ -302,6 +302,85 @@ def test_issue190_pre_registration_is_hash_pinned_and_safety_blocked(
         )
 
 
+def test_issue190_frozen_configs_are_content_addressed_across_worktrees(
+    tmp_path: Path,
+) -> None:
+    result = _create_future_holdout_pre_registration(tmp_path)
+    manifest = _load_json(result["manifest_path"])
+    alternate_root = tmp_path / "alternate-worktree/configs"
+    alternate_root.mkdir(parents=True)
+    protocol_copy = alternate_root / PROTOCOL_PATH.name
+    feature_copy = alternate_root / FEATURE_CONTRACT_PATH.name
+    protocol_copy.write_bytes(PROTOCOL_PATH.read_bytes())
+    feature_copy.write_bytes(FEATURE_CONTRACT_PATH.read_bytes())
+
+    audit = validate_pairwise_future_unseen_holdout_pre_registration_manifest(
+        manifest,
+        expected_candidate_protocol_path=protocol_copy,
+        expected_candidate_protocol_sha256=_sha256(protocol_copy),
+        expected_feature_contract_path=feature_copy,
+        expected_feature_contract_sha256=_sha256(feature_copy),
+    )
+
+    assert audit["future_holdout_candidate_protocol_path_equal"] is False
+    assert audit["future_holdout_candidate_protocol_sha256_equal"] is True
+    assert audit[
+        "future_holdout_candidate_protocol_semantic_validation_passed"
+    ] is True
+    assert audit[
+        "future_holdout_candidate_protocol_content_addressed_cross_worktree_equivalent"
+    ] is True
+    assert audit["future_holdout_feature_contract_path_equal"] is False
+    assert audit["future_holdout_feature_contract_sha256_equal"] is True
+    assert audit[
+        "future_holdout_feature_contract_semantic_validation_passed"
+    ] is True
+    assert audit[
+        "future_holdout_feature_contract_content_addressed_cross_worktree_equivalent"
+    ] is True
+
+
+def test_issue190_content_addressed_config_hash_or_semantic_drift_fails_closed(
+    tmp_path: Path,
+) -> None:
+    result = _create_future_holdout_pre_registration(tmp_path)
+    manifest = _load_json(result["manifest_path"])
+    drifted_path = tmp_path / "drifted-protocol.json"
+    drifted = _load_json(PROTOCOL_PATH)
+    drifted["candidate_name"] = "drifted_candidate"
+    _write_json(drifted_path, drifted)
+
+    with pytest.raises(ValueError, match="candidate_protocol_sha256_mismatch"):
+        validate_pairwise_future_unseen_holdout_pre_registration_manifest(
+            manifest,
+            expected_candidate_protocol_path=drifted_path,
+            expected_candidate_protocol_sha256=_sha256(drifted_path),
+            expected_feature_contract_path=FEATURE_CONTRACT_PATH,
+            expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
+        )
+
+    malformed_manifest = json.loads(json.dumps(manifest))
+    malformed_manifest["candidate_protocol"] = {
+        "path": str(drifted_path.resolve()),
+        "sha256": _sha256(drifted_path),
+    }
+    malformed_manifest["pre_registration_manifest_id"] = canonical_json_sha256(
+        {
+            key: value
+            for key, value in malformed_manifest.items()
+            if key != "pre_registration_manifest_id"
+        }
+    )
+    with pytest.raises(ValueError, match="candidate_name"):
+        validate_pairwise_future_unseen_holdout_pre_registration_manifest(
+            malformed_manifest,
+            expected_candidate_protocol_path=drifted_path,
+            expected_candidate_protocol_sha256=_sha256(drifted_path),
+            expected_feature_contract_path=FEATURE_CONTRACT_PATH,
+            expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
+        )
+
+
 def test_issue190_collection_freeze_binds_terminal_source_boundary(
     tmp_path: Path,
 ) -> None:
@@ -1074,6 +1153,39 @@ def test_pairwise_fit_support_lineage_is_hash_pinned_and_fail_closed(
                 feature_contract_path=FEATURE_CONTRACT_PATH,
                 expected_feature_contract_sha256=_sha256(
                     FEATURE_CONTRACT_PATH
+                ),
+                future_holdout_pre_registration_manifest_path=(
+                    pre_registration_path
+                ),
+                expected_future_holdout_pre_registration_manifest_sha256=(
+                    _sha256(pre_registration_path)
+                ),
+            )
+        )
+    assert forbidden_calls == {"jsonl": 0, "prediction": 0}
+
+    invalid_pre_registration[
+        "collection_control_uses_model_scores_bets_or_pnl"
+    ] = False
+    _write_json(pre_registration_path, invalid_pre_registration)
+    copied_feature_contract = tmp_path / "alternate-worktree-feature-contract.json"
+    copied_feature_contract.write_bytes(FEATURE_CONTRACT_PATH.read_bytes())
+    with pytest.raises(ValueError, match="role assignment rows descriptor is missing"):
+        fit_pairwise_action_advantage_lcb(
+            PairwiseActionAdvantageLCBFitConfig(
+                run_id="content-addressed-config-before-label-access",
+                output_dir=tmp_path / "runs",
+                support_gate_manifest_path=support_manifest_path,
+                expected_support_gate_manifest_sha256=_sha256(
+                    support_manifest_path
+                ),
+                role_assignment_manifest_path=role_manifest_path,
+                expected_role_assignment_manifest_sha256=role_descriptor[
+                    "sha256"
+                ],
+                feature_contract_path=copied_feature_contract,
+                expected_feature_contract_sha256=_sha256(
+                    copied_feature_contract
                 ),
                 future_holdout_pre_registration_manifest_path=(
                     pre_registration_path
