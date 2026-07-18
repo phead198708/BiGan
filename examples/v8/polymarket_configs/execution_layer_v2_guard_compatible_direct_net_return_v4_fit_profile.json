@@ -1,5 +1,5 @@
 {
-  "schema_version": "bigan-v8-guard-compatible-direct-net-return-v4-fit-profile-v1",
+  "schema_version": "bigan-v8-guard-compatible-direct-net-return-v4-fit-profile-v2",
   "candidate_name": "guard_compatible_direct_net_return_v4",
   "frozen": true,
   "parent_issue_201_commit": "6649b0317537533cc79c3ed1f4c706d1edd7d103",
@@ -61,7 +61,10 @@
   "development_gate": {
     "minimum_guard_accepted_bet_count": 10,
     "minimum_guard_accepted_unique_market_count": 10,
-    "minimum_action_support_for_action_pnl_gate": 5,
+    "pnl_hard_gate_aggregation": "selected_side_buy_up_buy_down_only",
+    "minimum_supported_side_count": 2,
+    "minimum_side_support_for_side_pnl_gate": 5,
+    "action_and_action_family_pnl_diagnostic_only": true,
     "accepted_bet_total_pnl_minimum_exclusive": 0.0,
     "all_oof_market_policy_pnl_lcb_minimum_exclusive": 0.0,
     "bootstrap_unit": "market_id",

@@ -45,7 +45,7 @@ from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking im
     _v8_execution_guard_config,
 )
 
-PROFILE_SCHEMA_VERSION = "bigan-v8-guard-compatible-direct-net-return-v4-fit-profile-v1"
+PROFILE_SCHEMA_VERSION = "bigan-v8-guard-compatible-direct-net-return-v4-fit-profile-v2"
 SCHEMA_PREFIX = "bigan-v8-guard-compatible-direct-net-return-v4"
 CANDIDATE_NAME = "guard_compatible_direct_net_return_v4"
 FIT_ROLE = "development_train"
@@ -167,7 +167,10 @@ def validate_guard_compatible_direct_net_return_v4_profile(
         ),
         "gate": gate.get("minimum_guard_accepted_bet_count") == 10
         and gate.get("minimum_guard_accepted_unique_market_count") == 10
-        and gate.get("minimum_action_support_for_action_pnl_gate") == 5
+        and gate.get("pnl_hard_gate_aggregation") == "selected_side_buy_up_buy_down_only"
+        and gate.get("minimum_supported_side_count") == 2
+        and gate.get("minimum_side_support_for_side_pnl_gate") == 5
+        and gate.get("action_and_action_family_pnl_diagnostic_only") is True
         and gate.get("accepted_bet_total_pnl_minimum_exclusive") == 0.0
         and gate.get("all_oof_market_policy_pnl_lcb_minimum_exclusive") == 0.0
         and gate.get("bootstrap_unit") == "market_id"
@@ -736,16 +739,44 @@ def _build_gate_report(
             "accepted_bet_net_pnl_sum": float(
                 sum(float(row["accepted_bet_net_pnl"]) for row in rows)
             ),
-            "supported_action": len(rows)
-            >= int(gate["minimum_action_support_for_action_pnl_gate"]),
+            "diagnostic_only": True,
         }
         for action, rows in sorted(by_action.items())
     }
-    supported_actions = [
-        metrics for metrics in action_metrics.values() if metrics["supported_action"]
-    ]
-    supported_action_gate = bool(supported_actions) and all(
-        metrics["accepted_bet_net_pnl_sum"] > 0.0 for metrics in supported_actions
+    by_family: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in accepted:
+        by_family[_family_for_action(str(row["executed_action"]))].append(row)
+    family_metrics = {
+        family: {
+            "accepted_bet_count": len(rows),
+            "accepted_unique_market_count": len({row["market_id"] for row in rows}),
+            "accepted_bet_net_pnl_sum": float(
+                sum(float(row["accepted_bet_net_pnl"]) for row in rows)
+            ),
+            "diagnostic_only": True,
+        }
+        for family, rows in sorted(by_family.items())
+    }
+    by_side: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in accepted:
+        by_side[str(row["selected_side"])].append(row)
+    side_metrics = {
+        side: {
+            "accepted_bet_count": len(rows),
+            "accepted_unique_market_count": len({row["market_id"] for row in rows}),
+            "accepted_bet_net_pnl_sum": float(
+                sum(float(row["accepted_bet_net_pnl"]) for row in rows)
+            ),
+            "supported_side": len({row["market_id"] for row in rows})
+            >= int(gate["minimum_side_support_for_side_pnl_gate"]),
+        }
+        for side, rows in sorted(by_side.items())
+        if side in {"UP", "DOWN"}
+    }
+    supported_sides = [metrics for metrics in side_metrics.values() if metrics["supported_side"]]
+    supported_side_gate = len(supported_sides) >= int(gate["minimum_supported_side_count"])
+    supported_side_gate = supported_side_gate and all(
+        metrics["accepted_bet_net_pnl_sum"] > 0.0 for metrics in supported_sides
     )
     accepted_pnl_sum = float(sum(float(row["accepted_bet_net_pnl"]) for row in accepted))
     selected_trade = [row for row in evaluation_rows if row["source_selected_action"] != "NO_TRADE"]
@@ -758,7 +789,7 @@ def _build_gate_report(
         > float(gate["accepted_bet_total_pnl_minimum_exclusive"]),
         "all_oof_market_policy_pnl_lcb_positive": interval["lower_confidence_bound"]
         > float(gate["all_oof_market_policy_pnl_lcb_minimum_exclusive"]),
-        "supported_action_pnl_gate": supported_action_gate,
+        "supported_side_pnl_gate": supported_side_gate,
         "selected_trade_p_up_alignment": all(
             row["p_up_action_disagreement"] is False for row in selected_trade
         ),
@@ -775,7 +806,7 @@ def _build_gate_report(
         "minimum_guard_accepted_unique_market_support": "insufficient_guard_accepted_unique_market_support",
         "accepted_bet_total_pnl_positive": "accepted_bet_total_pnl_not_positive",
         "all_oof_market_policy_pnl_lcb_positive": "all_oof_market_policy_pnl_lcb_not_positive",
-        "supported_action_pnl_gate": "supported_action_pnl_gate_failed",
+        "supported_side_pnl_gate": "supported_side_pnl_gate_failed",
         "selected_trade_p_up_alignment": "selected_trade_p_up_disagreement_present",
         "accepted_trade_p_up_alignment": "accepted_trade_p_up_disagreement_present",
         "feature_causality": "feature_causality_violation",
@@ -808,7 +839,13 @@ def _build_gate_report(
         ),
         "accepted_bet_net_pnl_sum": accepted_pnl_sum,
         "all_oof_market_policy_pnl": interval,
+        "pnl_hard_gate_aggregation": gate["pnl_hard_gate_aggregation"],
+        "accepted_side_metrics": side_metrics,
         "accepted_action_metrics": action_metrics,
+        "accepted_action_family_metrics": family_metrics,
+        "action_and_action_family_pnl_diagnostic_only": gate[
+            "action_and_action_family_pnl_diagnostic_only"
+        ],
         "oof_prediction_mae": float(np.mean(np.abs(prediction_errors))),
         "oof_prediction_rmse": float(np.sqrt(np.mean(np.square(prediction_errors)))),
         "development_gate_checks": checks,
@@ -821,6 +858,16 @@ def _build_gate_report(
         "current_oof_validation_or_future_pnl_used_for_tuning": False,
         **_blocked_safety_fields(),
     }
+
+
+def _family_for_action(action: str) -> str:
+    if action.endswith("HOLD_TO_SETTLEMENT"):
+        return "HOLD_TO_SETTLEMENT"
+    if action.endswith("SELL_BEFORE_CLOSE"):
+        return "SELL_BEFORE_CLOSE"
+    if action == "NO_TRADE":
+        return "NO_TRADE"
+    raise ValueError(f"unknown action: {action}")
 
 
 def _validate_lineage(
@@ -999,11 +1046,19 @@ def _pre_label_markdown(report: dict[str, Any]) -> str:
 
 def _gate_markdown(report: dict[str, Any]) -> str:
     interval = report["all_oof_market_policy_pnl"]
+    side_lines = "".join(
+        f"- {side} accepted PnL: `{row['accepted_bet_net_pnl_sum']}` "
+        f"across `{row['accepted_unique_market_count']}` markets\n"
+        for side, row in report["accepted_side_metrics"].items()
+    )
     return (
         "# Guard-compatible Direct Net-return v4 Development Gate\n\n"
+        "- Hard-gate aggregation: `selected_side_buy_up_buy_down_only`\n"
+        "- Action and action-family PnL: `diagnostic_only`\n"
         f"- Accepted bets: `{report['guard_accepted_bet_count']}`\n"
         f"- Accepted markets: `{report['guard_accepted_unique_market_count']}`\n"
         f"- Accepted-bet PnL: `{report['accepted_bet_net_pnl_sum']}`\n"
+        f"{side_lines}"
         f"- All-market policy PnL LCB: `{interval['lower_confidence_bound']}`\n"
         f"- Gate passed: `{str(report['development_gate_passed']).lower()}`\n"
         f"- Blocking reasons: `{report['gate_blocking_reason_codes']}`\n"

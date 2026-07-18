@@ -30,6 +30,10 @@ def test_issue202_profile_freezes_one_shot_model_mask_and_evidence_scope() -> No
     assert profile["model"]["hyperparameter_search_enabled"] is False
     assert profile["decision_rule"]["p_up_side_alignment_required"] is True
     assert profile["decision_rule"]["execution_guard_mutation_allowed"] is False
+    assert profile["development_gate"]["pnl_hard_gate_aggregation"] == (
+        "selected_side_buy_up_buy_down_only"
+    )
+    assert profile["development_gate"]["action_and_action_family_pnl_diagnostic_only"] is True
     assert profile["access_sequence"]["development_calibration_files_may_be_opened"] is False
     assert profile["access_sequence"]["confirmatory_files_may_be_opened"] is False
     assert profile["access_sequence"]["issue_190_or_192_future_files_may_be_opened"] is False
@@ -107,8 +111,10 @@ def test_issue202_gate_passes_research_evaluation_but_never_unlocks() -> None:
 
     assert report["development_gate_passed"] is True
     assert report["candidate_specific_future_evaluation_allowed"] is True
-    assert report["guard_accepted_bet_count"] == 10
-    assert report["guard_accepted_unique_market_count"] == 10
+    assert report["guard_accepted_bet_count"] == 20
+    assert report["guard_accepted_unique_market_count"] == 20
+    assert report["accepted_side_metrics"]["UP"]["accepted_bet_net_pnl_sum"] > 0.0
+    assert report["accepted_side_metrics"]["DOWN"]["accepted_bet_net_pnl_sum"] > 0.0
     assert report["all_oof_market_policy_pnl"]["lower_confidence_bound"] > 0.0
     assert report["source_model_candidate_eligible"] is False
     assert report["freeze_ready"] is False
@@ -136,19 +142,57 @@ def test_issue202_negative_pnl_remains_fail_closed() -> None:
     assert report["candidate_specific_future_evaluation_allowed"] is False
     assert "accepted_bet_total_pnl_not_positive" in report["gate_blocking_reason_codes"]
     assert "all_oof_market_policy_pnl_lcb_not_positive" in report["gate_blocking_reason_codes"]
-    assert "supported_action_pnl_gate_failed" in report["gate_blocking_reason_codes"]
+    assert "supported_side_pnl_gate_failed" in report["gate_blocking_reason_codes"]
     assert report["paper_candidate_allowed"] is False
+
+
+def test_issue202_action_loss_is_diagnostic_when_both_side_totals_are_positive() -> None:
+    profile = _profile()
+    evaluation_rows, oof_rows, train_rows = _gate_rows(pnl_per_bet=0.03)
+    down_rows = [row for row in evaluation_rows if row["selected_side"] == "DOWN"]
+    for index, row in enumerate(down_rows):
+        if index < 5:
+            row["executed_action"] = "BUY_DOWN_HOLD_TO_SETTLEMENT"
+            row["source_selected_action"] = "BUY_DOWN_HOLD_TO_SETTLEMENT"
+            row["accepted_bet_net_pnl"] = -0.01
+        else:
+            row["executed_action"] = "BUY_DOWN_SELL_BEFORE_CLOSE"
+            row["source_selected_action"] = "BUY_DOWN_SELL_BEFORE_CLOSE"
+            row["accepted_bet_net_pnl"] = 0.03
+
+    report = _build_gate_report(
+        run_id="test-side-only",
+        profile=profile,
+        decision_freeze_sha256="c" * 64,
+        evaluation_rows=evaluation_rows,
+        oof_rows=oof_rows,
+        train_rows=train_rows,
+        corpus_audits=[{"blocking_reason_codes": []}],
+    )
+
+    assert report["development_gate_passed"] is True
+    assert report["accepted_side_metrics"]["DOWN"]["accepted_bet_net_pnl_sum"] == pytest.approx(0.1)
+    assert report["accepted_action_metrics"]["BUY_DOWN_HOLD_TO_SETTLEMENT"][
+        "accepted_bet_net_pnl_sum"
+    ] == pytest.approx(-0.05)
+    assert (
+        report["accepted_action_metrics"]["BUY_DOWN_HOLD_TO_SETTLEMENT"]["diagnostic_only"] is True
+    )
 
 
 def _gate_rows(*, pnl_per_bet: float) -> tuple[list[dict], list[dict], list[dict]]:
     evaluations = []
     oof_rows = []
     train_rows = []
-    for index in range(10):
+    for index in range(20):
         market_id = f"market-{index:02d}"
         decision_ts = 1_000 + index
+        side = "UP" if index % 2 == 0 else "DOWN"
+        selected_action = (
+            "BUY_UP_HOLD_TO_SETTLEMENT" if side == "UP" else "BUY_DOWN_HOLD_TO_SETTLEMENT"
+        )
         for action in REQUIRED_ACTIONS:
-            target = pnl_per_bet / 0.2 if action == "BUY_UP_HOLD_TO_SETTLEMENT" else 0.0
+            target = pnl_per_bet / 0.2 if action == selected_action else 0.0
             row = {
                 "market_id": market_id,
                 "decision_ts": decision_ts,
@@ -169,9 +213,9 @@ def _gate_rows(*, pnl_per_bet: float) -> tuple[list[dict], list[dict], list[dict
             {
                 "market_id": market_id,
                 "decision_ts": decision_ts,
-                "source_selected_action": "BUY_UP_HOLD_TO_SETTLEMENT",
-                "executed_action": "BUY_UP_HOLD_TO_SETTLEMENT",
-                "selected_side": "UP",
+                "source_selected_action": selected_action,
+                "executed_action": selected_action,
+                "selected_side": side,
                 "p_up_action_disagreement": False,
                 "execution_guard_order_allowed": True,
                 "accepted_bet_net_pnl": pnl_per_bet,
