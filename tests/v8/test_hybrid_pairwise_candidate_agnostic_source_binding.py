@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from bigan.v8.polymarket.training.hybrid_pairwise_candidate_agnostic_source_binding import (
+    HybridBoundedFinalizationViewConfig,
     HybridCandidateAgnosticSourceBindingConfig,
     HybridCandidateAgnosticSourceSnapshotConfig,
     _bounded_finalized_batch,
     create_hybrid_candidate_agnostic_source_binding,
     freeze_hybrid_candidate_agnostic_source_snapshot,
+    prepare_hybrid_bounded_finalization_view,
 )
 
 PAIRWISE_PROTOCOL = Path(
@@ -182,6 +184,78 @@ def test_bounded_finalization_cannot_include_attempts_after_150(
     assert batch["captures"][151]["run_id"] not in included_run_ids
 
 
+def test_bounded_finalization_view_exposes_only_snapshot_allowlist(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path, capture_count=152)
+    snapshot_result = _terminal_snapshot(fixture)
+    finalizer_script = tmp_path / "frozen-finalizer.py"
+    finalizer_script.write_text("print('frozen finalizer')\n", encoding="utf-8")
+    source_batch_hash_before = _sha256(fixture["batch_path"])
+
+    result = prepare_hybrid_bounded_finalization_view(
+        HybridBoundedFinalizationViewConfig(
+            run_id="bounded-finalization-view",
+            output_dir=tmp_path / "runs",
+            snapshot_manifest_path=snapshot_result["manifest_path"],
+            expected_snapshot_manifest_sha256=snapshot_result["manifest_sha256"],
+            finalizer_script_path=finalizer_script,
+            expected_finalizer_script_sha256=_sha256(finalizer_script),
+            finalizer_git_commit="b" * 40,
+            python_executable=Path("/usr/bin/python3"),
+            training_corpus_root=tmp_path / "training-corpus",
+        )
+    )
+
+    view_batch = _load_json(result["view_batch_progress_path"])
+    assert view_batch["capture_count"] == 150
+    assert [row["round_index"] for row in view_batch["captures"]] == list(
+        range(1, 151)
+    )
+    view_root = result["view_root"]
+    assert len([path for path in view_root.iterdir() if path.is_symlink()]) == 150
+    assert not (view_root / "bound-source-round-0151").exists()
+    assert not (view_root / "bound-source-round-0152").exists()
+    assert _sha256(fixture["batch_path"]) == source_batch_hash_before
+    command = result["manifest"]["finalizer_command_argv"]
+    assert command[command.index("--output-dir") + 1] == str(view_root)
+    assert command[1] == str(finalizer_script.resolve())
+    assert result["report"]["finalizer_executed"] is False
+    assert result["report"]["source_batch_progress_mutated"] is False
+    _assert_safety_blocked(result["report"])
+
+
+def test_bounded_finalization_view_blocks_missing_pending_capture_evidence(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path, capture_count=150)
+    snapshot_result = _terminal_snapshot(fixture)
+    finalizer_script = tmp_path / "frozen-finalizer.py"
+    finalizer_script.write_text("print('frozen finalizer')\n", encoding="utf-8")
+    missing_run_dir = Path(
+        _load_json(fixture["batch_path"])["captures"][0]["run_dir"]
+    )
+    (missing_run_dir / "pending_round_capture_manifest.json").unlink()
+
+    try:
+        prepare_hybrid_bounded_finalization_view(
+            HybridBoundedFinalizationViewConfig(
+                run_id="missing-pending-evidence",
+                output_dir=tmp_path / "runs",
+                snapshot_manifest_path=snapshot_result["manifest_path"],
+                expected_snapshot_manifest_sha256=snapshot_result["manifest_sha256"],
+                finalizer_script_path=finalizer_script,
+                expected_finalizer_script_sha256=_sha256(finalizer_script),
+                finalizer_git_commit="b" * 40,
+                python_executable=Path("/usr/bin/python3"),
+            )
+        )
+    except ValueError as exc:
+        assert "bounded_view_pending_capture_manifest_missing" in str(exc)
+    else:
+        raise AssertionError("missing pending evidence must fail closed")
+
+
 def _fixture(
     tmp_path: Path,
     *,
@@ -285,6 +359,15 @@ def _fixture(
                 }
             ],
         )
+        _write_json(
+            run_dir / "pending_round_capture_manifest.json",
+            {
+                "run_id": run_id,
+                "round_index": index,
+                "paper_only": True,
+                "capital_at_risk": False,
+            },
+        )
         captures.append(
             {
                 "round_index": index,
@@ -344,6 +427,27 @@ def _fixture(
         "collection_freeze_path": collection_freeze_path,
         "batch_path": batch_path,
     }
+
+
+def _terminal_snapshot(fixture: dict[str, Any]) -> dict[str, Any]:
+    binding_result = create_hybrid_candidate_agnostic_source_binding(
+        _binding_config(fixture)
+    )
+    batch_path = fixture["batch_path"]
+    batch = _load_json(batch_path)
+    batch["collection_stop_reason"] = "outcome_blind_quality_target_reached"
+    batch["quality_target_reached"] = True
+    _write_json(batch_path, batch)
+    return freeze_hybrid_candidate_agnostic_source_snapshot(
+        HybridCandidateAgnosticSourceSnapshotConfig(
+            run_id="terminal-snapshot-helper",
+            output_dir=batch_path.parent / "runs",
+            binding_manifest_path=binding_result["manifest_path"],
+            expected_binding_manifest_sha256=binding_result["manifest_sha256"],
+            terminal_batch_progress_path=batch_path,
+            expected_terminal_batch_progress_sha256=_sha256(batch_path),
+        )
+    )
 
 
 def _binding_config(fixture: dict[str, Any]) -> HybridCandidateAgnosticSourceBindingConfig:

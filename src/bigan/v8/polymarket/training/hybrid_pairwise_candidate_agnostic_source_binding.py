@@ -186,6 +186,56 @@ class HybridBoundFreshRoleAssignmentConfig:
             object.__setattr__(self, name, Path(getattr(self, name)))
 
 
+@dataclass(frozen=True, slots=True)
+class HybridBoundedFinalizationViewConfig:
+    """Build a filesystem view that exposes only snapshot-allowlisted rounds."""
+
+    run_id: str
+    output_dir: Path | str
+    snapshot_manifest_path: Path | str
+    expected_snapshot_manifest_sha256: str
+    finalizer_script_path: Path | str
+    expected_finalizer_script_sha256: str
+    finalizer_git_commit: str
+    python_executable: Path | str
+    training_corpus_root: Path | str = Path("/Volumes/PHILIPS/v8")
+    settlement_poll_interval_seconds: float = 15.0
+    settlement_grace_seconds: float = 1_200.0
+    public_provider_http_timeout_seconds: float = 5.0
+    overwrite_existing: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        _require_sha256(
+            self.expected_snapshot_manifest_sha256,
+            name="snapshot manifest SHA-256",
+        )
+        _require_sha256(
+            self.expected_finalizer_script_sha256,
+            name="finalizer script SHA-256",
+        )
+        if len(self.finalizer_git_commit) != 40 or any(
+            character not in "0123456789abcdef"
+            for character in self.finalizer_git_commit.lower()
+        ):
+            raise ValueError("finalizer_git_commit must be a 40-character hex digest")
+        if self.settlement_poll_interval_seconds <= 0:
+            raise ValueError("settlement_poll_interval_seconds must be positive")
+        if self.settlement_grace_seconds < 0:
+            raise ValueError("settlement_grace_seconds must be non-negative")
+        if self.public_provider_http_timeout_seconds <= 0:
+            raise ValueError("public_provider_http_timeout_seconds must be positive")
+        for name in (
+            "output_dir",
+            "snapshot_manifest_path",
+            "finalizer_script_path",
+            "python_executable",
+            "training_corpus_root",
+        ):
+            object.__setattr__(self, name, Path(getattr(self, name)))
+
+
 def create_hybrid_candidate_agnostic_source_binding(
     config: HybridCandidateAgnosticSourceBindingConfig,
 ) -> dict[str, Any]:
@@ -447,6 +497,183 @@ def freeze_hybrid_candidate_agnostic_source_snapshot(
     _write_json(manifest_path, manifest)
     return {
         "run_dir": run_dir,
+        "report": report,
+        "report_path": report_path,
+        "report_sha256": _sha256_file(report_path),
+        "manifest": manifest,
+        "manifest_path": manifest_path,
+        "manifest_sha256": _sha256_file(manifest_path),
+    }
+
+
+def prepare_hybrid_bounded_finalization_view(
+    config: HybridBoundedFinalizationViewConfig,
+) -> dict[str, Any]:
+    """Expose only attempts 1-150 to the existing read-only finalizer."""
+
+    snapshot_path = config.snapshot_manifest_path.resolve()
+    finalizer_script_path = config.finalizer_script_path.resolve()
+    _verify_pin(
+        snapshot_path,
+        config.expected_snapshot_manifest_sha256,
+        name="source snapshot manifest",
+    )
+    _verify_pin(
+        finalizer_script_path,
+        config.expected_finalizer_script_sha256,
+        name="frozen finalizer script",
+    )
+    snapshot = _load_json(snapshot_path)
+    if snapshot.get("schema_version") != SNAPSHOT_MANIFEST_SCHEMA_VERSION:
+        raise ValueError("source snapshot manifest schema mismatch")
+    if snapshot.get("source_snapshot_ready") is not True:
+        raise ValueError("source snapshot is not ready")
+    rows_descriptor = _verified_descriptor(
+        snapshot.get("bounded_capture_rows"),
+        name="bounded capture rows",
+    )
+    allowlist_descriptor = _verified_descriptor(
+        snapshot.get("finalization_allowlist"),
+        name="bounded finalization allowlist",
+    )
+    terminal_batch_descriptor = _verified_descriptor(
+        snapshot.get("source_terminal_batch_progress"),
+        name="source terminal batch progress",
+    )
+    rows = _load_jsonl(Path(rows_descriptor["path"]))
+    allowlist = _load_json(Path(allowlist_descriptor["path"]))
+    source_batch_path = Path(terminal_batch_descriptor["path"])
+    source_batch_hash_before = _sha256_file(source_batch_path)
+    source_batch = _load_json(source_batch_path)
+    blockers = _finalization_view_blockers(
+        snapshot=snapshot,
+        rows=rows,
+        allowlist=allowlist,
+        source_batch=source_batch,
+    )
+    if blockers:
+        raise ValueError(
+            "bounded finalization view validation failed: "
+            + ", ".join(sorted(set(blockers)))
+        )
+    run_dir = _prepare_run_dir(
+        config.output_dir,
+        config.run_id,
+        overwrite=config.overwrite_existing,
+    )
+    view_root = run_dir / "bounded_finalization_view"
+    view_root.mkdir()
+    source_batch_id = str(source_batch["batch_id"])
+    view_batch_dir = view_root / source_batch_id
+    view_batch_dir.mkdir()
+    selected_run_ids = {str(row["run_id"]) for row in rows}
+    bounded_finalizations = [
+        dict(row)
+        for row in source_batch.get("finalizations") or []
+        if str(row.get("run_id") or "") in selected_run_ids
+    ]
+    bounded_batch = {
+        **{
+            key: value
+            for key, value in source_batch.items()
+            if key not in {"captures", "finalizations"}
+        },
+        "capture_count": len(rows),
+        "captures": rows,
+        "finalizations": bounded_finalizations,
+        "finalization_attempt_count": len(bounded_finalizations),
+        "hybrid_source_capture_attempt_limit": MAXIMUM_CAPTURE_ATTEMPT_COUNT,
+        "source_attempts_after_150_included": False,
+    }
+    view_batch_progress_path = view_batch_dir / "batch_progress.json"
+    _write_json(view_batch_progress_path, bounded_batch)
+    symlink_rows: list[dict[str, Any]] = []
+    for row in rows:
+        source_run_dir = Path(str(row["run_dir"])).resolve()
+        link_path = view_root / str(row["run_id"])
+        link_path.symlink_to(source_run_dir, target_is_directory=True)
+        symlink_rows.append(
+            {
+                "run_id": row["run_id"],
+                "source_run_dir": str(source_run_dir),
+                "bounded_view_path": str(link_path),
+                "capture_row_sha256": canonical_json_sha256(row),
+            }
+        )
+    symlink_rows_path = run_dir / "hybrid_pairwise_bounded_finalization_view_rows.jsonl"
+    _write_jsonl(symlink_rows_path, symlink_rows)
+    command_argv = [
+        str(config.python_executable.resolve()),
+        str(finalizer_script_path),
+        "--batch-id",
+        source_batch_id,
+        "--output-dir",
+        str(view_root),
+        "--finalize-only",
+        "--training-corpus-root",
+        str(config.training_corpus_root.expanduser().resolve()),
+        "--settlement-poll-interval-seconds",
+        str(config.settlement_poll_interval_seconds),
+        "--settlement-grace-seconds",
+        str(config.settlement_grace_seconds),
+        "--public-provider-http-timeout-seconds",
+        str(config.public_provider_http_timeout_seconds),
+    ]
+    report = {
+        "schema_version": f"{SCHEMA_PREFIX}-bounded-finalization-view-report-v1",
+        "run_id": config.run_id,
+        "status": "bounded_finalization_view_ready",
+        "bounded_finalization_view_ready": True,
+        "bounded_capture_attempt_count": len(rows),
+        "maximum_source_capture_attempt_ordinal": MAXIMUM_CAPTURE_ATTEMPT_COUNT,
+        "source_attempts_after_150_included": False,
+        "source_batch_progress_sha256_before_view_creation": source_batch_hash_before,
+        "source_batch_progress_sha256_after_view_creation": _sha256_file(
+            source_batch_path
+        ),
+        "source_batch_progress_mutated": (
+            source_batch_hash_before != _sha256_file(source_batch_path)
+        ),
+        "finalizer_script": _descriptor(finalizer_script_path),
+        "finalizer_git_commit": config.finalizer_git_commit.lower(),
+        "finalizer_command_generated": True,
+        "finalizer_executed": False,
+        "source_collection_was_terminal_before_view_creation": True,
+        "labels_or_outcomes_opened_for_view_creation": False,
+        **_hybrid_safety_fields(),
+    }
+    if report["source_batch_progress_mutated"]:
+        raise ValueError("source batch progress mutated during view creation")
+    report["report_id"] = canonical_json_sha256(report)
+    report_path = run_dir / "hybrid_pairwise_bounded_finalization_view_report.json"
+    _write_json(report_path, report)
+    manifest = {
+        "schema_version": f"{SCHEMA_PREFIX}-bounded-finalization-view-manifest-v1",
+        "run_id": config.run_id,
+        "source_snapshot_manifest": _descriptor(snapshot_path),
+        "source_terminal_batch_progress": terminal_batch_descriptor,
+        "bounded_view_batch_progress": _descriptor(view_batch_progress_path),
+        "bounded_view_rows": _descriptor(symlink_rows_path),
+        "bounded_view_root": str(view_root),
+        "bounded_batch_id": source_batch_id,
+        "bounded_capture_attempt_count": len(rows),
+        "source_attempts_after_150_included": False,
+        "finalizer_script": _descriptor(finalizer_script_path),
+        "finalizer_git_commit": config.finalizer_git_commit.lower(),
+        "finalizer_command_argv": command_argv,
+        "finalizer_executed": False,
+        "labels_or_outcomes_opened": False,
+        "report": _descriptor(report_path),
+        **_hybrid_safety_fields(),
+    }
+    manifest["bounded_finalization_view_id"] = canonical_json_sha256(manifest)
+    manifest_path = run_dir / "hybrid_pairwise_bounded_finalization_view_manifest.json"
+    _write_json(manifest_path, manifest)
+    return {
+        "run_dir": run_dir,
+        "view_root": view_root,
+        "view_batch_progress_path": view_batch_progress_path,
+        "view_batch_progress_sha256": _sha256_file(view_batch_progress_path),
         "report": report,
         "report_path": report_path,
         "report_sha256": _sha256_file(report_path),
@@ -866,6 +1093,93 @@ def _ordered_unique_captures(batch: dict[str, Any]) -> list[dict[str, Any]]:
         seen_run_ids.add(run_id)
         unique.append(capture)
     return unique
+
+
+def _finalization_view_blockers(
+    *,
+    snapshot: dict[str, Any],
+    rows: list[dict[str, Any]],
+    allowlist: dict[str, Any],
+    source_batch: dict[str, Any],
+) -> list[str]:
+    blockers: list[str] = []
+    snapshot_identity_payload = dict(snapshot)
+    snapshot_identity = str(snapshot_identity_payload.pop("snapshot_manifest_id", ""))
+    if canonical_json_sha256(snapshot_identity_payload) != snapshot_identity:
+        blockers.append("bounded_view_snapshot_manifest_id_mismatch")
+    allowlist_identity_payload = dict(allowlist)
+    allowlist_identity = str(allowlist_identity_payload.pop("allowlist_id", ""))
+    if canonical_json_sha256(allowlist_identity_payload) != allowlist_identity:
+        blockers.append("bounded_view_allowlist_id_mismatch")
+    if len(rows) != MAXIMUM_CAPTURE_ATTEMPT_COUNT:
+        blockers.append("bounded_view_capture_attempt_count_mismatch")
+    if int(snapshot.get("bounded_capture_attempt_count") or 0) != len(rows):
+        blockers.append("bounded_view_snapshot_capture_count_mismatch")
+    if int(snapshot.get("maximum_source_capture_attempt_ordinal") or 0) != (
+        MAXIMUM_CAPTURE_ATTEMPT_COUNT
+    ):
+        blockers.append("bounded_view_snapshot_attempt_limit_mismatch")
+    if snapshot.get("attempts_after_150_included") is not False:
+        blockers.append("bounded_view_snapshot_includes_late_attempts")
+    expected_allowlist_schema = f"{SCHEMA_PREFIX}-finalization-allowlist-v1"
+    if allowlist.get("schema_version") != expected_allowlist_schema:
+        blockers.append("bounded_view_allowlist_schema_mismatch")
+    if int(allowlist.get("allowed_capture_attempt_count") or 0) != len(rows):
+        blockers.append("bounded_view_allowlist_capture_count_mismatch")
+    if int(allowlist.get("maximum_source_capture_attempt_ordinal") or 0) != (
+        MAXIMUM_CAPTURE_ATTEMPT_COUNT
+    ):
+        blockers.append("bounded_view_allowlist_attempt_limit_mismatch")
+    if allowlist.get("attempts_after_150_allowed") is not False:
+        blockers.append("bounded_view_allowlist_permits_late_attempts")
+    if allowlist.get("read_only_finalization_only") is not True:
+        blockers.append("bounded_view_allowlist_not_read_only_finalization")
+    if allowlist.get("labels_or_outcomes_opened_for_allowlist_creation") is not False:
+        blockers.append("bounded_view_allowlist_creation_not_outcome_blind")
+    row_run_ids = [str(row.get("run_id") or "") for row in rows]
+    row_run_dirs = [str(row.get("run_dir") or "") for row in rows]
+    row_hashes = [canonical_json_sha256(row) for row in rows]
+    if "" in row_run_ids or len(set(row_run_ids)) != len(row_run_ids):
+        blockers.append("bounded_view_capture_identity_not_unique")
+    if [int(row.get("round_index") or 0) for row in rows] != list(
+        range(1, MAXIMUM_CAPTURE_ATTEMPT_COUNT + 1)
+    ):
+        blockers.append("bounded_view_round_index_sequence_invalid")
+    if allowlist.get("run_ids") != row_run_ids:
+        blockers.append("bounded_view_allowlist_run_ids_mismatch")
+    if allowlist.get("run_dirs") != row_run_dirs:
+        blockers.append("bounded_view_allowlist_run_dirs_mismatch")
+    if allowlist.get("capture_row_sha256s") != row_hashes:
+        blockers.append("bounded_view_allowlist_capture_hashes_mismatch")
+    if str(source_batch.get("collection_stop_reason") or "") not in (
+        TERMINAL_COLLECTION_STOP_REASONS
+    ):
+        blockers.append("bounded_view_source_collection_not_terminal")
+    source_captures = [dict(row) for row in source_batch.get("captures") or []]
+    if len(source_captures) != int(source_batch.get("capture_count") or 0):
+        blockers.append("bounded_view_source_capture_count_mismatch")
+    ordered_source_rows = _ordered_unique_captures(source_batch)
+    if len(ordered_source_rows) != len(source_captures):
+        blockers.append("bounded_view_source_capture_identity_not_unique")
+    if [canonical_json_sha256(row) for row in ordered_source_rows[:150]] != row_hashes:
+        blockers.append("bounded_view_snapshot_rows_do_not_match_source_first_150")
+    late_source_run_ids = {
+        str(row.get("run_id") or "") for row in ordered_source_rows[150:]
+    }
+    if late_source_run_ids.intersection(row_run_ids):
+        blockers.append("bounded_view_late_source_attempt_in_allowlist")
+    for row in rows:
+        run_dir = Path(str(row.get("run_dir") or ""))
+        if not run_dir.is_dir():
+            blockers.append("bounded_view_source_run_dir_missing")
+            continue
+        if not (run_dir / "pending_round_capture_manifest.json").is_file():
+            blockers.append("bounded_view_pending_capture_manifest_missing")
+    if _find_fields({"rows": rows}, FORBIDDEN_SOURCE_FIELDS):
+        blockers.append("bounded_view_forbidden_outcome_field_present")
+    if not _safety_blocked(snapshot, allowlist, source_batch):
+        blockers.append("bounded_view_safety_contract_failed")
+    return sorted(set(blockers))
 
 
 def _bounded_finalized_batch(
