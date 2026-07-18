@@ -5,11 +5,19 @@ from __future__ import annotations
 import json
 import math
 import shutil
+import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.recorder import (
+    PendingRoundFinalizationResult,
+    PolymarketPublicHTTPRealCorpusProvider,
+    finalize_polymarket_pending_round,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_evaluation import (
     _blocked_safety_fields,
     _descriptor,
@@ -35,7 +43,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_action_value im
 )
 
 SCHEMA_PREFIX = "bigan-v8-conformal-v5-strict-future-settlement"
-SETTLED_CORPUS_INDEX_SCHEMA_VERSION = f"{SCHEMA_PREFIX}-corpus-index-v1"
+SETTLED_CORPUS_INDEX_SCHEMA_VERSION = f"{SCHEMA_PREFIX}-corpus-index-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +78,470 @@ class ConformalV5FutureSettlementConfig:
             "settled_corpus_index_path",
         ):
             object.__setattr__(self, field, Path(getattr(self, field)))
+
+
+@dataclass(frozen=True, slots=True)
+class ConformalV5FutureSettlementCorpusIndexConfig:
+    """Pinned one-shot post-close corpus finalization for the frozen future window."""
+
+    run_id: str
+    output_dir: Path | str
+    prediction_freeze_manifest_path: Path | str
+    expected_prediction_freeze_manifest_sha256: str
+    builder_git_commit: str
+    target_access_started_ts: int
+    provider_timeout_seconds: float = 15.0
+    provider_http_timeout_seconds: float = 5.0
+    settlement_max_wait_seconds: float = 600.0
+    settlement_poll_interval_seconds: float = 15.0
+    max_workers: int = 8
+    overwrite_existing: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        _require_sha256(
+            self.expected_prediction_freeze_manifest_sha256,
+            name="expected_prediction_freeze_manifest_sha256",
+        )
+        if not _is_git_sha(self.builder_git_commit):
+            raise ValueError("builder_git_commit must be a Git SHA-1")
+        if self.target_access_started_ts <= 0:
+            raise ValueError("target_access_started_ts must be positive")
+        if self.provider_timeout_seconds <= 0 or self.provider_http_timeout_seconds <= 0:
+            raise ValueError("provider timeouts must be positive")
+        if self.settlement_max_wait_seconds < 0:
+            raise ValueError("settlement_max_wait_seconds must be non-negative")
+        if self.settlement_poll_interval_seconds <= 0:
+            raise ValueError("settlement_poll_interval_seconds must be positive")
+        if self.max_workers <= 0:
+            raise ValueError("max_workers must be positive")
+        for field in ("output_dir", "prediction_freeze_manifest_path"):
+            object.__setattr__(self, field, Path(getattr(self, field)))
+
+
+def build_conformal_v5_future_settled_corpus_index(
+    config: ConformalV5FutureSettlementCorpusIndexConfig,
+    *,
+    provider_factory: Callable[[], Any] | None = None,
+    monotonic_fn: Callable[[], float] = time.monotonic,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    clock_ms_fn: Callable[[], int] = lambda: int(time.time() * 1000),
+) -> dict[str, Any]:
+    """Finalize copied rounds after freeze; never mutate the outcome-blind source."""
+
+    freeze_manifest_path = config.prediction_freeze_manifest_path.resolve()
+    _verify_pin(
+        freeze_manifest_path,
+        config.expected_prediction_freeze_manifest_sha256,
+        "prediction freeze manifest",
+    )
+    freeze_manifest = _load_json(freeze_manifest_path)
+    if (
+        freeze_manifest.get("schema_version") != f"{PREDICTION_FREEZE_SCHEMA_PREFIX}-manifest-v1"
+        or freeze_manifest.get("decision_freeze_written_before_target_access") is not True
+        or freeze_manifest.get("future_labels_outcomes_or_pnl_opened") is not False
+        or freeze_manifest.get("resolution_artifact_opened") is not False
+    ):
+        raise ValueError("prediction freeze is not eligible for post-close finalization")
+    decision_freeze_descriptor = _verified_descriptor(
+        freeze_manifest["accepted_bet_decision_freeze"], "accepted-bet decision freeze"
+    )
+    decision_freeze = _load_json(Path(decision_freeze_descriptor["path"]))
+    decision_freeze_created_ts = int(decision_freeze["decision_freeze_created_ts"])
+    if config.target_access_started_ts <= decision_freeze_created_ts:
+        raise ValueError("settlement corpus index attempted before decision freeze")
+    selected_descriptor = _verified_descriptor(
+        freeze_manifest["selected_window_rows"], "selected window rows"
+    )
+    selected_rows = _load_jsonl(Path(selected_descriptor["path"]))
+    action_descriptor = _verified_descriptor(
+        freeze_manifest["target_free_five_action_rows"], "target-free five-action rows"
+    )
+    action_rows = _load_jsonl(Path(action_descriptor["path"]))
+    max_market_close_ts = max(int(row["market_close_ts"]) for row in action_rows)
+    if config.target_access_started_ts <= max_market_close_ts:
+        raise ValueError("settlement corpus index attempted before all markets closed")
+    if len(selected_rows) != 220 or len({str(row["market_id"]) for row in selected_rows}) != 220:
+        raise ValueError("settlement corpus builder requires the exact frozen 220-market window")
+    safety_mismatches = [
+        field
+        for field, expected in _blocked_safety_fields().items()
+        if freeze_manifest.get(field) != expected
+    ]
+    if safety_mismatches:
+        raise ValueError("prediction freeze safety mismatch: " + ", ".join(safety_mismatches))
+
+    run_dir = config.output_dir.resolve() / config.run_id
+    if run_dir.exists():
+        if not config.overwrite_existing:
+            raise FileExistsError(f"run directory exists: {run_dir}")
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True)
+    marker = {
+        "schema_version": f"{SCHEMA_PREFIX}-corpus-finalization-start-marker-v1",
+        "run_id": config.run_id,
+        "builder_git_commit": config.builder_git_commit,
+        "target_access_started_ts": config.target_access_started_ts,
+        "decision_freeze_created_ts": decision_freeze_created_ts,
+        "max_market_close_ts": max_market_close_ts,
+        "prediction_freeze_manifest": _descriptor(freeze_manifest_path),
+        "accepted_bet_decision_freeze": decision_freeze_descriptor,
+        "selected_window_rows": selected_descriptor,
+        "target_access_started_after_decision_freeze": True,
+        "all_markets_closed_before_target_access": True,
+        "source_outcome_blind_rounds_mutated": False,
+        "future_results_used_for_tuning": False,
+        "future_results_used_for_rerun": False,
+        "direct_training_corpus_exported": False,
+        **_blocked_safety_fields(),
+    }
+    marker["marker_id"] = canonical_json_sha256(marker)
+    marker_path = run_dir / "future_settled_corpus_finalization_started.json"
+    _write_json(marker_path, marker)
+
+    factory = provider_factory or (
+        lambda: PolymarketPublicHTTPRealCorpusProvider(
+            max_markets=1,
+            timeout_seconds=config.provider_timeout_seconds,
+            http_timeout_seconds=config.provider_http_timeout_seconds,
+            use_rest_orderbooks=False,
+        )
+    )
+    (run_dir / "settled_round_copies").mkdir()
+    (run_dir / "settled_corpus_quarantine").mkdir()
+    success_by_market: dict[str, dict[str, Any]] = {}
+    failure_by_market: dict[str, dict[str, Any]] = {}
+    selected_by_market = {str(row["market_id"]): row for row in selected_rows}
+    pending_rows = list(selected_rows)
+    retry_market_ids: set[str] = set()
+    settlement_attempt_count = 0
+    deadline = monotonic_fn() + config.settlement_max_wait_seconds
+    while pending_rows:
+        settlement_attempt_count += 1
+        attempt_results = _finalize_selected_rounds(
+            pending_rows,
+            run_dir=run_dir,
+            provider_factory=factory,
+            max_workers=config.max_workers,
+            settlement_attempt=settlement_attempt_count,
+        )
+        retryable_market_ids: set[str] = set()
+        for result in attempt_results:
+            market_id = str(result["market_id"])
+            if result["settled_corpus_ready"]:
+                success_by_market[market_id] = result["index_entry"]
+                failure_by_market.pop(market_id, None)
+                continue
+            failure = result["failure"]
+            failure_by_market[market_id] = failure
+            if _is_retryable_settlement_failure(failure):
+                retryable_market_ids.add(market_id)
+        if not retryable_market_ids:
+            break
+        retry_market_ids.update(retryable_market_ids)
+        remaining_seconds = deadline - monotonic_fn()
+        if remaining_seconds <= 0:
+            for market_id in retryable_market_ids:
+                failure = failure_by_market[market_id]
+                failure["reason_codes"] = sorted(
+                    {*failure["reason_codes"], "settlement_resolution_max_wait_elapsed"}
+                )
+            break
+        sleep_fn(min(config.settlement_poll_interval_seconds, remaining_seconds))
+        pending_rows = [selected_by_market[market_id] for market_id in sorted(retryable_market_ids)]
+    successes = sorted(success_by_market.values(), key=lambda row: str(row["market_id"]))
+    failures = sorted(failure_by_market.values(), key=lambda row: str(row["market_id"]))
+    complete = len(successes) == len(selected_rows) and not failures
+    index_finalized_ts = int(clock_ms_fn())
+    if index_finalized_ts < config.target_access_started_ts:
+        raise ValueError("index_finalized_ts precedes target access start")
+    index_path = run_dir / "conformal_v5_future_settled_corpus_index.json"
+    index_payload: dict[str, Any] | None = None
+    if complete:
+        index_payload = {
+            "schema_version": SETTLED_CORPUS_INDEX_SCHEMA_VERSION,
+            "run_id": config.run_id,
+            "builder_git_commit": config.builder_git_commit,
+            "target_access_started_ts": config.target_access_started_ts,
+            "index_finalized_ts": index_finalized_ts,
+            "decision_freeze_sha256": decision_freeze_descriptor["sha256"],
+            "prediction_freeze_manifest": _descriptor(freeze_manifest_path),
+            "selected_window_rows": selected_descriptor,
+            "entry_count": len(successes),
+            "entries": successes,
+            "outcomes_used_for_decision_or_selection": False,
+            "outcomes_used_for_threshold_or_model_tuning": False,
+            "source_outcome_blind_rounds_mutated": False,
+            "direct_training_corpus_exported": False,
+            **_blocked_safety_fields(),
+        }
+        index_payload["settled_corpus_index_id"] = canonical_json_sha256(index_payload)
+        _write_json(index_path, index_payload)
+    reason_distribution: dict[str, int] = {}
+    for failure in failures:
+        for reason in failure["reason_codes"]:
+            reason_distribution[reason] = reason_distribution.get(reason, 0) + 1
+    report = {
+        "schema_version": f"{SCHEMA_PREFIX}-corpus-index-build-report-v1",
+        "run_id": config.run_id,
+        "builder_git_commit": config.builder_git_commit,
+        "selected_market_count": len(selected_rows),
+        "settled_corpus_ready_market_count": len(successes),
+        "unresolved_or_failed_market_count": len(failures),
+        "target_access_started_ts": config.target_access_started_ts,
+        "index_finalized_ts": index_finalized_ts,
+        "settlement_attempt_count": settlement_attempt_count,
+        "settlement_retry_market_count": len(retry_market_ids),
+        "settlement_max_wait_seconds": config.settlement_max_wait_seconds,
+        "settlement_poll_interval_seconds": config.settlement_poll_interval_seconds,
+        "unresolved_or_failed_reason_distribution": dict(sorted(reason_distribution.items())),
+        "unresolved_or_failed_markets": failures,
+        "settled_corpus_index_ready": complete,
+        "settled_corpus_index_path": str(index_path) if complete else None,
+        "settled_corpus_index_sha256": _sha256_file(index_path) if complete else None,
+        "source_outcome_blind_rounds_mutated": False,
+        "direct_training_corpus_exported": False,
+        "official_read_only_resolution_only": True,
+        "future_results_used_for_tuning": False,
+        "future_results_used_for_rerun": False,
+        "blocking_reason_codes": [] if complete else ["settled_corpus_window_incomplete"],
+        **_blocked_safety_fields(),
+    }
+    report["report_id"] = canonical_json_sha256(report)
+    report_path = run_dir / "conformal_v5_future_settled_corpus_index_report.json"
+    _write_json(report_path, report)
+    _write_text(
+        run_dir / "conformal_v5_future_settled_corpus_index_report.md",
+        _settled_index_markdown(report),
+    )
+    manifest = {
+        "schema_version": f"{SCHEMA_PREFIX}-corpus-index-build-manifest-v1",
+        "run_id": config.run_id,
+        "prediction_freeze_manifest": _descriptor(freeze_manifest_path),
+        "accepted_bet_decision_freeze": decision_freeze_descriptor,
+        "selected_window_rows": selected_descriptor,
+        "finalization_start_marker": _descriptor(marker_path),
+        "report": _descriptor(report_path),
+        "settled_corpus_index": _descriptor(index_path) if complete else None,
+        "settled_corpus_index_ready": complete,
+        "target_access_started_ts": config.target_access_started_ts,
+        "index_finalized_ts": index_finalized_ts,
+        "settlement_attempt_count": settlement_attempt_count,
+        "settlement_retry_market_count": len(retry_market_ids),
+        "future_results_used_for_tuning": False,
+        "future_results_used_for_rerun": False,
+        "source_outcome_blind_rounds_mutated": False,
+        "direct_training_corpus_exported": False,
+        **_blocked_safety_fields(),
+    }
+    manifest["manifest_id"] = canonical_json_sha256(manifest)
+    manifest_path = run_dir / "conformal_v5_future_settled_corpus_index_manifest.json"
+    _write_json(manifest_path, manifest)
+    return {
+        "run_dir": run_dir,
+        "report": report,
+        "report_path": report_path,
+        "report_sha256": _sha256_file(report_path),
+        "manifest": manifest,
+        "manifest_path": manifest_path,
+        "manifest_sha256": _sha256_file(manifest_path),
+        "index": index_payload,
+        "index_path": index_path if complete else None,
+        "index_sha256": _sha256_file(index_path) if complete else None,
+    }
+
+
+def _finalize_selected_rounds(
+    selected_rows: list[dict[str, Any]],
+    *,
+    run_dir: Path,
+    provider_factory: Callable[[], Any],
+    max_workers: int,
+    settlement_attempt: int,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                _copy_and_finalize_selected_round,
+                selected,
+                run_dir=run_dir,
+                provider_factory=provider_factory,
+                settlement_attempt=settlement_attempt,
+            ): selected
+            for selected in selected_rows
+        }
+        for future in as_completed(futures):
+            selected = futures[future]
+            market_id = str(selected.get("market_id") or "")
+            try:
+                results.append(future.result())
+            except Exception as exc:  # noqa: BLE001
+                results.append(
+                    {
+                        "market_id": market_id,
+                        "settled_corpus_ready": False,
+                        "failure": {
+                            "market_id": market_id,
+                            "run_id": str(selected.get("run_id") or ""),
+                            "reason_codes": ["settled_corpus_finalization_exception"],
+                            "settlement_attempt_count": settlement_attempt,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                    }
+                )
+    return sorted(results, key=lambda row: str(row["market_id"]))
+
+
+def _is_retryable_settlement_failure(failure: dict[str, Any]) -> bool:
+    if failure.get("pending_resolution") is True:
+        return True
+    return any(
+        any(token in str(reason) for token in ("resolution", "provider", "timeout"))
+        for reason in failure.get("reason_codes", [])
+    )
+
+
+def _copy_and_finalize_selected_round(
+    selected: dict[str, Any],
+    *,
+    run_dir: Path,
+    provider_factory: Callable[[], Any],
+    settlement_attempt: int = 1,
+) -> dict[str, Any]:
+    market_id = str(selected.get("market_id") or "")
+    if not market_id:
+        raise ValueError("selected settlement row is missing market_id")
+    capture_manifest_descriptor = _verified_descriptor(
+        selected["pending_round_capture_manifest"], "pending capture manifest"
+    )
+    source_run_dir = Path(capture_manifest_descriptor["path"]).parent
+    source_run_id = source_run_dir.name
+    copied_parent = run_dir / "settled_round_copies"
+    copied_run_dir = copied_parent / source_run_id
+    if not copied_run_dir.exists():
+        shutil.copytree(source_run_dir, copied_run_dir)
+    copied_capture_manifest_path = copied_run_dir / "pending_round_capture_manifest.json"
+    copied_capture_manifest = _load_json(copied_capture_manifest_path)
+    copied_config = dict(copied_capture_manifest.get("config") or {})
+    if not copied_config or str(copied_config.get("run_id") or "") != source_run_id:
+        raise ValueError("copied pending capture config lineage is invalid")
+    if copied_capture_manifest.get("post_freeze_settlement_copy") is True:
+        if copied_capture_manifest.get("source_pending_capture_manifest") != (
+            capture_manifest_descriptor
+        ):
+            raise ValueError("settlement copy source lineage changed between attempts")
+    else:
+        copied_config["output_dir"] = str(copied_parent)
+        copied_capture_manifest["config"] = copied_config
+        copied_capture_manifest["post_freeze_settlement_copy"] = True
+        copied_capture_manifest["source_pending_capture_manifest"] = capture_manifest_descriptor
+        copied_capture_manifest["source_outcome_blind_round_mutated"] = False
+        _write_json(copied_capture_manifest_path, copied_capture_manifest)
+    result: PendingRoundFinalizationResult = finalize_polymarket_pending_round(
+        copied_run_dir,
+        public_provider=provider_factory(),
+        destination_root=run_dir / "settled_corpus_quarantine",
+        overwrite_existing=True,
+    )
+    _verify_selected_source_unchanged(selected, capture_manifest_descriptor)
+    report = dict(result.report)
+    if (
+        report.get("finalization_status") != "exported"
+        or report.get("pending_resolution") is not False
+        or report.get("resolution_provider_called") is not True
+        or report.get("phase2_corpus_built") is not True
+        or result.corpus_dir is None
+    ):
+        reasons = sorted(
+            {
+                *(str(reason) for reason in dict(report.get("reject_reason_counts") or {})),
+                *(
+                    ["official_resolution_still_pending"]
+                    if report.get("pending_resolution") is True
+                    else []
+                ),
+                *(
+                    ["phase2_settled_corpus_not_built"]
+                    if report.get("phase2_corpus_built") is not True
+                    else []
+                ),
+                *(
+                    ["settled_corpus_finalization_blocked"]
+                    if report.get("finalization_status") == "blocked_fail_closed"
+                    else []
+                ),
+            }
+        )
+        return {
+            "market_id": market_id,
+            "settled_corpus_ready": False,
+            "failure": {
+                "market_id": market_id,
+                "run_id": source_run_id,
+                "reason_codes": reasons or ["official_resolution_unavailable"],
+                "phase2_error": report.get("phase2_error"),
+                "finalization_status": report.get("finalization_status"),
+                "pending_resolution": report.get("pending_resolution"),
+                "settlement_attempt_count": settlement_attempt,
+                "copied_round_dir": str(copied_run_dir),
+            },
+        }
+    corpus_dir = result.corpus_dir.resolve()
+    corpus_manifest_path = corpus_dir / "polymarket_corpus_manifest.json"
+    feature_rows_path = corpus_dir / "polymarket_feature_rows.jsonl"
+    label_rows_path = corpus_dir / "polymarket_label_rows.jsonl"
+    resolution_events_path = corpus_dir / "polymarket_resolution_events.jsonl"
+    finalization_manifest_path = copied_run_dir / "pending_round_finalization_manifest.json"
+    for path in (
+        corpus_manifest_path,
+        feature_rows_path,
+        label_rows_path,
+        resolution_events_path,
+        finalization_manifest_path,
+    ):
+        if not path.is_file():
+            raise ValueError(f"settled corpus artifact missing: {path}")
+    index_entry = {
+        "market_id": market_id,
+        "run_id": source_run_id,
+        "scheduled_round_start_ts": int(selected["scheduled_round_start_ts"]),
+        "market_close_ts": int(selected["market_end_ts"]),
+        "source_pending_capture_manifest": capture_manifest_descriptor,
+        "copied_pending_capture_manifest": _descriptor(copied_capture_manifest_path),
+        "pending_round_finalization_manifest": _descriptor(finalization_manifest_path),
+        "corpus_manifest": _descriptor(corpus_manifest_path),
+        "feature_rows": _descriptor(feature_rows_path),
+        "label_rows": _descriptor(label_rows_path),
+        "resolution_events": _descriptor(resolution_events_path),
+        "official_read_only_resolution": True,
+        "corpus_built_after_decision_freeze": True,
+        "settled_after_market_close": True,
+        "source_outcome_blind_round_mutated": False,
+        "direct_training_corpus_exported": False,
+        "settlement_attempt_count": settlement_attempt,
+    }
+    index_entry["entry_sha256"] = canonical_json_sha256(index_entry)
+    return {
+        "market_id": market_id,
+        "settled_corpus_ready": True,
+        "index_entry": index_entry,
+    }
+
+
+def _verify_selected_source_unchanged(
+    selected: dict[str, Any], capture_manifest_descriptor: dict[str, Any]
+) -> None:
+    _verify_pin(
+        Path(capture_manifest_descriptor["path"]),
+        capture_manifest_descriptor["sha256"],
+        "source pending capture manifest after settlement-copy finalization",
+    )
+    for name, descriptor in sorted(dict(selected.get("raw_artifacts") or {}).items()):
+        if isinstance(descriptor, dict) and descriptor.get("path") and descriptor.get("sha256"):
+            _verified_descriptor(descriptor, f"source raw artifact {name}")
 
 
 def reconcile_conformal_v5_future_settlement(
@@ -292,9 +764,11 @@ def _validate_settled_corpus_index(
             row.get("corpus_built_after_decision_freeze") is True for row in entries
         ),
         "post_close": all(row.get("settled_after_market_close") is True for row in entries),
-        "index_after_decision_freeze": int(index.get("index_created_ts") or 0)
+        "target_access_after_decision_freeze": int(index.get("target_access_started_ts") or 0)
         > decision_freeze_created_ts,
-        "before_reconciliation": int(index.get("index_created_ts") or 0)
+        "index_finalized_after_target_access": int(index.get("index_finalized_ts") or 0)
+        >= int(index.get("target_access_started_ts") or 0),
+        "before_reconciliation": int(index.get("index_finalized_ts") or 0)
         <= reconciliation_started_ts,
         "no_selection_tuning": index.get("outcomes_used_for_decision_or_selection") is False
         and index.get("outcomes_used_for_threshold_or_model_tuning") is False,
@@ -515,8 +989,32 @@ def _gate_markdown(gate: dict[str, Any]) -> str:
     )
 
 
+def _settled_index_markdown(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# Conformal v5 future settled-corpus index",
+            "",
+            f"- ready: `{str(report['settled_corpus_index_ready']).lower()}`",
+            f"- selected markets: `{report['selected_market_count']}`",
+            f"- settled corpora: `{report['settled_corpus_ready_market_count']}`",
+            f"- unresolved/failed: `{report['unresolved_or_failed_market_count']}`",
+            f"- settlement attempts: `{report['settlement_attempt_count']}`",
+            f"- retried markets: `{report['settlement_retry_market_count']}`",
+            f"- bounded resolution wait seconds: `{report['settlement_max_wait_seconds']}`",
+            "- source outcome-blind rounds mutated: `false`",
+            "- direct training corpus export: `false`",
+            "- official read-only outcome access: `true`",
+            "- future results used for tuning/rerun: `false/false`",
+            "- paper/live/handoff unlock: `false`",
+            "",
+        ]
+    )
+
+
 __all__ = [
+    "ConformalV5FutureSettlementCorpusIndexConfig",
     "ConformalV5FutureSettlementConfig",
     "SETTLED_CORPUS_INDEX_SCHEMA_VERSION",
+    "build_conformal_v5_future_settled_corpus_index",
     "reconcile_conformal_v5_future_settlement",
 ]
