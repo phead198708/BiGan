@@ -18,6 +18,9 @@
     "replacement_attempts_after_maximum_allowed": false,
     "selection_is_outcome_blind": true,
     "labels_or_outcomes_opened_during_collection": false,
+    "outcome_blind_collection_only_required": true,
+    "settlement_finalizer_started_during_collection": false,
+    "training_corpus_export_during_collection_allowed": false,
     "github_comment_policy": "bounded_batch_summary_only",
     "quality_validity_inputs": [
       "raw_evidence_completeness",

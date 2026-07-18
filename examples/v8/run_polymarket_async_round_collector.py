@@ -67,6 +67,7 @@ def run_polymarket_async_round_collector_cli(
     clob_identity_revalidation_retry_seconds: float = 0.25,
     feature_enrichment_max_attempts: int = 40,
     outcome_blind_quality_stop_target: int | None = None,
+    outcome_blind_collection_only: bool = False,
     future_holdout_collection_freeze_manifest: Path | str | None = None,
     future_holdout_collection_freeze_manifest_sha256: str | None = None,
     overwrite_existing: bool = False,
@@ -129,6 +130,14 @@ def run_polymarket_async_round_collector_cli(
             raise ValueError(
                 "future holdout collection freeze manifest and SHA-256 are required"
             )
+        if not outcome_blind_collection_only:
+            raise ValueError(
+                "outcome_blind_collection_only is required for frozen future holdout collection"
+            )
+        if settlement_grace_seconds != 0.0:
+            raise ValueError(
+                "settlement_grace_seconds must be zero in outcome-blind collection-only mode"
+            )
         collection_freeze_path = Path(
             future_holdout_collection_freeze_manifest
         ).expanduser().resolve()
@@ -147,6 +156,7 @@ def run_polymarket_async_round_collector_cli(
         quality_collector_contract = dict(candidate_protocol["collector_contract"])
         quality_control_state = {
             "outcome_blind_quality_stop_enabled": True,
+            "outcome_blind_collection_only": True,
             "outcome_blind_quality_stop_target": TARGET_VALID_MARKET_COUNT,
             "maximum_capture_attempt_count": MAXIMUM_CAPTURE_ATTEMPT_COUNT,
             "future_holdout_collection_freeze_manifest": {
@@ -159,7 +169,11 @@ def run_polymarket_async_round_collector_cli(
             "uses_model_scores_for_collection_control": False,
             "uses_accepted_bet_count_for_collection_control": False,
             "labels_or_outcomes_opened_for_collection_control": False,
+            "labels_or_outcomes_opened_during_collection": False,
             "settlement_pnl_opened_for_collection_control": False,
+            "settlement_finalizer_started": False,
+            "resolution_provider_called": False,
+            "training_corpus_export_attempted": False,
             "outcome_blind_quality_valid_capture_count": 0,
             "outcome_blind_quality_valid_capture_run_ids": [],
             "outcome_blind_quality_excluded_capture_count": 0,
@@ -208,12 +222,16 @@ def run_polymarket_async_round_collector_cli(
             )
             stop_event.wait(settlement_poll_interval_seconds)
 
-    finalizer = threading.Thread(
-        target=finalizer_loop,
-        name=f"{batch_id}-settlement-finalizer",
-        daemon=True,
-    )
-    finalizer.start()
+    finalizer: threading.Thread | None = None
+    if _settlement_finalization_permitted(
+        outcome_blind_collection_only=outcome_blind_collection_only
+    ):
+        finalizer = threading.Thread(
+            target=finalizer_loop,
+            name=f"{batch_id}-settlement-finalizer",
+            daemon=True,
+        )
+        finalizer.start()
 
     def capture_round(
         *,
@@ -544,23 +562,27 @@ def run_polymarket_async_round_collector_cli(
                 time.sleep(min(settlement_poll_interval_seconds, deadline - time.monotonic()))
     finally:
         stop_event.set()
-        finalizer.join(timeout=max(1.0, settlement_poll_interval_seconds))
+        if finalizer is not None:
+            finalizer.join(timeout=max(1.0, settlement_poll_interval_seconds))
         chainlink_collector.stop()
 
-    _finalize_pending_once(
-        output_dir=root,
-        destination_root=Path(training_corpus_root),
-        clob_ws_url=clob_ws_url,
-        overwrite_existing=overwrite_existing,
-        batch_id_prefix=batch_id,
-        finalizations=finalizations,
-        errors=errors,
-        lock=lock,
-        captures=captures,
-        public_provider_http_timeout_seconds=(
-            public_provider_http_timeout_seconds
-        ),
-    )
+    if _settlement_finalization_permitted(
+        outcome_blind_collection_only=outcome_blind_collection_only
+    ):
+        _finalize_pending_once(
+            output_dir=root,
+            destination_root=Path(training_corpus_root),
+            clob_ws_url=clob_ws_url,
+            overwrite_existing=overwrite_existing,
+            batch_id_prefix=batch_id,
+            finalizations=finalizations,
+            errors=errors,
+            lock=lock,
+            captures=captures,
+            public_provider_http_timeout_seconds=(
+                public_provider_http_timeout_seconds
+            ),
+        )
     if quality_control_state is not None:
         quality_control_state.update(
             _outcome_blind_quality_control_snapshot(
@@ -585,10 +607,22 @@ def run_polymarket_async_round_collector_cli(
         quality_control_state=quality_control_state,
     )
     summary["chainlink_rtds_collection_report"] = chainlink_collector.collection_report()
+    summary["outcome_blind_collection_only"] = outcome_blind_collection_only
+    summary["settlement_finalizer_started"] = finalizer is not None
+    summary["resolution_provider_called"] = finalizer is not None
+    summary["training_corpus_export_attempted"] = finalizer is not None
     summary_path = batch_dir / "batch_summary.json"
     _write_json(summary_path, summary)
     summary["batch_summary_path"] = str(summary_path)
     return summary
+
+
+def _settlement_finalization_permitted(
+    *, outcome_blind_collection_only: bool
+) -> bool:
+    """Keep future-holdout outcomes sealed until explicit candidate binding."""
+
+    return not outcome_blind_collection_only
 
 
 def run_polymarket_async_finalizer_cli(
@@ -1346,6 +1380,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--outcome-blind-collection-only",
+        action="store_true",
+        help=(
+            "Persist raw pending-round evidence without calling resolution, "
+            "settlement finalization, or training-corpus export."
+        ),
+    )
+    parser.add_argument(
         "--future-holdout-collection-freeze-manifest",
         default=None,
     )
@@ -1417,6 +1459,7 @@ def main(argv: list[str] | None = None) -> int:
             outcome_blind_quality_stop_target=(
                 args.outcome_blind_quality_stop_target
             ),
+            outcome_blind_collection_only=args.outcome_blind_collection_only,
             future_holdout_collection_freeze_manifest=(
                 args.future_holdout_collection_freeze_manifest
             ),

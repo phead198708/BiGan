@@ -16,6 +16,7 @@ from examples.v8.run_polymarket_async_round_collector import (
     _outcome_blind_quality_control_snapshot,
     _round_start_alignment_sleep_seconds,
     _scheduled_round_start_epoch_seconds,
+    _settlement_finalization_permitted,
     _summary,
     _wait_until_scheduled_round_start,
     main,
@@ -90,6 +91,21 @@ def test_outcome_blind_quality_stop_requires_pinned_preregistration(
             round_count=340,
             outcome_blind_quality_stop_target=220,
         )
+
+
+def test_outcome_blind_collection_only_disables_settlement_finalization() -> None:
+    assert (
+        _settlement_finalization_permitted(
+            outcome_blind_collection_only=True
+        )
+        is False
+    )
+    assert (
+        _settlement_finalization_permitted(
+            outcome_blind_collection_only=False
+        )
+        is True
+    )
 
 
 def test_round_start_alignment_does_not_sleep_inside_start_window() -> None:

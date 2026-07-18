@@ -221,6 +221,9 @@ def test_issue190_future_holdout_protocol_freezes_outcome_blind_sequential_stop(
     ] is False
     assert collection["stop_when_target_valid_market_count_reached"] is True
     assert collection["selection_is_outcome_blind"] is True
+    assert collection["outcome_blind_collection_only_required"] is True
+    assert collection["settlement_finalizer_started_during_collection"] is False
+    assert collection["training_corpus_export_during_collection_allowed"] is False
     assert collection["dynamic_extension_allowed"] is False
     assert protocol["collection_may_run_in_parallel_with_confirmatory_evaluation"] is True
     assert protocol["uses_confirmatory_results_to_control_collection"] is False
@@ -256,6 +259,9 @@ def test_issue190_pre_registration_is_hash_pinned_and_safety_blocked(
     assert manifest["collection_may_run_before_issue189_confirmatory_result"] is True
     assert manifest["minimum_accepted_unique_market_count"] == 88
     assert manifest["collection_sizing_derived_from_prospective_power_analysis"] is True
+    assert manifest["outcome_blind_collection_only_required"] is True
+    assert manifest["settlement_finalizer_started_during_collection"] is False
+    assert manifest["training_corpus_export_during_collection_allowed"] is False
     assert audit["future_holdout_minimum_accepted_unique_market_count"] == 88
     assert audit["future_holdout_power_analysis_manifest"]["sha256"] == manifest[
         "power_analysis_manifest"
@@ -327,6 +333,9 @@ def test_issue190_collection_freeze_binds_terminal_source_boundary(
     assert manifest["minimum_accepted_unique_market_count"] == 88
     assert manifest["collection_sizing_derived_from_prospective_power_analysis"] is True
     assert manifest["collection_control_is_outcome_blind"] is True
+    assert manifest["outcome_blind_collection_only_required"] is True
+    assert manifest["settlement_finalizer_started_during_collection"] is False
+    assert manifest["training_corpus_export_during_collection_allowed"] is False
     assert audit["minimum_collection_decision_ts"] > manifest[
         "source_max_decision_ts"
     ]
