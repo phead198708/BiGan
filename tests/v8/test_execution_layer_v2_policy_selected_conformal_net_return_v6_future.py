@@ -21,9 +21,16 @@ from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_n
     pre_register_policy_selected_conformal_v6_future_evaluation,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_net_return_v6_future_prediction import (
+    SCHEMA_PREFIX as PREDICTION_SCHEMA_PREFIX,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_net_return_v6_future_prediction import (
     _future_support_summary,
     _validate_append_only_prefix,
     _validate_selected_future_rows,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_net_return_v6_future_settlement import (
+    _validate_prediction_freeze_for_target_access,
+    build_policy_selected_conformal_v6_side_only_future_pnl_gate,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -160,6 +167,124 @@ def test_v6_selected_future_rows_enforce_sequence_and_time_boundaries() -> None:
             prereg,
             selected_rows=[{**rows[0], "scheduled_round_start_ts": 999}, rows[1]],
         )
+
+
+def test_v6_future_side_only_gate_passes_with_supported_positive_sides() -> None:
+    candidate = _settled_gate_rows(candidate_pnl=0.10)
+    baseline = _settled_gate_rows(candidate_pnl=0.02)
+    gate = build_policy_selected_conformal_v6_side_only_future_pnl_gate(
+        candidate,
+        matched_baseline_evaluation_rows=baseline,
+        evaluation_market_ids=[f"market-{index:03d}" for index in range(300)],
+        profile=_load_json(SOURCE_PROFILE),
+        decision_freeze_sha256="a" * 64,
+    )
+    assert gate["future_gate_passed"] is True
+    assert gate["guard_accepted_unique_market_count"] == 120
+    assert gate["accepted_side_metrics"]["UP"]["accepted_unique_market_count"] == 60
+    assert gate["accepted_side_metrics"]["DOWN"]["accepted_unique_market_count"] == 60
+    assert gate["action_and_action_family_pnl_diagnostic_only"] is True
+    assert gate["paper_candidate_allowed"] is False
+    assert gate["v8_execution_handoff_allowed"] is False
+
+
+def test_v6_future_side_only_gate_blocks_negative_supported_side() -> None:
+    candidate = _settled_gate_rows(candidate_pnl=0.10)
+    for row in candidate[:60]:
+        row["accepted_bet_net_pnl"] = -0.10
+    gate = build_policy_selected_conformal_v6_side_only_future_pnl_gate(
+        candidate,
+        matched_baseline_evaluation_rows=_settled_gate_rows(candidate_pnl=0.02),
+        evaluation_market_ids=[f"market-{index:03d}" for index in range(300)],
+        profile=_load_json(SOURCE_PROFILE),
+        decision_freeze_sha256="b" * 64,
+    )
+    assert gate["future_gate_passed"] is False
+    assert "supported_side_post_cost_pnl_gate_failed" in gate[
+        "future_gate_blocking_reason_codes"
+    ]
+
+
+def test_v6_future_action_family_loss_is_diagnostic_only() -> None:
+    candidate = _settled_gate_rows(candidate_pnl=0.10)
+    candidate[0]["executed_action"] = "BUY_UP_HOLD_TO_SETTLEMENT"
+    candidate[0]["accepted_bet_net_pnl"] = -0.10
+    gate = build_policy_selected_conformal_v6_side_only_future_pnl_gate(
+        candidate,
+        matched_baseline_evaluation_rows=_settled_gate_rows(candidate_pnl=0.02),
+        evaluation_market_ids=[f"market-{index:03d}" for index in range(300)],
+        profile=_load_json(SOURCE_PROFILE),
+        decision_freeze_sha256="c" * 64,
+    )
+    assert gate["accepted_action_family_metrics"]["HOLD_TO_SETTLEMENT"][
+        "accepted_bet_net_pnl_sum"
+    ] < 0.0
+    assert gate["accepted_action_family_metrics"]["HOLD_TO_SETTLEMENT"][
+        "diagnostic_only"
+    ] is True
+    assert gate["future_gate_passed"] is True
+
+
+def test_v6_future_gate_fails_closed_on_runtime_safety_or_duplicate_market() -> None:
+    candidate = _settled_gate_rows(candidate_pnl=0.10)
+    candidate[0]["runtime_state_violation"] = True
+    gate = build_policy_selected_conformal_v6_side_only_future_pnl_gate(
+        candidate,
+        matched_baseline_evaluation_rows=_settled_gate_rows(candidate_pnl=0.02),
+        evaluation_market_ids=[f"market-{index:03d}" for index in range(300)],
+        profile=_load_json(SOURCE_PROFILE),
+        decision_freeze_sha256="d" * 64,
+    )
+    assert gate["future_gate_passed"] is False
+    assert "settlement_causality_provenance_or_runtime_safety_failed" in gate[
+        "future_gate_blocking_reason_codes"
+    ]
+    with pytest.raises(ValueError, match="duplicated"):
+        build_policy_selected_conformal_v6_side_only_future_pnl_gate(
+            _settled_gate_rows(candidate_pnl=0.10),
+            matched_baseline_evaluation_rows=_settled_gate_rows(candidate_pnl=0.02),
+            evaluation_market_ids=["market-000"] * 300,
+            profile=_load_json(SOURCE_PROFILE),
+            decision_freeze_sha256="e" * 64,
+        )
+
+
+def test_v6_future_target_access_requires_supported_decision_freeze() -> None:
+    freeze = {
+        "schema_version": f"{PREDICTION_SCHEMA_PREFIX}-manifest-v1",
+        "decision_freeze_written_before_target_access": True,
+        "future_target_free_support_gate_passed": False,
+        "future_target_access_allowed_after_decision_freeze": False,
+        "future_labels_outcomes_or_pnl_opened": False,
+        **_blocked_safety_fields(),
+    }
+    with pytest.raises(ValueError, match="target_free_support_gate_failed"):
+        _validate_prediction_freeze_for_target_access(freeze)
+
+
+def _settled_gate_rows(*, candidate_pnl: float) -> list[dict[str, object]]:
+    rows = []
+    for index in range(120):
+        side = "UP" if index < 60 else "DOWN"
+        rows.append(
+            {
+                "market_id": f"market-{index:03d}",
+                "selected_side": side,
+                "executed_action": f"BUY_{side}_SELL_BEFORE_CLOSE",
+                "execution_guard_order_allowed": True,
+                "accepted_bet_net_pnl": candidate_pnl,
+                "settlement_resolved": True,
+                "target_joined_after_decision_freeze": True,
+                "target_used_as_decision_input": False,
+                "forbidden_outcome_field_used_for_decision": False,
+                "feature_causality_violation": False,
+                "provenance_violation": False,
+                "runtime_state_violation": False,
+                "future_results_used_for_tuning": False,
+                **_blocked_safety_fields(),
+            }
+        )
+    return rows
 
 
 def _config(
