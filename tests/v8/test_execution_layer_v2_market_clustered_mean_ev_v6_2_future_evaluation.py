@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -51,13 +52,120 @@ def test_profile_freezes_exact_window_support_and_side_only_gate() -> None:
     assert profile["safety"]["promotion_evidence_eligible"] is False
 
 
+@pytest.mark.parametrize(
+    ("path", "replacement", "reason"),
+    [
+        (("window", "candidate_freeze_created_ts_exclusive"), 1, "window_contract"),
+        (("window", "all_markets_closed_before_target_access"), False, "window_contract"),
+        (
+            ("support_and_pnl_gates", "minimum_guard_accepted_bet_count"),
+            119,
+            "support_and_pnl_gate_contract",
+        ),
+        (
+            (
+                "support_and_pnl_gates",
+                "accepted_bet_total_post_cost_pnl_minimum_exclusive",
+            ),
+            -1.0,
+            "support_and_pnl_gate_contract",
+        ),
+        (
+            ("support_and_pnl_gates", "bootstrap_seed"),
+            1,
+            "support_and_pnl_gate_contract",
+        ),
+        (
+            ("access_sequence", "future_result_driven_rerun_allowed"),
+            True,
+            "access_sequence_contract",
+        ),
+        (("candidate_model_sha256",), "0" * 64, "frozen_lineage"),
+    ],
+)
+def test_profile_rejects_any_frozen_semantic_or_lineage_mutation(
+    path: tuple[str, ...], replacement: object, reason: str
+) -> None:
+    profile = copy.deepcopy(_profile())
+    destination = profile
+    for key in path[:-1]:
+        destination = destination[key]
+    destination[path[-1]] = replacement
+    with pytest.raises(ValueError, match=reason):
+        validate_market_clustered_mean_ev_v6_2_future_profile(profile)
+
+
 def test_collection_profile_is_bound_to_candidate_and_exact_window() -> None:
     collection = json.loads(COLLECTION_PROFILE_PATH.read_text(encoding="utf-8"))
     candidate_sha256 = _profile()["candidate_manifest_sha256"]
     _validate_collection_profile(collection, candidate_sha256=candidate_sha256)
     collection["candidate"]["candidate_manifest_sha256"] = "0" * 64
-    with pytest.raises(ValueError, match="candidate_hash"):
+    with pytest.raises(ValueError, match="candidate_contract"):
         _validate_collection_profile(collection, candidate_sha256=candidate_sha256)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "replacement", "reason"),
+    [
+        ("collection", "attempt_scan_cap", 241, "collection_contract"),
+        (
+            "target_free_support",
+            "minimum_guard_accepted_unique_market_count",
+            119,
+            "support_contract",
+        ),
+        (
+            "early_stop",
+            "threshold_or_model_change_after_canary_output_allowed",
+            True,
+            "early_stop_contract",
+        ),
+        (
+            "future_evaluation",
+            "single_evaluation_allowed",
+            False,
+            "evaluation_contract",
+        ),
+    ],
+)
+def test_collection_profile_rejects_frozen_contract_mutation(
+    section: str, field: str, replacement: object, reason: str
+) -> None:
+    collection = json.loads(COLLECTION_PROFILE_PATH.read_text(encoding="utf-8"))
+    collection[section][field] = replacement
+    with pytest.raises(ValueError, match=reason):
+        _validate_collection_profile(
+            collection,
+            candidate_sha256=_profile()["candidate_manifest_sha256"],
+        )
+
+
+def test_replacement_evaluation_hash_fails_before_prediction_or_output(tmp_path: Path) -> None:
+    output_dir = tmp_path / "runs"
+    with pytest.raises(ValueError, match="preregistered frozen #212 profile"):
+        freeze_market_clustered_mean_ev_v6_2_future_predictions(
+            MarketClusteredMeanEVV62FutureFreezeConfig(
+                run_id="must-not-start",
+                output_dir=output_dir,
+                evaluation_profile_path=tmp_path / "replacement-profile.json",
+                expected_evaluation_profile_sha256="0" * 64,
+                collection_profile_path=tmp_path / "collection-profile.json",
+                expected_collection_profile_sha256=(
+                    subject.FROZEN_COLLECTION_PROFILE_SHA256
+                ),
+                candidate_manifest_path=tmp_path / "candidate-manifest.json",
+                expected_candidate_manifest_sha256=(
+                    subject.FROZEN_CANDIDATE_MANIFEST_SHA256
+                ),
+                cumulative_canary_manifest_path=tmp_path / "cumulative.json",
+                expected_cumulative_canary_manifest_sha256="1" * 64,
+                collector_index_path=tmp_path / "index.jsonl",
+                expected_collector_index_sha256="2" * 64,
+                builder_git_commit="a" * 40,
+                decision_freeze_created_ts=1,
+            )
+        )
+    assert not output_dir.exists()
 
 
 def test_exact_window_uses_earliest_200_quality_rows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,6 +278,41 @@ def test_exact_200_freeze_materializes_raw_features_before_target_access(
 ) -> None:
     selected_rows = [_synthetic_selected_row(tmp_path, index) for index in range(200)]
     bundle = _synthetic_freeze_bundle(tmp_path)
+    monkeypatch.setattr(
+        subject,
+        "FROZEN_EVALUATION_PROFILE_SHA256",
+        _sha256(bundle["evaluation_profile"]),
+    )
+    monkeypatch.setattr(
+        subject,
+        "FROZEN_COLLECTION_PROFILE_SHA256",
+        _sha256(bundle["collection_profile"]),
+    )
+    monkeypatch.setattr(
+        subject,
+        "FROZEN_CANDIDATE_MANIFEST_SHA256",
+        _sha256(bundle["candidate_manifest"]),
+    )
+    monkeypatch.setattr(
+        subject,
+        "FROZEN_CANDIDATE_MODEL_SHA256",
+        _sha256(bundle["model"]),
+    )
+    monkeypatch.setattr(
+        subject,
+        "FROZEN_CANDIDATE_CALIBRATION_SHA256",
+        _sha256(bundle["calibration"]),
+    )
+    monkeypatch.setattr(
+        subject,
+        "FROZEN_MATCHED_V5_MANIFEST_SHA256",
+        _sha256(bundle["v5_manifest"]),
+    )
+    monkeypatch.setattr(
+        subject,
+        "FROZEN_FEATURE_CONTRACT_SHA256",
+        _sha256(bundle["feature_contract"]),
+    )
     monkeypatch.setattr(subject, "load_and_validate_persistent_outcome_blind_index", lambda _: selected_rows)
     monkeypatch.setattr(subject, "_prior_market_reference", lambda _: (set(), "a" * 64))
     monkeypatch.setattr(subject.xgb.Booster, "load_model", lambda self, path: None)
@@ -554,6 +697,10 @@ def _synthetic_freeze_bundle(tmp_path: Path) -> dict[str, Path]:
     collector_index.write_text("{}\n", encoding="utf-8")
     return {
         "candidate_manifest": candidate_manifest,
+        "model": model,
+        "calibration": calibration,
+        "v5_manifest": v5_manifest,
+        "feature_contract": feature_contract,
         "collection_profile": collection_profile,
         "evaluation_profile": evaluation_profile,
         "cumulative_manifest": cumulative_manifest,

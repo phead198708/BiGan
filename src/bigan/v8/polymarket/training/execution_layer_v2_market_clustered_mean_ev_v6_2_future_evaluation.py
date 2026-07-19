@@ -79,6 +79,66 @@ EXPECTED_ACTIONS = frozenset(
 )
 SIDES = ("UP", "DOWN")
 SINGLE_USE_CLAIM_FILENAME = "v6_2_future_side_only_gate_single_use_claim.json"
+FROZEN_EVALUATION_PROFILE_SHA256 = (
+    "739330e26c4e8a1ab7fa1667850e7fededab3ec1bde7794308ac8bf6ce62d722"
+)
+FROZEN_COLLECTION_PROFILE_SHA256 = (
+    "42bd1709d1fe197aeedc76499863e01f0c0da4b66581180bb9ae6d2b347ad3fe"
+)
+FROZEN_CANDIDATE_MANIFEST_SHA256 = (
+    "b9441b04fb595a927cbf9af9311612b037c36fc8c623ac8a92b6f4cb8ece84b9"
+)
+FROZEN_CANDIDATE_MODEL_SHA256 = (
+    "7e292852673fe2072017effc2d40fce000be81734f0c8c3d6950c02e957bcf0c"
+)
+FROZEN_CANDIDATE_CALIBRATION_SHA256 = (
+    "dc82ddebc51e95e46477894f2a0ba7bd8fa2f6845b22ced43402822b66b68e43"
+)
+FROZEN_MATCHED_V5_MANIFEST_SHA256 = (
+    "0d0927da515317d0576a04b6c4a9a5175f569225a85ebaf62020326fdc06510d"
+)
+FROZEN_FEATURE_CONTRACT_SHA256 = (
+    "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959"
+)
+FROZEN_CANDIDATE_PROFILE_SHA256 = (
+    "41e1fe0d1c1a9525aad292d1f7fd61927dab85ab11013fb6aac0b77da142664c"
+)
+FROZEN_CANDIDATE_BOUNDARY_EXCLUSIVE = 1_784_470_529_364
+FROZEN_WINDOW = {
+    "first_eligible_index_sequence": 313,
+    "candidate_freeze_created_ts_exclusive": FROZEN_CANDIDATE_BOUNDARY_EXCLUSIVE,
+    "quality_valid_market_count": 200,
+    "maximum_index_scan_count": 240,
+    "selection_rule": "chronological_earliest_quality_valid_strictly_later_disjoint",
+    "all_markets_closed_before_target_access": True,
+    "decision_freeze_before_target_access": True,
+    "single_use_holdout": True,
+    "result_dependent_extension_allowed": False,
+}
+FROZEN_SUPPORT_AND_PNL_GATES = {
+    "minimum_guard_accepted_bet_count": 120,
+    "minimum_guard_accepted_unique_market_count": 120,
+    "minimum_supported_side_market_count": 17,
+    "required_supported_sides": ["UP", "DOWN"],
+    "pnl_hard_gate_aggregation": "selected_side_buy_up_buy_down_only",
+    "action_and_action_family_pnl_diagnostic_only": True,
+    "accepted_bet_total_post_cost_pnl_minimum_exclusive": 0.0,
+    "supported_side_post_cost_pnl_minimum_exclusive": 0.0,
+    "candidate_minus_matched_v5_pnl_minimum_exclusive": 0.0,
+    "candidate_minus_matched_v5_bootstrap_lcb_minimum_exclusive": 0.0,
+    "largest_winner_removed_pnl_minimum_exclusive": 0.0,
+    "bootstrap_unit": "market_id",
+    "bootstrap_confidence_level": 0.95,
+    "bootstrap_resample_count": 5000,
+    "bootstrap_seed": 21060722,
+}
+FROZEN_ACCESS_SEQUENCE = {
+    "target_free_prediction_and_full_guard_freeze_first": True,
+    "official_read_only_settlement_on_quarantine_copies_second": True,
+    "single_side_only_pnl_gate_last": True,
+    "outcomes_used_for_model_threshold_cost_sizing_or_guard_tuning": False,
+    "future_result_driven_rerun_allowed": False,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,43 +228,22 @@ def validate_market_clustered_mean_ev_v6_2_future_profile(
     window = dict(profile.get("window") or {})
     gates = dict(profile.get("support_and_pnl_gates") or {})
     access = dict(profile.get("access_sequence") or {})
+    frozen_lineage = {
+        "collection_profile_sha256": FROZEN_COLLECTION_PROFILE_SHA256,
+        "candidate_manifest_sha256": FROZEN_CANDIDATE_MANIFEST_SHA256,
+        "candidate_model_sha256": FROZEN_CANDIDATE_MODEL_SHA256,
+        "candidate_calibration_sha256": FROZEN_CANDIDATE_CALIBRATION_SHA256,
+        "matched_v5_manifest_sha256": FROZEN_MATCHED_V5_MANIFEST_SHA256,
+        "feature_contract_sha256": FROZEN_FEATURE_CONTRACT_SHA256,
+    }
     checks = {
         "schema": profile.get("schema_version") == PROFILE_SCHEMA_VERSION,
+        "issue": profile.get("issue") == 212,
         "frozen": profile.get("frozen") is True,
-        "collection_profile": _is_sha256(profile.get("collection_profile_sha256")),
-        "candidate": _is_sha256(profile.get("candidate_manifest_sha256")),
-        "model": _is_sha256(profile.get("candidate_model_sha256")),
-        "calibration": _is_sha256(profile.get("candidate_calibration_sha256")),
-        "baseline": _is_sha256(profile.get("matched_v5_manifest_sha256")),
-        "feature_contract": _is_sha256(profile.get("feature_contract_sha256")),
-        "first_sequence": int(window.get("first_eligible_index_sequence") or 0) == 313,
-        "exact_200": int(window.get("quality_valid_market_count") or 0) == 200,
-        "scan_240": int(window.get("maximum_index_scan_count") or 0) == 240,
-        "selection": window.get("selection_rule")
-        == "chronological_earliest_quality_valid_strictly_later_disjoint",
-        "single_use": window.get("single_use_holdout") is True,
-        "no_extension": window.get("result_dependent_extension_allowed") is False,
-        "support": int(gates.get("minimum_guard_accepted_unique_market_count") or 0)
-        == 120,
-        "side_support": int(gates.get("minimum_supported_side_market_count") or 0) == 17,
-        "sides": list(gates.get("required_supported_sides") or []) == ["UP", "DOWN"],
-        "side_only": gates.get("pnl_hard_gate_aggregation")
-        == "selected_side_buy_up_buy_down_only",
-        "action_diagnostic": gates.get("action_and_action_family_pnl_diagnostic_only")
-        is True,
-        "market_bootstrap": gates.get("bootstrap_unit") == "market_id",
-        "target_free_first": access.get("target_free_prediction_and_full_guard_freeze_first")
-        is True,
-        "quarantine_second": access.get(
-            "official_read_only_settlement_on_quarantine_copies_second"
-        )
-        is True,
-        "gate_last": access.get("single_side_only_pnl_gate_last") is True,
-        "no_tuning": access.get(
-            "outcomes_used_for_model_threshold_cost_sizing_or_guard_tuning"
-        )
-        is False,
-        "no_rerun": access.get("future_result_driven_rerun_allowed") is False,
+        "frozen_lineage": all(profile.get(key) == value for key, value in frozen_lineage.items()),
+        "window_contract": window == FROZEN_WINDOW,
+        "support_and_pnl_gate_contract": gates == FROZEN_SUPPORT_AND_PNL_GATES,
+        "access_sequence_contract": access == FROZEN_ACCESS_SEQUENCE,
         "safety": dict(profile.get("safety") or {}) == _expected_safety(),
     }
     failed = [name for name, passed in checks.items() if not passed]
@@ -222,6 +261,12 @@ def freeze_market_clustered_mean_ev_v6_2_future_predictions(
     candidate_path = Path(config.candidate_manifest_path).resolve()
     cumulative_path = Path(config.cumulative_canary_manifest_path).resolve()
     index_path = Path(config.collector_index_path).resolve()
+    if config.expected_evaluation_profile_sha256 != FROZEN_EVALUATION_PROFILE_SHA256:
+        raise ValueError("evaluation profile is not the preregistered frozen #212 profile")
+    if config.expected_collection_profile_sha256 != FROZEN_COLLECTION_PROFILE_SHA256:
+        raise ValueError("collection profile is not the preregistered frozen #212 profile")
+    if config.expected_candidate_manifest_sha256 != FROZEN_CANDIDATE_MANIFEST_SHA256:
+        raise ValueError("candidate manifest is not the preregistered frozen #212 candidate")
     _verify_all_pins(
         (
             (profile_path, config.expected_evaluation_profile_sha256, "evaluation profile"),
@@ -666,6 +711,8 @@ def run_market_clustered_mean_ev_v6_2_future_gate(
     freeze_path = Path(config.prediction_freeze_manifest_path).resolve()
     index_path = Path(config.settled_corpus_index_path).resolve()
     profile_path = Path(config.evaluation_profile_path).resolve()
+    if config.expected_evaluation_profile_sha256 != FROZEN_EVALUATION_PROFILE_SHA256:
+        raise ValueError("evaluation profile is not the preregistered frozen #212 profile")
     _verify_all_pins(
         (
             (
@@ -1087,29 +1134,60 @@ def _validate_collection_profile(
     candidate = dict(profile.get("candidate") or {})
     collection = dict(profile.get("collection") or {})
     evaluation = dict(profile.get("future_evaluation") or {})
+    expected_candidate = {
+        "candidate_name": CANDIDATE_NAME,
+        "candidate_manifest_sha256": FROZEN_CANDIDATE_MANIFEST_SHA256,
+        "model_sha256": FROZEN_CANDIDATE_MODEL_SHA256,
+        "calibration_sha256": FROZEN_CANDIDATE_CALIBRATION_SHA256,
+        "profile_sha256": FROZEN_CANDIDATE_PROFILE_SHA256,
+        "freeze_created_ts_exclusive": FROZEN_CANDIDATE_BOUNDARY_EXCLUSIVE,
+        "first_eligible_index_sequence": 313,
+    }
+    expected_collection = {
+        "market_family": "btc_updown_5m",
+        "bounded_batch_round_count": 12,
+        "quality_valid_market_target": 200,
+        "attempt_scan_cap": 240,
+        "selection_rule": "chronological_earliest_quality_valid_strictly_later_disjoint",
+        "exact_freeze_market_count": 200,
+    }
+    expected_support = {
+        "minimum_guard_accepted_unique_market_count": 120,
+        "minimum_guard_accepted_unique_market_count_per_side": 17,
+        "statistical_unit": "unique_market_id",
+        "source_power_analysis_issue": 205,
+        "outcomes_used_for_support_monitoring": False,
+    }
+    expected_early_stop = {
+        "consecutive_complete_zero_action_batch_limit": 2,
+        "consecutive_zero_action_quality_market_minimum": 24,
+        "stop_on_hash_or_causality_violation": True,
+        "stop_on_target_or_outcome_access": True,
+        "stop_when_support_is_impossible_within_scan_cap": True,
+        "threshold_or_model_change_after_canary_output_allowed": False,
+    }
+    expected_evaluation = {
+        "decision_freeze_before_outcome_access_required": True,
+        "side_only_buy_up_buy_down_after_cost_pnl_gate": True,
+        "action_and_family_pnl_diagnostic_only": True,
+        "single_evaluation_allowed": True,
+    }
+    expected_safety = {
+        key: value
+        for key, value in _blocked_safety_fields().items()
+        if key != "paper_candidate_allowed"
+    }
     checks = {
         "schema": profile.get("schema_version")
         == "bigan-v8-market-clustered-mean-ev-v6-2-future-holdout-profile-v1",
-        "candidate": candidate.get("candidate_name") == CANDIDATE_NAME,
-        "candidate_hash": candidate.get("candidate_manifest_sha256")
-        == candidate_sha256,
-        "first_sequence": int(candidate.get("first_eligible_index_sequence") or 0)
-        == 313,
-        "quality_target": int(collection.get("quality_valid_market_target") or 0)
-        == 200,
-        "scan_cap": int(collection.get("attempt_scan_cap") or 0) == 240,
-        "exact_freeze": int(collection.get("exact_freeze_market_count") or 0)
-        == 200,
-        "side_only": evaluation.get("side_only_buy_up_buy_down_after_cost_pnl_gate")
-        is True,
-        "action_diagnostic": evaluation.get("action_and_family_pnl_diagnostic_only")
-        is True,
-        "single_use": evaluation.get("single_evaluation_allowed") is True,
-        "safety": all(
-            profile.get("safety", {}).get(field) == expected
-            for field, expected in _blocked_safety_fields().items()
-            if field != "paper_candidate_allowed"
-        ),
+        "issue": profile.get("issue") == 212,
+        "candidate_hash_argument": candidate_sha256 == FROZEN_CANDIDATE_MANIFEST_SHA256,
+        "candidate_contract": candidate == expected_candidate,
+        "collection_contract": collection == expected_collection,
+        "support_contract": dict(profile.get("target_free_support") or {}) == expected_support,
+        "early_stop_contract": dict(profile.get("early_stop") or {}) == expected_early_stop,
+        "evaluation_contract": evaluation == expected_evaluation,
+        "safety": dict(profile.get("safety") or {}) == expected_safety,
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
@@ -1117,11 +1195,20 @@ def _validate_collection_profile(
 
 
 def _validate_candidate(candidate: dict[str, Any], *, profile: dict[str, Any]) -> None:
+    model = _verified_descriptor(candidate.get("source_model"), "source model")
+    calibration = _verified_descriptor(
+        candidate.get("market_clustered_mean_risk_calibration"), "v6.2 calibration"
+    )
     checks = {
         "candidate": candidate.get("candidate_name") == CANDIDATE_NAME,
         "frozen": candidate.get("research_actionability_candidate_frozen") is True,
         "actionability": candidate.get("target_free_actionability_gate_passed") is True,
         "future": candidate.get("new_strictly_later_future_holdout_required") is True,
+        "boundary": int(candidate.get("future_collection_minimum_created_ts_exclusive") or 0)
+        == int(profile["window"]["candidate_freeze_created_ts_exclusive"])
+        == FROZEN_CANDIDATE_BOUNDARY_EXCLUSIVE,
+        "model": model["sha256"] == FROZEN_CANDIDATE_MODEL_SHA256,
+        "calibration": calibration["sha256"] == FROZEN_CANDIDATE_CALIBRATION_SHA256,
         "targets": candidate.get(
             "target_free_labels_outcomes_settlement_targets_or_pnl_opened"
         )
@@ -1138,6 +1225,14 @@ def _validate_freeze_manifest_for_target_access(manifest: dict[str, Any]) -> Non
         == f"{SCHEMA_PREFIX}-prediction-freeze-manifest-v1",
         "frozen": manifest.get("decision_freeze_written_before_target_access") is True,
         "support": manifest.get("future_target_access_allowed") is True,
+        "evaluation_profile": dict(manifest.get("evaluation_profile") or {}).get("sha256")
+        == FROZEN_EVALUATION_PROFILE_SHA256,
+        "collection_profile": dict(manifest.get("collection_profile") or {}).get("sha256")
+        == FROZEN_COLLECTION_PROFILE_SHA256,
+        "candidate_manifest": dict(manifest.get("candidate_manifest") or {}).get("sha256")
+        == FROZEN_CANDIDATE_MANIFEST_SHA256,
+        "matched_v5_manifest": dict(manifest.get("matched_v5_manifest") or {}).get("sha256")
+        == FROZEN_MATCHED_V5_MANIFEST_SHA256,
         "target_sealed": manifest.get("labels_outcomes_or_pnl_opened") is False,
         "resolution_sealed": manifest.get("resolution_artifact_opened") is False,
         "provider_sealed": manifest.get("settlement_provider_called") is False,
