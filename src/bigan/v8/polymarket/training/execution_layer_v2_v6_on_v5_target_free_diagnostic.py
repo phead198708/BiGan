@@ -323,7 +323,7 @@ def run_v6_on_v5_target_free_diagnostic(
     fit_rows = _normalize_v5_labeled_rows(
         _load_jsonl(Path(fit_descriptor["path"])),
         role=FIT_ROLE,
-        expected_source_roles={"development_train"},
+        expected_source_roles={"development_train", "development_calibration"},
         feature_columns=feature_columns,
     )
     calibration_rows = _normalize_v5_labeled_rows(

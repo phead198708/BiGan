@@ -100,6 +100,22 @@ def test_v5_role_adapter_preserves_complete_grid_and_blocks_feature_leakage() ->
         )
 
 
+def test_v5_fit_role_adapter_accepts_frozen_90_plus_45_source_roles() -> None:
+    rows = _labeled_rows()
+    rows[0]["role"] = "development_calibration"
+    normalized = _normalize_v5_labeled_rows(
+        rows,
+        role="point_model_fit",
+        expected_source_roles={"development_train", "development_calibration"},
+        feature_columns=("feature_a",),
+    )
+    assert {row["source_v5_role"] for row in normalized} == {
+        "development_train",
+        "development_calibration",
+    }
+    assert {row["role"] for row in normalized} == {"point_model_fit"}
+
+
 def test_v5_role_adapter_rejects_causality_and_role_mismatch() -> None:
     rows = _labeled_rows()
     rows[0]["max_input_ts"] = 101
