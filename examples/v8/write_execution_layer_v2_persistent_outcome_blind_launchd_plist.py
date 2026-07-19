@@ -14,6 +14,13 @@ RUNNER = ROOT / "examples/v8/run_execution_layer_v2_persistent_outcome_blind_col
 DEFAULT_PROTOCOL = ROOT / (
     "examples/v8/polymarket_configs/execution_layer_v2_persistent_outcome_blind_collector_v1.json"
 )
+DEFAULT_BATCH_CANARY_FEATURE_CONTRACT = ROOT / (
+    "examples/v8/polymarket_configs/"
+    "execution_layer_v2_pairwise_action_advantage_lcb_feature_contract_v1.json"
+)
+DEFAULT_BATCH_CANARY_FEATURE_CONTRACT_SHA256 = (
+    "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959"
+)
 
 
 def write_launchd_plist(
@@ -25,6 +32,10 @@ def write_launchd_plist(
     protocol_sha256: str,
     batch_round_count: int,
     python_executable: Path | str,
+    batch_canary_feature_contract_path: Path | str = DEFAULT_BATCH_CANARY_FEATURE_CONTRACT,
+    batch_canary_feature_contract_sha256: str = (
+        DEFAULT_BATCH_CANARY_FEATURE_CONTRACT_SHA256
+    ),
 ) -> dict:
     """Write a KeepAlive service descriptor without starting the service."""
 
@@ -39,6 +50,14 @@ def write_launchd_plist(
     protocol_path = Path(protocol_path).expanduser().resolve()
     if _sha256(protocol_path) != protocol_sha256.lower():
         raise ValueError("persistent collector protocol SHA-256 mismatch")
+    batch_canary_feature_contract_path = Path(
+        batch_canary_feature_contract_path
+    ).expanduser().resolve()
+    if (
+        _sha256(batch_canary_feature_contract_path)
+        != batch_canary_feature_contract_sha256.lower()
+    ):
+        raise ValueError("batch canary feature contract SHA-256 mismatch")
     output_path = Path(output_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     service_root.mkdir(parents=True, exist_ok=True)
@@ -55,6 +74,10 @@ def write_launchd_plist(
             protocol_sha256.lower(),
             "--batch-round-count",
             str(batch_round_count),
+            "--batch-canary-feature-contract",
+            str(batch_canary_feature_contract_path),
+            "--batch-canary-feature-contract-sha256",
+            batch_canary_feature_contract_sha256.lower(),
             "--max-batches",
             "0",
         ],
@@ -81,6 +104,9 @@ def write_launchd_plist(
         "service_root": str(service_root),
         "continuous_collection": True,
         "restart_supervision_enabled": True,
+        "automatic_outcome_blind_batch_canary_enabled": True,
+        "batch_canary_feature_contract_path": str(batch_canary_feature_contract_path),
+        "batch_canary_feature_contract_sha256": batch_canary_feature_contract_sha256.lower(),
         "outcome_blind_collection_only": True,
         "settlement_finalizer_started": False,
         "resolution_provider_called": False,
@@ -110,6 +136,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--protocol", default=str(DEFAULT_PROTOCOL))
     parser.add_argument("--protocol-sha256", required=True)
     parser.add_argument("--batch-round-count", type=int, default=12)
+    parser.add_argument(
+        "--batch-canary-feature-contract",
+        default=str(DEFAULT_BATCH_CANARY_FEATURE_CONTRACT),
+    )
+    parser.add_argument(
+        "--batch-canary-feature-contract-sha256",
+        default=DEFAULT_BATCH_CANARY_FEATURE_CONTRACT_SHA256,
+    )
     parser.add_argument("--python-executable", default=sys.executable)
     args = parser.parse_args(argv)
     report = write_launchd_plist(
@@ -120,6 +154,8 @@ def main(argv: list[str] | None = None) -> int:
         protocol_sha256=args.protocol_sha256,
         batch_round_count=args.batch_round_count,
         python_executable=args.python_executable,
+        batch_canary_feature_contract_path=args.batch_canary_feature_contract,
+        batch_canary_feature_contract_sha256=args.batch_canary_feature_contract_sha256,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

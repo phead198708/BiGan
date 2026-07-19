@@ -429,6 +429,28 @@ def test_bounded_service_uses_collection_only_mode_and_persists_resume_state(
             },
         }
 
+    def fake_canary(config):
+        canary_dir = tmp_path / "canary"
+        canary_dir.mkdir()
+        report_path = canary_dir / "report.json"
+        manifest_path = canary_dir / "manifest.json"
+        report = {
+            "batch_id": config.batch_id,
+            "development_data_canary_passed": True,
+            "development_data_canary_blocking_reason_codes": [],
+        }
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        manifest_path.write_text(
+            json.dumps({"batch_id": config.batch_id}), encoding="utf-8"
+        )
+        return {
+            "report": report,
+            "report_path": report_path,
+            "report_sha256": _sha256(report_path),
+            "manifest_path": manifest_path,
+            "manifest_sha256": _sha256(manifest_path),
+        }
+
     monkeypatch.setattr(
         service_module,
         "run_polymarket_async_round_collector_cli",
@@ -438,6 +460,11 @@ def test_bounded_service_uses_collection_only_mode_and_persists_resume_state(
         service_module,
         "index_persistent_outcome_blind_batch",
         fake_index,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "run_outcome_blind_development_batch_canary",
+        fake_canary,
     )
     monkeypatch.setattr(service_module, "_git_head", lambda: GIT_COMMIT)
 
@@ -459,6 +486,8 @@ def test_bounded_service_uses_collection_only_mode_and_persists_resume_state(
     assert state["settlement_finalizer_started"] is False
     assert state["resolution_provider_called"] is False
     assert state["training_corpus_export_attempted"] is False
+    assert state["last_batch_canary_passed"] is True
+    assert state["last_batch_canary_report_sha256"] == _sha256(tmp_path / "canary/report.json")
     frozen_protocol_path = tmp_path / "service/persistent_outcome_blind_collector_protocol.json"
     assert _sha256(frozen_protocol_path) == _sha256(PROTOCOL_PATH)
     _assert_safety(state)
@@ -483,9 +512,29 @@ def test_launchd_descriptor_keeps_service_alive_without_training_root_export(
     assert payload["KeepAlive"] is True
     assert payload["ProgramArguments"][-2:] == ["--max-batches", "0"]
     assert "--protocol-sha256" in payload["ProgramArguments"]
+    assert "--batch-canary-feature-contract" in payload["ProgramArguments"]
+    assert "--batch-canary-feature-contract-sha256" in payload["ProgramArguments"]
     assert "/Volumes/PHILIPS/v8" not in " ".join(payload["ProgramArguments"])
     assert result["labels_outcomes_or_pnl_opened"] is False
+    assert result["automatic_outcome_blind_batch_canary_enabled"] is True
     _assert_safety(result)
+
+
+def test_completed_batch_canary_failure_is_terminal() -> None:
+    with pytest.raises(
+        service_module.OutcomeBlindBatchCanaryFailure,
+        match="feature_timestamp_causality_violation",
+    ):
+        service_module._require_batch_canary_passed(
+            {
+                "report": {
+                    "development_data_canary_passed": False,
+                    "development_data_canary_blocking_reason_codes": [
+                        "feature_timestamp_causality_violation"
+                    ],
+                }
+            }
+        )
 
 
 def test_launchd_descriptor_rejects_direct_training_corpus_root(tmp_path: Path) -> None:
