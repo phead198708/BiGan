@@ -7,6 +7,7 @@ import json
 import math
 import shutil
 import statistics
+import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.recorder import PolymarketPublicHTTPRealCorpusProvider
 from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_evaluation import (
     FORBIDDEN_TARGET_FIELDS,
     _blocked_safety_fields,
@@ -21,6 +23,10 @@ from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_evaluat
 from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_prediction_freeze import (
     _materialize_future_action_rows,
     _materialize_selected_window_features,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_settlement import (
+    _finalize_selected_rounds,
+    _is_retryable_settlement_failure,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_persistent_outcome_blind_collector import (
     load_and_validate_persistent_outcome_blind_index,
@@ -40,6 +46,15 @@ DEVELOPMENT_WINDOW_REPORT_SCHEMA_VERSION = (
 )
 DEVELOPMENT_WINDOW_MANIFEST_SCHEMA_VERSION = (
     "bigan-v8-policy-selected-conformal-v6-development-window-manifest-v1"
+)
+DEVELOPMENT_SETTLED_INDEX_SCHEMA_VERSION = (
+    "bigan-v8-policy-selected-conformal-v6-development-settled-index-v1"
+)
+DEVELOPMENT_SETTLEMENT_REPORT_SCHEMA_VERSION = (
+    "bigan-v8-policy-selected-conformal-v6-development-settlement-report-v1"
+)
+DEVELOPMENT_SETTLEMENT_MANIFEST_SCHEMA_VERSION = (
+    "bigan-v8-policy-selected-conformal-v6-development-settlement-manifest-v1"
 )
 
 REQUIRED_ACTIONS = (
@@ -132,6 +147,45 @@ class PolicySelectedConformalV6DevelopmentWindowConfig:
             "collector_index_path",
             "feature_contract_path",
         ):
+            object.__setattr__(self, field, Path(getattr(self, field)))
+
+
+@dataclass(frozen=True, slots=True)
+class PolicySelectedConformalV6DevelopmentSettlementConfig:
+    """Pinned post-freeze read-only target finalization for v6 development roles."""
+
+    run_id: str
+    output_dir: Path | str
+    development_window_manifest_path: Path | str
+    expected_development_window_manifest_sha256: str
+    builder_git_commit: str
+    target_access_started_ts: int
+    provider_timeout_seconds: float = 15.0
+    provider_http_timeout_seconds: float = 5.0
+    settlement_max_wait_seconds: float = 600.0
+    settlement_poll_interval_seconds: float = 15.0
+    max_workers: int = 8
+    overwrite_existing: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        _require_sha256(
+            self.expected_development_window_manifest_sha256,
+            name="expected_development_window_manifest_sha256",
+        )
+        _require_git_sha(self.builder_git_commit)
+        if self.target_access_started_ts <= 0:
+            raise ValueError("target_access_started_ts must be positive")
+        if self.provider_timeout_seconds <= 0 or self.provider_http_timeout_seconds <= 0:
+            raise ValueError("provider timeouts must be positive")
+        if self.settlement_max_wait_seconds < 0:
+            raise ValueError("settlement_max_wait_seconds must be non-negative")
+        if self.settlement_poll_interval_seconds <= 0:
+            raise ValueError("settlement_poll_interval_seconds must be positive")
+        if self.max_workers <= 0:
+            raise ValueError("max_workers must be positive")
+        for field in ("output_dir", "development_window_manifest_path"):
             object.__setattr__(self, field, Path(getattr(self, field)))
 
 
@@ -689,6 +743,253 @@ def freeze_policy_selected_conformal_v6_development_window(
     }
 
 
+def build_policy_selected_conformal_v6_development_settled_corpus_index(
+    config: PolicySelectedConformalV6DevelopmentSettlementConfig,
+    *,
+    provider_factory: Callable[[], Any] | None = None,
+    round_finalizer: Callable[..., list[dict[str, Any]]] = _finalize_selected_rounds,
+    monotonic_fn: Callable[[], float] = time.monotonic,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Finalize quarantine copies only after the immutable development freeze."""
+
+    window_path = config.development_window_manifest_path.resolve()
+    _verify_pin(
+        window_path,
+        config.expected_development_window_manifest_sha256,
+        "v6 development window manifest",
+    )
+    window = _load_json(window_path)
+    _validate_development_window_manifest_for_settlement(window)
+    selected_descriptor = _verified_descriptor(window.get("selected_rows"), "selected rows")
+    roles_descriptor = _verified_descriptor(
+        window.get("role_assignment_rows"),
+        "development role assignment",
+    )
+    feature_descriptor = _verified_descriptor(
+        window.get("target_free_feature_rows"),
+        "target-free development features",
+    )
+    action_descriptor = _verified_descriptor(
+        window.get("target_free_five_action_rows"),
+        "target-free development actions",
+    )
+    selected_rows = _load_jsonl(Path(selected_descriptor["path"]))
+    role_rows = _load_jsonl(Path(roles_descriptor["path"]))
+    feature_rows = _load_jsonl(Path(feature_descriptor["path"]))
+    action_rows = _load_jsonl(Path(action_descriptor["path"]))
+    _validate_frozen_development_inputs_before_target_access(
+        selected_rows,
+        role_rows=role_rows,
+        feature_rows=feature_rows,
+        action_rows=action_rows,
+    )
+    freeze_created_ts = int(window["freeze_created_ts"])
+    max_market_end_ts = max(int(row["market_end_ts"]) for row in selected_rows)
+    if config.target_access_started_ts <= freeze_created_ts:
+        raise ValueError("development target access attempted before window freeze")
+    if config.target_access_started_ts <= max_market_end_ts:
+        raise ValueError("development target access attempted before all markets closed")
+
+    run_dir = Path(config.output_dir).resolve() / config.run_id
+    if run_dir.exists():
+        if not config.overwrite_existing:
+            raise FileExistsError(f"run directory already exists: {run_dir}")
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True)
+    marker = {
+        "schema_version": (
+            "bigan-v8-policy-selected-conformal-v6-development-target-access-marker-v1"
+        ),
+        "run_id": config.run_id,
+        "builder_git_commit": config.builder_git_commit,
+        "target_access_started_ts": config.target_access_started_ts,
+        "development_window_freeze_created_ts": freeze_created_ts,
+        "max_market_end_ts": max_market_end_ts,
+        "development_window_manifest": _descriptor(window_path),
+        "selected_rows": selected_descriptor,
+        "role_assignment_rows": roles_descriptor,
+        "target_free_feature_rows": feature_descriptor,
+        "target_free_five_action_rows": action_descriptor,
+        "target_access_started_after_freeze": True,
+        "all_markets_closed_before_target_access": True,
+        "source_outcome_blind_rounds_mutated": False,
+        "policy_pnl_computed": False,
+        "threshold_or_model_tuning_performed": False,
+        "direct_training_corpus_exported": False,
+        **_blocked_safety_fields(),
+    }
+    marker["marker_id"] = canonical_json_sha256(marker)
+    marker_path = run_dir / "conformal_v6_development_target_access_started.json"
+    _write_json(marker_path, marker)
+    (run_dir / "settled_round_copies").mkdir()
+    (run_dir / "settled_corpus_quarantine").mkdir()
+
+    factory = provider_factory or (
+        lambda: PolymarketPublicHTTPRealCorpusProvider(
+            max_markets=1,
+            timeout_seconds=config.provider_timeout_seconds,
+            http_timeout_seconds=config.provider_http_timeout_seconds,
+            use_rest_orderbooks=False,
+        )
+    )
+    success_by_market: dict[str, dict[str, Any]] = {}
+    failure_by_market: dict[str, dict[str, Any]] = {}
+    selected_by_market = {str(row["market_id"]): row for row in selected_rows}
+    pending_rows = list(selected_rows)
+    retry_market_ids: set[str] = set()
+    settlement_attempt_count = 0
+    deadline = monotonic_fn() + config.settlement_max_wait_seconds
+    while pending_rows:
+        settlement_attempt_count += 1
+        attempt_results = round_finalizer(
+            pending_rows,
+            run_dir=run_dir,
+            provider_factory=factory,
+            max_workers=config.max_workers,
+            settlement_attempt=settlement_attempt_count,
+        )
+        retryable: set[str] = set()
+        for result in attempt_results:
+            market_id = str(result["market_id"])
+            if result["settled_corpus_ready"]:
+                success_by_market[market_id] = dict(result["index_entry"])
+                failure_by_market.pop(market_id, None)
+                continue
+            failure = dict(result["failure"])
+            failure_by_market[market_id] = failure
+            if _is_retryable_settlement_failure(failure):
+                retryable.add(market_id)
+        if not retryable or monotonic_fn() >= deadline:
+            break
+        retry_market_ids.update(retryable)
+        sleep_fn(config.settlement_poll_interval_seconds)
+        pending_rows = [selected_by_market[market_id] for market_id in sorted(retryable)]
+
+    role_by_market = {str(row["market_id"]): row for row in role_rows}
+    settled_role_rows = []
+    for market_id in sorted(success_by_market, key=lambda value: role_by_market[value]["sequence"]):
+        entry = success_by_market[market_id]
+        role_row = role_by_market[market_id]
+        corpus_manifest = _verified_descriptor(entry.get("corpus_manifest"), "corpus manifest")
+        settled_role_rows.append(
+            {
+                **entry,
+                "market_id": market_id,
+                "role": str(role_row["development_role"]),
+                "development_role": str(role_row["development_role"]),
+                "selection_rank": int(role_row["development_window_index"]),
+                "development_role_index": int(role_row["development_role_index"]),
+                "source_corpus_dir": str(Path(corpus_manifest["path"]).parent),
+                "corpus_manifest": corpus_manifest,
+                "outcomes_used_as_training_targets_only": True,
+                "outcomes_used_as_decision_inputs": False,
+                "policy_pnl_computed": False,
+                "source_outcome_blind_round_mutated": False,
+            }
+        )
+    settled_role_rows.sort(key=lambda row: int(row["selection_rank"]))
+    unresolved = [
+        failure_by_market[market_id]
+        for market_id in sorted(set(selected_by_market) - set(success_by_market))
+    ]
+    ready = len(settled_role_rows) == len(selected_rows) == 260 and not unresolved
+    blockers = [] if ready else ["development_settled_corpus_incomplete"]
+
+    role_rows_path = run_dir / "conformal_v6_settled_development_role_rows.jsonl"
+    _write_jsonl(role_rows_path, settled_role_rows)
+    settled_index = {
+        "schema_version": DEVELOPMENT_SETTLED_INDEX_SCHEMA_VERSION,
+        "run_id": config.run_id,
+        "builder_git_commit": config.builder_git_commit,
+        "target_access_started_ts": config.target_access_started_ts,
+        "development_window_manifest": _descriptor(window_path),
+        "target_access_marker": _descriptor(marker_path),
+        "settled_market_count": len(settled_role_rows),
+        "unresolved_market_count": len(unresolved),
+        "role_market_counts": dict(
+            sorted(Counter(row["development_role"] for row in settled_role_rows).items())
+        ),
+        "settled_role_rows": _descriptor(role_rows_path),
+        "settled_corpus_ready": ready,
+        "source_outcome_blind_rounds_mutated": False,
+        "direct_training_corpus_exported": False,
+        "policy_pnl_computed": False,
+        "threshold_or_model_tuning_performed": False,
+        "blocking_reason_codes": blockers,
+        **_blocked_safety_fields(),
+    }
+    settled_index["settled_index_id"] = canonical_json_sha256(settled_index)
+    index_path = run_dir / "conformal_v6_development_settled_corpus_index.json"
+    _write_json(index_path, settled_index)
+    reason_distribution = Counter(
+        str(reason)
+        for row in unresolved
+        for reason in row.get("reason_codes", ["development_settlement_unresolved"])
+    )
+    report = {
+        "schema_version": DEVELOPMENT_SETTLEMENT_REPORT_SCHEMA_VERSION,
+        "report_id": None,
+        "run_id": config.run_id,
+        "selected_market_count": len(selected_rows),
+        "settled_market_count": len(settled_role_rows),
+        "unresolved_market_count": len(unresolved),
+        "unresolved_reason_distribution": dict(sorted(reason_distribution.items())),
+        "settlement_attempt_count": settlement_attempt_count,
+        "settlement_retry_market_count": len(retry_market_ids),
+        "role_market_counts": settled_index["role_market_counts"],
+        "all_markets_closed_before_target_access": True,
+        "source_outcome_blind_rounds_mutated": False,
+        "targets_available_for_fixed_training_roles_only": ready,
+        "policy_pnl_computed": False,
+        "uses_204_outcomes_for_fitting": False,
+        "uses_204_pnl_for_tuning": False,
+        "development_settled_corpus_ready": ready,
+        "blocking_reason_codes": blockers,
+        **_blocked_safety_fields(),
+    }
+    report["report_id"] = canonical_json_sha256(report)
+    report_path = run_dir / "conformal_v6_development_settlement_report.json"
+    _write_json(report_path, report)
+    _write_text(
+        run_dir / "conformal_v6_development_settlement_report.md",
+        _development_settlement_markdown(report),
+    )
+    manifest = {
+        "schema_version": DEVELOPMENT_SETTLEMENT_MANIFEST_SCHEMA_VERSION,
+        "run_id": config.run_id,
+        "builder_git_commit": config.builder_git_commit,
+        "development_window_manifest": _descriptor(window_path),
+        "target_access_marker": _descriptor(marker_path),
+        "settled_role_rows": _descriptor(role_rows_path),
+        "settled_corpus_index": _descriptor(index_path),
+        "report": _descriptor(report_path),
+        "development_settled_corpus_ready": ready,
+        "policy_pnl_computed": False,
+        "source_outcome_blind_rounds_mutated": False,
+        "direct_training_corpus_exported": False,
+        "blocking_reason_codes": blockers,
+        **_blocked_safety_fields(),
+    }
+    manifest["development_settlement_manifest_id"] = canonical_json_sha256(manifest)
+    manifest_path = run_dir / "conformal_v6_development_settlement_manifest.json"
+    _write_json(manifest_path, manifest)
+    return {
+        "run_dir": run_dir,
+        "settled_role_rows": settled_role_rows,
+        "unresolved_rows": unresolved,
+        "settled_index": settled_index,
+        "settled_index_path": index_path,
+        "settled_index_sha256": _sha256_file(index_path),
+        "report": report,
+        "report_path": report_path,
+        "report_sha256": _sha256_file(report_path),
+        "manifest": manifest,
+        "manifest_path": manifest_path,
+        "manifest_sha256": _sha256_file(manifest_path),
+    }
+
+
 def build_target_free_v5_no_trade_attrition_report(
     decision_freeze: dict[str, Any],
     *,
@@ -873,6 +1174,86 @@ def _validate_prior_window(
         blockers.append("development_time_boundary_not_after_issue204")
     if blockers:
         raise ValueError("#204 prior-window validation failed: " + ", ".join(blockers))
+
+
+def _validate_development_window_manifest_for_settlement(
+    manifest: dict[str, Any],
+) -> None:
+    checks = {
+        "schema": manifest.get("schema_version") == DEVELOPMENT_WINDOW_MANIFEST_SCHEMA_VERSION,
+        "candidate": manifest.get("candidate_name") == CANDIDATE_NAME,
+        "ready": manifest.get("development_window_freeze_ready") is True,
+        "market_count": manifest.get("selected_market_count") == 260,
+        "roles": manifest.get("role_market_counts")
+        == {
+            "calibration_check": 50,
+            "conformal_calibration": 60,
+            "point_model_fit": 150,
+        },
+        "target_not_accessed": manifest.get("development_target_accessed") is False,
+        "future_not_attempted": manifest.get("future_evaluation_attempted") is False,
+        "no_blockers": manifest.get("blocking_reason_codes") == [],
+        "safety": all(
+            manifest.get(field) == expected
+            for field, expected in _blocked_safety_fields().items()
+        ),
+    }
+    blockers = [name for name, passed in checks.items() if not passed]
+    if blockers:
+        raise ValueError("development window is not eligible for settlement: " + ", ".join(blockers))
+
+
+def _validate_frozen_development_inputs_before_target_access(
+    selected_rows: list[dict[str, Any]],
+    *,
+    role_rows: list[dict[str, Any]],
+    feature_rows: list[dict[str, Any]],
+    action_rows: list[dict[str, Any]],
+) -> None:
+    if len(selected_rows) != 260 or len({str(row["market_id"]) for row in selected_rows}) != 260:
+        raise ValueError("development selected rows are not the frozen 260-market window")
+    if len(role_rows) != 260:
+        raise ValueError("development role assignment row count mismatch")
+    role_counts = Counter(str(row["development_role"]) for row in role_rows)
+    if role_counts != Counter(
+        {"point_model_fit": 150, "conformal_calibration": 60, "calibration_check": 50}
+    ):
+        raise ValueError("development role assignment counts mismatch")
+    selected_markets = {str(row["market_id"]) for row in selected_rows}
+    if {str(row["market_id"]) for row in role_rows} != selected_markets:
+        raise ValueError("development role market identity mismatch")
+    if len(feature_rows) != 1040 or {str(row["market_id"]) for row in feature_rows} != selected_markets:
+        raise ValueError("development target-free feature coverage mismatch")
+    if len(action_rows) != 5200 or {str(row["market_id"]) for row in action_rows} != selected_markets:
+        raise ValueError("development target-free action coverage mismatch")
+    if _find_nonempty_fields(selected_rows, FORBIDDEN_TARGET_FIELDS):
+        raise ValueError("development selected rows contain target fields")
+    if _find_nonempty_fields(feature_rows, FORBIDDEN_TARGET_FIELDS):
+        raise ValueError("development feature rows contain target fields")
+    if _find_nonempty_fields(action_rows, FORBIDDEN_TARGET_FIELDS):
+        raise ValueError("development action rows contain target fields")
+    if any(int(row["max_input_ts"]) > int(row["decision_ts"]) for row in feature_rows):
+        raise ValueError("development feature causality violation before target access")
+    if any(row.get("target_used_as_decision_input") is not False for row in action_rows):
+        raise ValueError("development action target usage contract invalid")
+
+
+def _development_settlement_markdown(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# Policy-selected conformal v6 development settlement",
+            "",
+            f"- Settled corpus ready: `{str(report['development_settled_corpus_ready']).lower()}`",
+            f"- Settled / selected markets: `{report['settled_market_count']} / {report['selected_market_count']}`",
+            f"- Unresolved markets: `{report['unresolved_market_count']}`",
+            f"- Role counts: `{json.dumps(report['role_market_counts'], sort_keys=True)}`",
+            f"- Blocking reasons: `{json.dumps(report['blocking_reason_codes'])}`",
+            "- Source outcome-blind rounds mutated: `false`",
+            "- Policy PnL computed: `false`",
+            "- Paper/live/promotion/handoff unlock: `false`",
+            "",
+        ]
+    )
 
 
 def _validate_preregistration_manifest_for_development_freeze(

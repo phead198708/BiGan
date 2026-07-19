@@ -15,8 +15,10 @@ from bigan.v8.polymarket.training.execution_layer_v2_persistent_outcome_blind_co
     ZERO_SHA256,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_net_return_v6 import (
+    PolicySelectedConformalV6DevelopmentSettlementConfig,
     PolicySelectedConformalV6DevelopmentWindowConfig,
     PolicySelectedConformalV6PreRegistrationConfig,
+    build_policy_selected_conformal_v6_development_settled_corpus_index,
     build_target_free_v5_no_trade_attrition_report,
     freeze_policy_selected_conformal_v6_development_window,
     pre_register_policy_selected_conformal_v6,
@@ -279,6 +281,150 @@ def test_development_window_fails_closed_when_support_is_incomplete(tmp_path: Pa
     assert result["manifest"]["selected_rows"] is None
     assert result["manifest"]["development_target_accessed"] is False
     assert result["manifest"]["paper_candidate_allowed"] is False
+
+
+def test_development_settlement_builds_role_bound_quarantine_index(tmp_path: Path) -> None:
+    freeze = _ready_development_freeze(tmp_path)
+    result = build_policy_selected_conformal_v6_development_settled_corpus_index(
+        PolicySelectedConformalV6DevelopmentSettlementConfig(
+            run_id="issue207-development-settlement",
+            output_dir=tmp_path / "settlement-runs",
+            development_window_manifest_path=freeze["manifest_path"],
+            expected_development_window_manifest_sha256=freeze["manifest_sha256"],
+            builder_git_commit="d" * 40,
+            target_access_started_ts=1_784_700_000_000,
+            settlement_max_wait_seconds=0.0,
+        ),
+        round_finalizer=_fake_round_finalizer,
+        monotonic_fn=lambda: 0.0,
+    )
+    assert result["report"]["development_settled_corpus_ready"] is True
+    assert result["report"]["settled_market_count"] == 260
+    assert result["report"]["unresolved_market_count"] == 0
+    assert result["report"]["policy_pnl_computed"] is False
+    assert result["settled_index"]["role_market_counts"] == {
+        "calibration_check": 50,
+        "conformal_calibration": 60,
+        "point_model_fit": 150,
+    }
+    assert result["manifest"]["source_outcome_blind_rounds_mutated"] is False
+    assert result["manifest"]["paper_candidate_allowed"] is False
+
+
+def test_development_settlement_unresolved_market_blocks_training(tmp_path: Path) -> None:
+    freeze = _ready_development_freeze(tmp_path)
+
+    def finalizer_with_one_unresolved(*args: object, **kwargs: object) -> list[dict[str, object]]:
+        rows = _fake_round_finalizer(*args, **kwargs)
+        market_id = str(rows[-1]["market_id"])
+        rows[-1] = {
+            "market_id": market_id,
+            "settled_corpus_ready": False,
+            "failure": {
+                "market_id": market_id,
+                "pending_resolution": True,
+                "reason_codes": ["official_resolution_still_pending"],
+            },
+        }
+        return rows
+
+    result = build_policy_selected_conformal_v6_development_settled_corpus_index(
+        PolicySelectedConformalV6DevelopmentSettlementConfig(
+            run_id="issue207-development-unresolved",
+            output_dir=tmp_path / "settlement-runs",
+            development_window_manifest_path=freeze["manifest_path"],
+            expected_development_window_manifest_sha256=freeze["manifest_sha256"],
+            builder_git_commit="d" * 40,
+            target_access_started_ts=1_784_700_000_000,
+            settlement_max_wait_seconds=0.0,
+        ),
+        round_finalizer=finalizer_with_one_unresolved,
+        monotonic_fn=lambda: 0.0,
+    )
+    assert result["report"]["development_settled_corpus_ready"] is False
+    assert result["report"]["settled_market_count"] == 259
+    assert result["report"]["unresolved_market_count"] == 1
+    assert result["report"]["blocking_reason_codes"] == [
+        "development_settled_corpus_incomplete"
+    ]
+    assert result["manifest"]["paper_candidate_allowed"] is False
+
+
+def _ready_development_freeze(tmp_path: Path) -> dict[str, object]:
+    fixture = _prereg_fixture(tmp_path)
+    prereg = pre_register_policy_selected_conformal_v6(
+        PolicySelectedConformalV6PreRegistrationConfig(
+            run_id="issue207-prereg-ready-helper",
+            output_dir=tmp_path / "prereg-ready-runs",
+            profile_path=fixture["profile_path"],
+            expected_profile_sha256=_sha256(fixture["profile_path"]),
+            issue204_window_manifest_path=fixture["window_manifest_path"],
+            issue204_decision_freeze_path=fixture["decision_freeze_path"],
+            issue204_prediction_report_path=fixture["prediction_report_path"],
+            collector_index_path=fixture["index_path"],
+            expected_collector_index_prefix_sha256=_sha256(fixture["index_path"]),
+            collector_protocol_path=COLLECTOR_PROTOCOL_PATH,
+            power_report_path=fixture["power_report_path"],
+            power_manifest_path=fixture["power_manifest_path"],
+            builder_git_commit="b" * 40,
+            preregistration_created_ts=1_784_450_000_000,
+        )
+    )
+    extended_index_path = tmp_path / "ready_extended_index.jsonl"
+    _write_jsonl(extended_index_path, _index_rows(total=496))
+    return freeze_policy_selected_conformal_v6_development_window(
+        PolicySelectedConformalV6DevelopmentWindowConfig(
+            run_id="issue207-development-ready-helper",
+            output_dir=tmp_path / "freeze-ready-runs",
+            preregistration_manifest_path=prereg["manifest_path"],
+            expected_preregistration_manifest_sha256=prereg["manifest_sha256"],
+            collector_index_path=extended_index_path,
+            expected_collector_index_sha256=_sha256(extended_index_path),
+            feature_contract_path=FEATURE_CONTRACT_PATH,
+            expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
+            builder_git_commit="c" * 40,
+            freeze_created_ts=1_784_600_000_000,
+        ),
+        feature_materializer=_fake_feature_materializer,
+        action_materializer=_fake_action_materializer,
+    )
+
+
+def _fake_round_finalizer(
+    selected_rows: list[dict[str, object]],
+    *,
+    run_dir: Path,
+    provider_factory: object,
+    max_workers: int,
+    settlement_attempt: int,
+) -> list[dict[str, object]]:
+    del provider_factory, max_workers
+    results = []
+    for selected in selected_rows:
+        market_id = str(selected["market_id"])
+        corpus_dir = run_dir / "settled_corpus_quarantine" / market_id
+        corpus_dir.mkdir(parents=True, exist_ok=True)
+        corpus_manifest_path = corpus_dir / "polymarket_corpus_manifest.json"
+        _write_json(
+            corpus_manifest_path,
+            {
+                "market_id": market_id,
+                "settlement_attempt": settlement_attempt,
+            },
+        )
+        results.append(
+            {
+                "market_id": market_id,
+                "settled_corpus_ready": True,
+                "index_entry": {
+                    "market_id": market_id,
+                    "corpus_manifest": _descriptor(corpus_manifest_path),
+                    "official_read_only_resolution": True,
+                    "source_outcome_blind_round_mutated": False,
+                },
+            }
+        )
+    return results
 
 
 def _prereg_fixture(tmp_path: Path) -> dict[str, Path]:
