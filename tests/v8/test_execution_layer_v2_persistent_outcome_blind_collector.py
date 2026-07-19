@@ -16,6 +16,9 @@ from bigan.v8.polymarket.training.execution_layer_v2_persistent_outcome_blind_co
     load_and_validate_persistent_outcome_blind_index,
     validate_persistent_outcome_blind_collector_protocol,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_net_return_v6 import (
+    _blocked_safety_fields,
+)
 from examples.v8 import run_execution_layer_v2_persistent_outcome_blind_collector as service_module
 from examples.v8.run_polymarket_async_round_collector import _summary as _collector_batch_summary
 from examples.v8.write_execution_layer_v2_persistent_outcome_blind_launchd_plist import (
@@ -493,6 +496,149 @@ def test_bounded_service_uses_collection_only_mode_and_persists_resume_state(
     _assert_safety(state)
 
 
+def test_bounded_service_runs_and_persists_v6_2_batch_canary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch_summary_path = _batch_summary(
+        tmp_path,
+        batch_id="service-batch",
+        captures=[],
+        errors=[
+            {
+                "run_id": "failed-round",
+                "run_dir": str(tmp_path / "failed-round"),
+                "scheduled_round_start_ts": 2_000,
+                "stage": "round_capture",
+                "error_type": "TimeoutError",
+                "error": "timeout",
+            }
+        ],
+    )
+    candidate_manifest = tmp_path / "candidate.json"
+    candidate_manifest.write_text('{"candidate":"v6.2"}\n', encoding="utf-8")
+
+    def fake_collector(**kwargs):
+        return {"batch_summary_path": str(batch_summary_path)}
+
+    def fake_index(config):
+        index_path = Path(config.index_path)
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text("{}\n", encoding="utf-8")
+        return {
+            "index_sha256": _sha256(index_path),
+            "report": {"index_entry_count": 1, "quality_valid_index_entry_count": 1},
+        }
+
+    def fake_development(config):
+        path = tmp_path / "development.json"
+        manifest = tmp_path / "development_manifest.json"
+        _write_json(
+            path,
+            {
+                "development_data_canary_passed": True,
+                "development_data_canary_blocking_reason_codes": [],
+            },
+        )
+        _write_json(manifest, {"batch_id": config.batch_id})
+        return {
+            "report": json.loads(path.read_text()),
+            "report_path": path,
+            "report_sha256": _sha256(path),
+            "manifest_path": manifest,
+            "manifest_sha256": _sha256(manifest),
+        }
+
+    def fake_v6_2(config):
+        path = tmp_path / "v6_2.json"
+        manifest = tmp_path / "v6_2_manifest.json"
+        _write_json(
+            path,
+            {
+                "batch_id": "service-batch",
+                "candidate_name": "market_clustered_mean_ev_v6_2",
+                "future_strictly_later_and_disjoint_passed": True,
+                "bounded_batch_complete": True,
+                "source_sequence_start": 313,
+                "source_sequence_end": 313,
+                "indexed_market_count": 1,
+                "quality_valid_market_count": 1,
+                "positive_guard_compatible_trade_lcb_row_count": 1,
+                "positive_mean_ev_lcb_unique_market_count": 1,
+                "guard_accepted_unique_market_count": 1,
+                "guard_accepted_market_ids": ["market"],
+                "guard_accepted_market_ids_by_side": {"UP": ["market"], "DOWN": []},
+                "labels_outcomes_or_pnl_opened": False,
+                **_blocked_safety_fields(),
+            },
+        )
+        _write_json(manifest, {"batch_id": "service-batch"})
+        return {
+            "report": json.loads(path.read_text()),
+            "report_path": path,
+            "report_sha256": _sha256(path),
+            "manifest_path": manifest,
+            "manifest_sha256": _sha256(manifest),
+        }
+
+    def fake_cumulative(reports, *, run_id):
+        return {
+            "run_id": run_id,
+            "quality_valid_market_count": 1,
+            "guard_accepted_unique_market_count": 1,
+            "guard_accepted_unique_market_count_by_side": {"UP": 1, "DOWN": 0},
+            "future_holdout_collection_complete": False,
+            "target_free_terminal_blocked": False,
+            "target_free_terminal_blocking_reason_codes": [],
+        }
+
+    def fake_cumulative_write(**kwargs):
+        path = tmp_path / "cumulative.json"
+        manifest = tmp_path / "cumulative_manifest.json"
+        _write_json(path, kwargs["report"])
+        _write_json(manifest, {"run_id": kwargs["run_id"]})
+        return {
+            "report": kwargs["report"],
+            "report_path": path,
+            "report_sha256": _sha256(path),
+            "manifest_path": manifest,
+            "manifest_sha256": _sha256(manifest),
+        }
+
+    monkeypatch.setattr(service_module, "run_polymarket_async_round_collector_cli", fake_collector)
+    monkeypatch.setattr(service_module, "index_persistent_outcome_blind_batch", fake_index)
+    monkeypatch.setattr(service_module, "run_outcome_blind_development_batch_canary", fake_development)
+    monkeypatch.setattr(
+        service_module,
+        "run_market_clustered_mean_ev_v6_2_future_batch_canary",
+        fake_v6_2,
+    )
+    monkeypatch.setattr(service_module, "build_v6_2_future_cumulative_canary", fake_cumulative)
+    monkeypatch.setattr(service_module, "write_v6_2_future_cumulative_canary", fake_cumulative_write)
+    monkeypatch.setattr(service_module, "_git_head", lambda: GIT_COMMIT)
+
+    state = service_module.run_service(
+        service_root=tmp_path / "service",
+        protocol_path=PROTOCOL_PATH,
+        protocol_sha256=_sha256(PROTOCOL_PATH),
+        batch_round_count=1,
+        max_batches=1,
+        max_consecutive_failures=3,
+        failure_backoff_seconds=0.0,
+        v6_2_candidate_manifest_path=candidate_manifest,
+        v6_2_candidate_manifest_sha256=_sha256(candidate_manifest),
+    )
+    assert state["v6_2_future_quality_valid_market_count"] == 1
+    assert state["v6_2_future_guard_accepted_unique_market_count"] == 1
+    assert state["v6_2_future_guard_accepted_unique_market_count_by_side"] == {
+        "UP": 1,
+        "DOWN": 0,
+    }
+    assert len(state["v6_2_batch_canary_reports"]) == 1
+    assert state["labels_outcomes_or_pnl_opened"] is False
+    _assert_safety(state)
+
+
 def test_launchd_descriptor_keeps_service_alive_without_training_root_export(
     tmp_path: Path,
 ) -> None:
@@ -509,7 +655,7 @@ def test_launchd_descriptor_keeps_service_alive_without_training_root_export(
         payload = plistlib.load(handle)
 
     assert payload["RunAtLoad"] is True
-    assert payload["KeepAlive"] is True
+    assert payload["KeepAlive"] == {"SuccessfulExit": False}
     assert payload["ProgramArguments"][-2:] == ["--max-batches", "0"]
     assert "--protocol-sha256" in payload["ProgramArguments"]
     assert "--batch-canary-feature-contract" in payload["ProgramArguments"]
@@ -517,6 +663,31 @@ def test_launchd_descriptor_keeps_service_alive_without_training_root_export(
     assert "/Volumes/PHILIPS/v8" not in " ".join(payload["ProgramArguments"])
     assert result["labels_outcomes_or_pnl_opened"] is False
     assert result["automatic_outcome_blind_batch_canary_enabled"] is True
+    assert result["automatic_v6_2_frozen_batch_canary_enabled"] is False
+    _assert_safety(result)
+
+
+def test_launchd_descriptor_pins_v6_2_candidate_manifest(tmp_path: Path) -> None:
+    candidate_manifest = tmp_path / "candidate.json"
+    candidate_manifest.write_text('{"candidate":"v6.2"}\n', encoding="utf-8")
+    result = write_launchd_plist(
+        output_path=tmp_path / "collector.plist",
+        label="com.bigan.test.v6-2-collector",
+        service_root=tmp_path / "raw-service",
+        protocol_path=PROTOCOL_PATH,
+        protocol_sha256=_sha256(PROTOCOL_PATH),
+        batch_round_count=12,
+        python_executable=sys.executable,
+        v6_2_candidate_manifest_path=candidate_manifest,
+        v6_2_candidate_manifest_sha256=_sha256(candidate_manifest),
+    )
+    with Path(result["launchd_plist_path"]).open("rb") as handle:
+        payload = plistlib.load(handle)
+    arguments = payload["ProgramArguments"]
+    assert "--v6-2-candidate-manifest" in arguments
+    assert "--v6-2-candidate-manifest-sha256" in arguments
+    assert result["automatic_v6_2_frozen_batch_canary_enabled"] is True
+    assert result["v6_2_candidate_manifest_sha256"] == _sha256(candidate_manifest)
     _assert_safety(result)
 
 
@@ -798,6 +969,13 @@ def _freeze(
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text(
         "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
 

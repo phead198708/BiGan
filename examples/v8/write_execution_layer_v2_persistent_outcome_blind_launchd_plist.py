@@ -36,6 +36,8 @@ def write_launchd_plist(
     batch_canary_feature_contract_sha256: str = (
         DEFAULT_BATCH_CANARY_FEATURE_CONTRACT_SHA256
     ),
+    v6_2_candidate_manifest_path: Path | str | None = None,
+    v6_2_candidate_manifest_sha256: str | None = None,
 ) -> dict:
     """Write a KeepAlive service descriptor without starting the service."""
 
@@ -58,35 +60,55 @@ def write_launchd_plist(
         != batch_canary_feature_contract_sha256.lower()
     ):
         raise ValueError("batch canary feature contract SHA-256 mismatch")
+    if (v6_2_candidate_manifest_path is None) != (v6_2_candidate_manifest_sha256 is None):
+        raise ValueError("v6.2 candidate manifest path and SHA-256 must be provided together")
+    if v6_2_candidate_manifest_path is not None:
+        v6_2_candidate_manifest_path = Path(
+            v6_2_candidate_manifest_path
+        ).expanduser().resolve()
+        if _sha256(v6_2_candidate_manifest_path) != str(
+            v6_2_candidate_manifest_sha256
+        ).lower():
+            raise ValueError("v6.2 candidate manifest SHA-256 mismatch")
     output_path = Path(output_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     service_root.mkdir(parents=True, exist_ok=True)
+    program_arguments = [
+        str(Path(python_executable).expanduser().resolve()),
+        str(RUNNER),
+        "--service-root",
+        str(service_root),
+        "--protocol",
+        str(protocol_path),
+        "--protocol-sha256",
+        protocol_sha256.lower(),
+        "--batch-round-count",
+        str(batch_round_count),
+        "--batch-canary-feature-contract",
+        str(batch_canary_feature_contract_path),
+        "--batch-canary-feature-contract-sha256",
+        batch_canary_feature_contract_sha256.lower(),
+        "--max-batches",
+        "0",
+    ]
+    if v6_2_candidate_manifest_path is not None:
+        program_arguments.extend(
+            [
+                "--v6-2-candidate-manifest",
+                str(v6_2_candidate_manifest_path),
+                "--v6-2-candidate-manifest-sha256",
+                str(v6_2_candidate_manifest_sha256).lower(),
+            ]
+        )
     payload = {
         "Label": label,
-        "ProgramArguments": [
-            str(Path(python_executable).expanduser().resolve()),
-            str(RUNNER),
-            "--service-root",
-            str(service_root),
-            "--protocol",
-            str(protocol_path),
-            "--protocol-sha256",
-            protocol_sha256.lower(),
-            "--batch-round-count",
-            str(batch_round_count),
-            "--batch-canary-feature-contract",
-            str(batch_canary_feature_contract_path),
-            "--batch-canary-feature-contract-sha256",
-            batch_canary_feature_contract_sha256.lower(),
-            "--max-batches",
-            "0",
-        ],
+        "ProgramArguments": program_arguments,
         "WorkingDirectory": str(ROOT),
         "EnvironmentVariables": {
             "PYTHONPATH": "src:.",
         },
         "RunAtLoad": True,
-        "KeepAlive": True,
+        "KeepAlive": {"SuccessfulExit": False},
         "ThrottleInterval": 30,
         "ProcessType": "Background",
         "StandardOutPath": str(service_root / "persistent_collector_stdout.log"),
@@ -105,6 +127,19 @@ def write_launchd_plist(
         "continuous_collection": True,
         "restart_supervision_enabled": True,
         "automatic_outcome_blind_batch_canary_enabled": True,
+        "automatic_v6_2_frozen_batch_canary_enabled": (
+            v6_2_candidate_manifest_path is not None
+        ),
+        "v6_2_candidate_manifest_path": (
+            str(v6_2_candidate_manifest_path)
+            if v6_2_candidate_manifest_path is not None
+            else None
+        ),
+        "v6_2_candidate_manifest_sha256": (
+            str(v6_2_candidate_manifest_sha256).lower()
+            if v6_2_candidate_manifest_sha256 is not None
+            else None
+        ),
         "batch_canary_feature_contract_path": str(batch_canary_feature_contract_path),
         "batch_canary_feature_contract_sha256": batch_canary_feature_contract_sha256.lower(),
         "outcome_blind_collection_only": True,
@@ -144,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
         "--batch-canary-feature-contract-sha256",
         default=DEFAULT_BATCH_CANARY_FEATURE_CONTRACT_SHA256,
     )
+    parser.add_argument("--v6-2-candidate-manifest")
+    parser.add_argument("--v6-2-candidate-manifest-sha256")
     parser.add_argument("--python-executable", default=sys.executable)
     args = parser.parse_args(argv)
     report = write_launchd_plist(
@@ -156,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
         python_executable=args.python_executable,
         batch_canary_feature_contract_path=args.batch_canary_feature_contract,
         batch_canary_feature_contract_sha256=args.batch_canary_feature_contract_sha256,
+        v6_2_candidate_manifest_path=args.v6_2_candidate_manifest,
+        v6_2_candidate_manifest_sha256=args.v6_2_candidate_manifest_sha256,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
