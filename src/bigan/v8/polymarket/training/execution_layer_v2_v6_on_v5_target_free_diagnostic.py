@@ -17,6 +17,9 @@ from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_predict
     _materialize_future_action_rows,
     _materialize_selected_window_features,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_guard_compatible_conformal_net_return_v5 import (
+    _raw_target_stripped_predictions,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_guard_compatible_direct_net_return_v4 import (
     _row_sort_key,
     _train_regressor,
@@ -355,10 +358,14 @@ def run_v6_on_v5_target_free_diagnostic(
     model_path = run_dir / "v6_on_v5_policy_selected_conformal_model.xgb.json"
     booster.save_model(model_path)
     fit_predictions = attach_frozen_execution_compatibility(
-        _target_free_predictions(booster, fit_rows, feature_columns=feature_columns)
+        _raw_target_stripped_predictions(booster, fit_rows, feature_columns=feature_columns)
     )
     calibration_predictions = attach_frozen_execution_compatibility(
-        _target_free_predictions(booster, calibration_rows, feature_columns=feature_columns)
+        _raw_target_stripped_predictions(
+            booster,
+            calibration_rows,
+            feature_columns=feature_columns,
+        )
     )
     calibration_artifact = build_policy_selected_conformal_artifact(
         calibration_predictions,
