@@ -259,6 +259,7 @@ def test_window_freeze_is_earliest_strictly_later_disjoint_and_deterministic(
     assert first["report"]["labels_outcomes_or_pnl_opened_for_selection"] is False
     assert first["report"]["collector_index_snapshot_immutable"] is True
     assert first["report"]["window_selection_used_immutable_index_snapshot"] is True
+    assert first["report"]["paper_candidate_allowed"] is False
     assert first["index_snapshot_path"] != index_path
     assert first["manifest"]["index"]["path"] == str(first["index_snapshot_path"].resolve())
     assert first["manifest"]["source_index_pin_at_freeze"] == {
@@ -269,6 +270,7 @@ def test_window_freeze_is_earliest_strictly_later_disjoint_and_deterministic(
     index_path.write_bytes(index_path.read_bytes() + b"\n")
     assert _sha256(first["index_snapshot_path"]) == snapshot_sha256
     assert first["manifest"]["index"]["sha256"] == snapshot_sha256
+    assert first["manifest"]["paper_candidate_allowed"] is False
     _assert_safety(first["manifest"])
 
 

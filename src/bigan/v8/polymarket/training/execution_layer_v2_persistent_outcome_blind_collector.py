@@ -585,6 +585,7 @@ def freeze_outcome_blind_window(
         "labels_outcomes_or_pnl_opened_for_selection": False,
         "blocking_reason_codes": blockers,
         **_blocked_safety_fields(),
+        "paper_candidate_allowed": False,
     }
     report_path = run_dir / "outcome_blind_window_freeze_report.json"
     _write_json(report_path, report)
@@ -618,6 +619,7 @@ def freeze_outcome_blind_window(
         "labels_outcomes_or_pnl_opened_for_selection": False,
         "blocking_reason_codes": blockers,
         **_blocked_safety_fields(),
+        "paper_candidate_allowed": False,
     }
     manifest["window_freeze_manifest_id"] = canonical_json_sha256(manifest)
     manifest_path = run_dir / "outcome_blind_window_freeze_manifest.json"
