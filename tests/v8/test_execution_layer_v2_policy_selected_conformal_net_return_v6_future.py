@@ -20,6 +20,11 @@ from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_n
     PolicySelectedConformalV6FuturePreRegistrationConfig,
     pre_register_policy_selected_conformal_v6_future_evaluation,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_net_return_v6_future_prediction import (
+    _future_support_summary,
+    _validate_append_only_prefix,
+    _validate_selected_future_rows,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE_PROFILE = (
@@ -78,6 +83,82 @@ def test_v6_future_preregistration_rejects_mutated_index_pin(tmp_path: Path) -> 
     with pytest.raises(ValueError, match="SHA-256 mismatch"):
         pre_register_policy_selected_conformal_v6_future_evaluation(
             _config(tmp_path, fixture)
+        )
+
+
+def test_v6_future_prefix_check_allows_append_but_rejects_rewrite(tmp_path: Path) -> None:
+    fixture = _future_prereg_fixture(tmp_path)
+    prereg = pre_register_policy_selected_conformal_v6_future_evaluation(
+        _config(tmp_path, fixture)
+    )["manifest"]
+    first = json.loads(fixture["collector_index"].read_text(encoding="utf-8"))
+    second = {
+        **first,
+        "sequence": 2,
+        "previous_entry_sha256": first["entry_sha256"],
+        "decision_id": "c" * 64,
+        "source_row_hash": "d" * 64,
+        "market_id": "future-market",
+        "slug": "future-slug",
+    }
+    second.pop("entry_sha256")
+    second["entry_sha256"] = canonical_json_sha256(second)
+    _validate_append_only_prefix(prereg, current_index_rows=[first, second])
+    with pytest.raises(ValueError, match="prefix changed"):
+        _validate_append_only_prefix(
+            prereg,
+            current_index_rows=[{**first, "entry_sha256": "e" * 64}, second],
+        )
+
+
+def test_v6_future_support_gate_is_side_aware_and_outcome_free() -> None:
+    prereg = {
+        "required_supported_sides": ["UP", "DOWN"],
+        "minimum_guard_accepted_unique_market_count": 120,
+        "minimum_supported_side_market_count": 17,
+    }
+    rows = [
+        {
+            "market_id": f"market-{index:03d}",
+            "selected_side": "UP" if index < 60 else "DOWN",
+        }
+        for index in range(120)
+    ]
+    passed = _future_support_summary(rows, prereg=prereg)
+    assert passed["passed"] is True
+    assert passed["accepted_side_market_counts"] == {"DOWN": 60, "UP": 60}
+    insufficient = _future_support_summary(rows[:119], prereg=prereg)
+    assert insufficient["passed"] is False
+    assert "insufficient_future_accepted_market_support" in insufficient["reason_codes"]
+    leaked = _future_support_summary(
+        [{**row, "settlement_pnl": 1.0} for row in rows],
+        prereg=prereg,
+    )
+    assert leaked["passed"] is False
+    assert "future_support_rows_contain_forbidden_targets" in leaked["reason_codes"]
+
+
+def test_v6_selected_future_rows_enforce_sequence_and_time_boundaries() -> None:
+    prereg = {
+        "target_quality_valid_market_count": 2,
+        "minimum_collection_index_sequence": 10,
+        "minimum_collection_decision_ts": 1_000,
+    }
+    rows = [
+        {
+            "market_id": f"market-{index}",
+            "sequence": 10 + index,
+            "scheduled_round_start_ts": 1_000 + index,
+            "capture_quality_valid": True,
+            "labels_outcomes_or_pnl_opened": False,
+        }
+        for index in range(2)
+    ]
+    _validate_selected_future_rows(prereg, selected_rows=rows)
+    with pytest.raises(ValueError, match="timestamp boundary"):
+        _validate_selected_future_rows(
+            prereg,
+            selected_rows=[{**rows[0], "scheduled_round_start_ts": 999}, rows[1]],
         )
 
 
