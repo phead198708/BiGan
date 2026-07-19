@@ -30,6 +30,10 @@ def test_profile_pins_sized_cost_aware_pnl_and_no_tuning() -> None:
     assert profile["pnl"]["sized_pnl_formula"].endswith("proposed_order_size")
     assert profile["interpretation"]["result_used_to_tune_v6_2_or_future_gate"] is False
     assert profile["safety"]["promotion_evidence_eligible"] is False
+    assert profile["role_groups"]["model_fit_135"]["source_roles"] == [
+        "development_train",
+        "development_calibration",
+    ]
 
 
 def test_join_pnl_uses_actual_order_size_and_cost_basis() -> None:
@@ -118,11 +122,29 @@ def test_target_validation_rejects_future_feature_or_decision_target_usage() -> 
         "outcome_fields_used_as_decision_input": False,
     }
     with pytest.raises(ValueError, match="causality"):
-        _validate_target_rows([row], expected_role="development_train")
+        _validate_target_rows([row], expected_roles=("development_train",))
     row["max_input_ts"] = 1_000
     row["target_used_as_decision_input"] = True
     with pytest.raises(ValueError, match="target used"):
-        _validate_target_rows([row], expected_role="development_train")
+        _validate_target_rows([row], expected_roles=("development_train",))
+
+
+def test_target_validation_accepts_both_frozen_model_fit_source_roles() -> None:
+    rows = [
+        {
+            "role": role,
+            "decision_ts": 1_000,
+            "max_input_ts": 1_000,
+            "target_net_pnl_per_contract": 0.1,
+            "target_used_as_decision_input": False,
+            "outcome_fields_used_as_decision_input": False,
+        }
+        for role in ("development_train", "development_calibration")
+    ]
+    _validate_target_rows(
+        rows,
+        expected_roles=("development_train", "development_calibration"),
+    )
 
 
 def _evidence(market_id: str, decision_ts: int, pnl: float, cost_basis: float) -> dict:

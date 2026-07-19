@@ -4,10 +4,23 @@
   "candidate_manifest_sha256": "b9441b04fb595a927cbf9af9311612b037c36fc8c623ac8a92b6f4cb8ece84b9",
   "v5_freeze_manifest_sha256": "0d0927da515317d0576a04b6c4a9a5175f569225a85ebaf62020326fdc06510d",
   "feature_contract_sha256": "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959",
-  "roles": [
-    "development_train",
-    "confirmatory_validation"
-  ],
+  "role_groups": {
+    "model_fit_135": {
+      "source_roles": [
+        "development_train",
+        "development_calibration"
+      ],
+      "market_count": 135,
+      "interpretation": "in_sample_point_model_fit"
+    },
+    "mean_risk_calibration_60": {
+      "source_roles": [
+        "confirmatory_validation"
+      ],
+      "market_count": 60,
+      "interpretation": "in_sample_v6_2_mean_risk_calibration"
+    }
+  },
   "pnl": {
     "target_field": "target_net_pnl_per_contract",
     "sized_pnl_formula": "target_net_pnl_per_contract * proposed_order_size",

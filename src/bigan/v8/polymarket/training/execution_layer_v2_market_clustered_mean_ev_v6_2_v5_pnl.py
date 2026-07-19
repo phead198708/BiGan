@@ -44,9 +44,15 @@ from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_n
 )
 
 SCHEMA_PREFIX = "bigan-v8-market-clustered-mean-ev-v6-2-v5-pnl"
-ROLE_DESCRIPTORS = {
-    "development_train": "development_train_action_rows",
-    "confirmatory_validation": "development_calibration_action_rows",
+ROLE_GROUPS = {
+    "model_fit_135": {
+        "manifest_key": "development_train_action_rows",
+        "source_roles": ("development_train", "development_calibration"),
+    },
+    "mean_risk_calibration_60": {
+        "manifest_key": "development_calibration_action_rows",
+        "source_roles": ("confirmatory_validation",),
+    },
 }
 
 
@@ -137,11 +143,18 @@ def run_market_clustered_mean_ev_v6_2_v5_pnl(
     all_evidence: dict[str, list[dict[str, Any]]] = defaultdict(list)
     source_descriptors = {}
     raw_predictions_by_role = {}
-    for role, manifest_key in ROLE_DESCRIPTORS.items():
+    source_role_market_ids: dict[str, set[str]] = defaultdict(set)
+    for role, role_group in ROLE_GROUPS.items():
+        manifest_key = str(role_group["manifest_key"])
         descriptor = _verified_descriptor(v5_manifest.get(manifest_key), f"v5 {role} rows")
         source_descriptors[role] = descriptor
         target_rows = _load_jsonl(Path(descriptor["path"]))
-        _validate_target_rows(target_rows, expected_role=role)
+        _validate_target_rows(
+            target_rows,
+            expected_roles=tuple(role_group["source_roles"]),
+        )
+        for row in target_rows:
+            source_role_market_ids[str(row["role"])].add(str(row["market_id"]))
         raw = _raw_target_stripped_predictions(
             booster,
             target_rows,
@@ -212,6 +225,10 @@ def run_market_clustered_mean_ev_v6_2_v5_pnl(
                 }
             )
             for role, descriptor in source_descriptors.items()
+        },
+        "v5_source_market_count_by_source_role": {
+            role: len(market_ids)
+            for role, market_ids in sorted(source_role_market_ids.items())
         },
         "v5_source_total_unique_market_count": len(
             {
@@ -381,7 +398,7 @@ def _join_pnl_evidence(
 def _policy_metrics(rows: list[dict[str, Any]], *, profile: dict[str, Any]) -> dict[str, Any]:
     roles = {
         role: _summary([row for row in rows if row["role"] == role], profile=profile)
-        for role in ROLE_DESCRIPTORS
+        for role in ROLE_GROUPS
     }
     total = _summary(rows, profile=profile)
     return {
@@ -481,11 +498,16 @@ def _bootstrap_mean_ci(
     }
 
 
-def _validate_target_rows(rows: list[dict[str, Any]], *, expected_role: str) -> None:
+def _validate_target_rows(
+    rows: list[dict[str, Any]], *, expected_roles: tuple[str, ...]
+) -> None:
+    allowed_roles = set(expected_roles)
+    if not allowed_roles:
+        raise ValueError("at least one v5 source role is required")
     if not rows:
-        raise ValueError(f"v5 {expected_role} rows are empty")
+        raise ValueError(f"v5 {sorted(allowed_roles)} rows are empty")
     for row in rows:
-        if str(row.get("role") or "") != expected_role:
+        if str(row.get("role") or "") not in allowed_roles:
             raise ValueError("v5 source role mismatch")
         if row.get("target_used_as_decision_input") is not False:
             raise ValueError("v5 target used as decision input")
