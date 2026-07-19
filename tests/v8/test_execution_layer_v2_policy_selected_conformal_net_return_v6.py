@@ -24,6 +24,12 @@ from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_n
     pre_register_policy_selected_conformal_v6,
     validate_policy_selected_conformal_v6_profile,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_net_return_v6_fit import (
+    _target_free_check_support,
+    apply_policy_selected_conformal_scores,
+    build_policy_selected_conformal_artifact,
+    select_sequential_policy_rows,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE_PATH = (
@@ -73,6 +79,138 @@ def test_v6_profile_rejects_calibration_or_safety_relaxation() -> None:
     ] = True
     with pytest.raises(ValueError, match="causal_selection"):
         validate_policy_selected_conformal_v6_profile(profile)
+
+
+def test_v6_sequential_selection_cannot_use_later_decision_and_selects_once() -> None:
+    rows = []
+    for decision_ts, up_score in ((100, 0.1), (200, 0.9)):
+        for action in (
+            "BUY_UP_HOLD_TO_SETTLEMENT",
+            "BUY_DOWN_HOLD_TO_SETTLEMENT",
+            "BUY_UP_SELL_BEFORE_CLOSE",
+            "BUY_DOWN_SELL_BEFORE_CLOSE",
+            "NO_TRADE",
+        ):
+            rows.append(
+                {
+                    "market_id": "market-1",
+                    "decision_ts": decision_ts,
+                    "action": action,
+                    "side": "UP" if "BUY_UP" in action else "DOWN" if "BUY_DOWN" in action else "NONE",
+                    "guard_compatible_before_ranking": True,
+                    "raw_direct_predicted_net_return": (
+                        up_score
+                        if action == "BUY_UP_HOLD_TO_SETTLEMENT"
+                        else 0.0
+                    ),
+                }
+            )
+    selected = select_sequential_policy_rows(
+        rows,
+        score_field="raw_direct_predicted_net_return",
+        require_positive=True,
+    )
+    assert len(selected) == 1
+    assert selected[0]["decision_ts"] == 100
+    assert selected[0]["raw_direct_predicted_net_return"] == pytest.approx(0.1)
+    assert selected[0]["later_decision_rows_visible_to_selection"] is False
+
+
+def test_v6_conformal_penalty_uses_only_policy_selected_rows() -> None:
+    predictions = []
+    targets = []
+    actions = (
+        "BUY_UP_HOLD_TO_SETTLEMENT",
+        "BUY_DOWN_HOLD_TO_SETTLEMENT",
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+        "NO_TRADE",
+    )
+    for index in range(50):
+        market_id = f"market-{index:03d}"
+        selected_action = (
+            "BUY_UP_HOLD_TO_SETTLEMENT"
+            if index % 2 == 0
+            else "BUY_DOWN_HOLD_TO_SETTLEMENT"
+        )
+        for decision_ts in (100 + index * 10, 101 + index * 10):
+            for action in actions:
+                score = 0.0
+                if action == selected_action:
+                    score = 0.2 if decision_ts % 10 == 0 else 0.9
+                side = "UP" if "BUY_UP" in action else "DOWN" if "BUY_DOWN" in action else "NONE"
+                row = {
+                    "market_id": market_id,
+                    "decision_ts": decision_ts,
+                    "action": action,
+                    "side": side,
+                    "guard_compatible_before_ranking": True,
+                    "raw_direct_predicted_net_return": score,
+                }
+                predictions.append(row)
+                targets.append(
+                    {
+                        **row,
+                        "target_net_pnl_per_contract": (
+                            0.1 if decision_ts % 10 == 0 else -1.0
+                        ),
+                    }
+                )
+    artifact = build_policy_selected_conformal_artifact(
+        predictions,
+        target_rows=targets,
+        profile=_load_json(PROFILE_PATH),
+        feature_contract_sha256="a" * 64,
+    )
+    assert artifact["selected_calibration_market_count"] == 50
+    assert artifact["selected_side_distribution"] == {"DOWN": 25, "UP": 25}
+    assert artifact["sides"]["UP"]["calibration_source"] == "selected_side"
+    assert artifact["sides"]["DOWN"]["calibration_source"] == "selected_side"
+    assert artifact["sides"]["UP"]["calibration_penalty"] == pytest.approx(0.1)
+    assert artifact["sides"]["DOWN"]["calibration_penalty"] == pytest.approx(0.1)
+    assert artifact["later_decision_rows_visible_to_selection"] is False
+
+
+def test_v6_target_free_support_and_score_application_fail_closed() -> None:
+    profile = _load_json(PROFILE_PATH)
+    selected = [
+        {"market_id": f"up-{index}", "side": "UP"} for index in range(5)
+    ] + [{"market_id": "down-0", "side": "DOWN"}]
+    support = _target_free_check_support(selected, profile=profile)
+    assert support["passed"] is False
+    assert support["selected_side_market_counts"] == {"UP": 5, "DOWN": 1}
+
+    artifact = {
+        "sides": {
+            side: {
+                "calibration_source": "selected_side",
+                "calibration_penalty": 0.1,
+            }
+            for side in ("UP", "DOWN")
+        }
+    }
+    row = {
+        "market_id": "market-1",
+        "decision_ts": 100,
+        "action": "BUY_UP_HOLD_TO_SETTLEMENT",
+        "side": "UP",
+        "guard_compatible_before_ranking": True,
+        "raw_direct_predicted_net_return": 0.2,
+    }
+    scored = apply_policy_selected_conformal_scores(
+        [row],
+        calibration_artifact=artifact,
+        profile=profile,
+    )
+    assert scored[0]["conformal_net_return_lower_bound"] == pytest.approx(0.1)
+    assert scored[0]["target_used_as_decision_input"] is False
+    assert scored[0]["paper_candidate_allowed"] is False
+    with pytest.raises(ValueError, match="target fields"):
+        apply_policy_selected_conformal_scores(
+            [{**row, "settlement_pnl": 1.0}],
+            calibration_artifact=artifact,
+            profile=profile,
+        )
     profile = _load_json(PROFILE_PATH)
     profile["safety"]["paper_candidate_allowed"] = True
     with pytest.raises(ValueError, match="safety"):
