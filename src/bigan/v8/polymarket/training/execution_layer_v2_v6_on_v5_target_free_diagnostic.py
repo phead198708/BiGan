@@ -57,14 +57,15 @@ from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_n
     TARGET_FIELDS,
     _calibration_gate,
     _target_free_check_support,
-    _target_free_predictions,
     _validate_labeled_role_rows,
     _validate_target_free_check_rows,
     _xgb_model_config,
-    apply_policy_selected_conformal_scores,
     attach_frozen_execution_compatibility,
     build_policy_selected_conformal_artifact,
     select_sequential_policy_rows,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_net_return_v6_future_prediction import (
+    _candidate_predictions,
 )
 
 PROFILE_SCHEMA_VERSION = "bigan-v8-v6-on-v5-target-free-diagnostic-profile-v1"
@@ -387,13 +388,12 @@ def run_v6_on_v5_target_free_diagnostic(
     calibration_path = run_dir / "v6_on_v5_policy_selected_conformal_artifact.json"
     _write_json(calibration_path, calibration_artifact)
 
-    check_predictions = attach_frozen_execution_compatibility(
-        _target_free_predictions(booster, action_rows, feature_columns=feature_columns)
-    )
-    scored_check = apply_policy_selected_conformal_scores(
-        check_predictions,
+    scored_check = _candidate_predictions(
+        action_rows,
+        model_descriptor=_descriptor(model_path),
         calibration_artifact=calibration_artifact,
         profile=v6_profile,
+        feature_columns=feature_columns,
     )
     static_selected = select_sequential_policy_rows(
         scored_check,
