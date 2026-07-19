@@ -17,6 +17,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from bigan.v8.polymarket.training.execution_layer_v2_outcome_blind_batch_canary import (  # noqa: E402
+    OutcomeBlindDevelopmentBatchCanaryConfig,
+    run_outcome_blind_development_batch_canary,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_persistent_outcome_blind_collector import (  # noqa: E402
     PersistentOutcomeBlindBatchIndexConfig,
     index_persistent_outcome_blind_batch,
@@ -28,6 +32,13 @@ from examples.v8.run_polymarket_async_round_collector import (  # noqa: E402
 
 DEFAULT_PROTOCOL = ROOT / (
     "examples/v8/polymarket_configs/execution_layer_v2_persistent_outcome_blind_collector_v1.json"
+)
+DEFAULT_BATCH_CANARY_FEATURE_CONTRACT = ROOT / (
+    "examples/v8/polymarket_configs/"
+    "execution_layer_v2_pairwise_action_advantage_lcb_feature_contract_v1.json"
+)
+DEFAULT_BATCH_CANARY_FEATURE_CONTRACT_SHA256 = (
+    "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959"
 )
 SAFETY = {
     "paper_only": True,
@@ -41,6 +52,10 @@ SAFETY = {
     "#134_resume_allowed": False,
     "#146_start_allowed": False,
 }
+
+
+class OutcomeBlindBatchCanaryFailure(RuntimeError):
+    """Stop collection immediately when a completed batch violates the canary contract."""
 
 
 def _single_service_instance(function):
@@ -79,6 +94,10 @@ def run_service(
     max_batches: int,
     max_consecutive_failures: int,
     failure_backoff_seconds: float,
+    batch_canary_feature_contract_path: Path | str = DEFAULT_BATCH_CANARY_FEATURE_CONTRACT,
+    batch_canary_feature_contract_sha256: str = (
+        DEFAULT_BATCH_CANARY_FEATURE_CONTRACT_SHA256
+    ),
 ) -> dict:
     if batch_round_count <= 0:
         raise ValueError("batch_round_count must be positive")
@@ -93,6 +112,12 @@ def run_service(
         raise ValueError("persistent collector protocol SHA-256 mismatch")
     protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
     validate_persistent_outcome_blind_collector_protocol(protocol)
+    batch_canary_feature_contract_path = Path(batch_canary_feature_contract_path).resolve()
+    if (
+        _sha256(batch_canary_feature_contract_path)
+        != batch_canary_feature_contract_sha256.lower()
+    ):
+        raise ValueError("batch canary feature contract SHA-256 mismatch")
     frozen_protocol_path = root / "persistent_outcome_blind_collector_protocol.json"
     if frozen_protocol_path.exists():
         if _sha256(frozen_protocol_path) != protocol_sha256.lower():
@@ -110,6 +135,7 @@ def run_service(
     while max_batches == 0 or completed_batches < max_batches:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         batch_id = f"persistent-outcome-blind-{batch_sequence:06d}-{stamp}"
+        canary_result: dict | None = None
         try:
             summary = run_polymarket_async_round_collector_cli(
                 batch_id=batch_id,
@@ -147,6 +173,20 @@ def run_service(
                     collector_git_commit=collector_commit,
                 )
             )
+            canary_result = run_outcome_blind_development_batch_canary(
+                OutcomeBlindDevelopmentBatchCanaryConfig(
+                    run_id=f"outcome-blind-batch-canary-{batch_sequence:06d}-{stamp}",
+                    output_dir=root / "batch_canary_runs",
+                    collector_index_path=index_path,
+                    expected_collector_index_sha256=index_result["index_sha256"],
+                    batch_id=batch_id,
+                    feature_contract_path=batch_canary_feature_contract_path,
+                    expected_feature_contract_sha256=(
+                        batch_canary_feature_contract_sha256.lower()
+                    ),
+                )
+            )
+            _require_batch_canary_passed(canary_result)
             consecutive_failures = 0
             completed_batches += 1
             _write_state(
@@ -167,6 +207,17 @@ def run_service(
                     "quality_valid_index_entry_count": index_result["report"][
                         "quality_valid_index_entry_count"
                     ],
+                    "last_batch_canary_report_path": str(canary_result["report_path"]),
+                    "last_batch_canary_report_sha256": canary_result["report_sha256"],
+                    "last_batch_canary_manifest_path": str(canary_result["manifest_path"]),
+                    "last_batch_canary_manifest_sha256": canary_result["manifest_sha256"],
+                    "last_batch_canary_passed": True,
+                    "batch_canary_feature_contract_path": str(
+                        batch_canary_feature_contract_path
+                    ),
+                    "batch_canary_feature_contract_sha256": (
+                        batch_canary_feature_contract_sha256.lower()
+                    ),
                     "consecutive_failure_count": 0,
                     "outcome_blind_collection_only": True,
                     "settlement_finalizer_started": False,
@@ -179,28 +230,47 @@ def run_service(
             batch_sequence += 1
         except Exception as exc:
             consecutive_failures += 1
+            failure_state = {
+                "status": "collection_batch_failed_fail_closed",
+                "failed_batch_sequence": batch_sequence,
+                "failed_batch_id": batch_id,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "consecutive_failure_count": consecutive_failures,
+                "collector_git_commit": collector_commit,
+                "protocol_path": str(protocol_path),
+                "protocol_sha256": protocol_sha256.lower(),
+                "batch_round_count": batch_round_count,
+                "outcome_blind_collection_only": True,
+                "settlement_finalizer_started": False,
+                "resolution_provider_called": False,
+                "training_corpus_export_attempted": False,
+                "labels_outcomes_or_pnl_opened": False,
+                **SAFETY,
+            }
+            if canary_result is not None:
+                failure_state.update(
+                    {
+                        "failed_batch_canary_report_path": str(canary_result["report_path"]),
+                        "failed_batch_canary_report_sha256": canary_result["report_sha256"],
+                        "failed_batch_canary_manifest_path": str(
+                            canary_result["manifest_path"]
+                        ),
+                        "failed_batch_canary_manifest_sha256": canary_result[
+                            "manifest_sha256"
+                        ],
+                        "failed_batch_canary_reason_codes": canary_result["report"][
+                            "development_data_canary_blocking_reason_codes"
+                        ],
+                    }
+                )
             _write_state(
                 service_state_path,
-                {
-                    "status": "collection_batch_failed_fail_closed",
-                    "failed_batch_sequence": batch_sequence,
-                    "failed_batch_id": batch_id,
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                    "consecutive_failure_count": consecutive_failures,
-                    "collector_git_commit": collector_commit,
-                    "protocol_path": str(protocol_path),
-                    "protocol_sha256": protocol_sha256.lower(),
-                    "batch_round_count": batch_round_count,
-                    "outcome_blind_collection_only": True,
-                    "settlement_finalizer_started": False,
-                    "resolution_provider_called": False,
-                    "training_corpus_export_attempted": False,
-                    "labels_outcomes_or_pnl_opened": False,
-                    **SAFETY,
-                },
+                failure_state,
             )
             if consecutive_failures >= max_consecutive_failures:
+                raise
+            if isinstance(exc, OutcomeBlindBatchCanaryFailure):
                 raise
             batch_sequence += 1
             time.sleep(failure_backoff_seconds)
@@ -225,6 +295,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-consecutive-failures", type=int, default=3)
     parser.add_argument("--failure-backoff-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--batch-canary-feature-contract",
+        default=str(DEFAULT_BATCH_CANARY_FEATURE_CONTRACT),
+    )
+    parser.add_argument(
+        "--batch-canary-feature-contract-sha256",
+        default=DEFAULT_BATCH_CANARY_FEATURE_CONTRACT_SHA256,
+    )
     args = parser.parse_args(argv)
     state = run_service(
         service_root=args.service_root,
@@ -234,6 +312,8 @@ def main(argv: list[str] | None = None) -> int:
         max_batches=args.max_batches,
         max_consecutive_failures=args.max_consecutive_failures,
         failure_backoff_seconds=args.failure_backoff_seconds,
+        batch_canary_feature_contract_path=args.batch_canary_feature_contract,
+        batch_canary_feature_contract_sha256=args.batch_canary_feature_contract_sha256,
     )
     print(json.dumps(state, indent=2, sort_keys=True))
     return 0
@@ -249,6 +329,15 @@ def _write_state(path: Path, value: dict) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+def _require_batch_canary_passed(canary_result: dict) -> None:
+    report = dict(canary_result.get("report") or {})
+    if report.get("development_data_canary_passed") is not True:
+        raise OutcomeBlindBatchCanaryFailure(
+            "completed batch failed outcome-blind canary: "
+            + ",".join(report.get("development_data_canary_blocking_reason_codes") or [])
+        )
 
 
 def _sha256(path: Path) -> str:
