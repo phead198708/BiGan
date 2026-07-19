@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pytest
 
 import bigan.v8.polymarket.training.execution_layer_v2_market_clustered_mean_ev_v6_2_future_evaluation as subject
 from bigan.v8.polymarket.training.execution_layer_v2_market_clustered_mean_ev_v6_2_future_evaluation import (
+    MarketClusteredMeanEVV62FutureFreezeConfig,
     _bound_single_use_claim_path,
     _claim_single_use,
     _select_exact_future_index_rows,
@@ -15,6 +17,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_market_clustered_mean_ev_v6
     _validate_exact_feature_action_grid,
     _validate_freeze_manifest_for_target_access,
     build_market_clustered_mean_ev_v6_2_side_only_gate,
+    freeze_market_clustered_mean_ev_v6_2_future_predictions,
     validate_market_clustered_mean_ev_v6_2_future_profile,
 )
 
@@ -159,6 +162,133 @@ def test_exact_materialized_grid_requires_five_actions_and_causal_features() -> 
             selected_rows=selected,
             candidate=candidate,
         )
+
+
+def test_exact_200_freeze_materializes_raw_features_before_target_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_rows = [_synthetic_selected_row(tmp_path, index) for index in range(200)]
+    bundle = _synthetic_freeze_bundle(tmp_path)
+    monkeypatch.setattr(subject, "load_and_validate_persistent_outcome_blind_index", lambda _: selected_rows)
+    monkeypatch.setattr(subject, "_prior_market_reference", lambda _: (set(), "a" * 64))
+    monkeypatch.setattr(subject.xgb.Booster, "load_model", lambda self, path: None)
+
+    def fake_raw_predictions(booster, rows, *, feature_columns):
+        output = []
+        for row in rows:
+            market_index = int(str(row["market_id"]).rsplit("-", 1)[-1])
+            selected_action = (
+                "BUY_UP_SELL_BEFORE_CLOSE"
+                if market_index % 2 == 0
+                else "BUY_DOWN_SELL_BEFORE_CLOSE"
+            )
+            output.append(
+                {
+                    **row,
+                    "raw_direct_predicted_net_return": (
+                        0.10 if row["action"] == selected_action else 0.0
+                    ),
+                }
+            )
+        return output
+
+    monkeypatch.setattr(subject, "_raw_target_stripped_predictions", fake_raw_predictions)
+    monkeypatch.setattr(
+        subject,
+        "attach_frozen_execution_compatibility",
+        lambda rows: [
+            {
+                **row,
+                "guard_compatible_before_ranking": row["action"] != "NO_TRADE",
+            }
+            for row in rows
+        ],
+    )
+    monkeypatch.setattr(
+        subject,
+        "apply_market_clustered_mean_ev_scores",
+        lambda rows, *, calibration_artifact: [
+            {
+                **row,
+                "scoring_lineage": "v6_2",
+                "mean_ev_lower_confidence_bound": row[
+                    "raw_direct_predicted_net_return"
+                ],
+            }
+            for row in rows
+        ],
+    )
+    monkeypatch.setattr(
+        subject,
+        "apply_conformal_scores",
+        lambda rows, *, calibration_artifact, profile: [
+            {
+                **row,
+                "scoring_lineage": "matched_v5",
+                "mean_ev_lower_confidence_bound": -1.0,
+            }
+            for row in rows
+        ],
+    )
+
+    def fake_replay(rows, **kwargs):
+        if rows and rows[0]["scoring_lineage"] == "matched_v5":
+            return []
+        grouped: dict[tuple[str, int], list[dict]] = {}
+        for row in rows:
+            grouped.setdefault((row["market_id"], int(row["decision_ts"])), []).append(row)
+        output = []
+        for group in grouped.values():
+            selected = max(group, key=lambda row: float(row["mean_ev_lower_confidence_bound"]))
+            output.append(
+                {
+                    **selected,
+                    "selected_side": selected["side"],
+                    "executed_action": selected["action"],
+                    "execution_guard_order_allowed": True,
+                    "execution_blocking_reason_codes": [],
+                }
+            )
+        return output
+
+    monkeypatch.setattr(subject, "_outcome_blind_acceptance_replay", fake_replay)
+    result = freeze_market_clustered_mean_ev_v6_2_future_predictions(
+        MarketClusteredMeanEVV62FutureFreezeConfig(
+            run_id="exact-200-integration",
+            output_dir=tmp_path / "runs",
+            evaluation_profile_path=bundle["evaluation_profile"],
+            expected_evaluation_profile_sha256=_sha256(bundle["evaluation_profile"]),
+            collection_profile_path=bundle["collection_profile"],
+            expected_collection_profile_sha256=_sha256(bundle["collection_profile"]),
+            candidate_manifest_path=bundle["candidate_manifest"],
+            expected_candidate_manifest_sha256=_sha256(bundle["candidate_manifest"]),
+            cumulative_canary_manifest_path=bundle["cumulative_manifest"],
+            expected_cumulative_canary_manifest_sha256=_sha256(
+                bundle["cumulative_manifest"]
+            ),
+            collector_index_path=bundle["collector_index"],
+            expected_collector_index_sha256=_sha256(bundle["collector_index"]),
+            builder_git_commit="a" * 40,
+            decision_freeze_created_ts=max(row["market_end_ts"] for row in selected_rows)
+            + 1,
+        )
+    )
+
+    report = result["report"]
+    manifest = result["manifest"]
+    assert report["selected_market_count"] == 200
+    assert report["candidate_guard_accepted_unique_market_count"] == 200
+    assert report["candidate_guard_accepted_unique_market_count_by_side"] == {
+        "UP": 100,
+        "DOWN": 100,
+    }
+    assert report["target_free_support_gate_passed"] is True
+    assert report["future_target_access_allowed"] is True
+    assert len(manifest["opened_raw_feature_artifacts"]) == 200
+    assert manifest["labels_outcomes_or_pnl_opened"] is False
+    assert manifest["resolution_artifact_opened"] is False
+    assert not _bound_single_use_claim_path(result["manifest_path"]).exists()
 
 
 def test_support_failure_keeps_target_access_fail_closed() -> None:
@@ -310,3 +440,247 @@ def _evaluation_row(
         "provenance_violation": False,
         "runtime_state_violation": False,
     }
+
+
+def _synthetic_freeze_bundle(tmp_path: Path) -> dict[str, Path]:
+    feature_contract = Path(
+        "examples/v8/polymarket_configs/"
+        "execution_layer_v2_pairwise_action_advantage_lcb_feature_contract_v1.json"
+    ).resolve()
+    model = tmp_path / "model.json"
+    model.write_text("{}\n", encoding="utf-8")
+    calibration = tmp_path / "v6-2-calibration.json"
+    _write_json(
+        calibration,
+        {
+            "frozen": True,
+            "sides": {
+                "UP": {
+                    "mean_residual": 0.0,
+                    "mean_residual_upper_confidence_bound": 0.0,
+                },
+                "DOWN": {
+                    "mean_residual": 0.0,
+                    "mean_residual_upper_confidence_bound": 0.0,
+                },
+            },
+        },
+    )
+    v5_calibration = tmp_path / "v5-calibration.json"
+    v5_profile = tmp_path / "v5-profile.json"
+    _write_json(v5_calibration, {})
+    _write_json(v5_profile, {})
+    v5_manifest = tmp_path / "v5-manifest.json"
+    _write_json(
+        v5_manifest,
+        {
+            "calibration_artifact": _descriptor(v5_calibration),
+            "fit_profile": _descriptor(v5_profile),
+        },
+    )
+    pre_audit = tmp_path / "pre-audit.json"
+    _write_json(
+        pre_audit,
+        {
+            "feature_contract": _descriptor(feature_contract),
+            "v5_freeze_manifest": _descriptor(v5_manifest),
+        },
+    )
+    candidate_manifest = tmp_path / "candidate-manifest.json"
+    _write_json(
+        candidate_manifest,
+        {
+            "candidate_name": "market_clustered_mean_ev_v6_2",
+            "target_free_actionability_gate_passed": True,
+            "research_actionability_candidate_frozen": True,
+            "new_strictly_later_future_holdout_required": True,
+            "future_collection_minimum_created_ts_exclusive": 1_784_470_529_364,
+            "target_free_labels_outcomes_settlement_targets_or_pnl_opened": False,
+            "pre_target_access_audit": _descriptor(pre_audit),
+            "source_model": _descriptor(model),
+            "market_clustered_mean_risk_calibration": _descriptor(calibration),
+        },
+    )
+    collection_profile = tmp_path / "collection-profile.json"
+    collection = json.loads(COLLECTION_PROFILE_PATH.read_text(encoding="utf-8"))
+    collection["candidate"].update(
+        {
+            "candidate_manifest_sha256": _sha256(candidate_manifest),
+            "model_sha256": _sha256(model),
+            "calibration_sha256": _sha256(calibration),
+        }
+    )
+    _write_json(collection_profile, collection)
+    evaluation_profile = tmp_path / "evaluation-profile.json"
+    evaluation = _profile()
+    evaluation.update(
+        {
+            "collection_profile_sha256": _sha256(collection_profile),
+            "candidate_manifest_sha256": _sha256(candidate_manifest),
+            "candidate_model_sha256": _sha256(model),
+            "candidate_calibration_sha256": _sha256(calibration),
+            "matched_v5_manifest_sha256": _sha256(v5_manifest),
+            "feature_contract_sha256": _sha256(feature_contract),
+        }
+    )
+    _write_json(evaluation_profile, evaluation)
+    batch_report = tmp_path / "batch-report.json"
+    _write_json(
+        batch_report,
+        {"candidate_manifest_sha256": _sha256(candidate_manifest)},
+    )
+    cumulative_report = tmp_path / "cumulative-report.json"
+    _write_json(
+        cumulative_report,
+        {
+            "future_holdout_collection_complete": True,
+            "quality_valid_market_count": 200,
+            "attempted_market_count": 200,
+            "target_free_terminal_blocked": False,
+        },
+    )
+    cumulative_manifest = tmp_path / "cumulative-manifest.json"
+    _write_json(
+        cumulative_manifest,
+        {
+            "future_holdout_collection_complete": True,
+            "target_free_terminal_blocked": False,
+            "labels_outcomes_or_pnl_opened": False,
+            "report": _descriptor(cumulative_report),
+            "batch_reports": [_descriptor(batch_report)],
+        },
+    )
+    collector_index = tmp_path / "collector-index.jsonl"
+    collector_index.write_text("{}\n", encoding="utf-8")
+    return {
+        "candidate_manifest": candidate_manifest,
+        "collection_profile": collection_profile,
+        "evaluation_profile": evaluation_profile,
+        "cumulative_manifest": cumulative_manifest,
+        "collector_index": collector_index,
+    }
+
+
+def _synthetic_selected_row(tmp_path: Path, index: int) -> dict:
+    start = 1_784_472_000_000 + index * 300_000
+    end = start + 300_000
+    market_id = f"future-market-{index:03d}"
+    raw_dir = tmp_path / "raw" / market_id
+    raw_dir.mkdir(parents=True)
+    payloads: dict[str, list[dict]] = {
+        "raw_polymarket_markets.jsonl": [
+            {
+                "market_id": market_id,
+                "condition_id": f"condition-{index:03d}",
+                "slug": f"btc-updown-5m-{start // 1000}",
+                "market_family": "btc_updown_5m",
+                "horizon_ms": 300_000,
+                "market_start_ts": start,
+                "market_end_ts": end,
+                "settlement_ts": end,
+                "up_token_id": f"up-token-{index:03d}",
+                "down_token_id": f"down-token-{index:03d}",
+                "reference_price_source": "polymarket_rtds_chainlink",
+                "settlement_rule": "UP if end reference is at least start reference",
+                "paper_only": True,
+                "capital_at_risk": False,
+                "polymarket_write_enabled": False,
+                "wallet_signing_enabled": False,
+            }
+        ],
+        "raw_polymarket_orderbooks.jsonl": [],
+        "raw_polymarket_trades.jsonl": [],
+        "raw_binance_btcusdt_klines.jsonl": [],
+        "raw_polymarket_chainlink_prices.jsonl": [],
+    }
+    for offset in range(-15, 5):
+        ts = start + offset * 60_000
+        payloads["raw_binance_btcusdt_klines.jsonl"].append(
+            {
+                "ts": ts,
+                "available_at_ts": ts + 60_000,
+                "open_price": 100_000.0 + offset,
+                "high_price": 100_010.0 + offset,
+                "low_price": 99_990.0 + offset,
+                "close_price": 100_001.0 + offset,
+                "volume": 1.0,
+                "timeframe_ms": 60_000,
+                "source": "binance_btcusdt",
+            }
+        )
+    for offset in range(5):
+        ts = start + offset * 60_000
+        for outcome, bid, ask in (("UP", 0.54, 0.56), ("DOWN", 0.44, 0.46)):
+            payloads["raw_polymarket_orderbooks.jsonl"].append(
+                {
+                    "market_id": market_id,
+                    "token_id": f"{outcome.lower()}-token-{index:03d}",
+                    "outcome": outcome,
+                    "ts": ts,
+                    "available_at_ts": ts,
+                    "bid_price": bid,
+                    "ask_price": ask,
+                    "mid_price": (bid + ask) / 2.0,
+                    "bid_size": 100.0,
+                    "ask_size": 100.0,
+                    "liquidity_depth": 200.0,
+                    "paper_only": True,
+                    "capital_at_risk": False,
+                    "polymarket_write_enabled": False,
+                    "wallet_signing_enabled": False,
+                }
+            )
+        payloads["raw_polymarket_chainlink_prices.jsonl"].append(
+            {
+                "source_ts": ts,
+                "available_at_ts": ts,
+                "price": 100_000.0 + offset,
+                "source_type": "polymarket_rtds_chainlink",
+                "symbol": "BTC/USD",
+                "read_only": True,
+                "paper_only": True,
+                "capital_at_risk": False,
+                "polymarket_write_enabled": False,
+                "wallet_signing_enabled": False,
+            }
+        )
+    descriptors = {}
+    for filename, rows in payloads.items():
+        path = raw_dir / filename
+        _write_jsonl(path, rows)
+        descriptors[filename] = {
+            "path": str(path.resolve()),
+            "sha256": _sha256(path),
+            "row_count": len(rows),
+        }
+    return {
+        "sequence": 313 + index,
+        "scheduled_round_start_ts": start,
+        "market_start_ts": start,
+        "market_end_ts": end,
+        "market_id": market_id,
+        "entry_sha256": hashlib.sha256(market_id.encode()).hexdigest(),
+        "capture_quality_valid": True,
+        "labels_outcomes_or_pnl_opened": False,
+        "raw_resolution_row_count": 0,
+        "raw_artifacts": descriptors,
+    }
+
+
+def _descriptor(path: Path) -> dict[str, str]:
+    return {"path": str(path.resolve()), "sha256": _sha256(path)}
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
