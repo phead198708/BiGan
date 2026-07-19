@@ -537,6 +537,36 @@ def test_completed_batch_canary_failure_is_terminal() -> None:
         )
 
 
+def test_persistent_canary_terminal_stop_prevents_automatic_collection_restart(
+    tmp_path: Path,
+) -> None:
+    service_root = tmp_path / "service"
+    service_root.mkdir()
+    marker = service_root / "persistent_outcome_blind_canary_terminal_stop.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "status": "persistent_outcome_blind_canary_terminal_stop",
+                "blocking_reason_codes": ["complete_five_action_grid_failed"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        service_module.OutcomeBlindBatchCanaryFailure,
+        match="complete_five_action_grid_failed",
+    ):
+        service_module.run_service(
+            service_root=service_root,
+            protocol_path=PROTOCOL_PATH,
+            protocol_sha256=_sha256(PROTOCOL_PATH),
+            batch_round_count=2,
+            max_batches=1,
+            max_consecutive_failures=3,
+            failure_backoff_seconds=0.0,
+        )
+
+
 def test_launchd_descriptor_rejects_direct_training_corpus_root(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="direct training corpus root"):
         write_launchd_plist(

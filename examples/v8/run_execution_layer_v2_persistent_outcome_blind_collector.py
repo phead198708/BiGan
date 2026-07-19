@@ -127,6 +127,13 @@ def run_service(
     protocol_path = frozen_protocol_path
     index_path = root / "persistent_outcome_blind_round_index.jsonl"
     service_state_path = root / "persistent_outcome_blind_service_state.json"
+    terminal_stop_path = root / "persistent_outcome_blind_canary_terminal_stop.json"
+    if terminal_stop_path.is_file():
+        terminal_stop = _load_state(terminal_stop_path)
+        raise OutcomeBlindBatchCanaryFailure(
+            "persistent outcome-blind canary terminal stop is active: "
+            + ",".join(terminal_stop.get("blocking_reason_codes") or [])
+        )
     service_state = _load_state(service_state_path)
     batch_sequence = int(service_state.get("last_completed_batch_sequence") or 0) + 1
     completed_batches = 0
@@ -173,19 +180,24 @@ def run_service(
                     collector_git_commit=collector_commit,
                 )
             )
-            canary_result = run_outcome_blind_development_batch_canary(
-                OutcomeBlindDevelopmentBatchCanaryConfig(
-                    run_id=f"outcome-blind-batch-canary-{batch_sequence:06d}-{stamp}",
-                    output_dir=root / "batch_canary_runs",
-                    collector_index_path=index_path,
-                    expected_collector_index_sha256=index_result["index_sha256"],
-                    batch_id=batch_id,
-                    feature_contract_path=batch_canary_feature_contract_path,
-                    expected_feature_contract_sha256=(
-                        batch_canary_feature_contract_sha256.lower()
-                    ),
+            try:
+                canary_result = run_outcome_blind_development_batch_canary(
+                    OutcomeBlindDevelopmentBatchCanaryConfig(
+                        run_id=f"outcome-blind-batch-canary-{batch_sequence:06d}-{stamp}",
+                        output_dir=root / "batch_canary_runs",
+                        collector_index_path=index_path,
+                        expected_collector_index_sha256=index_result["index_sha256"],
+                        batch_id=batch_id,
+                        feature_contract_path=batch_canary_feature_contract_path,
+                        expected_feature_contract_sha256=(
+                            batch_canary_feature_contract_sha256.lower()
+                        ),
+                    )
                 )
-            )
+            except Exception as exc:
+                raise OutcomeBlindBatchCanaryFailure(
+                    f"completed batch canary could not be validated: {type(exc).__name__}: {exc}"
+                ) from exc
             _require_batch_canary_passed(canary_result)
             consecutive_failures = 0
             completed_batches += 1
@@ -264,6 +276,34 @@ def run_service(
                         ],
                     }
                 )
+            if isinstance(exc, OutcomeBlindBatchCanaryFailure):
+                terminal_reasons = (
+                    canary_result["report"]["development_data_canary_blocking_reason_codes"]
+                    if canary_result is not None
+                    else ["outcome_blind_batch_canary_validation_exception"]
+                )
+                terminal_stop = {
+                    "status": "persistent_outcome_blind_canary_terminal_stop",
+                    "failed_batch_sequence": batch_sequence,
+                    "failed_batch_id": batch_id,
+                    "blocking_reason_codes": terminal_reasons,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "automatic_restart_may_not_resume_collection": True,
+                    "explicit_operator_review_required": True,
+                    "labels_outcomes_or_pnl_opened": False,
+                    **SAFETY,
+                }
+                if canary_result is not None:
+                    terminal_stop.update(
+                        {
+                            "canary_report_path": str(canary_result["report_path"]),
+                            "canary_report_sha256": canary_result["report_sha256"],
+                            "canary_manifest_path": str(canary_result["manifest_path"]),
+                            "canary_manifest_sha256": canary_result["manifest_sha256"],
+                        }
+                    )
+                _write_state(terminal_stop_path, terminal_stop)
             _write_state(
                 service_state_path,
                 failure_state,
