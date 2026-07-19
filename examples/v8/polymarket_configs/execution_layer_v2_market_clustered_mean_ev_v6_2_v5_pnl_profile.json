@@ -1,0 +1,44 @@
+{
+  "schema_version": "bigan-v8-market-clustered-mean-ev-v6-2-v5-pnl-profile-v1",
+  "issue": 213,
+  "candidate_manifest_sha256": "b9441b04fb595a927cbf9af9311612b037c36fc8c623ac8a92b6f4cb8ece84b9",
+  "v5_freeze_manifest_sha256": "0d0927da515317d0576a04b6c4a9a5175f569225a85ebaf62020326fdc06510d",
+  "feature_contract_sha256": "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959",
+  "roles": [
+    "development_train",
+    "confirmatory_validation"
+  ],
+  "pnl": {
+    "target_field": "target_net_pnl_per_contract",
+    "sized_pnl_formula": "target_net_pnl_per_contract * proposed_order_size",
+    "cost_basis_formula": "entry_ask * proposed_order_size",
+    "cost_aware": true,
+    "bootstrap_unit": "market_id",
+    "bootstrap_confidence_level": 0.95,
+    "bootstrap_resample_count": 5000,
+    "bootstrap_seed": 21060721
+  },
+  "baselines": [
+    "no_trade_zero",
+    "raw_point_policy_diagnostic",
+    "original_v5_individual_outcome_conformal_policy"
+  ],
+  "interpretation": {
+    "development_retrospective_only": true,
+    "promotion_evidence": false,
+    "result_used_to_tune_v6_2_or_future_gate": false,
+    "future_holdout_required": true
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}
