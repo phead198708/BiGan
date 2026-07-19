@@ -15,8 +15,10 @@ from bigan.v8.polymarket.training.execution_layer_v2_persistent_outcome_blind_co
     ZERO_SHA256,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_net_return_v6 import (
+    PolicySelectedConformalV6DevelopmentWindowConfig,
     PolicySelectedConformalV6PreRegistrationConfig,
     build_target_free_v5_no_trade_attrition_report,
+    freeze_policy_selected_conformal_v6_development_window,
     pre_register_policy_selected_conformal_v6,
     validate_policy_selected_conformal_v6_profile,
 )
@@ -31,6 +33,11 @@ COLLECTOR_PROTOCOL_PATH = (
     ROOT
     / "examples/v8/polymarket_configs/"
     "execution_layer_v2_persistent_outcome_blind_collector_v1.json"
+)
+FEATURE_CONTRACT_PATH = (
+    ROOT
+    / "examples/v8/polymarket_configs/"
+    "execution_layer_v2_pairwise_action_advantage_lcb_feature_contract_v1.json"
 )
 BOUNDARY_TS = 1_784_445_600_000
 
@@ -170,6 +177,110 @@ def test_preregistration_rejects_changed_collector_prefix(tmp_path: Path) -> Non
         )
 
 
+def test_development_window_freezes_earliest_260_markets_and_roles(tmp_path: Path) -> None:
+    fixture = _prereg_fixture(tmp_path)
+    prereg = pre_register_policy_selected_conformal_v6(
+        PolicySelectedConformalV6PreRegistrationConfig(
+            run_id="issue207-prereg-for-freeze",
+            output_dir=tmp_path / "prereg-runs",
+            profile_path=fixture["profile_path"],
+            expected_profile_sha256=_sha256(fixture["profile_path"]),
+            issue204_window_manifest_path=fixture["window_manifest_path"],
+            issue204_decision_freeze_path=fixture["decision_freeze_path"],
+            issue204_prediction_report_path=fixture["prediction_report_path"],
+            collector_index_path=fixture["index_path"],
+            expected_collector_index_prefix_sha256=_sha256(fixture["index_path"]),
+            collector_protocol_path=COLLECTOR_PROTOCOL_PATH,
+            power_report_path=fixture["power_report_path"],
+            power_manifest_path=fixture["power_manifest_path"],
+            builder_git_commit="b" * 40,
+            preregistration_created_ts=1_784_450_000_000,
+        )
+    )
+    extended_index_path = tmp_path / "extended_index.jsonl"
+    _write_jsonl(extended_index_path, _index_rows(total=496))
+    result = freeze_policy_selected_conformal_v6_development_window(
+        PolicySelectedConformalV6DevelopmentWindowConfig(
+            run_id="issue207-development-freeze",
+            output_dir=tmp_path / "freeze-runs",
+            preregistration_manifest_path=prereg["manifest_path"],
+            expected_preregistration_manifest_sha256=prereg["manifest_sha256"],
+            collector_index_path=extended_index_path,
+            expected_collector_index_sha256=_sha256(extended_index_path),
+            feature_contract_path=FEATURE_CONTRACT_PATH,
+            expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
+            builder_git_commit="c" * 40,
+            freeze_created_ts=1_784_600_000_000,
+        ),
+        feature_materializer=_fake_feature_materializer,
+        action_materializer=_fake_action_materializer,
+    )
+    assert result["report"]["development_window_freeze_ready"] is True
+    assert result["report"]["selected_market_count"] == 260
+    assert result["report"]["scanned_post_boundary_row_count"] == 260
+    assert result["report"]["target_free_feature_row_count"] == 1040
+    assert result["report"]["target_free_five_action_row_count"] == 5200
+    assert result["report"]["selected_sequence_start"] == 237
+    assert result["report"]["selected_sequence_end"] == 496
+    assert result["report"]["role_market_counts"] == {
+        "calibration_check": 50,
+        "conformal_calibration": 60,
+        "point_model_fit": 150,
+    }
+    assert result["manifest"]["development_target_accessed"] is False
+    assert result["manifest"]["paper_candidate_allowed"] is False
+    assert [row["development_role"] for row in result["role_rows"][:150]] == [
+        "point_model_fit"
+    ] * 150
+    assert [row["development_role"] for row in result["role_rows"][-50:]] == [
+        "calibration_check"
+    ] * 50
+
+
+def test_development_window_fails_closed_when_support_is_incomplete(tmp_path: Path) -> None:
+    fixture = _prereg_fixture(tmp_path)
+    prereg = pre_register_policy_selected_conformal_v6(
+        PolicySelectedConformalV6PreRegistrationConfig(
+            run_id="issue207-prereg-incomplete",
+            output_dir=tmp_path / "prereg-runs",
+            profile_path=fixture["profile_path"],
+            expected_profile_sha256=_sha256(fixture["profile_path"]),
+            issue204_window_manifest_path=fixture["window_manifest_path"],
+            issue204_decision_freeze_path=fixture["decision_freeze_path"],
+            issue204_prediction_report_path=fixture["prediction_report_path"],
+            collector_index_path=fixture["index_path"],
+            expected_collector_index_prefix_sha256=_sha256(fixture["index_path"]),
+            collector_protocol_path=COLLECTOR_PROTOCOL_PATH,
+            power_report_path=fixture["power_report_path"],
+            power_manifest_path=fixture["power_manifest_path"],
+            builder_git_commit="b" * 40,
+            preregistration_created_ts=1_784_450_000_000,
+        )
+    )
+    result = freeze_policy_selected_conformal_v6_development_window(
+        PolicySelectedConformalV6DevelopmentWindowConfig(
+            run_id="issue207-development-incomplete",
+            output_dir=tmp_path / "freeze-runs",
+            preregistration_manifest_path=prereg["manifest_path"],
+            expected_preregistration_manifest_sha256=prereg["manifest_sha256"],
+            collector_index_path=fixture["index_path"],
+            expected_collector_index_sha256=_sha256(fixture["index_path"]),
+            feature_contract_path=FEATURE_CONTRACT_PATH,
+            expected_feature_contract_sha256=_sha256(FEATURE_CONTRACT_PATH),
+            builder_git_commit="c" * 40,
+            freeze_created_ts=1_784_600_000_000,
+        )
+    )
+    assert result["report"]["development_window_freeze_ready"] is False
+    assert result["report"]["selected_market_count"] == 4
+    assert result["report"]["blocking_reason_codes"] == [
+        "development_target_quality_valid_market_count_not_met"
+    ]
+    assert result["manifest"]["selected_rows"] is None
+    assert result["manifest"]["development_target_accessed"] is False
+    assert result["manifest"]["paper_candidate_allowed"] is False
+
+
 def _prereg_fixture(tmp_path: Path) -> dict[str, Path]:
     index_path = tmp_path / "persistent_index.jsonl"
     index_rows = _index_rows()
@@ -280,10 +391,10 @@ def _prediction_report() -> dict[str, object]:
     }
 
 
-def _index_rows() -> list[dict[str, object]]:
+def _index_rows(*, total: int = 240) -> list[dict[str, object]]:
     rows = []
     previous = ZERO_SHA256
-    for sequence in range(1, 241):
+    for sequence in range(1, total + 1):
         market_start = BOUNDARY_TS + (sequence - 237) * 300_000
         row = {
             "schema_version": INDEX_ENTRY_SCHEMA_VERSION,
@@ -301,9 +412,73 @@ def _index_rows() -> list[dict[str, object]]:
             "labels_outcomes_or_pnl_opened": False,
             **_blocked_safety_fields(),
         }
+        row.pop("paper_candidate_allowed")
         row["entry_sha256"] = canonical_json_sha256(row)
         previous = str(row["entry_sha256"])
         rows.append(row)
+    return rows
+
+
+def _fake_feature_materializer(
+    selected: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    rows = []
+    opened = []
+    for selected_row in selected:
+        market_id = str(selected_row["market_id"])
+        market_start = int(selected_row["market_start_ts"])
+        for decision_index in range(4):
+            decision_ts = market_start + (decision_index + 1) * 60_000
+            rows.append(
+                {
+                    "market_id": market_id,
+                    "decision_ts": decision_ts,
+                    "max_input_ts": decision_ts - 1,
+                }
+            )
+        opened.append(
+            {
+                "market_id": market_id,
+                "resolution_artifact_opened": False,
+            }
+        )
+    return rows, opened
+
+
+def _fake_action_materializer(
+    feature_rows: list[dict[str, object]],
+    *,
+    selected_rows: list[dict[str, object]],
+    feature_columns: tuple[str, ...],
+) -> list[dict[str, object]]:
+    del selected_rows
+    actions = (
+        "BUY_UP_HOLD_TO_SETTLEMENT",
+        "BUY_DOWN_HOLD_TO_SETTLEMENT",
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+        "NO_TRADE",
+    )
+    rows = []
+    for feature in feature_rows:
+        for action in actions:
+            row = {
+                **feature,
+                **dict.fromkeys(feature_columns, 0.0),
+                "action": action,
+                "action_family": (
+                    "NO_TRADE"
+                    if action == "NO_TRADE"
+                    else (
+                        "HOLD_TO_SETTLEMENT"
+                        if action.endswith("HOLD_TO_SETTLEMENT")
+                        else "SELL_BEFORE_CLOSE"
+                    )
+                ),
+                "side": "NONE" if action == "NO_TRADE" else action.split("_")[1],
+            }
+            row["action_row_sha256"] = canonical_json_sha256(row)
+            rows.append(row)
     return rows
 
 

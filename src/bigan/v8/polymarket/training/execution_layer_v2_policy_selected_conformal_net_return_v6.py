@@ -8,6 +8,7 @@ import math
 import shutil
 import statistics
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,10 @@ from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_evaluation import (
     FORBIDDEN_TARGET_FIELDS,
     _blocked_safety_fields,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_prediction_freeze import (
+    _materialize_future_action_rows,
+    _materialize_selected_window_features,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_persistent_outcome_blind_collector import (
     load_and_validate_persistent_outcome_blind_index,
@@ -30,6 +35,12 @@ PREREG_MANIFEST_SCHEMA_VERSION = (
     "bigan-v8-policy-selected-conformal-v6-preregistration-manifest-v1"
 )
 SOURCE_BOUNDARY_SCHEMA_VERSION = "bigan-v8-policy-selected-conformal-v6-source-boundary-v1"
+DEVELOPMENT_WINDOW_REPORT_SCHEMA_VERSION = (
+    "bigan-v8-policy-selected-conformal-v6-development-window-report-v1"
+)
+DEVELOPMENT_WINDOW_MANIFEST_SCHEMA_VERSION = (
+    "bigan-v8-policy-selected-conformal-v6-development-window-manifest-v1"
+)
 
 REQUIRED_ACTIONS = (
     "BUY_UP_HOLD_TO_SETTLEMENT",
@@ -83,6 +94,43 @@ class PolicySelectedConformalV6PreRegistrationConfig:
             "collector_protocol_path",
             "power_report_path",
             "power_manifest_path",
+        ):
+            object.__setattr__(self, field, Path(getattr(self, field)))
+
+
+@dataclass(frozen=True, slots=True)
+class PolicySelectedConformalV6DevelopmentWindowConfig:
+    """Pinned inputs for freezing the development roles before target access."""
+
+    run_id: str
+    output_dir: Path | str
+    preregistration_manifest_path: Path | str
+    expected_preregistration_manifest_sha256: str
+    collector_index_path: Path | str
+    expected_collector_index_sha256: str
+    feature_contract_path: Path | str
+    expected_feature_contract_sha256: str
+    builder_git_commit: str
+    freeze_created_ts: int
+    overwrite_existing: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id is required")
+        for field in (
+            "expected_preregistration_manifest_sha256",
+            "expected_collector_index_sha256",
+            "expected_feature_contract_sha256",
+        ):
+            _require_sha256(str(getattr(self, field)), name=field)
+        _require_git_sha(self.builder_git_commit)
+        if self.freeze_created_ts <= 0:
+            raise ValueError("freeze_created_ts must be positive")
+        for field in (
+            "output_dir",
+            "preregistration_manifest_path",
+            "collector_index_path",
+            "feature_contract_path",
         ):
             object.__setattr__(self, field, Path(getattr(self, field)))
 
@@ -381,6 +429,266 @@ def pre_register_policy_selected_conformal_v6(
     }
 
 
+def freeze_policy_selected_conformal_v6_development_window(
+    config: PolicySelectedConformalV6DevelopmentWindowConfig,
+    *,
+    feature_materializer: Callable[
+        [list[dict[str, Any]]],
+        tuple[list[dict[str, Any]], list[dict[str, Any]]],
+    ] = _materialize_selected_window_features,
+    action_materializer: Callable[..., list[dict[str, Any]]] = _materialize_future_action_rows,
+) -> dict[str, Any]:
+    """Freeze the earliest post-#204 150/60/50 roles without opening targets."""
+
+    prereg_path = config.preregistration_manifest_path.resolve()
+    _verify_pin(
+        prereg_path,
+        config.expected_preregistration_manifest_sha256,
+        "v6 preregistration manifest",
+    )
+    prereg = _load_json(prereg_path)
+    _validate_preregistration_manifest_for_development_freeze(prereg)
+    profile_descriptor = _verified_descriptor(prereg.get("profile"), "v6 profile")
+    profile = _load_json(Path(profile_descriptor["path"]))
+    validate_policy_selected_conformal_v6_profile(profile)
+    feature_contract_path = config.feature_contract_path.resolve()
+    _verify_pin(
+        feature_contract_path,
+        config.expected_feature_contract_sha256,
+        "feature contract",
+    )
+    if (
+        config.expected_feature_contract_sha256
+        != profile["frozen_upstream"]["feature_contract_sha256"]
+    ):
+        raise ValueError("feature contract pin does not match v6 profile")
+    feature_contract = _load_json(feature_contract_path)
+    feature_columns = tuple(str(value) for value in feature_contract["feature_columns"])
+    boundary_descriptor = _verified_descriptor(
+        prereg.get("development_source_boundary"),
+        "development source boundary",
+    )
+    prefix_descriptor = _verified_descriptor(
+        prereg.get("collector_index_prefix"),
+        "collector index prefix",
+    )
+    prefix_rows = load_and_validate_persistent_outcome_blind_index(
+        Path(prefix_descriptor["path"])
+    )
+
+    index_path = config.collector_index_path.resolve()
+    _verify_pin(index_path, config.expected_collector_index_sha256, "collector index")
+    current_rows = load_and_validate_persistent_outcome_blind_index(index_path)
+    if len(current_rows) < len(prefix_rows) or current_rows[: len(prefix_rows)] != prefix_rows:
+        raise ValueError("collector index prefix does not match preregistration snapshot")
+    if _sha256_file(index_path) != config.expected_collector_index_sha256:
+        raise ValueError("collector index changed during development freeze")
+
+    source_boundary = _load_json(Path(boundary_descriptor["path"]))
+    issue204_selected = _load_jsonl(
+        Path(
+            _verified_descriptor(
+                _load_json(Path(prereg["issue204_window_manifest"]["path"])).get(
+                    "selected_rows"
+                ),
+                "#204 selected rows",
+            )["path"]
+        )
+    )
+    exclusion = _prior_exclusion_summary(issue204_selected)
+    if exclusion["identity_hash"] != source_boundary["issue204_exclusion_identity_hash"]:
+        raise ValueError("#204 exclusion identity drift")
+
+    development = profile["development_window"]
+    minimum_sequence = int(development["minimum_eligible_index_sequence"])
+    scan_cap = int(development["maximum_index_scan_count"])
+    target_count = int(development["target_quality_valid_market_count"])
+    scan_rows = [row for row in current_rows if int(row["sequence"]) >= minimum_sequence]
+    considered_rows = scan_rows[:scan_cap]
+    selected = []
+    rejected_reasons = Counter()
+    seen_markets: set[str] = set()
+    seen_slugs: set[str] = set()
+    seen_source_hashes: set[str] = set()
+    scanned_row_count = 0
+    for row in considered_rows:
+        scanned_row_count += 1
+        reasons = _development_row_rejection_reasons(
+            row,
+            profile=profile,
+            exclusion=exclusion,
+            seen_markets=seen_markets,
+            seen_slugs=seen_slugs,
+            seen_source_hashes=seen_source_hashes,
+        )
+        if reasons:
+            rejected_reasons.update(reasons)
+            continue
+        selected.append(row)
+        seen_markets.add(str(row["market_id"]))
+        seen_slugs.add(str(row["slug"]))
+        seen_source_hashes.add(str(row["source_row_hash"]))
+        if len(selected) == target_count:
+            break
+
+    blockers = []
+    if len(selected) != target_count:
+        blockers.append("development_target_quality_valid_market_count_not_met")
+    if selected and config.freeze_created_ts <= max(int(row["market_end_ts"]) for row in selected):
+        blockers.append("development_markets_not_closed_before_freeze")
+    if _find_nonempty_fields(selected, FORBIDDEN_TARGET_FIELDS):
+        blockers.append("development_selected_rows_contain_target_fields")
+    if any(row.get("labels_outcomes_or_pnl_opened") is not False for row in selected):
+        blockers.append("development_selected_row_target_sealing_invalid")
+
+    run_dir = Path(config.output_dir).resolve() / config.run_id
+    if run_dir.exists():
+        if not config.overwrite_existing:
+            raise FileExistsError(f"run directory already exists: {run_dir}")
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True)
+    index_snapshot_path = run_dir / "persistent_outcome_blind_round_index_snapshot.jsonl"
+    shutil.copyfile(index_path, index_snapshot_path)
+    if _sha256_file(index_snapshot_path) != config.expected_collector_index_sha256:
+        raise ValueError("collector index snapshot hash mismatch")
+
+    selected_path = run_dir / "conformal_v6_development_window_selected_rows.jsonl"
+    role_rows_path = run_dir / "conformal_v6_development_role_assignment_rows.jsonl"
+    feature_rows_path = run_dir / "conformal_v6_development_target_free_feature_rows.jsonl"
+    action_rows_path = run_dir / "conformal_v6_development_target_free_five_action_rows.jsonl"
+    role_rows: list[dict[str, Any]] = []
+    feature_rows: list[dict[str, Any]] = []
+    action_rows: list[dict[str, Any]] = []
+    opened_raw_descriptors: list[dict[str, Any]] = []
+    if not blockers:
+        _write_jsonl(selected_path, selected)
+        role_rows = _assign_chronological_development_roles(selected, profile=profile)
+        _write_jsonl(role_rows_path, role_rows)
+        role_by_market = {
+            str(row["market_id"]): str(row["development_role"]) for row in role_rows
+        }
+        feature_rows, opened_raw_descriptors = feature_materializer(selected)
+        feature_rows = [
+            {
+                **row,
+                "role": role_by_market[str(row["market_id"])],
+                "development_role": role_by_market[str(row["market_id"])],
+                "target_used_as_decision_input": False,
+                "outcome_fields_used_as_decision_input": False,
+            }
+            for row in feature_rows
+        ]
+        action_rows = action_materializer(
+            feature_rows,
+            selected_rows=selected,
+            feature_columns=feature_columns,
+        )
+        action_rows = [
+            _development_target_free_action_row(
+                row,
+                role=role_by_market[str(row["market_id"])],
+            )
+            for row in action_rows
+        ]
+        _validate_development_target_free_materialization(
+            feature_rows,
+            action_rows,
+            selected_market_count=target_count,
+            feature_columns=feature_columns,
+        )
+        _write_jsonl(feature_rows_path, feature_rows)
+        _write_jsonl(action_rows_path, action_rows)
+
+    role_counts = dict(sorted(Counter(row["development_role"] for row in role_rows).items()))
+    report = {
+        "schema_version": DEVELOPMENT_WINDOW_REPORT_SCHEMA_VERSION,
+        "report_id": None,
+        "run_id": config.run_id,
+        "candidate_name": CANDIDATE_NAME,
+        "builder_git_commit": config.builder_git_commit,
+        "freeze_created_ts": config.freeze_created_ts,
+        "preregistration_manifest": _descriptor(prereg_path),
+        "collector_index": _descriptor(index_snapshot_path),
+        "collector_index_entry_count": len(current_rows),
+        "collector_index_prefix_unchanged": True,
+        "minimum_eligible_index_sequence": minimum_sequence,
+        "maximum_index_scan_count": scan_cap,
+        "scanned_post_boundary_row_count": scanned_row_count,
+        "selected_market_count": len(selected),
+        "target_market_count": target_count,
+        "role_market_counts": role_counts,
+        "selected_sequence_start": int(selected[0]["sequence"]) if selected else None,
+        "selected_sequence_end": int(selected[-1]["sequence"]) if selected else None,
+        "selected_window_start_ts": int(selected[0]["market_start_ts"]) if selected else None,
+        "selected_window_end_ts": int(selected[-1]["market_end_ts"]) if selected else None,
+        "issue204_market_slug_source_hash_overlap_count": 0,
+        "rejected_reason_distribution": dict(sorted(rejected_reasons.items())),
+        "target_free_feature_row_count": len(feature_rows),
+        "target_free_five_action_row_count": len(action_rows),
+        "opened_raw_feature_artifact_market_count": len(opened_raw_descriptors),
+        "timestamp_causality_violation_count": 0,
+        "target_free_feature_materialization_passed": not blockers,
+        "labels_outcomes_or_pnl_opened": False,
+        "raw_artifact_payloads_opened": bool(opened_raw_descriptors),
+        "resolution_artifact_opened": False,
+        "development_target_access_allowed_after_freeze": not blockers,
+        "development_window_freeze_ready": not blockers,
+        "blocking_reason_codes": blockers,
+        **_blocked_safety_fields(),
+    }
+    report["report_id"] = canonical_json_sha256(report)
+    report_path = run_dir / "conformal_v6_development_window_report.json"
+    _write_json(report_path, report)
+    _write_text(
+        run_dir / "conformal_v6_development_window_report.md",
+        _development_window_markdown(report),
+    )
+    manifest = {
+        "schema_version": DEVELOPMENT_WINDOW_MANIFEST_SCHEMA_VERSION,
+        "run_id": config.run_id,
+        "candidate_name": CANDIDATE_NAME,
+        "builder_git_commit": config.builder_git_commit,
+        "freeze_created_ts": config.freeze_created_ts,
+        "preregistration_manifest": _descriptor(prereg_path),
+        "profile": profile_descriptor,
+        "feature_contract": _descriptor(feature_contract_path),
+        "development_source_boundary": boundary_descriptor,
+        "collector_index_snapshot": _descriptor(index_snapshot_path),
+        "selected_rows": _descriptor(selected_path) if selected_path.is_file() else None,
+        "role_assignment_rows": _descriptor(role_rows_path) if role_rows_path.is_file() else None,
+        "target_free_feature_rows": (
+            _descriptor(feature_rows_path) if feature_rows_path.is_file() else None
+        ),
+        "target_free_five_action_rows": (
+            _descriptor(action_rows_path) if action_rows_path.is_file() else None
+        ),
+        "report": _descriptor(report_path),
+        "selected_market_count": len(selected),
+        "role_market_counts": role_counts,
+        "development_window_freeze_ready": not blockers,
+        "development_target_accessed": False,
+        "future_evaluation_attempted": False,
+        "blocking_reason_codes": blockers,
+        **_blocked_safety_fields(),
+    }
+    manifest["development_window_manifest_id"] = canonical_json_sha256(manifest)
+    manifest_path = run_dir / "conformal_v6_development_window_manifest.json"
+    _write_json(manifest_path, manifest)
+    return {
+        "run_dir": run_dir,
+        "selected_rows": selected,
+        "role_rows": role_rows,
+        "feature_rows": feature_rows,
+        "action_rows": action_rows,
+        "report": report,
+        "report_path": report_path,
+        "report_sha256": _sha256_file(report_path),
+        "manifest": manifest,
+        "manifest_path": manifest_path,
+        "manifest_sha256": _sha256_file(manifest_path),
+    }
+
+
 def build_target_free_v5_no_trade_attrition_report(
     decision_freeze: dict[str, Any],
     *,
@@ -565,6 +873,190 @@ def _validate_prior_window(
         blockers.append("development_time_boundary_not_after_issue204")
     if blockers:
         raise ValueError("#204 prior-window validation failed: " + ", ".join(blockers))
+
+
+def _validate_preregistration_manifest_for_development_freeze(
+    manifest: dict[str, Any],
+) -> None:
+    checks = {
+        "schema": manifest.get("schema_version") == PREREG_MANIFEST_SCHEMA_VERSION,
+        "candidate": manifest.get("candidate_name") == CANDIDATE_NAME,
+        "passed": manifest.get("preregistration_passed") is True,
+        "window_not_previously_frozen": manifest.get("development_window_frozen") is False,
+        "target_not_accessed": manifest.get("new_development_target_accessed") is False,
+        "future_not_attempted": manifest.get("future_evaluation_attempted") is False,
+        "rerun_not_allowed": manifest.get("result_dependent_rerun_or_tuning_allowed") is False,
+        "safety": all(
+            manifest.get(field) == expected
+            for field, expected in _blocked_safety_fields().items()
+        ),
+    }
+    blockers = [name for name, passed in checks.items() if not passed]
+    if blockers:
+        raise ValueError("v6 preregistration manifest invalid: " + ", ".join(blockers))
+
+
+def _development_row_rejection_reasons(
+    row: dict[str, Any],
+    *,
+    profile: dict[str, Any],
+    exclusion: dict[str, Any],
+    seen_markets: set[str],
+    seen_slugs: set[str],
+    seen_source_hashes: set[str],
+) -> list[str]:
+    reasons = []
+    if row.get("capture_quality_valid") is not True:
+        reasons.append("capture_quality_invalid")
+    if int(row.get("market_start_ts") or 0) < int(
+        profile["development_window"]["minimum_eligible_market_start_ts"]
+    ):
+        reasons.append("market_start_before_development_boundary")
+    market_id = str(row.get("market_id") or "")
+    slug = str(row.get("slug") or "")
+    source_hash = str(row.get("source_row_hash") or "")
+    if market_id in exclusion["market_ids"]:
+        reasons.append("issue204_market_overlap")
+    if slug in exclusion["slugs"]:
+        reasons.append("issue204_slug_overlap")
+    if source_hash in exclusion["source_row_hashes"]:
+        reasons.append("issue204_source_row_hash_overlap")
+    if market_id in seen_markets:
+        reasons.append("development_market_duplicate")
+    if slug in seen_slugs:
+        reasons.append("development_slug_duplicate")
+    if source_hash in seen_source_hashes:
+        reasons.append("development_source_row_hash_duplicate")
+    if row.get("labels_outcomes_or_pnl_opened") is not False:
+        reasons.append("development_row_target_sealing_invalid")
+    if _find_nonempty_fields(row, FORBIDDEN_TARGET_FIELDS):
+        reasons.append("development_row_forbidden_target_field")
+    source_safety_invalid = any(
+        (
+            row.get(field) not in (None, False)
+            if field == "paper_candidate_allowed"
+            else row.get(field) != expected
+        )
+        for field, expected in _blocked_safety_fields().items()
+    )
+    if source_safety_invalid:
+        reasons.append("development_row_safety_invalid")
+    return sorted(set(reasons))
+
+
+def _assign_chronological_development_roles(
+    selected: list[dict[str, Any]],
+    *,
+    profile: dict[str, Any],
+) -> list[dict[str, Any]]:
+    role_config = profile["chronological_roles"]
+    fit_count = int(role_config["point_model_fit_market_count"])
+    conformal_count = int(role_config["conformal_calibration_market_count"])
+    check_count = int(role_config["calibration_check_market_count"])
+    if len(selected) != fit_count + conformal_count + check_count:
+        raise ValueError("development role counts do not cover selected markets")
+    role_rows = []
+    for index, row in enumerate(selected):
+        if index < fit_count:
+            role = "point_model_fit"
+            role_index = index + 1
+        elif index < fit_count + conformal_count:
+            role = "conformal_calibration"
+            role_index = index - fit_count + 1
+        else:
+            role = "calibration_check"
+            role_index = index - fit_count - conformal_count + 1
+        role_rows.append(
+            {
+                **row,
+                "development_role": role,
+                "development_role_index": role_index,
+                "development_window_index": index + 1,
+                "labels_outcomes_or_pnl_opened": False,
+            }
+        )
+    role_order = [row["development_role"] for row in role_rows]
+    expected = (
+        ["point_model_fit"] * fit_count
+        + ["conformal_calibration"] * conformal_count
+        + ["calibration_check"] * check_count
+    )
+    if role_order != expected:
+        raise ValueError("development role assignment is not chronological")
+    return role_rows
+
+
+def _development_target_free_action_row(
+    row: dict[str, Any],
+    *,
+    role: str,
+) -> dict[str, Any]:
+    updated = {
+        key: value
+        for key, value in row.items()
+        if key not in {"action_row_sha256", "future_action_row_sha256"}
+    }
+    updated.update(
+        {
+            "role": role,
+            "development_role": role,
+            "target_used_as_decision_input": False,
+            "outcome_fields_used_as_decision_input": False,
+            "target_or_outcome_fields_used": False,
+        }
+    )
+    updated["action_row_sha256"] = canonical_json_sha256(updated)
+    return updated
+
+
+def _validate_development_target_free_materialization(
+    feature_rows: list[dict[str, Any]],
+    action_rows: list[dict[str, Any]],
+    *,
+    selected_market_count: int,
+    feature_columns: tuple[str, ...],
+) -> None:
+    expected_feature_count = selected_market_count * 4
+    if len(feature_rows) != expected_feature_count:
+        raise ValueError("development target-free feature row count mismatch")
+    if len(action_rows) != expected_feature_count * len(REQUIRED_ACTIONS):
+        raise ValueError("development target-free five-action row count mismatch")
+    if len({str(row["market_id"]) for row in feature_rows}) != selected_market_count:
+        raise ValueError("development feature market coverage mismatch")
+    if any(int(row["max_input_ts"]) > int(row["decision_ts"]) for row in feature_rows):
+        raise ValueError("development target-free feature causality violation")
+    if _find_nonempty_fields(feature_rows, FORBIDDEN_TARGET_FIELDS):
+        raise ValueError("development target-free features contain target fields")
+    if _find_nonempty_fields(action_rows, FORBIDDEN_TARGET_FIELDS):
+        raise ValueError("development target-free actions contain target fields")
+    if any(column not in row for row in action_rows for column in feature_columns):
+        raise ValueError("development action row feature contract mismatch")
+    actions_by_decision: dict[tuple[str, int], set[str]] = defaultdict(set)
+    for row in action_rows:
+        actions_by_decision[(str(row["market_id"]), int(row["decision_ts"]))].add(
+            str(row["action"])
+        )
+    if any(actions != set(REQUIRED_ACTIONS) for actions in actions_by_decision.values()):
+        raise ValueError("development target-free action grid incomplete")
+    if len(actions_by_decision) != expected_feature_count:
+        raise ValueError("development target-free decision group count mismatch")
+
+
+def _development_window_markdown(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# Policy-selected conformal v6 development window",
+            "",
+            f"- Freeze ready: `{str(report['development_window_freeze_ready']).lower()}`",
+            f"- Selected markets: `{report['selected_market_count']}`",
+            f"- Role counts: `{json.dumps(report['role_market_counts'], sort_keys=True)}`",
+            f"- Sequence range: `{report['selected_sequence_start']}..{report['selected_sequence_end']}`",
+            f"- Blocking reasons: `{json.dumps(report['blocking_reason_codes'])}`",
+            "- Labels/outcomes/PnL opened: `false`",
+            "- Paper/live/promotion/handoff unlock: `false`",
+            "",
+        ]
+    )
 
 
 def _prior_exclusion_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -790,6 +1282,13 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
 
 
 def _write_text(path: Path, value: str) -> None:
