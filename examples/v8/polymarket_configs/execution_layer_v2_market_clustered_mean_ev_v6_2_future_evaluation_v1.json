@@ -1,0 +1,62 @@
+{
+  "schema_version": "bigan-v8-market-clustered-mean-ev-v6-2-future-evaluation-profile-v1",
+  "issue": 212,
+  "frozen": true,
+  "collection_profile_sha256": "42bd1709d1fe197aeedc76499863e01f0c0da4b66581180bb9ae6d2b347ad3fe",
+  "candidate_manifest_sha256": "b9441b04fb595a927cbf9af9311612b037c36fc8c623ac8a92b6f4cb8ece84b9",
+  "candidate_model_sha256": "7e292852673fe2072017effc2d40fce000be81734f0c8c3d6950c02e957bcf0c",
+  "candidate_calibration_sha256": "dc82ddebc51e95e46477894f2a0ba7bd8fa2f6845b22ced43402822b66b68e43",
+  "matched_v5_manifest_sha256": "0d0927da515317d0576a04b6c4a9a5175f569225a85ebaf62020326fdc06510d",
+  "feature_contract_sha256": "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959",
+  "window": {
+    "first_eligible_index_sequence": 313,
+    "candidate_freeze_created_ts_exclusive": 1784470529364,
+    "quality_valid_market_count": 200,
+    "maximum_index_scan_count": 240,
+    "selection_rule": "chronological_earliest_quality_valid_strictly_later_disjoint",
+    "all_markets_closed_before_target_access": true,
+    "decision_freeze_before_target_access": true,
+    "single_use_holdout": true,
+    "result_dependent_extension_allowed": false
+  },
+  "support_and_pnl_gates": {
+    "minimum_guard_accepted_bet_count": 120,
+    "minimum_guard_accepted_unique_market_count": 120,
+    "minimum_supported_side_market_count": 17,
+    "required_supported_sides": [
+      "UP",
+      "DOWN"
+    ],
+    "pnl_hard_gate_aggregation": "selected_side_buy_up_buy_down_only",
+    "action_and_action_family_pnl_diagnostic_only": true,
+    "accepted_bet_total_post_cost_pnl_minimum_exclusive": 0.0,
+    "supported_side_post_cost_pnl_minimum_exclusive": 0.0,
+    "candidate_minus_matched_v5_pnl_minimum_exclusive": 0.0,
+    "candidate_minus_matched_v5_bootstrap_lcb_minimum_exclusive": 0.0,
+    "largest_winner_removed_pnl_minimum_exclusive": 0.0,
+    "bootstrap_unit": "market_id",
+    "bootstrap_confidence_level": 0.95,
+    "bootstrap_resample_count": 5000,
+    "bootstrap_seed": 21060722
+  },
+  "access_sequence": {
+    "target_free_prediction_and_full_guard_freeze_first": true,
+    "official_read_only_settlement_on_quarantine_copies_second": true,
+    "single_side_only_pnl_gate_last": true,
+    "outcomes_used_for_model_threshold_cost_sizing_or_guard_tuning": false,
+    "future_result_driven_rerun_allowed": false
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "paper_candidate_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}
