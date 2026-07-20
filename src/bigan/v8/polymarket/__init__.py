@@ -105,6 +105,7 @@ from bigan.v8.polymarket.recorder import (
     RealCorpusPublicProviderError,
     capture_polymarket_pending_round,
     finalize_polymarket_pending_round,
+    normalize_resolution_for_settlement,
     record_polymarket_real_corpus,
 )
 from bigan.v8.polymarket.rules import (
@@ -263,6 +264,7 @@ __all__ = [
     "convert_live_signals_to_phase2_corpus",
     "export_trainable_corpus",
     "finalize_polymarket_pending_round",
+    "normalize_resolution_for_settlement",
     "decide_polymarket_ev_action",
     "ev_threshold_report",
     "load_polymarket_policy_dataset",

@@ -138,6 +138,117 @@ def test_hold_to_settlement_position_never_emits_preclose_exit(
     assert settlement["rows"][0]["settlement_used_for_decision"] is False
 
 
+@pytest.mark.parametrize(
+    ("reference_start", "reference_end", "expected_outcome"),
+    ((100_000.0, 99_999.0, "DOWN"), (100_000.0, 100_000.0, "UP")),
+)
+def test_reference_price_only_resolution_is_normalized_by_frozen_market_rule(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reference_start: float,
+    reference_end: float,
+    expected_outcome: str,
+) -> None:
+    bundle = _lineage_bundle(tmp_path)
+    capture = _synthetic_capture(tmp_path)
+    market = _load_jsonl(capture / "raw" / "raw_polymarket_markets.jsonl")[0]
+    _write_jsonl(
+        capture / "raw" / "raw_polymarket_resolutions.jsonl",
+        [
+            {
+                "market_id": market["market_id"],
+                "reference_price_start": reference_start,
+                "reference_price_end": reference_end,
+                "reference_price_source": market["reference_price_source"],
+                "resolution_source_type": "reference_prices",
+                "resolution_status": "normal",
+                **_resolution_safety(),
+            }
+        ],
+    )
+    _patch_scoring(
+        monkeypatch,
+        order_allowed=True,
+        selected_action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+    )
+    result = run_market_clustered_mean_ev_v6_2_paper_canary(
+        MarketClusteredMeanEVV62PaperCanaryConfig(
+            run_id="reference-only-resolution",
+            output_dir=tmp_path / "out",
+            unlock_manifest_path=bundle["unlock"],
+            expected_unlock_manifest_sha256=_sha(bundle["unlock"]),
+            captured_round_dirs=(capture,),
+            runtime_created_ts=1,
+            builder_git_commit="a" * 40,
+        )
+    )
+
+    settlement = runner_subject._settlement_evaluation(
+        run_id="reference-only-resolution",
+        run_dir=Path(result["run_dir"]),
+        settlement_source_dirs=[capture],
+    )
+
+    assert settlement["report"]["unresolved_open_position_count"] == 0
+    assert settlement["report"]["derived_reference_price_resolution_count"] == 1
+    assert settlement["rows"][0]["resolved_outcome"] == expected_outcome
+    assert settlement["rows"][0]["resolved_outcome_source"] == (
+        "official_reference_price_rule_derivation"
+    )
+    assert settlement["rows"][0]["settlement_used_for_decision"] is False
+
+
+def test_reference_price_resolution_with_invalid_provenance_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _lineage_bundle(tmp_path)
+    capture = _synthetic_capture(tmp_path)
+    market = _load_jsonl(capture / "raw" / "raw_polymarket_markets.jsonl")[0]
+    _write_jsonl(
+        capture / "raw" / "raw_polymarket_resolutions.jsonl",
+        [
+            {
+                "market_id": market["market_id"],
+                "reference_price_start": 100_000.0,
+                "reference_price_end": 99_999.0,
+                "reference_price_source": "unverified-source",
+                "resolution_source_type": "reference_prices",
+                "resolution_status": "normal",
+                **_resolution_safety(),
+            }
+        ],
+    )
+    _patch_scoring(
+        monkeypatch,
+        order_allowed=True,
+        selected_action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+    )
+    result = run_market_clustered_mean_ev_v6_2_paper_canary(
+        MarketClusteredMeanEVV62PaperCanaryConfig(
+            run_id="invalid-reference-provenance",
+            output_dir=tmp_path / "out",
+            unlock_manifest_path=bundle["unlock"],
+            expected_unlock_manifest_sha256=_sha(bundle["unlock"]),
+            captured_round_dirs=(capture,),
+            runtime_created_ts=1,
+            builder_git_commit="a" * 40,
+        )
+    )
+
+    settlement = runner_subject._settlement_evaluation(
+        run_id="invalid-reference-provenance",
+        run_dir=Path(result["run_dir"]),
+        settlement_source_dirs=[capture],
+    )
+
+    assert settlement["report"]["unresolved_open_position_count"] == 1
+    assert settlement["report"]["invalid_resolution_row_count"] == 1
+    assert settlement["report"]["resolution_normalization_reason_distribution"] == {
+        "resolution_source_mismatch": 1
+    }
+    assert settlement["rows"][0]["total_paper_pnl"] is None
+
+
 def test_sell_before_close_without_exit_window_snapshot_remains_residual(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -195,6 +306,119 @@ def test_snapshot_runner_reports_fixture_mode_and_keeps_handoff_blocked(
     assert result["settlement_status"]["finalization_attempted_round_count"] == 0
     assert "settlement_evaluation_report" in result["manifest"]["artifacts"]
     assert "settlement_evaluation_rows" in result["manifest"]["artifacts"]
+
+
+def test_terminal_snapshot_rerun_returns_verified_artifacts_without_rescoring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _lineage_bundle(tmp_path)
+    capture = _synthetic_capture(tmp_path)
+    _patch_scoring(monkeypatch, order_allowed=True)
+    first = run_v6_2_paper_canary_cli(
+        run_id="terminal-idempotent",
+        output_dir=tmp_path / "out",
+        unlock_manifest_path=bundle["unlock"],
+        expected_unlock_manifest_sha256=_sha(bundle["unlock"]),
+        round_count=1,
+        snapshot_capture_dirs=(capture,),
+    )
+    monkeypatch.setattr(
+        runner_subject,
+        "_run_scoring",
+        lambda **kwargs: pytest.fail("terminal rerun must not rescore captures"),
+    )
+
+    second = run_v6_2_paper_canary_cli(
+        run_id="terminal-idempotent",
+        output_dir=tmp_path / "out",
+        unlock_manifest_path=bundle["unlock"],
+        expected_unlock_manifest_sha256=_sha(bundle["unlock"]),
+        round_count=1,
+        snapshot_capture_dirs=(capture,),
+        overwrite_existing=True,
+    )
+
+    assert second["terminal_idempotent_replay"] is True
+    assert second["manifest_sha256"] == first["manifest_sha256"]
+    assert second["report"]["decision_target_outcome_or_pnl_accessed"] is False
+    assert second["manifest"]["v8_execution_handoff_allowed"] is False
+
+
+def test_settlement_only_reconciliation_does_not_mutate_source_decisions(
+    tmp_path: Path,
+) -> None:
+    bundle = _lineage_bundle(tmp_path)
+    capture = _synthetic_capture(tmp_path)
+    market = _load_jsonl(capture / "raw" / "raw_polymarket_markets.jsonl")[0]
+    _write_jsonl(
+        capture / "raw" / "raw_polymarket_resolutions.jsonl",
+        [
+            {
+                "market_id": market["market_id"],
+                "reference_price_start": 100_000.0,
+                "reference_price_end": 99_999.0,
+                "reference_price_source": market["reference_price_source"],
+                "resolution_source_type": "reference_prices",
+                "resolution_status": "normal",
+                **_resolution_safety(),
+            }
+        ],
+    )
+    source = tmp_path / "source-run"
+    source.mkdir()
+    source_manifest = {"run_id": source.name, **runner_subject._safety()}
+    source_runtime = {
+        "run_id": source.name,
+        "decision_target_outcome_or_pnl_accessed": False,
+        "source_or_o_score_mutated": False,
+        "threshold_cost_sizing_or_guard_mutated": False,
+        **runner_subject._safety(),
+    }
+    positions = {
+        "positions": [
+            {
+                "position_id": "paper-fill-1",
+                "market_id": market["market_id"],
+                "selected_side": "DOWN",
+                "entry_action": "BUY_DOWN_HOLD_TO_SETTLEMENT",
+                "intended_exit_policy": "hold_to_settlement",
+                "status": "open",
+                "entry_contract_size": 0.2,
+                "entry_price": 0.6,
+                "exit_price": None,
+                "realized_trade_pnl": None,
+            }
+        ]
+    }
+    settlement_status = {"rows": [{"capture_run_dir": str(capture)}]}
+    _write_json(source / "v6_2_paper_canary_manifest.json", source_manifest)
+    _write_json(source / "v6_2_paper_canary_runtime_report.json", source_runtime)
+    _write_json(source / "v6_2_paper_positions.json", positions)
+    _write_json(
+        source / "v6_2_paper_canary_async_settlement_status.json",
+        settlement_status,
+    )
+    source_hashes_before = {
+        path.name: _sha(path) for path in sorted(source.iterdir()) if path.is_file()
+    }
+
+    result = runner_subject.reconcile_v6_2_paper_canary_settlement(
+        source_run_dir=source,
+        run_id="settlement-reconciled",
+        output_dir=tmp_path / "out",
+        unlock_manifest_path=bundle["unlock"],
+        expected_unlock_manifest_sha256=_sha(bundle["unlock"]),
+    )
+
+    report = result["settlement_evaluation"]["report"]
+    assert report["unresolved_open_position_count"] == 0
+    assert report["derived_reference_price_resolution_count"] == 1
+    assert report["total_paper_pnl"] == pytest.approx(0.08)
+    assert result["manifest"]["source_decision_artifacts_mutated"] is False
+    assert result["manifest"]["promotion_evidence_eligible"] is False
+    assert {
+        path.name: _sha(path) for path in sorted(source.iterdir()) if path.is_file()
+    } == source_hashes_before
 
 
 def test_real_runner_uses_one_continuous_collector_decoupled_from_scoring(
@@ -524,7 +748,17 @@ def _synthetic_capture(tmp_path: Path) -> Path:
         "raw_binance_btcusdt_klines.jsonl": [],
         "raw_polymarket_chainlink_prices.jsonl": [],
         "raw_polymarket_resolutions.jsonl": [
-            {"market_id": market_id, "resolved_outcome": "UP", "winning_outcome": "UP"}
+            {
+                "market_id": market_id,
+                "resolved_outcome": "UP",
+                "winning_outcome": "UP",
+                "payout_up": 1.0,
+                "payout_down": 0.0,
+                "reference_price_source": "polymarket_rtds_chainlink",
+                "resolution_source_type": "polymarket_clob_market_tokens",
+                "resolution_status": "normal",
+                **_resolution_safety(),
+            }
         ],
     }
     for offset in range(-15, 5):
@@ -603,6 +837,17 @@ def _synthetic_capture(tmp_path: Path) -> Path:
 
 def _descriptor(path: Path) -> dict[str, str]:
     return {"path": str(path.resolve()), "sha256": _sha(path)}
+
+
+def _resolution_safety() -> dict[str, bool]:
+    return {
+        "paper_only": True,
+        "capital_at_risk": False,
+        "broker_exchange_write_enabled": False,
+        "live_exchange_write_enabled": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
 
 
 def _sha(path: Path) -> str:

@@ -44,6 +44,9 @@ from bigan.v8.polymarket.recorder.public_provider import (
     PolymarketRealCorpusPublicProvider,
     RealCorpusPublicProviderError,
 )
+from bigan.v8.polymarket.recorder.resolution import (
+    normalize_resolution_for_settlement,
+)
 
 __all__ = [
     "DEFAULT_BTC_FEATURE_CANDLE_SOURCE",
@@ -79,5 +82,6 @@ __all__ = [
     "RealCorpusPublicProviderError",
     "capture_polymarket_pending_round",
     "finalize_polymarket_pending_round",
+    "normalize_resolution_for_settlement",
     "record_polymarket_real_corpus",
 ]

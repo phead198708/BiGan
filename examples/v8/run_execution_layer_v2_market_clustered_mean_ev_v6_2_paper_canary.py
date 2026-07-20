@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ if str(SRC) not in sys.path:
 from bigan.v8.polymarket import (  # noqa: E402
     PolymarketPublicHTTPRealCorpusProvider,
     finalize_polymarket_pending_round,
+    normalize_resolution_for_settlement,
 )
 from bigan.v8.polymarket.contracts import canonical_json_sha256  # noqa: E402
 from bigan.v8.polymarket.training.execution_layer_v2_market_clustered_mean_ev_v6_2_paper_canary import (  # noqa: E402
@@ -45,6 +47,10 @@ PINNED_APPROVED_UNLOCK_SHA256 = (
     "0e08825810a7310fc7274dbd51505761696410d776ba0570a6eb0ec05a718b02"
 )
 BTC_UPDOWN_5M_HORIZON_MS = 300_000
+TERMINAL_COMPLETION_FILENAME = "v6_2_paper_canary_terminal_completion.json"
+SETTLEMENT_RECONCILIATION_MANIFEST_FILENAME = (
+    "v6_2_paper_settlement_reconciliation_manifest.json"
+)
 
 
 def run_v6_2_paper_canary_cli(
@@ -77,6 +83,12 @@ def run_v6_2_paper_canary_cli(
         expected_unlock_manifest_sha256,
     )
     output_root = Path(output_dir).expanduser().resolve()
+    terminal_result = _load_terminal_canary_result(
+        run_id=run_id,
+        output_root=output_root,
+    )
+    if terminal_result is not None:
+        return terminal_result
     capture_root = output_root / f"{run_id}-captures"
     frozen_capture_root = capture_root / "frozen_decision_inputs"
     settlement_root = output_root / f"{run_id}-settled-corpus"
@@ -114,6 +126,7 @@ def run_v6_2_paper_canary_cli(
                         destination_root=settlement_root,
                         overwrite_existing=True,
                     )
+                    normalization = _capture_resolution_normalization(capture_dir)
                     status = {
                         "capture_run_id": capture_dir.name,
                         "capture_run_dir": str(capture_dir),
@@ -121,8 +134,11 @@ def run_v6_2_paper_canary_cli(
                             None if result.corpus_dir is None else str(result.corpus_dir)
                         ),
                         "finalization_status": result.report["finalization_status"],
-                        "pending_resolution": result.report["pending_resolution"],
+                        "pending_resolution": (
+                            normalization["normalized_resolution_count"] == 0
+                        ),
                         "raw_resolution_count": result.report["raw_resolution_count"],
+                        **normalization,
                         "raw_resolution_artifact": (
                             _descriptor(
                                 capture_dir
@@ -146,6 +162,12 @@ def run_v6_2_paper_canary_cli(
                         "finalization_status": "provider_error_fail_closed",
                         "pending_resolution": True,
                         "raw_resolution_count": 0,
+                        "normalized_resolution_count": 0,
+                        "derived_reference_price_resolution_count": 0,
+                        "explicit_resolution_count": 0,
+                        "resolution_normalization_reason_codes": [
+                            "settlement_provider_error_fail_closed"
+                        ],
                         "error_type": type(exc).__name__,
                         "error": str(exc),
                         "resolution_provider_called_after_decision_freeze": True,
@@ -413,10 +435,34 @@ def run_v6_2_paper_canary_cli(
         "settlement_may_block_next_round_collection": False,
         "finalization_attempted_round_count": len(settlement_rows),
         "resolved_round_count": sum(
-            row.get("pending_resolution") is False for row in settlement_rows
+            int(row.get("normalized_resolution_count") or 0) > 0
+            for row in settlement_rows
         ),
         "unresolved_round_count": sum(
-            row.get("pending_resolution") is True for row in settlement_rows
+            int(row.get("normalized_resolution_count") or 0) == 0
+            for row in settlement_rows
+        ),
+        "normalized_resolution_count": sum(
+            int(row.get("normalized_resolution_count") or 0)
+            for row in settlement_rows
+        ),
+        "derived_reference_price_resolution_count": sum(
+            int(row.get("derived_reference_price_resolution_count") or 0)
+            for row in settlement_rows
+        ),
+        "explicit_resolution_count": sum(
+            int(row.get("explicit_resolution_count") or 0)
+            for row in settlement_rows
+        ),
+        "resolution_normalization_reason_distribution": dict(
+            sorted(
+                Counter(
+                    reason
+                    for row in settlement_rows
+                    for reason in row.get("resolution_normalization_reason_codes")
+                    or []
+                ).items()
+            )
         ),
         "rows": sorted(settlement_rows, key=lambda row: row["capture_run_id"]),
         **_safety(),
@@ -462,6 +508,15 @@ def run_v6_2_paper_canary_cli(
         {key: value for key, value in manifest.items() if key != "manifest_id"}
     )
     _write_json(manifest_path, manifest)
+    terminal_completion = _write_terminal_completion(
+        run_id=run_id,
+        run_dir=run_dir,
+        manifest_path=manifest_path,
+        collection_status_path=collection_status_path,
+        settlement_status_path=settlement_status_path,
+        settlement_evaluation_rows_path=settlement_evaluation_rows_path,
+        settlement_evaluation_report_path=settlement_evaluation_report_path,
+    )
     return {
         **final_result,
         "manifest": manifest,
@@ -469,6 +524,8 @@ def run_v6_2_paper_canary_cli(
         "collection_status": collection_status,
         "settlement_status": settlement_status,
         "settlement_evaluation": settlement_evaluation,
+        "terminal_completion": terminal_completion,
+        "terminal_idempotent_replay": False,
     }
 
 
@@ -500,24 +557,18 @@ def _settlement_evaluation(
     run_id: str,
     run_dir: Path,
     settlement_source_dirs: list[Path],
+    positions_path: Path | None = None,
 ) -> dict[str, Any]:
     """Evaluate frozen paper positions after asynchronous official resolution only."""
 
-    resolutions: dict[str, dict[str, Any]] = {}
-    resolution_descriptors = []
-    for source in sorted(set(settlement_source_dirs)):
-        path = source / "raw" / "raw_polymarket_resolutions.jsonl"
-        if not path.is_file() or path.stat().st_size == 0:
-            continue
-        resolution_descriptors.append(_descriptor(path))
-        for row in _load_jsonl(path):
-            market_id = str(row.get("market_id") or "")
-            outcome = str(row.get("resolved_outcome") or "").upper()
-            if market_id and outcome in {"UP", "DOWN"}:
-                resolutions[market_id] = row
+    normalized = _load_normalized_settlement_resolutions(settlement_source_dirs)
+    resolutions = normalized["resolutions"]
+    resolution_descriptors = normalized["resolution_descriptors"]
 
-    positions_path = run_dir / "v6_2_paper_positions.json"
-    positions = _load_json(positions_path)
+    resolved_positions_path = positions_path or (
+        run_dir / "v6_2_paper_positions.json"
+    )
+    positions = _load_json(resolved_positions_path)
     rows = []
     for position in positions.get("positions") or []:
         market_id = str(position["market_id"])
@@ -562,6 +613,14 @@ def _settlement_evaluation(
             "exit_price": position.get("exit_price"),
             "resolved_outcome": (
                 None if resolution is None else resolution["resolved_outcome"]
+            ),
+            "resolved_outcome_source": (
+                None if resolution is None else resolution["resolved_outcome_source"]
+            ),
+            "resolution_normalization_reason_codes": (
+                []
+                if resolution is None
+                else resolution["resolution_normalization_reason_codes"]
             ),
             "settlement_pnl": settlement_pnl,
             "realized_trade_pnl": realized_trade_pnl,
@@ -610,6 +669,15 @@ def _settlement_evaluation(
             and row["resolved_outcome"] is not None
             for row in rows
         ),
+        "normalized_resolution_count": len(resolutions),
+        "explicit_resolution_count": normalized["explicit_resolution_count"],
+        "derived_reference_price_resolution_count": normalized[
+            "derived_reference_price_resolution_count"
+        ],
+        "invalid_resolution_row_count": normalized["invalid_resolution_row_count"],
+        "resolution_normalization_reason_distribution": normalized[
+            "resolution_normalization_reason_distribution"
+        ],
         "total_paper_pnl": sum(
             float(row["total_paper_pnl"]) for row in pnl_reconciled
         ),
@@ -621,6 +689,217 @@ def _settlement_evaluation(
     }
     report["report_id"] = canonical_json_sha256(report)
     return {"rows": rows, "report": report}
+
+
+def _capture_resolution_normalization(capture_dir: Path) -> dict[str, Any]:
+    normalized = _load_normalized_settlement_resolutions([capture_dir])
+    return {
+        "normalized_resolution_count": len(normalized["resolutions"]),
+        "derived_reference_price_resolution_count": normalized[
+            "derived_reference_price_resolution_count"
+        ],
+        "explicit_resolution_count": normalized["explicit_resolution_count"],
+        "invalid_resolution_row_count": normalized["invalid_resolution_row_count"],
+        "resolution_normalization_reason_codes": sorted(
+            normalized["resolution_normalization_reason_distribution"]
+        ),
+    }
+
+
+def _load_normalized_settlement_resolutions(
+    settlement_source_dirs: list[Path],
+) -> dict[str, Any]:
+    resolutions: dict[str, dict[str, Any]] = {}
+    resolution_descriptors: list[dict[str, str]] = []
+    reason_counts: Counter[str] = Counter()
+    invalid_count = 0
+    explicit_count = 0
+    derived_count = 0
+    for source in sorted(set(settlement_source_dirs)):
+        market_path = source / "raw" / "raw_polymarket_markets.jsonl"
+        resolution_path = source / "raw" / "raw_polymarket_resolutions.jsonl"
+        if not resolution_path.is_file() or resolution_path.stat().st_size == 0:
+            reason_counts["official_resolution_artifact_missing"] += 1
+            continue
+        resolution_descriptors.append(_descriptor(resolution_path))
+        markets = {
+            str(row.get("market_id") or ""): row
+            for row in (_load_jsonl(market_path) if market_path.is_file() else [])
+            if str(row.get("market_id") or "")
+        }
+        for resolution in _load_jsonl(resolution_path):
+            market_id = str(resolution.get("market_id") or "")
+            market = markets.get(market_id)
+            if market is None:
+                invalid_count += 1
+                reason_counts["resolution_market_metadata_missing"] += 1
+                continue
+            normalized, reasons = normalize_resolution_for_settlement(
+                market=market,
+                resolution=resolution,
+            )
+            if normalized is None:
+                invalid_count += 1
+                reason_counts.update(reasons or ["resolution_normalization_failed"])
+                continue
+            if market_id in resolutions:
+                invalid_count += 1
+                reason_counts["duplicate_normalized_market_resolution"] += 1
+                resolutions.pop(market_id, None)
+                continue
+            source_type = str(normalized["resolved_outcome_source"])
+            if source_type == "official_explicit_resolution":
+                explicit_count += 1
+            else:
+                derived_count += 1
+            reason_counts.update(normalized["resolution_normalization_reason_codes"])
+            resolutions[market_id] = normalized
+    return {
+        "resolutions": resolutions,
+        "resolution_descriptors": resolution_descriptors,
+        "explicit_resolution_count": explicit_count,
+        "derived_reference_price_resolution_count": derived_count,
+        "invalid_resolution_row_count": invalid_count,
+        "resolution_normalization_reason_distribution": dict(
+            sorted(reason_counts.items())
+        ),
+    }
+
+
+def reconcile_v6_2_paper_canary_settlement(
+    *,
+    source_run_dir: Path | str,
+    run_id: str,
+    output_dir: Path | str,
+    unlock_manifest_path: Path | str = PINNED_APPROVED_UNLOCK_PATH,
+    expected_unlock_manifest_sha256: str = PINNED_APPROVED_UNLOCK_SHA256,
+    overwrite_existing: bool = False,
+) -> dict[str, Any]:
+    """Reconcile frozen paper positions without rescoring or mutating source evidence."""
+
+    validate_v6_2_paper_candidate_unlock(
+        unlock_manifest_path,
+        expected_unlock_manifest_sha256,
+    )
+    source = Path(source_run_dir).expanduser().resolve()
+    source_manifest_path = source / "v6_2_paper_canary_manifest.json"
+    source_runtime_path = source / "v6_2_paper_canary_runtime_report.json"
+    source_positions_path = source / "v6_2_paper_positions.json"
+    source_settlement_status_path = (
+        source / "v6_2_paper_canary_async_settlement_status.json"
+    )
+    for path in (
+        source_manifest_path,
+        source_runtime_path,
+        source_positions_path,
+        source_settlement_status_path,
+    ):
+        if not path.is_file():
+            raise FileNotFoundError(f"required reconciliation source missing: {path}")
+    source_manifest = _load_json(source_manifest_path)
+    source_runtime = _load_json(source_runtime_path)
+    _validate_reconciliation_source(source_manifest, source_runtime)
+    source_settlement_status = _load_json(source_settlement_status_path)
+    source_dirs = [
+        Path(str(row["capture_run_dir"])).expanduser().resolve()
+        for row in source_settlement_status.get("rows") or []
+    ]
+    if not source_dirs:
+        raise ValueError("reconciliation source has no settlement capture directories")
+
+    output_root = Path(output_dir).expanduser().resolve()
+    run_dir = output_root / run_id
+    if run_dir.exists():
+        if not overwrite_existing:
+            raise FileExistsError(f"reconciliation run already exists: {run_dir}")
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True)
+    evaluation = _settlement_evaluation(
+        run_id=run_id,
+        run_dir=run_dir,
+        settlement_source_dirs=source_dirs,
+        positions_path=source_positions_path,
+    )
+    for row in evaluation["rows"]:
+        row["source_run_id"] = source.name
+        row["source_decision_artifacts_mutated"] = False
+        row["settlement_evaluation_row_sha256"] = canonical_json_sha256(
+            {
+                key: value
+                for key, value in row.items()
+                if key != "settlement_evaluation_row_sha256"
+            }
+        )
+    evaluation["report"].update(
+        {
+            "source_run_id": source.name,
+            "source_run_manifest": _descriptor(source_manifest_path),
+            "source_runtime_report": _descriptor(source_runtime_path),
+            "source_positions": _descriptor(source_positions_path),
+            "source_decision_artifacts_mutated": False,
+            "reconciliation_mode": "settlement_only_post_freeze",
+        }
+    )
+    evaluation["report"]["report_id"] = canonical_json_sha256(
+        {
+            key: value
+            for key, value in evaluation["report"].items()
+            if key != "report_id"
+        }
+    )
+    rows_path = run_dir / "v6_2_paper_settlement_evaluation_rows.jsonl"
+    report_path = run_dir / "v6_2_paper_settlement_evaluation_report.json"
+    _write_jsonl(rows_path, evaluation["rows"])
+    _write_json(report_path, evaluation["report"])
+    manifest = {
+        "schema_version": "bigan-v8-v6-2-paper-settlement-reconciliation-v1",
+        "run_id": run_id,
+        "source_run_id": source.name,
+        "source_run_manifest": _descriptor(source_manifest_path),
+        "source_runtime_report": _descriptor(source_runtime_path),
+        "source_positions": _descriptor(source_positions_path),
+        "settlement_evaluation_rows": _descriptor(rows_path),
+        "settlement_evaluation_report": _descriptor(report_path),
+        "source_decision_artifacts_mutated": False,
+        "settlement_only_reconciliation": True,
+        "unresolved_open_position_count": evaluation["report"][
+            "unresolved_open_position_count"
+        ],
+        "total_paper_pnl": evaluation["report"]["total_paper_pnl"],
+        "paper_results_are_promotion_evidence": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        **_safety(),
+    }
+    manifest["manifest_id"] = canonical_json_sha256(manifest)
+    manifest_path = run_dir / SETTLEMENT_RECONCILIATION_MANIFEST_FILENAME
+    _write_json(manifest_path, manifest)
+    return {
+        "run_dir": run_dir,
+        "manifest": manifest,
+        "manifest_path": manifest_path,
+        "manifest_sha256": _sha256(manifest_path),
+        "settlement_evaluation": evaluation,
+    }
+
+
+def _validate_reconciliation_source(
+    manifest: dict[str, Any],
+    runtime: dict[str, Any],
+) -> None:
+    for payload_name, payload in (("manifest", manifest), ("runtime", runtime)):
+        for field, expected in _safety().items():
+            if payload.get(field) != expected:
+                raise ValueError(
+                    f"reconciliation source {payload_name} safety mismatch: {field}"
+                )
+    if runtime.get("decision_target_outcome_or_pnl_accessed") is not False:
+        raise ValueError("reconciliation source used target/outcome/PnL for decisions")
+    if runtime.get("source_or_o_score_mutated") is not False:
+        raise ValueError("reconciliation source mutated source/O scores")
+    if runtime.get("threshold_cost_sizing_or_guard_mutated") is not False:
+        raise ValueError("reconciliation source mutated frozen execution policy")
 
 
 def _wait_until_epoch_ms(
@@ -662,6 +941,114 @@ def _git_commit() -> str:
     return subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
     ).strip()
+
+
+def _write_terminal_completion(
+    *,
+    run_id: str,
+    run_dir: Path,
+    manifest_path: Path,
+    collection_status_path: Path,
+    settlement_status_path: Path,
+    settlement_evaluation_rows_path: Path,
+    settlement_evaluation_report_path: Path,
+) -> dict[str, Any]:
+    runtime_report_path = run_dir / "v6_2_paper_canary_runtime_report.json"
+    runtime_safety_path = run_dir / "v6_2_paper_canary_runtime_safety_report.json"
+    payload = {
+        "schema_version": "bigan-v8-v6-2-paper-canary-terminal-completion-v1",
+        "run_id": run_id,
+        "terminal_completion": True,
+        "terminal_rerun_behavior": "return_verified_artifacts_without_rescoring",
+        "manifest": _descriptor(manifest_path),
+        "runtime_report": _descriptor(runtime_report_path),
+        "runtime_safety_report": _descriptor(runtime_safety_path),
+        "collection_status": _descriptor(collection_status_path),
+        "async_settlement_status": _descriptor(settlement_status_path),
+        "settlement_evaluation_rows": _descriptor(
+            settlement_evaluation_rows_path
+        ),
+        "settlement_evaluation_report": _descriptor(
+            settlement_evaluation_report_path
+        ),
+        **_safety(),
+    }
+    payload["terminal_completion_id"] = canonical_json_sha256(payload)
+    _write_json(run_dir / TERMINAL_COMPLETION_FILENAME, payload)
+    return payload
+
+
+def _load_terminal_canary_result(
+    *,
+    run_id: str,
+    output_root: Path,
+) -> dict[str, Any] | None:
+    run_dir = output_root / run_id
+    completion_path = run_dir / TERMINAL_COMPLETION_FILENAME
+    if not completion_path.is_file():
+        return None
+    completion = _load_json(completion_path)
+    if completion.get("run_id") != run_id or completion.get("terminal_completion") is not True:
+        raise ValueError("terminal completion marker identity is invalid")
+    for field, expected in _safety().items():
+        if completion.get(field) != expected:
+            raise ValueError(f"terminal completion safety mismatch: {field}")
+
+    required = {
+        "manifest",
+        "runtime_report",
+        "runtime_safety_report",
+        "collection_status",
+        "async_settlement_status",
+        "settlement_evaluation_rows",
+        "settlement_evaluation_report",
+    }
+    verified_paths = {
+        name: _verify_terminal_descriptor(
+            completion[name],
+            expected_parent=run_dir,
+            field_name=name,
+        )
+        for name in sorted(required)
+    }
+    manifest = _load_json(verified_paths["manifest"])
+    runtime_report = _load_json(verified_paths["runtime_report"])
+    collection_status = _load_json(verified_paths["collection_status"])
+    settlement_status = _load_json(verified_paths["async_settlement_status"])
+    settlement_report = _load_json(verified_paths["settlement_evaluation_report"])
+    settlement_rows = _load_jsonl(verified_paths["settlement_evaluation_rows"])
+    return {
+        "run_dir": run_dir,
+        "report": runtime_report,
+        "report_path": verified_paths["runtime_report"],
+        "manifest_path": verified_paths["manifest"],
+        "manifest": manifest,
+        "manifest_sha256": _sha256(verified_paths["manifest"]),
+        "collection_status": collection_status,
+        "settlement_status": settlement_status,
+        "settlement_evaluation": {
+            "rows": settlement_rows,
+            "report": settlement_report,
+        },
+        "terminal_completion": completion,
+        "terminal_idempotent_replay": True,
+    }
+
+
+def _verify_terminal_descriptor(
+    descriptor: dict[str, Any],
+    *,
+    expected_parent: Path,
+    field_name: str,
+) -> Path:
+    path = Path(str(descriptor.get("path") or "")).expanduser().resolve()
+    try:
+        path.relative_to(expected_parent.resolve())
+    except ValueError as exc:
+        raise ValueError(f"terminal descriptor escapes run dir: {field_name}") from exc
+    if not path.is_file() or _sha256(path) != descriptor.get("sha256"):
+        raise ValueError(f"terminal descriptor hash mismatch: {field_name}")
+    return path
 
 
 def _upsert(rows: list[dict[str, Any]], value: dict[str, Any]) -> None:
@@ -738,8 +1125,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--orderbook-snapshot-interval-seconds", type=float, default=1.0)
     parser.add_argument("--settlement-poll-interval-seconds", type=float, default=15.0)
     parser.add_argument("--settlement-grace-seconds", type=float, default=1_200.0)
+    parser.add_argument("--reconcile-existing-run-dir")
     parser.add_argument("--overwrite-existing", action="store_true")
     args = parser.parse_args(argv)
+    if args.reconcile_existing_run_dir:
+        result = reconcile_v6_2_paper_canary_settlement(
+            source_run_dir=args.reconcile_existing_run_dir,
+            run_id=args.run_id,
+            output_dir=args.output_dir,
+            unlock_manifest_path=args.unlock_manifest,
+            expected_unlock_manifest_sha256=args.unlock_manifest_sha256,
+            overwrite_existing=args.overwrite_existing,
+        )
+        print(
+            json.dumps(
+                {
+                    "run_dir": str(result["run_dir"]),
+                    "manifest_sha256": result["manifest_sha256"],
+                    "settlement_evaluation_report": result[
+                        "settlement_evaluation"
+                    ]["report"],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     result = run_v6_2_paper_canary_cli(
         run_id=args.run_id,
         output_dir=args.output_dir,
