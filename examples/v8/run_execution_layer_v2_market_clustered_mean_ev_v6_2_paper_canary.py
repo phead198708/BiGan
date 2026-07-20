@@ -26,7 +26,7 @@ from bigan.v8.polymarket import (  # noqa: E402
 )
 from bigan.v8.polymarket.contracts import canonical_json_sha256  # noqa: E402
 from bigan.v8.polymarket.training.execution_layer_v2_market_clustered_mean_ev_v6_2_paper_canary import (  # noqa: E402
-    HARD_CAPTURE_FAILURE_LIMIT,
+HARD_CAPTURE_FAILURE_LIMIT,
     MarketClusteredMeanEVV62PaperCanaryConfig,
     classify_capture_hard_failure,
     run_market_clustered_mean_ev_v6_2_paper_canary,
@@ -44,6 +44,7 @@ PINNED_APPROVED_UNLOCK_PATH = ROOT / (
 PINNED_APPROVED_UNLOCK_SHA256 = (
     "0e08825810a7310fc7274dbd51505761696410d776ba0570a6eb0ec05a718b02"
 )
+BTC_UPDOWN_5M_HORIZON_MS = 300_000
 
 
 def run_v6_2_paper_canary_cli(
@@ -149,6 +150,7 @@ def run_v6_2_paper_canary_cli(
 
     consecutive_hard_failures = 0
     provider_fail_fast_stop_triggered = False
+    previous_scheduled_round_start_ts: int | None = None
     final_result: dict[str, Any] | None = None
     try:
         if snapshot_capture_dirs:
@@ -163,6 +165,11 @@ def run_v6_2_paper_canary_cli(
             ]
         else:
             for index in range(1, round_count + 1):
+                if previous_scheduled_round_start_ts is not None:
+                    _wait_until_epoch_ms(
+                        previous_scheduled_round_start_ts
+                        + BTC_UPDOWN_5M_HORIZON_MS
+                    )
                 batch_id = f"{run_id}-capture-{index:02d}"
                 summary = run_polymarket_async_round_collector_cli(
                     batch_id=batch_id,
@@ -182,6 +189,7 @@ def run_v6_2_paper_canary_cli(
                     ),
                     settlement_poll_interval_seconds=settlement_poll_interval_seconds,
                     settlement_grace_seconds=0.0,
+                    max_round_start_lag_seconds=30.0,
                     outcome_blind_collection_only=True,
                     overwrite_existing=overwrite_existing,
                 )
@@ -209,10 +217,31 @@ def run_v6_2_paper_canary_cli(
                     for path in attempted_dirs
                     for reason in classify_capture_hard_failure(path)
                 ] or (["capture_not_persisted"] if not attempted_dirs else [])
+                scheduled_values = [
+                    int(row["scheduled_round_start_ts"])
+                    for row in (
+                        list(summary.get("captures") or [])
+                        + list(summary.get("errors") or [])
+                    )
+                    if row.get("scheduled_round_start_ts") is not None
+                ]
+                scheduled_round_start_ts = (
+                    min(scheduled_values) if scheduled_values else None
+                )
+                if (
+                    previous_scheduled_round_start_ts is not None
+                    and scheduled_round_start_ts is not None
+                    and scheduled_round_start_ts
+                    <= previous_scheduled_round_start_ts
+                ):
+                    hard_reasons.append("duplicate_or_non_monotonic_round_boundary")
+                if scheduled_round_start_ts is not None:
+                    previous_scheduled_round_start_ts = scheduled_round_start_ts
                 capture_dirs.extend(path for path in attempted_dirs if path not in capture_dirs)
                 row = {
                     "round_index": index,
                     "batch_id": batch_id,
+                    "scheduled_round_start_ts": scheduled_round_start_ts,
                     "source_capture_dirs": [
                         str(path) for path in attempted_source_dirs
                     ],
@@ -343,6 +372,21 @@ def _run_scoring(
             overwrite_existing=overwrite_existing,
         )
     )
+
+
+def _wait_until_epoch_ms(
+    target_ts: int,
+    *,
+    now_fn=time.time,
+    sleep_fn=time.sleep,
+) -> None:
+    """Keep one-round collector invocations on strictly increasing 5m boundaries."""
+
+    while True:
+        remaining = target_ts / 1000.0 - now_fn()
+        if remaining <= 0.0:
+            return
+        sleep_fn(remaining)
 
 
 def _freeze_capture_for_decision(

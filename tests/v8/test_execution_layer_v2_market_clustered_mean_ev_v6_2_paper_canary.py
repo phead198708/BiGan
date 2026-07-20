@@ -16,6 +16,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_market_clustered_mean_ev_v6
     validate_v6_2_paper_candidate_unlock,
 )
 from examples.v8.run_execution_layer_v2_market_clustered_mean_ev_v6_2_paper_canary import (
+    _wait_until_epoch_ms,
     run_v6_2_paper_canary_cli,
 )
 
@@ -152,6 +153,19 @@ def test_legacy_or_ambiguous_unlock_scope_is_rejected(tmp_path: Path) -> None:
     _write_json(bundle["unlock"], unlock)
     with pytest.raises(ValueError, match="scope"):
         validate_v6_2_paper_candidate_unlock(bundle["unlock"], _sha(bundle["unlock"]))
+
+
+def test_round_boundary_wait_survives_fast_failed_capture() -> None:
+    now_values = iter((100.0, 100.25, 400.0))
+    sleeps: list[float] = []
+
+    _wait_until_epoch_ms(
+        400_000,
+        now_fn=lambda: next(now_values),
+        sleep_fn=sleeps.append,
+    )
+
+    assert sleeps == [pytest.approx(300.0), pytest.approx(299.75)]
 
 
 def _patch_scoring(
