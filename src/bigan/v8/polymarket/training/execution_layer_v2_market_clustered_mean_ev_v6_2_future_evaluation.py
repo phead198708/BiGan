@@ -607,6 +607,14 @@ def build_market_clustered_mean_ev_v6_2_future_settled_corpus(
         )
     )
     selected_by_market = {str(row["market_id"]): row for row in selected_rows}
+    frozen_feature_descriptor = _verified_descriptor(
+        freeze_manifest["target_free_feature_rows"], "frozen target-free feature rows"
+    )
+    frozen_features_by_market: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in _load_jsonl(Path(frozen_feature_descriptor["path"])):
+        frozen_features_by_market[str(row["market_id"])].append(row)
+    if set(frozen_features_by_market) != set(selected_by_market):
+        raise ValueError("frozen feature market coverage differs from selected window")
     pending_rows = list(selected_rows)
     successes: dict[str, dict[str, Any]] = {}
     failures: dict[str, dict[str, Any]] = {}
@@ -621,6 +629,7 @@ def build_market_clustered_mean_ev_v6_2_future_settled_corpus(
             provider_factory=factory,
             max_workers=config.max_workers,
             settlement_attempt=attempt,
+            evaluation_only_frozen_features_by_market=frozen_features_by_market,
         ):
             market_id = str(result["market_id"])
             if result["settled_corpus_ready"]:
@@ -693,6 +702,15 @@ def build_market_clustered_mean_ev_v6_2_future_settled_corpus(
         "settlement_retry_market_count": len(retried),
         "unresolved_or_failed_reason_distribution": dict(sorted(reasons.items())),
         "settled_corpus_index_ready": complete,
+        "evaluation_only_settlement_fallback_market_count": sum(
+            entry.get("evaluation_only_settlement_fallback") is True for entry in entries
+        ),
+        "evaluation_only_settlement_fallback_market_ids": sorted(
+            str(entry["market_id"])
+            for entry in entries
+            if entry.get("evaluation_only_settlement_fallback") is True
+        ),
+        "direct_training_eligibility_relaxed": False,
         "official_read_only_resolution_only": True,
         "source_outcome_blind_rounds_mutated": False,
         "future_results_used_for_tuning": False,
@@ -715,6 +733,10 @@ def build_market_clustered_mean_ev_v6_2_future_settled_corpus(
         "report": _descriptor(report_path),
         "report_markdown": _descriptor(report_md_path),
         "settled_corpus_index_ready": complete,
+        "evaluation_only_settlement_fallback_market_count": report[
+            "evaluation_only_settlement_fallback_market_count"
+        ],
+        "direct_training_eligibility_relaxed": False,
         "future_results_used_for_tuning": False,
         "source_outcome_blind_rounds_mutated": False,
         **_blocked_safety_fields(),

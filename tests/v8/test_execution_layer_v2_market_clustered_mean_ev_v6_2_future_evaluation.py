@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 import bigan.v8.polymarket.training.execution_layer_v2_market_clustered_mean_ev_v6_2_future_evaluation as subject
+from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_settlement import (
+    _evaluation_only_settled_corpus_if_safe,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_market_clustered_mean_ev_v6_2_future_evaluation import (
     MarketClusteredMeanEVV62FutureFreezeConfig,
     _bound_single_use_claim_path,
@@ -36,6 +39,71 @@ def _profile() -> dict:
     return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
 
 
+def _evaluation_only_feature_row() -> dict:
+    return {
+        "market_id": "market-1",
+        "condition_id": "condition-1",
+        "slug": "btc-updown-5m-1",
+        "market_family": "btc_updown_5m",
+        "horizon_ms": 300_000,
+        "decision_ts": 200,
+        "feature_cutoff_ts": 200,
+        "max_input_ts": 199,
+        "available_at_ts": 200,
+        "features": {"execution_price": 0.5},
+        "feature_provenance": {"source": "frozen"},
+    }
+
+
+def _evaluation_only_corpus(tmp_path: Path, *, feature_row: dict) -> tuple[Path, dict]:
+    copied = tmp_path / "copy"
+    corpus = copied / "phase2_corpus"
+    corpus.mkdir(parents=True)
+    (corpus / "polymarket_feature_rows.jsonl").write_text(
+        json.dumps(feature_row, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (corpus / "polymarket_label_rows.jsonl").write_text("{}\n", encoding="utf-8")
+    (corpus / "polymarket_resolution_events.jsonl").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    (corpus / "polymarket_corpus_manifest.json").write_text(
+        json.dumps(
+            {
+                "sell_before_close_label_gate_passed": True,
+                "label_row_count": 1,
+                "chainlink_decision_time_feature_integration": {
+                    "timestamp_causality_violation_count": 0
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (copied / "pending_round_finalization_manifest.json").write_text(
+        json.dumps({"phase2_corpus_dir": str(corpus.resolve())}) + "\n",
+        encoding="utf-8",
+    )
+    report = {
+        "finalization_status": "blocked_fail_closed",
+        "pending_resolution": False,
+        "resolution_provider_called": True,
+        "phase2_corpus_built": True,
+        "phase2_error": (
+            "Chainlink decision-time feature integration failed: "
+            "chainlink_feature_builder_integration_failed"
+        ),
+        "raw_resolution_count": 1,
+        "reject_reason_counts": {},
+        "chainlink_corpus_evidence": {
+            "reason_codes": [
+                "chainlink_feature_builder_integration_failed",
+                "chainlink_feature_builder_integration_still_required",
+            ]
+        },
+    }
+    return copied, report
+
+
 def test_profile_freezes_exact_window_support_and_side_only_gate() -> None:
     profile = _profile()
     validate_market_clustered_mean_ev_v6_2_future_profile(profile)
@@ -50,6 +118,40 @@ def test_profile_freezes_exact_window_support_and_side_only_gate() -> None:
     )
     assert profile["access_sequence"]["future_result_driven_rerun_allowed"] is False
     assert profile["safety"]["promotion_evidence_eligible"] is False
+
+
+def test_evaluation_only_settlement_fallback_requires_frozen_feature_equality(
+    tmp_path: Path,
+) -> None:
+    frozen = _evaluation_only_feature_row()
+    copied, report = _evaluation_only_corpus(tmp_path, feature_row=frozen)
+
+    corpus, reasons = _evaluation_only_settled_corpus_if_safe(
+        copied_run_dir=copied,
+        report=report,
+        frozen_feature_rows=[frozen],
+    )
+
+    assert corpus == (copied / "phase2_corpus").resolve()
+    assert reasons == []
+
+
+def test_evaluation_only_settlement_fallback_fails_closed_on_feature_drift(
+    tmp_path: Path,
+) -> None:
+    frozen = _evaluation_only_feature_row()
+    settled = copy.deepcopy(frozen)
+    settled["features"]["execution_price"] = 0.51
+    copied, report = _evaluation_only_corpus(tmp_path, feature_row=settled)
+
+    corpus, reasons = _evaluation_only_settled_corpus_if_safe(
+        copied_run_dir=copied,
+        report=report,
+        frozen_feature_rows=[frozen],
+    )
+
+    assert corpus is None
+    assert reasons == ["evaluation_only_frozen_feature_payload_mismatch"]
 
 
 @pytest.mark.parametrize(

@@ -359,6 +359,9 @@ def _finalize_selected_rounds(
     provider_factory: Callable[[], Any],
     max_workers: int,
     settlement_attempt: int,
+    evaluation_only_frozen_features_by_market: (
+        dict[str, list[dict[str, Any]]] | None
+    ) = None,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -369,6 +372,13 @@ def _finalize_selected_rounds(
                 run_dir=run_dir,
                 provider_factory=provider_factory,
                 settlement_attempt=settlement_attempt,
+                evaluation_only_frozen_feature_rows=(
+                    evaluation_only_frozen_features_by_market.get(
+                        str(selected.get("market_id") or ""), []
+                    )
+                    if evaluation_only_frozen_features_by_market is not None
+                    else None
+                ),
             ): selected
             for selected in selected_rows
         }
@@ -410,6 +420,7 @@ def _copy_and_finalize_selected_round(
     run_dir: Path,
     provider_factory: Callable[[], Any],
     settlement_attempt: int = 1,
+    evaluation_only_frozen_feature_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     market_id = str(selected.get("market_id") or "")
     if not market_id:
@@ -448,12 +459,26 @@ def _copy_and_finalize_selected_round(
     )
     _verify_selected_source_unchanged(selected, capture_manifest_descriptor)
     report = dict(result.report)
+    evaluation_only_corpus_dir = None
+    evaluation_only_reason_codes: list[str] = []
+    if evaluation_only_frozen_feature_rows is not None:
+        evaluation_only_corpus_dir, evaluation_only_reason_codes = (
+            _evaluation_only_settled_corpus_if_safe(
+                copied_run_dir=copied_run_dir,
+                report=report,
+                frozen_feature_rows=evaluation_only_frozen_feature_rows,
+            )
+        )
+    evaluation_only_fallback = evaluation_only_corpus_dir is not None
     if (
-        report.get("finalization_status") != "exported"
+        (
+            report.get("finalization_status") != "exported"
+            and not evaluation_only_fallback
+        )
         or report.get("pending_resolution") is not False
         or report.get("resolution_provider_called") is not True
         or report.get("phase2_corpus_built") is not True
-        or result.corpus_dir is None
+        or (result.corpus_dir is None and not evaluation_only_fallback)
     ):
         reasons = sorted(
             {
@@ -469,12 +494,13 @@ def _copy_and_finalize_selected_round(
                     else []
                 ),
                 *(
-                    ["settled_corpus_finalization_blocked"]
-                    if report.get("finalization_status") == "blocked_fail_closed"
-                    else []
-                ),
-            }
-        )
+                        ["settled_corpus_finalization_blocked"]
+                        if report.get("finalization_status") == "blocked_fail_closed"
+                        else []
+                    ),
+                    *evaluation_only_reason_codes,
+                }
+            )
         return {
             "market_id": market_id,
             "settled_corpus_ready": False,
@@ -489,7 +515,11 @@ def _copy_and_finalize_selected_round(
                 "copied_round_dir": str(copied_run_dir),
             },
         }
-    corpus_dir = result.corpus_dir.resolve()
+    corpus_dir = (
+        evaluation_only_corpus_dir
+        if evaluation_only_fallback
+        else result.corpus_dir.resolve()
+    )
     corpus_manifest_path = corpus_dir / "polymarket_corpus_manifest.json"
     feature_rows_path = corpus_dir / "polymarket_feature_rows.jsonl"
     label_rows_path = corpus_dir / "polymarket_label_rows.jsonl"
@@ -522,6 +552,13 @@ def _copy_and_finalize_selected_round(
         "source_outcome_blind_round_mutated": False,
         "direct_training_corpus_exported": False,
         "settlement_attempt_count": settlement_attempt,
+        "evaluation_only_settlement_fallback": evaluation_only_fallback,
+        "evaluation_only_settlement_fallback_reason_codes": (
+            ["frozen_feature_equivalent_chainlink_training_gate_block"]
+            if evaluation_only_fallback
+            else []
+        ),
+        "direct_training_eligibility_relaxed": False,
     }
     index_entry["entry_sha256"] = canonical_json_sha256(index_entry)
     return {
@@ -529,6 +566,99 @@ def _copy_and_finalize_selected_round(
         "settled_corpus_ready": True,
         "index_entry": index_entry,
     }
+
+
+def _evaluation_only_settled_corpus_if_safe(
+    *,
+    copied_run_dir: Path,
+    report: dict[str, Any],
+    frozen_feature_rows: list[dict[str, Any]],
+) -> tuple[Path | None, list[str]]:
+    """Accept a training-blocked corpus only when frozen evaluation inputs match."""
+
+    if report.get("finalization_status") == "exported":
+        return None, []
+    reasons = []
+    allowed_phase2_error = "Chainlink decision-time feature integration failed:"
+    if report.get("finalization_status") != "blocked_fail_closed":
+        reasons.append("evaluation_only_finalization_status_invalid")
+    if report.get("pending_resolution") is not False:
+        reasons.append("evaluation_only_resolution_pending")
+    if report.get("resolution_provider_called") is not True:
+        reasons.append("evaluation_only_resolution_provider_not_called")
+    if report.get("phase2_corpus_built") is not True:
+        reasons.append("evaluation_only_phase2_corpus_not_built")
+    if not str(report.get("phase2_error") or "").startswith(allowed_phase2_error):
+        reasons.append("evaluation_only_blocker_not_chainlink_training_integration")
+    if report.get("raw_resolution_count") != 1:
+        reasons.append("evaluation_only_official_resolution_count_invalid")
+    if dict(report.get("reject_reason_counts") or {}):
+        reasons.append("evaluation_only_additional_reject_reasons_present")
+    chainlink = dict(report.get("chainlink_corpus_evidence") or {})
+    allowed_chainlink_reasons = {
+        "chainlink_feature_builder_integration_failed",
+        "chainlink_feature_builder_integration_still_required",
+    }
+    if set(chainlink.get("reason_codes") or []) - allowed_chainlink_reasons:
+        reasons.append("evaluation_only_chainlink_blocker_not_allowlisted")
+
+    finalization_manifest_path = copied_run_dir / "pending_round_finalization_manifest.json"
+    if not finalization_manifest_path.is_file():
+        reasons.append("evaluation_only_finalization_manifest_missing")
+        return None, sorted(set(reasons))
+    finalization_manifest = _load_json(finalization_manifest_path)
+    corpus_dir_text = str(finalization_manifest.get("phase2_corpus_dir") or "")
+    corpus_dir = Path(corpus_dir_text).resolve() if corpus_dir_text else Path()
+    if not corpus_dir_text or not corpus_dir.is_relative_to(copied_run_dir.resolve()):
+        reasons.append("evaluation_only_corpus_path_outside_settlement_copy")
+        return None, sorted(set(reasons))
+    corpus_manifest_path = corpus_dir / "polymarket_corpus_manifest.json"
+    feature_rows_path = corpus_dir / "polymarket_feature_rows.jsonl"
+    label_rows_path = corpus_dir / "polymarket_label_rows.jsonl"
+    resolution_events_path = corpus_dir / "polymarket_resolution_events.jsonl"
+    for path, reason in (
+        (corpus_manifest_path, "evaluation_only_corpus_manifest_missing"),
+        (feature_rows_path, "evaluation_only_feature_rows_missing"),
+        (label_rows_path, "evaluation_only_label_rows_missing"),
+        (resolution_events_path, "evaluation_only_resolution_events_missing"),
+    ):
+        if not path.is_file():
+            reasons.append(reason)
+    if reasons:
+        return None, sorted(set(reasons))
+
+    corpus_manifest = _load_json(corpus_manifest_path)
+    integration = dict(corpus_manifest.get("chainlink_decision_time_feature_integration") or {})
+    if corpus_manifest.get("sell_before_close_label_gate_passed") is not True:
+        reasons.append("evaluation_only_sell_before_close_label_gate_failed")
+    if int(corpus_manifest.get("label_row_count") or 0) <= 0:
+        reasons.append("evaluation_only_label_rows_empty")
+    if int(integration.get("timestamp_causality_violation_count") or 0) != 0:
+        reasons.append("evaluation_only_chainlink_timestamp_causality_violation")
+    settled_features = _load_jsonl(feature_rows_path)
+    if not frozen_feature_rows:
+        reasons.append("evaluation_only_frozen_feature_rows_missing")
+    if any(int(row.get("max_input_ts") or 0) > int(row.get("decision_ts") or 0) for row in settled_features):
+        reasons.append("evaluation_only_feature_timestamp_causality_violation")
+    frozen_payloads = sorted(
+        (_feature_payload(row) for row in frozen_feature_rows),
+        key=lambda row: (int(row["decision_ts"]), str(row["market_id"])),
+    )
+    settled_payloads = sorted(
+        (_feature_payload(row) for row in settled_features),
+        key=lambda row: (int(row["decision_ts"]), str(row["market_id"])),
+    )
+    if frozen_payloads != settled_payloads:
+        reasons.append("evaluation_only_frozen_feature_payload_mismatch")
+    if sum(1 for line in label_rows_path.read_text(encoding="utf-8").splitlines() if line) <= 0:
+        reasons.append("evaluation_only_label_rows_empty")
+    if sum(
+        1 for line in resolution_events_path.read_text(encoding="utf-8").splitlines() if line
+    ) != 1:
+        reasons.append("evaluation_only_resolution_event_count_invalid")
+    if reasons:
+        return None, sorted(set(reasons))
+    return corpus_dir, []
 
 
 def _verify_selected_source_unchanged(
