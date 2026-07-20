@@ -188,6 +188,9 @@ def test_exact_window_scans_invalid_rows_but_never_selects_them(
     monkeypatch.setattr(subject, "_prior_market_reference", lambda candidate: (set(), "a" * 64))
     rows = [_index_row(sequence) for sequence in range(313, 553)]
     rows[0]["capture_quality_valid"] = False
+    rows[0]["capture_quality_reason_codes"] = ["market_id_missing"]
+    rows[0]["market_id"] = ""
+    rows[0]["market_start_ts"] = 0
     selected, attempted = _select_exact_future_index_rows(
         rows,
         profile=_profile(),
@@ -196,6 +199,23 @@ def test_exact_window_scans_invalid_rows_but_never_selects_them(
     assert selected[0]["sequence"] == 314
     assert selected[-1]["sequence"] == 513
     assert len(attempted) == 201
+
+
+def test_exact_window_still_rejects_invalid_attempt_before_freeze(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(subject, "_prior_market_reference", lambda candidate: (set(), "a" * 64))
+    rows = [_index_row(sequence) for sequence in range(313, 553)]
+    rows[0].update(
+        {
+            "capture_quality_valid": False,
+            "market_id": "",
+            "market_start_ts": 0,
+            "scheduled_round_start_ts": 1,
+        }
+    )
+    with pytest.raises(ValueError, match="scheduled strictly later"):
+        _select_exact_future_index_rows(rows, profile=_profile(), candidate={})
 
 
 def test_exact_window_rejects_resolution_or_target_access(
@@ -276,7 +296,18 @@ def test_exact_200_freeze_materializes_raw_features_before_target_access(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    selected_rows = [_synthetic_selected_row(tmp_path, index) for index in range(200)]
+    invalid_attempt = {
+        **_index_row(313),
+        "capture_quality_valid": False,
+        "capture_quality_reason_codes": ["market_id_missing"],
+        "market_id": "",
+        "market_start_ts": 0,
+        "market_end_ts": 0,
+    }
+    selected_rows = [
+        invalid_attempt,
+        *[_synthetic_selected_row(tmp_path, index) for index in range(1, 201)],
+    ]
     bundle = _synthetic_freeze_bundle(tmp_path)
     monkeypatch.setattr(
         subject,
@@ -313,7 +344,11 @@ def test_exact_200_freeze_materializes_raw_features_before_target_access(
         "FROZEN_FEATURE_CONTRACT_SHA256",
         _sha256(bundle["feature_contract"]),
     )
-    monkeypatch.setattr(subject, "load_and_validate_persistent_outcome_blind_index", lambda _: selected_rows)
+    monkeypatch.setattr(
+        subject,
+        "load_and_validate_persistent_outcome_blind_index",
+        lambda _: selected_rows,
+    )
     monkeypatch.setattr(subject, "_prior_market_reference", lambda _: (set(), "a" * 64))
     monkeypatch.setattr(subject.xgb.Booster, "load_model", lambda self, path: None)
 
@@ -421,6 +456,18 @@ def test_exact_200_freeze_materializes_raw_features_before_target_access(
     report = result["report"]
     manifest = result["manifest"]
     assert report["selected_market_count"] == 200
+    assert report["attempted_index_row_count"] == 201
+    assert report["quality_invalid_attempt_count"] == 1
+    assert report["quality_invalid_attempt_sequences"] == [313]
+    assert report["quality_invalid_attempt_reason_distribution"] == {
+        "market_id_missing": 1
+    }
+    assert (
+        report[
+            "quality_invalid_attempts_excluded_before_selected_market_identity_checks"
+        ]
+        is True
+    )
     assert report["candidate_guard_accepted_unique_market_count"] == 200
     assert report["candidate_guard_accepted_unique_market_count_by_side"] == {
         "UP": 100,
@@ -551,10 +598,12 @@ def test_single_use_claim_path_is_deterministically_bound_to_freeze(tmp_path: Pa
 
 
 def _index_row(sequence: int) -> dict:
+    market_start_ts = 1_784_471_000_000 + sequence * 300_000
     return {
         "sequence": sequence,
         "market_id": f"market-{sequence}",
-        "market_start_ts": 1_784_471_000_000 + sequence * 300_000,
+        "market_start_ts": market_start_ts,
+        "scheduled_round_start_ts": market_start_ts,
         "capture_quality_valid": True,
         "raw_resolution_row_count": 0,
         "labels_outcomes_or_pnl_opened": False,

@@ -309,6 +309,18 @@ def freeze_market_clustered_mean_ev_v6_2_future_predictions(
         profile=profile,
         candidate=candidate,
     )
+    quality_invalid_attempts = [
+        row for row in attempted_rows if row.get("capture_quality_valid") is False
+    ]
+    quality_invalid_reason_distribution = dict(
+        sorted(
+            Counter(
+                str(reason)
+                for row in quality_invalid_attempts
+                for reason in row.get("capture_quality_reason_codes") or []
+            ).items()
+        )
+    )
     pre_audit = _load_json(
         Path(_verified_descriptor(candidate["pre_target_access_audit"], "candidate audit")["path"])
     )
@@ -421,6 +433,14 @@ def freeze_market_clustered_mean_ev_v6_2_future_predictions(
         "cumulative_canary_manifest": _descriptor(cumulative_path),
         "collector_index": _descriptor(index_path),
         "collector_index_attempted_row_count": len(attempted_rows),
+        "quality_invalid_attempt_count": len(quality_invalid_attempts),
+        "quality_invalid_attempt_sequences": [
+            int(row["sequence"]) for row in quality_invalid_attempts
+        ],
+        "quality_invalid_attempt_reason_distribution": (
+            quality_invalid_reason_distribution
+        ),
+        "quality_invalid_attempts_excluded_before_selected_market_identity_checks": True,
         "selected_market_count": len(selected_rows),
         "selected_market_ids": selected_market_ids,
         "selected_market_ids_sha256": canonical_json_sha256(selected_market_ids),
@@ -445,6 +465,14 @@ def freeze_market_clustered_mean_ev_v6_2_future_predictions(
         "candidate_name": CANDIDATE_NAME,
         "selected_market_count": len(selected_rows),
         "attempted_index_row_count": len(attempted_rows),
+        "quality_invalid_attempt_count": len(quality_invalid_attempts),
+        "quality_invalid_attempt_sequences": [
+            int(row["sequence"]) for row in quality_invalid_attempts
+        ],
+        "quality_invalid_attempt_reason_distribution": (
+            quality_invalid_reason_distribution
+        ),
+        "quality_invalid_attempts_excluded_before_selected_market_identity_checks": True,
         "selected_sequence_start": int(selected_rows[0]["sequence"]),
         "selected_sequence_end": int(selected_rows[-1]["sequence"]),
         "complete_five_action_grid_passed": True,
@@ -1026,14 +1054,21 @@ def _select_exact_future_index_rows(
             raise ValueError("future index row opened target fields")
         if row.get("raw_resolution_row_count") != 0:
             raise ValueError("future index row contains resolution before freeze")
+        if int(row.get("scheduled_round_start_ts") or 0) <= freeze_ts:
+            raise ValueError("future index attempt is not scheduled strictly later")
+        if row.get("capture_quality_valid") is False:
+            continue
+        if row.get("capture_quality_valid") is not True:
+            raise ValueError("future index row has invalid capture quality status")
+        if not str(row.get("market_id") or ""):
+            raise ValueError("future quality-valid index row has no market identity")
         if int(row.get("market_start_ts") or 0) <= freeze_ts:
             raise ValueError("future index row is not strictly later than candidate freeze")
         if str(row.get("market_id") or "") in prior_market_ids:
             raise ValueError("future index row overlaps candidate lineage")
-        if row.get("capture_quality_valid") is True:
-            selected.append(row)
-            if len(selected) == target:
-                break
+        selected.append(row)
+        if len(selected) == target:
+            break
     if len(selected) != target:
         raise ValueError("exact future quality-valid market target not reached")
     market_ids = [str(row["market_id"]) for row in selected]
@@ -1383,6 +1418,8 @@ def _prediction_markdown(report: dict[str, Any]) -> str:
             "# v6.2 future prediction freeze",
             "",
             f"- selected markets: `{report['selected_market_count']}`",
+            f"- attempted index rows: `{report['attempted_index_row_count']}`",
+            f"- quality-invalid attempts excluded: `{report['quality_invalid_attempt_count']}`",
             f"- guard accepted: `{report['candidate_guard_accepted_unique_market_count']}`",
             f"- support gate passed: `{str(report['target_free_support_gate_passed']).lower()}`",
             "- outcomes opened: `false`",
