@@ -75,6 +75,19 @@ def test_executable_exit_must_be_strictly_after_decision(tmp_path: Path) -> None
     assert audited["label_audit"]["label_audit_gate_passed"] is False
 
 
+def test_sparse_theoretical_non_executable_is_valid_exit_availability_negative(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path, compatible_source_gate_failure=True)
+    frozen = _run_freeze(fixture, tmp_path)
+    audited = _run_audit(fixture, frozen, tmp_path)
+    report = audited["label_audit"]
+    assert report["source_net_return_label_gate_failed_market_count"] == 1
+    assert report["source_net_return_label_gate_compatible_negative_market_count"] == 1
+    assert report["source_net_return_label_gate_incompatible_market_count"] == 0
+    assert report["label_audit_gate_passed"] is True
+
+
 def _profile() -> dict:
     path = Path(
         "examples/v8/polymarket_configs/"
@@ -83,7 +96,12 @@ def _profile() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _fixture(tmp_path: Path, *, causality_violation: bool = False) -> dict:
+def _fixture(
+    tmp_path: Path,
+    *,
+    causality_violation: bool = False,
+    compatible_source_gate_failure: bool = False,
+) -> dict:
     root = tmp_path / "corpus"
     root.mkdir()
     profile = copy.deepcopy(_profile())
@@ -145,23 +163,52 @@ def _fixture(tmp_path: Path, *, causality_violation: bool = False) -> dict:
                             and decision_ts == 1000
                             and side == "UP"
                         ),
+                        sparse_theoretical=(
+                            compatible_source_gate_failure
+                            and index == 1
+                            and decision_ts == 2000
+                            and side == "DOWN"
+                        ),
                     )
                 )
         _write_jsonl(source / "polymarket_feature_rows.jsonl", features)
         _write_jsonl(source / "polymarket_label_rows.jsonl", labels)
         _write_jsonl(source / "polymarket_token_book_snapshots.jsonl", [{"ts": 1}])
         _write_jsonl(source / "raw_polymarket_orderbooks.jsonl", [{"ts": 1}])
+        label_redesign_report = {
+            "label_gate_passed": not (
+                compatible_source_gate_failure and index == 1
+            ),
+            "label_gate_reason_codes": (
+                ["positive_theoretical_return_without_executable_exit"]
+                if compatible_source_gate_failure and index == 1
+                else []
+            ),
+            "sparse_theoretical_sell_before_close_count": (
+                1 if compatible_source_gate_failure and index == 1 else 0
+            ),
+            "theoretical_sell_before_close_count": (
+                1 if compatible_source_gate_failure and index == 1 else 0
+            ),
+            "fixed_terminal_bid_only_labels_allowed": False,
+        }
+        label_redesign_path = source / "sell_before_close_label_redesign_report.json"
+        _write_json(label_redesign_path, label_redesign_report)
         corpus = {
             "sell_before_close_label_schema_version": (
                 "bigan-v8-polymarket-sell-before-close-executable-exit-v1"
             ),
-            "sell_before_close_label_gate_passed": True,
+            "sell_before_close_label_gate_passed": not (
+                compatible_source_gate_failure and index == 1
+            ),
+            "sell_before_close_label_redesign_report_path": label_redesign_path.name,
             "normalized_artifact_hashes": {
                 "feature_rows": _sha(source / "polymarket_feature_rows.jsonl"),
                 "label_rows": _sha(source / "polymarket_label_rows.jsonl"),
                 "token_book_snapshots": _sha(
                     source / "polymarket_token_book_snapshots.jsonl"
                 ),
+                "sell_before_close_label_redesign_report": _sha(label_redesign_path),
             },
             "raw_artifact_hashes": {
                 "raw_polymarket_orderbooks.jsonl": _sha(
@@ -271,6 +318,7 @@ def _label_row(
     side: str,
     executable: bool,
     causality_violation: bool = False,
+    sparse_theoretical: bool = False,
 ) -> dict:
     return {
         "market_id": market_id,
@@ -279,11 +327,15 @@ def _label_row(
         "sell_before_close_execution_class": (
             "realizable_sell_before_close"
             if executable
+            else "sparse_theoretical_sell_before_close"
+            if sparse_theoretical
             else "non_executable_sell_before_close"
         ),
         "label_uses_executable_exit_path": executable,
         "sell_before_close_exit_path": {
-            "candidate_exit_snapshot_count": 1 if executable else 0,
+            "candidate_exit_snapshot_count": (
+                1 if executable or sparse_theoretical else 0
+            ),
             "best_executable_exit_ts": (
                 decision_ts if causality_violation else decision_ts + 1
             )
@@ -292,6 +344,8 @@ def _label_row(
             "exit_path_reason_codes": [
                 "executable_intraround_exit_found"
                 if executable
+                else "sparse_exit_snapshot_sampling"
+                if sparse_theoretical
                 else "no_candidate_exit_snapshot"
             ],
         },

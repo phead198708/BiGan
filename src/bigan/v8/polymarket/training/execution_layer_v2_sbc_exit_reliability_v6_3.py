@@ -272,6 +272,9 @@ def _audit_labels(
         "raw_exit_window_snapshot_row_count": 0,
         "label_causality_violations": [],
         "invalid_label_rows": [],
+        "source_net_return_label_gate_failed_markets": [],
+        "source_net_return_label_gate_compatible_negative_markets": [],
+        "source_net_return_label_gate_incompatible_markets": [],
     }
     feature_stats: dict[str, Any] = {
         "feature_row_count": 0,
@@ -461,6 +464,12 @@ def _audit_source_labels(
             raw_orderbook_hash,
             "raw orderbook",
         )
+    _audit_source_net_return_label_gate(
+        source=source,
+        corpus=corpus,
+        normalized_hashes=normalized_hashes,
+        stats=stats,
+    )
     labels = _load_jsonl(Path(label_descriptor["path"]), label_content=True)
     expected_schema = profile["label_contract"]["required_label_schema_version"]
     sbc_rows = [row for row in labels if str(row.get("action")) in SBC_ACTIONS.values()]
@@ -474,6 +483,18 @@ def _audit_source_labels(
         path = dict(row.get("sell_before_close_exit_path") or {})
         execution_class = str(row.get("sell_before_close_execution_class") or "")
         uses_path = row.get("label_uses_executable_exit_path") is True
+        if execution_class not in {
+            "realizable_sell_before_close",
+            "non_executable_sell_before_close",
+            "theoretical_sell_before_close",
+            "sparse_theoretical_sell_before_close",
+        }:
+            stats["invalid_label_rows"].append(
+                {
+                    "market_id": str(source["market_id"]),
+                    "reason": "unknown_sell_before_close_execution_class",
+                }
+            )
         target = int(execution_class == "realizable_sell_before_close" and uses_path)
         market_id = str(source["market_id"])
         role = str(source["role"])
@@ -502,10 +523,6 @@ def _audit_source_labels(
         if corpus.get("sell_before_close_label_schema_version") != expected_schema:
             stats["invalid_label_rows"].append(
                 {"market_id": market_id, "reason": "label_schema_version_mismatch"}
-            )
-        if corpus.get("sell_before_close_label_gate_passed") is not True:
-            stats["invalid_label_rows"].append(
-                {"market_id": market_id, "reason": "source_label_gate_not_passed"}
             )
         if row.get("paper_only") is not True or row.get("capital_at_risk") is not False:
             stats["invalid_label_rows"].append(
@@ -645,6 +662,21 @@ def _build_label_audit_report(
         "label_causality_violations": stats["label_causality_violations"][:25],
         "invalid_label_row_count": len(stats["invalid_label_rows"]),
         "invalid_label_rows": stats["invalid_label_rows"][:25],
+        "source_net_return_label_gate_failed_market_count": len(
+            stats["source_net_return_label_gate_failed_markets"]
+        ),
+        "source_net_return_label_gate_failed_markets": stats[
+            "source_net_return_label_gate_failed_markets"
+        ],
+        "source_net_return_label_gate_compatible_negative_market_count": len(
+            stats["source_net_return_label_gate_compatible_negative_markets"]
+        ),
+        "source_net_return_label_gate_compatible_negative_markets": stats[
+            "source_net_return_label_gate_compatible_negative_markets"
+        ],
+        "source_net_return_label_gate_incompatible_market_count": len(
+            stats["source_net_return_label_gate_incompatible_markets"]
+        ),
         "market_disjoint_split_feasible": len(eligible_rows)
         == len({str(row["market_id"]) for row in eligible_rows}),
         "support_gate_checks": checks,
@@ -752,6 +784,59 @@ def _validate_frozen_lineage(
     if blockers:
         raise ValueError("#223 frozen lineage invalid: " + ", ".join(blockers))
     _verified_descriptor(lineage.get("lineage_rows"), "lineage rows")
+
+
+def _audit_source_net_return_label_gate(
+    *,
+    source: dict[str, Any],
+    corpus: dict[str, Any],
+    normalized_hashes: dict[str, Any],
+    stats: dict[str, Any],
+) -> None:
+    if corpus.get("sell_before_close_label_gate_passed") is True:
+        return
+    market_id = str(source["market_id"])
+    source_dir = Path(str(source["source_corpus_dir"])).resolve()
+    report_name = str(corpus.get("sell_before_close_label_redesign_report_path") or "")
+    report_path = source_dir / report_name
+    expected_hash = str(
+        normalized_hashes.get("sell_before_close_label_redesign_report") or ""
+    )
+    stats["source_net_return_label_gate_failed_markets"].append(market_id)
+    compatible = False
+    reason_codes: list[str] = []
+    if report_name and _is_sha256(expected_hash) and report_path.is_file():
+        _verify_pin(report_path, expected_hash, "sell-before-close label redesign report")
+        report = _load_json(report_path)
+        reason_codes = sorted(
+            str(value) for value in report.get("label_gate_reason_codes") or []
+        )
+        compatible = (
+            reason_codes == ["positive_theoretical_return_without_executable_exit"]
+            and int(report.get("sparse_theoretical_sell_before_close_count") or 0) > 0
+            and int(report.get("theoretical_sell_before_close_count") or 0) > 0
+            and report.get("fixed_terminal_bid_only_labels_allowed") is False
+        )
+    detail = {
+        "market_id": market_id,
+        "slug": str(source["slug"]),
+        "source_net_return_label_gate_reason_codes": reason_codes,
+        "exit_availability_target_interpretation": (
+            "valid_non_executable_negative_target"
+            if compatible
+            else "incompatible_source_label_gate_failure"
+        ),
+    }
+    if compatible:
+        stats["source_net_return_label_gate_compatible_negative_markets"].append(detail)
+        return
+    stats["source_net_return_label_gate_incompatible_markets"].append(detail)
+    stats["invalid_label_rows"].append(
+        {
+            "market_id": market_id,
+            "reason": "source_label_gate_failure_not_compatible_with_exit_availability_target",
+        }
+    )
 
 
 def _valid_source_contract(source: dict[str, Any]) -> bool:
