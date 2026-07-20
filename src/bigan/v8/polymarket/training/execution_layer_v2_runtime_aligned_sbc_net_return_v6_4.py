@@ -586,14 +586,11 @@ def _market_runtime_target_rows(
                 - int(SELL_BEFORE_CLOSE_EXIT_WINDOW_SECONDS * 1000.0),
             }
         )
-    lifecycle = _paper_position_lifecycle(
+    positions = _independent_counterfactual_position_rows(
         run_id=f"{run_id}-{source['market_id']}",
         feature_rows=feature_rows,
         entry_fills=fills,
     )
-    positions = {
-        str(row["position_id"]): row for row in lifecycle["positions"]["positions"]
-    }
     reasons: Counter[str] = Counter()
     rows = []
     for fill in fills:
@@ -656,6 +653,32 @@ def _market_runtime_target_rows(
         row["target_row_id"] = canonical_json_sha256(row)
         rows.append(row)
     return rows, reasons
+
+
+def _independent_counterfactual_position_rows(
+    *,
+    run_id: str,
+    feature_rows: list[dict[str, Any]],
+    entry_fills: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Replay each hypothetical action in an isolated position/ledger state."""
+
+    positions: dict[str, dict[str, Any]] = {}
+    for index, fill in enumerate(entry_fills, start=1):
+        lifecycle = _paper_position_lifecycle(
+            run_id=f"{run_id}-counterfactual-{index:04d}",
+            feature_rows=feature_rows,
+            entry_fills=[fill],
+        )
+        rows = list(lifecycle["positions"]["positions"])
+        if len(rows) != 1:
+            raise ValueError("counterfactual position lifecycle did not reconcile one fill")
+        position = rows[0]
+        position_id = str(position["position_id"])
+        if position_id in positions:
+            raise ValueError("duplicate counterfactual position identity")
+        positions[position_id] = position
+    return positions
 
 
 def _target_report(

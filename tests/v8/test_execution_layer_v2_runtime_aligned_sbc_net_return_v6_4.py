@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from bigan.v8.polymarket.training import (
+    execution_layer_v2_runtime_aligned_sbc_net_return_v6_4 as target_module,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_runtime_aligned_sbc_net_return_v6_4 import (
+    _independent_counterfactual_position_rows,
     compute_runtime_policy_after_cost_target,
     runtime_policy_source_hashes,
     validate_runtime_aligned_sbc_net_return_v6_4_profile,
@@ -102,6 +106,37 @@ def test_runtime_target_rejects_invalid_side_and_negative_cost() -> None:
             liquidity_impact=0.0,
             paper_position_size=0.2,
         )
+
+
+def test_counterfactual_actions_replay_in_isolated_position_state(monkeypatch) -> None:
+    call_sizes = []
+
+    def fake_lifecycle(*, run_id, feature_rows, entry_fills):
+        del run_id, feature_rows
+        call_sizes.append(len(entry_fills))
+        fill = entry_fills[0]
+        return {
+            "positions": {
+                "positions": [
+                    {
+                        "position_id": fill["paper_fill_id"],
+                        "exit_price": None,
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr(target_module, "_paper_position_lifecycle", fake_lifecycle)
+    positions = _independent_counterfactual_position_rows(
+        run_id="test",
+        feature_rows=[],
+        entry_fills=[
+            {"paper_fill_id": "up"},
+            {"paper_fill_id": "down"},
+        ],
+    )
+    assert call_sizes == [1, 1]
+    assert sorted(positions) == ["down", "up"]
     with pytest.raises(ValueError, match="non-negative"):
         compute_runtime_policy_after_cost_target(
             selected_side="UP",
