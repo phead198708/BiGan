@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 from bigan.v8.polymarket.training.execution_layer_v2_p_up_semantic_compatibility_v6_7 import (
@@ -70,6 +71,12 @@ def main() -> None:
         default="3c3bca259aef6430d53ec544a2478bd3debdc41ea00230ca49fc8fda015f7a1a",
     )
     parser.add_argument("--implementation-commit", required=True)
+    parser.add_argument(
+        "--candidate-freeze-created-ts",
+        type=int,
+        default=None,
+        help="Explicit epoch milliseconds; defaults to runner start time.",
+    )
     parser.add_argument("--overwrite-existing", action="store_true")
     args = parser.parse_args()
     result = run_p_up_semantic_compatibility_v6_7(
@@ -91,6 +98,11 @@ def main() -> None:
                 args.expected_legacy_guard_replay_sha256
             ),
             implementation_commit=args.implementation_commit,
+            candidate_freeze_created_ts=(
+                args.candidate_freeze_created_ts
+                if args.candidate_freeze_created_ts is not None
+                else time.time_ns() // 1_000_000
+            ),
             overwrite_existing=args.overwrite_existing,
         )
     )

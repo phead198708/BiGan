@@ -64,6 +64,7 @@ class PUpSemanticCompatibilityV67Config:
     legacy_guard_replay_path: Path | str
     expected_legacy_guard_replay_sha256: str
     implementation_commit: str
+    candidate_freeze_created_ts: int
     overwrite_existing: bool = False
 
     def __post_init__(self) -> None:
@@ -78,6 +79,8 @@ class PUpSemanticCompatibilityV67Config:
         ):
             _require_sha256(str(getattr(self, name)), name=name)
         _require_git_sha(self.implementation_commit)
+        if self.candidate_freeze_created_ts <= 0:
+            raise ValueError("candidate_freeze_created_ts must be positive")
         for name in (
             "output_dir",
             "profile_path",
@@ -230,6 +233,11 @@ def run_p_up_semantic_compatibility_v6_7(
     selected_rows = select_v6_7_target_free_rows(candidate_rows, profile=profile)
     selected_side_count = Counter(str(row["side"]) for row in selected_rows)
     selected_market_count = len({str(row["market_id"]) for row in selected_rows})
+    maximum_selected_decision_ts = max(
+        int(row["decision_ts"]) for row in selected_rows
+    )
+    if config.candidate_freeze_created_ts <= maximum_selected_decision_ts:
+        raise ValueError("#227 candidate freeze timestamp is not after source decisions")
     minimum_side = int(
         profile["target_free_support_gate"][
             "minimum_unique_selected_market_count_per_side"
@@ -282,6 +290,8 @@ def run_p_up_semantic_compatibility_v6_7(
         "issue_number": 227,
         "candidate_name": CANDIDATE_NAME,
         "implementation_commit": config.implementation_commit,
+        "candidate_freeze_created_ts": config.candidate_freeze_created_ts,
+        "maximum_selected_decision_ts": maximum_selected_decision_ts,
         "profile_sha256": expected["profile"],
         "source_freeze_manifest_sha256": expected["source_freeze_manifest"],
         "source_prediction_sha256": expected["predictions"],
@@ -332,6 +342,10 @@ def run_p_up_semantic_compatibility_v6_7(
         "issue_number": 227,
         "candidate_name": CANDIDATE_NAME,
         "implementation_commit": config.implementation_commit,
+        "candidate_freeze_created_ts": config.candidate_freeze_created_ts,
+        "future_collection_minimum_created_ts_exclusive": (
+            config.candidate_freeze_created_ts
+        ),
         "profile": _descriptor(paths["profile"]),
         "source_freeze_manifest": _descriptor(paths["source_freeze_manifest"]),
         "source_target_free_predictions": _descriptor(paths["predictions"]),

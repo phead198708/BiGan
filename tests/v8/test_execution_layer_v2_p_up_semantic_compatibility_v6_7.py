@@ -174,6 +174,7 @@ def test_v6_7_real_exact_60_canary_passes_without_unlock(tmp_path: Path) -> None
             legacy_guard_replay_path=legacy_replay,
             expected_legacy_guard_replay_sha256=_sha256(legacy_replay),
             implementation_commit="a" * 40,
+            candidate_freeze_created_ts=2_000_000_000_000,
         )
     )
     report = json.loads(Path(result["report_path"]).read_text())
