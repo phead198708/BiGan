@@ -257,7 +257,14 @@ def _freeze_predictions(
         selected_rows=selected_rows,
         feature_columns=feature_columns,
     )
-    _validate_target_free_grid(feature_rows, action_rows, selected_rows=selected_rows)
+    _validate_target_free_grid(
+        feature_rows,
+        action_rows,
+        selected_rows=selected_rows,
+        minimum_market_start_ts_exclusive=int(
+            profile["fresh_calibration_collection"]["minimum_market_start_ts_exclusive"]
+        ),
+    )
     booster = xgb.Booster()
     booster.load_model(source_model_descriptor["path"])
     raw_predictions = _raw_target_stripped_predictions(
@@ -1060,13 +1067,27 @@ def _validate_target_free_grid(
     action_rows: list[dict[str, Any]],
     *,
     selected_rows: list[dict[str, Any]],
+    minimum_market_start_ts_exclusive: int,
 ) -> None:
     selected_markets = {str(row["market_id"]) for row in selected_rows}
+    selected_by_market = {str(row["market_id"]): row for row in selected_rows}
     feature_keys = {(str(row["market_id"]), int(row["decision_ts"])) for row in feature_rows}
+    if any(
+        int(row["decision_ts"])
+        <= int(selected_by_market[str(row["market_id"])]["market_start_ts"])
+        or int(row["decision_ts"])
+        >= int(selected_by_market[str(row["market_id"])]["market_end_ts"])
+        or int(row["decision_ts"]) <= minimum_market_start_ts_exclusive
+        for row in feature_rows
+    ):
+        raise ValueError("#226 calibration feature decision is outside its frozen market window")
     grouped: dict[tuple[str, int], set[str]] = defaultdict(set)
     for row in action_rows:
         if int(row["max_input_ts"]) > int(row["decision_ts"]):
             raise ValueError("#226 calibration action feature causality violation")
+        selected = selected_by_market[str(row["market_id"])]
+        if int(row["market_close_ts"]) != int(selected["market_end_ts"]):
+            raise ValueError("#226 calibration action market-close lineage mismatch")
         grouped[(str(row["market_id"]), int(row["decision_ts"]))].add(str(row["action"]))
     if {market for market, _ in feature_keys} != selected_markets:
         raise ValueError("#226 calibration feature market coverage mismatch")

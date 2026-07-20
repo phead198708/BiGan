@@ -7,6 +7,7 @@ import pytest
 
 from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_runtime_pnl_v6_6_calibration import (
     _single_use_claim_path,
+    _validate_target_free_grid,
     _write_single_use_claim,
     build_v6_6_fresh_calibration_artifact,
     build_v6_6_policy_selected_target_free_rows,
@@ -73,6 +74,47 @@ def test_exact_60_selection_fails_closed_on_target_access_or_overlap() -> None:
         )
 
 
+def test_raw_rebuilt_decision_must_match_frozen_market_window() -> None:
+    selected = [
+        {
+            "market_id": "market-a",
+            "market_start_ts": 2_000,
+            "market_end_ts": 3_000,
+        }
+    ]
+    features = [
+        {"market_id": "market-a", "decision_ts": 2_500, "max_input_ts": 2_499}
+    ]
+    actions = [
+        {
+            "market_id": "market-a",
+            "decision_ts": 2_500,
+            "max_input_ts": 2_499,
+            "market_close_ts": 3_000,
+            "action": action,
+        }
+        for action in (
+            "BUY_UP_HOLD_TO_SETTLEMENT",
+            "BUY_DOWN_HOLD_TO_SETTLEMENT",
+            "BUY_UP_SELL_BEFORE_CLOSE",
+            "BUY_DOWN_SELL_BEFORE_CLOSE",
+            "NO_TRADE",
+        )
+    ]
+    _validate_target_free_grid(
+        features,
+        actions,
+        selected_rows=selected,
+        minimum_market_start_ts_exclusive=1_500,
+    )
+    features[0]["decision_ts"] = 1_999
+    with pytest.raises(ValueError, match="outside its frozen market window"):
+        _validate_target_free_grid(
+            features,
+            actions,
+            selected_rows=selected,
+            minimum_market_start_ts_exclusive=1_500,
+        )
 def test_policy_selected_mapper_uses_only_guard_accepted_sbc() -> None:
     market_id = "market-a"
     decision_ts = 1_900_000_000_000
