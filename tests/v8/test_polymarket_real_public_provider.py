@@ -62,6 +62,130 @@ def test_public_http_provider_normalizes_public_market_rows_without_fake_resolut
     assert resolutions == []
 
 
+def test_public_http_provider_uses_exact_trade_and_clob_identity_when_gamma_times_out() -> None:
+    decision_ts = 1_700_001_060_000
+    slug = "btc-updown-5m-1700001000"
+
+    def fetch_json(url: str):
+        parsed = urllib.parse.urlparse(url)
+        if "gamma-api.polymarket.com" in parsed.netloc:
+            raise RealCorpusPublicProviderError(
+                "pytest Gamma timeout",
+                reason_codes=("read_only_public_http_timeout",),
+            )
+        if "data-api.polymarket.com" in parsed.netloc:
+            return [
+                {
+                    "slug": slug,
+                    "conditionId": "0xcondition",
+                    "asset": "up-token",
+                    "outcome": "Up",
+                    "timestamp": 1_700_001_059,
+                },
+                {
+                    "slug": "unrelated-market",
+                    "conditionId": "0xunrelated",
+                    "asset": "other-token",
+                    "outcome": "Yes",
+                    "timestamp": 1_700_001_059,
+                },
+            ]
+        if parsed.netloc == "clob.polymarket.com" and parsed.path == "/markets/0xcondition":
+            return {
+                "condition_id": "0xcondition",
+                "market_slug": slug,
+                "question": "Bitcoin Up or Down - test",
+                "description": (
+                    "Resolution uses the BTC/USD stream at "
+                    "https://data.chain.link/streams/btc-usd."
+                ),
+                "enable_order_book": True,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "tokens": [
+                    {"token_id": "up-token", "outcome": "Up"},
+                    {"token_id": "down-token", "outcome": "Down"},
+                ],
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=decision_ts,
+        fetch_json=fetch_json,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider-clob-fallback",
+        output_dir="/tmp/provider-clob-fallback",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+
+    assert len(markets) == 1
+    assert markets[0]["slug"] == slug
+    assert markets[0]["condition_id"] == "0xcondition"
+    assert markets[0]["up_token_id"] == "up-token"
+    assert markets[0]["down_token_id"] == "down-token"
+    assert markets[0]["reference_price_source"] == (
+        "https://data.chain.link/streams/btc-usd"
+    )
+    assert markets[0]["market_identity_source_type"] == (
+        "data_api_recent_trade_clob_verified"
+    )
+    assert markets[0]["market_identity_data_api_discovery_used"] is True
+    assert markets[0]["market_identity_clob_revalidation_passed"] is True
+    validation = markets[0]["market_identity_clob_revalidation"]
+    assert validation["data_api_exact_slug_trade_count"] == 1
+    assert validation["data_api_latest_trade_ts"] <= decision_ts
+
+
+def test_public_http_provider_fails_closed_when_data_api_identity_is_ambiguous() -> None:
+    slug = "btc-updown-5m-1700001000"
+
+    def fetch_json(url: str):
+        parsed = urllib.parse.urlparse(url)
+        if "gamma-api.polymarket.com" in parsed.netloc:
+            raise RealCorpusPublicProviderError(
+                "pytest Gamma timeout",
+                reason_codes=("read_only_public_http_timeout",),
+            )
+        if "data-api.polymarket.com" in parsed.netloc:
+            return [
+                {
+                    "slug": slug,
+                    "conditionId": condition_id,
+                    "asset": f"{condition_id}-token",
+                    "outcome": "Up",
+                    "timestamp": 1_700_001_059,
+                }
+                for condition_id in ("0xcondition-a", "0xcondition-b")
+            ]
+        raise AssertionError(f"CLOB must not be queried for ambiguous identity: {url}")
+
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_060_000,
+        fetch_json=fetch_json,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider-clob-fallback-ambiguous",
+        output_dir="/tmp/provider-clob-fallback-ambiguous",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    with pytest.raises(RealCorpusPublicProviderError) as exc_info:
+        provider.market_rows(config)
+
+    assert "data_api_market_identity_condition_ambiguous" in (
+        exc_info.value.reason_codes
+    )
+    assert "gamma_market_identity_cache_not_configured" in (
+        exc_info.value.reason_codes
+    )
+
+
 def test_public_http_provider_uses_official_reference_prices_when_present() -> None:
     provider = PolymarketPublicHTTPRealCorpusProvider(
         current_time_ms=1_700_001_000_000,

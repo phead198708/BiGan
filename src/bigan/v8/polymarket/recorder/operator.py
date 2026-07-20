@@ -461,6 +461,7 @@ def _raw_market_row(market: dict[str, Any]) -> dict[str, Any]:
         "market_identity_clob_revalidation_passed",
         "market_identity_clob_revalidation",
         "market_identity_live_orderbook_validation_required",
+        "market_identity_data_api_discovery_used",
     ):
         if field_name in market:
             row[field_name] = market[field_name]

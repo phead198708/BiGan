@@ -54,6 +54,10 @@ BTC_FEATURE_SOURCE_KRAKEN = "kraken_xbt_usd"
 BTC_FEATURE_SOURCE_BINANCE = "binance_btcusdt"
 DEFAULT_BTC_FEATURE_SOURCE_ORDER = ("coinbase", "kraken", "binance")
 GAMMA_PRIMARY_MARKET_IDENTITY_SOURCE_TYPE = "gamma_primary"
+DATA_API_CLOB_MARKET_IDENTITY_SOURCE_TYPE = (
+    "data_api_recent_trade_clob_verified"
+)
+DATA_API_MARKET_IDENTITY_DISCOVERY_LIMIT = 500
 _ACTIVE_GAMMA_PREFETCH_CACHE_PATHS: set[str] = set()
 _ACTIVE_GAMMA_PREFETCH_LOCK = threading.Lock()
 
@@ -335,6 +339,20 @@ class PolymarketPublicHTTPRealCorpusProvider:
                 fallback_reason_codes = (
                     "real_public_collection_empty_market_discovery",
                 )
+            try:
+                rows.append(
+                    self._market_row_from_data_api_clob_fallback(
+                        slug=slug,
+                        config=config,
+                        fetched_at_ts=fetched_at_ts,
+                        fallback_reason_codes=fallback_reason_codes,
+                    )
+                )
+                continue
+            except RealCorpusPublicProviderError as exc:
+                fallback_reason_codes = tuple(
+                    dict.fromkeys((*fallback_reason_codes, *exc.reason_codes))
+                )
             rows.append(
                 self._market_row_from_identity_cache(
                     slug=slug,
@@ -354,6 +372,127 @@ class PolymarketPublicHTTPRealCorpusProvider:
                 base_slugs=slugs,
             )
         return rows[: self.max_markets]
+
+    def _market_row_from_data_api_clob_fallback(
+        self,
+        *,
+        slug: str,
+        config: PolymarketRealCorpusRecorderConfig,
+        fetched_at_ts: int,
+        fallback_reason_codes: tuple[str, ...],
+    ) -> dict[str, Any]:
+        params = urllib.parse.urlencode(
+            {"limit": max(self.recent_trade_limit, DATA_API_MARKET_IDENTITY_DISCOVERY_LIMIT)}
+        )
+        payload = self._get_json(f"{self.data_trades_endpoint}?{params}")
+        if not isinstance(payload, list):
+            raise RealCorpusPublicProviderError(
+                "Data API market identity discovery returned an invalid payload.",
+                reason_codes=("data_api_market_identity_invalid_payload",),
+            )
+        exact_rows = [
+            dict(row)
+            for row in payload
+            if isinstance(row, dict) and str(row.get("slug") or "") == slug
+        ]
+        if not exact_rows:
+            raise RealCorpusPublicProviderError(
+                "Data API recent trades did not contain the exact current market slug.",
+                reason_codes=("data_api_market_identity_exact_slug_missing",),
+            )
+        causal_rows = [
+            row
+            for row in exact_rows
+            if 0 < _trade_timestamp_millis(row) <= fetched_at_ts
+        ]
+        if not causal_rows:
+            raise RealCorpusPublicProviderError(
+                "Data API exact-slug trades were not available by identity decision time.",
+                reason_codes=("data_api_market_identity_noncausal_trade_rows",),
+            )
+        condition_ids = {
+            str(row.get("conditionId") or row.get("condition_id") or "")
+            for row in causal_rows
+            if str(row.get("conditionId") or row.get("condition_id") or "")
+        }
+        if len(condition_ids) != 1:
+            reason = (
+                "data_api_market_identity_condition_missing"
+                if not condition_ids
+                else "data_api_market_identity_condition_ambiguous"
+            )
+            raise RealCorpusPublicProviderError(
+                "Data API exact-slug trades did not identify one condition id.",
+                reason_codes=(reason,),
+            )
+        condition_id = next(iter(condition_ids))
+        clob_payload = self._get_json(
+            f"{self.clob_market_endpoint}/{urllib.parse.quote(condition_id, safe='')}"
+        )
+        if not isinstance(clob_payload, dict):
+            raise RealCorpusPublicProviderError(
+                "CLOB market identity fallback returned an invalid payload.",
+                reason_codes=("data_api_clob_market_identity_invalid_payload",),
+            )
+        row = self._normalize_clob_market_payload(
+            dict(clob_payload),
+            config,
+        )
+        if row is None:
+            raise RealCorpusPublicProviderError(
+                "CLOB market identity fallback could not normalize the exact market.",
+                reason_codes=("data_api_clob_market_identity_normalization_failed",),
+            )
+        if row["slug"] != slug:
+            raise RealCorpusPublicProviderError(
+                "CLOB market identity fallback returned a different slug.",
+                reason_codes=("data_api_clob_market_identity_slug_mismatch",),
+            )
+        if row["condition_id"] != condition_id:
+            raise RealCorpusPublicProviderError(
+                "CLOB market identity fallback returned a different condition id.",
+                reason_codes=("data_api_clob_market_identity_condition_mismatch",),
+            )
+        discovery_projection = [
+            {
+                "slug": slug,
+                "condition_id": condition_id,
+                "asset": str(row_.get("asset") or ""),
+                "outcome": str(row_.get("outcome") or ""),
+                "timestamp": row_.get("timestamp"),
+            }
+            for row_ in causal_rows
+        ]
+        clob_validation = {
+            "passed": True,
+            "condition_id": condition_id,
+            "slug": slug,
+            "up_token_id": row["up_token_id"],
+            "down_token_id": row["down_token_id"],
+            "clob_market_payload_sha256": canonical_json_sha256(clob_payload),
+            "data_api_discovery_projection_sha256": canonical_json_sha256(
+                discovery_projection
+            ),
+            "data_api_exact_slug_trade_count": len(causal_rows),
+            "data_api_latest_trade_ts": max(
+                _trade_timestamp_millis(row_) for row_ in causal_rows
+            ),
+            "retry_policy_relaxed_identity_checks": False,
+        }
+        annotated = _annotate_market_identity(
+            row,
+            source_type=DATA_API_CLOB_MARKET_IDENTITY_SOURCE_TYPE,
+            fetched_at_ts=fetched_at_ts,
+            cache_fallback=False,
+            fallback_reason_codes=fallback_reason_codes,
+            cache_entry_sha256=None,
+            cache_age_ms=None,
+            clob_validation=clob_validation,
+        )
+        annotated["market_identity_clob_revalidation_passed"] = True
+        annotated["market_identity_clob_revalidation"] = clob_validation
+        annotated["market_identity_data_api_discovery_used"] = True
+        return annotated
 
     def prefetch_gamma_market_identities(
         self,
@@ -1416,6 +1555,60 @@ class PolymarketPublicHTTPRealCorpusProvider:
             row["reference_price_start_source_type"] = "gamma_market_payload"
         return row
 
+    def _normalize_clob_market_payload(
+        self,
+        payload: dict[str, Any],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> dict[str, Any] | None:
+        slug = str(payload.get("market_slug") or payload.get("slug") or "")
+        match = BTC_UPDOWN_SLUG_PATTERN.match(slug)
+        if not match:
+            return None
+        family = BTC_UPDOWN_FAMILY_BY_SLUG[match.group(1)]
+        if family not in config.market_families:
+            return None
+        start_ts = int(match.group(2)) * 1000
+        horizon_ms = BTC_UPDOWN_MARKET_HORIZONS_MS[family]
+        end_ts = start_ts + horizon_ms
+        now_ms = self._current_time_ms()
+        if not (start_ts <= now_ms < end_ts):
+            return None
+        condition_id = str(
+            payload.get("condition_id") or payload.get("conditionId") or ""
+        )
+        token_by_outcome = _clob_token_by_up_down_outcome(payload.get("tokens"))
+        if not condition_id or token_by_outcome is None:
+            return None
+        if payload.get("active") is not True or payload.get("closed") is True:
+            return None
+        if payload.get("enable_order_book") is not True:
+            return None
+        if payload.get("accepting_orders") is not True:
+            return None
+        settlement_rule = str(
+            payload.get("description") or payload.get("question") or ""
+        ).strip()
+        reference_source = _reference_price_source_from_clob_payload(payload)
+        if not settlement_rule or not reference_source:
+            return None
+        return {
+            "market_id": condition_id,
+            "condition_id": condition_id,
+            "slug": slug,
+            "market_family": family,
+            "horizon_ms": horizon_ms,
+            "market_start_ts": start_ts,
+            "market_end_ts": end_ts,
+            "settlement_ts": _settlement_ts(payload, default=end_ts + 60_000),
+            "up_token_id": token_by_outcome["UP"],
+            "down_token_id": token_by_outcome["DOWN"],
+            "reference_price_source": reference_source,
+            "settlement_rule": settlement_rule,
+            "raw_market_sha256": canonical_json_sha256(payload),
+            "raw_public_payload": payload,
+            **safety_fields(),
+        }
+
     def _normalize_book_payload(
         self,
         *,
@@ -2202,6 +2395,35 @@ def _clob_token_by_up_down_outcome(value: Any) -> dict[str, str] | None:
             outcomes.append(outcome)
             token_ids.append(token_id)
     return _token_by_up_down_outcome(outcomes=outcomes, token_ids=token_ids)
+
+
+def _trade_timestamp_millis(payload: dict[str, Any]) -> int:
+    raw_value = payload.get("timestamp")
+    try:
+        timestamp = int(float(raw_value))
+    except (TypeError, ValueError):
+        return 0
+    return timestamp if timestamp >= 10_000_000_000 else timestamp * 1000
+
+
+def _reference_price_source_from_clob_payload(payload: dict[str, Any]) -> str:
+    explicit = str(
+        payload.get("resolutionSource")
+        or payload.get("resolution_source")
+        or ""
+    ).strip()
+    if explicit:
+        return explicit
+    settlement_text = "\n".join(
+        str(payload.get(field_name) or "")
+        for field_name in ("description", "question")
+    )
+    match = re.search(
+        r"https://data\.chain\.link/streams/btc-usd(?:\b|/)",
+        settlement_text,
+        flags=re.IGNORECASE,
+    )
+    return "https://data.chain.link/streams/btc-usd" if match else ""
 
 
 def _settlement_ts(payload: dict[str, Any], *, default: int) -> int:
