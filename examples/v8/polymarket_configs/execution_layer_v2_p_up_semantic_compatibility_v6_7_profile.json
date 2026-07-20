@@ -1,0 +1,79 @@
+{
+  "schema_version": "bigan-v8-p-up-semantic-execution-compatibility-v6-7-profile-v1",
+  "issue_number": 227,
+  "candidate_name": "p_up_semantic_execution_compatibility_v6_7",
+  "frozen": true,
+  "source_lineage": {
+    "source_freeze_manifest_sha256": "c9634613d51199cb1ebe9cf8205230a31643dfaa01573040a527063c1f248f91",
+    "v6_2_target_free_predictions_sha256": "ae2d4763bc5f18a057cb1b6165062bc29398c292e5f251a4fa1e61f566e29e90",
+    "target_free_five_action_rows_sha256": "718151b1fa7e7f4ef59ab09c6e65b84966d5ca14450843f261a8310124edd03a",
+    "legacy_guard_replay_sha256": "3c3bca259aef6430d53ec544a2478bd3debdc41ea00230ca49fc8fda015f7a1a",
+    "v6_2_source_model_sha256": "7e292852673fe2072017effc2d40fce000be81734f0c8c3d6950c02e957bcf0c",
+    "v6_2_calibration_sha256": "dc82ddebc51e95e46477894f2a0ba7bd8fa2f6845b22ced43402822b66b68e43"
+  },
+  "selection_rule": {
+    "eligible_actions": [
+      "BUY_DOWN_SELL_BEFORE_CLOSE",
+      "BUY_UP_SELL_BEFORE_CLOSE"
+    ],
+    "ranking_score_field": "mean_ev_lower_confidence_bound",
+    "ranking_score_source": "frozen_v6_2_market_clustered_mean_ev_lcb",
+    "entry_threshold": 0.0,
+    "threshold_operator": "strictly_greater_than",
+    "one_row_per_market": true,
+    "tie_break": [
+      "highest_mean_ev_lower_confidence_bound",
+      "earliest_decision_ts",
+      "lexicographic_action"
+    ],
+    "target_fields_used_for_selection": false,
+    "score_mutation_allowed": false
+  },
+  "hard_execution_safety": {
+    "max_spread_bps": 1000.0,
+    "max_book_staleness_ms": 2000.0,
+    "min_queue_fill_probability_proxy": 0.5,
+    "min_time_to_close_seconds": 60.0,
+    "positive_execution_price_required": true,
+    "positive_executable_ask_notional_required": true,
+    "positive_executable_bid_notional_required": true,
+    "positive_liquidity_depth_required": true,
+    "feature_causality_required": true,
+    "reference_provenance_required": true,
+    "exposure_duplicate_position_and_sizing_guards_unchanged": true
+  },
+  "p_up_semantics": {
+    "p_up_side_alignment_filter_enabled": false,
+    "p_up_action_disagreement_diagnostic_only": true,
+    "market_implied_probability_used_as_direct_fair_value_ev": false,
+    "market_implied_probability_used_as_conditioning_feature": true,
+    "market_implied_probability_used_as_regime_direction_vote": false,
+    "p_up_disagreement_removed_from_execution_safety_blockers_only": true
+  },
+  "target_free_support_gate": {
+    "expected_market_count": 60,
+    "minimum_unique_selected_market_count_per_side": 20,
+    "require_both_sides": true,
+    "labels_outcomes_settlement_or_pnl_access_allowed": false,
+    "result_selected_rerun_allowed": false
+  },
+  "prohibited": {
+    "source_score_mutation_allowed": false,
+    "execution_safety_threshold_tuning_allowed": false,
+    "validation_or_future_labels_used_for_selection": false,
+    "settlement_outcome_or_pnl_access_before_freeze": false,
+    "paper_live_write_wallet_or_capital_unlock_allowed": false
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}
