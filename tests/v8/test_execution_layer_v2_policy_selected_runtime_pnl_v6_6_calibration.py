@@ -5,8 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_net_return_v6 import (
+    _blocked_safety_fields,
+    _descriptor,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_runtime_pnl_v6_6_calibration import (
+    SCHEMA_PREFIX,
     _single_use_claim_path,
+    _validate_prediction_freeze,
     _validate_target_free_grid,
     _write_single_use_claim,
     build_v6_6_fresh_calibration_artifact,
@@ -115,6 +121,141 @@ def test_raw_rebuilt_decision_must_match_frozen_market_window() -> None:
             selected_rows=selected,
             minimum_market_start_ts_exclusive=1_500,
         )
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+
+
+def _prediction_freeze_fixture(tmp_path: Path) -> tuple[dict, Path, Path, Path, Path]:
+    profile_path = tmp_path / "profile.json"
+    point_path = tmp_path / "point.json"
+    selected_path = tmp_path / "selected.jsonl"
+    point_rows_path = tmp_path / "point_rows.jsonl"
+    decision_path = tmp_path / "decision.json"
+    report_path = tmp_path / "report.json"
+    _write_json(profile_path, _profile())
+    _write_json(point_path, {})
+    selected_rows = [
+        {"market_id": f"market-{index}"} for index in range(60)
+    ]
+    point_rows = [
+        {
+            "market_id": f"market-{index}",
+            "side": "UP" if index < 20 else "DOWN",
+            "action": (
+                "BUY_UP_SELL_BEFORE_CLOSE"
+                if index < 20
+                else "BUY_DOWN_SELL_BEFORE_CLOSE"
+            ),
+        }
+        for index in range(40)
+    ]
+    _write_jsonl(selected_path, selected_rows)
+    _write_jsonl(point_rows_path, point_rows)
+    support = {
+        "selected_guard_accepted_sbc_count": 40,
+        "count_by_side": {"UP": 20, "DOWN": 20},
+        "minimum_required_per_side": 20,
+        "target_free_support_gate_passed": True,
+        "blocking_reason_codes": [],
+    }
+    decision = {
+        "schema_version": f"{SCHEMA_PREFIX}-decision-freeze-v1",
+        "future_target_access_allowed": True,
+        "target_free_support": support,
+        "selected_market_count": 60,
+        "selected_market_ids": [row["market_id"] for row in selected_rows],
+        "labels_outcomes_resolution_or_pnl_opened": False,
+        "settlement_provider_called": False,
+        **_blocked_safety_fields(),
+    }
+    report = {
+        "schema_version": f"{SCHEMA_PREFIX}-prediction-freeze-report-v1",
+        "target_free_support_gate_passed": True,
+        "future_target_access_allowed": True,
+        "selected_market_count": 60,
+        "policy_selected_guard_accepted_sbc_count": 40,
+        "policy_selected_guard_accepted_sbc_count_by_side": {"UP": 20, "DOWN": 20},
+        "target_free_support_blocking_reason_codes": [],
+        "labels_outcomes_resolution_or_pnl_opened": False,
+        **_blocked_safety_fields(),
+    }
+    _write_json(decision_path, decision)
+    _write_json(report_path, report)
+    manifest = {
+        "schema_version": f"{SCHEMA_PREFIX}-prediction-freeze-manifest-v1",
+        "future_target_access_allowed": True,
+        "labels_outcomes_resolution_or_pnl_opened": False,
+        "resolution_artifact_opened": False,
+        "settlement_provider_called": False,
+        "profile": _descriptor(profile_path),
+        "point_freeze_manifest": _descriptor(point_path),
+        "accepted_bet_decision_freeze": _descriptor(decision_path),
+        "report": _descriptor(report_path),
+        "selected_window_rows": _descriptor(selected_path),
+        "point_predictions": _descriptor(point_rows_path),
+        **_blocked_safety_fields(),
+    }
+    return manifest, profile_path, point_path, decision_path, report_path
+
+
+def test_prediction_freeze_target_access_requires_cross_artifact_agreement(
+    tmp_path: Path,
+) -> None:
+    manifest, profile_path, point_path, _, _ = _prediction_freeze_fixture(tmp_path)
+    _validate_prediction_freeze(
+        manifest,
+        profile_path=profile_path,
+        point_path=point_path,
+    )
+
+
+@pytest.mark.parametrize("artifact_name", ["decision", "report"])
+def test_prediction_freeze_blocks_semantically_inconsistent_referenced_artifact(
+    tmp_path: Path, artifact_name: str
+) -> None:
+    manifest, profile_path, point_path, decision_path, report_path = (
+        _prediction_freeze_fixture(tmp_path)
+    )
+    artifact_path = decision_path if artifact_name == "decision" else report_path
+    payload = json.loads(artifact_path.read_text())
+    payload["future_target_access_allowed"] = False
+    _write_json(artifact_path, payload)
+    descriptor_field = (
+        "accepted_bet_decision_freeze" if artifact_name == "decision" else "report"
+    )
+    manifest[descriptor_field] = _descriptor(artifact_path)
+    with pytest.raises(ValueError, match="target-access mismatch"):
+        _validate_prediction_freeze(
+            manifest,
+            profile_path=profile_path,
+            point_path=point_path,
+        )
+
+
+def test_prediction_freeze_recomputes_support_from_frozen_point_rows(
+    tmp_path: Path,
+) -> None:
+    manifest, profile_path, point_path, _, _ = _prediction_freeze_fixture(tmp_path)
+    point_rows_path = Path(manifest["point_predictions"]["path"])
+    point_rows = [json.loads(line) for line in point_rows_path.read_text().splitlines()]
+    point_rows[0]["side"] = "DOWN"
+    point_rows[0]["action"] = "BUY_DOWN_SELL_BEFORE_CLOSE"
+    _write_jsonl(point_rows_path, point_rows)
+    manifest["point_predictions"] = _descriptor(point_rows_path)
+    with pytest.raises(ValueError, match="target-access mismatch"):
+        _validate_prediction_freeze(
+            manifest,
+            profile_path=profile_path,
+            point_path=point_path,
+        )
+
+
 def test_policy_selected_mapper_uses_only_guard_accepted_sbc() -> None:
     market_id = "market-a"
     decision_ts = 1_900_000_000_000

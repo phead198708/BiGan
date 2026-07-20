@@ -1142,6 +1142,77 @@ def _validate_prediction_freeze(
         if manifest.get(field) != expected:
             raise ValueError("#226 prediction freeze safety mismatch")
 
+    profile = _load_json(profile_path)
+    decision = _load_json(
+        Path(
+            _verified_descriptor(
+                manifest["accepted_bet_decision_freeze"], "accepted-bet decision freeze"
+            )["path"]
+        )
+    )
+    report = _load_json(
+        Path(
+            _verified_descriptor(
+                manifest["report"], "prediction-freeze report"
+            )["path"]
+        )
+    )
+    selected_rows = _load_jsonl(
+        Path(
+            _verified_descriptor(
+                manifest["selected_window_rows"], "selected calibration window"
+            )["path"]
+        )
+    )
+    point_rows = _load_jsonl(
+        Path(
+            _verified_descriptor(
+                manifest["point_predictions"], "runtime-PnL point predictions"
+            )["path"]
+        )
+    )
+    selected_market_ids = [str(row.get("market_id") or "") for row in selected_rows]
+    point_market_ids = [str(row.get("market_id") or "") for row in point_rows]
+    support = _target_free_support(point_rows, profile=profile)
+    nested_safety = _blocked_safety_fields()
+    if (
+        len(selected_rows) != TARGET_MARKET_COUNT
+        or "" in selected_market_ids
+        or len(set(selected_market_ids)) != TARGET_MARKET_COUNT
+        or "" in point_market_ids
+        or len(set(point_market_ids)) != len(point_market_ids)
+        or not set(point_market_ids).issubset(selected_market_ids)
+        or any(str(row.get("side") or "") not in SIDES for row in point_rows)
+        or any(str(row.get("action") or "") not in SBC_ACTIONS for row in point_rows)
+    ):
+        raise ValueError("#226 prediction freeze selected-market evidence mismatch")
+    if (
+        decision.get("schema_version") != f"{SCHEMA_PREFIX}-decision-freeze-v1"
+        or decision.get("future_target_access_allowed") is not True
+        or decision.get("target_free_support") != support
+        or decision.get("selected_market_count") != TARGET_MARKET_COUNT
+        or decision.get("selected_market_ids") != selected_market_ids
+        or decision.get("labels_outcomes_resolution_or_pnl_opened") is not False
+        or decision.get("settlement_provider_called") is not False
+        or any(decision.get(field) != expected for field, expected in nested_safety.items())
+    ):
+        raise ValueError("#226 accepted-bet decision freeze target-access mismatch")
+    if (
+        report.get("schema_version") != f"{SCHEMA_PREFIX}-prediction-freeze-report-v1"
+        or report.get("target_free_support_gate_passed") is not True
+        or report.get("future_target_access_allowed") is not True
+        or report.get("selected_market_count") != TARGET_MARKET_COUNT
+        or report.get("policy_selected_guard_accepted_sbc_count") != len(point_rows)
+        or report.get("policy_selected_guard_accepted_sbc_count_by_side")
+        != support["count_by_side"]
+        or report.get("target_free_support_blocking_reason_codes") != []
+        or report.get("labels_outcomes_resolution_or_pnl_opened") is not False
+        or any(report.get(field) != expected for field, expected in nested_safety.items())
+    ):
+        raise ValueError("#226 prediction-freeze report target-access mismatch")
+    if support["target_free_support_gate_passed"] is not True:
+        raise ValueError("#226 target-free support gate did not pass")
+
 
 def _validate_settled_index(
     index: dict[str, Any], *, freeze_path: Path, evaluation_started_ts: int
