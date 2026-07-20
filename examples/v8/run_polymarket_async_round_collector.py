@@ -71,6 +71,7 @@ def run_polymarket_async_round_collector_cli(
     future_holdout_collection_freeze_manifest: Path | str | None = None,
     future_holdout_collection_freeze_manifest_sha256: str | None = None,
     overwrite_existing: bool = False,
+    external_stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     if round_count <= 0:
         raise ValueError("round_count must be positive")
@@ -508,11 +509,15 @@ def run_polymarket_async_round_collector_cli(
     try:
         previous_round_start_epoch_seconds: float | None = None
         for index in range(1, round_count + 1):
+            if external_stop_event is not None and external_stop_event.is_set():
+                break
             scheduled_round_start_epoch_seconds = _sleep_until_round_start_window(
                 market_family=market_family,
                 max_round_start_lag_seconds=max_round_start_lag_seconds,
                 previous_round_start_epoch_seconds=(previous_round_start_epoch_seconds),
             )
+            if external_stop_event is not None and external_stop_event.is_set():
+                break
             while (
                 minimum_collection_decision_ts is not None
                 and int(scheduled_round_start_epoch_seconds * 1000)

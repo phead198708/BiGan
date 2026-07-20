@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +17,9 @@ from bigan.v8.polymarket.training.execution_layer_v2_market_clustered_mean_ev_v6
     classify_capture_hard_failure,
     run_market_clustered_mean_ev_v6_2_paper_canary,
     validate_v6_2_paper_candidate_unlock,
+)
+from examples.v8 import (
+    run_execution_layer_v2_market_clustered_mean_ev_v6_2_paper_canary as runner_subject,
 )
 from examples.v8.run_execution_layer_v2_market_clustered_mean_ev_v6_2_paper_canary import (
     _wait_until_epoch_ms,
@@ -65,7 +71,14 @@ def test_snapshot_canary_emits_only_guard_allowed_paper_artifacts(
     assert report["five_action_row_count"] == report["feature_row_count"] * 5
     assert report["paper_intent_count"] == 1
     assert report["paper_fill_count"] == 1
-    assert report["paper_ledger_entry_count"] == 1
+    assert report["paper_exit_intent_count"] == 1
+    assert report["paper_exit_fill_count"] == 1
+    assert report["paper_ledger_entry_count"] == 2
+    assert report["sell_before_close_residual_position_count"] == 0
+    assert report["sell_before_close_lifecycle_complete"] is True
+    assert report["closed_before_settlement_realized_trade_pnl_sum"] == pytest.approx(
+        -0.004
+    )
     assert report["runtime_safety_passed"] is True
     assert report["decision_target_outcome_or_pnl_accessed"] is False
     assert report["paper_candidate_allowed"] is True
@@ -80,6 +93,83 @@ def test_snapshot_canary_emits_only_guard_allowed_paper_artifacts(
     assert intents[0]["forced_coverage_bet"] is False
     audit = _load_jsonl(Path(result["run_dir"]) / "v6_2_paper_canary_capture_audit.jsonl")
     assert audit[0]["resolution_artifact_opened_for_decision"] is False
+
+
+def test_hold_to_settlement_position_never_emits_preclose_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _lineage_bundle(tmp_path)
+    capture = _synthetic_capture(tmp_path)
+    _patch_scoring(
+        monkeypatch,
+        order_allowed=True,
+        selected_action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+    )
+
+    result = run_market_clustered_mean_ev_v6_2_paper_canary(
+        MarketClusteredMeanEVV62PaperCanaryConfig(
+            run_id="hts-lifecycle",
+            output_dir=tmp_path / "out",
+            unlock_manifest_path=bundle["unlock"],
+            expected_unlock_manifest_sha256=_sha(bundle["unlock"]),
+            captured_round_dirs=(capture,),
+            runtime_created_ts=1_784_472_600_000,
+            builder_git_commit="a" * 40,
+        )
+    )
+
+    report = result["report"]
+    assert report["paper_exit_signal_count"] == 1
+    assert report["paper_exit_intent_count"] == 0
+    assert report["paper_exit_fill_count"] == 0
+    assert report["hold_to_settlement_open_position_count"] == 1
+    signals = _load_jsonl(Path(result["run_dir"]) / "v6_2_paper_exit_signals.jsonl")
+    assert signals[0]["paper_exit_decision"] == "HOLD_TO_SETTLEMENT"
+    assert signals[0]["accepted_for_paper_exit_intent"] is False
+    settlement = runner_subject._settlement_evaluation(
+        run_id="hts-lifecycle",
+        run_dir=Path(result["run_dir"]),
+        settlement_source_dirs=[capture],
+    )
+    assert settlement["report"]["settled_position_count"] == 1
+    assert settlement["report"]["unresolved_open_position_count"] == 0
+    assert settlement["rows"][0]["resolved_outcome"] == "UP"
+    assert settlement["rows"][0]["settlement_pnl"] == pytest.approx(-0.112)
+    assert settlement["rows"][0]["settlement_used_for_decision"] is False
+
+
+def test_sell_before_close_without_exit_window_snapshot_remains_residual(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _lineage_bundle(tmp_path)
+    capture = _synthetic_capture(tmp_path)
+    books_path = capture / "raw" / "raw_polymarket_orderbooks.jsonl"
+    books = _load_jsonl(books_path)
+    last_ts = max(int(row["ts"]) for row in books)
+    _write_jsonl(books_path, [row for row in books if int(row["ts"]) < last_ts])
+    _patch_scoring(monkeypatch, order_allowed=True)
+
+    result = run_market_clustered_mean_ev_v6_2_paper_canary(
+        MarketClusteredMeanEVV62PaperCanaryConfig(
+            run_id="sbc-residual",
+            output_dir=tmp_path / "out",
+            unlock_manifest_path=bundle["unlock"],
+            expected_unlock_manifest_sha256=_sha(bundle["unlock"]),
+            captured_round_dirs=(capture,),
+            runtime_created_ts=1_784_472_600_000,
+            builder_git_commit="a" * 40,
+        )
+    )
+
+    report = result["report"]
+    assert report["paper_exit_intent_count"] == 0
+    assert report["paper_exit_fill_count"] == 0
+    assert report["sell_before_close_residual_position_count"] == 1
+    assert report["sell_before_close_lifecycle_complete"] is False
+    assert report["runtime_safety_passed"] is False
+    signals = _load_jsonl(Path(result["run_dir"]) / "v6_2_paper_exit_signals.jsonl")
+    assert signals[-1]["exit_reason_codes"] == ["exit_book_stale"]
+    assert signals[-1]["accepted_for_paper_exit_intent"] is False
 
 
 def test_snapshot_runner_reports_fixture_mode_and_keeps_handoff_blocked(
@@ -103,6 +193,80 @@ def test_snapshot_runner_reports_fixture_mode_and_keeps_handoff_blocked(
     assert result["manifest"]["paper_only"] is True
     assert result["manifest"]["capital_at_risk"] is False
     assert result["settlement_status"]["finalization_attempted_round_count"] == 0
+    assert "settlement_evaluation_report" in result["manifest"]["artifacts"]
+    assert "settlement_evaluation_rows" in result["manifest"]["artifacts"]
+
+
+def test_real_runner_uses_one_continuous_collector_decoupled_from_scoring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _lineage_bundle(tmp_path)
+    source = _synthetic_capture(tmp_path)
+    for dirname in ("raw", "provider_raw"):
+        _write_jsonl(source / dirname / "raw_polymarket_resolutions.jsonl", [])
+    _patch_scoring(monkeypatch, order_allowed=True)
+    collector_finished = threading.Event()
+    collector_calls = []
+
+    def fake_collector(**kwargs):
+        collector_calls.append(kwargs)
+        target = Path(kwargs["output_dir"]) / "continuous-capture-round-01"
+        shutil.copytree(source, target)
+        capture = {
+            "round_index": 1,
+            "run_id": target.name,
+            "run_dir": str(target),
+            "scheduled_round_start_ts": 1_784_472_000_000,
+        }
+        collector_finished.set()
+        return {"captures": [capture], "errors": []}
+
+    original_scoring = runner_subject._run_scoring
+
+    def scoring_after_collector(**kwargs):
+        assert collector_finished.is_set()
+        return original_scoring(**kwargs)
+
+    monkeypatch.setattr(
+        runner_subject,
+        "run_polymarket_async_round_collector_cli",
+        fake_collector,
+    )
+    monkeypatch.setattr(runner_subject, "_run_scoring", scoring_after_collector)
+    monkeypatch.setattr(
+        runner_subject,
+        "finalize_polymarket_pending_round",
+        lambda *args, **kwargs: SimpleNamespace(
+            corpus_dir=None,
+            report={
+                "finalization_status": "pending_resolution",
+                "pending_resolution": True,
+                "raw_resolution_count": 0,
+            }
+        ),
+    )
+
+    result = run_v6_2_paper_canary_cli(
+        run_id="continuous-runner",
+        output_dir=tmp_path / "out",
+        unlock_manifest_path=bundle["unlock"],
+        expected_unlock_manifest_sha256=_sha(bundle["unlock"]),
+        round_count=12,
+        settlement_poll_interval_seconds=0.01,
+        settlement_grace_seconds=0.0,
+    )
+
+    assert len(collector_calls) == 1
+    assert collector_calls[0]["round_count"] == 12
+    assert isinstance(collector_calls[0]["external_stop_event"], threading.Event)
+    assert result["collection_status"]["continuous_round_collector_enabled"] is True
+    assert (
+        result["collection_status"][
+            "round_capture_scheduler_decoupled_from_scoring"
+        ]
+        is True
+    )
+    assert result["manifest"]["v8_execution_handoff_allowed"] is False
 
 
 def test_guard_blocked_decision_creates_no_intent_fill_or_ledger(
@@ -169,7 +333,10 @@ def test_round_boundary_wait_survives_fast_failed_capture() -> None:
 
 
 def _patch_scoring(
-    monkeypatch: pytest.MonkeyPatch, *, order_allowed: bool
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    order_allowed: bool,
+    selected_action: str = "BUY_UP_SELL_BEFORE_CLOSE",
 ) -> None:
     monkeypatch.setattr(subject.xgb.Booster, "load_model", lambda self, path: None)
 
@@ -178,7 +345,7 @@ def _patch_scoring(
             {
                 **row,
                 "raw_direct_predicted_net_return": (
-                    0.1 if row["action"] == "BUY_UP_SELL_BEFORE_CLOSE" else 0.0
+                    0.1 if row["action"] == selected_action else 0.0
                 ),
             }
             for row in rows
@@ -206,8 +373,12 @@ def _patch_scoring(
     )
 
     def fake_replay(rows, **kwargs):
-        selected = next(
-            row for row in rows if row["action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+        selected = next(row for row in rows if row["action"] == selected_action)
+        side = "UP" if "BUY_UP" in selected_action else "DOWN"
+        family = (
+            "SELL_BEFORE_CLOSE"
+            if "SELL_BEFORE_CLOSE" in selected_action
+            else "HOLD_TO_SETTLEMENT"
         )
         return [
             {
@@ -215,8 +386,8 @@ def _patch_scoring(
                 "decision_ts": selected["decision_ts"],
                 "source_selected_action": selected["action"],
                 "executed_action": selected["action"],
-                "selected_side": "UP",
-                "selected_action_family": "SELL_BEFORE_CLOSE",
+                "selected_side": side,
+                "selected_action_family": family,
                 "decision_score": 0.1,
                 "selected_vs_runner_up_advantage": 0.05,
                 "execution_guard_order_allowed": order_allowed,

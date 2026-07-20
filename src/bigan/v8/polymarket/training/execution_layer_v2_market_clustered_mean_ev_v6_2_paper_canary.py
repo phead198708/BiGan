@@ -10,8 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import xgboost as xgb
 
+from bigan.execution.position_manager import PositionManager
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_prediction_freeze import (
     ALLOWED_RAW_FEATURE_FILES,
@@ -31,12 +33,25 @@ from bigan.v8.polymarket.training.execution_layer_v2_outcome_blind_acceptance_vi
 from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_net_return_v6_fit import (
     attach_frozen_execution_compatibility,
 )
+from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
+    O_V8_PAPER_FRESH_EXIT_DECISION_POLICY_SOURCE,
+    O_V8_PAPER_FRESH_EXIT_FORCE_SECONDS_TO_CLOSE,
+    O_V8_PAPER_FRESH_EXIT_THRESHOLD_PROFILE_NAME,
+    _fresh_paper_adapter_sell_decision,
+)
+from bigan.v8.polymarket.training.post_freeze_o_replay_aligned_source_ranking import (
+    _v8_execution_guard_config,
+)
 
 SCHEMA_PREFIX = "bigan-v8-market-clustered-mean-ev-v6-2-paper-canary"
 EXPECTED_SCOPE = "v6_2_bounded_local_paper_canary_only"
 EXPECTED_ROUND_COUNT = 12
 MAXIMUM_PAPER_ORDER_SIZE = 0.2
 HARD_CAPTURE_FAILURE_LIMIT = 3
+SELL_BEFORE_CLOSE_EXIT_WINDOW_SECONDS = O_V8_PAPER_FRESH_EXIT_FORCE_SECONDS_TO_CLOSE
+SELL_BEFORE_CLOSE_EXIT_RULE_ID = (
+    "legacy_adapter_first_causal_guard_quality_sell_signal_v1"
+)
 FORBIDDEN_DECISION_FIELDS = frozenset(
     {
         "accepted_bet_net_pnl",
@@ -204,10 +219,18 @@ def run_market_clustered_mean_ev_v6_2_paper_canary(
         )
 
     allowed = [row for row in guard_rows if row.get("execution_guard_order_allowed") is True]
-    intents = _paper_intents(config.run_id, allowed)
+    intents = _paper_intents(config.run_id, allowed, feature_rows=feature_rows)
     fills = _paper_fills(intents)
-    ledger = _paper_ledger(fills)
-    positions = _paper_positions(fills)
+    lifecycle = _paper_position_lifecycle(
+        run_id=config.run_id,
+        feature_rows=feature_rows,
+        entry_fills=fills,
+    )
+    exit_signals = lifecycle["exit_signals"]
+    exit_intents = lifecycle["exit_intents"]
+    exit_fills = lifecycle["exit_fills"]
+    ledger = lifecycle["ledger"]
+    positions = lifecycle["positions"]
 
     run_dir = Path(config.output_dir).expanduser().resolve() / config.run_id
     if run_dir.exists():
@@ -223,8 +246,14 @@ def run_market_clustered_mean_ev_v6_2_paper_canary(
         "guard_rows": run_dir / "v6_2_paper_canary_execution_guard_rows.jsonl",
         "paper_intents": run_dir / "v6_2_paper_intents.jsonl",
         "paper_fills": run_dir / "v6_2_paper_fills.jsonl",
+        "paper_exit_signals": run_dir / "v6_2_paper_exit_signals.jsonl",
+        "paper_exit_intents": run_dir / "v6_2_paper_exit_intents.jsonl",
+        "paper_exit_fills": run_dir / "v6_2_paper_exit_fills.jsonl",
         "paper_ledger": run_dir / "v6_2_paper_ledger.jsonl",
         "paper_positions": run_dir / "v6_2_paper_positions.json",
+        "position_lifecycle_report": (
+            run_dir / "v6_2_paper_position_lifecycle_report.json"
+        ),
         "safety_report": run_dir / "v6_2_paper_canary_runtime_safety_report.json",
         "runtime_report": run_dir / "v6_2_paper_canary_runtime_report.json",
         "runtime_markdown": run_dir / "v6_2_paper_canary_runtime_report.md",
@@ -238,10 +267,14 @@ def run_market_clustered_mean_ev_v6_2_paper_canary(
         ("guard_rows", guard_rows),
         ("paper_intents", intents),
         ("paper_fills", fills),
+        ("paper_exit_signals", exit_signals),
+        ("paper_exit_intents", exit_intents),
+        ("paper_exit_fills", exit_fills),
         ("paper_ledger", ledger),
     ):
         _write_jsonl(paths[name], rows)
     _write_json(paths["paper_positions"], positions)
+    _write_json(paths["position_lifecycle_report"], lifecycle["report"])
     round_artifacts = _write_per_round_artifacts(
         run_dir / "rounds",
         capture_audits=capture_audits,
@@ -251,6 +284,9 @@ def run_market_clustered_mean_ev_v6_2_paper_canary(
         guard_rows=guard_rows,
         intents=intents,
         fills=fills,
+        exit_signals=exit_signals,
+        exit_intents=exit_intents,
+        exit_fills=exit_fills,
         ledger=ledger,
     )
     safety = _safety_report(
@@ -261,7 +297,11 @@ def run_market_clustered_mean_ev_v6_2_paper_canary(
         guard_rows=guard_rows,
         intents=intents,
         fills=fills,
+        exit_signals=exit_signals,
+        exit_intents=exit_intents,
+        exit_fills=exit_fills,
         ledger=ledger,
+        positions=positions,
     )
     _write_json(paths["safety_report"], safety)
     report = _runtime_report(
@@ -276,8 +316,12 @@ def run_market_clustered_mean_ev_v6_2_paper_canary(
         guard_rows=guard_rows,
         intents=intents,
         fills=fills,
+        exit_signals=exit_signals,
+        exit_intents=exit_intents,
+        exit_fills=exit_fills,
         ledger=ledger,
         positions=positions,
+        lifecycle_report=lifecycle["report"],
         safety=safety,
         round_artifacts=round_artifacts,
     )
@@ -289,7 +333,7 @@ def run_market_clustered_mean_ev_v6_2_paper_canary(
         if name != "manifest" and path.is_file()
     }
     manifest = {
-        "schema_version": f"{SCHEMA_PREFIX}-manifest-v1",
+        "schema_version": f"{SCHEMA_PREFIX}-manifest-v2",
         "run_id": config.run_id,
         "builder_git_commit": config.builder_git_commit,
         "runtime_created_ts": config.runtime_created_ts,
@@ -299,6 +343,14 @@ def run_market_clustered_mean_ev_v6_2_paper_canary(
         "complete_round_count": len(valid_audits),
         "paper_intent_count": len(intents),
         "paper_fill_count": len(fills),
+        "paper_exit_intent_count": len(exit_intents),
+        "paper_exit_fill_count": len(exit_fills),
+        "sell_before_close_residual_position_count": positions[
+            "sell_before_close_residual_position_count"
+        ],
+        "closed_before_settlement_realized_trade_pnl_sum": lifecycle["report"][
+            "closed_before_settlement_realized_trade_pnl_sum"
+        ],
         "runtime_safety_passed": safety["runtime_safety_passed"],
         "paper_candidate_allowed": True,
         "paper_only": True,
@@ -433,12 +485,45 @@ def _validate_decision_artifacts(
             raise ValueError("paper canary decision row contains targets:" + ",".join(forbidden))
 
 
-def _paper_intents(run_id: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _paper_intents(
+    run_id: str,
+    rows: list[dict[str, Any]],
+    *,
+    feature_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    features_by_decision = {
+        (str(row["market_id"]), int(row["decision_ts"])): row
+        for row in feature_rows
+    }
     intents = []
     for index, row in enumerate(rows, 1):
         size = float(row.get("proposed_order_size") or 0.0)
         micro = dict(row.get("microstructure_snapshot") or {})
         price = float(micro.get("entry_ask") or 0.0)
+        decision_ts = int(row["decision_ts"])
+        source_feature = features_by_decision.get(
+            (str(row["market_id"]), decision_ts)
+        )
+        if source_feature is None:
+            raise ValueError("guard-allowed decision is missing its source feature row")
+        time_to_close_seconds = float(
+            (source_feature.get("features") or {}).get("time_to_close_seconds")
+            or 0.0
+        )
+        if time_to_close_seconds <= 0.0:
+            raise ValueError("guard-allowed decision has invalid source market close")
+        market_close_ts = decision_ts + int(round(time_to_close_seconds * 1_000.0))
+        action_family = str(row["selected_action_family"])
+        intended_exit_policy = (
+            "sell_before_close"
+            if action_family == "SELL_BEFORE_CLOSE"
+            else "hold_to_settlement"
+        )
+        planned_exit_before_ts = (
+            market_close_ts - int(SELL_BEFORE_CLOSE_EXIT_WINDOW_SECONDS * 1_000.0)
+            if intended_exit_policy == "sell_before_close"
+            else None
+        )
         if not 0.0 < size <= MAXIMUM_PAPER_ORDER_SIZE:
             raise ValueError("guard-allowed paper order size violates frozen maximum")
         if not 0.0 < price < 1.0:
@@ -446,11 +531,19 @@ def _paper_intents(run_id: str, rows: list[dict[str, Any]]) -> list[dict[str, An
         intent = {
             "paper_intent_id": f"{run_id}-intent-{index:06d}",
             "market_id": row["market_id"],
-            "decision_ts": int(row["decision_ts"]),
+            "decision_ts": decision_ts,
+            "market_close_ts": market_close_ts,
             "source_selected_action": row["source_selected_action"],
             "executed_action": row["executed_action"],
             "selected_side": row["selected_side"],
-            "selected_action_family": row["selected_action_family"],
+            "selected_action_family": action_family,
+            "intended_exit_policy": intended_exit_policy,
+            "planned_exit_before_ts": planned_exit_before_ts,
+            "sell_before_close_exit_rule_id": (
+                SELL_BEFORE_CLOSE_EXIT_RULE_ID
+                if intended_exit_policy == "sell_before_close"
+                else None
+            ),
             "decision_score": float(row["decision_score"]),
             "selected_vs_runner_up_advantage": float(row["selected_vs_runner_up_advantage"]),
             "paper_order_size": size,
@@ -482,9 +575,12 @@ def _paper_fills(intents: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "paper_intent_id": intent["paper_intent_id"],
             "market_id": intent["market_id"],
             "decision_ts": intent["decision_ts"],
+            "market_close_ts": intent["market_close_ts"],
             "executed_action": intent["executed_action"],
             "selected_side": intent["selected_side"],
             "selected_action_family": intent["selected_action_family"],
+            "intended_exit_policy": intent["intended_exit_policy"],
+            "planned_exit_before_ts": intent["planned_exit_before_ts"],
             "requested_size": size,
             "filled_size": size,
             "paper_fill_price": price,
@@ -504,22 +600,542 @@ def _paper_fills(intents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return fills
 
 
-def _paper_ledger(fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _paper_position_lifecycle(
+    *,
+    run_id: str,
+    feature_rows: list[dict[str, Any]],
+    entry_fills: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply the frozen action-family lifecycle using causal paper-only books."""
+
+    guard_config = _v8_execution_guard_config()
+    conn = duckdb.connect(":memory:")
+    manager = PositionManager(conn=conn)
+    exit_signals: list[dict[str, Any]] = []
+    exit_intents: list[dict[str, Any]] = []
+    exit_fills: list[dict[str, Any]] = []
+    fill_by_event_id: dict[str, dict[str, Any]] = {}
+    residual_reasons: dict[str, list[str]] = {}
+    try:
+        for fill in sorted(
+            entry_fills,
+            key=lambda row: (int(row["decision_ts"]), str(row["paper_fill_id"])),
+        ):
+            event_id = str(fill["paper_fill_id"])
+            fill_by_event_id[event_id] = fill
+            family = str(fill["selected_action_family"])
+            manager.open_position(
+                event_id=event_id,
+                symbol=f"POLYMARKET:{fill['market_id']}:{fill['selected_side']}",
+                side=str(fill["selected_side"]),
+                entry_price=float(fill["paper_fill_price"]),
+                size=float(fill["filled_size"]),
+                order_id=str(fill["paper_intent_id"]),
+                sleeve="volatility" if family == "SELL_BEFORE_CLOSE" else "settlement",
+                entry_time=int(fill["decision_ts"]),
+                fill_price=float(fill["paper_fill_price"]),
+            )
+            if family == "HOLD_TO_SETTLEMENT":
+                exit_signals.append(
+                    _paper_exit_signal(
+                        run_id=run_id,
+                        signal_index=len(exit_signals) + 1,
+                        fill=fill,
+                        decision="HOLD_TO_SETTLEMENT",
+                        candidate=None,
+                        reason_codes=["hold_to_settlement_policy_no_preclose_exit"],
+                    )
+                )
+                continue
+
+            candidates = _sell_before_close_exit_candidates(
+                fill=fill,
+                feature_rows=feature_rows,
+            )
+            if not candidates:
+                reasons = ["sell_before_close_post_entry_snapshot_missing"]
+                residual_reasons[event_id] = reasons
+                exit_signals.append(
+                    _paper_exit_signal(
+                        run_id=run_id,
+                        signal_index=len(exit_signals) + 1,
+                        fill=fill,
+                        decision="HOLD_POSITION",
+                        candidate=None,
+                        reason_codes=reasons,
+                    )
+                )
+                continue
+
+            closed = False
+            last_reasons: list[str] = []
+            for candidate in candidates:
+                quality_reasons = _sell_before_close_exit_blockers(
+                    candidate=candidate,
+                    fill=fill,
+                    guard_config=guard_config,
+                )
+                sell = False
+                adapter_reasons: list[str] = []
+                if not quality_reasons:
+                    sell, adapter_reasons = _fresh_paper_adapter_sell_decision(
+                        exit_price=float(candidate["exit_bid"]),
+                        entry_price=float(fill["paper_fill_price"]),
+                        p_side=float(candidate["selected_side_probability"]),
+                        time_to_close=float(candidate["time_to_close_seconds"]),
+                    )
+                reasons = quality_reasons or adapter_reasons
+                decision = "SELL_POSITION" if sell else "HOLD_POSITION"
+                signal = _paper_exit_signal(
+                    run_id=run_id,
+                    signal_index=len(exit_signals) + 1,
+                    fill=fill,
+                    decision=decision,
+                    candidate=candidate,
+                    reason_codes=reasons,
+                )
+                exit_signals.append(signal)
+                if not sell:
+                    last_reasons = reasons
+                    continue
+                manager.close_position(
+                    event_id,
+                    float(candidate["exit_bid"]),
+                    exit_time=int(candidate["decision_ts"]),
+                )
+                intent = _paper_exit_intent(
+                    run_id=run_id,
+                    intent_index=len(exit_intents) + 1,
+                    signal=signal,
+                )
+                exit_intents.append(intent)
+                exit_fills.append(
+                    _paper_exit_fill(
+                        fill_index=len(exit_fills) + 1,
+                        intent=intent,
+                    )
+                )
+                closed = True
+                break
+            if not closed:
+                residual_reasons[event_id] = last_reasons or [
+                    "sell_before_close_no_guard_quality_exit_snapshot"
+                ]
+
+        position_rows = _paper_position_rows(
+            manager=manager,
+            fill_by_event_id=fill_by_event_id,
+            exit_fills=exit_fills,
+            residual_reasons=residual_reasons,
+        )
+    finally:
+        conn.close()
+
+    positions = {
+        "schema_version": f"{SCHEMA_PREFIX}-positions-v2",
+        "position_count": len(position_rows),
+        "open_position_count": sum(row["status"] == "open" for row in position_rows),
+        "closed_position_count": sum(row["status"] == "closed" for row in position_rows),
+        "sell_before_close_residual_position_count": sum(
+            row["status"] == "open"
+            and row["intended_exit_policy"] == "sell_before_close"
+            for row in position_rows
+        ),
+        "hold_to_settlement_open_position_count": sum(
+            row["status"] == "open"
+            and row["intended_exit_policy"] == "hold_to_settlement"
+            for row in position_rows
+        ),
+        "positions": position_rows,
+        "paper_only": True,
+        "capital_at_risk": False,
+    }
+    ledger = _paper_ledger(entry_fills, exit_fills)
+    causal_violations = sum(
+        signal.get("exit_max_input_ts") is not None
+        and (
+            int(signal["exit_max_input_ts"]) > int(signal["decision_ts"])
+            or int(signal["decision_ts"]) >= int(signal["market_close_ts"])
+        )
+        for signal in exit_signals
+    )
+    report = {
+        "schema_version": f"{SCHEMA_PREFIX}-position-lifecycle-report-v1",
+        "run_id": run_id,
+        "position_manager_reused": True,
+        "position_manager_module": "bigan.execution.position_manager.PositionManager",
+        "legacy_position_exit_adapter_reused": True,
+        "exit_decision_policy_source": O_V8_PAPER_FRESH_EXIT_DECISION_POLICY_SOURCE,
+        "exit_threshold_profile_name": O_V8_PAPER_FRESH_EXIT_THRESHOLD_PROFILE_NAME,
+        "sell_before_close_exit_rule_id": SELL_BEFORE_CLOSE_EXIT_RULE_ID,
+        "sell_before_close_exit_window_seconds": SELL_BEFORE_CLOSE_EXIT_WINDOW_SECONDS,
+        "exit_quality_guard_config": {
+            key: guard_config[key]
+            for key in (
+                "max_spread_bps",
+                "max_book_staleness_ms",
+                "min_queue_fill",
+            )
+        },
+        "exit_quality_guard_config_sha256": canonical_json_sha256(
+            {
+                key: guard_config[key]
+                for key in (
+                    "max_spread_bps",
+                    "max_book_staleness_ms",
+                    "min_queue_fill",
+                )
+            }
+        ),
+        "entry_fill_count": len(entry_fills),
+        "exit_signal_count": len(exit_signals),
+        "exit_intent_count": len(exit_intents),
+        "exit_fill_count": len(exit_fills),
+        "closed_before_settlement_realized_trade_pnl_sum": sum(
+            float(row["realized_trade_pnl"])
+            for row in position_rows
+            if row["realized_trade_pnl"] is not None
+        ),
+        "sell_before_close_residual_position_count": positions[
+            "sell_before_close_residual_position_count"
+        ],
+        "hold_to_settlement_preclose_exit_count": sum(
+            row["intended_exit_policy"] == "hold_to_settlement"
+            for row in exit_fills
+        ),
+        "exit_causality_violation_count": causal_violations,
+        "position_lifecycle_reconciled": (
+            len(position_rows) == len(entry_fills)
+            and len(exit_intents) == len(exit_fills)
+            and causal_violations == 0
+        ),
+        "sell_before_close_lifecycle_complete": positions[
+            "sell_before_close_residual_position_count"
+        ]
+        == 0,
+        "outcome_label_or_pnl_used_for_exit_decision": False,
+        "realized_exit_pnl_used_for_policy_tuning": False,
+        "source_or_o_score_mutated": False,
+        "threshold_cost_sizing_or_entry_guard_mutated": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "live_trading_enabled": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+    }
+    report["report_id"] = canonical_json_sha256(report)
+    return {
+        "exit_signals": exit_signals,
+        "exit_intents": exit_intents,
+        "exit_fills": exit_fills,
+        "ledger": ledger,
+        "positions": positions,
+        "report": report,
+    }
+
+
+def _sell_before_close_exit_candidates(
+    *,
+    fill: dict[str, Any],
+    feature_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    market_id = str(fill["market_id"])
+    entry_ts = int(fill["decision_ts"])
+    market_close_ts = int(fill["market_close_ts"])
+    side = str(fill["selected_side"]).lower()
+    candidates = []
+    for row in feature_rows:
+        decision_ts = int(row.get("decision_ts") or 0)
+        if (
+            str(row.get("market_id") or "") != market_id
+            or decision_ts <= entry_ts
+            or decision_ts >= market_close_ts
+        ):
+            continue
+        raw = dict(row.get("features") or {})
+        candidate = {
+            "market_id": market_id,
+            "decision_ts": decision_ts,
+            "market_close_ts": market_close_ts,
+            "max_input_ts": int(row.get("max_input_ts") or 0),
+            "available_at_ts": int(row.get("available_at_ts") or 0),
+            "exit_bid": float(raw.get(f"{side}_bid") or 0.0),
+            "exit_ask": float(raw.get(f"{side}_ask") or 0.0),
+            "exit_bid_size": float(raw.get(f"{side}_bid_size") or 0.0),
+            "exit_executable_bid_notional": float(
+                raw.get(f"{side}_executable_bid_notional") or 0.0
+            ),
+            "spread_bps": float(raw.get(f"{side}_spread_bps") or 0.0),
+            "book_staleness_ms": float(
+                raw.get(f"{side}_book_staleness_ms") or 0.0
+            ),
+            "queue_fill_proxy": float(
+                raw.get(f"{side}_queue_fill_probability_proxy") or 0.0
+            ),
+            "time_to_close_seconds": float(raw.get("time_to_close_seconds") or 0.0),
+            "source_feature_row_sha256": str(
+                row.get("future_feature_row_sha256")
+                or canonical_json_sha256(row)
+            ),
+        }
+        up_mid = float(raw.get("up_mid") or 0.0)
+        down_mid = float(raw.get("down_mid") or 0.0)
+        probability_denominator = up_mid + down_mid
+        p_up = up_mid / probability_denominator if probability_denominator > 0.0 else 0.5
+        candidate["p_up"] = p_up
+        candidate["p_down"] = 1.0 - p_up
+        candidate["selected_side_probability"] = (
+            p_up if side == "up" else 1.0 - p_up
+        )
+        candidate["exit_candidate_sha256"] = canonical_json_sha256(candidate)
+        candidates.append(candidate)
+    return sorted(candidates, key=lambda row: (row["decision_ts"], row["max_input_ts"]))
+
+
+def _sell_before_close_exit_blockers(
+    *,
+    candidate: dict[str, Any],
+    fill: dict[str, Any],
+    guard_config: dict[str, Any],
+) -> list[str]:
+    reasons = []
+    decision_ts = int(candidate["decision_ts"])
+    if (
+        int(candidate["max_input_ts"]) <= 0
+        or int(candidate["available_at_ts"]) <= 0
+        or int(candidate["max_input_ts"]) > decision_ts
+        or int(candidate["available_at_ts"]) > decision_ts
+    ):
+        reasons.append("exit_feature_timestamp_causality_violation")
+    if decision_ts >= int(candidate["market_close_ts"]):
+        reasons.append("exit_not_strictly_before_market_close")
+    if not 0.0 < float(candidate["exit_bid"]) < 1.0:
+        reasons.append("exit_executable_bid_missing_or_invalid")
+    if not 0.0 < float(candidate["exit_ask"]) < 1.0:
+        reasons.append("exit_executable_ask_missing_or_invalid")
+    if (
+        float(candidate["spread_bps"]) < 0.0
+        or float(candidate["spread_bps"]) > float(guard_config["max_spread_bps"])
+    ):
+        reasons.append("exit_spread_too_wide")
+    if (
+        float(candidate["book_staleness_ms"]) < 0.0
+        or float(candidate["book_staleness_ms"])
+        > float(guard_config["max_book_staleness_ms"])
+    ):
+        reasons.append("exit_book_stale")
+    if not (
+        float(guard_config["min_queue_fill"])
+        <= float(candidate["queue_fill_proxy"])
+        <= 1.0
+    ):
+        reasons.append("exit_queue_fill_too_weak")
+    size = float(fill["filled_size"])
+    if float(candidate["exit_bid_size"]) < size:
+        reasons.append("exit_bid_size_below_position_size")
+    if float(candidate["exit_executable_bid_notional"]) < size * float(
+        candidate["exit_bid"]
+    ):
+        reasons.append("exit_executable_notional_below_position_notional")
+    return sorted(set(reasons))
+
+
+def _paper_exit_signal(
+    *,
+    run_id: str,
+    signal_index: int,
+    fill: dict[str, Any],
+    decision: str,
+    candidate: dict[str, Any] | None,
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    row = {
+        "paper_exit_signal_id": f"{run_id}-exit-signal-{signal_index:06d}",
+        "paper_fill_id": fill["paper_fill_id"],
+        "market_id": fill["market_id"],
+        "selected_side": fill["selected_side"],
+        "entry_action": fill["executed_action"],
+        "intended_exit_policy": fill["intended_exit_policy"],
+        "entry_decision_ts": fill["decision_ts"],
+        "decision_ts": (
+            int(candidate["decision_ts"])
+            if candidate is not None
+            else int(fill["decision_ts"])
+        ),
+        "market_close_ts": fill["market_close_ts"],
+        "planned_exit_before_ts": fill["planned_exit_before_ts"],
+        "paper_exit_decision": decision,
+        "accepted_for_paper_exit_intent": decision == "SELL_POSITION",
+        "exit_price": None if candidate is None else candidate["exit_bid"],
+        "exit_size": (
+            float(fill["filled_size"]) if decision == "SELL_POSITION" else 0.0
+        ),
+        "exit_max_input_ts": None if candidate is None else candidate["max_input_ts"],
+        "exit_available_at_ts": (
+            None if candidate is None else candidate["available_at_ts"]
+        ),
+        "exit_microstructure_snapshot": None if candidate is None else candidate,
+        "exit_reason_codes": sorted(set(reason_codes)),
+        "sell_before_close_exit_rule_id": (
+            SELL_BEFORE_CLOSE_EXIT_RULE_ID
+            if fill["intended_exit_policy"] == "sell_before_close"
+            else None
+        ),
+        "outcome_label_or_pnl_used": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+    }
+    row["paper_exit_signal_sha256"] = canonical_json_sha256(row)
+    return row
+
+
+def _paper_exit_intent(
+    *, run_id: str, intent_index: int, signal: dict[str, Any]
+) -> dict[str, Any]:
+    intent = {
+        "paper_exit_intent_id": f"{run_id}-exit-intent-{intent_index:06d}",
+        "paper_exit_signal_id": signal["paper_exit_signal_id"],
+        "paper_fill_id": signal["paper_fill_id"],
+        "market_id": signal["market_id"],
+        "selected_side": signal["selected_side"],
+        "entry_action": signal["entry_action"],
+        "intended_exit_policy": signal["intended_exit_policy"],
+        "decision_ts": signal["decision_ts"],
+        "market_close_ts": signal["market_close_ts"],
+        "paper_exit_action": "SELL_POSITION",
+        "paper_exit_size": signal["exit_size"],
+        "paper_limit_price": signal["exit_price"],
+        "exit_reason_codes": signal["exit_reason_codes"],
+        "local_paper_exit_only": True,
+        "outcome_label_or_pnl_used": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+    }
+    intent["paper_exit_intent_sha256"] = canonical_json_sha256(intent)
+    return intent
+
+
+def _paper_exit_fill(*, fill_index: int, intent: dict[str, Any]) -> dict[str, Any]:
+    size = float(intent["paper_exit_size"])
+    price = float(intent["paper_limit_price"])
+    fill = {
+        "paper_exit_fill_id": f"paper-exit-fill-{fill_index:06d}",
+        "paper_exit_intent_id": intent["paper_exit_intent_id"],
+        "entry_paper_fill_id": intent["paper_fill_id"],
+        "market_id": intent["market_id"],
+        "selected_side": intent["selected_side"],
+        "entry_action": intent["entry_action"],
+        "intended_exit_policy": intent["intended_exit_policy"],
+        "decision_ts": intent["decision_ts"],
+        "market_close_ts": intent["market_close_ts"],
+        "requested_size": size,
+        "filled_size": size,
+        "paper_fill_price": price,
+        "synthetic_paper_cash_delta": size * price,
+        "fill_rule_id": "causal_guard_quality_executable_bid_full_fill_v1",
+        "outcome_used_for_fill_decision": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+    }
+    fill["paper_exit_fill_sha256"] = canonical_json_sha256(fill)
+    return fill
+
+
+def _paper_position_rows(
+    *,
+    manager: PositionManager,
+    fill_by_event_id: dict[str, dict[str, Any]],
+    exit_fills: list[dict[str, Any]],
+    residual_reasons: dict[str, list[str]],
+) -> list[dict[str, Any]]:
+    exit_by_entry = {str(row["entry_paper_fill_id"]): row for row in exit_fills}
+    rows = []
+    for position in sorted(manager.list_positions(), key=lambda value: value.event_id):
+        entry = fill_by_event_id[position.event_id]
+        exit_fill = exit_by_entry.get(position.event_id)
+        row = {
+            "position_id": position.event_id,
+            "market_id": entry["market_id"],
+            "selected_side": entry["selected_side"],
+            "entry_action": entry["executed_action"],
+            "action_family": entry["selected_action_family"],
+            "intended_exit_policy": entry["intended_exit_policy"],
+            "status": position.status,
+            "entry_decision_ts": entry["decision_ts"],
+            "market_close_ts": entry["market_close_ts"],
+            "planned_exit_before_ts": entry["planned_exit_before_ts"],
+            "entry_price": float(entry["paper_fill_price"]),
+            "entry_contract_size": float(entry["filled_size"]),
+            "open_contract_size": float(position.size) if position.status == "open" else 0.0,
+            "exit_decision_ts": None if exit_fill is None else exit_fill["decision_ts"],
+            "exit_price": None if exit_fill is None else exit_fill["paper_fill_price"],
+            "realized_trade_pnl": (
+                None
+                if exit_fill is None
+                else (
+                    float(exit_fill["paper_fill_price"])
+                    - float(entry["paper_fill_price"])
+                )
+                * float(entry["filled_size"])
+            ),
+            "settlement_residual": position.status == "open",
+            "residual_reason_codes": residual_reasons.get(position.event_id, []),
+            "settlement_resolved": False,
+            "outcome_used_for_position_lifecycle": False,
+            "paper_only": True,
+            "capital_at_risk": False,
+            "polymarket_write_enabled": False,
+            "wallet_signing_enabled": False,
+        }
+        row["position_row_sha256"] = canonical_json_sha256(row)
+        rows.append(row)
+    return rows
+
+
+def _paper_ledger(
+    fills: list[dict[str, Any]], exit_fills: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     cash = 10_000.0
     exposure: defaultdict[str, float] = defaultdict(float)
     rows = []
-    for index, fill in enumerate(fills, 1):
+    events = [
+        (int(fill["decision_ts"]), 0, "ENTRY", fill) for fill in fills
+    ] + [
+        (int(fill["decision_ts"]), 1, "EXIT", fill) for fill in exit_fills
+    ]
+    for index, (_, _, event_type, fill) in enumerate(sorted(events), 1):
         market_id = str(fill["market_id"])
         before = cash
         cash += float(fill["synthetic_paper_cash_delta"])
-        exposure[market_id] += float(fill["filled_size"])
+        exposure_delta = float(fill["filled_size"]) * (
+            1.0 if event_type == "ENTRY" else -1.0
+        )
+        exposure[market_id] += exposure_delta
+        if abs(exposure[market_id]) < 1e-12:
+            exposure[market_id] = 0.0
         row = {
             "paper_ledger_entry_id": f"paper-ledger-{index:06d}",
-            "paper_fill_id": fill["paper_fill_id"],
+            "ledger_event_type": event_type,
+            "paper_fill_id": fill.get("paper_fill_id"),
+            "paper_exit_fill_id": fill.get("paper_exit_fill_id"),
             "market_id": market_id,
             "decision_ts": fill["decision_ts"],
             "cash_before": before,
             "cash_after": cash,
+            "synthetic_cash_delta": float(fill["synthetic_paper_cash_delta"]),
+            "synthetic_position_delta": exposure_delta,
             "market_contract_exposure_after": exposure[market_id],
             "total_contract_exposure_after": sum(exposure.values()),
             "settlement_resolved": False,
@@ -534,30 +1150,6 @@ def _paper_ledger(fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
-def _paper_positions(fills: list[dict[str, Any]]) -> dict[str, Any]:
-    positions: defaultdict[tuple[str, str], float] = defaultdict(float)
-    for fill in fills:
-        positions[(str(fill["market_id"]), str(fill["selected_side"]))] += float(
-            fill["filled_size"]
-        )
-    rows = [
-        {
-            "market_id": market_id,
-            "selected_side": side,
-            "open_contract_size": size,
-            "settlement_resolved": False,
-        }
-        for (market_id, side), size in sorted(positions.items())
-    ]
-    return {
-        "schema_version": f"{SCHEMA_PREFIX}-positions-v1",
-        "position_count": len(rows),
-        "positions": rows,
-        "paper_only": True,
-        "capital_at_risk": False,
-    }
-
-
 def _safety_report(
     *,
     run_id: str,
@@ -567,7 +1159,11 @@ def _safety_report(
     guard_rows: list[dict[str, Any]],
     intents: list[dict[str, Any]],
     fills: list[dict[str, Any]],
+    exit_signals: list[dict[str, Any]],
+    exit_intents: list[dict[str, Any]],
+    exit_fills: list[dict[str, Any]],
     ledger: list[dict[str, Any]],
+    positions: dict[str, Any],
 ) -> dict[str, Any]:
     causality_violations = sum(
         int(row["max_input_ts"]) > int(row["decision_ts"])
@@ -575,7 +1171,22 @@ def _safety_report(
     )
     forbidden = sum(
         bool(_find_nonempty_fields(row, FORBIDDEN_DECISION_FIELDS))
-        for row in (*feature_rows, *action_rows, *guard_rows, *intents)
+        for row in (
+            *feature_rows,
+            *action_rows,
+            *guard_rows,
+            *intents,
+            *exit_signals,
+            *exit_intents,
+        )
+    )
+    exit_causality_violations = sum(
+        row.get("exit_max_input_ts") is not None
+        and (
+            int(row["exit_max_input_ts"]) > int(row["decision_ts"])
+            or int(row["decision_ts"]) >= int(row["market_close_ts"])
+        )
+        for row in exit_signals
     )
     checks = {
         "feature_causality": causality_violations == 0,
@@ -583,7 +1194,24 @@ def _safety_report(
         "five_action_grid": len(action_rows) == len(feature_rows) * 5,
         "guard_only_intents": len(intents)
         == sum(row.get("execution_guard_order_allowed") is True for row in guard_rows),
-        "deterministic_fill_reconciliation": len(intents) == len(fills) == len(ledger),
+        "deterministic_entry_fill_reconciliation": len(intents) == len(fills),
+        "deterministic_exit_fill_reconciliation": len(exit_intents) == len(exit_fills),
+        "deterministic_ledger_reconciliation": len(ledger)
+        == len(fills) + len(exit_fills),
+        "position_reconciliation": positions["position_count"] == len(fills),
+        "sell_before_close_lifecycle_complete": positions[
+            "sell_before_close_residual_position_count"
+        ]
+        == 0,
+        "hold_to_settlement_never_exits_preclose": all(
+            row["intended_exit_policy"] != "hold_to_settlement"
+            for row in exit_fills
+        ),
+        "exit_feature_causality": exit_causality_violations == 0,
+        "no_negative_position_exposure": all(
+            float(row["open_contract_size"]) >= 0.0
+            for row in positions["positions"]
+        ),
         "order_size": all(
             0.0 < float(row["paper_order_size"]) <= MAXIMUM_PAPER_ORDER_SIZE
             for row in intents
@@ -593,12 +1221,13 @@ def _safety_report(
         ),
     }
     report = {
-        "schema_version": f"{SCHEMA_PREFIX}-safety-v1",
+        "schema_version": f"{SCHEMA_PREFIX}-safety-v2",
         "run_id": run_id,
         "runtime_safety_checks": checks,
         "runtime_safety_passed": all(checks.values()),
         "feature_causality_violation_count": causality_violations,
         "forbidden_decision_field_count": forbidden,
+        "exit_feature_causality_violation_count": exit_causality_violations,
         "paper_only": True,
         "capital_at_risk": False,
         "live_trading_enabled": False,
@@ -625,8 +1254,12 @@ def _runtime_report(
     guard_rows: list[dict[str, Any]],
     intents: list[dict[str, Any]],
     fills: list[dict[str, Any]],
+    exit_signals: list[dict[str, Any]],
+    exit_intents: list[dict[str, Any]],
+    exit_fills: list[dict[str, Any]],
     ledger: list[dict[str, Any]],
     positions: dict[str, Any],
+    lifecycle_report: dict[str, Any],
     safety: dict[str, Any],
     round_artifacts: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -638,7 +1271,7 @@ def _runtime_report(
         reason for row in guard_rows for reason in row["execution_blocking_reason_codes"]
     )
     report = {
-        "schema_version": f"{SCHEMA_PREFIX}-runtime-report-v1",
+        "schema_version": f"{SCHEMA_PREFIX}-runtime-report-v2",
         "run_id": config.run_id,
         "builder_git_commit": config.builder_git_commit,
         "runtime_created_ts": config.runtime_created_ts,
@@ -664,8 +1297,29 @@ def _runtime_report(
         "guard_blocking_reason_distribution": dict(sorted(blockers.items())),
         "paper_intent_count": len(intents),
         "paper_fill_count": len(fills),
+        "paper_exit_signal_count": len(exit_signals),
+        "paper_exit_intent_count": len(exit_intents),
+        "paper_exit_fill_count": len(exit_fills),
         "paper_ledger_entry_count": len(ledger),
-        "open_paper_position_count": positions["position_count"],
+        "open_paper_position_count": positions["open_position_count"],
+        "closed_paper_position_count": positions["closed_position_count"],
+        "sell_before_close_residual_position_count": positions[
+            "sell_before_close_residual_position_count"
+        ],
+        "hold_to_settlement_open_position_count": positions[
+            "hold_to_settlement_open_position_count"
+        ],
+        "position_lifecycle_report_id": lifecycle_report["report_id"],
+        "position_lifecycle_reconciled": lifecycle_report[
+            "position_lifecycle_reconciled"
+        ],
+        "sell_before_close_lifecycle_complete": lifecycle_report[
+            "sell_before_close_lifecycle_complete"
+        ],
+        "sell_before_close_exit_rule_id": SELL_BEFORE_CLOSE_EXIT_RULE_ID,
+        "closed_before_settlement_realized_trade_pnl_sum": lifecycle_report[
+            "closed_before_settlement_realized_trade_pnl_sum"
+        ],
         "paper_order_size_distribution": dict(
             sorted(Counter(str(row["paper_order_size"]) for row in intents).items())
         ),
@@ -707,6 +1361,9 @@ def _write_per_round_artifacts(
     guard_rows: list[dict[str, Any]],
     intents: list[dict[str, Any]],
     fills: list[dict[str, Any]],
+    exit_signals: list[dict[str, Any]],
+    exit_intents: list[dict[str, Any]],
+    exit_fills: list[dict[str, Any]],
     ledger: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     by_market = defaultdict(lambda: defaultdict(list))
@@ -717,6 +1374,9 @@ def _write_per_round_artifacts(
         ("guard_rows", guard_rows),
         ("paper_intents", intents),
         ("paper_fills", fills),
+        ("paper_exit_signals", exit_signals),
+        ("paper_exit_intents", exit_intents),
+        ("paper_exit_fills", exit_fills),
         ("paper_ledger", ledger),
     ):
         for row in rows:
@@ -748,6 +1408,9 @@ def _write_per_round_artifacts(
             "guard_rows",
             "paper_intents",
             "paper_fills",
+            "paper_exit_signals",
+            "paper_exit_intents",
+            "paper_exit_fills",
             "paper_ledger",
         ):
             path = round_dir / f"{name}.jsonl"
@@ -775,6 +1438,12 @@ def _runtime_markdown(report: dict[str, Any]) -> str:
             f"- guard_allowed_count: `{report['guard_allowed_count']}`",
             f"- paper_intent_count: `{report['paper_intent_count']}`",
             f"- paper_fill_count: `{report['paper_fill_count']}`",
+            f"- paper_exit_fill_count: `{report['paper_exit_fill_count']}`",
+            f"- open_paper_position_count: `{report['open_paper_position_count']}`",
+            f"- sell_before_close_residual_position_count: "
+            f"`{report['sell_before_close_residual_position_count']}`",
+            f"- sell_before_close_lifecycle_complete: "
+            f"`{str(report['sell_before_close_lifecycle_complete']).lower()}`",
             f"- runtime_safety_passed: `{str(report['runtime_safety_passed']).lower()}`",
             f"- paper_candidate_allowed: `{str(report['paper_candidate_allowed']).lower()}`",
             f"- v8_execution_handoff_allowed: `{str(report['v8_execution_handoff_allowed']).lower()}`",
