@@ -38,6 +38,8 @@ def write_launchd_plist(
     ),
     v6_2_candidate_manifest_path: Path | str | None = None,
     v6_2_candidate_manifest_sha256: str | None = None,
+    v6_6_point_freeze_manifest_path: Path | str | None = None,
+    v6_6_point_freeze_manifest_sha256: str | None = None,
 ) -> dict:
     """Write a KeepAlive service descriptor without starting the service."""
 
@@ -70,6 +72,20 @@ def write_launchd_plist(
             v6_2_candidate_manifest_sha256
         ).lower():
             raise ValueError("v6.2 candidate manifest SHA-256 mismatch")
+    if (v6_6_point_freeze_manifest_path is None) != (
+        v6_6_point_freeze_manifest_sha256 is None
+    ):
+        raise ValueError(
+            "v6.6 point freeze manifest path and SHA-256 must be provided together"
+        )
+    if v6_6_point_freeze_manifest_path is not None:
+        v6_6_point_freeze_manifest_path = Path(
+            v6_6_point_freeze_manifest_path
+        ).expanduser().resolve()
+        if _sha256(v6_6_point_freeze_manifest_path) != str(
+            v6_6_point_freeze_manifest_sha256
+        ).lower():
+            raise ValueError("v6.6 point freeze manifest SHA-256 mismatch")
     output_path = Path(output_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     service_root.mkdir(parents=True, exist_ok=True)
@@ -98,6 +114,15 @@ def write_launchd_plist(
                 str(v6_2_candidate_manifest_path),
                 "--v6-2-candidate-manifest-sha256",
                 str(v6_2_candidate_manifest_sha256).lower(),
+            ]
+        )
+    if v6_6_point_freeze_manifest_path is not None:
+        program_arguments.extend(
+            [
+                "--v6-6-point-freeze-manifest",
+                str(v6_6_point_freeze_manifest_path),
+                "--v6-6-point-freeze-manifest-sha256",
+                str(v6_6_point_freeze_manifest_sha256).lower(),
             ]
         )
     payload = {
@@ -138,6 +163,19 @@ def write_launchd_plist(
         "v6_2_candidate_manifest_sha256": (
             str(v6_2_candidate_manifest_sha256).lower()
             if v6_2_candidate_manifest_sha256 is not None
+            else None
+        ),
+        "v6_6_fresh_calibration_collection_mode": (
+            v6_6_point_freeze_manifest_path is not None
+        ),
+        "v6_6_point_freeze_manifest_path": (
+            str(v6_6_point_freeze_manifest_path)
+            if v6_6_point_freeze_manifest_path is not None
+            else None
+        ),
+        "v6_6_point_freeze_manifest_sha256": (
+            str(v6_6_point_freeze_manifest_sha256).lower()
+            if v6_6_point_freeze_manifest_sha256 is not None
             else None
         ),
         "batch_canary_feature_contract_path": str(batch_canary_feature_contract_path),
@@ -181,6 +219,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--v6-2-candidate-manifest")
     parser.add_argument("--v6-2-candidate-manifest-sha256")
+    parser.add_argument("--v6-6-point-freeze-manifest")
+    parser.add_argument("--v6-6-point-freeze-manifest-sha256")
     parser.add_argument("--python-executable", default=sys.executable)
     args = parser.parse_args(argv)
     report = write_launchd_plist(
@@ -195,6 +235,8 @@ def main(argv: list[str] | None = None) -> int:
         batch_canary_feature_contract_sha256=args.batch_canary_feature_contract_sha256,
         v6_2_candidate_manifest_path=args.v6_2_candidate_manifest,
         v6_2_candidate_manifest_sha256=args.v6_2_candidate_manifest_sha256,
+        v6_6_point_freeze_manifest_path=args.v6_6_point_freeze_manifest,
+        v6_6_point_freeze_manifest_sha256=args.v6_6_point_freeze_manifest_sha256,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

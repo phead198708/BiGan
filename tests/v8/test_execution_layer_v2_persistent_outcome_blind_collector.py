@@ -691,6 +691,220 @@ def test_launchd_descriptor_pins_v6_2_candidate_manifest(tmp_path: Path) -> None
     _assert_safety(result)
 
 
+def test_v6_6_calibration_progress_is_strictly_later_and_stops_at_target(
+    tmp_path: Path,
+) -> None:
+    index_path = tmp_path / "state/index.jsonl"
+    boundary_capture = _capture_fixture(tmp_path, boundary=2_000, market_id="boundary")
+    _index_batch(
+        tmp_path,
+        run_id="boundary-index",
+        index_path=index_path,
+        batch_path=_batch_summary(
+            tmp_path,
+            batch_id="boundary-batch",
+            captures=[boundary_capture],
+        ),
+    )
+    boundary_rows = load_and_validate_persistent_outcome_blind_index(index_path)
+    point_freeze = _v6_6_point_freeze_manifest(
+        tmp_path,
+        boundary_sequence=1,
+        boundary_sha256=_sha256(index_path),
+        last_entry_sha256=boundary_rows[-1]["entry_sha256"],
+        minimum_market_start_ts_exclusive=2_000,
+        target=2,
+        maximum=3,
+    )
+    plan = service_module._load_v6_6_calibration_plan(
+        manifest_path=point_freeze,
+        expected_sha256=_sha256(point_freeze),
+    )
+
+    later_captures = [
+        _capture_fixture(tmp_path, boundary=3_000, market_id="later-1"),
+        _capture_fixture(tmp_path, boundary=4_000, market_id="later-2"),
+    ]
+    _index_batch(
+        tmp_path,
+        run_id="later-index",
+        index_path=index_path,
+        batch_path=_batch_summary(
+            tmp_path,
+            batch_id="later-batch",
+            captures=later_captures,
+        ),
+    )
+
+    progress = service_module._v6_6_calibration_progress(index_path, plan)
+    assert progress["attempted_market_count"] == 2
+    assert progress["quality_valid_market_count"] == 2
+    assert progress["target_reached"] is True
+    assert progress["labels_outcomes_or_pnl_opened"] is False
+    terminal = service_module._v6_6_terminal_collection_state(
+        progress=progress,
+        plan=plan,
+        point_freeze_manifest_path=point_freeze,
+        point_freeze_manifest_sha256=_sha256(point_freeze),
+    )
+    assert terminal["status"] == "v6_6_fresh_calibration_collection_complete"
+    assert terminal["v6_6_candidate_scoring_attempted"] is False
+    assert terminal["blocking_reason_codes"] == []
+    _assert_safety(terminal)
+
+
+def test_v6_6_calibration_progress_rejects_boundary_hash_mismatch(
+    tmp_path: Path,
+) -> None:
+    index_path = tmp_path / "state/index.jsonl"
+    capture = _capture_fixture(tmp_path, boundary=2_000, market_id="boundary")
+    _index_batch(
+        tmp_path,
+        run_id="boundary-index",
+        index_path=index_path,
+        batch_path=_batch_summary(
+            tmp_path,
+            batch_id="boundary-batch",
+            captures=[capture],
+        ),
+    )
+    rows = load_and_validate_persistent_outcome_blind_index(index_path)
+    plan = {
+        "collector_index_boundary_sequence": 1,
+        "collector_index_boundary_sha256": "f" * 64,
+        "collector_last_entry_sha256": rows[-1]["entry_sha256"],
+        "minimum_market_start_ts_exclusive": 2_000,
+        "target_quality_valid_market_count": 2,
+        "maximum_attempted_market_count": 3,
+    }
+    with pytest.raises(ValueError, match="boundary SHA-256 mismatch"):
+        service_module._v6_6_calibration_progress(index_path, plan)
+
+
+def test_v6_6_service_resumes_past_v6_2_stop_and_writes_own_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_root = tmp_path / "service"
+    index_path = service_root / "persistent_outcome_blind_round_index.jsonl"
+    boundary_capture = _capture_fixture(tmp_path, boundary=2_000, market_id="boundary")
+    _index_batch(
+        tmp_path,
+        run_id="boundary-index",
+        index_path=index_path,
+        batch_path=_batch_summary(
+            tmp_path,
+            batch_id="boundary-batch",
+            captures=[boundary_capture],
+        ),
+    )
+    boundary_rows = load_and_validate_persistent_outcome_blind_index(index_path)
+    point_freeze = _v6_6_point_freeze_manifest(
+        tmp_path,
+        boundary_sequence=1,
+        boundary_sha256=_sha256(index_path),
+        last_entry_sha256=boundary_rows[-1]["entry_sha256"],
+        minimum_market_start_ts_exclusive=2_000,
+        target=1,
+        maximum=2,
+    )
+    _write_json(
+        service_root / "persistent_outcome_blind_v6_2_future_collection_complete_stop.json",
+        {"status": "v6_2_future_holdout_collection_complete"},
+    )
+    later_capture = _capture_fixture(tmp_path, boundary=3_000, market_id="later")
+    later_summary = _batch_summary(
+        tmp_path,
+        batch_id="later-batch",
+        captures=[later_capture],
+    )
+
+    monkeypatch.setattr(
+        service_module,
+        "run_polymarket_async_round_collector_cli",
+        lambda **kwargs: {"batch_summary_path": str(later_summary)},
+    )
+
+    def fake_canary(config):
+        output = tmp_path / "canary"
+        output.mkdir(exist_ok=True)
+        report_path = output / "report.json"
+        manifest_path = output / "manifest.json"
+        _write_json(
+            report_path,
+            {
+                "development_data_canary_passed": True,
+                "development_data_canary_blocking_reason_codes": [],
+            },
+        )
+        _write_json(manifest_path, {"batch_id": config.batch_id})
+        return {
+            "report": json.loads(report_path.read_text()),
+            "report_path": report_path,
+            "report_sha256": _sha256(report_path),
+            "manifest_path": manifest_path,
+            "manifest_sha256": _sha256(manifest_path),
+        }
+
+    monkeypatch.setattr(
+        service_module,
+        "run_outcome_blind_development_batch_canary",
+        fake_canary,
+    )
+    monkeypatch.setattr(service_module, "_git_head", lambda: GIT_COMMIT)
+
+    state = service_module.run_service(
+        service_root=service_root,
+        protocol_path=PROTOCOL_PATH,
+        protocol_sha256=_sha256(PROTOCOL_PATH),
+        batch_round_count=12,
+        max_batches=1,
+        max_consecutive_failures=3,
+        failure_backoff_seconds=0.0,
+        v6_6_point_freeze_manifest_path=point_freeze,
+        v6_6_point_freeze_manifest_sha256=_sha256(point_freeze),
+    )
+
+    assert state["status"] == "v6_6_fresh_calibration_collection_complete"
+    assert state["v6_6_fresh_calibration_attempted_market_count"] == 1
+    assert state["v6_6_fresh_calibration_quality_valid_market_count"] == 1
+    assert state["v6_6_candidate_scoring_attempted"] is False
+    assert (
+        service_root / "persistent_outcome_blind_v6_6_calibration_collection_stop.json"
+    ).is_file()
+    _assert_safety(state)
+
+
+def test_launchd_descriptor_pins_v6_6_calibration_manifest(tmp_path: Path) -> None:
+    point_freeze = _v6_6_point_freeze_manifest(
+        tmp_path,
+        boundary_sequence=1,
+        boundary_sha256="a" * 64,
+        last_entry_sha256="b" * 64,
+        minimum_market_start_ts_exclusive=2_000,
+        target=2,
+        maximum=3,
+    )
+    result = write_launchd_plist(
+        output_path=tmp_path / "collector.plist",
+        label="com.bigan.test.v6-6-calibration-collector",
+        service_root=tmp_path / "raw-service",
+        protocol_path=PROTOCOL_PATH,
+        protocol_sha256=_sha256(PROTOCOL_PATH),
+        batch_round_count=12,
+        python_executable=sys.executable,
+        v6_6_point_freeze_manifest_path=point_freeze,
+        v6_6_point_freeze_manifest_sha256=_sha256(point_freeze),
+    )
+    with Path(result["launchd_plist_path"]).open("rb") as handle:
+        arguments = plistlib.load(handle)["ProgramArguments"]
+    assert "--v6-6-point-freeze-manifest" in arguments
+    assert "--v6-6-point-freeze-manifest-sha256" in arguments
+    assert result["v6_6_fresh_calibration_collection_mode"] is True
+    assert result["v6_6_point_freeze_manifest_sha256"] == _sha256(point_freeze)
+    _assert_safety(result)
+
+
 def test_completed_batch_canary_failure_is_terminal() -> None:
     with pytest.raises(
         service_module.OutcomeBlindBatchCanaryFailure,
@@ -846,6 +1060,42 @@ def _capture_fixture(
         "raw_chainlink_price_row_count": 1,
         "market_identity_cache_provenance_violation_count": 0,
     }
+
+
+def _v6_6_point_freeze_manifest(
+    tmp_path: Path,
+    *,
+    boundary_sequence: int,
+    boundary_sha256: str,
+    last_entry_sha256: str,
+    minimum_market_start_ts_exclusive: int,
+    target: int,
+    maximum: int,
+) -> Path:
+    path = tmp_path / "v6_6_point_freeze_manifest.json"
+    _write_json(
+        path,
+        {
+            "candidate_name": "policy_selected_runtime_pnl_v6_6",
+            "point_model_frozen": True,
+            "fresh_calibration_collection_allowed": True,
+            "fresh_calibration_outcomes_opened": False,
+            "candidate_scoring_frozen": False,
+            "fresh_calibration_boundary": {
+                "collector_index_boundary_sequence": boundary_sequence,
+                "collector_index_boundary_sha256": boundary_sha256,
+                "collector_last_entry_sha256": last_entry_sha256,
+                "minimum_market_start_ts_exclusive": (
+                    minimum_market_start_ts_exclusive
+                ),
+                "target_quality_valid_market_count": target,
+                "maximum_attempted_market_count": maximum,
+                "batch_market_count": 12,
+            },
+            **_blocked_safety_fields(),
+        },
+    )
+    return path
 
 
 def _batch_summary(

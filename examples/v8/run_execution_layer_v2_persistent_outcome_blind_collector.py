@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import subprocess
 import sys
@@ -30,6 +31,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_outcome_blind_batch_canary 
 from bigan.v8.polymarket.training.execution_layer_v2_persistent_outcome_blind_collector import (  # noqa: E402
     PersistentOutcomeBlindBatchIndexConfig,
     index_persistent_outcome_blind_batch,
+    load_and_validate_persistent_outcome_blind_index,
     validate_persistent_outcome_blind_collector_protocol,
 )
 from examples.v8.run_polymarket_async_round_collector import (  # noqa: E402
@@ -106,6 +108,8 @@ def run_service(
     ),
     v6_2_candidate_manifest_path: Path | str | None = None,
     v6_2_candidate_manifest_sha256: str | None = None,
+    v6_6_point_freeze_manifest_path: Path | str | None = None,
+    v6_6_point_freeze_manifest_sha256: str | None = None,
 ) -> dict:
     if batch_round_count <= 0:
         raise ValueError("batch_round_count must be positive")
@@ -134,6 +138,10 @@ def run_service(
             v6_2_candidate_manifest_sha256
         ).lower():
             raise ValueError("v6.2 candidate manifest SHA-256 mismatch")
+    v6_6_plan = _load_v6_6_calibration_plan(
+        manifest_path=v6_6_point_freeze_manifest_path,
+        expected_sha256=v6_6_point_freeze_manifest_sha256,
+    )
     frozen_protocol_path = root / "persistent_outcome_blind_collector_protocol.json"
     if frozen_protocol_path.exists():
         if _sha256(frozen_protocol_path) != protocol_sha256.lower():
@@ -147,7 +155,12 @@ def run_service(
     collection_complete_stop_path = (
         root / "persistent_outcome_blind_v6_2_future_collection_complete_stop.json"
     )
-    if collection_complete_stop_path.is_file():
+    v6_6_collection_stop_path = (
+        root / "persistent_outcome_blind_v6_6_calibration_collection_stop.json"
+    )
+    if v6_6_plan is not None and v6_6_collection_stop_path.is_file():
+        return _load_state(service_state_path)
+    if v6_6_plan is None and collection_complete_stop_path.is_file():
         completed_state = _load_state(service_state_path)
         completed_state["status"] = "v6_2_future_holdout_collection_complete"
         return completed_state
@@ -158,6 +171,22 @@ def run_service(
             + ",".join(terminal_stop.get("blocking_reason_codes") or [])
         )
     service_state = _load_state(service_state_path)
+    if v6_6_plan is not None:
+        initial_progress = _v6_6_calibration_progress(index_path, v6_6_plan)
+        terminal_state = _v6_6_terminal_collection_state(
+            progress=initial_progress,
+            plan=v6_6_plan,
+            point_freeze_manifest_path=Path(
+                str(v6_6_point_freeze_manifest_path)
+            ).resolve(),
+            point_freeze_manifest_sha256=str(
+                v6_6_point_freeze_manifest_sha256
+            ).lower(),
+        )
+        if terminal_state is not None:
+            _write_state(service_state_path, terminal_state)
+            _write_state(v6_6_collection_stop_path, terminal_state)
+            return terminal_state
     batch_sequence = int(service_state.get("last_completed_batch_sequence") or 0) + 1
     completed_batches = 0
     consecutive_failures = 0
@@ -172,10 +201,22 @@ def run_service(
         v6_2_canary_result: dict | None = None
         v6_2_cumulative_result: dict | None = None
         try:
+            effective_batch_round_count = batch_round_count
+            if v6_6_plan is not None:
+                progress_before_batch = _v6_6_calibration_progress(index_path, v6_6_plan)
+                effective_batch_round_count = min(
+                    batch_round_count,
+                    v6_6_plan["maximum_attempted_market_count"]
+                    - progress_before_batch["attempted_market_count"],
+                )
+                if effective_batch_round_count <= 0:
+                    raise OutcomeBlindBatchCanaryFailure(
+                        "v6.6 fresh calibration attempt cap reached before target support"
+                    )
             summary = run_polymarket_async_round_collector_cli(
                 batch_id=batch_id,
                 output_dir=root / "captures",
-                round_count=batch_round_count,
+                round_count=effective_batch_round_count,
                 market_family="btc_updown_5m",
                 public_provider_timeout_seconds=330.0,
                 public_provider_http_timeout_seconds=5.0,
@@ -374,10 +415,58 @@ def run_service(
                         ),
                     }
                 )
+            if v6_6_plan is not None:
+                v6_6_progress = _v6_6_calibration_progress(index_path, v6_6_plan)
+                next_state.update(
+                    {
+                        "status": "collecting_v6_6_fresh_calibration_batches",
+                        "v6_6_point_freeze_manifest_path": str(
+                            Path(str(v6_6_point_freeze_manifest_path)).resolve()
+                        ),
+                        "v6_6_point_freeze_manifest_sha256": str(
+                            v6_6_point_freeze_manifest_sha256
+                        ).lower(),
+                        "v6_6_fresh_calibration_boundary_sequence": v6_6_plan[
+                            "collector_index_boundary_sequence"
+                        ],
+                        "v6_6_fresh_calibration_attempted_market_count": (
+                            v6_6_progress["attempted_market_count"]
+                        ),
+                        "v6_6_fresh_calibration_quality_valid_market_count": (
+                            v6_6_progress["quality_valid_market_count"]
+                        ),
+                        "v6_6_fresh_calibration_target_quality_valid_market_count": (
+                            v6_6_plan["target_quality_valid_market_count"]
+                        ),
+                        "v6_6_fresh_calibration_maximum_attempted_market_count": (
+                            v6_6_plan["maximum_attempted_market_count"]
+                        ),
+                        "v6_6_fresh_calibration_collection_complete": (
+                            v6_6_progress["target_reached"]
+                        ),
+                        "v6_6_candidate_scoring_attempted": False,
+                    }
+                )
             _write_state(
                 service_state_path,
                 next_state,
             )
+            if v6_6_plan is not None:
+                terminal_state = _v6_6_terminal_collection_state(
+                    progress=v6_6_progress,
+                    plan=v6_6_plan,
+                    point_freeze_manifest_path=Path(
+                        str(v6_6_point_freeze_manifest_path)
+                    ).resolve(),
+                    point_freeze_manifest_sha256=str(
+                        v6_6_point_freeze_manifest_sha256
+                    ).lower(),
+                    base_state=next_state,
+                )
+                if terminal_state is not None:
+                    _write_state(service_state_path, terminal_state)
+                    _write_state(v6_6_collection_stop_path, terminal_state)
+                    return terminal_state
             if (
                 v6_2_cumulative_result is not None
                 and v6_2_cumulative_result["report"][
@@ -543,6 +632,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--v6-2-candidate-manifest")
     parser.add_argument("--v6-2-candidate-manifest-sha256")
+    parser.add_argument("--v6-6-point-freeze-manifest")
+    parser.add_argument("--v6-6-point-freeze-manifest-sha256")
     args = parser.parse_args(argv)
     state = run_service(
         service_root=args.service_root,
@@ -556,6 +647,8 @@ def main(argv: list[str] | None = None) -> int:
         batch_canary_feature_contract_sha256=args.batch_canary_feature_contract_sha256,
         v6_2_candidate_manifest_path=args.v6_2_candidate_manifest,
         v6_2_candidate_manifest_sha256=args.v6_2_candidate_manifest_sha256,
+        v6_6_point_freeze_manifest_path=args.v6_6_point_freeze_manifest,
+        v6_6_point_freeze_manifest_sha256=args.v6_6_point_freeze_manifest_sha256,
     )
     print(json.dumps(state, indent=2, sort_keys=True))
     return 0
@@ -565,6 +658,156 @@ def _load_state(path: Path) -> dict:
     if not path.is_file():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_v6_6_calibration_plan(
+    *,
+    manifest_path: Path | str | None,
+    expected_sha256: str | None,
+) -> dict | None:
+    if (manifest_path is None) != (expected_sha256 is None):
+        raise ValueError(
+            "v6.6 point freeze manifest path and SHA-256 must be provided together"
+        )
+    if manifest_path is None:
+        return None
+    path = Path(manifest_path).resolve()
+    if _sha256(path) != str(expected_sha256).lower():
+        raise ValueError("v6.6 point freeze manifest SHA-256 mismatch")
+    manifest = _load_state(path)
+    if manifest.get("candidate_name") != "policy_selected_runtime_pnl_v6_6":
+        raise ValueError("v6.6 point freeze candidate identity mismatch")
+    if manifest.get("point_model_frozen") is not True:
+        raise ValueError("v6.6 point model is not frozen")
+    if manifest.get("fresh_calibration_collection_allowed") is not True:
+        raise ValueError("v6.6 fresh calibration collection is not allowed")
+    if manifest.get("fresh_calibration_outcomes_opened") is not False:
+        raise ValueError("v6.6 fresh calibration outcomes must remain sealed")
+    if manifest.get("candidate_scoring_frozen") is not False:
+        raise ValueError("v6.6 candidate scoring must not be frozen before calibration")
+    safety_mismatches = [
+        field for field, expected in SAFETY.items() if manifest.get(field) != expected
+    ]
+    if safety_mismatches:
+        raise ValueError(
+            "v6.6 point freeze safety mismatch: " + ",".join(safety_mismatches)
+        )
+    boundary = dict(manifest.get("fresh_calibration_boundary") or {})
+    required_positive = (
+        "collector_index_boundary_sequence",
+        "minimum_market_start_ts_exclusive",
+        "target_quality_valid_market_count",
+        "maximum_attempted_market_count",
+        "batch_market_count",
+    )
+    if any(int(boundary.get(field) or 0) <= 0 for field in required_positive):
+        raise ValueError("v6.6 fresh calibration boundary is incomplete")
+    if boundary["target_quality_valid_market_count"] > boundary[
+        "maximum_attempted_market_count"
+    ]:
+        raise ValueError("v6.6 fresh calibration target exceeds attempt cap")
+    for field in ("collector_index_boundary_sha256", "collector_last_entry_sha256"):
+        value = str(boundary.get(field) or "")
+        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+            raise ValueError(f"v6.6 {field} is not a SHA-256 hex digest")
+    return boundary
+
+
+def _v6_6_calibration_progress(index_path: Path, plan: dict) -> dict:
+    rows = load_and_validate_persistent_outcome_blind_index(index_path)
+    boundary_sequence = int(plan["collector_index_boundary_sequence"])
+    if len(rows) < boundary_sequence:
+        raise ValueError("v6.6 collector index precedes frozen calibration boundary")
+    lines = index_path.read_bytes().splitlines(keepends=True)
+    boundary_bytes = b"".join(lines[:boundary_sequence])
+    if hashlib.sha256(boundary_bytes).hexdigest() != plan[
+        "collector_index_boundary_sha256"
+    ]:
+        raise ValueError("v6.6 collector index boundary SHA-256 mismatch")
+    if rows[boundary_sequence - 1]["entry_sha256"] != plan[
+        "collector_last_entry_sha256"
+    ]:
+        raise ValueError("v6.6 collector boundary last-entry SHA-256 mismatch")
+    post_boundary = rows[boundary_sequence:]
+    minimum_start = int(plan["minimum_market_start_ts_exclusive"])
+    invalid_time_rows = [
+        row
+        for row in post_boundary
+        if int(row.get("scheduled_round_start_ts") or 0) <= minimum_start
+    ]
+    if invalid_time_rows:
+        raise ValueError("v6.6 calibration row is not strictly later than frozen boundary")
+    quality_rows = [row for row in post_boundary if row.get("capture_quality_valid") is True]
+    unique_quality_markets = {
+        str(row.get("market_id") or "") for row in quality_rows if row.get("market_id")
+    }
+    if len(unique_quality_markets) != len(quality_rows):
+        raise ValueError("v6.6 calibration quality rows contain duplicate market identity")
+    target = int(plan["target_quality_valid_market_count"])
+    maximum = int(plan["maximum_attempted_market_count"])
+    return {
+        "attempted_market_count": len(post_boundary),
+        "quality_valid_market_count": len(quality_rows),
+        "target_reached": len(quality_rows) >= target,
+        "attempt_cap_reached": len(post_boundary) >= maximum,
+        "first_selected_quality_market_ids": [
+            str(row["market_id"]) for row in quality_rows[:target]
+        ],
+        "labels_outcomes_or_pnl_opened": False,
+    }
+
+
+def _v6_6_terminal_collection_state(
+    *,
+    progress: dict,
+    plan: dict,
+    point_freeze_manifest_path: Path,
+    point_freeze_manifest_sha256: str,
+    base_state: dict | None = None,
+) -> dict | None:
+    if not progress["target_reached"] and not progress["attempt_cap_reached"]:
+        return None
+    passed = progress["target_reached"]
+    state = dict(base_state or {})
+    state.update(
+        {
+            "status": (
+                "v6_6_fresh_calibration_collection_complete"
+                if passed
+                else "v6_6_fresh_calibration_collection_exhausted_fail_closed"
+            ),
+            "v6_6_point_freeze_manifest_path": str(point_freeze_manifest_path),
+            "v6_6_point_freeze_manifest_sha256": point_freeze_manifest_sha256,
+            "v6_6_fresh_calibration_boundary_sequence": plan[
+                "collector_index_boundary_sequence"
+            ],
+            "v6_6_fresh_calibration_attempted_market_count": progress[
+                "attempted_market_count"
+            ],
+            "v6_6_fresh_calibration_quality_valid_market_count": progress[
+                "quality_valid_market_count"
+            ],
+            "v6_6_fresh_calibration_target_quality_valid_market_count": plan[
+                "target_quality_valid_market_count"
+            ],
+            "v6_6_fresh_calibration_maximum_attempted_market_count": plan[
+                "maximum_attempted_market_count"
+            ],
+            "v6_6_fresh_calibration_collection_complete": passed,
+            "v6_6_fresh_calibration_first_selected_market_ids": progress[
+                "first_selected_quality_market_ids"
+            ],
+            "v6_6_candidate_scoring_attempted": False,
+            "labels_outcomes_or_pnl_opened": False,
+            "blocking_reason_codes": (
+                []
+                if passed
+                else ["v6_6_fresh_calibration_support_not_met_before_attempt_cap"]
+            ),
+            **SAFETY,
+        }
+    )
+    return state
 
 
 def _write_state(path: Path, value: dict) -> None:
