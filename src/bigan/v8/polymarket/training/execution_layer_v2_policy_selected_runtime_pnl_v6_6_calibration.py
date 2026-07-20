@@ -130,7 +130,7 @@ class PolicySelectedRuntimePNLV66CalibrationConfig:
             "expected_profile_sha256",
             "expected_point_freeze_manifest_sha256",
         ):
-            _require_sha256(str(getattr(self, name)), name)
+            _require_sha256(str(getattr(self, name)), name=name)
         for name in (
             "output_dir",
             "profile_path",
@@ -169,7 +169,7 @@ class PolicySelectedRuntimePNLV66CalibrationConfig:
             raise ValueError("missing #226 stage inputs: " + ",".join(missing))
         for name in required:
             if name.startswith("expected_"):
-                _require_sha256(str(getattr(self, name)), name)
+                _require_sha256(str(getattr(self, name)), name=name)
 
 
 def run_policy_selected_runtime_pnl_v6_6_calibration(

@@ -11,6 +11,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_n
 )
 from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_runtime_pnl_v6_6_calibration import (
     SCHEMA_PREFIX,
+    PolicySelectedRuntimePNLV66CalibrationConfig,
     _single_use_claim_path,
     _validate_prediction_freeze,
     _validate_target_free_grid,
@@ -29,6 +30,57 @@ PROFILE_PATH = ROOT / (
 
 def _profile() -> dict:
     return json.loads(PROFILE_PATH.read_text())
+
+
+@pytest.mark.parametrize(
+    ("stage", "stage_inputs"),
+    [
+        (
+            "freeze_predictions",
+            {
+                "v6_2_candidate_manifest_path": "candidate.json",
+                "expected_v6_2_candidate_manifest_sha256": "c" * 64,
+                "collector_index_path": "index.jsonl",
+                "expected_collector_index_sha256": "d" * 64,
+            },
+        ),
+        (
+            "settle",
+            {
+                "prediction_freeze_manifest_path": "freeze.json",
+                "expected_prediction_freeze_manifest_sha256": "e" * 64,
+            },
+        ),
+        (
+            "calibrate",
+            {
+                "runtime_policy_profile_path": "runtime.json",
+                "expected_runtime_policy_profile_sha256": "f" * 64,
+                "prediction_freeze_manifest_path": "freeze.json",
+                "expected_prediction_freeze_manifest_sha256": "1" * 64,
+                "settled_corpus_index_path": "settled.json",
+                "expected_settled_corpus_index_sha256": "2" * 64,
+            },
+        ),
+    ],
+)
+def test_calibration_stage_configs_validate_keyword_only_hash_names(
+    tmp_path: Path, stage: str, stage_inputs: dict[str, str]
+) -> None:
+    config = PolicySelectedRuntimePNLV66CalibrationConfig(
+        stage=stage,
+        run_id=f"{stage}-config-test",
+        output_dir=tmp_path,
+        profile_path="profile.json",
+        expected_profile_sha256="a" * 64,
+        point_freeze_manifest_path="point.json",
+        expected_point_freeze_manifest_sha256="b" * 64,
+        implementation_commit="3" * 40,
+        stage_started_ts=1,
+        **stage_inputs,
+    )
+
+    assert config.stage == stage
 
 
 def _index_row(sequence: int, *, quality: bool = True) -> dict:
