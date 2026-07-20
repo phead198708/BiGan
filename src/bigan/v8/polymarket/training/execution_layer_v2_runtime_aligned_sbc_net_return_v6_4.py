@@ -494,6 +494,7 @@ def _build_labels(
         profile=profile,
         corpus_path=corpus_path,
         freeze_path=freeze_path,
+        implementation_commit=config.implementation_commit,
     )
     report_path = run_dir / "v6_4_runtime_aligned_target_report.json"
     _write_json(report_path, report)
@@ -505,6 +506,7 @@ def _build_labels(
         "schema_version": TARGET_MANIFEST_SCHEMA_VERSION,
         "run_id": config.run_id,
         "candidate_name": CANDIDATE_NAME,
+        "implementation_commit": config.implementation_commit,
         "profile": _descriptor(profile_path),
         "lineage_freeze_manifest": _descriptor(freeze_path),
         "runtime_aligned_rows": _descriptor(corpus_path),
@@ -689,6 +691,7 @@ def _target_report(
     profile: dict[str, Any],
     corpus_path: Path,
     freeze_path: Path,
+    implementation_commit: str,
 ) -> dict[str, Any]:
     expected_rows = len(lineage_rows) * int(
         profile["support_gates"]["expected_rows_per_market"]
@@ -791,6 +794,7 @@ def _target_report(
     report = {
         "schema_version": TARGET_REPORT_SCHEMA_VERSION,
         "candidate_name": CANDIDATE_NAME,
+        "implementation_commit": implementation_commit,
         "lineage_freeze_manifest": _descriptor(freeze_path),
         "runtime_aligned_rows": _descriptor(corpus_path),
         "market_count": len({str(row["market_id"]) for row in rows}),
