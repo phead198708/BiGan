@@ -582,6 +582,7 @@ def _market_runtime_target_rows(
                 "intended_exit_policy": "sell_before_close",
                 "paper_fill_price": entry_price,
                 "filled_size": size,
+                "synthetic_paper_cash_delta": -(size * entry_price),
                 "decision_ts": decision_ts,
                 "market_close_ts": market_close_ts,
                 "planned_exit_before_ts": market_close_ts
