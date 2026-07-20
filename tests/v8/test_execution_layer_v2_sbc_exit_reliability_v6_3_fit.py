@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from bigan.v8.polymarket.training.execution_layer_v2_sbc_exit_reliability_v6_3_fit import (
+    _find_forbidden_fields,
     apply_exit_reliability_model,
     build_exit_reliability_calibration,
     build_v6_3_side_only_oof_gate,
@@ -135,6 +136,18 @@ def test_target_free_replay_role_selection_fails_on_missing_lineage_market() -> 
             ],
             role="confirmatory_validation",
         )
+
+
+def test_forbidden_field_scan_allows_only_false_safety_declarations() -> None:
+    assert _find_forbidden_fields(
+        [{"target_or_outcome_fields_used": False, "decision_score": 0.1}]
+    ) == []
+    assert _find_forbidden_fields([{"target_or_outcome_fields_used": True}]) == [
+        "target_or_outcome_fields_used"
+    ]
+    assert _find_forbidden_fields([{"accepted_bet_net_pnl": 0.1}]) == [
+        "accepted_bet_net_pnl"
+    ]
 
 
 def _profile() -> dict:

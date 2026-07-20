@@ -38,6 +38,11 @@ TARGET_TOKENS = (
     "oracle",
     "future_return",
 )
+ALLOWED_FALSE_SAFETY_DECLARATIONS = {
+    "target_or_outcome_fields_used",
+    "target_or_outcome_used_for_decision",
+    "target_used_for_decision",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -1225,9 +1230,15 @@ def _validate_threshold_freeze(
 def _find_forbidden_fields(rows: list[dict[str, Any]]) -> list[str]:
     found = set()
     for row in rows:
-        for name in _flatten_keys(row):
+        for name, value in _flatten_items(row):
             lower = name.lower()
             if any(token in lower for token in TARGET_TOKENS):
+                leaf_name = name.rsplit(".", 1)[-1]
+                if (
+                    leaf_name in ALLOWED_FALSE_SAFETY_DECLARATIONS
+                    and value is False
+                ):
+                    continue
                 found.add(name)
     return sorted(found)
 
@@ -1240,16 +1251,16 @@ def _strip_target_fields(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _flatten_keys(value: Any, prefix: str = "") -> list[str]:
+def _flatten_items(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
     if isinstance(value, dict):
         output = []
         for key, child in value.items():
             name = f"{prefix}.{key}" if prefix else str(key)
-            output.append(name)
-            output.extend(_flatten_keys(child, name))
+            output.append((name, child))
+            output.extend(_flatten_items(child, name))
         return output
     if isinstance(value, list):
-        return [name for child in value for name in _flatten_keys(child, prefix)]
+        return [item for child in value for item in _flatten_items(child, prefix)]
     return []
 
 
