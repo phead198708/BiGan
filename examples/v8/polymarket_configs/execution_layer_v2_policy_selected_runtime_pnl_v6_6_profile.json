@@ -1,0 +1,103 @@
+{
+  "schema_version": "bigan-v8-policy-selected-runtime-pnl-v6-6-profile-v1",
+  "issue_number": 226,
+  "candidate_name": "policy_selected_runtime_pnl_v6_6",
+  "frozen": true,
+  "source_lineage": {
+    "v6_5_train_manifest_sha256": "55b45ab1fe914cfb9f5bea034d9a31d675d4b9c20b5ecf0059d7c55a78fa4a32",
+    "v6_5_train_rows_sha256": "b6b3cea2c292de4db621693bd5465cfb584384207e1928ac7d3dac7c1a0fe45a",
+    "v6_2_target_free_guard_replay_sha256": "c064ec61d958f194d00f58c1ec10ee2858545847647df47bf5cc4f95439e0a05",
+    "v6_2_source_model_sha256": "7e292852673fe2072017effc2d40fce000be81734f0c8c3d6950c02e957bcf0c"
+  },
+  "fit_population": {
+    "role": "development_train",
+    "execution_guard_order_allowed": true,
+    "selected_action_family": "SELL_BEFORE_CLOSE",
+    "target_action_must_equal_executed_action": true,
+    "target_side_must_equal_selected_side": true,
+    "expected_row_count": 65,
+    "expected_unique_market_count": 65,
+    "expected_side_count": {
+      "UP": 22,
+      "DOWN": 43
+    },
+    "one_row_per_market": true,
+    "counterfactual_rows_included": false
+  },
+  "model": {
+    "family": "deterministic_l2_ridge_policy_selected_runtime_net_pnl",
+    "target": "runtime_policy_after_cost_net_pnl_per_contract",
+    "feature_columns": [
+      "side_is_up",
+      "execution_price",
+      "current_bid",
+      "spread_bps",
+      "queue_fill_probability_proxy",
+      "time_to_close_seconds",
+      "selected_side_probability",
+      "canonical_v6_2_score"
+    ],
+    "ridge_alpha": 1.0,
+    "intercept_penalized": false,
+    "standardized_feature_clip": 8.0,
+    "coefficient_absolute_bound": 8.0,
+    "hyperparameter_search_enabled": false,
+    "feature_set_search_enabled": false,
+    "threshold_search_enabled": false,
+    "validation_labels_used_for_model_fit": false,
+    "oof_or_future_labels_used_for_model_fit": false
+  },
+  "train_only_cross_fit_gate": {
+    "method": "five_fold_sha256_market_grouped_cross_fit",
+    "fold_count": 5,
+    "minimum_held_row_count": 8,
+    "require_both_sides_across_all_folds": true,
+    "minimum_relative_mae_improvement_over_fold_train_mean_exclusive": 0.0,
+    "minimum_relative_mse_improvement_over_fold_train_mean_exclusive": 0.0,
+    "important_coefficient_absolute_minimum": 0.02,
+    "minimum_median_important_coefficient_sign_agreement": 0.65,
+    "result_selected_rerun_allowed": false
+  },
+  "fresh_calibration_collection": {
+    "collector_index_boundary_sequence": 528,
+    "collector_index_boundary_sha256": "d5a4eb8c70b79b323c3783ebca722b365d434cca84d3e17cc1f59d8767af71d1",
+    "collector_last_entry_sha256": "7af8b5f66f5115c1970d12a17161b0bf250635efb6931cf0516b1e6217cf3472",
+    "minimum_market_start_ts_exclusive": 1784541000000,
+    "target_quality_valid_market_count": 60,
+    "maximum_attempted_market_count": 90,
+    "batch_market_count": 12,
+    "labels_outcomes_resolution_or_pnl_opened_during_collection": false,
+    "candidate_scoring_during_collection": false
+  },
+  "fresh_calibration_gate": {
+    "method": "side_specific_market_bootstrap_upper_confidence_bound_of_mean_residual",
+    "confidence_level": 0.95,
+    "bootstrap_resample_count": 5000,
+    "bootstrap_seed": 2262026,
+    "minimum_positive_lcb_unique_market_count_per_side": 20,
+    "decision_boundary": "runtime_expected_net_pnl_lcb_strictly_greater_than_zero",
+    "threshold_search_enabled": false,
+    "result_selected_rerun_allowed": false
+  },
+  "prohibited": {
+    "v6_4_consumed_calibration_labels_used": false,
+    "historical_oof_labels_or_pnl_used": false,
+    "prior_future_or_paper_labels_or_pnl_used": false,
+    "fresh_calibration_outcomes_opened_before_window_freeze": false,
+    "outcome_settlement_pnl_or_future_fields_used_as_model_inputs": false,
+    "v6_2_source_score_mutation_allowed": false,
+    "execution_guard_cost_sizing_or_position_manager_mutation_allowed": false
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}
