@@ -15,6 +15,9 @@ from bigan.v8.polymarket.training.execution_layer_v2_runtime_aligned_sbc_net_ret
     runtime_policy_source_hashes,
     validate_runtime_aligned_sbc_net_return_v6_4_profile,
 )
+from examples.v8.run_execution_layer_v2_runtime_aligned_sbc_net_return_v6_4 import (
+    _verified_implementation_commit,
+)
 
 
 def test_v6_4_profile_freezes_development_only_runtime_contract() -> None:
@@ -137,6 +140,17 @@ def test_counterfactual_actions_replay_in_isolated_position_state(monkeypatch) -
     )
     assert call_sizes == [1, 1]
     assert sorted(positions) == ["down", "up"]
+
+
+def test_runner_rejects_manual_commit_that_is_not_checkout_head(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "examples.v8.run_execution_layer_v2_runtime_aligned_sbc_net_return_v6_4._head",
+        lambda: "a" * 40,
+    )
+    assert _verified_implementation_commit(None) == "a" * 40
+    assert _verified_implementation_commit("a" * 40) == "a" * 40
+    with pytest.raises(ValueError, match="does not match"):
+        _verified_implementation_commit("b" * 40)
     with pytest.raises(ValueError, match="non-negative"):
         compute_runtime_policy_after_cost_target(
             selected_side="UP",

@@ -50,6 +50,15 @@ def _head() -> str:
     ).stdout.strip()
 
 
+def _verified_implementation_commit(value: str | None) -> str:
+    head = _head()
+    if value is not None and value != head:
+        raise ValueError(
+            f"implementation commit does not match current checkout HEAD: {value} != {head}"
+        )
+    return head
+
+
 def main() -> None:
     args = _parse_args()
     result = run_runtime_aligned_sbc_net_return_v6_4(
@@ -61,7 +70,9 @@ def main() -> None:
             expected_profile_sha256=args.expected_profile_sha256,
             issue_223_lineage_manifest_path=args.issue_223_lineage_manifest,
             v6_2_historical_manifest_path=args.v6_2_historical_manifest,
-            implementation_commit=args.implementation_commit or _head(),
+            implementation_commit=_verified_implementation_commit(
+                args.implementation_commit
+            ),
             external_corpus_dir=args.external_corpus_dir,
             lineage_freeze_manifest_path=args.lineage_freeze_manifest,
             expected_lineage_freeze_manifest_sha256=(
