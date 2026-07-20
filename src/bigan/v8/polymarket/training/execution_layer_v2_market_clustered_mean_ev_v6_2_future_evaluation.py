@@ -381,10 +381,12 @@ def freeze_market_clustered_mean_ev_v6_2_future_predictions(
         v5_manifest["calibration_artifact"], "v5 calibration"
     )
     v5_profile_descriptor = _verified_descriptor(v5_manifest["fit_profile"], "v5 profile")
-    baseline_predictions = apply_conformal_scores(
-        raw_predictions,
-        calibration_artifact=_load_json(Path(v5_calibration_descriptor["path"])),
-        profile=_load_json(Path(v5_profile_descriptor["path"])),
+    baseline_predictions = _attach_matched_v5_acceptance_replay_fields(
+        apply_conformal_scores(
+            raw_predictions,
+            calibration_artifact=_load_json(Path(v5_calibration_descriptor["path"])),
+            profile=_load_json(Path(v5_profile_descriptor["path"])),
+        )
     )
     baseline_replay = _outcome_blind_acceptance_replay(
         baseline_predictions,
@@ -1079,6 +1081,32 @@ def _select_exact_future_index_rows(
     ):
         raise ValueError("future index scan is not chronological")
     return selected, attempted
+
+
+def _attach_matched_v5_acceptance_replay_fields(
+    predictions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Adapt frozen v5 scores to the unchanged outcome-blind replay contract."""
+
+    if _find_nonempty_fields(predictions, TARGET_FIELDS):
+        raise ValueError("matched v5 future predictions contain target fields")
+    output = []
+    for row in predictions:
+        raw_score = float(row["raw_direct_predicted_net_return"])
+        updated = {
+            **row,
+            "raw_pairwise_rank_score": raw_score,
+            "pairwise_group_normalized_rank_score": raw_score,
+            "action_advantage_lcb_score_bucket": (
+                "not_applicable_matched_v5_individual_outcome_conformal"
+            ),
+            "action_advantage_lcb_estimate_source": row["ranking_score_source"],
+        }
+        updated["matched_v5_future_prediction_row_sha256"] = canonical_json_sha256(
+            updated
+        )
+        output.append(updated)
+    return output
 
 
 def _validate_exact_feature_action_grid(

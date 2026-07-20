@@ -362,13 +362,14 @@ def test_exact_200_freeze_materializes_raw_features_before_target_access(
                 else "BUY_DOWN_SELL_BEFORE_CLOSE"
             )
             output.append(
-                {
-                    **row,
-                    "raw_direct_predicted_net_return": (
-                        0.10 if row["action"] == selected_action else 0.0
-                    ),
-                }
-            )
+                    {
+                        **row,
+                        "raw_direct_predicted_net_return": (
+                            0.10 if row["action"] == selected_action else 0.0
+                        ),
+                        "ranking_score_source": "synthetic_raw_model_score",
+                    }
+                )
         return output
 
     monkeypatch.setattr(subject, "_raw_target_stripped_predictions", fake_raw_predictions)
@@ -393,6 +394,14 @@ def test_exact_200_freeze_materializes_raw_features_before_target_access(
                 "mean_ev_lower_confidence_bound": row[
                     "raw_direct_predicted_net_return"
                 ],
+                "raw_pairwise_rank_score": row[
+                    "raw_direct_predicted_net_return"
+                ],
+                "pairwise_group_normalized_rank_score": row[
+                    "raw_direct_predicted_net_return"
+                ],
+                "action_advantage_lcb_score_bucket": "synthetic_test_bucket",
+                "action_advantage_lcb_estimate_source": "synthetic_test_source",
             }
             for row in rows
         ],
@@ -411,6 +420,13 @@ def test_exact_200_freeze_materializes_raw_features_before_target_access(
     )
 
     def fake_replay(rows, **kwargs):
+        required_replay_fields = {
+            "raw_pairwise_rank_score",
+            "pairwise_group_normalized_rank_score",
+            "action_advantage_lcb_score_bucket",
+            "action_advantage_lcb_estimate_source",
+        }
+        assert all(required_replay_fields <= set(row) for row in rows)
         if rows and rows[0]["scoring_lineage"] == "matched_v5":
             return []
         grouped: dict[tuple[str, int], list[dict]] = {}
