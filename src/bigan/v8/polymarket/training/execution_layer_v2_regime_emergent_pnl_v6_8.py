@@ -169,13 +169,19 @@ def build_regime_emergent_target_free_support(
     exact_window_market_count: int,
     required_total_market_count: int,
     score_field: str,
+    expected_window_market_count: int | None = None,
 ) -> dict[str, Any]:
     """Validate total target-free support without imposing a side composition."""
 
     side_count = Counter(str(row.get("side") or "") for row in rows)
+    expected_window = (
+        required_total_market_count
+        if expected_window_market_count is None
+        else expected_window_market_count
+    )
     checks = {
         "exact_window_market_count": exact_window_market_count
-        == required_total_market_count,
+        == expected_window,
         "one_selected_row_per_market": len(
             {str(row.get("market_id") or "") for row in rows}
         )
@@ -203,6 +209,7 @@ def build_regime_emergent_target_free_support(
         "selected_market_count": len(rows),
         "count_by_side": {side: side_count[side] for side in SIDES},
         "minimum_total_required": required_total_market_count,
+        "expected_window_market_count": expected_window,
         "minimum_per_side_required": None,
         "side_count_hard_gate_enabled": False,
         "side_composition_is_regime_emergent": True,
