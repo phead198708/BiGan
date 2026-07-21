@@ -21,6 +21,7 @@ import websockets
 from bigan.ingestion.message_types import (
     BestBidAskEvent,
     BookEvent,
+    LastTradePriceEvent,
     MarketResolvedEvent,
     PriceChangeEvent,
     UnknownEvent,
@@ -178,6 +179,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
         btc_feature_source_order: tuple[str, ...] = DEFAULT_BTC_FEATURE_SOURCE_ORDER,
         max_markets: int = 3,
         recent_trade_limit: int = 250,
+        recent_trade_max_pages: int = 5,
         timeout_seconds: float = 15.0,
         http_timeout_seconds: float | None = None,
         orderbook_snapshot_interval_seconds: float = 1.0,
@@ -198,6 +200,8 @@ class PolymarketPublicHTTPRealCorpusProvider:
             raise ValueError("max_markets must be positive")
         if recent_trade_limit <= 0:
             raise ValueError("recent_trade_limit must be positive")
+        if recent_trade_max_pages <= 0:
+            raise ValueError("recent_trade_max_pages must be positive")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         if http_timeout_seconds is not None and http_timeout_seconds <= 0:
@@ -250,6 +254,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
         self.btc_feature_source_order = source_order
         self.max_markets = max_markets
         self.recent_trade_limit = recent_trade_limit
+        self.recent_trade_max_pages = recent_trade_max_pages
         self.timeout_seconds = timeout_seconds
         self.http_timeout_seconds = timeout_seconds if http_timeout_seconds is None else http_timeout_seconds
         self.orderbook_snapshot_interval_seconds = orderbook_snapshot_interval_seconds
@@ -860,18 +865,117 @@ class PolymarketPublicHTTPRealCorpusProvider:
     ) -> list[dict[str, Any]]:
         del config
         rows: list[dict[str, Any]] = []
+        stream_payload_getter = getattr(self.orderbook_source, "trade_payloads", None)
+        stream_report_getter = getattr(
+            self.orderbook_source,
+            "trade_collection_report",
+            None,
+        )
+        stream_payloads = (
+            list(stream_payload_getter(_token_ids_for_markets(markets)))
+            if callable(stream_payload_getter)
+            else []
+        )
+        stream_report = (
+            dict(stream_report_getter()) if callable(stream_report_getter) else {}
+        )
         by_condition = {str(market["condition_id"]): market for market in markets}
         for condition_id, market in by_condition.items():
+            market_stream_payloads = [
+                payload
+                for payload in stream_payloads
+                if str(payload.get("market") or "") == condition_id
+            ]
+            try:
+                rest_payloads, rest_report = self._paginated_trade_payloads(
+                    condition_id=condition_id,
+                    market=market,
+                )
+            except RealCorpusPublicProviderError as exc:
+                rest_payloads = []
+                rest_report = _failed_paginated_trade_report(
+                    collection_ts=self._current_time_ms(),
+                    requested_limit=self.recent_trade_limit,
+                    max_pages=self.recent_trade_max_pages,
+                    reason_codes=exc.reason_codes,
+                )
+            normalized_rows: list[dict[str, Any]] = []
+            for trade in [*market_stream_payloads, *rest_payloads]:
+                row = self._normalize_trade_payload(
+                    market=market,
+                    payload=trade,
+                    rest_collection_ts=int(rest_report["collection_ts"]),
+                )
+                if row is not None:
+                    normalized_rows.append(row)
+            normalized_rows = _deduplicate_trade_rows(normalized_rows)
+            collection_report = _trade_collection_report_for_market(
+                market=market,
+                stream_report=stream_report,
+                stream_row_count=sum(
+                    row.get("trade_source_type") == "polymarket_clob_websocket_market"
+                    for row in normalized_rows
+                ),
+                rest_report=rest_report,
+                merged_row_count=len(normalized_rows),
+            )
+            market.update(collection_report)
+            rows.extend(
+                {**row, **collection_report}
+                for row in normalized_rows
+            )
+        return rows
+
+    def _paginated_trade_payloads(
+        self,
+        *,
+        condition_id: str,
+        market: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        page_counts: list[int] = []
+        collection_ts = self._current_time_ms()
+        exhausted = False
+        for page_index in range(self.recent_trade_max_pages):
+            offset = page_index * self.recent_trade_limit
             params = urllib.parse.urlencode(
-                {"market": condition_id, "limit": self.recent_trade_limit}
+                {
+                    "market": condition_id,
+                    "limit": self.recent_trade_limit,
+                    "offset": offset,
+                }
             )
             payload = self._get_json(f"{self.data_trades_endpoint}?{params}")
-            trades = payload if isinstance(payload, list) else []
-            for trade in trades:
-                row = self._normalize_trade_payload(market=market, payload=trade)
-                if row is not None:
-                    rows.append(row)
-        return rows
+            page = payload if isinstance(payload, list) else []
+            page_counts.append(len(page))
+            payloads.extend(dict(row) for row in page if isinstance(row, dict))
+            if len(page) < self.recent_trade_limit:
+                exhausted = True
+                break
+        normalized_timestamps = [
+            _trade_payload_timestamp_ms(row)
+            for row in payloads
+        ]
+        normalized_timestamps = [timestamp for timestamp in normalized_timestamps if timestamp > 0]
+        oldest_ts = min(normalized_timestamps, default=None)
+        newest_ts = max(normalized_timestamps, default=None)
+        reached_market_start = (
+            oldest_ts is not None and oldest_ts <= int(market["market_start_ts"])
+        )
+        truncated = not exhausted and not reached_market_start
+        return payloads, {
+            "collection_ts": collection_ts,
+            "page_count": len(page_counts),
+            "page_row_counts": page_counts,
+            "requested_limit": self.recent_trade_limit,
+            "max_pages": self.recent_trade_max_pages,
+            "returned_count": len(payloads),
+            "oldest_ts": oldest_ts,
+            "newest_ts": newest_ts,
+            "pagination_exhausted": exhausted,
+            "reached_market_start": reached_market_start,
+            "rows_truncated": truncated,
+        }
 
     def btc_feature_candle_rows(
         self,
@@ -1657,6 +1761,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
         *,
         market: dict[str, Any],
         payload: dict[str, Any],
+        rest_collection_ts: int,
     ) -> dict[str, Any] | None:
         token_id = str(payload.get("asset") or payload.get("token_id") or "")
         outcome = _expected_outcome_for_token(market=market, token_id=token_id)
@@ -1666,18 +1771,33 @@ class PolymarketPublicHTTPRealCorpusProvider:
         size = _optional_float(payload.get("size"))
         if price is None or size is None:
             return None
-        timestamp = int(float(payload.get("timestamp") or 0) * 1000)
+        timestamp = _trade_payload_timestamp_ms(payload)
         if timestamp <= 0:
             return None
+        source_type = str(
+            payload.get("trade_source_type") or "polymarket_data_api_rest"
+        )
+        receive_time = int(payload.get("receive_time") or 0)
+        available_at_ts = (
+            max(timestamp, receive_time)
+            if source_type == "polymarket_clob_websocket_market"
+            else max(timestamp, rest_collection_ts)
+        )
         return {
             "market_id": market["market_id"],
             "token_id": token_id,
             "outcome": outcome,
             "ts": timestamp,
-            "available_at_ts": timestamp,
+            "available_at_ts": available_at_ts,
             "price": price,
             "size": size,
             "side": str(payload.get("side") or "").upper(),
+            "transaction_hash": (
+                str(payload.get("transaction_hash") or payload.get("transactionHash") or "")
+                or None
+            ),
+            "trade_source_type": source_type,
+            "trade_source_receive_time": receive_time or None,
             **safety_fields(),
         }
 
@@ -1841,6 +1961,10 @@ class PolymarketCLOBWebSocketOrderBookSource:
         )
         self.custom_feature_enabled = custom_feature_enabled
         self._last_market_resolution_payloads: dict[str, dict[str, Any]] = {}
+        self._last_trade_payloads: list[dict[str, Any]] = []
+        self._last_trade_collection_report: dict[str, Any] = (
+            _empty_ws_trade_collection_report()
+        )
 
     def book_payloads(self, token_ids: tuple[str, ...]) -> dict[str, dict[str, Any]]:
         token_ids = tuple(dict.fromkeys(str(token_id) for token_id in token_ids if str(token_id)))
@@ -1882,6 +2006,19 @@ class PolymarketCLOBWebSocketOrderBookSource:
             return {}
         return dict(self._last_market_resolution_payloads)
 
+    def trade_payloads(self, token_ids: tuple[str, ...]) -> list[dict[str, Any]]:
+        target_tokens = {
+            str(token_id) for token_id in token_ids if str(token_id)
+        }
+        return [
+            dict(payload)
+            for payload in self._last_trade_payloads
+            if str(payload.get("asset") or "") in target_tokens
+        ]
+
+    def trade_collection_report(self) -> dict[str, Any]:
+        return dict(self._last_trade_collection_report)
+
     async def _collect_book_payloads(
         self,
         token_ids: tuple[str, ...],
@@ -1890,6 +2027,7 @@ class PolymarketCLOBWebSocketOrderBookSource:
         book_payloads: dict[str, dict[str, Any]] = {}
         fallback_payloads: dict[str, dict[str, Any]] = {}
         resolution_payloads: dict[str, dict[str, Any]] = {}
+        trade_payloads: list[dict[str, Any]] = []
         deadline = time.monotonic() + self.timeout_seconds
         connection_error: Exception | None = None
         while time.monotonic() < deadline and set(book_payloads) != target_tokens:
@@ -1925,6 +2063,7 @@ class PolymarketCLOBWebSocketOrderBookSource:
                                 book_payloads=book_payloads,
                                 fallback_payloads=fallback_payloads,
                                 resolution_payloads=resolution_payloads,
+                                trade_payloads=trade_payloads,
                             )
             except Exception as exc:  # noqa: BLE001
                 connection_error = exc
@@ -1943,6 +2082,7 @@ class PolymarketCLOBWebSocketOrderBookSource:
                 reason_codes=("polymarket_clob_ws_no_orderbooks",),
             )
         self._last_market_resolution_payloads = dict(resolution_payloads)
+        self._last_trade_payloads = _deduplicate_trade_payloads(trade_payloads)
         return {token_id: merged[token_id] for token_id in token_ids if token_id in merged}
 
     async def _collect_book_payload_snapshots(
@@ -1963,8 +2103,10 @@ class PolymarketCLOBWebSocketOrderBookSource:
         book_payloads: dict[str, dict[str, Any]] = {}
         fallback_payloads: dict[str, dict[str, Any]] = {}
         resolution_payloads: dict[str, dict[str, Any]] = {}
+        trade_payloads: list[dict[str, Any]] = []
         snapshots: list[dict[str, dict[str, Any]]] = []
         started_at = time.monotonic()
+        collection_started_at_ts = int(time.time() * 1000)
         deadline = started_at + self.timeout_seconds
         initial_complete_book_deadline = min(
             deadline,
@@ -1972,6 +2114,8 @@ class PolymarketCLOBWebSocketOrderBookSource:
         )
         next_snapshot_at = started_at
         connection_error: Exception | None = None
+        connection_count = 0
+        reconnect_count = 0
         complete_book_observed = False
         while time.monotonic() < deadline:
             active_deadline = (
@@ -1994,6 +2138,9 @@ class PolymarketCLOBWebSocketOrderBookSource:
                     max_size=2**24,
                     open_timeout=open_timeout,
                 ) as ws:
+                    connection_count += 1
+                    if connection_count > 1:
+                        reconnect_count += 1
                     await ws.send(
                         orjson.dumps(
                             {
@@ -2030,6 +2177,7 @@ class PolymarketCLOBWebSocketOrderBookSource:
                                     book_payloads=book_payloads,
                                     fallback_payloads=fallback_payloads,
                                     resolution_payloads=resolution_payloads,
+                                    trade_payloads=trade_payloads,
                                 )
                         if time.monotonic() >= next_snapshot_at:
                             merged = dict(fallback_payloads)
@@ -2057,6 +2205,34 @@ class PolymarketCLOBWebSocketOrderBookSource:
                 )
                 await _sleep_until_reconnect(reconnect_deadline)
 
+        collection_ended_at_ts = int(time.time() * 1000)
+        self._last_trade_payloads = _deduplicate_trade_payloads(trade_payloads)
+        self._last_trade_collection_report = {
+            "trade_collection_mode": "polymarket_clob_websocket_market",
+            "trade_stream_started_at_ts": collection_started_at_ts,
+            "trade_stream_ended_at_ts": collection_ended_at_ts,
+            "trade_stream_connection_count": connection_count,
+            "trade_stream_reconnect_count": reconnect_count,
+            "trade_stream_continuity_passed": (
+                connection_count == 1 and connection_error is None
+            ),
+            "trade_stream_event_count": len(trade_payloads),
+            "trade_stream_unique_event_count": len(self._last_trade_payloads),
+            "trade_stream_duplicate_event_count": (
+                len(trade_payloads) - len(self._last_trade_payloads)
+            ),
+            "trade_stream_timestamp_causality_violation_count": sum(
+                int(payload.get("timestamp_ms") or 0)
+                > int(payload.get("receive_time") or 0)
+                for payload in self._last_trade_payloads
+            ),
+            "trade_stream_reason_codes": (
+                []
+                if connection_count == 1 and connection_error is None
+                else ["polymarket_clob_ws_trade_stream_continuity_not_proven"]
+            ),
+            **safety_fields(),
+        }
         if not snapshots:
             if connection_error is not None:
                 raise RealCorpusPublicProviderError(
@@ -2085,6 +2261,7 @@ class PolymarketCLOBWebSocketOrderBookSource:
         book_payloads: dict[str, dict[str, Any]],
         fallback_payloads: dict[str, dict[str, Any]],
         resolution_payloads: dict[str, dict[str, Any]] | None = None,
+        trade_payloads: list[dict[str, Any]] | None = None,
     ) -> None:
         normalized_payload = _market_ws_payload_for_parse(
             payload=payload,
@@ -2129,6 +2306,16 @@ class PolymarketCLOBWebSocketOrderBookSource:
                 )
                 if top_payload is not None:
                     fallback_payloads[change.asset_id] = top_payload
+            return
+        if isinstance(event, LastTradePriceEvent) and trade_payloads is not None:
+            if event.asset_id in target_tokens:
+                trade_payloads.append(
+                    _last_trade_event_payload(
+                        event,
+                        receive_time_ms=receive_time_ms,
+                        transaction_hash=payload.get("transaction_hash"),
+                    )
+                )
             return
         if isinstance(event, MarketResolvedEvent) and resolution_payloads is not None:
             resolution_payload = _market_resolved_event_payload(event)
@@ -2260,11 +2447,218 @@ def _infer_market_ws_event_type(payload: dict[str, Any]) -> str | None:
         return "market_resolved"
     if "price_changes" in payload:
         return "price_change"
+    if (
+        "asset_id" in payload
+        and "price" in payload
+        and "size" in payload
+        and "side" in payload
+    ):
+        return "last_trade_price"
     if "asset_id" in payload and "bids" in payload and ("asks" in payload or "ask" in payload):
         return "book"
     if "asset_id" in payload and ("best_bid" in payload or "best_ask" in payload):
         return "best_bid_ask"
     return None
+
+
+def _empty_ws_trade_collection_report() -> dict[str, Any]:
+    return {
+        "trade_collection_mode": "not_collected",
+        "trade_stream_started_at_ts": None,
+        "trade_stream_ended_at_ts": None,
+        "trade_stream_connection_count": 0,
+        "trade_stream_reconnect_count": 0,
+        "trade_stream_continuity_passed": False,
+        "trade_stream_event_count": 0,
+        "trade_stream_unique_event_count": 0,
+        "trade_stream_duplicate_event_count": 0,
+        "trade_stream_timestamp_causality_violation_count": 0,
+        "trade_stream_reason_codes": ["trade_stream_not_collected"],
+        **safety_fields(),
+    }
+
+
+def _failed_paginated_trade_report(
+    *,
+    collection_ts: int,
+    requested_limit: int,
+    max_pages: int,
+    reason_codes: tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        "collection_ts": collection_ts,
+        "page_count": 0,
+        "page_row_counts": [],
+        "requested_limit": requested_limit,
+        "max_pages": max_pages,
+        "returned_count": 0,
+        "oldest_ts": None,
+        "newest_ts": None,
+        "pagination_exhausted": False,
+        "reached_market_start": False,
+        "rows_truncated": False,
+        "request_failed": True,
+        "reason_codes": list(reason_codes),
+    }
+
+
+def _last_trade_event_payload(
+    event: LastTradePriceEvent,
+    *,
+    receive_time_ms: int,
+    transaction_hash: Any,
+) -> dict[str, Any]:
+    return {
+        "market": event.market,
+        "asset": event.asset_id,
+        "timestamp_ms": int(event.timestamp),
+        "receive_time": int(event.receive_time or receive_time_ms),
+        "price": str(event.price),
+        "size": str(event.size),
+        "side": str(event.side.value),
+        "transaction_hash": str(transaction_hash or "") or None,
+        "trade_source_type": "polymarket_clob_websocket_market",
+    }
+
+
+def _trade_payload_timestamp_ms(payload: dict[str, Any]) -> int:
+    raw = payload.get("timestamp_ms")
+    if raw is None:
+        raw = payload.get("timestamp")
+    if raw is None:
+        raw = payload.get("ts")
+    try:
+        timestamp = int(float(raw or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return timestamp * 1000 if 0 < timestamp < 10_000_000_000 else timestamp
+
+
+def _trade_payload_identity(payload: dict[str, Any]) -> str:
+    transaction_hash = str(
+        payload.get("transaction_hash") or payload.get("transactionHash") or ""
+    ).strip()
+    if transaction_hash:
+        return f"transaction:{transaction_hash.lower()}"
+    return "fields:" + canonical_json_sha256(
+        {
+            "market": str(
+                payload.get("market")
+                or payload.get("conditionId")
+                or payload.get("market_id")
+                or ""
+            ),
+            "asset": str(payload.get("asset") or payload.get("token_id") or ""),
+            "timestamp_ms": _trade_payload_timestamp_ms(payload),
+            "price": str(payload.get("price") or ""),
+            "size": str(payload.get("size") or ""),
+            "side": str(payload.get("side") or "").upper(),
+        }
+    )
+
+
+def _deduplicate_trade_payloads(
+    payloads: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    deduplicated: dict[str, dict[str, Any]] = {}
+    for payload in payloads:
+        identity = _trade_payload_identity(payload)
+        previous = deduplicated.get(identity)
+        if previous is None or int(payload.get("receive_time") or 0) < int(
+            previous.get("receive_time") or 0
+        ):
+            deduplicated[identity] = dict(payload)
+    return sorted(
+        deduplicated.values(),
+        key=lambda row: (
+            _trade_payload_timestamp_ms(row),
+            str(row.get("asset") or row.get("token_id") or ""),
+            _trade_payload_identity(row),
+        ),
+    )
+
+
+def _deduplicate_trade_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduplicated: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        identity = _trade_payload_identity(row)
+        previous = deduplicated.get(identity)
+        if previous is None or (
+            previous.get("trade_source_type") != "polymarket_clob_websocket_market"
+            and row.get("trade_source_type") == "polymarket_clob_websocket_market"
+        ):
+            deduplicated[identity] = dict(row)
+    return sorted(
+        deduplicated.values(),
+        key=lambda row: (
+            int(row["ts"]),
+            int(row["available_at_ts"]),
+            str(row["token_id"]),
+            _trade_payload_identity(row),
+        ),
+    )
+
+
+def _trade_collection_report_for_market(
+    *,
+    market: dict[str, Any],
+    stream_report: dict[str, Any],
+    stream_row_count: int,
+    rest_report: dict[str, Any],
+    merged_row_count: int,
+) -> dict[str, Any]:
+    stream_started_at_ts = stream_report.get("trade_stream_started_at_ts")
+    stream_ended_at_ts = stream_report.get("trade_stream_ended_at_ts")
+    continuity_passed = stream_report.get("trade_stream_continuity_passed") is True
+    full_round_coverage = bool(
+        continuity_passed
+        and stream_started_at_ts is not None
+        and stream_ended_at_ts is not None
+        and int(stream_started_at_ts) <= int(market["market_start_ts"])
+        and int(stream_ended_at_ts) >= int(market["market_end_ts"])
+    )
+    reason_codes = list(stream_report.get("trade_stream_reason_codes") or [])
+    if stream_started_at_ts is None:
+        reason_codes.append("trade_stream_unavailable")
+    elif int(stream_started_at_ts) > int(market["market_start_ts"]):
+        reason_codes.append("trade_stream_started_after_market_start")
+    if stream_ended_at_ts is None or int(stream_ended_at_ts) < int(market["market_end_ts"]):
+        reason_codes.append("trade_stream_ended_before_market_close")
+    if rest_report.get("rows_truncated") is True:
+        reason_codes.append("trade_data_api_pagination_truncated")
+    if rest_report.get("request_failed") is True:
+        reason_codes.extend(str(reason) for reason in rest_report.get("reason_codes") or [])
+        reason_codes.append("trade_data_api_reconciliation_failed")
+    tape_censored = not full_round_coverage and (
+        rest_report.get("rows_truncated") is True
+        or rest_report.get("request_failed") is True
+    )
+    return {
+        "trade_collection_mode": (
+            "clob_websocket_plus_data_api_paginated_reconciliation"
+            if stream_started_at_ts is not None
+            else "data_api_paginated_rest_fallback"
+        ),
+        "trade_stream_started_at_ts": stream_started_at_ts,
+        "trade_stream_ended_at_ts": stream_ended_at_ts,
+        "trade_stream_continuity_passed": continuity_passed,
+        "trade_stream_row_count": stream_row_count,
+        "trade_api_requested_limit": int(rest_report["requested_limit"]),
+        "trade_api_page_count": int(rest_report["page_count"]),
+        "trade_api_page_row_counts": list(rest_report["page_row_counts"]),
+        "trade_api_returned_count": int(rest_report["returned_count"]),
+        "trade_api_oldest_ts": rest_report.get("oldest_ts"),
+        "trade_api_newest_ts": rest_report.get("newest_ts"),
+        "trade_api_pagination_exhausted": rest_report.get("pagination_exhausted") is True,
+        "trade_api_reached_market_start": rest_report.get("reached_market_start") is True,
+        "trade_api_request_failed": rest_report.get("request_failed") is True,
+        "trade_rest_rows_truncated": rest_report.get("rows_truncated") is True,
+        "trade_merged_row_count": merged_row_count,
+        "trade_full_round_coverage_complete": full_round_coverage,
+        "trade_coverage_complete_for_feature_window": full_round_coverage,
+        "trade_tape_censored": tape_censored,
+        "trade_collection_reason_codes": sorted(set(reason_codes)),
+    }
 
 
 def _book_event_payload(event: BookEvent) -> dict[str, Any]:

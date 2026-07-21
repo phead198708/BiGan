@@ -69,6 +69,15 @@ def test_recorder_writes_raw_files_manifest_and_phase2_corpus(tmp_path: Path) ->
         result.manifest["phase2_corpus_manifest_sha256"]
         == result.report["phase2_corpus_manifest_sha256"]
     )
+    for key in (
+        "trade_collection_mode_distribution",
+        "trade_full_round_coverage_complete_market_count",
+        "trade_rest_truncated_market_count",
+        "trade_api_request_failed_market_count",
+        "trade_tape_censored_market_count",
+        "trade_collection_reason_distribution",
+    ):
+        assert result.manifest[key] == result.report[key]
 
     markets = _read_jsonl(result.raw_dir / "raw_polymarket_markets.jsonl")
     assert {row["market_family"] for row in markets} == {

@@ -557,6 +557,7 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
     book_payloads: dict[str, dict] = {}
     fallback_payloads: dict[str, dict] = {}
     resolution_payloads: dict[str, dict] = {}
+    trade_payloads: list[dict] = []
 
     source._update_payload_maps(
         payload={
@@ -572,6 +573,7 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
         book_payloads=book_payloads,
         fallback_payloads=fallback_payloads,
         resolution_payloads=resolution_payloads,
+        trade_payloads=trade_payloads,
     )
     source._update_payload_maps(
         payload={
@@ -593,6 +595,25 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
         book_payloads=book_payloads,
         fallback_payloads=fallback_payloads,
         resolution_payloads=resolution_payloads,
+        trade_payloads=trade_payloads,
+    )
+    source._update_payload_maps(
+        payload={
+            "event_type": "last_trade_price",
+            "market": "0xcondition",
+            "asset_id": "up-token",
+            "timestamp": "1700000000120",
+            "price": "0.57",
+            "size": "3.5",
+            "side": "BUY",
+            "transaction_hash": "0xtrade",
+        },
+        receive_time_ms=1_700_000_000_125,
+        target_tokens={"up-token", "down-token"},
+        book_payloads=book_payloads,
+        fallback_payloads=fallback_payloads,
+        resolution_payloads=resolution_payloads,
+        trade_payloads=trade_payloads,
     )
     source._update_payload_maps(
         payload={
@@ -609,6 +630,7 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
         book_payloads=book_payloads,
         fallback_payloads=fallback_payloads,
         resolution_payloads=resolution_payloads,
+        trade_payloads=trade_payloads,
     )
 
     assert book_payloads["up-token"]["bids"] == [{"price": "0.56", "size": "100"}]
@@ -618,6 +640,124 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
     assert fallback_payloads["down-token"]["source_event_type"] == "price_change"
     assert resolution_payloads["0xcondition"]["winning_asset_id"] == "up-token"
     assert resolution_payloads["0xcondition"]["winning_outcome"] == "Up"
+    assert trade_payloads == [
+        {
+            "market": "0xcondition",
+            "asset": "up-token",
+            "timestamp_ms": 1_700_000_000_120,
+            "receive_time": 1_700_000_000_125,
+            "price": "0.57",
+            "size": "3.5",
+            "side": "BUY",
+            "transaction_hash": "0xtrade",
+            "trade_source_type": "polymarket_clob_websocket_market",
+        }
+    ]
+
+
+def test_public_http_provider_merges_ws_trade_tape_with_paginated_rest() -> None:
+    fetch = PaginatedTradeFetch(page_size=2, truncated=False)
+    orderbook_source = FakeTradeStreamOrderBookSource()
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_300_100,
+        fetch_json=fetch,
+        orderbook_source=orderbook_source,
+        recent_trade_limit=2,
+        recent_trade_max_pages=3,
+    )
+    market = _trade_test_market()
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="trade-tape",
+        output_dir="/tmp/trade-tape",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    rows = provider.trade_rows([market], config)
+
+    assert fetch.requested_offsets == [0, 2]
+    assert len(rows) == 3
+    assert [row["transaction_hash"] for row in rows] == ["0xa", "0xb", "0xc"]
+    duplicate = next(row for row in rows if row["transaction_hash"] == "0xb")
+    assert duplicate["trade_source_type"] == "polymarket_clob_websocket_market"
+    assert duplicate["available_at_ts"] == 1_700_001_200_105
+    assert market["trade_api_pagination_exhausted"] is True
+    assert market["trade_api_reached_market_start"] is True
+    assert market["trade_rest_rows_truncated"] is False
+    assert market["trade_full_round_coverage_complete"] is True
+    assert market["trade_tape_censored"] is False
+    assert market["trade_collection_reason_codes"] == []
+
+
+def test_public_http_provider_marks_bounded_trade_backfill_as_censored() -> None:
+    fetch = PaginatedTradeFetch(page_size=2, truncated=True)
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_300_100,
+        fetch_json=fetch,
+        orderbook_source=FakeOrderBookSource(),
+        recent_trade_limit=2,
+        recent_trade_max_pages=2,
+    )
+    market = _trade_test_market()
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="trade-tape-truncated",
+        output_dir="/tmp/trade-tape-truncated",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    rows = provider.trade_rows([market], config)
+
+    assert len(rows) == 4
+    assert fetch.requested_offsets == [0, 2]
+    assert market["trade_api_pagination_exhausted"] is False
+    assert market["trade_api_reached_market_start"] is False
+    assert market["trade_rest_rows_truncated"] is True
+    assert market["trade_full_round_coverage_complete"] is False
+    assert market["trade_tape_censored"] is True
+    assert "trade_data_api_pagination_truncated" in market[
+        "trade_collection_reason_codes"
+    ]
+    assert "trade_stream_unavailable" in market["trade_collection_reason_codes"]
+
+
+def test_public_http_provider_keeps_complete_ws_tape_when_rest_reconciliation_fails() -> None:
+    orderbook_source = FakeTradeStreamOrderBookSource()
+
+    def fail_rest(url: str):
+        raise RealCorpusPublicProviderError(
+            f"read-only reconciliation unavailable: {url}",
+            reason_codes=("read_only_public_http_timeout",),
+        )
+
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_300_100,
+        fetch_json=fail_rest,
+        orderbook_source=orderbook_source,
+        recent_trade_limit=2,
+        recent_trade_max_pages=2,
+    )
+    market = _trade_test_market()
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="trade-tape-ws-only",
+        output_dir="/tmp/trade-tape-ws-only",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    rows = provider.trade_rows([market], config)
+
+    assert len(rows) == 1
+    assert rows[0]["trade_source_type"] == "polymarket_clob_websocket_market"
+    assert market["trade_full_round_coverage_complete"] is True
+    assert market["trade_api_request_failed"] is True
+    assert market["trade_tape_censored"] is False
+    assert "read_only_public_http_timeout" in market[
+        "trade_collection_reason_codes"
+    ]
+    assert "trade_data_api_reconciliation_failed" in market[
+        "trade_collection_reason_codes"
+    ]
 
 
 def test_websocket_orderbook_source_keeps_partial_snapshots_after_disconnect(monkeypatch) -> None:
@@ -1153,6 +1293,118 @@ class FakeOrderBookSource:
             "up-token": _book_payload(token_id="up-token", bid=0.56, ask=0.58),
             "down-token": _book_payload(token_id="down-token", bid=0.42, ask=0.44),
         }
+
+
+class FakeTradeStreamOrderBookSource(FakeOrderBookSource):
+    def trade_payloads(self, token_ids: tuple[str, ...]) -> list[dict]:
+        self.requested_token_ids = token_ids
+        return [
+            {
+                "market": "0xcondition",
+                "asset": "up-token",
+                "timestamp_ms": 1_700_001_200_100,
+                "receive_time": 1_700_001_200_105,
+                "price": "0.57",
+                "size": "2.5",
+                "side": "BUY",
+                "transaction_hash": "0xb",
+                "trade_source_type": "polymarket_clob_websocket_market",
+            }
+        ]
+
+    def trade_collection_report(self) -> dict:
+        return {
+            "trade_stream_started_at_ts": 1_700_001_000_000,
+            "trade_stream_ended_at_ts": 1_700_001_300_000,
+            "trade_stream_continuity_passed": True,
+            "trade_stream_reason_codes": [],
+        }
+
+
+class PaginatedTradeFetch:
+    def __init__(self, *, page_size: int, truncated: bool) -> None:
+        self.page_size = page_size
+        self.truncated = truncated
+        self.requested_offsets: list[int] = []
+
+    def __call__(self, url: str):
+        parsed = urllib.parse.urlparse(url)
+        if "data-api.polymarket.com" not in parsed.netloc:
+            raise AssertionError(f"unexpected URL: {url}")
+        query = urllib.parse.parse_qs(parsed.query)
+        assert int(query["limit"][0]) == self.page_size
+        offset = int(query["offset"][0])
+        self.requested_offsets.append(offset)
+        rows = [
+            _trade_payload(
+                transaction_hash="0xc",
+                token_id="down-token",
+                timestamp_ms=1_700_001_250_000,
+            ),
+            _trade_payload(
+                transaction_hash="0xb",
+                token_id="up-token",
+                timestamp_ms=1_700_001_200_100,
+            ),
+            _trade_payload(
+                transaction_hash="0xa",
+                token_id="up-token",
+                timestamp_ms=(
+                    1_700_001_000_000 if not self.truncated else 1_700_001_150_000
+                ),
+            ),
+        ]
+        if self.truncated:
+            rows.extend(
+                [
+                    _trade_payload(
+                        transaction_hash="0xd",
+                        token_id="down-token",
+                        timestamp_ms=1_700_001_100_000,
+                    ),
+                    _trade_payload(
+                        transaction_hash="0xe",
+                        token_id="up-token",
+                        timestamp_ms=1_700_001_090_000,
+                    ),
+                    _trade_payload(
+                        transaction_hash="0xf",
+                        token_id="down-token",
+                        timestamp_ms=1_700_001_080_000,
+                    ),
+                ]
+            )
+        return rows[offset : offset + self.page_size]
+
+
+def _trade_test_market() -> dict:
+    return {
+        "market_id": "0xcondition",
+        "condition_id": "0xcondition",
+        "slug": "btc-updown-5m-1700001000",
+        "market_family": "btc_updown_5m",
+        "market_start_ts": 1_700_001_000_000,
+        "market_end_ts": 1_700_001_300_000,
+        "up_token_id": "up-token",
+        "down_token_id": "down-token",
+    }
+
+
+def _trade_payload(
+    *,
+    transaction_hash: str,
+    token_id: str,
+    timestamp_ms: int,
+) -> dict:
+    return {
+        "market": "0xcondition",
+        "asset": token_id,
+        "timestamp": timestamp_ms // 1000,
+        "price": "0.57" if token_id == "up-token" else "0.43",
+        "size": "1.0",
+        "side": "BUY",
+        "transactionHash": transaction_hash,
+    }
 
 
 class FakeStreamOrderBookSource(FakeOrderBookSource):

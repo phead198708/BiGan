@@ -462,6 +462,26 @@ def _raw_market_row(market: dict[str, Any]) -> dict[str, Any]:
         "market_identity_clob_revalidation",
         "market_identity_live_orderbook_validation_required",
         "market_identity_data_api_discovery_used",
+        "trade_collection_mode",
+        "trade_stream_started_at_ts",
+        "trade_stream_ended_at_ts",
+        "trade_stream_continuity_passed",
+        "trade_stream_row_count",
+        "trade_api_requested_limit",
+        "trade_api_page_count",
+        "trade_api_page_row_counts",
+        "trade_api_returned_count",
+        "trade_api_oldest_ts",
+        "trade_api_newest_ts",
+        "trade_api_pagination_exhausted",
+        "trade_api_reached_market_start",
+        "trade_api_request_failed",
+        "trade_rest_rows_truncated",
+        "trade_merged_row_count",
+        "trade_full_round_coverage_complete",
+        "trade_coverage_complete_for_feature_window",
+        "trade_tape_censored",
+        "trade_collection_reason_codes",
     ):
         if field_name in market:
             row[field_name] = market[field_name]
@@ -488,6 +508,8 @@ def _recorder_report(
         for row in raw_market_rows
     )
     market_identity_fallback_reason_counts: Counter[str] = Counter()
+    trade_collection_mode_counts: Counter[str] = Counter()
+    trade_collection_reason_counts: Counter[str] = Counter()
     for row in raw_market_rows:
         market_identity_fallback_reason_counts.update(
             str(reason)
@@ -495,6 +517,13 @@ def _recorder_report(
                 "market_identity_cache_fallback_reason_codes"
             )
             or []
+        )
+        trade_collection_mode_counts.update(
+            [str(row.get("trade_collection_mode") or "unknown")]
+        )
+        trade_collection_reason_counts.update(
+            str(reason)
+            for reason in row.get("trade_collection_reason_codes") or []
         )
     phase2_corpus_manifest_sha256 = None
     if phase2_result is not None:
@@ -571,6 +600,25 @@ def _recorder_report(
         ),
         "raw_orderbook_row_count": len(raw_payloads["raw_polymarket_orderbooks.jsonl"]),
         "raw_trade_row_count": len(raw_payloads["raw_polymarket_trades.jsonl"]),
+        "trade_collection_mode_distribution": dict(
+            sorted(trade_collection_mode_counts.items())
+        ),
+        "trade_full_round_coverage_complete_market_count": sum(
+            row.get("trade_full_round_coverage_complete") is True
+            for row in raw_market_rows
+        ),
+        "trade_rest_truncated_market_count": sum(
+            row.get("trade_rest_rows_truncated") is True for row in raw_market_rows
+        ),
+        "trade_api_request_failed_market_count": sum(
+            row.get("trade_api_request_failed") is True for row in raw_market_rows
+        ),
+        "trade_tape_censored_market_count": sum(
+            row.get("trade_tape_censored") is True for row in raw_market_rows
+        ),
+        "trade_collection_reason_distribution": dict(
+            sorted(trade_collection_reason_counts.items())
+        ),
         "raw_btc_candle_row_count": len(raw_payloads["raw_binance_btcusdt_klines.jsonl"]),
         "raw_resolution_count": len(raw_payloads["raw_polymarket_resolutions.jsonl"]),
         "rejected_row_count": len(rejected_rows),
@@ -609,6 +657,17 @@ def _recorder_manifest(
         },
         "raw_artifact_row_counts": {
             filename: len(raw_payloads[filename]) for filename in RAW_CORPUS_FILENAMES
+        },
+        **{
+            key: report[key]
+            for key in (
+                "trade_collection_mode_distribution",
+                "trade_full_round_coverage_complete_market_count",
+                "trade_rest_truncated_market_count",
+                "trade_api_request_failed_market_count",
+                "trade_tape_censored_market_count",
+                "trade_collection_reason_distribution",
+            )
         },
         "training_eligible": report["training_eligible"],
         "phase2_corpus_build_eligible": report["phase2_corpus_build_eligible"],

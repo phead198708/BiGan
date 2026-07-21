@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from statistics import pstdev
+from typing import Any
 
 from bigan.v8.polymarket.corpus.contracts import (
     BinanceBTCCandle,
@@ -105,17 +106,30 @@ def _feature_row(
         if reference_price_to_beat is not None and reference_price_to_beat > 0.0
         else None
     )
-    recent_up_volume = _recent_trade_volume(
-        trades=market_trades,
-        outcome="UP",
+    trade_volume_coverage = _recent_trade_volume_coverage(
+        market=market,
         decision_ts=decision_ts,
         lookback_ms=60_000,
     )
-    recent_down_volume = _recent_trade_volume(
-        trades=market_trades,
-        outcome="DOWN",
-        decision_ts=decision_ts,
-        lookback_ms=60_000,
+    recent_up_volume = (
+        _recent_trade_volume(
+            trades=market_trades,
+            outcome="UP",
+            decision_ts=decision_ts,
+            lookback_ms=60_000,
+        )
+        if trade_volume_coverage["use_volume"]
+        else None
+    )
+    recent_down_volume = (
+        _recent_trade_volume(
+            trades=market_trades,
+            outcome="DOWN",
+            decision_ts=decision_ts,
+            lookback_ms=60_000,
+        )
+        if trade_volume_coverage["use_volume"]
+        else None
     )
     up_spread_bps = _spread_bps(up_snapshot)
     down_spread_bps = _spread_bps(down_snapshot)
@@ -237,6 +251,10 @@ def _feature_row(
         else (up_snapshot.liquidity_depth - down_snapshot.liquidity_depth) / liquidity_total,
         "recent_up_trade_volume": recent_up_volume,
         "recent_down_trade_volume": recent_down_volume,
+        "recent_trade_volume_coverage_complete": trade_volume_coverage[
+            "coverage_complete"
+        ],
+        "recent_trade_volume_censored": trade_volume_coverage["censored"],
     }
     max_trade_ts = max(
         (
@@ -276,6 +294,28 @@ def _feature_row(
         }
         for name in features
     }
+    for feature_name in (
+        "recent_up_trade_volume",
+        "recent_down_trade_volume",
+        "recent_trade_volume_coverage_complete",
+        "recent_trade_volume_censored",
+    ):
+        provenance[feature_name].update(
+            {
+                "trade_coverage_required_start_ts": trade_volume_coverage[
+                    "required_start_ts"
+                ],
+                "trade_stream_started_at_ts": market.trade_stream_started_at_ts,
+                "trade_stream_ended_at_ts": market.trade_stream_ended_at_ts,
+                "trade_stream_continuity_passed": (
+                    market.trade_stream_continuity_passed
+                ),
+                "trade_tape_censored": market.trade_tape_censored,
+                "trade_collection_reason_codes": list(
+                    market.trade_collection_reason_codes
+                ),
+            }
+        )
     if reference_context is not None:
         reference_provenance = {
             "source": "polymarket_corpus",
@@ -572,6 +612,44 @@ def _recent_trade_volume(
         if trade.outcome == outcome
         and decision_ts - lookback_ms <= trade.available_at_ts <= decision_ts
     )
+
+
+def _recent_trade_volume_coverage(
+    *,
+    market: PolymarketCorpusMarket,
+    decision_ts: int,
+    lookback_ms: int,
+) -> dict[str, Any]:
+    metadata_available = any(
+        value is not None
+        for value in (
+            market.trade_stream_started_at_ts,
+            market.trade_stream_ended_at_ts,
+            market.trade_stream_continuity_passed,
+            market.trade_tape_censored,
+        )
+    )
+    required_start_ts = max(market.market_start_ts, decision_ts - lookback_ms)
+    if not metadata_available:
+        return {
+            "use_volume": True,
+            "coverage_complete": None,
+            "censored": None,
+            "required_start_ts": required_start_ts,
+        }
+    coverage_complete = bool(
+        market.trade_stream_continuity_passed is True
+        and market.trade_stream_started_at_ts is not None
+        and market.trade_stream_ended_at_ts is not None
+        and market.trade_stream_started_at_ts <= required_start_ts
+        and market.trade_stream_ended_at_ts >= decision_ts
+    )
+    return {
+        "use_volume": coverage_complete,
+        "coverage_complete": float(coverage_complete),
+        "censored": float(not coverage_complete),
+        "required_start_ts": required_start_ts,
+    }
 
 
 def _recent_book_update_count(
