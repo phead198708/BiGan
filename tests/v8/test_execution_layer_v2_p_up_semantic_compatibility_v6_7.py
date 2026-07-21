@@ -13,6 +13,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_p_up_semantic_compatibility
     run_p_up_semantic_compatibility_v6_7,
     select_v6_7_target_free_rows,
     validate_p_up_semantic_compatibility_v6_7_profile,
+    validate_v6_7_collection_plan_correction,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -99,6 +100,109 @@ def test_v6_7_profile_freezes_p_up_as_diagnostic_only() -> None:
     ] = True
     with pytest.raises(ValueError, match="semantics"):
         validate_p_up_semantic_compatibility_v6_7_profile(invalid)
+
+
+def test_v6_7_collection_plan_hash_correction_is_narrow_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps(_profile(), indent=2, sort_keys=True) + "\n")
+    profile_descriptor = {
+        "path": str(profile_path.resolve()),
+        "sha256": _sha256(profile_path),
+    }
+    candidate_path = tmp_path / "candidate.json"
+    candidate_path.write_text(
+        json.dumps(
+            {
+                "candidate_freeze_created_ts": 100,
+                "candidate_scoring_frozen": True,
+                "target_free_support_gate_passed": True,
+                "labels_outcomes_resolution_or_pnl_opened": False,
+                "profile": profile_descriptor,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    candidate_descriptor = {
+        "path": str(candidate_path.resolve()),
+        "sha256": _sha256(candidate_path),
+    }
+    wrong_hash = "1" * 64
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "candidate_freeze": candidate_descriptor,
+                "candidate_profile": {
+                    "path": profile_descriptor["path"],
+                    "sha256": wrong_hash,
+                },
+                "future_collection_minimum_created_ts_exclusive": 100,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    safety = {
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+    }
+    correction = {
+        "schema_version": (
+            "bigan-v8-p-up-semantic-execution-compatibility-v6-7-"
+            "collection-plan-correction-v1"
+        ),
+        "issue_number": 227,
+        "candidate_name": "p_up_semantic_execution_compatibility_v6_7",
+        "correction_created_ts": 101,
+        "correction_scope": "candidate_profile_file_sha256_binding_only",
+        "original_collection_plan": {
+            "path": str(plan_path.resolve()),
+            "sha256": _sha256(plan_path),
+        },
+        "incorrect_declared_candidate_profile_sha256": wrong_hash,
+        "authoritative_candidate_freeze": candidate_descriptor,
+        "authoritative_candidate_profile": profile_descriptor,
+        "candidate_freeze_created_ts": 100,
+        "future_collection_minimum_created_ts_exclusive": 100,
+        "collection_window_sizes_changed": False,
+        "collection_order_changed": False,
+        "candidate_scoring_changed": False,
+        "execution_thresholds_or_guards_changed": False,
+        "calibration_or_confirmatory_gate_changed": False,
+        "labels_outcomes_resolution_or_pnl_opened_before_correction": False,
+        "candidate_scoring_attempted_before_correction": False,
+        "result_selected_correction": False,
+        "required_for_future_window_freeze": True,
+        "safety": safety,
+    }
+
+    validate_v6_7_collection_plan_correction(
+        correction,
+        original_plan_path=plan_path,
+        candidate_freeze_path=candidate_path,
+        profile_path=profile_path,
+    )
+    correction["execution_thresholds_or_guards_changed"] = True
+    with pytest.raises(ValueError, match="guards unchanged"):
+        validate_v6_7_collection_plan_correction(
+            correction,
+            original_plan_path=plan_path,
+            candidate_freeze_path=candidate_path,
+            profile_path=profile_path,
+        )
 
 
 def test_v6_7_accepts_p_up_disagreement_but_keeps_microstructure_guard() -> None:

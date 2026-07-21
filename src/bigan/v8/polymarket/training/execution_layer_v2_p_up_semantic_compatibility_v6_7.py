@@ -29,6 +29,10 @@ REPORT_SCHEMA_VERSION = "bigan-v8-p-up-semantic-execution-compatibility-v6-7-rep
 MANIFEST_SCHEMA_VERSION = (
     "bigan-v8-p-up-semantic-execution-compatibility-v6-7-freeze-manifest-v1"
 )
+COLLECTION_PLAN_CORRECTION_SCHEMA_VERSION = (
+    "bigan-v8-p-up-semantic-execution-compatibility-v6-7-"
+    "collection-plan-correction-v1"
+)
 CANDIDATE_NAME = "p_up_semantic_execution_compatibility_v6_7"
 SBC_ACTIONS = {
     "BUY_UP_SELL_BEFORE_CLOSE",
@@ -178,6 +182,90 @@ def validate_p_up_semantic_compatibility_v6_7_profile(
     blockers = [name for name, passed in checks.items() if not passed]
     if blockers:
         raise ValueError("#227 profile invalid: " + ", ".join(blockers))
+
+
+def validate_v6_7_collection_plan_correction(
+    correction: dict[str, Any],
+    *,
+    original_plan_path: Path,
+    candidate_freeze_path: Path,
+    profile_path: Path,
+) -> dict[str, Any]:
+    """Bind the hash-only plan correction to the already frozen candidate."""
+
+    original_plan_path = original_plan_path.resolve()
+    candidate_freeze_path = candidate_freeze_path.resolve()
+    profile_path = profile_path.resolve()
+    original_descriptor = dict(correction.get("original_collection_plan") or {})
+    candidate_descriptor = dict(correction.get("authoritative_candidate_freeze") or {})
+    profile_descriptor = dict(correction.get("authoritative_candidate_profile") or {})
+    for descriptor, path, name in (
+        (original_descriptor, original_plan_path, "original collection plan"),
+        (candidate_descriptor, candidate_freeze_path, "authoritative candidate freeze"),
+        (profile_descriptor, profile_path, "authoritative candidate profile"),
+    ):
+        if descriptor != _descriptor(path):
+            raise ValueError(f"#227 collection-plan correction {name} descriptor mismatch")
+
+    plan = _load_json(original_plan_path)
+    candidate = _load_json(candidate_freeze_path)
+    expected_safety = _blocked_safety_fields()
+    checks = {
+        "schema": correction.get("schema_version")
+        == COLLECTION_PLAN_CORRECTION_SCHEMA_VERSION,
+        "issue": correction.get("issue_number") == 227,
+        "candidate": correction.get("candidate_name") == CANDIDATE_NAME,
+        "scope": correction.get("correction_scope")
+        == "candidate_profile_file_sha256_binding_only",
+        "incorrect hash recorded": correction.get(
+            "incorrect_declared_candidate_profile_sha256"
+        )
+        == dict(plan.get("candidate_profile") or {}).get("sha256"),
+        "incorrect hash differs": correction.get(
+            "incorrect_declared_candidate_profile_sha256"
+        )
+        != profile_descriptor["sha256"],
+        "plan candidate freeze": plan.get("candidate_freeze") == candidate_descriptor,
+        "plan profile path": dict(plan.get("candidate_profile") or {}).get("path")
+        == profile_descriptor["path"],
+        "candidate profile": candidate.get("profile") == profile_descriptor,
+        "candidate frozen": candidate.get("candidate_scoring_frozen") is True,
+        "candidate support": candidate.get("target_free_support_gate_passed") is True,
+        "candidate targets sealed": candidate.get(
+            "labels_outcomes_resolution_or_pnl_opened"
+        )
+        is False,
+        "boundary": int(correction.get("candidate_freeze_created_ts") or 0)
+        == int(candidate.get("candidate_freeze_created_ts") or -1)
+        == int(plan.get("future_collection_minimum_created_ts_exclusive") or -2)
+        == int(correction.get("future_collection_minimum_created_ts_exclusive") or -3),
+        "correction after freeze": int(correction.get("correction_created_ts") or 0)
+        > int(candidate.get("candidate_freeze_created_ts") or 0),
+        "window sizes unchanged": correction.get("collection_window_sizes_changed")
+        is False,
+        "order unchanged": correction.get("collection_order_changed") is False,
+        "scoring unchanged": correction.get("candidate_scoring_changed") is False,
+        "guards unchanged": correction.get("execution_thresholds_or_guards_changed")
+        is False,
+        "gates unchanged": correction.get("calibration_or_confirmatory_gate_changed")
+        is False,
+        "targets sealed": correction.get(
+            "labels_outcomes_resolution_or_pnl_opened_before_correction"
+        )
+        is False,
+        "scoring not attempted": correction.get(
+            "candidate_scoring_attempted_before_correction"
+        )
+        is False,
+        "not result selected": correction.get("result_selected_correction") is False,
+        "required at freeze": correction.get("required_for_future_window_freeze")
+        is True,
+        "safety": correction.get("safety") == expected_safety,
+    }
+    blockers = [name for name, passed in checks.items() if not passed]
+    if blockers:
+        raise ValueError("#227 collection-plan correction invalid: " + ", ".join(blockers))
+    return plan
 
 
 def run_p_up_semantic_compatibility_v6_7(
