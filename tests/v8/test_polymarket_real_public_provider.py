@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+import urllib.error
 import urllib.parse
 
 import pytest
@@ -14,6 +15,117 @@ from bigan.v8.polymarket import (
     PolymarketRealCorpusRecorderConfig,
 )
 from bigan.v8.polymarket.recorder.public_provider import RealCorpusPublicProviderError
+
+
+def test_public_http_provider_uses_stable_read_only_json_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+    class Opener:
+        def open(self, request, *, timeout):
+            captured["headers"] = {
+                name.lower(): value for name, value in request.header_items()
+            }
+            captured["method"] = request.get_method()
+            captured["timeout"] = timeout
+            return Response()
+
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.recorder.public_provider.urllib.request.build_opener",
+        lambda *handlers: Opener(),
+    )
+    provider = PolymarketPublicHTTPRealCorpusProvider(http_timeout_seconds=7.0)
+
+    assert provider._get_json("https://gamma-api.polymarket.com/markets") == {
+        "ok": True
+    }
+    assert captured == {
+        "headers": {
+            "accept": "application/json",
+            "user-agent": "bigan-v8-polymarket-real-corpus-readonly/1.0",
+        },
+        "method": "GET",
+        "timeout": 7.0,
+    }
+
+
+def test_public_http_provider_http_error_remains_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Opener:
+        def open(self, request, *, timeout):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                403,
+                "Forbidden",
+                hdrs=None,
+                fp=None,
+            )
+
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.recorder.public_provider.urllib.request.build_opener",
+        lambda *handlers: Opener(),
+    )
+    provider = PolymarketPublicHTTPRealCorpusProvider(http_timeout_seconds=7.0)
+
+    with pytest.raises(RealCorpusPublicProviderError) as exc_info:
+        provider._get_json("https://gamma-api.polymarket.com/markets")
+
+    assert exc_info.value.reason_codes == ("read_only_public_http_error",)
+
+
+def test_public_http_provider_clob_books_uses_stable_read_only_json_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'[{"asset_id": "up-token"}]'
+
+    def urlopen(request, *, timeout):
+        captured["headers"] = {
+            name.lower(): value for name, value in request.header_items()
+        }
+        captured["method"] = request.get_method()
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.recorder.public_provider.urllib.request.urlopen",
+        urlopen,
+    )
+    provider = PolymarketPublicHTTPRealCorpusProvider(http_timeout_seconds=7.0)
+
+    assert provider._fetch_clob_books(("up-token",)) == {
+        "up-token": {"asset_id": "up-token"}
+    }
+    assert captured == {
+        "headers": {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "user-agent": "bigan-v8-polymarket-real-corpus-readonly/1.0",
+        },
+        "method": "POST",
+        "timeout": 7.0,
+    }
 
 
 def test_public_http_provider_normalizes_public_market_rows_without_fake_resolution() -> None:

@@ -49,6 +49,10 @@ BTC_UPDOWN_SLUG_HORIZON_BY_FAMILY = {
 }
 DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 POLYMARKET_CLOB_WS_SOURCE_CHANNEL = "polymarket_clob_ws_market"
+READ_ONLY_PUBLIC_HTTP_USER_AGENT = (
+    "bigan-v8-polymarket-real-corpus-readonly/1.0"
+)
+READ_ONLY_PUBLIC_HTTP_ACCEPT = "application/json"
 BTC_FEATURE_SOURCE_COINBASE = "coinbase_btc_usd"
 BTC_FEATURE_SOURCE_KRAKEN = "kraken_xbt_usd"
 BTC_FEATURE_SOURCE_BINANCE = "binance_btcusdt"
@@ -60,6 +64,16 @@ DATA_API_CLOB_MARKET_IDENTITY_SOURCE_TYPE = (
 DATA_API_MARKET_IDENTITY_DISCOVERY_LIMIT = 500
 _ACTIVE_GAMMA_PREFETCH_CACHE_PATHS: set[str] = set()
 _ACTIVE_GAMMA_PREFETCH_LOCK = threading.Lock()
+
+
+def _read_only_json_headers(*, include_content_type: bool = False) -> dict[str, str]:
+    headers = {
+        "Accept": READ_ONLY_PUBLIC_HTTP_ACCEPT,
+        "User-Agent": READ_ONLY_PUBLIC_HTTP_USER_AGENT,
+    }
+    if include_content_type:
+        headers["Content-Type"] = "application/json"
+    return headers
 
 
 class RealCorpusPublicProviderError(RuntimeError):
@@ -1479,10 +1493,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
         request = urllib.request.Request(
             self.clob_books_endpoint,
             data=json.dumps([{"token_id": token_id} for token_id in token_ids]).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "bigan-v8-polymarket-real-corpus-readonly/1.0",
-            },
+            headers=_read_only_json_headers(include_content_type=True),
             method="POST",
         )
         try:
@@ -1750,7 +1761,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
             return self._fetch_json(url)
         request = urllib.request.Request(
             url,
-            headers={"User-Agent": "bigan-v8-polymarket-real-corpus-readonly/1.0"},
+            headers=_read_only_json_headers(),
             method="GET",
         )
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
