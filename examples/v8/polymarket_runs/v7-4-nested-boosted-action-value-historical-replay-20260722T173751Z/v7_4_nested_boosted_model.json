@@ -259,9 +259,9 @@
     "v6_7_baseline_market_action_identity_hash": "5db52896fa89ba2d9b681f5cb37ab882a511b8d9bfeaa5c0f60754e537f83008"
   },
   "historical_training_targets_used_inside_nested_training_only_selection": true,
-  "implementation_commit": "86e3b4a52bfa112fa7cf98ddc0e634dc5e1516f5",
+  "implementation_commit": "dcc24317fe90a566638eb25fccf15a37a62e9636",
   "live_trading_enabled": false,
-  "model_artifact_id": "868e7b668a053db4971c2fa3679de95a52e66ee2d5db513752ccf0eb2fd1e8dd",
+  "model_artifact_id": "edd5103fb9f420adbb515030f0859a3ddc422adb85f8f1c0ff4323d2f816d24d",
   "model_improvement_demonstrated": false,
   "outer_fold_reports": [
     {

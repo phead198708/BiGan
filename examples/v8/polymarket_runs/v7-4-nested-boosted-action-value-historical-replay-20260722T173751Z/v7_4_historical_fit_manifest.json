@@ -12,16 +12,16 @@
   "freeze_ready": false,
   "historical_gate_blocking_reason_codes": [],
   "historical_noninferiority_gate_passed": true,
-  "implementation_commit": "86e3b4a52bfa112fa7cf98ddc0e634dc5e1516f5",
+  "implementation_commit": "dcc24317fe90a566638eb25fccf15a37a62e9636",
   "leakage_audit": {
     "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/v7-4-nested-boosted-action-value-historical-replay-20260722T173751Z/v7_4_fit_leakage_audit.json",
     "sha256": "baec9c664935daa7cd80807f75057115c7c8c2c74bf0a3d56b8ccac559bab762"
   },
   "live_trading_enabled": false,
-  "manifest_id": "242769068df04f3cf639d75e9affdebf73f70da3349683592778cb45bdbe69e2",
+  "manifest_id": "768fe8e209e37c3e2d8bf1d30ac38e57226d6c4d756d884dc59ccb15e4cd32c7",
   "model": {
     "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/v7-4-nested-boosted-action-value-historical-replay-20260722T173751Z/v7_4_nested_boosted_model.json",
-    "sha256": "8ecb6a2c980071a5352b0bd1a5cda1f0093669f4596245fb7b4de1267d56979b"
+    "sha256": "6b17a8b2a5265a3c4e315389e1e25c9c01bc2b4733efea10257683d369514239"
   },
   "model_improvement_demonstrated": false,
   "outer_oof_rows": {
@@ -33,7 +33,7 @@
   "polymarket_write_enabled": false,
   "profile": {
     "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_configs/execution_layer_v2_nested_boosted_action_value_v7_4_profile.json",
-    "sha256": "0fecaf59e20849a35ffc129829754e52daaf64a2689ea963a57b3566cb90bb60"
+    "sha256": "8c155dad7413781f92d961b2a5217798e2874bc437a902e1c854541683d79bb7"
   },
   "promotion_evidence_eligible": false,
   "report": {
