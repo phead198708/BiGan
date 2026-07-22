@@ -1,0 +1,90 @@
+{
+  "schema_version": "bigan-v8-retained-v6-7-future-noninferiority-v7-5-profile-v1",
+  "issue_number": 238,
+  "candidate_name": "v7_5_retained_v6_7_policy",
+  "frozen": true,
+  "lineage": {
+    "source_target_free_freeze_manifest_sha256": "186f82099ac2075e9c7f34411c68ef1655bddc7510e92426fb6b2ff82214dd80",
+    "source_accepted_bet_decision_freeze_sha256": "a6043b9f3167d402272883813e09b14aac4416e44211999ba72d1222327806d7",
+    "source_selected_index_rows_sha256": "8c1a5b92ccd4657bdd6d064cbc45af39d208d944c2b763419597500a7dde48fa",
+    "source_attempted_index_rows_sha256": "85470a17e3815bb39b814f7de39a8694c6b31e3e0d9aeecd9a620003118f1a4a",
+    "source_target_free_feature_rows_sha256": "f7a9b2c47a2ab0590d0ec635678b5ce1148f21447093160de539c4c71f617955",
+    "source_five_action_rows_sha256": "929357e4ec57746dae04f608fcbe7740375e40a95137813048080a10ffb06bc5",
+    "source_v6_7_candidate_rows_sha256": "52acf2b99e855a145122ee595566f300f2fe11d5d9fdeb392e7d63c0cf5638f0",
+    "source_v6_7_base_selected_rows_sha256": "ef2e66a0e7577e1230f7871d7a713dbdbff1c315dec29536409d93d583d00cb1",
+    "runtime_policy_profile_sha256": "1306f6b6f7a6c1216b23413352ff66f4061ec62a9751b0de51eded256ca51264",
+    "v7_4_historical_manifest_sha256": "279bd746edabcdbe3ec22d6f84fb9b8cd9ce9d2d496fd07012dcf12ea9437e34",
+    "v7_4_historical_noninferiority_report_sha256": "5360809cc293c0c39098d1b3d06f7667e98fb8d89e21f9258000682d40332298",
+    "v7_5_historical_manifest_sha256": "07376bceaed9319eb8462db9e47a7898daf5f015e88b2886457e885b57f9e08a",
+    "v7_5_historical_noninferiority_report_sha256": "3c8d76c69e5b1e75a23065244d084ee2f20def1d6c92082aaecaafd1ed2c261f"
+  },
+  "retained_policy_contract": {
+    "candidate_policy": "v7_5_retained_v6_7_policy",
+    "baseline_policy": "v6_7_frozen_policy",
+    "candidate_decisions_are_byte_identical_to_baseline": true,
+    "historical_noninferiority_gate_passed": true,
+    "model_improvement_demonstrated": false,
+    "score_mutation_allowed": false,
+    "action_mutation_allowed": false,
+    "side_mutation_allowed": false,
+    "decision_timestamp_mutation_allowed": false,
+    "cost_sizing_or_guard_mutation_allowed": false
+  },
+  "future_window": {
+    "role": "future_confirmatory",
+    "exact_market_count": 120,
+    "one_frozen_decision_per_market": true,
+    "all_markets_closed_before_target_access": true,
+    "complete_five_action_grid_required": true,
+    "feature_causality_required": true,
+    "strictly_later_and_disjoint_already_frozen": true,
+    "side_composition_is_regime_emergent": true,
+    "side_quota_enabled": false,
+    "side_pnl_hard_gate_enabled": false
+  },
+  "future_pnl_gate": {
+    "minimum_guard_accepted_unique_market_count": 40,
+    "accepted_total_after_cost_pnl_minimum_exclusive": 0.0,
+    "largest_winner_removed_after_cost_pnl_minimum_exclusive": 0.0,
+    "candidate_minus_v6_7_after_cost_pnl_minimum_inclusive": 0.0,
+    "candidate_minus_v6_7_largest_winner_removed_minimum_inclusive": 0.0,
+    "candidate_minus_v6_7_bootstrap_lcb_minimum_inclusive": 0.0,
+    "bootstrap_unit": "market_id",
+    "bootstrap_confidence_level": 0.95,
+    "bootstrap_resample_count": 5000,
+    "bootstrap_seed": 2382026,
+    "comparison_operator": "greater_than_or_equal",
+    "equality_passes_noninferiority": true,
+    "model_improvement_reported_separately": true,
+    "side_action_and_family_metrics_diagnostic_only": true,
+    "single_use_future_gate": true,
+    "result_selected_rerun_allowed": false,
+    "result_selected_extension_allowed": false
+  },
+  "target_access_contract": {
+    "target_free_freeze_before_settlement": true,
+    "official_read_only_settlement_on_quarantine_copies": true,
+    "source_outcome_blind_artifacts_mutated": false,
+    "complete_settlement_required": true,
+    "outcomes_used_for_selection_or_tuning": false,
+    "target_used_as_decision_time_input": false
+  },
+  "downstream_contract": {
+    "bounded_paper_candidate_review_requires_future_pnl_gate": true,
+    "paper_candidate_auto_unlock_allowed": false,
+    "future_pnl_pass_does_not_enable_live_or_handoff": true
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}
