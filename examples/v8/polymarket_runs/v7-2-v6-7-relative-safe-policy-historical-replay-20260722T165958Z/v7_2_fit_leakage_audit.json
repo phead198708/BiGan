@@ -1,0 +1,31 @@
+{
+  "#134_resume_allowed": false,
+  "#146_start_allowed": false,
+  "candidate_name": "frozen_v6_7_relative_safe_policy_v7_2",
+  "capital_at_risk": false,
+  "fit_leakage_audit_passed": true,
+  "fit_leakage_blocking_reason_codes": [],
+  "fit_leakage_checks": {
+    "all_134_historical_markets_used": true,
+    "feature_timestamp_causality": true,
+    "future_outcomes_not_used": true,
+    "issue233_result_artifacts_not_opened": true,
+    "no_alternative_decision_timestamp": true,
+    "no_outcome_driven_tuning": true,
+    "safety_blocked": true,
+    "validation_labels_isolated_per_fold": true
+  },
+  "freeze_ready": false,
+  "future_target_accessed": false,
+  "issue233_result_artifact_paths_accepted_by_config": false,
+  "leakage_audit_id": "36e8bd9f31fa85fcf3720ad4b9f125ab4b24f3c53e25de91095700f62b575bac",
+  "live_trading_enabled": false,
+  "paper_candidate_allowed": false,
+  "paper_only": true,
+  "polymarket_write_enabled": false,
+  "promotion_evidence_eligible": false,
+  "schema_version": "bigan-v8-v6-7-relative-safe-policy-v7-2-leakage-v1",
+  "source_model_candidate_eligible": false,
+  "v8_execution_handoff_allowed": false,
+  "wallet_signing_enabled": false
+}
