@@ -1,0 +1,68 @@
+{
+  "schema_version": "bigan-v8-rolling-origin-drift-adaptive-action-value-v7-7-canary-plan-v1",
+  "issue_number": 240,
+  "candidate_name": "rolling_origin_drift_adaptive_action_value_v7_7",
+  "plan_created_ts": 1784751858000,
+  "preregistered_before_collection": true,
+  "historical_gate": {
+    "historical_manifest_sha256": "49a409fb6720e12fdf7e3215223f39e05ebf901e4e85c42394d25b9f5d114c27",
+    "model_sha256": "29cad5c65feb9608b9ecf333fac190fba48617ca20af80f303b01568bfbfad40",
+    "profile_sha256": "133a78cf5af33cef1bfb4e6d6f5de1771e153c2450d9226282648f4232bf006a",
+    "historical_noninferiority_required": true,
+    "historical_actionability_required": true,
+    "inclusive_noninferiority_operator": "greater_than_or_equal",
+    "equality_passes": true
+  },
+  "frozen_scoring": {
+    "decision_policy_implementation_commit": "b355a7e1a9cb7e588c00d99cf66b937c56f5a400",
+    "decision_policy_source_sha256": "d28a6695578022001534b4beaeaac7cc0ec562d618725bb2f06111521946be48",
+    "v6_2_source_candidate_manifest_sha256": "b9441b04fb595a927cbf9af9311612b037c36fc8c623ac8a92b6f4cb8ece84b9",
+    "v6_7_profile_sha256": "cec55d243acd6bbf60a5e8474545b487086ddcd4d18073682ae7f2d4660d2248",
+    "v7_0_training_profile_sha256": "1f66d8699b9727651538cc34a9a2a25ba5eaac5cfded75cf8f4a258b1b5d3f4a",
+    "fixed_edge_buffer": 0.025,
+    "model_score_or_threshold_tuning_after_collection_allowed": false
+  },
+  "collection": {
+    "mode": "bounded_candidate_agnostic_outcome_blind_raw_collection",
+    "selection_method": "earliest_quality_valid_strictly_later_disjoint_markets",
+    "target_quality_valid_market_count": 12,
+    "maximum_attempted_market_count": 18,
+    "strictly_later_minimum_market_start_ts_exclusive": 1784755200000,
+    "prior_maximum_market_close_ts": 1784689200000,
+    "market_id_disjointness_required": true,
+    "slug_disjointness_required": true,
+    "source_row_hash_disjointness_required": true,
+    "collector_protocol_sha256": "2343f8247b2c1441e694b2975bccec7ae2448db5e5a5c916c3a02def49d44843",
+    "feature_contract_sha256": "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959",
+    "outcomes_resolution_labels_or_pnl_opened": false
+  },
+  "target_free_actionability_gate": {
+    "exact_quality_valid_market_count": 12,
+    "minimum_guard_accepted_policy_difference_market_count": 1,
+    "same_decision_sbc_pair_required": true,
+    "full_execution_guard_unchanged": true,
+    "v6_7_no_trade_activation_allowed": false,
+    "no_side_quota": true,
+    "outcomes_resolution_labels_or_pnl_opened": false,
+    "failure_stops_before_future_pnl_collection": true
+  },
+  "result_scope": {
+    "target_free_actionability_only": true,
+    "promotion_evidence": false,
+    "future_unseen_pnl_holdout_still_required": true
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "live_trading_enabled": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}
