@@ -154,6 +154,10 @@ def test_equal_keep_policy_passes_noninferiority_without_claiming_improvement(
     assert replay[
         "candidate_minus_v6_7_total_after_cost_net_pnl_at_frozen_size"
     ] == pytest.approx(0.0)
+    assert replay["gate_name"] == (
+        "same_dataset_historical_replay_noninferiority_to_v6_7"
+    )
+    assert replay["policy_difference_is_diagnostic_only"] is True
     assert model["target_free_canary_collection_allowed"] is True
 
 

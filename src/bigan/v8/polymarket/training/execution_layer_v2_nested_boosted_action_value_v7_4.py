@@ -352,6 +352,11 @@ def fit_nested_boosted_action_value_v7_4(
         cache=cache,
     )
     replay = _historical_replay(outer_rows, profile=profile)
+    replay["gate_name"] = "same_dataset_historical_replay_noninferiority_to_v6_7"
+    replay["gate_mode"] = (
+        "development_noninferiority_screening_only_before_new_collection"
+    )
+    replay["policy_difference_is_diagnostic_only"] = True
     candidate_rows = replay.pop("candidate_selected_rows")
     baseline_rows = replay.pop("v6_7_baseline_selected_rows")
     policy_difference_count = sum(
