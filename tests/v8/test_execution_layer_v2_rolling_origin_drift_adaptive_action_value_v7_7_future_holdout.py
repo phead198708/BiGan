@@ -15,6 +15,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_rolling_origin_drift_adapti
     _safety_fields,
     build_v7_7_future_pnl_noninferiority_gate,
     build_v7_7_target_free_holdout_freeze_report,
+    materialize_guard_accepted_runtime_decisions,
     select_v7_7_future_holdout_window,
     validate_v7_7_future_holdout_plan,
 )
@@ -380,3 +381,43 @@ def test_target_free_freeze_fails_support_causality_and_target_leakage() -> None
         "target_free_feature_causality_violation",
         "target_free_forbidden_target_field_present",
     }
+
+
+def test_guard_accepted_runtime_decisions_bind_frozen_source_rows() -> None:
+    actions = _action_rows()
+    for row in actions:
+        row["market_close_ts"] = row["decision_ts"] + 60_000
+        row["decision_id"] = f"{row['market_id']}:{row['action']}"
+        row["microstructure_snapshot"] = {"time_to_close_seconds": 60.0}
+    accepted = materialize_guard_accepted_runtime_decisions(
+        _guard_rows(accepted_count=40, side="DOWN"),
+        action_rows=actions,
+    )
+
+    assert len(accepted) == 40
+    assert {row["side"] for row in accepted} == {"DOWN"}
+    assert {row["action"] for row in accepted} == {
+        "BUY_DOWN_SELL_BEFORE_CLOSE"
+    }
+    assert all(row["max_input_ts"] <= row["decision_ts"] for row in accepted)
+    assert all(row["source_score_mutated"] is False for row in accepted)
+    assert all(
+        row["labels_outcomes_resolution_or_pnl_opened"] is False
+        for row in accepted
+    )
+
+
+def test_guard_accepted_runtime_decisions_fail_on_missing_source_action() -> None:
+    actions = [
+        row
+        for row in _action_rows()
+        if not (
+            row["market_id"] == "market-000"
+            and row["action"] == "BUY_DOWN_SELL_BEFORE_CLOSE"
+        )
+    ]
+    with pytest.raises(ValueError, match="source identity"):
+        materialize_guard_accepted_runtime_decisions(
+            _guard_rows(accepted_count=40, side="DOWN"),
+            action_rows=actions,
+        )

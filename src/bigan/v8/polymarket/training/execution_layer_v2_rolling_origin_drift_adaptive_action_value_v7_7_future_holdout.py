@@ -542,6 +542,62 @@ def _guard_side(row: dict[str, Any]) -> str:
     return str(row.get("selected_side") or row.get("side") or "NONE")
 
 
+def materialize_guard_accepted_runtime_decisions(
+    guard_rows: list[dict[str, Any]],
+    *,
+    action_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bind frozen guard-accepted actions to their immutable decision-time source."""
+
+    sources: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in action_rows:
+        action = str(row.get("action") or "")
+        if action in SBC_ACTIONS:
+            sources[(str(row.get("market_id") or ""), action)].append(row)
+    output = []
+    seen: set[str] = set()
+    for guard in guard_rows:
+        if guard.get("execution_guard_order_allowed") is not True:
+            continue
+        market_id = str(guard.get("market_id") or "")
+        action = str(guard.get("selected_action") or guard.get("action") or "")
+        side = str(guard.get("selected_side") or guard.get("side") or "")
+        matches = sources.get((market_id, action), [])
+        if (
+            not market_id
+            or market_id in seen
+            or action not in SBC_ACTIONS
+            or side not in SIDES
+            or len(matches) != 1
+        ):
+            raise ValueError("#241 guard-accepted runtime source identity invalid")
+        source = matches[0]
+        decision_ts = int(source.get("decision_ts") or 0)
+        max_input_ts = int(source.get("max_input_ts") or 0)
+        if decision_ts <= 0 or max_input_ts > decision_ts:
+            raise ValueError("#241 guard-accepted runtime source causality invalid")
+        seen.add(market_id)
+        output.append(
+            {
+                "market_id": market_id,
+                "decision_ts": decision_ts,
+                "max_input_ts": max_input_ts,
+                "market_close_ts": int(source.get("market_close_ts") or 0),
+                "side": side,
+                "action": action,
+                "microstructure_snapshot": dict(
+                    source.get("microstructure_snapshot") or {}
+                ),
+                "source_decision_id": str(source.get("decision_id") or ""),
+                "source_score_mutated": False,
+                "labels_outcomes_resolution_or_pnl_opened": False,
+                "target_used_as_decision_time_input": False,
+                **_safety_fields(),
+            }
+        )
+    return sorted(output, key=lambda row: (int(row["decision_ts"]), row["market_id"]))
+
+
 def _validate_runtime_target_rows(
     rows: list[dict[str, Any]], *, market_ids: list[str]
 ) -> None:
