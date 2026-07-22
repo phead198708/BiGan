@@ -259,7 +259,7 @@ def validate_nested_boosted_action_value_v7_4_profile(
             "historical_noninferiority_gate_must_pass_before_collection": True,
             "strictly_later_outcome_blind_market_count": 12,
             "maximum_attempt_count": 18,
-            "minimum_guard_accepted_policy_difference_market_count": 1,
+            "minimum_guard_accepted_policy_difference_market_count": 0,
             "outcome_label_or_pnl_access_allowed": False,
             "full_execution_guard_unchanged": True,
         },

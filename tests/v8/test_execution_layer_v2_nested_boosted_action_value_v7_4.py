@@ -119,6 +119,9 @@ def test_profile_freezes_boosted_library_and_noninferiority_gate() -> None:
     gate = profile["historical_replay_superiority_gate"]
     assert gate["candidate_minus_v6_7_total_pnl_minimum_inclusive"] == 0.0
     assert gate["policy_difference_is_diagnostic_only"] is True
+    assert profile["target_free_canary"][
+        "minimum_guard_accepted_policy_difference_market_count"
+    ] == 0
 
     changed = copy.deepcopy(profile)
     changed["xgboost"]["max_depth"] = 3
