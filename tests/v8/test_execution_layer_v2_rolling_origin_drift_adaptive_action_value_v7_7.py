@@ -286,6 +286,42 @@ def test_weighted_model_uses_positive_recency_weights() -> None:
     assert artifact["maximum_row_weight"] == pytest.approx(1.0)
 
 
+def test_target_free_consumer_uses_frozen_rule_and_rejects_outcomes() -> None:
+    artifact = v77._fit_weighted_model(
+        _seed_rows(),
+        market_order=[f"seed-{index:03d}" for index in range(134)],
+        profile=_profile(),
+    )
+    model = {
+        "schema_version": v77.MODEL_SCHEMA_VERSION,
+        "historical_noninferiority_gate_passed": True,
+        "target_free_canary_collection_allowed": True,
+        "final_weighted_model": artifact,
+    }
+    market = _stream_markets()[0]
+    decision = v77.score_rolling_origin_drift_adaptive_v7_7_market(
+        market, model_artifact=model
+    )
+    assert decision["selected_action"] in {
+        "NO_TRADE",
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+    }
+    assert decision["outcome_or_pnl_field_used_at_inference"] is False
+    assert decision["source_score_mutated"] is False
+    assert decision["capital_at_risk"] is False
+
+    blocked_market = copy.deepcopy(market)
+    blocked_market["baseline_row"]["settlement_pnl"] = 1.0
+    blocked = v77.score_rolling_origin_drift_adaptive_v7_7_market(
+        blocked_market, model_artifact=model
+    )
+    assert blocked["selected_action"] == "NO_TRADE"
+    assert "v7_7_forbidden_outcome_field_in_inference_row" in blocked[
+        "selection_reason_codes"
+    ]
+
+
 def test_config_rejects_issue239_result_paths_by_construction() -> None:
     annotations = v77.RollingOriginDriftAdaptiveV77Config.__annotations__
     assert not any("issue239" in name for name in annotations)

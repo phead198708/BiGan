@@ -49,8 +49,10 @@ from bigan.v8.polymarket.training.execution_layer_v2_runtime_aligned_sbc_net_ret
     validate_runtime_aligned_sbc_net_return_v6_4_profile,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_v6_7_relative_safe_policy_v7_2 import (
+    FORBIDDEN_INFERENCE_FIELDS,
     _historical_replay,
     _market_order,
+    _no_trade_inference,
     _validate_canonical_rows,
 )
 
@@ -61,6 +63,7 @@ REPORT_SCHEMA_VERSION = "bigan-v8-rolling-origin-drift-adaptive-action-value-v7-
 LEAKAGE_SCHEMA_VERSION = "bigan-v8-rolling-origin-drift-adaptive-action-value-v7-7-leakage-v1"
 MANIFEST_SCHEMA_VERSION = "bigan-v8-rolling-origin-drift-adaptive-action-value-v7-7-manifest-v1"
 SBC_ACTIONS = ("BUY_UP_SELL_BEFORE_CLOSE", "BUY_DOWN_SELL_BEFORE_CLOSE")
+FROZEN_EDGE_BUFFER = 0.025
 FROZEN_LINEAGE = {
     "seed_runtime_target_rows_sha256": "1565116daeb2f5d4d8c33fefa507276f59251edd5ffb5f4f313041bcf9dbb0ec",
     "v7_0_training_profile_sha256": "1f66d8699b9727651538cc34a9a2a25ba5eaac5cfded75cf8f4a258b1b5d3f4a",
@@ -543,6 +546,59 @@ def run_rolling_origin_drift_adaptive_v7_7_fit(
         "manifest_sha256": _sha256_file(manifest_path),
         "outputs": outputs,
     }
+
+
+def score_rolling_origin_drift_adaptive_v7_7_market(
+    market: dict[str, Any], *, model_artifact: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply the frozen v7.7 model to one outcome-free target-free market."""
+
+    rows = [market.get("baseline_row") or {}, market.get("opposite_row") or {}]
+    reasons = []
+    if model_artifact.get("schema_version") != MODEL_SCHEMA_VERSION:
+        reasons.append("v7_7_model_artifact_schema_invalid")
+    if model_artifact.get("historical_noninferiority_gate_passed") is not True:
+        reasons.append("v7_7_historical_noninferiority_gate_not_passed")
+    if model_artifact.get("target_free_canary_collection_allowed") is not True:
+        reasons.append("v7_7_historical_actionability_not_passed")
+    if any(
+        FORBIDDEN_INFERENCE_FIELDS.intersection(row)
+        or FORBIDDEN_INFERENCE_FIELDS.intersection(
+            dict(row.get("decision_time_features") or {})
+        )
+        for row in rows
+    ):
+        reasons.append("v7_7_forbidden_outcome_field_in_inference_row")
+    if reasons:
+        return _no_trade_inference(rows, reasons=reasons)
+    if (
+        not market.get("market_id")
+        or {row.get("action") for row in rows} != set(SBC_ACTIONS)
+        or len({row.get("decision_ts") for row in rows}) != 1
+        or any(
+            tuple((row.get("decision_time_features") or {}).keys()) != FEATURE_NAMES
+            or int(row["max_input_ts"]) > int(row["decision_ts"])
+            for row in rows
+        )
+    ):
+        return _no_trade_inference(
+            rows, reasons=["v7_7_target_free_feature_contract_invalid"]
+        )
+    decision = _score_stream_market(
+        market,
+        artifact=model_artifact["final_weighted_model"],
+        profile={"model_contract": {"fixed_edge_buffer": FROZEN_EDGE_BUFFER}},
+    )
+    result = {
+        **decision,
+        "trade_selected": decision["selected_action"] != "NO_TRADE",
+        "alternative_decision_timestamp_used": False,
+        "outcome_or_pnl_field_used_at_inference": False,
+        "selection_reason_codes": [],
+        **_v7_0_blocked_safety_fields(),
+    }
+    result["decision_id"] = canonical_json_sha256(result)
+    return result
 
 
 def _fit_weighted_model(
