@@ -13,6 +13,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_rolling_origin_drift_adapti
     SCAN_CAP,
     STRICTLY_LATER_MINIMUM_MARKET_START_TS_EXCLUSIVE,
     _safety_fields,
+    build_v7_7_future_pnl_noninferiority_gate,
     validate_v7_7_future_holdout_plan,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_runtime_aligned_sbc_net_return_v6_4 import (
@@ -28,6 +29,23 @@ PLAN_PATH = ROOT / (
 
 def _plan() -> dict:
     return json.loads(PLAN_PATH.read_text())
+
+
+def _target_row(index: int, pnl: float, *, side: str = "UP") -> dict:
+    return {
+        "market_id": f"market-{index:03d}",
+        "decision_ts": 1_000_000 + index,
+        "max_input_ts": 999_000 + index,
+        "side": side,
+        "action": f"BUY_{side}_SELL_BEFORE_CLOSE",
+        "runtime_policy_after_cost_net_pnl_at_frozen_size": pnl,
+        "target_available_only_post_exit_or_official_resolution": True,
+        "target_used_as_decision_time_input": False,
+    }
+
+
+def _market_ids() -> list[str]:
+    return [f"market-{index:03d}" for index in range(120)]
 
 
 def test_plan_freezes_bounded_strictly_later_outcome_blind_collection() -> None:
@@ -100,3 +118,126 @@ def test_plan_safety_remains_fail_closed() -> None:
         "paper_candidate_allowed": False,
         "live_trading_enabled": False,
     }
+
+
+def test_equal_positive_candidate_passes_inclusive_noninferiority() -> None:
+    rows = [_target_row(index, 0.01) for index in range(40)]
+    report = build_v7_7_future_pnl_noninferiority_gate(
+        rows,
+        baseline_rows=[dict(row) for row in rows],
+        evaluation_market_ids=_market_ids(),
+        settled_market_ids=_market_ids(),
+        plan=_plan(),
+        target_free_freeze_sha256="a" * 64,
+    )
+
+    assert report["candidate_minus_v6_7_after_cost_pnl"] == 0.0
+    assert report["future_noninferiority_gate_passed"] is True
+    assert report["future_pnl_gate_passed"] is True
+    assert report["model_improvement_demonstrated"] is False
+    assert report["promotion_discussion_evidence_available"] is True
+    assert report["paper_candidate_allowed"] is False
+    assert report["v8_execution_handoff_allowed"] is False
+
+
+def test_distinct_candidate_actions_can_pass_without_side_quota() -> None:
+    candidate = [_target_row(index, 0.02, side="DOWN") for index in range(40)]
+    baseline = [_target_row(index, 0.01, side="UP") for index in range(40)]
+    report = build_v7_7_future_pnl_noninferiority_gate(
+        candidate,
+        baseline_rows=baseline,
+        evaluation_market_ids=_market_ids(),
+        settled_market_ids=_market_ids(),
+        plan=_plan(),
+        target_free_freeze_sha256="b" * 64,
+    )
+
+    assert report["candidate_side_distribution_diagnostic"] == {"DOWN": 40}
+    assert report["v6_7_side_distribution_diagnostic"] == {"UP": 40}
+    assert report["side_quota_enabled"] is False
+    assert report["candidate_minus_v6_7_after_cost_pnl"] == pytest.approx(0.4)
+    assert report["future_pnl_gate_passed"] is True
+
+
+def test_equal_negative_candidate_fails_only_absolute_pnl_check() -> None:
+    rows = [_target_row(index, -0.01) for index in range(40)]
+    report = build_v7_7_future_pnl_noninferiority_gate(
+        rows,
+        baseline_rows=[dict(row) for row in rows],
+        evaluation_market_ids=_market_ids(),
+        settled_market_ids=_market_ids(),
+        plan=_plan(),
+        target_free_freeze_sha256="c" * 64,
+    )
+
+    assert report["future_noninferiority_gate_passed"] is True
+    assert report["future_pnl_gate_passed"] is False
+    assert report["future_pnl_gate_blocking_reason_codes"] == [
+        "candidate_total_after_cost_pnl_not_positive"
+    ]
+
+
+def test_inferior_candidate_fails_total_noninferiority() -> None:
+    candidate = [_target_row(index, 0.009) for index in range(40)]
+    baseline = [_target_row(index, 0.01) for index in range(40)]
+    report = build_v7_7_future_pnl_noninferiority_gate(
+        candidate,
+        baseline_rows=baseline,
+        evaluation_market_ids=_market_ids(),
+        settled_market_ids=_market_ids(),
+        plan=_plan(),
+        target_free_freeze_sha256="d" * 64,
+    )
+
+    assert report["future_noninferiority_gate_passed"] is False
+    assert "candidate_total_pnl_inferior_to_v6_7" in report[
+        "future_pnl_gate_blocking_reason_codes"
+    ]
+
+
+def test_largest_winner_removed_noninferiority_is_hard_gate() -> None:
+    candidate = [_target_row(index, 0.01) for index in range(40)]
+    candidate[0] = _target_row(0, 1.0)
+    baseline = [_target_row(index, 0.02) for index in range(40)]
+    report = build_v7_7_future_pnl_noninferiority_gate(
+        candidate,
+        baseline_rows=baseline,
+        evaluation_market_ids=_market_ids(),
+        settled_market_ids=_market_ids(),
+        plan=_plan(),
+        target_free_freeze_sha256="e" * 64,
+    )
+
+    assert report["candidate_minus_v6_7_after_cost_pnl"] > 0.0
+    assert report[
+        "candidate_minus_v6_7_largest_winner_removed_after_cost_pnl"
+    ] < 0.0
+    assert report["future_noninferiority_gate_passed"] is False
+    assert "candidate_largest_winner_removed_pnl_inferior_to_v6_7" in report[
+        "future_pnl_gate_blocking_reason_codes"
+    ]
+
+
+def test_support_and_complete_settlement_remain_fail_closed() -> None:
+    candidate = [_target_row(index, 0.01) for index in range(39)]
+    report = build_v7_7_future_pnl_noninferiority_gate(
+        candidate,
+        baseline_rows=[dict(row) for row in candidate],
+        evaluation_market_ids=_market_ids(),
+        settled_market_ids=_market_ids(),
+        plan=_plan(),
+        target_free_freeze_sha256="f" * 64,
+    )
+    assert "insufficient_v7_7_guard_accepted_unique_market_support" in report[
+        "future_pnl_gate_blocking_reason_codes"
+    ]
+
+    with pytest.raises(ValueError, match="exact settled"):
+        build_v7_7_future_pnl_noninferiority_gate(
+            [_target_row(index, 0.01) for index in range(40)],
+            baseline_rows=[_target_row(index, 0.01) for index in range(40)],
+            evaluation_market_ids=_market_ids(),
+            settled_market_ids=_market_ids()[:-1],
+            plan=_plan(),
+            target_free_freeze_sha256="0" * 64,
+        )
