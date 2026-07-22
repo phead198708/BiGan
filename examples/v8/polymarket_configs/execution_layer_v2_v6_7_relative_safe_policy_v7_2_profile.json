@@ -1,0 +1,169 @@
+{
+  "schema_version": "bigan-v8-v6-7-relative-safe-policy-v7-2-profile-v1",
+  "issue_number": 234,
+  "candidate_name": "frozen_v6_7_relative_safe_policy_v7_2",
+  "preregistered_before_implementation_and_fit": true,
+  "lineage": {
+    "runtime_target_rows_sha256": "1565116daeb2f5d4d8c33fefa507276f59251edd5ffb5f4f313041bcf9dbb0ec",
+    "v7_0_training_profile_sha256": "1f66d8699b9727651538cc34a9a2a25ba5eaac5cfded75cf8f4a258b1b5d3f4a",
+    "v6_7_candidate_profile_sha256": "cec55d243acd6bbf60a5e8474545b487086ddcd4d18073682ae7f2d4660d2248",
+    "prior_rejected_candidate_implementation_commit": "24db43f27348f6e0432febb30f2443f98682a223",
+    "prior_rejected_candidate_evidence_commit": "6ca8af575bc5b7c228527e1b5020e0e84a765c22"
+  },
+  "prior_result_exclusion": {
+    "issue233_result_artifacts_opened_for_fit_or_tuning": false,
+    "issue233_oof_rows_used": false,
+    "issue233_selected_rows_used": false,
+    "issue233_pnl_or_action_loss_examples_used": false,
+    "issue229_or_issue231_future_outcomes_used": false,
+    "only_structural_prior_used": "preserve_frozen_v6_7_as_default_policy"
+  },
+  "baseline_contract": {
+    "candidate_name": "p_up_semantic_execution_compatibility_v6_7",
+    "score_source": "frozen_v6_2_market_clustered_mean_ev_lcb",
+    "selection_rule": "highest_positive_score_per_market_then_earliest_decision_ts_then_action",
+    "no_positive_score_behavior": "NO_TRADE",
+    "source_score_mutation_allowed": false,
+    "baseline_is_default_action": true
+  },
+  "action_contract": {
+    "enabled_action_family": "SELL_BEFORE_CLOSE",
+    "allowed_policy_decisions": [
+      "KEEP_V6_7",
+      "SWITCH_SAME_DECISION_SBC",
+      "NO_TRADE"
+    ],
+    "enabled_trade_actions": [
+      "BUY_UP_SELL_BEFORE_CLOSE",
+      "BUY_DOWN_SELL_BEFORE_CLOSE"
+    ],
+    "disabled_action_family": "HOLD_TO_SETTLEMENT",
+    "disabled_trade_actions": [
+      "BUY_UP_HOLD_TO_SETTLEMENT",
+      "BUY_DOWN_HOLD_TO_SETTLEMENT"
+    ],
+    "no_trade_action": "NO_TRADE",
+    "full_five_action_interface_required": true,
+    "opposite_action_must_share_baseline_decision_group": true,
+    "alternative_decision_timestamp_allowed": false,
+    "maximum_bets_per_market": 1,
+    "side_quota_allowed": false,
+    "side_pnl_hard_gate_enabled": false
+  },
+  "historical_split": {
+    "source_market_count": 134,
+    "market_order": "minimum_decision_ts_then_market_id",
+    "initial_training_market_count": 44,
+    "forward_fold_count": 5,
+    "forward_validation_market_count_per_fold": 18,
+    "forward_oof_market_count": 90,
+    "fold_local_conformal_calibration_tail_market_count": 10,
+    "validation_labels_used_for_fold_model_or_correction": false,
+    "all_historical_markets_used_for_final_model_fit": true,
+    "final_conformal_source": "fixed_rolling_oof_residuals"
+  },
+  "feature_contract": {
+    "base_feature_names": [
+      "action_score_available",
+      "action_score",
+      "action_score_margin",
+      "btc_anchor_direction",
+      "selected_side_probability",
+      "execution_price",
+      "selected_side_probability_minus_execution_price",
+      "log1p_spread_bps",
+      "queue_fill_shortfall",
+      "log1p_book_staleness_ms",
+      "late_window_pressure",
+      "pre_entry_market_exposure",
+      "same_side_prior_entry",
+      "side_flip_prior_entry",
+      "side_is_up"
+    ],
+    "switch_head_feature_construction": "baseline_features_plus_opposite_features_plus_opposite_minus_baseline",
+    "abstain_head_feature_construction": "baseline_features_only",
+    "fit_only_standardization": true,
+    "standard_deviation_floor": 1e-12,
+    "forbidden_inference_field_names": [
+      "resolved_outcome",
+      "winning_outcome",
+      "settlement_pnl",
+      "realized_trade_pnl",
+      "total_polymarket_pnl",
+      "runtime_policy_after_cost_net_pnl_per_contract",
+      "runtime_policy_after_cost_net_pnl_at_frozen_size",
+      "target_after_cost_net_pnl_per_contract",
+      "future_return",
+      "label",
+      "oracle_action"
+    ]
+  },
+  "incremental_advantage_models": {
+    "heads": [
+      "SWITCH_SAME_DECISION_SBC",
+      "NO_TRADE"
+    ],
+    "model_family": "weighted_l2_ridge_with_unpenalized_intercept",
+    "ridge_alpha": 100.0,
+    "coefficient_absolute_bound": 8.0,
+    "switch_target": "opposite_same_decision_target_minus_frozen_v6_7_target",
+    "no_trade_target": "zero_minus_frozen_v6_7_target",
+    "market_weighting": "one_baseline_selected_example_per_market",
+    "hyperparameter_search_enabled": false,
+    "feature_search_enabled": false,
+    "threshold_search_enabled": false,
+    "result_selected_rerun_allowed": false
+  },
+  "conformal_contract": {
+    "coverage_level": 0.8,
+    "lower_residual_quantile": 0.2,
+    "fold_correction_source": "latest_10_prior_training_markets_only",
+    "final_correction_source": "all_fixed_rolling_oof_residuals",
+    "upward_correction_allowed": false,
+    "applied_correction": "min(weighted_lower_residual_quantile,0)",
+    "selection_threshold": 0.0,
+    "threshold_operator": "strictly_greater_than",
+    "positive_advantage_tie_break": "higher_lcb_then_policy_decision_lexicographic",
+    "minimum_fold_calibration_selected_market_count": 5,
+    "minimum_oof_market_count": 90
+  },
+  "historical_replay_superiority_gate": {
+    "exact_evaluation_market_count": 90,
+    "evaluation_market_source": "fixed_rolling_oof_market_cohort",
+    "no_bet_market_pnl": 0.0,
+    "common_selected_row_filter_allowed": false,
+    "fixed_position_size": 0.2,
+    "primary_metric": "total_after_cost_net_pnl_at_frozen_size",
+    "candidate_minus_v6_7_total_pnl_minimum_exclusive": 0.0,
+    "candidate_minus_v6_7_largest_winner_removed_pnl_minimum_inclusive": 0.0,
+    "exact_baseline_market_and_action_identity_reconciliation_required": true,
+    "historical_training_targets_used_for_fixed_coefficient_fit": true,
+    "historical_oof_or_validation_pnl_used_for_feature_hyperparameter_or_threshold_tuning": false,
+    "historical_pnl_used_for_pre_collection_screening_only": true,
+    "gate_failure_or_policy_identity_stops_before_collection": true,
+    "promotion_or_paper_unlock_allowed": false
+  },
+  "target_free_canary": {
+    "historical_replay_superiority_gate_must_pass_before_collection": true,
+    "new_strictly_later_outcome_blind_market_count": 12,
+    "maximum_attempt_count": 18,
+    "minimum_guard_accepted_unique_market_count_to_continue": 1,
+    "minimum_policy_difference_market_count_to_continue": 1,
+    "outcome_resolution_label_or_pnl_access_allowed": false,
+    "full_execution_guard_unchanged": true
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "live_trading_enabled": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}
