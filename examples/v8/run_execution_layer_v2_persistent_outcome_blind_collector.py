@@ -18,6 +18,13 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from bigan.v8.polymarket.training.execution_layer_v2_calibration_scale_aligned_runtime_pnl_v6_9_future_batch_canary import (  # noqa: E402
+    CalibrationScaleAlignedV69FutureBatchCanaryConfig,
+    build_v6_9_future_cumulative_canary,
+    run_v6_9_future_batch_canary,
+    validate_v6_9_future_collection_plan,
+    write_v6_9_future_cumulative_canary,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_market_clustered_mean_ev_v6_2_future_batch_canary import (  # noqa: E402
     MarketClusteredMeanEVV62FutureBatchCanaryConfig,
     build_v6_2_future_cumulative_canary,
@@ -103,13 +110,15 @@ def run_service(
     max_consecutive_failures: int,
     failure_backoff_seconds: float,
     batch_canary_feature_contract_path: Path | str = DEFAULT_BATCH_CANARY_FEATURE_CONTRACT,
-    batch_canary_feature_contract_sha256: str = (
-        DEFAULT_BATCH_CANARY_FEATURE_CONTRACT_SHA256
-    ),
+    batch_canary_feature_contract_sha256: str = (DEFAULT_BATCH_CANARY_FEATURE_CONTRACT_SHA256),
     v6_2_candidate_manifest_path: Path | str | None = None,
     v6_2_candidate_manifest_sha256: str | None = None,
     v6_6_point_freeze_manifest_path: Path | str | None = None,
     v6_6_point_freeze_manifest_sha256: str | None = None,
+    v6_9_candidate_manifest_path: Path | str | None = None,
+    v6_9_candidate_manifest_sha256: str | None = None,
+    v6_9_collection_plan_path: Path | str | None = None,
+    v6_9_collection_plan_sha256: str | None = None,
 ) -> dict:
     if batch_round_count <= 0:
         raise ValueError("batch_round_count must be positive")
@@ -125,19 +134,51 @@ def run_service(
     protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
     validate_persistent_outcome_blind_collector_protocol(protocol)
     batch_canary_feature_contract_path = Path(batch_canary_feature_contract_path).resolve()
-    if (
-        _sha256(batch_canary_feature_contract_path)
-        != batch_canary_feature_contract_sha256.lower()
-    ):
+    if _sha256(batch_canary_feature_contract_path) != batch_canary_feature_contract_sha256.lower():
         raise ValueError("batch canary feature contract SHA-256 mismatch")
     if (v6_2_candidate_manifest_path is None) != (v6_2_candidate_manifest_sha256 is None):
         raise ValueError("v6.2 candidate manifest path and SHA-256 must be provided together")
     if v6_2_candidate_manifest_path is not None:
         v6_2_candidate_manifest_path = Path(v6_2_candidate_manifest_path).resolve()
-        if _sha256(v6_2_candidate_manifest_path) != str(
-            v6_2_candidate_manifest_sha256
-        ).lower():
+        if _sha256(v6_2_candidate_manifest_path) != str(v6_2_candidate_manifest_sha256).lower():
             raise ValueError("v6.2 candidate manifest SHA-256 mismatch")
+    v6_9_enabled = any(
+        value is not None
+        for value in (
+            v6_9_candidate_manifest_path,
+            v6_9_candidate_manifest_sha256,
+            v6_9_collection_plan_path,
+            v6_9_collection_plan_sha256,
+        )
+    )
+    if v6_9_enabled and any(
+        value is None
+        for value in (
+            v6_9_candidate_manifest_path,
+            v6_9_candidate_manifest_sha256,
+            v6_9_collection_plan_path,
+            v6_9_collection_plan_sha256,
+        )
+    ):
+        raise ValueError("v6.9 candidate and collection-plan paths/hashes are required together")
+    if v6_9_enabled and v6_2_candidate_manifest_path is None:
+        raise ValueError("v6.9 batch canary requires the frozen v6.2 candidate manifest")
+    if v6_9_enabled:
+        v6_9_candidate_manifest_path = Path(v6_9_candidate_manifest_path).resolve()
+        v6_9_collection_plan_path = Path(v6_9_collection_plan_path).resolve()
+        if _sha256(v6_9_candidate_manifest_path) != str(v6_9_candidate_manifest_sha256).lower():
+            raise ValueError("v6.9 candidate manifest SHA-256 mismatch")
+        if _sha256(v6_9_collection_plan_path) != str(v6_9_collection_plan_sha256).lower():
+            raise ValueError("v6.9 collection plan SHA-256 mismatch")
+        v6_9_candidate_manifest = _load_state(v6_9_candidate_manifest_path)
+        v6_9_collection_plan = _load_state(v6_9_collection_plan_path)
+        validate_v6_9_future_collection_plan(
+            v6_9_collection_plan,
+            candidate_manifest=v6_9_candidate_manifest,
+            candidate_manifest_sha256=str(v6_9_candidate_manifest_sha256),
+        )
+    else:
+        v6_9_collection_plan = None
     v6_6_plan = _load_v6_6_calibration_plan(
         manifest_path=v6_6_point_freeze_manifest_path,
         expected_sha256=v6_6_point_freeze_manifest_sha256,
@@ -158,6 +199,11 @@ def run_service(
     v6_6_collection_stop_path = (
         root / "persistent_outcome_blind_v6_6_calibration_collection_stop.json"
     )
+    v6_9_collection_stop_path = (
+        root / "persistent_outcome_blind_v6_9_confirmatory_collection_stop.json"
+    )
+    if v6_9_enabled and v6_9_collection_stop_path.is_file():
+        return _load_state(service_state_path)
     if v6_6_plan is not None and v6_6_collection_stop_path.is_file():
         return _load_state(service_state_path)
     if v6_6_plan is None and collection_complete_stop_path.is_file():
@@ -176,12 +222,8 @@ def run_service(
         terminal_state = _v6_6_terminal_collection_state(
             progress=initial_progress,
             plan=v6_6_plan,
-            point_freeze_manifest_path=Path(
-                str(v6_6_point_freeze_manifest_path)
-            ).resolve(),
-            point_freeze_manifest_sha256=str(
-                v6_6_point_freeze_manifest_sha256
-            ).lower(),
+            point_freeze_manifest_path=Path(str(v6_6_point_freeze_manifest_path)).resolve(),
+            point_freeze_manifest_sha256=str(v6_6_point_freeze_manifest_sha256).lower(),
         )
         if terminal_state is not None:
             _write_state(service_state_path, terminal_state)
@@ -191,15 +233,16 @@ def run_service(
     completed_batches = 0
     consecutive_failures = 0
     collector_commit = _git_head()
-    v6_2_batch_report_descriptors = list(
-        service_state.get("v6_2_batch_canary_reports") or []
-    )
+    v6_2_batch_report_descriptors = list(service_state.get("v6_2_batch_canary_reports") or [])
+    v6_9_batch_report_descriptors = list(service_state.get("v6_9_batch_canary_reports") or [])
     while max_batches == 0 or completed_batches < max_batches:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         batch_id = f"persistent-outcome-blind-{batch_sequence:06d}-{stamp}"
         canary_result: dict | None = None
         v6_2_canary_result: dict | None = None
         v6_2_cumulative_result: dict | None = None
+        v6_9_canary_result: dict | None = None
+        v6_9_cumulative_result: dict | None = None
         try:
             effective_batch_round_count = batch_round_count
             if v6_6_plan is not None:
@@ -269,57 +312,101 @@ def run_service(
                 ) from exc
             _require_batch_canary_passed(canary_result)
             if v6_2_candidate_manifest_path is not None:
-                v6_2_canary_result = (
-                    run_market_clustered_mean_ev_v6_2_future_batch_canary(
-                        MarketClusteredMeanEVV62FutureBatchCanaryConfig(
-                            run_id=f"v6-2-future-batch-canary-{batch_sequence:06d}-{stamp}",
-                            output_dir=root / "v6_2_batch_canary_runs",
-                            development_batch_canary_manifest_path=canary_result[
-                                "manifest_path"
-                            ],
-                            expected_development_batch_canary_manifest_sha256=(
-                                canary_result["manifest_sha256"]
-                            ),
-                            candidate_manifest_path=v6_2_candidate_manifest_path,
-                            expected_candidate_manifest_sha256=str(
-                                v6_2_candidate_manifest_sha256
-                            ),
-                        )
+                v6_2_canary_result = run_market_clustered_mean_ev_v6_2_future_batch_canary(
+                    MarketClusteredMeanEVV62FutureBatchCanaryConfig(
+                        run_id=f"v6-2-future-batch-canary-{batch_sequence:06d}-{stamp}",
+                        output_dir=root / "v6_2_batch_canary_runs",
+                        development_batch_canary_manifest_path=canary_result["manifest_path"],
+                        expected_development_batch_canary_manifest_sha256=(
+                            canary_result["manifest_sha256"]
+                        ),
+                        candidate_manifest_path=v6_2_candidate_manifest_path,
+                        expected_candidate_manifest_sha256=str(v6_2_candidate_manifest_sha256),
                     )
                 )
-                v6_2_batch_report_descriptors.append(
+                if not v6_9_enabled:
+                    v6_2_batch_report_descriptors.append(
+                        {
+                            "path": str(v6_2_canary_result["report_path"]),
+                            "sha256": v6_2_canary_result["report_sha256"],
+                        }
+                    )
+                    batch_reports = []
+                    batch_report_paths = []
+                    for descriptor in v6_2_batch_report_descriptors:
+                        report_path = Path(str(descriptor["path"])).resolve()
+                        if _sha256(report_path) != str(descriptor["sha256"]):
+                            raise OutcomeBlindBatchCanaryFailure(
+                                "v6.2 prior batch report SHA-256 mismatch"
+                            )
+                        batch_report_paths.append(report_path)
+                        batch_reports.append(_load_state(report_path))
+                    cumulative_report = build_v6_2_future_cumulative_canary(
+                        batch_reports,
+                        run_id=f"v6-2-future-cumulative-{batch_sequence:06d}-{stamp}",
+                    )
+                    v6_2_cumulative_result = write_v6_2_future_cumulative_canary(
+                        report=cumulative_report,
+                        batch_report_paths=batch_report_paths,
+                        output_dir=root / "v6_2_cumulative_canary_runs",
+                        run_id=f"v6-2-future-cumulative-{batch_sequence:06d}-{stamp}",
+                    )
+                    if cumulative_report["target_free_terminal_blocked"]:
+                        raise OutcomeBlindBatchCanaryFailure(
+                            "v6.2 future cumulative canary blocked: "
+                            + ",".join(
+                                cumulative_report["target_free_terminal_blocking_reason_codes"]
+                            )
+                        )
+            if v6_9_enabled:
+                v6_9_canary_result = run_v6_9_future_batch_canary(
+                    CalibrationScaleAlignedV69FutureBatchCanaryConfig(
+                        run_id=f"v6-9-future-batch-canary-{batch_sequence:06d}-{stamp}",
+                        output_dir=root / "v6_9_batch_canary_runs",
+                        v6_2_batch_canary_manifest_path=v6_2_canary_result["manifest_path"],
+                        expected_v6_2_batch_canary_manifest_sha256=v6_2_canary_result[
+                            "manifest_sha256"
+                        ],
+                        candidate_manifest_path=v6_9_candidate_manifest_path,
+                        expected_candidate_manifest_sha256=str(v6_9_candidate_manifest_sha256),
+                        collection_plan_path=v6_9_collection_plan_path,
+                        expected_collection_plan_sha256=str(v6_9_collection_plan_sha256),
+                    )
+                )
+                v6_9_batch_report_descriptors.append(
                     {
-                        "path": str(v6_2_canary_result["report_path"]),
-                        "sha256": v6_2_canary_result["report_sha256"],
+                        "path": str(v6_9_canary_result["report_path"]),
+                        "sha256": v6_9_canary_result["report_sha256"],
                     }
                 )
-                batch_reports = []
-                batch_report_paths = []
-                for descriptor in v6_2_batch_report_descriptors:
+                v6_9_reports = []
+                v6_9_report_paths = []
+                for descriptor in v6_9_batch_report_descriptors:
                     report_path = Path(str(descriptor["path"])).resolve()
                     if _sha256(report_path) != str(descriptor["sha256"]):
                         raise OutcomeBlindBatchCanaryFailure(
-                            "v6.2 prior batch report SHA-256 mismatch"
+                            "v6.9 prior batch report SHA-256 mismatch"
                         )
-                    batch_report_paths.append(report_path)
-                    batch_reports.append(_load_state(report_path))
-                cumulative_report = build_v6_2_future_cumulative_canary(
-                    batch_reports,
-                    run_id=f"v6-2-future-cumulative-{batch_sequence:06d}-{stamp}",
+                    v6_9_report_paths.append(report_path)
+                    v6_9_reports.append(_load_state(report_path))
+                v6_9_cumulative_report = build_v6_9_future_cumulative_canary(
+                    v6_9_reports,
+                    run_id=f"v6-9-future-cumulative-{batch_sequence:06d}-{stamp}",
+                    collection_plan=v6_9_collection_plan,
+                    collection_plan_sha256=str(v6_9_collection_plan_sha256),
                 )
-                v6_2_cumulative_result = write_v6_2_future_cumulative_canary(
-                    report=cumulative_report,
-                    batch_report_paths=batch_report_paths,
-                    output_dir=root / "v6_2_cumulative_canary_runs",
-                    run_id=f"v6-2-future-cumulative-{batch_sequence:06d}-{stamp}",
+                v6_9_cumulative_result = write_v6_9_future_cumulative_canary(
+                    report=v6_9_cumulative_report,
+                    batch_report_paths=v6_9_report_paths,
+                    collection_plan_path=v6_9_collection_plan_path,
+                    output_dir=root / "v6_9_cumulative_canary_runs",
+                    run_id=f"v6-9-future-cumulative-{batch_sequence:06d}-{stamp}",
                 )
-                if cumulative_report["target_free_terminal_blocked"]:
+                if v6_9_cumulative_report["target_free_terminal_blocked"]:
                     raise OutcomeBlindBatchCanaryFailure(
-                        "v6.2 future cumulative canary blocked: "
+                        "v6.9 future cumulative canary blocked: "
                         + ",".join(
-                            cumulative_report[
-                                "target_free_terminal_blocking_reason_codes"
-                            ]
+                            v6_9_cumulative_report["target_free_terminal_blocking_reason_codes"]
                         )
                     )
             consecutive_failures = 0
@@ -345,9 +432,7 @@ def run_service(
                 "last_batch_canary_manifest_path": str(canary_result["manifest_path"]),
                 "last_batch_canary_manifest_sha256": canary_result["manifest_sha256"],
                 "last_batch_canary_passed": True,
-                "batch_canary_feature_contract_path": str(
-                    batch_canary_feature_contract_path
-                ),
+                "batch_canary_feature_contract_path": str(batch_canary_feature_contract_path),
                 "batch_canary_feature_contract_sha256": (
                     batch_canary_feature_contract_sha256.lower()
                 ),
@@ -362,18 +447,14 @@ def run_service(
             if v6_2_canary_result is not None and v6_2_cumulative_result is not None:
                 next_state.update(
                     {
-                        "v6_2_candidate_manifest_path": str(
-                            v6_2_candidate_manifest_path
-                        ),
+                        "v6_2_candidate_manifest_path": str(v6_2_candidate_manifest_path),
                         "v6_2_candidate_manifest_sha256": str(
                             v6_2_candidate_manifest_sha256
                         ).lower(),
                         "last_v6_2_batch_canary_report_path": str(
                             v6_2_canary_result["report_path"]
                         ),
-                        "last_v6_2_batch_canary_report_sha256": v6_2_canary_result[
-                            "report_sha256"
-                        ],
+                        "last_v6_2_batch_canary_report_sha256": v6_2_canary_result["report_sha256"],
                         "last_v6_2_batch_canary_manifest_path": str(
                             v6_2_canary_result["manifest_path"]
                         ),
@@ -394,14 +475,10 @@ def run_service(
                             v6_2_cumulative_result["manifest_sha256"]
                         ),
                         "v6_2_future_quality_valid_market_count": (
-                            v6_2_cumulative_result["report"][
-                                "quality_valid_market_count"
-                            ]
+                            v6_2_cumulative_result["report"]["quality_valid_market_count"]
                         ),
                         "v6_2_future_guard_accepted_unique_market_count": (
-                            v6_2_cumulative_result["report"][
-                                "guard_accepted_unique_market_count"
-                            ]
+                            v6_2_cumulative_result["report"]["guard_accepted_unique_market_count"]
                         ),
                         "v6_2_future_guard_accepted_unique_market_count_by_side": (
                             v6_2_cumulative_result["report"][
@@ -409,9 +486,7 @@ def run_service(
                             ]
                         ),
                         "v6_2_future_holdout_collection_complete": (
-                            v6_2_cumulative_result["report"][
-                                "future_holdout_collection_complete"
-                            ]
+                            v6_2_cumulative_result["report"]["future_holdout_collection_complete"]
                         ),
                     }
                 )
@@ -447,6 +522,44 @@ def run_service(
                         "v6_6_candidate_scoring_attempted": False,
                     }
                 )
+            if v6_9_canary_result is not None and v6_9_cumulative_result is not None:
+                next_state.update(
+                    {
+                        "status": "collecting_v6_9_future_confirmatory_batches",
+                        "v6_9_candidate_manifest_path": str(v6_9_candidate_manifest_path),
+                        "v6_9_candidate_manifest_sha256": str(
+                            v6_9_candidate_manifest_sha256
+                        ).lower(),
+                        "v6_9_collection_plan_path": str(v6_9_collection_plan_path),
+                        "v6_9_collection_plan_sha256": str(v6_9_collection_plan_sha256).lower(),
+                        "last_v6_9_batch_canary_report_path": str(
+                            v6_9_canary_result["report_path"]
+                        ),
+                        "last_v6_9_batch_canary_report_sha256": v6_9_canary_result["report_sha256"],
+                        "last_v6_9_batch_action_liveness_passed": v6_9_canary_result["report"][
+                            "batch_action_liveness_passed"
+                        ],
+                        "v6_9_batch_canary_reports": v6_9_batch_report_descriptors,
+                        "v6_9_cumulative_canary_report_path": str(
+                            v6_9_cumulative_result["report_path"]
+                        ),
+                        "v6_9_cumulative_canary_report_sha256": v6_9_cumulative_result[
+                            "report_sha256"
+                        ],
+                        "v6_9_future_attempted_market_count": v6_9_cumulative_result["report"][
+                            "attempted_market_count"
+                        ],
+                        "v6_9_future_quality_valid_market_count": v6_9_cumulative_result["report"][
+                            "quality_valid_market_count"
+                        ],
+                        "v6_9_future_guard_accepted_unique_market_count": v6_9_cumulative_result[
+                            "report"
+                        ]["guard_accepted_unique_market_count"],
+                        "v6_9_future_confirmatory_collection_complete": v6_9_cumulative_result[
+                            "report"
+                        ]["future_confirmatory_collection_complete"],
+                    }
+                )
             _write_state(
                 service_state_path,
                 next_state,
@@ -455,12 +568,8 @@ def run_service(
                 terminal_state = _v6_6_terminal_collection_state(
                     progress=v6_6_progress,
                     plan=v6_6_plan,
-                    point_freeze_manifest_path=Path(
-                        str(v6_6_point_freeze_manifest_path)
-                    ).resolve(),
-                    point_freeze_manifest_sha256=str(
-                        v6_6_point_freeze_manifest_sha256
-                    ).lower(),
+                    point_freeze_manifest_path=Path(str(v6_6_point_freeze_manifest_path)).resolve(),
+                    point_freeze_manifest_sha256=str(v6_6_point_freeze_manifest_sha256).lower(),
                     base_state=next_state,
                 )
                 if terminal_state is not None:
@@ -468,10 +577,27 @@ def run_service(
                     _write_state(v6_6_collection_stop_path, terminal_state)
                     return terminal_state
             if (
+                v6_9_cumulative_result is not None
+                and v6_9_cumulative_result["report"]["future_confirmatory_collection_complete"]
+            ):
+                completed_state = _load_state(service_state_path)
+                completed_state["status"] = "v6_9_future_confirmatory_collection_complete"
+                _write_state(service_state_path, completed_state)
+                _write_state(
+                    v6_9_collection_stop_path,
+                    {
+                        "status": "v6_9_future_confirmatory_collection_complete",
+                        "last_completed_batch_sequence": batch_sequence,
+                        "cumulative_canary_report_path": str(v6_9_cumulative_result["report_path"]),
+                        "cumulative_canary_report_sha256": v6_9_cumulative_result["report_sha256"],
+                        "labels_outcomes_or_pnl_opened": False,
+                        **SAFETY,
+                    },
+                )
+                return completed_state
+            if (
                 v6_2_cumulative_result is not None
-                and v6_2_cumulative_result["report"][
-                    "future_holdout_collection_complete"
-                ]
+                and v6_2_cumulative_result["report"]["future_holdout_collection_complete"]
             ):
                 completed_state = _load_state(service_state_path)
                 completed_state["status"] = "v6_2_future_holdout_collection_complete"
@@ -481,12 +607,8 @@ def run_service(
                     {
                         "status": "v6_2_future_holdout_collection_complete",
                         "last_completed_batch_sequence": batch_sequence,
-                        "cumulative_canary_report_path": str(
-                            v6_2_cumulative_result["report_path"]
-                        ),
-                        "cumulative_canary_report_sha256": v6_2_cumulative_result[
-                            "report_sha256"
-                        ],
+                        "cumulative_canary_report_path": str(v6_2_cumulative_result["report_path"]),
+                        "cumulative_canary_report_sha256": v6_2_cumulative_result["report_sha256"],
                         "labels_outcomes_or_pnl_opened": False,
                         **SAFETY,
                     },
@@ -518,12 +640,8 @@ def run_service(
                     {
                         "failed_batch_canary_report_path": str(canary_result["report_path"]),
                         "failed_batch_canary_report_sha256": canary_result["report_sha256"],
-                        "failed_batch_canary_manifest_path": str(
-                            canary_result["manifest_path"]
-                        ),
-                        "failed_batch_canary_manifest_sha256": canary_result[
-                            "manifest_sha256"
-                        ],
+                        "failed_batch_canary_manifest_path": str(canary_result["manifest_path"]),
+                        "failed_batch_canary_manifest_sha256": canary_result["manifest_sha256"],
                         "failed_batch_canary_reason_codes": canary_result["report"][
                             "development_data_canary_blocking_reason_codes"
                         ],
@@ -556,8 +674,37 @@ def run_service(
                         ),
                     }
                 )
+            if v6_9_canary_result is not None:
+                failure_state.update(
+                    {
+                        "failed_v6_9_batch_canary_report_path": str(
+                            v6_9_canary_result["report_path"]
+                        ),
+                        "failed_v6_9_batch_canary_report_sha256": v6_9_canary_result[
+                            "report_sha256"
+                        ],
+                    }
+                )
+            if v6_9_cumulative_result is not None:
+                failure_state.update(
+                    {
+                        "failed_v6_9_cumulative_report_path": str(
+                            v6_9_cumulative_result["report_path"]
+                        ),
+                        "failed_v6_9_cumulative_report_sha256": v6_9_cumulative_result[
+                            "report_sha256"
+                        ],
+                        "failed_v6_9_cumulative_reason_codes": v6_9_cumulative_result["report"][
+                            "target_free_terminal_blocking_reason_codes"
+                        ],
+                    }
+                )
             if isinstance(exc, OutcomeBlindBatchCanaryFailure):
-                if v6_2_cumulative_result is not None:
+                if v6_9_cumulative_result is not None:
+                    terminal_reasons = v6_9_cumulative_result["report"][
+                        "target_free_terminal_blocking_reason_codes"
+                    ]
+                elif v6_2_cumulative_result is not None:
                     terminal_reasons = v6_2_cumulative_result["report"][
                         "target_free_terminal_blocking_reason_codes"
                     ]
@@ -566,9 +713,7 @@ def run_service(
                         "development_data_canary_blocking_reason_codes"
                     ]
                 else:
-                    terminal_reasons = [
-                        "outcome_blind_batch_canary_validation_exception"
-                    ]
+                    terminal_reasons = ["outcome_blind_batch_canary_validation_exception"]
                 terminal_stop = {
                     "status": "persistent_outcome_blind_canary_terminal_stop",
                     "failed_batch_sequence": batch_sequence,
@@ -634,6 +779,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--v6-2-candidate-manifest-sha256")
     parser.add_argument("--v6-6-point-freeze-manifest")
     parser.add_argument("--v6-6-point-freeze-manifest-sha256")
+    parser.add_argument("--v6-9-candidate-manifest")
+    parser.add_argument("--v6-9-candidate-manifest-sha256")
+    parser.add_argument("--v6-9-collection-plan")
+    parser.add_argument("--v6-9-collection-plan-sha256")
     args = parser.parse_args(argv)
     state = run_service(
         service_root=args.service_root,
@@ -649,6 +798,10 @@ def main(argv: list[str] | None = None) -> int:
         v6_2_candidate_manifest_sha256=args.v6_2_candidate_manifest_sha256,
         v6_6_point_freeze_manifest_path=args.v6_6_point_freeze_manifest,
         v6_6_point_freeze_manifest_sha256=args.v6_6_point_freeze_manifest_sha256,
+        v6_9_candidate_manifest_path=args.v6_9_candidate_manifest,
+        v6_9_candidate_manifest_sha256=args.v6_9_candidate_manifest_sha256,
+        v6_9_collection_plan_path=args.v6_9_collection_plan,
+        v6_9_collection_plan_sha256=args.v6_9_collection_plan_sha256,
     )
     print(json.dumps(state, indent=2, sort_keys=True))
     return 0
@@ -666,9 +819,7 @@ def _load_v6_6_calibration_plan(
     expected_sha256: str | None,
 ) -> dict | None:
     if (manifest_path is None) != (expected_sha256 is None):
-        raise ValueError(
-            "v6.6 point freeze manifest path and SHA-256 must be provided together"
-        )
+        raise ValueError("v6.6 point freeze manifest path and SHA-256 must be provided together")
     if manifest_path is None:
         return None
     path = Path(manifest_path).resolve()
@@ -689,9 +840,7 @@ def _load_v6_6_calibration_plan(
         field for field, expected in SAFETY.items() if manifest.get(field) != expected
     ]
     if safety_mismatches:
-        raise ValueError(
-            "v6.6 point freeze safety mismatch: " + ",".join(safety_mismatches)
-        )
+        raise ValueError("v6.6 point freeze safety mismatch: " + ",".join(safety_mismatches))
     boundary = dict(manifest.get("fresh_calibration_boundary") or {})
     required_positive = (
         "collector_index_boundary_sequence",
@@ -702,9 +851,7 @@ def _load_v6_6_calibration_plan(
     )
     if any(int(boundary.get(field) or 0) <= 0 for field in required_positive):
         raise ValueError("v6.6 fresh calibration boundary is incomplete")
-    if boundary["target_quality_valid_market_count"] > boundary[
-        "maximum_attempted_market_count"
-    ]:
+    if boundary["target_quality_valid_market_count"] > boundary["maximum_attempted_market_count"]:
         raise ValueError("v6.6 fresh calibration target exceeds attempt cap")
     for field in ("collector_index_boundary_sha256", "collector_last_entry_sha256"):
         value = str(boundary.get(field) or "")
@@ -720,13 +867,9 @@ def _v6_6_calibration_progress(index_path: Path, plan: dict) -> dict:
         raise ValueError("v6.6 collector index precedes frozen calibration boundary")
     lines = index_path.read_bytes().splitlines(keepends=True)
     boundary_bytes = b"".join(lines[:boundary_sequence])
-    if hashlib.sha256(boundary_bytes).hexdigest() != plan[
-        "collector_index_boundary_sha256"
-    ]:
+    if hashlib.sha256(boundary_bytes).hexdigest() != plan["collector_index_boundary_sha256"]:
         raise ValueError("v6.6 collector index boundary SHA-256 mismatch")
-    if rows[boundary_sequence - 1]["entry_sha256"] != plan[
-        "collector_last_entry_sha256"
-    ]:
+    if rows[boundary_sequence - 1]["entry_sha256"] != plan["collector_last_entry_sha256"]:
         raise ValueError("v6.6 collector boundary last-entry SHA-256 mismatch")
     post_boundary = rows[boundary_sequence:]
     minimum_start = int(plan["minimum_market_start_ts_exclusive"])
@@ -778,12 +921,8 @@ def _v6_6_terminal_collection_state(
             ),
             "v6_6_point_freeze_manifest_path": str(point_freeze_manifest_path),
             "v6_6_point_freeze_manifest_sha256": point_freeze_manifest_sha256,
-            "v6_6_fresh_calibration_boundary_sequence": plan[
-                "collector_index_boundary_sequence"
-            ],
-            "v6_6_fresh_calibration_attempted_market_count": progress[
-                "attempted_market_count"
-            ],
+            "v6_6_fresh_calibration_boundary_sequence": plan["collector_index_boundary_sequence"],
+            "v6_6_fresh_calibration_attempted_market_count": progress["attempted_market_count"],
             "v6_6_fresh_calibration_quality_valid_market_count": progress[
                 "quality_valid_market_count"
             ],
@@ -800,9 +939,7 @@ def _v6_6_terminal_collection_state(
             "v6_6_candidate_scoring_attempted": False,
             "labels_outcomes_or_pnl_opened": False,
             "blocking_reason_codes": (
-                []
-                if passed
-                else ["v6_6_fresh_calibration_support_not_met_before_attempt_cap"]
+                [] if passed else ["v6_6_fresh_calibration_support_not_met_before_attempt_cap"]
             ),
             **SAFETY,
         }

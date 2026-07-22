@@ -443,9 +443,7 @@ def test_bounded_service_uses_collection_only_mode_and_persists_resume_state(
             "development_data_canary_blocking_reason_codes": [],
         }
         report_path.write_text(json.dumps(report), encoding="utf-8")
-        manifest_path.write_text(
-            json.dumps({"batch_id": config.batch_id}), encoding="utf-8"
-        )
+        manifest_path.write_text(json.dumps({"batch_id": config.batch_id}), encoding="utf-8")
         return {
             "report": report,
             "report_path": report_path,
@@ -607,14 +605,18 @@ def test_bounded_service_runs_and_persists_v6_2_batch_canary(
 
     monkeypatch.setattr(service_module, "run_polymarket_async_round_collector_cli", fake_collector)
     monkeypatch.setattr(service_module, "index_persistent_outcome_blind_batch", fake_index)
-    monkeypatch.setattr(service_module, "run_outcome_blind_development_batch_canary", fake_development)
+    monkeypatch.setattr(
+        service_module, "run_outcome_blind_development_batch_canary", fake_development
+    )
     monkeypatch.setattr(
         service_module,
         "run_market_clustered_mean_ev_v6_2_future_batch_canary",
         fake_v6_2,
     )
     monkeypatch.setattr(service_module, "build_v6_2_future_cumulative_canary", fake_cumulative)
-    monkeypatch.setattr(service_module, "write_v6_2_future_cumulative_canary", fake_cumulative_write)
+    monkeypatch.setattr(
+        service_module, "write_v6_2_future_cumulative_canary", fake_cumulative_write
+    )
     monkeypatch.setattr(service_module, "_git_head", lambda: GIT_COMMIT)
 
     state = service_module.run_service(
@@ -636,6 +638,131 @@ def test_bounded_service_runs_and_persists_v6_2_batch_canary(
     }
     assert len(state["v6_2_batch_canary_reports"]) == 1
     assert state["labels_outcomes_or_pnl_opened"] is False
+    _assert_safety(state)
+
+
+def test_bounded_service_runs_v6_9_batch_liveness_and_stops_at_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch_summary_path = _batch_summary(
+        tmp_path,
+        batch_id="v6-9-service-batch",
+        captures=[],
+        errors=[],
+    )
+    v6_2_candidate = tmp_path / "v6_2_candidate.json"
+    v6_9_candidate = tmp_path / "v6_9_candidate.json"
+    v6_9_plan = tmp_path / "v6_9_plan.json"
+    for path in (v6_2_candidate, v6_9_candidate, v6_9_plan):
+        _write_json(path, {"fixture": path.stem})
+
+    def fake_index(config):
+        index_path = Path(config.index_path)
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text("{}\n", encoding="utf-8")
+        return {
+            "index_sha256": _sha256(index_path),
+            "report": {"index_entry_count": 12, "quality_valid_index_entry_count": 12},
+        }
+
+    def artifact(name: str, report: dict) -> dict:
+        root = tmp_path / name
+        root.mkdir(exist_ok=True)
+        report_path = root / "report.json"
+        manifest_path = root / "manifest.json"
+        _write_json(report_path, report)
+        _write_json(manifest_path, {"name": name})
+        return {
+            "report": report,
+            "report_path": report_path,
+            "report_sha256": _sha256(report_path),
+            "manifest_path": manifest_path,
+            "manifest_sha256": _sha256(manifest_path),
+        }
+
+    monkeypatch.setattr(
+        service_module,
+        "validate_v6_9_future_collection_plan",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "run_polymarket_async_round_collector_cli",
+        lambda **kwargs: {"batch_summary_path": str(batch_summary_path)},
+    )
+    monkeypatch.setattr(service_module, "index_persistent_outcome_blind_batch", fake_index)
+    monkeypatch.setattr(
+        service_module,
+        "run_outcome_blind_development_batch_canary",
+        lambda config: artifact(
+            "development",
+            {
+                "development_data_canary_passed": True,
+                "development_data_canary_blocking_reason_codes": [],
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        service_module,
+        "run_market_clustered_mean_ev_v6_2_future_batch_canary",
+        lambda config: artifact("v6_2", {"labels_outcomes_or_pnl_opened": False}),
+    )
+    monkeypatch.setattr(
+        service_module,
+        "run_v6_9_future_batch_canary",
+        lambda config: artifact(
+            "v6_9",
+            {
+                "batch_action_liveness_passed": True,
+                "labels_outcomes_or_pnl_opened": False,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        service_module,
+        "build_v6_9_future_cumulative_canary",
+        lambda *args, **kwargs: {
+            "attempted_market_count": 120,
+            "quality_valid_market_count": 120,
+            "guard_accepted_unique_market_count": 80,
+            "future_confirmatory_collection_complete": True,
+            "target_free_terminal_blocked": False,
+            "target_free_terminal_blocking_reason_codes": [],
+            "labels_outcomes_or_pnl_opened": False,
+        },
+    )
+    monkeypatch.setattr(
+        service_module,
+        "write_v6_9_future_cumulative_canary",
+        lambda **kwargs: artifact("v6_9_cumulative", kwargs["report"]),
+    )
+    monkeypatch.setattr(service_module, "_git_head", lambda: GIT_COMMIT)
+
+    state = service_module.run_service(
+        service_root=tmp_path / "service",
+        protocol_path=PROTOCOL_PATH,
+        protocol_sha256=_sha256(PROTOCOL_PATH),
+        batch_round_count=12,
+        max_batches=1,
+        max_consecutive_failures=3,
+        failure_backoff_seconds=0.0,
+        v6_2_candidate_manifest_path=v6_2_candidate,
+        v6_2_candidate_manifest_sha256=_sha256(v6_2_candidate),
+        v6_9_candidate_manifest_path=v6_9_candidate,
+        v6_9_candidate_manifest_sha256=_sha256(v6_9_candidate),
+        v6_9_collection_plan_path=v6_9_plan,
+        v6_9_collection_plan_sha256=_sha256(v6_9_plan),
+    )
+
+    assert state["status"] == "v6_9_future_confirmatory_collection_complete"
+    assert state["last_v6_9_batch_action_liveness_passed"] is True
+    assert state["v6_9_future_quality_valid_market_count"] == 120
+    assert state["v6_9_future_guard_accepted_unique_market_count"] == 80
+    assert state["labels_outcomes_or_pnl_opened"] is False
+    assert (
+        tmp_path / "service/persistent_outcome_blind_v6_9_confirmatory_collection_stop.json"
+    ).is_file()
     _assert_safety(state)
 
 
@@ -688,6 +815,44 @@ def test_launchd_descriptor_pins_v6_2_candidate_manifest(tmp_path: Path) -> None
     assert "--v6-2-candidate-manifest-sha256" in arguments
     assert result["automatic_v6_2_frozen_batch_canary_enabled"] is True
     assert result["v6_2_candidate_manifest_sha256"] == _sha256(candidate_manifest)
+    _assert_safety(result)
+
+
+def test_launchd_descriptor_pins_v6_9_candidate_and_collection_plan(
+    tmp_path: Path,
+) -> None:
+    v6_2_candidate = tmp_path / "v6_2_candidate.json"
+    v6_9_candidate = tmp_path / "v6_9_candidate.json"
+    v6_9_plan = tmp_path / "v6_9_plan.json"
+    v6_2_candidate.write_text('{"candidate":"v6.2"}\n', encoding="utf-8")
+    v6_9_candidate.write_text('{"candidate":"v6.9"}\n', encoding="utf-8")
+    v6_9_plan.write_text('{"plan":"future"}\n', encoding="utf-8")
+
+    result = write_launchd_plist(
+        output_path=tmp_path / "collector.plist",
+        label="com.bigan.test.v6-9-collector",
+        service_root=tmp_path / "raw-service",
+        protocol_path=PROTOCOL_PATH,
+        protocol_sha256=_sha256(PROTOCOL_PATH),
+        batch_round_count=12,
+        python_executable=sys.executable,
+        v6_2_candidate_manifest_path=v6_2_candidate,
+        v6_2_candidate_manifest_sha256=_sha256(v6_2_candidate),
+        v6_9_candidate_manifest_path=v6_9_candidate,
+        v6_9_candidate_manifest_sha256=_sha256(v6_9_candidate),
+        v6_9_collection_plan_path=v6_9_plan,
+        v6_9_collection_plan_sha256=_sha256(v6_9_plan),
+    )
+    with Path(result["launchd_plist_path"]).open("rb") as handle:
+        arguments = plistlib.load(handle)["ProgramArguments"]
+
+    assert "--v6-9-candidate-manifest" in arguments
+    assert "--v6-9-candidate-manifest-sha256" in arguments
+    assert "--v6-9-collection-plan" in arguments
+    assert "--v6-9-collection-plan-sha256" in arguments
+    assert result["automatic_v6_9_frozen_batch_canary_enabled"] is True
+    assert result["v6_9_candidate_manifest_sha256"] == _sha256(v6_9_candidate)
+    assert result["v6_9_collection_plan_sha256"] == _sha256(v6_9_plan)
     _assert_safety(result)
 
 
@@ -1085,9 +1250,7 @@ def _v6_6_point_freeze_manifest(
                 "collector_index_boundary_sequence": boundary_sequence,
                 "collector_index_boundary_sha256": boundary_sha256,
                 "collector_last_entry_sha256": last_entry_sha256,
-                "minimum_market_start_ts_exclusive": (
-                    minimum_market_start_ts_exclusive
-                ),
+                "minimum_market_start_ts_exclusive": (minimum_market_start_ts_exclusive),
                 "target_quality_valid_market_count": target,
                 "maximum_attempted_market_count": maximum,
                 "batch_market_count": 12,
