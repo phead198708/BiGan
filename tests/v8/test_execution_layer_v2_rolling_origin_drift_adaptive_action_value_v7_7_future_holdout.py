@@ -14,6 +14,8 @@ from bigan.v8.polymarket.training.execution_layer_v2_rolling_origin_drift_adapti
     STRICTLY_LATER_MINIMUM_MARKET_START_TS_EXCLUSIVE,
     _safety_fields,
     build_v7_7_future_pnl_noninferiority_gate,
+    build_v7_7_target_free_holdout_freeze_report,
+    select_v7_7_future_holdout_window,
     validate_v7_7_future_holdout_plan,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_runtime_aligned_sbc_net_return_v6_4 import (
@@ -46,6 +48,58 @@ def _target_row(index: int, pnl: float, *, side: str = "UP") -> dict:
 
 def _market_ids() -> list[str]:
     return [f"market-{index:03d}" for index in range(120)]
+
+
+def _index_row(index: int, *, quality_valid: bool = True) -> dict:
+    market_start_ts = STRICTLY_LATER_MINIMUM_MARKET_START_TS_EXCLUSIVE + 300_000 * (
+        index + 1
+    )
+    return {
+        "sequence": index + 1,
+        "market_id": f"market-{index:03d}",
+        "slug": f"market-slug-{index:03d}",
+        "decision_id": f"decision-{index:03d}",
+        "source_row_hash": f"{index + 1:064x}",
+        "market_start_ts": market_start_ts,
+        "market_end_ts": market_start_ts + 300_000,
+        "capture_quality_valid": quality_valid,
+    }
+
+
+def _action_rows() -> list[dict]:
+    actions = (
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+        "BUY_UP_HOLD_TO_SETTLEMENT",
+        "BUY_DOWN_HOLD_TO_SETTLEMENT",
+        "NO_TRADE",
+    )
+    return [
+        {
+            "market_id": f"market-{index:03d}",
+            "decision_ts": 2_000_000 + index,
+            "max_input_ts": 1_999_000 + index,
+            "action": action,
+        }
+        for index in range(120)
+        for action in actions
+    ]
+
+
+def _guard_rows(*, accepted_count: int, side: str = "DOWN") -> list[dict]:
+    return [
+        {
+            "market_id": f"market-{index:03d}",
+            "selected_action": f"BUY_{side}_SELL_BEFORE_CLOSE"
+            if index < accepted_count
+            else "NO_TRADE",
+            "selected_side": side if index < accepted_count else "NONE",
+            "execution_guard_order_allowed": index < accepted_count,
+            "source_score_mutated": False,
+            "labels_outcomes_or_pnl_opened": False,
+        }
+        for index in range(120)
+    ]
 
 
 def test_plan_freezes_bounded_strictly_later_outcome_blind_collection() -> None:
@@ -241,3 +295,88 @@ def test_support_and_complete_settlement_remain_fail_closed() -> None:
             plan=_plan(),
             target_free_freeze_sha256="0" * 64,
         )
+
+
+def test_window_selection_uses_earliest_exact_120_within_scan_cap() -> None:
+    rows = [_index_row(index) for index in range(130)]
+    selected, attempted, summary = select_v7_7_future_holdout_window(
+        rows,
+        plan=_plan(),
+        prior_market_ids=set(),
+        prior_slugs=set(),
+        prior_decision_ids=set(),
+        prior_source_row_hashes=set(),
+    )
+
+    assert len(selected) == 120
+    assert len(attempted) == 130
+    assert [row["sequence"] for row in selected] == list(range(1, 121))
+    assert summary["exact_window_ready"] is True
+
+
+def test_window_selection_excludes_invalid_and_prior_identity_rows() -> None:
+    rows = [_index_row(index) for index in range(122)]
+    rows[0]["capture_quality_valid"] = False
+    selected, _, summary = select_v7_7_future_holdout_window(
+        rows,
+        plan=_plan(),
+        prior_market_ids={"market-001"},
+        prior_slugs=set(),
+        prior_decision_ids=set(),
+        prior_source_row_hashes=set(),
+    )
+
+    assert len(selected) == 120
+    assert selected[0]["market_id"] == "market-002"
+    assert summary["exclusion_reason_distribution"] == {
+        "capture_quality_invalid": 1,
+        "prior_market_id_overlap": 1,
+    }
+
+
+def test_target_free_freeze_passes_one_sided_support_without_outcomes() -> None:
+    selected = [_index_row(index) for index in range(120)]
+    report = build_v7_7_target_free_holdout_freeze_report(
+        selected,
+        attempted_rows=selected,
+        action_rows=_action_rows(),
+        candidate_guard_rows=_guard_rows(accepted_count=40, side="DOWN"),
+        baseline_guard_rows=_guard_rows(accepted_count=50, side="UP"),
+        selection_summary={"exact_window_ready": True},
+        plan=_plan(),
+        stage_started_ts=max(row["market_end_ts"] for row in selected) + 1,
+        collector_index_sha256="1" * 64,
+    )
+
+    assert report["target_free_freeze_passed"] is True
+    assert report["v7_7_guard_accepted_market_count"] == 40
+    assert report["v7_7_guard_accepted_side_distribution_diagnostic"] == {"DOWN": 40}
+    assert report["side_quota_enabled"] is False
+    assert report["future_target_access_allowed"] is True
+    assert report["labels_outcomes_resolution_or_pnl_opened"] is False
+
+
+def test_target_free_freeze_fails_support_causality_and_target_leakage() -> None:
+    selected = [_index_row(index) for index in range(120)]
+    actions = _action_rows()
+    actions[0]["max_input_ts"] = actions[0]["decision_ts"] + 1
+    actions[1]["settlement_pnl"] = 1.0
+    report = build_v7_7_target_free_holdout_freeze_report(
+        selected,
+        attempted_rows=selected,
+        action_rows=actions,
+        candidate_guard_rows=_guard_rows(accepted_count=39),
+        baseline_guard_rows=_guard_rows(accepted_count=50),
+        selection_summary={"exact_window_ready": True},
+        plan=_plan(),
+        stage_started_ts=max(row["market_end_ts"] for row in selected) + 1,
+        collector_index_sha256="2" * 64,
+    )
+
+    assert report["target_free_freeze_passed"] is False
+    assert set(report["target_free_blocking_reason_codes"]) >= {
+        "target_free_v7_7_guard_accepted_support_insufficient",
+        "target_free_five_action_grid_incomplete",
+        "target_free_feature_causality_violation",
+        "target_free_forbidden_target_field_present",
+    }

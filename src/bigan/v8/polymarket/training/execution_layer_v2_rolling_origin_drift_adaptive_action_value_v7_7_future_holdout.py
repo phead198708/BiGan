@@ -11,6 +11,9 @@ from bigan.v8.polymarket.training.execution_layer_v2_p_up_semantic_compatibility
     SBC_ACTIONS,
     SIDES,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_net_return_v6 import (
+    _find_nonempty_fields,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_runtime_aligned_sbc_net_return_v6_4 import (
     _blocked_safety_fields,
     _require_git_sha,
@@ -29,6 +32,32 @@ BOUNDED_BATCH_MARKET_COUNT = 12
 MINIMUM_GUARD_ACCEPTED_MARKET_COUNT = 40
 STRICTLY_LATER_MINIMUM_MARKET_START_TS_EXCLUSIVE = 1_784_760_900_000
 FROZEN_PLAN_SHA256 = "9750317ff18d698f5130489a871ffb9c71812bb79bf172e25b00ce4dc9382602"
+FIVE_ACTIONS = frozenset(
+    {
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+        "BUY_UP_HOLD_TO_SETTLEMENT",
+        "BUY_DOWN_HOLD_TO_SETTLEMENT",
+        "NO_TRADE",
+    }
+)
+FORBIDDEN_TARGET_FIELDS = frozenset(
+    {
+        "outcome",
+        "resolved_outcome",
+        "resolution",
+        "winner",
+        "settlement_pnl",
+        "settlement_price",
+        "runtime_policy_after_cost_net_pnl_per_contract",
+        "runtime_policy_after_cost_net_pnl_at_frozen_size",
+        "realized_pnl",
+        "realized_return",
+        "future_return",
+        "label",
+        "oracle_action",
+    }
+)
 
 
 def _safety_fields() -> dict[str, Any]:
@@ -286,6 +315,231 @@ def build_v7_7_future_pnl_noninferiority_gate(
     }
     report["report_id"] = canonical_json_sha256(report)
     return report
+
+
+def select_v7_7_future_holdout_window(
+    index_rows: list[dict[str, Any]],
+    *,
+    plan: dict[str, Any],
+    prior_market_ids: set[str],
+    prior_slugs: set[str],
+    prior_decision_ids: set[str],
+    prior_source_row_hashes: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Select the earliest exact-120 eligible rows within the frozen scan cap."""
+
+    validate_v7_7_future_holdout_plan(plan)
+    collection = dict(plan["collection"])
+    boundary = int(collection["strictly_later_minimum_market_start_ts_exclusive"])
+    ordered = sorted(index_rows, key=lambda row: int(row["sequence"]))
+    post_boundary = [
+        row for row in ordered if int(row.get("market_start_ts") or 0) > boundary
+    ][: int(collection["maximum_attempted_market_count"])]
+    eligible: list[dict[str, Any]] = []
+    exclusion_reasons: Counter[str] = Counter()
+    for row in post_boundary:
+        reasons = []
+        if row.get("capture_quality_valid") is not True:
+            reasons.append("capture_quality_invalid")
+        if str(row.get("market_id") or "") in prior_market_ids:
+            reasons.append("prior_market_id_overlap")
+        if str(row.get("slug") or "") in prior_slugs:
+            reasons.append("prior_slug_overlap")
+        if str(row.get("decision_id") or "") in prior_decision_ids:
+            reasons.append("prior_decision_id_overlap")
+        if str(row.get("source_row_hash") or "") in prior_source_row_hashes:
+            reasons.append("prior_source_row_hash_overlap")
+        if reasons:
+            exclusion_reasons.update(reasons)
+            continue
+        eligible.append(row)
+        if len(eligible) == int(collection["exact_quality_valid_market_count"]):
+            break
+    selected = eligible[: int(collection["exact_quality_valid_market_count"])]
+    selected_ids = [str(row.get("market_id") or "") for row in selected]
+    summary = {
+        "attempted_scan_count": len(post_boundary),
+        "eligible_market_count": len(eligible),
+        "selected_market_count": len(selected),
+        "selected_sequence_start": int(selected[0]["sequence"]) if selected else None,
+        "selected_sequence_end": int(selected[-1]["sequence"]) if selected else None,
+        "selected_market_ids_sha256": canonical_json_sha256(selected_ids),
+        "exclusion_reason_distribution": dict(sorted(exclusion_reasons.items())),
+        "strictly_later_time_violation_count": sum(
+            int(row.get("market_start_ts") or 0) <= boundary for row in selected
+        ),
+        "selected_identity_duplicate_count": len(selected_ids) - len(set(selected_ids)),
+        "exact_window_ready": (
+            len(selected) == EXACT_MARKET_COUNT
+            and "" not in selected_ids
+            and len(set(selected_ids)) == EXACT_MARKET_COUNT
+        ),
+    }
+    return selected, post_boundary, summary
+
+
+def build_v7_7_target_free_holdout_freeze_report(
+    selected_rows: list[dict[str, Any]],
+    *,
+    attempted_rows: list[dict[str, Any]],
+    action_rows: list[dict[str, Any]],
+    candidate_guard_rows: list[dict[str, Any]],
+    baseline_guard_rows: list[dict[str, Any]],
+    selection_summary: dict[str, Any],
+    plan: dict[str, Any],
+    stage_started_ts: int,
+    collector_index_sha256: str,
+) -> dict[str, Any]:
+    """Freeze both policies before any settlement or PnL access."""
+
+    validate_v7_7_future_holdout_plan(plan)
+    _require_sha256(collector_index_sha256, name="collector_index_sha256")
+    selected_ids = [str(row.get("market_id") or "") for row in selected_rows]
+    selected_set = set(selected_ids)
+    action_rows = [row for row in action_rows if str(row.get("market_id") or "") in selected_set]
+    candidate_guard_rows = [
+        row for row in candidate_guard_rows if str(row.get("market_id") or "") in selected_set
+    ]
+    baseline_guard_rows = [
+        row for row in baseline_guard_rows if str(row.get("market_id") or "") in selected_set
+    ]
+    candidate_by_market = _one_guard_row_per_market(candidate_guard_rows)
+    baseline_by_market = _one_guard_row_per_market(baseline_guard_rows)
+    forbidden = sorted(
+        set(_find_nonempty_fields(action_rows, FORBIDDEN_TARGET_FIELDS))
+        | set(_find_nonempty_fields(candidate_guard_rows, FORBIDDEN_TARGET_FIELDS))
+        | set(_find_nonempty_fields(baseline_guard_rows, FORBIDDEN_TARGET_FIELDS))
+    )
+    causality_violations = sum(
+        int(row.get("max_input_ts") or 0) > int(row.get("decision_ts") or 0)
+        for row in action_rows
+    )
+    candidate_accepted = [
+        row
+        for row in candidate_guard_rows
+        if row.get("execution_guard_order_allowed") is True
+    ]
+    baseline_accepted = [
+        row
+        for row in baseline_guard_rows
+        if row.get("execution_guard_order_allowed") is True
+    ]
+    checks = {
+        "exact_120_selected_markets": (
+            selection_summary.get("exact_window_ready") is True
+            and len(selected_rows) == EXACT_MARKET_COUNT
+            and len(selected_set) == EXACT_MARKET_COUNT
+        ),
+        "attempted_scan_cap_respected": len(attempted_rows) <= SCAN_CAP,
+        "all_selected_markets_closed_before_target_access": (
+            bool(selected_rows)
+            and stage_started_ts > max(int(row.get("market_end_ts") or 0) for row in selected_rows)
+        ),
+        "complete_five_action_grid": _complete_five_action_grid(
+            action_rows, selected_market_ids=selected_set
+        ),
+        "candidate_complete_decision_coverage": set(candidate_by_market) == selected_set,
+        "baseline_complete_decision_coverage": set(baseline_by_market) == selected_set,
+        "minimum_v7_7_guard_accepted_market_support": len(candidate_accepted)
+        >= MINIMUM_GUARD_ACCEPTED_MARKET_COUNT,
+        "feature_timestamp_causality": causality_violations == 0,
+        "forbidden_target_fields_absent": not forbidden,
+        "candidate_source_scores_unchanged": all(
+            row.get("source_score_mutated") is False for row in candidate_guard_rows
+        ),
+        "baseline_source_scores_unchanged": all(
+            row.get("source_score_mutated") is False for row in baseline_guard_rows
+        ),
+        "outcomes_resolution_labels_or_pnl_sealed": all(
+            row.get("labels_outcomes_or_pnl_opened") is False
+            for row in candidate_guard_rows + baseline_guard_rows
+        ),
+    }
+    reason_map = {
+        "exact_120_selected_markets": "target_free_exact_120_window_not_ready",
+        "attempted_scan_cap_respected": "target_free_scan_cap_exceeded",
+        "all_selected_markets_closed_before_target_access": "target_free_markets_not_all_closed",
+        "complete_five_action_grid": "target_free_five_action_grid_incomplete",
+        "candidate_complete_decision_coverage": "target_free_v7_7_decision_coverage_incomplete",
+        "baseline_complete_decision_coverage": "target_free_v6_7_decision_coverage_incomplete",
+        "minimum_v7_7_guard_accepted_market_support": "target_free_v7_7_guard_accepted_support_insufficient",
+        "feature_timestamp_causality": "target_free_feature_causality_violation",
+        "forbidden_target_fields_absent": "target_free_forbidden_target_field_present",
+        "candidate_source_scores_unchanged": "target_free_v7_7_source_score_mutated",
+        "baseline_source_scores_unchanged": "target_free_v6_7_source_score_mutated",
+        "outcomes_resolution_labels_or_pnl_sealed": "target_free_outcome_or_pnl_access_detected",
+    }
+    blockers = [reason_map[name] for name, passed in checks.items() if not passed]
+    report = {
+        "schema_version": f"{SCHEMA_PREFIX}-target-free-freeze-report-v1",
+        "candidate_name": CANDIDATE_NAME,
+        "baseline_name": BASELINE_NAME,
+        "collector_index_sha256": collector_index_sha256,
+        "selected_market_count": len(selected_rows),
+        "attempted_market_count": len(attempted_rows),
+        "selection_summary": selection_summary,
+        "v7_7_guard_accepted_market_count": len(candidate_accepted),
+        "v6_7_guard_accepted_market_count": len(baseline_accepted),
+        "v7_7_guard_accepted_side_distribution_diagnostic": dict(
+            sorted(Counter(_guard_side(row) for row in candidate_accepted).items())
+        ),
+        "v6_7_guard_accepted_side_distribution_diagnostic": dict(
+            sorted(Counter(_guard_side(row) for row in baseline_accepted).items())
+        ),
+        "side_quota_enabled": False,
+        "side_action_and_family_metrics_diagnostic_only": True,
+        "feature_causality_violation_count": causality_violations,
+        "forbidden_target_fields": forbidden,
+        "target_free_checks": checks,
+        "target_free_freeze_passed": not blockers,
+        "target_free_blocking_reason_codes": blockers,
+        "future_target_access_allowed": not blockers,
+        "labels_outcomes_resolution_or_pnl_opened": False,
+        "settlement_provider_called": False,
+        "threshold_or_model_tuning_performed": False,
+        "source_scores_mutated": False,
+        "promotion_evidence": False,
+        **_safety_fields(),
+    }
+    report["report_id"] = canonical_json_sha256(report)
+    return report
+
+
+def _one_guard_row_per_market(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    output: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        market_id = str(row.get("market_id") or "")
+        if not market_id or market_id in output:
+            raise ValueError("#241 guard replay market identity is missing or duplicated")
+        output[market_id] = row
+    return output
+
+
+def _complete_five_action_grid(
+    rows: list[dict[str, Any]], *, selected_market_ids: set[str]
+) -> bool:
+    groups: dict[tuple[str, int], set[str]] = defaultdict(set)
+    for row in rows:
+        market_id = str(row.get("market_id") or "")
+        decision_ts = int(row.get("decision_ts") or 0)
+        action = str(row.get("action") or "")
+        if (
+            market_id not in selected_market_ids
+            or decision_ts <= 0
+            or action not in FIVE_ACTIONS
+            or int(row.get("max_input_ts") or 0) > decision_ts
+        ):
+            return False
+        groups[(market_id, decision_ts)].add(action)
+    return (
+        len({market_id for market_id, _ in groups}) == EXACT_MARKET_COUNT
+        and all(actions == FIVE_ACTIONS for actions in groups.values())
+        and len(groups) == EXACT_MARKET_COUNT
+    )
+
+
+def _guard_side(row: dict[str, Any]) -> str:
+    return str(row.get("selected_side") or row.get("side") or "NONE")
 
 
 def _validate_runtime_target_rows(
