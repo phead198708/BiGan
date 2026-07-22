@@ -1,0 +1,163 @@
+{
+  "schema_version": "bigan-v8-recency-adaptive-nested-action-value-v7-6-profile-v1",
+  "issue_number": 239,
+  "candidate_name": "recency_adaptive_nested_action_value_v7_6",
+  "preregistered_before_implementation_and_fit": true,
+  "lineage": {
+    "runtime_target_rows_sha256": "1565116daeb2f5d4d8c33fefa507276f59251edd5ffb5f4f313041bcf9dbb0ec",
+    "v7_0_training_profile_sha256": "1f66d8699b9727651538cc34a9a2a25ba5eaac5cfded75cf8f4a258b1b5d3f4a",
+    "v6_7_candidate_profile_sha256": "cec55d243acd6bbf60a5e8474545b487086ddcd4d18073682ae7f2d4660d2248",
+    "v7_2_relative_policy_source_sha256": "bc099273ca3c1db04062d40a5172e82d0ec075e2c63886cc42dd2dde67cc961a",
+    "v7_4_boosted_source_sha256": "686b445307412cbc545b40fa87e41df7357c442fd8ab3d38af4c69b13e29e26a",
+    "xgboost_version": "3.2.0"
+  },
+  "design_split": {
+    "market_count": 44,
+    "maximum_decision_ts": 1784245320000,
+    "sealed_outer_oof_minimum_decision_ts": 1784245560000,
+    "sealed_outer_oof_targets_opened_for_design": false
+  },
+  "prior_result_exclusion": {
+    "issue238_manifest_report_or_target_rows_accepted_as_inputs": false,
+    "issue238_side_action_or_pnl_diagnostics_used_for_design": false,
+    "issue229_or_issue231_future_outcomes_used": false,
+    "v7_4_or_v7_5_outer_oof_rows_used_for_profile_selection": false
+  },
+  "baseline_and_action_contract": {
+    "baseline_candidate": "p_up_semantic_execution_compatibility_v6_7",
+    "baseline_is_default_action": true,
+    "baseline_no_trade_cannot_be_activated": true,
+    "allowed_policy_decisions": [
+      "KEEP_V6_7",
+      "SWITCH_SAME_DECISION_SBC",
+      "VETO_TO_NO_TRADE"
+    ],
+    "opposite_action_same_decision_group_required": true,
+    "alternative_decision_timestamp_allowed": false,
+    "maximum_bets_per_market": 1,
+    "side_quota_allowed": false,
+    "full_five_action_interface_required": true,
+    "hts_disabled_fail_closed": true
+  },
+  "outer_split": {
+    "source_market_count": 134,
+    "initial_training_market_count": 44,
+    "forward_fold_count": 5,
+    "validation_market_count_per_fold": 18,
+    "outer_oof_market_count": 90,
+    "market_order": "minimum_decision_ts_then_market_id",
+    "outer_validation_targets_used_for_profile_selection_or_fit": false
+  },
+  "xgboost": {
+    "booster": "gbtree",
+    "objective": "reg:squarederror",
+    "eval_metric": "rmse",
+    "num_boost_round": 64,
+    "max_depth": 2,
+    "eta": 0.05,
+    "min_child_weight": 5.0,
+    "gamma": 0.0,
+    "subsample": 1.0,
+    "colsample_bytree": 1.0,
+    "reg_alpha": 0.0,
+    "reg_lambda": 10.0,
+    "max_bin": 64,
+    "tree_method": "hist",
+    "seed": 0,
+    "nthread": 1,
+    "early_stopping_enabled": false,
+    "canonical_features_must_be_finite": true
+  },
+  "model_heads": {
+    "head_names": [
+      "BASELINE_LOSS_VETO",
+      "RELATIVE_SWITCH_VALUE"
+    ],
+    "baseline_relative_minimum_prior_active_market_count": 15,
+    "baseline_veto_target": "v6_7_baseline_post_cost_net_return",
+    "relative_switch_target": "opposite_minus_baseline_post_cost_net_return",
+    "historical_targets_allowed_only_on_strictly_prior_training_markets": true
+  },
+  "training_windows": {
+    "market_counts": [
+      30,
+      60,
+      0
+    ],
+    "zero_means_all_available_prior_markets": true,
+    "window_applied_after_chronological_ordering": true,
+    "outer_or_inner_validation_market_in_window_allowed": false
+  },
+  "policy_profiles": [
+    {"name": "KEEP_V6_7", "head": "KEEP_V6_7", "training_window_market_count": 0, "edge_buffer": 0.0},
+    {"name": "BASELINE_VETO_W030_B000", "head": "BASELINE_LOSS_VETO", "training_window_market_count": 30, "edge_buffer": 0.0},
+    {"name": "BASELINE_VETO_W030_B025", "head": "BASELINE_LOSS_VETO", "training_window_market_count": 30, "edge_buffer": 0.025},
+    {"name": "BASELINE_VETO_W030_B050", "head": "BASELINE_LOSS_VETO", "training_window_market_count": 30, "edge_buffer": 0.05},
+    {"name": "BASELINE_VETO_W060_B000", "head": "BASELINE_LOSS_VETO", "training_window_market_count": 60, "edge_buffer": 0.0},
+    {"name": "BASELINE_VETO_W060_B025", "head": "BASELINE_LOSS_VETO", "training_window_market_count": 60, "edge_buffer": 0.025},
+    {"name": "BASELINE_VETO_W060_B050", "head": "BASELINE_LOSS_VETO", "training_window_market_count": 60, "edge_buffer": 0.05},
+    {"name": "BASELINE_VETO_WALL_B000", "head": "BASELINE_LOSS_VETO", "training_window_market_count": 0, "edge_buffer": 0.0},
+    {"name": "BASELINE_VETO_WALL_B025", "head": "BASELINE_LOSS_VETO", "training_window_market_count": 0, "edge_buffer": 0.025},
+    {"name": "BASELINE_VETO_WALL_B050", "head": "BASELINE_LOSS_VETO", "training_window_market_count": 0, "edge_buffer": 0.05},
+    {"name": "RELATIVE_SWITCH_W030_B000", "head": "RELATIVE_SWITCH_VALUE", "training_window_market_count": 30, "edge_buffer": 0.0},
+    {"name": "RELATIVE_SWITCH_W030_B025", "head": "RELATIVE_SWITCH_VALUE", "training_window_market_count": 30, "edge_buffer": 0.025},
+    {"name": "RELATIVE_SWITCH_W030_B050", "head": "RELATIVE_SWITCH_VALUE", "training_window_market_count": 30, "edge_buffer": 0.05},
+    {"name": "RELATIVE_SWITCH_W060_B000", "head": "RELATIVE_SWITCH_VALUE", "training_window_market_count": 60, "edge_buffer": 0.0},
+    {"name": "RELATIVE_SWITCH_W060_B025", "head": "RELATIVE_SWITCH_VALUE", "training_window_market_count": 60, "edge_buffer": 0.025},
+    {"name": "RELATIVE_SWITCH_W060_B050", "head": "RELATIVE_SWITCH_VALUE", "training_window_market_count": 60, "edge_buffer": 0.05},
+    {"name": "RELATIVE_SWITCH_WALL_B000", "head": "RELATIVE_SWITCH_VALUE", "training_window_market_count": 0, "edge_buffer": 0.0},
+    {"name": "RELATIVE_SWITCH_WALL_B025", "head": "RELATIVE_SWITCH_VALUE", "training_window_market_count": 0, "edge_buffer": 0.025},
+    {"name": "RELATIVE_SWITCH_WALL_B050", "head": "RELATIVE_SWITCH_VALUE", "training_window_market_count": 0, "edge_buffer": 0.05}
+  ],
+  "nested_selector": {
+    "inner_prequential_initial_market_count": 20,
+    "minimum_inner_evaluation_market_count": 20,
+    "minimum_profile_available_active_market_count": 10,
+    "minimum_policy_difference_market_count": 3,
+    "inner_no_bet_market_pnl": 0.0,
+    "alternative_total_pnl_must_be_noninferior_to_keep": true,
+    "alternative_largest_winner_removed_must_be_noninferior_to_keep": true,
+    "tie_break": "highest_pnl_then_highest_lwr_then_profile_name_lexicographic",
+    "no_eligible_alternative_behavior": "KEEP_V6_7",
+    "outer_oof_results_used_for_selection": false,
+    "result_selected_rerun_allowed": false
+  },
+  "historical_replay_superiority_gate": {
+    "exact_evaluation_market_count": 90,
+    "fixed_position_size": 0.2,
+    "no_bet_market_pnl": 0.0,
+    "common_selected_row_filter_allowed": false,
+    "candidate_minus_v6_7_total_pnl_minimum_inclusive": 0.0,
+    "candidate_minus_v6_7_largest_winner_removed_pnl_minimum_inclusive": 0.0,
+    "comparison_operator": "greater_than_or_equal",
+    "equality_passes_noninferiority": true,
+    "exact_baseline_identity_reconciliation_required": true,
+    "oof_pnl_used_for_profile_feature_hyperparameter_window_or_threshold_selection": false,
+    "oof_pnl_used_for_pre_collection_screening_only": true,
+    "failure_stops_before_collection": true,
+    "promotion_or_paper_unlock_allowed": false
+  },
+  "target_free_canary": {
+    "historical_noninferiority_gate_must_pass_before_collection": true,
+    "minimum_historical_policy_difference_market_count": 3,
+    "final_selected_profile_must_not_be_keep_v6_7": true,
+    "strictly_later_outcome_blind_market_count": 12,
+    "minimum_guard_accepted_policy_difference_market_count": 1,
+    "outcomes_resolution_labels_or_pnl_opened": false,
+    "collection_allowed_only_after_historical_actionability": true
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "live_trading_enabled": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}
