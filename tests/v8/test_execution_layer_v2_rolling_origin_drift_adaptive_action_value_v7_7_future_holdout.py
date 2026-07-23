@@ -99,6 +99,7 @@ def _guard_rows(*, accepted_count: int, side: str = "DOWN") -> list[dict]:
     return [
         {
             "market_id": f"market-{index:03d}",
+            "decision_ts": 2_000_000 + index,
             "selected_action": f"BUY_{side}_SELL_BEFORE_CLOSE"
             if index < accepted_count
             else "NO_TRADE",
@@ -459,6 +460,48 @@ def test_guard_accepted_runtime_decisions_bind_frozen_source_rows() -> None:
         row["labels_outcomes_resolution_or_pnl_opened"] is False
         for row in accepted
     )
+
+
+def test_guard_accepted_runtime_decisions_bind_exact_decision_timestamp() -> None:
+    actions = _action_rows()
+    selected = next(
+        row
+        for row in actions
+        if row["market_id"] == "market-000"
+        and row["action"] == "BUY_DOWN_SELL_BEFORE_CLOSE"
+    )
+    selected["decision_id"] = "selected-decision"
+    selected["market_close_ts"] = selected["decision_ts"] + 60_000
+    selected["microstructure_snapshot"] = {"time_to_close_seconds": 60.0}
+    actions.append(
+        {
+            **selected,
+            "decision_ts": selected["decision_ts"] - 1_000,
+            "max_input_ts": selected["max_input_ts"] - 1_000,
+            "decision_id": "earlier-decision",
+        }
+    )
+
+    accepted = materialize_guard_accepted_runtime_decisions(
+        _guard_rows(accepted_count=1, side="DOWN"),
+        action_rows=actions,
+    )
+
+    assert len(accepted) == 1
+    assert accepted[0]["decision_ts"] == selected["decision_ts"]
+    assert accepted[0]["source_decision_id"] == "selected-decision"
+
+
+def test_guard_accepted_runtime_decisions_fail_without_exact_decision_timestamp() -> None:
+    actions = _action_rows()
+    guards = _guard_rows(accepted_count=1, side="DOWN")
+    guards[0]["decision_ts"] += 1
+
+    with pytest.raises(ValueError, match="source identity"):
+        materialize_guard_accepted_runtime_decisions(
+            guards,
+            action_rows=actions,
+        )
 
 
 def test_guard_accepted_runtime_decisions_fail_on_missing_source_action() -> None:

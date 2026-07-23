@@ -609,6 +609,7 @@ def _baseline_guard_window(
             )
         row = {
             "market_id": market_id,
+            "decision_ts": int(source.get("decision_ts") or 0) if source else 0,
             "selected_action": action,
             "selected_side": side,
             "execution_guard_order_allowed": source is not None and not reasons,

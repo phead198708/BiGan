@@ -520,6 +520,7 @@ def _score_window(
         decisions.append(decision)
         guard_row = {
             **decision,
+            "decision_ts": int(source.get("decision_ts") or 0) if source else 0,
             "execution_guard_order_allowed": source is not None and not reasons,
             "execution_blocking_reason_codes": reasons,
             "p_up_action_disagreement": (

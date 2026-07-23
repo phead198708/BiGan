@@ -560,30 +560,37 @@ def materialize_guard_accepted_runtime_decisions(
 ) -> list[dict[str, Any]]:
     """Bind frozen guard-accepted actions to their immutable decision-time source."""
 
-    sources: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    sources: dict[tuple[str, int, str], list[dict[str, Any]]] = defaultdict(list)
     for row in action_rows:
         action = str(row.get("action") or "")
         if action in SBC_ACTIONS:
-            sources[(str(row.get("market_id") or ""), action)].append(row)
+            sources[
+                (
+                    str(row.get("market_id") or ""),
+                    int(row.get("decision_ts") or 0),
+                    action,
+                )
+            ].append(row)
     output = []
     seen: set[str] = set()
     for guard in guard_rows:
         if guard.get("execution_guard_order_allowed") is not True:
             continue
         market_id = str(guard.get("market_id") or "")
+        decision_ts = int(guard.get("decision_ts") or 0)
         action = str(guard.get("selected_action") or guard.get("action") or "")
         side = str(guard.get("selected_side") or guard.get("side") or "")
-        matches = sources.get((market_id, action), [])
+        matches = sources.get((market_id, decision_ts, action), [])
         if (
             not market_id
             or market_id in seen
+            or decision_ts <= 0
             or action not in SBC_ACTIONS
             or side not in SIDES
             or len(matches) != 1
         ):
             raise ValueError("#241 guard-accepted runtime source identity invalid")
         source = matches[0]
-        decision_ts = int(source.get("decision_ts") or 0)
         max_input_ts = int(source.get("max_input_ts") or 0)
         if decision_ts <= 0 or max_input_ts > decision_ts:
             raise ValueError("#241 guard-accepted runtime source causality invalid")
