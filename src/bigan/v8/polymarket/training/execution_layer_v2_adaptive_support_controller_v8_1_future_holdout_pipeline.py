@@ -295,6 +295,7 @@ def run_adaptive_support_controller_v8_1_future_target_free_freeze(
         collector_index_sha256=pins["index"].lower(),
     )
     report["run_id"] = config.run_id
+    report["decision_freeze_created_ts"] = config.stage_started_ts
     candidate_runtime = (
         materialize_adaptive_support_controller_v8_1_runtime_decisions(
             candidate_guard,
@@ -698,6 +699,8 @@ def _write_freeze_artifacts(
         "run_id": report.get("run_id"),
         "candidate_name": v81.CANDIDATE_NAME,
         "implementation_commit": implementation_commit,
+        "decision_freeze_created_ts": report["decision_freeze_created_ts"],
+        "exact_market_count": report["selected_market_count"],
         "plan": _descriptor(plan_path),
         "collector_protocol": _descriptor(protocol_path),
         "collector_index_snapshot": _descriptor(index_snapshot),
@@ -715,6 +718,9 @@ def _write_freeze_artifacts(
             _descriptor(Path(row["_manifest_path"])) for row in v6_2
         ],
         **{name: _descriptor(path) for name, path in outputs.items()},
+        "selected_rows": _descriptor(outputs["selected_index_rows"]),
+        "candidate_runtime": _descriptor(outputs["candidate_runtime"]),
+        "v6_7_runtime": _descriptor(outputs["baseline_runtime"]),
         "report": _descriptor(report_path),
         "report_markdown": _descriptor(report_md_path),
         "target_free_freeze_passed": report["target_free_freeze_passed"],
@@ -722,7 +728,11 @@ def _write_freeze_artifacts(
             "target_free_blocking_reason_codes"
         ],
         "future_target_access_allowed": report["future_target_access_allowed"],
+        "decision_freeze_written_before_target_access": True,
         "labels_outcomes_resolution_or_pnl_opened": False,
+        "settlement_provider_called": False,
+        "source_scores_mutated": False,
+        "threshold_model_or_controller_tuning_performed": False,
         **_v7_0_blocked_safety_fields(),
     }
     manifest["manifest_id"] = canonical_json_sha256(manifest)
