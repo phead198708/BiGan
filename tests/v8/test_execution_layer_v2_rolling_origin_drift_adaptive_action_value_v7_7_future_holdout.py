@@ -19,6 +19,10 @@ from bigan.v8.polymarket.training.execution_layer_v2_rolling_origin_drift_adapti
     select_v7_7_future_holdout_window,
     validate_v7_7_future_holdout_plan,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_rolling_origin_drift_adaptive_action_value_v7_7_future_holdout_pipeline import (
+    V77FutureTargetFreeFreezeConfig,
+    _baseline_guard_window,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_runtime_aligned_sbc_net_return_v6_4 import (
     _sha256_file,
 )
@@ -421,3 +425,83 @@ def test_guard_accepted_runtime_decisions_fail_on_missing_source_action() -> Non
             _guard_rows(accepted_count=40, side="DOWN"),
             action_rows=actions,
         )
+
+
+def test_target_free_pipeline_config_requires_aligned_pinned_batch_inputs(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="nonempty and aligned"):
+        V77FutureTargetFreeFreezeConfig(
+            run_id="freeze",
+            output_dir=tmp_path,
+            plan_path=PLAN_PATH,
+            expected_plan_sha256=FROZEN_PLAN_SHA256,
+            collector_protocol_path=tmp_path / "protocol.json",
+            expected_collector_protocol_sha256="1" * 64,
+            collector_index_path=tmp_path / "index.jsonl",
+            expected_collector_index_sha256="2" * 64,
+            historical_manifest_path=tmp_path / "historical.json",
+            expected_historical_manifest_sha256="3" * 64,
+            prior_lineage_rows_path=tmp_path / "lineage.jsonl",
+            expected_prior_lineage_rows_sha256="4" * 64,
+            prior_canary_index_path=tmp_path / "canary.jsonl",
+            expected_prior_canary_index_sha256="5" * 64,
+            development_batch_manifest_paths=(tmp_path / "development.json",),
+            expected_development_batch_manifest_sha256s=("6" * 64,),
+            v6_2_batch_manifest_paths=(),
+            expected_v6_2_batch_manifest_sha256s=(),
+            implementation_commit="a" * 40,
+            stage_started_ts=1,
+        )
+
+
+def test_v6_7_baseline_guard_replay_is_complete_and_fail_closed() -> None:
+    profile = json.loads(
+        (
+            ROOT
+            / "examples/v8/polymarket_configs/"
+            "execution_layer_v2_p_up_semantic_compatibility_v6_7_profile.json"
+        ).read_text()
+    )
+    source = {
+        "market_id": "market-1",
+        "decision_ts": 2_000,
+        "max_input_ts": 1_999,
+        "action": "BUY_DOWN_SELL_BEFORE_CLOSE",
+        "decision_time_features": {
+            "execution_price": 0.55,
+            "selected_side_executable_ask_notional": 1.0,
+            "selected_side_executable_bid_notional": 1.0,
+            "selected_side_liquidity_depth": 1.0,
+        },
+        "microstructure_snapshot": {
+            "spread_bps": 10.0,
+            "book_staleness_ms": 10.0,
+            "queue_fill_proxy": 1.0,
+            "time_to_close_seconds": 120.0,
+        },
+        "reference_price_feature_provenance": {"provenance_valid": True},
+    }
+    rows = _baseline_guard_window(
+        ["market-1", "market-2"],
+        baseline_rows=[
+            {
+                "market_id": "market-1",
+                "decision_ts": 2_000,
+                "action": "BUY_DOWN_SELL_BEFORE_CLOSE",
+            }
+        ],
+        action_rows=[source],
+        v6_7_profile=profile,
+    )
+
+    assert len(rows) == 2
+    assert rows[0]["execution_guard_order_allowed"] is True
+    assert rows[0]["selected_side"] == "DOWN"
+    assert rows[1]["selected_action"] == "NO_TRADE"
+    assert rows[1]["execution_guard_order_allowed"] is False
+    assert rows[1]["execution_blocking_reason_codes"] == [
+        "v6_7_no_positive_guard_compatible_action"
+    ]
+    assert all(row["source_score_mutated"] is False for row in rows)
+    assert all(row["labels_outcomes_or_pnl_opened"] is False for row in rows)
