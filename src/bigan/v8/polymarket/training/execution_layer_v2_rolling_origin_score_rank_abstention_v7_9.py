@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -193,10 +194,13 @@ def fit_rolling_origin_score_rank_abstention_v7_9(
     v6_7_profile: dict[str, Any],
     implementation_commit: str,
     fit_created_ts: int,
+    _profile_validator: Callable[[dict[str, Any]], None] = (
+        validate_rolling_origin_score_rank_abstention_v7_9_profile
+    ),
 ) -> dict[str, Any]:
     """Run the one strictly-prior historical score-rank gate."""
 
-    validate_rolling_origin_score_rank_abstention_v7_9_profile(profile)
+    _profile_validator(profile)
     _validate_canonical_rows(seed_rows)
     seed_order = _market_order(seed_rows)
     expected_seed = int(profile["historical_stream"]["seed_market_count"])
