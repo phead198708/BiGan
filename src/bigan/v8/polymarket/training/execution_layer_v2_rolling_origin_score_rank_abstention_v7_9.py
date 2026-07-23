@@ -197,6 +197,7 @@ def fit_rolling_origin_score_rank_abstention_v7_9(
     _profile_validator: Callable[[dict[str, Any]], None] = (
         validate_rolling_origin_score_rank_abstention_v7_9_profile
     ),
+    _rank_controller: Callable[[tuple[bool, ...]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run the one strictly-prior historical score-rank gate."""
 
@@ -231,6 +232,7 @@ def fit_rolling_origin_score_rank_abstention_v7_9(
     prequential_rows: list[dict[str, Any]] = []
     guard_replay_rows: list[dict[str, Any]] = []
     loaded_target_rows: list[dict[str, Any]] = []
+    controller_guard_acceptance_history: list[bool] = []
     prior_close_ts = seed_max_close
     for stream_index, market in enumerate(stream_markets):
         if prior_close_ts >= int(market["decision_ts"]):
@@ -238,7 +240,16 @@ def fit_rolling_origin_score_rank_abstention_v7_9(
         prior_window = eligible_scores[-window_size:]
         if len(prior_window) != window_size:
             raise ValueError("#243 rolling score window incomplete")
-        threshold = finite_sample_score_quantile(prior_window, quantile)
+        controller_decision = (
+            _rank_controller(tuple(controller_guard_acceptance_history))
+            if _rank_controller is not None
+            else {
+                "selected_quantile": quantile,
+                "controller_enabled": False,
+            }
+        )
+        current_quantile = float(controller_decision["selected_quantile"])
+        threshold = finite_sample_score_quantile(prior_window, current_quantile)
         artifact = v77._fit_weighted_model(
             training_rows,
             market_order=training_order,
@@ -273,6 +284,14 @@ def fit_rolling_origin_score_rank_abstention_v7_9(
                 ),
                 "current_market_score_used_for_threshold": False,
                 "current_market_target_used_for_prediction": False,
+                "rank_controller_decision": controller_decision,
+                "prior_controller_observation_count": len(
+                    controller_guard_acceptance_history
+                ),
+                "prior_controller_history_hash": canonical_json_sha256(
+                    controller_guard_acceptance_history
+                ),
+                "current_guard_result_used_for_own_controller_decision": False,
             }
         )
         guard = v78._execution_guard_result(
@@ -281,6 +300,10 @@ def fit_rolling_origin_score_rank_abstention_v7_9(
             v6_7_profile=v6_7_profile,
         )
         prediction.update(guard)
+        controller_guard_acceptance_history.append(
+            prediction["candidate_execution_guard_order_allowed"] is True
+        )
+        prediction["current_guard_result_added_after_decision_freeze"] = True
         current_rank_row = _rank_lineage_row(
             prediction,
             source_role="consumed_historical_prequential",
@@ -333,7 +356,15 @@ def fit_rolling_origin_score_rank_abstention_v7_9(
         eligible_scores,
         rank_lineage_rows=rank_lineage_rows,
         window_size=window_size,
-        quantile=quantile,
+        quantile=(
+            float(
+                _rank_controller(tuple(controller_guard_acceptance_history))[
+                    "selected_quantile"
+                ]
+            )
+            if _rank_controller is not None
+            else quantile
+        ),
     )
     replay_profile = {
         "historical_replay_superiority_gate": {
@@ -475,6 +506,7 @@ def fit_rolling_origin_score_rank_abstention_v7_9(
         "loaded_runtime_target_rows": loaded_target_rows,
         "candidate_selected_rows": candidate_rows,
         "v6_7_baseline_selected_rows": baseline_rows,
+        "controller_guard_acceptance_history": controller_guard_acceptance_history,
     }
 
 
