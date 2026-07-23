@@ -65,6 +65,7 @@ def _index_row(index: int, *, quality_valid: bool = True) -> dict:
         "slug": f"market-slug-{index:03d}",
         "decision_id": f"decision-{index:03d}",
         "source_row_hash": f"{index + 1:064x}",
+        "scheduled_round_start_ts": market_start_ts,
         "market_start_ts": market_start_ts,
         "market_end_ts": market_start_ts + 300_000,
         "capture_quality_valid": quality_valid,
@@ -337,6 +338,52 @@ def test_window_selection_excludes_invalid_and_prior_identity_rows() -> None:
         "capture_quality_invalid": 1,
         "prior_market_id_overlap": 1,
     }
+
+
+def test_scan_cap_counts_failed_attempts_with_missing_market_start() -> None:
+    rows = [_index_row(index) for index in range(SCAN_CAP + 1)]
+    for index in range(61):
+        rows[index]["capture_quality_valid"] = False
+        rows[index]["market_start_ts"] = 0
+    selected, attempted, summary = select_v7_7_future_holdout_window(
+        rows,
+        plan=_plan(),
+        prior_market_ids=set(),
+        prior_slugs=set(),
+        prior_decision_ids=set(),
+        prior_source_row_hashes=set(),
+    )
+
+    assert len(attempted) == SCAN_CAP
+    assert len(selected) == 119
+    assert rows[SCAN_CAP]["capture_quality_valid"] is True
+    assert rows[SCAN_CAP] not in attempted
+    assert summary["exact_window_ready"] is False
+    assert summary["exclusion_reason_distribution"] == {
+        "capture_quality_invalid": 61,
+        "market_start_not_strictly_later": 61,
+    }
+
+
+def test_scan_cap_allows_exact_120_only_within_first_180_attempts() -> None:
+    rows = [_index_row(index) for index in range(SCAN_CAP)]
+    for index in range(60):
+        rows[index]["capture_quality_valid"] = False
+        rows[index]["market_start_ts"] = 0
+    selected, attempted, summary = select_v7_7_future_holdout_window(
+        rows,
+        plan=_plan(),
+        prior_market_ids=set(),
+        prior_slugs=set(),
+        prior_decision_ids=set(),
+        prior_source_row_hashes=set(),
+    )
+
+    assert len(attempted) == SCAN_CAP
+    assert len(selected) == EXACT_MARKET_COUNT
+    assert selected[0]["sequence"] == 61
+    assert selected[-1]["sequence"] == SCAN_CAP
+    assert summary["exact_window_ready"] is True
 
 
 def test_target_free_freeze_passes_one_sided_support_without_outcomes() -> None:

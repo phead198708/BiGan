@@ -332,15 +332,19 @@ def select_v7_7_future_holdout_window(
     collection = dict(plan["collection"])
     boundary = int(collection["strictly_later_minimum_market_start_ts_exclusive"])
     ordered = sorted(index_rows, key=lambda row: int(row["sequence"]))
-    post_boundary = [
-        row for row in ordered if int(row.get("market_start_ts") or 0) > boundary
-    ][: int(collection["maximum_attempted_market_count"])]
+    # The scan cap applies to collection attempts, including provider failures whose
+    # market identity/start timestamp could not be recovered.
+    attempted = ordered[: int(collection["maximum_attempted_market_count"])]
     eligible: list[dict[str, Any]] = []
     exclusion_reasons: Counter[str] = Counter()
-    for row in post_boundary:
+    for row in attempted:
         reasons = []
         if row.get("capture_quality_valid") is not True:
             reasons.append("capture_quality_invalid")
+        if int(row.get("scheduled_round_start_ts") or 0) <= boundary:
+            reasons.append("scheduled_round_not_strictly_later")
+        if int(row.get("market_start_ts") or 0) <= boundary:
+            reasons.append("market_start_not_strictly_later")
         if str(row.get("market_id") or "") in prior_market_ids:
             reasons.append("prior_market_id_overlap")
         if str(row.get("slug") or "") in prior_slugs:
@@ -358,7 +362,7 @@ def select_v7_7_future_holdout_window(
     selected = eligible[: int(collection["exact_quality_valid_market_count"])]
     selected_ids = [str(row.get("market_id") or "") for row in selected]
     summary = {
-        "attempted_scan_count": len(post_boundary),
+        "attempted_scan_count": len(attempted),
         "eligible_market_count": len(eligible),
         "selected_market_count": len(selected),
         "selected_sequence_start": int(selected[0]["sequence"]) if selected else None,
@@ -375,7 +379,7 @@ def select_v7_7_future_holdout_window(
             and len(set(selected_ids)) == EXACT_MARKET_COUNT
         ),
     }
-    return selected, post_boundary, summary
+    return selected, attempted, summary
 
 
 def build_v7_7_target_free_holdout_freeze_report(
