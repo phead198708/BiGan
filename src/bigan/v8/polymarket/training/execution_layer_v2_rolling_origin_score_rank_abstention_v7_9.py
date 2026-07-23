@@ -225,7 +225,11 @@ def fit_rolling_origin_score_rank_abstention_v7_9(
     rank_contract = profile["rank_abstention_contract"]
     window_size = int(rank_contract["eligible_prior_score_window"])
     minimum_scores = int(rank_contract["minimum_prior_eligible_score_count"])
-    quantile = float(rank_contract["rolling_score_quantile"])
+    quantile = (
+        float(_rank_controller(())["selected_quantile"])
+        if _rank_controller is not None
+        else float(rank_contract["rolling_score_quantile"])
+    )
     if len(eligible_scores) < minimum_scores:
         raise ValueError("#243 seed eligible prediction-score support insufficient")
 
