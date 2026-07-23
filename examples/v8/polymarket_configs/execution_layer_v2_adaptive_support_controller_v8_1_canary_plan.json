@@ -1,0 +1,81 @@
+{
+  "schema_version": "bigan-v8-adaptive-support-controller-v8-1-canary-plan-v1",
+  "issue_number": 246,
+  "candidate_name": "adaptive_support_controller_v8_1",
+  "plan_created_ts": 1784812543000,
+  "preregistered_before_collection": true,
+  "historical_gate": {
+    "historical_manifest_sha256": "3fff5785a53cb32fb26d839786e3f48c2ff2bd7cc9dcf84e801c916a6ebb0fb7",
+    "model_sha256": "b92d2c087de20fbc6e6a142f13e0e48e14ecc25915cf318b485dc2927f958772",
+    "profile_sha256": "1c808195fab5aea976429f4ab0fb46d69a29a4bbb705313d138a9ce8d3d19abf",
+    "historical_hard_gate_required": true,
+    "inclusive_noninferiority_operator": "greater_than_or_equal",
+    "equality_passes": true
+  },
+  "frozen_scoring": {
+    "decision_policy_implementation_commit": "993801e5cc1c173a7fdf6073d9b603f84be01a19",
+    "decision_policy_source_sha256": "ea1e0d1a2b1252c0b1e706fe5c2f108daa3f4e3fc45f8f6afc9f97f3b409ca11",
+    "v6_2_source_candidate_manifest_sha256": "b9441b04fb595a927cbf9af9311612b037c36fc8c623ac8a92b6f4cb8ece84b9",
+    "v6_7_profile_sha256": "cec55d243acd6bbf60a5e8474545b487086ddcd4d18073682ae7f2d4660d2248",
+    "v7_0_training_profile_sha256": "1f66d8699b9727651538cc34a9a2a25ba5eaac5cfded75cf8f4a258b1b5d3f4a",
+    "runtime_policy_profile_sha256": "1306f6b6f7a6c1216b23413352ff66f4061ec62a9751b0de51eded256ca51264",
+    "fixed_edge_buffer": 0.025,
+    "controller_state_advances_only_after_decision_and_full_guard_freeze": true,
+    "model_score_controller_or_threshold_tuning_after_collection_allowed": false
+  },
+  "collection": {
+    "mode": "bounded_candidate_agnostic_outcome_blind_raw_collection",
+    "selection_method": "earliest_quality_valid_strictly_later_disjoint_markets",
+    "target_quality_valid_market_count": 12,
+    "maximum_attempted_market_count": 18,
+    "strictly_later_minimum_market_start_ts_exclusive": 1784812500000,
+    "market_start_ts_must_exceed_plan_created_ts": true,
+    "prior_maximum_market_close_ts": 1784689200000,
+    "market_id_disjointness_required": true,
+    "slug_disjointness_required": true,
+    "source_row_hash_disjointness_required": true,
+    "collector_protocol_sha256": "2343f8247b2c1441e694b2975bccec7ae2448db5e5a5c916c3a02def49d44843",
+    "feature_contract_sha256": "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959",
+    "outcomes_resolution_labels_or_pnl_opened": false
+  },
+  "target_free_actionability_gate": {
+    "exact_quality_valid_market_count": 12,
+    "minimum_guard_accepted_market_count": 4,
+    "minimum_guard_accepted_policy_difference_market_count": 1,
+    "same_decision_sbc_pair_required": true,
+    "full_execution_guard_unchanged": true,
+    "no_side_quota": true,
+    "outcomes_resolution_labels_or_pnl_opened": false,
+    "failure_stops_before_future_pnl_collection": true
+  },
+  "future_unseen_holdout": {
+    "starts_strictly_after_complete_canary_latest_market_close": true,
+    "exact_quality_valid_market_count": 120,
+    "maximum_attempted_market_count": 180,
+    "minimum_guard_accepted_market_count": 40,
+    "candidate_total_after_cost_pnl_minimum_exclusive": 0.0,
+    "candidate_minus_v6_7_total_pnl_minimum_inclusive": 0.0,
+    "candidate_minus_v6_7_largest_winner_removed_minimum_inclusive": 0.0,
+    "single_use_gate": true,
+    "no_side_quota": true
+  },
+  "result_scope": {
+    "target_free_actionability_only": true,
+    "promotion_evidence": false,
+    "future_unseen_pnl_holdout_still_required": true
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "live_trading_enabled": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}
