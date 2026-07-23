@@ -75,6 +75,8 @@ class V77FutureTargetFreeFreezeConfig:
     expected_collector_protocol_sha256: str
     collector_index_path: Path | str
     expected_collector_index_sha256: str
+    excluded_attempt_rows_path: Path | str
+    expected_excluded_attempt_rows_sha256: str
     historical_manifest_path: Path | str
     expected_historical_manifest_sha256: str
     prior_lineage_rows_path: Path | str
@@ -101,6 +103,7 @@ class V77FutureTargetFreeFreezeConfig:
             "plan_path",
             "collector_protocol_path",
             "collector_index_path",
+            "excluded_attempt_rows_path",
             "historical_manifest_path",
             "prior_lineage_rows_path",
             "prior_canary_index_path",
@@ -121,6 +124,7 @@ class V77FutureTargetFreeFreezeConfig:
             "expected_plan_sha256",
             "expected_collector_protocol_sha256",
             "expected_collector_index_sha256",
+            "expected_excluded_attempt_rows_sha256",
             "expected_historical_manifest_sha256",
             "expected_prior_lineage_rows_sha256",
             "expected_prior_canary_index_sha256",
@@ -160,6 +164,7 @@ def run_v7_7_future_target_free_freeze(
         "plan": config.plan_path.resolve(),
         "protocol": config.collector_protocol_path.resolve(),
         "index": config.collector_index_path.resolve(),
+        "excluded_attempts": config.excluded_attempt_rows_path.resolve(),
         "historical": config.historical_manifest_path.resolve(),
         "prior_lineage": config.prior_lineage_rows_path.resolve(),
         "prior_canary_index": config.prior_canary_index_path.resolve(),
@@ -168,6 +173,7 @@ def run_v7_7_future_target_free_freeze(
         "plan": config.expected_plan_sha256,
         "protocol": config.expected_collector_protocol_sha256,
         "index": config.expected_collector_index_sha256,
+        "excluded_attempts": config.expected_excluded_attempt_rows_sha256,
         "historical": config.expected_historical_manifest_sha256,
         "prior_lineage": config.expected_prior_lineage_rows_sha256,
         "prior_canary_index": config.expected_prior_canary_index_sha256,
@@ -202,13 +208,16 @@ def run_v7_7_future_target_free_freeze(
     if _sha256_file(index_snapshot) != pins["index"].lower():
         raise ValueError("#241 collector index changed while snapshotting")
     index_rows = load_and_validate_persistent_outcome_blind_index(index_snapshot)
+    excluded_attempts = _load_and_validate_excluded_attempts(
+        paths["excluded_attempts"], plan=plan
+    )
     prior = _prior_reference_sets(
         prior_lineage_rows_path=paths["prior_lineage"],
         prior_canary_index_path=paths["prior_canary_index"],
         historical=historical,
     )
     selected, attempted, selection = select_v7_7_future_holdout_window(
-        index_rows,
+        [*index_rows, *excluded_attempts],
         plan=plan,
         prior_market_ids=prior["market_ids"],
         prior_slugs=prior["slugs"],
@@ -404,6 +413,93 @@ def _load_batch_target_free_rows(
             )
         )
     return action_rows, feature_rows, scored_rows
+
+
+def _load_and_validate_excluded_attempts(
+    path: Path, *, plan: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Load immutable unindexed attempts that still consume the frozen scan cap."""
+
+    rows = _load_jsonl(path)
+    boundary = int(
+        plan["collection"]["strictly_later_minimum_market_start_ts_exclusive"]
+    )
+    attempt_ids: set[str] = set()
+    for row in rows:
+        attempt_id = str(row.get("attempt_id") or "")
+        scheduled_ts = int(row.get("scheduled_round_start_ts") or 0)
+        report = _verified_descriptor(
+            row.get("pending_round_capture_report"), "#241 excluded capture report"
+        )
+        manifest = _verified_descriptor(
+            row.get("pending_round_capture_manifest"),
+            "#241 excluded capture manifest",
+        )
+        report_payload = _load_json(Path(report["path"]))
+        manifest_payload = _load_json(Path(manifest["path"]))
+        expected_row_id = canonical_json_sha256(
+            {key: value for key, value in row.items() if key != "excluded_attempt_row_id"}
+        )
+        if (
+            row.get("schema_version")
+            != f"{SCHEMA_PREFIX}-excluded-collection-attempt-v1"
+            or not attempt_id
+            or attempt_id in attempt_ids
+            or scheduled_ts <= boundary
+            or row.get("capture_quality_valid") is not False
+            or row.get("excluded_from_selection") is not True
+            or row.get("excluded_from_settlement") is not True
+            or row.get("excluded_from_quality_valid_support") is not True
+            or row.get("counts_against_frozen_scan_cap") is not True
+            or not row.get("capture_quality_reason_codes")
+            or row.get("labels_outcomes_or_pnl_opened") is not False
+            or row.get("settlement_finalizer_started") is not False
+            or row.get("resolution_provider_called") is not False
+            or row.get("market_start_ts") not in (None, 0)
+            or row.get("excluded_attempt_row_id") != expected_row_id
+            or report["path"] != str(Path(report["path"]).resolve())
+            or manifest["path"] != str(Path(manifest["path"]).resolve())
+        ):
+            raise ValueError("#241 excluded collection attempt registry is invalid")
+        expected_capture_fields = {
+            "run_id": attempt_id,
+            "capture_status": "blocked_fail_closed",
+            "pending_resolution": False,
+            "resolution_provider_called": False,
+            "paper_only": True,
+            "capital_at_risk": False,
+            "polymarket_write_enabled": False,
+            "wallet_signing_enabled": False,
+            "live_exchange_write_enabled": False,
+            "broker_exchange_write_enabled": False,
+        }
+        for payload in (report_payload, manifest_payload):
+            if any(
+                payload.get(field) != expected
+                for field, expected in expected_capture_fields.items()
+            ):
+                raise ValueError(
+                    "#241 excluded source capture safety or status is invalid"
+                )
+        if (
+            report_payload.get("training_eligible") is not False
+            or int(report_payload.get("raw_resolution_count") or 0) != 0
+            or sorted(report_payload.get("public_collection_reason_codes") or [])
+            != sorted(row["capture_quality_reason_codes"])
+        ):
+            raise ValueError("#241 excluded source capture evidence is invalid")
+        for field, expected in _safety_fields().items():
+            if row.get(field) != expected:
+                raise ValueError(
+                    f"#241 excluded collection attempt safety mismatch: {field}"
+                )
+        forbidden = _find_nonempty_fields(
+            [row, report_payload, manifest_payload], FORBIDDEN_TARGET_FIELDS
+        )
+        if forbidden:
+            raise ValueError("#241 excluded collection attempt contains targets")
+        attempt_ids.add(attempt_id)
+    return rows
 
 
 def _validate_historical_lineage(
@@ -605,6 +701,10 @@ def _write_freeze_artifacts(
         ),
         "prior_reference_hash": prior["prior_reference_hash"],
         "prior_reference_source_row_counts": prior["source_row_counts"],
+        "unindexed_excluded_attempt_count": len(
+            _load_jsonl(paths["excluded_attempts"])
+        ),
+        "unindexed_excluded_attempts_count_against_scan_cap": True,
         "v6_7_candidate_summary": candidate_summary,
         "canonical_mapping_summary": canonical_summary,
         "v7_7_guard_blocking_reason_distribution": dict(
@@ -643,6 +743,7 @@ def _write_freeze_artifacts(
             "path": str(paths["index"]),
             "sha256": pins["index"].lower(),
         },
+        "excluded_attempt_rows": _descriptor(paths["excluded_attempts"]),
         "collector_index_snapshot": _descriptor(index_snapshot),
         "historical_manifest": _descriptor(paths["historical"]),
         "prior_lineage_rows": _descriptor(paths["prior_lineage"]),

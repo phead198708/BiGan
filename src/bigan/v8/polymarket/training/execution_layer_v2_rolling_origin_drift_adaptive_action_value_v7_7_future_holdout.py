@@ -331,7 +331,14 @@ def select_v7_7_future_holdout_window(
     validate_v7_7_future_holdout_plan(plan)
     collection = dict(plan["collection"])
     boundary = int(collection["strictly_later_minimum_market_start_ts_exclusive"])
-    ordered = sorted(index_rows, key=lambda row: int(row["sequence"]))
+    ordered = sorted(
+        index_rows,
+        key=lambda row: (
+            int(row.get("scheduled_round_start_ts") or 0),
+            int(row.get("sequence") or 0),
+            str(row.get("attempt_id") or row.get("run_id") or ""),
+        ),
+    )
     # The scan cap applies to collection attempts, including provider failures whose
     # market identity/start timestamp could not be recovered.
     attempted = ordered[: int(collection["maximum_attempted_market_count"])]

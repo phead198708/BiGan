@@ -27,6 +27,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-collector-protocol-sha256", required=True)
     parser.add_argument("--collector-index", type=Path, required=True)
     parser.add_argument("--expected-collector-index-sha256", required=True)
+    parser.add_argument("--excluded-attempt-rows", type=Path, required=True)
+    parser.add_argument("--expected-excluded-attempt-rows-sha256", required=True)
     parser.add_argument("--historical-manifest", type=Path, required=True)
     parser.add_argument("--expected-historical-manifest-sha256", required=True)
     parser.add_argument("--prior-lineage-rows", type=Path, required=True)
@@ -77,6 +79,10 @@ def main() -> None:
             ),
             collector_index_path=args.collector_index,
             expected_collector_index_sha256=args.expected_collector_index_sha256,
+            excluded_attempt_rows_path=args.excluded_attempt_rows,
+            expected_excluded_attempt_rows_sha256=(
+                args.expected_excluded_attempt_rows_sha256
+            ),
             historical_manifest_path=args.historical_manifest,
             expected_historical_manifest_sha256=(
                 args.expected_historical_manifest_sha256

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training.execution_layer_v2_rolling_origin_drift_adaptive_action_value_v7_7_future_holdout import (
     EXACT_MARKET_COUNT,
     FROZEN_PLAN_SHA256,
@@ -22,8 +23,10 @@ from bigan.v8.polymarket.training.execution_layer_v2_rolling_origin_drift_adapti
 from bigan.v8.polymarket.training.execution_layer_v2_rolling_origin_drift_adaptive_action_value_v7_7_future_holdout_pipeline import (
     V77FutureTargetFreeFreezeConfig,
     _baseline_guard_window,
+    _load_and_validate_excluded_attempts,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_runtime_aligned_sbc_net_return_v6_4 import (
+    _descriptor,
     _sha256_file,
 )
 
@@ -487,6 +490,8 @@ def test_target_free_pipeline_config_requires_aligned_pinned_batch_inputs(
             expected_collector_protocol_sha256="1" * 64,
             collector_index_path=tmp_path / "index.jsonl",
             expected_collector_index_sha256="2" * 64,
+            excluded_attempt_rows_path=tmp_path / "excluded.jsonl",
+            expected_excluded_attempt_rows_sha256="7" * 64,
             historical_manifest_path=tmp_path / "historical.json",
             expected_historical_manifest_sha256="3" * 64,
             prior_lineage_rows_path=tmp_path / "lineage.jsonl",
@@ -552,3 +557,89 @@ def test_v6_7_baseline_guard_replay_is_complete_and_fail_closed() -> None:
     ]
     assert all(row["source_score_mutated"] is False for row in rows)
     assert all(row["labels_outcomes_or_pnl_opened"] is False for row in rows)
+
+
+def test_unindexed_failed_attempt_registry_is_target_free_and_consumes_scan_cap(
+    tmp_path: Path,
+) -> None:
+    capture_report_path = tmp_path / "pending_round_capture_report.json"
+    attempt_id = "partial-round-1"
+    capture_safety = {
+        "run_id": attempt_id,
+        "capture_status": "blocked_fail_closed",
+        "pending_resolution": False,
+        "resolution_provider_called": False,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "live_exchange_write_enabled": False,
+        "broker_exchange_write_enabled": False,
+    }
+    capture_report_path.write_text(
+        json.dumps(
+            {
+                **capture_safety,
+                "training_eligible": False,
+                "raw_resolution_count": 0,
+                "public_collection_reason_codes": [
+                    "read_only_public_http_transport_error"
+                ],
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    capture_manifest_path = tmp_path / "pending_round_capture_manifest.json"
+    capture_manifest_path.write_text(
+        json.dumps(capture_safety, sort_keys=True) + "\n"
+    )
+    excluded_path = tmp_path / "excluded.jsonl"
+    excluded = {
+        "schema_version": (
+            "bigan-v8-rolling-origin-drift-adaptive-action-value-v7-7-"
+            "future-holdout-excluded-collection-attempt-v1"
+        ),
+        "attempt_id": attempt_id,
+        "run_id": attempt_id,
+        "scheduled_round_start_ts": (
+            STRICTLY_LATER_MINIMUM_MARKET_START_TS_EXCLUSIVE + 1
+        ),
+        "market_start_ts": 0,
+        "capture_quality_valid": False,
+        "capture_quality_reason_codes": ["read_only_public_http_transport_error"],
+        "excluded_from_selection": True,
+        "excluded_from_settlement": True,
+        "excluded_from_quality_valid_support": True,
+        "counts_against_frozen_scan_cap": True,
+        "pending_round_capture_report": _descriptor(capture_report_path),
+        "pending_round_capture_manifest": _descriptor(capture_manifest_path),
+        "labels_outcomes_or_pnl_opened": False,
+        "settlement_finalizer_started": False,
+        "resolution_provider_called": False,
+        **_safety_fields(),
+    }
+    excluded["excluded_attempt_row_id"] = canonical_json_sha256(excluded)
+    excluded_path.write_text(json.dumps(excluded, sort_keys=True) + "\n")
+
+    rows = _load_and_validate_excluded_attempts(excluded_path, plan=_plan())
+    assert rows == [excluded]
+
+    index_rows = [_index_row(index) for index in range(SCAN_CAP)]
+    selected, attempted, summary = select_v7_7_future_holdout_window(
+        [*index_rows, *rows],
+        plan=_plan(),
+        prior_market_ids=set(),
+        prior_slugs=set(),
+        prior_decision_ids=set(),
+        prior_source_row_hashes=set(),
+    )
+
+    assert len(attempted) == SCAN_CAP
+    assert rows[0] in attempted
+    assert index_rows[-1] not in attempted
+    assert len(selected) == EXACT_MARKET_COUNT
+    assert summary["exclusion_reason_distribution"] == {
+        "capture_quality_invalid": 1,
+        "market_start_not_strictly_later": 1,
+    }
