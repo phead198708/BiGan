@@ -13,6 +13,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_rolling_origin_drift_adapti
     MINIMUM_GUARD_ACCEPTED_MARKET_COUNT,
     SCAN_CAP,
     STRICTLY_LATER_MINIMUM_MARKET_START_TS_EXCLUSIVE,
+    _complete_five_action_grid,
     _safety_fields,
     build_v7_7_future_pnl_noninferiority_gate,
     build_v7_7_target_free_holdout_freeze_report,
@@ -518,6 +519,46 @@ def test_guard_accepted_runtime_decisions_fail_on_missing_source_action() -> Non
             _guard_rows(accepted_count=40, side="DOWN"),
             action_rows=actions,
         )
+
+
+def test_complete_five_action_grid_allows_multiple_decision_points_per_market() -> None:
+    actions = _action_rows()
+    actions.extend(
+        {
+            **row,
+            "decision_ts": row["decision_ts"] + 1_000,
+            "max_input_ts": row["max_input_ts"] + 1_000,
+        }
+        for row in _action_rows()
+    )
+    selected_market_ids = {f"market-{index:03d}" for index in range(120)}
+
+    assert _complete_five_action_grid(
+        actions,
+        selected_market_ids=selected_market_ids,
+    )
+
+
+def test_complete_five_action_grid_rejects_incomplete_decision_point() -> None:
+    actions = _action_rows()
+    actions.extend(
+        {
+            **row,
+            "decision_ts": row["decision_ts"] + 1_000,
+            "max_input_ts": row["max_input_ts"] + 1_000,
+        }
+        for row in _action_rows()
+        if not (
+            row["market_id"] == "market-000"
+            and row["action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+        )
+    )
+    selected_market_ids = {f"market-{index:03d}" for index in range(120)}
+
+    assert not _complete_five_action_grid(
+        actions,
+        selected_market_ids=selected_market_ids,
+    )
 
 
 def test_target_free_pipeline_config_requires_aligned_pinned_batch_inputs(

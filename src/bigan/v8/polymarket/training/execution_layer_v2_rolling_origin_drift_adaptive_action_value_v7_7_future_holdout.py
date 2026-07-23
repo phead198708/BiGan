@@ -543,9 +543,9 @@ def _complete_five_action_grid(
             return False
         groups[(market_id, decision_ts)].add(action)
     return (
-        len({market_id for market_id, _ in groups}) == EXACT_MARKET_COUNT
+        {market_id for market_id, _ in groups} == selected_market_ids
+        and len(selected_market_ids) == EXACT_MARKET_COUNT
         and all(actions == FIVE_ACTIONS for actions in groups.values())
-        and len(groups) == EXACT_MARKET_COUNT
     )
 
 
