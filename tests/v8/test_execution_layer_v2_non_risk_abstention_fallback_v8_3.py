@@ -20,6 +20,15 @@ def _profile() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _future_plan() -> dict:
+    path = (
+        Path(__file__).parents[2]
+        / "examples/v8/polymarket_configs"
+        / "execution_layer_v2_non_risk_abstention_fallback_v8_3_future_holdout_plan.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _decision(
     *,
     market_id: str = "m1",
@@ -49,6 +58,30 @@ def test_v8_3_profile_is_frozen_and_fail_closed() -> None:
     assert profile["historical_gate"]["side_quota_enabled"] is False
     assert profile["lineage"]["issue246_outcomes_allowed_for_v8_3"] is False
     assert profile["safety"]["paper_candidate_allowed"] is False
+
+
+def test_v8_3_future_plan_is_strictly_later_and_preregistered() -> None:
+    plan = _future_plan()
+    v83.validate_non_risk_abstention_fallback_v8_3_future_plan(plan)
+    assert plan["collection"][
+        "strictly_later_minimum_market_start_ts_exclusive"
+    ] > plan["lineage"]["issue246_latest_selected_market_end_ts"]
+    assert plan["collection"][
+        "candidate_scoring_during_raw_capture_allowed"
+    ] is False
+    assert plan["per_batch_target_free_diagnostic"][
+        "candidate_scoring_after_batch_seal_allowed"
+    ] is True
+    assert plan["target_free_decision_freeze"]["side_quota_enabled"] is False
+
+
+def test_v8_3_future_plan_rejects_gate_relaxation() -> None:
+    plan = copy.deepcopy(_future_plan())
+    plan["target_free_decision_freeze"][
+        "minimum_candidate_guard_accepted_unique_market_count"
+    ] = 1
+    with pytest.raises(ValueError, match="future plan invalid"):
+        v83.validate_non_risk_abstention_fallback_v8_3_future_plan(plan)
 
 
 def test_v8_3_uses_v8_1_primary_when_guard_passes() -> None:

@@ -42,6 +42,9 @@ CANARY_REPORT_SCHEMA_VERSION = (
 MANIFEST_SCHEMA_VERSION = (
     "bigan-v8-non-risk-abstention-fallback-v8-3-manifest-v1"
 )
+FUTURE_PLAN_SCHEMA_VERSION = (
+    "bigan-v8-non-risk-abstention-fallback-v8-3-future-holdout-plan-v1"
+)
 POLICY_LEVEL_ABSTENTION_REASON_CODES = {
     "policy_selected_no_trade",
     "v6_7_no_positive_guard_compatible_action",
@@ -126,6 +129,95 @@ def validate_non_risk_abstention_fallback_v8_3_profile(
     blockers = [name for name, passed in checks.items() if not passed]
     if blockers:
         raise ValueError("#248 v8.3 profile invalid: " + ", ".join(blockers))
+
+
+def validate_non_risk_abstention_fallback_v8_3_future_plan(
+    plan: dict[str, Any],
+) -> None:
+    collection = plan.get("collection", {})
+    diagnostic = plan.get("per_batch_target_free_diagnostic", {})
+    freeze = plan.get("target_free_decision_freeze", {})
+    future_gate = plan.get("single_use_future_pnl_gate", {})
+    lineage = plan.get("lineage", {})
+    checks = {
+        "identity": plan.get("schema_version") == FUTURE_PLAN_SCHEMA_VERSION
+        and plan.get("issue_number") == 249
+        and plan.get("candidate_name") == CANDIDATE_NAME
+        and plan.get("frozen") is True
+        and plan.get("preregistered_before_collection") is True,
+        "collection": collection
+        == {
+            "bounded_batch_market_count": 12,
+            "candidate_scoring_during_raw_capture_allowed": False,
+            "decision_id_disjointness_required": True,
+            "exact_quality_valid_market_count": 120,
+            "feature_timestamp_causality_required": True,
+            "market_id_disjointness_required": True,
+            "maximum_attempted_market_count": 180,
+            "mode": "bounded_candidate_agnostic_outcome_blind_raw_collection",
+            "outcomes_resolution_labels_or_pnl_opened": False,
+            "partial_authoritative_window_freeze_allowed": False,
+            "raw_artifact_hash_verification_required": True,
+            "selection_method": (
+                "earliest_quality_valid_strictly_later_disjoint_markets"
+            ),
+            "slug_disjointness_required": True,
+            "source_row_hash_disjointness_required": True,
+            "strictly_later_minimum_market_start_ts_exclusive": (
+                plan.get("plan_created_ts")
+            ),
+        },
+        "strict_boundary": isinstance(plan.get("plan_created_ts"), int)
+        and plan["plan_created_ts"]
+        > lineage.get("issue246_latest_selected_market_end_ts", 0),
+        "batch_diagnostic": diagnostic
+        == {
+            "action_and_fallback_distribution_reported": True,
+            "candidate_scoring_after_batch_seal_allowed": True,
+            "consecutive_zero_support_batches_before_stop": 2,
+            "full_guard_blocker_distribution_reported": True,
+            "model_threshold_cost_sizing_guard_or_gate_tuning_allowed": False,
+            "outcomes_resolution_labels_or_pnl_opened": False,
+            "provider_causality_or_hash_violation_stops_fail_closed": True,
+            "result_scope": "engineering_and_actionability_only",
+        },
+        "freeze": freeze
+        == {
+            "exact_market_count": 120,
+            "full_v6_7_execution_guard_unchanged": True,
+            "minimum_candidate_guard_accepted_unique_market_count": 40,
+            "model_score_threshold_fallback_cost_sizing_or_guard_tuning_allowed": False,
+            "one_frozen_decision_per_policy_per_market": True,
+            "outcomes_resolution_labels_or_pnl_opened": False,
+            "side_quota_enabled": False,
+            "source_score_mutation_allowed": False,
+        },
+        "future_gate": future_gate
+        == {
+            "candidate_minus_v6_7_largest_winner_removed_after_cost_pnl_minimum_inclusive": 0.0,
+            "candidate_minus_v6_7_total_after_cost_pnl_minimum_inclusive": 0.0,
+            "candidate_total_after_cost_pnl_minimum_exclusive": 0.0,
+            "complete_settlement_required": True,
+            "equality_passes_comparative_noninferiority": True,
+            "official_read_only_settlement_on_quarantine_copies": True,
+            "outcomes_used_for_selection_or_tuning": False,
+            "result_selected_extension_allowed": False,
+            "result_selected_rerun_allowed": False,
+            "side_action_and_family_metrics_diagnostic_only": True,
+        },
+        "lineage": lineage.get("candidate_profile_sha256")
+        == "84c6bc06db0c2d25d342ecda23f5c06a4d9809c39db94a8eca1e550a4f822088"
+        and lineage.get("historical_gate_manifest_sha256")
+        == "adb930dc8bde72d89ae8b7520907ad88bb29d54f9c3b22317f9f4635ce5e015d"
+        and lineage.get("issue246_target_free_canary_manifest_sha256")
+        == "bf4cff80df1bf92a3980b7e79c772f8bfe55f34f575cb8d2ad0e52235376a18b",
+        "safety": plan.get("safety") == _expected_safety(),
+    }
+    blockers = [name for name, passed in checks.items() if not passed]
+    if blockers:
+        raise ValueError(
+            "#249 v8.3 future plan invalid: " + ", ".join(blockers)
+        )
 
 
 def select_non_risk_abstention_fallback_v8_3_decision(
@@ -866,4 +958,5 @@ __all__ = [
     "run_non_risk_abstention_fallback_v8_3_historical_gate",
     "select_non_risk_abstention_fallback_v8_3_decision",
     "validate_non_risk_abstention_fallback_v8_3_profile",
+    "validate_non_risk_abstention_fallback_v8_3_future_plan",
 ]
