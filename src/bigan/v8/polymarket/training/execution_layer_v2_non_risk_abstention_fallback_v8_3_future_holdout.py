@@ -11,6 +11,9 @@ from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training import (
     execution_layer_v2_adaptive_support_controller_v8_1 as v81,
 )
+from bigan.v8.polymarket.training.execution_layer_v2_abstention_aware_expected_net_pnl_v7_0 import (
+    _v7_0_blocked_safety_fields,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_adaptive_support_controller_v8_1_canary import (
     _score_window,
 )
@@ -683,21 +686,16 @@ def _write_outputs(
         "settlement_provider_called": False,
         "source_scores_mutated": False,
         "threshold_model_cost_sizing_guard_or_gate_tuning_performed": False,
-        "paper_only": True,
-        "capital_at_risk": False,
-        "polymarket_write_enabled": False,
-        "wallet_signing_enabled": False,
-        "v8_execution_handoff_allowed": False,
-        "source_model_candidate_eligible": False,
-        "freeze_ready": False,
-        "promotion_evidence_eligible": False,
-        "#134_resume_allowed": False,
-        "#146_start_allowed": False,
+        **_future_safety_fields(),
     }
     manifest["manifest_id"] = canonical_json_sha256(manifest)
     manifest_path = run_dir / "v8_3_future_target_free_freeze_manifest.json"
     _write_json(manifest_path, manifest)
     return _result(run_dir, report, report_path, manifest, manifest_path)
+
+
+def _future_safety_fields() -> dict[str, bool]:
+    return _v7_0_blocked_safety_fields()
 
 
 __all__ = [

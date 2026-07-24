@@ -457,3 +457,13 @@ def test_v8_3_lineage_accepts_sealed_issue246_support_failure() -> None:
             "issue246_target_free_canary_manifest_sha256"
         ],
     )
+
+
+def test_v8_3_future_manifest_safety_fields_are_explicitly_fail_closed() -> None:
+    safety = future._future_safety_fields()
+    assert safety["paper_candidate_allowed"] is False
+    assert safety["live_trading_enabled"] is False
+    assert safety["capital_at_risk"] is False
+    assert safety["polymarket_write_enabled"] is False
+    assert safety["wallet_signing_enabled"] is False
+    assert safety["v8_execution_handoff_allowed"] is False
