@@ -417,6 +417,10 @@ def test_v8_3_settlement_adapter_preserves_fail_closed_identity() -> None:
         "decision_freeze_created_ts": 1000,
         "exact_market_count": 120,
         "selected_rows": {"path": "/tmp/selected", "sha256": "1" * 64},
+        "target_free_feature_rows": {
+            "path": "/tmp/features",
+            "sha256": "5" * 64,
+        },
         "candidate_runtime": {"path": "/tmp/candidate", "sha256": "2" * 64},
         "v6_7_runtime": {"path": "/tmp/baseline", "sha256": "3" * 64},
     }
@@ -426,6 +430,9 @@ def test_v8_3_settlement_adapter_preserves_fail_closed_identity() -> None:
         freeze_sha256="4" * 64,
     )
     assert adapter["candidate_name"] == v83.CANDIDATE_NAME
+    assert adapter["target_free_feature_rows"] == freeze[
+        "target_free_feature_rows"
+    ]
     assert adapter["future_target_access_allowed"] is True
     assert adapter["labels_outcomes_resolution_or_pnl_opened"] is False
     assert adapter["paper_candidate_allowed"] is False

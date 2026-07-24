@@ -353,6 +353,7 @@ def build_non_risk_abstention_fallback_v8_3_target_free_freeze_report(
     *,
     attempted_rows: list[dict[str, Any]],
     action_rows: list[dict[str, Any]],
+    feature_rows: list[dict[str, Any]],
     overlay_decisions: list[dict[str, Any]],
     baseline_guard_rows: list[dict[str, Any]],
     selection_summary: dict[str, Any],
@@ -370,6 +371,11 @@ def build_non_risk_abstention_fallback_v8_3_target_free_freeze_report(
         for row in action_rows
         if str(row.get("market_id") or "") in selected_set
     ]
+    filtered_features = [
+        row
+        for row in feature_rows
+        if str(row.get("market_id") or "") in selected_set
+    ]
     overlay_by_market = _one_row_per_market(
         overlay_decisions, label="v8.3 overlay"
     )
@@ -380,6 +386,11 @@ def build_non_risk_abstention_fallback_v8_3_target_free_freeze_report(
         set(
             v81_canary._find_nonempty_fields(
                 filtered_actions, FORBIDDEN_INFERENCE_FIELDS
+            )
+        )
+        | set(
+            v81_canary._find_nonempty_fields(
+                filtered_features, FORBIDDEN_INFERENCE_FIELDS
             )
         )
         | set(
@@ -396,8 +407,11 @@ def build_non_risk_abstention_fallback_v8_3_target_free_freeze_report(
     causality_violations = sum(
         int(row.get("max_input_ts") or 0)
         > int(row.get("decision_ts") or 0)
-        for row in filtered_actions
+        for row in filtered_actions + filtered_features
     )
+    feature_market_ids = {
+        str(row.get("market_id") or "") for row in filtered_features
+    } - {""}
     overlay_accepted = [
         row
         for row in overlay_decisions
@@ -440,6 +454,7 @@ def build_non_risk_abstention_fallback_v8_3_target_free_freeze_report(
             > max(int(row.get("market_end_ts") or 0) for row in selected_rows)
         ),
         "complete_five_action_grid": complete_grid,
+        "complete_frozen_feature_coverage": feature_market_ids == selected_set,
         "candidate_complete_decision_coverage": set(overlay_by_market)
         == selected_set,
         "baseline_complete_decision_coverage": set(baseline_by_market)
@@ -472,6 +487,9 @@ def build_non_risk_abstention_fallback_v8_3_target_free_freeze_report(
             "target_free_markets_not_all_closed"
         ),
         "complete_five_action_grid": "target_free_five_action_grid_incomplete",
+        "complete_frozen_feature_coverage": (
+            "target_free_feature_coverage_incomplete"
+        ),
         "candidate_complete_decision_coverage": (
             "target_free_v8_3_decision_coverage_incomplete"
         ),

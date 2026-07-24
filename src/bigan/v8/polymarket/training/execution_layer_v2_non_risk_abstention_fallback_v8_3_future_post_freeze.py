@@ -12,6 +12,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_abstention_aware_expected_n
 )
 from bigan.v8.polymarket.training.execution_layer_v2_adaptive_support_controller_v8_1_future_holdout_post_freeze import (
     AdaptiveSupportControllerV81FutureSettlementConfig,
+    _evaluation_only_frozen_features_by_market,
     _validate_settled_index,
     _write_single_use_claim,
     build_adaptive_support_controller_v8_1_future_settled_index,
@@ -443,6 +444,9 @@ def _validated_v8_3_freeze(
         )
     )
     market_ids = [str(row.get("market_id") or "") for row in selected]
+    _evaluation_only_frozen_features_by_market(
+        freeze, selected_market_ids=market_ids
+    )
     if (
         len(selected) != FUTURE_EXACT_MARKET_COUNT
         or "" in market_ids
@@ -472,6 +476,7 @@ def _settlement_engine_adapter(
         "decision_freeze_created_ts": freeze["decision_freeze_created_ts"],
         "exact_market_count": freeze["exact_market_count"],
         "selected_rows": freeze["selected_rows"],
+        "target_free_feature_rows": freeze["target_free_feature_rows"],
         "candidate_runtime": freeze["candidate_runtime"],
         "v6_7_runtime": freeze["v6_7_runtime"],
         "v8_3_target_free_freeze_manifest": {

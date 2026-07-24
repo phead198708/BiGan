@@ -62,9 +62,21 @@ def _freeze(tmp_path: Path) -> tuple[Path, list[str]]:
     selected_path = tmp_path / "selected.jsonl"
     candidate_path = tmp_path / "candidate.jsonl"
     baseline_path = tmp_path / "baseline.jsonl"
+    feature_path = tmp_path / "features.jsonl"
     _write_jsonl(selected_path, selected)
     _write_jsonl(candidate_path, runtime)
     _write_jsonl(baseline_path, runtime)
+    _write_jsonl(
+        feature_path,
+        [
+            {
+                "market_id": market_id,
+                "decision_ts": 150,
+                "max_input_ts": 149,
+            }
+            for market_id in market_ids
+        ],
+    )
     manifest = {
         "schema_version": (
             "bigan-v8-adaptive-support-controller-v8-1-future-holdout-"
@@ -81,6 +93,7 @@ def _freeze(tmp_path: Path) -> tuple[Path, list[str]]:
         "threshold_model_or_controller_tuning_performed": False,
         "plan": _descriptor(PLAN_PATH),
         "selected_rows": _descriptor(selected_path),
+        "target_free_feature_rows": _descriptor(feature_path),
         "candidate_runtime": _descriptor(candidate_path),
         "v6_7_runtime": _descriptor(baseline_path),
         **_v7_0_blocked_safety_fields(),
@@ -141,8 +154,12 @@ def test_v8_1_future_settlement_is_quarantined_and_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     freeze_path, market_ids = _freeze(tmp_path)
+    finalized_feature_maps: list[dict[str, list[dict]]] = []
 
-    def fake_finalize(rows: list[dict], **_: object) -> list[dict]:
+    def fake_finalize(rows: list[dict], **kwargs: object) -> list[dict]:
+        finalized_feature_maps.append(
+            kwargs["evaluation_only_frozen_features_by_market"]  # type: ignore[arg-type]
+        )
         return [
             {
                 "market_id": row["market_id"],
@@ -174,6 +191,8 @@ def test_v8_1_future_settlement_is_quarantined_and_complete(
     assert result["report"]["settled_market_count"] == len(market_ids)
     assert result["report"]["source_outcome_blind_rounds_mutated"] is False
     assert result["report"]["capital_at_risk"] is False
+    assert set(finalized_feature_maps[0]) == set(market_ids)
+    assert all(len(rows) == 1 for rows in finalized_feature_maps[0].values())
 
 
 def test_v8_1_future_pnl_gate_is_single_use_and_keeps_unlocks_false(
@@ -259,4 +278,43 @@ def test_v8_1_future_freeze_rejects_insufficient_candidate_support(
         post._validated_freeze(
             freeze_path,
             expected_sha256=_sha256_file(freeze_path),
+        )
+
+
+def test_v8_1_evaluation_only_features_fail_closed_on_incomplete_coverage(
+    tmp_path: Path,
+) -> None:
+    freeze_path, market_ids = _freeze(tmp_path)
+    freeze = json.loads(freeze_path.read_text())
+    feature_path = Path(freeze["target_free_feature_rows"]["path"])
+    rows = [
+        json.loads(line)
+        for line in feature_path.read_text().splitlines()
+        if line.strip()
+    ][:-1]
+    _write_jsonl(feature_path, rows)
+    freeze["target_free_feature_rows"] = _descriptor(feature_path)
+    with pytest.raises(ValueError, match="coverage incomplete"):
+        post._evaluation_only_frozen_features_by_market(
+            freeze, selected_market_ids=market_ids
+        )
+
+
+def test_v8_1_evaluation_only_features_fail_closed_on_target_or_causality(
+    tmp_path: Path,
+) -> None:
+    freeze_path, market_ids = _freeze(tmp_path)
+    freeze = json.loads(freeze_path.read_text())
+    feature_path = Path(freeze["target_free_feature_rows"]["path"])
+    rows = [
+        json.loads(line)
+        for line in feature_path.read_text().splitlines()
+        if line.strip()
+    ]
+    rows[0]["max_input_ts"] = rows[0]["decision_ts"] + 1
+    _write_jsonl(feature_path, rows)
+    freeze["target_free_feature_rows"] = _descriptor(feature_path)
+    with pytest.raises(ValueError, match="identity or causality invalid"):
+        post._evaluation_only_frozen_features_by_market(
+            freeze, selected_market_ids=market_ids
         )

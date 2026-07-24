@@ -15,6 +15,7 @@ from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.recorder import PolymarketPublicHTTPRealCorpusProvider
 from bigan.v8.polymarket.training.execution_layer_v2_adaptive_support_controller_v8_1_future_holdout import (
     EXACT_MARKET_COUNT,
+    FORBIDDEN_TARGET_FIELDS,
     FROZEN_PLAN_SHA256,
     SCHEMA_PREFIX,
     _v7_0_blocked_safety_fields,
@@ -34,6 +35,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_p_up_semantic_compatibility
 )
 from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_net_return_v6 import (
     _descriptor,
+    _find_nonempty_fields,
     _load_json,
     _load_jsonl,
     _require_sha256,
@@ -141,6 +143,12 @@ def build_adaptive_support_controller_v8_1_future_settled_index(
         freeze_path,
         expected_sha256=config.expected_target_free_freeze_manifest_sha256,
     )
+    evaluation_only_frozen_features_by_market = (
+        _evaluation_only_frozen_features_by_market(
+            freeze,
+            selected_market_ids=[str(row["market_id"]) for row in selected],
+        )
+    )
     freeze_created_ts = int(freeze["decision_freeze_created_ts"])
     max_market_end_ts = max(int(row["market_end_ts"]) for row in selected)
     if config.target_access_started_ts <= max(freeze_created_ts, max_market_end_ts):
@@ -193,6 +201,9 @@ def build_adaptive_support_controller_v8_1_future_settled_index(
             provider_factory=factory,
             max_workers=config.max_workers,
             settlement_attempt=attempt_count,
+            evaluation_only_frozen_features_by_market=(
+                evaluation_only_frozen_features_by_market
+            ),
         )
         retryable: set[str] = set()
         for result in results:
@@ -504,6 +515,49 @@ def _validated_freeze(
     ):
         raise ValueError("#246 frozen market or accepted-decision support invalid")
     return freeze, selected, candidate, baseline
+
+
+def _evaluation_only_frozen_features_by_market(
+    freeze: dict[str, Any],
+    *,
+    selected_market_ids: list[str],
+) -> dict[str, list[dict[str, Any]]] | None:
+    """Load optional frozen features for strict evaluation-only finalization."""
+
+    descriptor = freeze.get("target_free_feature_rows")
+    if descriptor is None:
+        return None
+    verified = _verified_descriptor(
+        descriptor, "#246 evaluation-only frozen features"
+    )
+    rows = _load_jsonl(Path(verified["path"]))
+    selected = set(selected_market_ids)
+    forbidden = _find_nonempty_fields(rows, FORBIDDEN_TARGET_FIELDS)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        market_id = str(row.get("market_id") or "")
+        decision_ts = int(row.get("decision_ts") or 0)
+        max_input_ts = int(row.get("max_input_ts") or 0)
+        if (
+            not market_id
+            or market_id not in selected
+            or decision_ts <= 0
+            or max_input_ts > decision_ts
+        ):
+            raise ValueError(
+                "#246 evaluation-only frozen feature identity or causality invalid"
+            )
+        grouped.setdefault(market_id, []).append(row)
+    if forbidden:
+        raise ValueError(
+            "#246 evaluation-only frozen features contain targets: "
+            + ",".join(sorted(forbidden))
+        )
+    if set(grouped) != selected or any(not values for values in grouped.values()):
+        raise ValueError(
+            "#246 evaluation-only frozen feature market coverage incomplete"
+        )
+    return grouped
 
 
 def _validate_settled_index(
