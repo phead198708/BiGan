@@ -9,6 +9,9 @@ import pytest
 from bigan.v8.polymarket.training import (
     execution_layer_v2_non_risk_abstention_fallback_v8_3 as v83,
 )
+from bigan.v8.polymarket.training import (
+    execution_layer_v2_non_risk_abstention_fallback_v8_3_future_post_freeze as post,
+)
 
 
 def _profile() -> dict:
@@ -305,3 +308,122 @@ def test_v8_3_rejects_profile_drift() -> None:
     ] = True
     with pytest.raises(ValueError, match="profile invalid"):
         v83.validate_non_risk_abstention_fallback_v8_3_profile(profile)
+
+
+def test_v8_3_future_window_selects_earliest_exact_120() -> None:
+    plan = _future_plan()
+    boundary = plan["plan_created_ts"]
+    rows = [
+        {
+            "sequence": index + 1,
+            "scheduled_round_start_ts": boundary + (index + 1) * 300_000,
+            "market_start_ts": boundary + (index + 1) * 300_000,
+            "market_id": f"m{index:03d}",
+            "slug": f"s{index:03d}",
+            "decision_id": f"d{index:03d}",
+            "source_row_hash": f"h{index:03d}",
+            "capture_quality_valid": index != 0,
+        }
+        for index in range(121)
+    ]
+    selected, attempted, summary = (
+        v83.select_non_risk_abstention_fallback_v8_3_future_window(
+            rows,
+            plan=plan,
+            prior_market_ids=set(),
+            prior_slugs=set(),
+            prior_decision_ids=set(),
+            prior_source_row_hashes=set(),
+        )
+    )
+    assert len(attempted) == 121
+    assert len(selected) == 120
+    assert selected[0]["market_id"] == "m001"
+    assert summary["exact_window_ready"] is True
+    assert summary["exclusion_reason_distribution"] == {
+        "capture_quality_invalid": 1
+    }
+
+
+def _runtime_target(
+    market_id: str,
+    *,
+    pnl: float,
+    side: str = "DOWN",
+) -> dict:
+    return {
+        "market_id": market_id,
+        "decision_ts": 1000,
+        "max_input_ts": 999,
+        "side": side,
+        "action": f"BUY_{side}_SELL_BEFORE_CLOSE",
+        "runtime_policy_after_cost_net_pnl_at_frozen_size": pnl,
+        "target_available_only_post_exit_or_official_resolution": True,
+        "target_used_as_decision_time_input": False,
+    }
+
+
+def test_v8_3_future_pnl_gate_uses_preregistered_comparative_checks() -> None:
+    market_ids = [f"m{index:03d}" for index in range(120)]
+    candidate = [
+        _runtime_target(market_id, pnl=0.01)
+        for market_id in market_ids[:40]
+    ]
+    baseline = [
+        _runtime_target(market_id, pnl=0.005)
+        for market_id in market_ids[:40]
+    ]
+    report = v83.build_non_risk_abstention_fallback_v8_3_future_pnl_gate(
+        candidate,
+        baseline_rows=baseline,
+        evaluation_market_ids=market_ids,
+        settled_market_ids=market_ids,
+        plan=_future_plan(),
+        target_free_freeze_sha256="a" * 64,
+    )
+    assert report["candidate_after_cost_pnl"] == pytest.approx(0.4)
+    assert report["candidate_minus_v6_7_after_cost_pnl"] == pytest.approx(0.2)
+    assert report["future_pnl_gate_passed"] is True
+    assert report["automatic_paper_or_live_unlock_allowed"] is False
+    assert report["paper_candidate_allowed"] is False
+
+
+def test_v8_3_future_pnl_gate_fails_when_candidate_is_negative() -> None:
+    market_ids = [f"m{index:03d}" for index in range(120)]
+    candidate = [
+        _runtime_target(market_id, pnl=-0.01)
+        for market_id in market_ids[:40]
+    ]
+    report = v83.build_non_risk_abstention_fallback_v8_3_future_pnl_gate(
+        candidate,
+        baseline_rows=[],
+        evaluation_market_ids=market_ids,
+        settled_market_ids=market_ids,
+        plan=_future_plan(),
+        target_free_freeze_sha256="b" * 64,
+    )
+    assert report["future_pnl_gate_passed"] is False
+    assert "candidate_total_after_cost_pnl_not_positive" in report[
+        "future_pnl_gate_blocking_reason_codes"
+    ]
+
+
+def test_v8_3_settlement_adapter_preserves_fail_closed_identity() -> None:
+    freeze = {
+        "candidate_name": v83.CANDIDATE_NAME,
+        "decision_freeze_created_ts": 1000,
+        "exact_market_count": 120,
+        "selected_rows": {"path": "/tmp/selected", "sha256": "1" * 64},
+        "candidate_runtime": {"path": "/tmp/candidate", "sha256": "2" * 64},
+        "v6_7_runtime": {"path": "/tmp/baseline", "sha256": "3" * 64},
+    }
+    adapter = post._settlement_engine_adapter(
+        freeze=freeze,
+        freeze_path=Path("/tmp/freeze.json"),
+        freeze_sha256="4" * 64,
+    )
+    assert adapter["candidate_name"] == v83.CANDIDATE_NAME
+    assert adapter["future_target_access_allowed"] is True
+    assert adapter["labels_outcomes_resolution_or_pnl_opened"] is False
+    assert adapter["paper_candidate_allowed"] is False
+    assert adapter["polymarket_write_enabled"] is False

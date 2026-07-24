@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import shutil
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,12 @@ MANIFEST_SCHEMA_VERSION = (
 FUTURE_PLAN_SCHEMA_VERSION = (
     "bigan-v8-non-risk-abstention-fallback-v8-3-future-holdout-plan-v1"
 )
+FUTURE_SCHEMA_PREFIX = (
+    "bigan-v8-non-risk-abstention-fallback-v8-3-future-holdout"
+)
+FUTURE_EXACT_MARKET_COUNT = 120
+FUTURE_SCAN_CAP = 180
+FUTURE_MINIMUM_GUARD_ACCEPTED_MARKET_COUNT = 40
 POLICY_LEVEL_ABSTENTION_REASON_CODES = {
     "policy_selected_no_trade",
     "v6_7_no_positive_guard_compatible_action",
@@ -259,6 +266,412 @@ def validate_non_risk_abstention_fallback_v8_3_future_plan(
         raise ValueError(
             "#249 v8.3 future plan invalid: " + ", ".join(blockers)
         )
+
+
+def select_non_risk_abstention_fallback_v8_3_future_window(
+    index_rows: list[dict[str, Any]],
+    *,
+    plan: dict[str, Any],
+    prior_market_ids: set[str],
+    prior_slugs: set[str],
+    prior_decision_ids: set[str],
+    prior_source_row_hashes: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Select the earliest exact-120 eligible #249 markets."""
+
+    validate_non_risk_abstention_fallback_v8_3_future_plan(plan)
+    collection = dict(plan["collection"])
+    boundary = int(
+        collection["strictly_later_minimum_market_start_ts_exclusive"]
+    )
+    ordered = sorted(
+        index_rows,
+        key=lambda row: (
+            int(row.get("scheduled_round_start_ts") or 0),
+            int(row.get("sequence") or 0),
+            str(row.get("attempt_id") or row.get("run_id") or ""),
+        ),
+    )
+    attempted = ordered[: int(collection["maximum_attempted_market_count"])]
+    eligible: list[dict[str, Any]] = []
+    exclusion_reasons: Counter[str] = Counter()
+    for row in attempted:
+        reasons: list[str] = []
+        if row.get("capture_quality_valid") is not True:
+            reasons.append("capture_quality_invalid")
+        if int(row.get("scheduled_round_start_ts") or 0) <= boundary:
+            reasons.append("scheduled_round_not_strictly_later")
+        if int(row.get("market_start_ts") or 0) <= boundary:
+            reasons.append("market_start_not_strictly_later")
+        if str(row.get("market_id") or "") in prior_market_ids:
+            reasons.append("prior_market_id_overlap")
+        if str(row.get("slug") or "") in prior_slugs:
+            reasons.append("prior_slug_overlap")
+        if str(row.get("decision_id") or "") in prior_decision_ids:
+            reasons.append("prior_decision_id_overlap")
+        if str(row.get("source_row_hash") or "") in prior_source_row_hashes:
+            reasons.append("prior_source_row_hash_overlap")
+        if reasons:
+            exclusion_reasons.update(reasons)
+            continue
+        eligible.append(row)
+        if len(eligible) == FUTURE_EXACT_MARKET_COUNT:
+            break
+    selected = eligible[:FUTURE_EXACT_MARKET_COUNT]
+    selected_ids = [str(row.get("market_id") or "") for row in selected]
+    summary = {
+        "attempted_scan_count": len(attempted),
+        "eligible_market_count": len(eligible),
+        "selected_market_count": len(selected),
+        "selected_sequence_start": (
+            int(selected[0]["sequence"]) if selected else None
+        ),
+        "selected_sequence_end": (
+            int(selected[-1]["sequence"]) if selected else None
+        ),
+        "selected_market_ids_sha256": canonical_json_sha256(selected_ids),
+        "exclusion_reason_distribution": dict(
+            sorted(exclusion_reasons.items())
+        ),
+        "strictly_later_time_violation_count": sum(
+            int(row.get("market_start_ts") or 0) <= boundary
+            for row in selected
+        ),
+        "selected_identity_duplicate_count": len(selected_ids)
+        - len(set(selected_ids)),
+        "exact_window_ready": (
+            len(selected) == FUTURE_EXACT_MARKET_COUNT
+            and "" not in selected_ids
+            and len(set(selected_ids)) == FUTURE_EXACT_MARKET_COUNT
+        ),
+    }
+    return selected, attempted, summary
+
+
+def build_non_risk_abstention_fallback_v8_3_target_free_freeze_report(
+    selected_rows: list[dict[str, Any]],
+    *,
+    attempted_rows: list[dict[str, Any]],
+    action_rows: list[dict[str, Any]],
+    overlay_decisions: list[dict[str, Any]],
+    baseline_guard_rows: list[dict[str, Any]],
+    selection_summary: dict[str, Any],
+    plan: dict[str, Any],
+    stage_started_ts: int,
+    collector_index_sha256: str,
+) -> dict[str, Any]:
+    """Validate the authoritative v8.3/v6.7 decision freeze."""
+
+    validate_non_risk_abstention_fallback_v8_3_future_plan(plan)
+    selected_ids = [str(row.get("market_id") or "") for row in selected_rows]
+    selected_set = set(selected_ids)
+    filtered_actions = [
+        row
+        for row in action_rows
+        if str(row.get("market_id") or "") in selected_set
+    ]
+    overlay_by_market = _one_row_per_market(
+        overlay_decisions, label="v8.3 overlay"
+    )
+    baseline_by_market = _one_row_per_market(
+        baseline_guard_rows, label="v6.7 guard"
+    )
+    forbidden = sorted(
+        set(
+            v81_canary._find_nonempty_fields(
+                filtered_actions, FORBIDDEN_INFERENCE_FIELDS
+            )
+        )
+        | set(
+            v81_canary._find_nonempty_fields(
+                overlay_decisions, FORBIDDEN_INFERENCE_FIELDS
+            )
+        )
+        | set(
+            v81_canary._find_nonempty_fields(
+                baseline_guard_rows, FORBIDDEN_INFERENCE_FIELDS
+            )
+        )
+    )
+    causality_violations = sum(
+        int(row.get("max_input_ts") or 0)
+        > int(row.get("decision_ts") or 0)
+        for row in filtered_actions
+    )
+    overlay_accepted = [
+        row
+        for row in overlay_decisions
+        if row.get("execution_guard_order_allowed") is True
+    ]
+    baseline_accepted = [
+        row
+        for row in baseline_guard_rows
+        if row.get("execution_guard_order_allowed") is True
+    ]
+    five_action_groups: dict[tuple[str, int], set[str]] = defaultdict(set)
+    for row in filtered_actions:
+        five_action_groups[
+            (
+                str(row.get("market_id") or ""),
+                int(row.get("decision_ts") or 0),
+            )
+        ].add(str(row.get("action") or ""))
+    expected_actions = {
+        "BUY_UP_SELL_BEFORE_CLOSE",
+        "BUY_DOWN_SELL_BEFORE_CLOSE",
+        "BUY_UP_HOLD_TO_SETTLEMENT",
+        "BUY_DOWN_HOLD_TO_SETTLEMENT",
+        "NO_TRADE",
+    }
+    complete_grid = (
+        {market_id for market_id, _ in five_action_groups} == selected_set
+        and all(actions == expected_actions for actions in five_action_groups.values())
+    )
+    checks = {
+        "exact_120_selected_markets": (
+            selection_summary.get("exact_window_ready") is True
+            and len(selected_rows) == FUTURE_EXACT_MARKET_COUNT
+            and len(selected_set) == FUTURE_EXACT_MARKET_COUNT
+        ),
+        "attempted_scan_cap_respected": len(attempted_rows) <= FUTURE_SCAN_CAP,
+        "all_selected_markets_closed_before_target_access": (
+            bool(selected_rows)
+            and stage_started_ts
+            > max(int(row.get("market_end_ts") or 0) for row in selected_rows)
+        ),
+        "complete_five_action_grid": complete_grid,
+        "candidate_complete_decision_coverage": set(overlay_by_market)
+        == selected_set,
+        "baseline_complete_decision_coverage": set(baseline_by_market)
+        == selected_set,
+        "minimum_candidate_guard_accepted_market_support": len(
+            overlay_accepted
+        )
+        >= FUTURE_MINIMUM_GUARD_ACCEPTED_MARKET_COUNT,
+        "feature_timestamp_causality": causality_violations == 0,
+        "forbidden_target_fields_absent": not forbidden,
+        "source_scores_unchanged": all(
+            row.get("source_score_mutated") is False
+            for row in overlay_decisions + baseline_guard_rows
+        ),
+        "risk_blocker_bypass_absent": all(
+            row.get("explicit_execution_risk_blocker_bypass_used") is False
+            for row in overlay_decisions
+        ),
+        "outcomes_resolution_labels_or_pnl_sealed": all(
+            row.get("target_or_outcome_used_for_selection") is not True
+            and row.get("labels_outcomes_resolution_or_pnl_opened") is not True
+            and row.get("labels_outcomes_or_pnl_opened") is not True
+            for row in overlay_decisions + baseline_guard_rows
+        ),
+    }
+    reason_map = {
+        "exact_120_selected_markets": "target_free_exact_120_window_not_ready",
+        "attempted_scan_cap_respected": "target_free_scan_cap_exceeded",
+        "all_selected_markets_closed_before_target_access": (
+            "target_free_markets_not_all_closed"
+        ),
+        "complete_five_action_grid": "target_free_five_action_grid_incomplete",
+        "candidate_complete_decision_coverage": (
+            "target_free_v8_3_decision_coverage_incomplete"
+        ),
+        "baseline_complete_decision_coverage": (
+            "target_free_v6_7_decision_coverage_incomplete"
+        ),
+        "minimum_candidate_guard_accepted_market_support": (
+            "target_free_v8_3_guard_accepted_support_insufficient"
+        ),
+        "feature_timestamp_causality": "target_free_feature_causality_violation",
+        "forbidden_target_fields_absent": (
+            "target_free_forbidden_target_field_present"
+        ),
+        "source_scores_unchanged": "target_free_source_score_mutated",
+        "risk_blocker_bypass_absent": "execution_risk_blocker_bypass_detected",
+        "outcomes_resolution_labels_or_pnl_sealed": (
+            "target_free_outcome_or_pnl_access_detected"
+        ),
+    }
+    blockers = [
+        reason_map[name] for name, passed in checks.items() if not passed
+    ]
+    report = {
+        "schema_version": f"{FUTURE_SCHEMA_PREFIX}-target-free-freeze-report-v1",
+        "candidate_name": CANDIDATE_NAME,
+        "baseline_name": "p_up_semantic_compatibility_v6_7",
+        "collector_index_sha256": collector_index_sha256,
+        "selected_market_count": len(selected_rows),
+        "attempted_market_count": len(attempted_rows),
+        "selection_summary": selection_summary,
+        "candidate_guard_accepted_market_count": len(overlay_accepted),
+        "v6_7_guard_accepted_market_count": len(baseline_accepted),
+        "selection_source_distribution": _distribution(
+            overlay_decisions, "selection_source"
+        ),
+        "selected_action_distribution": _distribution(
+            overlay_decisions, "selected_action"
+        ),
+        "selected_side_distribution_diagnostic": _distribution(
+            [
+                row
+                for row in overlay_accepted
+                if row.get("selected_side") != "NONE"
+            ],
+            "selected_side",
+        ),
+        "side_quota_enabled": False,
+        "side_action_and_family_metrics_diagnostic_only": True,
+        "feature_causality_violation_count": causality_violations,
+        "forbidden_target_fields": forbidden,
+        "target_free_checks": checks,
+        "target_free_freeze_passed": not blockers,
+        "target_free_blocking_reason_codes": blockers,
+        "future_target_access_allowed": not blockers,
+        "labels_outcomes_resolution_or_pnl_opened": False,
+        "settlement_provider_called": False,
+        "threshold_model_cost_sizing_guard_or_gate_tuning_performed": False,
+        "source_scores_mutated": False,
+        "promotion_evidence": False,
+        **_v7_0_blocked_safety_fields(),
+    }
+    report["report_id"] = canonical_json_sha256(report)
+    return report
+
+
+def build_non_risk_abstention_fallback_v8_3_future_pnl_gate(
+    candidate_rows: list[dict[str, Any]],
+    *,
+    baseline_rows: list[dict[str, Any]],
+    evaluation_market_ids: list[str],
+    settled_market_ids: list[str],
+    plan: dict[str, Any],
+    target_free_freeze_sha256: str,
+) -> dict[str, Any]:
+    """Run the preregistered single-use #249 PnL comparison."""
+
+    validate_non_risk_abstention_fallback_v8_3_future_plan(plan)
+    market_ids = list(dict.fromkeys(str(value) for value in evaluation_market_ids))
+    settled_ids = list(dict.fromkeys(str(value) for value in settled_market_ids))
+    if (
+        len(market_ids) != FUTURE_EXACT_MARKET_COUNT
+        or "" in market_ids
+        or set(settled_ids) != set(market_ids)
+    ):
+        raise ValueError("#249 exact settled evaluation market identity invalid")
+    _validate_runtime_target_rows(candidate_rows, market_ids=market_ids)
+    _validate_runtime_target_rows(baseline_rows, market_ids=market_ids)
+    candidate_by_market = dict.fromkeys(market_ids, 0.0)
+    baseline_by_market = dict.fromkeys(market_ids, 0.0)
+    for row in candidate_rows:
+        candidate_by_market[str(row["market_id"])] += float(
+            row["runtime_policy_after_cost_net_pnl_at_frozen_size"]
+        )
+    for row in baseline_rows:
+        baseline_by_market[str(row["market_id"])] += float(
+            row["runtime_policy_after_cost_net_pnl_at_frozen_size"]
+        )
+    candidate_total = float(sum(candidate_by_market.values()))
+    baseline_total = float(sum(baseline_by_market.values()))
+    candidate_largest = max(candidate_by_market.values(), default=0.0)
+    baseline_largest = max(baseline_by_market.values(), default=0.0)
+    candidate_lwr = candidate_total - max(candidate_largest, 0.0)
+    baseline_lwr = baseline_total - max(baseline_largest, 0.0)
+    total_delta = candidate_total - baseline_total
+    lwr_delta = candidate_lwr - baseline_lwr
+    gate = dict(plan["single_use_future_pnl_gate"])
+    target_isolation = all(
+        row.get("target_available_only_post_exit_or_official_resolution") is True
+        and row.get("target_used_as_decision_time_input") is False
+        and int(row["max_input_ts"]) <= int(row["decision_ts"])
+        for row in candidate_rows + baseline_rows
+    )
+    checks = {
+        "exact_120_settled_market_reconciliation": set(settled_ids)
+        == set(market_ids),
+        "minimum_candidate_guard_accepted_unique_market_support": len(
+            candidate_rows
+        )
+        >= FUTURE_MINIMUM_GUARD_ACCEPTED_MARKET_COUNT,
+        "candidate_total_after_cost_pnl_positive": candidate_total
+        > float(gate["candidate_total_after_cost_pnl_minimum_exclusive"]),
+        "candidate_noninferior_to_v6_7_total_pnl": total_delta
+        >= float(
+            gate[
+                "candidate_minus_v6_7_total_after_cost_pnl_minimum_inclusive"
+            ]
+        ),
+        "candidate_noninferior_to_v6_7_largest_winner_removed": lwr_delta
+        >= float(
+            gate[
+                "candidate_minus_v6_7_largest_winner_removed_after_cost_pnl_"
+                "minimum_inclusive"
+            ]
+        ),
+        "settlement_causality_and_target_isolation": target_isolation,
+    }
+    reason_map = {
+        "exact_120_settled_market_reconciliation": (
+            "exact_120_settlement_reconciliation_failed"
+        ),
+        "minimum_candidate_guard_accepted_unique_market_support": (
+            "insufficient_v8_3_guard_accepted_unique_market_support"
+        ),
+        "candidate_total_after_cost_pnl_positive": (
+            "candidate_total_after_cost_pnl_not_positive"
+        ),
+        "candidate_noninferior_to_v6_7_total_pnl": (
+            "candidate_total_pnl_inferior_to_v6_7"
+        ),
+        "candidate_noninferior_to_v6_7_largest_winner_removed": (
+            "candidate_largest_winner_removed_pnl_inferior_to_v6_7"
+        ),
+        "settlement_causality_and_target_isolation": (
+            "settlement_causality_or_target_isolation_failed"
+        ),
+    }
+    blockers = [
+        reason_map[name] for name, passed in checks.items() if not passed
+    ]
+    report = {
+        "schema_version": f"{FUTURE_SCHEMA_PREFIX}-pnl-gate-report-v1",
+        "candidate_name": CANDIDATE_NAME,
+        "baseline_name": "p_up_semantic_compatibility_v6_7",
+        "target_free_freeze_sha256": target_free_freeze_sha256,
+        "evaluation_market_count": len(market_ids),
+        "settled_market_count": len(settled_ids),
+        "candidate_guard_accepted_unique_market_count": len(candidate_rows),
+        "v6_7_guard_accepted_unique_market_count": len(baseline_rows),
+        "candidate_after_cost_pnl": candidate_total,
+        "v6_7_after_cost_pnl": baseline_total,
+        "candidate_minus_v6_7_after_cost_pnl": total_delta,
+        "candidate_largest_winner_after_cost_pnl": candidate_largest,
+        "candidate_largest_winner_removed_after_cost_pnl": candidate_lwr,
+        "v6_7_largest_winner_after_cost_pnl": baseline_largest,
+        "v6_7_largest_winner_removed_after_cost_pnl": baseline_lwr,
+        "candidate_minus_v6_7_largest_winner_removed_after_cost_pnl": (
+            lwr_delta
+        ),
+        "candidate_side_distribution_diagnostic": dict(
+            sorted(Counter(str(row["side"]) for row in candidate_rows).items())
+        ),
+        "v6_7_side_distribution_diagnostic": dict(
+            sorted(Counter(str(row["side"]) for row in baseline_rows).items())
+        ),
+        "noninferiority_comparison_operator": "greater_than_or_equal",
+        "equality_passes_noninferiority": True,
+        "side_quota_enabled": False,
+        "side_action_and_family_metrics_diagnostic_only": True,
+        "future_pnl_gate_checks": checks,
+        "future_pnl_gate_passed": not blockers,
+        "future_pnl_gate_blocking_reason_codes": blockers,
+        "promotion_discussion_evidence_available": not blockers,
+        "automatic_paper_or_live_unlock_allowed": False,
+        "future_outcomes_used_for_model_threshold_cost_sizing_or_guard_tuning": False,
+        "single_use_future_gate": True,
+        "result_selected_rerun_allowed": False,
+        **_v7_0_blocked_safety_fields(),
+    }
+    report["report_id"] = canonical_json_sha256(report)
+    return report
 
 
 def select_non_risk_abstention_fallback_v8_3_decision(
@@ -1104,6 +1517,45 @@ def _distribution(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
     return dict(sorted(Counter(str(row[key]) for row in rows).items()))
 
 
+def _one_row_per_market(
+    rows: list[dict[str, Any]], *, label: str
+) -> dict[str, dict[str, Any]]:
+    output: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        market_id = str(row.get("market_id") or "")
+        if not market_id or market_id in output:
+            raise ValueError(f"#249 {label} market identity missing or duplicated")
+        output[market_id] = row
+    return output
+
+
+def _validate_runtime_target_rows(
+    rows: list[dict[str, Any]], *, market_ids: list[str]
+) -> None:
+    allowed = set(market_ids)
+    seen: set[str] = set()
+    for row in rows:
+        market_id = str(row.get("market_id") or "")
+        side = str(row.get("side") or row.get("selected_side") or "")
+        action = str(row.get("action") or row.get("executed_action") or "")
+        if (
+            not market_id
+            or market_id not in allowed
+            or market_id in seen
+            or side not in {"UP", "DOWN"}
+            or action
+            not in {
+                "BUY_UP_SELL_BEFORE_CLOSE",
+                "BUY_DOWN_SELL_BEFORE_CLOSE",
+            }
+        ):
+            raise ValueError("#249 runtime target identity invalid")
+        seen.add(market_id)
+        value = float(row["runtime_policy_after_cost_net_pnl_at_frozen_size"])
+        if not math.isfinite(value):
+            raise ValueError("#249 runtime target PnL is non-finite")
+
+
 def _expected_safety() -> dict[str, bool]:
     safety = _v7_0_blocked_safety_fields()
     safety["paper_only"] = True
@@ -1312,15 +1764,22 @@ def _markdown(report: dict[str, Any]) -> str:
 
 
 __all__ = [
+    "FUTURE_EXACT_MARKET_COUNT",
+    "FUTURE_MINIMUM_GUARD_ACCEPTED_MARKET_COUNT",
+    "FUTURE_SCAN_CAP",
+    "FUTURE_SCHEMA_PREFIX",
     "NonRiskAbstentionFallbackV83CanaryConfig",
     "NonRiskAbstentionFallbackV83HistoricalConfig",
     "NonRiskAbstentionFallbackV83BatchConfig",
     "build_non_risk_abstention_fallback_v8_3_canary",
+    "build_non_risk_abstention_fallback_v8_3_future_pnl_gate",
     "build_non_risk_abstention_fallback_v8_3_historical",
+    "build_non_risk_abstention_fallback_v8_3_target_free_freeze_report",
     "run_non_risk_abstention_fallback_v8_3_canary",
     "run_non_risk_abstention_fallback_v8_3_batch_diagnostic",
     "run_non_risk_abstention_fallback_v8_3_historical_gate",
     "select_non_risk_abstention_fallback_v8_3_decision",
+    "select_non_risk_abstention_fallback_v8_3_future_window",
     "validate_non_risk_abstention_fallback_v8_3_profile",
     "validate_non_risk_abstention_fallback_v8_3_future_plan",
 ]
