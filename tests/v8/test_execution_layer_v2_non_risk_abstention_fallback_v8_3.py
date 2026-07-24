@@ -269,6 +269,35 @@ def test_v8_3_target_free_canary_reports_support_without_targets() -> None:
     assert report["new_future_holdout_collection_allowed"] is True
 
 
+def test_v8_3_batch_baseline_guard_rows_fail_closed() -> None:
+    rows = v83._baseline_guard_rows(
+        ["m1", "m2"],
+        baseline_rows=[
+            {
+                "market_id": "m1",
+                "action": "BUY_DOWN_SELL_BEFORE_CLOSE",
+                "side": "DOWN",
+                "decision_group_id": "g1",
+                "decision_ts": 1000,
+            }
+        ],
+        action_rows=[],
+        v6_7_profile={"hard_execution_safety": {}},
+    )
+    assert rows[0]["execution_guard_order_allowed"] is False
+    assert rows[0]["execution_blocking_reason_codes"] == [
+        "selected_action_source_row_missing"
+    ]
+    assert rows[1]["selected_action"] == "NO_TRADE"
+    assert rows[1]["execution_blocking_reason_codes"] == [
+        "v6_7_no_positive_guard_compatible_action"
+    ]
+    assert all(
+        row["labels_outcomes_resolution_or_pnl_opened"] is False
+        for row in rows
+    )
+
+
 def test_v8_3_rejects_profile_drift() -> None:
     profile = copy.deepcopy(_profile())
     profile["policy_contract"][

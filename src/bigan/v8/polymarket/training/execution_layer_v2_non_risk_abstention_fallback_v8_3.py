@@ -10,10 +10,29 @@ from typing import Any
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.training import (
+    execution_layer_v2_adaptive_support_controller_v8_1 as v81,
+)
+from bigan.v8.polymarket.training import (
+    execution_layer_v2_adaptive_support_controller_v8_1_canary as v81_canary,
+)
+from bigan.v8.polymarket.training import (
     execution_layer_v2_support_preserving_overlay_v8_2 as v82,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_abstention_aware_expected_net_pnl_v7_0 import (
     _v7_0_blocked_safety_fields,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_nested_boosted_action_value_v7_4_canary import (
+    _canonicalize_target_free_sbc_rows,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_p_up_semantic_compatibility_v6_7 import (
+    _microstructure_blocking_reasons,
+    build_v6_7_target_free_candidate_rows,
+    select_v6_7_target_free_rows,
+    validate_p_up_semantic_compatibility_v6_7_profile,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_rolling_origin_drift_adaptive_action_value_v7_7_canary import (
+    _action_key,
+    _earliest_market_ids,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_runtime_aligned_sbc_net_return_v6_4 import (
     _descriptor,
@@ -24,6 +43,9 @@ from bigan.v8.polymarket.training.execution_layer_v2_runtime_aligned_sbc_net_ret
     _write_json,
     _write_jsonl,
     _write_text,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_v6_7_relative_safe_policy_v7_2 import (
+    FORBIDDEN_INFERENCE_FIELDS,
 )
 
 CANDIDATE_NAME = "non_risk_abstention_fallback_v8_3"
@@ -77,6 +99,25 @@ class NonRiskAbstentionFallbackV83CanaryConfig:
     expected_issue246_target_free_manifest_sha256: str
     implementation_commit: str
     canary_started_ts: int
+    overwrite_existing: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class NonRiskAbstentionFallbackV83BatchConfig:
+    run_id: str
+    output_dir: str
+    profile_path: str
+    expected_profile_sha256: str
+    future_plan_path: str
+    expected_future_plan_sha256: str
+    development_batch_manifest_path: str
+    expected_development_batch_manifest_sha256: str
+    v6_2_batch_manifest_path: str
+    expected_v6_2_batch_manifest_sha256: str
+    v8_1_historical_manifest_path: str
+    expected_v8_1_historical_manifest_sha256: str
+    implementation_commit: str
+    diagnostic_started_ts: int
     overwrite_existing: bool = False
 
 
@@ -531,6 +572,267 @@ def run_non_risk_abstention_fallback_v8_3_canary(
     )
 
 
+def run_non_risk_abstention_fallback_v8_3_batch_diagnostic(
+    config: NonRiskAbstentionFallbackV83BatchConfig,
+) -> dict[str, Any]:
+    paths = {
+        "profile": Path(config.profile_path).resolve(),
+        "plan": Path(config.future_plan_path).resolve(),
+        "development": Path(config.development_batch_manifest_path).resolve(),
+        "v6_2": Path(config.v6_2_batch_manifest_path).resolve(),
+        "v8_1_historical": Path(
+            config.v8_1_historical_manifest_path
+        ).resolve(),
+    }
+    pins = {
+        "profile": config.expected_profile_sha256,
+        "plan": config.expected_future_plan_sha256,
+        "development": config.expected_development_batch_manifest_sha256,
+        "v6_2": config.expected_v6_2_batch_manifest_sha256,
+        "v8_1_historical": (
+            config.expected_v8_1_historical_manifest_sha256
+        ),
+    }
+    for name, path in paths.items():
+        _verify_pin(path, pins[name], f"#249 batch {name}")
+    profile = _load_json(paths["profile"])
+    plan = _load_json(paths["plan"])
+    development = _load_json(paths["development"])
+    v6_2 = _load_json(paths["v6_2"])
+    historical = _load_json(paths["v8_1_historical"])
+    validate_non_risk_abstention_fallback_v8_3_profile(profile)
+    validate_non_risk_abstention_fallback_v8_3_future_plan(plan)
+    if (
+        plan["lineage"]["candidate_profile_sha256"]
+        != pins["profile"].lower()
+        or plan["lineage"]["historical_gate_manifest_sha256"]
+        != "adb930dc8bde72d89ae8b7520907ad88bb29d54f9c3b22317f9f4635ce5e015d"
+    ):
+        raise ValueError("#249 batch frozen lineage mismatch")
+    if (
+        development.get("development_data_canary_passed") is not True
+        or development.get("labels_outcomes_or_pnl_opened") is not False
+        or v6_2.get("labels_outcomes_or_pnl_opened") is not False
+    ):
+        raise ValueError("#249 batch input is not sealed outcome-free evidence")
+    model_path = _verified_descriptor_path(
+        historical["model"], label="#249 v8.1 model"
+    )
+    v8_1_profile_path = _verified_descriptor_path(
+        historical["profile"], label="#249 v8.1 profile"
+    )
+    v6_7_profile_path = _verified_descriptor_path(
+        historical["v6_7_candidate_profile"], label="#249 v6.7 profile"
+    )
+    v7_0_profile_path = _verified_descriptor_path(
+        historical["v7_0_training_profile"], label="#249 v7.0 profile"
+    )
+    action_path = _verified_descriptor_path(
+        development["five_action_grid"], label="#249 five-action grid"
+    )
+    scored_path = _verified_descriptor_path(
+        v6_2["mean_ev_scored_rows"], label="#249 v6.2 scored rows"
+    )
+    model = _load_json(model_path)
+    v8_1_profile = _load_json(v8_1_profile_path)
+    v6_7_profile = _load_json(v6_7_profile_path)
+    v7_0_profile = _load_json(v7_0_profile_path)
+    v81.validate_adaptive_support_controller_v8_1_profile(v8_1_profile)
+    validate_p_up_semantic_compatibility_v6_7_profile(v6_7_profile)
+    action_rows = _load_jsonl(action_path)
+    scored_rows = _load_jsonl(scored_path)
+    forbidden = sorted(
+        set(v81_canary._find_nonempty_fields(action_rows, FORBIDDEN_INFERENCE_FIELDS))
+        | set(
+            v81_canary._find_nonempty_fields(
+                scored_rows, FORBIDDEN_INFERENCE_FIELDS
+            )
+        )
+    )
+    if forbidden:
+        raise ValueError(
+            "#249 batch forbidden inference fields: " + ",".join(forbidden)
+        )
+    available_markets = _earliest_market_ids(
+        action_rows,
+        target=len({str(row["market_id"]) for row in action_rows}),
+    )
+    selected_set = set(available_markets)
+    action_rows = [
+        row for row in action_rows if str(row["market_id"]) in selected_set
+    ]
+    scored_rows = [
+        row for row in scored_rows if str(row["market_id"]) in selected_set
+    ]
+    candidate_rows, _ = build_v6_7_target_free_candidate_rows(
+        scored_rows,
+        action_rows=action_rows,
+        profile=v6_7_profile,
+    )
+    baseline_rows = select_v6_7_target_free_rows(
+        candidate_rows, profile=v6_7_profile
+    )
+    canonical_rows, canonical_summary = _canonicalize_target_free_sbc_rows(
+        scored_rows,
+        action_rows=action_rows,
+        v6_7_profile=v6_7_profile,
+        v7_0_profile=v7_0_profile,
+    )
+    _, candidate_guard_rows, _ = v81_canary._score_window(
+        available_markets,
+        canonical_rows=canonical_rows,
+        baseline_rows=baseline_rows,
+        action_rows=action_rows,
+        model=model,
+        v6_7_profile=v6_7_profile,
+    )
+    baseline_guard_rows = _baseline_guard_rows(
+        available_markets,
+        baseline_rows=baseline_rows,
+        action_rows=action_rows,
+        v6_7_profile=v6_7_profile,
+    )
+    overlay = build_non_risk_abstention_fallback_v8_3_canary(
+        candidate_rows=candidate_guard_rows,
+        baseline_rows=baseline_guard_rows,
+        profile=profile,
+    )
+    decisions = overlay["decisions"]
+    support = sum(
+        row["execution_guard_order_allowed"] is True for row in decisions
+    )
+    causality_violations = sum(
+        int(row.get("max_input_ts") or 0) > int(row.get("decision_ts") or 0)
+        for row in action_rows
+    )
+    minimum_start = int(
+        plan["collection"][
+            "strictly_later_minimum_market_start_ts_exclusive"
+        ]
+    )
+    time_violations = sum(
+        int(row.get("market_close_ts") or 0) - 300_000 <= minimum_start
+        for row in action_rows
+    )
+    checks = {
+        "development_data_canary_passed": True,
+        "v6_2_target_free_scoring_sealed": True,
+        "forbidden_target_fields_absent": not forbidden,
+        "complete_decision_coverage": len(decisions) == len(available_markets),
+        "canonical_sbc_mapping_complete": canonical_summary[
+            "missing_scored_or_source_action_row_count"
+        ]
+        == 0,
+        "feature_timestamp_causality": causality_violations == 0,
+        "strictly_later": time_violations == 0,
+        "source_scores_unchanged": all(
+            row["source_score_mutated"] is False for row in decisions
+        ),
+        "risk_blocker_bypass_absent": all(
+            row["explicit_execution_risk_blocker_bypass_used"] is False
+            for row in decisions
+        ),
+    }
+    reason_map = {
+        "development_data_canary_passed": "development_data_canary_not_passed",
+        "v6_2_target_free_scoring_sealed": "v6_2_scoring_not_sealed",
+        "forbidden_target_fields_absent": "forbidden_target_field_present",
+        "complete_decision_coverage": "decision_coverage_incomplete",
+        "canonical_sbc_mapping_complete": "canonical_sbc_mapping_incomplete",
+        "feature_timestamp_causality": "feature_timestamp_causality_violation",
+        "strictly_later": "batch_market_not_strictly_later",
+        "source_scores_unchanged": "source_score_mutation_detected",
+        "risk_blocker_bypass_absent": "execution_risk_blocker_bypass_detected",
+    }
+    blockers = [
+        reason_map[name] for name, passed in checks.items() if not passed
+    ]
+    report = {
+        "schema_version": (
+            "bigan-v8-non-risk-abstention-fallback-v8-3-batch-report-v1"
+        ),
+        "run_id": config.run_id,
+        "candidate_name": CANDIDATE_NAME,
+        "implementation_commit": config.implementation_commit,
+        "diagnostic_started_ts": config.diagnostic_started_ts,
+        "batch_market_count": len(available_markets),
+        "guard_accepted_market_count": support,
+        "zero_guard_accepted_support": support == 0,
+        "selection_source_distribution": _distribution(
+            decisions, "selection_source"
+        ),
+        "selected_action_distribution": _distribution(
+            decisions, "selected_action"
+        ),
+        "selected_side_distribution_diagnostic": _distribution(
+            [
+                row
+                for row in decisions
+                if row["selected_side"] != "NONE"
+            ],
+            "selected_side",
+        ),
+        "execution_blocking_reason_distribution": dict(
+            sorted(
+                Counter(
+                    reason
+                    for row in decisions
+                    if row["execution_guard_order_allowed"] is False
+                    for reason in row["selection_reason_codes"]
+                ).items()
+            )
+        ),
+        "feature_causality_violation_count": causality_violations,
+        "strictly_later_violation_count": time_violations,
+        "labels_outcomes_resolution_or_pnl_opened": False,
+        "threshold_model_cost_sizing_guard_or_gate_tuning_performed": False,
+        "checks": checks,
+        "batch_target_free_diagnostic_passed": not blockers,
+        "batch_target_free_blocking_reason_codes": blockers,
+        **_v7_0_blocked_safety_fields(),
+    }
+    report["report_id"] = canonical_json_sha256(report)
+    run_dir = _fresh_run_dir(
+        output_dir=config.output_dir,
+        run_id=config.run_id,
+        overwrite_existing=config.overwrite_existing,
+    )
+    outputs = {
+        "report": run_dir / "v8_3_batch_target_free_report.json",
+        "report_markdown": run_dir / "v8_3_batch_target_free_report.md",
+        "decision_rows": run_dir / "v8_3_batch_target_free_decisions.jsonl",
+    }
+    _write_json(outputs["report"], report)
+    _write_text(outputs["report_markdown"], _markdown(report))
+    _write_jsonl(outputs["decision_rows"], decisions)
+    manifest = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "run_id": config.run_id,
+        "stage": "post_seal_batch_target_free_diagnostic",
+        "candidate_name": CANDIDATE_NAME,
+        "implementation_commit": config.implementation_commit,
+        **{name: _descriptor(path) for name, path in paths.items()},
+        **{name: _descriptor(path) for name, path in outputs.items()},
+        "batch_target_free_diagnostic_passed": report[
+            "batch_target_free_diagnostic_passed"
+        ],
+        "zero_guard_accepted_support": report["zero_guard_accepted_support"],
+        "labels_outcomes_resolution_or_pnl_opened": False,
+        "new_future_holdout_collection_allowed": False,
+        **_v7_0_blocked_safety_fields(),
+    }
+    manifest["manifest_id"] = canonical_json_sha256(manifest)
+    manifest_path = run_dir / "v8_3_batch_target_free_manifest.json"
+    _write_json(manifest_path, manifest)
+    return _run_result(
+        run_dir=run_dir,
+        report=report,
+        manifest=manifest,
+        manifest_path=manifest_path,
+        outputs=outputs,
+    )
+
+
 def _evaluate_historical_decisions(
     *,
     decisions: list[dict[str, Any]],
@@ -716,6 +1018,56 @@ def _future_baseline_projection(row: dict[str, Any]) -> dict[str, Any]:
         "rank_abstention_passed": None,
         "point_selected_action": row["selected_action"],
     }
+
+
+def _baseline_guard_rows(
+    market_ids: list[str],
+    *,
+    baseline_rows: list[dict[str, Any]],
+    action_rows: list[dict[str, Any]],
+    v6_7_profile: dict[str, Any],
+) -> list[dict[str, Any]]:
+    baseline_by_market = {str(row["market_id"]): row for row in baseline_rows}
+    source_by_key = {_action_key(row): row for row in action_rows}
+    rows: list[dict[str, Any]] = []
+    for market_id in market_ids:
+        baseline = baseline_by_market.get(market_id)
+        source = source_by_key.get(_action_key(baseline)) if baseline else None
+        reasons = (
+            ["v6_7_no_positive_guard_compatible_action"]
+            if baseline is None
+            else ["selected_action_source_row_missing"]
+            if source is None
+            else _microstructure_blocking_reasons(
+                source, guard=v6_7_profile["hard_execution_safety"]
+            )
+        )
+        action = str(baseline["action"]) if baseline else "NO_TRADE"
+        side = (
+            str(baseline["side"])
+            if baseline and baseline.get("side")
+            else "UP"
+            if "UP" in action
+            else "DOWN"
+            if "DOWN" in action
+            else "NONE"
+        )
+        rows.append(
+            {
+                "market_id": market_id,
+                "decision_ts": int(source.get("decision_ts") or 0)
+                if source
+                else 0,
+                "selected_action": action,
+                "selected_side": side,
+                "execution_guard_order_allowed": source is not None
+                and not reasons,
+                "execution_blocking_reason_codes": reasons,
+                "labels_outcomes_resolution_or_pnl_opened": False,
+                "source_score_mutated": False,
+            }
+        )
+    return rows
 
 
 def _no_trade_reasons(
@@ -917,7 +1269,17 @@ def _run_result(
 
 
 def _markdown(report: dict[str, Any]) -> str:
-    if "historical_noninferiority_gate_passed" in report:
+    if "batch_target_free_diagnostic_passed" in report:
+        lines = [
+            "# Execution Layer v2 v8.3 Post-Seal Batch Diagnostic",
+            "",
+            f"- markets: `{report['batch_market_count']}`",
+            f"- guard accepted: `{report['guard_accepted_market_count']}`",
+            f"- zero support: `{str(report['zero_guard_accepted_support']).lower()}`",
+            f"- selection sources: `{report['selection_source_distribution']}`",
+            f"- diagnostic passed: `{str(report['batch_target_free_diagnostic_passed']).lower()}`",
+        ]
+    elif "historical_noninferiority_gate_passed" in report:
         lines = [
             "# Execution Layer v2 v8.3 Historical Non-Inferiority",
             "",
@@ -952,9 +1314,11 @@ def _markdown(report: dict[str, Any]) -> str:
 __all__ = [
     "NonRiskAbstentionFallbackV83CanaryConfig",
     "NonRiskAbstentionFallbackV83HistoricalConfig",
+    "NonRiskAbstentionFallbackV83BatchConfig",
     "build_non_risk_abstention_fallback_v8_3_canary",
     "build_non_risk_abstention_fallback_v8_3_historical",
     "run_non_risk_abstention_fallback_v8_3_canary",
+    "run_non_risk_abstention_fallback_v8_3_batch_diagnostic",
     "run_non_risk_abstention_fallback_v8_3_historical_gate",
     "select_non_risk_abstention_fallback_v8_3_decision",
     "validate_non_risk_abstention_fallback_v8_3_profile",

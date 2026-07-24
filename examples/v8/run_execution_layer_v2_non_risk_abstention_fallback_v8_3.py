@@ -7,8 +7,10 @@ import argparse
 import json
 
 from bigan.v8.polymarket.training.execution_layer_v2_non_risk_abstention_fallback_v8_3 import (
+    NonRiskAbstentionFallbackV83BatchConfig,
     NonRiskAbstentionFallbackV83CanaryConfig,
     NonRiskAbstentionFallbackV83HistoricalConfig,
+    run_non_risk_abstention_fallback_v8_3_batch_diagnostic,
     run_non_risk_abstention_fallback_v8_3_canary,
     run_non_risk_abstention_fallback_v8_3_historical_gate,
 )
@@ -31,6 +33,17 @@ def main() -> None:
         "--issue246-target-free-manifest-sha256", required=True
     )
     canary.add_argument("--canary-started-ts", type=int, required=True)
+    batch = subparsers.add_parser("batch")
+    _common(batch)
+    batch.add_argument("--future-plan", required=True)
+    batch.add_argument("--future-plan-sha256", required=True)
+    batch.add_argument("--development-batch-manifest", required=True)
+    batch.add_argument("--development-batch-manifest-sha256", required=True)
+    batch.add_argument("--v6-2-batch-manifest", required=True)
+    batch.add_argument("--v6-2-batch-manifest-sha256", required=True)
+    batch.add_argument("--v8-1-historical-manifest", required=True)
+    batch.add_argument("--v8-1-historical-manifest-sha256", required=True)
+    batch.add_argument("--diagnostic-started-ts", type=int, required=True)
     args = parser.parse_args()
     if args.stage == "historical":
         result = run_non_risk_abstention_fallback_v8_3_historical_gate(
@@ -48,7 +61,7 @@ def main() -> None:
                 overwrite_existing=args.overwrite_existing,
             )
         )
-    else:
+    elif args.stage == "canary":
         result = run_non_risk_abstention_fallback_v8_3_canary(
             NonRiskAbstentionFallbackV83CanaryConfig(
                 run_id=args.run_id,
@@ -67,6 +80,36 @@ def main() -> None:
                 ),
                 implementation_commit=args.implementation_commit,
                 canary_started_ts=args.canary_started_ts,
+                overwrite_existing=args.overwrite_existing,
+            )
+        )
+    else:
+        result = run_non_risk_abstention_fallback_v8_3_batch_diagnostic(
+            NonRiskAbstentionFallbackV83BatchConfig(
+                run_id=args.run_id,
+                output_dir=args.output_dir,
+                profile_path=args.profile,
+                expected_profile_sha256=args.profile_sha256,
+                future_plan_path=args.future_plan,
+                expected_future_plan_sha256=args.future_plan_sha256,
+                development_batch_manifest_path=(
+                    args.development_batch_manifest
+                ),
+                expected_development_batch_manifest_sha256=(
+                    args.development_batch_manifest_sha256
+                ),
+                v6_2_batch_manifest_path=args.v6_2_batch_manifest,
+                expected_v6_2_batch_manifest_sha256=(
+                    args.v6_2_batch_manifest_sha256
+                ),
+                v8_1_historical_manifest_path=(
+                    args.v8_1_historical_manifest
+                ),
+                expected_v8_1_historical_manifest_sha256=(
+                    args.v8_1_historical_manifest_sha256
+                ),
+                implementation_commit=args.implementation_commit,
+                diagnostic_started_ts=args.diagnostic_started_ts,
                 overwrite_existing=args.overwrite_existing,
             )
         )
