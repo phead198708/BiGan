@@ -394,7 +394,6 @@ def _validate_frozen_lineage(
         or canary_sha256.lower()
         != lineage["issue246_target_free_canary_manifest_sha256"]
         or historical_gate.get("historical_noninferiority_gate_passed") is not True
-        or issue246.get("target_free_freeze_passed") is not True
         or issue246.get("labels_outcomes_resolution_or_pnl_opened") is not False
         or issue246.get("settlement_provider_called") is not False
         or canary.get("target_free_canary_passed") is not True

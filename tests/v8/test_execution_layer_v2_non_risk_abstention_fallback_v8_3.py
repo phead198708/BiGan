@@ -10,6 +10,9 @@ from bigan.v8.polymarket.training import (
     execution_layer_v2_non_risk_abstention_fallback_v8_3 as v83,
 )
 from bigan.v8.polymarket.training import (
+    execution_layer_v2_non_risk_abstention_fallback_v8_3_future_holdout as future,
+)
+from bigan.v8.polymarket.training import (
     execution_layer_v2_non_risk_abstention_fallback_v8_3_future_post_freeze as post,
 )
 
@@ -427,3 +430,30 @@ def test_v8_3_settlement_adapter_preserves_fail_closed_identity() -> None:
     assert adapter["labels_outcomes_resolution_or_pnl_opened"] is False
     assert adapter["paper_candidate_allowed"] is False
     assert adapter["polymarket_write_enabled"] is False
+
+
+def test_v8_3_lineage_accepts_sealed_issue246_support_failure() -> None:
+    plan = _future_plan()
+    future._validate_frozen_lineage(
+        plan=plan,
+        profile_sha256=plan["lineage"]["candidate_profile_sha256"],
+        protocol_sha256=plan["lineage"]["collector_protocol_sha256"],
+        historical_gate={"historical_noninferiority_gate_passed": True},
+        historical_gate_sha256=plan["lineage"][
+            "historical_gate_manifest_sha256"
+        ],
+        issue246={
+            "target_free_freeze_passed": False,
+            "labels_outcomes_resolution_or_pnl_opened": False,
+            "settlement_provider_called": False,
+        },
+        issue246_sha256=plan["lineage"]["issue246_target_free_manifest_sha256"],
+        canary={
+            "target_free_canary_passed": True,
+            "issue246_outcomes_opened": False,
+        },
+        canary_report={"labels_outcomes_resolution_or_pnl_opened": False},
+        canary_sha256=plan["lineage"][
+            "issue246_target_free_canary_manifest_sha256"
+        ],
+    )
