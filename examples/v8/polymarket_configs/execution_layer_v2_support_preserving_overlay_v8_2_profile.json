@@ -1,0 +1,50 @@
+{
+  "#134_resume_allowed": false,
+  "#146_start_allowed": false,
+  "candidate_name": "support_preserving_overlay_v8_2",
+  "historical_gate": {
+    "candidate_minus_v6_7_largest_winner_removed_after_cost_pnl_minimum_inclusive": 0.0,
+    "candidate_minus_v6_7_total_after_cost_pnl_minimum_inclusive": 0.0,
+    "candidate_support_not_below_v6_7": true,
+    "equality_passes_noninferiority": true,
+    "side_quota_enabled": false
+  },
+  "issue_number": 247,
+  "lineage": {
+    "issue246_outcomes_allowed_for_v8_2": false,
+    "issue246_target_free_manifest_sha256": "d285eb784d81b9581b0f47b7ea6903076c8db29ee654ec5b9443d9128e034617",
+    "v6_7_profile_sha256": "cec55d243acd6bbf60a5e8474545b487086ddcd4d18073682ae7f2d4660d2248",
+    "v8_1_historical_manifest_sha256": "3fff5785a53cb32fb26d839786e3f48c2ff2bd7cc9dcf84e801c916a6ebb0fb7",
+    "v8_1_profile_sha256": "1c808195fab5aea976429f4ab0fb46d69a29a4bbb705313d138a9ce8d3d19abf"
+  },
+  "policy_contract": {
+    "allowed_rank_veto_reason_codes": [
+      "policy_selected_no_trade",
+      "v8_1_veto_to_no_trade"
+    ],
+    "candidate_primary": "adaptive_support_controller_v8_1",
+    "fallback_baseline": "p_up_semantic_compatibility_v6_7",
+    "fallback_requires_independent_full_guard_pass": true,
+    "fallback_trigger": "v8_1_rank_threshold_abstention_only",
+    "full_execution_guard_unchanged": true,
+    "model_threshold_quantile_cost_sizing_or_guard_changed": false,
+    "risk_blocker_bypass_allowed": false,
+    "source_or_o_score_mutation_allowed": false
+  },
+  "preregistered_before_implementation_and_historical_target_access": true,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_enabled": false,
+    "paper_candidate_allowed": false,
+    "paper_only": true,
+    "polymarket_write_enabled": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_enabled": false
+  },
+  "schema_version": "bigan-v8-support-preserving-overlay-v8-2-profile-v1"
+}
