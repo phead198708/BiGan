@@ -410,18 +410,52 @@ def _prior_reference_sets(
     canary_rows = load_and_validate_persistent_outcome_blind_index(
         prior_canary_index_path
     )
-    historical_rows: list[dict[str, Any]] = []
-    for key in ("seed_runtime_target_rows", "consumed_stream_five_action_rows"):
-        historical_rows.extend(
-            _load_jsonl(
-                Path(
-                    _verified_descriptor(
-                        historical[key],
-                        f"#246 prior {key}",
-                    )["path"]
-                )
-            )
+    rank_lineage_rows = _load_jsonl(
+        Path(
+            _verified_descriptor(
+                historical["rank_lineage_rows"],
+                "#246 prior rank lineage",
+            )["path"]
         )
+    )
+    target_free_manifest_descriptor = _verified_descriptor(
+        historical["consumed_stream_target_free_freeze_manifest"],
+        "#246 prior target-free freeze manifest",
+    )
+    target_free_manifest = _load_json(
+        Path(target_free_manifest_descriptor["path"])
+    )
+    if (
+        target_free_manifest.get("target_free_freeze_passed") is not True
+        or target_free_manifest.get(
+            "labels_outcomes_resolution_or_pnl_opened"
+        )
+        is not False
+        or target_free_manifest.get("settlement_provider_called") is not False
+        or target_free_manifest.get("source_score_mutated") is not False
+    ):
+        raise ValueError("#246 prior target-free identity lineage is invalid")
+    selected_index_rows = _load_jsonl(
+        Path(
+            _verified_descriptor(
+                target_free_manifest["selected_window_rows"],
+                "#246 prior target-free selected index",
+            )["path"]
+        )
+    )
+    five_action_rows = _load_jsonl(
+        Path(
+            _verified_descriptor(
+                target_free_manifest["target_free_five_action_rows"],
+                "#246 prior target-free five-action rows",
+            )["path"]
+        )
+    )
+    historical_rows = [
+        *rank_lineage_rows,
+        *selected_index_rows,
+        *five_action_rows,
+    ]
     all_rows = [*historical_rows, *canary_rows]
     forbidden = _find_nonempty_fields(all_rows, FORBIDDEN_TARGET_FIELDS)
     if forbidden:
@@ -446,6 +480,11 @@ def _prior_reference_sets(
         - {""},
         "source_row_counts": {
             "historical_rows": len(historical_rows),
+            "historical_rank_lineage_rows": len(rank_lineage_rows),
+            "historical_target_free_selected_index_rows": len(
+                selected_index_rows
+            ),
+            "historical_target_free_five_action_rows": len(five_action_rows),
             "target_free_canary_index": len(canary_rows),
         },
     }

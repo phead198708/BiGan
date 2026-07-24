@@ -10,6 +10,9 @@ import pytest
 from bigan.v8.polymarket.training import (
     execution_layer_v2_adaptive_support_controller_v8_1 as v81,
 )
+from bigan.v8.polymarket.training import (
+    execution_layer_v2_adaptive_support_controller_v8_1_future_holdout_pipeline as v81_future_pipeline,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_adaptive_support_controller_v8_1_future_holdout import (
     COMPLETE_CANARY_BATCH_LATEST_MARKET_CLOSE_TS,
     EXACT_MARKET_COUNT,
@@ -168,6 +171,109 @@ def test_v8_1_future_freeze_config_requires_aligned_batch_pins(
             implementation_commit="3" * 40,
             stage_started_ts=1,
         )
+
+
+def test_v8_1_prior_identity_registry_uses_target_free_lineage(
+    tmp_path: Path,
+) -> None:
+    def write_json(path: Path, payload: object) -> dict[str, str]:
+        path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "path": str(path),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    def write_jsonl(path: Path, rows: list[dict]) -> dict[str, str]:
+        path.write_text(
+            "".join(
+                json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                for row in rows
+            ),
+            encoding="utf-8",
+        )
+        return {
+            "path": str(path),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    rank_lineage = write_jsonl(
+        tmp_path / "rank-lineage.jsonl",
+        [{"market_id": "rank-market", "score_uses_target_outcome_or_pnl": False}],
+    )
+    selected = write_jsonl(
+        tmp_path / "selected-index.jsonl",
+        [
+            {
+                "market_id": "selected-market",
+                "slug": "selected-slug",
+                "decision_id": "selected-decision",
+                "source_row_hash": "selected-source",
+            }
+        ],
+    )
+    five_action = write_jsonl(
+        tmp_path / "five-action.jsonl",
+        [
+            {
+                "market_id": "selected-market",
+                "market_slug": "selected-slug",
+                "decision_id": "action-decision",
+                "source_feature_row_sha256": "action-source",
+                "outcome_fields_used_as_decision_input": False,
+                "target_used_as_decision_input": False,
+            }
+        ],
+    )
+    target_free_manifest = write_json(
+        tmp_path / "target-free-manifest.json",
+        {
+            "target_free_freeze_passed": True,
+            "labels_outcomes_resolution_or_pnl_opened": False,
+            "settlement_provider_called": False,
+            "source_score_mutated": False,
+            "selected_window_rows": selected,
+            "target_free_five_action_rows": five_action,
+        },
+    )
+    legacy_targets = write_jsonl(
+        tmp_path / "legacy-targets.jsonl",
+        [{"market_id": "must-not-open", "settlement_pnl": 1.0}],
+    )
+    prior_canary_index = tmp_path / "prior-canary-index.jsonl"
+    prior_canary_index.write_text("", encoding="utf-8")
+
+    result = v81_future_pipeline._prior_reference_sets(
+        historical={
+            "rank_lineage_rows": rank_lineage,
+            "consumed_stream_target_free_freeze_manifest": (
+                target_free_manifest
+            ),
+            "seed_runtime_target_rows": legacy_targets,
+            "consumed_stream_five_action_rows": legacy_targets,
+        },
+        prior_canary_index_path=prior_canary_index,
+    )
+
+    assert result["market_ids"] == {"rank-market", "selected-market"}
+    assert result["slugs"] == {"selected-slug"}
+    assert result["decision_ids"] == {
+        "selected-decision",
+        "action-decision",
+    }
+    assert result["source_row_hashes"] == {
+        "selected-source",
+        "action-source",
+    }
+    assert result["source_row_counts"] == {
+        "historical_rows": 3,
+        "historical_rank_lineage_rows": 1,
+        "historical_target_free_selected_index_rows": 1,
+        "historical_target_free_five_action_rows": 1,
+        "target_free_canary_index": 0,
+    }
 
 
 def _index_row(
