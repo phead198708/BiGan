@@ -68,6 +68,9 @@ MANIFEST_SCHEMA_VERSION = (
 FUTURE_PLAN_SCHEMA_VERSION = (
     "bigan-v8-non-risk-abstention-fallback-v8-3-future-holdout-plan-v1"
 )
+FUTURE_PLAN_V2_SCHEMA_VERSION = (
+    "bigan-v8-non-risk-abstention-fallback-v8-3-future-holdout-plan-v2"
+)
 FUTURE_SCHEMA_PREFIX = (
     "bigan-v8-non-risk-abstention-fallback-v8-3-future-holdout"
 )
@@ -187,9 +190,83 @@ def validate_non_risk_abstention_fallback_v8_3_future_plan(
     freeze = plan.get("target_free_decision_freeze", {})
     future_gate = plan.get("single_use_future_pnl_gate", {})
     lineage = plan.get("lineage", {})
+    schema_version = plan.get("schema_version")
+    issue_number = plan.get("issue_number")
+    v1 = schema_version == FUTURE_PLAN_SCHEMA_VERSION and issue_number == 249
+    v2 = schema_version == FUTURE_PLAN_V2_SCHEMA_VERSION and issue_number == 250
+    prior_latest_market_end_ts = lineage.get(
+        "latest_prior_selected_market_end_ts",
+        lineage.get("issue246_latest_selected_market_end_ts", 0),
+    )
+    lineage_valid = (
+        lineage.get("candidate_profile_sha256")
+        == "84c6bc06db0c2d25d342ecda23f5c06a4d9809c39db94a8eca1e550a4f822088"
+        and lineage.get("historical_gate_manifest_sha256")
+        == "adb930dc8bde72d89ae8b7520907ad88bb29d54f9c3b22317f9f4635ce5e015d"
+        and lineage.get("issue246_target_free_canary_manifest_sha256")
+        == "bf4cff80df1bf92a3980b7e79c772f8bfe55f34f575cb8d2ad0e52235376a18b"
+    )
+    if v2:
+        lineage_valid = lineage_valid and {
+            "candidate_implementation_commit": lineage.get(
+                "candidate_implementation_commit"
+            ),
+            "candidate_decision_policy_source_sha256": lineage.get(
+                "candidate_decision_policy_source_sha256"
+            ),
+            "settlement_fallback_source_sha256": lineage.get(
+                "settlement_fallback_source_sha256"
+            ),
+            "issue249_consumed_freeze_manifest_sha256": lineage.get(
+                "issue249_consumed_freeze_manifest_sha256"
+            ),
+            "issue249_target_access_claim_sha256": lineage.get(
+                "issue249_target_access_claim_sha256"
+            ),
+            "issue249_terminal_settlement_report_sha256": lineage.get(
+                "issue249_terminal_settlement_report_sha256"
+            ),
+            "frozen_feature_artifact_canary_manifest_sha256": lineage.get(
+                "frozen_feature_artifact_canary_manifest_sha256"
+            ),
+            "frozen_feature_artifact_canary_report_sha256": lineage.get(
+                "frozen_feature_artifact_canary_report_sha256"
+            ),
+            "frozen_feature_rows_sha256": lineage.get(
+                "frozen_feature_rows_sha256"
+            ),
+        } == {
+            "candidate_implementation_commit": (
+                "9eff4026f4fc6e1eeff70e0cef3685feb542a7d9"
+            ),
+            "candidate_decision_policy_source_sha256": (
+                "6622e5bf8c349f58bb9977bde1007cf69450225dda5abe0a9d14dbb5848469cf"
+            ),
+            "settlement_fallback_source_sha256": (
+                "6f0670c041e4258c1451a3332c6e67dfad2f4ab57313ce6fc48ea24619c9749c"
+            ),
+            "issue249_consumed_freeze_manifest_sha256": (
+                "e2e70d0bac83e2fac1bafee4e4c913aeaf1595272aaa73d62da7ac9a8ff5b499"
+            ),
+            "issue249_target_access_claim_sha256": (
+                "15c73d459dda3045e673c89d00ea8d1255d832a14415b5a819767a444d144f53"
+            ),
+            "issue249_terminal_settlement_report_sha256": (
+                "e8f426604395dd0cff27985035a7a3a1db341a8bdcca7f7ac8df000cf6a83fac"
+            ),
+            "frozen_feature_artifact_canary_manifest_sha256": (
+                "2cef83685dde40fcfa9b6c2be81496a5dc41f3fc798ede6dad2d587668b1ccb7"
+            ),
+            "frozen_feature_artifact_canary_report_sha256": (
+                "9cf9e84395f8609fd909f33f3728016114ad5bdcd91138ed2f9e6dc1b65e67ef"
+            ),
+            "frozen_feature_rows_sha256": (
+                "ba806b6926bdcbe6d0f3344f1a7aab921563740cfddd7c180adf826c70beff66"
+            ),
+        }
+    hardening = plan.get("settlement_hardening")
     checks = {
-        "identity": plan.get("schema_version") == FUTURE_PLAN_SCHEMA_VERSION
-        and plan.get("issue_number") == 249
+        "identity": (v1 or v2)
         and plan.get("candidate_name") == CANDIDATE_NAME
         and plan.get("frozen") is True
         and plan.get("preregistered_before_collection") is True,
@@ -217,7 +294,7 @@ def validate_non_risk_abstention_fallback_v8_3_future_plan(
         },
         "strict_boundary": isinstance(plan.get("plan_created_ts"), int)
         and plan["plan_created_ts"]
-        > lineage.get("issue246_latest_selected_market_end_ts", 0),
+        > prior_latest_market_end_ts,
         "batch_diagnostic": diagnostic
         == {
             "action_and_fallback_distribution_reported": True,
@@ -253,12 +330,22 @@ def validate_non_risk_abstention_fallback_v8_3_future_plan(
             "result_selected_rerun_allowed": False,
             "side_action_and_family_metrics_diagnostic_only": True,
         },
-        "lineage": lineage.get("candidate_profile_sha256")
-        == "84c6bc06db0c2d25d342ecda23f5c06a4d9809c39db94a8eca1e550a4f822088"
-        and lineage.get("historical_gate_manifest_sha256")
-        == "adb930dc8bde72d89ae8b7520907ad88bb29d54f9c3b22317f9f4635ce5e015d"
-        and lineage.get("issue246_target_free_canary_manifest_sha256")
-        == "bf4cff80df1bf92a3980b7e79c772f8bfe55f34f575cb8d2ad0e52235376a18b",
+        "lineage": lineage_valid,
+        "settlement_hardening": (
+            hardening is None
+            if v1
+            else hardening
+            == {
+                "additional_finalization_blockers_allowed": False,
+                "direct_training_or_export_eligibility_relaxed": False,
+                "evaluation_only_fallback_requires_exact_frozen_feature_payload_match": True,
+                "evaluation_only_fallback_requires_official_resolution": True,
+                "evaluation_only_fallback_requires_zero_timestamp_violations": True,
+                "frozen_feature_market_coverage_required": True,
+                "frozen_feature_rows_hash_pinned_before_target_access": True,
+                "legacy_freeze_without_frozen_features_fails_closed": True,
+            }
+        ),
         "safety": plan.get("safety") == _expected_safety(),
     }
     blockers = [name for name, passed in checks.items() if not passed]

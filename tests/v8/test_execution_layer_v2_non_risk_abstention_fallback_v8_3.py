@@ -35,6 +35,15 @@ def _future_plan() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _future_plan_v2() -> dict:
+    path = (
+        Path(__file__).parents[2]
+        / "examples/v8/polymarket_configs"
+        / "execution_layer_v2_non_risk_abstention_fallback_v8_3_future_holdout_plan_v2.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _decision(
     *,
     market_id: str = "m1",
@@ -88,6 +97,21 @@ def test_v8_3_future_plan_rejects_gate_relaxation() -> None:
     ] = 1
     with pytest.raises(ValueError, match="future plan invalid"):
         v83.validate_non_risk_abstention_fallback_v8_3_future_plan(plan)
+
+
+def test_v8_3_future_plan_v2_freezes_settlement_hardening() -> None:
+    plan = _future_plan_v2()
+    v83.validate_non_risk_abstention_fallback_v8_3_future_plan(plan)
+    assert plan["issue_number"] == 250
+    assert plan["plan_created_ts"] > plan["lineage"][
+        "latest_prior_selected_market_end_ts"
+    ]
+    assert plan["settlement_hardening"][
+        "evaluation_only_fallback_requires_exact_frozen_feature_payload_match"
+    ] is True
+    assert plan["settlement_hardening"][
+        "direct_training_or_export_eligibility_relaxed"
+    ] is False
 
 
 def test_v8_3_uses_v8_1_primary_when_guard_passes() -> None:
