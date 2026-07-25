@@ -455,6 +455,29 @@ def run_polymarket_async_round_collector_cli(
                     "provider_raw_orderbook_fallback_reason_distribution": (
                         capture.report["provider_raw_orderbook_fallback_reason_distribution"]
                     ),
+                    "orderbook_full_window_coverage_required": capture.report[
+                        "orderbook_full_window_coverage_required"
+                    ],
+                    "orderbook_full_window_coverage_passed": capture.report[
+                        "orderbook_full_window_coverage_passed"
+                    ],
+                    "orderbook_expected_decision_pair_count": capture.report[
+                        "orderbook_expected_decision_pair_count"
+                    ],
+                    "orderbook_observed_decision_pair_count": capture.report[
+                        "orderbook_observed_decision_pair_count"
+                    ],
+                    "orderbook_window_coverage_fallback_applied_market_count": (
+                        capture.report[
+                            "orderbook_window_coverage_fallback_applied_market_count"
+                        ]
+                    ),
+                    "orderbook_window_coverage_reason_distribution": capture.report[
+                        "orderbook_window_coverage_reason_distribution"
+                    ],
+                    "orderbook_window_coverage_by_market": capture.report[
+                        "orderbook_window_coverage_by_market"
+                    ],
                     "raw_trade_row_count": capture.report["raw_trade_row_count"],
                     "raw_btc_candle_row_count": capture.report["raw_btc_candle_row_count"],
                     "raw_chainlink_price_row_count": capture.report[
@@ -1047,6 +1070,8 @@ def _summary(
     market_identity_fallback_reason_distribution: dict[str, int] = {}
     clob_revalidation_attempt_distribution: dict[str, int] = {}
     clob_revalidation_retry_reason_distribution: dict[str, int] = {}
+    orderbook_window_coverage_reason_distribution: dict[str, int] = {}
+    orderbook_window_coverage_by_market: dict[str, dict[str, Any]] = {}
     for capture in captures:
         for name, count in dict(
             capture.get(
@@ -1086,6 +1111,24 @@ def _summary(
                 clob_revalidation_retry_reason_distribution.get(str(name), 0)
                 + int(count)
             )
+        for name, count in dict(
+            capture.get("orderbook_window_coverage_reason_distribution") or {}
+        ).items():
+            orderbook_window_coverage_reason_distribution[str(name)] = (
+                orderbook_window_coverage_reason_distribution.get(str(name), 0)
+                + int(count)
+            )
+        for market_id, coverage in dict(
+            capture.get("orderbook_window_coverage_by_market") or {}
+        ).items():
+            orderbook_window_coverage_by_market[str(market_id)] = dict(
+                coverage
+            )
+    orderbook_window_coverage_required_captures = [
+        capture
+        for capture in captures
+        if capture.get("orderbook_full_window_coverage_required") is True
+    ]
     summary = {
         "batch_id": batch_id,
         "paper_only": True,
@@ -1163,6 +1206,50 @@ def _summary(
         ),
         "training_sampled_orderbook_row_count": sum(
             int(item.get("training_sampled_orderbook_row_count") or 0) for item in captures
+        ),
+        "orderbook_full_window_coverage_required": bool(
+            orderbook_window_coverage_required_captures
+        ),
+        "orderbook_full_window_coverage_passed": bool(
+            orderbook_window_coverage_required_captures
+        )
+        and all(
+            item.get("orderbook_full_window_coverage_passed") is True
+            for item in orderbook_window_coverage_required_captures
+        ),
+        "orderbook_full_window_coverage_required_capture_count": len(
+            orderbook_window_coverage_required_captures
+        ),
+        "orderbook_full_window_coverage_passed_capture_count": sum(
+            item.get("orderbook_full_window_coverage_passed") is True
+            for item in orderbook_window_coverage_required_captures
+        ),
+        "orderbook_full_window_coverage_failed_capture_count": sum(
+            item.get("orderbook_full_window_coverage_passed") is not True
+            for item in orderbook_window_coverage_required_captures
+        ),
+        "orderbook_expected_decision_pair_count": sum(
+            int(item.get("orderbook_expected_decision_pair_count") or 0)
+            for item in captures
+        ),
+        "orderbook_observed_decision_pair_count": sum(
+            int(item.get("orderbook_observed_decision_pair_count") or 0)
+            for item in captures
+        ),
+        "orderbook_window_coverage_fallback_applied_market_count": sum(
+            int(
+                item.get(
+                    "orderbook_window_coverage_fallback_applied_market_count"
+                )
+                or 0
+            )
+            for item in captures
+        ),
+        "orderbook_window_coverage_reason_distribution": dict(
+            sorted(orderbook_window_coverage_reason_distribution.items())
+        ),
+        "orderbook_window_coverage_by_market": dict(
+            sorted(orderbook_window_coverage_by_market.items())
         ),
         "raw_chainlink_price_row_count": sum(
             int(item.get("raw_chainlink_price_row_count") or 0) for item in captures
