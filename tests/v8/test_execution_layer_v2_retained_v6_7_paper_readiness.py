@@ -34,6 +34,15 @@ def _future(name: str, *, start: int, pnl: list[float]) -> dict:
         "guard_blocked_zero_market_count": 1,
         "minimum_market_start_ts": start,
         "maximum_market_start_ts": start + len(pnl),
+        "maximum_market_end_ts": start + len(pnl) + 10,
+        "slugs": [f"{name}-slug-{index}" for index in range(len(pnl))],
+        "decision_ids": [
+            f"{name}-decision-{index}" for index in range(len(pnl))
+        ],
+        "source_row_hashes": [
+            f"{index + (1 if name == 'issue238' else 100):064x}"
+            for index in range(len(pnl))
+        ],
         "market_pnl_values": pnl,
         "source_manifest_sha256": "a" * 64,
         "target_free_manifest_sha256": "b" * 64,
@@ -52,6 +61,10 @@ def _historical() -> dict:
         "guard_blocked_zero_market_count": 0,
         "minimum_market_start_ts": 1,
         "maximum_market_start_ts": 2,
+        "maximum_market_end_ts": 2,
+        "slugs": ["h1", "h2"],
+        "decision_ids": ["hd1", "hd2"],
+        "source_row_hashes": ["e" * 64, "f" * 64],
         "market_pnl_values": [],
         "source_manifest_sha256": "d" * 64,
         "target_free_manifest_sha256": "",
@@ -113,7 +126,12 @@ def test_reports_use_future_windows_for_power_and_historical_for_lineage() -> No
     gate = result["gate_plan"]
     assert inventory["future_quality_valid_market_count"] == 8
     assert inventory["future_guard_blocked_zero_market_count"] == 2
-    assert inventory["future_market_overlap_count"] == 0
+    assert inventory["future_identity_overlap_counts"] == {
+        "decision_id": 0,
+        "market_id": 0,
+        "slug": 0,
+        "source_row_hash": 0,
+    }
     assert inventory["evidence_inventory_passed"] is True
     assert power["planning_market_count"] == 8
     assert power["completed_future_outcomes_used_for_variance_planning_only"] is True
@@ -129,7 +147,7 @@ def test_overlapping_future_windows_fail_closed() -> None:
     first = _future("issue238", start=100, pnl=[0.01, 0.02])
     second = _future("issue250", start=1_000, pnl=[0.01, 0.02])
     second["market_ids"][0] = first["market_ids"][0]
-    with pytest.raises(ValueError, match="market_overlap"):
+    with pytest.raises(ValueError, match="market_id_overlap"):
         readiness.build_paper_readiness_reports(
             issue238_window=first,
             issue250_window=second,

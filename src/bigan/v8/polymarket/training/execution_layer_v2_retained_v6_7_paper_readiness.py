@@ -128,6 +128,12 @@ def validate_retained_v6_7_paper_readiness_profile(
                 "6c44b6d56ed9aeb6910bcbf32882e6b6c77a8f3e0ecfe445e4021ade7594da5b"
             ),
             "future_windows_must_be_market_disjoint": True,
+            "future_window_identity_fields": [
+                "market_id",
+                "slug",
+                "decision_id",
+                "source_row_hash",
+            ],
             "future_windows_must_be_chronological": True,
             "target_free_freeze_must_precede_outcome_access": True,
             "official_read_only_settlement_required": True,
@@ -229,16 +235,24 @@ def build_paper_readiness_reports(
     first = _validate_future_window(issue238_window, expected_name="issue238")
     second = _validate_future_window(issue250_window, expected_name="issue250")
     historical = _validate_historical_inventory(historical_inventory)
-    first_ids = set(first["market_ids"])
-    second_ids = set(second["market_ids"])
-    overlap = sorted(first_ids & second_ids)
+    identity_fields = {
+        "market_id": "market_ids",
+        "slug": "slugs",
+        "decision_id": "decision_ids",
+        "source_row_hash": "source_row_hashes",
+    }
+    overlaps = {
+        field: sorted(set(first[key]) & set(second[key]))
+        for field, key in identity_fields.items()
+    }
     chronological = (
         int(second["minimum_market_start_ts"])
-        > int(first["maximum_market_start_ts"])
+        > int(first["maximum_market_end_ts"])
     )
     inventory_blockers = []
-    if overlap:
-        inventory_blockers.append("future_evidence_market_overlap")
+    for field, values in overlaps.items():
+        if values:
+            inventory_blockers.append(f"future_evidence_{field}_overlap")
     if not chronological:
         inventory_blockers.append("future_evidence_not_strictly_chronological")
     inventory = {
@@ -263,8 +277,12 @@ def build_paper_readiness_reports(
             first["guard_blocked_zero_market_count"]
             + second["guard_blocked_zero_market_count"]
         ),
-        "future_market_overlap_count": len(overlap),
-        "future_market_overlap_ids": overlap,
+        "future_identity_overlap_counts": {
+            field: len(values) for field, values in overlaps.items()
+        },
+        "future_identity_overlap_examples": {
+            field: values[:10] for field, values in overlaps.items()
+        },
         "future_windows_strictly_chronological": chronological,
         "target_free_freezes_preceded_outcome_access": True,
         "official_read_only_settlement_complete": True,
@@ -386,6 +404,10 @@ def build_paper_readiness_reports(
     power_report["report_id"] = canonical_json_sha256(power_report)
 
     gate = profile["forward_gate_contract"]
+    prior_registries = {
+        field: sorted(set(first[key]) | set(second[key]))
+        for field, key in identity_fields.items()
+    }
     gate_plan = {
         "schema_version": GATE_PLAN_SCHEMA_VERSION,
         "report_created_ts": report_created_ts,
@@ -400,6 +422,18 @@ def build_paper_readiness_reports(
         "minimum_target_free_guard_accepted_market_count": minimum_accepted,
         "maximum_capture_attempt_count": attempt_cap,
         "bounded_batch_market_count": design["bounded_batch_market_count"],
+        "strictly_later_minimum_market_start_ts_exclusive": max(
+            int(first["maximum_market_end_ts"]),
+            int(second["maximum_market_end_ts"]),
+        ),
+        "prior_identity_registry_counts": {
+            field: len(values) for field, values in prior_registries.items()
+        },
+        "prior_identity_registry_hashes": {
+            field: canonical_json_sha256(values)
+            for field, values in prior_registries.items()
+        },
+        "required_disjoint_identity_fields": list(identity_fields),
         "strictly_later_and_disjoint_required": True,
         "target_free_decision_freeze_required": True,
         "all_selected_markets_closed_before_outcome_access": True,
@@ -432,6 +466,7 @@ def build_paper_readiness_reports(
         "paper_candidate_auto_unlock_allowed": False,
         "separate_manual_paper_authorization_issue_required": True,
         "future_outcome_blind_collection_preregistered": True,
+        "future_collection_boundary_and_identity_registries_frozen": True,
         "future_outcome_blind_collection_may_start_after_code_validation": True,
         "paper_candidate_gate_design_ready": True,
         "paper_candidate_gate_blocking_reason_codes": [],
@@ -629,6 +664,9 @@ def _load_issue251_inventory(manifest_path: Path) -> dict[str, Any]:
         "maximum_market_start_ts": max(
             int(row.get("decision_ts") or 0) for row in selected
         ),
+        "maximum_market_end_ts": max(
+            int(row.get("decision_ts") or 0) for row in selected
+        ),
         "market_pnl_values": [],
         "source_manifest_sha256": _descriptor(manifest_path)["sha256"],
         "target_free_manifest_sha256": "",
@@ -686,6 +724,7 @@ def _future_window(
     if not math.isclose(sum(pnl_values), reported_total, abs_tol=1e-12):
         raise ValueError(f"#252 {name} target/report PnL mismatch")
     starts = [int(row["market_start_ts"]) for row in selected_rows]
+    ends = [int(row["market_end_ts"]) for row in selected_rows]
     return {
         "name": name,
         "role": "independent_future_variance_planning_only",
@@ -695,6 +734,12 @@ def _future_window(
         "guard_blocked_zero_market_count": len(selected_by_id) - len(target_by_id),
         "minimum_market_start_ts": min(starts),
         "maximum_market_start_ts": max(starts),
+        "maximum_market_end_ts": max(ends),
+        "slugs": sorted(str(row["slug"]) for row in selected_rows),
+        "decision_ids": sorted(str(row["decision_id"]) for row in selected_rows),
+        "source_row_hashes": sorted(
+            str(row["source_row_hash"]) for row in selected_rows
+        ),
         "market_pnl_values": pnl_values,
         "reported_total_after_cost_pnl": reported_total,
         "source_manifest_sha256": source_manifest_sha256,
@@ -717,6 +762,11 @@ def _validate_future_window(
         != int(window.get("quality_valid_market_count") or 0)
         or len(window.get("market_pnl_values") or [])
         != int(window.get("quality_valid_market_count") or 0)
+        or any(
+            len(window.get(field) or [])
+            != int(window.get("quality_valid_market_count") or 0)
+            for field in ("slugs", "decision_ids", "source_row_hashes")
+        )
     ):
         raise ValueError(f"#252 {expected_name} future window invalid")
     for field in (
@@ -751,11 +801,25 @@ def _inventory_source(
     return {
         key: value
         for key, value in window.items()
-        if key not in {"market_ids", "market_pnl_values"}
+        if key
+        not in {
+            "market_ids",
+            "slugs",
+            "decision_ids",
+            "source_row_hashes",
+            "market_pnl_values",
+        }
     } | {
-        "unique_market_identity_hash": canonical_json_sha256(
-            window["market_ids"]
-        ),
+        "identity_registry_hashes": {
+            "market_id": canonical_json_sha256(window["market_ids"]),
+            "slug": canonical_json_sha256(window.get("slugs") or []),
+            "decision_id": canonical_json_sha256(
+                window.get("decision_ids") or []
+            ),
+            "source_row_hash": canonical_json_sha256(
+                window.get("source_row_hashes") or []
+            ),
+        },
         "variance_planning_eligible": variance_eligible,
         "promotion_pass_eligible": False,
     }
@@ -933,7 +997,7 @@ def _inventory_markdown(report: dict[str, Any]) -> str:
             f"- inventory passed: `{str(report['evidence_inventory_passed']).lower()}`",
             f"- independent future markets: `{report['future_quality_valid_market_count']}`",
             f"- guard accepted / zero: `{report['future_guard_accepted_market_count']} / {report['future_guard_blocked_zero_market_count']}`",
-            f"- future overlap: `{report['future_market_overlap_count']}`",
+            f"- future identity overlaps: `{report['future_identity_overlap_counts']}`",
             f"- chronological: `{str(report['future_windows_strictly_chronological']).lower()}`",
             "- outcomes used for variance planning only: `true`",
             "- retrospective promotion pass evaluated: `false`",
@@ -968,6 +1032,8 @@ def _gate_markdown(report: dict[str, Any]) -> str:
             "",
             f"- stop rule: `{report['collection_stop_rule']}`",
             f"- quality-valid / accepted support: `{report['exact_quality_valid_market_count']} / {report['minimum_target_free_guard_accepted_market_count']}`",
+            f"- strict future start boundary: `>{report['strictly_later_minimum_market_start_ts_exclusive']}`",
+            f"- disjoint identity fields: `{report['required_disjoint_identity_fields']}`",
             "- total PnL, largest-winner-removed PnL, and one-sided bootstrap LCB must all be positive",
             "- side quota: `false`",
             "- one evaluation; result-selected extension/rerun: `false / false`",

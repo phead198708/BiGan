@@ -15,6 +15,12 @@
     "issue250_manifest_sha256": "6ecb044f3fc34c4ebf2063412da71fe974f2f55f231fb8fa51418cf247d5ae26",
     "issue251_manifest_sha256": "6c44b6d56ed9aeb6910bcbf32882e6b6c77a8f3e0ecfe445e4021ade7594da5b",
     "future_windows_must_be_market_disjoint": true,
+    "future_window_identity_fields": [
+      "market_id",
+      "slug",
+      "decision_id",
+      "source_row_hash"
+    ],
     "future_windows_must_be_chronological": true,
     "target_free_freeze_must_precede_outcome_access": true,
     "official_read_only_settlement_required": true,
