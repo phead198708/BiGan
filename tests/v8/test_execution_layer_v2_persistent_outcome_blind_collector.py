@@ -91,6 +91,51 @@ def test_real_collector_batch_summary_contract_indexes_without_safety_schema_gap
     assert result["report"]["quality_valid_index_entry_count"] == 1
 
 
+def test_index_rejects_silent_partial_orderbook_decision_window(
+    tmp_path: Path,
+) -> None:
+    capture = _capture_fixture(
+        tmp_path,
+        boundary=2_000,
+        market_id="market-partial-window",
+        orderbook_decision_offsets_ms=(60_000, 120_000),
+    )
+    batch_path = _batch_summary(
+        tmp_path,
+        batch_id="batch-partial-window",
+        captures=[capture],
+    )
+    index_path = tmp_path / "state" / "index.jsonl"
+
+    result = _index_batch(
+        tmp_path,
+        run_id="index-partial-window",
+        index_path=index_path,
+        batch_path=batch_path,
+    )
+    row = load_and_validate_persistent_outcome_blind_index(index_path)[0]
+
+    assert row["capture_quality_valid"] is False
+    assert "orderbook_full_decision_window_coverage_failed" in (
+        row["capture_quality_reason_codes"]
+    )
+    assert "orderbook_collection_ended_before_last_required_decision" in (
+        row["capture_quality_reason_codes"]
+    )
+    assert "orderbook_required_decision_pair_coverage_incomplete" in (
+        row["capture_quality_reason_codes"]
+    )
+    coverage = row["orderbook_window_coverage"]
+    assert coverage["orderbook_expected_decision_pair_count"] == 4
+    assert coverage["orderbook_observed_decision_pair_count"] == 2
+    assert coverage["orderbook_latest_covered_decision_ts"] == 122_000
+    assert result["report"][
+        "batch_orderbook_full_window_coverage_failed_count"
+    ] == 1
+    assert result["report"]["quality_valid_index_entry_count"] == 0
+    _assert_safety(row)
+
+
 def test_index_is_hash_chained_idempotent_and_retains_failed_attempts(
     tmp_path: Path,
 ) -> None:
@@ -1136,36 +1181,53 @@ def _capture_fixture(
     boundary: int,
     market_id: str,
     resolution_rows: list[dict] | None = None,
+    orderbook_decision_offsets_ms: tuple[int, ...] = (
+        60_000,
+        120_000,
+        180_000,
+        240_000,
+    ),
 ) -> dict:
     run_id = f"round-{boundary}-{market_id}"
     run_dir = tmp_path / run_id
     raw_dir = run_dir / "raw"
     raw_dir.mkdir(parents=True)
     slug = f"btc-updown-5m-{boundary}"
+    orderbook_collection_end_ts = boundary + max(
+        orderbook_decision_offsets_ms,
+        default=0,
+    )
     payloads = {
         "raw_polymarket_markets.jsonl": [
             {
                 "market_id": market_id,
                 "slug": slug,
+                "market_family": "btc_updown_5m",
                 "market_start_ts": boundary,
                 "market_end_ts": boundary + 300_000,
+                "up_token_id": "up-token",
+                "down_token_id": "down-token",
             }
         ],
         "raw_polymarket_orderbooks.jsonl": [
             {
                 "market_id": market_id,
-                "timestamp": boundary,
-                "outcome": "UP",
-                "best_bid": 0.49,
-                "best_ask": 0.51,
-            },
-            {
-                "market_id": market_id,
-                "timestamp": boundary,
-                "outcome": "DOWN",
-                "best_bid": 0.49,
-                "best_ask": 0.51,
-            },
+                "token_id": token_id,
+                "ts": decision_ts,
+                "available_at_ts": decision_ts,
+                "collection_end_ts": orderbook_collection_end_ts,
+                "outcome": outcome,
+                "bid_price": 0.49,
+                "ask_price": 0.51,
+            }
+            for decision_ts in (
+                boundary + offset
+                for offset in orderbook_decision_offsets_ms
+            )
+            for outcome, token_id in (
+                ("UP", "up-token"),
+                ("DOWN", "down-token"),
+            )
         ],
         "raw_polymarket_trades.jsonl": [],
         "raw_binance_btcusdt_klines.jsonl": [
@@ -1219,8 +1281,12 @@ def _capture_fixture(
         "run_dir": str(run_dir),
         "scheduled_round_start_ts": boundary,
         "capture_start_boundary_validation_passed": True,
-        "provider_raw_orderbook_snapshot_count": 2,
-        "training_sampled_orderbook_row_count": 2,
+        "provider_raw_orderbook_snapshot_count": (
+            len(orderbook_decision_offsets_ms) * 2
+        ),
+        "training_sampled_orderbook_row_count": (
+            len(orderbook_decision_offsets_ms) * 2
+        ),
         "raw_btc_candle_row_count": 1,
         "raw_chainlink_price_row_count": 1,
         "market_identity_cache_provenance_violation_count": 0,

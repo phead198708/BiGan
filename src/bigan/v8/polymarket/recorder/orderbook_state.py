@@ -25,6 +25,174 @@ def sample_times_for_market(
     return tuple(times)
 
 
+def full_decision_window_orderbook_coverage(
+    *,
+    market: dict[str, Any],
+    book_rows: list[dict[str, Any]],
+    sample_interval_seconds: int,
+) -> dict[str, Any]:
+    """Measure paired causal book coverage for every post-open decision time."""
+
+    if sample_interval_seconds <= 0:
+        raise ValueError("sample_interval_seconds must be positive")
+    start_ts = int(market["market_start_ts"])
+    end_ts = int(market["market_end_ts"])
+    interval_ms = sample_interval_seconds * 1000
+    required_decision_timestamps: list[int] = []
+    decision_ts = start_ts + interval_ms
+    while decision_ts < end_ts:
+        required_decision_timestamps.append(decision_ts)
+        decision_ts += interval_ms
+
+    up_token_id = str(market.get("up_token_id") or "")
+    down_token_id = str(market.get("down_token_id") or "")
+    expected_tokens = {
+        token_id: outcome
+        for token_id, outcome in (
+            (up_token_id, "UP"),
+            (down_token_id, "DOWN"),
+        )
+        if token_id
+    }
+    by_outcome: dict[str, list[dict[str, Any]]] = {"UP": [], "DOWN": []}
+    for row in book_rows:
+        if str(row.get("market_id") or "") != str(market["market_id"]):
+            continue
+        expected_outcome = expected_tokens.get(str(row.get("token_id") or ""))
+        outcome = str(row.get("outcome") or "").upper()
+        if expected_tokens and (
+            expected_outcome is None or outcome != expected_outcome
+        ):
+            continue
+        if not expected_tokens and outcome not in by_outcome:
+            continue
+        try:
+            row_ts = int(row.get("ts") or row.get("timestamp"))
+            available_at_ts = int(row.get("available_at_ts") or row_ts)
+        except (TypeError, ValueError):
+            continue
+        if available_at_ts < row_ts:
+            continue
+        by_outcome[expected_outcome or outcome].append(
+            {
+                **row,
+                "ts": row_ts,
+                "available_at_ts": available_at_ts,
+            }
+        )
+    for rows in by_outcome.values():
+        rows.sort(
+            key=lambda item: (
+                int(item["ts"]),
+                int(item["available_at_ts"]),
+            )
+        )
+
+    complete_decision_timestamps: list[int] = []
+    missing_decision_timestamps: list[int] = []
+    for required_ts in required_decision_timestamps:
+        sampled = {
+            outcome: _latest_causal_book_for_sample(
+                rows=rows,
+                decision_ts=required_ts,
+                max_book_age_ms=interval_ms,
+            )
+            for outcome, rows in by_outcome.items()
+        }
+        if sampled["UP"] is not None and sampled["DOWN"] is not None:
+            complete_decision_timestamps.append(required_ts)
+        else:
+            missing_decision_timestamps.append(required_ts)
+
+    collection_end_by_outcome: dict[str, int | None] = {}
+    for outcome, rows in by_outcome.items():
+        ends = [
+            int(row.get("collection_end_ts") or row["available_at_ts"])
+            for row in rows
+        ]
+        collection_end_by_outcome[outcome] = max(ends) if ends else None
+    observed_collection_end_ts = (
+        min(
+            value
+            for value in collection_end_by_outcome.values()
+            if value is not None
+        )
+        if all(value is not None for value in collection_end_by_outcome.values())
+        else None
+    )
+    last_required_decision_ts = (
+        required_decision_timestamps[-1]
+        if required_decision_timestamps
+        else None
+    )
+    collection_reached_last_required_decision = (
+        last_required_decision_ts is not None
+        and observed_collection_end_ts is not None
+        and observed_collection_end_ts >= last_required_decision_ts
+    )
+    reason_codes: list[str] = []
+    if not required_decision_timestamps:
+        reason_codes.append("orderbook_expected_decision_window_empty")
+    if not up_token_id or not down_token_id or up_token_id == down_token_id:
+        reason_codes.append("orderbook_expected_token_identity_invalid")
+    if any(not rows for rows in by_outcome.values()):
+        reason_codes.append("orderbook_missing_expected_token_side")
+    if (
+        last_required_decision_ts is not None
+        and not collection_reached_last_required_decision
+    ):
+        reason_codes.append(
+            "orderbook_collection_ended_before_last_required_decision"
+        )
+    if len(complete_decision_timestamps) != len(required_decision_timestamps):
+        reason_codes.append(
+            "orderbook_required_decision_pair_coverage_incomplete"
+        )
+    return {
+        "orderbook_full_decision_window_coverage_passed": not reason_codes,
+        "orderbook_window_coverage_reason_codes": reason_codes,
+        "orderbook_sample_interval_seconds": sample_interval_seconds,
+        "orderbook_expected_decision_pair_count": len(
+            required_decision_timestamps
+        ),
+        "orderbook_observed_decision_pair_count": len(
+            complete_decision_timestamps
+        ),
+        "orderbook_expected_raw_side_row_count": (
+            len(required_decision_timestamps) * 2
+        ),
+        "orderbook_observed_complete_side_row_count": (
+            len(complete_decision_timestamps) * 2
+        ),
+        "orderbook_required_decision_timestamps": (
+            required_decision_timestamps
+        ),
+        "orderbook_complete_decision_timestamps": (
+            complete_decision_timestamps
+        ),
+        "orderbook_missing_decision_timestamps": (
+            missing_decision_timestamps
+        ),
+        "orderbook_last_required_decision_ts": (
+            last_required_decision_ts
+        ),
+        "orderbook_latest_covered_decision_ts": (
+            complete_decision_timestamps[-1]
+            if complete_decision_timestamps
+            else None
+        ),
+        "orderbook_observed_collection_end_ts": (
+            observed_collection_end_ts
+        ),
+        "orderbook_collection_end_by_outcome": (
+            collection_end_by_outcome
+        ),
+        "orderbook_collection_reached_last_required_decision": (
+            collection_reached_last_required_decision
+        ),
+    }
+
+
 def mock_orderbook_rows(
     markets: list[dict[str, Any]],
     config: PolymarketRealCorpusRecorderConfig,

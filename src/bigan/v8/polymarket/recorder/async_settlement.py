@@ -1783,6 +1783,48 @@ def _pending_capture_report(
             str(reason)
             for reason in row.get("orderbook_fallback_reason_codes") or []
         )
+    window_coverage_by_market: dict[str, dict[str, Any]] = {}
+    for row in provider_raw_orderbooks:
+        if row.get("orderbook_full_window_coverage_required") is not True:
+            continue
+        market_id = str(row.get("market_id") or "")
+        if not market_id or market_id in window_coverage_by_market:
+            continue
+        window_coverage_by_market[market_id] = {
+            "passed": (
+                row.get(
+                    "orderbook_full_decision_window_coverage_passed"
+                )
+                is True
+            ),
+            "expected_decision_pair_count": int(
+                row.get("orderbook_expected_decision_pair_count") or 0
+            ),
+            "observed_decision_pair_count": int(
+                row.get("orderbook_observed_decision_pair_count") or 0
+            ),
+            "last_required_decision_ts": row.get(
+                "orderbook_last_required_decision_ts"
+            ),
+            "latest_covered_decision_ts": row.get(
+                "orderbook_latest_covered_decision_ts"
+            ),
+            "observed_collection_end_ts": row.get(
+                "orderbook_observed_collection_end_ts"
+            ),
+            "fallback_applied": (
+                row.get("orderbook_window_coverage_fallback_applied")
+                is True
+            ),
+            "reason_codes": list(
+                row.get("orderbook_window_coverage_reason_codes") or []
+            ),
+        }
+    window_reason_counts: Counter[str] = Counter()
+    for coverage in window_coverage_by_market.values():
+        window_reason_counts.update(
+            str(reason) for reason in coverage["reason_codes"]
+        )
     return {
         "schema_version": ASYNC_SETTLEMENT_SCHEMA_VERSION,
         "phase": PENDING_CAPTURE_PHASE,
@@ -1877,6 +1919,34 @@ def _pending_capture_report(
         ),
         "provider_raw_orderbook_fallback_reason_distribution": dict(
             sorted(fallback_reason_counts.items())
+        ),
+        "orderbook_full_window_coverage_required": bool(
+            window_coverage_by_market
+        ),
+        "orderbook_full_window_coverage_passed": bool(
+            window_coverage_by_market
+        )
+        and all(
+            coverage["passed"]
+            for coverage in window_coverage_by_market.values()
+        ),
+        "orderbook_expected_decision_pair_count": sum(
+            coverage["expected_decision_pair_count"]
+            for coverage in window_coverage_by_market.values()
+        ),
+        "orderbook_observed_decision_pair_count": sum(
+            coverage["observed_decision_pair_count"]
+            for coverage in window_coverage_by_market.values()
+        ),
+        "orderbook_window_coverage_fallback_applied_market_count": sum(
+            coverage["fallback_applied"]
+            for coverage in window_coverage_by_market.values()
+        ),
+        "orderbook_window_coverage_reason_distribution": dict(
+            sorted(window_reason_counts.items())
+        ),
+        "orderbook_window_coverage_by_market": dict(
+            sorted(window_coverage_by_market.items())
         ),
         "raw_trade_row_count": len(raw_payloads["raw_polymarket_trades.jsonl"]),
         "raw_btc_candle_row_count": len(raw_payloads["raw_binance_btcusdt_klines.jsonl"]),

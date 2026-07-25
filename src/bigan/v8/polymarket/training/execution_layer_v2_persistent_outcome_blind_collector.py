@@ -13,6 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.recorder.contracts import (
+    DEFAULT_SAMPLING_POLICY_SECONDS,
+)
+from bigan.v8.polymarket.recorder.orderbook_state import (
+    full_decision_window_orderbook_coverage,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_pairwise_action_advantage_lcb import (
     _blocked_safety_fields,
     _descriptor,
@@ -370,6 +376,20 @@ def index_persistent_outcome_blind_batch(
 
     all_rows = load_and_validate_persistent_outcome_blind_index(index_path)
     run_dir.mkdir(parents=True, exist_ok=False)
+    batch_window_coverage_rows = [
+        dict(row["orderbook_window_coverage"])
+        for row in appended
+        if isinstance(row.get("orderbook_window_coverage"), dict)
+    ]
+    batch_window_reason_counts: Counter[str] = Counter()
+    for coverage in batch_window_coverage_rows:
+        batch_window_reason_counts.update(
+            str(reason)
+            for reason in coverage.get(
+                "orderbook_window_coverage_reason_codes"
+            )
+            or []
+        )
     report = {
         "schema_version": BATCH_REPORT_SCHEMA_VERSION,
         "run_id": config.run_id,
@@ -385,6 +405,41 @@ def index_persistent_outcome_blind_batch(
         "index_entry_count": len(all_rows),
         "quality_valid_index_entry_count": sum(
             row.get("capture_quality_valid") is True for row in all_rows
+        ),
+        "batch_orderbook_full_window_coverage_passed_count": sum(
+            coverage.get(
+                "orderbook_full_decision_window_coverage_passed"
+            )
+            is True
+            for coverage in batch_window_coverage_rows
+        ),
+        "batch_orderbook_full_window_coverage_failed_count": sum(
+            coverage.get(
+                "orderbook_full_decision_window_coverage_passed"
+            )
+            is not True
+            for coverage in batch_window_coverage_rows
+        ),
+        "batch_orderbook_expected_decision_pair_count": sum(
+            int(
+                coverage.get(
+                    "orderbook_expected_decision_pair_count"
+                )
+                or 0
+            )
+            for coverage in batch_window_coverage_rows
+        ),
+        "batch_orderbook_observed_decision_pair_count": sum(
+            int(
+                coverage.get(
+                    "orderbook_observed_decision_pair_count"
+                )
+                or 0
+            )
+            for coverage in batch_window_coverage_rows
+        ),
+        "batch_orderbook_window_coverage_reason_distribution": dict(
+            sorted(batch_window_reason_counts.items())
         ),
         "index_chain_validation_passed": True,
         "outcome_blind_collection_only": True,
@@ -793,6 +848,47 @@ def _capture_index_entry(
     }
     if not {"UP", "DOWN"}.issubset(orderbook_outcomes):
         reasons.append("executable_up_down_orderbook_coverage_failed")
+    market_family = str(
+        market.get("market_family")
+        or protocol.get("market_family")
+        or ""
+    )
+    sample_interval_seconds = DEFAULT_SAMPLING_POLICY_SECONDS.get(
+        market_family
+    )
+    if not market or sample_interval_seconds is None:
+        orderbook_window_coverage = {
+            "orderbook_full_decision_window_coverage_passed": False,
+            "orderbook_window_coverage_reason_codes": [
+                "orderbook_window_coverage_contract_unavailable"
+            ],
+            "orderbook_expected_decision_pair_count": 0,
+            "orderbook_observed_decision_pair_count": 0,
+            "orderbook_last_required_decision_ts": None,
+            "orderbook_latest_covered_decision_ts": None,
+            "orderbook_observed_collection_end_ts": None,
+        }
+    else:
+        orderbook_window_coverage = (
+            full_decision_window_orderbook_coverage(
+                market=market,
+                book_rows=orderbooks,
+                sample_interval_seconds=sample_interval_seconds,
+            )
+        )
+    if (
+        orderbook_window_coverage[
+            "orderbook_full_decision_window_coverage_passed"
+        ]
+        is not True
+    ):
+        reasons.append("orderbook_full_decision_window_coverage_failed")
+        reasons.extend(
+            str(reason)
+            for reason in orderbook_window_coverage[
+                "orderbook_window_coverage_reason_codes"
+            ]
+        )
     if int(capture.get("raw_btc_candle_row_count") or 0) <= 0 or not candles:
         reasons.append("btc_candle_coverage_failed")
     if int(capture.get("raw_chainlink_price_row_count") or 0) <= 0 or not chainlink_rows:
@@ -864,6 +960,7 @@ def _capture_index_entry(
         "pending_round_capture_report": _descriptor(report_path),
         "batch_summary": _descriptor(batch_summary_path),
         "raw_artifacts": raw_descriptors,
+        "orderbook_window_coverage": orderbook_window_coverage,
         "raw_resolution_row_count": len(resolution_rows),
         "resolution_provider_called": False,
         "settlement_finalizer_started": False,
@@ -1117,6 +1214,14 @@ def _batch_markdown(report: dict[str, Any]) -> str:
             f"- batch: `{report['batch_id']}`",
             f"- appended / captures: `{report['appended_entry_count']}/{report['batch_capture_count']}`",
             f"- total / quality-valid index rows: `{report['index_entry_count']}/{report['quality_valid_index_entry_count']}`",
+            "- full-window orderbook pass / fail: "
+            f"`{report['batch_orderbook_full_window_coverage_passed_count']}/"
+            f"{report['batch_orderbook_full_window_coverage_failed_count']}`",
+            "- observed / expected decision pairs: "
+            f"`{report['batch_orderbook_observed_decision_pair_count']}/"
+            f"{report['batch_orderbook_expected_decision_pair_count']}`",
+            "- orderbook window blockers: "
+            f"`{report['batch_orderbook_window_coverage_reason_distribution']}`",
             f"- idempotent skips: `{report['idempotent_existing_run_count']}`",
             "- labels/outcomes/PnL opened: `false`",
             "- settlement finalizer / resolution / training export: `false/false/false`",
