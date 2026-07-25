@@ -35,6 +35,9 @@ from bigan.v8.polymarket.recorder.market_identity_cache import (
     GammaMarketIdentityCache,
     GammaMarketIdentityCacheError,
 )
+from bigan.v8.polymarket.recorder.orderbook_state import (
+    full_decision_window_orderbook_coverage,
+)
 
 BTC_UPDOWN_SLUG_PATTERN = re.compile(r"^btc-updown-(5m|15m|1h)-(\d+)$")
 BTC_UPDOWN_FAMILY_BY_SLUG = {
@@ -616,43 +619,47 @@ class PolymarketPublicHTTPRealCorpusProvider:
         config: PolymarketRealCorpusRecorderConfig,
     ) -> list[dict[str, Any]]:
         if self.orderbook_source is not None:
+            fallback_applied = False
             try:
                 rows = self._orderbook_rows_from_stream_source(markets, config)
                 if not rows:
                     rows = self._orderbook_rows_from_source(markets)
             except RealCorpusPublicProviderError as exc:
-                return self._rest_orderbook_fallback(
+                rows = self._rest_orderbook_fallback(
                     markets,
                     reason_codes=exc.reason_codes,
                 )
-
-            rows = _annotate_orderbook_rows(
-                rows,
-                source_type="polymarket_clob_websocket",
-                rest_fallback=False,
-                fallback_reason_codes=(),
-            )
+                fallback_applied = True
+            else:
+                rows = _annotate_orderbook_rows(
+                    rows,
+                    source_type="polymarket_clob_websocket",
+                    rest_fallback=False,
+                    fallback_reason_codes=(),
+                )
             expected_token_ids = set(_token_ids_for_markets(markets))
             observed_token_ids = {str(row.get("token_id") or "") for row in rows}
             missing_token_ids = expected_token_ids - observed_token_ids
-            if not missing_token_ids:
-                return rows
-
-            fallback_rows = self._rest_orderbook_fallback(
-                markets,
-                reason_codes=("polymarket_clob_ws_missing_token_orderbook",),
-            )
-            if self.rest_fallback_collection_seconds > 0:
-                # Synchronized REST snapshots establish new complete paired
-                # timestamps without backdating a missing token onto an
-                # earlier partial WebSocket observation.
-                rows.extend(fallback_rows)
-            else:
-                rows.extend(
-                    row
-                    for row in fallback_rows
-                    if str(row.get("token_id") or "") in missing_token_ids
+            if missing_token_ids:
+                fallback_rows = self._rest_orderbook_fallback(
+                    markets,
+                    reason_codes=(
+                        "polymarket_clob_ws_missing_token_orderbook",
+                    ),
                 )
+                fallback_applied = True
+                if self.rest_fallback_collection_seconds > 0:
+                    # Synchronized REST snapshots establish new complete paired
+                    # timestamps without backdating a missing token onto an
+                    # earlier partial WebSocket observation.
+                    rows.extend(fallback_rows)
+                else:
+                    rows.extend(
+                        row
+                        for row in fallback_rows
+                        if str(row.get("token_id") or "")
+                        in missing_token_ids
+                    )
             remaining_missing_token_ids = expected_token_ids - {
                 str(row.get("token_id") or "") for row in rows
             }
@@ -663,8 +670,98 @@ class PolymarketPublicHTTPRealCorpusProvider:
                         "polymarket_clob_ws_and_rest_orderbook_coverage_incomplete",
                     ),
                 )
-            return _with_orderbook_collection_end(rows)
+            rows = _with_orderbook_collection_end(rows)
+            if self._full_window_coverage_required():
+                coverage = self._orderbook_window_coverage(
+                    markets=markets,
+                    rows=rows,
+                    config=config,
+                )
+                if not coverage["passed"] and not fallback_applied:
+                    rows.extend(
+                        self._rest_orderbook_fallback(
+                            markets,
+                            reason_codes=(
+                                "polymarket_clob_ws_window_coverage_incomplete",
+                            ),
+                        )
+                    )
+                    fallback_applied = True
+                    rows = _with_orderbook_collection_end(rows)
+                    coverage = self._orderbook_window_coverage(
+                        markets=markets,
+                        rows=rows,
+                        config=config,
+                    )
+                if not coverage["passed"]:
+                    raise RealCorpusPublicProviderError(
+                        "WebSocket orderbook rows and REST fallback did not "
+                        "cover the full causal decision window.",
+                        reason_codes=tuple(
+                            dict.fromkeys(
+                                (
+                                    "polymarket_clob_ws_and_rest_window_coverage_incomplete",
+                                    *coverage["reason_codes"],
+                                )
+                            )
+                        ),
+                    )
+                rows = _annotate_orderbook_window_coverage(
+                    rows,
+                    coverage_by_market=coverage["by_market"],
+                    fallback_applied=fallback_applied,
+                )
+            return rows
         return self._orderbook_rows_from_rest(markets)
+
+    def _full_window_coverage_required(self) -> bool:
+        return (
+            self.rest_fallback_collection_seconds > 0
+            and getattr(
+                self.orderbook_source,
+                "continuous_window_coverage_required",
+                False,
+            )
+            is True
+        )
+
+    def _orderbook_window_coverage(
+        self,
+        *,
+        markets: list[dict[str, Any]],
+        rows: list[dict[str, Any]],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> dict[str, Any]:
+        policy = config.resolved_sampling_policy_seconds()
+        by_market = {
+            str(market["market_id"]): full_decision_window_orderbook_coverage(
+                market=market,
+                book_rows=rows,
+                sample_interval_seconds=policy[str(market["market_family"])],
+            )
+            for market in markets
+        }
+        reason_codes = sorted(
+            {
+                str(reason)
+                for report in by_market.values()
+                for reason in report[
+                    "orderbook_window_coverage_reason_codes"
+                ]
+            }
+        )
+        return {
+            "passed": bool(by_market)
+            and all(
+                report[
+                    "orderbook_full_decision_window_coverage_passed"
+                ]
+                is True
+                for report in by_market.values()
+            ),
+            "reason_codes": reason_codes,
+            "by_market": by_market,
+        }
 
     def _rest_orderbook_fallback(
         self,
@@ -1805,6 +1902,7 @@ class PolymarketCLOBWebSocketOrderBookSource:
 
     read_only = True
     write_capable = False
+    continuous_window_coverage_required = True
     paper_only = True
     capital_at_risk = False
     broker_exchange_write_enabled = False
@@ -1821,6 +1919,7 @@ class PolymarketCLOBWebSocketOrderBookSource:
         timeout_seconds: float = 15.0,
         snapshot_interval_seconds: float = 1.0,
         initial_complete_book_timeout_seconds: float = 15.0,
+        snapshot_stall_timeout_seconds: float | None = None,
         custom_feature_enabled: bool = True,
     ) -> None:
         if timeout_seconds <= 0:
@@ -1831,6 +1930,11 @@ class PolymarketCLOBWebSocketOrderBookSource:
             raise ValueError(
                 "initial_complete_book_timeout_seconds must be positive"
             )
+        if (
+            snapshot_stall_timeout_seconds is not None
+            and snapshot_stall_timeout_seconds <= 0
+        ):
+            raise ValueError("snapshot_stall_timeout_seconds must be positive")
         if not ws_url.strip():
             raise ValueError("ws_url is required")
         self.ws_url = ws_url
@@ -1838,6 +1942,11 @@ class PolymarketCLOBWebSocketOrderBookSource:
         self.snapshot_interval_seconds = snapshot_interval_seconds
         self.initial_complete_book_timeout_seconds = (
             initial_complete_book_timeout_seconds
+        )
+        self.snapshot_stall_timeout_seconds = (
+            max(5.0, snapshot_interval_seconds * 3.0)
+            if snapshot_stall_timeout_seconds is None
+            else snapshot_stall_timeout_seconds
         )
         self.custom_feature_enabled = custom_feature_enabled
         self._last_market_resolution_payloads: dict[str, dict[str, Any]] = {}
@@ -1973,12 +2082,26 @@ class PolymarketCLOBWebSocketOrderBookSource:
         next_snapshot_at = started_at
         connection_error: Exception | None = None
         complete_book_observed = False
+        last_snapshot_at = started_at
         while time.monotonic() < deadline:
             active_deadline = (
                 deadline
                 if complete_book_observed
                 else initial_complete_book_deadline
             )
+            if complete_book_observed:
+                stall_deadline = (
+                    last_snapshot_at + self.snapshot_stall_timeout_seconds
+                )
+                if time.monotonic() >= stall_deadline:
+                    raise RealCorpusPublicProviderError(
+                        "CLOB websocket snapshot stream stalled after a "
+                        "complete book was observed.",
+                        reason_codes=(
+                            "polymarket_clob_ws_snapshot_stream_stalled",
+                        ),
+                    )
+                active_deadline = min(active_deadline, stall_deadline)
             if time.monotonic() >= active_deadline:
                 break
             try:
@@ -2045,6 +2168,7 @@ class PolymarketCLOBWebSocketOrderBookSource:
                                         observation_time_ms=observation_time_ms,
                                     )
                                 )
+                                last_snapshot_at = time.monotonic()
                             next_snapshot_at = (
                                 time.monotonic() + self.snapshot_interval_seconds
                             )
@@ -2055,6 +2179,12 @@ class PolymarketCLOBWebSocketOrderBookSource:
                     if complete_book_observed
                     else initial_complete_book_deadline
                 )
+                if complete_book_observed:
+                    reconnect_deadline = min(
+                        reconnect_deadline,
+                        last_snapshot_at
+                        + self.snapshot_stall_timeout_seconds,
+                    )
                 await _sleep_until_reconnect(reconnect_deadline)
 
         if not snapshots:
@@ -2176,6 +2306,53 @@ def _annotate_orderbook_rows(
         }
         for row in rows
     ]
+
+
+def _annotate_orderbook_window_coverage(
+    rows: list[dict[str, Any]],
+    *,
+    coverage_by_market: dict[str, dict[str, Any]],
+    fallback_applied: bool,
+) -> list[dict[str, Any]]:
+    annotated: list[dict[str, Any]] = []
+    for row in rows:
+        coverage = coverage_by_market.get(str(row.get("market_id") or ""))
+        if coverage is None:
+            annotated.append(dict(row))
+            continue
+        annotated.append(
+            {
+                **row,
+                "orderbook_full_window_coverage_required": True,
+                "orderbook_full_decision_window_coverage_passed": (
+                    coverage[
+                        "orderbook_full_decision_window_coverage_passed"
+                    ]
+                ),
+                "orderbook_window_coverage_reason_codes": list(
+                    coverage["orderbook_window_coverage_reason_codes"]
+                ),
+                "orderbook_expected_decision_pair_count": int(
+                    coverage["orderbook_expected_decision_pair_count"]
+                ),
+                "orderbook_observed_decision_pair_count": int(
+                    coverage["orderbook_observed_decision_pair_count"]
+                ),
+                "orderbook_last_required_decision_ts": coverage[
+                    "orderbook_last_required_decision_ts"
+                ],
+                "orderbook_latest_covered_decision_ts": coverage[
+                    "orderbook_latest_covered_decision_ts"
+                ],
+                "orderbook_observed_collection_end_ts": coverage[
+                    "orderbook_observed_collection_end_ts"
+                ],
+                "orderbook_window_coverage_fallback_applied": (
+                    fallback_applied
+                ),
+            }
+        )
+    return annotated
 
 
 def _annotate_market_identity(
