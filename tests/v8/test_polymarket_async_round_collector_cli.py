@@ -230,6 +230,59 @@ def test_batch_summary_aggregates_market_identity_cache_evidence() -> None:
     assert summary["market_identity_clob_revalidation_passed_count"] == 1
 
 
+def test_batch_summary_aggregates_orderbook_full_window_coverage_evidence() -> None:
+    summary = _summary(
+        "orderbook-window-coverage",
+        [
+            {
+                "orderbook_full_window_coverage_required": True,
+                "orderbook_full_window_coverage_passed": True,
+                "orderbook_expected_decision_pair_count": 4,
+                "orderbook_observed_decision_pair_count": 4,
+                "orderbook_window_coverage_fallback_applied_market_count": 0,
+                "orderbook_window_coverage_reason_distribution": {},
+                "orderbook_window_coverage_by_market": {
+                    "market-1": {"passed": True}
+                },
+            },
+            {
+                "orderbook_full_window_coverage_required": True,
+                "orderbook_full_window_coverage_passed": False,
+                "orderbook_expected_decision_pair_count": 4,
+                "orderbook_observed_decision_pair_count": 3,
+                "orderbook_window_coverage_fallback_applied_market_count": 1,
+                "orderbook_window_coverage_reason_distribution": {
+                    "orderbook_required_decision_pair_coverage_incomplete": 1
+                },
+                "orderbook_window_coverage_by_market": {
+                    "market-2": {"passed": False}
+                },
+            },
+        ],
+        [],
+        [],
+    )
+
+    assert summary["orderbook_full_window_coverage_required"] is True
+    assert summary["orderbook_full_window_coverage_passed"] is False
+    assert summary["orderbook_full_window_coverage_required_capture_count"] == 2
+    assert summary["orderbook_full_window_coverage_passed_capture_count"] == 1
+    assert summary["orderbook_full_window_coverage_failed_capture_count"] == 1
+    assert summary["orderbook_expected_decision_pair_count"] == 8
+    assert summary["orderbook_observed_decision_pair_count"] == 7
+    assert (
+        summary["orderbook_window_coverage_fallback_applied_market_count"]
+        == 1
+    )
+    assert summary["orderbook_window_coverage_reason_distribution"] == {
+        "orderbook_required_decision_pair_coverage_incomplete": 1
+    }
+    assert summary["orderbook_window_coverage_by_market"] == {
+        "market-1": {"passed": True},
+        "market-2": {"passed": False},
+    }
+
+
 def test_batch_summary_reports_feature_enrichment_recovery() -> None:
     summary = _summary(
         "feature-enrichment",
