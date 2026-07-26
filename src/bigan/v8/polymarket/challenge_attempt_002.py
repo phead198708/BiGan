@@ -51,6 +51,8 @@ def validate_attempt_002_preregistration(
     eligibility = dict(protocol.get("historical_eligibility") or {})
     alpha = dict(protocol.get("alpha_spending") or {})
     promotion = dict(protocol.get("promotion_evidence") or {})
+    freeze_created_ts = protocol.get("preregistration_freeze_created_ts")
+    preregistered_at = protocol.get("preregistered_at")
 
     checks = {
         "schema": protocol.get("schema_version")
@@ -63,6 +65,11 @@ def validate_attempt_002_preregistration(
         and protocol.get("model_version") == "v8.1"
         and protocol.get("candidate_id") == CANDIDATE_ID
         and protocol.get("baseline_id") == BASELINE_ID,
+        "freeze": protocol.get("frozen") is True
+        and protocol.get("preregistered_before_collection") is True
+        and _positive_integer(freeze_created_ts)
+        and isinstance(preregistered_at, str)
+        and preregistered_at.endswith("Z"),
         "lineage": bool(lineage)
         and all(
             _is_sha256(value) or _is_git_commit(value)
@@ -98,6 +105,15 @@ def validate_attempt_002_preregistration(
                 "examples/v8/polymarket_live_runs/"
                 "challenge-model-v8-1-attempt-002"
             ),
+            "strictly_later_minimum_market_start_ts_exclusive": (
+                freeze_created_ts
+            ),
+            "maximum_attempted_market_count": 180,
+            "bounded_batch_market_count": 12,
+            "maximum_batch_count": 15,
+            "candidate_scoring_during_raw_capture_allowed": False,
+            "settlement_finalizer_enabled_during_collection": False,
+            "resolution_provider_enabled_during_collection": False,
             "operator_collection_authorization_required": True,
             "operator_collection_authorization_granted": False,
             "collection_started": False,

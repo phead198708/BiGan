@@ -24,6 +24,10 @@ def _protocol() -> dict:
         "model_version": "v8.1",
         "candidate_id": CANDIDATE_ID,
         "baseline_id": "matched_frozen_v6_7",
+        "frozen": True,
+        "preregistered_before_collection": True,
+        "preregistration_freeze_created_ts": 2_000_000_000_000,
+        "preregistered_at": "2033-05-18T03:33:20Z",
         "lineage": {
             "candidate_implementation_commit": "a" * 40,
             "candidate_profile_sha256": "b" * 64,
@@ -61,6 +65,15 @@ def _protocol() -> dict:
                 "examples/v8/polymarket_live_runs/"
                 "challenge-model-v8-1-attempt-002"
             ),
+            "strictly_later_minimum_market_start_ts_exclusive": (
+                2_000_000_000_000
+            ),
+            "maximum_attempted_market_count": 180,
+            "bounded_batch_market_count": 12,
+            "maximum_batch_count": 15,
+            "candidate_scoring_during_raw_capture_allowed": False,
+            "settlement_finalizer_enabled_during_collection": False,
+            "resolution_provider_enabled_during_collection": False,
             "operator_collection_authorization_required": True,
             "operator_collection_authorization_granted": False,
             "collection_started": False,
