@@ -50,9 +50,6 @@ DEFAULT_FEATURE_MISSINGNESS_CONTRACT = (
 DEFAULT_FEATURE_MISSINGNESS_RUNTIME_SCHEMA = (
     CONFIG / "feature_missingness_runtime.schema.json"
 )
-DEFAULT_PROMOTION_EVIDENCE_PROTOCOL = (
-    CONFIG / "challenge_promotion_evidence_protocol.json"
-)
 DEFAULT_HISTORICAL_GATE_CONTRACT = (
     CONFIG / "historical_replay_superiority_contract.json"
 )
@@ -83,9 +80,6 @@ def validate_plan(
     feature_missingness_runtime_schema_path: Path = (
         DEFAULT_FEATURE_MISSINGNESS_RUNTIME_SCHEMA
     ),
-    promotion_evidence_protocol_path: Path = (
-        DEFAULT_PROMOTION_EVIDENCE_PROTOCOL
-    ),
     frozen_model_binding_path: Path,
     prefreeze_checklist_path: Path = DEFAULT_PREFREEZE_CHECKLIST,
     excluded_capture_ledger_path: Path = DEFAULT_EXCLUDED_CAPTURE_LEDGER,
@@ -110,9 +104,6 @@ def validate_plan(
         ),
         feature_missingness_runtime_schema_sha256=_sha256(
             feature_missingness_runtime_schema_path
-        ),
-        promotion_evidence_protocol_sha256=_sha256(
-            promotion_evidence_protocol_path
         ),
         frozen_model_binding_sha256=_sha256(frozen_model_binding_path),
         frozen_model_binding=_read_json(frozen_model_binding_path),

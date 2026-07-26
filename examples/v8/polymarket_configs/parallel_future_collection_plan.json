@@ -2,13 +2,13 @@
   "schema_version": "bigan-v8-parallel-future-collection-plan-v1",
   "issue": 254,
   "goal": "challenge_model_promote_to_champion_model",
-  "fresh_attempt_id": "v8-5-challenger-parallel-future-attempt-001-provider-complete-corrective-refreeze",
-  "freeze_created_ts": 1785057938000,
-  "freeze_created_at": "2026-07-26T09:25:38Z",
+  "fresh_attempt_id": "v8-5-challenger-parallel-future-attempt-001-canonical-payload-corrective-refreeze",
+  "freeze_created_ts": 1785059125000,
+  "freeze_created_at": "2026-07-26T09:45:25Z",
   "frozen": true,
   "preregistered_before_collection": true,
   "lineage": {
-    "implementation_commit": "0f0e94192ae88bc84ad2dfeeae2045d1b2d3ba76",
+    "implementation_commit": "455e57d4a201ae005decbe8f1aab3b215d3bced0",
     "parallel_candidate_protocol_sha256": "fdd0e3f8808cf831f22e0b5ff319d1668e3c0bd80add28de170b7d7c11639ca4",
     "candidate_contract_sha256s": {
       "v8_1_primary_no_fallback": "b06919aadbea6821f44c1decf4f488fd3e34fc2612a115466caad3fe6173ad90",
@@ -19,17 +19,16 @@
     "feature_contract_sha256": "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959",
     "feature_missingness_contract_sha256": "4eb9cb453a684170e3db64dd0db803f4f0e44055a105806368d48428b5d3a107",
     "feature_missingness_runtime_schema_sha256": "2d97a7102c983afed2e9ea8a71b77cd5af5855c8860a5669842338a5fdca527c",
-    "challenge_promotion_evidence_protocol_sha256": "b9eaaf37c214cea59abdea7bc682a12e0e12a23837f626bd815e4d37c14dee52",
     "frozen_model_binding_sha256": "64fa0f227ce97ec8ea238c3d8285d55efd96be65c95bf7c091aa95c1c185ccfd",
-    "prefreeze_checklist_sha256": "6557bdd0325d4f27befdf124d8c28ee93e37af2192d77f6b6e0b47f5aae71c06",
-    "excluded_capture_ledger_sha256": "90b3374c04abecb3ac4ac235faa7f94c2d892ae08e2b7940cafccd6a72833e97"
+    "prefreeze_checklist_sha256": "7b99922c8190f0d2a18b40d82733bc1ce87a30a6267e337123604a1abbf4504b",
+    "excluded_capture_ledger_sha256": "a96e62b9a8a272374db87201788a0a8d4d34289ebc525593b926a5435b1dc033"
   },
   "collection": {
     "market_family": "btc_updown_5m",
     "mode": "bounded_candidate_agnostic_outcome_blind_raw_collection",
-    "service_root": "examples/v8/polymarket_live_runs/challenge-model-v8-5-provider-complete-corrective-attempt-001",
+    "service_root": "examples/v8/polymarket_live_runs/challenge-model-v8-5-canonical-payload-corrective-attempt-001",
     "selection_rule": "chronological_earliest_quality_valid_after_freeze_boundary",
-    "strictly_later_minimum_market_start_ts_exclusive": 1785057938000,
+    "strictly_later_minimum_market_start_ts_exclusive": 1785059125000,
     "quality_valid_market_target": 120,
     "maximum_attempted_market_count": 180,
     "bounded_batch_market_count": 12,
@@ -58,15 +57,16 @@
     "historical_replay_is_promotion_evidence": false
   },
   "supersession": {
-    "sequence_number": 5,
+    "sequence_number": 6,
     "corrective_prerequisite_supersession": true,
-    "prior_plan_was_marked_fourth_and_final": true,
+    "prior_plan_was_marked_fourth_and_final": false,
     "fourth_and_final_supersession": false,
     "prior_plan_collection_started": false,
     "prior_plan_capture_count": 0,
-    "superseded_collection_plan_sha256": "7188e1ec0dacbdc24352dc179c346ed3f8cdfd363df2ad95857834636a547fb6",
-    "previous_superseded_collection_plan_sha256": "4e1e75e14835e12d133d3709a67a7e9c287a2a32525e99f105e744f43e736498",
-    "earlier_superseded_collection_plan_sha256": "72c009459e59972702b3f67f485f889510bf49d568b004ac50d904b73f6f81b1",
+    "superseded_collection_plan_sha256": "df9a81b1ed8cc9e3bd50ca580cd617ecde041a97a7d8470d0c5b82e9d79436ff",
+    "previous_superseded_collection_plan_sha256": "7188e1ec0dacbdc24352dc179c346ed3f8cdfd363df2ad95857834636a547fb6",
+    "earlier_superseded_collection_plan_sha256": "4e1e75e14835e12d133d3709a67a7e9c287a2a32525e99f105e744f43e736498",
+    "third_superseded_collection_plan_sha256": "72c009459e59972702b3f67f485f889510bf49d568b004ac50d904b73f6f81b1",
     "second_superseded_collection_plan_sha256": "f754088a4494cb7908f3b3640fd47d8784ce9063d676245d16c9d3d20dccf3cd",
     "initial_superseded_collection_plan_sha256": "35fca6bfa3e4d4337b3fecc5106a930982d8640373695d74933131aa1b254e95",
     "full_supersession_chain_sha256s": [
@@ -74,10 +74,11 @@
       "f754088a4494cb7908f3b3640fd47d8784ce9063d676245d16c9d3d20dccf3cd",
       "72c009459e59972702b3f67f485f889510bf49d568b004ac50d904b73f6f81b1",
       "4e1e75e14835e12d133d3709a67a7e9c287a2a32525e99f105e744f43e736498",
-      "7188e1ec0dacbdc24352dc179c346ed3f8cdfd363df2ad95857834636a547fb6"
+      "7188e1ec0dacbdc24352dc179c346ed3f8cdfd363df2ad95857834636a547fb6",
+      "df9a81b1ed8cc9e3bd50ca580cd617ecde041a97a7d8470d0c5b82e9d79436ff"
     ],
-    "reason": "issue_257_provider_health_and_trade_tape_prerequisites_missing_before_collection",
-    "excluded_capture_ledger_sha256": "90b3374c04abecb3ac4ac235faa7f94c2d892ae08e2b7940cafccd6a72833e97",
+    "reason": "remove_downstream_protocol_hash_cycle_and_bind_issue_259_before_collection",
+    "excluded_capture_ledger_sha256": "a96e62b9a8a272374db87201788a0a8d4d34289ebc525593b926a5435b1dc033",
     "excluded_pre_replay_probe": {
       "batch_id": "challenge-v8-5-probe-20260726T0649Z",
       "service_root": "examples/v8/polymarket_live_runs/challenge-model-v8-5-fresh-attempt-001",

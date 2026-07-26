@@ -58,7 +58,6 @@ def validate_parallel_future_collection_plan(
     feature_contract_sha256: str,
     feature_missingness_contract_sha256: str,
     feature_missingness_runtime_schema_sha256: str,
-    promotion_evidence_protocol_sha256: str,
     frozen_model_binding_sha256: str,
     frozen_model_binding: dict[str, Any],
     candidate_contracts: dict[str, dict[str, Any]],
@@ -104,9 +103,6 @@ def validate_parallel_future_collection_plan(
         ),
         "feature_missingness_runtime_schema_sha256": (
             feature_missingness_runtime_schema_sha256
-        ),
-        "challenge_promotion_evidence_protocol_sha256": (
-            promotion_evidence_protocol_sha256
         ),
         "frozen_model_binding_sha256": frozen_model_binding_sha256,
         "prefreeze_checklist_sha256": prefreeze_checklist_sha256,
@@ -259,11 +255,11 @@ def validate_parallel_future_collection_plan(
     )
     if len(prior_plan_sha256) != 64:
         blockers.append("superseded_collection_plan_sha256")
-    if supersession.get("sequence_number") != 5:
+    if supersession.get("sequence_number") != 6:
         blockers.append("supersession_sequence_number")
     if supersession.get("corrective_prerequisite_supersession") is not True:
         blockers.append("corrective_prerequisite_supersession")
-    if supersession.get("prior_plan_was_marked_fourth_and_final") is not True:
+    if supersession.get("prior_plan_was_marked_fourth_and_final") is not False:
         blockers.append("prior_plan_was_marked_fourth_and_final")
     if supersession.get("fourth_and_final_supersession") is not False:
         blockers.append("fourth_and_final_supersession")
@@ -272,15 +268,15 @@ def validate_parallel_future_collection_plan(
     if int(supersession.get("prior_plan_capture_count", -1)) != 0:
         blockers.append("prior_plan_capture_count")
     if supersession.get("reason") != (
-        "issue_257_provider_health_and_trade_tape_prerequisites_missing_before_collection"
+        "remove_downstream_protocol_hash_cycle_and_bind_issue_259_before_collection"
     ):
         blockers.append("supersession_reason")
     chain = supersession.get("full_supersession_chain_sha256s")
     if (
         not isinstance(chain, list)
-        or len(chain) != 5
+        or len(chain) != 6
         or chain[-1:] != [prior_plan_sha256]
-        or len(set(chain)) != 5
+        or len(set(chain)) != 6
         or not all(_is_sha256(value) for value in chain)
     ):
         blockers.append("full_supersession_chain")
@@ -372,9 +368,6 @@ def validate_parallel_future_collection_plan(
             ),
             feature_missingness_runtime_schema_sha256=(
                 feature_missingness_runtime_schema_sha256
-            ),
-            promotion_evidence_protocol_sha256=(
-                promotion_evidence_protocol_sha256
             ),
         )
     except ChallengePrefreezeError:

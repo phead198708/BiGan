@@ -78,9 +78,6 @@ def _validate_prefreeze_artifacts() -> None:
         feature_missingness_runtime_schema_sha256=_sha256(
             "feature_missingness_runtime.schema.json"
         ),
-        promotion_evidence_protocol_sha256=_sha256(
-            "challenge_promotion_evidence_protocol.json"
-        ),
     )
 
 
@@ -103,9 +100,6 @@ def _prefreeze_plan_kwargs() -> dict:
         ),
         "feature_missingness_runtime_schema_sha256": _sha256(
             "feature_missingness_runtime.schema.json"
-        ),
-        "promotion_evidence_protocol_sha256": _sha256(
-            "challenge_promotion_evidence_protocol.json"
         ),
     }
 
@@ -312,6 +306,32 @@ def test_prefreeze_checklist_and_excluded_ledger_are_hash_pinned() -> None:
     )
 
 
+def test_collection_plan_lineage_has_no_downstream_protocol_hash_cycle() -> None:
+    plan = _json("parallel_future_collection_plan.json")
+    checklist = _json("challenge_prefreeze_checklist.json")
+
+    assert (
+        "challenge_promotion_evidence_protocol_sha256"
+        not in plan["lineage"]
+    )
+    assert (
+        "challenge_promotion_evidence_protocol_sha256"
+        not in checklist["feature_completeness"]
+    )
+    assert (
+        _json("challenge_promotion_evidence_protocol.json")["lineage"][
+            "challenge_future_post_freeze_protocol_sha256"
+        ]
+        == _sha256("challenge_future_post_freeze_protocol.json")
+    )
+    assert (
+        _json("challenge_future_post_freeze_protocol.json")["lineage"][
+            "parallel_future_collection_plan_sha256"
+        ]
+        == _sha256("parallel_future_collection_plan.json")
+    )
+
+
 def test_prefreeze_checklist_rejects_caller_asserted_authorization() -> None:
     checklist = _json("challenge_prefreeze_checklist.json")
     checklist["operator_authorization"]["granted"] = True
@@ -342,9 +362,6 @@ def test_prefreeze_checklist_rejects_caller_asserted_authorization() -> None:
             ),
             feature_missingness_runtime_schema_sha256=_sha256(
                 "feature_missingness_runtime.schema.json"
-            ),
-            promotion_evidence_protocol_sha256=_sha256(
-                "challenge_promotion_evidence_protocol.json"
             ),
         )
 
@@ -384,9 +401,6 @@ def test_prefreeze_checklist_rejects_provider_health_contract_drift() -> None:
             ),
             feature_missingness_runtime_schema_sha256=_sha256(
                 "feature_missingness_runtime.schema.json"
-            ),
-            promotion_evidence_protocol_sha256=_sha256(
-                "challenge_promotion_evidence_protocol.json"
             ),
         )
 

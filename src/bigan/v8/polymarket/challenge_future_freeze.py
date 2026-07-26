@@ -636,9 +636,6 @@ def run_challenge_future_target_free_freeze(
         feature_missingness_runtime_schema_sha256=_sha256_file(
             config_dir / "feature_missingness_runtime.schema.json"
         ),
-        promotion_evidence_protocol_sha256=_sha256_file(
-            config_dir / "challenge_promotion_evidence_protocol.json"
-        ),
         frozen_model_binding_sha256=pins["binding"].lower(),
         frozen_model_binding=binding,
         candidate_contracts=candidate_contracts,
