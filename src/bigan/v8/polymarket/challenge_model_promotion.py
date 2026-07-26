@@ -7,6 +7,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from bigan.v8.canonical_payload import (
+    validate_canonical_payload_contract,
+)
 from bigan.v8.polymarket.candidate_budget import (
     evaluate_next_gate_eligibility,
 )
@@ -96,6 +99,14 @@ def audit_challenge_model_promotion(
         if historical_replay_path.is_file()
         else {}
     )
+    canonical_payload_contract_valid = False
+    try:
+        validate_canonical_payload_contract(
+            _read_json(config_dir / "canonical_payload_contract.json")
+        )
+        canonical_payload_contract_valid = True
+    except (TypeError, ValueError):
+        canonical_payload_contract_valid = False
     budget_decision_valid = False
     try:
         recomputed_next_gate = evaluate_next_gate_eligibility(
@@ -210,6 +221,9 @@ def audit_challenge_model_promotion(
         parallel_plan_valid = False
     static_checks = {
         "all_issue_contract_artifacts_hash_verified": all(artifact_checks.values()),
+        "issue_259_canonical_payload_contract_valid": (
+            canonical_payload_contract_valid
+        ),
         "issue_255_next_fresh_gate_statistically_eligible": (
             next_gate.get("next_gate_eligible") is True
             and next_gate.get("outcomes_read_to_make_eligibility_decision") is False

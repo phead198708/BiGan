@@ -11,7 +11,7 @@
     "execution_policy_contract_sha256": "4ce2475dca9dfb211808ceba3bd770f9bcde9728770dbdf1ef6641d5bda822cc",
     "policy_candidate_manifest_sha256": "809713868b888ef31e818769e8f7b44d9d13a096356fcc8ee8888829749e0882",
     "source_execution_compatibility_manifest_sha256": "c9aa04b0e358734ccd96bdc940fcaaad921fd56d2d3740055b1d10305a2e4c51",
-    "challenge_future_post_freeze_protocol_sha256": "3e89460662174360de321de9a951ee9fcceeec858c721c6431e0bef8129e5dc5",
+    "challenge_future_post_freeze_protocol_sha256": "e64363a435b9ed798435226cdbdd05159867b1583fc593d1691a5c122ecec4b8",
     "feature_missingness_contract_sha256": "4eb9cb453a684170e3db64dd0db803f4f0e44055a105806368d48428b5d3a107",
     "canonical_payload_contract_sha256": "d6b96c9d5d816c5a9b184cd884789e2a45d3c697b01219b23e9be124f57b00ca"
   },

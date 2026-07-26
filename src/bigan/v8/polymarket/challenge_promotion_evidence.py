@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from bigan.v8.canonical_payload import canonical_payload_sha256
+from bigan.v8.canonical_payload import (
+    canonical_payload_sha256,
+    validate_canonical_payload_contract,
+)
 from bigan.v8.polymarket.challenge_future_freeze import (
     CHALLENGE_FUTURE_FREEZE_MANIFEST_SCHEMA_VERSION,
 )
@@ -548,6 +551,9 @@ def _validate_static_lineage(
     repository_root: Path,
 ) -> None:
     config_dir = repository_root / "examples/v8/polymarket_configs"
+    validate_canonical_payload_contract(
+        _load_json(config_dir / "canonical_payload_contract.json")
+    )
     validate_challenge_promotion_evidence_protocol(
         evidence_protocol,
         regime_contract_sha256=regime_contract_sha256,

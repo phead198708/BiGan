@@ -114,6 +114,124 @@ def test_copy_then_settle_preserves_outcome_blind_source(
     assert source_manifest["config"]["output_dir"] == str(source_run_dir.parent)
 
 
+@pytest.mark.parametrize(
+    ("settled_price", "expected_ready"),
+    [(0.5, True), (0.51, False)],
+)
+def test_exported_settlement_persists_canonical_feature_comparison(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    settled_price: float,
+    expected_ready: bool,
+) -> None:
+    selected, source_run_dir = _selected_capture_fixture(tmp_path)
+    frozen = _canonical_feature_row(price=0.5)
+    raw_artifacts = {}
+    for filename in settlement_module.ALLOWED_RAW_FEATURE_FILES:
+        path = source_run_dir / "raw" / filename
+        path.write_text("", encoding="utf-8")
+        raw_artifacts[filename] = {
+            "path": str(path.resolve()),
+            "sha256": _sha256(path),
+        }
+    selected["raw_artifacts"] = raw_artifacts
+
+    def fake_finalize(copied_run_dir: Path, **_: object) -> SimpleNamespace:
+        corpus_dir = copied_run_dir / "phase2_corpus"
+        corpus_dir.mkdir()
+        feature_path = corpus_dir / "polymarket_feature_rows.jsonl"
+        label_path = corpus_dir / "polymarket_label_rows.jsonl"
+        resolution_path = corpus_dir / "polymarket_resolution_events.jsonl"
+        manifest_path = corpus_dir / "polymarket_corpus_manifest.json"
+        feature_path.write_text(
+            json.dumps(
+                _canonical_feature_row(price=settled_price),
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        label_path.write_text("{}\n", encoding="utf-8")
+        resolution_path.write_text("{}\n", encoding="utf-8")
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "raw_artifact_hashes": {
+                        name: descriptor["sha256"]
+                        for name, descriptor in raw_artifacts.items()
+                    },
+                    "normalized_artifact_hashes": {
+                        "feature_rows": _sha256(feature_path),
+                        "label_rows": _sha256(label_path),
+                        "resolution_events": _sha256(resolution_path),
+                    },
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        finalization_path = (
+            copied_run_dir / "pending_round_finalization_manifest.json"
+        )
+        finalization_path.write_text(
+            json.dumps(
+                {
+                    "phase2_corpus_dir": str(corpus_dir.resolve()),
+                    "phase2_corpus_manifest_sha256": _sha256(
+                        manifest_path
+                    ),
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(
+            report={
+                "finalization_status": "exported",
+                "pending_resolution": False,
+                "resolution_provider_called": True,
+                "phase2_corpus_built": True,
+            },
+            corpus_dir=corpus_dir,
+        )
+
+    monkeypatch.setattr(
+        settlement_module,
+        "finalize_polymarket_pending_round",
+        fake_finalize,
+    )
+    run_dir = tmp_path / "settlement-run"
+    (run_dir / "settled_round_copies").mkdir(parents=True)
+    (run_dir / "settled_corpus_quarantine").mkdir()
+
+    result = _copy_and_finalize_selected_round(
+        selected,
+        run_dir=run_dir,
+        provider_factory=object,
+        evaluation_only_frozen_feature_rows=[frozen],
+        require_complete_raw_feature_lineage=True,
+    )
+
+    assert result["settled_corpus_ready"] is expected_ready
+    container = (
+        result["index_entry"] if expected_ready else result["failure"]
+    )
+    descriptor = container[
+        "canonical_feature_payload_comparison_report"
+    ]
+    comparison = json.loads(Path(descriptor["path"]).read_text())
+    assert comparison["canonical_comparison_passed"] is expected_ready
+    assert comparison["approved_source_lineage"] is True
+    if expected_ready:
+        assert comparison["semantic_diff"] == []
+    else:
+        assert comparison["semantic_diff"][0]["path"] == (
+            "/0/features/execution_price"
+        )
+
+
 def test_unresolved_copy_fails_closed_without_index_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -475,6 +593,28 @@ def _target_row(market_id: str, decision_ts: int, **overrides: float) -> dict:
         "resolved_outcome": "UP",
         "target_net_pnl_per_notional_by_action": values,
     }
+
+
+def _canonical_feature_row(*, price: float) -> dict:
+    return {
+        "market_id": "market-1",
+        "condition_id": "condition-1",
+        "slug": "btc-updown-5m-1",
+        "market_family": "btc_updown_5m",
+        "horizon_ms": 300_000,
+        "decision_ts": 100,
+        "feature_cutoff_ts": 100,
+        "max_input_ts": 100,
+        "available_at_ts": 100,
+        "features": {"execution_price": price},
+        "feature_provenance": {
+            "execution_price": {"max_input_ts": 100}
+        },
+    }
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _settled_index(market_ids: list[str]) -> dict:

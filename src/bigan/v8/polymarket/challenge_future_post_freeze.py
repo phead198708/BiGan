@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from bigan.v8.canonical_payload import canonical_payload_sha256
+from bigan.v8.canonical_payload import (
+    CANONICAL_COMPARISON_REPORT_SCHEMA_VERSION,
+    canonical_payload_sha256,
+)
 from bigan.v8.polymarket.challenge_future_freeze import (
     CHALLENGE_FUTURE_FREEZE_MANIFEST_SCHEMA_VERSION,
 )
@@ -186,6 +189,7 @@ def validate_challenge_future_post_freeze_protocol(
     collection_plan_sha256: str,
     frozen_model_binding_sha256: str,
     runtime_policy_profile_sha256: str,
+    canonical_payload_contract_sha256: str,
 ) -> None:
     """Reject operational drift from the pre-target-access protocol."""
 
@@ -194,6 +198,9 @@ def validate_challenge_future_post_freeze_protocol(
         "parallel_future_collection_plan_sha256": collection_plan_sha256,
         "frozen_model_binding_sha256": frozen_model_binding_sha256,
         "runtime_policy_profile_sha256": runtime_policy_profile_sha256,
+        "canonical_payload_contract_sha256": (
+            canonical_payload_contract_sha256
+        ),
     }
     expected_settlement = {
         "exact_market_count": 120,
@@ -201,6 +208,11 @@ def validate_challenge_future_post_freeze_protocol(
         "quarantine_copies_required": True,
         "source_outcome_blind_rounds_mutated": False,
         "frozen_feature_fallback_requires_exact_payload_match": True,
+        "canonical_payload_contract_required": True,
+        "canonical_feature_comparison_report_required_per_market": True,
+        "approved_source_lineage_required": True,
+        "semantic_mismatch_report_required": True,
+        "raw_source_artifact_hashes_preserved": True,
         "target_access_must_follow_decision_freeze_and_market_close": True,
         "single_target_access_claim": True,
         "retry_only_unresolved_or_transient_provider_failures": True,
@@ -237,7 +249,7 @@ def validate_challenge_future_post_freeze_protocol(
             protocol.get("schema_version")
             == POST_FREEZE_PROTOCOL_SCHEMA_VERSION
         ),
-        "issues": protocol.get("issues") == [254, 258, 256],
+        "issues": protocol.get("issues") == [259, 257, 254, 258, 256],
         "goal": (
             protocol.get("goal")
             == "challenge_model_promote_to_champion_model"
@@ -370,6 +382,7 @@ def build_challenge_future_settled_index(
             max_workers=config.max_workers,
             settlement_attempt=attempt_count,
             evaluation_only_frozen_features_by_market=frozen_features,
+            require_complete_raw_feature_lineage=True,
         )
         retryable: set[str] = set()
         for result in results:
@@ -969,6 +982,9 @@ def _validated_post_freeze_protocol(
             "frozen_model_binding"
         ]["sha256"],
         runtime_policy_profile_sha256=runtime_descriptor["sha256"],
+        canonical_payload_contract_sha256=_sha256_file(
+            path.parent / "canonical_payload_contract.json"
+        ),
     )
     return protocol
 
@@ -1113,6 +1129,40 @@ def _validate_settled_index(
             )
         for name in ("feature_rows", "label_rows", "resolution_events"):
             _verified_descriptor(entry[name], f"challenge settled {name}")
+        canonical_report_descriptor = _verified_descriptor(
+            entry["canonical_feature_payload_comparison_report"],
+            "challenge canonical feature comparison report",
+        )
+        canonical_report = _load_json(
+            Path(canonical_report_descriptor["path"])
+        )
+        canonical_report_payload = {
+            key: value
+            for key, value in canonical_report.items()
+            if key != "report_id"
+        }
+        if (
+            canonical_report.get("schema_version")
+            != CANONICAL_COMPARISON_REPORT_SCHEMA_VERSION
+            or canonical_report.get("report_id")
+            != canonical_payload_sha256(
+                canonical_report_payload,
+                payload_schema_version=(
+                    CANONICAL_COMPARISON_REPORT_SCHEMA_VERSION
+                ),
+            )
+            or canonical_report.get("canonical_comparison_passed") is not True
+            or canonical_report.get("canonical_hash_match") is not True
+            or canonical_report.get("approved_source_lineage") is not True
+            or canonical_report.get("settlement_evaluation_eligible")
+            is not True
+            or canonical_report.get("reason_codes") != []
+            or canonical_report.get("training_or_export_eligibility_relaxed")
+            is not False
+        ):
+            raise ChallengeFuturePostFreezeError(
+                "canonical feature comparison is not evaluation eligible"
+            )
     return entries
 
 

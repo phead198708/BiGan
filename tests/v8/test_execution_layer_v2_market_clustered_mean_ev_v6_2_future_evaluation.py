@@ -59,18 +59,32 @@ def _evaluation_only_corpus(tmp_path: Path, *, feature_row: dict) -> tuple[Path,
     copied = tmp_path / "copy"
     corpus = copied / "phase2_corpus"
     corpus.mkdir(parents=True)
-    (corpus / "polymarket_feature_rows.jsonl").write_text(
+    feature_path = corpus / "polymarket_feature_rows.jsonl"
+    label_path = corpus / "polymarket_label_rows.jsonl"
+    resolution_path = corpus / "polymarket_resolution_events.jsonl"
+    manifest_path = corpus / "polymarket_corpus_manifest.json"
+    feature_path.write_text(
         json.dumps(feature_row, sort_keys=True) + "\n", encoding="utf-8"
     )
-    (corpus / "polymarket_label_rows.jsonl").write_text("{}\n", encoding="utf-8")
-    (corpus / "polymarket_resolution_events.jsonl").write_text(
-        "{}\n", encoding="utf-8"
-    )
-    (corpus / "polymarket_corpus_manifest.json").write_text(
+    label_path.write_text("{}\n", encoding="utf-8")
+    resolution_path.write_text("{}\n", encoding="utf-8")
+    manifest_path.write_text(
         json.dumps(
             {
                 "sell_before_close_label_gate_passed": True,
                 "label_row_count": 1,
+                "raw_artifact_hashes": {},
+                "normalized_artifact_hashes": {
+                    "feature_rows": hashlib.sha256(
+                        feature_path.read_bytes()
+                    ).hexdigest(),
+                    "label_rows": hashlib.sha256(
+                        label_path.read_bytes()
+                    ).hexdigest(),
+                    "resolution_events": hashlib.sha256(
+                        resolution_path.read_bytes()
+                    ).hexdigest(),
+                },
                 "chainlink_decision_time_feature_integration": {
                     "timestamp_causality_violation_count": 0
                 },
@@ -80,7 +94,15 @@ def _evaluation_only_corpus(tmp_path: Path, *, feature_row: dict) -> tuple[Path,
         encoding="utf-8",
     )
     (copied / "pending_round_finalization_manifest.json").write_text(
-        json.dumps({"phase2_corpus_dir": str(corpus.resolve())}) + "\n",
+        json.dumps(
+            {
+                "phase2_corpus_dir": str(corpus.resolve()),
+                "phase2_corpus_manifest_sha256": hashlib.sha256(
+                    manifest_path.read_bytes()
+                ).hexdigest(),
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     report = {
@@ -102,6 +124,22 @@ def _evaluation_only_corpus(tmp_path: Path, *, feature_row: dict) -> tuple[Path,
         },
     }
     return copied, report
+
+
+def _source_lineage_evidence() -> dict:
+    return {
+        "schema_version": "bigan-v8-canonical-source-lineage-evidence-v1",
+        "checks": {
+            "source_pending_capture_manifest_hash_verified": True,
+            "declared_raw_artifact_hashes_verified": True,
+            "required_raw_feature_artifacts_complete": True,
+        },
+        "source_pending_capture_manifest": {
+            "path": "/verified/frozen/manifest.json",
+            "sha256": "a" * 64,
+        },
+        "raw_artifacts": {},
+    }
 
 
 def test_profile_freezes_exact_window_support_and_side_only_gate() -> None:
@@ -130,10 +168,18 @@ def test_evaluation_only_settlement_fallback_requires_frozen_feature_equality(
         copied_run_dir=copied,
         report=report,
         frozen_feature_rows=[frozen],
+        source_lineage_evidence=_source_lineage_evidence(),
     )
 
     assert corpus == (copied / "phase2_corpus").resolve()
     assert reasons == []
+    comparison = json.loads(
+        (
+            copied / "canonical_feature_payload_comparison_report.json"
+        ).read_text()
+    )
+    assert comparison["canonical_comparison_passed"] is True
+    assert comparison["approved_source_lineage"] is True
 
 
 def test_evaluation_only_settlement_fallback_fails_closed_on_feature_drift(
@@ -148,10 +194,48 @@ def test_evaluation_only_settlement_fallback_fails_closed_on_feature_drift(
         copied_run_dir=copied,
         report=report,
         frozen_feature_rows=[frozen],
+        source_lineage_evidence=_source_lineage_evidence(),
     )
 
     assert corpus is None
     assert reasons == ["evaluation_only_frozen_feature_payload_mismatch"]
+    comparison = json.loads(
+        (
+            copied / "canonical_feature_payload_comparison_report.json"
+        ).read_text()
+    )
+    assert comparison["canonical_comparison_passed"] is False
+    assert comparison["semantic_diff"][0]["path"] == "/0/features/execution_price"
+
+
+def test_evaluation_only_settlement_fallback_rejects_unapproved_lineage(
+    tmp_path: Path,
+) -> None:
+    frozen = _evaluation_only_feature_row()
+    copied, report = _evaluation_only_corpus(
+        tmp_path,
+        feature_row=frozen,
+    )
+    evidence = _source_lineage_evidence()
+    evidence["checks"]["declared_raw_artifact_hashes_verified"] = False
+
+    corpus, reasons = _evaluation_only_settled_corpus_if_safe(
+        copied_run_dir=copied,
+        report=report,
+        frozen_feature_rows=[frozen],
+        source_lineage_evidence=evidence,
+    )
+
+    assert corpus is None
+    assert reasons == ["evaluation_only_frozen_feature_payload_mismatch"]
+    comparison = json.loads(
+        (
+            copied / "canonical_feature_payload_comparison_report.json"
+        ).read_text()
+    )
+    assert comparison["canonical_hash_match"] is True
+    assert comparison["approved_source_lineage"] is False
+    assert comparison["canonical_comparison_passed"] is False
 
 
 @pytest.mark.parametrize(

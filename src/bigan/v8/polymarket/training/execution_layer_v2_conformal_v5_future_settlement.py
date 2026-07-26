@@ -14,6 +14,7 @@ from typing import Any
 
 from bigan.v8.canonical_payload import (
     DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
+    build_canonical_payload_comparison_report,
     compare_canonical_payloads,
 )
 from bigan.v8.polymarket.contracts import canonical_json_sha256
@@ -48,6 +49,9 @@ from bigan.v8.polymarket.training.execution_layer_v2_pnl_aligned_action_value im
 
 SCHEMA_PREFIX = "bigan-v8-conformal-v5-strict-future-settlement"
 SETTLED_CORPUS_INDEX_SCHEMA_VERSION = f"{SCHEMA_PREFIX}-corpus-index-v2"
+CANONICAL_FEATURE_COMPARISON_REPORT_FILENAME = (
+    "canonical_feature_payload_comparison_report.json"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,6 +370,7 @@ def _finalize_selected_rounds(
     evaluation_only_frozen_features_by_market: (
         dict[str, list[dict[str, Any]]] | None
     ) = None,
+    require_complete_raw_feature_lineage: bool = False,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -382,6 +387,9 @@ def _finalize_selected_rounds(
                     )
                     if evaluation_only_frozen_features_by_market is not None
                     else None
+                ),
+                require_complete_raw_feature_lineage=(
+                    require_complete_raw_feature_lineage
                 ),
             ): selected
             for selected in selected_rows
@@ -425,6 +433,7 @@ def _copy_and_finalize_selected_round(
     provider_factory: Callable[[], Any],
     settlement_attempt: int = 1,
     evaluation_only_frozen_feature_rows: list[dict[str, Any]] | None = None,
+    require_complete_raw_feature_lineage: bool = False,
 ) -> dict[str, Any]:
     market_id = str(selected.get("market_id") or "")
     if not market_id:
@@ -461,7 +470,13 @@ def _copy_and_finalize_selected_round(
         destination_root=run_dir / "settled_corpus_quarantine",
         overwrite_existing=True,
     )
-    _verify_selected_source_unchanged(selected, capture_manifest_descriptor)
+    source_lineage_evidence = _verify_selected_source_unchanged(
+        selected,
+        capture_manifest_descriptor,
+        require_complete_raw_feature_lineage=(
+            require_complete_raw_feature_lineage
+        ),
+    )
     report = dict(result.report)
     evaluation_only_corpus_dir = None
     evaluation_only_reason_codes: list[str] = []
@@ -471,6 +486,10 @@ def _copy_and_finalize_selected_round(
                 copied_run_dir=copied_run_dir,
                 report=report,
                 frozen_feature_rows=evaluation_only_frozen_feature_rows,
+                source_lineage_evidence=source_lineage_evidence,
+                require_complete_raw_feature_lineage=(
+                    require_complete_raw_feature_lineage
+                ),
             )
         )
     evaluation_only_fallback = evaluation_only_corpus_dir is not None
@@ -505,7 +524,7 @@ def _copy_and_finalize_selected_round(
                     *evaluation_only_reason_codes,
                 }
             )
-        return {
+        failure = {
             "market_id": market_id,
             "settled_corpus_ready": False,
             "failure": {
@@ -519,6 +538,15 @@ def _copy_and_finalize_selected_round(
                 "copied_round_dir": str(copied_run_dir),
             },
         }
+        canonical_report_path = (
+            copied_run_dir
+            / CANONICAL_FEATURE_COMPARISON_REPORT_FILENAME
+        )
+        if canonical_report_path.is_file():
+            failure["failure"][
+                "canonical_feature_payload_comparison_report"
+            ] = _descriptor(canonical_report_path)
+        return failure
     corpus_dir = (
         evaluation_only_corpus_dir
         if evaluation_only_fallback
@@ -538,6 +566,45 @@ def _copy_and_finalize_selected_round(
     ):
         if not path.is_file():
             raise ValueError(f"settled corpus artifact missing: {path}")
+    canonical_report_path: Path | None = None
+    if evaluation_only_frozen_feature_rows is not None:
+        canonical_report_path = (
+            copied_run_dir
+            / CANONICAL_FEATURE_COMPARISON_REPORT_FILENAME
+        )
+        if not evaluation_only_fallback:
+            canonical_report = _write_canonical_feature_comparison_report(
+                copied_run_dir=copied_run_dir,
+                corpus_dir=corpus_dir,
+                frozen_feature_rows=evaluation_only_frozen_feature_rows,
+                source_lineage_evidence=source_lineage_evidence,
+                require_complete_raw_feature_lineage=(
+                    require_complete_raw_feature_lineage
+                ),
+                context="settled_export_feature_payload",
+            )
+            if canonical_report["canonical_comparison_passed"] is not True:
+                return {
+                    "market_id": market_id,
+                    "settled_corpus_ready": False,
+                    "failure": {
+                        "market_id": market_id,
+                        "run_id": source_run_id,
+                        "reason_codes": [
+                            "settled_feature_canonical_comparison_failed"
+                        ],
+                        "pending_resolution": False,
+                        "settlement_attempt_count": settlement_attempt,
+                        "copied_round_dir": str(copied_run_dir),
+                        "canonical_feature_payload_comparison_report": (
+                            _descriptor(canonical_report_path)
+                        ),
+                    },
+                }
+        if not canonical_report_path.is_file():
+            raise ValueError(
+                "canonical feature comparison report was not materialized"
+            )
     index_entry = {
         "market_id": market_id,
         "run_id": source_run_id,
@@ -562,6 +629,14 @@ def _copy_and_finalize_selected_round(
             if evaluation_only_fallback
             else []
         ),
+        "canonical_feature_payload_comparison_required": (
+            evaluation_only_frozen_feature_rows is not None
+        ),
+        "canonical_feature_payload_comparison_report": (
+            _descriptor(canonical_report_path)
+            if canonical_report_path is not None
+            else None
+        ),
         "direct_training_eligibility_relaxed": False,
     }
     index_entry["entry_sha256"] = canonical_json_sha256(index_entry)
@@ -577,6 +652,8 @@ def _evaluation_only_settled_corpus_if_safe(
     copied_run_dir: Path,
     report: dict[str, Any],
     frozen_feature_rows: list[dict[str, Any]],
+    source_lineage_evidence: dict[str, Any] | None = None,
+    require_complete_raw_feature_lineage: bool = False,
 ) -> tuple[Path | None, list[str]]:
     """Accept a training-blocked corpus only when frozen evaluation inputs match."""
 
@@ -644,22 +721,17 @@ def _evaluation_only_settled_corpus_if_safe(
         reasons.append("evaluation_only_frozen_feature_rows_missing")
     if any(int(row.get("max_input_ts") or 0) > int(row.get("decision_ts") or 0) for row in settled_features):
         reasons.append("evaluation_only_feature_timestamp_causality_violation")
-    frozen_payloads = sorted(
-        (_feature_payload(row) for row in frozen_feature_rows),
-        key=lambda row: (int(row["decision_ts"]), str(row["market_id"])),
+    comparison = _write_canonical_feature_comparison_report(
+        copied_run_dir=copied_run_dir,
+        corpus_dir=corpus_dir,
+        frozen_feature_rows=frozen_feature_rows,
+        source_lineage_evidence=source_lineage_evidence,
+        require_complete_raw_feature_lineage=(
+            require_complete_raw_feature_lineage
+        ),
+        context="evaluation_only_settlement_fallback_feature_payload",
     )
-    settled_payloads = sorted(
-        (_feature_payload(row) for row in settled_features),
-        key=lambda row: (int(row["decision_ts"]), str(row["market_id"])),
-    )
-    comparison = compare_canonical_payloads(
-        frozen_payloads,
-        settled_payloads,
-        frozen_payload_schema_version=DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
-        settled_payload_schema_version=DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
-        approved_source_lineage=True,
-    )
-    if not comparison.settlement_evaluation_eligible:
+    if comparison["canonical_comparison_passed"] is not True:
         reasons.append("evaluation_only_frozen_feature_payload_mismatch")
     if sum(1 for line in label_rows_path.read_text(encoding="utf-8").splitlines() if line) <= 0:
         reasons.append("evaluation_only_label_rows_empty")
@@ -672,17 +744,171 @@ def _evaluation_only_settled_corpus_if_safe(
     return corpus_dir, []
 
 
+def _write_canonical_feature_comparison_report(
+    *,
+    copied_run_dir: Path,
+    corpus_dir: Path,
+    frozen_feature_rows: list[dict[str, Any]],
+    source_lineage_evidence: dict[str, Any] | None,
+    require_complete_raw_feature_lineage: bool,
+    context: str,
+) -> dict[str, Any]:
+    """Persist validator-derived source lineage and canonical feature equality."""
+
+    finalization_manifest_path = (
+        copied_run_dir / "pending_round_finalization_manifest.json"
+    )
+    corpus_manifest_path = corpus_dir / "polymarket_corpus_manifest.json"
+    feature_rows_path = corpus_dir / "polymarket_feature_rows.jsonl"
+    label_rows_path = corpus_dir / "polymarket_label_rows.jsonl"
+    resolution_events_path = (
+        corpus_dir / "polymarket_resolution_events.jsonl"
+    )
+    finalization_manifest = _load_json(finalization_manifest_path)
+    corpus_manifest = _load_json(corpus_manifest_path)
+    settled_features = _load_jsonl(feature_rows_path)
+    normalized = dict(
+        corpus_manifest.get("normalized_artifact_hashes") or {}
+    )
+    source_evidence = dict(source_lineage_evidence or {})
+    source_checks = dict(source_evidence.get("checks") or {})
+    source_raw = {
+        str(name): str(dict(descriptor or {}).get("sha256") or "")
+        for name, descriptor in dict(
+            source_evidence.get("raw_artifacts") or {}
+        ).items()
+    }
+    corpus_raw = {
+        str(name): str(digest or "")
+        for name, digest in dict(
+            corpus_manifest.get("raw_artifact_hashes") or {}
+        ).items()
+    }
+    expected_raw_names = set(ALLOWED_RAW_FEATURE_FILES)
+    raw_lineage_matches = all(
+        corpus_raw.get(name) == digest
+        for name, digest in source_raw.items()
+    )
+    if require_complete_raw_feature_lineage:
+        raw_lineage_matches = (
+            expected_raw_names.issubset(source_raw)
+            and all(
+                corpus_raw.get(name) == source_raw[name]
+                for name in expected_raw_names
+            )
+        )
+    lineage_checks = {
+        **{
+            f"capture_{name}": passed
+            for name, passed in source_checks.items()
+            if type(passed) is bool
+        },
+        "source_lineage_evidence_supplied": bool(source_checks),
+        "settled_corpus_within_quarantine_copy": corpus_dir.resolve().is_relative_to(
+            copied_run_dir.resolve()
+        ),
+        "finalization_manifest_corpus_path_matches": (
+            str(finalization_manifest.get("phase2_corpus_dir") or "")
+            == str(corpus_dir.resolve())
+        ),
+        "finalization_manifest_corpus_hash_matches": (
+            str(
+                finalization_manifest.get(
+                    "phase2_corpus_manifest_sha256"
+                )
+                or ""
+            )
+            == _sha256_file(corpus_manifest_path)
+        ),
+        "normalized_feature_rows_hash_matches": (
+            normalized.get("feature_rows")
+            == _sha256_file(feature_rows_path)
+        ),
+        "normalized_label_rows_hash_matches": (
+            normalized.get("label_rows") == _sha256_file(label_rows_path)
+        ),
+        "normalized_resolution_events_hash_matches": (
+            normalized.get("resolution_events")
+            == _sha256_file(resolution_events_path)
+        ),
+        "source_raw_artifact_hashes_match_settled_corpus": (
+            raw_lineage_matches
+        ),
+    }
+    frozen_payloads = sorted(
+        (_feature_payload(row) for row in frozen_feature_rows),
+        key=lambda row: (int(row["decision_ts"]), str(row["market_id"])),
+    )
+    settled_payloads = sorted(
+        (_feature_payload(row) for row in settled_features),
+        key=lambda row: (int(row["decision_ts"]), str(row["market_id"])),
+    )
+    comparison = build_canonical_payload_comparison_report(
+        frozen_payloads,
+        settled_payloads,
+        frozen_payload_schema_version=DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
+        settled_payload_schema_version=DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
+        source_lineage_checks=lineage_checks,
+        source_lineage_evidence={
+            "capture": source_evidence,
+            "settled_corpus_manifest": _descriptor(corpus_manifest_path),
+            "settled_feature_rows": _descriptor(feature_rows_path),
+            "settled_label_rows": _descriptor(label_rows_path),
+            "settled_resolution_events": _descriptor(
+                resolution_events_path
+            ),
+            "frozen_feature_payload_row_count": len(frozen_payloads),
+            "settled_feature_payload_row_count": len(settled_payloads),
+            "raw_source_artifacts_preserved": True,
+            "historical_manifest_rewritten": False,
+        },
+        context=context,
+    )
+    _write_json(
+        copied_run_dir / CANONICAL_FEATURE_COMPARISON_REPORT_FILENAME,
+        comparison,
+    )
+    return comparison
+
+
 def _verify_selected_source_unchanged(
-    selected: dict[str, Any], capture_manifest_descriptor: dict[str, Any]
-) -> None:
+    selected: dict[str, Any],
+    capture_manifest_descriptor: dict[str, Any],
+    *,
+    require_complete_raw_feature_lineage: bool = False,
+) -> dict[str, Any]:
     _verify_pin(
         Path(capture_manifest_descriptor["path"]),
         capture_manifest_descriptor["sha256"],
         "source pending capture manifest after settlement-copy finalization",
     )
-    for name, descriptor in sorted(dict(selected.get("raw_artifacts") or {}).items()):
+    raw_artifacts = dict(selected.get("raw_artifacts") or {})
+    verified_raw_artifacts: dict[str, dict[str, str]] = {}
+    for name, descriptor in sorted(raw_artifacts.items()):
         if isinstance(descriptor, dict) and descriptor.get("path") and descriptor.get("sha256"):
-            _verified_descriptor(descriptor, f"source raw artifact {name}")
+            verified_raw_artifacts[name] = _verified_descriptor(
+                descriptor,
+                f"source raw artifact {name}",
+            )
+    required_raw_artifacts_complete = set(
+        ALLOWED_RAW_FEATURE_FILES
+    ).issubset(verified_raw_artifacts)
+    return {
+        "schema_version": "bigan-v8-canonical-source-lineage-evidence-v1",
+        "checks": {
+            "source_pending_capture_manifest_hash_verified": True,
+            "declared_raw_artifact_hashes_verified": (
+                len(verified_raw_artifacts) == len(raw_artifacts)
+            ),
+            "required_raw_feature_artifacts_complete": (
+                required_raw_artifacts_complete
+                if require_complete_raw_feature_lineage
+                else True
+            ),
+        },
+        "source_pending_capture_manifest": capture_manifest_descriptor,
+        "raw_artifacts": verified_raw_artifacts,
+    }
 
 
 def reconcile_conformal_v5_future_settlement(

@@ -1,6 +1,8 @@
 {
   "schema_version": "bigan-v8-challenge-future-post-freeze-protocol-v1",
   "issues": [
+    259,
+    257,
     254,
     258,
     256
@@ -9,9 +11,10 @@
   "frozen_before_target_access": true,
   "lineage": {
     "parallel_candidate_protocol_sha256": "fdd0e3f8808cf831f22e0b5ff319d1668e3c0bd80add28de170b7d7c11639ca4",
-    "parallel_future_collection_plan_sha256": "7188e1ec0dacbdc24352dc179c346ed3f8cdfd363df2ad95857834636a547fb6",
+    "parallel_future_collection_plan_sha256": "df9a81b1ed8cc9e3bd50ca580cd617ecde041a97a7d8470d0c5b82e9d79436ff",
     "frozen_model_binding_sha256": "64fa0f227ce97ec8ea238c3d8285d55efd96be65c95bf7c091aa95c1c185ccfd",
-    "runtime_policy_profile_sha256": "1306f6b6f7a6c1216b23413352ff66f4061ec62a9751b0de51eded256ca51264"
+    "runtime_policy_profile_sha256": "1306f6b6f7a6c1216b23413352ff66f4061ec62a9751b0de51eded256ca51264",
+    "canonical_payload_contract_sha256": "d6b96c9d5d816c5a9b184cd884789e2a45d3c697b01219b23e9be124f57b00ca"
   },
   "settlement": {
     "exact_market_count": 120,
@@ -19,6 +22,11 @@
     "quarantine_copies_required": true,
     "source_outcome_blind_rounds_mutated": false,
     "frozen_feature_fallback_requires_exact_payload_match": true,
+    "canonical_payload_contract_required": true,
+    "canonical_feature_comparison_report_required_per_market": true,
+    "approved_source_lineage_required": true,
+    "semantic_mismatch_report_required": true,
+    "raw_source_artifact_hashes_preserved": true,
     "target_access_must_follow_decision_freeze_and_market_close": true,
     "single_target_access_claim": true,
     "retry_only_unresolved_or_transient_provider_failures": true,
