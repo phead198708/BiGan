@@ -1,0 +1,62 @@
+{
+  "candidate_count": 1,
+  "candidate_id": "v8_1_high_price_support_recovery_0_30",
+  "candidate_specification": {
+    "base_candidate_id": "v8_1_primary_no_fallback",
+    "base_controller_state_transition_changed": false,
+    "cost_model_changed": false,
+    "entry_price_floor_inclusive": 0.3,
+    "entry_price_source": "matched_outcome_blind_five_action_row.decision_time_features.execution_price",
+    "filter_application_order": "after_v8_1_controller_and_full_guard_before_final_trade",
+    "fixed_position_size": 0.2,
+    "missing_or_nonfinite_entry_price_behavior": "fail_closed_to_no_trade",
+    "position_sizing_changed": false,
+    "primary_path": "keep_v8_1_trade_only_when_execution_price_at_least_0_30",
+    "recovery_path": "when_v8_1_vetoes_recover_existing_v6_7_guard_compatible_action_only_when_execution_price_at_least_0_30",
+    "recovery_source_score_or_action_mutated": false,
+    "veto_action": "NO_TRADE",
+    "veto_pnl": 0.0
+  },
+  "change_description": "Keep the iteration-1 terminal 0.30 execution-price floor and add one high-price support-recovery path: when v8.1 emits NO_TRADE but the frozen guard row has an existing v6.7 guard-compatible action, recover that exact action only if its matched decision-time execution_price is at least 0.30. Do not change controller state, model scores, action identity, costs, lifecycle, or fixed 0.2 size.",
+  "changed_components": [
+    "controller",
+    "feature",
+    "threshold"
+  ],
+  "development_corpus_registry_sha256": "dd4926b24bbe2b80bb127c5af861f62e432131469bfc202248d85ec4a1380fd4",
+  "evaluation_started": false,
+  "expected_mechanism": "Iteration 1 proved positive absolute edge but failed only the paired LCB. Recovering high-price v6.7 actions should increase market-level support and correlation with the baseline, reducing paired-difference variance, while the unchanged 0.30 floor continues to suppress cheap-contract tail exposure. This is a development hypothesis and never promotion evidence.",
+  "grid_search": false,
+  "implementation_commit": "e6741c70fccfb9b66e7f845b55bd7bf6f7123cc4",
+  "implementation_commit_role": "prechange_base_commit",
+  "input_artifact_sha256s": {
+    "base_v8_1_guard_replay": "7534b07c41d1a1f2afe3519e7eef9146c9b84bdda72f88a22b9d0351baa9ce2d",
+    "base_v8_1_market_comparison": "fce95987a10b160d7a7e6cdfd3842cc3e3b34dd138eb27093fb9f86b0a790eae",
+    "base_v8_1_runtime_targets": "f589421b7b483b9cfc42a486ddc484743f4114250f7c3c363586786a836fcb3e",
+    "exact_195_five_action_rows": "134425d9f38ffdebbf72043a8b802e95bbb87eebbe7e8d39bfa5d6f8b98828f7",
+    "exact_195_market_ids": "fef9eda7b8dac138b88c75f96b010bd40953795b2bcf7424debf77a004e06883",
+    "iteration_001_entry_file": "2bbe733ee254c66b608ff68b7cbbbc976172ebac358765c9c6ceb68924098b75",
+    "iteration_001_result": "80baab4220f48d2cfb98d4ccd25a9b4807462691cfc13f0a40fb96f381a90782"
+  },
+  "iteration_number": 2,
+  "ledger_root_sha256": "2bdbbb1ee0f8694b7be3f5fa485a3591662daa906e1edfc316db92f538fc894a",
+  "mechanistic_rationale": "The first preregistered candidate passed the absolute, largest-winner-removal, temporal-half, support, and safety gates, but its paired 97.5% LCB remained -0.15145125 despite a +1.33240 point delta. That pattern indicates the remaining problem is paired-difference dispersion, not candidate absolute edge. A high-price-only recovery path reintroduces baseline correlation on a timestamp-safe, interpretable subset without weakening the existing price floor or running a threshold grid.",
+  "nominal_one_sided_development_alpha": 0.025,
+  "outcome_aware_replay_started": false,
+  "previous_iteration_entry_sha256": "76b1ea851c40c3b66aa47e762cfcfdeaada0b6372232a1f4c4365cb6cbebff95",
+  "preregistered_at": "2026-07-26T17:36:35Z",
+  "promotion_evidence_eligible": false,
+  "result_selected_parameter_search": false,
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-historical-development-preregistration-v1",
+  "success_standard_sha256": "07609f09692723dd1e650080cfdd29466a7ee8a0f8c30d8378045a8ee3523114"
+}
