@@ -98,3 +98,19 @@ does not authorize an unregistered threshold scan.
 - If five iterations are consumed without a pass, stop and perform a
   comprehensive review.
 - Never use a historical report or iteration entry as promotion evidence.
+
+## Completed outcome
+
+Historical development stopped after iteration 3; iterations 4 and 5 were not
+used.
+
+- Iteration 1 failed the paired LCB gate.
+- Iteration 2 failed the paired, absolute, and largest-winner-removal gates.
+- Iteration 3 kept iteration 1's exact five selected trades and changed only
+  fixed candidate size from `0.2` to `1.0`. It passed every frozen gate:
+  paired 97.5% LCB `0.6115975`, absolute 97.5% LCB `0.23475`, total after-cost
+  PnL `1.18375`, and largest-winner-removed PnL `0.784`.
+
+The iteration-3 result remains development-only and is not promotion evidence.
+It only unlocked the additive attempt-002 preregistration described in
+`challenge_attempt_002_runbook.md`.
