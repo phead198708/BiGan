@@ -1,0 +1,74 @@
+{
+  "schema_version": "bigan-v8-challenge-promotion-evidence-protocol-v1",
+  "issues": [
+    258,
+    256
+  ],
+  "frozen_before_target_access": true,
+  "lineage": {
+    "regime_definition_contract_sha256": "7bb37764eee45c78bfc4a571df7d443be3b4063a9112ad64f6a015fe3f217da5",
+    "execution_policy_contract_sha256": "4ce2475dca9dfb211808ceba3bd770f9bcde9728770dbdf1ef6641d5bda822cc",
+    "policy_candidate_manifest_sha256": "809713868b888ef31e818769e8f7b44d9d13a096356fcc8ee8888829749e0882",
+    "source_execution_compatibility_manifest_sha256": "c9aa04b0e358734ccd96bdc940fcaaad921fd56d2d3740055b1d10305a2e4c51",
+    "challenge_future_post_freeze_protocol_sha256": "6ee35f0d11f09ba30ad6d3c4f09e3248d612ba447cdc17a034dcfc86f9d5bba3",
+    "feature_missingness_contract_sha256": "4eb9cb453a684170e3db64dd0db803f4f0e44055a105806368d48428b5d3a107",
+    "canonical_payload_contract_sha256": "d6b96c9d5d816c5a9b184cd884789e2a45d3c697b01219b23e9be124f57b00ca"
+  },
+  "selected_model_rule": {
+    "source": "parallel_evaluation_report.multiplicity_aware_selected_candidate",
+    "allowed_candidates": [
+      "v8_1_primary_no_fallback",
+      "v8_3_primary_with_fallback"
+    ],
+    "selected_candidate_all_hard_gates_required": true,
+    "candidate_or_threshold_override_allowed": false
+  },
+  "regime_context_mapping": {
+    "reference_return": "features.btc_return_5m",
+    "realized_volatility": "features.btc_volatility_5m",
+    "combined_spread_bps": "features.combined_spread_bps",
+    "liquidity_depth": "features.up_liquidity_depth_plus_down_liquidity_depth",
+    "provider_health_score": "features.provider_health_score",
+    "provider_coverage_complete": "all_provider_coverage_complete_flags_and_health_present",
+    "missing_policy_grid_context": "causal_unknown_context_at_shared_decision_ts",
+    "outcome_or_settlement_fields_allowed": false,
+    "diagnostic_only": true
+  },
+  "execution_policy_input_mapping": {
+    "source_action_scores": "v8_1_native_predicted_baseline_and_opposite_returns",
+    "uncertainty": "absolute_predicted_baseline_minus_opposite_return",
+    "opportunity_window_id": "frozen_collector_batch_id",
+    "fill_quality_score": "minimum_up_down_queue_fill_probability_proxy",
+    "provider_health_score": "features.provider_health_score_or_zero_if_missing",
+    "provider_features_complete": "all_provider_coverage_complete_flags_and_health_present",
+    "kill_switch_active": false,
+    "source_scores_mutated": false,
+    "outcome_or_settlement_inputs_allowed": false
+  },
+  "execution_policy_validation": {
+    "evaluate_all_preregistered_policy_fixtures": true,
+    "outcome_selected_policy_allowed": false,
+    "offline_and_paper_exact_decision_parity_required": true,
+    "offline_and_paper_exact_risk_state_parity_required": true,
+    "all_policy_safety_reports_required": true,
+    "all_policy_reconciliations_required": true,
+    "policy_performance_is_not_a_model_promotion_gate": true
+  },
+  "powered_paper_gate": {
+    "source": "exact_selected_candidate_parallel_hard_gate",
+    "separate_result_selected_retest_allowed": false,
+    "minimum_support_inherited": true,
+    "multiplicity_adjusted_lcb_inherited": true,
+    "largest_winner_removed_gates_inherited": true,
+    "paper_only": true,
+    "capital_at_risk": false
+  },
+  "safety": {
+    "paper_candidate_unlocked": false,
+    "promotion_unlocked": false,
+    "live_unlocked": false,
+    "write_enabled": false,
+    "wallet_enabled": false,
+    "capital_at_risk": false
+  }
+}

@@ -65,3 +65,13 @@ Both commands require a clean committed implementation and caller-supplied
 raw SHA-256 pins for the freeze and settled index. A second target-access or
 evaluation claim fails closed; unresolved-provider polling is bounded by the
 preregistered settlement policy and cannot extend the market window.
+
+If and only if the parallel evaluator selects an eligible challenger,
+`examples/v8/run_challenge_promotion_evidence.py` binds the exact winning
+candidate and parallel-report hash to issue #258 regime diagnostics and all
+three issue #256 execution-policy fixtures. It requires exact offline-paper
+parity, policy safety, intent/fill/position reconciliation, and inherits the
+already-consumed multiplicity-aware hard gate without running a
+result-selected second test. The final audit also reconciles the fresh attempt
+ID, freeze hash, selected candidate, report lineage, and attempt/alpha
+consumption record before it can emit `PROMOTE_TO_CHAMPION`.

@@ -25,6 +25,8 @@ REQUIRED_HASH_PINNED_ARTIFACTS = (
     "source_execution_compatibility_manifest.json",
     "historical_replay_superiority_contract.json",
     "historical_replay_superiority_report.json",
+    "challenge_future_post_freeze_protocol.json",
+    "challenge_promotion_evidence_protocol.json",
 )
 
 
@@ -105,6 +107,13 @@ def audit_challenge_model_promotion(
         "position_intent_fill_ledger_reconciled": False,
         "powered_paper_gate_passed": False,
         "evidence_attempt_and_alpha_consumed": False,
+        "fresh_attempt_identity_reconciles": False,
+        "parallel_freeze_lineage_reconciles": False,
+        "selected_candidate_lineage_reconciles": False,
+        "parallel_report_hash_lineage_reconciles": False,
+        "runtime_evidence_schemas_exact": False,
+        "all_preregistered_execution_policies_validated": False,
+        "powered_paper_gate_is_exact_parallel_gate": False,
     }
     evidence_descriptors: dict[str, Any] = {}
     if runtime:
@@ -119,9 +128,68 @@ def audit_challenge_model_promotion(
         reconciliation = evidence_descriptors.get("policy_reconciliation_report", {})
         paper = evidence_descriptors.get("powered_paper_gate_report", {})
         consumption = evidence_descriptors.get("attempt_consumption_record", {})
+        parallel_report_sha256 = str(
+            (runtime.get("parallel_evaluation_report") or {}).get("sha256")
+            or ""
+        )
+        fresh_attempt_id = str(consumption.get("fresh_attempt_id") or "")
+        parallel_freeze_sha256 = str(claim.get("freeze_sha256") or "")
+        downstream_reports = (
+            regime,
+            parity,
+            safety,
+            reconciliation,
+            paper,
+        )
+        exact_schemas = {
+            "parallel": "bigan-v8-parallel-future-evaluation-v1",
+            "regime": "bigan-v8-regime-stratified-pnl-report-v1",
+            "parity": "bigan-v8-challenge-execution-policy-replay-parity-v1",
+            "safety": "bigan-v8-challenge-execution-policy-safety-v1",
+            "reconciliation": (
+                "bigan-v8-challenge-execution-policy-reconciliation-v1"
+            ),
+            "paper": "bigan-v8-challenge-powered-paper-gate-v1",
+            "consumption": "bigan-v8-challenge-attempt-consumption-v1",
+        }
+        lineage_common = (
+            bool(fresh_attempt_id)
+            and all(
+                report.get("fresh_attempt_id") == fresh_attempt_id
+                for report in downstream_reports
+            )
+        )
+        freeze_common = (
+            len(parallel_freeze_sha256) == 64
+            and consumption.get("parallel_freeze_sha256")
+            == parallel_freeze_sha256
+            and all(
+                report.get("parallel_freeze_sha256")
+                == parallel_freeze_sha256
+                for report in downstream_reports
+            )
+        )
+        selected_common = (
+            selected in {"v8_1_primary_no_fallback", "v8_3_primary_with_fallback"}
+            and all(
+                report.get("selected_candidate_id") == selected
+                for report in downstream_reports
+            )
+        )
+        report_hash_common = (
+            len(parallel_report_sha256) == 64
+            and all(
+                report.get("source_parallel_evaluation_report_sha256")
+                == parallel_report_sha256
+                for report in downstream_reports
+            )
+        )
         evidence_checks.update(
             {
-                "fresh_parallel_evaluation_present": bool(parallel),
+                "fresh_parallel_evaluation_present": (
+                    parallel.get("schema_version")
+                    == exact_schemas["parallel"]
+                ),
                 "fresh_parallel_evaluation_single_use": (
                     claim.get("single_use") is True
                     and claim.get("target_access_after_decision_freeze") is True
@@ -149,11 +217,55 @@ def audit_challenge_model_promotion(
                     paper.get("powered_paper_gate_passed") is True
                     and paper.get("paper_only") is True
                     and paper.get("capital_at_risk") is False
+                    and paper.get("separate_result_selected_retest_performed")
+                    is False
                 ),
                 "evidence_attempt_and_alpha_consumed": (
-                    consumption.get("consumes_attempt") is True
+                    consumption.get("attempt_consumed") is True
+                    and consumption.get("alpha_consumed") is True
+                    and consumption.get("consumes_attempt") is True
                     and consumption.get("consumes_alpha") is True
                     and consumption.get("evidence_permanently_consumed") is True
+                    and int(consumption.get("fresh_attempt_number") or 0) == 1
+                    and float(consumption.get("familywise_window_alpha") or 0.0)
+                    == 0.025
+                    and float(consumption.get("per_candidate_alpha") or 0.0)
+                    == 0.0125
+                ),
+                "fresh_attempt_identity_reconciles": lineage_common,
+                "parallel_freeze_lineage_reconciles": freeze_common,
+                "selected_candidate_lineage_reconciles": selected_common,
+                "parallel_report_hash_lineage_reconciles": report_hash_common,
+                "runtime_evidence_schemas_exact": (
+                    parallel.get("schema_version") == exact_schemas["parallel"]
+                    and regime.get("schema_version") == exact_schemas["regime"]
+                    and parity.get("schema_version") == exact_schemas["parity"]
+                    and safety.get("schema_version") == exact_schemas["safety"]
+                    and reconciliation.get("schema_version")
+                    == exact_schemas["reconciliation"]
+                    and paper.get("schema_version") == exact_schemas["paper"]
+                    and consumption.get("schema_version")
+                    == exact_schemas["consumption"]
+                ),
+                "all_preregistered_execution_policies_validated": (
+                    all(
+                        report.get("policy_candidate_count") == 3
+                        and report.get(
+                            "all_preregistered_policy_candidates_evaluated"
+                        )
+                        is True
+                        and report.get("outcome_selected_policy_used") is False
+                        for report in (parity, safety, reconciliation)
+                    )
+                ),
+                "powered_paper_gate_is_exact_parallel_gate": (
+                    paper.get("selected_candidate_gate") == selected_gate
+                    and paper.get("selected_candidate_id") == selected
+                    and paper.get(
+                        "source_parallel_evaluation_report_sha256"
+                    )
+                    == parallel_report_sha256
+                    and all((paper.get("checks") or {}).values())
                 ),
             }
         )
