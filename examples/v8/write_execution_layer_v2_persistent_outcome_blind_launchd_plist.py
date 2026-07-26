@@ -32,6 +32,7 @@ def write_launchd_plist(
     protocol_sha256: str,
     batch_round_count: int,
     python_executable: Path | str,
+    max_batches: int = 0,
     batch_canary_feature_contract_path: Path | str = DEFAULT_BATCH_CANARY_FEATURE_CONTRACT,
     batch_canary_feature_contract_sha256: str = (DEFAULT_BATCH_CANARY_FEATURE_CONTRACT_SHA256),
     v6_2_candidate_manifest_path: Path | str | None = None,
@@ -49,6 +50,8 @@ def write_launchd_plist(
         raise ValueError("launchd label is required")
     if batch_round_count <= 0:
         raise ValueError("batch_round_count must be positive")
+    if max_batches < 0:
+        raise ValueError("max_batches must be non-negative")
     service_root = Path(service_root).expanduser().resolve()
     direct_training_root = Path("/Volumes/PHILIPS/v8")
     if service_root == direct_training_root or direct_training_root in service_root.parents:
@@ -116,7 +119,7 @@ def write_launchd_plist(
         "--batch-canary-feature-contract-sha256",
         batch_canary_feature_contract_sha256.lower(),
         "--max-batches",
-        "0",
+        str(max_batches),
     ]
     if v6_2_candidate_manifest_path is not None:
         program_arguments.extend(
@@ -173,7 +176,8 @@ def write_launchd_plist(
         "launchd_plist_sha256": _sha256(output_path),
         "launchd_label": label,
         "service_root": str(service_root),
-        "continuous_collection": True,
+        "continuous_collection": max_batches == 0,
+        "maximum_batch_count": max_batches,
         "restart_supervision_enabled": True,
         "automatic_outcome_blind_batch_canary_enabled": True,
         "automatic_v6_2_frozen_batch_canary_enabled": (v6_2_candidate_manifest_path is not None),
@@ -245,6 +249,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--protocol-sha256", required=True)
     parser.add_argument("--batch-round-count", type=int, default=12)
     parser.add_argument(
+        "--max-batches",
+        type=int,
+        default=0,
+        help="Stop successfully after this many batches; zero runs continuously.",
+    )
+    parser.add_argument(
         "--batch-canary-feature-contract",
         default=str(DEFAULT_BATCH_CANARY_FEATURE_CONTRACT),
     )
@@ -270,6 +280,7 @@ def main(argv: list[str] | None = None) -> int:
         protocol_sha256=args.protocol_sha256,
         batch_round_count=args.batch_round_count,
         python_executable=args.python_executable,
+        max_batches=args.max_batches,
         batch_canary_feature_contract_path=args.batch_canary_feature_contract,
         batch_canary_feature_contract_sha256=args.batch_canary_feature_contract_sha256,
         v6_2_candidate_manifest_path=args.v6_2_candidate_manifest,

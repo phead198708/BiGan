@@ -839,6 +839,28 @@ def test_launchd_descriptor_keeps_service_alive_without_training_root_export(
     _assert_safety(result)
 
 
+def test_launchd_descriptor_supports_preregistered_bounded_collection(
+    tmp_path: Path,
+) -> None:
+    result = write_launchd_plist(
+        output_path=tmp_path / "collector.plist",
+        label="com.bigan.test.bounded-persistent-collector",
+        service_root=tmp_path / "raw-service",
+        protocol_path=PROTOCOL_PATH,
+        protocol_sha256=_sha256(PROTOCOL_PATH),
+        batch_round_count=12,
+        python_executable=sys.executable,
+        max_batches=10,
+    )
+    with Path(result["launchd_plist_path"]).open("rb") as handle:
+        payload = plistlib.load(handle)
+
+    assert payload["ProgramArguments"][-2:] == ["--max-batches", "10"]
+    assert result["continuous_collection"] is False
+    assert result["maximum_batch_count"] == 10
+    _assert_safety(result)
+
+
 def test_launchd_descriptor_pins_v6_2_candidate_manifest(tmp_path: Path) -> None:
     candidate_manifest = tmp_path / "candidate.json"
     candidate_manifest.write_text('{"candidate":"v6.2"}\n', encoding="utf-8")
