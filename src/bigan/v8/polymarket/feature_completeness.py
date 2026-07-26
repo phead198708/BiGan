@@ -7,13 +7,39 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
-from bigan.v8.polymarket.corpus.contracts import PolymarketCorpusTrade
+from bigan.v8.polymarket.corpus.contracts import (
+    PolymarketCorpusMarket,
+    PolymarketCorpusTrade,
+)
 
 FEATURE_MISSINGNESS_CONTRACT_VERSION = "bigan-v8-feature-missingness-v1"
 TRADE_TAPE_LOOKBACK_MS = 60_000
 TradeTapeCollectionMode = Literal["websocket", "rest", "timeout", "backfill", "mock"]
 ALLOWED_COLLECTION_MODES = frozenset(
     {"websocket", "rest", "timeout", "backfill", "mock"}
+)
+TRADE_TAPE_FEATURE_FIELDS = (
+    "recent_up_trade_volume",
+    "recent_up_trade_volume_missing",
+    "recent_up_trade_volume_coverage_complete",
+    "recent_down_trade_volume",
+    "recent_down_trade_volume_missing",
+    "recent_down_trade_volume_coverage_complete",
+    "trade_tape_missingness_reason",
+    "trade_tape_collection_mode",
+    "trade_tape_provider_source",
+    "trade_tape_provider_timeout",
+    "trade_tape_truncated",
+    "trade_tape_censored",
+    "trade_tape_historical_backfill",
+    "trade_tape_observation_window_start_ts",
+    "trade_tape_observation_window_end_ts",
+    "trade_tape_max_causal_input_ts",
+    "trade_tape_available_at_ts",
+    "trade_tape_collection_latency_ms",
+    "trade_tape_data_age_ms",
+    "trade_tape_observed_trade_count",
+    "provider_health_score",
 )
 
 
@@ -207,6 +233,168 @@ def build_trade_volume_feature_bundle(
     return features, provenance
 
 
+def derive_trade_tape_coverage_status(
+    *,
+    market: PolymarketCorpusMarket,
+    trades: tuple[PolymarketCorpusTrade, ...],
+    decision_ts: int,
+    lookback_ms: int = TRADE_TAPE_LOOKBACK_MS,
+) -> TradeTapeCoverageStatus | None:
+    """Derive causal per-decision completeness from a captured trade-tape proof."""
+
+    metadata_available = any(
+        value is not None
+        for value in (
+            market.trade_collection_mode,
+            market.trade_stream_started_at_ts,
+            market.trade_stream_ended_at_ts,
+            market.trade_stream_continuity_passed,
+            market.trade_api_collection_ts,
+            market.trade_api_request_failed,
+            market.trade_rest_rows_truncated,
+            market.trade_tape_censored,
+        )
+    )
+    if not metadata_available:
+        return None
+    if lookback_ms <= 0:
+        raise FeatureCompletenessError("lookback_ms must be positive")
+
+    required_start_ts = max(
+        market.market_start_ts,
+        decision_ts - lookback_ms,
+    )
+    stream_start = market.trade_stream_started_at_ts
+    stream_end = market.trade_stream_ended_at_ts
+    causality_violations = int(
+        market.trade_stream_timestamp_causality_violation_count or 0
+    )
+    stream_covers_decision = bool(
+        market.trade_stream_continuity_passed is True
+        and stream_start is not None
+        and stream_end is not None
+        and stream_start <= required_start_ts
+        and stream_end >= decision_ts
+        and causality_violations == 0
+    )
+    provider_timeout = bool(
+        not stream_covers_decision
+        and market.trade_api_request_failed is True
+        and stream_start is None
+    )
+    historical_backfill = bool(
+        not stream_covers_decision
+        and stream_start is None
+        and market.trade_api_request_failed is not True
+    )
+    truncated = bool(
+        not stream_covers_decision
+        and market.trade_rest_rows_truncated is True
+    )
+    censored = bool(
+        not stream_covers_decision
+        and (
+            market.trade_tape_censored is True
+            or stream_start is not None
+        )
+    )
+    if stream_covers_decision:
+        collection_mode: TradeTapeCollectionMode = "websocket"
+        provider_source = "polymarket_clob_websocket_market"
+    elif provider_timeout:
+        collection_mode = "timeout"
+        provider_source = "polymarket_data_api"
+    elif historical_backfill:
+        collection_mode = "backfill"
+        provider_source = "polymarket_data_api"
+    elif stream_start is not None:
+        collection_mode = "websocket"
+        provider_source = "polymarket_clob_websocket_market"
+    else:
+        collection_mode = "rest"
+        provider_source = "polymarket_data_api"
+
+    collection_started_ts = min(decision_ts, stream_start or decision_ts)
+    observation_start_ts = (
+        decision_ts - lookback_ms
+        if stream_covers_decision
+        else min(
+            decision_ts,
+            max(required_start_ts, stream_start or decision_ts),
+        )
+    )
+    observation_end_ts = min(decision_ts, stream_end or decision_ts)
+    if observation_end_ts < observation_start_ts:
+        observation_start_ts = observation_end_ts
+    causal_trades = tuple(
+        trade
+        for trade in trades
+        if trade.market_id == market.market_id
+        and required_start_ts <= trade.ts <= decision_ts
+        and trade.available_at_ts <= decision_ts
+    )
+    max_causal_input_ts = max(
+        (trade.available_at_ts for trade in causal_trades),
+        default=observation_end_ts,
+    )
+    reason_codes = list(market.trade_collection_reason_codes)
+    if stream_covers_decision:
+        missingness_reason = None
+    elif provider_timeout:
+        missingness_reason = "provider_timeout"
+    elif historical_backfill:
+        missingness_reason = "historical_backfill_not_causal"
+    elif truncated:
+        missingness_reason = "provider_limit_truncated"
+    elif censored:
+        missingness_reason = "websocket_gap_censored"
+    elif causality_violations:
+        missingness_reason = "provider_timestamp_causality_violation"
+    elif stream_start is not None and stream_start > required_start_ts:
+        missingness_reason = "observation_window_incomplete"
+    elif stream_end is None or stream_end < decision_ts:
+        missingness_reason = "trade_stream_ended_before_decision"
+    elif market.trade_stream_continuity_passed is not True:
+        missingness_reason = "trade_stream_continuity_not_proven"
+    else:
+        missingness_reason = reason_codes[0] if reason_codes else None
+    coverage_complete = stream_covers_decision and missingness_reason is None
+    if not coverage_complete and missingness_reason is None:
+        missingness_reason = "trade_tape_coverage_incomplete"
+
+    if coverage_complete:
+        provider_health_score = 1.0
+    elif provider_timeout or historical_backfill:
+        provider_health_score = 0.0
+    elif truncated:
+        provider_health_score = 0.4
+    elif censored or causality_violations:
+        provider_health_score = 0.3
+    else:
+        provider_health_score = 0.5
+
+    return TradeTapeCoverageStatus(
+        market_id=market.market_id,
+        decision_ts=decision_ts,
+        provider_source=provider_source,
+        collection_mode=collection_mode,
+        collection_started_ts=collection_started_ts,
+        collection_completed_ts=observation_end_ts,
+        observation_window_start_ts=observation_start_ts,
+        observation_window_end_ts=observation_end_ts,
+        max_causal_input_ts=max_causal_input_ts,
+        available_at_ts=observation_end_ts,
+        observed_trade_count=len(causal_trades),
+        provider_timeout=provider_timeout,
+        truncated=truncated,
+        censored=censored,
+        coverage_complete=coverage_complete,
+        missingness_reason=missingness_reason,
+        provider_health_score=provider_health_score,
+        historical_backfill=historical_backfill,
+    )
+
+
 def validate_trade_volume_feature_bundle(
     features: dict[str, Any],
     *,
@@ -215,28 +403,7 @@ def validate_trade_volume_feature_bundle(
 ) -> None:
     """Validate model-facing missingness fields for a future candidate."""
 
-    required = {
-        "recent_up_trade_volume",
-        "recent_up_trade_volume_missing",
-        "recent_up_trade_volume_coverage_complete",
-        "recent_down_trade_volume",
-        "recent_down_trade_volume_missing",
-        "recent_down_trade_volume_coverage_complete",
-        "trade_tape_missingness_reason",
-        "trade_tape_collection_mode",
-        "trade_tape_provider_source",
-        "trade_tape_provider_timeout",
-        "trade_tape_truncated",
-        "trade_tape_censored",
-        "trade_tape_historical_backfill",
-        "trade_tape_observation_window_start_ts",
-        "trade_tape_observation_window_end_ts",
-        "trade_tape_max_causal_input_ts",
-        "trade_tape_available_at_ts",
-        "trade_tape_collection_latency_ms",
-        "trade_tape_data_age_ms",
-        "provider_health_score",
-    }
+    required = set(TRADE_TAPE_FEATURE_FIELDS)
     missing = sorted(required - set(features))
     if missing:
         raise FeatureCompletenessError(
@@ -304,8 +471,27 @@ def build_provider_health_diagnostics(
         (str(row["market_id"]), int(row["decision_ts"])): dict(row.get("features") or {})
         for row in feature_rows
     }
-    health_counts: Counter[str] = Counter()
+    if len(by_key) != len(feature_rows):
+        raise FeatureCompletenessError(
+            "duplicate provider-health feature row identity"
+        )
+    health_counts: Counter[str] = Counter(
+        _provider_health_bucket(features) for features in by_key.values()
+    )
     zero_counts: Counter[str] = Counter()
+    for features in by_key.values():
+        for side in ("up", "down"):
+            value = features.get(f"recent_{side}_trade_volume")
+            missing = (
+                features.get(f"recent_{side}_trade_volume_missing") == 1
+            )
+            zero_counts[
+                f"{side}_missing"
+                if missing
+                else f"{side}_zero"
+                if value == 0
+                else f"{side}_positive"
+            ] += 1
     association: dict[str, Counter[str]] = defaultdict(Counter)
     side_counts: dict[str, Counter[str]] = defaultdict(Counter)
     action_counts: dict[str, Counter[str]] = defaultdict(Counter)
@@ -317,11 +503,6 @@ def build_provider_health_diagnostics(
             unmatched += 1
             continue
         bucket = _provider_health_bucket(features)
-        health_counts[bucket] += 1
-        for side in ("up", "down"):
-            value = features.get(f"recent_{side}_trade_volume")
-            missing = features.get(f"recent_{side}_trade_volume_missing") == 1
-            zero_counts[f"{side}_missing" if missing else f"{side}_zero" if value == 0 else f"{side}_positive"] += 1
         origin = str(
             decision.get("decision_origin")
             or decision.get("selection_source")
@@ -330,6 +511,7 @@ def build_provider_health_diagnostics(
         selected_action = str(
             decision.get("executed_action")
             or decision.get("selected_action")
+            or decision.get("source_selected_action")
             or decision.get("action")
             or "NO_TRADE"
         )
@@ -370,6 +552,8 @@ def build_provider_health_diagnostics(
             bucket: dict(sorted(counts.items()))
             for bucket, counts in sorted(action_counts.items())
         },
+        "decision_row_count": len(decision_rows),
+        "matched_decision_count": len(decision_rows) - unmatched,
         "unmatched_decision_count": unmatched,
         "diagnostic_only": True,
         "outcomes_settlement_pnl_or_future_information_used": False,
@@ -402,9 +586,11 @@ def _provider_health_bucket(features: dict[str, Any]) -> str:
 __all__ = [
     "FEATURE_MISSINGNESS_CONTRACT_VERSION",
     "TRADE_TAPE_LOOKBACK_MS",
+    "TRADE_TAPE_FEATURE_FIELDS",
     "FeatureCompletenessError",
     "TradeTapeCoverageStatus",
     "build_provider_health_diagnostics",
     "build_trade_volume_feature_bundle",
+    "derive_trade_tape_coverage_status",
     "validate_trade_volume_feature_bundle",
 ]

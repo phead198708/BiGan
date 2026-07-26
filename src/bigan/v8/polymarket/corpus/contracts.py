@@ -186,6 +186,17 @@ class PolymarketCorpusMarket:
     settlement_rule: str
     raw_market_sha256: str
     reference_price_start: float | None = None
+    trade_collection_mode: str | None = None
+    trade_stream_started_at_ts: int | None = None
+    trade_stream_ended_at_ts: int | None = None
+    trade_stream_continuity_passed: bool | None = None
+    trade_stream_timestamp_causality_violation_count: int | None = None
+    trade_api_collection_ts: int | None = None
+    trade_api_request_failed: bool | None = None
+    trade_rest_rows_truncated: bool | None = None
+    trade_full_round_coverage_complete: bool | None = None
+    trade_tape_censored: bool | None = None
+    trade_collection_reason_codes: tuple[str, ...] = ()
     paper_only: bool = True
     capital_at_risk: bool = False
     broker_exchange_write_enabled: bool = False
@@ -221,6 +232,26 @@ class PolymarketCorpusMarket:
             or not math.isfinite(self.reference_price_start)
         ):
             raise ValueError("reference_price_start must be positive and finite")
+        if (
+            self.trade_stream_started_at_ts is not None
+            and self.trade_stream_ended_at_ts is not None
+            and self.trade_stream_ended_at_ts < self.trade_stream_started_at_ts
+        ):
+            raise ValueError("trade stream end cannot precede start")
+        if self.trade_collection_mode is not None and not (
+            self.trade_collection_mode.strip()
+        ):
+            raise ValueError("trade_collection_mode cannot be blank")
+        if any(
+            value is not None and value < 0
+            for value in (
+                self.trade_stream_started_at_ts,
+                self.trade_stream_ended_at_ts,
+                self.trade_api_collection_ts,
+                self.trade_stream_timestamp_causality_violation_count,
+            )
+        ):
+            raise ValueError("trade-tape timestamps and counts must be non-negative")
         _validate_safety_boundary(self)
 
     def token_id_for_outcome(self, outcome: CorpusOutcome) -> str:
@@ -280,6 +311,7 @@ class PolymarketCorpusTrade:
     size: float
     side: str
     source: str = "polymarket"
+    transaction_hash: str | None = None
     paper_only: bool = True
     capital_at_risk: bool = False
     broker_exchange_write_enabled: bool = False
@@ -455,7 +487,7 @@ class PolymarketCorpusFeatureRow:
     max_input_ts: int
     available_at_ts: int
     features: dict[str, float | int | str | None]
-    feature_provenance: dict[str, dict[str, int | str | None]]
+    feature_provenance: dict[str, dict[str, Any]]
     paper_only: bool = True
     capital_at_risk: bool = False
     broker_exchange_write_enabled: bool = False

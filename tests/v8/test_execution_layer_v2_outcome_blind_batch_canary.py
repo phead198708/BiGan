@@ -95,7 +95,36 @@ def test_development_batch_canary_materializes_target_free_grid_and_guard_diagno
     _write_json(feature_contract_path, {"feature_columns": ["feature_x"]})
 
     feature_rows = [
-        {"market_id": "market-1", "decision_ts": 200, "max_input_ts": 199}
+        {
+            "market_id": "market-1",
+            "decision_ts": 200,
+            "max_input_ts": 199,
+            "features": {
+                "recent_up_trade_volume": 0.0,
+                "recent_up_trade_volume_missing": 0,
+                "recent_up_trade_volume_coverage_complete": 1,
+                "recent_down_trade_volume": 0.0,
+                "recent_down_trade_volume_missing": 0,
+                "recent_down_trade_volume_coverage_complete": 1,
+                "trade_tape_missingness_reason": None,
+                "trade_tape_collection_mode": "websocket",
+                "trade_tape_provider_source": (
+                    "polymarket_clob_websocket_market"
+                ),
+                "trade_tape_provider_timeout": 0,
+                "trade_tape_truncated": 0,
+                "trade_tape_censored": 0,
+                "trade_tape_historical_backfill": 0,
+                "trade_tape_observation_window_start_ts": 0,
+                "trade_tape_observation_window_end_ts": 200,
+                "trade_tape_max_causal_input_ts": 199,
+                "trade_tape_available_at_ts": 200,
+                "trade_tape_collection_latency_ms": 100,
+                "trade_tape_data_age_ms": 1,
+                "trade_tape_observed_trade_count": 0,
+                "provider_health_score": 1.0,
+            },
+        }
     ]
     action_rows = []
     for action in REQUIRED_ACTIONS:
@@ -168,6 +197,13 @@ def test_development_batch_canary_materializes_target_free_grid_and_guard_diagno
     assert report["candidate_model_scoring_attempted"] is False
     assert report["labels_outcomes_or_pnl_opened"] is False
     assert report["development_data_canary_passed"] is True
+    assert report["provider_health_validation_error_count"] == 0
+    assert (
+        report["provider_health_diagnostics"][
+            "missing_versus_zero_audit_report"
+        ]["up_zero"]
+        == 1
+    )
     assert report["exact_model_runtime_binding_required"] is True
     assert report["exact_model_runtime_binding_verified"] is True
     assert (
@@ -175,6 +211,8 @@ def test_development_batch_canary_materializes_target_free_grid_and_guard_diagno
         == _runtime_binding_summary()["summary_id"]
     )
     assert result["manifest"]["exact_model_runtime_binding_verified"] is True
+    assert result["manifest"]["provider_health_rows"]["sha256"]
+    assert result["manifest"]["provider_health_diagnostics"]["sha256"]
     assert result["manifest"]["paper_candidate_allowed"] is False
 
 

@@ -241,6 +241,10 @@ def audit_challenge_model_promotion(
         "selected_candidate_all_hard_gates_passed": False,
         "regime_partitions_reconcile": False,
         "regime_metrics_diagnostic_only": False,
+        "provider_health_diagnostics_present": False,
+        "provider_health_decisions_reconcile": False,
+        "provider_health_features_complete": False,
+        "provider_health_diagnostic_only": False,
         "offline_paper_replay_parity_passed": False,
         "execution_policy_safety_passed": False,
         "position_intent_fill_ledger_reconciled": False,
@@ -262,6 +266,10 @@ def audit_challenge_model_promotion(
         selected_gate = dict(parallel.get("candidate_gates", {}).get(selected, {}))
         claim = dict(parallel.get("single_use_claim") or {})
         regime = evidence_descriptors.get("regime_stratified_pnl_report", {})
+        provider_health = evidence_descriptors.get(
+            "provider_health_diagnostics_report",
+            {},
+        )
         parity = evidence_descriptors.get("replay_parity_report", {})
         safety = evidence_descriptors.get("policy_safety_report", {})
         reconciliation = evidence_descriptors.get("policy_reconciliation_report", {})
@@ -275,6 +283,7 @@ def audit_challenge_model_promotion(
         parallel_freeze_sha256 = str(claim.get("freeze_sha256") or "")
         downstream_reports = (
             regime,
+            provider_health,
             parity,
             safety,
             reconciliation,
@@ -283,6 +292,7 @@ def audit_challenge_model_promotion(
         exact_schemas = {
             "parallel": "bigan-v8-parallel-future-evaluation-v1",
             "regime": "bigan-v8-regime-stratified-pnl-report-v1",
+            "provider_health": "bigan-v8-provider-health-diagnostics-v1",
             "parity": "bigan-v8-challenge-execution-policy-replay-parity-v1",
             "safety": "bigan-v8-challenge-execution-policy-safety-v1",
             "reconciliation": (
@@ -347,6 +357,29 @@ def audit_challenge_model_promotion(
                     and regime.get("stratified_metrics_are_eligibility_blockers")
                     is False
                 ),
+                "provider_health_diagnostics_present": (
+                    provider_health.get("schema_version")
+                    == exact_schemas["provider_health"]
+                ),
+                "provider_health_decisions_reconcile": (
+                    provider_health.get("decision_row_count") == 120
+                    and provider_health.get("matched_decision_count") == 120
+                    and provider_health.get("unmatched_decision_count") == 0
+                ),
+                "provider_health_features_complete": (
+                    (
+                        provider_health.get("feature_completeness_report")
+                        or {}
+                    ).get("incomplete_feature_row_count")
+                    == 0
+                ),
+                "provider_health_diagnostic_only": (
+                    provider_health.get("diagnostic_only") is True
+                    and provider_health.get(
+                        "outcomes_settlement_pnl_or_future_information_used"
+                    )
+                    is False
+                ),
                 "offline_paper_replay_parity_passed": parity.get("passed") is True,
                 "execution_policy_safety_passed": safety.get("passed") is True,
                 "position_intent_fill_ledger_reconciled": (
@@ -378,6 +411,8 @@ def audit_challenge_model_promotion(
                 "runtime_evidence_schemas_exact": (
                     parallel.get("schema_version") == exact_schemas["parallel"]
                     and regime.get("schema_version") == exact_schemas["regime"]
+                    and provider_health.get("schema_version")
+                    == exact_schemas["provider_health"]
                     and parity.get("schema_version") == exact_schemas["parity"]
                     and safety.get("schema_version") == exact_schemas["safety"]
                     and reconciliation.get("schema_version")
@@ -486,6 +521,7 @@ def _verified_runtime_evidence(manifest: dict[str, Any]) -> dict[str, Any]:
     required = {
         "parallel_evaluation_report",
         "regime_stratified_pnl_report",
+        "provider_health_diagnostics_report",
         "replay_parity_report",
         "policy_safety_report",
         "policy_reconciliation_report",

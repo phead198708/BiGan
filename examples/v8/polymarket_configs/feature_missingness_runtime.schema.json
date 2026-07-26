@@ -22,6 +22,7 @@
     "trade_tape_available_at_ts",
     "trade_tape_collection_latency_ms",
     "trade_tape_data_age_ms",
+    "trade_tape_observed_trade_count",
     "provider_health_score"
   ],
   "properties": {
@@ -72,6 +73,16 @@
         "mock"
       ]
     },
+    "trade_tape_missingness_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "trade_tape_provider_source": {
+      "type": "string",
+      "minLength": 1
+    },
     "trade_tape_provider_timeout": {
       "enum": [
         0,
@@ -95,6 +106,34 @@
         0,
         1
       ]
+    },
+    "trade_tape_observation_window_start_ts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trade_tape_observation_window_end_ts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trade_tape_max_causal_input_ts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trade_tape_available_at_ts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trade_tape_collection_latency_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trade_tape_data_age_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trade_tape_observed_trade_count": {
+      "type": "integer",
+      "minimum": 0
     },
     "provider_health_score": {
       "type": "number",

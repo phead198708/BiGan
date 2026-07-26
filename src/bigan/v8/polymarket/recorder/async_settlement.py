@@ -1749,9 +1749,18 @@ def _pending_capture_report(
         for row in provider_raw_markets
     )
     market_identity_fallback_reason_counts: Counter[str] = Counter()
+    trade_collection_mode_counts: Counter[str] = Counter()
+    trade_collection_reason_counts: Counter[str] = Counter()
     clob_revalidation_attempt_counts: Counter[str] = Counter()
     clob_revalidation_retry_reason_counts: Counter[str] = Counter()
     for row in provider_raw_markets:
+        trade_collection_mode_counts.update(
+            [str(row.get("trade_collection_mode") or "unknown")]
+        )
+        trade_collection_reason_counts.update(
+            str(reason)
+            for reason in row.get("trade_collection_reason_codes") or []
+        )
         market_identity_fallback_reason_counts.update(
             str(reason)
             for reason in row.get(
@@ -1949,6 +1958,31 @@ def _pending_capture_report(
             sorted(window_coverage_by_market.items())
         ),
         "raw_trade_row_count": len(raw_payloads["raw_polymarket_trades.jsonl"]),
+        "provider_raw_trade_row_count": len(
+            provider_raw_payloads["raw_polymarket_trades.jsonl"]
+        ),
+        "trade_collection_mode_distribution": dict(
+            sorted(trade_collection_mode_counts.items())
+        ),
+        "trade_full_round_coverage_complete_market_count": sum(
+            row.get("trade_full_round_coverage_complete") is True
+            for row in provider_raw_markets
+        ),
+        "trade_rest_truncated_market_count": sum(
+            row.get("trade_rest_rows_truncated") is True
+            for row in provider_raw_markets
+        ),
+        "trade_api_request_failed_market_count": sum(
+            row.get("trade_api_request_failed") is True
+            for row in provider_raw_markets
+        ),
+        "trade_tape_censored_market_count": sum(
+            row.get("trade_tape_censored") is True
+            for row in provider_raw_markets
+        ),
+        "trade_collection_reason_distribution": dict(
+            sorted(trade_collection_reason_counts.items())
+        ),
         "raw_btc_candle_row_count": len(raw_payloads["raw_binance_btcusdt_klines.jsonl"]),
         "raw_chainlink_price_row_count": len(raw_chainlink_rows),
         "provider_raw_chainlink_price_row_count": len(provider_chainlink_rows),
@@ -2042,6 +2076,18 @@ def _pending_capture_manifest(
             config.run_dir / CHAINLINK_RTDS_COLLECTION_REPORT_FILENAME
         ),
         "provider_raw_artifacts_preserved": True,
+        **{
+            key: report[key]
+            for key in (
+                "provider_raw_trade_row_count",
+                "trade_collection_mode_distribution",
+                "trade_full_round_coverage_complete_market_count",
+                "trade_rest_truncated_market_count",
+                "trade_api_request_failed_market_count",
+                "trade_tape_censored_market_count",
+                "trade_collection_reason_distribution",
+            )
+        },
         "training_raw_is_validated_sampled_view": not pending_feature_enrichment,
         "pending_feature_enrichment": pending_feature_enrichment,
         "feature_enrichment_attempt_count": 0,
@@ -2078,6 +2124,18 @@ def _pending_finalization_report(
 ) -> dict[str, Any]:
     market_count = len(raw_payloads["raw_polymarket_markets.jsonl"])
     resolution_count = len(raw_payloads["raw_polymarket_resolutions.jsonl"])
+    provider_raw_markets = provider_raw_payloads[
+        "raw_polymarket_markets.jsonl"
+    ]
+    trade_collection_mode_counts = Counter(
+        str(row.get("trade_collection_mode") or "unknown")
+        for row in provider_raw_markets
+    )
+    trade_collection_reason_counts = Counter(
+        str(reason)
+        for row in provider_raw_markets
+        for reason in row.get("trade_collection_reason_codes") or []
+    )
     exported = phase2_result is not None and exported_training_corpus_dir is not None
     if exported:
         status = "exported"
@@ -2143,6 +2201,31 @@ def _pending_finalization_report(
         ),
         "provider_raw_artifacts_preserved": True,
         "raw_trade_row_count": len(raw_payloads["raw_polymarket_trades.jsonl"]),
+        "provider_raw_trade_row_count": len(
+            provider_raw_payloads["raw_polymarket_trades.jsonl"]
+        ),
+        "trade_collection_mode_distribution": dict(
+            sorted(trade_collection_mode_counts.items())
+        ),
+        "trade_full_round_coverage_complete_market_count": sum(
+            row.get("trade_full_round_coverage_complete") is True
+            for row in provider_raw_markets
+        ),
+        "trade_rest_truncated_market_count": sum(
+            row.get("trade_rest_rows_truncated") is True
+            for row in provider_raw_markets
+        ),
+        "trade_api_request_failed_market_count": sum(
+            row.get("trade_api_request_failed") is True
+            for row in provider_raw_markets
+        ),
+        "trade_tape_censored_market_count": sum(
+            row.get("trade_tape_censored") is True
+            for row in provider_raw_markets
+        ),
+        "trade_collection_reason_distribution": dict(
+            sorted(trade_collection_reason_counts.items())
+        ),
         "raw_btc_candle_row_count": len(raw_payloads["raw_binance_btcusdt_klines.jsonl"]),
         "raw_chainlink_price_row_count": len(raw_chainlink_rows),
         "provider_raw_chainlink_price_row_count": len(provider_chainlink_rows),
@@ -2230,6 +2313,18 @@ def _pending_finalization_manifest(
         ),
         "chainlink_corpus_evidence": chainlink_corpus_evidence,
         "provider_raw_artifacts_preserved": True,
+        **{
+            key: report[key]
+            for key in (
+                "provider_raw_trade_row_count",
+                "trade_collection_mode_distribution",
+                "trade_full_round_coverage_complete_market_count",
+                "trade_rest_truncated_market_count",
+                "trade_api_request_failed_market_count",
+                "trade_tape_censored_market_count",
+                "trade_collection_reason_distribution",
+            )
+        },
         "training_raw_is_validated_sampled_view": True,
         "finalization_status": report["finalization_status"],
         "pending_feature_enrichment": False,

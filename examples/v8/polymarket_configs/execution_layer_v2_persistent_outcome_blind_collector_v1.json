@@ -24,6 +24,7 @@
     "capture_boundary_causality",
     "provider_provenance",
     "executable_up_down_book_coverage",
+    "trade_tape_full_round_coverage",
     "decision_time_reference_coverage"
   ],
   "forbidden_collection_control_inputs": [

@@ -1,6 +1,7 @@
 {
   "schema_version": "bigan-v8-challenge-promotion-evidence-protocol-v1",
   "issues": [
+    257,
     258,
     256
   ],
@@ -32,6 +33,18 @@
     "provider_coverage_complete": "all_provider_coverage_complete_flags_and_health_present",
     "missing_policy_grid_context": "causal_unknown_context_at_shared_decision_ts",
     "outcome_or_settlement_fields_allowed": false,
+    "diagnostic_only": true
+  },
+  "provider_health_diagnostics": {
+    "feature_source": "frozen_feature_rows.features",
+    "decision_source": "multiplicity_aware_selected_candidate_settled_rows",
+    "decision_identity_mapping": "market_id_plus_policy_grid_decision_ts",
+    "feature_completeness_report_required": true,
+    "missing_versus_zero_audit_report_required": true,
+    "fallback_provider_health_association_report_required": true,
+    "side_and_action_composition_required": true,
+    "all_selected_decisions_must_match_feature_rows": true,
+    "outcome_settlement_pnl_or_future_information_used": false,
     "diagnostic_only": true
   },
   "execution_policy_input_mapping": {

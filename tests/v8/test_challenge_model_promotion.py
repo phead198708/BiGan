@@ -66,6 +66,23 @@ def _runtime(tmp_path: Path):
                 "stratified_metrics_are_eligibility_blockers": False,
             },
         ),
+        "provider_health_diagnostics_report": _write(
+            tmp_path / "provider-health.json",
+            {
+                "schema_version": "bigan-v8-provider-health-diagnostics-v1",
+                **common,
+                "feature_completeness_report": {
+                    "feature_row_count": 480,
+                    "complete_feature_row_count": 480,
+                    "incomplete_feature_row_count": 0,
+                },
+                "decision_row_count": 120,
+                "matched_decision_count": 120,
+                "unmatched_decision_count": 0,
+                "diagnostic_only": True,
+                "outcomes_settlement_pnl_or_future_information_used": False,
+            },
+        ),
         "replay_parity_report": _write(
             tmp_path / "parity.json",
             {

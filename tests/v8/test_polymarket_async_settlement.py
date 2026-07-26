@@ -83,6 +83,16 @@ def test_pending_capture_does_not_call_resolution_or_export(tmp_path: Path) -> N
         "raw_polymarket_orderbooks.jsonl"
     ]
     assert result.manifest["training_raw_is_validated_sampled_view"] is True
+    for key in (
+        "provider_raw_trade_row_count",
+        "trade_collection_mode_distribution",
+        "trade_full_round_coverage_complete_market_count",
+        "trade_rest_truncated_market_count",
+        "trade_api_request_failed_market_count",
+        "trade_tape_censored_market_count",
+        "trade_collection_reason_distribution",
+    ):
+        assert result.manifest[key] == result.report[key]
 
 
 def test_pending_feature_enrichment_preserves_raw_evidence_and_blocks_resolution(

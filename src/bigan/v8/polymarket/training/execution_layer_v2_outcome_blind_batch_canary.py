@@ -17,6 +17,12 @@ from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.exact_model_runtime_binding import (
     validate_runtime_binding_summary,
 )
+from bigan.v8.polymarket.feature_completeness import (
+    TRADE_TAPE_FEATURE_FIELDS,
+    FeatureCompletenessError,
+    build_provider_health_diagnostics,
+    validate_trade_volume_feature_bundle,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_evaluation import (
     FORBIDDEN_TARGET_FIELDS,
     _blocked_safety_fields,
@@ -205,6 +211,37 @@ def run_outcome_blind_development_batch_canary(
             feature_columns=feature_columns,
         )
         universe_rows = build_execution_compatible_action_universe(action_rows)
+    provider_health_rows: list[dict[str, Any]] = []
+    provider_health_validation_errors: list[str] = []
+    for row in feature_rows:
+        features = dict(row.get("features") or {})
+        try:
+            validate_trade_volume_feature_bundle(
+                features,
+                decision_ts=int(row["decision_ts"]),
+                require_complete=True,
+            )
+        except FeatureCompletenessError as exc:
+            provider_health_validation_errors.append(
+                f"{row.get('market_id')}:{row.get('decision_ts')}:{exc}"
+            )
+        provider_health_rows.append(
+            {
+                "schema_version": "bigan-v8-provider-health-row-v1",
+                "market_id": str(row["market_id"]),
+                "decision_ts": int(row["decision_ts"]),
+                "features": {
+                    field: features.get(field)
+                    for field in TRADE_TAPE_FEATURE_FIELDS
+                },
+                "target_used_as_decision_input": False,
+                "outcome_fields_used_as_decision_input": False,
+            }
+        )
+    provider_health_diagnostics = build_provider_health_diagnostics(
+        feature_rows=provider_health_rows,
+        decision_rows=[],
+    )
     forbidden_fields = sorted(
         set(_find_nonempty_fields(feature_rows, FORBIDDEN_TARGET_FIELDS))
         | set(_find_nonempty_fields(action_rows, FORBIDDEN_TARGET_FIELDS))
@@ -251,6 +288,10 @@ def run_outcome_blind_development_batch_canary(
         blocking_reasons.append("complete_five_action_grid_failed")
     if feature_contract_missing_or_nonfinite_action_row_count:
         blocking_reasons.append("feature_contract_missing_or_nonfinite_value")
+    if provider_health_validation_errors:
+        blocking_reasons.append(
+            "provider_feature_completeness_validation_failed"
+        )
     if forbidden_fields:
         blocking_reasons.append("forbidden_target_or_outcome_field_present")
     if not quality_rows:
@@ -262,9 +303,20 @@ def run_outcome_blind_development_batch_canary(
     features_path = run_dir / "outcome_blind_batch_feature_rows.jsonl"
     actions_path = run_dir / "outcome_blind_batch_five_action_grid.jsonl"
     universe_path = run_dir / "outcome_blind_batch_execution_compatible_universe.jsonl"
+    provider_health_rows_path = (
+        run_dir / "outcome_blind_batch_provider_health_rows.jsonl"
+    )
+    provider_health_diagnostics_path = (
+        run_dir / "outcome_blind_batch_provider_health_diagnostics.json"
+    )
     _write_jsonl(features_path, feature_rows)
     _write_jsonl(actions_path, action_rows)
     _write_jsonl(universe_path, universe_rows)
+    _write_jsonl(provider_health_rows_path, provider_health_rows)
+    _write_json(
+        provider_health_diagnostics_path,
+        provider_health_diagnostics,
+    )
     runtime_binding_fields = (
         {
             "exact_model_runtime_binding_required": True,
@@ -314,6 +366,12 @@ def run_outcome_blind_development_batch_canary(
             feature_contract_missing_or_nonfinite_action_row_count
         ),
         "feature_timestamp_causality_violation_count": feature_causality_violations,
+        "provider_health_feature_row_count": len(provider_health_rows),
+        "provider_health_validation_error_count": len(
+            provider_health_validation_errors
+        ),
+        "provider_health_validation_errors": provider_health_validation_errors,
+        "provider_health_diagnostics": provider_health_diagnostics,
         "decision_group_count": len(action_groups),
         "five_action_row_count": len(action_rows),
         "complete_five_action_grid_passed": (
@@ -366,6 +424,10 @@ def run_outcome_blind_development_batch_canary(
         "batch_summary": _descriptor(batch_summary_path),
         "feature_contract": _descriptor(feature_contract_path),
         "feature_rows": _descriptor(features_path),
+        "provider_health_rows": _descriptor(provider_health_rows_path),
+        "provider_health_diagnostics": _descriptor(
+            provider_health_diagnostics_path
+        ),
         "five_action_grid": _descriptor(actions_path),
         "execution_compatible_universe": _descriptor(universe_path),
         "report": _descriptor(report_path),
@@ -414,6 +476,13 @@ def run_frozen_model_batch_canary(config: FrozenModelBatchCanaryConfig) -> dict[
     action_descriptor = _verified_descriptor(
         development_manifest.get("five_action_grid"), "five action grid"
     )
+    feature_rows_descriptor = _verified_descriptor(
+        development_manifest.get("feature_rows"), "feature rows"
+    )
+    provider_health_rows_descriptor = _verified_descriptor(
+        development_manifest.get("provider_health_rows"),
+        "provider health rows",
+    )
     model_descriptor = _verified_descriptor(candidate_manifest.get("model"), "model")
     artifact_descriptor = _verified_descriptor(
         candidate_manifest.get("calibration_artifact"), "calibration artifact"
@@ -423,6 +492,7 @@ def run_frozen_model_batch_canary(config: FrozenModelBatchCanaryConfig) -> dict[
         candidate_manifest.get("feature_contract"), "feature contract"
     )
     action_rows = _load_jsonl(Path(action_descriptor["path"]))
+    feature_rows = _load_jsonl(Path(feature_rows_descriptor["path"]))
     if _find_nonempty_fields(action_rows, FORBIDDEN_TARGET_FIELDS):
         raise ValueError("frozen_batch_actions_contain_forbidden_targets")
     feature_contract = _load_json(Path(feature_contract_descriptor["path"]))
@@ -455,6 +525,14 @@ def run_frozen_model_batch_canary(config: FrozenModelBatchCanaryConfig) -> dict[
         entry_threshold=0.0,
         runner_up_advantage_threshold=0.0,
     )
+    provider_health_diagnostics = build_provider_health_diagnostics(
+        feature_rows=feature_rows,
+        decision_rows=replay,
+    )
+    if provider_health_diagnostics["unmatched_decision_count"]:
+        raise ValueError(
+            "frozen_batch_provider_health_decision_identity_mismatch"
+        )
     accepted = [row for row in replay if row["execution_guard_order_allowed"]]
     positive_trade_lcb = [
         row
@@ -469,8 +547,15 @@ def run_frozen_model_batch_canary(config: FrozenModelBatchCanaryConfig) -> dict[
     )
     predictions_path = run_dir / "frozen_model_batch_target_free_predictions.jsonl"
     replay_path = run_dir / "frozen_model_batch_outcome_blind_guard_replay.jsonl"
+    provider_health_diagnostics_path = (
+        run_dir / "frozen_model_batch_provider_health_diagnostics.json"
+    )
     _write_jsonl(predictions_path, predictions)
     _write_jsonl(replay_path, replay)
+    _write_json(
+        provider_health_diagnostics_path,
+        provider_health_diagnostics,
+    )
     report = {
         "schema_version": f"{SCHEMA_PREFIX}-frozen-model-batch-report-v1",
         "run_id": config.run_id,
@@ -482,6 +567,10 @@ def run_frozen_model_batch_canary(config: FrozenModelBatchCanaryConfig) -> dict[
         "source_sequence_end": int(development_report["source_sequence_end"]),
         "quality_valid_market_count": len({str(row["market_id"]) for row in action_rows}),
         "decision_group_count": len(replay),
+        "provider_health_unmatched_decision_count": (
+            provider_health_diagnostics["unmatched_decision_count"]
+        ),
+        "provider_health_diagnostics": provider_health_diagnostics,
         "positive_guard_compatible_trade_lcb_row_count": len(positive_trade_lcb),
         "positive_guard_compatible_trade_lcb_market_count": len(
             {str(row["market_id"]) for row in positive_trade_lcb}
@@ -536,6 +625,10 @@ def run_frozen_model_batch_canary(config: FrozenModelBatchCanaryConfig) -> dict[
         "research_candidate_manifest": _descriptor(candidate_manifest_path),
         "target_free_predictions": _descriptor(predictions_path),
         "outcome_blind_guard_replay": _descriptor(replay_path),
+        "provider_health_rows": provider_health_rows_descriptor,
+        "provider_health_diagnostics": _descriptor(
+            provider_health_diagnostics_path
+        ),
         "report": _descriptor(report_path),
         "labels_outcomes_or_pnl_opened": False,
         **_blocked_safety_fields(),

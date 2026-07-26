@@ -194,6 +194,15 @@ def validate_persistent_outcome_blind_collector_protocol(
         "raw_polymarket_chainlink_prices.jsonl",
     }:
         blockers.append("required_raw_artifacts")
+    if set(protocol.get("quality_validity_inputs") or []) != {
+        "raw_evidence_completeness",
+        "capture_boundary_causality",
+        "provider_provenance",
+        "executable_up_down_book_coverage",
+        "trade_tape_full_round_coverage",
+        "decision_time_reference_coverage",
+    }:
+        blockers.append("quality_validity_inputs")
     forbidden_control = set(protocol.get("forbidden_collection_control_inputs") or [])
     if forbidden_control != {
         "model_score",
@@ -390,6 +399,16 @@ def index_persistent_outcome_blind_batch(
             )
             or []
         )
+    batch_trade_tape_rows = [
+        dict(row["trade_tape_coverage"])
+        for row in appended
+        if isinstance(row.get("trade_tape_coverage"), dict)
+    ]
+    batch_trade_tape_reason_counts: Counter[str] = Counter(
+        str(reason)
+        for coverage in batch_trade_tape_rows
+        for reason in coverage.get("trade_collection_reason_codes") or []
+    )
     report = {
         "schema_version": BATCH_REPORT_SCHEMA_VERSION,
         "run_id": config.run_id,
@@ -440,6 +459,35 @@ def index_persistent_outcome_blind_batch(
         ),
         "batch_orderbook_window_coverage_reason_distribution": dict(
             sorted(batch_window_reason_counts.items())
+        ),
+        "batch_trade_tape_full_round_coverage_passed_count": sum(
+            coverage.get("trade_full_round_coverage_complete") is True
+            and coverage.get("trade_stream_continuity_passed") is True
+            and int(
+                coverage.get(
+                    "trade_stream_timestamp_causality_violation_count"
+                )
+                or 0
+            )
+            == 0
+            and coverage.get("trade_tape_censored") is False
+            for coverage in batch_trade_tape_rows
+        ),
+        "batch_trade_tape_full_round_coverage_failed_count": sum(
+            coverage.get("trade_full_round_coverage_complete") is not True
+            or coverage.get("trade_stream_continuity_passed") is not True
+            or int(
+                coverage.get(
+                    "trade_stream_timestamp_causality_violation_count"
+                )
+                or 0
+            )
+            != 0
+            or coverage.get("trade_tape_censored") is not False
+            for coverage in batch_trade_tape_rows
+        ),
+        "batch_trade_tape_collection_reason_distribution": dict(
+            sorted(batch_trade_tape_reason_counts.items())
         ),
         "index_chain_validation_passed": True,
         "outcome_blind_collection_only": True,
@@ -754,7 +802,7 @@ def _capture_index_entry(
     if not manifest_path.is_file() or not report_path.is_file():
         raise ValueError(f"pending capture evidence missing: {run_dir}")
     manifest = _load_json(manifest_path)
-    _load_json(report_path)
+    report = _load_json(report_path)
     reasons: list[str] = []
     if manifest.get("resolution_provider_called") is not False:
         reasons.append("resolution_provider_called_during_capture")
@@ -830,6 +878,58 @@ def _capture_index_entry(
     if len(markets) != 1:
         reasons.append("raw_market_identity_count_invalid")
     market = markets[0] if len(markets) == 1 else {}
+    trade_tape_coverage = {
+        "trade_collection_mode": market.get("trade_collection_mode"),
+        "trade_stream_started_at_ts": market.get(
+            "trade_stream_started_at_ts"
+        ),
+        "trade_stream_ended_at_ts": market.get("trade_stream_ended_at_ts"),
+        "trade_stream_continuity_passed": market.get(
+            "trade_stream_continuity_passed"
+        ),
+        "trade_stream_timestamp_causality_violation_count": int(
+            market.get(
+                "trade_stream_timestamp_causality_violation_count"
+            )
+            or 0
+        ),
+        "trade_full_round_coverage_complete": market.get(
+            "trade_full_round_coverage_complete"
+        ),
+        "trade_rest_rows_truncated": market.get(
+            "trade_rest_rows_truncated"
+        ),
+        "trade_api_request_failed": market.get("trade_api_request_failed"),
+        "trade_tape_censored": market.get("trade_tape_censored"),
+        "trade_collection_reason_codes": list(
+            market.get("trade_collection_reason_codes") or []
+        ),
+    }
+    if (
+        trade_tape_coverage["trade_full_round_coverage_complete"] is not True
+        or trade_tape_coverage["trade_stream_continuity_passed"] is not True
+        or trade_tape_coverage[
+            "trade_stream_timestamp_causality_violation_count"
+        ]
+        != 0
+        or trade_tape_coverage["trade_tape_censored"] is not False
+    ):
+        reasons.append("trade_tape_full_round_coverage_failed")
+    if (
+        int(
+            report.get(
+                "trade_full_round_coverage_complete_market_count"
+            )
+            or 0
+        )
+        != int(
+            trade_tape_coverage[
+                "trade_full_round_coverage_complete"
+            ]
+            is True
+        )
+    ):
+        reasons.append("trade_tape_report_market_coverage_mismatch")
     market_id = str(market.get("market_id") or capture.get("market_id") or "")
     slug = str(market.get("slug") or "")
     if not market_id:
@@ -961,6 +1061,7 @@ def _capture_index_entry(
         "batch_summary": _descriptor(batch_summary_path),
         "raw_artifacts": raw_descriptors,
         "orderbook_window_coverage": orderbook_window_coverage,
+        "trade_tape_coverage": trade_tape_coverage,
         "raw_resolution_row_count": len(resolution_rows),
         "resolution_provider_called": False,
         "settlement_finalizer_started": False,

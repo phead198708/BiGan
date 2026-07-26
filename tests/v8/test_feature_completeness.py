@@ -5,13 +5,18 @@ import json
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
-from bigan.v8.polymarket.corpus.contracts import PolymarketCorpusTrade
+from bigan.v8.polymarket.corpus.contracts import (
+    PolymarketCorpusMarket,
+    PolymarketCorpusTrade,
+)
 from bigan.v8.polymarket.feature_completeness import (
     FeatureCompletenessError,
     TradeTapeCoverageStatus,
     build_provider_health_diagnostics,
     build_trade_volume_feature_bundle,
+    derive_trade_tape_coverage_status,
     validate_trade_volume_feature_bundle,
 )
 
@@ -62,6 +67,39 @@ def _trade(outcome: str, size: float, ts: int = 180_000) -> PolymarketCorpusTrad
     )
 
 
+def _market(**overrides) -> PolymarketCorpusMarket:
+    values = {
+        "market_id": "market-1",
+        "condition_id": "condition-1",
+        "slug": "btc-updown-5m-140",
+        "market_family": "btc_updown_5m",
+        "horizon_ms": 300_000,
+        "market_start_ts": 140_000,
+        "market_end_ts": 440_000,
+        "settlement_ts": 440_000,
+        "up_token_id": "token-UP",
+        "down_token_id": "token-DOWN",
+        "reference_price_source": "chainlink",
+        "settlement_rule": "UP if close >= open",
+        "raw_market_sha256": "a" * 64,
+        "trade_collection_mode": (
+            "clob_websocket_plus_data_api_paginated_reconciliation"
+        ),
+        "trade_stream_started_at_ts": 140_000,
+        "trade_stream_ended_at_ts": 440_000,
+        "trade_stream_continuity_passed": True,
+        "trade_stream_timestamp_causality_violation_count": 0,
+        "trade_api_collection_ts": 440_000,
+        "trade_api_request_failed": False,
+        "trade_rest_rows_truncated": False,
+        "trade_full_round_coverage_complete": True,
+        "trade_tape_censored": False,
+        "trade_collection_reason_codes": (),
+    }
+    values.update(overrides)
+    return PolymarketCorpusMarket(**values)
+
+
 def test_contract_and_runtime_schema_are_hash_pinned_and_closed() -> None:
     for path, sha_path in (
         (CONTRACT, CONTRACT_SHA),
@@ -70,6 +108,29 @@ def test_contract_and_runtime_schema_are_hash_pinned_and_closed() -> None:
         assert hashlib.sha256(path.read_bytes()).hexdigest() == sha_path.read_text().strip()
     contract = json.loads(CONTRACT.read_text())
     assert all(value is False for value in contract["safety"].values())
+
+
+def test_runtime_schema_validates_complete_and_missing_feature_bundles() -> None:
+    schema = json.loads(RUNTIME_SCHEMA.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema)
+    complete, _ = build_trade_volume_feature_bundle(
+        trades=(),
+        status=_status(),
+    )
+    missing, _ = build_trade_volume_feature_bundle(
+        trades=(),
+        status=_status(
+            collection_mode="timeout",
+            provider_timeout=True,
+            coverage_complete=False,
+            missingness_reason="provider_timeout",
+            provider_health_score=0.0,
+        ),
+    )
+
+    validator.validate(complete)
+    validator.validate(missing)
 
 
 def test_true_zero_requires_complete_coverage() -> None:
@@ -93,6 +154,53 @@ def test_complete_tape_sums_only_causally_available_window_trades() -> None:
     assert features["recent_up_trade_volume"] == 2.5
     assert features["recent_down_trade_volume"] == 1.25
     assert provenance["recent_up_trade_volume"]["available_at_ts"] <= 200_000
+
+
+def test_captured_trade_tape_proof_derives_complete_decision_metadata() -> None:
+    status = derive_trade_tape_coverage_status(
+        market=_market(),
+        trades=(_trade("UP", 2.5),),
+        decision_ts=200_000,
+    )
+
+    assert status is not None
+    assert status.collection_mode == "websocket"
+    assert status.coverage_complete is True
+    assert status.available_at_ts <= status.decision_ts
+    features, _ = build_trade_volume_feature_bundle(
+        trades=(_trade("UP", 2.5),),
+        status=status,
+    )
+    assert features["recent_up_trade_volume"] == 2.5
+    assert features["recent_down_trade_volume"] == 0
+
+
+def test_captured_backfill_or_censored_tape_derives_missing_not_zero() -> None:
+    status = derive_trade_tape_coverage_status(
+        market=_market(
+            trade_stream_started_at_ts=None,
+            trade_stream_ended_at_ts=None,
+            trade_stream_continuity_passed=False,
+            trade_rest_rows_truncated=True,
+            trade_full_round_coverage_complete=False,
+            trade_tape_censored=True,
+            trade_collection_reason_codes=(
+                "trade_data_api_pagination_truncated",
+            ),
+        ),
+        trades=(_trade("UP", 2.5),),
+        decision_ts=200_000,
+    )
+
+    assert status is not None
+    assert status.collection_mode == "backfill"
+    assert status.coverage_complete is False
+    features, _ = build_trade_volume_feature_bundle(
+        trades=(_trade("UP", 2.5),),
+        status=status,
+    )
+    assert features["recent_up_trade_volume"] is None
+    assert features["recent_up_trade_volume_missing"] == 1
 
 
 @pytest.mark.parametrize(

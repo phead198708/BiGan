@@ -209,6 +209,94 @@ def test_chainlink_price_to_beat_is_causal_and_overrides_candle_proxy(
     assert evidence["missing_or_invalid_feature_row_count"] == 0
 
 
+def test_recent_trade_volume_fails_closed_when_stream_window_is_censored(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw-censored"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    markets = _read_jsonl(raw_dir / "raw_polymarket_markets.jsonl")
+    market = next(row for row in markets if row["market_id"] == "btc5m-up")
+    market.update(
+        {
+            "trade_stream_started_at_ts": market["market_start_ts"] + 1,
+            "trade_stream_ended_at_ts": market["market_end_ts"],
+            "trade_stream_continuity_passed": True,
+            "trade_full_round_coverage_complete": False,
+            "trade_tape_censored": True,
+            "trade_collection_reason_codes": [
+                "trade_stream_started_after_market_start"
+            ],
+        }
+    )
+    _write_jsonl(raw_dir / "raw_polymarket_markets.jsonl", markets)
+
+    result = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus-censored",
+        )
+    )
+    feature = _feature_at(
+        features=_read_jsonl(result.output_dir / "polymarket_feature_rows.jsonl"),
+        market_id="btc5m-up",
+        decision_ts=market["market_start_ts"],
+    )
+
+    assert feature["features"]["recent_up_trade_volume"] is None
+    assert feature["features"]["recent_down_trade_volume"] is None
+    assert feature["features"]["recent_trade_volume_coverage_complete"] == 0.0
+    assert feature["features"]["recent_trade_volume_censored"] == 1.0
+    provenance = feature["feature_provenance"]["recent_up_trade_volume"]
+    assert provenance["trade_stream_continuity_passed"] is True
+    assert provenance["trade_tape_censored"] is True
+    assert provenance["trade_collection_reason_codes"] == [
+        "trade_stream_started_after_market_start"
+    ]
+
+
+def test_recent_trade_volume_is_used_only_with_complete_causal_stream_window(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw-complete"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    markets = _read_jsonl(raw_dir / "raw_polymarket_markets.jsonl")
+    market = next(row for row in markets if row["market_id"] == "btc5m-up")
+    market.update(
+        {
+            "trade_stream_started_at_ts": market["market_start_ts"],
+            "trade_stream_ended_at_ts": market["market_end_ts"],
+            "trade_stream_continuity_passed": True,
+            "trade_full_round_coverage_complete": True,
+            "trade_tape_censored": False,
+            "trade_collection_reason_codes": [],
+        }
+    )
+    _write_jsonl(raw_dir / "raw_polymarket_markets.jsonl", markets)
+
+    result = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus-complete",
+        )
+    )
+    feature = _feature_at(
+        features=_read_jsonl(result.output_dir / "polymarket_feature_rows.jsonl"),
+        market_id="btc5m-up",
+        decision_ts=market["market_start_ts"],
+    )
+
+    assert feature["features"]["recent_up_trade_volume"] == pytest.approx(10.0)
+    assert feature["features"]["recent_down_trade_volume"] == pytest.approx(10.0)
+    assert feature["features"]["recent_trade_volume_coverage_complete"] == 1.0
+    assert feature["features"]["recent_trade_volume_censored"] == 0.0
+    provenance = feature["feature_provenance"]["recent_up_trade_volume"]
+    assert provenance["trade_coverage_required_start_ts"] == market[
+        "market_start_ts"
+    ]
+    assert provenance["trade_stream_started_at_ts"] == market["market_start_ts"]
+    assert provenance["trade_stream_ended_at_ts"] >= feature["decision_ts"]
+
+
 def test_train_shadow_split_is_temporal_and_leak_free(tmp_path: Path) -> None:
     result = _build_fixture_corpus(tmp_path)
     split = _read_json(result.output_dir / "polymarket_train_shadow_split.json")

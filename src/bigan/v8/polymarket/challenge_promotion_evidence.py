@@ -27,6 +27,9 @@ from bigan.v8.polymarket.execution_policy_framework import (
     validate_execution_policy_contract,
     validate_source_execution_compatibility,
 )
+from bigan.v8.polymarket.feature_completeness import (
+    build_provider_health_diagnostics,
+)
 from bigan.v8.polymarket.regime_diagnostics import (
     REGIME_REPORT_SCHEMA_VERSION,
     assign_regime,
@@ -200,12 +203,31 @@ def validate_challenge_promotion_evidence_protocol(
     }
     checks = {
         "schema": (protocol.get("schema_version") == PROMOTION_EVIDENCE_PROTOCOL_SCHEMA_VERSION),
-        "issues": protocol.get("issues") == [258, 256],
+        "issues": protocol.get("issues") == [257, 258, 256],
         "frozen": protocol.get("frozen_before_target_access") is True,
         "lineage": protocol.get("lineage") == expected_lineage,
         "selected_model_rule": (protocol.get("selected_model_rule") == expected_selected_rule),
         "regime_context_mapping": (
             protocol.get("regime_context_mapping") == expected_regime_mapping
+        ),
+        "provider_health_diagnostics": (
+            protocol.get("provider_health_diagnostics")
+            == {
+                "feature_source": "frozen_feature_rows.features",
+                "decision_source": (
+                    "multiplicity_aware_selected_candidate_settled_rows"
+                ),
+                "decision_identity_mapping": (
+                    "market_id_plus_policy_grid_decision_ts"
+                ),
+                "feature_completeness_report_required": True,
+                "missing_versus_zero_audit_report_required": True,
+                "fallback_provider_health_association_report_required": True,
+                "side_and_action_composition_required": True,
+                "all_selected_decisions_must_match_feature_rows": True,
+                "outcome_settlement_pnl_or_future_information_used": False,
+                "diagnostic_only": True,
+            }
         ),
         "execution_policy_input_mapping": (
             protocol.get("execution_policy_input_mapping") == expected_policy_mapping
@@ -328,6 +350,28 @@ def run_challenge_promotion_evidence(
         parallel_freeze_sha256=parallel_freeze_sha256,
         source_report_sha256=source_report_sha256,
     )
+    provider_health_report = build_provider_health_diagnostics(
+        feature_rows=feature_rows,
+        decision_rows=_provider_health_diagnostic_decisions(
+            selected_candidate_rows=candidate_rows,
+            source_rows=source_rows,
+        ),
+    )
+    provider_health_report.update(common)
+    provider_health_report["report_id"] = canonical_payload_sha256(
+        provider_health_report,
+        payload_schema_version=(
+            "bigan-v8-provider-health-diagnostics-v1"
+        ),
+    )
+    if (
+        provider_health_report["decision_row_count"] != 120
+        or provider_health_report["matched_decision_count"] != 120
+        or provider_health_report["unmatched_decision_count"] != 0
+    ):
+        raise ChallengePromotionEvidenceError(
+            "provider-health decision identities do not reconcile"
+        )
     parity_report = _aggregate_policy_report(
         schema_version=AGGREGATE_PARITY_SCHEMA_VERSION,
         common=common,
@@ -362,6 +406,9 @@ def run_challenge_promotion_evidence(
     side_path = run_dir / "challenge_side_action_attribution_report.json"
     regime_md_path = run_dir / "challenge_regime_diagnostics.md"
     policy_inputs_path = run_dir / "challenge_execution_policy_inputs.jsonl"
+    provider_health_path = (
+        run_dir / "challenge_provider_health_diagnostics.json"
+    )
     parity_path = run_dir / "challenge_replay_parity_report.json"
     safety_path = run_dir / "challenge_policy_safety_report.json"
     reconciliation_path = run_dir / "challenge_policy_reconciliation_report.json"
@@ -378,6 +425,7 @@ def run_challenge_promotion_evidence(
     )
     _write_text(regime_md_path, regime_diagnostics_markdown(regime_artifacts))
     _write_jsonl(policy_inputs_path, policy_inputs)
+    _write_json(provider_health_path, provider_health_report)
     replay_descriptors = _write_policy_replays(
         run_dir=run_dir,
         policy_results=policy_results,
@@ -408,6 +456,9 @@ def run_challenge_promotion_evidence(
         "policy_safety_report": _descriptor(safety_path),
         "policy_reconciliation_report": _descriptor(reconciliation_path),
         "powered_paper_gate_report": _descriptor(powered_path),
+        "provider_health_diagnostics_report": _descriptor(
+            provider_health_path
+        ),
         "attempt_consumption_record": attempt_descriptor,
     }
     runtime_evidence_path = run_dir / "challenge_runtime_evidence_manifest.json"
@@ -454,6 +505,9 @@ def run_challenge_promotion_evidence(
         "regime_bootstrap_report": _descriptor(regime_bootstrap_path),
         "side_action_attribution_report": _descriptor(side_path),
         "execution_policy_inputs": _descriptor(policy_inputs_path),
+        "provider_health_diagnostics_report": _descriptor(
+            provider_health_path
+        ),
         "policy_replays": replay_descriptors,
         "replay_parity_report": _descriptor(parity_path),
         "policy_safety_report": _descriptor(safety_path),
@@ -660,6 +714,43 @@ def _regime_assignments(
             )
         )
     return assignments
+
+
+def _provider_health_diagnostic_decisions(
+    *,
+    selected_candidate_rows: list[dict[str, Any]],
+    source_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    source_by_market = {
+        str(row["market_id"]): row for row in source_rows
+    }
+    if len(source_by_market) != len(source_rows):
+        raise ChallengePromotionEvidenceError(
+            "provider-health source market identities are duplicated"
+        )
+    decisions: list[dict[str, Any]] = []
+    for selected in selected_candidate_rows:
+        market_id = str(selected["market_id"])
+        source = source_by_market.get(market_id)
+        if source is None:
+            raise ChallengePromotionEvidenceError(
+                "provider-health selected decision lacks a source market"
+            )
+        policy_grid_decision_ts = int(
+            source.get("policy_grid_decision_ts") or 0
+        )
+        if policy_grid_decision_ts <= 0:
+            raise ChallengePromotionEvidenceError(
+                "provider-health policy-grid decision timestamp is missing"
+            )
+        decisions.append(
+            {
+                **selected,
+                "market_id": market_id,
+                "decision_ts": policy_grid_decision_ts,
+            }
+        )
+    return decisions
 
 
 def _causal_context(

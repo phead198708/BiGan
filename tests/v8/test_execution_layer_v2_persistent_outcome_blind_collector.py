@@ -136,6 +136,58 @@ def test_index_rejects_silent_partial_orderbook_decision_window(
     _assert_safety(row)
 
 
+def test_index_rejects_incomplete_or_censored_trade_tape(
+    tmp_path: Path,
+) -> None:
+    capture = _capture_fixture(
+        tmp_path,
+        boundary=2_000,
+        market_id="market-incomplete-trade-tape",
+    )
+    run_dir = Path(capture["run_dir"])
+    market_path = run_dir / "raw/raw_polymarket_markets.jsonl"
+    market = json.loads(market_path.read_text(encoding="utf-8"))
+    market.update(
+        {
+            "trade_stream_continuity_passed": False,
+            "trade_full_round_coverage_complete": False,
+            "trade_tape_censored": True,
+            "trade_collection_reason_codes": [
+                "polymarket_clob_ws_trade_stream_continuity_not_proven"
+            ],
+        }
+    )
+    _write_jsonl(market_path, [market])
+    manifest_path = run_dir / "pending_round_capture_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["raw_artifact_hashes"][
+        "raw_polymarket_markets.jsonl"
+    ] = _sha256(market_path)
+    _write_json(manifest_path, manifest)
+    report_path = run_dir / "pending_round_capture_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["trade_full_round_coverage_complete_market_count"] = 0
+    _write_json(report_path, report)
+
+    index_path = tmp_path / "state/index.jsonl"
+    _index_batch(
+        tmp_path,
+        run_id="index-incomplete-trade-tape",
+        index_path=index_path,
+        batch_path=_batch_summary(
+            tmp_path,
+            batch_id="batch-incomplete-trade-tape",
+            captures=[capture],
+        ),
+    )
+    row = load_and_validate_persistent_outcome_blind_index(index_path)[0]
+
+    assert row["capture_quality_valid"] is False
+    assert "trade_tape_full_round_coverage_failed" in (
+        row["capture_quality_reason_codes"]
+    )
+
+
 def test_index_is_hash_chained_idempotent_and_retains_failed_attempts(
     tmp_path: Path,
 ) -> None:
@@ -1229,6 +1281,19 @@ def _capture_fixture(
                 "market_end_ts": boundary + 300_000,
                 "up_token_id": "up-token",
                 "down_token_id": "down-token",
+                "trade_collection_mode": (
+                    "clob_websocket_plus_data_api_paginated_reconciliation"
+                ),
+                "trade_stream_started_at_ts": boundary,
+                "trade_stream_ended_at_ts": boundary + 300_000,
+                "trade_stream_continuity_passed": True,
+                "trade_stream_timestamp_causality_violation_count": 0,
+                "trade_api_collection_ts": boundary + 300_000,
+                "trade_api_request_failed": False,
+                "trade_rest_rows_truncated": False,
+                "trade_full_round_coverage_complete": True,
+                "trade_tape_censored": False,
+                "trade_collection_reason_codes": [],
             }
         ],
         "raw_polymarket_orderbooks.jsonl": [
@@ -1290,6 +1355,7 @@ def _capture_fixture(
                 "run_id": run_id,
                 "pending_resolution": True,
                 "resolution_provider_called": False,
+                "trade_full_round_coverage_complete_market_count": 1,
                 "paper_only": True,
                 "capital_at_risk": False,
             },

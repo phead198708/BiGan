@@ -439,6 +439,54 @@ def _normalize_markets(
                     if row.get("reference_price_start") is not None
                     else row.get("reference_price_at_start")
                 ),
+                trade_collection_mode=(
+                    str(row.get("trade_collection_mode"))
+                    if row.get("trade_collection_mode")
+                    else None
+                ),
+                trade_stream_started_at_ts=_optional_int(
+                    row.get("trade_stream_started_at_ts")
+                ),
+                trade_stream_ended_at_ts=_optional_int(
+                    row.get("trade_stream_ended_at_ts")
+                ),
+                trade_stream_continuity_passed=(
+                    row.get("trade_stream_continuity_passed") is True
+                    if row.get("trade_stream_continuity_passed") is not None
+                    else None
+                ),
+                trade_stream_timestamp_causality_violation_count=_optional_int(
+                    row.get(
+                        "trade_stream_timestamp_causality_violation_count"
+                    )
+                ),
+                trade_api_collection_ts=_optional_int(
+                    row.get("trade_api_collection_ts")
+                ),
+                trade_api_request_failed=(
+                    row.get("trade_api_request_failed") is True
+                    if row.get("trade_api_request_failed") is not None
+                    else None
+                ),
+                trade_rest_rows_truncated=(
+                    row.get("trade_rest_rows_truncated") is True
+                    if row.get("trade_rest_rows_truncated") is not None
+                    else None
+                ),
+                trade_full_round_coverage_complete=(
+                    row.get("trade_full_round_coverage_complete") is True
+                    if row.get("trade_full_round_coverage_complete") is not None
+                    else None
+                ),
+                trade_tape_censored=(
+                    row.get("trade_tape_censored") is True
+                    if row.get("trade_tape_censored") is not None
+                    else None
+                ),
+                trade_collection_reason_codes=tuple(
+                    str(reason)
+                    for reason in row.get("trade_collection_reason_codes") or []
+                ),
                 paper_only=row.get("paper_only", True) is True,
                 capital_at_risk=row.get("capital_at_risk", False) is True,
                 broker_exchange_write_enabled=row.get("broker_exchange_write_enabled", False) is True,
@@ -534,6 +582,12 @@ def _normalize_trades(
                 price=float(row["price"]),
                 size=float(row.get("size") or 0.0),
                 side=str(row.get("side") or "unknown"),
+                source=str(row.get("trade_source_type") or row.get("source") or "polymarket"),
+                transaction_hash=(
+                    str(row.get("transaction_hash"))
+                    if row.get("transaction_hash")
+                    else None
+                ),
                 paper_only=row.get("paper_only", True) is True,
                 capital_at_risk=row.get("capital_at_risk", False) is True,
                 broker_exchange_write_enabled=row.get("broker_exchange_write_enabled", False) is True,
@@ -818,6 +872,13 @@ def _optional_positive_float(value: Any) -> float | None:
     if numeric <= 0.0 or not math.isfinite(numeric):
         raise ValueError("reference prices must be positive")
     return numeric
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _optional_float(value: Any) -> float | None:
