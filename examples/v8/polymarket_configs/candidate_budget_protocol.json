@@ -44,5 +44,19 @@
   "altered_hash_rejected": true,
   "append_only_ledgers_required": true,
   "fail_closed": true,
-  "permissions_granted_by_protocol": []
+  "permissions_granted_by_protocol": [],
+  "safety": {
+    "paper_candidate_unlocked": false,
+    "promotion_unlocked": false,
+    "live_unlocked": false,
+    "write_enabled": false,
+    "wallet_enabled": false,
+    "capital_at_risk": false,
+    "handoff_enabled": false,
+    "source_change_enabled": false,
+    "freeze_change_enabled": false,
+    "promotion_evidence_eligible": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
 }

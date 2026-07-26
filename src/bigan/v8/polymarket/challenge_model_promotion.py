@@ -12,6 +12,8 @@ from bigan.v8.canonical_payload import (
 )
 from bigan.v8.polymarket.candidate_budget import (
     evaluate_next_gate_eligibility,
+    validate_candidate_budget_artifacts,
+    validate_eligibility_decision,
 )
 from bigan.v8.polymarket.parallel_future_gate import (
     validate_parallel_future_collection_plan,
@@ -96,6 +98,24 @@ def audit_challenge_model_promotion(
         canonical_payload_contract_valid = False
     budget_decision_valid = False
     try:
+        validate_candidate_budget_artifacts(
+            family_manifest=candidate_family,
+            budget_protocol=candidate_budget,
+            error_control_contract=family_error_control,
+            attempt_ledger=attempt_ledger,
+            evidence_ledger=evidence_ledger,
+        )
+        candidate_stable_identities = {
+            str(candidate["candidate_id"]): str(
+                candidate["stable_candidate_identity"]
+            )
+            for candidate in candidate_family["candidates"]
+            if candidate["candidate_id"]
+            in {
+                "v8_1_primary_no_fallback",
+                "v8_3_primary_with_fallback",
+            }
+        }
         recomputed_next_gate = evaluate_next_gate_eligibility(
             family_manifest=candidate_family,
             budget_protocol=candidate_budget,
@@ -105,16 +125,24 @@ def audit_challenge_model_promotion(
             proposed_attempt={
                 "family_id": candidate_family.get("family_id"),
                 "attempt_id": next_gate.get("attempt_id"),
+                "attempt_case": "parallel_shared_window_candidate",
                 "candidate_ids": [
                     "v8_1_primary_no_fallback",
                     "v8_3_primary_with_fallback",
                 ],
+                "candidate_stable_identities": (
+                    candidate_stable_identities
+                ),
                 "target_outcomes_opened": False,
                 "decision_freeze_complete": True,
                 "shared_window_source_rows_frozen": True,
             },
         )
-        budget_decision_valid = recomputed_next_gate == next_gate
+        validate_eligibility_decision(
+            next_gate,
+            recomputed=recomputed_next_gate,
+        )
+        budget_decision_valid = True
     except (TypeError, ValueError):
         budget_decision_valid = False
 

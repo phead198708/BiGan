@@ -17,7 +17,28 @@ candidate consumes budget once its target is opened. A pre-target invalid
 window or pre-target bug fix consumes no attempt; a bug discovered after target
 access consumes the attempt and makes the old candidate hash terminal.
 
+The repository validator now checks the semantics behind every hash:
+
+- candidate identities are recomputed from source-model, execution-policy, and
+  candidate-definition hashes, with duplicate identities rejected;
+- the case table, attempt cap, preregistered alpha-spending sequence, Bonferroni
+  allocation, and family-wise alpha sum are validated as one contract;
+- an opened attempt must consume both its attempt and alpha and become
+  terminal, while opened evidence must be permanently consumed and never
+  reusable for promotion, even if an attacker recomputes a valid ledger hash
+  chain after changing those fields;
+- the proposed gate pins the ordered candidate IDs and their stable identities,
+  so a branch/version rename or alias cannot reset history;
+- every budget contract artifact and the machine decision carries the complete
+  closed paper/live/write/wallet/capital/handoff/source/freeze/promotion/
+  #134/#146 safety state. The append-only ledger bytes and entries are
+  unchanged.
+
 The committed machine decision says only that issue #254 is statistically
 eligible to freeze and collect its first window. It does not grant paper,
 promotion, live, write, wallet, capital, handoff, source/freeze, #134, or #146
 permission.
+
+This hardening does not change the accepted collection plan, pre-freeze
+checklist, excluded-capture ledger, candidate set, attempt number, or alpha
+allocation. Collection remains an independent operator-authorized action.

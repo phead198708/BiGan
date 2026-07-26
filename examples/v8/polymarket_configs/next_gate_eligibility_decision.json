@@ -2,6 +2,15 @@
   "schema_version": "bigan-v8-candidate-budget-eligibility-v1",
   "family_id": "v8-high-signal-vs-fallback-2026q3",
   "attempt_id": "v8-parallel-future-gate-attempt-001",
+  "attempt_case": "parallel_shared_window_candidate",
+  "candidate_ids": [
+    "v8_1_primary_no_fallback",
+    "v8_3_primary_with_fallback"
+  ],
+  "candidate_stable_identities": {
+    "v8_1_primary_no_fallback": "2f343da4bb8d61265fc597f53094e3e327987dd74f7cff3eecfb89ac067af12c",
+    "v8_3_primary_with_fallback": "6c03c9d6815522ed53655d152eac674df09d6fec3485543641a86e1ba686e766"
+  },
   "next_attempt_number": 1,
   "maximum_confirmatory_attempts": 3,
   "parallel_candidate_count": 2,
@@ -16,5 +25,11 @@
   "live_unlocked": false,
   "write_enabled": false,
   "wallet_enabled": false,
-  "capital_at_risk": false
+  "capital_at_risk": false,
+  "handoff_enabled": false,
+  "source_change_enabled": false,
+  "freeze_change_enabled": false,
+  "promotion_evidence_eligible": false,
+  "#134_resume_allowed": false,
+  "#146_start_allowed": false
 }
