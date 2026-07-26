@@ -24,3 +24,12 @@ Reports separate primary, fallback, abstention, and no-bet contributions. A
 multiplicity-aware winner is diagnostic evidence only: issue #254 never
 unlocks paper, promotion, live, write, wallet, capital, handoff, source/freeze,
 #134, or #146 permissions.
+
+The executable entry point is `examples/v8/run_parallel_future_gate.py`:
+
+- `validate-plan` verifies the preregistration and every bound raw-file hash;
+- `freeze` writes one shared source grid and three immutable decision streams;
+- `evaluate` consumes a freeze once and writes the multiplicity-aware report;
+- `legacy-smoke` exercises the full evaluator on an already-consumed v8.3
+  window while explicitly keeping promotion eligibility and alpha consumption
+  false.

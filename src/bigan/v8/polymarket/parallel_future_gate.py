@@ -349,7 +349,12 @@ def evaluate_parallel_future_gate(
         )
         candidate_metrics = metrics[candidate_id]
         delta_total = sum(delta_by_market.values())
-        largest_winner_removed = _largest_winner_removed(rows)
+        candidate_largest_winner_removed = _largest_winner_removed(
+            [float(row["after_cost_pnl"]) for row in rows]
+        )
+        delta_largest_winner_removed = _largest_winner_removed(
+            list(delta_by_market.values())
+        )
         support = int(candidate_metrics["accepted_bet_count"])
         status = "evaluated" if support >= minimum_support else "insufficient_support"
         passed = (
@@ -357,7 +362,8 @@ def evaluate_parallel_future_gate(
             and float(candidate_metrics["total_after_cost_pnl"]) > 0.0
             and delta_total > 0.0
             and lcb > 0.0
-            and largest_winner_removed > 0.0
+            and candidate_largest_winner_removed > 0.0
+            and delta_largest_winner_removed > 0.0
         )
         gates[candidate_id] = {
             "status": status,
@@ -368,7 +374,12 @@ def evaluate_parallel_future_gate(
             "adjusted_bootstrap_alpha": candidate_alpha,
             "candidate_minus_baseline_bootstrap_lcb": lcb,
             "candidate_minus_baseline_bootstrap_ucb": ucb,
-            "largest_winner_removed_after_cost_pnl": largest_winner_removed,
+            "candidate_largest_winner_removed_after_cost_pnl": (
+                candidate_largest_winner_removed
+            ),
+            "candidate_minus_baseline_largest_winner_removed_after_cost_pnl": (
+                delta_largest_winner_removed
+            ),
             "all_hard_gates_passed": passed,
         }
     eligible_candidates = [
@@ -567,9 +578,11 @@ def _candidate_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _largest_winner_removed(rows: list[dict[str, Any]]) -> float:
-    pnls = [float(row["after_cost_pnl"]) for row in rows]
-    return sum(pnls) - max([value for value in pnls if value > 0.0], default=0.0)
+def _largest_winner_removed(values: list[float]) -> float:
+    return sum(values) - max(
+        [value for value in values if value > 0.0],
+        default=0.0,
+    )
 
 
 def _bootstrap_sum_interval(

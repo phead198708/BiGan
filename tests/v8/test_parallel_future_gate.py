@@ -14,6 +14,9 @@ from bigan.v8.polymarket.parallel_future_gate import (
     validate_parallel_candidate_protocol,
     validate_parallel_future_collection_plan,
 )
+from examples.v8.run_parallel_future_gate import (
+    build_legacy_v8_3_smoke_inputs,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "examples/v8/polymarket_configs"
@@ -256,6 +259,12 @@ def test_parallel_evaluation_is_single_use_and_reports_attribution() -> None:
     report = result["report"]
     assert report["candidate_metrics"]["v8_3_primary_with_fallback"]["fallback_count"] == 22
     assert report["candidate_gates"]["v8_1_primary_no_fallback"]["status"] == "evaluated"
+    assert (
+        report["candidate_gates"]["v8_1_primary_no_fallback"][
+            "candidate_minus_baseline_largest_winner_removed_after_cost_pnl"
+        ]
+        == 0.0
+    )
     assert report["multiplicity_aware_selected_candidate"] is None
     assert report["promotion_unlocked"] is False
     with pytest.raises(ParallelFutureGateError, match="already consumed"):
@@ -306,3 +315,89 @@ def test_insufficient_support_is_explicit_and_does_not_unlock() -> None:
         assert result["report"]["candidate_gates"][candidate_id][
             "all_hard_gates_passed"
         ] is False
+
+
+def test_legacy_consumed_window_adapter_separates_primary_and_fallback() -> None:
+    overlays = [
+        {
+            "market_id": "fallback-market",
+            "decision_ts": 1_000,
+            "overlay_decision_id": "fallback",
+            "original_v8_1_action": "NO_TRADE",
+            "original_v8_1_side": "NONE",
+            "original_v8_1_guard_allowed": False,
+            "selected_action": "BUY_DOWN",
+            "selected_side": "DOWN",
+            "selection_source": "v6_7_non_risk_abstention_fallback",
+            "execution_guard_order_allowed": True,
+            "fallback_applied": True,
+            "original_v6_7_action": "BUY_DOWN",
+            "original_v6_7_side": "DOWN",
+            "original_v6_7_guard_allowed": True,
+        },
+        {
+            "market_id": "primary-market",
+            "decision_ts": 2_000,
+            "overlay_decision_id": "primary",
+            "original_v8_1_action": "BUY_UP",
+            "original_v8_1_side": "UP",
+            "original_v8_1_guard_allowed": True,
+            "selected_action": "BUY_UP",
+            "selected_side": "UP",
+            "selection_source": "v8_1_primary",
+            "execution_guard_order_allowed": True,
+            "fallback_applied": False,
+            "original_v6_7_action": "BUY_DOWN",
+            "original_v6_7_side": "DOWN",
+            "original_v6_7_guard_allowed": True,
+        },
+    ]
+    candidate_targets = [
+        {
+            "market_id": row["market_id"],
+            "decision_ts": row["decision_ts"],
+            "action": row["selected_action"],
+            "paper_position_size": 1.0,
+            "runtime_policy_after_cost_net_pnl_per_contract": 0.1,
+        }
+        for row in overlays
+    ]
+    baseline_targets = [
+        {
+            "market_id": row["market_id"],
+            "decision_ts": row["decision_ts"],
+            "action": "BUY_DOWN",
+            "paper_position_size": 1.0,
+            "runtime_policy_after_cost_net_pnl_per_contract": 0.1,
+        }
+        for row in overlays
+    ]
+    inputs = build_legacy_v8_3_smoke_inputs(
+        overlay_rows=overlays,
+        candidate_target_rows=candidate_targets,
+        baseline_target_rows=baseline_targets,
+    )
+    freeze = build_parallel_target_free_freeze(
+        protocol=_json("parallel_candidate_protocol.json"),
+        candidate_contracts=_contracts(),
+        source_rows=inputs["source_rows"],
+        decisions_by_candidate=inputs["decisions_by_candidate"],
+        decision_freeze_created_ts=900,
+        target_access_started=False,
+    )
+    report = evaluate_parallel_future_gate(
+        protocol=_json("parallel_candidate_protocol.json"),
+        freeze=freeze,
+        settled_targets=inputs["settled_targets"],
+        evaluation_started_ts=3_000,
+        consumed_freeze_sha256s=set(),
+    )["report"]
+    assert report["candidate_metrics"]["v8_1_primary_no_fallback"][
+        "accepted_bet_count"
+    ] == 1
+    assert report["candidate_metrics"]["v8_3_primary_with_fallback"][
+        "fallback_count"
+    ] == 1
+    assert report["candidate_metrics"]["matched_frozen_v6_7"][
+        "accepted_bet_count"
+    ] == 2
