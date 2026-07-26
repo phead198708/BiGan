@@ -156,6 +156,9 @@ def test_development_batch_canary_materializes_target_free_grid_and_guard_diagno
             batch_id=batch_id,
             feature_contract_path=feature_contract_path,
             expected_feature_contract_sha256=_sha256(feature_contract_path),
+            exact_model_runtime_binding_summary=(
+                _runtime_binding_summary()
+            ),
         )
     )
     report = result["report"]
@@ -165,6 +168,13 @@ def test_development_batch_canary_materializes_target_free_grid_and_guard_diagno
     assert report["candidate_model_scoring_attempted"] is False
     assert report["labels_outcomes_or_pnl_opened"] is False
     assert report["development_data_canary_passed"] is True
+    assert report["exact_model_runtime_binding_required"] is True
+    assert report["exact_model_runtime_binding_verified"] is True
+    assert (
+        report["exact_model_runtime_binding_summary"]["summary_id"]
+        == _runtime_binding_summary()["summary_id"]
+    )
+    assert result["manifest"]["exact_model_runtime_binding_verified"] is True
     assert result["manifest"]["paper_candidate_allowed"] is False
 
 
@@ -271,6 +281,39 @@ def _batch_report(
         "labels_outcomes_or_pnl_opened": False,
         **_blocked_safety_fields(),
     }
+
+
+def _runtime_binding_summary() -> dict:
+    summary = {
+        "schema_version": (
+            "bigan-v8-exact-model-runtime-byte-verification-v1"
+        ),
+        "candidate_name": "candidate-from-contract",
+        "checks": {
+            "booster_bytes_loaded": True,
+            "profile_file_sha256": True,
+            "initial_controller_state_exact": True,
+        },
+        "verified_hashes": {
+            "booster_bytes_sha256": "a" * 64,
+            "profile_file_sha256": "b" * 64,
+            "initial_controller_state_payload_sha256": "c" * 64,
+        },
+        "runtime_byte_verification_passed": True,
+        "paper_candidate_allowed": False,
+        "live_trading_enabled": False,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+    }
+    summary["summary_id"] = canonical_json_sha256(summary)
+    return summary
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:

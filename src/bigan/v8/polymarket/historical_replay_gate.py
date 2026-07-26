@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import math
 import string
 from collections import Counter
@@ -16,8 +18,26 @@ HISTORICAL_REPLAY_CONTRACT_SCHEMA_VERSION = (
 HISTORICAL_REPLAY_REPORT_SCHEMA_VERSION = (
     "bigan-v8-challenge-historical-replay-report-v1"
 )
+EXACT_MODEL_BINDING_SUMMARY_SCHEMA_VERSION = (
+    "bigan-v8-exact-historical-model-binding-summary-v1"
+)
 SUPPORTED_CANDIDATE_ID = "v8_1_primary_no_fallback"
 SUPPORTED_BASELINE_ID = "matched_frozen_v6_7"
+EXACT_MODEL_BINDING_CHECK_NAMES = (
+    "binding_sha256",
+    "model_artifact_identity",
+    "historical_manifest_sha256",
+    "candidate_profile_sha256",
+    "candidate_identity",
+    "booster_sha256",
+    "rank_state_id",
+    "rank_lineage_hash",
+    "eligible_prediction_scores_hash",
+    "controller_guard_acceptance_history_hash",
+    "historical_gate_passed",
+    "target_free_controller",
+    "all_safety_unlocks_remain_false",
+)
 
 
 class HistoricalReplayGateError(ValueError):
@@ -34,7 +54,7 @@ def validate_exact_historical_model_binding(
     expected_model_artifact_sha256: str,
     expected_source_manifest_sha256: str,
     expected_candidate_profile_sha256: str,
-) -> None:
+) -> dict[str, Any]:
     """Bind replay evidence to exact model bytes and controller state."""
 
     state = dict(frozen_model_binding.get("initial_controller_state") or {})
@@ -44,11 +64,24 @@ def validate_exact_historical_model_binding(
     )
     manifest_model = dict(source_manifest.get("model") or {})
     manifest_profile = dict(source_manifest.get("profile") or {})
+    candidate_name = candidate_contract.get("primary_policy")
+    booster_bytes = _decode_booster_bytes(weighted_model)
+    recomputed_booster_contract_sha256 = (
+        canonical_json_sha256(base64.b64encode(booster_bytes).decode("ascii"))
+        if booster_bytes is not None
+        else None
+    )
+    recomputed_booster_bytes_sha256 = (
+        hashlib.sha256(booster_bytes).hexdigest()
+        if booster_bytes is not None
+        else None
+    )
     safety_false_fields = (
         "source_model_candidate_eligible",
         "freeze_ready",
         "promotion_evidence_eligible",
         "paper_candidate_allowed",
+        "live_trading_enabled",
         "v8_execution_handoff_allowed",
         "capital_at_risk",
         "polymarket_write_enabled",
@@ -62,7 +95,7 @@ def validate_exact_historical_model_binding(
             and candidate_contract.get("frozen_model_binding_sha256")
             == expected_binding_sha256
         ),
-        "model_artifact_sha256": (
+        "model_artifact_identity": (
             _valid_sha256(expected_model_artifact_sha256)
             and candidate_contract.get("frozen_model_artifact_sha256")
             == expected_model_artifact_sha256
@@ -70,9 +103,7 @@ def validate_exact_historical_model_binding(
             == expected_model_artifact_sha256
             and manifest_model.get("sha256")
             == expected_model_artifact_sha256
-        ),
-        "model_artifact_id": (
-            _valid_sha256(frozen_model_artifact.get("model_artifact_id"))
+            and _valid_sha256(frozen_model_artifact.get("model_artifact_id"))
             and candidate_contract.get("frozen_model_artifact_id")
             == frozen_model_artifact.get("model_artifact_id")
             and frozen_model_binding.get("frozen_model_artifact_id")
@@ -93,14 +124,17 @@ def validate_exact_historical_model_binding(
             == expected_candidate_profile_sha256
         ),
         "candidate_identity": (
-            frozen_model_artifact.get("candidate_name")
-            == "adaptive_support_controller_v8_1"
-            and frozen_model_binding.get("candidate_name")
-            == frozen_model_artifact.get("candidate_name")
+            isinstance(candidate_name, str)
+            and bool(candidate_name)
+            and frozen_model_artifact.get("candidate_name") == candidate_name
+            and frozen_model_binding.get("candidate_name") == candidate_name
         ),
         "booster_sha256": (
-            _valid_sha256(weighted_model.get("booster_sha256"))
+            booster_bytes is not None
+            and _valid_sha256(weighted_model.get("booster_sha256"))
             and frozen_model_binding.get("frozen_booster_sha256")
+            == weighted_model.get("booster_sha256")
+            and recomputed_booster_contract_sha256
             == weighted_model.get("booster_sha256")
         ),
         "rank_state_id": (
@@ -155,12 +189,58 @@ def validate_exact_historical_model_binding(
             for field in safety_false_fields
         ),
     }
+    if tuple(checks) != EXACT_MODEL_BINDING_CHECK_NAMES:
+        raise AssertionError("exact model binding check order drifted")
+    verified_hashes = {
+        "binding_sha256": str(expected_binding_sha256).lower(),
+        "model_artifact_sha256": str(
+            expected_model_artifact_sha256
+        ).lower(),
+        "model_artifact_id": str(
+            frozen_model_artifact.get("model_artifact_id") or ""
+        ).lower(),
+        "historical_manifest_sha256": str(
+            expected_source_manifest_sha256
+        ).lower(),
+        "candidate_profile_sha256": str(
+            expected_candidate_profile_sha256
+        ).lower(),
+        "booster_contract_sha256": str(
+            recomputed_booster_contract_sha256 or ""
+        ).lower(),
+        "booster_bytes_sha256": str(
+            recomputed_booster_bytes_sha256 or ""
+        ).lower(),
+        "rank_state_id": str(model_state.get("rank_state_id") or "").lower(),
+        "rank_lineage_hash": str(
+            model_state.get("rank_lineage_hash") or ""
+        ).lower(),
+        "eligible_prediction_scores_hash": str(
+            model_state.get("eligible_prediction_scores_hash") or ""
+        ).lower(),
+        "controller_guard_acceptance_history_hash": str(
+            model_state.get(
+                "controller_guard_acceptance_history_hash"
+            )
+            or ""
+        ).lower(),
+    }
+    summary = {
+        "schema_version": EXACT_MODEL_BINDING_SUMMARY_SCHEMA_VERSION,
+        "candidate_name": candidate_name,
+        "check_count": len(checks),
+        "checks": checks,
+        "verified_hashes": verified_hashes,
+        "exact_frozen_model_binding_verified": all(checks.values()),
+    }
+    summary["summary_id"] = canonical_json_sha256(summary)
     blockers = [name for name, passed in checks.items() if not passed]
     if blockers:
         raise HistoricalReplayGateError(
             "exact historical model binding invalid: "
             + ", ".join(sorted(blockers))
         )
+    return summary
 
 
 def validate_historical_replay_contract(contract: dict[str, Any]) -> None:
@@ -242,7 +322,7 @@ def audit_historical_replay_superiority(
     baseline_rows: list[dict[str, Any]],
     lineage_sha256s: dict[str, str],
     evaluation_completed_ts: int,
-    exact_model_binding_verified: bool,
+    exact_model_binding_summary: dict[str, Any],
 ) -> dict[str, Any]:
     """Recompute the matched replay and enforce strict pre-collection superiority."""
 
@@ -289,6 +369,9 @@ def audit_historical_replay_superiority(
         float(row["fixed_position_size"])
         for row in candidate_rows + baseline_rows
     }
+    binding_summary_checks = _binding_summary_checks(
+        exact_model_binding_summary
+    )
 
     source_metrics_reconciled = all(
         (
@@ -452,7 +535,7 @@ def audit_historical_replay_superiority(
         "lineage_hashes_complete": bool(lineage_sha256s)
         and all(_valid_sha256(value) for value in lineage_sha256s.values()),
         "exact_frozen_model_binding_verified": (
-            exact_model_binding_verified is True
+            all(binding_summary_checks.values())
         ),
         "all_safety_unlocks_remain_false": (
             all(source_report.get(field) is False for field in safety_false_fields)
@@ -482,6 +565,7 @@ def audit_historical_replay_superiority(
         "historical_role": gate_contract["historical_role"],
         "evaluation_completed_ts": evaluation_completed_ts,
         "lineage_sha256s": dict(sorted(lineage_sha256s.items())),
+        "exact_model_binding_summary": exact_model_binding_summary,
         "evaluation_market_count": len(market_keys),
         "evaluation_market_ids_hash": expected_market_hash,
         "candidate_accepted_market_count": len(candidate_rows),
@@ -610,9 +694,50 @@ def _valid_sha256(value: Any) -> bool:
     )
 
 
+def _decode_booster_bytes(
+    weighted_model: dict[str, Any],
+) -> bytes | None:
+    encoded = weighted_model.get("booster_json_base64")
+    if not isinstance(encoded, str) or not encoded:
+        return None
+    try:
+        return base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError):
+        return None
+
+
+def _binding_summary_checks(summary: dict[str, Any]) -> dict[str, bool]:
+    if not isinstance(summary, dict):
+        return dict.fromkeys(EXACT_MODEL_BINDING_CHECK_NAMES, False)
+    checks = summary.get("checks")
+    verified_hashes = summary.get("verified_hashes")
+    without_id = {
+        key: value for key, value in summary.items() if key != "summary_id"
+    }
+    structurally_valid = (
+        summary.get("schema_version")
+        == EXACT_MODEL_BINDING_SUMMARY_SCHEMA_VERSION
+        and summary.get("check_count") == len(EXACT_MODEL_BINDING_CHECK_NAMES)
+        and isinstance(checks, dict)
+        and set(checks) == set(EXACT_MODEL_BINDING_CHECK_NAMES)
+        and all(isinstance(value, bool) for value in checks.values())
+        and isinstance(verified_hashes, dict)
+        and bool(verified_hashes)
+        and all(_valid_sha256(value) for value in verified_hashes.values())
+        and summary.get("summary_id") == canonical_json_sha256(without_id)
+        and summary.get("exact_frozen_model_binding_verified")
+        is bool(all(checks.values()))
+    )
+    if not structurally_valid:
+        return dict.fromkeys(EXACT_MODEL_BINDING_CHECK_NAMES, False)
+    return dict(checks)
+
+
 __all__ = [
     "HISTORICAL_REPLAY_CONTRACT_SCHEMA_VERSION",
     "HISTORICAL_REPLAY_REPORT_SCHEMA_VERSION",
+    "EXACT_MODEL_BINDING_CHECK_NAMES",
+    "EXACT_MODEL_BINDING_SUMMARY_SCHEMA_VERSION",
     "HistoricalReplayGateError",
     "audit_historical_replay_superiority",
     "validate_exact_historical_model_binding",

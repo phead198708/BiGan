@@ -18,6 +18,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from bigan.v8.polymarket.exact_model_runtime_binding import (  # noqa: E402
+    ExactModelRuntimeBindingConfig,
+    verify_exact_model_runtime_binding,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_calibration_scale_aligned_runtime_pnl_v6_9_future_batch_canary import (  # noqa: E402
     CalibrationScaleAlignedV69FutureBatchCanaryConfig,
     build_v6_9_future_cumulative_canary,
@@ -78,6 +82,13 @@ def _single_service_instance(function):
 
     @wraps(function)
     def wrapped(**kwargs):
+        runtime_binding_summary = (
+            _verify_challenge_runtime_binding_from_kwargs(kwargs)
+        )
+        if runtime_binding_summary is not None:
+            kwargs["_exact_model_runtime_binding_summary"] = (
+                runtime_binding_summary
+            )
         root = Path(kwargs["service_root"]).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True)
         lock_path = root / "persistent_outcome_blind_service.lock"
@@ -119,6 +130,15 @@ def run_service(
     v6_9_candidate_manifest_sha256: str | None = None,
     v6_9_collection_plan_path: Path | str | None = None,
     v6_9_collection_plan_sha256: str | None = None,
+    challenge_candidate_contract_path: Path | str | None = None,
+    challenge_candidate_contract_sha256: str | None = None,
+    challenge_frozen_model_binding_path: Path | str | None = None,
+    challenge_frozen_model_binding_sha256: str | None = None,
+    challenge_frozen_model_artifact_path: Path | str | None = None,
+    challenge_frozen_model_artifact_sha256: str | None = None,
+    challenge_candidate_profile_path: Path | str | None = None,
+    challenge_candidate_profile_sha256: str | None = None,
+    _exact_model_runtime_binding_summary: dict | None = None,
 ) -> dict:
     if batch_round_count <= 0:
         raise ValueError("batch_round_count must be positive")
@@ -304,6 +324,9 @@ def run_service(
                         expected_feature_contract_sha256=(
                             batch_canary_feature_contract_sha256.lower()
                         ),
+                        exact_model_runtime_binding_summary=(
+                            _exact_model_runtime_binding_summary
+                        ),
                     )
                 )
             except Exception as exc:
@@ -442,6 +465,15 @@ def run_service(
                 "resolution_provider_called": False,
                 "training_corpus_export_attempted": False,
                 "labels_outcomes_or_pnl_opened": False,
+                "exact_model_runtime_binding_required": (
+                    _exact_model_runtime_binding_summary is not None
+                ),
+                "exact_model_runtime_binding_verified": (
+                    _exact_model_runtime_binding_summary is not None
+                ),
+                "exact_model_runtime_binding_summary": (
+                    _exact_model_runtime_binding_summary
+                ),
                 **SAFETY,
             }
             if v6_2_canary_result is not None and v6_2_cumulative_result is not None:
@@ -633,6 +665,15 @@ def run_service(
                 "resolution_provider_called": False,
                 "training_corpus_export_attempted": False,
                 "labels_outcomes_or_pnl_opened": False,
+                "exact_model_runtime_binding_required": (
+                    _exact_model_runtime_binding_summary is not None
+                ),
+                "exact_model_runtime_binding_verified": (
+                    _exact_model_runtime_binding_summary is not None
+                ),
+                "exact_model_runtime_binding_summary": (
+                    _exact_model_runtime_binding_summary
+                ),
                 **SAFETY,
             }
             if canary_result is not None:
@@ -783,6 +824,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--v6-9-candidate-manifest-sha256")
     parser.add_argument("--v6-9-collection-plan")
     parser.add_argument("--v6-9-collection-plan-sha256")
+    parser.add_argument("--challenge-candidate-contract")
+    parser.add_argument("--challenge-candidate-contract-sha256")
+    parser.add_argument("--challenge-frozen-model-binding")
+    parser.add_argument("--challenge-frozen-model-binding-sha256")
+    parser.add_argument("--challenge-frozen-model-artifact")
+    parser.add_argument("--challenge-frozen-model-artifact-sha256")
+    parser.add_argument("--challenge-candidate-profile")
+    parser.add_argument("--challenge-candidate-profile-sha256")
     args = parser.parse_args(argv)
     state = run_service(
         service_root=args.service_root,
@@ -802,9 +851,85 @@ def main(argv: list[str] | None = None) -> int:
         v6_9_candidate_manifest_sha256=args.v6_9_candidate_manifest_sha256,
         v6_9_collection_plan_path=args.v6_9_collection_plan,
         v6_9_collection_plan_sha256=args.v6_9_collection_plan_sha256,
+        challenge_candidate_contract_path=(
+            args.challenge_candidate_contract
+        ),
+        challenge_candidate_contract_sha256=(
+            args.challenge_candidate_contract_sha256
+        ),
+        challenge_frozen_model_binding_path=(
+            args.challenge_frozen_model_binding
+        ),
+        challenge_frozen_model_binding_sha256=(
+            args.challenge_frozen_model_binding_sha256
+        ),
+        challenge_frozen_model_artifact_path=(
+            args.challenge_frozen_model_artifact
+        ),
+        challenge_frozen_model_artifact_sha256=(
+            args.challenge_frozen_model_artifact_sha256
+        ),
+        challenge_candidate_profile_path=args.challenge_candidate_profile,
+        challenge_candidate_profile_sha256=(
+            args.challenge_candidate_profile_sha256
+        ),
     )
     print(json.dumps(state, indent=2, sort_keys=True))
     return 0
+
+
+def _verify_challenge_runtime_binding_from_kwargs(
+    kwargs: dict,
+) -> dict | None:
+    fields = (
+        "challenge_candidate_contract_path",
+        "challenge_candidate_contract_sha256",
+        "challenge_frozen_model_binding_path",
+        "challenge_frozen_model_binding_sha256",
+        "challenge_frozen_model_artifact_path",
+        "challenge_frozen_model_artifact_sha256",
+        "challenge_candidate_profile_path",
+        "challenge_candidate_profile_sha256",
+    )
+    supplied = [kwargs.get(field) is not None for field in fields]
+    if not any(supplied):
+        return None
+    if not all(supplied):
+        missing = [
+            field for field in fields if kwargs.get(field) is None
+        ]
+        raise ValueError(
+            "challenge runtime binding arguments must be supplied together: "
+            + ",".join(missing)
+        )
+    return verify_exact_model_runtime_binding(
+        ExactModelRuntimeBindingConfig(
+            candidate_contract_path=kwargs[
+                "challenge_candidate_contract_path"
+            ],
+            expected_candidate_contract_sha256=kwargs[
+                "challenge_candidate_contract_sha256"
+            ],
+            frozen_model_binding_path=kwargs[
+                "challenge_frozen_model_binding_path"
+            ],
+            expected_frozen_model_binding_sha256=kwargs[
+                "challenge_frozen_model_binding_sha256"
+            ],
+            frozen_model_artifact_path=kwargs[
+                "challenge_frozen_model_artifact_path"
+            ],
+            expected_frozen_model_artifact_sha256=kwargs[
+                "challenge_frozen_model_artifact_sha256"
+            ],
+            candidate_profile_path=kwargs[
+                "challenge_candidate_profile_path"
+            ],
+            expected_candidate_profile_sha256=kwargs[
+                "challenge_candidate_profile_sha256"
+            ],
+        )
+    )
 
 
 def _load_state(path: Path) -> dict:

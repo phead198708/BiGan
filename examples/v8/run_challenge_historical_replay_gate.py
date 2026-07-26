@@ -77,7 +77,7 @@ def main() -> int:
     source_manifest = _json(paths["source_manifest"])
     _validate_source_manifest(source_manifest, paths=paths, expected=expected)
     candidate_contract = _json(paths["candidate_contract"])
-    validate_exact_historical_model_binding(
+    binding_summary = validate_exact_historical_model_binding(
         candidate_contract=candidate_contract,
         frozen_model_binding=_json(paths["frozen_model_binding"]),
         frozen_model_artifact=_json(paths["frozen_model_artifact"]),
@@ -96,7 +96,7 @@ def main() -> int:
         baseline_rows=_jsonl(paths["baseline_rows"]),
         lineage_sha256s=expected,
         evaluation_completed_ts=args.evaluation_completed_ts,
-        exact_model_binding_verified=True,
+        exact_model_binding_summary=binding_summary,
     )
     payload = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output is not None:

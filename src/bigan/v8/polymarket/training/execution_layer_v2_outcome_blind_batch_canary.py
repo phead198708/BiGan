@@ -14,6 +14,9 @@ from typing import Any
 import xgboost as xgb
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.exact_model_runtime_binding import (
+    validate_runtime_binding_summary,
+)
 from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_evaluation import (
     FORBIDDEN_TARGET_FIELDS,
     _blocked_safety_fields,
@@ -61,6 +64,7 @@ class OutcomeBlindDevelopmentBatchCanaryConfig:
     batch_id: str
     feature_contract_path: Path | str
     expected_feature_contract_sha256: str
+    exact_model_runtime_binding_summary: dict[str, Any] | None = None
     overwrite_existing: bool = False
 
     def __post_init__(self) -> None:
@@ -70,6 +74,10 @@ class OutcomeBlindDevelopmentBatchCanaryConfig:
         _require_sha256(self.expected_feature_contract_sha256, name="feature contract sha256")
         for name in ("output_dir", "collector_index_path", "feature_contract_path"):
             object.__setattr__(self, name, Path(getattr(self, name)))
+        if self.exact_model_runtime_binding_summary is not None:
+            validate_runtime_binding_summary(
+                self.exact_model_runtime_binding_summary
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,6 +265,21 @@ def run_outcome_blind_development_batch_canary(
     _write_jsonl(features_path, feature_rows)
     _write_jsonl(actions_path, action_rows)
     _write_jsonl(universe_path, universe_rows)
+    runtime_binding_fields = (
+        {
+            "exact_model_runtime_binding_required": True,
+            "exact_model_runtime_binding_verified": True,
+            "exact_model_runtime_binding_summary": (
+                config.exact_model_runtime_binding_summary
+            ),
+        }
+        if config.exact_model_runtime_binding_summary is not None
+        else {
+            "exact_model_runtime_binding_required": False,
+            "exact_model_runtime_binding_verified": False,
+            "exact_model_runtime_binding_summary": None,
+        }
+    )
     report = {
         "schema_version": f"{SCHEMA_PREFIX}-development-report-v1",
         "run_id": config.run_id,
@@ -327,6 +350,7 @@ def run_outcome_blind_development_batch_canary(
         "model_or_source_score_mutated": False,
         "raw_artifacts_mutated": False,
         "direct_training_corpus_exported": False,
+        **runtime_binding_fields,
         **_blocked_safety_fields(),
     }
     report["report_id"] = canonical_json_sha256(report)
@@ -349,6 +373,7 @@ def run_outcome_blind_development_batch_canary(
         "development_data_canary_passed": report["development_data_canary_passed"],
         "candidate_model_scoring_attempted": False,
         "labels_outcomes_or_pnl_opened": False,
+        **runtime_binding_fields,
         **_blocked_safety_fields(),
     }
     manifest["manifest_id"] = canonical_json_sha256(manifest)

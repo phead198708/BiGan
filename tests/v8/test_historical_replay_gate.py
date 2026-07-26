@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import json
 from pathlib import Path
@@ -8,6 +9,7 @@ import pytest
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.historical_replay_gate import (
+    EXACT_MODEL_BINDING_CHECK_NAMES,
     HistoricalReplayGateError,
     audit_historical_replay_superiority,
     validate_exact_historical_model_binding,
@@ -145,8 +147,86 @@ def _inputs() -> dict:
         "baseline_rows": baseline,
         "lineage_sha256s": {"source_report": "a" * 64},
         "evaluation_completed_ts": 2_000_000,
-        "exact_model_binding_verified": True,
+        "exact_model_binding_summary": _binding_summary(),
     }
+
+
+def _binding_inputs() -> dict:
+    booster_base64 = base64.b64encode(b"exact-booster-bytes").decode("ascii")
+    booster_sha256 = canonical_json_sha256(booster_base64)
+    candidate_name = "candidate-from-contract"
+    safety_fields = (
+        "source_model_candidate_eligible",
+        "freeze_ready",
+        "promotion_evidence_eligible",
+        "paper_candidate_allowed",
+        "live_trading_enabled",
+        "v8_execution_handoff_allowed",
+        "capital_at_risk",
+        "polymarket_write_enabled",
+        "wallet_signing_enabled",
+        "#134_resume_allowed",
+        "#146_start_allowed",
+    )
+    candidate_contract = {
+        "primary_policy": candidate_name,
+        "frozen_model_binding_sha256": "a" * 64,
+        "frozen_model_artifact_sha256": "b" * 64,
+        "frozen_model_artifact_id": "c" * 64,
+        "profile_sha256": "d" * 64,
+        "initial_controller_state_id": "e" * 64,
+    }
+    binding = {
+        "candidate_name": candidate_name,
+        "historical_fit_manifest_sha256": "f" * 64,
+        "frozen_model_artifact_sha256": "b" * 64,
+        "frozen_model_artifact_id": "c" * 64,
+        "frozen_booster_sha256": booster_sha256,
+        "frozen_profile_sha256": "d" * 64,
+        "initial_controller_state": {
+            "rank_state_id": "e" * 64,
+            "rank_lineage_hash": "2" * 64,
+            "eligible_prediction_scores_hash": "3" * 64,
+            "controller_guard_acceptance_history_hash": "4" * 64,
+            "controller_state_uses_target_outcome_label_or_pnl": False,
+            "future_controller_updates_use_strictly_prior_guard_results_only": True,
+        },
+    }
+    model = {
+        "candidate_name": candidate_name,
+        "model_artifact_id": "c" * 64,
+        "historical_hard_gate_passed": True,
+        "historical_gate_blocking_reason_codes": [],
+        "final_weighted_model": {
+            "booster_json_base64": booster_base64,
+            "booster_sha256": booster_sha256,
+        },
+        "final_rank_state": {
+            "rank_state_id": "e" * 64,
+            "rank_lineage_hash": "2" * 64,
+            "eligible_prediction_scores_hash": "3" * 64,
+            "controller_guard_acceptance_history_hash": "4" * 64,
+            "controller_target_outcome_label_or_pnl_free": True,
+        },
+        **dict.fromkeys(safety_fields, False),
+    }
+    return {
+        "candidate_contract": candidate_contract,
+        "frozen_model_binding": binding,
+        "frozen_model_artifact": model,
+        "source_manifest": {
+            "model": {"sha256": "b" * 64},
+            "profile": {"sha256": "d" * 64},
+        },
+        "expected_binding_sha256": "a" * 64,
+        "expected_model_artifact_sha256": "b" * 64,
+        "expected_source_manifest_sha256": "f" * 64,
+        "expected_candidate_profile_sha256": "d" * 64,
+    }
+
+
+def _binding_summary() -> dict:
+    return validate_exact_historical_model_binding(**_binding_inputs())
 
 
 def test_contract_is_strict_and_bootstrap_is_diagnostic_only() -> None:
@@ -208,69 +288,143 @@ def test_target_contamination_fails_closed() -> None:
         audit_historical_replay_superiority(**inputs)
 
 
-def test_exact_model_binding_rejects_artifact_id_drift() -> None:
-    candidate_contract = {
-        "frozen_model_binding_sha256": "a" * 64,
-        "frozen_model_artifact_sha256": "b" * 64,
-        "frozen_model_artifact_id": "c" * 64,
-        "profile_sha256": "d" * 64,
-        "initial_controller_state_id": "e" * 64,
+def test_exact_model_binding_returns_validator_derived_summary() -> None:
+    summary = _binding_summary()
+    assert summary["check_count"] == 13
+    assert tuple(summary["checks"]) == EXACT_MODEL_BINDING_CHECK_NAMES
+    assert all(summary["checks"].values())
+    assert summary["exact_frozen_model_binding_verified"] is True
+    assert len(summary["verified_hashes"]["booster_bytes_sha256"]) == 64
+
+
+@pytest.mark.parametrize(
+    "failed_check",
+    EXACT_MODEL_BINDING_CHECK_NAMES,
+)
+def test_each_exact_model_binding_check_fails_independently(
+    failed_check: str,
+) -> None:
+    inputs = _binding_inputs()
+    contract = inputs["candidate_contract"]
+    binding = inputs["frozen_model_binding"]
+    model = inputs["frozen_model_artifact"]
+    state = binding["initial_controller_state"]
+    mutations = {
+        "binding_sha256": lambda: contract.__setitem__(
+            "frozen_model_binding_sha256", "0" * 64
+        ),
+        "model_artifact_identity": lambda: model.__setitem__(
+            "model_artifact_id", "0" * 64
+        ),
+        "historical_manifest_sha256": lambda: binding.__setitem__(
+            "historical_fit_manifest_sha256", "0" * 64
+        ),
+        "candidate_profile_sha256": lambda: binding.__setitem__(
+            "frozen_profile_sha256", "0" * 64
+        ),
+        "candidate_identity": lambda: binding.__setitem__(
+            "candidate_name", "other-candidate"
+        ),
+        "booster_sha256": lambda: model[
+            "final_weighted_model"
+        ].__setitem__(
+            "booster_json_base64",
+            base64.b64encode(b"drifted-booster").decode("ascii"),
+        ),
+        "rank_state_id": lambda: state.__setitem__(
+            "rank_state_id", "0" * 64
+        ),
+        "rank_lineage_hash": lambda: state.__setitem__(
+            "rank_lineage_hash", "0" * 64
+        ),
+        "eligible_prediction_scores_hash": lambda: state.__setitem__(
+            "eligible_prediction_scores_hash", "0" * 64
+        ),
+        "controller_guard_acceptance_history_hash": lambda: state.__setitem__(
+            "controller_guard_acceptance_history_hash", "0" * 64
+        ),
+        "historical_gate_passed": lambda: model.__setitem__(
+            "historical_hard_gate_passed", False
+        ),
+        "target_free_controller": lambda: state.__setitem__(
+            "controller_state_uses_target_outcome_label_or_pnl", True
+        ),
+        "all_safety_unlocks_remain_false": lambda: model.__setitem__(
+            "capital_at_risk", True
+        ),
     }
-    binding = {
-        "candidate_name": "adaptive_support_controller_v8_1",
-        "historical_fit_manifest_sha256": "f" * 64,
-        "frozen_model_artifact_sha256": "b" * 64,
-        "frozen_model_artifact_id": "c" * 64,
-        "frozen_booster_sha256": "1" * 64,
-        "frozen_profile_sha256": "d" * 64,
-        "initial_controller_state": {
-            "rank_state_id": "e" * 64,
-            "rank_lineage_hash": "2" * 64,
-            "eligible_prediction_scores_hash": "3" * 64,
-            "controller_guard_acceptance_history_hash": "4" * 64,
-            "controller_state_uses_target_outcome_label_or_pnl": False,
-            "future_controller_updates_use_strictly_prior_guard_results_only": True,
-        },
-    }
-    model = {
-        "candidate_name": "adaptive_support_controller_v8_1",
-        "model_artifact_id": "9" * 64,
-        "historical_hard_gate_passed": True,
-        "historical_gate_blocking_reason_codes": [],
-        "final_weighted_model": {"booster_sha256": "1" * 64},
-        "final_rank_state": {
-            "rank_state_id": "e" * 64,
-            "rank_lineage_hash": "2" * 64,
-            "eligible_prediction_scores_hash": "3" * 64,
-            "controller_guard_acceptance_history_hash": "4" * 64,
-            "controller_target_outcome_label_or_pnl_free": True,
-        },
-        "source_model_candidate_eligible": False,
-        "freeze_ready": False,
-        "promotion_evidence_eligible": False,
-        "paper_candidate_allowed": False,
-        "v8_execution_handoff_allowed": False,
-        "capital_at_risk": False,
-        "polymarket_write_enabled": False,
-        "wallet_signing_enabled": False,
-        "#134_resume_allowed": False,
-        "#146_start_allowed": False,
-    }
-    manifest = {
-        "model": {"sha256": "b" * 64},
-        "profile": {"sha256": "d" * 64},
-    }
+    mutations[failed_check]()
     with pytest.raises(
         HistoricalReplayGateError,
-        match="model_artifact_id",
+        match=failed_check,
     ):
-        validate_exact_historical_model_binding(
-            candidate_contract=candidate_contract,
-            frozen_model_binding=binding,
-            frozen_model_artifact=model,
-            source_manifest=manifest,
-            expected_binding_sha256="a" * 64,
-            expected_model_artifact_sha256="b" * 64,
-            expected_source_manifest_sha256="f" * 64,
-            expected_candidate_profile_sha256="d" * 64,
-        )
+        validate_exact_historical_model_binding(**inputs)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "source_model_candidate_eligible",
+        "freeze_ready",
+        "promotion_evidence_eligible",
+        "paper_candidate_allowed",
+        "live_trading_enabled",
+        "v8_execution_handoff_allowed",
+        "capital_at_risk",
+        "polymarket_write_enabled",
+        "wallet_signing_enabled",
+        "#134_resume_allowed",
+        "#146_start_allowed",
+    ],
+)
+@pytest.mark.parametrize("mode", ["true", "missing"])
+def test_each_safety_field_true_or_missing_fails_closed(
+    field: str,
+    mode: str,
+) -> None:
+    inputs = _binding_inputs()
+    model = inputs["frozen_model_artifact"]
+    if mode == "true":
+        model[field] = True
+    else:
+        model.pop(field)
+    with pytest.raises(
+        HistoricalReplayGateError,
+        match="all_safety_unlocks_remain_false",
+    ):
+        validate_exact_historical_model_binding(**inputs)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "expected_binding_sha256",
+        "expected_model_artifact_sha256",
+        "expected_source_manifest_sha256",
+        "expected_candidate_profile_sha256",
+    ],
+)
+def test_malformed_expected_sha256_fails_closed(field: str) -> None:
+    inputs = _binding_inputs()
+    inputs[field] = "not-a-sha256"
+    with pytest.raises(HistoricalReplayGateError):
+        validate_exact_historical_model_binding(**inputs)
+
+
+def test_audit_cannot_assert_binding_without_passing_summary() -> None:
+    inputs = _inputs()
+    summary = copy.deepcopy(inputs["exact_model_binding_summary"])
+    summary["checks"]["booster_sha256"] = False
+    summary["exact_frozen_model_binding_verified"] = False
+    summary_without_id = {
+        key: value for key, value in summary.items() if key != "summary_id"
+    }
+    summary["summary_id"] = canonical_json_sha256(summary_without_id)
+    inputs["exact_model_binding_summary"] = summary
+    report = audit_historical_replay_superiority(**inputs)
+    assert report["checks"]["exact_frozen_model_binding_verified"] is False
+    assert report["historical_superiority_gate_passed"] is False
+    assert (
+        "exact_frozen_model_binding_verified"
+        in report["blocking_reason_codes"]
+    )
