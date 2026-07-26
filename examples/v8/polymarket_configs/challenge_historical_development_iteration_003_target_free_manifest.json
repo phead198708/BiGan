@@ -1,0 +1,58 @@
+{
+  "base_guard_rows": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-exact195-23-bet-diagnostic-20260726T163817Z/challenge_v8_1_exact195_guard_replay.jsonl",
+    "sha256": "7534b07c41d1a1f2afe3519e7eef9146c9b84bdda72f88a22b9d0351baa9ce2d",
+    "size_bytes": 1338671
+  },
+  "candidate_decisions": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-entry-price-floor-0-30-sized-1-0-development-iteration-003-20260726T175000Z/candidate_target_free_decisions.jsonl",
+    "sha256": "c2345d49b3460e857b152568b7764cc43c39de5ffc869fca8d4c42e164cf121f",
+    "size_bytes": 376488
+  },
+  "candidate_id": "v8_1_entry_price_floor_0_30_sized_1_0",
+  "collection_started": false,
+  "entry_price_floor_profile": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_v8_1_entry_price_floor_0_30_profile.json",
+    "sha256": "ea54d339c3ead15188a5fe1ede947e20e8f82cb422418f34a11277633180305e",
+    "size_bytes": 2077
+  },
+  "five_action_rows": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue192/examples/v8/polymarket_runs/v6-7-paper-readiness-ws-hardened-outcome-blind-service-20260725T184000Z/powered_gate_runs/v6-7-powered-target-free-freeze-20260726T155926Z/powered_v6_7_five_action_rows.jsonl",
+    "sha256": "134425d9f38ffdebbf72043a8b802e95bbb87eebbe7e8d39bfa5d6f8b98828f7",
+    "size_bytes": 11510972
+  },
+  "fixed_candidate_position_size": 1.0,
+  "frozen_market_ids": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_historical_development_exact_195_market_ids.txt",
+    "sha256": "fef9eda7b8dac138b88c75f96b010bd40953795b2bcf7424debf77a004e06883",
+    "size_bytes": 13065
+  },
+  "historical_development_only": true,
+  "implementation_base_commit": "80f98ac721d1534c1c2ce596b17255da0c109854",
+  "implementation_commit": "5aa6ff72192c27c15a5999b016e7fbdd3a663f65",
+  "outcomes_labels_settlement_or_pnl_opened": false,
+  "preregistration": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_historical_development_iteration_003_preregistration.json",
+    "sha256": "5317fa03d12ce66d4c0eda8d29c18603bbcb600ffc36b80cf896b823599d4b00",
+    "size_bytes": 4996
+  },
+  "preregistration_commit": "6dd4c485a5d58e9228e7e32b456773bf8127a1d9",
+  "profile": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_v8_1_entry_price_floor_0_30_sized_1_0_profile.json",
+    "sha256": "b04b25fb7dfad6a8949bd630f407abb156128ba59e33682816846344f1c130ff",
+    "size_bytes": 2823
+  },
+  "promotion_evidence_eligible": false,
+  "run_id": "challenge-v8-1-entry-price-floor-0-30-sized-1-0-development-iteration-003-20260726T175000Z",
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-entry-price-floor-sizing-target-free-manifest-v1"
+}

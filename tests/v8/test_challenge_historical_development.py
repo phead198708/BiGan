@@ -569,3 +569,60 @@ def test_iteration_002_failure_is_immutably_recorded() -> None:
     assert result["bootstrap"]["paired_delta_97_5_lcb"] == pytest.approx(
         -0.6944075
     )
+
+
+def test_iteration_003_success_is_immutably_recorded() -> None:
+    stems = (
+        "challenge_historical_development_iteration_003_entry",
+        "challenge_historical_development_iteration_003_result",
+        "challenge_historical_development_iteration_003_target_free_manifest",
+        "challenge_historical_development_iteration_003_manifest",
+    )
+    for stem in stems:
+        path = CONFIG_DIR / f"{stem}.json"
+        assert _sha256(path) == _sidecar(f"{stem}.sha256")
+
+    entry = _json("challenge_historical_development_iteration_003_entry.json")
+    result = _json("challenge_historical_development_iteration_003_result.json")
+    semantic_payload = {
+        key: value for key, value in entry.items() if key != "entry_sha256"
+    }
+    semantic_sha256 = hashlib.sha256(
+        json.dumps(
+            semantic_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    assert entry["entry_sha256"] == (
+        "abe1eb3b6e03530c15cb51326801e783454a0be4d5885edd7dcca8dab22779ae"
+    )
+    assert semantic_sha256 == entry["entry_sha256"]
+    assert entry["previous_entry_sha256"] == (
+        "b608b9e7b884ca636610f18bd89ef780ac2a4c3fecff65b45b7f836dd9367740"
+    )
+    assert entry["consumes_development_iteration_slot"] is True
+    assert entry["consumes_fresh_promotion_alpha"] is False
+    assert entry["result"]["sha256"] == _sidecar(
+        "challenge_historical_development_iteration_003_result.sha256"
+    )
+    assert result["all_historical_success_criteria_passed"] is True
+    assert result["attempt_002_preregistration_allowed"] is True
+    assert result["checks"][
+        "full_window_paired_bootstrap_97_5_lcb_positive"
+    ] is True
+    assert result["checks"][
+        "candidate_absolute_bootstrap_97_5_lcb_positive"
+    ] is True
+    assert result["metrics"]["candidate_total_after_cost_pnl"] == pytest.approx(
+        1.18375
+    )
+    assert result["bootstrap"]["paired_delta_97_5_lcb"] == pytest.approx(
+        0.6115975
+    )
+    assert result["bootstrap"]["candidate_absolute_97_5_lcb"] == pytest.approx(
+        0.23475
+    )
+    assert result["promotion_evidence_eligible"] is False
+    assert result["safety"] == SAFETY
