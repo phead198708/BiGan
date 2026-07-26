@@ -1,0 +1,59 @@
+{
+  "schema_version": "bigan-v8-challenge-future-post-freeze-protocol-v1",
+  "issues": [
+    254,
+    258,
+    256
+  ],
+  "goal": "challenge_model_promote_to_champion_model",
+  "frozen_before_target_access": true,
+  "lineage": {
+    "parallel_candidate_protocol_sha256": "fdd0e3f8808cf831f22e0b5ff319d1668e3c0bd80add28de170b7d7c11639ca4",
+    "parallel_future_collection_plan_sha256": "4e1e75e14835e12d133d3709a67a7e9c287a2a32525e99f105e744f43e736498",
+    "frozen_model_binding_sha256": "64fa0f227ce97ec8ea238c3d8285d55efd96be65c95bf7c091aa95c1c185ccfd",
+    "runtime_policy_profile_sha256": "1306f6b6f7a6c1216b23413352ff66f4061ec62a9751b0de51eded256ca51264"
+  },
+  "settlement": {
+    "exact_market_count": 120,
+    "official_read_only_resolution_only": true,
+    "quarantine_copies_required": true,
+    "source_outcome_blind_rounds_mutated": false,
+    "frozen_feature_fallback_requires_exact_payload_match": true,
+    "target_access_must_follow_decision_freeze_and_market_close": true,
+    "single_target_access_claim": true,
+    "retry_only_unresolved_or_transient_provider_failures": true,
+    "result_dependent_window_extension_allowed": false
+  },
+  "target_mapping": {
+    "actions": [
+      "NO_TRADE",
+      "BUY_UP_SELL_BEFORE_CLOSE",
+      "BUY_DOWN_SELL_BEFORE_CLOSE"
+    ],
+    "no_trade_after_cost_pnl_per_notional": 0.0,
+    "trade_value_field": "runtime_policy_after_cost_net_pnl_per_contract",
+    "paper_position_size": 0.2,
+    "costs_subtracted_exactly_once": true,
+    "same_runtime_profile_for_all_candidates": true,
+    "same_settled_entry_for_all_candidates": true,
+    "target_available_after_decision_freeze_required": true,
+    "target_used_as_decision_input": false
+  },
+  "evaluation": {
+    "single_use": true,
+    "attempt_and_alpha_consumed_at_first_target_access": true,
+    "parallel_candidates_evaluated_without_mutation": true,
+    "statistical_gate_owned_by_parallel_candidate_protocol": true,
+    "regime_policy_and_replay_reports_are_downstream_diagnostics": true,
+    "result_selected_rerun_allowed": false,
+    "threshold_model_cost_sizing_guard_or_candidate_change_allowed": false
+  },
+  "safety": {
+    "paper_candidate_unlocked": false,
+    "promotion_unlocked": false,
+    "live_unlocked": false,
+    "write_enabled": false,
+    "wallet_enabled": false,
+    "capital_at_risk": false
+  }
+}

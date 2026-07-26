@@ -49,3 +49,19 @@ The production collector bridge is
 `parallel_frozen_v8_1_model_binding.json`. It also requires a clean committed
 worktree so the implementation commit in the freeze manifest identifies the
 code that produced the decision streams.
+
+After that freeze exists,
+`examples/v8/run_challenge_future_post_freeze.py` executes the separately
+hash-pinned `challenge_future_post_freeze_protocol.json`:
+
+- `settle` atomically records the one target-access claim (thereby consuming
+  attempt 1 and its alpha), settles official outcomes on quarantine copies,
+  and writes an exact-120 settled index without mutating source captures;
+- `evaluate` maps the same runtime cost profile to both frozen trade actions,
+  adds the zero-PnL `NO_TRADE` target, joins those targets to the shared source
+  grid, and consumes the parallel freeze once through the Bonferroni gate.
+
+Both commands require a clean committed implementation and caller-supplied
+raw SHA-256 pins for the freeze and settled index. A second target-access or
+evaluation claim fails closed; unresolved-provider polling is bounded by the
+preregistered settlement policy and cannot extend the market window.
