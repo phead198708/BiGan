@@ -52,15 +52,23 @@ def _input(index: int, **overrides):
 
 
 def test_contract_and_candidate_manifest_are_hash_pinned_and_closed() -> None:
-    contract_path = CONFIG / "execution_policy_contract.json"
-    assert hashlib.sha256(contract_path.read_bytes()).hexdigest() == (
-        contract_path.with_suffix(".sha256").read_text().strip()
-    )
+    for name in (
+        "execution_policy_contract.json",
+        "policy_candidate_manifest.json",
+        "source_execution_compatibility_manifest.json",
+        "decision_attribution.jsonl",
+        "risk_budget_state.jsonl",
+        "replay_parity_report.json",
+        "policy_safety_report.json",
+    ):
+        path = CONFIG / name
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == (
+            path.with_suffix(".sha256").read_text().strip()
+        )
     validate_execution_policy_contract(_json("execution_policy_contract.json"))
-    assert all(value is False for value in _json("execution_policy_contract.json")["safety"].values())
-    manifest_path = CONFIG / "policy_candidate_manifest.json"
-    assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == (
-        manifest_path.with_suffix(".sha256").read_text().strip()
+    assert all(
+        value is False
+        for value in _json("execution_policy_contract.json")["safety"].values()
     )
 
 

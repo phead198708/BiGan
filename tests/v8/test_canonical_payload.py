@@ -25,6 +25,7 @@ FIXTURE_PATH = (
     ROOT
     / "examples/v8/polymarket_configs/canonical_payload_cross_runtime_fixtures.json"
 )
+FIXTURE_SHA_PATH = FIXTURE_PATH.with_suffix(".sha256")
 
 
 def test_contract_artifact_is_hash_pinned_and_safety_closed() -> None:
@@ -147,6 +148,8 @@ def test_raw_bytes_are_preserved_separately_from_canonical_bytes() -> None:
 
 
 def test_canonical_output_is_repeatable_and_matches_cross_runtime_fixtures() -> None:
+    expected = FIXTURE_SHA_PATH.read_text(encoding="ascii").strip()
+    assert hashlib.sha256(FIXTURE_PATH.read_bytes()).hexdigest() == expected
     fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     for row in fixture["fixtures"]:
         actual_bytes = canonical_payload_bytes(

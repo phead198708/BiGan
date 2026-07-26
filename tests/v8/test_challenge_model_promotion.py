@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -124,6 +125,9 @@ def _runtime(tmp_path: Path):
 def test_static_issue_prerequisites_pass_but_promotion_waits_for_fresh_evidence() -> None:
     report = audit_challenge_model_promotion(repository_root=ROOT)
     assert all(report["static_checks"].values())
+    assert all(report["artifact_checks"].values())
+    assert report["static_checks"]["issue_255_next_fresh_gate_statistically_eligible"]
+    assert report["static_checks"]["issue_254_parallel_protocol_preregistered"]
     assert report["static_checks"]["historical_replay_strictly_superior_before_collection"] is True
     assert report["fresh_runtime_evidence_supplied"] is False
     assert report["decision"] == "BLOCKED"
@@ -133,6 +137,28 @@ def test_static_issue_prerequisites_pass_but_promotion_waits_for_fresh_evidence(
     assert "Historical or consumed results are not substituted" in (
         promotion_readiness_markdown(report)
     )
+
+
+def test_semantically_tampered_collection_plan_fails_even_with_new_hash(
+    tmp_path: Path,
+) -> None:
+    source = ROOT / "examples/v8/polymarket_configs"
+    destination = tmp_path / "examples/v8/polymarket_configs"
+    shutil.copytree(source, destination)
+    plan_path = destination / "parallel_future_collection_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["collection"]["quality_valid_market_target"] = 119
+    plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+    plan_path.with_suffix(".sha256").write_text(
+        hashlib.sha256(plan_path.read_bytes()).hexdigest() + "\n",
+        encoding="ascii",
+    )
+
+    report = audit_challenge_model_promotion(repository_root=tmp_path)
+
+    assert report["artifact_checks"]["parallel_future_collection_plan.json"] is True
+    assert report["static_checks"]["issue_254_parallel_protocol_preregistered"] is False
+    assert report["decision"] == "BLOCKED"
 
 
 def test_complete_fresh_hash_bound_evidence_can_promote_candidate(tmp_path: Path) -> None:

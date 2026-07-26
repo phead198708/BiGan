@@ -7,22 +7,41 @@ import json
 from pathlib import Path
 from typing import Any
 
+from bigan.v8.polymarket.candidate_budget import (
+    evaluate_next_gate_eligibility,
+)
+from bigan.v8.polymarket.parallel_future_gate import (
+    validate_parallel_future_collection_plan,
+)
+
 PROMOTION_READINESS_SCHEMA_VERSION = "bigan-v8-challenge-model-promotion-readiness-v1"
 REQUIRED_HASH_PINNED_ARTIFACTS = (
     "canonical_payload_contract.json",
+    "canonical_payload_cross_runtime_fixtures.json",
     "feature_missingness_contract.json",
+    "feature_missingness_runtime.schema.json",
     "candidate_family_manifest.json",
     "candidate_budget_protocol.json",
     "family_error_control_contract.json",
+    "candidate_attempt_ledger.json",
+    "evidence_consumption_ledger.json",
+    "next_gate_eligibility_decision.json",
     "parallel_candidate_protocol.json",
     "parallel_candidate_v8_1_primary_no_fallback_contract.json",
     "parallel_candidate_v8_3_primary_with_fallback_contract.json",
     "parallel_candidate_matched_frozen_v6_7_contract.json",
     "parallel_frozen_v8_1_model_binding.json",
+    "parallel_future_collection_plan.json",
+    "challenge_prefreeze_checklist.json",
+    "challenge_prefreeze_excluded_capture_ledger.json",
     "regime_definition_contract.json",
     "execution_policy_contract.json",
     "policy_candidate_manifest.json",
     "source_execution_compatibility_manifest.json",
+    "decision_attribution.jsonl",
+    "risk_budget_state.jsonl",
+    "replay_parity_report.json",
+    "policy_safety_report.json",
     "historical_replay_superiority_contract.json",
     "historical_replay_superiority_report.json",
     "challenge_future_post_freeze_protocol.json",
@@ -54,6 +73,21 @@ def audit_challenge_model_promotion(
         artifact_hashes[filename] = actual
     next_gate_path = config_dir / "next_gate_eligibility_decision.json"
     next_gate = _read_json(next_gate_path) if next_gate_path.is_file() else {}
+    candidate_family = _read_json(
+        config_dir / "candidate_family_manifest.json"
+    )
+    candidate_budget = _read_json(
+        config_dir / "candidate_budget_protocol.json"
+    )
+    family_error_control = _read_json(
+        config_dir / "family_error_control_contract.json"
+    )
+    attempt_ledger = _read_json(
+        config_dir / "candidate_attempt_ledger.json"
+    )
+    evidence_ledger = _read_json(
+        config_dir / "evidence_consumption_ledger.json"
+    )
     historical_replay_path = (
         config_dir / "historical_replay_superiority_report.json"
     )
@@ -62,16 +96,121 @@ def audit_challenge_model_promotion(
         if historical_replay_path.is_file()
         else {}
     )
+    budget_decision_valid = False
+    try:
+        recomputed_next_gate = evaluate_next_gate_eligibility(
+            family_manifest=candidate_family,
+            budget_protocol=candidate_budget,
+            error_control_contract=family_error_control,
+            attempt_ledger=list(attempt_ledger.get("entries") or []),
+            evidence_ledger=list(evidence_ledger.get("entries") or []),
+            proposed_attempt={
+                "family_id": candidate_family.get("family_id"),
+                "attempt_id": next_gate.get("attempt_id"),
+                "candidate_ids": [
+                    "v8_1_primary_no_fallback",
+                    "v8_3_primary_with_fallback",
+                ],
+                "target_outcomes_opened": False,
+                "decision_freeze_complete": True,
+                "shared_window_source_rows_frozen": True,
+            },
+        )
+        budget_decision_valid = recomputed_next_gate == next_gate
+    except (TypeError, ValueError):
+        budget_decision_valid = False
+
+    candidate_contracts = {
+        candidate_id: _read_json(config_dir / filename)
+        for candidate_id, filename in {
+            "v8_1_primary_no_fallback": (
+                "parallel_candidate_v8_1_primary_no_fallback_contract.json"
+            ),
+            "v8_3_primary_with_fallback": (
+                "parallel_candidate_v8_3_primary_with_fallback_contract.json"
+            ),
+            "matched_frozen_v6_7": (
+                "parallel_candidate_matched_frozen_v6_7_contract.json"
+            ),
+        }.items()
+    }
+    parallel_plan = _read_json(
+        config_dir / "parallel_future_collection_plan.json"
+    )
+    parallel_plan_valid = False
+    try:
+        validate_parallel_future_collection_plan(
+            parallel_plan,
+            protocol_sha256=str(
+                artifact_hashes["parallel_candidate_protocol.json"]
+            ),
+            candidate_contract_sha256s={
+                candidate_id: str(artifact_hashes[filename])
+                for candidate_id, filename in {
+                    "v8_1_primary_no_fallback": (
+                        "parallel_candidate_v8_1_primary_no_fallback_contract.json"
+                    ),
+                    "v8_3_primary_with_fallback": (
+                        "parallel_candidate_v8_3_primary_with_fallback_contract.json"
+                    ),
+                    "matched_frozen_v6_7": (
+                        "parallel_candidate_matched_frozen_v6_7_contract.json"
+                    ),
+                }.items()
+            },
+            collector_protocol_sha256=_sha256_file(
+                config_dir
+                / "execution_layer_v2_persistent_outcome_blind_collector_v1.json"
+            ),
+            feature_contract_sha256=_sha256_file(
+                config_dir
+                / "execution_layer_v2_pairwise_action_advantage_lcb_feature_contract_v1.json"
+            ),
+            frozen_model_binding_sha256=str(
+                artifact_hashes["parallel_frozen_v8_1_model_binding.json"]
+            ),
+            frozen_model_binding=_read_json(
+                config_dir / "parallel_frozen_v8_1_model_binding.json"
+            ),
+            candidate_contracts=candidate_contracts,
+            prefreeze_checklist_sha256=str(
+                artifact_hashes["challenge_prefreeze_checklist.json"]
+            ),
+            prefreeze_checklist=_read_json(
+                config_dir / "challenge_prefreeze_checklist.json"
+            ),
+            excluded_capture_ledger_sha256=str(
+                artifact_hashes[
+                    "challenge_prefreeze_excluded_capture_ledger.json"
+                ]
+            ),
+            excluded_capture_ledger=_read_json(
+                config_dir
+                / "challenge_prefreeze_excluded_capture_ledger.json"
+            ),
+            historical_gate_contract_sha256=str(
+                artifact_hashes["historical_replay_superiority_contract.json"]
+            ),
+            historical_replay_report_sha256=str(
+                artifact_hashes["historical_replay_superiority_report.json"]
+            ),
+            historical_replay_report=historical_replay,
+        )
+        parallel_plan_valid = True
+    except (TypeError, ValueError):
+        parallel_plan_valid = False
     static_checks = {
         "all_issue_contract_artifacts_hash_verified": all(artifact_checks.values()),
         "issue_255_next_fresh_gate_statistically_eligible": (
             next_gate.get("next_gate_eligible") is True
             and next_gate.get("outcomes_read_to_make_eligibility_decision") is False
+            and budget_decision_valid
         ),
         "issue_254_parallel_protocol_preregistered": artifact_checks.get(
             "parallel_candidate_protocol.json"
         )
-        is True,
+        is True
+        and parallel_plan_valid,
         "issue_256_policy_framework_preregistered": artifact_checks.get(
             "execution_policy_contract.json"
         )
@@ -379,6 +518,10 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ChallengeModelPromotionError(f"JSON object required: {path}")
     return payload
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 __all__ = [

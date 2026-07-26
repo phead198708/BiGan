@@ -54,6 +54,9 @@ def test_all_required_artifacts_are_hash_pinned() -> None:
         "candidate_family_manifest.json",
         "candidate_budget_protocol.json",
         "family_error_control_contract.json",
+        "candidate_attempt_ledger.json",
+        "evidence_consumption_ledger.json",
+        "next_gate_eligibility_decision.json",
     ):
         path = CONFIG / name
         expected = path.with_suffix(".sha256").read_text().strip()
