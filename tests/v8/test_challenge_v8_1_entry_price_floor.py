@@ -153,6 +153,9 @@ def test_terminal_floor_keeps_or_vetoes_without_changing_controller_state() -> N
         side="UP",
         decision_ts=2_000,
     )
+    at_floor_guard.pop("max_input_ts")
+    at_floor_guard["baseline_max_input_ts"] = 1_998
+    at_floor_guard["opposite_max_input_ts"] = 1_999
     at_floor = apply_entry_price_floor(
         base_decision=at_floor_guard,
         matched_action_row=_action_row(
@@ -166,6 +169,7 @@ def test_terminal_floor_keeps_or_vetoes_without_changing_controller_state() -> N
     assert at_floor["selected_action"] == "BUY_UP_SELL_BEFORE_CLOSE"
     assert at_floor["selected_side"] == "UP"
     assert at_floor["entry_price_filter_passed"] is True
+    assert at_floor["max_input_ts"] == 1_999
 
     no_trade = apply_entry_price_floor(
         base_decision=_guard(
