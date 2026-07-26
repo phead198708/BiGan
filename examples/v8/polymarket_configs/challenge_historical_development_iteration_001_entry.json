@@ -1,0 +1,38 @@
+{
+  "all_historical_success_criteria_passed": false,
+  "candidate_id": "v8_1_entry_price_floor_0_30",
+  "consumes_development_iteration_slot": true,
+  "consumes_fresh_promotion_alpha": false,
+  "development_registry_sha256": "dd4926b24bbe2b80bb127c5af861f62e432131469bfc202248d85ec4a1380fd4",
+  "entry_id": "challenge-historical-development-entry-001",
+  "entry_sha256": "76b1ea851c40c3b66aa47e762cfcfdeaada0b6372232a1f4c4365cb6cbebff95",
+  "historical_result_is_promotion_evidence": false,
+  "implementation_base_commit": "b87537b5a4db20ef39d928f9287731ecfdbdd89e",
+  "implementation_commit": "d151e11419d151abbc90c17024ffe7845376c5d0",
+  "ledger_root_sha256": "2bdbbb1ee0f8694b7be3f5fa485a3591662daa906e1edfc316db92f538fc894a",
+  "nominal_one_sided_alpha": 0.025,
+  "preregistration": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_historical_development_iteration_001_preregistration.json",
+    "sha256": "883a60ec4acfe02b9ae5216bd582d1579622c249aa6ffa7845c3e28a32d2578e",
+    "size_bytes": 4256
+  },
+  "preregistration_commit": "2f8c305cb4133b5a3c69c7500877889e0cdcd2c2",
+  "previous_entry_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "result": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-entry-price-floor-0-30-development-iteration-001-20260726T172800Z/evaluation/challenge_historical_development_result.json",
+    "sha256": "80baab4220f48d2cfb98d4ccd25a9b4807462691cfc13f0a40fb96f381a90782"
+  },
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-historical-development-iteration-entry-v1",
+  "sequence": 1,
+  "success_standard_sha256": "07609f09692723dd1e650080cfdd29466a7ee8a0f8c30d8378045a8ee3523114"
+}

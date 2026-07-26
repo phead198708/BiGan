@@ -482,3 +482,46 @@ def test_cli_requires_preregistration_commit_before_candidate_change(
     assert state["implementation_base_commit"] == base_commit
     assert state["preregistration_commit"] == preregistration_commit
     assert state["implementation_commit"] == implementation_commit
+
+
+def test_iteration_001_failure_is_immutably_recorded() -> None:
+    stems = (
+        "challenge_historical_development_iteration_001_entry",
+        "challenge_historical_development_iteration_001_result",
+        "challenge_historical_development_iteration_001_target_free_manifest",
+        "challenge_historical_development_iteration_001_manifest",
+    )
+    for stem in stems:
+        path = CONFIG_DIR / f"{stem}.json"
+        assert _sha256(path) == _sidecar(f"{stem}.sha256")
+
+    entry = _json("challenge_historical_development_iteration_001_entry.json")
+    result = _json("challenge_historical_development_iteration_001_result.json")
+    semantic_payload = {
+        key: value for key, value in entry.items() if key != "entry_sha256"
+    }
+    semantic_sha256 = hashlib.sha256(
+        json.dumps(
+            semantic_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    assert entry["entry_sha256"] == (
+        "76b1ea851c40c3b66aa47e762cfcfdeaada0b6372232a1f4c4365cb6cbebff95"
+    )
+    assert semantic_sha256 == entry["entry_sha256"]
+    assert entry["consumes_development_iteration_slot"] is True
+    assert entry["consumes_fresh_promotion_alpha"] is False
+    assert entry["result"]["sha256"] == _sidecar(
+        "challenge_historical_development_iteration_001_result.sha256"
+    )
+    assert result["all_historical_success_criteria_passed"] is False
+    assert result["attempt_002_preregistration_allowed"] is False
+    assert result["checks"][
+        "full_window_paired_bootstrap_97_5_lcb_positive"
+    ] is False
+    assert result["bootstrap"]["paired_delta_97_5_lcb"] == pytest.approx(
+        -0.15145125
+    )
