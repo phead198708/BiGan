@@ -1,0 +1,76 @@
+{
+  "schema_version": "bigan-v8-canonical-payload-contract-artifact-v1",
+  "canonical_contract_version": "bigan-v8-canonical-payload-v1",
+  "issue": 259,
+  "allowed_types": [
+    "null",
+    "boolean",
+    "unicode_string",
+    "signed_64_bit_integer",
+    "finite_ieee_754_binary64",
+    "ordered_list",
+    "string_keyed_object"
+  ],
+  "object_key_order": "normalized_utf8_byte_lexicographic",
+  "list_order_semantics": "preserved_and_semantically_significant",
+  "numeric_normalization": {
+    "algorithm": "shortest_round_trip_decimal_expanded_to_plain_notation",
+    "equivalent_integer_and_float_are_equal": true,
+    "negative_zero_serializes_as": "0",
+    "nan_allowed": false,
+    "positive_infinity_allowed": false,
+    "negative_infinity_allowed": false,
+    "loose_rounding_allowed": false
+  },
+  "unicode_normalization": "NFC",
+  "null_and_missing_are_distinct": true,
+  "timestamp_contract": {
+    "representation": "UTC Unix epoch milliseconds",
+    "json_type": "integer",
+    "minimum": 0,
+    "maximum": 253402300799999,
+    "recognized_field_names": [
+      "timestamp",
+      "*_ts",
+      "*_ts_ms",
+      "*_timestamp_ms"
+    ]
+  },
+  "schema_version_contract": {
+    "included_in_canonical_envelope": true,
+    "frozen_and_settled_versions_must_match": true,
+    "embedded_schema_version_must_match_when_present": true
+  },
+  "encoding": "UTF-8",
+  "digest": "SHA-256",
+  "comparison_sequence": [
+    "validate_same_schema_version",
+    "canonicalize_independently",
+    "compute_independent_sha256",
+    "require_exact_canonical_hash_equality",
+    "emit_deterministic_semantic_diff_on_mismatch",
+    "require_approved_source_lineage",
+    "fail_closed"
+  ],
+  "compatibility": {
+    "preserve_raw_payload_bytes": true,
+    "preserve_raw_sha256": true,
+    "canonical_fields_are_additive": true,
+    "legacy_artifacts_are_immutable": true,
+    "legacy_verification_path_is_explicit": true,
+    "historical_manifest_rewrite_allowed": false
+  },
+  "safety": {
+    "paper_candidate_unlocked": false,
+    "promotion_unlocked": false,
+    "live_unlocked": false,
+    "write_enabled": false,
+    "wallet_enabled": false,
+    "capital_at_risk": false,
+    "handoff_enabled": false,
+    "source_change_enabled": false,
+    "freeze_change_enabled": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "schema_version": "bigan-v8-execution-policy-future-validation-template-v1",
+  "candidate_family_manifest": "candidate_family_manifest.json",
+  "candidate_budget_protocol": "candidate_budget_protocol.json",
+  "family_error_control_contract": "family_error_control_contract.json",
+  "parallel_candidate_protocol": "parallel_candidate_protocol.json",
+  "regime_definition_contract": "regime_definition_contract.json",
+  "freeze_order": [
+    "source_model_hash",
+    "execution_policy_hash",
+    "compatibility_manifest",
+    "target_free_inputs",
+    "all_policy_decisions",
+    "decision_attribution",
+    "risk_budget_state",
+    "single_use_target_access_claim"
+  ],
+  "outcome_access_before_all_decisions_frozen": false,
+  "result_driven_policy_search_allowed": false,
+  "promotion_unlocked": false
+}

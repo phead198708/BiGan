@@ -1,0 +1,58 @@
+{
+  "schema_version": "bigan-v8-regime-definition-contract-v1",
+  "issue": 258,
+  "classification_inputs_available_by_decision_time": true,
+  "boundaries": {
+    "market_direction_flat_abs_max": 0.0005,
+    "bearish_return_max": -0.001,
+    "bullish_return_min": 0.001,
+    "volatility_low_max_exclusive": 0.0015,
+    "volatility_medium_max_exclusive": 0.004,
+    "spread_tight_max_bps": 100,
+    "spread_normal_max_bps": 300,
+    "liquidity_low_max_exclusive": 100,
+    "liquidity_medium_max_exclusive": 500,
+    "time_of_day_timezone": "UTC",
+    "provider_health_healthy_minimum": 0.9,
+    "provider_health_degraded_minimum": 0.5
+  },
+  "dimensions": [
+    "selected_side",
+    "market_direction_bucket",
+    "regime",
+    "realized_volatility_bucket",
+    "spread_liquidity_bucket",
+    "time_of_day_bucket",
+    "provider_health_bucket",
+    "decision_origin",
+    "action_family"
+  ],
+  "reporting": {
+    "minimum_supported_stratum_count": 5,
+    "bootstrap_unit": "market_id",
+    "bootstrap_resample_count": 5000,
+    "bootstrap_seed": 2582026,
+    "confidence_level": 0.95,
+    "empty_strata_reported": true,
+    "low_support_status": "insufficient_support",
+    "aggregate_and_mutually_exclusive_partition_reconciliation_required": true
+  },
+  "diagnostic_only": true,
+  "fixed_side_quota_enabled": false,
+  "aggregate_hard_gate_changed": false,
+  "post_outcome_boundary_change_allowed": false,
+  "stratified_blocker_requires_separate_future_preregistration": true,
+  "safety": {
+    "paper_candidate_unlocked": false,
+    "promotion_unlocked": false,
+    "live_unlocked": false,
+    "write_enabled": false,
+    "wallet_enabled": false,
+    "capital_at_risk": false,
+    "handoff_enabled": false,
+    "source_change_enabled": false,
+    "freeze_change_enabled": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "schema_version": "bigan-v8-candidate-family-manifest-v1",
+  "family_id": "v8-high-signal-vs-fallback-2026q3",
+  "issue": 255,
+  "source_model_lineage": "frozen_v8_1_primary_source_scores",
+  "source_model_hash": "1565116daeb2f5d4d8c33fefa507276f59251edd5ffb5f4f313041bcf9dbb0ec",
+  "candidates": [
+    {
+      "candidate_id": "v8_1_primary_no_fallback",
+      "candidate_definition_hash": "1c808195fab5aea976429f4ab0fb46d69a29a4bbb705313d138a9ce8d3d19abf",
+      "execution_policy_hash": "1c808195fab5aea976429f4ab0fb46d69a29a4bbb705313d138a9ce8d3d19abf",
+      "stable_candidate_identity": "2f343da4bb8d61265fc597f53094e3e327987dd74f7cff3eecfb89ac067af12c",
+      "abstention_semantics": "NO_TRADE",
+      "fallback_enabled": false
+    },
+    {
+      "candidate_id": "v8_3_primary_with_fallback",
+      "candidate_definition_hash": "84c6bc06db0c2d25d342ecda23f5c06a4d9809c39db94a8eca1e550a4f822088",
+      "execution_policy_hash": "84c6bc06db0c2d25d342ecda23f5c06a4d9809c39db94a8eca1e550a4f822088",
+      "stable_candidate_identity": "6c03c9d6815522ed53655d152eac674df09d6fec3485543641a86e1ba686e766",
+      "abstention_semantics": "route_non_risk_abstention_to_frozen_v6_7",
+      "fallback_enabled": true
+    }
+  ],
+  "matched_baseline": {
+    "candidate_id": "matched_frozen_v6_7",
+    "execution_policy_hash": "cec55d243acd6bbf60a5e8474545b487086ddcd4d18073682ae7f2d4660d2248"
+  },
+  "history_reset_by_branch_version_or_name_allowed": false,
+  "new_family_requires_new_lineage_and_evidence_program": true,
+  "safety": {
+    "paper_candidate_unlocked": false,
+    "promotion_unlocked": false,
+    "live_unlocked": false,
+    "write_enabled": false,
+    "wallet_enabled": false,
+    "capital_at_risk": false
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "schema_version": "bigan-v8-challenge-model-promotion-readiness-v1",
+  "objective": "promote challenge model to champion model",
+  "issue_sequence": [
+    259,
+    257,
+    255,
+    254,
+    258,
+    256
+  ],
+  "static_issue_prerequisites_passed": true,
+  "fresh_runtime_evidence_supplied": false,
+  "decision": "BLOCKED",
+  "challenge_model_promotion_eligible": false,
+  "selected_champion_candidate": null,
+  "remaining_required_evidence": [
+    "fresh single-use parallel future evaluation",
+    "multiplicity-aware candidate hard-gate pass",
+    "regime partition reconciliation",
+    "offline-paper exact replay parity",
+    "execution-policy safety and ledger reconciliation",
+    "powered paper gate pass",
+    "append-only attempt and alpha consumption record"
+  ],
+  "historical_or_consumed_evidence_substituted_for_fresh_evidence": false,
+  "paper_candidate_unlocked": false,
+  "promotion_unlocked": false,
+  "live_unlocked": false,
+  "write_enabled": false,
+  "wallet_enabled": false,
+  "capital_at_risk": false,
+  "#134_resume_allowed": false,
+  "#146_start_allowed": false
+}

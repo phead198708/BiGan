@@ -1,0 +1,20 @@
+{
+  "schema_version": "bigan-v8-candidate-budget-eligibility-v1",
+  "family_id": "v8-high-signal-vs-fallback-2026q3",
+  "attempt_id": "v8-parallel-future-gate-attempt-001",
+  "next_attempt_number": 1,
+  "maximum_confirmatory_attempts": 3,
+  "parallel_candidate_count": 2,
+  "window_familywise_alpha": 0.025,
+  "per_candidate_alpha": 0.0125,
+  "parallel_method": "bonferroni",
+  "next_gate_eligible": true,
+  "reason_codes": [],
+  "outcomes_read_to_make_eligibility_decision": false,
+  "paper_candidate_unlocked": false,
+  "promotion_unlocked": false,
+  "live_unlocked": false,
+  "write_enabled": false,
+  "wallet_enabled": false,
+  "capital_at_risk": false
+}

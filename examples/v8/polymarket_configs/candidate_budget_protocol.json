@@ -1,0 +1,48 @@
+{
+  "schema_version": "bigan-v8-candidate-budget-protocol-v1",
+  "family_id": "v8-high-signal-vs-fallback-2026q3",
+  "issue": 255,
+  "maximum_confirmatory_attempts": 3,
+  "development_evidence_can_claim_promotion": false,
+  "consumed_validation_evidence_reusable": false,
+  "cases": {
+    "engineering_rerun_identical_decisions": {
+      "consumes_attempt": false,
+      "consumes_alpha": false
+    },
+    "new_candidate_changed_decisions": {
+      "consumes_when_target_opened": true,
+      "consumes_alpha_when_target_opened": true
+    },
+    "parallel_candidates_shared_window": {
+      "one_sequential_attempt": true,
+      "parallel_multiplicity_correction": "bonferroni"
+    },
+    "sequential_candidate_new_window": {
+      "consumes_attempt": true,
+      "uses_next_alpha_spending_increment": true
+    },
+    "bug_fix_before_target_access": {
+      "consumes_attempt": false,
+      "requires_new_hash_and_refreeze": true
+    },
+    "bug_fix_after_target_access": {
+      "consumes_attempt": true,
+      "consumes_alpha": true,
+      "old_hash_terminal": true
+    },
+    "invalid_incomplete_pre_target_window": {
+      "consumes_attempt": false,
+      "requires_no_target_claim_opened": true
+    },
+    "outcomes_opened": {
+      "evidence_permanently_consumed": true,
+      "attempt_consumed": true
+    }
+  },
+  "duplicate_attempt_id_rejected": true,
+  "altered_hash_rejected": true,
+  "append_only_ledgers_required": true,
+  "fail_closed": true,
+  "permissions_granted_by_protocol": []
+}

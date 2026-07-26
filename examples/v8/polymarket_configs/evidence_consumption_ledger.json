@@ -1,0 +1,60 @@
+{
+  "schema_version": "bigan-v8-evidence-consumption-ledger-v1",
+  "entries": [
+    {
+      "schema_version": "bigan-v8-candidate-ledger-entry-v1",
+      "sequence": 1,
+      "entry_id": "evidence-ledger-001",
+      "previous_entry_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "entry_sha256": "36d7aac02912366f3c6c143e608f4eab6e3912748a85b03ecc247cf3c9463ac9",
+      "evidence_id": "issue-238-strictly-later-outcomes",
+      "target_outcomes_opened": true,
+      "evidence_permanently_consumed": true,
+      "reusable_for_promotion": false
+    },
+    {
+      "schema_version": "bigan-v8-candidate-ledger-entry-v1",
+      "sequence": 2,
+      "entry_id": "evidence-ledger-002",
+      "previous_entry_sha256": "36d7aac02912366f3c6c143e608f4eab6e3912748a85b03ecc247cf3c9463ac9",
+      "entry_sha256": "2f041c330677a71aaa43d67c473ae48973c0340918e5f404449c824e60d86056",
+      "evidence_id": "issue-241-v7-7-holdout-outcomes",
+      "target_outcomes_opened": true,
+      "evidence_permanently_consumed": true,
+      "reusable_for_promotion": false
+    },
+    {
+      "schema_version": "bigan-v8-candidate-ledger-entry-v1",
+      "sequence": 3,
+      "entry_id": "evidence-ledger-003",
+      "previous_entry_sha256": "2f041c330677a71aaa43d67c473ae48973c0340918e5f404449c824e60d86056",
+      "entry_sha256": "405d02b091967c71f3c7405e561af190ff37dd70ca11ee995d0a435ea179056f",
+      "evidence_id": "issue-246-v8-1-holdout-outcomes",
+      "target_outcomes_opened": true,
+      "evidence_permanently_consumed": true,
+      "reusable_for_promotion": false
+    },
+    {
+      "schema_version": "bigan-v8-candidate-ledger-entry-v1",
+      "sequence": 4,
+      "entry_id": "evidence-ledger-004",
+      "previous_entry_sha256": "405d02b091967c71f3c7405e561af190ff37dd70ca11ee995d0a435ea179056f",
+      "entry_sha256": "d2bbdfa67d994e2ea27fe3fb3d06e1c10b36605c4109f4dc865f78971fcec7bc",
+      "evidence_id": "issue-249-v8-3-holdout-outcomes",
+      "target_outcomes_opened": true,
+      "evidence_permanently_consumed": true,
+      "reusable_for_promotion": false
+    },
+    {
+      "schema_version": "bigan-v8-candidate-ledger-entry-v1",
+      "sequence": 5,
+      "entry_id": "evidence-ledger-005",
+      "previous_entry_sha256": "d2bbdfa67d994e2ea27fe3fb3d06e1c10b36605c4109f4dc865f78971fcec7bc",
+      "entry_sha256": "919ecc8dd179c840630cb1424320ac46d31f5f880c4caf52ac70962849352c20",
+      "evidence_id": "issue-250-hardened-settlement-outcomes",
+      "target_outcomes_opened": true,
+      "evidence_permanently_consumed": true,
+      "reusable_for_promotion": false
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"schema_version":"bigan-v8-risk-budget-state-template-v1","runtime_generated":true,"required_fields":["sequence","market_id","decision_ts","execution_policy_hash","before","after","risk_budget_state_sha256"],"paper_candidate_unlocked":false,"promotion_unlocked":false}

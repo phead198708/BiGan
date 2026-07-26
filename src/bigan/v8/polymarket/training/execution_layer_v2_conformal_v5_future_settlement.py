@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bigan.v8.canonical_payload import (
+    DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
+    compare_canonical_payloads,
+)
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.recorder import (
     PendingRoundFinalizationResult,
@@ -648,7 +652,14 @@ def _evaluation_only_settled_corpus_if_safe(
         (_feature_payload(row) for row in settled_features),
         key=lambda row: (int(row["decision_ts"]), str(row["market_id"])),
     )
-    if frozen_payloads != settled_payloads:
+    comparison = compare_canonical_payloads(
+        frozen_payloads,
+        settled_payloads,
+        frozen_payload_schema_version=DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
+        settled_payload_schema_version=DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
+        approved_source_lineage=True,
+    )
+    if not comparison.settlement_evaluation_eligible:
         reasons.append("evaluation_only_frozen_feature_payload_mismatch")
     if sum(1 for line in label_rows_path.read_text(encoding="utf-8").splitlines() if line) <= 0:
         reasons.append("evaluation_only_label_rows_empty")
@@ -958,7 +969,18 @@ def _load_and_validate_targets(
         for feature in feature_rows:
             key = (str(feature["market_id"]), int(feature["decision_ts"]))
             frozen = frozen_feature_by_key.get(key)
-            if frozen is None or _feature_payload(feature) != _feature_payload(frozen):
+            comparison = (
+                compare_canonical_payloads(
+                    _feature_payload(frozen),
+                    _feature_payload(feature),
+                    frozen_payload_schema_version=DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
+                    settled_payload_schema_version=DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
+                    approved_source_lineage=True,
+                )
+                if frozen is not None
+                else None
+            )
+            if comparison is None or not comparison.settlement_evaluation_eligible:
                 raise ValueError("settled corpus feature rows differ from decision freeze")
         resolutions = _load_jsonl(Path(resolution_descriptor["path"]))
         if len(resolutions) != 1 or str(resolutions[0].get("market_id") or "") != market_id:

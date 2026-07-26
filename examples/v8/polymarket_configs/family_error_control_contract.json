@@ -1,0 +1,18 @@
+{
+  "schema_version": "bigan-v8-family-error-control-v1",
+  "family_id": "v8-high-signal-vs-fallback-2026q3",
+  "familywise_alpha": 0.05,
+  "sequential_method": "preregistered_alpha_spending",
+  "sequential_alpha_spending": [
+    0.025,
+    0.015,
+    0.01
+  ],
+  "parallel_method": "bonferroni",
+  "maximum_parallel_candidates": 2,
+  "attempt_1_parallel_candidate_alpha": 0.0125,
+  "method_selected_before_candidate_outcomes": true,
+  "winner_selection_after_results_without_preregistered_rule_allowed": false,
+  "confidence_intervals_use_adjusted_alpha": true,
+  "permissions_granted_by_error_control": []
+}

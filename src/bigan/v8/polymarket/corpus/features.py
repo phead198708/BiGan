@@ -13,6 +13,10 @@ from bigan.v8.polymarket.corpus.contracts import (
     PolymarketCorpusMarket,
     PolymarketCorpusTrade,
 )
+from bigan.v8.polymarket.feature_completeness import (
+    TradeTapeCoverageStatus,
+    build_trade_volume_feature_bundle,
+)
 
 
 def build_polymarket_corpus_feature_rows(
@@ -22,6 +26,8 @@ def build_polymarket_corpus_feature_rows(
     trades: tuple[PolymarketCorpusTrade, ...],
     btc_candles: tuple[BinanceBTCCandle, ...],
     chainlink_prices: tuple[PolymarketChainlinkPrice, ...] = (),
+    trade_tape_statuses: tuple[TradeTapeCoverageStatus, ...] = (),
+    require_feature_completeness: bool = False,
     config: PolymarketCorpusBuildConfig,
 ) -> tuple[PolymarketCorpusFeatureRow, ...]:
     """Build strictly point-in-time feature rows for configured markets."""
@@ -32,6 +38,11 @@ def build_polymarket_corpus_feature_rows(
     chainlink = tuple(
         sorted(chainlink_prices, key=lambda item: (item.source_ts, item.available_at_ts))
     )
+    trade_tape_status_by_key = {
+        (status.market_id, status.decision_ts): status for status in trade_tape_statuses
+    }
+    if len(trade_tape_status_by_key) != len(trade_tape_statuses):
+        raise ValueError("duplicate trade-tape status for market decision")
     rows: list[PolymarketCorpusFeatureRow] = []
     for market in sorted(markets, key=lambda item: (item.market_start_ts, item.market_id)):
         if market.market_family not in config.market_families:
@@ -62,6 +73,10 @@ def build_polymarket_corpus_feature_rows(
                     candles=candles,
                     current_candle=candle,
                     chainlink_prices=chainlink,
+                    trade_tape_status=trade_tape_status_by_key.get(
+                        (market.market_id, decision_ts)
+                    ),
+                    require_feature_completeness=require_feature_completeness,
                 )
             )
     if not rows:
@@ -81,6 +96,8 @@ def _feature_row(
     candles: tuple[BinanceBTCCandle, ...],
     current_candle: BinanceBTCCandle,
     chainlink_prices: tuple[PolymarketChainlinkPrice, ...],
+    trade_tape_status: TradeTapeCoverageStatus | None,
+    require_feature_completeness: bool,
 ) -> PolymarketCorpusFeatureRow:
     reference_context = _chainlink_reference_price_context(
         market=market,
@@ -238,6 +255,19 @@ def _feature_row(
         "recent_up_trade_volume": recent_up_volume,
         "recent_down_trade_volume": recent_down_volume,
     }
+    completeness_provenance: dict[str, dict[str, int | str | None]] = {}
+    if require_feature_completeness and trade_tape_status is None:
+        raise ValueError(
+            "future candidate feature row requires trade-tape completeness metadata"
+        )
+    if trade_tape_status is not None:
+        completeness_features, completeness_provenance = (
+            build_trade_volume_feature_bundle(
+                trades=market_trades,
+                status=trade_tape_status,
+            )
+        )
+        features.update(completeness_features)
     max_trade_ts = max(
         (
             trade.available_at_ts
@@ -255,6 +285,7 @@ def _feature_row(
         if reference_context
         else 0,
         max_trade_ts,
+        trade_tape_status.max_causal_input_ts if trade_tape_status else 0,
     )
     available_at_ts = max(
         up_snapshot.available_at_ts,
@@ -265,6 +296,7 @@ def _feature_row(
         if reference_context
         else 0,
         max_trade_ts,
+        trade_tape_status.available_at_ts if trade_tape_status else 0,
     )
     provenance = {
         name: {
@@ -276,6 +308,7 @@ def _feature_row(
         }
         for name in features
     }
+    provenance.update(completeness_provenance)
     if reference_context is not None:
         reference_provenance = {
             "source": "polymarket_corpus",

@@ -1,0 +1,46 @@
+{
+  "schema_version": "bigan-v8-execution-policy-contract-v1",
+  "issue": 256,
+  "interface": {
+    "input": "frozen_source_action_scores_plus_causal_risk_state",
+    "output": "explicit_action_or_no_trade_with_attribution",
+    "state_transition": "deterministic_paper_only_risk_budget_state",
+    "source_model_hash_required": true,
+    "execution_policy_hash_required": true
+  },
+  "source_model_and_execution_policy_independently_versioned": true,
+  "source_scores_mutation_allowed": false,
+  "outcome_driven_policy_search_allowed": false,
+  "unsupported_or_missing_inputs": "fail_closed_no_trade",
+  "required_capabilities": [
+    "adaptive_abstention",
+    "opportunity_budget",
+    "global_exposure_cap",
+    "side_exposure_cap",
+    "market_exposure_cap",
+    "duplicate_and_reentry_cooldown",
+    "position_replacement",
+    "paper_notional_scheduler",
+    "fill_quality_filter",
+    "provider_health_degradation",
+    "separate_policy_kill_switch"
+  ],
+  "replay_parity_required": true,
+  "intent_fill_position_ledger_reconciliation_required": true,
+  "future_comparison_outcome_blind_until_all_decisions_frozen": true,
+  "safety": {
+    "source_model_mutation_enabled": false,
+    "execution_guard_relaxation_enabled": false,
+    "paper_candidate_unlocked": false,
+    "promotion_unlocked": false,
+    "live_unlocked": false,
+    "write_enabled": false,
+    "wallet_enabled": false,
+    "capital_at_risk": false,
+    "handoff_enabled": false,
+    "source_change_enabled": false,
+    "freeze_change_enabled": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "schema_version": "bigan-v8-parallel-candidate-contract-v1",
+  "candidate_id": "v8_1_primary_no_fallback",
+  "profile_sha256": "1c808195fab5aea976429f4ab0fb46d69a29a4bbb705313d138a9ce8d3d19abf",
+  "source_model_hash": "1565116daeb2f5d4d8c33fefa507276f59251edd5ffb5f4f313041bcf9dbb0ec",
+  "primary_policy": "adaptive_support_controller_v8_1",
+  "primary_abstention_action": "NO_TRADE",
+  "fallback_enabled": false,
+  "v6_7_routing_on_abstention_allowed": false,
+  "contract_frozen_before_target_access": true,
+  "outcomes_labels_settlement_returns_or_pnl_opened": false,
+  "safety": {
+    "paper_candidate_unlocked": false,
+    "promotion_unlocked": false,
+    "live_unlocked": false,
+    "write_enabled": false,
+    "wallet_enabled": false,
+    "capital_at_risk": false
+  }
+}

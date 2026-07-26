@@ -1,0 +1,15 @@
+{
+  "schema_version": "bigan-v8-execution-policy-replay-parity-template-v1",
+  "runtime_generated": true,
+  "required_exact_matches": [
+    "source_model_hash",
+    "execution_policy_hash",
+    "decision_stream_sha256",
+    "risk_state_stream_sha256"
+  ],
+  "passed": false,
+  "paper_candidate_unlocked": false,
+  "promotion_unlocked": false,
+  "live_unlocked": false,
+  "capital_at_risk": false
+}

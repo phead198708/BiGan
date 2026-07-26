@@ -1,0 +1,19 @@
+{
+  "schema_version": "bigan-v8-execution-policy-safety-report-template-v1",
+  "runtime_generated": true,
+  "required_checks": [
+    "source_scores_immutable",
+    "no_target_or_outcome_inputs",
+    "paper_only",
+    "capital_at_risk_false",
+    "reconciliation_passed",
+    "all_no_trade_has_reason"
+  ],
+  "passed": false,
+  "paper_candidate_unlocked": false,
+  "promotion_unlocked": false,
+  "live_unlocked": false,
+  "write_enabled": false,
+  "wallet_enabled": false,
+  "capital_at_risk": false
+}

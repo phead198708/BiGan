@@ -1,0 +1,22 @@
+{
+  "schema_version": "bigan-v8-parallel-target-free-freeze-template-v1",
+  "protocol": "parallel_candidate_protocol.json",
+  "required_candidate_contracts": [
+    "parallel_candidate_v8_1_primary_no_fallback_contract.json",
+    "parallel_candidate_v8_3_primary_with_fallback_contract.json",
+    "parallel_candidate_matched_frozen_v6_7_contract.json"
+  ],
+  "required_runtime_artifacts": [
+    "shared_target_free_source_rows.jsonl",
+    "v8_1_primary_no_fallback_decisions.jsonl",
+    "v8_3_primary_with_fallback_decisions.jsonl",
+    "matched_frozen_v6_7_decisions.jsonl",
+    "single_use_settlement_claim.json",
+    "per_candidate_pnl_reports.json",
+    "multiplicity_aware_comparison_report.json",
+    "parallel_future_final_manifest.json"
+  ],
+  "freeze_ready": false,
+  "outcomes_labels_settlement_returns_or_pnl_opened": false,
+  "promotion_unlocked": false
+}
