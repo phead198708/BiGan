@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -17,6 +18,8 @@ from bigan.v8.polymarket.feature_completeness import (
     build_provider_health_diagnostics,
     build_trade_volume_feature_bundle,
     derive_trade_tape_coverage_status,
+    validate_feature_missingness_contract,
+    validate_feature_missingness_runtime_schema,
     validate_trade_volume_feature_bundle,
 )
 
@@ -108,6 +111,24 @@ def test_contract_and_runtime_schema_are_hash_pinned_and_closed() -> None:
         assert hashlib.sha256(path.read_bytes()).hexdigest() == sha_path.read_text().strip()
     contract = json.loads(CONTRACT.read_text())
     assert all(value is False for value in contract["safety"].values())
+    validate_feature_missingness_contract(contract)
+    validate_feature_missingness_runtime_schema(
+        json.loads(RUNTIME_SCHEMA.read_text())
+    )
+
+
+def test_semantic_governance_validation_rejects_repinnable_weakening() -> None:
+    contract = json.loads(CONTRACT.read_text())
+    weakened_contract = copy.deepcopy(contract)
+    weakened_contract["rules"]["missing_encoded_as_zero"] = True
+    with pytest.raises(FeatureCompletenessError, match="rules"):
+        validate_feature_missingness_contract(weakened_contract)
+
+    schema = json.loads(RUNTIME_SCHEMA.read_text())
+    weakened_schema = copy.deepcopy(schema)
+    weakened_schema["properties"]["provider_health_score"]["maximum"] = 2
+    with pytest.raises(FeatureCompletenessError, match="properties"):
+        validate_feature_missingness_runtime_schema(weakened_schema)
 
 
 def test_runtime_schema_validates_complete_and_missing_feature_bundles() -> None:

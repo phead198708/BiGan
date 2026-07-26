@@ -13,6 +13,12 @@ from bigan.v8.polymarket.corpus.contracts import (
 )
 
 FEATURE_MISSINGNESS_CONTRACT_VERSION = "bigan-v8-feature-missingness-v1"
+FEATURE_MISSINGNESS_CONTRACT_ARTIFACT_VERSION = (
+    "bigan-v8-feature-missingness-contract-artifact-v1"
+)
+FEATURE_MISSINGNESS_RUNTIME_SCHEMA_VERSION = (
+    "bigan-v8-feature-missingness-runtime-v1"
+)
 TRADE_TAPE_LOOKBACK_MS = 60_000
 TradeTapeCollectionMode = Literal["websocket", "rest", "timeout", "backfill", "mock"]
 ALLOWED_COLLECTION_MODES = frozenset(
@@ -45,6 +51,183 @@ TRADE_TAPE_FEATURE_FIELDS = (
 
 class FeatureCompletenessError(ValueError):
     """Raised when provider-dependent features cannot be proved complete."""
+
+
+def validate_feature_missingness_contract(contract: dict[str, Any]) -> None:
+    """Validate the frozen #257 missingness governance contract semantically."""
+
+    expected_fields = {
+        "schema_version",
+        "feature_contract_version",
+        "issue",
+        "provider_dependent_feature_fields",
+        "trade_volume_features",
+        "collection_modes",
+        "rules",
+        "diagnostics",
+        "safety",
+    }
+    expected_provider_fields = (
+        "value",
+        "availability_flag",
+        "coverage_complete_flag",
+        "missingness_reason",
+        "provider_source",
+        "collection_mode",
+        "collection_latency_ms",
+        "data_age_ms",
+        "truncated",
+        "censored",
+        "observation_window_start_ts",
+        "observation_window_end_ts",
+        "max_causal_input_ts",
+        "available_at_ts",
+    )
+    expected_trade_volume_features = (
+        "recent_up_trade_volume",
+        "recent_up_trade_volume_missing",
+        "recent_up_trade_volume_coverage_complete",
+        "recent_down_trade_volume",
+        "recent_down_trade_volume_missing",
+        "recent_down_trade_volume_coverage_complete",
+        "trade_tape_collection_mode",
+        "trade_tape_provider_timeout",
+        "trade_tape_truncated",
+        "trade_tape_censored",
+        "provider_health_score",
+    )
+    expected_rules = {
+        "unknown_or_incomplete_value": None,
+        "missing_encoded_as_zero": False,
+        "true_zero_requires_complete_coverage": True,
+        "available_at_must_not_exceed_decision_ts": True,
+        "historical_backfill_available_to_earlier_decisions": False,
+        "timeout_truncation_censor_or_backfill_can_be_complete": False,
+        "provider_health_can_bypass_execution_safety": False,
+        "future_candidate_missing_metadata_behavior": "fail_closed",
+        "legacy_frozen_artifact_rewrite_allowed": False,
+    }
+    expected_diagnostics = (
+        "primary_candidate_selection",
+        "fallback_selection",
+        "no_trade",
+        "execution_guard_rejection",
+        "side_composition",
+        "action_family_composition",
+        "feature_null_zero_positive_distribution",
+    )
+    expected_safety_fields = {
+        "settlement_used_at_decision_time",
+        "outcome_used_at_decision_time",
+        "pnl_used_at_decision_time",
+        "future_information_used_at_decision_time",
+        "paper_candidate_unlocked",
+        "promotion_unlocked",
+        "live_unlocked",
+        "write_enabled",
+        "wallet_enabled",
+        "capital_at_risk",
+        "handoff_enabled",
+        "source_change_enabled",
+        "freeze_change_enabled",
+        "#134_resume_allowed",
+        "#146_start_allowed",
+    }
+    blockers: list[str] = []
+    if not isinstance(contract, dict) or set(contract) != expected_fields:
+        blockers.append("fields")
+        contract = contract if isinstance(contract, dict) else {}
+    if contract.get("schema_version") != FEATURE_MISSINGNESS_CONTRACT_ARTIFACT_VERSION:
+        blockers.append("schema_version")
+    if contract.get("feature_contract_version") != FEATURE_MISSINGNESS_CONTRACT_VERSION:
+        blockers.append("feature_contract_version")
+    if contract.get("issue") != 257:
+        blockers.append("issue")
+    if tuple(contract.get("provider_dependent_feature_fields") or ()) != expected_provider_fields:
+        blockers.append("provider_dependent_feature_fields")
+    if tuple(contract.get("trade_volume_features") or ()) != expected_trade_volume_features:
+        blockers.append("trade_volume_features")
+    if tuple(contract.get("collection_modes") or ()) != (
+        "websocket",
+        "rest",
+        "timeout",
+        "backfill",
+        "mock",
+    ):
+        blockers.append("collection_modes")
+    if contract.get("rules") != expected_rules:
+        blockers.append("rules")
+    if tuple(contract.get("diagnostics") or ()) != expected_diagnostics:
+        blockers.append("diagnostics")
+    safety = contract.get("safety")
+    if (
+        not isinstance(safety, dict)
+        or set(safety) != expected_safety_fields
+        or any(value is not False for value in safety.values())
+    ):
+        blockers.append("safety")
+    if blockers:
+        raise FeatureCompletenessError(
+            "feature missingness contract invalid: " + ", ".join(sorted(blockers))
+        )
+
+
+def validate_feature_missingness_runtime_schema(schema: dict[str, Any]) -> None:
+    """Reject a weakened #257 runtime JSON schema even when its hash is repinned."""
+
+    expected_properties = {
+        "recent_up_trade_volume": {"type": ["number", "null"], "minimum": 0},
+        "recent_down_trade_volume": {"type": ["number", "null"], "minimum": 0},
+        "recent_up_trade_volume_missing": {"enum": [0, 1]},
+        "recent_down_trade_volume_missing": {"enum": [0, 1]},
+        "recent_up_trade_volume_coverage_complete": {"enum": [0, 1]},
+        "recent_down_trade_volume_coverage_complete": {"enum": [0, 1]},
+        "trade_tape_collection_mode": {
+            "enum": ["websocket", "rest", "timeout", "backfill", "mock"]
+        },
+        "trade_tape_missingness_reason": {"type": ["string", "null"]},
+        "trade_tape_provider_source": {"type": "string", "minLength": 1},
+        "trade_tape_provider_timeout": {"enum": [0, 1]},
+        "trade_tape_truncated": {"enum": [0, 1]},
+        "trade_tape_censored": {"enum": [0, 1]},
+        "trade_tape_historical_backfill": {"enum": [0, 1]},
+        "trade_tape_observation_window_start_ts": {"type": "integer", "minimum": 0},
+        "trade_tape_observation_window_end_ts": {"type": "integer", "minimum": 0},
+        "trade_tape_max_causal_input_ts": {"type": "integer", "minimum": 0},
+        "trade_tape_available_at_ts": {"type": "integer", "minimum": 0},
+        "trade_tape_collection_latency_ms": {"type": "integer", "minimum": 0},
+        "trade_tape_data_age_ms": {"type": "integer", "minimum": 0},
+        "trade_tape_observed_trade_count": {"type": "integer", "minimum": 0},
+        "provider_health_score": {"type": "number", "minimum": 0, "maximum": 1},
+    }
+    blockers: list[str] = []
+    if not isinstance(schema, dict) or set(schema) != {
+        "$schema",
+        "$id",
+        "type",
+        "required",
+        "properties",
+        "additionalProperties",
+    }:
+        blockers.append("fields")
+        schema = schema if isinstance(schema, dict) else {}
+    if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+        blockers.append("dialect")
+    if schema.get("$id") != FEATURE_MISSINGNESS_RUNTIME_SCHEMA_VERSION:
+        blockers.append("schema_version")
+    if schema.get("type") != "object":
+        blockers.append("type")
+    if tuple(schema.get("required") or ()) != TRADE_TAPE_FEATURE_FIELDS:
+        blockers.append("required")
+    if schema.get("properties") != expected_properties:
+        blockers.append("properties")
+    if schema.get("additionalProperties") is not True:
+        blockers.append("additional_properties")
+    if blockers:
+        raise FeatureCompletenessError(
+            "feature missingness runtime schema invalid: "
+            + ", ".join(sorted(blockers))
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -584,7 +767,9 @@ def _provider_health_bucket(features: dict[str, Any]) -> str:
 
 
 __all__ = [
+    "FEATURE_MISSINGNESS_CONTRACT_ARTIFACT_VERSION",
     "FEATURE_MISSINGNESS_CONTRACT_VERSION",
+    "FEATURE_MISSINGNESS_RUNTIME_SCHEMA_VERSION",
     "TRADE_TAPE_LOOKBACK_MS",
     "TRADE_TAPE_FEATURE_FIELDS",
     "FeatureCompletenessError",
@@ -592,5 +777,7 @@ __all__ = [
     "build_provider_health_diagnostics",
     "build_trade_volume_feature_bundle",
     "derive_trade_tape_coverage_status",
+    "validate_feature_missingness_contract",
+    "validate_feature_missingness_runtime_schema",
     "validate_trade_volume_feature_bundle",
 ]

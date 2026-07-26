@@ -24,6 +24,20 @@ def _write(path: Path, payload: dict) -> dict[str, str]:
     }
 
 
+def _copy_config(tmp_path: Path) -> Path:
+    destination = tmp_path / "examples/v8/polymarket_configs"
+    shutil.copytree(ROOT / "examples/v8/polymarket_configs", destination)
+    return destination
+
+
+def _rewrite_json_and_pin(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    path.with_suffix(".sha256").write_text(
+        hashlib.sha256(path.read_bytes()).hexdigest() + "\n",
+        encoding="ascii",
+    )
+
+
 def _runtime(tmp_path: Path):
     fresh_attempt_id = "challenge-future-attempt-001"
     freeze_sha256 = "f" * 64
@@ -145,6 +159,10 @@ def test_static_issue_prerequisites_pass_but_promotion_waits_for_fresh_evidence(
     assert all(report["artifact_checks"].values())
     assert report["static_checks"]["issue_255_next_fresh_gate_statistically_eligible"]
     assert report["static_checks"]["issue_254_parallel_protocol_preregistered"]
+    assert report["static_checks"]["issue_257_feature_missingness_governance_valid"]
+    assert report["static_checks"]["issue_258_regime_diagnostics_governance_valid"]
+    assert report["static_checks"]["issue_256_policy_framework_preregistered"]
+    assert report["static_checks"]["cross_issue_promotion_evidence_protocol_valid"]
     assert report["static_checks"]["historical_replay_strictly_superior_before_collection"] is True
     assert report["fresh_runtime_evidence_supplied"] is False
     assert report["decision"] == "BLOCKED"
@@ -159,22 +177,76 @@ def test_static_issue_prerequisites_pass_but_promotion_waits_for_fresh_evidence(
 def test_semantically_tampered_collection_plan_fails_even_with_new_hash(
     tmp_path: Path,
 ) -> None:
-    source = ROOT / "examples/v8/polymarket_configs"
-    destination = tmp_path / "examples/v8/polymarket_configs"
-    shutil.copytree(source, destination)
+    destination = _copy_config(tmp_path)
     plan_path = destination / "parallel_future_collection_plan.json"
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     plan["collection"]["quality_valid_market_target"] = 119
-    plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
-    plan_path.with_suffix(".sha256").write_text(
-        hashlib.sha256(plan_path.read_bytes()).hexdigest() + "\n",
-        encoding="ascii",
-    )
+    _rewrite_json_and_pin(plan_path, plan)
 
     report = audit_challenge_model_promotion(repository_root=tmp_path)
 
     assert report["artifact_checks"]["parallel_future_collection_plan.json"] is True
     assert report["static_checks"]["issue_254_parallel_protocol_preregistered"] is False
+    assert report["decision"] == "BLOCKED"
+
+
+def test_issue_257_semantic_weakening_fails_even_with_new_sidecar(
+    tmp_path: Path,
+) -> None:
+    destination = _copy_config(tmp_path)
+    contract_path = destination / "feature_missingness_contract.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["rules"]["missing_encoded_as_zero"] = True
+    _rewrite_json_and_pin(contract_path, contract)
+
+    report = audit_challenge_model_promotion(repository_root=tmp_path)
+
+    assert report["artifact_checks"]["feature_missingness_contract.json"] is True
+    assert report["static_checks"]["all_issue_contract_artifacts_hash_verified"] is True
+    assert report["static_checks"]["issue_257_feature_missingness_governance_valid"] is False
+    assert report["decision"] == "BLOCKED"
+
+
+def test_issue_258_semantic_weakening_fails_even_with_new_sidecar(
+    tmp_path: Path,
+) -> None:
+    destination = _copy_config(tmp_path)
+    contract_path = destination / "regime_definition_contract.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["diagnostic_only"] = False
+    _rewrite_json_and_pin(contract_path, contract)
+
+    report = audit_challenge_model_promotion(repository_root=tmp_path)
+
+    assert report["artifact_checks"]["regime_definition_contract.json"] is True
+    assert report["static_checks"]["all_issue_contract_artifacts_hash_verified"] is True
+    assert report["static_checks"]["issue_258_regime_diagnostics_governance_valid"] is False
+    assert report["decision"] == "BLOCKED"
+
+
+def test_issue_256_template_weakening_fails_even_with_new_sidecar(
+    tmp_path: Path,
+) -> None:
+    destination = _copy_config(tmp_path)
+    template_path = (
+        destination
+        / "execution_policy_future_validation_protocol.template.json"
+    )
+    template = json.loads(template_path.read_text(encoding="utf-8"))
+    template["result_driven_policy_search_allowed"] = True
+    _rewrite_json_and_pin(template_path, template)
+
+    report = audit_challenge_model_promotion(repository_root=tmp_path)
+
+    assert (
+        report["artifact_checks"][
+            "execution_policy_future_validation_protocol.template.json"
+        ]
+        is True
+    )
+    assert report["static_checks"]["all_issue_contract_artifacts_hash_verified"] is True
+    assert report["static_checks"]["cross_issue_promotion_evidence_protocol_valid"] is True
+    assert report["static_checks"]["issue_256_policy_framework_preregistered"] is False
     assert report["decision"] == "BLOCKED"
 
 

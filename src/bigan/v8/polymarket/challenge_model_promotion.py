@@ -15,8 +15,23 @@ from bigan.v8.polymarket.candidate_budget import (
     validate_candidate_budget_artifacts,
     validate_eligibility_decision,
 )
+from bigan.v8.polymarket.execution_policy_framework import (
+    execution_policy_hash,
+    validate_execution_policy_contract,
+    validate_execution_policy_fixture,
+    validate_execution_policy_future_validation_protocol,
+    validate_policy_candidate_manifest,
+    validate_source_execution_compatibility,
+)
+from bigan.v8.polymarket.feature_completeness import (
+    validate_feature_missingness_contract,
+    validate_feature_missingness_runtime_schema,
+)
 from bigan.v8.polymarket.parallel_future_gate import (
     validate_parallel_future_collection_plan,
+)
+from bigan.v8.polymarket.regime_diagnostics import (
+    validate_regime_definition_contract,
 )
 
 PROMOTION_READINESS_SCHEMA_VERSION = "bigan-v8-challenge-model-promotion-readiness-v1"
@@ -48,6 +63,7 @@ REQUIRED_HASH_PINNED_ARTIFACTS = (
     "risk_budget_state.jsonl",
     "replay_parity_report.json",
     "policy_safety_report.json",
+    "execution_policy_future_validation_protocol.template.json",
     "historical_replay_superiority_contract.json",
     "historical_replay_superiority_report.json",
     "challenge_future_post_freeze_protocol.json",
@@ -145,6 +161,43 @@ def audit_challenge_model_promotion(
         budget_decision_valid = True
     except (TypeError, ValueError):
         budget_decision_valid = False
+    feature_missingness_valid = False
+    try:
+        validate_feature_missingness_contract(
+            _read_json(config_dir / "feature_missingness_contract.json")
+        )
+        validate_feature_missingness_runtime_schema(
+            _read_json(config_dir / "feature_missingness_runtime.schema.json")
+        )
+        feature_missingness_valid = True
+    except (OSError, TypeError, ValueError):
+        feature_missingness_valid = False
+    regime_contract_valid = False
+    try:
+        validate_regime_definition_contract(
+            _read_json(config_dir / "regime_definition_contract.json")
+        )
+        regime_contract_valid = True
+    except (OSError, TypeError, ValueError):
+        regime_contract_valid = False
+    execution_policy_preregistration_valid = False
+    try:
+        _validate_execution_policy_preregistration(
+            config_dir=config_dir,
+            artifact_hashes=artifact_hashes,
+        )
+        execution_policy_preregistration_valid = True
+    except (KeyError, OSError, TypeError, ValueError):
+        execution_policy_preregistration_valid = False
+    promotion_evidence_protocol_valid = False
+    try:
+        _validate_promotion_evidence_protocol(
+            config_dir=config_dir,
+            artifact_hashes=artifact_hashes,
+        )
+        promotion_evidence_protocol_valid = True
+    except (KeyError, OSError, TypeError, ValueError):
+        promotion_evidence_protocol_valid = False
 
     candidate_contracts = {
         candidate_id: _read_json(config_dir / filename)
@@ -241,10 +294,33 @@ def audit_challenge_model_promotion(
         )
         is True
         and parallel_plan_valid,
-        "issue_256_policy_framework_preregistered": artifact_checks.get(
-            "execution_policy_contract.json"
-        )
-        is True,
+        "issue_257_feature_missingness_governance_valid": (
+            artifact_checks.get("feature_missingness_contract.json") is True
+            and artifact_checks.get("feature_missingness_runtime.schema.json") is True
+            and feature_missingness_valid
+            and promotion_evidence_protocol_valid
+        ),
+        "issue_258_regime_diagnostics_governance_valid": (
+            artifact_checks.get("regime_definition_contract.json") is True
+            and regime_contract_valid
+            and promotion_evidence_protocol_valid
+        ),
+        "issue_256_policy_framework_preregistered": (
+            all(
+                artifact_checks.get(filename) is True
+                for filename in (
+                    "execution_policy_contract.json",
+                    "policy_candidate_manifest.json",
+                    "source_execution_compatibility_manifest.json",
+                    "execution_policy_future_validation_protocol.template.json",
+                )
+            )
+            and execution_policy_preregistration_valid
+            and promotion_evidence_protocol_valid
+        ),
+        "cross_issue_promotion_evidence_protocol_valid": (
+            promotion_evidence_protocol_valid
+        ),
         "historical_replay_strictly_superior_before_collection": (
             artifact_checks.get("historical_replay_superiority_contract.json") is True
             and artifact_checks.get("historical_replay_superiority_report.json") is True
@@ -487,6 +563,119 @@ def promotion_readiness_markdown(report: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _validate_execution_policy_preregistration(
+    *,
+    config_dir: Path,
+    artifact_hashes: dict[str, str | None],
+) -> None:
+    contract = _read_json(config_dir / "execution_policy_contract.json")
+    manifest = _read_json(config_dir / "policy_candidate_manifest.json")
+    compatibility = _read_json(
+        config_dir / "source_execution_compatibility_manifest.json"
+    )
+    validate_execution_policy_contract(contract)
+    validate_policy_candidate_manifest(manifest)
+    validate_execution_policy_future_validation_protocol(
+        _read_json(
+            config_dir
+            / "execution_policy_future_validation_protocol.template.json"
+        )
+    )
+    source_model_hash = str(manifest["source_model_hash"])
+    if compatibility.get("source_model_hash") != source_model_hash:
+        raise ChallengeModelPromotionError(
+            "execution policy source-model lineage mismatch"
+        )
+    frozen_binding = _read_json(
+        config_dir / "parallel_frozen_v8_1_model_binding.json"
+    )
+    if frozen_binding.get("source_training_rows_sha256") != source_model_hash:
+        raise ChallengeModelPromotionError(
+            "execution policy does not bind the frozen source-model rows"
+        )
+    semantic_hashes: list[str] = []
+    for descriptor in manifest["candidate_fixtures"]:
+        fixture_path = config_dir / str(descriptor["path"])
+        if _sha256_file(fixture_path) != descriptor["raw_sha256"]:
+            raise ChallengeModelPromotionError(
+                "execution policy candidate raw hash mismatch"
+            )
+        fixture = _read_json(fixture_path)
+        validate_execution_policy_fixture(fixture)
+        if fixture.get("candidate_id") != descriptor["candidate_id"]:
+            raise ChallengeModelPromotionError(
+                "execution policy candidate identity mismatch"
+            )
+        semantic_hash = execution_policy_hash(fixture)
+        if semantic_hash != descriptor["execution_policy_hash"]:
+            raise ChallengeModelPromotionError(
+                "execution policy candidate semantic hash mismatch"
+            )
+        validate_source_execution_compatibility(
+            compatibility_manifest=compatibility,
+            policy=fixture,
+            source_model_hash=source_model_hash,
+        )
+        semantic_hashes.append(semantic_hash)
+    if tuple(compatibility.get("allowed_execution_policy_hashes") or ()) != tuple(
+        semantic_hashes
+    ):
+        raise ChallengeModelPromotionError(
+            "execution policy candidate family is not exactly compatibility-bound"
+        )
+    expected_lineage = {
+        "canonical_payload_contract_sha256": artifact_hashes.get(
+            "canonical_payload_contract.json"
+        ),
+        "feature_missingness_contract_sha256": artifact_hashes.get(
+            "feature_missingness_contract.json"
+        ),
+    }
+    if any(
+        compatibility.get(name) != value
+        for name, value in expected_lineage.items()
+    ):
+        raise ChallengeModelPromotionError(
+            "execution policy compatibility artifact lineage mismatch"
+        )
+
+
+def _validate_promotion_evidence_protocol(
+    *,
+    config_dir: Path,
+    artifact_hashes: dict[str, str | None],
+) -> None:
+    # Imported lazily because the evidence runner invokes this audit in turn.
+    from bigan.v8.polymarket.challenge_promotion_evidence import (
+        validate_challenge_promotion_evidence_protocol,
+    )
+
+    validate_challenge_promotion_evidence_protocol(
+        _read_json(config_dir / "challenge_promotion_evidence_protocol.json"),
+        regime_contract_sha256=str(
+            artifact_hashes["regime_definition_contract.json"]
+        ),
+        execution_policy_contract_sha256=str(
+            artifact_hashes["execution_policy_contract.json"]
+        ),
+        policy_candidate_manifest_sha256=str(
+            artifact_hashes["policy_candidate_manifest.json"]
+        ),
+        compatibility_manifest_sha256=str(
+            artifact_hashes["source_execution_compatibility_manifest.json"]
+        ),
+        post_freeze_protocol_sha256=str(
+            artifact_hashes["challenge_future_post_freeze_protocol.json"]
+        ),
+        feature_missingness_contract_sha256=str(
+            artifact_hashes["feature_missingness_contract.json"]
+        ),
+        canonical_payload_contract_sha256=str(
+            artifact_hashes["canonical_payload_contract.json"]
+        ),
+    )
 
 
 def _verified_runtime_evidence(manifest: dict[str, Any]) -> dict[str, Any]:
