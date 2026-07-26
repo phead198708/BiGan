@@ -95,6 +95,9 @@ A passing result is future promotion evidence, not automatic promotion.
 The promotion audit still runs separately and every safety flag remains false
 until that audit succeeds.
 
+The final audit is attempt-002-specific. It does not reuse attempt-001's
+parallel-candidate alpha allocation or candidate identities.
+
 ## Executable evidence pipeline
 
 `run_challenge_attempt_002_pipeline.py` controls evidence freezing and
@@ -150,6 +153,72 @@ comparison, result, and manifest. Synthetic claims never consume promotion
 alpha and can never emit promotion-eligible evidence, even when their
 statistical gates pass.
 
+## Supplemental issue evidence
+
+After the real future gate has run, generate the preregistered diagnostic and
+execution-policy evidence from the same frozen source grid. This step does not
+change or rerun the future gate and does not make a promotion decision:
+
+```bash
+PYTHONPATH=src:. python examples/v8/run_challenge_attempt_002_supplemental.py \
+  --run-id <supplemental-run-id> \
+  --future-manifest <attempt_002_future_manifest.json> \
+  --future-manifest-sha256 <sha256> \
+  --operator-authorization <authorization.json> \
+  --operator-authorization-sha256 <sha256> \
+  --shared-source-rows <shared-source.jsonl> \
+  --shared-source-rows-sha256 <sha256> \
+  --feature-rows <decision-time-feature-rows.jsonl> \
+  --feature-rows-sha256 <sha256> \
+  --native-decisions <frozen-v8.1-native-decisions.jsonl> \
+  --native-decisions-sha256 <sha256> \
+  --regime-contract-sha256 <sha256> \
+  --policy-manifest-sha256 <sha256> \
+  --compatibility-manifest-sha256 <sha256> \
+  --generated-at <UTC timestamp>
+```
+
+The generator requires exact market-grid reconciliation and complete
+decision-time provider features. It creates:
+
+- provider-health and feature-completeness diagnostics for issue #257;
+- causal regime assignments, stratified PnL, bootstrap, and side/action
+  reports for issue #258;
+- all three preregistered execution-policy offline/paper replays, exact parity,
+  safety, and reconciliation reports for issue #256;
+- a hash-indexed supplemental runtime-evidence manifest.
+
+All reports bind the attempt ID, v8.1 candidate ID, future-manifest SHA-256,
+future-result SHA-256, and locked safety fields. Regime metrics remain
+diagnostic only, and execution-policy performance cannot replace or alter the
+attempt-002 future gate.
+
+## Final promotion audit
+
+Run the final audit exactly once against the immutable future manifest and
+supplemental runtime-evidence manifest:
+
+```bash
+PYTHONPATH=src:. python examples/v8/run_challenge_attempt_002_promotion_audit.py \
+  --future-manifest <attempt_002_future_manifest.json> \
+  --future-manifest-sha256 <sha256> \
+  --supplemental-runtime-evidence \
+    <attempt_002_supplemental_runtime_evidence.json> \
+  --supplemental-runtime-evidence-sha256 <sha256> \
+  --output <attempt_002_promotion_readiness.json>
+```
+
+The audit independently verifies every descriptor hash, reconstructs the
+settled 120-market comparison from the frozen decisions and targets, reruns the
+preregistered bootstrap gate, verifies the real single-use target claim and
+operator authorization, checks all issue prerequisites, and requires every
+supplemental report. Missing, synthetic, historical, rehashed-but-altered, or
+incomplete evidence remains `BLOCKED`.
+
+Only an exact `PROMOTE_TO_CHAMPION` decision names
+`v8_1_entry_price_floor_0_30_sized_1_0` as the champion. Paper, live, write,
+wallet, capital, handoff, #134, and #146 permissions remain false.
+
 ## Pre-collection verification
 
 The pipeline has already passed a synthetic 120-market dry-run without opening
@@ -159,17 +228,25 @@ real labels. Recheck before any authorized launch:
 python -m ruff check \
   src/bigan/v8/polymarket/challenge_attempt_002.py \
   src/bigan/v8/polymarket/challenge_attempt_002_pipeline.py \
+  src/bigan/v8/polymarket/challenge_attempt_002_promotion.py \
+  src/bigan/v8/polymarket/challenge_attempt_002_supplemental.py \
   examples/v8/run_challenge_attempt_002_pipeline.py \
+  examples/v8/run_challenge_attempt_002_promotion_audit.py \
+  examples/v8/run_challenge_attempt_002_supplemental.py \
   tests/v8/test_challenge_attempt_002.py \
   tests/v8/test_challenge_attempt_002_preregistration.py \
   tests/v8/test_challenge_attempt_002_pipeline.py \
-  tests/v8/test_challenge_attempt_002_execution_manifest.py
+  tests/v8/test_challenge_attempt_002_execution_manifest.py \
+  tests/v8/test_challenge_attempt_002_promotion.py \
+  tests/v8/test_challenge_attempt_002_promotion_manifest.py
 
 PYTHONPATH=src pytest -q \
   tests/v8/test_challenge_attempt_002.py \
   tests/v8/test_challenge_attempt_002_preregistration.py \
   tests/v8/test_challenge_attempt_002_pipeline.py \
-  tests/v8/test_challenge_attempt_002_execution_manifest.py
+  tests/v8/test_challenge_attempt_002_execution_manifest.py \
+  tests/v8/test_challenge_attempt_002_promotion.py \
+  tests/v8/test_challenge_attempt_002_promotion_manifest.py
 ```
 
 Do not add a collection command to an operational checklist until the separate
