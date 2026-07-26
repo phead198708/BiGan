@@ -1,0 +1,47 @@
+{
+  "candidate_id": "v8_1_high_price_support_recovery_0_30",
+  "development_contract": {
+    "comparison_scope": "all_195_markets_in_frozen_chronological_order",
+    "cost_model_changed": false,
+    "historical_development_only": true,
+    "no_trade_after_cost_pnl": 0.0,
+    "position_lifecycle_changed": false,
+    "position_size": 0.2,
+    "promotion_evidence_eligible": false
+  },
+  "lineage": {
+    "base_v8_1_guard_replay_sha256": "7534b07c41d1a1f2afe3519e7eef9146c9b84bdda72f88a22b9d0351baa9ce2d",
+    "base_v8_1_market_comparison_sha256": "fce95987a10b160d7a7e6cdfd3842cc3e3b34dd138eb27093fb9f86b0a790eae",
+    "exact_195_five_action_rows_sha256": "134425d9f38ffdebbf72043a8b802e95bbb87eebbe7e8d39bfa5d6f8b98828f7",
+    "exact_195_market_ids_sha256": "fef9eda7b8dac138b88c75f96b010bd40953795b2bcf7424debf77a004e06883",
+    "iteration_001_entry_sha256": "76b1ea851c40c3b66aa47e762cfcfdeaada0b6372232a1f4c4365cb6cbebff95",
+    "iteration_001_result_sha256": "80baab4220f48d2cfb98d4ccd25a9b4807462691cfc13f0a40fb96f381a90782",
+    "preregistration_commit": "42328b2743ebf54684007082d255ab16a5160ffa",
+    "preregistration_sha256": "e774af3e31fc7b932561745aee330bef18a21e666d8e7e54d4f71be8e550c1f6"
+  },
+  "policy": {
+    "base_candidate_id": "v8_1_primary_no_fallback",
+    "base_controller_state_transition_changed": false,
+    "entry_price_floor_inclusive": 0.3,
+    "entry_price_source": "matched_outcome_blind_five_action_row.decision_time_features.execution_price",
+    "filter_application_order": "after_v8_1_controller_and_full_guard_before_final_trade",
+    "missing_or_nonfinite_entry_price_behavior": "fail_closed_to_no_trade",
+    "primary_path": "keep_v8_1_trade_only_when_execution_price_at_least_0_30",
+    "recovery_path": "recover_existing_v6_7_guard_compatible_action_only_when_execution_price_at_least_0_30",
+    "recovery_source_action_mutated": false,
+    "threshold_grid_search_performed": false,
+    "veto_action": "NO_TRADE",
+    "veto_side": "NONE"
+  },
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-v8-1-high-price-support-recovery-profile-v1"
+}
