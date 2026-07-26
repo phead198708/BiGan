@@ -330,10 +330,7 @@ def _apply_entry_price_floor_validated(
             base_decision.get("market_close_ts"),
             field="market_close_ts",
         ),
-        "max_input_ts": _integer(
-            _base_max_input_ts(base_decision),
-            field="max_input_ts",
-        ),
+        "max_input_ts": _base_max_input_ts(base_decision),
         "base_selected_action": base_action,
         "base_selected_side": base_side,
         "selected_action": selected_action,
@@ -402,13 +399,14 @@ def _validate_base_decision(base_decision: Mapping[str, Any]) -> None:
         base_decision.get("decision_ts"),
         field="base decision_ts",
     )
-    if _base_max_input_ts(base_decision) > decision_ts:
+    max_input_ts = _base_max_input_ts(base_decision)
+    if max_input_ts is not None and max_input_ts > decision_ts:
         raise ChallengeEntryPriceFloorError(
             "base decision uses input after decision_ts"
         )
 
 
-def _base_max_input_ts(base_decision: Mapping[str, Any]) -> int:
+def _base_max_input_ts(base_decision: Mapping[str, Any]) -> int | None:
     direct = base_decision.get("max_input_ts")
     if direct is not None:
         return _integer(direct, field="base max_input_ts")
@@ -418,9 +416,13 @@ def _base_max_input_ts(base_decision: Mapping[str, Any]) -> int:
         if (value := base_decision.get(field)) is not None
     ]
     if not timestamps:
-        raise ChallengeEntryPriceFloorError(
-            "base decision has no causal max_input_ts"
-        )
+        if (
+            base_decision.get("selected_action") == "NO_TRADE"
+            and "v6_7_no_positive_guard_compatible_action"
+            in (base_decision.get("selection_reason_codes") or [])
+        ):
+            return None
+        raise ChallengeEntryPriceFloorError("base decision has no causal max_input_ts")
     return max(timestamps)
 
 
