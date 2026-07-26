@@ -50,6 +50,7 @@ def _guard(
         "execution_guard_order_allowed": action != "NO_TRADE",
         "target_used_as_decision_time_input": False,
         "outcome_or_pnl_field_used_at_inference": False,
+        "labels_outcomes_or_pnl_opened": False,
         "source_score_mutated": False,
         "capital_at_risk": False,
         "polymarket_write_enabled": False,
@@ -171,13 +172,18 @@ def test_terminal_floor_keeps_or_vetoes_without_changing_controller_state() -> N
     assert at_floor["entry_price_filter_passed"] is True
     assert at_floor["max_input_ts"] == 1_999
 
+    no_trade_guard = _guard(
+        "market-no-trade",
+        action="NO_TRADE",
+        side="NONE",
+        decision_ts=3_000,
+    )
+    no_trade_guard["target_used_as_decision_time_input"] = None
+    no_trade_guard["selection_reason_codes"] = [
+        "v6_7_no_positive_guard_compatible_action"
+    ]
     no_trade = apply_entry_price_floor(
-        base_decision=_guard(
-            "market-no-trade",
-            action="NO_TRADE",
-            side="NONE",
-            decision_ts=3_000,
-        ),
+        base_decision=no_trade_guard,
         matched_action_row=None,
         profile=_profile(),
     )

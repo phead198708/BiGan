@@ -376,10 +376,19 @@ def _validate_base_decision(base_decision: Mapping[str, Any]) -> None:
             action == "NO_TRADE"
             or base_decision.get("execution_guard_order_allowed") is True
         ),
-        "causal": base_decision.get("target_used_as_decision_time_input")
-        is False
+        "causal": (
+            base_decision.get("target_used_as_decision_time_input") is False
+            or (
+                action == "NO_TRADE"
+                and base_decision.get("target_used_as_decision_time_input")
+                is None
+                and "v6_7_no_positive_guard_compatible_action"
+                in (base_decision.get("selection_reason_codes") or [])
+            )
+        )
         and base_decision.get("outcome_or_pnl_field_used_at_inference")
-        is False,
+        is False
+        and base_decision.get("labels_outcomes_or_pnl_opened") is False,
         "immutable_score": base_decision.get("source_score_mutated") is False,
         "safety": base_decision.get("capital_at_risk") is False
         and base_decision.get("polymarket_write_enabled") is False
