@@ -1,0 +1,74 @@
+{
+  "all_future_success_criteria_passed": true,
+  "collection_control_invoked": false,
+  "executed_at": "2026-07-26T18:05:00Z",
+  "implementation_commit": "df9baec20e36950efc43bafa5058eaa0883fb06a",
+  "pipeline_stages": {
+    "settlement_mapping": {
+      "comparison_sha256": "6489abac8ca0da3a9014886edb4f0b749d4586ba16d7bcea3c1cab157909b35b",
+      "settlement_targets_sha256": "9f743c1d2641fe777c0c8fa6ef1a369795828eb628c35128224ad889da9378ef"
+    },
+    "single_use_evaluation": {
+      "manifest_sha256": "5f5edce6eb7e636e035f123b8361d896dfdf31c8f1f0f9e8e3041e30e8c1da04",
+      "result_sha256": "8e9580096c4b28ec29c288998331f2aa5c9b788ac2c51c94929714e320087e5f"
+    },
+    "synthetic_target_claim": {
+      "attempt_and_promotion_alpha_consumed": false,
+      "claim_sha256": "91319653ca73cd0686aa506d5465b04e8e4306e40c21d43085d0529fc0d0d437"
+    },
+    "target_free_freeze": {
+      "manifest_sha256": "cf2978e0c1ebfdfaf7732b42374a8dfc5bf4f2748da278b55f8d718188b4ba64",
+      "market_count": 120,
+      "outcomes_opened": false,
+      "target_free_pairs_sha256": "dc7cec27d50dafe84188dcb78f9a31507cd9e761b36b953ae3013c76107e31b4"
+    }
+  },
+  "promotion_evidence_eligible": false,
+  "protocol_sha256": "0fa091610966a3a3470872a7e1b5832c8a32985fc312235366ad41aa891f249f",
+  "purpose": "end_to_end_precollection_pipeline_integrity_only",
+  "real_future_evidence": false,
+  "real_labels_outcomes_settlement_or_pnl_opened": false,
+  "result_summary": {
+    "bootstrap": {
+      "candidate_absolute_97_5_lcb": 0.2,
+      "first_half_candidate_97_5_ucb": 1.4000000000000001,
+      "paired_delta_97_5_lcb": 1.4000000000000004,
+      "second_half_candidate_97_5_ucb": 1.0
+    },
+    "checks": {
+      "all_market_rows_in_full_window_pair": true,
+      "all_safety_unlocks_remain_false": true,
+      "candidate_absolute_bootstrap_97_5_lcb_positive": true,
+      "exact_120_unique_chronological_future_markets": true,
+      "first_half_not_significantly_negative": true,
+      "largest_winner_removed_candidate_pnl_positive": true,
+      "minimum_candidate_support_not_required": true,
+      "paired_bootstrap_97_5_lcb_positive": true,
+      "second_half_not_significantly_negative": true,
+      "single_use_future_evidence_only": true
+    },
+    "metrics": {
+      "acceptance_rate": 0.041666666666666664,
+      "accepted_market_count": 5,
+      "baseline_total_after_cost_pnl": -1.2000000000000002,
+      "candidate_largest_winner_after_cost_pnl": 0.2,
+      "candidate_largest_winner_removed_after_cost_pnl": 0.8,
+      "candidate_minus_baseline_total_after_cost_pnl": 2.2,
+      "candidate_total_after_cost_pnl": 1.0,
+      "first_half_candidate_total_after_cost_pnl": 0.6000000000000001,
+      "second_half_candidate_total_after_cost_pnl": 0.4
+    }
+  },
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-attempt-002-pipeline-synthetic-dry-run-v1",
+  "synthetic_only": true
+}

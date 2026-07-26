@@ -95,6 +95,61 @@ A passing result is future promotion evidence, not automatic promotion.
 The promotion audit still runs separately and every safety flag remains false
 until that audit succeeds.
 
+## Executable evidence pipeline
+
+`run_challenge_attempt_002_pipeline.py` controls evidence freezing and
+evaluation only; it has no collector-start operation.
+
+After an authorized collection reaches 120 quality-valid markets, freeze the
+shared source grid and both target-free decision streams:
+
+```bash
+PYTHONPATH=src:. python examples/v8/run_challenge_attempt_002_pipeline.py \
+  freeze-pairs \
+  --run-id <target-free-freeze-run-id> \
+  --shared-source-rows <shared-source.jsonl> \
+  --shared-source-rows-sha256 <sha256> \
+  --candidate-decisions <candidate-decisions.jsonl> \
+  --candidate-decisions-sha256 <sha256> \
+  --baseline-decisions <baseline-decisions.jsonl> \
+  --baseline-decisions-sha256 <sha256>
+```
+
+The real single-use target claim requires a separate
+`challenge-attempt-002-operator-authorization-v1` artifact and its valid
+sidecar. A missing or synthetic authorization cannot create a real claim:
+
+```bash
+PYTHONPATH=src:. python examples/v8/run_challenge_attempt_002_pipeline.py \
+  claim \
+  --target-free-pairs <target-free-pairs.jsonl> \
+  --target-free-pairs-sha256 <sha256> \
+  --operator-authorization <authorization.json> \
+  --output <single-use-target-claim.json>
+```
+
+After official settlement writes exact action-level targets, run the gate once:
+
+```bash
+PYTHONPATH=src:. python examples/v8/run_challenge_attempt_002_pipeline.py \
+  evaluate \
+  --run-id <future-evaluation-run-id> \
+  --target-free-pairs <target-free-pairs.jsonl> \
+  --target-free-pairs-sha256 <sha256> \
+  --target-access-claim <single-use-target-claim.json> \
+  --target-access-claim-sha256 <sha256> \
+  --settlement-targets <settlement-targets.jsonl> \
+  --settlement-targets-sha256 <sha256> \
+  --operator-authorization <authorization.json> \
+  --evaluated-at <UTC timestamp>
+```
+
+The runner requires a clean committed worktree, validates every input hash,
+rejects non-canonical decision and target row IDs, and writes an immutable
+comparison, result, and manifest. Synthetic claims never consume promotion
+alpha and can never emit promotion-eligible evidence, even when their
+statistical gates pass.
+
 ## Pre-collection verification
 
 The pipeline has already passed a synthetic 120-market dry-run without opening
@@ -103,12 +158,18 @@ real labels. Recheck before any authorized launch:
 ```bash
 python -m ruff check \
   src/bigan/v8/polymarket/challenge_attempt_002.py \
+  src/bigan/v8/polymarket/challenge_attempt_002_pipeline.py \
+  examples/v8/run_challenge_attempt_002_pipeline.py \
   tests/v8/test_challenge_attempt_002.py \
-  tests/v8/test_challenge_attempt_002_preregistration.py
+  tests/v8/test_challenge_attempt_002_preregistration.py \
+  tests/v8/test_challenge_attempt_002_pipeline.py \
+  tests/v8/test_challenge_attempt_002_execution_manifest.py
 
 PYTHONPATH=src pytest -q \
   tests/v8/test_challenge_attempt_002.py \
-  tests/v8/test_challenge_attempt_002_preregistration.py
+  tests/v8/test_challenge_attempt_002_preregistration.py \
+  tests/v8/test_challenge_attempt_002_pipeline.py \
+  tests/v8/test_challenge_attempt_002_execution_manifest.py
 ```
 
 Do not add a collection command to an operational checklist until the separate

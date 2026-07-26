@@ -1,0 +1,70 @@
+{
+  "attempt_id": "v8-1-challenger-future-attempt-002",
+  "candidate_id": "v8_1_entry_price_floor_0_30_sized_1_0",
+  "collection_state": {
+    "collection_started": false,
+    "collector_pid": null,
+    "operator_authorization_artifact_present": false,
+    "operator_authorization_required": true,
+    "outcomes_resolution_labels_or_pnl_opened": false,
+    "quality_valid_market_count": 0,
+    "service_root_created": false
+  },
+  "frozen_protocol": {
+    "commit": "67208c26d8262428864258707eabc564a5628efb",
+    "sha256": "0fa091610966a3a3470872a7e1b5832c8a32985fc312235366ad41aa891f249f"
+  },
+  "issue_contract_lineage": {
+    "issue_254_parallel_candidate_protocol_sha256": "fdd0e3f8808cf831f22e0b5ff319d1668e3c0bd80add28de170b7d7c11639ca4",
+    "issue_255_candidate_budget_protocol_sha256": "75f7164db6cf68b94989f9662add3134fdc15b8569e5123256eedfd6dd60a2f0",
+    "issue_256_execution_policy_contract_sha256": "4ce2475dca9dfb211808ceba3bd770f9bcde9728770dbdf1ef6641d5bda822cc",
+    "issue_257_feature_missingness_contract_sha256": "4eb9cb453a684170e3db64dd0db803f4f0e44055a105806368d48428b5d3a107",
+    "issue_258_regime_definition_contract_sha256": "7bb37764eee45c78bfc4a571df7d443be3b4063a9112ad64f6a015fe3f217da5",
+    "issue_259_canonical_payload_contract_sha256": "d6b96c9d5d816c5a9b184cd884789e2a45d3c697b01219b23e9be124f57b00ca",
+    "promotion_evidence_protocol_sha256": "b9eaaf37c214cea59abdea7bc682a12e0e12a23837f626bd815e4d37c14dee52"
+  },
+  "pipeline": {
+    "implementation_commit": "df9baec20e36950efc43bafa5058eaa0883fb06a",
+    "module_sha256": "adc9cbbd57b128dc5628ed4eeb83c6efe83c631a924766c28e69fabafda89592",
+    "runner_sha256": "20984a830b9f4a0f050de2bca296214a96a2d6b91a4a37c68d3b67a66b34b6f0",
+    "test_sha256": "f3906e8db1ea458718dcdcd38c716e6f8d45c6e979a7e68f6ba1d17d83005dc9"
+  },
+  "pipeline_contract": {
+    "candidate_and_baseline_same_future_market_grid_required": true,
+    "collection_control_is_out_of_scope": true,
+    "exact_target_free_pair_count": 120,
+    "manual_code_change_after_target_access_allowed": false,
+    "operator_authorization_schema_version": "bigan-v8-challenge-attempt-002-operator-authorization-v1",
+    "real_claim_requires_pinned_operator_authorization": true,
+    "result_selected_rerun_allowed": false,
+    "settlement_target_exact_action_coverage_required": true,
+    "single_use_target_access_claim_required": true,
+    "synthetic_evidence_promotion_eligible": false,
+    "target_access_claim_schema_version": "bigan-v8-challenge-attempt-002-target-access-claim-v1",
+    "target_free_pair_schema_version": "bigan-v8-challenge-attempt-002-target-free-pair-v1"
+  },
+  "promotion_state": {
+    "automatic_promotion_allowed": false,
+    "historical_evidence_eligible": false,
+    "promotion_audit_required_after_real_future_gate_pass": true,
+    "promotion_evidence_present": false,
+    "promotion_ready": false
+  },
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-attempt-002-execution-manifest-v1",
+  "synthetic_pipeline_dry_run": {
+    "all_future_success_criteria_passed": true,
+    "promotion_evidence_eligible": false,
+    "real_future_evidence": false,
+    "sha256": "1d7e2f720d45b4ede1c7aaa5f01ee80ba96c3571d08b3a21cc00e1c0e21b95c8"
+  }
+}
