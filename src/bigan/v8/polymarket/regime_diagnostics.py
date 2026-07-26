@@ -13,6 +13,19 @@ from bigan.v8.canonical_payload import canonical_payload_sha256
 REGIME_DEFINITION_SCHEMA_VERSION = "bigan-v8-regime-definition-contract-v1"
 REGIME_ASSIGNMENT_SCHEMA_VERSION = "bigan-v8-regime-assignment-v1"
 REGIME_REPORT_SCHEMA_VERSION = "bigan-v8-regime-stratified-pnl-report-v1"
+SAFETY = {
+    "paper_candidate_unlocked": False,
+    "promotion_unlocked": False,
+    "live_unlocked": False,
+    "write_enabled": False,
+    "wallet_enabled": False,
+    "capital_at_risk": False,
+    "handoff_enabled": False,
+    "source_change_enabled": False,
+    "freeze_change_enabled": False,
+    "#134_resume_allowed": False,
+    "#146_start_allowed": False,
+}
 DIMENSION_BUCKETS = {
     "selected_side": ("UP", "DOWN", "NONE"),
     "market_direction_bucket": ("negative", "flat", "positive", "unknown"),
@@ -62,13 +75,101 @@ def validate_regime_definition_contract(contract: dict[str, Any]) -> None:
         blockers.append("schema_version")
     if contract.get("classification_inputs_available_by_decision_time") is not True:
         blockers.append("causal_inputs")
+    if contract.get("issue") != 258:
+        blockers.append("issue")
+    boundaries = dict(contract.get("boundaries") or {})
+    expected_boundary_names = {
+        "market_direction_flat_abs_max",
+        "bearish_return_max",
+        "bullish_return_min",
+        "volatility_low_max_exclusive",
+        "volatility_medium_max_exclusive",
+        "spread_tight_max_bps",
+        "spread_normal_max_bps",
+        "liquidity_low_max_exclusive",
+        "liquidity_medium_max_exclusive",
+        "time_of_day_timezone",
+        "provider_health_healthy_minimum",
+        "provider_health_degraded_minimum",
+    }
+    if set(boundaries) != expected_boundary_names:
+        blockers.append("boundary_fields")
+    else:
+        try:
+            numeric_boundaries = {
+                name: float(value)
+                for name, value in boundaries.items()
+                if name != "time_of_day_timezone"
+            }
+        except (TypeError, ValueError):
+            blockers.append("boundary_values")
+        else:
+            if (
+                any(not math.isfinite(value) for value in numeric_boundaries.values())
+                or numeric_boundaries["market_direction_flat_abs_max"] < 0.0
+                or not (
+                    numeric_boundaries["bearish_return_max"]
+                    < numeric_boundaries["bullish_return_min"]
+                )
+                or not (
+                    0.0
+                    < numeric_boundaries["volatility_low_max_exclusive"]
+                    < numeric_boundaries["volatility_medium_max_exclusive"]
+                )
+                or not (
+                    0.0
+                    <= numeric_boundaries["spread_tight_max_bps"]
+                    < numeric_boundaries["spread_normal_max_bps"]
+                )
+                or not (
+                    0.0
+                    <= numeric_boundaries["liquidity_low_max_exclusive"]
+                    < numeric_boundaries["liquidity_medium_max_exclusive"]
+                )
+                or not (
+                    0.0
+                    <= numeric_boundaries[
+                        "provider_health_degraded_minimum"
+                    ]
+                    < numeric_boundaries["provider_health_healthy_minimum"]
+                    <= 1.0
+                )
+                or boundaries["time_of_day_timezone"] != "UTC"
+            ):
+                blockers.append("boundary_values")
+    if contract.get("dimensions") != list(DIMENSION_BUCKETS):
+        blockers.append("dimensions")
+    reporting = dict(contract.get("reporting") or {})
+    if (
+        int(reporting.get("minimum_supported_stratum_count") or 0) <= 0
+        or reporting.get("bootstrap_unit") != "market_id"
+        or int(reporting.get("bootstrap_resample_count") or 0) <= 0
+        or type(reporting.get("bootstrap_seed")) is not int
+        or not 0.0 < float(reporting.get("confidence_level") or 0.0) < 1.0
+        or reporting.get("empty_strata_reported") is not True
+        or reporting.get("low_support_status") != "insufficient_support"
+        or reporting.get(
+            "aggregate_and_mutually_exclusive_partition_reconciliation_required"
+        )
+        is not True
+    ):
+        blockers.append("reporting")
     if contract.get("diagnostic_only") is not True:
         blockers.append("diagnostic_only")
     if contract.get("fixed_side_quota_enabled") is not False:
         blockers.append("side_quota")
     if contract.get("post_outcome_boundary_change_allowed") is not False:
         blockers.append("post_outcome_boundary_change")
-    if any(contract.get("safety", {}).values()):
+    if contract.get("aggregate_hard_gate_changed") is not False:
+        blockers.append("aggregate_hard_gate")
+    if (
+        contract.get(
+            "stratified_blocker_requires_separate_future_preregistration"
+        )
+        is not True
+    ):
+        blockers.append("stratified_preregistration")
+    if contract.get("safety") != SAFETY:
         blockers.append("safety")
     if blockers:
         raise RegimeDiagnosticError(
@@ -141,7 +242,15 @@ def assign_regime(
             ),
         ),
         "time_of_day_bucket": _time_bucket(decision_ts),
-        "provider_health_bucket": _provider_health_bucket(causal_context),
+        "provider_health_bucket": _provider_health_bucket(
+            causal_context,
+            healthy_minimum=float(
+                boundaries["provider_health_healthy_minimum"]
+            ),
+            degraded_minimum=float(
+                boundaries["provider_health_degraded_minimum"]
+            ),
+        ),
         "decision_origin": _decision_origin(decision),
         "action_family": _action_family(decision),
         "classification_contract_sha256": canonical_payload_sha256(
@@ -157,6 +266,55 @@ def assign_regime(
     return assignment
 
 
+def validate_regime_assignment(
+    assignment: dict[str, Any],
+    *,
+    contract: dict[str, Any],
+) -> None:
+    """Verify a persisted assignment before it can enter diagnostics."""
+
+    validate_regime_definition_contract(contract)
+    expected_contract_hash = canonical_payload_sha256(
+        contract,
+        payload_schema_version=REGIME_DEFINITION_SCHEMA_VERSION,
+    )
+    without_hash = {
+        key: value
+        for key, value in assignment.items()
+        if key != "regime_assignment_sha256"
+    }
+    if (
+        assignment.get("schema_version") != REGIME_ASSIGNMENT_SCHEMA_VERSION
+        or not str(assignment.get("market_id") or "")
+        or type(assignment.get("decision_ts")) is not int
+        or type(assignment.get("available_at_ts")) is not int
+        or type(assignment.get("max_input_ts")) is not int
+        or int(assignment.get("decision_ts") or 0) < 0
+        or int(assignment.get("available_at_ts") or 0)
+        > int(assignment.get("decision_ts") or 0)
+        or int(assignment.get("max_input_ts") or 0)
+        > int(assignment.get("decision_ts") or 0)
+        or assignment.get("classification_contract_sha256")
+        != expected_contract_hash
+        or assignment.get(
+            "outcome_settlement_pnl_or_future_information_used"
+        )
+        is not False
+        or any(
+            assignment.get(dimension) not in buckets
+            for dimension, buckets in DIMENSION_BUCKETS.items()
+        )
+        or assignment.get("regime_assignment_sha256")
+        != canonical_payload_sha256(
+            without_hash,
+            payload_schema_version=REGIME_ASSIGNMENT_SCHEMA_VERSION,
+        )
+    ):
+        raise RegimeDiagnosticError(
+            "regime assignment hash, lineage, or bucket contract invalid"
+        )
+
+
 def build_regime_stratified_diagnostics(
     *,
     assignments: list[dict[str, Any]],
@@ -167,6 +325,8 @@ def build_regime_stratified_diagnostics(
     """Report complete/empty strata and reconcile every partition to aggregate PnL."""
 
     validate_regime_definition_contract(contract)
+    for assignment in assignments:
+        validate_regime_assignment(assignment, contract=contract)
     assignment_by_key = {_key(row): row for row in assignments}
     candidate_by_key = {_key(row): row for row in candidate_rows}
     baseline_by_key = {_key(row): row for row in baseline_rows}
@@ -183,13 +343,28 @@ def build_regime_stratified_diagnostics(
         assignment = assignment_by_key[key]
         candidate = candidate_by_key[key]
         baseline = baseline_by_key[key]
+        if (
+            assignment["selected_side"] != _selected_side(candidate)
+            or assignment["decision_origin"] != _decision_origin(candidate)
+            or assignment["action_family"] != _action_family(candidate)
+        ):
+            raise RegimeDiagnosticError(
+                "regime assignment attribution differs from candidate row"
+            )
+        candidate_pnl = _required_finite(
+            candidate.get("after_cost_pnl"),
+            name="candidate after_cost_pnl",
+        )
+        baseline_pnl = _required_finite(
+            baseline.get("after_cost_pnl"),
+            name="baseline after_cost_pnl",
+        )
         joined.append(
             {
                 **assignment,
-                "after_cost_pnl": float(candidate["after_cost_pnl"]),
-                "baseline_after_cost_pnl": float(baseline["after_cost_pnl"]),
-                "candidate_minus_baseline": float(candidate["after_cost_pnl"])
-                - float(baseline["after_cost_pnl"]),
+                "after_cost_pnl": candidate_pnl,
+                "baseline_after_cost_pnl": baseline_pnl,
+                "candidate_minus_baseline": candidate_pnl - baseline_pnl,
                 "accepted_bet": bool(candidate.get("execution_guard_order_allowed"))
                 and candidate.get("executed_action") != "NO_TRADE",
             }
@@ -262,10 +437,7 @@ def build_regime_stratified_diagnostics(
         "aggregate_hard_gate_changed": False,
         "stratified_metrics_are_eligibility_blockers": False,
         "fixed_side_quota_enabled": False,
-        "paper_candidate_unlocked": False,
-        "promotion_unlocked": False,
-        "live_unlocked": False,
-        "capital_at_risk": False,
+        **SAFETY,
     }
     report["report_sha256"] = canonical_payload_sha256(
         report,
@@ -295,6 +467,9 @@ def build_regime_stratified_diagnostics(
                 }
                 for dimension, strata in dimension_reports.items()
             },
+            "diagnostic_only": True,
+            "aggregate_hard_gate_changed": False,
+            **SAFETY,
         },
         "side_action_attribution_report": {
             "schema_version": "bigan-v8-side-action-attribution-v1",
@@ -302,6 +477,8 @@ def build_regime_stratified_diagnostics(
             "action_family": dimension_reports["action_family"],
             "decision_origin": dimension_reports["decision_origin"],
             "diagnostic_only": True,
+            "aggregate_hard_gate_changed": False,
+            **SAFETY,
         },
     }
 
@@ -431,6 +608,16 @@ def _optional_finite(value: Any) -> float | None:
     return converted
 
 
+def _required_finite(value: Any, *, name: str) -> float:
+    try:
+        converted = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RegimeDiagnosticError(f"{name} must be finite") from exc
+    if not math.isfinite(converted):
+        raise RegimeDiagnosticError(f"{name} must be finite")
+    return converted
+
+
 def _direction_bucket(value: float | None, *, flat_abs_max: float) -> str:
     if value is None:
         return "unknown"
@@ -504,7 +691,12 @@ def _time_bucket(decision_ts: int) -> str:
     return "utc_18_23"
 
 
-def _provider_health_bucket(context: dict[str, Any]) -> str:
+def _provider_health_bucket(
+    context: dict[str, Any],
+    *,
+    healthy_minimum: float,
+    degraded_minimum: float,
+) -> str:
     if context.get("trade_tape_provider_timeout") == 1:
         return "timeout"
     if context.get("trade_tape_truncated") == 1:
@@ -518,9 +710,9 @@ def _provider_health_bucket(context: dict[str, Any]) -> str:
     score = _optional_finite(context.get("provider_health_score"))
     if score is None:
         return "unknown"
-    if score >= 0.9:
+    if score >= healthy_minimum:
         return "healthy"
-    if score >= 0.5:
+    if score >= degraded_minimum:
         return "degraded"
     return "unhealthy"
 
@@ -559,9 +751,11 @@ __all__ = [
     "REGIME_ASSIGNMENT_SCHEMA_VERSION",
     "REGIME_DEFINITION_SCHEMA_VERSION",
     "REGIME_REPORT_SCHEMA_VERSION",
+    "SAFETY",
     "RegimeDiagnosticError",
     "assign_regime",
     "build_regime_stratified_diagnostics",
     "regime_diagnostics_markdown",
+    "validate_regime_assignment",
     "validate_regime_definition_contract",
 ]

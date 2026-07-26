@@ -7,12 +7,17 @@ from pathlib import Path
 
 import pytest
 
+from bigan.v8.canonical_payload import canonical_payload_sha256
 from bigan.v8.polymarket.regime_diagnostics import (
     DIMENSION_BUCKETS,
+    REGIME_ASSIGNMENT_SCHEMA_VERSION,
+    SAFETY,
     RegimeDiagnosticError,
     assign_regime,
     build_regime_stratified_diagnostics,
     regime_diagnostics_markdown,
+    validate_regime_assignment,
+    validate_regime_definition_contract,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -63,6 +68,29 @@ def test_regime_contract_is_hash_pinned_and_safety_closed() -> None:
         CONTRACT_SHA.read_text().strip()
     )
     assert all(value is False for value in _contract()["safety"].values())
+    validate_regime_definition_contract(_contract())
+
+
+@pytest.mark.parametrize("field", list(SAFETY))
+def test_regime_contract_requires_every_safety_field_false(
+    field: str,
+) -> None:
+    contract = _contract()
+    contract["safety"][field] = True
+    with pytest.raises(RegimeDiagnosticError, match="safety"):
+        validate_regime_definition_contract(contract)
+
+
+def test_regime_contract_rejects_invalid_boundaries_and_reporting() -> None:
+    contract = _contract()
+    contract["boundaries"]["provider_health_degraded_minimum"] = 0.95
+    contract["boundaries"]["provider_health_healthy_minimum"] = 0.9
+    contract["reporting"]["bootstrap_resample_count"] = 0
+    with pytest.raises(
+        RegimeDiagnosticError,
+        match="boundary_values, reporting",
+    ):
+        validate_regime_definition_contract(contract)
 
 
 def test_boundary_assignments_are_deterministic_and_hash_stable() -> None:
@@ -110,6 +138,22 @@ def test_missing_inputs_are_explicit_unknown_strata() -> None:
     assert assignment["realized_volatility_bucket"] == "unknown"
     assert assignment["spread_liquidity_bucket"] == "unknown"
     assert assignment["provider_health_bucket"] == "unknown"
+
+
+def test_provider_health_thresholds_come_from_frozen_contract() -> None:
+    decision = _decision(1)
+    contract = _contract()
+    contract["boundaries"]["provider_health_healthy_minimum"] = 0.95
+    contract["boundaries"]["provider_health_degraded_minimum"] = 0.8
+    assignment = assign_regime(
+        decision=decision,
+        causal_context=_context(
+            decision["decision_ts"],
+            provider_health_score=0.9,
+        ),
+        contract=contract,
+    )
+    assert assignment["provider_health_bucket"] == "degraded"
 
 
 def test_future_or_target_input_fails_closed() -> None:
@@ -169,6 +213,16 @@ def test_all_dimensions_report_empty_low_support_and_reconcile() -> None:
         assert set(report["dimensions"][dimension]) == set(buckets)
     assert report["diagnostic_only"] is True
     assert report["stratified_metrics_are_eligibility_blockers"] is False
+    assert all(report[field] is expected for field, expected in SAFETY.items())
+    for artifact_name in (
+        "regime_bootstrap_report",
+        "side_action_attribution_report",
+    ):
+        artifact = artifacts[artifact_name]
+        assert all(
+            artifact[field] is expected
+            for field, expected in SAFETY.items()
+        )
     assert "promotion unlocked: `false`" in regime_diagnostics_markdown(artifacts)
 
 
@@ -186,5 +240,56 @@ def test_grid_or_assignment_tamper_fails_closed() -> None:
             assignments=[assignment],
             candidate_rows=[{**decision, "after_cost_pnl": 0.1}],
             baseline_rows=[{**bad_baseline, "after_cost_pnl": 0.0}],
+            contract=_contract(),
+        )
+
+
+def test_assignment_hash_and_candidate_attribution_are_revalidated() -> None:
+    decision = _decision(1)
+    contract = _contract()
+    assignment = assign_regime(
+        decision=decision,
+        causal_context=_context(decision["decision_ts"]),
+        contract=contract,
+    )
+    assignment["regime"] = "bearish"
+    with pytest.raises(RegimeDiagnosticError, match="assignment hash"):
+        validate_regime_assignment(assignment, contract=contract)
+
+    assignment = assign_regime(
+        decision=decision,
+        causal_context=_context(decision["decision_ts"]),
+        contract=contract,
+    )
+    assignment["selected_side"] = "UP"
+    assignment["regime_assignment_sha256"] = canonical_payload_sha256(
+        {
+            key: value
+            for key, value in assignment.items()
+            if key != "regime_assignment_sha256"
+        },
+        payload_schema_version=REGIME_ASSIGNMENT_SCHEMA_VERSION,
+    )
+    with pytest.raises(RegimeDiagnosticError, match="attribution"):
+        build_regime_stratified_diagnostics(
+            assignments=[assignment],
+            candidate_rows=[{**decision, "after_cost_pnl": 0.1}],
+            baseline_rows=[{**decision, "after_cost_pnl": 0.0}],
+            contract=contract,
+        )
+
+
+def test_nonfinite_candidate_or_baseline_pnl_fails_closed() -> None:
+    decision = _decision(1)
+    assignment = assign_regime(
+        decision=decision,
+        causal_context=_context(decision["decision_ts"]),
+        contract=_contract(),
+    )
+    with pytest.raises(RegimeDiagnosticError, match="must be finite"):
+        build_regime_stratified_diagnostics(
+            assignments=[assignment],
+            candidate_rows=[{**decision, "after_cost_pnl": float("nan")}],
+            baseline_rows=[{**decision, "after_cost_pnl": 0.0}],
             contract=_contract(),
         )
