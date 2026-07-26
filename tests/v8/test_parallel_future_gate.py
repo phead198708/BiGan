@@ -7,6 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from bigan.v8.polymarket.challenge_prefreeze import (
+    ChallengePrefreezeError,
+    validate_excluded_capture_ledger,
+    validate_prefreeze_checklist,
+)
 from bigan.v8.polymarket.parallel_future_gate import (
     ParallelFutureGateError,
     build_parallel_target_free_freeze,
@@ -37,6 +42,49 @@ def _contracts():
         ),
         "matched_frozen_v6_7": _json(
             "parallel_candidate_matched_frozen_v6_7_contract.json"
+        ),
+    }
+
+
+def _sha256(name: str) -> str:
+    return hashlib.sha256((CONFIG / name).read_bytes()).hexdigest()
+
+
+def _validate_prefreeze_artifacts() -> None:
+    validate_prefreeze_checklist(
+        _json("challenge_prefreeze_checklist.json"),
+        candidate_contract=_contracts()["v8_1_primary_no_fallback"],
+        candidate_contract_sha256=_sha256(
+            "parallel_candidate_v8_1_primary_no_fallback_contract.json"
+        ),
+        historical_replay_report=_json(
+            "historical_replay_superiority_report.json"
+        ),
+        historical_replay_report_sha256=_sha256(
+            "historical_replay_superiority_report.json"
+        ),
+        excluded_capture_ledger=_json(
+            "challenge_prefreeze_excluded_capture_ledger.json"
+        ),
+        excluded_capture_ledger_sha256=_sha256(
+            "challenge_prefreeze_excluded_capture_ledger.json"
+        ),
+    )
+
+
+def _prefreeze_plan_kwargs() -> dict:
+    return {
+        "prefreeze_checklist_sha256": _sha256(
+            "challenge_prefreeze_checklist.json"
+        ),
+        "prefreeze_checklist": _json(
+            "challenge_prefreeze_checklist.json"
+        ),
+        "excluded_capture_ledger_sha256": _sha256(
+            "challenge_prefreeze_excluded_capture_ledger.json"
+        ),
+        "excluded_capture_ledger": _json(
+            "challenge_prefreeze_excluded_capture_ledger.json"
         ),
     }
 
@@ -188,6 +236,8 @@ def test_fresh_collection_plan_is_hash_pinned_and_preregistered() -> None:
         frozen_model_binding=_json(
             "parallel_frozen_v8_1_model_binding.json"
         ),
+        candidate_contracts=_contracts(),
+        **_prefreeze_plan_kwargs(),
         historical_gate_contract_sha256=hashlib.sha256(
             (
                 CONFIG / "historical_replay_superiority_contract.json"
@@ -203,6 +253,74 @@ def test_fresh_collection_plan_is_hash_pinned_and_preregistered() -> None:
         ),
         collection_started_ts=plan["freeze_created_ts"] + 1,
     )
+
+
+def test_prefreeze_checklist_and_excluded_ledger_are_hash_pinned() -> None:
+    for name in (
+        "challenge_prefreeze_checklist.json",
+        "challenge_prefreeze_excluded_capture_ledger.json",
+    ):
+        assert _sha256(name) == (
+            CONFIG / name
+        ).with_suffix(".sha256").read_text().strip()
+    _validate_prefreeze_artifacts()
+    ledger = _json("challenge_prefreeze_excluded_capture_ledger.json")
+    validate_excluded_capture_ledger(ledger)
+    current_captures = [
+        entry
+        for entry in ledger["entries"]
+        if entry.get("current_superseded_plan_capture") is True
+    ]
+    assert len(current_captures) == 6
+    assert all(entry["index_entry_written"] is False for entry in current_captures)
+    assert all(
+        entry["labels_outcomes_or_pnl_opened"] is False
+        for entry in current_captures
+    )
+    assert all(
+        entry["consumes_attempt_or_alpha"] is False
+        for entry in current_captures
+    )
+
+
+def test_prefreeze_checklist_rejects_caller_asserted_authorization() -> None:
+    checklist = _json("challenge_prefreeze_checklist.json")
+    checklist["operator_authorization"]["granted"] = True
+    with pytest.raises(ChallengePrefreezeError, match="operator_authorization"):
+        validate_prefreeze_checklist(
+            checklist,
+            candidate_contract=_contracts()["v8_1_primary_no_fallback"],
+            candidate_contract_sha256=_sha256(
+                "parallel_candidate_v8_1_primary_no_fallback_contract.json"
+            ),
+            historical_replay_report=_json(
+                "historical_replay_superiority_report.json"
+            ),
+            historical_replay_report_sha256=_sha256(
+                "historical_replay_superiority_report.json"
+            ),
+            excluded_capture_ledger=_json(
+                "challenge_prefreeze_excluded_capture_ledger.json"
+            ),
+            excluded_capture_ledger_sha256=_sha256(
+                "challenge_prefreeze_excluded_capture_ledger.json"
+            ),
+        )
+
+
+def test_frozen_binding_candidate_name_is_derived_from_contracts() -> None:
+    contracts = _contracts()
+    contracts["v8_1_primary_no_fallback"]["primary_policy"] = (
+        "caller-invented-candidate"
+    )
+    with pytest.raises(ParallelFutureGateError, match="candidate_name"):
+        validate_parallel_frozen_model_binding(
+            _json("parallel_frozen_v8_1_model_binding.json"),
+            candidate_contracts=contracts,
+            expected_binding_sha256=_sha256(
+                "parallel_frozen_v8_1_model_binding.json"
+            ),
+        )
 
 
 def test_collection_plan_rejects_target_access_and_non_later_start() -> None:
@@ -224,6 +342,8 @@ def test_collection_plan_rejects_target_access_and_non_later_start() -> None:
             frozen_model_binding=_json(
                 "parallel_frozen_v8_1_model_binding.json"
             ),
+            candidate_contracts=_contracts(),
+            **_prefreeze_plan_kwargs(),
             historical_gate_contract_sha256=plan[
                 "historical_replay_prerequisite"
             ]["gate_contract_sha256"],
@@ -259,6 +379,8 @@ def test_collection_plan_rejects_missing_historical_superiority() -> None:
             frozen_model_binding=_json(
                 "parallel_frozen_v8_1_model_binding.json"
             ),
+            candidate_contracts=_contracts(),
+            **_prefreeze_plan_kwargs(),
             historical_gate_contract_sha256=historical[
                 "gate_contract_sha256"
             ],

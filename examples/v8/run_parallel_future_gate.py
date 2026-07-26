@@ -53,6 +53,12 @@ DEFAULT_HISTORICAL_REPLAY_REPORT = (
 DEFAULT_FROZEN_MODEL_BINDING = (
     CONFIG / "parallel_frozen_v8_1_model_binding.json"
 )
+DEFAULT_PREFREEZE_CHECKLIST = (
+    CONFIG / "challenge_prefreeze_checklist.json"
+)
+DEFAULT_EXCLUDED_CAPTURE_LEDGER = (
+    CONFIG / "challenge_prefreeze_excluded_capture_ledger.json"
+)
 
 
 def validate_plan(
@@ -63,6 +69,8 @@ def validate_plan(
     collector_protocol_path: Path,
     feature_contract_path: Path,
     frozen_model_binding_path: Path,
+    prefreeze_checklist_path: Path = DEFAULT_PREFREEZE_CHECKLIST,
+    excluded_capture_ledger_path: Path = DEFAULT_EXCLUDED_CAPTURE_LEDGER,
     historical_gate_contract_path: Path,
     historical_replay_report_path: Path,
     collection_started_ts: int | None = None,
@@ -81,6 +89,18 @@ def validate_plan(
         feature_contract_sha256=_sha256(feature_contract_path),
         frozen_model_binding_sha256=_sha256(frozen_model_binding_path),
         frozen_model_binding=_read_json(frozen_model_binding_path),
+        candidate_contracts={
+            candidate_id: _read_json(path)
+            for candidate_id, path in contract_paths.items()
+        },
+        prefreeze_checklist_sha256=_sha256(prefreeze_checklist_path),
+        prefreeze_checklist=_read_json(prefreeze_checklist_path),
+        excluded_capture_ledger_sha256=_sha256(
+            excluded_capture_ledger_path
+        ),
+        excluded_capture_ledger=_read_json(
+            excluded_capture_ledger_path
+        ),
         historical_gate_contract_sha256=_sha256(
             historical_gate_contract_path
         ),
@@ -521,6 +541,16 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=DEFAULT_HISTORICAL_REPLAY_REPORT,
     )
+    validate.add_argument(
+        "--prefreeze-checklist",
+        type=Path,
+        default=DEFAULT_PREFREEZE_CHECKLIST,
+    )
+    validate.add_argument(
+        "--excluded-capture-ledger",
+        type=Path,
+        default=DEFAULT_EXCLUDED_CAPTURE_LEDGER,
+    )
     validate.add_argument("--collection-started-ts", type=int)
     _add_contract_args(validate)
 
@@ -565,6 +595,8 @@ def main(argv: list[str] | None = None) -> int:
             collector_protocol_path=args.collector_protocol,
             feature_contract_path=args.feature_contract,
             frozen_model_binding_path=args.frozen_model_binding,
+            prefreeze_checklist_path=args.prefreeze_checklist,
+            excluded_capture_ledger_path=args.excluded_capture_ledger,
             historical_gate_contract_path=args.historical_gate_contract,
             historical_replay_report_path=args.historical_replay_report,
             collection_started_ts=args.collection_started_ts,

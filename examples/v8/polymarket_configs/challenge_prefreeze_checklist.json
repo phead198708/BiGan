@@ -1,0 +1,134 @@
+{
+  "schema_version": "bigan-v8-challenge-prefreeze-checklist-v1",
+  "issue": 254,
+  "goal": "challenge_model_promote_to_champion_model",
+  "preregistered_before_collection": true,
+  "candidate_id": "v8_1_primary_no_fallback",
+  "candidate_name": "adaptive_support_controller_v8_1",
+  "candidate_name_source": "candidate_contract.primary_policy",
+  "candidate_contract_sha256": "b06919aadbea6821f44c1decf4f488fd3e34fc2612a115466caad3fe6173ad90",
+  "historical_replay": {
+    "historical_superiority_gate_passed": true,
+    "report_sha256": "558a1802513e70426d9bd4c589b2e7736ea0ed11a704f51fdaa613e18ef45988",
+    "replay_row_sha256s": {
+      "candidate": "c26c9164cada8abedcff94c05553cb43bdc9eaa138dbff1293abe09af1f4f59f",
+      "baseline": "82acc593d57c37c77da866f989487273865c3501ab39aa8fe346aa15cedb74df"
+    },
+    "row_hashes_unchanged_from_pre_hardening_report": true,
+    "exact_model_binding_summary": {
+      "candidate_name": "adaptive_support_controller_v8_1",
+      "check_count": 13,
+      "checks": {
+        "all_safety_unlocks_remain_false": true,
+        "binding_sha256": true,
+        "booster_sha256": true,
+        "candidate_identity": true,
+        "candidate_profile_sha256": true,
+        "controller_guard_acceptance_history_hash": true,
+        "eligible_prediction_scores_hash": true,
+        "historical_gate_passed": true,
+        "historical_manifest_sha256": true,
+        "model_artifact_identity": true,
+        "rank_lineage_hash": true,
+        "rank_state_id": true,
+        "target_free_controller": true
+      },
+      "exact_frozen_model_binding_verified": true,
+      "schema_version": "bigan-v8-exact-historical-model-binding-summary-v1",
+      "summary_id": "9a214f2d4651f1e7c2adef6a6dfc5c92de9b463b06902061af728e4870bc44a0",
+      "verified_hashes": {
+        "binding_sha256": "64fa0f227ce97ec8ea238c3d8285d55efd96be65c95bf7c091aa95c1c185ccfd",
+        "booster_bytes_sha256": "898420ecbcb4cffb416695db047b84bfd385d0843e2a20a4930de1f1d564e283",
+        "booster_contract_sha256": "cdadca3758ff84638464e0953479f062805658d31fb5543379b762d1c4ac8918",
+        "candidate_profile_sha256": "1c808195fab5aea976429f4ab0fb46d69a29a4bbb705313d138a9ce8d3d19abf",
+        "controller_guard_acceptance_history_hash": "1db6166e4e59a6d7a9f2213b641ae002bba8dbd20424c7f51b6e15a35b2a806e",
+        "eligible_prediction_scores_hash": "03361deb79bdf6d6bd9c1d1973af939e8356066260e1482229dcba95aea31abb",
+        "historical_manifest_sha256": "3fff5785a53cb32fb26d839786e3f48c2ff2bd7cc9dcf84e801c916a6ebb0fb7",
+        "model_artifact_id": "2373fb67f88dcb8bbf32216473426a65e31202ce7e79edcc82e10b16949ce332",
+        "model_artifact_sha256": "b92d2c087de20fbc6e6a142f13e0e48e14ecc25915cf318b485dc2927f958772",
+        "rank_lineage_hash": "95716bcce4a260085c58c03dda5f81916add955cc272701b893f7239dd8c2682",
+        "rank_state_id": "537172168394807ee7548127c4e9e37e38b973ffca272a32952fb73e58f36d8c"
+      }
+    }
+  },
+  "runtime_byte_verification": {
+    "implemented": true,
+    "tested": true,
+    "required_at_collector_startup": true,
+    "required_in_every_bounded_batch_report": true,
+    "mismatch_fails_before_indexable_artifacts": true,
+    "verification_summary": {
+      "#134_resume_allowed": false,
+      "#146_start_allowed": false,
+      "booster_hash_semantics": "canonical_sha256_of_base64_encoded_exact_loaded_booster_bytes",
+      "candidate_name": "adaptive_support_controller_v8_1",
+      "capital_at_risk": false,
+      "checks": {
+        "binding_file_sha256": true,
+        "booster_bytes_loaded": true,
+        "booster_bytes_match_frozen_contract": true,
+        "candidate_contract_file_sha256": true,
+        "candidate_identity_from_contract": true,
+        "initial_controller_rank_state_id": true,
+        "initial_controller_state_exact": true,
+        "model_artifact_file_sha256": true,
+        "profile_file_sha256": true
+      },
+      "controller_state_semantics": "exact_payload_equality_plus_frozen_rank_state_id",
+      "freeze_ready": false,
+      "live_trading_enabled": false,
+      "paper_candidate_allowed": false,
+      "polymarket_write_enabled": false,
+      "profile_hash_semantics": "sha256_of_exact_loaded_profile_file_bytes",
+      "promotion_evidence_eligible": false,
+      "runtime_byte_verification_passed": true,
+      "schema_version": "bigan-v8-exact-model-runtime-byte-verification-v1",
+      "source_model_candidate_eligible": false,
+      "summary_id": "781874091a0473fe21208fe6643bc4aaaf8674cebd784c99a3fa13fa8ff36760",
+      "v8_execution_handoff_allowed": false,
+      "verified_hashes": {
+        "binding_file_sha256": "64fa0f227ce97ec8ea238c3d8285d55efd96be65c95bf7c091aa95c1c185ccfd",
+        "booster_bytes_sha256": "898420ecbcb4cffb416695db047b84bfd385d0843e2a20a4930de1f1d564e283",
+        "booster_contract_sha256": "cdadca3758ff84638464e0953479f062805658d31fb5543379b762d1c4ac8918",
+        "candidate_contract_file_sha256": "b06919aadbea6821f44c1decf4f488fd3e34fc2612a115466caad3fe6173ad90",
+        "initial_controller_state_payload_sha256": "9c8244e6f41332994c5fcbba4a1a5dde4c909642d526c002dee1bff4bcfe8f58",
+        "model_artifact_file_sha256": "b92d2c087de20fbc6e6a142f13e0e48e14ecc25915cf318b485dc2927f958772",
+        "profile_file_sha256": "1c808195fab5aea976429f4ab0fb46d69a29a4bbb705313d138a9ce8d3d19abf",
+        "rank_state_id": "537172168394807ee7548127c4e9e37e38b973ffca272a32952fb73e58f36d8c"
+      },
+      "wallet_signing_enabled": false
+    }
+  },
+  "alpha_spending": {
+    "fresh_attempt_number": 1,
+    "familywise_window_alpha": 0.025,
+    "parallel_tested_candidate_count": 2,
+    "per_candidate_alpha": 0.0125,
+    "attempt_consumed": false
+  },
+  "excluded_capture_ledger_sha256": "e15322f142bdc52ec685a5bc9db59e2a7282f027cc4c4f97efded127533b6b02",
+  "excluded_capture_ledger_complete": true,
+  "operator_authorization": {
+    "required": true,
+    "granted": false,
+    "scope": "start_or_resume_120_round_challenge_collection",
+    "decision_is_separate_from_this_refreeze": true
+  },
+  "technical_prerequisites_satisfied": true,
+  "collection_start_allowed": false,
+  "safety": {
+    "paper_only": true,
+    "paper_candidate_allowed": false,
+    "live_trading_enabled": false,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  },
+  "checklist_id": "ac236bd1b03032a51a116432dea11957ecc8cf9223fa822b7ac78025b4b39d1c"
+}

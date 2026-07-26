@@ -26,7 +26,7 @@ DEFAULT_PLAN = CONFIG_DIR / "parallel_future_collection_plan.json"
 DEFAULT_SERVICE_ROOT = (
     EXAMPLES_DIR
     / "polymarket_live_runs"
-    / "challenge-model-v8-5-exact-model-attempt-001"
+    / "challenge-model-v8-5-runtime-byte-verified-final-attempt-001"
 )
 DEFAULT_PROTOCOL = CONFIG_DIR / "parallel_candidate_protocol.json"
 DEFAULT_V8_1_CONTRACT = (
@@ -47,6 +47,12 @@ DEFAULT_HISTORICAL_GATE = (
 )
 DEFAULT_HISTORICAL_REPORT = (
     CONFIG_DIR / "historical_replay_superiority_report.json"
+)
+DEFAULT_PREFREEZE_CHECKLIST = (
+    CONFIG_DIR / "challenge_prefreeze_checklist.json"
+)
+DEFAULT_EXCLUDED_CAPTURE_LEDGER = (
+    CONFIG_DIR / "challenge_prefreeze_excluded_capture_ledger.json"
 )
 DEFAULT_COLLECTOR_PROTOCOL = (
     CONFIG_DIR
@@ -163,6 +169,14 @@ def _freeze(args: argparse.Namespace) -> dict:
         expected_historical_replay_report_sha256=str(
             plan["historical_replay_prerequisite"]["report_sha256"]
         ),
+        prefreeze_checklist_path=args.prefreeze_checklist,
+        expected_prefreeze_checklist_sha256=str(
+            plan["lineage"]["prefreeze_checklist_sha256"]
+        ),
+        excluded_capture_ledger_path=args.excluded_capture_ledger,
+        expected_excluded_capture_ledger_sha256=str(
+            plan["lineage"]["excluded_capture_ledger_sha256"]
+        ),
         historical_fit_manifest_path=args.historical_fit_manifest,
         expected_historical_fit_manifest_sha256=str(
             binding["historical_fit_manifest_sha256"]
@@ -249,6 +263,16 @@ def main(argv: list[str] | None = None) -> int:
         "--historical-replay-report",
         type=Path,
         default=DEFAULT_HISTORICAL_REPORT,
+    )
+    freeze.add_argument(
+        "--prefreeze-checklist",
+        type=Path,
+        default=DEFAULT_PREFREEZE_CHECKLIST,
+    )
+    freeze.add_argument(
+        "--excluded-capture-ledger",
+        type=Path,
+        default=DEFAULT_EXCLUDED_CAPTURE_LEDGER,
     )
     freeze.add_argument(
         "--historical-fit-manifest",

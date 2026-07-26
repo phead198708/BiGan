@@ -19,6 +19,13 @@ candidate contracts, the implementation commit, a strictly-later millisecond
 boundary, 120 quality-valid markets, a maximum of 180 attempts, and 12-market
 batches. During collection, candidate scoring, settlement finalization,
 resolution access, labels, outcomes, returns, and PnL remain disabled.
+The fourth and final supersession also pins
+`challenge_prefreeze_checklist.json` and
+`challenge_prefreeze_excluded_capture_ledger.json`. The checklist embeds the
+validator-derived 13-check historical model binding and a successful runtime
+verification of the exact loaded booster bytes, profile file bytes, and
+initial controller state. Collection remains stopped and requires a separate
+operator authorization before any 120-round attempt may start or resume.
 
 Reports separate primary, fallback, abstention, and no-bet contributions. A
 multiplicity-aware winner is diagnostic evidence only: issue #254 never
@@ -48,7 +55,10 @@ The production collector bridge is
 `freeze` requires the exact historical fit manifest named by
 `parallel_frozen_v8_1_model_binding.json`. It also requires a clean committed
 worktree so the implementation commit in the freeze manifest identifies the
-code that produced the decision streams.
+code that produced the decision streams. The collector verifies the same
+runtime binding before creating its service root, and every bounded-batch
+canary report and manifest carries the recomputed hashes and verification
+result.
 
 After that freeze exists,
 `examples/v8/run_challenge_future_post_freeze.py` executes the separately

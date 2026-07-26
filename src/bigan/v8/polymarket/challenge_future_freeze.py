@@ -16,6 +16,10 @@ from typing import Any
 
 from bigan.v8.canonical_payload import canonical_payload_sha256
 from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.exact_model_runtime_binding import (
+    ExactModelRuntimeBindingConfig,
+    verify_exact_model_runtime_binding,
+)
 from bigan.v8.polymarket.parallel_future_gate import (
     PARALLEL_FREEZE_SCHEMA_VERSION,
     REQUIRED_CANDIDATES,
@@ -109,6 +113,10 @@ class ChallengeFutureFreezeConfig:
     expected_historical_gate_contract_sha256: str
     historical_replay_report_path: Path | str
     expected_historical_replay_report_sha256: str
+    prefreeze_checklist_path: Path | str
+    expected_prefreeze_checklist_sha256: str
+    excluded_capture_ledger_path: Path | str
+    expected_excluded_capture_ledger_sha256: str
     historical_fit_manifest_path: Path | str
     expected_historical_fit_manifest_sha256: str
     collector_protocol_path: Path | str
@@ -145,6 +153,8 @@ class ChallengeFutureFreezeConfig:
             "frozen_model_binding_path",
             "historical_gate_contract_path",
             "historical_replay_report_path",
+            "prefreeze_checklist_path",
+            "excluded_capture_ledger_path",
             "historical_fit_manifest_path",
             "collector_protocol_path",
             "feature_contract_path",
@@ -161,6 +171,8 @@ class ChallengeFutureFreezeConfig:
             "expected_frozen_model_binding_sha256",
             "expected_historical_gate_contract_sha256",
             "expected_historical_replay_report_sha256",
+            "expected_prefreeze_checklist_sha256",
+            "expected_excluded_capture_ledger_sha256",
             "expected_historical_fit_manifest_sha256",
             "expected_collector_protocol_sha256",
             "expected_feature_contract_sha256",
@@ -546,6 +558,10 @@ def run_challenge_future_target_free_freeze(
         "binding": config.frozen_model_binding_path.resolve(),
         "historical_gate_contract": config.historical_gate_contract_path.resolve(),
         "historical_report": config.historical_replay_report_path.resolve(),
+        "prefreeze_checklist": config.prefreeze_checklist_path.resolve(),
+        "excluded_capture_ledger": (
+            config.excluded_capture_ledger_path.resolve()
+        ),
         "historical_fit_manifest": config.historical_fit_manifest_path.resolve(),
         "collector_protocol": config.collector_protocol_path.resolve(),
         "feature_contract": config.feature_contract_path.resolve(),
@@ -563,6 +579,12 @@ def run_challenge_future_target_free_freeze(
         ),
         "historical_report": (
             config.expected_historical_replay_report_sha256
+        ),
+        "prefreeze_checklist": (
+            config.expected_prefreeze_checklist_sha256
+        ),
+        "excluded_capture_ledger": (
+            config.expected_excluded_capture_ledger_sha256
         ),
         "historical_fit_manifest": (
             config.expected_historical_fit_manifest_sha256
@@ -588,6 +610,8 @@ def run_challenge_future_target_free_freeze(
     }
     binding = _load_json(paths["binding"])
     historical_report = _load_json(paths["historical_report"])
+    prefreeze_checklist = _load_json(paths["prefreeze_checklist"])
+    excluded_capture_ledger = _load_json(paths["excluded_capture_ledger"])
     fit_manifest = _load_json(paths["historical_fit_manifest"])
     v8_3_profile = _load_json(paths["v8_3_profile"])
     validate_parallel_candidate_protocol(
@@ -607,6 +631,13 @@ def run_challenge_future_target_free_freeze(
         feature_contract_sha256=pins["feature_contract"].lower(),
         frozen_model_binding_sha256=pins["binding"].lower(),
         frozen_model_binding=binding,
+        candidate_contracts=candidate_contracts,
+        prefreeze_checklist_sha256=pins["prefreeze_checklist"].lower(),
+        prefreeze_checklist=prefreeze_checklist,
+        excluded_capture_ledger_sha256=pins[
+            "excluded_capture_ledger"
+        ].lower(),
+        excluded_capture_ledger=excluded_capture_ledger,
         historical_gate_contract_sha256=pins[
             "historical_gate_contract"
         ].lower(),
@@ -624,9 +655,13 @@ def run_challenge_future_target_free_freeze(
     artifacts = _load_and_validate_exact_model_artifacts(
         fit_manifest=fit_manifest,
         binding=binding,
+        binding_path=paths["binding"],
+        binding_sha256=pins["binding"].lower(),
         v8_3_profile=v8_3_profile,
         v8_3_profile_sha256=pins["v8_3_profile"].lower(),
         candidate_contracts=candidate_contracts,
+        v8_1_contract_path=paths["v8_1_contract"],
+        v8_1_contract_sha256=pins["v8_1_contract"].lower(),
     )
     index_path = (
         config.service_root.resolve()
@@ -659,6 +694,9 @@ def run_challenge_future_target_free_freeze(
                 "frozen_v6_2_candidate_manifest_sha256"
             ]
         ).lower(),
+        expected_runtime_binding_summary_id=artifacts[
+            "runtime_binding_summary"
+        ]["summary_id"],
     )
     action_rows, feature_rows, scored_rows = _load_target_free_batch_rows(
         development,
@@ -805,6 +843,7 @@ def run_challenge_future_target_free_freeze(
         canonical_summary=canonical_summary,
         final_state=final_state,
         binding=binding,
+        runtime_binding_summary=artifacts["runtime_binding_summary"],
     )
     return _write_freeze_outputs(
         run_dir=run_dir,
@@ -838,9 +877,13 @@ def _load_and_validate_exact_model_artifacts(
     *,
     fit_manifest: dict[str, Any],
     binding: dict[str, Any],
+    binding_path: Path,
+    binding_sha256: str,
     v8_3_profile: dict[str, Any],
     v8_3_profile_sha256: str,
     candidate_contracts: dict[str, dict[str, Any]],
+    v8_1_contract_path: Path,
+    v8_1_contract_sha256: str,
 ) -> dict[str, Any]:
     model_descriptor = _verified_descriptor(
         fit_manifest.get("model"),
@@ -861,6 +904,22 @@ def _load_and_validate_exact_model_artifacts(
     training_descriptor = _verified_descriptor(
         fit_manifest.get("seed_runtime_target_rows"),
         "challenge source training rows",
+    )
+    runtime_binding_summary = verify_exact_model_runtime_binding(
+        ExactModelRuntimeBindingConfig(
+            candidate_contract_path=v8_1_contract_path,
+            expected_candidate_contract_sha256=v8_1_contract_sha256,
+            frozen_model_binding_path=binding_path,
+            expected_frozen_model_binding_sha256=binding_sha256,
+            frozen_model_artifact_path=Path(model_descriptor["path"]),
+            expected_frozen_model_artifact_sha256=str(
+                model_descriptor["sha256"]
+            ),
+            candidate_profile_path=Path(v8_1_profile_descriptor["path"]),
+            expected_candidate_profile_sha256=str(
+                v8_1_profile_descriptor["sha256"]
+            ),
+        )
     )
     model = _load_json(Path(model_descriptor["path"]))
     v8_1_profile = _load_json(Path(v8_1_profile_descriptor["path"]))
@@ -947,6 +1006,7 @@ def _load_and_validate_exact_model_artifacts(
         "v8_1_profile": v8_1_profile,
         "v6_7_profile": v6_7_profile,
         "v7_0_profile": v7_0_profile,
+        "runtime_binding_summary": runtime_binding_summary,
         "descriptors": {
             "model": model_descriptor,
             "v8_1_profile": v8_1_profile_descriptor,
@@ -963,6 +1023,7 @@ def _discover_and_validate_batch_manifests(
     selected_index_rows: list[dict[str, Any]],
     expected_feature_contract_sha256: str,
     expected_v6_2_candidate_sha256: str,
+    expected_runtime_binding_summary_id: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     selected_batch_ids = {
         str(row.get("batch_id") or "") for row in selected_index_rows
@@ -1014,6 +1075,16 @@ def _discover_and_validate_batch_manifests(
             blockers.append("development_candidate_scoring")
         if dev.get("labels_outcomes_or_pnl_opened") is not False:
             blockers.append("development_target_access")
+        runtime_summary = dict(
+            dev.get("exact_model_runtime_binding_summary") or {}
+        )
+        if (
+            dev.get("exact_model_runtime_binding_required") is not True
+            or dev.get("exact_model_runtime_binding_verified") is not True
+            or runtime_summary.get("summary_id")
+            != expected_runtime_binding_summary_id
+        ):
+            blockers.append("exact_model_runtime_binding")
         if feature["sha256"] != expected_feature_contract_sha256:
             blockers.append("feature_contract_sha256")
         if score.get("labels_outcomes_or_pnl_opened") is not False:
@@ -1109,6 +1180,7 @@ def _build_freeze_report(
     canonical_summary: dict[str, Any],
     final_state: dict[str, Any],
     binding: dict[str, Any],
+    runtime_binding_summary: dict[str, Any],
 ) -> dict[str, Any]:
     source_keys = [
         (str(row["market_id"]), int(row["decision_ts"]))
@@ -1145,6 +1217,10 @@ def _build_freeze_report(
             final_state.get("rank_state_id") is not None
             and binding.get("frozen_model_artifact_id")
             is not None
+            and runtime_binding_summary.get(
+                "runtime_byte_verification_passed"
+            )
+            is True
         ),
         "parallel_freeze_hash_written": (
             parallel_freeze.get("schema_version")
@@ -1200,6 +1276,7 @@ def _build_freeze_report(
         "frozen_model_artifact_id": binding.get(
             "frozen_model_artifact_id"
         ),
+        "exact_model_runtime_binding_summary": runtime_binding_summary,
         "target_free_checks": checks,
         "parallel_target_free_freeze_passed": not blockers,
         "target_free_blocking_reason_codes": blockers,

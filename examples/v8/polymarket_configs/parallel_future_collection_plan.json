@@ -2,13 +2,13 @@
   "schema_version": "bigan-v8-parallel-future-collection-plan-v1",
   "issue": 254,
   "goal": "challenge_model_promote_to_champion_model",
-  "fresh_attempt_id": "v8-5-challenger-parallel-future-attempt-001-exact-model-refreeze",
-  "freeze_created_ts": 1785051696047,
-  "freeze_created_at": "2026-07-26T07:41:36.047000Z",
+  "fresh_attempt_id": "v8-5-challenger-parallel-future-attempt-001-runtime-byte-verified-final-refreeze",
+  "freeze_created_ts": 1785055257444,
+  "freeze_created_at": "2026-07-26T08:40:57.444000Z",
   "frozen": true,
   "preregistered_before_collection": true,
   "lineage": {
-    "implementation_commit": "4971fc5cebe8b3f4634e83ba443580c8db509526",
+    "implementation_commit": "26f3a586360ac4e322686953df27302a2eeaa150",
     "parallel_candidate_protocol_sha256": "fdd0e3f8808cf831f22e0b5ff319d1668e3c0bd80add28de170b7d7c11639ca4",
     "candidate_contract_sha256s": {
       "v8_1_primary_no_fallback": "b06919aadbea6821f44c1decf4f488fd3e34fc2612a115466caad3fe6173ad90",
@@ -17,14 +17,16 @@
     },
     "persistent_collector_protocol_sha256": "2343f8247b2c1441e694b2975bccec7ae2448db5e5a5c916c3a02def49d44843",
     "feature_contract_sha256": "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959",
-    "frozen_model_binding_sha256": "64fa0f227ce97ec8ea238c3d8285d55efd96be65c95bf7c091aa95c1c185ccfd"
+    "frozen_model_binding_sha256": "64fa0f227ce97ec8ea238c3d8285d55efd96be65c95bf7c091aa95c1c185ccfd",
+    "prefreeze_checklist_sha256": "a4d49b20998ef16658d87805b61012f5d274cdce21ecf0a9f6e14f65ef38cf31",
+    "excluded_capture_ledger_sha256": "e15322f142bdc52ec685a5bc9db59e2a7282f027cc4c4f97efded127533b6b02"
   },
   "collection": {
     "market_family": "btc_updown_5m",
     "mode": "bounded_candidate_agnostic_outcome_blind_raw_collection",
-    "service_root": "examples/v8/polymarket_live_runs/challenge-model-v8-5-exact-model-attempt-001",
+    "service_root": "examples/v8/polymarket_live_runs/challenge-model-v8-5-runtime-byte-verified-final-attempt-001",
     "selection_rule": "chronological_earliest_quality_valid_after_freeze_boundary",
-    "strictly_later_minimum_market_start_ts_exclusive": 1785051696047,
+    "strictly_later_minimum_market_start_ts_exclusive": 1785055257444,
     "quality_valid_market_target": 120,
     "maximum_attempted_market_count": 180,
     "bounded_batch_market_count": 12,
@@ -37,11 +39,15 @@
     "candidate_scoring_during_raw_capture_allowed": false,
     "settlement_finalizer_enabled_during_collection": false,
     "resolution_provider_enabled_during_collection": false,
-    "result_dependent_extension_allowed": false
+    "result_dependent_extension_allowed": false,
+    "operator_collection_authorization_required": true,
+    "operator_collection_authorization_granted_at_refreeze": false,
+    "collection_started": false,
+    "start_requires_separate_operator_decision_after_issue_254_comment": true
   },
   "historical_replay_prerequisite": {
     "gate_contract_sha256": "3ba70dc0c589b0c891dd60ec254e6a733eb203e224598460415be34cffa825fd",
-    "report_sha256": "3edfd0445bb7284a216cec2e68fcdfb92b6e72d577256cb0f99b9fc99db8a4ce",
+    "report_sha256": "558a1802513e70426d9bd4c589b2e7736ea0ed11a704f51fdaa613e18ef45988",
     "candidate_id": "v8_1_primary_no_fallback",
     "evaluation_completed_ts": 1785051694862,
     "historical_superiority_gate_passed": true,
@@ -49,10 +55,20 @@
     "historical_replay_is_promotion_evidence": false
   },
   "supersession": {
-    "superseded_collection_plan_sha256": "72c009459e59972702b3f67f485f889510bf49d568b004ac50d904b73f6f81b1",
-    "previous_superseded_collection_plan_sha256": "f754088a4494cb7908f3b3640fd47d8784ce9063d676245d16c9d3d20dccf3cd",
-    "earlier_superseded_collection_plan_sha256": "35fca6bfa3e4d4337b3fecc5106a930982d8640373695d74933131aa1b254e95",
-    "reason": "historical_replay_must_verify_the_exact_frozen_model_bytes_artifact_id_and_controller_state_before_collection",
+    "sequence_number": 4,
+    "fourth_and_final_supersession": true,
+    "superseded_collection_plan_sha256": "4e1e75e14835e12d133d3709a67a7e9c287a2a32525e99f105e744f43e736498",
+    "previous_superseded_collection_plan_sha256": "72c009459e59972702b3f67f485f889510bf49d568b004ac50d904b73f6f81b1",
+    "earlier_superseded_collection_plan_sha256": "f754088a4494cb7908f3b3640fd47d8784ce9063d676245d16c9d3d20dccf3cd",
+    "initial_superseded_collection_plan_sha256": "35fca6bfa3e4d4337b3fecc5106a930982d8640373695d74933131aa1b254e95",
+    "full_supersession_chain_sha256s": [
+      "35fca6bfa3e4d4337b3fecc5106a930982d8640373695d74933131aa1b254e95",
+      "f754088a4494cb7908f3b3640fd47d8784ce9063d676245d16c9d3d20dccf3cd",
+      "72c009459e59972702b3f67f485f889510bf49d568b004ac50d904b73f6f81b1",
+      "4e1e75e14835e12d133d3709a67a7e9c287a2a32525e99f105e744f43e736498"
+    ],
+    "reason": "binding_summary_and_runtime_byte_verification_required_before_collection",
+    "excluded_capture_ledger_sha256": "e15322f142bdc52ec685a5bc9db59e2a7282f027cc4c4f97efded127533b6b02",
     "excluded_pre_replay_probe": {
       "batch_id": "challenge-v8-5-probe-20260726T0649Z",
       "service_root": "examples/v8/polymarket_live_runs/challenge-model-v8-5-fresh-attempt-001",

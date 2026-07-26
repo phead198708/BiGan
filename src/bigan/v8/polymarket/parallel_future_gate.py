@@ -7,6 +7,10 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from bigan.v8.canonical_payload import canonical_payload_sha256
+from bigan.v8.polymarket.challenge_prefreeze import (
+    ChallengePrefreezeError,
+    validate_prefreeze_checklist,
+)
 
 PARALLEL_PROTOCOL_SCHEMA_VERSION = "bigan-v8-parallel-candidate-protocol-v1"
 PARALLEL_COLLECTION_PLAN_SCHEMA_VERSION = (
@@ -54,6 +58,11 @@ def validate_parallel_future_collection_plan(
     feature_contract_sha256: str,
     frozen_model_binding_sha256: str,
     frozen_model_binding: dict[str, Any],
+    candidate_contracts: dict[str, dict[str, Any]],
+    prefreeze_checklist_sha256: str,
+    prefreeze_checklist: dict[str, Any],
+    excluded_capture_ledger_sha256: str,
+    excluded_capture_ledger: dict[str, Any],
     historical_gate_contract_sha256: str,
     historical_replay_report_sha256: str,
     historical_replay_report: dict[str, Any],
@@ -88,6 +97,8 @@ def validate_parallel_future_collection_plan(
         "persistent_collector_protocol_sha256": collector_protocol_sha256,
         "feature_contract_sha256": feature_contract_sha256,
         "frozen_model_binding_sha256": frozen_model_binding_sha256,
+        "prefreeze_checklist_sha256": prefreeze_checklist_sha256,
+        "excluded_capture_ledger_sha256": excluded_capture_ledger_sha256,
     }
     for name, expected in expected_lineage.items():
         if str(lineage.get(name) or "").lower() != expected.lower():
@@ -137,6 +148,22 @@ def validate_parallel_future_collection_plan(
     ):
         if collection.get(name) is not False:
             blockers.append(name)
+    if collection.get("operator_collection_authorization_required") is not True:
+        blockers.append("operator_collection_authorization_required")
+    if (
+        collection.get("operator_collection_authorization_granted_at_refreeze")
+        is not False
+    ):
+        blockers.append("operator_collection_authorization_at_refreeze")
+    if collection.get("collection_started") is not False:
+        blockers.append("collection_started_at_refreeze")
+    if (
+        collection.get(
+            "start_requires_separate_operator_decision_after_issue_254_comment"
+        )
+        is not True
+    ):
+        blockers.append("separate_operator_decision")
 
     alpha = dict(plan.get("alpha_spending") or {})
     if int(alpha.get("fresh_attempt_number") or 0) != 1:
@@ -220,6 +247,28 @@ def validate_parallel_future_collection_plan(
     )
     if len(prior_plan_sha256) != 64:
         blockers.append("superseded_collection_plan_sha256")
+    if supersession.get("sequence_number") != 4:
+        blockers.append("supersession_sequence_number")
+    if supersession.get("fourth_and_final_supersession") is not True:
+        blockers.append("fourth_and_final_supersession")
+    if supersession.get("reason") != (
+        "binding_summary_and_runtime_byte_verification_required_before_collection"
+    ):
+        blockers.append("supersession_reason")
+    chain = supersession.get("full_supersession_chain_sha256s")
+    if (
+        not isinstance(chain, list)
+        or len(chain) != 4
+        or chain[-1:] != [prior_plan_sha256]
+        or len(set(chain)) != 4
+        or not all(_is_sha256(value) for value in chain)
+    ):
+        blockers.append("full_supersession_chain")
+    if (
+        excluded_capture_ledger.get("superseded_collection_plan_sha256")
+        != prior_plan_sha256
+    ):
+        blockers.append("excluded_ledger_superseded_plan")
     if excluded_probe.get("excluded_from_fresh_attempt") is not True:
         blockers.append("pre_replay_probe_not_excluded")
     if excluded_probe.get("labels_outcomes_or_pnl_opened") is not False:
@@ -262,11 +311,27 @@ def validate_parallel_future_collection_plan(
     try:
         validate_parallel_frozen_model_binding(
             frozen_model_binding,
-            candidate_contracts={},
+            candidate_contracts=candidate_contracts,
             expected_binding_sha256=frozen_model_binding_sha256,
         )
     except ParallelFutureGateError:
         blockers.append("frozen_model_binding")
+    try:
+        validate_prefreeze_checklist(
+            prefreeze_checklist,
+            candidate_contract=candidate_contracts.get(
+                "v8_1_primary_no_fallback", {}
+            ),
+            candidate_contract_sha256=candidate_contract_sha256s.get(
+                "v8_1_primary_no_fallback", ""
+            ),
+            historical_replay_report=historical_replay_report,
+            historical_replay_report_sha256=historical_replay_report_sha256,
+            excluded_capture_ledger=excluded_capture_ledger,
+            excluded_capture_ledger_sha256=excluded_capture_ledger_sha256,
+        )
+    except ChallengePrefreezeError:
+        blockers.append("prefreeze_checklist")
     if blockers:
         raise ParallelFutureGateError(
             "parallel future collection plan invalid: "
@@ -362,7 +427,19 @@ def validate_parallel_frozen_model_binding(
     blockers: list[str] = []
     if binding.get("schema_version") != FROZEN_MODEL_BINDING_SCHEMA_VERSION:
         blockers.append("schema_version")
-    if binding.get("candidate_name") != "adaptive_support_controller_v8_1":
+    primary_policy_names = {
+        candidate_contracts.get(candidate_id, {}).get("primary_policy")
+        for candidate_id in REQUIRED_CANDIDATES[:2]
+    }
+    if (
+        len(primary_policy_names) != 1
+        or not all(
+            isinstance(name, str) and bool(name)
+            for name in primary_policy_names
+        )
+        or binding.get("candidate_name")
+        != next(iter(primary_policy_names), None)
+    ):
         blockers.append("candidate_name")
     if binding.get("primary_candidate_ids") != list(REQUIRED_CANDIDATES[:2]):
         blockers.append("primary_candidate_ids")
