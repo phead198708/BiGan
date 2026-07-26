@@ -26,8 +26,10 @@ from bigan.v8.polymarket.challenge_model_promotion import (
 from bigan.v8.polymarket.execution_policy_framework import (
     build_policy_safety_report,
     build_replay_parity_report,
+    execution_policy_hash,
     run_execution_policy_replay,
     validate_execution_policy_contract,
+    validate_policy_candidate_manifest,
     validate_source_execution_compatibility,
 )
 from bigan.v8.polymarket.feature_completeness import (
@@ -863,6 +865,9 @@ def _run_all_execution_policies(
     policy_manifest_path: Path,
     compatibility: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
+    validate_policy_candidate_manifest(policy_manifest)
+    if policy_manifest.get("source_model_hash") != compatibility.get("source_model_hash"):
+        raise ChallengePromotionEvidenceError("execution policy source-model family mismatch")
     fixtures = list(policy_manifest.get("candidate_fixtures") or [])
     if (
         policy_manifest.get("candidate_count_cap") != 3
@@ -871,6 +876,7 @@ def _run_all_execution_policies(
     ):
         raise ChallengePromotionEvidenceError("execution policy candidate manifest is invalid")
     output = {}
+    constraint_hashes: set[str] = set()
     for descriptor in fixtures:
         path = policy_manifest_path.parent / str(descriptor["path"])
         _verify_pin(
@@ -881,6 +887,16 @@ def _run_all_execution_policies(
         policy = _load_json(path)
         if policy.get("candidate_id") != descriptor.get("candidate_id"):
             raise ChallengePromotionEvidenceError("execution policy candidate identity mismatch")
+        if execution_policy_hash(policy) != descriptor.get("execution_policy_hash"):
+            raise ChallengePromotionEvidenceError(
+                "execution policy candidate semantic hash mismatch"
+            )
+        constraint_hashes.add(
+            canonical_payload_sha256(
+                policy["constraints"],
+                payload_schema_version="bigan-v8-execution-policy-constraints-v1",
+            )
+        )
         validate_source_execution_compatibility(
             compatibility_manifest=compatibility,
             policy=policy,
@@ -912,6 +928,14 @@ def _run_all_execution_policies(
             "safety": safety,
             "reconciliation": reconciliation,
         }
+    if set(compatibility.get("allowed_execution_policy_hashes") or []) != {
+        str(descriptor["execution_policy_hash"]) for descriptor in fixtures
+    }:
+        raise ChallengePromotionEvidenceError("execution policy compatibility family mismatch")
+    if len(constraint_hashes) != 3:
+        raise ChallengePromotionEvidenceError(
+            "execution policy candidates are not materially distinct"
+        )
     return output
 
 

@@ -2,11 +2,18 @@
   "schema_version": "bigan-v8-execution-policy-replay-parity-template-v1",
   "runtime_generated": true,
   "required_exact_matches": [
+    "runtime_modes",
     "source_model_hash",
     "execution_policy_hash",
+    "candidate_id",
+    "source_input_stream_sha256",
     "decision_stream_sha256",
-    "risk_state_stream_sha256"
+    "attribution_stream_sha256",
+    "risk_state_stream_sha256",
+    "execution_output_sha256"
   ],
+  "caller_supplied_digest_trusted_without_recomputation": false,
+  "both_reconciliations_must_pass": true,
   "passed": false,
   "paper_candidate_unlocked": false,
   "promotion_unlocked": false,
