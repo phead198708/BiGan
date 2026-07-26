@@ -15,6 +15,9 @@ PARALLEL_COLLECTION_PLAN_SCHEMA_VERSION = (
 PARALLEL_FREEZE_SCHEMA_VERSION = "bigan-v8-parallel-target-free-freeze-v1"
 PARALLEL_EVALUATION_SCHEMA_VERSION = "bigan-v8-parallel-future-evaluation-v1"
 DECISION_STREAM_SCHEMA_VERSION = "bigan-v8-parallel-candidate-decision-stream-v1"
+FROZEN_MODEL_BINDING_SCHEMA_VERSION = (
+    "bigan-v8-parallel-frozen-model-binding-v1"
+)
 TARGET_FIELDS = frozenset(
     {
         "outcome",
@@ -49,6 +52,8 @@ def validate_parallel_future_collection_plan(
     candidate_contract_sha256s: dict[str, str],
     collector_protocol_sha256: str,
     feature_contract_sha256: str,
+    frozen_model_binding_sha256: str,
+    frozen_model_binding: dict[str, Any],
     historical_gate_contract_sha256: str,
     historical_replay_report_sha256: str,
     historical_replay_report: dict[str, Any],
@@ -82,6 +87,7 @@ def validate_parallel_future_collection_plan(
         "parallel_candidate_protocol_sha256": protocol_sha256,
         "persistent_collector_protocol_sha256": collector_protocol_sha256,
         "feature_contract_sha256": feature_contract_sha256,
+        "frozen_model_binding_sha256": frozen_model_binding_sha256,
     }
     for name, expected in expected_lineage.items():
         if str(lineage.get(name) or "").lower() != expected.lower():
@@ -221,6 +227,14 @@ def validate_parallel_future_collection_plan(
         blockers.append("pre_replay_probe_not_before_refreeze")
     if collection.get("service_root") == excluded_probe.get("service_root"):
         blockers.append("pre_replay_probe_service_root_reused")
+    try:
+        validate_parallel_frozen_model_binding(
+            frozen_model_binding,
+            candidate_contracts={},
+            expected_binding_sha256=frozen_model_binding_sha256,
+        )
+    except ParallelFutureGateError:
+        blockers.append("frozen_model_binding")
     if blockers:
         raise ParallelFutureGateError(
             "parallel future collection plan invalid: "
@@ -263,9 +277,114 @@ def validate_parallel_candidate_protocol(
             blockers.append(f"{candidate_id}_target_opened")
         if any(contract.get("safety", {}).values()):
             blockers.append(f"{candidate_id}_safety")
+    primary_contracts = [
+        candidate_contracts.get(candidate_id, {})
+        for candidate_id in REQUIRED_CANDIDATES[:2]
+    ]
+    if any(
+        contract.get("source_model_hash_role")
+        != "source_training_rows_sha256"
+        or not _is_sha256(contract.get("frozen_model_binding_sha256"))
+        or not _is_sha256(contract.get("frozen_model_artifact_sha256"))
+        or not _is_sha256(contract.get("frozen_model_artifact_id"))
+        or not _is_sha256(contract.get("initial_controller_state_id"))
+        or float(contract.get("paper_position_size") or 0.0) != 0.2
+        for contract in primary_contracts
+    ):
+        blockers.append("primary_frozen_model_binding")
+    if len(
+        {
+            (
+                contract.get("frozen_model_binding_sha256"),
+                contract.get("frozen_model_artifact_sha256"),
+                contract.get("frozen_model_artifact_id"),
+                contract.get("initial_controller_state_id"),
+                contract.get("paper_position_size"),
+            )
+            for contract in primary_contracts
+        }
+    ) != 1:
+        blockers.append("primary_frozen_model_binding_mismatch")
+    baseline = candidate_contracts.get("matched_frozen_v6_7", {})
+    if (
+        not _is_sha256(
+            baseline.get("frozen_v6_2_candidate_manifest_sha256")
+        )
+        or float(baseline.get("paper_position_size") or 0.0) != 0.2
+    ):
+        blockers.append("baseline_frozen_model_binding")
     if blockers:
         raise ParallelFutureGateError(
             "parallel candidate protocol invalid: " + ", ".join(sorted(blockers))
+        )
+
+
+def validate_parallel_frozen_model_binding(
+    binding: dict[str, Any],
+    *,
+    candidate_contracts: dict[str, dict[str, Any]],
+    expected_binding_sha256: str,
+) -> None:
+    """Validate the immutable v8.1 model and controller-state binding."""
+
+    blockers: list[str] = []
+    if binding.get("schema_version") != FROZEN_MODEL_BINDING_SCHEMA_VERSION:
+        blockers.append("schema_version")
+    if binding.get("candidate_name") != "adaptive_support_controller_v8_1":
+        blockers.append("candidate_name")
+    if binding.get("primary_candidate_ids") != list(REQUIRED_CANDIDATES[:2]):
+        blockers.append("primary_candidate_ids")
+    for field in (
+        "historical_fit_manifest_sha256",
+        "frozen_model_artifact_sha256",
+        "frozen_model_artifact_id",
+        "frozen_booster_sha256",
+        "frozen_profile_sha256",
+        "source_training_rows_sha256",
+    ):
+        if not _is_sha256(binding.get(field)):
+            blockers.append(field)
+    state = dict(binding.get("initial_controller_state") or {})
+    for field in (
+        "rank_state_id",
+        "rank_lineage_hash",
+        "eligible_prediction_scores_hash",
+        "controller_guard_acceptance_history_hash",
+    ):
+        if not _is_sha256(state.get(field)):
+            blockers.append(field)
+    execution = dict(binding.get("execution") or {})
+    if float(execution.get("paper_position_size") or 0.0) != 0.2:
+        blockers.append("paper_position_size")
+    if execution.get("v8_1_fallback_allowed") is not False:
+        blockers.append("v8_1_fallback_allowed")
+    if binding.get("frozen_before_fresh_collection") is not True:
+        blockers.append("not_frozen_before_collection")
+    if binding.get(
+        "current_or_future_outcomes_labels_settlement_returns_or_pnl_opened"
+    ) is not False:
+        blockers.append("target_access")
+    if any((binding.get("safety") or {}).values()):
+        blockers.append("safety")
+    if not _is_sha256(expected_binding_sha256):
+        blockers.append("expected_binding_sha256")
+    for candidate_id in REQUIRED_CANDIDATES[:2]:
+        contract = candidate_contracts.get(candidate_id, {})
+        if contract and (
+            contract.get("frozen_model_binding_sha256")
+            != expected_binding_sha256
+            or contract.get("frozen_model_artifact_sha256")
+            != binding.get("frozen_model_artifact_sha256")
+            or contract.get("frozen_model_artifact_id")
+            != binding.get("frozen_model_artifact_id")
+            or contract.get("initial_controller_state_id")
+            != state.get("rank_state_id")
+        ):
+            blockers.append(f"{candidate_id}_binding")
+    if blockers:
+        raise ParallelFutureGateError(
+            "parallel frozen model binding invalid: "
+            + ", ".join(sorted(set(blockers)))
         )
 
 
@@ -679,6 +798,13 @@ def _decision_key(row: dict[str, Any]) -> tuple[str, int]:
     return str(row["market_id"]), int(row["decision_ts"])
 
 
+def _is_sha256(value: Any) -> bool:
+    candidate = str(value or "").lower()
+    return len(candidate) == 64 and all(
+        character in "0123456789abcdef" for character in candidate
+    )
+
+
 def _find_target_fields(value: Any, *, path: str = "") -> set[str]:
     found: set[str] = set()
     if isinstance(value, dict):
@@ -716,5 +842,6 @@ __all__ = [
     "build_parallel_target_free_freeze",
     "evaluate_parallel_future_gate",
     "validate_parallel_candidate_protocol",
+    "validate_parallel_frozen_model_binding",
     "validate_parallel_future_collection_plan",
 ]

@@ -1,0 +1,42 @@
+{
+  "schema_version": "bigan-v8-parallel-frozen-model-binding-v1",
+  "candidate_name": "adaptive_support_controller_v8_1",
+  "primary_candidate_ids": [
+    "v8_1_primary_no_fallback",
+    "v8_3_primary_with_fallback"
+  ],
+  "historical_fit_manifest_sha256": "3fff5785a53cb32fb26d839786e3f48c2ff2bd7cc9dcf84e801c916a6ebb0fb7",
+  "frozen_model_artifact_sha256": "b92d2c087de20fbc6e6a142f13e0e48e14ecc25915cf318b485dc2927f958772",
+  "frozen_model_artifact_id": "2373fb67f88dcb8bbf32216473426a65e31202ce7e79edcc82e10b16949ce332",
+  "frozen_booster_sha256": "cdadca3758ff84638464e0953479f062805658d31fb5543379b762d1c4ac8918",
+  "frozen_profile_sha256": "1c808195fab5aea976429f4ab0fb46d69a29a4bbb705313d138a9ce8d3d19abf",
+  "source_training_rows_sha256": "1565116daeb2f5d4d8c33fefa507276f59251edd5ffb5f4f313041bcf9dbb0ec",
+  "initial_controller_state": {
+    "rank_state_id": "537172168394807ee7548127c4e9e37e38b973ffca272a32952fb73e58f36d8c",
+    "rank_lineage_hash": "95716bcce4a260085c58c03dda5f81916add955cc272701b893f7239dd8c2682",
+    "eligible_prediction_scores_hash": "03361deb79bdf6d6bd9c1d1973af939e8356066260e1482229dcba95aea31abb",
+    "controller_guard_acceptance_history_hash": "1db6166e4e59a6d7a9f2213b641ae002bba8dbd20424c7f51b6e15a35b2a806e",
+    "controller_state_uses_target_outcome_label_or_pnl": false,
+    "future_controller_updates_use_strictly_prior_guard_results_only": true
+  },
+  "execution": {
+    "paper_position_size": 0.2,
+    "one_bet_maximum_per_market": true,
+    "full_execution_guard_unchanged": true,
+    "source_scores_read_only": true,
+    "v8_1_abstention_action": "NO_TRADE",
+    "v8_1_fallback_allowed": false,
+    "v8_3_fallback_contract": "frozen_non_risk_abstention_only"
+  },
+  "frozen_before_fresh_collection": true,
+  "current_or_future_outcomes_labels_settlement_returns_or_pnl_opened": false,
+  "result_selected_model_controller_or_threshold_change_allowed": false,
+  "safety": {
+    "paper_candidate_unlocked": false,
+    "promotion_unlocked": false,
+    "live_unlocked": false,
+    "write_enabled": false,
+    "wallet_enabled": false,
+    "capital_at_risk": false
+  }
+}

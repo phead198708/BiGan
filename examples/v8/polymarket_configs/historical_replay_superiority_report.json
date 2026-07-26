@@ -33,7 +33,7 @@
     "prediction_and_rank_state_are_strictly_prequential": true,
     "source_report_metrics_reconciled": true
   },
-  "evaluation_completed_ts": 1785050104578,
+  "evaluation_completed_ts": 1785050774332,
   "evaluation_market_count": 120,
   "evaluation_market_ids_hash": "5b154125ee6299eb31f2f95b763cc07f3270b59831a4bf22231485b723cee928",
   "future_collection_prerequisite_satisfied": true,
@@ -42,7 +42,7 @@
   "historical_superiority_gate_passed": true,
   "lineage_sha256s": {
     "baseline_rows": "82acc593d57c37c77da866f989487273865c3501ab39aa8fe346aa15cedb74df",
-    "candidate_contract": "9a893494600e96b0e7719bde088c96b00d7a1322a5a2942a5ff405124f90a3b1",
+    "candidate_contract": "b06919aadbea6821f44c1decf4f488fd3e34fc2612a115466caad3fe6173ad90",
     "candidate_rows": "c26c9164cada8abedcff94c05553cb43bdc9eaa138dbff1293abe09af1f4f59f",
     "gate_contract": "3ba70dc0c589b0c891dd60ec254e6a733eb203e224598460415be34cffa825fd",
     "leakage_audit": "234ed6c29317c811799bc435965fa7606b8a4ddca333ab5fb9cd1c31c9c52a5c",
@@ -73,7 +73,7 @@
   "paper_candidate_allowed": false,
   "policy_difference_market_count": 86,
   "promotion_unlocked": false,
-  "report_id": "56e081e04697dbd13c9215e15346c99611b994c7a656c6b070059f3cfd6bdd27",
+  "report_id": "164978ed5da3a0d6f701189385928e3e5e8b16b878fad393d1ba1b575cd50f35",
   "schema_version": "bigan-v8-challenge-historical-replay-report-v1",
   "wallet_enabled": false,
   "write_enabled": false

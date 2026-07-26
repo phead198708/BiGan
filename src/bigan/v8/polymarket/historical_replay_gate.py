@@ -205,6 +205,24 @@ def audit_historical_replay_superiority(
     checks = {
         "candidate_contract_is_frozen_v8_1_no_fallback": (
             candidate_contract.get("candidate_id") == SUPPORTED_CANDIDATE_ID
+            and candidate_contract.get("source_model_hash_role")
+            == "source_training_rows_sha256"
+            and _valid_sha256(
+                candidate_contract.get("frozen_model_binding_sha256")
+            )
+            and _valid_sha256(
+                candidate_contract.get("frozen_model_artifact_sha256")
+            )
+            and _valid_sha256(
+                candidate_contract.get("frozen_model_artifact_id")
+            )
+            and _valid_sha256(
+                candidate_contract.get("initial_controller_state_id")
+            )
+            and float(
+                candidate_contract.get("paper_position_size") or 0.0
+            )
+            == 0.2
             and candidate_contract.get("fallback_enabled") is False
             and candidate_contract.get("v6_7_routing_on_abstention_allowed")
             is False

@@ -50,6 +50,9 @@ DEFAULT_HISTORICAL_GATE_CONTRACT = (
 DEFAULT_HISTORICAL_REPLAY_REPORT = (
     CONFIG / "historical_replay_superiority_report.json"
 )
+DEFAULT_FROZEN_MODEL_BINDING = (
+    CONFIG / "parallel_frozen_v8_1_model_binding.json"
+)
 
 
 def validate_plan(
@@ -59,6 +62,7 @@ def validate_plan(
     contract_paths: dict[str, Path],
     collector_protocol_path: Path,
     feature_contract_path: Path,
+    frozen_model_binding_path: Path,
     historical_gate_contract_path: Path,
     historical_replay_report_path: Path,
     collection_started_ts: int | None = None,
@@ -75,6 +79,8 @@ def validate_plan(
         },
         collector_protocol_sha256=_sha256(collector_protocol_path),
         feature_contract_sha256=_sha256(feature_contract_path),
+        frozen_model_binding_sha256=_sha256(frozen_model_binding_path),
+        frozen_model_binding=_read_json(frozen_model_binding_path),
         historical_gate_contract_sha256=_sha256(
             historical_gate_contract_path
         ),
@@ -506,6 +512,11 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_HISTORICAL_GATE_CONTRACT,
     )
     validate.add_argument(
+        "--frozen-model-binding",
+        type=Path,
+        default=DEFAULT_FROZEN_MODEL_BINDING,
+    )
+    validate.add_argument(
         "--historical-replay-report",
         type=Path,
         default=DEFAULT_HISTORICAL_REPLAY_REPORT,
@@ -553,6 +564,7 @@ def main(argv: list[str] | None = None) -> int:
             contract_paths=_contract_paths(args),
             collector_protocol_path=args.collector_protocol,
             feature_contract_path=args.feature_contract,
+            frozen_model_binding_path=args.frozen_model_binding,
             historical_gate_contract_path=args.historical_gate_contract,
             historical_replay_report_path=args.historical_replay_report,
             collection_started_ts=args.collection_started_ts,

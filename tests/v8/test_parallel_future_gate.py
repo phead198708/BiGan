@@ -12,6 +12,7 @@ from bigan.v8.polymarket.parallel_future_gate import (
     build_parallel_target_free_freeze,
     evaluate_parallel_future_gate,
     validate_parallel_candidate_protocol,
+    validate_parallel_frozen_model_binding,
     validate_parallel_future_collection_plan,
 )
 from examples.v8.run_parallel_future_gate import (
@@ -179,6 +180,14 @@ def test_fresh_collection_plan_is_hash_pinned_and_preregistered() -> None:
                 / "execution_layer_v2_pairwise_action_advantage_lcb_feature_contract_v1.json"
             ).read_bytes()
         ).hexdigest(),
+        frozen_model_binding_sha256=hashlib.sha256(
+            (
+                CONFIG / "parallel_frozen_v8_1_model_binding.json"
+            ).read_bytes()
+        ).hexdigest(),
+        frozen_model_binding=_json(
+            "parallel_frozen_v8_1_model_binding.json"
+        ),
         historical_gate_contract_sha256=hashlib.sha256(
             (
                 CONFIG / "historical_replay_superiority_contract.json"
@@ -209,6 +218,12 @@ def test_collection_plan_rejects_target_access_and_non_later_start() -> None:
                 "persistent_collector_protocol_sha256"
             ],
             feature_contract_sha256=hashes["feature_contract_sha256"],
+            frozen_model_binding_sha256=hashes[
+                "frozen_model_binding_sha256"
+            ],
+            frozen_model_binding=_json(
+                "parallel_frozen_v8_1_model_binding.json"
+            ),
             historical_gate_contract_sha256=plan[
                 "historical_replay_prerequisite"
             ]["gate_contract_sha256"],
@@ -238,6 +253,12 @@ def test_collection_plan_rejects_missing_historical_superiority() -> None:
                 "persistent_collector_protocol_sha256"
             ],
             feature_contract_sha256=hashes["feature_contract_sha256"],
+            frozen_model_binding_sha256=hashes[
+                "frozen_model_binding_sha256"
+            ],
+            frozen_model_binding=_json(
+                "parallel_frozen_v8_1_model_binding.json"
+            ),
             historical_gate_contract_sha256=historical[
                 "gate_contract_sha256"
             ],
@@ -247,6 +268,20 @@ def test_collection_plan_rejects_missing_historical_superiority() -> None:
             ),
             collection_started_ts=plan["freeze_created_ts"] + 1,
         )
+
+
+def test_frozen_model_binding_matches_both_primary_candidates() -> None:
+    binding_path = CONFIG / "parallel_frozen_v8_1_model_binding.json"
+    binding_hash = hashlib.sha256(binding_path.read_bytes()).hexdigest()
+    assert (
+        binding_hash
+        == binding_path.with_suffix(".sha256").read_text().strip()
+    )
+    validate_parallel_frozen_model_binding(
+        _json("parallel_frozen_v8_1_model_binding.json"),
+        candidate_contracts=_contracts(),
+        expected_binding_sha256=binding_hash,
+    )
 
 
 def test_same_target_free_window_is_frozen_for_all_candidates() -> None:

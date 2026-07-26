@@ -18,6 +18,7 @@ REQUIRED_HASH_PINNED_ARTIFACTS = (
     "parallel_candidate_v8_1_primary_no_fallback_contract.json",
     "parallel_candidate_v8_3_primary_with_fallback_contract.json",
     "parallel_candidate_matched_frozen_v6_7_contract.json",
+    "parallel_frozen_v8_1_model_binding.json",
     "regime_definition_contract.json",
     "execution_policy_contract.json",
     "policy_candidate_manifest.json",
