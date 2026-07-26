@@ -24,6 +24,145 @@ class HistoricalReplayGateError(ValueError):
     """Raised when historical replay evidence is malformed or contaminated."""
 
 
+def validate_exact_historical_model_binding(
+    *,
+    candidate_contract: dict[str, Any],
+    frozen_model_binding: dict[str, Any],
+    frozen_model_artifact: dict[str, Any],
+    source_manifest: dict[str, Any],
+    expected_binding_sha256: str,
+    expected_model_artifact_sha256: str,
+    expected_source_manifest_sha256: str,
+    expected_candidate_profile_sha256: str,
+) -> None:
+    """Bind replay evidence to exact model bytes and controller state."""
+
+    state = dict(frozen_model_binding.get("initial_controller_state") or {})
+    model_state = dict(frozen_model_artifact.get("final_rank_state") or {})
+    weighted_model = dict(
+        frozen_model_artifact.get("final_weighted_model") or {}
+    )
+    manifest_model = dict(source_manifest.get("model") or {})
+    manifest_profile = dict(source_manifest.get("profile") or {})
+    safety_false_fields = (
+        "source_model_candidate_eligible",
+        "freeze_ready",
+        "promotion_evidence_eligible",
+        "paper_candidate_allowed",
+        "v8_execution_handoff_allowed",
+        "capital_at_risk",
+        "polymarket_write_enabled",
+        "wallet_signing_enabled",
+        "#134_resume_allowed",
+        "#146_start_allowed",
+    )
+    checks = {
+        "binding_sha256": (
+            _valid_sha256(expected_binding_sha256)
+            and candidate_contract.get("frozen_model_binding_sha256")
+            == expected_binding_sha256
+        ),
+        "model_artifact_sha256": (
+            _valid_sha256(expected_model_artifact_sha256)
+            and candidate_contract.get("frozen_model_artifact_sha256")
+            == expected_model_artifact_sha256
+            and frozen_model_binding.get("frozen_model_artifact_sha256")
+            == expected_model_artifact_sha256
+            and manifest_model.get("sha256")
+            == expected_model_artifact_sha256
+        ),
+        "model_artifact_id": (
+            _valid_sha256(frozen_model_artifact.get("model_artifact_id"))
+            and candidate_contract.get("frozen_model_artifact_id")
+            == frozen_model_artifact.get("model_artifact_id")
+            and frozen_model_binding.get("frozen_model_artifact_id")
+            == frozen_model_artifact.get("model_artifact_id")
+        ),
+        "historical_manifest_sha256": (
+            _valid_sha256(expected_source_manifest_sha256)
+            and frozen_model_binding.get("historical_fit_manifest_sha256")
+            == expected_source_manifest_sha256
+        ),
+        "candidate_profile_sha256": (
+            _valid_sha256(expected_candidate_profile_sha256)
+            and candidate_contract.get("profile_sha256")
+            == expected_candidate_profile_sha256
+            and frozen_model_binding.get("frozen_profile_sha256")
+            == expected_candidate_profile_sha256
+            and manifest_profile.get("sha256")
+            == expected_candidate_profile_sha256
+        ),
+        "candidate_identity": (
+            frozen_model_artifact.get("candidate_name")
+            == "adaptive_support_controller_v8_1"
+            and frozen_model_binding.get("candidate_name")
+            == frozen_model_artifact.get("candidate_name")
+        ),
+        "booster_sha256": (
+            _valid_sha256(weighted_model.get("booster_sha256"))
+            and frozen_model_binding.get("frozen_booster_sha256")
+            == weighted_model.get("booster_sha256")
+        ),
+        "rank_state_id": (
+            _valid_sha256(model_state.get("rank_state_id"))
+            and candidate_contract.get("initial_controller_state_id")
+            == model_state.get("rank_state_id")
+            and state.get("rank_state_id") == model_state.get("rank_state_id")
+        ),
+        "rank_lineage_hash": (
+            _valid_sha256(model_state.get("rank_lineage_hash"))
+            and state.get("rank_lineage_hash")
+            == model_state.get("rank_lineage_hash")
+        ),
+        "eligible_prediction_scores_hash": (
+            _valid_sha256(
+                model_state.get("eligible_prediction_scores_hash")
+            )
+            and state.get("eligible_prediction_scores_hash")
+            == model_state.get("eligible_prediction_scores_hash")
+        ),
+        "controller_guard_acceptance_history_hash": (
+            _valid_sha256(
+                model_state.get(
+                    "controller_guard_acceptance_history_hash"
+                )
+            )
+            and state.get("controller_guard_acceptance_history_hash")
+            == model_state.get(
+                "controller_guard_acceptance_history_hash"
+            )
+        ),
+        "historical_gate_passed": (
+            frozen_model_artifact.get("historical_hard_gate_passed") is True
+            and not frozen_model_artifact.get(
+                "historical_gate_blocking_reason_codes"
+            )
+        ),
+        "target_free_controller": (
+            state.get("controller_state_uses_target_outcome_label_or_pnl")
+            is False
+            and state.get(
+                "future_controller_updates_use_strictly_prior_guard_results_only"
+            )
+            is True
+            and model_state.get(
+                "controller_target_outcome_label_or_pnl_free"
+            )
+            is True
+        ),
+        "all_safety_unlocks_remain_false": all(
+            frozen_model_artifact.get(field) is False
+            for field in safety_false_fields
+        ),
+    }
+    blockers = [name for name, passed in checks.items() if not passed]
+    if blockers:
+        raise HistoricalReplayGateError(
+            "exact historical model binding invalid: "
+            + ", ".join(sorted(blockers))
+        )
+
+
 def validate_historical_replay_contract(contract: dict[str, Any]) -> None:
     """Validate the immutable, point-estimate pre-collection gate contract."""
 
@@ -103,6 +242,7 @@ def audit_historical_replay_superiority(
     baseline_rows: list[dict[str, Any]],
     lineage_sha256s: dict[str, str],
     evaluation_completed_ts: int,
+    exact_model_binding_verified: bool,
 ) -> dict[str, Any]:
     """Recompute the matched replay and enforce strict pre-collection superiority."""
 
@@ -311,6 +451,9 @@ def audit_historical_replay_superiority(
         ),
         "lineage_hashes_complete": bool(lineage_sha256s)
         and all(_valid_sha256(value) for value in lineage_sha256s.values()),
+        "exact_frozen_model_binding_verified": (
+            exact_model_binding_verified is True
+        ),
         "all_safety_unlocks_remain_false": (
             all(source_report.get(field) is False for field in safety_false_fields)
             and all(leakage_audit.get(field) is False for field in safety_false_fields)
@@ -472,5 +615,6 @@ __all__ = [
     "HISTORICAL_REPLAY_REPORT_SCHEMA_VERSION",
     "HistoricalReplayGateError",
     "audit_historical_replay_superiority",
+    "validate_exact_historical_model_binding",
     "validate_historical_replay_contract",
 ]

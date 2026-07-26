@@ -11,6 +11,7 @@ from typing import Any
 
 from bigan.v8.polymarket.historical_replay_gate import (
     audit_historical_replay_superiority,
+    validate_exact_historical_model_binding,
 )
 
 
@@ -23,6 +24,9 @@ def main() -> int:
     parser.add_argument("--candidate-rows", required=True, type=Path)
     parser.add_argument("--baseline-rows", required=True, type=Path)
     parser.add_argument("--source-manifest", required=True, type=Path)
+    parser.add_argument("--frozen-model-binding", required=True, type=Path)
+    parser.add_argument("--frozen-model-artifact", required=True, type=Path)
+    parser.add_argument("--candidate-profile", required=True, type=Path)
     parser.add_argument("--expected-gate-contract-sha256", required=True)
     parser.add_argument("--expected-candidate-contract-sha256", required=True)
     parser.add_argument("--expected-source-report-sha256", required=True)
@@ -30,6 +34,9 @@ def main() -> int:
     parser.add_argument("--expected-candidate-rows-sha256", required=True)
     parser.add_argument("--expected-baseline-rows-sha256", required=True)
     parser.add_argument("--expected-source-manifest-sha256", required=True)
+    parser.add_argument("--expected-frozen-model-binding-sha256", required=True)
+    parser.add_argument("--expected-frozen-model-artifact-sha256", required=True)
+    parser.add_argument("--expected-candidate-profile-sha256", required=True)
     parser.add_argument("--evaluation-completed-ts", required=True, type=int)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -42,6 +49,9 @@ def main() -> int:
         "candidate_rows": args.candidate_rows.resolve(),
         "baseline_rows": args.baseline_rows.resolve(),
         "source_manifest": args.source_manifest.resolve(),
+        "frozen_model_binding": args.frozen_model_binding.resolve(),
+        "frozen_model_artifact": args.frozen_model_artifact.resolve(),
+        "candidate_profile": args.candidate_profile.resolve(),
     }
     expected = {
         "gate_contract": args.expected_gate_contract_sha256,
@@ -51,6 +61,13 @@ def main() -> int:
         "candidate_rows": args.expected_candidate_rows_sha256,
         "baseline_rows": args.expected_baseline_rows_sha256,
         "source_manifest": args.expected_source_manifest_sha256,
+        "frozen_model_binding": (
+            args.expected_frozen_model_binding_sha256
+        ),
+        "frozen_model_artifact": (
+            args.expected_frozen_model_artifact_sha256
+        ),
+        "candidate_profile": args.expected_candidate_profile_sha256,
     }
     for name, path in paths.items():
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -59,15 +76,27 @@ def main() -> int:
 
     source_manifest = _json(paths["source_manifest"])
     _validate_source_manifest(source_manifest, paths=paths, expected=expected)
+    candidate_contract = _json(paths["candidate_contract"])
+    validate_exact_historical_model_binding(
+        candidate_contract=candidate_contract,
+        frozen_model_binding=_json(paths["frozen_model_binding"]),
+        frozen_model_artifact=_json(paths["frozen_model_artifact"]),
+        source_manifest=source_manifest,
+        expected_binding_sha256=expected["frozen_model_binding"],
+        expected_model_artifact_sha256=expected["frozen_model_artifact"],
+        expected_source_manifest_sha256=expected["source_manifest"],
+        expected_candidate_profile_sha256=expected["candidate_profile"],
+    )
     report = audit_historical_replay_superiority(
         gate_contract=_json(paths["gate_contract"]),
-        candidate_contract=_json(paths["candidate_contract"]),
+        candidate_contract=candidate_contract,
         source_report=_json(paths["source_report"]),
         leakage_audit=_json(paths["leakage_audit"]),
         candidate_rows=_jsonl(paths["candidate_rows"]),
         baseline_rows=_jsonl(paths["baseline_rows"]),
         lineage_sha256s=expected,
         evaluation_completed_ts=args.evaluation_completed_ts,
+        exact_model_binding_verified=True,
     )
     payload = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output is not None:
@@ -89,6 +118,8 @@ def _validate_source_manifest(
         "leakage_audit": "leakage_audit",
         "candidate_selected_rows": "candidate_rows",
         "v6_7_baseline_selected_rows": "baseline_rows",
+        "model": "frozen_model_artifact",
+        "profile": "candidate_profile",
     }
     for manifest_name, local_name in descriptors.items():
         descriptor = dict(manifest.get(manifest_name) or {})

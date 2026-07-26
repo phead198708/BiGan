@@ -10,6 +10,7 @@ from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.historical_replay_gate import (
     HistoricalReplayGateError,
     audit_historical_replay_superiority,
+    validate_exact_historical_model_binding,
     validate_historical_replay_contract,
 )
 
@@ -144,6 +145,7 @@ def _inputs() -> dict:
         "baseline_rows": baseline,
         "lineage_sha256s": {"source_report": "a" * 64},
         "evaluation_completed_ts": 2_000_000,
+        "exact_model_binding_verified": True,
     }
 
 
@@ -204,3 +206,71 @@ def test_target_contamination_fails_closed() -> None:
     inputs["candidate_rows"][0]["target_used_as_decision_time_input"] = True
     with pytest.raises(HistoricalReplayGateError, match="contaminated"):
         audit_historical_replay_superiority(**inputs)
+
+
+def test_exact_model_binding_rejects_artifact_id_drift() -> None:
+    candidate_contract = {
+        "frozen_model_binding_sha256": "a" * 64,
+        "frozen_model_artifact_sha256": "b" * 64,
+        "frozen_model_artifact_id": "c" * 64,
+        "profile_sha256": "d" * 64,
+        "initial_controller_state_id": "e" * 64,
+    }
+    binding = {
+        "candidate_name": "adaptive_support_controller_v8_1",
+        "historical_fit_manifest_sha256": "f" * 64,
+        "frozen_model_artifact_sha256": "b" * 64,
+        "frozen_model_artifact_id": "c" * 64,
+        "frozen_booster_sha256": "1" * 64,
+        "frozen_profile_sha256": "d" * 64,
+        "initial_controller_state": {
+            "rank_state_id": "e" * 64,
+            "rank_lineage_hash": "2" * 64,
+            "eligible_prediction_scores_hash": "3" * 64,
+            "controller_guard_acceptance_history_hash": "4" * 64,
+            "controller_state_uses_target_outcome_label_or_pnl": False,
+            "future_controller_updates_use_strictly_prior_guard_results_only": True,
+        },
+    }
+    model = {
+        "candidate_name": "adaptive_support_controller_v8_1",
+        "model_artifact_id": "9" * 64,
+        "historical_hard_gate_passed": True,
+        "historical_gate_blocking_reason_codes": [],
+        "final_weighted_model": {"booster_sha256": "1" * 64},
+        "final_rank_state": {
+            "rank_state_id": "e" * 64,
+            "rank_lineage_hash": "2" * 64,
+            "eligible_prediction_scores_hash": "3" * 64,
+            "controller_guard_acceptance_history_hash": "4" * 64,
+            "controller_target_outcome_label_or_pnl_free": True,
+        },
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_candidate_allowed": False,
+        "v8_execution_handoff_allowed": False,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+    }
+    manifest = {
+        "model": {"sha256": "b" * 64},
+        "profile": {"sha256": "d" * 64},
+    }
+    with pytest.raises(
+        HistoricalReplayGateError,
+        match="model_artifact_id",
+    ):
+        validate_exact_historical_model_binding(
+            candidate_contract=candidate_contract,
+            frozen_model_binding=binding,
+            frozen_model_artifact=model,
+            source_manifest=manifest,
+            expected_binding_sha256="a" * 64,
+            expected_model_artifact_sha256="b" * 64,
+            expected_source_manifest_sha256="f" * 64,
+            expected_candidate_profile_sha256="d" * 64,
+        )
