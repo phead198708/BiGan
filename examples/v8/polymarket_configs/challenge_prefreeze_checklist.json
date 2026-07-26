@@ -104,6 +104,7 @@
     "persistent_collector_protocol_sha256": "9a4020f173c3ee7f1f396ceb5387672f67939c64906d2f263cabe623a1d7c083",
     "feature_missingness_contract_sha256": "4eb9cb453a684170e3db64dd0db803f4f0e44055a105806368d48428b5d3a107",
     "feature_missingness_runtime_schema_sha256": "2d97a7102c983afed2e9ea8a71b77cd5af5855c8860a5669842338a5fdca527c",
+    "challenge_promotion_evidence_protocol_sha256": "b9eaaf37c214cea59abdea7bc682a12e0e12a23837f626bd815e4d37c14dee52",
     "full_round_trade_tape_collection_implemented": true,
     "full_round_trade_tape_collection_tested": true,
     "per_round_provider_health_rows_required": true,
@@ -118,7 +119,7 @@
     "per_candidate_alpha": 0.0125,
     "attempt_consumed": false
   },
-  "excluded_capture_ledger_sha256": "a96e62b9a8a272374db87201788a0a8d4d34289ebc525593b926a5435b1dc033",
+  "excluded_capture_ledger_sha256": "90b3374c04abecb3ac4ac235faa7f94c2d892ae08e2b7940cafccd6a72833e97",
   "excluded_capture_ledger_complete": true,
   "operator_authorization": {
     "required": true,
@@ -142,5 +143,5 @@
     "#134_resume_allowed": false,
     "#146_start_allowed": false
   },
-  "checklist_id": "7c54bf8c84027a376427beb38319650fff4960cc55c6513c75638687717a23bf"
+  "checklist_id": "ad1ff440694acc847170d72b7a5f1215d32b2508689ca8ab2e1a4cd3b3d7d432"
 }

@@ -1,0 +1,53 @@
+{
+  "schema_version": "bigan-v8-challenge-supersession-governance-v1",
+  "issue": 254,
+  "frozen": true,
+  "preregistered_before_batch_1": true,
+  "attempt_id": "v8-5-challenger-parallel-future-attempt-001-provider-complete-corrective-refreeze",
+  "parallel_future_collection_plan_sha256": "df9a81b1ed8cc9e3bd50ca580cd617ecde041a97a7d8470d0c5b82e9d79436ff",
+  "max_total_supersessions_for_attempt": 5,
+  "supersessions_consumed": 5,
+  "additional_supersessions_allowed": 0,
+  "supersession_chain_order": "oldest_to_newest",
+  "allowed_supersession_reason_codes": [
+    "settlement_finalizer_gap",
+    "exact_model_binding_gap",
+    "runtime_byte_verification_gap",
+    "provider_health_or_feature_completeness_gap",
+    "binding_summary_and_runtime_byte_verification_required_before_collection",
+    "issue_257_provider_health_and_trade_tape_prerequisites_missing_before_collection"
+  ],
+  "supersession_reason_policy": {
+    "closed_enumeration": true,
+    "infrastructure_only": true,
+    "market_condition_reason_allowed": false,
+    "outcome_related_reason_allowed": false,
+    "performance_related_reason_allowed": false
+  },
+  "attempt_exhaustion_policy": {
+    "further_supersession_of_attempt_allowed": false,
+    "only_allowed_path": "close_attempt_001_via_new_issue_then_record_alpha_spending_review_before_new_attempt_preregistration",
+    "new_issue_required": true,
+    "alpha_spending_review_required_before_new_attempt_preregistration": true
+  },
+  "checklist_schema_versioning": {
+    "new_mandatory_prerequisite_requires_schema_version_bump": true,
+    "future_freeze_must_validate_latest_checklist_schema_version": true,
+    "consecutive_corrective_supersessions_trigger": 2,
+    "mandatory_full_prerequisite_inventory_before_further_freeze": true
+  },
+  "safety": {
+    "collection_start_authorized": false,
+    "paper_candidate_allowed": false,
+    "live_trading_enabled": false,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}

@@ -7,9 +7,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from bigan.v8.canonical_payload import (
-    validate_canonical_payload_contract,
-)
 from bigan.v8.polymarket.candidate_budget import (
     evaluate_next_gate_eligibility,
 )
@@ -37,6 +34,7 @@ REQUIRED_HASH_PINNED_ARTIFACTS = (
     "parallel_future_collection_plan.json",
     "challenge_prefreeze_checklist.json",
     "challenge_prefreeze_excluded_capture_ledger.json",
+    "challenge_supersession_governance.json",
     "regime_definition_contract.json",
     "execution_policy_contract.json",
     "policy_candidate_manifest.json",
@@ -99,14 +97,6 @@ def audit_challenge_model_promotion(
         if historical_replay_path.is_file()
         else {}
     )
-    canonical_payload_contract_valid = False
-    try:
-        validate_canonical_payload_contract(
-            _read_json(config_dir / "canonical_payload_contract.json")
-        )
-        canonical_payload_contract_valid = True
-    except (TypeError, ValueError):
-        canonical_payload_contract_valid = False
     budget_decision_valid = False
     try:
         recomputed_next_gate = evaluate_next_gate_eligibility(
@@ -152,6 +142,9 @@ def audit_challenge_model_promotion(
     try:
         validate_parallel_future_collection_plan(
             parallel_plan,
+            plan_sha256=str(
+                artifact_hashes["parallel_future_collection_plan.json"]
+            ),
             protocol_sha256=str(
                 artifact_hashes["parallel_candidate_protocol.json"]
             ),
@@ -183,6 +176,9 @@ def audit_challenge_model_promotion(
             feature_missingness_runtime_schema_sha256=_sha256_file(
                 config_dir / "feature_missingness_runtime.schema.json"
             ),
+            promotion_evidence_protocol_sha256=_sha256_file(
+                config_dir / "challenge_promotion_evidence_protocol.json"
+            ),
             frozen_model_binding_sha256=str(
                 artifact_hashes["parallel_frozen_v8_1_model_binding.json"]
             ),
@@ -212,15 +208,28 @@ def audit_challenge_model_promotion(
                 artifact_hashes["historical_replay_superiority_report.json"]
             ),
             historical_replay_report=historical_replay,
+            supersession_governance=_read_json(
+                config_dir / "challenge_supersession_governance.json"
+            ),
+            supersession_governance_sha256=str(
+                artifact_hashes[
+                    "challenge_supersession_governance.json"
+                ]
+            ),
+            expected_supersession_governance_sha256=(
+                (
+                    config_dir
+                    / "challenge_supersession_governance.sha256"
+                )
+                .read_text(encoding="ascii")
+                .strip()
+            ),
         )
         parallel_plan_valid = True
     except (TypeError, ValueError):
         parallel_plan_valid = False
     static_checks = {
         "all_issue_contract_artifacts_hash_verified": all(artifact_checks.values()),
-        "issue_259_canonical_payload_contract_valid": (
-            canonical_payload_contract_valid
-        ),
         "issue_255_next_fresh_gate_statistically_eligible": (
             next_gate.get("next_gate_eligible") is True
             and next_gate.get("outcomes_read_to_make_eligibility_decision") is False

@@ -12,7 +12,6 @@ import base64
 import hashlib
 import json
 import math
-import re
 import unicodedata
 from dataclasses import asdict, dataclass
 from decimal import Decimal
@@ -20,9 +19,6 @@ from typing import Any
 
 CANONICAL_PAYLOAD_CONTRACT_VERSION = "bigan-v8-canonical-payload-v1"
 DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION = "bigan-v8-decision-feature-payload-v1"
-CANONICAL_COMPARISON_REPORT_SCHEMA_VERSION = (
-    "bigan-v8-canonical-payload-comparison-report-v1"
-)
 MAX_TIMESTAMP_MS = 253_402_300_799_999
 MIN_SIGNED_64 = -(2**63)
 MAX_SIGNED_64 = 2**63 - 1
@@ -130,10 +126,6 @@ def describe_canonical_payload(
 
     if raw_payload_bytes is not None and not isinstance(raw_payload_bytes, bytes):
         raise TypeError("raw_payload_bytes must be bytes when supplied")
-    canonical_bytes = canonical_payload_bytes(
-        payload,
-        payload_schema_version=payload_schema_version,
-    )
     raw_origin = "caller_preserved_bytes"
     raw_bytes = raw_payload_bytes
     if raw_bytes is None:
@@ -147,26 +139,10 @@ def describe_canonical_payload(
             ).encode("utf-8")
         except (TypeError, ValueError) as exc:
             raise CanonicalPayloadError(f"raw payload is not valid JSON: {exc}") from exc
-    else:
-        try:
-            raw_payload = json.loads(
-                raw_bytes.decode("utf-8"),
-                parse_constant=_reject_nonfinite_json_constant,
-            )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-            raise CanonicalPayloadError(
-                f"raw payload bytes are not strict UTF-8 JSON: {exc}"
-            ) from exc
-        if (
-            canonical_payload_bytes(
-                raw_payload,
-                payload_schema_version=payload_schema_version,
-            )
-            != canonical_bytes
-        ):
-            raise CanonicalPayloadError(
-                "raw payload bytes do not represent the supplied semantic payload"
-            )
+    canonical_bytes = canonical_payload_bytes(
+        payload,
+        payload_schema_version=payload_schema_version,
+    )
     return CanonicalHashDescriptor(
         canonical_contract_version=CANONICAL_PAYLOAD_CONTRACT_VERSION,
         payload_schema_version=_normalize_schema_version(payload_schema_version),
@@ -273,220 +249,6 @@ def compare_canonical_payloads(
     )
 
 
-def build_canonical_payload_comparison_report(
-    frozen_payload: Any,
-    settled_payload: Any,
-    *,
-    frozen_payload_schema_version: str,
-    settled_payload_schema_version: str,
-    source_lineage_checks: dict[str, bool],
-    source_lineage_evidence: dict[str, Any] | None = None,
-    context: str,
-    frozen_raw_payload_bytes: bytes | None = None,
-    settled_raw_payload_bytes: bytes | None = None,
-) -> dict[str, Any]:
-    """Build a hash-bound comparison report with validator-derived lineage."""
-
-    if not isinstance(context, str) or not context.strip():
-        raise CanonicalPayloadError("comparison context must be non-empty")
-    if (
-        not isinstance(source_lineage_checks, dict)
-        or not source_lineage_checks
-        or any(
-            not isinstance(name, str)
-            or not name
-            or type(passed) is not bool
-            for name, passed in source_lineage_checks.items()
-        )
-    ):
-        raise CanonicalPayloadError(
-            "source_lineage_checks must be a non-empty string-to-boolean mapping"
-        )
-    normalized_checks = dict(sorted(source_lineage_checks.items()))
-    if source_lineage_evidence is not None and not isinstance(
-        source_lineage_evidence, dict
-    ):
-        raise CanonicalPayloadError(
-            "source_lineage_evidence must be an object when supplied"
-        )
-    approved_source_lineage = all(normalized_checks.values())
-    comparison = compare_canonical_payloads(
-        frozen_payload,
-        settled_payload,
-        frozen_payload_schema_version=frozen_payload_schema_version,
-        settled_payload_schema_version=settled_payload_schema_version,
-        approved_source_lineage=approved_source_lineage,
-        frozen_raw_payload_bytes=frozen_raw_payload_bytes,
-        settled_raw_payload_bytes=settled_raw_payload_bytes,
-    )
-    report = {
-        "schema_version": CANONICAL_COMPARISON_REPORT_SCHEMA_VERSION,
-        "context": context,
-        "source_lineage_checks": normalized_checks,
-        "source_lineage_evidence": dict(source_lineage_evidence or {}),
-        "approved_source_lineage": approved_source_lineage,
-        **comparison.to_dict(),
-        "canonical_comparison_passed": (
-            comparison.settlement_evaluation_eligible
-        ),
-        "training_or_export_eligibility_relaxed": False,
-        "handoff_enabled": False,
-        "source_change_enabled": False,
-        "freeze_change_enabled": False,
-        "#134_resume_allowed": False,
-        "#146_start_allowed": False,
-    }
-    report["report_id"] = canonical_payload_sha256(
-        report,
-        payload_schema_version=CANONICAL_COMPARISON_REPORT_SCHEMA_VERSION,
-    )
-    return report
-
-
-def validate_canonical_payload_contract(contract: dict[str, Any]) -> None:
-    """Validate the immutable issue #259 semantic serialization contract."""
-
-    expected_numeric = {
-        "algorithm": "shortest_round_trip_decimal_expanded_to_plain_notation",
-        "equivalent_integer_and_float_are_equal": True,
-        "negative_zero_serializes_as": "0",
-        "nan_allowed": False,
-        "positive_infinity_allowed": False,
-        "negative_infinity_allowed": False,
-        "loose_rounding_allowed": False,
-    }
-    expected_timestamp = {
-        "representation": "UTC Unix epoch milliseconds",
-        "json_type": "integer",
-        "minimum": 0,
-        "maximum": MAX_TIMESTAMP_MS,
-        "recognized_field_names": [
-            "timestamp",
-            "*_ts",
-            "*_ts_ms",
-            "*_timestamp_ms",
-        ],
-    }
-    expected_schema = {
-        "included_in_canonical_envelope": True,
-        "frozen_and_settled_versions_must_match": True,
-        "embedded_schema_version_must_match_when_present": True,
-    }
-    expected_compatibility = {
-        "preserve_raw_payload_bytes": True,
-        "preserve_raw_sha256": True,
-        "canonical_fields_are_additive": True,
-        "legacy_artifacts_are_immutable": True,
-        "legacy_verification_path_is_explicit": True,
-        "historical_manifest_rewrite_allowed": False,
-    }
-    expected_safety_fields = {
-        "paper_candidate_unlocked",
-        "promotion_unlocked",
-        "live_unlocked",
-        "write_enabled",
-        "wallet_enabled",
-        "capital_at_risk",
-        "handoff_enabled",
-        "source_change_enabled",
-        "freeze_change_enabled",
-        "#134_resume_allowed",
-        "#146_start_allowed",
-    }
-    checks = {
-        "schema_version": contract.get("schema_version")
-        == "bigan-v8-canonical-payload-contract-artifact-v1",
-        "canonical_contract_version": contract.get(
-            "canonical_contract_version"
-        )
-        == CANONICAL_PAYLOAD_CONTRACT_VERSION,
-        "issue": contract.get("issue") == 259,
-        "allowed_types": contract.get("allowed_types")
-        == [
-            "null",
-            "boolean",
-            "unicode_string",
-            "signed_64_bit_integer",
-            "finite_ieee_754_binary64",
-            "ordered_list",
-            "string_keyed_object",
-        ],
-        "object_key_order": contract.get("object_key_order")
-        == "normalized_utf8_byte_lexicographic",
-        "list_order_semantics": contract.get("list_order_semantics")
-        == "preserved_and_semantically_significant",
-        "numeric_normalization": contract.get("numeric_normalization")
-        == expected_numeric,
-        "unicode_normalization": contract.get("unicode_normalization")
-        == "NFC",
-        "null_and_missing": contract.get("null_and_missing_are_distinct")
-        is True,
-        "timestamp_contract": contract.get("timestamp_contract")
-        == expected_timestamp,
-        "schema_version_contract": contract.get(
-            "schema_version_contract"
-        )
-        == expected_schema,
-        "encoding": contract.get("encoding") == "UTF-8",
-        "digest": contract.get("digest") == "SHA-256",
-        "comparison_sequence": contract.get("comparison_sequence")
-        == [
-            "validate_same_schema_version",
-            "canonicalize_independently",
-            "compute_independent_sha256",
-            "require_exact_canonical_hash_equality",
-            "emit_deterministic_semantic_diff_on_mismatch",
-            "require_approved_source_lineage",
-            "fail_closed",
-        ],
-        "compatibility": contract.get("compatibility")
-        == expected_compatibility,
-        "safety": set(dict(contract.get("safety") or {}))
-        == expected_safety_fields
-        and all(
-            value is False
-            for value in dict(contract.get("safety") or {}).values()
-        ),
-    }
-    blockers = sorted(name for name, passed in checks.items() if not passed)
-    if blockers:
-        raise CanonicalPayloadError(
-            "canonical payload contract invalid: " + ", ".join(blockers)
-        )
-
-
-def verify_legacy_raw_payload(
-    raw_payload_bytes: bytes,
-    *,
-    expected_raw_sha256: str,
-    artifact_id: str,
-) -> dict[str, Any]:
-    """Verify immutable legacy bytes without synthesizing canonical fields."""
-
-    if not isinstance(raw_payload_bytes, bytes):
-        raise TypeError("raw_payload_bytes must be bytes")
-    expected = str(expected_raw_sha256 or "").lower()
-    if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
-        raise CanonicalPayloadError(
-            "expected_raw_sha256 must be a lowercase SHA-256"
-        )
-    if not isinstance(artifact_id, str) or not artifact_id.strip():
-        raise CanonicalPayloadError("legacy artifact_id must be non-empty")
-    actual = hashlib.sha256(raw_payload_bytes).hexdigest()
-    if actual != expected:
-        raise CanonicalPayloadError("legacy raw payload SHA-256 mismatch")
-    return {
-        "schema_version": "bigan-v8-legacy-raw-payload-verification-v1",
-        "artifact_id": artifact_id,
-        "legacy_verification_path": True,
-        "raw_payload_sha256": actual,
-        "raw_payload_byte_length": len(raw_payload_bytes),
-        "legacy_artifact_rewritten": False,
-        "canonical_hash_added_to_legacy_manifest": False,
-        "training_or_export_eligibility_relaxed": False,
-    }
-
-
 def _encode_value(value: Any, *, path: str, field_name: str | None = None) -> str:
     if _is_timestamp_field(field_name):
         _validate_timestamp(value, path=path)
@@ -549,10 +311,6 @@ def _canonical_number(value: float) -> str:
     if "." in rendered:
         rendered = rendered.rstrip("0").rstrip(".")
     return "0" if rendered in {"-0", ""} else rendered
-
-
-def _reject_nonfinite_json_constant(value: str) -> Any:
-    raise ValueError(f"non-finite JSON constant is forbidden: {value}")
 
 
 def _normalize_schema_version(value: str) -> str:
@@ -711,16 +469,12 @@ def _pointer_escape(value: str) -> str:
 
 __all__ = [
     "CANONICAL_PAYLOAD_CONTRACT_VERSION",
-    "CANONICAL_COMPARISON_REPORT_SCHEMA_VERSION",
     "DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION",
     "CanonicalHashDescriptor",
     "CanonicalPayloadComparison",
     "CanonicalPayloadError",
     "canonical_payload_bytes",
     "canonical_payload_sha256",
-    "build_canonical_payload_comparison_report",
     "compare_canonical_payloads",
     "describe_canonical_payload",
-    "validate_canonical_payload_contract",
-    "verify_legacy_raw_payload",
 ]

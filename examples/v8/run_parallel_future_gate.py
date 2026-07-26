@@ -50,6 +50,9 @@ DEFAULT_FEATURE_MISSINGNESS_CONTRACT = (
 DEFAULT_FEATURE_MISSINGNESS_RUNTIME_SCHEMA = (
     CONFIG / "feature_missingness_runtime.schema.json"
 )
+DEFAULT_PROMOTION_EVIDENCE_PROTOCOL = (
+    CONFIG / "challenge_promotion_evidence_protocol.json"
+)
 DEFAULT_HISTORICAL_GATE_CONTRACT = (
     CONFIG / "historical_replay_superiority_contract.json"
 )
@@ -64,6 +67,9 @@ DEFAULT_PREFREEZE_CHECKLIST = (
 )
 DEFAULT_EXCLUDED_CAPTURE_LEDGER = (
     CONFIG / "challenge_prefreeze_excluded_capture_ledger.json"
+)
+DEFAULT_SUPERSESSION_GOVERNANCE = (
+    CONFIG / "challenge_supersession_governance.json"
 )
 
 
@@ -80,9 +86,15 @@ def validate_plan(
     feature_missingness_runtime_schema_path: Path = (
         DEFAULT_FEATURE_MISSINGNESS_RUNTIME_SCHEMA
     ),
+    promotion_evidence_protocol_path: Path = (
+        DEFAULT_PROMOTION_EVIDENCE_PROTOCOL
+    ),
     frozen_model_binding_path: Path,
     prefreeze_checklist_path: Path = DEFAULT_PREFREEZE_CHECKLIST,
     excluded_capture_ledger_path: Path = DEFAULT_EXCLUDED_CAPTURE_LEDGER,
+    supersession_governance_path: Path = (
+        DEFAULT_SUPERSESSION_GOVERNANCE
+    ),
     historical_gate_contract_path: Path,
     historical_replay_report_path: Path,
     collection_started_ts: int | None = None,
@@ -92,6 +104,7 @@ def validate_plan(
     plan = _read_json(plan_path)
     validate_parallel_future_collection_plan(
         plan,
+        plan_sha256=_sha256(plan_path),
         protocol_sha256=_sha256(protocol_path),
         candidate_contract_sha256s={
             candidate_id: _sha256(path)
@@ -104,6 +117,9 @@ def validate_plan(
         ),
         feature_missingness_runtime_schema_sha256=_sha256(
             feature_missingness_runtime_schema_path
+        ),
+        promotion_evidence_protocol_sha256=_sha256(
+            promotion_evidence_protocol_path
         ),
         frozen_model_binding_sha256=_sha256(frozen_model_binding_path),
         frozen_model_binding=_read_json(frozen_model_binding_path),
@@ -127,6 +143,17 @@ def validate_plan(
         ),
         historical_replay_report=_read_json(
             historical_replay_report_path
+        ),
+        supersession_governance=_read_json(
+            supersession_governance_path
+        ),
+        supersession_governance_sha256=_sha256(
+            supersession_governance_path
+        ),
+        expected_supersession_governance_sha256=(
+            supersession_governance_path.with_suffix(".sha256")
+            .read_text(encoding="ascii")
+            .strip()
         ),
         collection_started_ts=collection_started_ts,
     )
@@ -569,6 +596,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=DEFAULT_EXCLUDED_CAPTURE_LEDGER,
     )
+    validate.add_argument(
+        "--supersession-governance",
+        type=Path,
+        default=DEFAULT_SUPERSESSION_GOVERNANCE,
+    )
     validate.add_argument("--collection-started-ts", type=int)
     _add_contract_args(validate)
 
@@ -615,6 +647,7 @@ def main(argv: list[str] | None = None) -> int:
             frozen_model_binding_path=args.frozen_model_binding,
             prefreeze_checklist_path=args.prefreeze_checklist,
             excluded_capture_ledger_path=args.excluded_capture_ledger,
+            supersession_governance_path=args.supersession_governance,
             historical_gate_contract_path=args.historical_gate_contract,
             historical_replay_report_path=args.historical_replay_report,
             collection_started_ts=args.collection_started_ts,

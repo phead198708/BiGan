@@ -51,8 +51,21 @@ def _sha256(name: str) -> str:
 
 
 def _validate_prefreeze_artifacts() -> None:
+    _validate_checklist(_json("challenge_prefreeze_checklist.json"))
+
+
+def _validate_checklist(
+    checklist: dict,
+    *,
+    excluded_capture_ledger: dict | None = None,
+) -> None:
+    ledger = (
+        excluded_capture_ledger
+        if excluded_capture_ledger is not None
+        else _json("challenge_prefreeze_excluded_capture_ledger.json")
+    )
     validate_prefreeze_checklist(
-        _json("challenge_prefreeze_checklist.json"),
+        checklist,
         candidate_contract=_contracts()["v8_1_primary_no_fallback"],
         candidate_contract_sha256=_sha256(
             "parallel_candidate_v8_1_primary_no_fallback_contract.json"
@@ -63,9 +76,7 @@ def _validate_prefreeze_artifacts() -> None:
         historical_replay_report_sha256=_sha256(
             "historical_replay_superiority_report.json"
         ),
-        excluded_capture_ledger=_json(
-            "challenge_prefreeze_excluded_capture_ledger.json"
-        ),
+        excluded_capture_ledger=ledger,
         excluded_capture_ledger_sha256=_sha256(
             "challenge_prefreeze_excluded_capture_ledger.json"
         ),
@@ -78,11 +89,15 @@ def _validate_prefreeze_artifacts() -> None:
         feature_missingness_runtime_schema_sha256=_sha256(
             "feature_missingness_runtime.schema.json"
         ),
+        promotion_evidence_protocol_sha256=_sha256(
+            "challenge_promotion_evidence_protocol.json"
+        ),
     )
 
 
-def _prefreeze_plan_kwargs() -> dict:
-    return {
+def _prefreeze_plan_kwargs(**overrides) -> dict:
+    values = {
+        "plan_sha256": _sha256("parallel_future_collection_plan.json"),
         "prefreeze_checklist_sha256": _sha256(
             "challenge_prefreeze_checklist.json"
         ),
@@ -101,7 +116,82 @@ def _prefreeze_plan_kwargs() -> dict:
         "feature_missingness_runtime_schema_sha256": _sha256(
             "feature_missingness_runtime.schema.json"
         ),
+        "promotion_evidence_protocol_sha256": _sha256(
+            "challenge_promotion_evidence_protocol.json"
+        ),
+        "supersession_governance": _json(
+            "challenge_supersession_governance.json"
+        ),
+        "supersession_governance_sha256": _sha256(
+            "challenge_supersession_governance.json"
+        ),
+        "expected_supersession_governance_sha256": (
+            CONFIG / "challenge_supersession_governance.sha256"
+        ).read_text(encoding="ascii").strip(),
     }
+    values.update(overrides)
+    return values
+
+
+def _validate_plan_fixture(
+    *,
+    plan: dict | None = None,
+    excluded_capture_ledger: dict | None = None,
+    **overrides,
+) -> None:
+    frozen_plan = (
+        plan
+        if plan is not None
+        else _json("parallel_future_collection_plan.json")
+    )
+    plan_kwargs = _prefreeze_plan_kwargs()
+    if excluded_capture_ledger is not None:
+        plan_kwargs["excluded_capture_ledger"] = (
+            excluded_capture_ledger
+        )
+    plan_kwargs.update(overrides)
+    validate_parallel_future_collection_plan(
+        frozen_plan,
+        protocol_sha256=_sha256("parallel_candidate_protocol.json"),
+        candidate_contract_sha256s={
+            candidate_id: _sha256(filename)
+            for candidate_id, filename in {
+                "v8_1_primary_no_fallback": (
+                    "parallel_candidate_v8_1_primary_no_fallback_contract.json"
+                ),
+                "v8_3_primary_with_fallback": (
+                    "parallel_candidate_v8_3_primary_with_fallback_contract.json"
+                ),
+                "matched_frozen_v6_7": (
+                    "parallel_candidate_matched_frozen_v6_7_contract.json"
+                ),
+            }.items()
+        },
+        collector_protocol_sha256=_sha256(
+            "execution_layer_v2_persistent_outcome_blind_collector_v1.json"
+        ),
+        feature_contract_sha256=_sha256(
+            "execution_layer_v2_pairwise_action_advantage_lcb_feature_contract_v1.json"
+        ),
+        frozen_model_binding_sha256=_sha256(
+            "parallel_frozen_v8_1_model_binding.json"
+        ),
+        frozen_model_binding=_json(
+            "parallel_frozen_v8_1_model_binding.json"
+        ),
+        candidate_contracts=_contracts(),
+        historical_gate_contract_sha256=_sha256(
+            "historical_replay_superiority_contract.json"
+        ),
+        historical_replay_report_sha256=_sha256(
+            "historical_replay_superiority_report.json"
+        ),
+        historical_replay_report=_json(
+            "historical_replay_superiority_report.json"
+        ),
+        collection_started_ts=frozen_plan["freeze_created_ts"] + 1,
+        **plan_kwargs,
+    )
 
 
 def _source_rows(count: int = 45):
@@ -306,30 +396,167 @@ def test_prefreeze_checklist_and_excluded_ledger_are_hash_pinned() -> None:
     )
 
 
-def test_collection_plan_lineage_has_no_downstream_protocol_hash_cycle() -> None:
+def test_supersession_governance_registry_is_hash_pinned_and_valid() -> None:
+    assert _sha256("challenge_supersession_governance.json") == (
+        CONFIG / "challenge_supersession_governance.sha256"
+    ).read_text(encoding="ascii").strip()
+    governance = _json("challenge_supersession_governance.json")
     plan = _json("parallel_future_collection_plan.json")
-    checklist = _json("challenge_prefreeze_checklist.json")
-
+    assert governance["attempt_id"] == plan["fresh_attempt_id"]
     assert (
-        "challenge_promotion_evidence_protocol_sha256"
-        not in plan["lineage"]
-    )
-    assert (
-        "challenge_promotion_evidence_protocol_sha256"
-        not in checklist["feature_completeness"]
-    )
-    assert (
-        _json("challenge_promotion_evidence_protocol.json")["lineage"][
-            "challenge_future_post_freeze_protocol_sha256"
-        ]
-        == _sha256("challenge_future_post_freeze_protocol.json")
-    )
-    assert (
-        _json("challenge_future_post_freeze_protocol.json")["lineage"][
-            "parallel_future_collection_plan_sha256"
-        ]
+        governance["parallel_future_collection_plan_sha256"]
         == _sha256("parallel_future_collection_plan.json")
     )
+    assert governance["max_total_supersessions_for_attempt"] == 5
+    assert governance["supersessions_consumed"] == 5
+    assert governance["additional_supersessions_allowed"] == 0
+    assert (
+        governance["attempt_exhaustion_policy"][
+            "further_supersession_of_attempt_allowed"
+        ]
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "blocker"),
+    [
+        (
+            "immediate_service_root_empty",
+            "immediate_superseded_plan_service_root",
+        ),
+        (
+            "immediate_service_root_reused",
+            "immediate_superseded_plan_service_root_reused",
+        ),
+        (
+            "immediate_collection_started_true",
+            "immediate_superseded_plan_collection_started",
+        ),
+        (
+            "immediate_collection_started_missing",
+            "immediate_superseded_plan_collection_started",
+        ),
+        (
+            "immediate_capture_count_nonzero",
+            "immediate_superseded_plan_capture_count",
+        ),
+        (
+            "immediate_capture_count_missing",
+            "immediate_superseded_plan_capture_count",
+        ),
+        (
+            "source_superseded_plan_sha256_missing",
+            "source_superseded_plan_sha256",
+        ),
+        (
+            "source_superseded_plan_sha256_malformed",
+            "source_superseded_plan_sha256",
+        ),
+    ],
+)
+def test_excluded_capture_ledger_metadata_fails_closed(
+    case: str,
+    blocker: str,
+) -> None:
+    ledger = _json("challenge_prefreeze_excluded_capture_ledger.json")
+    if case == "immediate_service_root_empty":
+        ledger["immediate_superseded_plan_service_root"] = ""
+    elif case == "immediate_service_root_reused":
+        ledger["immediate_superseded_plan_service_root"] = _json(
+            "parallel_future_collection_plan.json"
+        )["collection"]["service_root"]
+    elif case == "immediate_collection_started_true":
+        ledger["immediate_superseded_plan_collection_started"] = True
+    elif case == "immediate_collection_started_missing":
+        ledger.pop("immediate_superseded_plan_collection_started")
+    elif case == "immediate_capture_count_nonzero":
+        ledger["immediate_superseded_plan_capture_count"] = 1
+    elif case == "immediate_capture_count_missing":
+        ledger.pop("immediate_superseded_plan_capture_count")
+    else:
+        entry = next(
+            row
+            for row in ledger["entries"]
+            if row["entry_type"] == "superseded_plan_capture"
+        )
+        if case == "source_superseded_plan_sha256_missing":
+            entry.pop("source_superseded_plan_sha256")
+        else:
+            entry["source_superseded_plan_sha256"] = "not-a-sha256"
+
+    if case == "immediate_service_root_reused":
+        with pytest.raises(ParallelFutureGateError, match=blocker):
+            _validate_plan_fixture(excluded_capture_ledger=ledger)
+    else:
+        with pytest.raises(ChallengePrefreezeError, match=blocker):
+            validate_excluded_capture_ledger(ledger)
+
+
+def test_collection_plan_rejects_missing_supersession_governance() -> None:
+    with pytest.raises(
+        ParallelFutureGateError,
+        match="supersession_governance_missing",
+    ):
+        _validate_plan_fixture(supersession_governance=None)
+
+
+def test_collection_plan_rejects_governance_hash_mismatch() -> None:
+    with pytest.raises(
+        ParallelFutureGateError,
+        match="supersession_governance_hash_mismatch",
+    ):
+        _validate_plan_fixture(
+            supersession_governance_sha256="0" * 64
+        )
+
+
+def test_collection_plan_rejects_exhausted_sixth_supersession() -> None:
+    plan = _json("parallel_future_collection_plan.json")
+    ledger = _json("challenge_prefreeze_excluded_capture_ledger.json")
+    current_plan_sha256 = _sha256(
+        "parallel_future_collection_plan.json"
+    )
+    prior_service_root = plan["collection"]["service_root"]
+    plan["collection"]["service_root"] = (
+        "examples/v8/polymarket_live_runs/"
+        "challenge-model-v8-5-prohibited-sixth-attempt"
+    )
+    plan["supersession"]["sequence_number"] = 6
+    plan["supersession"][
+        "superseded_collection_plan_sha256"
+    ] = current_plan_sha256
+    plan["supersession"]["full_supersession_chain_sha256s"].append(
+        current_plan_sha256
+    )
+    plan["supersession"]["reason"] = (
+        "provider_health_or_feature_completeness_gap"
+    )
+    plan["lineage"][
+        "challenge_supersession_governance_sha256"
+    ] = _sha256("challenge_supersession_governance.json")
+    ledger["superseded_collection_plan_sha256"] = current_plan_sha256
+    ledger["immediate_superseded_plan_service_root"] = prior_service_root
+
+    with pytest.raises(
+        ParallelFutureGateError,
+        match="supersession_budget_exhausted",
+    ):
+        _validate_plan_fixture(
+            plan=plan,
+            excluded_capture_ledger=ledger,
+            plan_sha256="e" * 64,
+        )
+
+
+def test_collection_plan_rejects_unregistered_supersession_reason() -> None:
+    plan = _json("parallel_future_collection_plan.json")
+    plan["supersession"]["reason"] = "performance_was_disappointing"
+    with pytest.raises(
+        ParallelFutureGateError,
+        match="supersession_reason_not_registered",
+    ):
+        _validate_plan_fixture(plan=plan)
 
 
 def test_prefreeze_checklist_rejects_caller_asserted_authorization() -> None:
@@ -363,46 +590,76 @@ def test_prefreeze_checklist_rejects_caller_asserted_authorization() -> None:
             feature_missingness_runtime_schema_sha256=_sha256(
                 "feature_missingness_runtime.schema.json"
             ),
+            promotion_evidence_protocol_sha256=_sha256(
+                "challenge_promotion_evidence_protocol.json"
+            ),
         )
 
 
-def test_prefreeze_checklist_rejects_provider_health_contract_drift() -> None:
+@pytest.mark.parametrize(
+    ("field", "drifted_value", "blocker"),
+    [
+        (
+            "persistent_collector_protocol_sha256",
+            "0" * 64,
+            "persistent_collector_protocol_sha256",
+        ),
+        (
+            "feature_missingness_contract_sha256",
+            "0" * 64,
+            "feature_missingness_contract_sha256",
+        ),
+        (
+            "feature_missingness_runtime_schema_sha256",
+            "0" * 64,
+            "feature_missingness_runtime_schema_sha256",
+        ),
+        (
+            "challenge_promotion_evidence_protocol_sha256",
+            "0" * 64,
+            "challenge_promotion_evidence_protocol_sha256",
+        ),
+        (
+            "full_round_trade_tape_collection_implemented",
+            False,
+            "full_round_trade_tape_collection_implemented",
+        ),
+        (
+            "full_round_trade_tape_collection_tested",
+            False,
+            "full_round_trade_tape_collection_tested",
+        ),
+        (
+            "per_round_provider_health_rows_required",
+            False,
+            "per_round_provider_health_rows_required",
+        ),
+        (
+            "batch_provider_health_diagnostics_required",
+            False,
+            "batch_provider_health_diagnostics_required",
+        ),
+        (
+            "legacy_and_frozen_model_inputs_unchanged",
+            False,
+            "legacy_and_frozen_model_inputs_unchanged",
+        ),
+        (
+            "outcomes_labels_settlement_returns_or_pnl_opened",
+            True,
+            "feature_completeness_target_access",
+        ),
+    ],
+)
+def test_prefreeze_checklist_rejects_every_feature_completeness_drift(
+    field: str,
+    drifted_value: object,
+    blocker: str,
+) -> None:
     checklist = _json("challenge_prefreeze_checklist.json")
-    checklist["feature_completeness"][
-        "feature_missingness_runtime_schema_sha256"
-    ] = "0" * 64
-    with pytest.raises(
-        ChallengePrefreezeError,
-        match="feature_missingness_runtime_schema_sha256",
-    ):
-        validate_prefreeze_checklist(
-            checklist,
-            candidate_contract=_contracts()["v8_1_primary_no_fallback"],
-            candidate_contract_sha256=_sha256(
-                "parallel_candidate_v8_1_primary_no_fallback_contract.json"
-            ),
-            historical_replay_report=_json(
-                "historical_replay_superiority_report.json"
-            ),
-            historical_replay_report_sha256=_sha256(
-                "historical_replay_superiority_report.json"
-            ),
-            excluded_capture_ledger=_json(
-                "challenge_prefreeze_excluded_capture_ledger.json"
-            ),
-            excluded_capture_ledger_sha256=_sha256(
-                "challenge_prefreeze_excluded_capture_ledger.json"
-            ),
-            collector_protocol_sha256=_sha256(
-                "execution_layer_v2_persistent_outcome_blind_collector_v1.json"
-            ),
-            feature_missingness_contract_sha256=_sha256(
-                "feature_missingness_contract.json"
-            ),
-            feature_missingness_runtime_schema_sha256=_sha256(
-                "feature_missingness_runtime.schema.json"
-            ),
-        )
+    checklist["feature_completeness"][field] = drifted_value
+    with pytest.raises(ChallengePrefreezeError, match=blocker):
+        _validate_checklist(checklist)
 
 
 def test_frozen_binding_candidate_name_is_derived_from_contracts() -> None:

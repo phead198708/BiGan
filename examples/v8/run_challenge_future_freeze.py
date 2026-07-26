@@ -54,6 +54,9 @@ DEFAULT_PREFREEZE_CHECKLIST = (
 DEFAULT_EXCLUDED_CAPTURE_LEDGER = (
     CONFIG_DIR / "challenge_prefreeze_excluded_capture_ledger.json"
 )
+DEFAULT_SUPERSESSION_GOVERNANCE = (
+    CONFIG_DIR / "challenge_supersession_governance.json"
+)
 DEFAULT_COLLECTOR_PROTOCOL = (
     CONFIG_DIR
     / "execution_layer_v2_persistent_outcome_blind_collector_v1.json"
@@ -91,14 +94,25 @@ def _git_head_and_clean() -> str:
     return head
 
 
-def _expected_plan_sha256(path: Path) -> str:
+def _expected_artifact_sha256(
+    path: Path,
+    *,
+    artifact_name: str,
+) -> str:
     sidecar = path.with_suffix(".sha256")
     if not sidecar.is_file():
-        raise ValueError(f"collection plan sidecar missing: {sidecar}")
+        raise ValueError(f"{artifact_name} sidecar missing: {sidecar}")
     value = sidecar.read_text(encoding="utf-8").strip().split()[0]
     if _sha256_file(path) != value.lower():
-        raise ValueError("collection plan SHA-256 sidecar mismatch")
+        raise ValueError(f"{artifact_name} SHA-256 sidecar mismatch")
     return value.lower()
+
+
+def _expected_plan_sha256(path: Path) -> str:
+    return _expected_artifact_sha256(
+        path,
+        artifact_name="collection plan",
+    )
 
 
 def _status(args: argparse.Namespace) -> dict:
@@ -176,6 +190,13 @@ def _freeze(args: argparse.Namespace) -> dict:
         excluded_capture_ledger_path=args.excluded_capture_ledger,
         expected_excluded_capture_ledger_sha256=str(
             plan["lineage"]["excluded_capture_ledger_sha256"]
+        ),
+        supersession_governance_path=args.supersession_governance,
+        expected_supersession_governance_sha256=(
+            _expected_artifact_sha256(
+                args.supersession_governance.resolve(),
+                artifact_name="supersession governance",
+            )
         ),
         historical_fit_manifest_path=args.historical_fit_manifest,
         expected_historical_fit_manifest_sha256=str(
@@ -273,6 +294,11 @@ def main(argv: list[str] | None = None) -> int:
         "--excluded-capture-ledger",
         type=Path,
         default=DEFAULT_EXCLUDED_CAPTURE_LEDGER,
+    )
+    freeze.add_argument(
+        "--supersession-governance",
+        type=Path,
+        default=DEFAULT_SUPERSESSION_GOVERNANCE,
     )
     freeze.add_argument(
         "--historical-fit-manifest",

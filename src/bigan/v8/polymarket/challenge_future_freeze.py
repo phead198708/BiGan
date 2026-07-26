@@ -117,6 +117,8 @@ class ChallengeFutureFreezeConfig:
     expected_prefreeze_checklist_sha256: str
     excluded_capture_ledger_path: Path | str
     expected_excluded_capture_ledger_sha256: str
+    supersession_governance_path: Path | str
+    expected_supersession_governance_sha256: str
     historical_fit_manifest_path: Path | str
     expected_historical_fit_manifest_sha256: str
     collector_protocol_path: Path | str
@@ -155,6 +157,7 @@ class ChallengeFutureFreezeConfig:
             "historical_replay_report_path",
             "prefreeze_checklist_path",
             "excluded_capture_ledger_path",
+            "supersession_governance_path",
             "historical_fit_manifest_path",
             "collector_protocol_path",
             "feature_contract_path",
@@ -173,6 +176,7 @@ class ChallengeFutureFreezeConfig:
             "expected_historical_replay_report_sha256",
             "expected_prefreeze_checklist_sha256",
             "expected_excluded_capture_ledger_sha256",
+            "expected_supersession_governance_sha256",
             "expected_historical_fit_manifest_sha256",
             "expected_collector_protocol_sha256",
             "expected_feature_contract_sha256",
@@ -562,6 +566,9 @@ def run_challenge_future_target_free_freeze(
         "excluded_capture_ledger": (
             config.excluded_capture_ledger_path.resolve()
         ),
+        "supersession_governance": (
+            config.supersession_governance_path.resolve()
+        ),
         "historical_fit_manifest": config.historical_fit_manifest_path.resolve(),
         "collector_protocol": config.collector_protocol_path.resolve(),
         "feature_contract": config.feature_contract_path.resolve(),
@@ -585,6 +592,9 @@ def run_challenge_future_target_free_freeze(
         ),
         "excluded_capture_ledger": (
             config.expected_excluded_capture_ledger_sha256
+        ),
+        "supersession_governance": (
+            config.expected_supersession_governance_sha256
         ),
         "historical_fit_manifest": (
             config.expected_historical_fit_manifest_sha256
@@ -612,6 +622,9 @@ def run_challenge_future_target_free_freeze(
     historical_report = _load_json(paths["historical_report"])
     prefreeze_checklist = _load_json(paths["prefreeze_checklist"])
     excluded_capture_ledger = _load_json(paths["excluded_capture_ledger"])
+    supersession_governance = _load_json(
+        paths["supersession_governance"]
+    )
     fit_manifest = _load_json(paths["historical_fit_manifest"])
     v8_3_profile = _load_json(paths["v8_3_profile"])
     config_dir = paths["plan"].parent
@@ -626,6 +639,7 @@ def run_challenge_future_target_free_freeze(
     )
     validate_parallel_future_collection_plan(
         plan,
+        plan_sha256=pins["plan"].lower(),
         protocol_sha256=pins["protocol"].lower(),
         candidate_contract_sha256s=candidate_hashes,
         collector_protocol_sha256=pins["collector_protocol"].lower(),
@@ -635,6 +649,9 @@ def run_challenge_future_target_free_freeze(
         ),
         feature_missingness_runtime_schema_sha256=_sha256_file(
             config_dir / "feature_missingness_runtime.schema.json"
+        ),
+        promotion_evidence_protocol_sha256=_sha256_file(
+            config_dir / "challenge_promotion_evidence_protocol.json"
         ),
         frozen_model_binding_sha256=pins["binding"].lower(),
         frozen_model_binding=binding,
@@ -650,6 +667,13 @@ def run_challenge_future_target_free_freeze(
         ].lower(),
         historical_replay_report_sha256=pins["historical_report"].lower(),
         historical_replay_report=historical_report,
+        supersession_governance=supersession_governance,
+        supersession_governance_sha256=pins[
+            "supersession_governance"
+        ].lower(),
+        expected_supersession_governance_sha256=pins[
+            "supersession_governance"
+        ].lower(),
     )
     if (
         str(plan["collection"]["service_root"])

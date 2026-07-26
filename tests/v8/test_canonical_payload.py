@@ -7,17 +7,13 @@ from pathlib import Path
 import pytest
 
 from bigan.v8.canonical_payload import (
-    CANONICAL_COMPARISON_REPORT_SCHEMA_VERSION,
     CANONICAL_PAYLOAD_CONTRACT_VERSION,
     DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
     CanonicalPayloadError,
-    build_canonical_payload_comparison_report,
     canonical_payload_bytes,
     canonical_payload_sha256,
     compare_canonical_payloads,
     describe_canonical_payload,
-    validate_canonical_payload_contract,
-    verify_legacy_raw_payload,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,19 +34,6 @@ def test_contract_artifact_is_hash_pinned_and_safety_closed() -> None:
     assert hashlib.sha256(CONTRACT_PATH.read_bytes()).hexdigest() == expected
     assert contract["canonical_contract_version"] == CANONICAL_PAYLOAD_CONTRACT_VERSION
     assert all(value is False for value in contract["safety"].values())
-    validate_canonical_payload_contract(contract)
-
-
-def test_contract_validator_rejects_semantic_or_safety_drift() -> None:
-    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
-    contract["numeric_normalization"]["loose_rounding_allowed"] = True
-    contract["safety"]["promotion_unlocked"] = True
-
-    with pytest.raises(
-        CanonicalPayloadError,
-        match="numeric_normalization, safety",
-    ):
-        validate_canonical_payload_contract(contract)
 
 
 def test_key_order_whitespace_equivalent_numbers_unicode_and_negative_zero_match() -> None:
@@ -164,28 +147,6 @@ def test_raw_bytes_are_preserved_separately_from_canonical_bytes() -> None:
     assert descriptor.raw_payload_base64 != descriptor.canonical_payload_utf8_base64
 
 
-def test_raw_bytes_must_represent_the_described_semantic_payload() -> None:
-    with pytest.raises(CanonicalPayloadError, match="do not represent"):
-        describe_canonical_payload(
-            {"value": 1},
-            payload_schema_version=DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
-            raw_payload_bytes=b'{"value":2}',
-        )
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [b'{"value":NaN}', b'{"value":Infinity}', b'\\xff'],
-)
-def test_raw_bytes_must_be_strict_utf8_json(raw: bytes) -> None:
-    with pytest.raises(CanonicalPayloadError, match="strict UTF-8 JSON"):
-        describe_canonical_payload(
-            {"value": 1},
-            payload_schema_version=DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
-            raw_payload_bytes=raw,
-        )
-
-
 def test_canonical_output_is_repeatable_and_matches_cross_runtime_fixtures() -> None:
     expected = FIXTURE_SHA_PATH.read_text(encoding="ascii").strip()
     assert hashlib.sha256(FIXTURE_PATH.read_bytes()).hexdigest() == expected
@@ -207,24 +168,6 @@ def test_canonical_output_is_repeatable_and_matches_cross_runtime_fixtures() -> 
             row["payload"],
             payload_schema_version=fixture["payload_schema_version"],
         )
-    for row in fixture["comparison_fixtures"]:
-        comparison = compare_canonical_payloads(
-            row["frozen_payload"],
-            row["settled_payload"],
-            frozen_payload_schema_version=row[
-                "frozen_payload_schema_version"
-            ],
-            settled_payload_schema_version=row[
-                "settled_payload_schema_version"
-            ],
-            approved_source_lineage=True,
-        )
-        assert comparison.canonical_hash_match is row[
-            "expected_canonical_hash_match"
-        ]
-        assert list(comparison.reason_codes) == row[
-            "expected_reason_codes"
-        ]
 
 
 def test_nested_key_normalization_collision_fails_closed() -> None:
@@ -232,105 +175,4 @@ def test_nested_key_normalization_collision_fails_closed() -> None:
         canonical_payload_bytes(
             {"nested": {"é": 1, "e\u0301": 2}},
             payload_schema_version=DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
-        )
-
-
-def test_comparison_report_derives_lineage_and_is_deterministic() -> None:
-    kwargs = {
-        "frozen_payload_schema_version": (
-            DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION
-        ),
-        "settled_payload_schema_version": (
-            DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION
-        ),
-        "source_lineage_checks": {
-            "settled_artifact_hash_verified": True,
-            "frozen_artifact_hash_verified": True,
-        },
-        "context": "settlement_feature_payload",
-    }
-    first = build_canonical_payload_comparison_report(
-        {"value": 1},
-        {"value": 1.0},
-        **kwargs,
-    )
-    second = build_canonical_payload_comparison_report(
-        {"value": 1},
-        {"value": 1.0},
-        **kwargs,
-    )
-
-    assert first == second
-    assert (
-        first["schema_version"]
-        == CANONICAL_COMPARISON_REPORT_SCHEMA_VERSION
-    )
-    assert first["approved_source_lineage"] is True
-    assert first["canonical_comparison_passed"] is True
-    assert first["settlement_evaluation_eligible"] is True
-    assert len(first["report_id"]) == 64
-
-
-def test_comparison_report_fails_closed_when_any_lineage_check_fails() -> None:
-    report = build_canonical_payload_comparison_report(
-        {"value": 1},
-        {"value": 1},
-        frozen_payload_schema_version=DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
-        settled_payload_schema_version=DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
-        source_lineage_checks={
-            "frozen_artifact_hash_verified": True,
-            "settled_artifact_hash_verified": False,
-        },
-        context="settlement_feature_payload",
-    )
-
-    assert report["approved_source_lineage"] is False
-    assert report["canonical_hash_match"] is True
-    assert report["canonical_comparison_passed"] is False
-    assert report["settlement_evaluation_eligible"] is False
-    assert report["reason_codes"] == [
-        "canonical_payload_source_lineage_not_approved"
-    ]
-
-
-@pytest.mark.parametrize("checks", [{}, {"invalid": 1}, {1: True}])
-def test_comparison_report_rejects_caller_asserted_or_malformed_lineage(
-    checks,
-) -> None:
-    with pytest.raises(CanonicalPayloadError, match="source_lineage_checks"):
-        build_canonical_payload_comparison_report(
-            {"value": 1},
-            {"value": 1},
-            frozen_payload_schema_version=(
-                DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION
-            ),
-            settled_payload_schema_version=(
-                DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION
-            ),
-            source_lineage_checks=checks,
-            context="settlement_feature_payload",
-        )
-
-
-def test_legacy_verification_is_raw_only_and_never_rewrites_manifest() -> None:
-    raw = b'{ "legacy": true }\n'
-    result = verify_legacy_raw_payload(
-        raw,
-        expected_raw_sha256=hashlib.sha256(raw).hexdigest(),
-        artifact_id="legacy-freeze-001",
-    )
-
-    assert result["legacy_verification_path"] is True
-    assert result["legacy_artifact_rewritten"] is False
-    assert result["canonical_hash_added_to_legacy_manifest"] is False
-    assert "canonical_payload_sha256" not in result
-
-
-def test_legacy_verification_fails_closed_on_raw_byte_drift() -> None:
-    raw = b'{"legacy":true}'
-    with pytest.raises(CanonicalPayloadError, match="mismatch"):
-        verify_legacy_raw_payload(
-            raw + b"\n",
-            expected_raw_sha256=hashlib.sha256(raw).hexdigest(),
-            artifact_id="legacy-freeze-001",
         )

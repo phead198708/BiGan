@@ -16,6 +16,9 @@ PARALLEL_PROTOCOL_SCHEMA_VERSION = "bigan-v8-parallel-candidate-protocol-v1"
 PARALLEL_COLLECTION_PLAN_SCHEMA_VERSION = (
     "bigan-v8-parallel-future-collection-plan-v1"
 )
+SUPERSESSION_GOVERNANCE_SCHEMA_VERSION = (
+    "bigan-v8-challenge-supersession-governance-v1"
+)
 PARALLEL_FREEZE_SCHEMA_VERSION = "bigan-v8-parallel-target-free-freeze-v1"
 PARALLEL_EVALUATION_SCHEMA_VERSION = "bigan-v8-parallel-future-evaluation-v1"
 DECISION_STREAM_SCHEMA_VERSION = "bigan-v8-parallel-candidate-decision-stream-v1"
@@ -52,12 +55,14 @@ class ParallelFutureGateError(ValueError):
 def validate_parallel_future_collection_plan(
     plan: dict[str, Any],
     *,
+    plan_sha256: str,
     protocol_sha256: str,
     candidate_contract_sha256s: dict[str, str],
     collector_protocol_sha256: str,
     feature_contract_sha256: str,
     feature_missingness_contract_sha256: str,
     feature_missingness_runtime_schema_sha256: str,
+    promotion_evidence_protocol_sha256: str,
     frozen_model_binding_sha256: str,
     frozen_model_binding: dict[str, Any],
     candidate_contracts: dict[str, dict[str, Any]],
@@ -68,6 +73,9 @@ def validate_parallel_future_collection_plan(
     historical_gate_contract_sha256: str,
     historical_replay_report_sha256: str,
     historical_replay_report: dict[str, Any],
+    supersession_governance: dict[str, Any] | None,
+    supersession_governance_sha256: str,
+    expected_supersession_governance_sha256: str,
     collection_started_ts: int | None = None,
 ) -> None:
     """Validate the immutable, pre-collection instance of the parallel gate."""
@@ -88,6 +96,130 @@ def validate_parallel_future_collection_plan(
     ):
         blockers.append("collection_not_strictly_later")
 
+    governance = (
+        dict(supersession_governance)
+        if isinstance(supersession_governance, dict)
+        and supersession_governance
+        else {}
+    )
+    if not governance:
+        blockers.append("supersession_governance_missing")
+    if (
+        not _is_sha256(supersession_governance_sha256)
+        or not _is_sha256(expected_supersession_governance_sha256)
+        or supersession_governance_sha256.lower()
+        != expected_supersession_governance_sha256.lower()
+    ):
+        blockers.append("supersession_governance_hash_mismatch")
+    if governance:
+        if (
+            governance.get("schema_version")
+            != SUPERSESSION_GOVERNANCE_SCHEMA_VERSION
+            or governance.get("issue") != 254
+            or governance.get("frozen") is not True
+            or governance.get("preregistered_before_batch_1") is not True
+        ):
+            blockers.append("supersession_governance_contract")
+        if (
+            governance.get("attempt_id") != plan.get("fresh_attempt_id")
+            or not _is_sha256(
+                governance.get(
+                    "parallel_future_collection_plan_sha256"
+                )
+            )
+        ):
+            blockers.append("supersession_governance_attempt_binding")
+        reason_codes = governance.get("allowed_supersession_reason_codes")
+        if (
+            not isinstance(reason_codes, list)
+            or not reason_codes
+            or not all(
+                isinstance(value, str) and value
+                for value in reason_codes
+            )
+            or len(reason_codes) != len(set(reason_codes))
+        ):
+            blockers.append("supersession_governance_reason_codes")
+        reason_policy = dict(
+            governance.get("supersession_reason_policy") or {}
+        )
+        if (
+            reason_policy.get("closed_enumeration") is not True
+            or reason_policy.get("infrastructure_only") is not True
+            or reason_policy.get("market_condition_reason_allowed")
+            is not False
+            or reason_policy.get("outcome_related_reason_allowed")
+            is not False
+            or reason_policy.get("performance_related_reason_allowed")
+            is not False
+        ):
+            blockers.append("supersession_governance_reason_policy")
+        exhaustion = dict(
+            governance.get("attempt_exhaustion_policy") or {}
+        )
+        if (
+            exhaustion.get("further_supersession_of_attempt_allowed")
+            is not False
+            or exhaustion.get("new_issue_required") is not True
+            or exhaustion.get(
+                "alpha_spending_review_required_before_new_attempt_preregistration"
+            )
+            is not True
+            or exhaustion.get("only_allowed_path")
+            != (
+                "close_attempt_001_via_new_issue_then_record_alpha_spending_review_"
+                "before_new_attempt_preregistration"
+            )
+        ):
+            blockers.append("supersession_governance_attempt_exhaustion")
+        checklist_versioning = dict(
+            governance.get("checklist_schema_versioning") or {}
+        )
+        if (
+            checklist_versioning.get(
+                "new_mandatory_prerequisite_requires_schema_version_bump"
+            )
+            is not True
+            or checklist_versioning.get(
+                "future_freeze_must_validate_latest_checklist_schema_version"
+            )
+            is not True
+            or checklist_versioning.get(
+                "consecutive_corrective_supersessions_trigger"
+            )
+            != 2
+            or checklist_versioning.get(
+                "mandatory_full_prerequisite_inventory_before_further_freeze"
+            )
+            is not True
+        ):
+            blockers.append(
+                "supersession_governance_checklist_versioning"
+            )
+        governance_safety = dict(governance.get("safety") or {})
+        expected_governance_safety_fields = {
+            "collection_start_authorized",
+            "paper_candidate_allowed",
+            "live_trading_enabled",
+            "capital_at_risk",
+            "polymarket_write_enabled",
+            "wallet_signing_enabled",
+            "v8_execution_handoff_allowed",
+            "source_model_candidate_eligible",
+            "freeze_ready",
+            "promotion_evidence_eligible",
+            "#134_resume_allowed",
+            "#146_start_allowed",
+        }
+        if (
+            set(governance_safety) != expected_governance_safety_fields
+            or any(
+                value is not False
+                for value in governance_safety.values()
+            )
+        ):
+            blockers.append("supersession_governance_safety")
+
     lineage = dict(plan.get("lineage") or {})
     implementation_commit = str(lineage.get("implementation_commit") or "")
     if len(implementation_commit) != 40 or any(
@@ -104,6 +236,9 @@ def validate_parallel_future_collection_plan(
         "feature_missingness_runtime_schema_sha256": (
             feature_missingness_runtime_schema_sha256
         ),
+        "challenge_promotion_evidence_protocol_sha256": (
+            promotion_evidence_protocol_sha256
+        ),
         "frozen_model_binding_sha256": frozen_model_binding_sha256,
         "prefreeze_checklist_sha256": prefreeze_checklist_sha256,
         "excluded_capture_ledger_sha256": excluded_capture_ledger_sha256,
@@ -111,6 +246,25 @@ def validate_parallel_future_collection_plan(
     for name, expected in expected_lineage.items():
         if str(lineage.get(name) or "").lower() != expected.lower():
             blockers.append(name)
+    governed_plan_sha256 = str(
+        governance.get("parallel_future_collection_plan_sha256") or ""
+    ).lower()
+    is_governed_frozen_plan = (
+        _is_sha256(plan_sha256)
+        and plan_sha256.lower() == governed_plan_sha256
+    )
+    if (
+        governance
+        and not is_governed_frozen_plan
+        and str(
+            lineage.get(
+                "challenge_supersession_governance_sha256"
+            )
+            or ""
+        ).lower()
+        != supersession_governance_sha256.lower()
+    ):
+        blockers.append("supersession_governance_future_lineage_pin")
     frozen_candidate_hashes = dict(
         lineage.get("candidate_contract_sha256s") or {}
     )
@@ -253,33 +407,62 @@ def validate_parallel_future_collection_plan(
     prior_plan_sha256 = str(
         supersession.get("superseded_collection_plan_sha256") or ""
     )
-    if len(prior_plan_sha256) != 64:
+    if not _is_sha256(prior_plan_sha256):
         blockers.append("superseded_collection_plan_sha256")
-    if supersession.get("sequence_number") != 6:
-        blockers.append("supersession_sequence_number")
     if supersession.get("corrective_prerequisite_supersession") is not True:
         blockers.append("corrective_prerequisite_supersession")
-    if supersession.get("prior_plan_was_marked_fourth_and_final") is not False:
-        blockers.append("prior_plan_was_marked_fourth_and_final")
-    if supersession.get("fourth_and_final_supersession") is not False:
-        blockers.append("fourth_and_final_supersession")
     if supersession.get("prior_plan_collection_started") is not False:
         blockers.append("prior_plan_collection_started")
     if int(supersession.get("prior_plan_capture_count", -1)) != 0:
         blockers.append("prior_plan_capture_count")
-    if supersession.get("reason") != (
-        "remove_downstream_protocol_hash_cycle_and_bind_issue_259_before_collection"
-    ):
-        blockers.append("supersession_reason")
     chain = supersession.get("full_supersession_chain_sha256s")
+    sequence_number = supersession.get("sequence_number")
     if (
         not isinstance(chain, list)
-        or len(chain) != 6
+        or not chain
         or chain[-1:] != [prior_plan_sha256]
-        or len(set(chain)) != 6
+        or len(set(chain)) != len(chain)
         or not all(_is_sha256(value) for value in chain)
     ):
-        blockers.append("full_supersession_chain")
+        blockers.append("supersession_chain_not_strictly_monotonic")
+    if (
+        not isinstance(sequence_number, int)
+        or isinstance(sequence_number, bool)
+        or not isinstance(chain, list)
+        or sequence_number != len(chain)
+    ):
+        blockers.append("supersession_sequence_number")
+    registered_reasons = {
+        value
+        for value in (
+            governance.get("allowed_supersession_reason_codes") or ()
+        )
+        if isinstance(value, str)
+    }
+    if supersession.get("reason") not in registered_reasons:
+        blockers.append("supersession_reason_not_registered")
+    max_supersessions = governance.get(
+        "max_total_supersessions_for_attempt"
+    )
+    consumed_supersessions = governance.get("supersessions_consumed")
+    if (
+        not isinstance(max_supersessions, int)
+        or isinstance(max_supersessions, bool)
+        or max_supersessions <= 0
+        or not isinstance(consumed_supersessions, int)
+        or isinstance(consumed_supersessions, bool)
+        or consumed_supersessions != max_supersessions
+        or governance.get("additional_supersessions_allowed") != 0
+        or governance.get("supersession_chain_order")
+        != "oldest_to_newest"
+    ):
+        blockers.append("supersession_governance_budget")
+    elif (
+        not isinstance(sequence_number, int)
+        or sequence_number > max_supersessions
+        or not is_governed_frozen_plan
+    ):
+        blockers.append("supersession_budget_exhausted")
     if (
         excluded_capture_ledger.get("superseded_collection_plan_sha256")
         != prior_plan_sha256
@@ -368,6 +551,9 @@ def validate_parallel_future_collection_plan(
             ),
             feature_missingness_runtime_schema_sha256=(
                 feature_missingness_runtime_schema_sha256
+            ),
+            promotion_evidence_protocol_sha256=(
+                promotion_evidence_protocol_sha256
             ),
         )
     except ChallengePrefreezeError:
@@ -987,6 +1173,7 @@ __all__ = [
     "PARALLEL_EVALUATION_SCHEMA_VERSION",
     "PARALLEL_FREEZE_SCHEMA_VERSION",
     "PARALLEL_PROTOCOL_SCHEMA_VERSION",
+    "SUPERSESSION_GOVERNANCE_SCHEMA_VERSION",
     "ParallelFutureGateError",
     "build_parallel_target_free_freeze",
     "evaluate_parallel_future_gate",

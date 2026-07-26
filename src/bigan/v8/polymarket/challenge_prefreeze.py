@@ -132,6 +132,7 @@ def validate_prefreeze_checklist(
     collector_protocol_sha256: str,
     feature_missingness_contract_sha256: str,
     feature_missingness_runtime_schema_sha256: str,
+    promotion_evidence_protocol_sha256: str,
 ) -> None:
     """Validate all technical prerequisites without authorizing collection."""
 
@@ -205,6 +206,9 @@ def validate_prefreeze_checklist(
         ),
         "feature_missingness_runtime_schema_sha256": (
             feature_missingness_runtime_schema_sha256
+        ),
+        "challenge_promotion_evidence_protocol_sha256": (
+            promotion_evidence_protocol_sha256
         ),
     }
     if feature_completeness.get("issue") != 257:
