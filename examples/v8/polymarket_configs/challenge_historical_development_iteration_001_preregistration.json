@@ -1,0 +1,62 @@
+{
+  "candidate_count": 1,
+  "candidate_id": "v8_1_entry_price_floor_0_30",
+  "candidate_specification": {
+    "base_candidate_id": "v8_1_primary_no_fallback",
+    "base_controller_state_transition_changed": false,
+    "cost_model_changed": false,
+    "entry_price_floor_inclusive": 0.3,
+    "entry_price_source": "matched_outcome_blind_five_action_row.decision_time_features.execution_price",
+    "filter_application_order": "after_v8_1_controller_and_full_guard_before_final_trade",
+    "fixed_position_size": 0.2,
+    "kept_trade_action_side_and_lifecycle_unchanged": true,
+    "missing_or_nonfinite_entry_price_behavior": "fail_closed_to_no_trade",
+    "position_sizing_changed": false,
+    "price_floor_source": "existing_v7_paper_runtime_min_entry_price_not_exact_195_grid_search",
+    "veto_action": "NO_TRADE",
+    "veto_pnl": 0.0
+  },
+  "change_description": "Add one terminal decision-time execution-price floor to trades already accepted by frozen v8.1: keep the original action only when execution_price is at least 0.30; otherwise emit NO_TRADE. Do not change the v8.1 controller, model scores, cost model, lifecycle, or fixed 0.2 position size.",
+  "changed_components": [
+    "feature",
+    "threshold"
+  ],
+  "development_corpus_registry_sha256": "dd4926b24bbe2b80bb127c5af861f62e432131469bfc202248d85ec4a1380fd4",
+  "evaluation_started": false,
+  "expected_mechanism": "A decision-time minimum executable price should suppress cheap-contract tail and settlement-residual exposure while retaining higher-price accepted trades. Because the only retained UP trade in the registered diagnostic is above the floor, the filter may also reduce the observed DOWN-side concentration. This is a development hypothesis, not promotion evidence.",
+  "grid_search": false,
+  "implementation_commit": "b87537b5a4db20ef39d928f9287731ecfdbdd89e",
+  "implementation_commit_role": "prechange_base_commit",
+  "input_artifact_sha256s": {
+    "base_v8_1_guard_replay": "7534b07c41d1a1f2afe3519e7eef9146c9b84bdda72f88a22b9d0351baa9ce2d",
+    "base_v8_1_market_comparison": "fce95987a10b160d7a7e6cdfd3842cc3e3b34dd138eb27093fb9f86b0a790eae",
+    "base_v8_1_model_artifact": "b92d2c087de20fbc6e6a142f13e0e48e14ecc25915cf318b485dc2927f958772",
+    "base_v8_1_profile": "1c808195fab5aea976429f4ab0fb46d69a29a4bbb705313d138a9ce8d3d19abf",
+    "base_v8_1_runtime_decisions": "5e06a6690a01cf3f51331264e37fe744570c1f765d1c564ab3f229a67c088071",
+    "base_v8_1_runtime_targets": "f589421b7b483b9cfc42a486ddc484743f4114250f7c3c363586786a836fcb3e",
+    "exact_195_chronological_market_ids": "fef9eda7b8dac138b88c75f96b010bd40953795b2bcf7424debf77a004e06883",
+    "exact_195_five_action_rows": "134425d9f38ffdebbf72043a8b802e95bbb87eebbe7e8d39bfa5d6f8b98828f7",
+    "existing_v7_paper_runtime_script": "da922c060a4cbd47c7cdffea7e00fea5a3a0e03667e49c0b0e21e8e9acc65ac2"
+  },
+  "iteration_number": 1,
+  "ledger_root_sha256": "2bdbbb1ee0f8694b7be3f5fa485a3591662daa906e1edfc316db92f538fc894a",
+  "mechanistic_rationale": "The registered diagnostic shows that v8.1 already derives its paired advantage from avoiding v6.7 losses, while retained trades remain exposed to full fixed-size downside and are heavily DOWN-concentrated. Execution price is timestamp-safe and available in the matched five-action row before the decision. A terminal 0.30 floor reuses an established runtime safety boundary and adds a single interpretable second-stage risk screen without tuning a threshold grid on exact-195 outcomes.",
+  "nominal_one_sided_development_alpha": 0.025,
+  "outcome_aware_replay_started": false,
+  "previous_iteration_entry_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "preregistered_at": "2026-07-26T17:24:34Z",
+  "promotion_evidence_eligible": false,
+  "result_selected_parameter_search": false,
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-historical-development-preregistration-v1",
+  "success_standard_sha256": "07609f09692723dd1e650080cfdd29466a7ee8a0f8c30d8378045a8ee3523114"
+}
