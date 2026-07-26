@@ -12,6 +12,7 @@ from pathlib import Path
 from bigan.v8.polymarket.challenge_future_freeze import (
     ChallengeFutureFreezeConfig,
     challenge_collection_status,
+    resolve_challenge_collection_service_root,
     run_challenge_future_target_free_freeze,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_policy_selected_conformal_net_return_v6 import (
@@ -23,11 +24,6 @@ EXAMPLES_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EXAMPLES_DIR.parent.parent
 CONFIG_DIR = EXAMPLES_DIR / "polymarket_configs"
 DEFAULT_PLAN = CONFIG_DIR / "parallel_future_collection_plan.json"
-DEFAULT_SERVICE_ROOT = (
-    EXAMPLES_DIR
-    / "polymarket_live_runs"
-    / "challenge-model-v8-5-runtime-byte-verified-final-attempt-001"
-)
 DEFAULT_PROTOCOL = CONFIG_DIR / "parallel_candidate_protocol.json"
 DEFAULT_V8_1_CONTRACT = (
     CONFIG_DIR
@@ -119,8 +115,13 @@ def _status(args: argparse.Namespace) -> dict:
     plan_path = args.plan.resolve()
     _expected_plan_sha256(plan_path)
     plan = _load_json(plan_path)
+    service_root = resolve_challenge_collection_service_root(
+        collection_plan=plan,
+        collection_plan_path=plan_path,
+        requested_service_root=args.service_root,
+    )
     return challenge_collection_status(
-        service_root=args.service_root,
+        service_root=service_root,
         collection_plan=plan,
     )
 
@@ -129,6 +130,11 @@ def _freeze(args: argparse.Namespace) -> dict:
     implementation_commit = _git_head_and_clean()
     plan_path = args.plan.resolve()
     plan = _load_json(plan_path)
+    service_root = resolve_challenge_collection_service_root(
+        collection_plan=plan,
+        collection_plan_path=plan_path,
+        requested_service_root=args.service_root,
+    )
     binding = _load_json(args.binding.resolve())
     candidate_contracts = {
         "v8_1_primary_no_fallback": _load_json(
@@ -144,7 +150,7 @@ def _freeze(args: argparse.Namespace) -> dict:
     config = ChallengeFutureFreezeConfig(
         run_id=args.run_id,
         output_dir=args.output_dir,
-        service_root=args.service_root,
+        service_root=service_root,
         collection_plan_path=plan_path,
         expected_collection_plan_sha256=_expected_plan_sha256(plan_path),
         parallel_protocol_path=args.protocol,
@@ -243,7 +249,10 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument(
         "--service-root",
         type=Path,
-        default=DEFAULT_SERVICE_ROOT,
+        help=(
+            "Optional exact collector root override; when omitted it is "
+            "derived from the hash-pinned collection plan."
+        ),
     )
 
     freeze = subparsers.add_parser(
@@ -256,7 +265,10 @@ def main(argv: list[str] | None = None) -> int:
     freeze.add_argument(
         "--service-root",
         type=Path,
-        default=DEFAULT_SERVICE_ROOT,
+        help=(
+            "Optional exact collector root override; when omitted it is "
+            "derived from the hash-pinned collection plan."
+        ),
     )
     freeze.add_argument("--protocol", type=Path, default=DEFAULT_PROTOCOL)
     freeze.add_argument(

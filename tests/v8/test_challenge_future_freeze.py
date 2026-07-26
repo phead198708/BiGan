@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import argparse
+import copy
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,15 +12,101 @@ from bigan.v8.polymarket.challenge_future_freeze import (
     ChallengeFutureFreezeError,
     build_challenge_parallel_decisions,
     build_parallel_shared_source_rows,
+    resolve_challenge_collection_service_root,
     select_challenge_future_window,
 )
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.parallel_future_gate import (
     build_parallel_target_free_freeze,
 )
+from examples.v8.run_challenge_future_freeze import _status
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = ROOT / "examples" / "v8" / "polymarket_configs"
+
+
+def test_service_root_is_derived_exactly_from_frozen_plan() -> None:
+    plan_path = CONFIG_DIR / "parallel_future_collection_plan.json"
+    plan = json.loads(plan_path.read_text())
+    expected = ROOT / str(plan["collection"]["service_root"])
+
+    assert resolve_challenge_collection_service_root(
+        collection_plan=plan,
+        collection_plan_path=plan_path,
+    ) == expected.resolve()
+    assert resolve_challenge_collection_service_root(
+        collection_plan=plan,
+        collection_plan_path=plan_path,
+        requested_service_root=expected,
+    ) == expected.resolve()
+
+
+def test_service_root_rejects_stale_or_same_suffix_checkout(
+    tmp_path: Path,
+) -> None:
+    plan_path = CONFIG_DIR / "parallel_future_collection_plan.json"
+    plan = json.loads(plan_path.read_text())
+    same_suffix = tmp_path / str(plan["collection"]["service_root"])
+
+    with pytest.raises(
+        ChallengeFutureFreezeError,
+        match="does not match",
+    ):
+        resolve_challenge_collection_service_root(
+            collection_plan=plan,
+            collection_plan_path=plan_path,
+            requested_service_root=same_suffix,
+        )
+
+    invalid = copy.deepcopy(plan)
+    invalid["collection"]["service_root"] = "../outside"
+    with pytest.raises(
+        ChallengeFutureFreezeError,
+        match="service root is invalid",
+    ):
+        resolve_challenge_collection_service_root(
+            collection_plan=invalid,
+            collection_plan_path=plan_path,
+        )
+
+
+def test_status_default_uses_plan_derived_service_root(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repo"
+    config_dir = repository / "examples/v8/polymarket_configs"
+    config_dir.mkdir(parents=True)
+    plan = json.loads(
+        (CONFIG_DIR / "parallel_future_collection_plan.json").read_text()
+    )
+    plan_path = config_dir / "parallel_future_collection_plan.json"
+    plan_bytes = (
+        json.dumps(plan, indent=2, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    plan_path.write_bytes(plan_bytes)
+    plan_path.with_suffix(".sha256").write_text(
+        hashlib.sha256(plan_bytes).hexdigest() + "\n",
+        encoding="ascii",
+    )
+
+    status = _status(
+        argparse.Namespace(
+            plan=plan_path,
+            service_root=None,
+        )
+    )
+
+    expected = repository / str(plan["collection"]["service_root"])
+    assert status["service_root"] == str(expected.resolve())
+    assert status["collector_index_exists"] is False
+    assert status["selected_market_count"] == 0
+    assert status["service_status"] == "not_started"
+    assert status["collection_started"] is False
+    assert status["operator_collection_authorization_required"] is True
+    assert (
+        status["operator_collection_authorization_granted_at_refreeze"]
+        is False
+    )
 
 
 def _index_row(

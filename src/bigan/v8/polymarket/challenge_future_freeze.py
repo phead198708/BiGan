@@ -529,6 +529,12 @@ def challenge_collection_status(
     )
     state_path = root / "persistent_outcome_blind_service_state.json"
     state = _load_json(state_path) if state_path.is_file() else {}
+    collection = dict(collection_plan.get("collection") or {})
+    collection_started = (
+        index_path.is_file()
+        or state_path.is_file()
+        or bool(rows)
+    )
     return {
         "service_root": str(root),
         "collector_index_path": str(index_path),
@@ -536,7 +542,21 @@ def challenge_collection_status(
         "collector_index_sha256": (
             _sha256_file(index_path) if index_path.is_file() else None
         ),
-        "service_status": state.get("status", "batch_in_progress"),
+        "service_status": state.get(
+            "status",
+            "collection_started" if collection_started else "not_started",
+        ),
+        "collection_started": collection_started,
+        "operator_collection_authorization_required": (
+            collection.get("operator_collection_authorization_required")
+            is True
+        ),
+        "operator_collection_authorization_granted_at_refreeze": (
+            collection.get(
+                "operator_collection_authorization_granted_at_refreeze"
+            )
+            is True
+        ),
         "last_completed_batch_sequence": int(
             state.get("last_completed_batch_sequence") or 0
         ),
@@ -546,6 +566,58 @@ def challenge_collection_status(
         **selection,
         "labels_outcomes_or_pnl_opened": False,
     }
+
+
+def resolve_challenge_collection_service_root(
+    *,
+    collection_plan: dict[str, Any],
+    collection_plan_path: Path | str,
+    requested_service_root: Path | str | None = None,
+) -> Path:
+    """Resolve and bind the collector root to the exact frozen plan path."""
+
+    plan_path = Path(collection_plan_path).resolve()
+    parts = plan_path.parts
+    try:
+        examples_index = (
+            len(parts) - 1 - tuple(reversed(parts)).index("examples")
+        )
+    except ValueError as exc:
+        raise ChallengeFutureFreezeError(
+            "collection plan must be stored under the repository examples/ tree"
+        ) from exc
+    repository_root = Path(*parts[:examples_index]).resolve()
+    raw_service_root = str(
+        (collection_plan.get("collection") or {}).get("service_root")
+        or ""
+    )
+    relative_service_root = Path(raw_service_root)
+    if (
+        not raw_service_root
+        or relative_service_root.is_absolute()
+        or relative_service_root.as_posix() != raw_service_root
+        or relative_service_root.parts[:3]
+        != ("examples", "v8", "polymarket_live_runs")
+        or any(
+            part in {"", ".", ".."}
+            for part in relative_service_root.parts
+        )
+    ):
+        raise ChallengeFutureFreezeError(
+            "frozen collection plan service root is invalid"
+        )
+    expected = (repository_root / relative_service_root).resolve()
+    if not expected.is_relative_to(repository_root):
+        raise ChallengeFutureFreezeError(
+            "frozen collection plan service root escapes the repository"
+        )
+    if requested_service_root is not None:
+        requested = Path(requested_service_root).resolve()
+        if requested != expected:
+            raise ChallengeFutureFreezeError(
+                "service root does not match the frozen collection plan"
+            )
+    return expected
 
 
 def run_challenge_future_target_free_freeze(
@@ -675,13 +747,11 @@ def run_challenge_future_target_free_freeze(
             "supersession_governance"
         ].lower(),
     )
-    if (
-        str(plan["collection"]["service_root"])
-        != _relative_service_root(config.service_root)
-    ):
-        raise ChallengeFutureFreezeError(
-            "service root does not match the frozen collection plan"
-        )
+    service_root = resolve_challenge_collection_service_root(
+        collection_plan=plan,
+        collection_plan_path=paths["plan"],
+        requested_service_root=config.service_root,
+    )
 
     artifacts = _load_and_validate_exact_model_artifacts(
         fit_manifest=fit_manifest,
@@ -694,10 +764,7 @@ def run_challenge_future_target_free_freeze(
         v8_1_contract_path=paths["v8_1_contract"],
         v8_1_contract_sha256=pins["v8_1_contract"].lower(),
     )
-    index_path = (
-        config.service_root.resolve()
-        / "persistent_outcome_blind_round_index.jsonl"
-    )
+    index_path = service_root / "persistent_outcome_blind_round_index.jsonl"
     if not index_path.is_file():
         raise ChallengeFutureFreezeError(
             "collector index is not available; collection is still in its first batch"
@@ -717,7 +784,7 @@ def run_challenge_future_target_free_freeze(
         _verify_index_raw_descriptors(row)
 
     development, v6_2 = _discover_and_validate_batch_manifests(
-        service_root=config.service_root.resolve(),
+        service_root=service_root,
         selected_index_rows=selected,
         expected_feature_contract_sha256=pins["feature_contract"].lower(),
         expected_v6_2_candidate_sha256=str(
@@ -1551,18 +1618,6 @@ def _side_for_action(action: str) -> str:
     return "NONE"
 
 
-def _relative_service_root(path: Path | str) -> str:
-    resolved = Path(path).resolve()
-    parts = resolved.parts
-    try:
-        index = parts.index("examples")
-    except ValueError as exc:
-        raise ChallengeFutureFreezeError(
-            "service root must be under examples/"
-        ) from exc
-    return Path(*parts[index:]).as_posix()
-
-
 __all__ = [
     "CHALLENGE_FUTURE_FREEZE_MANIFEST_SCHEMA_VERSION",
     "CHALLENGE_FUTURE_FREEZE_REPORT_SCHEMA_VERSION",
@@ -1571,6 +1626,7 @@ __all__ = [
     "build_challenge_parallel_decisions",
     "build_parallel_shared_source_rows",
     "challenge_collection_status",
+    "resolve_challenge_collection_service_root",
     "run_challenge_future_target_free_freeze",
     "select_challenge_future_window",
 ]

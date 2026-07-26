@@ -19,13 +19,17 @@ candidate contracts, the implementation commit, a strictly-later millisecond
 boundary, 120 quality-valid markets, a maximum of 180 attempts, and 12-market
 batches. During collection, candidate scoring, settlement finalization,
 resolution access, labels, outcomes, returns, and PnL remain disabled.
-The fourth and final supersession also pins
+The accepted fifth corrective supersession also pins
 `challenge_prefreeze_checklist.json` and
 `challenge_prefreeze_excluded_capture_ledger.json`. The checklist embeds the
 validator-derived 13-check historical model binding and a successful runtime
 verification of the exact loaded booster bytes, profile file bytes, and
 initial controller state. Collection remains stopped and requires a separate
 operator authorization before any 120-round attempt may start or resume.
+`challenge_supersession_governance.json` is additive governance outside those
+frozen bytes: attempt 001 has consumed its five-supersession ceiling, and any
+further change requires closing the attempt through a new issue and an
+explicit alpha-spending review.
 
 Reports separate primary, fallback, abstention, and no-bet contributions. A
 multiplicity-aware winner is diagnostic evidence only: issue #254 never
@@ -51,6 +55,13 @@ The production collector bridge is
   v8.1 model bytes and initial controller state, reconstructs v8.1, v8.3, and
   matched v6.7 decisions on one source grid, and writes the canonical parallel
   freeze before settlement access.
+
+Both commands derive the collector service root from the hash-pinned
+collection plan. An explicit `--service-root` is accepted only when its fully
+resolved path is exactly the plan-derived repository path; a stale root or a
+same-suffix path under another checkout fails closed. Before the service has
+created any state or index, `status` reports `not_started` and preserves the
+frozen `authorization required=true / granted=false` state.
 
 `freeze` requires the exact historical fit manifest named by
 `parallel_frozen_v8_1_model_binding.json`. It also requires a clean committed
