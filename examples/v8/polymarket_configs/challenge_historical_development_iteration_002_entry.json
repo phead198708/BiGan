@@ -1,0 +1,38 @@
+{
+  "all_historical_success_criteria_passed": false,
+  "candidate_id": "v8_1_high_price_support_recovery_0_30",
+  "consumes_development_iteration_slot": true,
+  "consumes_fresh_promotion_alpha": false,
+  "development_registry_sha256": "dd4926b24bbe2b80bb127c5af861f62e432131469bfc202248d85ec4a1380fd4",
+  "entry_id": "challenge-historical-development-entry-002",
+  "entry_sha256": "b608b9e7b884ca636610f18bd89ef780ac2a4c3fecff65b45b7f836dd9367740",
+  "historical_result_is_promotion_evidence": false,
+  "implementation_base_commit": "e6741c70fccfb9b66e7f845b55bd7bf6f7123cc4",
+  "implementation_commit": "2f1d98e24342e5cff900b412c54a193a55024ab9",
+  "ledger_root_sha256": "2bdbbb1ee0f8694b7be3f5fa485a3591662daa906e1edfc316db92f538fc894a",
+  "nominal_one_sided_alpha": 0.025,
+  "preregistration": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_historical_development_iteration_002_preregistration.json",
+    "sha256": "e774af3e31fc7b932561745aee330bef18a21e666d8e7e54d4f71be8e550c1f6",
+    "size_bytes": 4269
+  },
+  "preregistration_commit": "42328b2743ebf54684007082d255ab16a5160ffa",
+  "previous_entry_sha256": "76b1ea851c40c3b66aa47e762cfcfdeaada0b6372232a1f4c4365cb6cbebff95",
+  "result": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-high-price-support-recovery-0-30-development-iteration-002-20260726T174000Z/evaluation/challenge_historical_development_result.json",
+    "sha256": "f79269fa22b6fb2b140e280416177026f2b68d37922f2096c4ce301939277619"
+  },
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-historical-development-iteration-entry-v1",
+  "sequence": 2,
+  "success_standard_sha256": "07609f09692723dd1e650080cfdd29466a7ee8a0f8c30d8378045a8ee3523114"
+}
