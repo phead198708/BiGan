@@ -179,6 +179,19 @@ def test_fresh_collection_plan_is_hash_pinned_and_preregistered() -> None:
                 / "execution_layer_v2_pairwise_action_advantage_lcb_feature_contract_v1.json"
             ).read_bytes()
         ).hexdigest(),
+        historical_gate_contract_sha256=hashlib.sha256(
+            (
+                CONFIG / "historical_replay_superiority_contract.json"
+            ).read_bytes()
+        ).hexdigest(),
+        historical_replay_report_sha256=hashlib.sha256(
+            (
+                CONFIG / "historical_replay_superiority_report.json"
+            ).read_bytes()
+        ).hexdigest(),
+        historical_replay_report=_json(
+            "historical_replay_superiority_report.json"
+        ),
         collection_started_ts=plan["freeze_created_ts"] + 1,
     )
 
@@ -196,7 +209,43 @@ def test_collection_plan_rejects_target_access_and_non_later_start() -> None:
                 "persistent_collector_protocol_sha256"
             ],
             feature_contract_sha256=hashes["feature_contract_sha256"],
+            historical_gate_contract_sha256=plan[
+                "historical_replay_prerequisite"
+            ]["gate_contract_sha256"],
+            historical_replay_report_sha256=plan[
+                "historical_replay_prerequisite"
+            ]["report_sha256"],
+            historical_replay_report=_json(
+                "historical_replay_superiority_report.json"
+            ),
             collection_started_ts=plan["freeze_created_ts"],
+        )
+
+
+def test_collection_plan_rejects_missing_historical_superiority() -> None:
+    plan = _json("parallel_future_collection_plan.json")
+    hashes = plan["lineage"]
+    historical = plan["historical_replay_prerequisite"]
+    plan["historical_replay_prerequisite"][
+        "historical_superiority_gate_passed"
+    ] = False
+    with pytest.raises(ParallelFutureGateError, match="historical_superiority"):
+        validate_parallel_future_collection_plan(
+            plan,
+            protocol_sha256=hashes["parallel_candidate_protocol_sha256"],
+            candidate_contract_sha256s=hashes["candidate_contract_sha256s"],
+            collector_protocol_sha256=hashes[
+                "persistent_collector_protocol_sha256"
+            ],
+            feature_contract_sha256=hashes["feature_contract_sha256"],
+            historical_gate_contract_sha256=historical[
+                "gate_contract_sha256"
+            ],
+            historical_replay_report_sha256=historical["report_sha256"],
+            historical_replay_report=_json(
+                "historical_replay_superiority_report.json"
+            ),
+            collection_started_ts=plan["freeze_created_ts"] + 1,
         )
 
 

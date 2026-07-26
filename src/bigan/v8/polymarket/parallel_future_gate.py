@@ -49,6 +49,9 @@ def validate_parallel_future_collection_plan(
     candidate_contract_sha256s: dict[str, str],
     collector_protocol_sha256: str,
     feature_contract_sha256: str,
+    historical_gate_contract_sha256: str,
+    historical_replay_report_sha256: str,
+    historical_replay_report: dict[str, Any],
     collection_started_ts: int | None = None,
 ) -> None:
     """Validate the immutable, pre-collection instance of the parallel gate."""
@@ -153,6 +156,71 @@ def validate_parallel_future_collection_plan(
     ):
         if safety.get(name) is not False:
             blockers.append(name)
+
+    historical = dict(plan.get("historical_replay_prerequisite") or {})
+    historical_completed_ts = int(
+        historical.get("evaluation_completed_ts") or 0
+    )
+    if (
+        historical.get("gate_contract_sha256")
+        != historical_gate_contract_sha256
+    ):
+        blockers.append("historical_gate_contract_sha256")
+    if historical.get("report_sha256") != historical_replay_report_sha256:
+        blockers.append("historical_replay_report_sha256")
+    if historical.get("candidate_id") != "v8_1_primary_no_fallback":
+        blockers.append("historical_candidate_id")
+    if historical.get("historical_superiority_gate_passed") is not True:
+        blockers.append("historical_superiority_gate")
+    if historical.get("future_collection_prerequisite_satisfied") is not True:
+        blockers.append("historical_future_collection_prerequisite")
+    if historical.get("historical_replay_is_promotion_evidence") is not False:
+        blockers.append("historical_promotion_evidence_role")
+    if (
+        historical_completed_ts <= 0
+        or historical_completed_ts >= freeze_created_ts
+    ):
+        blockers.append("historical_replay_not_completed_before_freeze")
+    if (
+        historical_replay_report.get("candidate_id")
+        != historical.get("candidate_id")
+        or historical_replay_report.get("evaluation_completed_ts")
+        != historical_completed_ts
+        or historical_replay_report.get("historical_superiority_gate_passed")
+        is not True
+        or historical_replay_report.get(
+            "future_collection_prerequisite_satisfied"
+        )
+        is not True
+        or historical_replay_report.get(
+            "historical_replay_is_promotion_evidence"
+        )
+        is not False
+        or not all(
+            (historical_replay_report.get("checks") or {}).values()
+        )
+    ):
+        blockers.append("historical_replay_report_content")
+
+    supersession = dict(plan.get("supersession") or {})
+    excluded_probe = dict(
+        supersession.get("excluded_pre_replay_probe") or {}
+    )
+    prior_plan_sha256 = str(
+        supersession.get("superseded_collection_plan_sha256") or ""
+    )
+    if len(prior_plan_sha256) != 64:
+        blockers.append("superseded_collection_plan_sha256")
+    if excluded_probe.get("excluded_from_fresh_attempt") is not True:
+        blockers.append("pre_replay_probe_not_excluded")
+    if excluded_probe.get("labels_outcomes_or_pnl_opened") is not False:
+        blockers.append("pre_replay_probe_target_access")
+    if excluded_probe.get("consumes_attempt_or_alpha") is not False:
+        blockers.append("pre_replay_probe_attempt_accounting")
+    if int(excluded_probe.get("market_start_ts") or 0) > freeze_created_ts:
+        blockers.append("pre_replay_probe_not_before_refreeze")
+    if collection.get("service_root") == excluded_probe.get("service_root"):
+        blockers.append("pre_replay_probe_service_root_reused")
     if blockers:
         raise ParallelFutureGateError(
             "parallel future collection plan invalid: "

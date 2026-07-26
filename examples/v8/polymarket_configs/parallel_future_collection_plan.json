@@ -2,13 +2,13 @@
   "schema_version": "bigan-v8-parallel-future-collection-plan-v1",
   "issue": 254,
   "goal": "challenge_model_promote_to_champion_model",
-  "fresh_attempt_id": "v8-5-challenger-parallel-future-attempt-001",
-  "freeze_created_ts": 1785048487204,
-  "freeze_created_at": "2026-07-26T06:48:07.204927Z",
+  "fresh_attempt_id": "v8-5-challenger-parallel-future-attempt-001-post-historical-refreeze",
+  "freeze_created_ts": 1785050182305,
+  "freeze_created_at": "2026-07-26T07:16:22.304960Z",
   "frozen": true,
   "preregistered_before_collection": true,
   "lineage": {
-    "implementation_commit": "34cf64d201cf02b7adbc5871aa0f95eaf5ae4f00",
+    "implementation_commit": "8936a089c6086351e9c304794c8ccfd7608d00a9",
     "parallel_candidate_protocol_sha256": "fdd0e3f8808cf831f22e0b5ff319d1668e3c0bd80add28de170b7d7c11639ca4",
     "candidate_contract_sha256s": {
       "v8_1_primary_no_fallback": "9a893494600e96b0e7719bde088c96b00d7a1322a5a2942a5ff405124f90a3b1",
@@ -21,9 +21,9 @@
   "collection": {
     "market_family": "btc_updown_5m",
     "mode": "bounded_candidate_agnostic_outcome_blind_raw_collection",
-    "service_root": "examples/v8/polymarket_live_runs/challenge-model-v8-5-fresh-attempt-001",
+    "service_root": "examples/v8/polymarket_live_runs/challenge-model-v8-5-post-historical-attempt-001",
     "selection_rule": "chronological_earliest_quality_valid_after_freeze_boundary",
-    "strictly_later_minimum_market_start_ts_exclusive": 1785048487204,
+    "strictly_later_minimum_market_start_ts_exclusive": 1785050182305,
     "quality_valid_market_target": 120,
     "maximum_attempted_market_count": 180,
     "bounded_batch_market_count": 12,
@@ -37,6 +37,29 @@
     "settlement_finalizer_enabled_during_collection": false,
     "resolution_provider_enabled_during_collection": false,
     "result_dependent_extension_allowed": false
+  },
+  "historical_replay_prerequisite": {
+    "gate_contract_sha256": "3ba70dc0c589b0c891dd60ec254e6a733eb203e224598460415be34cffa825fd",
+    "report_sha256": "f8a849615bb9847486a07a61f2fcfcf5b640b3cf6acec609e3f47802608fc340",
+    "candidate_id": "v8_1_primary_no_fallback",
+    "evaluation_completed_ts": 1785050104578,
+    "historical_superiority_gate_passed": true,
+    "future_collection_prerequisite_satisfied": true,
+    "historical_replay_is_promotion_evidence": false
+  },
+  "supersession": {
+    "superseded_collection_plan_sha256": "35fca6bfa3e4d4337b3fecc5106a930982d8640373695d74933131aa1b254e95",
+    "reason": "historical_replay_made_a_mandatory_pre_collection_prerequisite",
+    "excluded_pre_replay_probe": {
+      "batch_id": "challenge-v8-5-probe-20260726T0649Z",
+      "service_root": "examples/v8/polymarket_live_runs/challenge-model-v8-5-fresh-attempt-001",
+      "market_start_ts": 1785048600000,
+      "index_entry_sha256": "8f6600e054d6705aa154cd3961661fd9b5e5fb71bc2875ebf12536adb606768f",
+      "index_sha256": "c7426e2bbded23043f3ea6c73f224a15c97de911875f914dcf5b0542812a494c",
+      "excluded_from_fresh_attempt": true,
+      "labels_outcomes_or_pnl_opened": false,
+      "consumes_attempt_or_alpha": false
+    }
   },
   "alpha_spending": {
     "fresh_attempt_number": 1,

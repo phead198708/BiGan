@@ -44,6 +44,12 @@ DEFAULT_FEATURE_CONTRACT = (
     CONFIG
     / "execution_layer_v2_pairwise_action_advantage_lcb_feature_contract_v1.json"
 )
+DEFAULT_HISTORICAL_GATE_CONTRACT = (
+    CONFIG / "historical_replay_superiority_contract.json"
+)
+DEFAULT_HISTORICAL_REPLAY_REPORT = (
+    CONFIG / "historical_replay_superiority_report.json"
+)
 
 
 def validate_plan(
@@ -53,6 +59,8 @@ def validate_plan(
     contract_paths: dict[str, Path],
     collector_protocol_path: Path,
     feature_contract_path: Path,
+    historical_gate_contract_path: Path,
+    historical_replay_report_path: Path,
     collection_started_ts: int | None = None,
 ) -> dict[str, Any]:
     """Load and validate every raw-file hash bound by the collection plan."""
@@ -67,6 +75,15 @@ def validate_plan(
         },
         collector_protocol_sha256=_sha256(collector_protocol_path),
         feature_contract_sha256=_sha256(feature_contract_path),
+        historical_gate_contract_sha256=_sha256(
+            historical_gate_contract_path
+        ),
+        historical_replay_report_sha256=_sha256(
+            historical_replay_report_path
+        ),
+        historical_replay_report=_read_json(
+            historical_replay_report_path
+        ),
         collection_started_ts=collection_started_ts,
     )
     return {
@@ -483,6 +500,16 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=DEFAULT_FEATURE_CONTRACT,
     )
+    validate.add_argument(
+        "--historical-gate-contract",
+        type=Path,
+        default=DEFAULT_HISTORICAL_GATE_CONTRACT,
+    )
+    validate.add_argument(
+        "--historical-replay-report",
+        type=Path,
+        default=DEFAULT_HISTORICAL_REPLAY_REPORT,
+    )
     validate.add_argument("--collection-started-ts", type=int)
     _add_contract_args(validate)
 
@@ -526,6 +553,8 @@ def main(argv: list[str] | None = None) -> int:
             contract_paths=_contract_paths(args),
             collector_protocol_path=args.collector_protocol,
             feature_contract_path=args.feature_contract,
+            historical_gate_contract_path=args.historical_gate_contract,
+            historical_replay_report_path=args.historical_replay_report,
             collection_started_ts=args.collection_started_ts,
         )
         output = {
