@@ -12,6 +12,7 @@ from bigan.v8.polymarket.parallel_future_gate import (
     build_parallel_target_free_freeze,
     evaluate_parallel_future_gate,
     validate_parallel_candidate_protocol,
+    validate_parallel_future_collection_plan,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -129,6 +130,71 @@ def test_protocol_and_candidate_contracts_are_hash_pinned() -> None:
         _json("parallel_candidate_protocol.json"),
         candidate_contracts=_contracts(),
     )
+
+
+def test_fresh_collection_plan_is_hash_pinned_and_preregistered() -> None:
+    plan_path = CONFIG / "parallel_future_collection_plan.json"
+    assert hashlib.sha256(plan_path.read_bytes()).hexdigest() == plan_path.with_suffix(
+        ".sha256"
+    ).read_text().strip()
+    candidate_hashes = {
+        "v8_1_primary_no_fallback": hashlib.sha256(
+            (
+                CONFIG
+                / "parallel_candidate_v8_1_primary_no_fallback_contract.json"
+            ).read_bytes()
+        ).hexdigest(),
+        "v8_3_primary_with_fallback": hashlib.sha256(
+            (
+                CONFIG
+                / "parallel_candidate_v8_3_primary_with_fallback_contract.json"
+            ).read_bytes()
+        ).hexdigest(),
+        "matched_frozen_v6_7": hashlib.sha256(
+            (
+                CONFIG
+                / "parallel_candidate_matched_frozen_v6_7_contract.json"
+            ).read_bytes()
+        ).hexdigest(),
+    }
+    plan = _json("parallel_future_collection_plan.json")
+    validate_parallel_future_collection_plan(
+        plan,
+        protocol_sha256=hashlib.sha256(
+            (CONFIG / "parallel_candidate_protocol.json").read_bytes()
+        ).hexdigest(),
+        candidate_contract_sha256s=candidate_hashes,
+        collector_protocol_sha256=hashlib.sha256(
+            (
+                CONFIG
+                / "execution_layer_v2_persistent_outcome_blind_collector_v1.json"
+            ).read_bytes()
+        ).hexdigest(),
+        feature_contract_sha256=hashlib.sha256(
+            (
+                CONFIG
+                / "execution_layer_v2_pairwise_action_advantage_lcb_feature_contract_v1.json"
+            ).read_bytes()
+        ).hexdigest(),
+        collection_started_ts=plan["freeze_created_ts"] + 1,
+    )
+
+
+def test_collection_plan_rejects_target_access_and_non_later_start() -> None:
+    plan = _json("parallel_future_collection_plan.json")
+    hashes = plan["lineage"]
+    plan["collection"]["resolution_provider_enabled_during_collection"] = True
+    with pytest.raises(ParallelFutureGateError, match="resolution_provider"):
+        validate_parallel_future_collection_plan(
+            plan,
+            protocol_sha256=hashes["parallel_candidate_protocol_sha256"],
+            candidate_contract_sha256s=hashes["candidate_contract_sha256s"],
+            collector_protocol_sha256=hashes[
+                "persistent_collector_protocol_sha256"
+            ],
+            feature_contract_sha256=hashes["feature_contract_sha256"],
+            collection_started_ts=plan["freeze_created_ts"],
+        )
 
 
 def test_same_target_free_window_is_frozen_for_all_candidates() -> None:

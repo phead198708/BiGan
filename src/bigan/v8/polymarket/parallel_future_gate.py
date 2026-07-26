@@ -9,6 +9,9 @@ from typing import Any
 from bigan.v8.canonical_payload import canonical_payload_sha256
 
 PARALLEL_PROTOCOL_SCHEMA_VERSION = "bigan-v8-parallel-candidate-protocol-v1"
+PARALLEL_COLLECTION_PLAN_SCHEMA_VERSION = (
+    "bigan-v8-parallel-future-collection-plan-v1"
+)
 PARALLEL_FREEZE_SCHEMA_VERSION = "bigan-v8-parallel-target-free-freeze-v1"
 PARALLEL_EVALUATION_SCHEMA_VERSION = "bigan-v8-parallel-future-evaluation-v1"
 DECISION_STREAM_SCHEMA_VERSION = "bigan-v8-parallel-candidate-decision-stream-v1"
@@ -37,6 +40,124 @@ REQUIRED_CANDIDATES = (
 
 class ParallelFutureGateError(ValueError):
     """Raised when the parallel future gate cannot remain outcome-blind."""
+
+
+def validate_parallel_future_collection_plan(
+    plan: dict[str, Any],
+    *,
+    protocol_sha256: str,
+    candidate_contract_sha256s: dict[str, str],
+    collector_protocol_sha256: str,
+    feature_contract_sha256: str,
+    collection_started_ts: int | None = None,
+) -> None:
+    """Validate the immutable, pre-collection instance of the parallel gate."""
+
+    blockers: list[str] = []
+    freeze_created_ts = int(plan.get("freeze_created_ts") or 0)
+    if plan.get("schema_version") != PARALLEL_COLLECTION_PLAN_SCHEMA_VERSION:
+        blockers.append("schema_version")
+    if plan.get("frozen") is not True:
+        blockers.append("not_frozen")
+    if plan.get("preregistered_before_collection") is not True:
+        blockers.append("not_preregistered")
+    if freeze_created_ts <= 0:
+        blockers.append("freeze_created_ts")
+    if (
+        collection_started_ts is not None
+        and collection_started_ts <= freeze_created_ts
+    ):
+        blockers.append("collection_not_strictly_later")
+
+    lineage = dict(plan.get("lineage") or {})
+    implementation_commit = str(lineage.get("implementation_commit") or "")
+    if len(implementation_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in implementation_commit
+    ):
+        blockers.append("implementation_commit")
+    expected_lineage = {
+        "parallel_candidate_protocol_sha256": protocol_sha256,
+        "persistent_collector_protocol_sha256": collector_protocol_sha256,
+        "feature_contract_sha256": feature_contract_sha256,
+    }
+    for name, expected in expected_lineage.items():
+        if str(lineage.get(name) or "").lower() != expected.lower():
+            blockers.append(name)
+    frozen_candidate_hashes = dict(
+        lineage.get("candidate_contract_sha256s") or {}
+    )
+    if set(frozen_candidate_hashes) != set(REQUIRED_CANDIDATES):
+        blockers.append("candidate_contract_set")
+    else:
+        for candidate_id, expected in candidate_contract_sha256s.items():
+            if (
+                str(frozen_candidate_hashes.get(candidate_id) or "").lower()
+                != expected.lower()
+            ):
+                blockers.append(f"{candidate_id}_contract_sha256")
+
+    collection = dict(plan.get("collection") or {})
+    if collection.get("market_family") != "btc_updown_5m":
+        blockers.append("market_family")
+    if int(collection.get("quality_valid_market_target") or 0) != 120:
+        blockers.append("quality_valid_market_target")
+    if int(collection.get("maximum_attempted_market_count") or 0) != 180:
+        blockers.append("maximum_attempted_market_count")
+    if int(collection.get("bounded_batch_market_count") or 0) != 12:
+        blockers.append("bounded_batch_market_count")
+    if (
+        int(
+            collection.get(
+                "strictly_later_minimum_market_start_ts_exclusive"
+            )
+            or 0
+        )
+        != freeze_created_ts
+    ):
+        blockers.append("strictly_later_boundary")
+    if collection.get("selection_rule") != (
+        "chronological_earliest_quality_valid_after_freeze_boundary"
+    ):
+        blockers.append("selection_rule")
+    for name in (
+        "outcomes_resolution_labels_or_pnl_opened",
+        "candidate_scoring_during_raw_capture_allowed",
+        "settlement_finalizer_enabled_during_collection",
+        "resolution_provider_enabled_during_collection",
+        "result_dependent_extension_allowed",
+    ):
+        if collection.get(name) is not False:
+            blockers.append(name)
+
+    alpha = dict(plan.get("alpha_spending") or {})
+    if int(alpha.get("fresh_attempt_number") or 0) != 1:
+        blockers.append("fresh_attempt_number")
+    if float(alpha.get("familywise_window_alpha") or 0.0) != 0.025:
+        blockers.append("familywise_window_alpha")
+    if int(alpha.get("parallel_tested_candidate_count") or 0) != 2:
+        blockers.append("parallel_tested_candidate_count")
+    if float(alpha.get("per_candidate_alpha") or 0.0) != 0.0125:
+        blockers.append("per_candidate_alpha")
+    if alpha.get("attempt_consumed") is not False:
+        blockers.append("attempt_consumed_before_target_access")
+
+    safety = dict(plan.get("safety") or {})
+    if safety.get("paper_only") is not True:
+        blockers.append("paper_only")
+    for name in (
+        "capital_at_risk",
+        "polymarket_write_enabled",
+        "wallet_signing_enabled",
+        "promotion_unlocked",
+        "live_unlocked",
+    ):
+        if safety.get(name) is not False:
+            blockers.append(name)
+    if blockers:
+        raise ParallelFutureGateError(
+            "parallel future collection plan invalid: "
+            + ", ".join(sorted(blockers))
+        )
 
 
 def validate_parallel_candidate_protocol(
@@ -506,6 +627,7 @@ def _find_target_fields(value: Any, *, path: str = "") -> set[str]:
 
 __all__ = [
     "DECISION_STREAM_SCHEMA_VERSION",
+    "PARALLEL_COLLECTION_PLAN_SCHEMA_VERSION",
     "PARALLEL_EVALUATION_SCHEMA_VERSION",
     "PARALLEL_FREEZE_SCHEMA_VERSION",
     "PARALLEL_PROTOCOL_SCHEMA_VERSION",
@@ -513,4 +635,5 @@ __all__ = [
     "build_parallel_target_free_freeze",
     "evaluate_parallel_future_gate",
     "validate_parallel_candidate_protocol",
+    "validate_parallel_future_collection_plan",
 ]

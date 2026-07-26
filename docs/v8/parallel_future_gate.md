@@ -13,6 +13,13 @@ settlement, return, label, or PnL access. Evaluation consumes the freeze once.
 Each tested candidate has a Bonferroni-adjusted alpha of 0.0125. Insufficient
 support is terminal for the window and cannot trigger an extension.
 
+`parallel_future_collection_plan.json` is the concrete first fresh-attempt
+preregistration. It pins the collector and feature contracts, all three
+candidate contracts, the implementation commit, a strictly-later millisecond
+boundary, 120 quality-valid markets, a maximum of 180 attempts, and 12-market
+batches. During collection, candidate scoring, settlement finalization,
+resolution access, labels, outcomes, returns, and PnL remain disabled.
+
 Reports separate primary, fallback, abstention, and no-bet contributions. A
 multiplicity-aware winner is diagnostic evidence only: issue #254 never
 unlocks paper, promotion, live, write, wallet, capital, handoff, source/freeze,
