@@ -96,8 +96,13 @@ code.
 
 After exactly 120 quality-valid markets:
 
-1. Freeze all 120 candidate and matched v6.7 decisions before target access.
-   Every market stays in the comparison; `NO_TRADE` is zero.
+1. Run the post-collection target-free adapter. It verifies the terminal
+   supervisor state and collector-index hash, reconstructs the earliest exact
+   120 quality-valid markets, verifies every raw descriptor, performs frozen
+   v6.2/v6.7/v8.1 scoring only after collection has stopped, applies the
+   preregistered `0.30` entry-price floor and `1.0` sizing overlay, and freezes
+   all 120 candidate and matched v6.7 decisions before target access. Every
+   market stays in the comparison; `NO_TRADE` is zero.
 2. Write the single-use target-access claim. This consumes attempt-002's
    one-sided alpha `0.025`.
 3. Settle all 120 markets using official read-only resolution on quarantine
@@ -139,20 +144,50 @@ parallel-candidate alpha allocation or candidate identities.
 `run_challenge_attempt_002_pipeline.py` controls evidence freezing and
 evaluation only; it has no collector-start operation.
 
-After an authorized collection reaches 120 quality-valid markets, freeze the
-shared source grid and both target-free decision streams:
+After an authorized collection reaches 120 quality-valid markets and the
+collector PID is null, run the deterministic target-free adapter. All input
+hashes are required explicitly, including the terminal supervisor state and
+collector index. The v6.2 and historical v8.1 manifests remain immutable and
+are consumed through their existing SHA-pinned descriptors:
 
 ```bash
-PYTHONPATH=src:. python examples/v8/run_challenge_attempt_002_pipeline.py \
-  freeze-pairs \
+PYTHONPATH=src:. python \
+  examples/v8/run_challenge_attempt_002_target_freeze.py \
   --run-id <target-free-freeze-run-id> \
-  --shared-source-rows <shared-source.jsonl> \
-  --shared-source-rows-sha256 <sha256> \
-  --candidate-decisions <candidate-decisions.jsonl> \
-  --candidate-decisions-sha256 <sha256> \
-  --baseline-decisions <baseline-decisions.jsonl> \
-  --baseline-decisions-sha256 <sha256>
+  --output-dir examples/v8/polymarket_runs \
+  --service-root \
+    examples/v8/polymarket_live_runs/challenge-model-v8-1-attempt-002 \
+  --protocol-sha256 \
+    0fa091610966a3a3470872a7e1b5832c8a32985fc312235366ad41aa891f249f \
+  --supervisor-state <attempt_002_collection_supervisor_state.json> \
+  --supervisor-state-sha256 <sha256> \
+  --collector-index <persistent_outcome_blind_round_index.jsonl> \
+  --collector-index-sha256 <sha256> \
+  --feature-contract-sha256 \
+    a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959 \
+  --v6-2-candidate-manifest <frozen-v6.2-manifest.json> \
+  --v6-2-candidate-manifest-sha256 \
+    b9441b04fb595a927cbf9af9311612b037c36fc8c623ac8a92b6f4cb8ece84b9 \
+  --historical-fit-manifest <frozen-v8.1-fit-manifest.json> \
+  --historical-fit-manifest-sha256 \
+    3fff5785a53cb32fb26d839786e3f48c2ff2bd7cc9dcf84e801c916a6ebb0fb7 \
+  --frozen-model-binding-sha256 \
+    64fa0f227ce97ec8ea238c3d8285d55efd96be65c95bf7c091aa95c1c185ccfd \
+  --v8-1-candidate-contract-sha256 \
+    b06919aadbea6821f44c1decf4f488fd3e34fc2612a115466caad3fe6173ad90 \
+  --entry-price-floor-profile-sha256 \
+    ea54d339c3ead15188a5fe1ede947e20e8f82cb422418f34a11277633180305e \
+  --sizing-profile-sha256 \
+    b04b25fb7dfad6a8949bd630f407abb156128ba59e33682816846344f1c130ff \
+  --decision-freeze-created-ts <UTC epoch milliseconds after final close>
 ```
+
+The adapter writes the shared source rows, exact decision-time feature rows,
+v8.1 native decisions, candidate and baseline decisions, canonical
+`attempt_002_target_free_pairs.jsonl`, an index snapshot, and a hash-indexed
+manifest. It does not create a target-access claim, call settlement or a
+resolution provider, or control collection. Any index change during the run
+fails closed.
 
 The real single-use target claim requires a separate
 `challenge-attempt-002-operator-authorization-v1` artifact and its valid
@@ -267,10 +302,12 @@ python -m ruff check \
   src/bigan/v8/polymarket/challenge_attempt_002_pipeline.py \
   src/bigan/v8/polymarket/challenge_attempt_002_promotion.py \
   src/bigan/v8/polymarket/challenge_attempt_002_supplemental.py \
+  src/bigan/v8/polymarket/challenge_attempt_002_target_freeze.py \
   examples/v8/run_challenge_attempt_002_collection.py \
   examples/v8/run_challenge_attempt_002_pipeline.py \
   examples/v8/run_challenge_attempt_002_promotion_audit.py \
   examples/v8/run_challenge_attempt_002_supplemental.py \
+  examples/v8/run_challenge_attempt_002_target_freeze.py \
   tests/v8/test_challenge_attempt_002.py \
   tests/v8/test_challenge_attempt_002_collection.py \
   tests/v8/test_challenge_attempt_002_collection_manifest.py \
@@ -278,7 +315,8 @@ python -m ruff check \
   tests/v8/test_challenge_attempt_002_pipeline.py \
   tests/v8/test_challenge_attempt_002_execution_manifest.py \
   tests/v8/test_challenge_attempt_002_promotion.py \
-  tests/v8/test_challenge_attempt_002_promotion_manifest.py
+  tests/v8/test_challenge_attempt_002_promotion_manifest.py \
+  tests/v8/test_challenge_attempt_002_target_freeze.py
 
 PYTHONPATH=src pytest -q \
   tests/v8/test_challenge_attempt_002.py \
@@ -288,7 +326,8 @@ PYTHONPATH=src pytest -q \
   tests/v8/test_challenge_attempt_002_pipeline.py \
   tests/v8/test_challenge_attempt_002_execution_manifest.py \
   tests/v8/test_challenge_attempt_002_promotion.py \
-  tests/v8/test_challenge_attempt_002_promotion_manifest.py
+  tests/v8/test_challenge_attempt_002_promotion_manifest.py \
+  tests/v8/test_challenge_attempt_002_target_freeze.py
 ```
 
 Do not add a collection command to an operational checklist until the separate
