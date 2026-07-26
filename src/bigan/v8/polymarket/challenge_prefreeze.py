@@ -66,7 +66,11 @@ def validate_excluded_capture_ledger(ledger: dict[str, Any]) -> None:
             blockers.append(f"{prefix}_attempt_accounting")
         if not str(entry.get("service_root") or ""):
             blockers.append(f"{prefix}_service_root")
-        if entry.get("current_superseded_plan_capture") is True:
+        if entry.get("entry_type") == "superseded_plan_capture":
+            if not _valid_sha256(
+                entry.get("source_superseded_plan_sha256")
+            ):
+                blockers.append(f"{prefix}_source_superseded_plan_sha256")
             for name in (
                 "capture_manifest_sha256",
                 "capture_report_sha256",
@@ -78,6 +82,19 @@ def validate_excluded_capture_ledger(ledger: dict[str, Any]) -> None:
                 blockers.append(f"{prefix}_indexed")
             if int(entry.get("raw_resolution_row_count") or 0) != 0:
                 blockers.append(f"{prefix}_resolution_rows")
+    if not _valid_sha256(ledger.get("superseded_collection_plan_sha256")):
+        blockers.append("superseded_collection_plan_sha256")
+    if not str(ledger.get("immediate_superseded_plan_service_root") or ""):
+        blockers.append("immediate_superseded_plan_service_root")
+    if ledger.get("immediate_superseded_plan_collection_started") is not False:
+        blockers.append("immediate_superseded_plan_collection_started")
+    if int(ledger.get("immediate_superseded_plan_capture_count", -1)) != 0:
+        blockers.append("immediate_superseded_plan_capture_count")
+    if any(
+        entry.get("current_superseded_plan_capture") is True
+        for entry in entries
+    ):
+        blockers.append("immediate_superseded_plan_capture_entries")
     if not isinstance(incomplete, list):
         blockers.append("unmaterialized_capture_directories")
         incomplete = []
@@ -112,12 +129,19 @@ def validate_prefreeze_checklist(
     historical_replay_report_sha256: str,
     excluded_capture_ledger: dict[str, Any],
     excluded_capture_ledger_sha256: str,
+    collector_protocol_sha256: str,
+    feature_missingness_contract_sha256: str,
+    feature_missingness_runtime_schema_sha256: str,
+    promotion_evidence_protocol_sha256: str,
 ) -> None:
     """Validate all technical prerequisites without authorizing collection."""
 
     blockers: list[str] = []
     historical = dict(checklist.get("historical_replay") or {})
     runtime = dict(checklist.get("runtime_byte_verification") or {})
+    feature_completeness = dict(
+        checklist.get("feature_completeness") or {}
+    )
     alpha = dict(checklist.get("alpha_spending") or {})
     authorization = dict(checklist.get("operator_authorization") or {})
     safety = dict(checklist.get("safety") or {})
@@ -175,6 +199,43 @@ def validate_prefreeze_checklist(
         or runtime.get("mismatch_fails_before_indexable_artifacts") is not True
     ):
         blockers.append("runtime_requirements")
+    expected_feature_hashes = {
+        "persistent_collector_protocol_sha256": collector_protocol_sha256,
+        "feature_missingness_contract_sha256": (
+            feature_missingness_contract_sha256
+        ),
+        "feature_missingness_runtime_schema_sha256": (
+            feature_missingness_runtime_schema_sha256
+        ),
+        "challenge_promotion_evidence_protocol_sha256": (
+            promotion_evidence_protocol_sha256
+        ),
+    }
+    if feature_completeness.get("issue") != 257:
+        blockers.append("feature_completeness_issue")
+    for name, expected in expected_feature_hashes.items():
+        if (
+            not _valid_sha256(expected)
+            or str(feature_completeness.get(name) or "").lower()
+            != expected.lower()
+        ):
+            blockers.append(name)
+    for name in (
+        "full_round_trade_tape_collection_implemented",
+        "full_round_trade_tape_collection_tested",
+        "per_round_provider_health_rows_required",
+        "batch_provider_health_diagnostics_required",
+        "legacy_and_frozen_model_inputs_unchanged",
+    ):
+        if feature_completeness.get(name) is not True:
+            blockers.append(name)
+    if (
+        feature_completeness.get(
+            "outcomes_labels_settlement_returns_or_pnl_opened"
+        )
+        is not False
+    ):
+        blockers.append("feature_completeness_target_access")
     validate_excluded_capture_ledger(excluded_capture_ledger)
     if (
         checklist.get("excluded_capture_ledger_sha256")

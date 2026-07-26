@@ -166,6 +166,15 @@ def audit_challenge_model_promotion(
                 config_dir
                 / "execution_layer_v2_pairwise_action_advantage_lcb_feature_contract_v1.json"
             ),
+            feature_missingness_contract_sha256=_sha256_file(
+                config_dir / "feature_missingness_contract.json"
+            ),
+            feature_missingness_runtime_schema_sha256=_sha256_file(
+                config_dir / "feature_missingness_runtime.schema.json"
+            ),
+            promotion_evidence_protocol_sha256=_sha256_file(
+                config_dir / "challenge_promotion_evidence_protocol.json"
+            ),
             frozen_model_binding_sha256=str(
                 artifact_hashes["parallel_frozen_v8_1_model_binding.json"]
             ),

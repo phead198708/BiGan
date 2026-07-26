@@ -56,6 +56,9 @@ def validate_parallel_future_collection_plan(
     candidate_contract_sha256s: dict[str, str],
     collector_protocol_sha256: str,
     feature_contract_sha256: str,
+    feature_missingness_contract_sha256: str,
+    feature_missingness_runtime_schema_sha256: str,
+    promotion_evidence_protocol_sha256: str,
     frozen_model_binding_sha256: str,
     frozen_model_binding: dict[str, Any],
     candidate_contracts: dict[str, dict[str, Any]],
@@ -96,6 +99,15 @@ def validate_parallel_future_collection_plan(
         "parallel_candidate_protocol_sha256": protocol_sha256,
         "persistent_collector_protocol_sha256": collector_protocol_sha256,
         "feature_contract_sha256": feature_contract_sha256,
+        "feature_missingness_contract_sha256": (
+            feature_missingness_contract_sha256
+        ),
+        "feature_missingness_runtime_schema_sha256": (
+            feature_missingness_runtime_schema_sha256
+        ),
+        "challenge_promotion_evidence_protocol_sha256": (
+            promotion_evidence_protocol_sha256
+        ),
         "frozen_model_binding_sha256": frozen_model_binding_sha256,
         "prefreeze_checklist_sha256": prefreeze_checklist_sha256,
         "excluded_capture_ledger_sha256": excluded_capture_ledger_sha256,
@@ -247,20 +259,28 @@ def validate_parallel_future_collection_plan(
     )
     if len(prior_plan_sha256) != 64:
         blockers.append("superseded_collection_plan_sha256")
-    if supersession.get("sequence_number") != 4:
+    if supersession.get("sequence_number") != 5:
         blockers.append("supersession_sequence_number")
-    if supersession.get("fourth_and_final_supersession") is not True:
+    if supersession.get("corrective_prerequisite_supersession") is not True:
+        blockers.append("corrective_prerequisite_supersession")
+    if supersession.get("prior_plan_was_marked_fourth_and_final") is not True:
+        blockers.append("prior_plan_was_marked_fourth_and_final")
+    if supersession.get("fourth_and_final_supersession") is not False:
         blockers.append("fourth_and_final_supersession")
+    if supersession.get("prior_plan_collection_started") is not False:
+        blockers.append("prior_plan_collection_started")
+    if int(supersession.get("prior_plan_capture_count", -1)) != 0:
+        blockers.append("prior_plan_capture_count")
     if supersession.get("reason") != (
-        "binding_summary_and_runtime_byte_verification_required_before_collection"
+        "issue_257_provider_health_and_trade_tape_prerequisites_missing_before_collection"
     ):
         blockers.append("supersession_reason")
     chain = supersession.get("full_supersession_chain_sha256s")
     if (
         not isinstance(chain, list)
-        or len(chain) != 4
+        or len(chain) != 5
         or chain[-1:] != [prior_plan_sha256]
-        or len(set(chain)) != 4
+        or len(set(chain)) != 5
         or not all(_is_sha256(value) for value in chain)
     ):
         blockers.append("full_supersession_chain")
@@ -269,6 +289,23 @@ def validate_parallel_future_collection_plan(
         != prior_plan_sha256
     ):
         blockers.append("excluded_ledger_superseded_plan")
+    if (
+        excluded_capture_ledger.get(
+            "immediate_superseded_plan_collection_started"
+        )
+        is not False
+        or int(
+            excluded_capture_ledger.get(
+                "immediate_superseded_plan_capture_count", -1
+            )
+        )
+        != 0
+    ):
+        blockers.append("excluded_ledger_immediate_plan_capture")
+    if collection.get("service_root") == excluded_capture_ledger.get(
+        "immediate_superseded_plan_service_root"
+    ):
+        blockers.append("immediate_superseded_plan_service_root_reused")
     if excluded_probe.get("excluded_from_fresh_attempt") is not True:
         blockers.append("pre_replay_probe_not_excluded")
     if excluded_probe.get("labels_outcomes_or_pnl_opened") is not False:
@@ -329,6 +366,16 @@ def validate_parallel_future_collection_plan(
             historical_replay_report_sha256=historical_replay_report_sha256,
             excluded_capture_ledger=excluded_capture_ledger,
             excluded_capture_ledger_sha256=excluded_capture_ledger_sha256,
+            collector_protocol_sha256=collector_protocol_sha256,
+            feature_missingness_contract_sha256=(
+                feature_missingness_contract_sha256
+            ),
+            feature_missingness_runtime_schema_sha256=(
+                feature_missingness_runtime_schema_sha256
+            ),
+            promotion_evidence_protocol_sha256=(
+                promotion_evidence_protocol_sha256
+            ),
         )
     except ChallengePrefreezeError:
         blockers.append("prefreeze_checklist")

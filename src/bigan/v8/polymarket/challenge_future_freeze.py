@@ -614,6 +614,7 @@ def run_challenge_future_target_free_freeze(
     excluded_capture_ledger = _load_json(paths["excluded_capture_ledger"])
     fit_manifest = _load_json(paths["historical_fit_manifest"])
     v8_3_profile = _load_json(paths["v8_3_profile"])
+    config_dir = paths["plan"].parent
     validate_parallel_candidate_protocol(
         protocol,
         candidate_contracts=candidate_contracts,
@@ -629,6 +630,15 @@ def run_challenge_future_target_free_freeze(
         candidate_contract_sha256s=candidate_hashes,
         collector_protocol_sha256=pins["collector_protocol"].lower(),
         feature_contract_sha256=pins["feature_contract"].lower(),
+        feature_missingness_contract_sha256=_sha256_file(
+            config_dir / "feature_missingness_contract.json"
+        ),
+        feature_missingness_runtime_schema_sha256=_sha256_file(
+            config_dir / "feature_missingness_runtime.schema.json"
+        ),
+        promotion_evidence_protocol_sha256=_sha256_file(
+            config_dir / "challenge_promotion_evidence_protocol.json"
+        ),
         frozen_model_binding_sha256=pins["binding"].lower(),
         frozen_model_binding=binding,
         candidate_contracts=candidate_contracts,

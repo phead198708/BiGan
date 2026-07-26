@@ -69,6 +69,18 @@ def _validate_prefreeze_artifacts() -> None:
         excluded_capture_ledger_sha256=_sha256(
             "challenge_prefreeze_excluded_capture_ledger.json"
         ),
+        collector_protocol_sha256=_sha256(
+            "execution_layer_v2_persistent_outcome_blind_collector_v1.json"
+        ),
+        feature_missingness_contract_sha256=_sha256(
+            "feature_missingness_contract.json"
+        ),
+        feature_missingness_runtime_schema_sha256=_sha256(
+            "feature_missingness_runtime.schema.json"
+        ),
+        promotion_evidence_protocol_sha256=_sha256(
+            "challenge_promotion_evidence_protocol.json"
+        ),
     )
 
 
@@ -85,6 +97,15 @@ def _prefreeze_plan_kwargs() -> dict:
         ),
         "excluded_capture_ledger": _json(
             "challenge_prefreeze_excluded_capture_ledger.json"
+        ),
+        "feature_missingness_contract_sha256": _sha256(
+            "feature_missingness_contract.json"
+        ),
+        "feature_missingness_runtime_schema_sha256": _sha256(
+            "feature_missingness_runtime.schema.json"
+        ),
+        "promotion_evidence_protocol_sha256": _sha256(
+            "challenge_promotion_evidence_protocol.json"
         ),
     }
 
@@ -271,15 +292,23 @@ def test_prefreeze_checklist_and_excluded_ledger_are_hash_pinned() -> None:
         for entry in ledger["entries"]
         if entry.get("current_superseded_plan_capture") is True
     ]
-    assert len(current_captures) == 6
-    assert all(entry["index_entry_written"] is False for entry in current_captures)
+    assert current_captures == []
+    assert ledger["immediate_superseded_plan_collection_started"] is False
+    assert ledger["immediate_superseded_plan_capture_count"] == 0
+    prior_captures = [
+        entry
+        for entry in ledger["entries"]
+        if entry.get("entry_type") == "superseded_plan_capture"
+    ]
+    assert len(prior_captures) == 6
+    assert all(entry["index_entry_written"] is False for entry in prior_captures)
     assert all(
         entry["labels_outcomes_or_pnl_opened"] is False
-        for entry in current_captures
+        for entry in prior_captures
     )
     assert all(
         entry["consumes_attempt_or_alpha"] is False
-        for entry in current_captures
+        for entry in prior_captures
     )
 
 
@@ -304,6 +333,60 @@ def test_prefreeze_checklist_rejects_caller_asserted_authorization() -> None:
             ),
             excluded_capture_ledger_sha256=_sha256(
                 "challenge_prefreeze_excluded_capture_ledger.json"
+            ),
+            collector_protocol_sha256=_sha256(
+                "execution_layer_v2_persistent_outcome_blind_collector_v1.json"
+            ),
+            feature_missingness_contract_sha256=_sha256(
+                "feature_missingness_contract.json"
+            ),
+            feature_missingness_runtime_schema_sha256=_sha256(
+                "feature_missingness_runtime.schema.json"
+            ),
+            promotion_evidence_protocol_sha256=_sha256(
+                "challenge_promotion_evidence_protocol.json"
+            ),
+        )
+
+
+def test_prefreeze_checklist_rejects_provider_health_contract_drift() -> None:
+    checklist = _json("challenge_prefreeze_checklist.json")
+    checklist["feature_completeness"][
+        "feature_missingness_runtime_schema_sha256"
+    ] = "0" * 64
+    with pytest.raises(
+        ChallengePrefreezeError,
+        match="feature_missingness_runtime_schema_sha256",
+    ):
+        validate_prefreeze_checklist(
+            checklist,
+            candidate_contract=_contracts()["v8_1_primary_no_fallback"],
+            candidate_contract_sha256=_sha256(
+                "parallel_candidate_v8_1_primary_no_fallback_contract.json"
+            ),
+            historical_replay_report=_json(
+                "historical_replay_superiority_report.json"
+            ),
+            historical_replay_report_sha256=_sha256(
+                "historical_replay_superiority_report.json"
+            ),
+            excluded_capture_ledger=_json(
+                "challenge_prefreeze_excluded_capture_ledger.json"
+            ),
+            excluded_capture_ledger_sha256=_sha256(
+                "challenge_prefreeze_excluded_capture_ledger.json"
+            ),
+            collector_protocol_sha256=_sha256(
+                "execution_layer_v2_persistent_outcome_blind_collector_v1.json"
+            ),
+            feature_missingness_contract_sha256=_sha256(
+                "feature_missingness_contract.json"
+            ),
+            feature_missingness_runtime_schema_sha256=_sha256(
+                "feature_missingness_runtime.schema.json"
+            ),
+            promotion_evidence_protocol_sha256=_sha256(
+                "challenge_promotion_evidence_protocol.json"
             ),
         )
 
