@@ -33,3 +33,19 @@ The executable entry point is `examples/v8/run_parallel_future_gate.py`:
 - `legacy-smoke` exercises the full evaluator on an already-consumed v8.3
   window while explicitly keeping promotion eligibility and alpha consumption
   false.
+
+The production collector bridge is
+`examples/v8/run_challenge_future_freeze.py`:
+
+- `status` validates the append-only collector index and reports exact-window
+  readiness without writing artifacts or opening targets;
+- `freeze` snapshots the ready index, verifies every selected raw descriptor
+  and matched development/v6.2 batch manifest, binds the exact historical
+  v8.1 model bytes and initial controller state, reconstructs v8.1, v8.3, and
+  matched v6.7 decisions on one source grid, and writes the canonical parallel
+  freeze before settlement access.
+
+`freeze` requires the exact historical fit manifest named by
+`parallel_frozen_v8_1_model_binding.json`. It also requires a clean committed
+worktree so the implementation commit in the freeze manifest identifies the
+code that produced the decision streams.
