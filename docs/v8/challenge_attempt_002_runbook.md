@@ -16,6 +16,8 @@ Governing additive artifacts:
 
 - `challenge_attempt_002_preregistration.json`
 - `challenge_attempt_002_synthetic_dry_run.json`
+- `challenge_attempt_002_collection_execution_manifest.json`
+- `challenge_attempt_002_promotion_execution_manifest.json`
 - `challenge_historical_development_iteration_003_result.json`
 
 Each has a SHA-256 sidecar. The earlier frozen attempt-001 plan, governance,
@@ -29,6 +31,21 @@ the operator's explicit permission for the 120-market run. After permission,
 record it in a new, hash-pinned authorization artifact; do not rewrite the
 preregistration.
 
+The guarded supervisor is
+`run_challenge_attempt_002_collection.py`. Both its `preflight` and `run`
+subcommands require the separately hash-pinned authorization. Missing or
+invalid authorization fails before the service root is created and before any
+network operation. The supervisor:
+
+- invokes the generic raw collector for exactly one 12-market batch at a time;
+- stops as soon as the chronological quality-valid count reaches 120;
+- fails closed at 180 attempted markets or 15 batches;
+- never enables scoring, settlement, resolution, labels, or PnL;
+- locks against concurrent supervisors and supports hash-bound resume;
+- writes one issue-#260-ready summary per completed batch with PID, commit,
+  frozen plan hash, attempted/valid counts, exclusion reasons, and provider
+  health.
+
 The future service root is:
 
 ```text
@@ -40,6 +57,25 @@ Only markets with start timestamps strictly greater than
 quality-valid BTC UP/DOWN 5-minute markets, collected in bounded batches of 12.
 The maximum attempted count is 180. Batch summaries go to issue #260; there is
 no per-round comment.
+
+After explicit permission and creation of the authorization artifact, run the
+read-only preflight first:
+
+```bash
+PYTHONPATH=src:. python examples/v8/run_challenge_attempt_002_collection.py \
+  preflight \
+  --run-id <collection-run-id> \
+  --protocol-sha256 <attempt-002 protocol sha256> \
+  --operator-authorization <authorization.json> \
+  --operator-authorization-sha256 <sha256> \
+  --collector-protocol-sha256 <collector protocol sha256> \
+  --feature-contract-sha256 <feature contract sha256> \
+  --service-root \
+    examples/v8/polymarket_live_runs/challenge-model-v8-1-attempt-002
+```
+
+The collection `run` invocation is intentionally withheld until that
+authorization artifact exists.
 
 ## Outcome-blind collection
 
@@ -227,13 +263,17 @@ real labels. Recheck before any authorized launch:
 ```bash
 python -m ruff check \
   src/bigan/v8/polymarket/challenge_attempt_002.py \
+  src/bigan/v8/polymarket/challenge_attempt_002_collection.py \
   src/bigan/v8/polymarket/challenge_attempt_002_pipeline.py \
   src/bigan/v8/polymarket/challenge_attempt_002_promotion.py \
   src/bigan/v8/polymarket/challenge_attempt_002_supplemental.py \
+  examples/v8/run_challenge_attempt_002_collection.py \
   examples/v8/run_challenge_attempt_002_pipeline.py \
   examples/v8/run_challenge_attempt_002_promotion_audit.py \
   examples/v8/run_challenge_attempt_002_supplemental.py \
   tests/v8/test_challenge_attempt_002.py \
+  tests/v8/test_challenge_attempt_002_collection.py \
+  tests/v8/test_challenge_attempt_002_collection_manifest.py \
   tests/v8/test_challenge_attempt_002_preregistration.py \
   tests/v8/test_challenge_attempt_002_pipeline.py \
   tests/v8/test_challenge_attempt_002_execution_manifest.py \
@@ -242,6 +282,8 @@ python -m ruff check \
 
 PYTHONPATH=src pytest -q \
   tests/v8/test_challenge_attempt_002.py \
+  tests/v8/test_challenge_attempt_002_collection.py \
+  tests/v8/test_challenge_attempt_002_collection_manifest.py \
   tests/v8/test_challenge_attempt_002_preregistration.py \
   tests/v8/test_challenge_attempt_002_pipeline.py \
   tests/v8/test_challenge_attempt_002_execution_manifest.py \

@@ -1,0 +1,88 @@
+{
+  "attempt_id": "v8-1-challenger-future-attempt-002",
+  "bounded_collection": {
+    "batch_market_count": 12,
+    "exact_quality_valid_market_target": 120,
+    "maximum_attempted_market_count": 180,
+    "maximum_batch_count": 15,
+    "stop_when_quality_valid_target_reached": true
+  },
+  "current_state": {
+    "attempted_market_count": 0,
+    "collection_started": false,
+    "collector_pid": null,
+    "operator_authorization_present": false,
+    "outcomes_resolution_labels_or_pnl_opened": false,
+    "quality_valid_market_count": 0,
+    "service_root_created": false
+  },
+  "implementation": {
+    "commit": "904766b8137728cc6da9a858bd4d7260f7880786",
+    "generic_collector_module_sha256": "3ddc70bc24ac8617065f82ce1f971c53a761ab1a4eca8cdc7aee99f1b32295fc",
+    "generic_collector_runner_sha256": "1035c7c2fe016eb54062da2af376f00f03dcf4f552bc7f7811053f377b160faf",
+    "supervisor_module_sha256": "df3ee9269cf12b8d3f32e3ac57d57618d21e6a7a0389b1cb3848cc2c76af61d6",
+    "supervisor_runner_sha256": "e04899e966ce8e1b3666495006bac2887971b5015bbb7ad0462d25f8a2c52705",
+    "supervisor_test_sha256": "19fca104744e1a06296797e37a120f42349c3582b9d061084082e15f88b0d8c4"
+  },
+  "lineage": {
+    "attempt_002_preregistration_sha256": "0fa091610966a3a3470872a7e1b5832c8a32985fc312235366ad41aa891f249f",
+    "collector_protocol_sha256": "9a4020f173c3ee7f1f396ceb5387672f67939c64906d2f263cabe623a1d7c083",
+    "feature_contract_sha256": "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959"
+  },
+  "model_version": "v8.1",
+  "operator_authorization_contract": {
+    "authorization_artifact_required_before_network": true,
+    "authorization_artifact_required_before_service_root_creation": true,
+    "authorization_scope": "outcome_blind_collection_of_exact_120_market_window_only",
+    "authorization_sha256_required": true,
+    "paper_live_write_wallet_handoff_or_promotion_authorized": false
+  },
+  "reporting": {
+    "github_issue": 260,
+    "per_round_comment_allowed": false,
+    "policy": "one_summary_comment_per_completed_batch",
+    "required_batch_fields": [
+      "collector_pid",
+      "implementation_commit",
+      "protocol_sha256",
+      "batch_attempted_market_count",
+      "batch_quality_valid_market_count",
+      "cumulative_attempted_market_count",
+      "cumulative_quality_valid_market_count",
+      "batch_exclusion_reason_distribution",
+      "provider_health"
+    ]
+  },
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-attempt-002-collection-execution-manifest-v1",
+  "supervisor_contract": {
+    "candidate_scoring_during_collection": false,
+    "concurrent_supervisor_allowed": false,
+    "existing_unbound_service_root_reuse_allowed": false,
+    "hash_bound_resume_required": true,
+    "resolution_provider_called": false,
+    "settlement_finalizer_started": false,
+    "target_or_result_dependent_extension_allowed": false
+  },
+  "synthetic_preflight": {
+    "collection_or_network_invoked": false,
+    "missing_authorization_fails_before_service_root": true,
+    "stop_at_120_path_passed": true,
+    "stop_at_180_fail_closed_path_passed": true
+  },
+  "validation": {
+    "collection_control_invoked": false,
+    "focused_related_test_count": 147,
+    "focused_related_tests_passed": true,
+    "ruff_passed": true
+  }
+}
