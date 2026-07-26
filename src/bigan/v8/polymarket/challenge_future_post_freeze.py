@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from bigan.v8.canonical_payload import canonical_payload_sha256
+from bigan.v8.canonical_payload import (
+    CANONICAL_COMPARISON_REPORT_SCHEMA_VERSION,
+    DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION,
+    canonical_payload_sha256,
+)
 from bigan.v8.polymarket.challenge_future_freeze import (
     CHALLENGE_FUTURE_FREEZE_MANIFEST_SCHEMA_VERSION,
 )
@@ -24,6 +28,7 @@ from bigan.v8.polymarket.training.execution_layer_v2_adaptive_support_controller
     FORBIDDEN_TARGET_FIELDS,
 )
 from bigan.v8.polymarket.training.execution_layer_v2_conformal_v5_future_settlement import (
+    _feature_payload,
     _finalize_selected_rounds,
     _is_retryable_settlement_failure,
 )
@@ -51,24 +56,12 @@ from bigan.v8.polymarket.training.execution_layer_v2_runtime_aligned_sbc_net_ret
     validate_runtime_aligned_sbc_net_return_v6_4_profile,
 )
 
-POST_FREEZE_PROTOCOL_SCHEMA_VERSION = (
-    "bigan-v8-challenge-future-post-freeze-protocol-v1"
-)
-SETTLED_INDEX_SCHEMA_VERSION = (
-    "bigan-v8-challenge-future-settled-index-v1"
-)
-SETTLEMENT_REPORT_SCHEMA_VERSION = (
-    "bigan-v8-challenge-future-settlement-report-v1"
-)
-SETTLEMENT_MANIFEST_SCHEMA_VERSION = (
-    "bigan-v8-challenge-future-settlement-manifest-v1"
-)
-EVALUATION_MANIFEST_SCHEMA_VERSION = (
-    "bigan-v8-challenge-future-evaluation-manifest-v1"
-)
-ATTEMPT_CONSUMPTION_SCHEMA_VERSION = (
-    "bigan-v8-challenge-attempt-consumption-v1"
-)
+POST_FREEZE_PROTOCOL_SCHEMA_VERSION = "bigan-v8-challenge-future-post-freeze-protocol-v1"
+SETTLED_INDEX_SCHEMA_VERSION = "bigan-v8-challenge-future-settled-index-v1"
+SETTLEMENT_REPORT_SCHEMA_VERSION = "bigan-v8-challenge-future-settlement-report-v1"
+SETTLEMENT_MANIFEST_SCHEMA_VERSION = "bigan-v8-challenge-future-settlement-manifest-v1"
+EVALUATION_MANIFEST_SCHEMA_VERSION = "bigan-v8-challenge-future-evaluation-manifest-v1"
+ATTEMPT_CONSUMPTION_SCHEMA_VERSION = "bigan-v8-challenge-attempt-consumption-v1"
 TRADE_ACTIONS = (
     "BUY_UP_SELL_BEFORE_CLOSE",
     "BUY_DOWN_SELL_BEFORE_CLOSE",
@@ -213,9 +206,7 @@ def validate_challenge_future_post_freeze_protocol(
             "BUY_DOWN_SELL_BEFORE_CLOSE",
         ],
         "no_trade_after_cost_pnl_per_notional": 0.0,
-        "trade_value_field": (
-            "runtime_policy_after_cost_net_pnl_per_contract"
-        ),
+        "trade_value_field": ("runtime_policy_after_cost_net_pnl_per_contract"),
         "paper_position_size": 0.2,
         "costs_subtracted_exactly_once": True,
         "same_runtime_profile_for_all_candidates": True,
@@ -233,29 +224,20 @@ def validate_challenge_future_post_freeze_protocol(
         "threshold_model_cost_sizing_guard_or_candidate_change_allowed": False,
     }
     checks = {
-        "schema": (
-            protocol.get("schema_version")
-            == POST_FREEZE_PROTOCOL_SCHEMA_VERSION
-        ),
+        "schema": (protocol.get("schema_version") == POST_FREEZE_PROTOCOL_SCHEMA_VERSION),
         "issues": protocol.get("issues") == [254, 258, 256],
-        "goal": (
-            protocol.get("goal")
-            == "challenge_model_promote_to_champion_model"
-        ),
+        "goal": (protocol.get("goal") == "challenge_model_promote_to_champion_model"),
         "frozen": protocol.get("frozen_before_target_access") is True,
         "lineage": protocol.get("lineage") == expected_lineage,
         "settlement": protocol.get("settlement") == expected_settlement,
-        "target_mapping": (
-            protocol.get("target_mapping") == expected_target_mapping
-        ),
+        "target_mapping": (protocol.get("target_mapping") == expected_target_mapping),
         "evaluation": protocol.get("evaluation") == expected_evaluation,
         "safety": protocol.get("safety") == SAFETY,
     }
     blockers = [name for name, passed in checks.items() if not passed]
     if blockers:
         raise ChallengeFuturePostFreezeError(
-            "challenge post-freeze protocol invalid: "
-            + ",".join(blockers)
+            "challenge post-freeze protocol invalid: " + ",".join(blockers)
         )
 
 
@@ -271,13 +253,9 @@ def build_challenge_future_settled_index(
 
     freeze_path = config.target_free_freeze_manifest_path.resolve()
     protocol_path = config.post_freeze_protocol_path.resolve()
-    freeze, parallel_freeze, selected, feature_rows, _ = (
-        _validated_challenge_freeze(
-            freeze_path,
-            expected_sha256=(
-                config.expected_target_free_freeze_manifest_sha256
-            ),
-        )
+    freeze, parallel_freeze, selected, feature_rows, _ = _validated_challenge_freeze(
+        freeze_path,
+        expected_sha256=(config.expected_target_free_freeze_manifest_sha256),
     )
     protocol = _validated_post_freeze_protocol(
         protocol_path,
@@ -301,9 +279,7 @@ def build_challenge_future_settled_index(
         overwrite=config.overwrite_existing,
     )
     claim = {
-        "schema_version": (
-            "bigan-v8-challenge-future-target-access-claim-v1"
-        ),
+        "schema_version": ("bigan-v8-challenge-future-target-access-claim-v1"),
         "run_id": config.run_id,
         "fresh_attempt_id": freeze["fresh_attempt_id"],
         "implementation_commit": config.implementation_commit,
@@ -322,10 +298,7 @@ def build_challenge_future_settled_index(
         claim,
         payload_schema_version=str(claim["schema_version"]),
     )
-    claim_path = (
-        freeze_path.parent
-        / "challenge_future_single_use_target_access_claim.json"
-    )
+    claim_path = freeze_path.parent / "challenge_future_single_use_target_access_claim.json"
     _write_single_use_claim(claim_path, claim)
     marker_path = run_dir / "challenge_settlement_start_marker.json"
     _write_json(marker_path, claim)
@@ -335,9 +308,7 @@ def build_challenge_future_settled_index(
         claim_path=claim_path,
         target_access_started_ts=config.target_access_started_ts,
     )
-    attempt_record_path = (
-        run_dir / "challenge_attempt_consumption_record.json"
-    )
+    attempt_record_path = run_dir / "challenge_attempt_consumption_record.json"
     _write_json(attempt_record_path, attempt_record)
 
     frozen_features = _frozen_features_by_market(
@@ -370,6 +341,7 @@ def build_challenge_future_settled_index(
             max_workers=config.max_workers,
             settlement_attempt=attempt_count,
             evaluation_only_frozen_features_by_market=frozen_features,
+            require_complete_raw_feature_lineage=True,
         )
         retryable: set[str] = set()
         for result in results:
@@ -396,10 +368,7 @@ def build_challenge_future_settled_index(
                 )
             break
         sleep_fn(min(config.settlement_poll_interval_seconds, remaining))
-        pending = [
-            selected_by_market[market_id]
-            for market_id in sorted(retryable)
-        ]
+        pending = [selected_by_market[market_id] for market_id in sorted(retryable)]
 
     success_rows = sorted(
         successes.values(),
@@ -412,9 +381,7 @@ def build_challenge_future_settled_index(
     complete = len(success_rows) == 120 and not failure_rows
     finalized_ts = int(clock_ms_fn())
     if finalized_ts < config.target_access_started_ts:
-        raise ChallengeFuturePostFreezeError(
-            "settlement finalized before target access start"
-        )
+        raise ChallengeFuturePostFreezeError("settlement finalized before target access start")
     index_path = run_dir / "challenge_future_settled_index.json"
     index: dict[str, Any] | None = None
     if complete:
@@ -427,9 +394,7 @@ def build_challenge_future_settled_index(
             "parallel_freeze_sha256": parallel_freeze["freeze_sha256"],
             "post_freeze_protocol": _descriptor(protocol_path),
             "target_access_claim": _descriptor(claim_path),
-            "attempt_consumption_record": _descriptor(
-                attempt_record_path
-            ),
+            "attempt_consumption_record": _descriptor(attempt_record_path),
             "target_access_started_ts": config.target_access_started_ts,
             "index_finalized_ts": finalized_ts,
             "entry_count": len(success_rows),
@@ -446,11 +411,7 @@ def build_challenge_future_settled_index(
             payload_schema_version=SETTLED_INDEX_SCHEMA_VERSION,
         )
         _write_json(index_path, index)
-    reasons = Counter(
-        reason
-        for row in failure_rows
-        for reason in row.get("reason_codes", [])
-    )
+    reasons = Counter(reason for row in failure_rows for reason in row.get("reason_codes", []))
     report = {
         "schema_version": SETTLEMENT_REPORT_SCHEMA_VERSION,
         "run_id": config.run_id,
@@ -460,9 +421,7 @@ def build_challenge_future_settled_index(
         "unresolved_or_failed_market_count": len(failure_rows),
         "settlement_attempt_count": attempt_count,
         "settlement_retry_market_count": len(retry_market_ids),
-        "unresolved_or_failed_reason_distribution": dict(
-            sorted(reasons.items())
-        ),
+        "unresolved_or_failed_reason_distribution": dict(sorted(reasons.items())),
         "unresolved_or_failed_markets": failure_rows,
         "settled_index_ready": complete,
         "attempt_and_alpha_consumed": True,
@@ -472,9 +431,7 @@ def build_challenge_future_settled_index(
         "official_read_only_resolution_only": True,
         "future_results_used_for_tuning": False,
         "result_selected_rerun_allowed": False,
-        "blocking_reason_codes": (
-            [] if complete else ["settled_window_incomplete"]
-        ),
+        "blocking_reason_codes": ([] if complete else ["settled_window_incomplete"]),
         **SAFETY,
     }
     report["report_id"] = canonical_payload_sha256(
@@ -492,9 +449,7 @@ def build_challenge_future_settled_index(
         "target_free_freeze_manifest": _descriptor(freeze_path),
         "post_freeze_protocol": _descriptor(protocol_path),
         "target_access_claim": _descriptor(claim_path),
-        "attempt_consumption_record": _descriptor(
-            attempt_record_path
-        ),
+        "attempt_consumption_record": _descriptor(attempt_record_path),
         "settlement_start_marker": _descriptor(marker_path),
         "report": _descriptor(report_path),
         "report_markdown": _descriptor(report_md_path),
@@ -523,13 +478,9 @@ def build_challenge_future_settled_index(
         {
             "index": index,
             "index_path": index_path if complete else None,
-            "index_sha256": (
-                _sha256_file(index_path) if complete else None
-            ),
+            "index_sha256": (_sha256_file(index_path) if complete else None),
             "attempt_consumption_record_path": attempt_record_path,
-            "attempt_consumption_record_sha256": _sha256_file(
-                attempt_record_path
-            ),
+            "attempt_consumption_record_sha256": _sha256_file(attempt_record_path),
         }
     )
     return result
@@ -544,22 +495,16 @@ def evaluate_challenge_parallel_future_gate(
     settled_path = config.settled_index_path.resolve()
     protocol_path = config.post_freeze_protocol_path.resolve()
     runtime_path = config.runtime_policy_profile_path.resolve()
-    freeze, parallel_freeze, selected, _, action_rows = (
-        _validated_challenge_freeze(
-            freeze_path,
-            expected_sha256=(
-                config.expected_target_free_freeze_manifest_sha256
-            ),
-        )
+    freeze, parallel_freeze, selected, feature_rows, action_rows = _validated_challenge_freeze(
+        freeze_path,
+        expected_sha256=(config.expected_target_free_freeze_manifest_sha256),
     )
     _validated_post_freeze_protocol(
         protocol_path,
         expected_sha256=config.expected_post_freeze_protocol_sha256,
         freeze_manifest=freeze,
         runtime_profile_path=runtime_path,
-        expected_runtime_profile_sha256=(
-            config.expected_runtime_policy_profile_sha256
-        ),
+        expected_runtime_profile_sha256=(config.expected_runtime_policy_profile_sha256),
     )
     _verify_pin(
         settled_path,
@@ -577,17 +522,17 @@ def evaluate_challenge_parallel_future_gate(
     entries = _validate_settled_index(
         settled,
         freeze_path=freeze_path,
-        freeze_sha256=(
-            config.expected_target_free_freeze_manifest_sha256
-        ),
+        freeze_sha256=(config.expected_target_free_freeze_manifest_sha256),
         parallel_freeze_sha256=parallel_freeze["freeze_sha256"],
         selected_market_ids=[str(row["market_id"]) for row in selected],
+        frozen_features_by_market=_frozen_features_by_market(
+            feature_rows,
+            selected_market_ids=[str(row["market_id"]) for row in selected],
+        ),
         evaluation_started_ts=config.evaluation_started_ts,
     )
     claim = {
-        "schema_version": (
-            "bigan-v8-challenge-future-parallel-evaluation-claim-v1"
-        ),
+        "schema_version": ("bigan-v8-challenge-future-parallel-evaluation-claim-v1"),
         "run_id": config.run_id,
         "fresh_attempt_id": freeze["fresh_attempt_id"],
         "implementation_commit": config.implementation_commit,
@@ -606,10 +551,7 @@ def evaluate_challenge_parallel_future_gate(
         claim,
         payload_schema_version=str(claim["schema_version"]),
     )
-    claim_path = (
-        freeze_path.parent
-        / "challenge_future_single_use_parallel_evaluation_claim.json"
-    )
+    claim_path = freeze_path.parent / "challenge_future_single_use_parallel_evaluation_claim.json"
     _write_single_use_claim(claim_path, claim)
     runtime_decisions_by_action = _runtime_decisions_by_action(
         parallel_freeze=parallel_freeze,
@@ -652,9 +594,7 @@ def evaluate_challenge_parallel_future_gate(
         overwrite=config.overwrite_existing,
     )
     targets_path = run_dir / "challenge_parallel_settled_targets.jsonl"
-    action_targets_path = (
-        run_dir / "challenge_parallel_action_runtime_targets.jsonl"
-    )
+    action_targets_path = run_dir / "challenge_parallel_action_runtime_targets.jsonl"
     claim_copy_path = run_dir / "challenge_parallel_evaluation_claim.json"
     _write_jsonl(targets_path, settled_targets)
     _write_jsonl(action_targets_path, action_targets)
@@ -664,9 +604,7 @@ def evaluate_challenge_parallel_future_gate(
         path = run_dir / f"challenge_{candidate_id}_settled_rows.jsonl"
         _write_jsonl(path, rows)
         candidate_paths[candidate_id] = path
-    parallel_claim_path = (
-        run_dir / "challenge_parallel_gate_single_use_claim.json"
-    )
+    parallel_claim_path = run_dir / "challenge_parallel_gate_single_use_claim.json"
     report_path = run_dir / "challenge_parallel_evaluation_report.json"
     final_path = run_dir / "challenge_parallel_final_manifest.json"
     report_md_path = run_dir / "challenge_parallel_evaluation_report.md"
@@ -693,13 +631,10 @@ def evaluate_challenge_parallel_future_gate(
         "settled_targets": _descriptor(targets_path),
         "action_runtime_targets": _descriptor(action_targets_path),
         "candidate_settled_rows": {
-            candidate_id: _descriptor(path)
-            for candidate_id, path in candidate_paths.items()
+            candidate_id: _descriptor(path) for candidate_id, path in candidate_paths.items()
         },
         "parallel_evaluation_report": _descriptor(report_path),
-        "parallel_evaluation_report_markdown": _descriptor(
-            report_md_path
-        ),
+        "parallel_evaluation_report_markdown": _descriptor(report_md_path),
         "parallel_final_manifest": _descriptor(final_path),
         "multiplicity_aware_selected_candidate": result["report"][
             "multiplicity_aware_selected_candidate"
@@ -738,12 +673,7 @@ def build_parallel_settled_targets(
             int(row.get("decision_ts") or 0),
             str(row.get("action") or ""),
         )
-        if (
-            not key[0]
-            or key[1] <= 0
-            or key[2] not in TRADE_ACTIONS
-            or key in target_by_key
-        ):
+        if not key[0] or key[1] <= 0 or key[2] not in TRADE_ACTIONS or key in target_by_key:
             raise ChallengeFuturePostFreezeError(
                 "runtime action target identity missing or duplicated"
             )
@@ -762,25 +692,19 @@ def build_parallel_settled_targets(
                 str(decision["market_id"]),
                 int(decision["decision_ts"]),
             )
-            frozen_actions_by_key.setdefault(key, set()).add(
-                str(decision["executed_action"])
-            )
+            frozen_actions_by_key.setdefault(key, set()).add(str(decision["executed_action"]))
     output = []
     for source in parallel_freeze["shared_source_rows"]:
         market_id = str(source["market_id"])
         shared_ts = int(source["decision_ts"])
-        policy_ts = int(
-            source.get("policy_grid_decision_ts") or shared_ts
-        )
+        policy_ts = int(source.get("policy_grid_decision_ts") or shared_ts)
         pnl_by_action = {"NO_TRADE": 0.0}
         resolved_outcomes: set[str] = set()
         for action in TRADE_ACTIONS:
             target = target_by_key.get((market_id, policy_ts, action))
             if target is not None:
                 pnl_by_action[action] = float(
-                    target[
-                        "runtime_policy_after_cost_net_pnl_per_contract"
-                    ]
+                    target["runtime_policy_after_cost_net_pnl_per_contract"]
                 )
                 if target.get("resolved_outcome"):
                     resolved_outcomes.add(str(target["resolved_outcome"]))
@@ -788,24 +712,17 @@ def build_parallel_settled_targets(
         missing = sorted(required_actions - set(pnl_by_action))
         if missing:
             raise ChallengeFuturePostFreezeError(
-                f"settled target missing frozen action for {market_id}: "
-                + ",".join(missing)
+                f"settled target missing frozen action for {market_id}: " + ",".join(missing)
             )
         if len(resolved_outcomes) > 1:
-            raise ChallengeFuturePostFreezeError(
-                f"runtime target outcome mismatch for {market_id}"
-            )
+            raise ChallengeFuturePostFreezeError(f"runtime target outcome mismatch for {market_id}")
         output.append(
             {
                 "market_id": market_id,
                 "decision_ts": shared_ts,
                 "policy_grid_decision_ts": policy_ts,
                 "after_cost_pnl_per_notional_by_action": pnl_by_action,
-                "resolved_outcome": (
-                    next(iter(resolved_outcomes))
-                    if resolved_outcomes
-                    else None
-                ),
+                "resolved_outcome": (next(iter(resolved_outcomes)) if resolved_outcomes else None),
                 "official_read_only_resolution": True,
                 "costs_subtracted_exactly_once": True,
                 "target_available_after_decision_freeze": True,
@@ -829,25 +746,17 @@ def _validated_challenge_freeze(
     _verify_pin(path, expected_sha256, "challenge target-free freeze")
     manifest = _load_json(path)
     if (
-        manifest.get("schema_version")
-        != CHALLENGE_FUTURE_FREEZE_MANIFEST_SCHEMA_VERSION
+        manifest.get("schema_version") != CHALLENGE_FUTURE_FREEZE_MANIFEST_SCHEMA_VERSION
         or int(manifest.get("exact_market_count") or 0) != 120
         or manifest.get("parallel_target_free_freeze_passed") is not True
         or manifest.get("future_target_access_allowed") is not True
-        or manifest.get("decision_freeze_written_before_target_access")
-        is not True
-        or manifest.get(
-            "outcomes_labels_settlement_returns_or_pnl_opened"
-        )
-        is not False
+        or manifest.get("decision_freeze_written_before_target_access") is not True
+        or manifest.get("outcomes_labels_settlement_returns_or_pnl_opened") is not False
         or manifest.get("settlement_provider_called") is not False
-        or manifest.get("result_selected_extension_or_rerun_allowed")
-        is not False
+        or manifest.get("result_selected_extension_or_rerun_allowed") is not False
         or any(manifest.get(field) is not expected for field, expected in SAFETY.items())
     ):
-        raise ChallengeFuturePostFreezeError(
-            "challenge freeze is not target-access eligible"
-        )
+        raise ChallengeFuturePostFreezeError("challenge freeze is not target-access eligible")
     parallel_path = Path(
         _verified_descriptor(
             manifest["parallel_target_free_freeze"],
@@ -856,32 +765,17 @@ def _validated_challenge_freeze(
     )
     parallel_freeze = _load_json(parallel_path)
     expected_parallel_hash = canonical_payload_sha256(
-        {
-            key: value
-            for key, value in parallel_freeze.items()
-            if key != "freeze_sha256"
-        },
+        {key: value for key, value in parallel_freeze.items() if key != "freeze_sha256"},
         payload_schema_version=PARALLEL_FREEZE_SCHEMA_VERSION,
     )
     if (
-        parallel_freeze.get("schema_version")
-        != PARALLEL_FREEZE_SCHEMA_VERSION
-        or parallel_freeze.get("freeze_sha256")
-        != expected_parallel_hash
-        or parallel_freeze.get("freeze_sha256")
-        != manifest.get("parallel_freeze_sha256")
-        or parallel_freeze.get(
-            "all_candidate_decisions_frozen_before_target_access"
-        )
-        is not True
-        or parallel_freeze.get(
-            "outcomes_labels_settlement_returns_or_pnl_opened"
-        )
-        is not False
+        parallel_freeze.get("schema_version") != PARALLEL_FREEZE_SCHEMA_VERSION
+        or parallel_freeze.get("freeze_sha256") != expected_parallel_hash
+        or parallel_freeze.get("freeze_sha256") != manifest.get("parallel_freeze_sha256")
+        or parallel_freeze.get("all_candidate_decisions_frozen_before_target_access") is not True
+        or parallel_freeze.get("outcomes_labels_settlement_returns_or_pnl_opened") is not False
     ):
-        raise ChallengeFuturePostFreezeError(
-            "challenge parallel freeze hash or sealing invalid"
-        )
+        raise ChallengeFuturePostFreezeError("challenge parallel freeze hash or sealing invalid")
     selected = _load_jsonl(
         Path(
             _verified_descriptor(
@@ -907,10 +801,7 @@ def _validated_challenge_freeze(
         )
     )
     selected_ids = [str(row.get("market_id") or "") for row in selected]
-    source_ids = [
-        str(row.get("market_id") or "")
-        for row in parallel_freeze["shared_source_rows"]
-    ]
+    source_ids = [str(row.get("market_id") or "") for row in parallel_freeze["shared_source_rows"]]
     if (
         len(selected) != 120
         or "" in selected_ids
@@ -919,9 +810,7 @@ def _validated_challenge_freeze(
         or int(manifest.get("decision_freeze_created_ts") or 0)
         != int(parallel_freeze["decision_freeze_created_ts"])
     ):
-        raise ChallengeFuturePostFreezeError(
-            "challenge frozen market grid is invalid"
-        )
+        raise ChallengeFuturePostFreezeError("challenge frozen market grid is invalid")
     return manifest, parallel_freeze, selected, features, actions
 
 
@@ -959,15 +848,9 @@ def _validated_post_freeze_protocol(
             )
     validate_challenge_future_post_freeze_protocol(
         protocol,
-        parallel_protocol_sha256=freeze_manifest[
-            "parallel_protocol"
-        ]["sha256"],
-        collection_plan_sha256=freeze_manifest[
-            "collection_plan"
-        ]["sha256"],
-        frozen_model_binding_sha256=freeze_manifest[
-            "frozen_model_binding"
-        ]["sha256"],
+        parallel_protocol_sha256=freeze_manifest["parallel_protocol"]["sha256"],
+        collection_plan_sha256=freeze_manifest["collection_plan"]["sha256"],
+        frozen_model_binding_sha256=freeze_manifest["frozen_model_binding"]["sha256"],
         runtime_policy_profile_sha256=runtime_descriptor["sha256"],
     )
     return protocol
@@ -994,19 +877,14 @@ def _frozen_features_by_market(
             or decision_ts <= 0
             or max_input_ts > decision_ts
         ):
-            raise ChallengeFuturePostFreezeError(
-                "frozen feature identity or causality invalid"
-            )
+            raise ChallengeFuturePostFreezeError("frozen feature identity or causality invalid")
         grouped.setdefault(market_id, []).append(row)
     if forbidden:
         raise ChallengeFuturePostFreezeError(
-            "frozen features contain target fields: "
-            + ",".join(sorted(forbidden))
+            "frozen features contain target fields: " + ",".join(sorted(forbidden))
         )
     if set(grouped) != selected or any(not rows for rows in grouped.values()):
-        raise ChallengeFuturePostFreezeError(
-            "frozen feature market coverage incomplete"
-        )
+        raise ChallengeFuturePostFreezeError("frozen feature market coverage incomplete")
     return grouped
 
 
@@ -1033,8 +911,7 @@ def _runtime_decisions_by_action(
             matches = source_by_key.get((market_id, policy_ts, action), [])
             if len(matches) != 1:
                 raise ChallengeFuturePostFreezeError(
-                    f"frozen action source missing or duplicated: "
-                    f"{market_id}/{policy_ts}/{action}"
+                    f"frozen action source missing or duplicated: {market_id}/{policy_ts}/{action}"
                 )
             row = matches[0]
             output[action].append(
@@ -1042,18 +919,10 @@ def _runtime_decisions_by_action(
                     "market_id": market_id,
                     "decision_ts": policy_ts,
                     "max_input_ts": int(row.get("max_input_ts") or 0),
-                    "market_close_ts": int(
-                        row.get("market_close_ts") or 0
-                    ),
-                    "side": (
-                        "UP"
-                        if action.startswith("BUY_UP_")
-                        else "DOWN"
-                    ),
+                    "market_close_ts": int(row.get("market_close_ts") or 0),
+                    "side": ("UP" if action.startswith("BUY_UP_") else "DOWN"),
                     "action": action,
-                    "microstructure_snapshot": dict(
-                        row.get("microstructure_snapshot") or {}
-                    ),
+                    "microstructure_snapshot": dict(row.get("microstructure_snapshot") or {}),
                 }
             )
     return output
@@ -1066,6 +935,7 @@ def _validate_settled_index(
     freeze_sha256: str,
     parallel_freeze_sha256: str,
     selected_market_ids: list[str],
+    frozen_features_by_market: dict[str, list[dict[str, Any]]],
     evaluation_started_ts: int,
 ) -> list[dict[str, Any]]:
     entries = list(index.get("entries") or [])
@@ -1078,23 +948,18 @@ def _validate_settled_index(
         index.get("schema_version") != SETTLED_INDEX_SCHEMA_VERSION
         or freeze_descriptor != _descriptor(freeze_path)
         or freeze_descriptor["sha256"] != freeze_sha256.lower()
-        or index.get("parallel_freeze_sha256")
-        != parallel_freeze_sha256
+        or index.get("parallel_freeze_sha256") != parallel_freeze_sha256
         or int(index.get("entry_count") or 0) != 120
         or len(entries) != 120
         or set(entry_ids) != set(selected_market_ids)
         or "" in entry_ids
-        or evaluation_started_ts
-        <= int(index.get("index_finalized_ts") or 0)
+        or evaluation_started_ts <= int(index.get("index_finalized_ts") or 0)
         or index.get("official_read_only_resolution") is not True
         or index.get("source_outcome_blind_rounds_mutated") is not False
-        or index.get("outcomes_used_for_decision_selection_or_tuning")
-        is not False
+        or index.get("outcomes_used_for_decision_selection_or_tuning") is not False
         or any(index.get(field) is not expected for field, expected in SAFETY.items())
     ):
-        raise ChallengeFuturePostFreezeError(
-            "challenge settled index is not evaluation eligible"
-        )
+        raise ChallengeFuturePostFreezeError("challenge settled index is not evaluation eligible")
     _verified_descriptor(
         index["target_access_claim"],
         "challenge target access claim",
@@ -1107,12 +972,115 @@ def _validate_settled_index(
         if (
             entry.get("official_read_only_resolution") is not True
             or entry.get("source_outcome_blind_round_mutated") is not False
+            or entry.get("canonical_feature_payload_comparison_required") is not True
+            or entry.get("direct_training_eligibility_relaxed") is not False
+        ):
+            raise ChallengeFuturePostFreezeError("settled entry violates quarantine contract")
+        settled_descriptors = {
+            name: _verified_descriptor(
+                entry[name],
+                f"challenge settled {name}",
+            )
+            for name in ("feature_rows", "label_rows", "resolution_events")
+        }
+        canonical_report_descriptor = _verified_descriptor(
+            entry["canonical_feature_payload_comparison_report"],
+            "challenge canonical feature comparison report",
+        )
+        canonical_report = _load_json(Path(canonical_report_descriptor["path"]))
+        canonical_report_payload = {
+            key: value for key, value in canonical_report.items() if key != "report_id"
+        }
+        market_id = str(entry["market_id"])
+        frozen_payloads = sorted(
+            (_feature_payload(row) for row in frozen_features_by_market.get(market_id, [])),
+            key=lambda row: (
+                int(row["decision_ts"]),
+                str(row["market_id"]),
+            ),
+        )
+        settled_payloads = sorted(
+            (
+                _feature_payload(row)
+                for row in _load_jsonl(Path(settled_descriptors["feature_rows"]["path"]))
+            ),
+            key=lambda row: (
+                int(row["decision_ts"]),
+                str(row["market_id"]),
+            ),
+        )
+        frozen_descriptor = dict(canonical_report.get("frozen_descriptor") or {})
+        settled_descriptor = dict(canonical_report.get("settled_descriptor") or {})
+        source_checks = dict(canonical_report.get("source_lineage_checks") or {})
+        source_evidence = dict(canonical_report.get("source_lineage_evidence") or {})
+        expected_frozen_hash = canonical_payload_sha256(
+            frozen_payloads,
+            payload_schema_version=(DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION),
+        )
+        expected_settled_hash = canonical_payload_sha256(
+            settled_payloads,
+            payload_schema_version=(DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION),
+        )
+        evidence_descriptors_match = all(
+            source_evidence.get(evidence_name) == settled_descriptors[entry_name]
+            for evidence_name, entry_name in (
+                ("settled_feature_rows", "feature_rows"),
+                ("settled_label_rows", "label_rows"),
+                ("settled_resolution_events", "resolution_events"),
+            )
+        )
+        safety_fields = (
+            "paper_candidate_unlocked",
+            "promotion_unlocked",
+            "live_unlocked",
+            "write_enabled",
+            "wallet_enabled",
+            "capital_at_risk",
+            "handoff_enabled",
+            "source_change_enabled",
+            "freeze_change_enabled",
+            "#134_resume_allowed",
+            "#146_start_allowed",
+        )
+        if (
+            canonical_report.get("schema_version") != CANONICAL_COMPARISON_REPORT_SCHEMA_VERSION
+            or canonical_report.get("report_id")
+            != canonical_payload_sha256(
+                canonical_report_payload,
+                payload_schema_version=(CANONICAL_COMPARISON_REPORT_SCHEMA_VERSION),
+            )
+            or canonical_report.get("canonical_comparison_passed") is not True
+            or canonical_report.get("canonical_hash_match") is not True
+            or canonical_report.get("approved_source_lineage") is not True
+            or canonical_report.get("settlement_evaluation_eligible") is not True
+            or canonical_report.get("reason_codes") != []
+            or canonical_report.get("training_or_export_eligibility_relaxed") is not False
+            or canonical_report.get("context")
+            not in {
+                "settled_export_feature_payload",
+                "evaluation_only_settlement_fallback_feature_payload",
+            }
+            or not source_checks
+            or any(type(value) is not bool for value in source_checks.values())
+            or not all(source_checks.values())
+            or not evidence_descriptors_match
+            or source_evidence.get("frozen_feature_payload_row_count") != len(frozen_payloads)
+            or source_evidence.get("settled_feature_payload_row_count") != len(settled_payloads)
+            or source_evidence.get("raw_source_artifacts_preserved") is not True
+            or source_evidence.get("historical_manifest_rewritten") is not False
+            or not frozen_payloads
+            or len(settled_payloads) != len(frozen_payloads)
+            or frozen_descriptor.get("payload_schema_version")
+            != DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION
+            or settled_descriptor.get("payload_schema_version")
+            != DECISION_FEATURE_PAYLOAD_SCHEMA_VERSION
+            or frozen_descriptor.get("canonical_payload_sha256") != expected_frozen_hash
+            or settled_descriptor.get("canonical_payload_sha256") != expected_settled_hash
+            or any(canonical_report.get(field) is not False for field in safety_fields)
         ):
             raise ChallengeFuturePostFreezeError(
-                "settled entry violates quarantine contract"
+                "canonical feature comparison is not evaluation eligible"
             )
-        for name in ("feature_rows", "label_rows", "resolution_events"):
-            _verified_descriptor(entry[name], f"challenge settled {name}")
     return entries
 
 
@@ -1171,12 +1139,8 @@ def _validate_run_identity(
 ) -> None:
     if not run_id.strip():
         raise ValueError("run_id is required")
-    if (
-        len(implementation_commit) != 40
-        or any(
-            character not in "0123456789abcdef"
-            for character in implementation_commit.lower()
-        )
+    if len(implementation_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in implementation_commit.lower()
     ):
         raise ValueError("implementation_commit must be a Git SHA-1")
     if stage_started_ts <= 0:
@@ -1190,12 +1154,9 @@ def _settlement_markdown(report: dict[str, Any]) -> str:
             "",
             f"- selected markets: `{report['selected_market_count']}`",
             f"- settled markets: `{report['settled_market_count']}`",
-            "- unresolved/failed markets: "
-            f"`{report['unresolved_or_failed_market_count']}`",
-            "- attempt and alpha consumed: "
-            f"`{str(report['attempt_and_alpha_consumed']).lower()}`",
-            "- settled index ready: "
-            f"`{str(report['settled_index_ready']).lower()}`",
+            f"- unresolved/failed markets: `{report['unresolved_or_failed_market_count']}`",
+            f"- attempt and alpha consumed: `{str(report['attempt_and_alpha_consumed']).lower()}`",
+            f"- settled index ready: `{str(report['settled_index_ready']).lower()}`",
             f"- blockers: `{report['blocking_reason_codes']}`",
             "- source outcome-blind rounds mutated: `false`",
             "- official read-only resolution only: `true`",
@@ -1209,8 +1170,7 @@ def _evaluation_markdown(report: dict[str, Any]) -> str:
     lines = [
         "# Challenge Parallel Future Evaluation",
         "",
-        "- selected candidate: "
-        f"`{report['multiplicity_aware_selected_candidate']}`",
+        f"- selected candidate: `{report['multiplicity_aware_selected_candidate']}`",
     ]
     for candidate_id, gate in report["candidate_gates"].items():
         lines.extend(
@@ -1220,8 +1180,7 @@ def _evaluation_markdown(report: dict[str, Any]) -> str:
                 "- "
                 f"{candidate_id} candidate-minus-baseline LCB: "
                 f"`{gate['candidate_minus_baseline_bootstrap_lcb']}`",
-                f"- {candidate_id} hard gates: "
-                f"`{str(gate['all_hard_gates_passed']).lower()}`",
+                f"- {candidate_id} hard gates: `{str(gate['all_hard_gates_passed']).lower()}`",
             ]
         )
     lines.extend(

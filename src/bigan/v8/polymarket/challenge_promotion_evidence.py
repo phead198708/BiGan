@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from bigan.v8.canonical_payload import canonical_payload_sha256
+from bigan.v8.canonical_payload import (
+    canonical_payload_sha256,
+    validate_canonical_payload_contract,
+)
 from bigan.v8.polymarket.challenge_future_freeze import (
     CHALLENGE_FUTURE_FREEZE_MANIFEST_SCHEMA_VERSION,
 )
@@ -214,12 +217,8 @@ def validate_challenge_promotion_evidence_protocol(
             protocol.get("provider_health_diagnostics")
             == {
                 "feature_source": "frozen_feature_rows.features",
-                "decision_source": (
-                    "multiplicity_aware_selected_candidate_settled_rows"
-                ),
-                "decision_identity_mapping": (
-                    "market_id_plus_policy_grid_decision_ts"
-                ),
+                "decision_source": ("multiplicity_aware_selected_candidate_settled_rows"),
+                "decision_identity_mapping": ("market_id_plus_policy_grid_decision_ts"),
                 "feature_completeness_report_required": True,
                 "missing_versus_zero_audit_report_required": True,
                 "fallback_provider_health_association_report_required": True,
@@ -360,9 +359,7 @@ def run_challenge_promotion_evidence(
     provider_health_report.update(common)
     provider_health_report["report_id"] = canonical_payload_sha256(
         provider_health_report,
-        payload_schema_version=(
-            "bigan-v8-provider-health-diagnostics-v1"
-        ),
+        payload_schema_version=("bigan-v8-provider-health-diagnostics-v1"),
     )
     if (
         provider_health_report["decision_row_count"] != 120
@@ -406,9 +403,7 @@ def run_challenge_promotion_evidence(
     side_path = run_dir / "challenge_side_action_attribution_report.json"
     regime_md_path = run_dir / "challenge_regime_diagnostics.md"
     policy_inputs_path = run_dir / "challenge_execution_policy_inputs.jsonl"
-    provider_health_path = (
-        run_dir / "challenge_provider_health_diagnostics.json"
-    )
+    provider_health_path = run_dir / "challenge_provider_health_diagnostics.json"
     parity_path = run_dir / "challenge_replay_parity_report.json"
     safety_path = run_dir / "challenge_policy_safety_report.json"
     reconciliation_path = run_dir / "challenge_policy_reconciliation_report.json"
@@ -456,9 +451,7 @@ def run_challenge_promotion_evidence(
         "policy_safety_report": _descriptor(safety_path),
         "policy_reconciliation_report": _descriptor(reconciliation_path),
         "powered_paper_gate_report": _descriptor(powered_path),
-        "provider_health_diagnostics_report": _descriptor(
-            provider_health_path
-        ),
+        "provider_health_diagnostics_report": _descriptor(provider_health_path),
         "attempt_consumption_record": attempt_descriptor,
     }
     runtime_evidence_path = run_dir / "challenge_runtime_evidence_manifest.json"
@@ -505,9 +498,7 @@ def run_challenge_promotion_evidence(
         "regime_bootstrap_report": _descriptor(regime_bootstrap_path),
         "side_action_attribution_report": _descriptor(side_path),
         "execution_policy_inputs": _descriptor(policy_inputs_path),
-        "provider_health_diagnostics_report": _descriptor(
-            provider_health_path
-        ),
+        "provider_health_diagnostics_report": _descriptor(provider_health_path),
         "policy_replays": replay_descriptors,
         "replay_parity_report": _descriptor(parity_path),
         "policy_safety_report": _descriptor(safety_path),
@@ -548,6 +539,7 @@ def _validate_static_lineage(
     repository_root: Path,
 ) -> None:
     config_dir = repository_root / "examples/v8/polymarket_configs"
+    validate_canonical_payload_contract(_load_json(config_dir / "canonical_payload_contract.json"))
     validate_challenge_promotion_evidence_protocol(
         evidence_protocol,
         regime_contract_sha256=regime_contract_sha256,
@@ -721,9 +713,7 @@ def _provider_health_diagnostic_decisions(
     selected_candidate_rows: list[dict[str, Any]],
     source_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    source_by_market = {
-        str(row["market_id"]): row for row in source_rows
-    }
+    source_by_market = {str(row["market_id"]): row for row in source_rows}
     if len(source_by_market) != len(source_rows):
         raise ChallengePromotionEvidenceError(
             "provider-health source market identities are duplicated"
@@ -736,9 +726,7 @@ def _provider_health_diagnostic_decisions(
             raise ChallengePromotionEvidenceError(
                 "provider-health selected decision lacks a source market"
             )
-        policy_grid_decision_ts = int(
-            source.get("policy_grid_decision_ts") or 0
-        )
+        policy_grid_decision_ts = int(source.get("policy_grid_decision_ts") or 0)
         if policy_grid_decision_ts <= 0:
             raise ChallengePromotionEvidenceError(
                 "provider-health policy-grid decision timestamp is missing"

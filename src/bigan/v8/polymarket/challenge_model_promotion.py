@@ -7,6 +7,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from bigan.v8.canonical_payload import (
+    validate_canonical_payload_contract,
+)
 from bigan.v8.polymarket.candidate_budget import (
     evaluate_next_gate_eligibility,
 )
@@ -74,29 +77,23 @@ def audit_challenge_model_promotion(
         artifact_hashes[filename] = actual
     next_gate_path = config_dir / "next_gate_eligibility_decision.json"
     next_gate = _read_json(next_gate_path) if next_gate_path.is_file() else {}
-    candidate_family = _read_json(
-        config_dir / "candidate_family_manifest.json"
-    )
-    candidate_budget = _read_json(
-        config_dir / "candidate_budget_protocol.json"
-    )
-    family_error_control = _read_json(
-        config_dir / "family_error_control_contract.json"
-    )
-    attempt_ledger = _read_json(
-        config_dir / "candidate_attempt_ledger.json"
-    )
-    evidence_ledger = _read_json(
-        config_dir / "evidence_consumption_ledger.json"
-    )
-    historical_replay_path = (
-        config_dir / "historical_replay_superiority_report.json"
-    )
+    candidate_family = _read_json(config_dir / "candidate_family_manifest.json")
+    candidate_budget = _read_json(config_dir / "candidate_budget_protocol.json")
+    family_error_control = _read_json(config_dir / "family_error_control_contract.json")
+    attempt_ledger = _read_json(config_dir / "candidate_attempt_ledger.json")
+    evidence_ledger = _read_json(config_dir / "evidence_consumption_ledger.json")
+    historical_replay_path = config_dir / "historical_replay_superiority_report.json"
     historical_replay = (
-        _read_json(historical_replay_path)
-        if historical_replay_path.is_file()
-        else {}
+        _read_json(historical_replay_path) if historical_replay_path.is_file() else {}
     )
+    canonical_payload_contract_valid = False
+    try:
+        validate_canonical_payload_contract(
+            _read_json(config_dir / "canonical_payload_contract.json")
+        )
+        canonical_payload_contract_valid = True
+    except (TypeError, ValueError):
+        canonical_payload_contract_valid = False
     budget_decision_valid = False
     try:
         recomputed_next_gate = evaluate_next_gate_eligibility(
@@ -130,24 +127,16 @@ def audit_challenge_model_promotion(
             "v8_3_primary_with_fallback": (
                 "parallel_candidate_v8_3_primary_with_fallback_contract.json"
             ),
-            "matched_frozen_v6_7": (
-                "parallel_candidate_matched_frozen_v6_7_contract.json"
-            ),
+            "matched_frozen_v6_7": ("parallel_candidate_matched_frozen_v6_7_contract.json"),
         }.items()
     }
-    parallel_plan = _read_json(
-        config_dir / "parallel_future_collection_plan.json"
-    )
+    parallel_plan = _read_json(config_dir / "parallel_future_collection_plan.json")
     parallel_plan_valid = False
     try:
         validate_parallel_future_collection_plan(
             parallel_plan,
-            plan_sha256=str(
-                artifact_hashes["parallel_future_collection_plan.json"]
-            ),
-            protocol_sha256=str(
-                artifact_hashes["parallel_candidate_protocol.json"]
-            ),
+            plan_sha256=str(artifact_hashes["parallel_future_collection_plan.json"]),
+            protocol_sha256=str(artifact_hashes["parallel_candidate_protocol.json"]),
             candidate_contract_sha256s={
                 candidate_id: str(artifact_hashes[filename])
                 for candidate_id, filename in {
@@ -157,14 +146,11 @@ def audit_challenge_model_promotion(
                     "v8_3_primary_with_fallback": (
                         "parallel_candidate_v8_3_primary_with_fallback_contract.json"
                     ),
-                    "matched_frozen_v6_7": (
-                        "parallel_candidate_matched_frozen_v6_7_contract.json"
-                    ),
+                    "matched_frozen_v6_7": ("parallel_candidate_matched_frozen_v6_7_contract.json"),
                 }.items()
             },
             collector_protocol_sha256=_sha256_file(
-                config_dir
-                / "execution_layer_v2_persistent_outcome_blind_collector_v1.json"
+                config_dir / "execution_layer_v2_persistent_outcome_blind_collector_v1.json"
             ),
             feature_contract_sha256=_sha256_file(
                 config_dir
@@ -182,24 +168,15 @@ def audit_challenge_model_promotion(
             frozen_model_binding_sha256=str(
                 artifact_hashes["parallel_frozen_v8_1_model_binding.json"]
             ),
-            frozen_model_binding=_read_json(
-                config_dir / "parallel_frozen_v8_1_model_binding.json"
-            ),
+            frozen_model_binding=_read_json(config_dir / "parallel_frozen_v8_1_model_binding.json"),
             candidate_contracts=candidate_contracts,
-            prefreeze_checklist_sha256=str(
-                artifact_hashes["challenge_prefreeze_checklist.json"]
-            ),
-            prefreeze_checklist=_read_json(
-                config_dir / "challenge_prefreeze_checklist.json"
-            ),
+            prefreeze_checklist_sha256=str(artifact_hashes["challenge_prefreeze_checklist.json"]),
+            prefreeze_checklist=_read_json(config_dir / "challenge_prefreeze_checklist.json"),
             excluded_capture_ledger_sha256=str(
-                artifact_hashes[
-                    "challenge_prefreeze_excluded_capture_ledger.json"
-                ]
+                artifact_hashes["challenge_prefreeze_excluded_capture_ledger.json"]
             ),
             excluded_capture_ledger=_read_json(
-                config_dir
-                / "challenge_prefreeze_excluded_capture_ledger.json"
+                config_dir / "challenge_prefreeze_excluded_capture_ledger.json"
             ),
             historical_gate_contract_sha256=str(
                 artifact_hashes["historical_replay_superiority_contract.json"]
@@ -212,15 +189,10 @@ def audit_challenge_model_promotion(
                 config_dir / "challenge_supersession_governance.json"
             ),
             supersession_governance_sha256=str(
-                artifact_hashes[
-                    "challenge_supersession_governance.json"
-                ]
+                artifact_hashes["challenge_supersession_governance.json"]
             ),
             expected_supersession_governance_sha256=(
-                (
-                    config_dir
-                    / "challenge_supersession_governance.sha256"
-                )
+                (config_dir / "challenge_supersession_governance.sha256")
                 .read_text(encoding="ascii")
                 .strip()
             ),
@@ -230,6 +202,7 @@ def audit_challenge_model_promotion(
         parallel_plan_valid = False
     static_checks = {
         "all_issue_contract_artifacts_hash_verified": all(artifact_checks.values()),
+        "issue_259_canonical_payload_contract_valid": (canonical_payload_contract_valid),
         "issue_255_next_fresh_gate_statistically_eligible": (
             next_gate.get("next_gate_eligible") is True
             and next_gate.get("outcomes_read_to_make_eligibility_decision") is False
@@ -245,21 +218,12 @@ def audit_challenge_model_promotion(
         )
         is True,
         "historical_replay_strictly_superior_before_collection": (
-            artifact_checks.get("historical_replay_superiority_contract.json")
-            is True
-            and artifact_checks.get("historical_replay_superiority_report.json")
-            is True
-            and historical_replay.get("historical_superiority_gate_passed")
-            is True
-            and historical_replay.get(
-                "future_collection_prerequisite_satisfied"
-            )
-            is True
-            and historical_replay.get("historical_replay_is_promotion_evidence")
-            is False
-            and all(
-                (historical_replay.get("checks") or {}).values()
-            )
+            artifact_checks.get("historical_replay_superiority_contract.json") is True
+            and artifact_checks.get("historical_replay_superiority_report.json") is True
+            and historical_replay.get("historical_superiority_gate_passed") is True
+            and historical_replay.get("future_collection_prerequisite_satisfied") is True
+            and historical_replay.get("historical_replay_is_promotion_evidence") is False
+            and all((historical_replay.get("checks") or {}).values())
         ),
     }
     runtime = dict(runtime_evidence or {})
@@ -305,8 +269,7 @@ def audit_challenge_model_promotion(
         paper = evidence_descriptors.get("powered_paper_gate_report", {})
         consumption = evidence_descriptors.get("attempt_consumption_record", {})
         parallel_report_sha256 = str(
-            (runtime.get("parallel_evaluation_report") or {}).get("sha256")
-            or ""
+            (runtime.get("parallel_evaluation_report") or {}).get("sha256") or ""
         )
         fresh_attempt_id = str(consumption.get("fresh_attempt_id") or "")
         parallel_freeze_sha256 = str(claim.get("freeze_sha256") or "")
@@ -324,49 +287,33 @@ def audit_challenge_model_promotion(
             "provider_health": "bigan-v8-provider-health-diagnostics-v1",
             "parity": "bigan-v8-challenge-execution-policy-replay-parity-v1",
             "safety": "bigan-v8-challenge-execution-policy-safety-v1",
-            "reconciliation": (
-                "bigan-v8-challenge-execution-policy-reconciliation-v1"
-            ),
+            "reconciliation": ("bigan-v8-challenge-execution-policy-reconciliation-v1"),
             "paper": "bigan-v8-challenge-powered-paper-gate-v1",
             "consumption": "bigan-v8-challenge-attempt-consumption-v1",
         }
-        lineage_common = (
-            bool(fresh_attempt_id)
-            and all(
-                report.get("fresh_attempt_id") == fresh_attempt_id
-                for report in downstream_reports
-            )
+        lineage_common = bool(fresh_attempt_id) and all(
+            report.get("fresh_attempt_id") == fresh_attempt_id for report in downstream_reports
         )
         freeze_common = (
             len(parallel_freeze_sha256) == 64
-            and consumption.get("parallel_freeze_sha256")
-            == parallel_freeze_sha256
+            and consumption.get("parallel_freeze_sha256") == parallel_freeze_sha256
             and all(
-                report.get("parallel_freeze_sha256")
-                == parallel_freeze_sha256
+                report.get("parallel_freeze_sha256") == parallel_freeze_sha256
                 for report in downstream_reports
             )
         )
-        selected_common = (
-            selected in {"v8_1_primary_no_fallback", "v8_3_primary_with_fallback"}
-            and all(
-                report.get("selected_candidate_id") == selected
-                for report in downstream_reports
-            )
-        )
-        report_hash_common = (
-            len(parallel_report_sha256) == 64
-            and all(
-                report.get("source_parallel_evaluation_report_sha256")
-                == parallel_report_sha256
-                for report in downstream_reports
-            )
+        selected_common = selected in {
+            "v8_1_primary_no_fallback",
+            "v8_3_primary_with_fallback",
+        } and all(report.get("selected_candidate_id") == selected for report in downstream_reports)
+        report_hash_common = len(parallel_report_sha256) == 64 and all(
+            report.get("source_parallel_evaluation_report_sha256") == parallel_report_sha256
+            for report in downstream_reports
         )
         evidence_checks.update(
             {
                 "fresh_parallel_evaluation_present": (
-                    parallel.get("schema_version")
-                    == exact_schemas["parallel"]
+                    parallel.get("schema_version") == exact_schemas["parallel"]
                 ),
                 "fresh_parallel_evaluation_single_use": (
                     claim.get("single_use") is True
@@ -383,12 +330,10 @@ def audit_challenge_model_promotion(
                 ),
                 "regime_metrics_diagnostic_only": (
                     regime.get("diagnostic_only") is True
-                    and regime.get("stratified_metrics_are_eligibility_blockers")
-                    is False
+                    and regime.get("stratified_metrics_are_eligibility_blockers") is False
                 ),
                 "provider_health_diagnostics_present": (
-                    provider_health.get("schema_version")
-                    == exact_schemas["provider_health"]
+                    provider_health.get("schema_version") == exact_schemas["provider_health"]
                 ),
                 "provider_health_decisions_reconcile": (
                     provider_health.get("decision_row_count") == 120
@@ -396,30 +341,24 @@ def audit_challenge_model_promotion(
                     and provider_health.get("unmatched_decision_count") == 0
                 ),
                 "provider_health_features_complete": (
-                    (
-                        provider_health.get("feature_completeness_report")
-                        or {}
-                    ).get("incomplete_feature_row_count")
+                    (provider_health.get("feature_completeness_report") or {}).get(
+                        "incomplete_feature_row_count"
+                    )
                     == 0
                 ),
                 "provider_health_diagnostic_only": (
                     provider_health.get("diagnostic_only") is True
-                    and provider_health.get(
-                        "outcomes_settlement_pnl_or_future_information_used"
-                    )
+                    and provider_health.get("outcomes_settlement_pnl_or_future_information_used")
                     is False
                 ),
                 "offline_paper_replay_parity_passed": parity.get("passed") is True,
                 "execution_policy_safety_passed": safety.get("passed") is True,
-                "position_intent_fill_ledger_reconciled": (
-                    reconciliation.get("passed") is True
-                ),
+                "position_intent_fill_ledger_reconciled": (reconciliation.get("passed") is True),
                 "powered_paper_gate_passed": (
                     paper.get("powered_paper_gate_passed") is True
                     and paper.get("paper_only") is True
                     and paper.get("capital_at_risk") is False
-                    and paper.get("separate_result_selected_retest_performed")
-                    is False
+                    and paper.get("separate_result_selected_retest_performed") is False
                 ),
                 "evidence_attempt_and_alpha_consumed": (
                     consumption.get("attempt_consumed") is True
@@ -428,10 +367,8 @@ def audit_challenge_model_promotion(
                     and consumption.get("consumes_alpha") is True
                     and consumption.get("evidence_permanently_consumed") is True
                     and int(consumption.get("fresh_attempt_number") or 0) == 1
-                    and float(consumption.get("familywise_window_alpha") or 0.0)
-                    == 0.025
-                    and float(consumption.get("per_candidate_alpha") or 0.0)
-                    == 0.0125
+                    and float(consumption.get("familywise_window_alpha") or 0.0) == 0.025
+                    and float(consumption.get("per_candidate_alpha") or 0.0) == 0.0125
                 ),
                 "fresh_attempt_identity_reconciles": lineage_common,
                 "parallel_freeze_lineage_reconciles": freeze_common,
@@ -440,23 +377,17 @@ def audit_challenge_model_promotion(
                 "runtime_evidence_schemas_exact": (
                     parallel.get("schema_version") == exact_schemas["parallel"]
                     and regime.get("schema_version") == exact_schemas["regime"]
-                    and provider_health.get("schema_version")
-                    == exact_schemas["provider_health"]
+                    and provider_health.get("schema_version") == exact_schemas["provider_health"]
                     and parity.get("schema_version") == exact_schemas["parity"]
                     and safety.get("schema_version") == exact_schemas["safety"]
-                    and reconciliation.get("schema_version")
-                    == exact_schemas["reconciliation"]
+                    and reconciliation.get("schema_version") == exact_schemas["reconciliation"]
                     and paper.get("schema_version") == exact_schemas["paper"]
-                    and consumption.get("schema_version")
-                    == exact_schemas["consumption"]
+                    and consumption.get("schema_version") == exact_schemas["consumption"]
                 ),
                 "all_preregistered_execution_policies_validated": (
                     all(
                         report.get("policy_candidate_count") == 3
-                        and report.get(
-                            "all_preregistered_policy_candidates_evaluated"
-                        )
-                        is True
+                        and report.get("all_preregistered_policy_candidates_evaluated") is True
                         and report.get("outcome_selected_policy_used") is False
                         for report in (parity, safety, reconciliation)
                     )
@@ -464,17 +395,13 @@ def audit_challenge_model_promotion(
                 "powered_paper_gate_is_exact_parallel_gate": (
                     paper.get("selected_candidate_gate") == selected_gate
                     and paper.get("selected_candidate_id") == selected
-                    and paper.get(
-                        "source_parallel_evaluation_report_sha256"
-                    )
+                    and paper.get("source_parallel_evaluation_report_sha256")
                     == parallel_report_sha256
                     and all((paper.get("checks") or {}).values())
                 ),
             }
         )
-    blockers = [
-        f"static:{name}" for name, passed in static_checks.items() if not passed
-    ] + [
+    blockers = [f"static:{name}" for name, passed in static_checks.items() if not passed] + [
         f"evidence:{name}" for name, passed in evidence_checks.items() if not passed
     ]
     eligible = not blockers
@@ -515,26 +442,14 @@ def promotion_readiness_markdown(report: dict[str, Any]) -> str:
         "# Challenge Model Promotion Readiness",
         "",
         f"- decision: `{report['decision']}`",
-        (
-            "- static issue prerequisites: "
-            f"`{all(report['static_checks'].values())}`"
-        ),
-        (
-            "- fresh runtime evidence supplied: "
-            f"`{report['fresh_runtime_evidence_supplied']}`"
-        ),
-        (
-            "- challenge model promotion eligible: "
-            f"`{report['challenge_model_promotion_eligible']}`"
-        ),
+        (f"- static issue prerequisites: `{all(report['static_checks'].values())}`"),
+        (f"- fresh runtime evidence supplied: `{report['fresh_runtime_evidence_supplied']}`"),
+        (f"- challenge model promotion eligible: `{report['challenge_model_promotion_eligible']}`"),
         "",
         "## Blockers",
         "",
     ]
-    lines.extend(
-        [f"- `{blocker}`" for blocker in report["blockers"]]
-        or ["- none"]
-    )
+    lines.extend([f"- `{blocker}`" for blocker in report["blockers"]] or ["- none"])
     lines.extend(
         [
             "",
@@ -559,8 +474,7 @@ def _verified_runtime_evidence(manifest: dict[str, Any]) -> dict[str, Any]:
     }
     if set(manifest) != required:
         raise ChallengeModelPromotionError(
-            "runtime evidence manifest must contain exactly: "
-            + ", ".join(sorted(required))
+            "runtime evidence manifest must contain exactly: " + ", ".join(sorted(required))
         )
     output: dict[str, Any] = {}
     for name, descriptor in manifest.items():

@@ -59,18 +59,24 @@ def _evaluation_only_corpus(tmp_path: Path, *, feature_row: dict) -> tuple[Path,
     copied = tmp_path / "copy"
     corpus = copied / "phase2_corpus"
     corpus.mkdir(parents=True)
-    (corpus / "polymarket_feature_rows.jsonl").write_text(
-        json.dumps(feature_row, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    (corpus / "polymarket_label_rows.jsonl").write_text("{}\n", encoding="utf-8")
-    (corpus / "polymarket_resolution_events.jsonl").write_text(
-        "{}\n", encoding="utf-8"
-    )
-    (corpus / "polymarket_corpus_manifest.json").write_text(
+    feature_path = corpus / "polymarket_feature_rows.jsonl"
+    label_path = corpus / "polymarket_label_rows.jsonl"
+    resolution_path = corpus / "polymarket_resolution_events.jsonl"
+    manifest_path = corpus / "polymarket_corpus_manifest.json"
+    feature_path.write_text(json.dumps(feature_row, sort_keys=True) + "\n", encoding="utf-8")
+    label_path.write_text("{}\n", encoding="utf-8")
+    resolution_path.write_text("{}\n", encoding="utf-8")
+    manifest_path.write_text(
         json.dumps(
             {
                 "sell_before_close_label_gate_passed": True,
                 "label_row_count": 1,
+                "raw_artifact_hashes": {},
+                "normalized_artifact_hashes": {
+                    "feature_rows": hashlib.sha256(feature_path.read_bytes()).hexdigest(),
+                    "label_rows": hashlib.sha256(label_path.read_bytes()).hexdigest(),
+                    "resolution_events": hashlib.sha256(resolution_path.read_bytes()).hexdigest(),
+                },
                 "chainlink_decision_time_feature_integration": {
                     "timestamp_causality_violation_count": 0
                 },
@@ -80,7 +86,15 @@ def _evaluation_only_corpus(tmp_path: Path, *, feature_row: dict) -> tuple[Path,
         encoding="utf-8",
     )
     (copied / "pending_round_finalization_manifest.json").write_text(
-        json.dumps({"phase2_corpus_dir": str(corpus.resolve())}) + "\n",
+        json.dumps(
+            {
+                "phase2_corpus_dir": str(corpus.resolve()),
+                "phase2_corpus_manifest_sha256": hashlib.sha256(
+                    manifest_path.read_bytes()
+                ).hexdigest(),
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     report = {
@@ -104,14 +118,28 @@ def _evaluation_only_corpus(tmp_path: Path, *, feature_row: dict) -> tuple[Path,
     return copied, report
 
 
+def _source_lineage_evidence() -> dict:
+    return {
+        "schema_version": "bigan-v8-canonical-source-lineage-evidence-v1",
+        "checks": {
+            "source_pending_capture_manifest_hash_verified": True,
+            "declared_raw_artifact_hashes_verified": True,
+            "required_raw_feature_artifacts_complete": True,
+        },
+        "source_pending_capture_manifest": {
+            "path": "/verified/frozen/manifest.json",
+            "sha256": "a" * 64,
+        },
+        "raw_artifacts": {},
+    }
+
+
 def test_profile_freezes_exact_window_support_and_side_only_gate() -> None:
     profile = _profile()
     validate_market_clustered_mean_ev_v6_2_future_profile(profile)
     assert profile["window"]["quality_valid_market_count"] == 200
     assert profile["window"]["maximum_index_scan_count"] == 240
-    assert profile["support_and_pnl_gates"][
-        "minimum_guard_accepted_unique_market_count"
-    ] == 120
+    assert profile["support_and_pnl_gates"]["minimum_guard_accepted_unique_market_count"] == 120
     assert profile["support_and_pnl_gates"]["minimum_supported_side_market_count"] == 17
     assert profile["support_and_pnl_gates"]["pnl_hard_gate_aggregation"] == (
         "selected_side_buy_up_buy_down_only"
@@ -130,10 +158,16 @@ def test_evaluation_only_settlement_fallback_requires_frozen_feature_equality(
         copied_run_dir=copied,
         report=report,
         frozen_feature_rows=[frozen],
+        source_lineage_evidence=_source_lineage_evidence(),
     )
 
     assert corpus == (copied / "phase2_corpus").resolve()
     assert reasons == []
+    comparison = json.loads(
+        (copied / "canonical_feature_payload_comparison_report.json").read_text()
+    )
+    assert comparison["canonical_comparison_passed"] is True
+    assert comparison["approved_source_lineage"] is True
 
 
 def test_evaluation_only_settlement_fallback_fails_closed_on_feature_drift(
@@ -148,17 +182,55 @@ def test_evaluation_only_settlement_fallback_fails_closed_on_feature_drift(
         copied_run_dir=copied,
         report=report,
         frozen_feature_rows=[frozen],
+        source_lineage_evidence=_source_lineage_evidence(),
     )
 
     assert corpus is None
     assert reasons == ["evaluation_only_frozen_feature_payload_mismatch"]
+    comparison = json.loads(
+        (copied / "canonical_feature_payload_comparison_report.json").read_text()
+    )
+    assert comparison["canonical_comparison_passed"] is False
+    assert comparison["semantic_diff"][0]["path"] == "/0/features/execution_price"
+
+
+def test_evaluation_only_settlement_fallback_rejects_unapproved_lineage(
+    tmp_path: Path,
+) -> None:
+    frozen = _evaluation_only_feature_row()
+    copied, report = _evaluation_only_corpus(
+        tmp_path,
+        feature_row=frozen,
+    )
+    evidence = _source_lineage_evidence()
+    evidence["checks"]["declared_raw_artifact_hashes_verified"] = False
+
+    corpus, reasons = _evaluation_only_settled_corpus_if_safe(
+        copied_run_dir=copied,
+        report=report,
+        frozen_feature_rows=[frozen],
+        source_lineage_evidence=evidence,
+    )
+
+    assert corpus is None
+    assert reasons == ["evaluation_only_frozen_feature_payload_mismatch"]
+    comparison = json.loads(
+        (copied / "canonical_feature_payload_comparison_report.json").read_text()
+    )
+    assert comparison["canonical_hash_match"] is True
+    assert comparison["approved_source_lineage"] is False
+    assert comparison["canonical_comparison_passed"] is False
 
 
 @pytest.mark.parametrize(
     ("path", "replacement", "reason"),
     [
         (("window", "candidate_freeze_created_ts_exclusive"), 1, "window_contract"),
-        (("window", "all_markets_closed_before_target_access"), False, "window_contract"),
+        (
+            ("window", "all_markets_closed_before_target_access"),
+            False,
+            "window_contract",
+        ),
         (
             ("support_and_pnl_gates", "minimum_guard_accepted_bet_count"),
             119,
@@ -242,7 +314,9 @@ def test_collection_profile_rejects_frozen_contract_mutation(
         )
 
 
-def test_replacement_evaluation_hash_fails_before_prediction_or_output(tmp_path: Path) -> None:
+def test_replacement_evaluation_hash_fails_before_prediction_or_output(
+    tmp_path: Path,
+) -> None:
     output_dir = tmp_path / "runs"
     with pytest.raises(ValueError, match="preregistered frozen #212 profile"):
         freeze_market_clustered_mean_ev_v6_2_future_predictions(
@@ -252,13 +326,9 @@ def test_replacement_evaluation_hash_fails_before_prediction_or_output(tmp_path:
                 evaluation_profile_path=tmp_path / "replacement-profile.json",
                 expected_evaluation_profile_sha256="0" * 64,
                 collection_profile_path=tmp_path / "collection-profile.json",
-                expected_collection_profile_sha256=(
-                    subject.FROZEN_COLLECTION_PROFILE_SHA256
-                ),
+                expected_collection_profile_sha256=(subject.FROZEN_COLLECTION_PROFILE_SHA256),
                 candidate_manifest_path=tmp_path / "candidate-manifest.json",
-                expected_candidate_manifest_sha256=(
-                    subject.FROZEN_CANDIDATE_MANIFEST_SHA256
-                ),
+                expected_candidate_manifest_sha256=(subject.FROZEN_CANDIDATE_MANIFEST_SHA256),
                 cumulative_canary_manifest_path=tmp_path / "cumulative.json",
                 expected_cumulative_canary_manifest_sha256="1" * 64,
                 collector_index_path=tmp_path / "index.jsonl",
@@ -270,7 +340,9 @@ def test_replacement_evaluation_hash_fails_before_prediction_or_output(tmp_path:
     assert not output_dir.exists()
 
 
-def test_exact_window_uses_earliest_200_quality_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_exact_window_uses_earliest_200_quality_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(subject, "_prior_market_reference", lambda candidate: (set(), "a" * 64))
     rows = [_index_row(sequence) for sequence in range(313, 553)]
     selected, attempted = _select_exact_future_index_rows(
@@ -351,9 +423,10 @@ def test_target_free_support_is_unique_market_and_side_scoped() -> None:
         "DOWN": 60,
     }
     replay.extend([dict(replay[0]) for _ in range(100)])
-    assert _target_free_support(replay, profile=_profile())[
-        "guard_accepted_unique_market_count"
-    ] == 120
+    assert (
+        _target_free_support(replay, profile=_profile())["guard_accepted_unique_market_count"]
+        == 120
+    )
 
 
 def test_exact_materialized_grid_requires_five_actions_and_causal_features() -> None:
@@ -464,14 +537,14 @@ def test_exact_200_freeze_materializes_raw_features_before_target_access(
                 else "BUY_DOWN_SELL_BEFORE_CLOSE"
             )
             output.append(
-                    {
-                        **row,
-                        "raw_direct_predicted_net_return": (
-                            0.10 if row["action"] == selected_action else 0.0
-                        ),
-                        "ranking_score_source": "synthetic_raw_model_score",
-                    }
-                )
+                {
+                    **row,
+                    "raw_direct_predicted_net_return": (
+                        0.10 if row["action"] == selected_action else 0.0
+                    ),
+                    "ranking_score_source": "synthetic_raw_model_score",
+                }
+            )
         return output
 
     monkeypatch.setattr(subject, "_raw_target_stripped_predictions", fake_raw_predictions)
@@ -493,15 +566,9 @@ def test_exact_200_freeze_materializes_raw_features_before_target_access(
             {
                 **row,
                 "scoring_lineage": "v6_2",
-                "mean_ev_lower_confidence_bound": row[
-                    "raw_direct_predicted_net_return"
-                ],
-                "raw_pairwise_rank_score": row[
-                    "raw_direct_predicted_net_return"
-                ],
-                "pairwise_group_normalized_rank_score": row[
-                    "raw_direct_predicted_net_return"
-                ],
+                "mean_ev_lower_confidence_bound": row["raw_direct_predicted_net_return"],
+                "raw_pairwise_rank_score": row["raw_direct_predicted_net_return"],
+                "pairwise_group_normalized_rank_score": row["raw_direct_predicted_net_return"],
                 "action_advantage_lcb_score_bucket": "synthetic_test_bucket",
                 "action_advantage_lcb_estimate_source": "synthetic_test_source",
             }
@@ -560,14 +627,11 @@ def test_exact_200_freeze_materializes_raw_features_before_target_access(
             candidate_manifest_path=bundle["candidate_manifest"],
             expected_candidate_manifest_sha256=_sha256(bundle["candidate_manifest"]),
             cumulative_canary_manifest_path=bundle["cumulative_manifest"],
-            expected_cumulative_canary_manifest_sha256=_sha256(
-                bundle["cumulative_manifest"]
-            ),
+            expected_cumulative_canary_manifest_sha256=_sha256(bundle["cumulative_manifest"]),
             collector_index_path=bundle["collector_index"],
             expected_collector_index_sha256=_sha256(bundle["collector_index"]),
             builder_git_commit="a" * 40,
-            decision_freeze_created_ts=max(row["market_end_ts"] for row in selected_rows)
-            + 1,
+            decision_freeze_created_ts=max(row["market_end_ts"] for row in selected_rows) + 1,
         )
     )
 
@@ -577,14 +641,9 @@ def test_exact_200_freeze_materializes_raw_features_before_target_access(
     assert report["attempted_index_row_count"] == 201
     assert report["quality_invalid_attempt_count"] == 1
     assert report["quality_invalid_attempt_sequences"] == [313]
-    assert report["quality_invalid_attempt_reason_distribution"] == {
-        "market_id_missing": 1
-    }
+    assert report["quality_invalid_attempt_reason_distribution"] == {"market_id_missing": 1}
     assert (
-        report[
-            "quality_invalid_attempts_excluded_before_selected_market_identity_checks"
-        ]
-        is True
+        report["quality_invalid_attempts_excluded_before_selected_market_identity_checks"] is True
     )
     assert report["candidate_guard_accepted_unique_market_count"] == 200
     assert report["candidate_guard_accepted_unique_market_count_by_side"] == {
@@ -659,9 +718,7 @@ def test_side_only_gate_fails_when_one_side_loses_even_if_total_is_positive() ->
     )
     assert gate["candidate_post_cost_net_pnl"] > 0.0
     assert gate["future_gate_passed"] is False
-    assert "supported_side_post_cost_pnl_gate_failed" in gate[
-        "future_gate_blocking_reason_codes"
-    ]
+    assert "supported_side_post_cost_pnl_gate_failed" in gate["future_gate_blocking_reason_codes"]
 
 
 def test_action_and_family_metrics_are_diagnostic_only() -> None:
@@ -674,11 +731,7 @@ def test_action_and_family_metrics_are_diagnostic_only() -> None:
             action=(
                 "BUY_UP_HOLD_TO_SETTLEMENT"
                 if index == 0
-                else (
-                    "BUY_UP_SELL_BEFORE_CLOSE"
-                    if index < 60
-                    else "BUY_DOWN_SELL_BEFORE_CLOSE"
-                )
+                else ("BUY_UP_SELL_BEFORE_CLOSE" if index < 60 else "BUY_DOWN_SELL_BEFORE_CLOSE")
             ),
         )
         for index, market in enumerate(markets[:120])
@@ -691,12 +744,8 @@ def test_action_and_family_metrics_are_diagnostic_only() -> None:
         decision_freeze_sha256="c" * 64,
     )
     assert gate["future_gate_passed"] is True
-    assert gate["accepted_action_metrics"]["BUY_UP_HOLD_TO_SETTLEMENT"][
-        "diagnostic_only"
-    ] is True
-    assert gate["accepted_action_family_metrics"]["HOLD_TO_SETTLEMENT"][
-        "diagnostic_only"
-    ] is True
+    assert gate["accepted_action_metrics"]["BUY_UP_HOLD_TO_SETTLEMENT"]["diagnostic_only"] is True
+    assert gate["accepted_action_family_metrics"]["HOLD_TO_SETTLEMENT"]["diagnostic_only"] is True
 
 
 def test_single_use_claim_is_atomic_and_cannot_be_overwritten(tmp_path: Path) -> None:
@@ -708,7 +757,9 @@ def test_single_use_claim_is_atomic_and_cannot_be_overwritten(tmp_path: Path) ->
     assert json.loads(path.read_text(encoding="utf-8"))["claim_id"] == "first"
 
 
-def test_single_use_claim_path_is_deterministically_bound_to_freeze(tmp_path: Path) -> None:
+def test_single_use_claim_path_is_deterministically_bound_to_freeze(
+    tmp_path: Path,
+) -> None:
     freeze = tmp_path / "freeze" / "v6_2_future_prediction_freeze_manifest.json"
     assert _bound_single_use_claim_path(freeze) == (
         freeze.parent.resolve() / subject.SINGLE_USE_CLAIM_FILENAME
