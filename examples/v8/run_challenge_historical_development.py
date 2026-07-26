@@ -42,7 +42,9 @@ def _run_git(*args: str) -> str:
     ).stdout.strip()
 
 
-def _require_clean_preregistered_state(preregistration_path: Path) -> dict[str, Any]:
+def _require_clean_preregistered_state(
+    preregistration_path: Path,
+) -> dict[str, Any]:
     if _run_git("status", "--porcelain", "--untracked-files=all"):
         raise ValueError("historical replay requires a clean committed worktree")
     head = _run_git("rev-parse", "HEAD")
@@ -53,40 +55,80 @@ def _require_clean_preregistered_state(preregistration_path: Path) -> dict[str, 
         raise ValueError("preregistration must be inside this repository") from error
     tracked_path = relative_path.as_posix()
     _run_git("ls-files", "--error-unmatch", tracked_path)
+    preregistration_commit = _run_git(
+        "log",
+        "-1",
+        "--format=%H",
+        "--",
+        tracked_path,
+    )
+    if not preregistration_commit:
+        raise ValueError("preregistration has no introducing commit")
     committed_bytes = subprocess.run(
-        ["git", "show", f"HEAD:{tracked_path}"],
+        ["git", "show", f"{preregistration_commit}:{tracked_path}"],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
     ).stdout
     if committed_bytes != path.read_bytes():
-        raise ValueError("preregistration bytes do not match HEAD")
+        raise ValueError("preregistration bytes changed after its introducing commit")
 
     preregistration = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(preregistration, dict):
         raise ValueError("preregistration must be a JSON object")
-    implementation_commit = str(
+    implementation_base_commit = str(
         preregistration.get("implementation_commit") or ""
     )
-    if not implementation_commit:
+    if not implementation_base_commit:
         raise ValueError("preregistration implementation_commit is required")
+    actual_parent = _run_git("rev-parse", f"{preregistration_commit}^")
+    if implementation_base_commit != actual_parent:
+        raise ValueError(
+            "preregistration implementation_commit must be its prechange parent"
+        )
     subprocess.run(
-        ["git", "merge-base", "--is-ancestor", implementation_commit, head],
+        ["git", "merge-base", "--is-ancestor", preregistration_commit, head],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
     )
-    changed = set(
-        _run_git("diff", "--name-only", f"{implementation_commit}..{head}")
+    preregistration_changes = set(
+        _run_git(
+            "diff",
+            "--name-only",
+            f"{implementation_base_commit}..{preregistration_commit}",
+        )
         .splitlines()
     )
     allowed = {tracked_path, str(Path(tracked_path).with_suffix(".sha256"))}
-    if not changed or not changed <= allowed:
+    if not preregistration_changes or not preregistration_changes <= allowed:
         raise ValueError(
             "only the committed preregistration and its sidecar may differ "
-            "from the candidate implementation commit"
+            "from its prechange base commit"
         )
-    return preregistration
+    implementation_changes = set(
+        _run_git(
+            "diff",
+            "--name-only",
+            f"{preregistration_commit}..{head}",
+        ).splitlines()
+    )
+    if (
+        not implementation_changes
+        or tracked_path in implementation_changes
+        or str(Path(tracked_path).with_suffix(".sha256"))
+        in implementation_changes
+    ):
+        raise ValueError(
+            "candidate implementation must follow preregistration without "
+            "rewriting preregistration bytes"
+        )
+    return {
+        "preregistration": preregistration,
+        "implementation_base_commit": implementation_base_commit,
+        "preregistration_commit": preregistration_commit,
+        "implementation_commit": head,
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -122,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ledger-root", type=Path, default=DEFAULT_LEDGER)
     args = parser.parse_args(argv)
 
-    preregistration = _require_clean_preregistered_state(args.preregistration)
+    git_state = _require_clean_preregistered_state(args.preregistration)
     if _sha256(args.preregistration.resolve()) != args.preregistration_sha256.lower():
         raise ValueError("preregistration SHA-256 mismatch")
     result = run_historical_development_evaluation(
@@ -151,7 +193,11 @@ def main(argv: list[str] | None = None) -> int:
             expected_attempt_closure_sha256=_sidecar_digest(
                 args.attempt_closure.resolve()
             ),
-            implementation_commit=str(preregistration["implementation_commit"]),
+            implementation_base_commit=git_state[
+                "implementation_base_commit"
+            ],
+            preregistration_commit=git_state["preregistration_commit"],
+            implementation_commit=git_state["implementation_commit"],
             evaluated_at=args.evaluated_at,
             previous_iteration_entry_sha256=args.previous_entry_sha256,
             previous_iteration_entry_path=args.previous_entry,

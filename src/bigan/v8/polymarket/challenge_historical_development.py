@@ -92,14 +92,23 @@ class HistoricalDevelopmentEvaluationConfig:
     expected_ledger_root_sha256: str
     attempt_closure_path: Path
     expected_attempt_closure_sha256: str
+    implementation_base_commit: str
+    preregistration_commit: str
     implementation_commit: str
     evaluated_at: str
     previous_iteration_entry_sha256: str = ZERO_SHA256
     previous_iteration_entry_path: Path | None = None
 
     def __post_init__(self) -> None:
-        if not self.run_id or not self.candidate_id or not self.implementation_commit:
-            raise ValueError("run_id, candidate_id, and implementation_commit are required")
+        if not self.run_id or not self.candidate_id:
+            raise ValueError("run_id and candidate_id are required")
+        for commit in (
+            self.implementation_base_commit,
+            self.preregistration_commit,
+            self.implementation_commit,
+        ):
+            if not _is_git_commit(commit):
+                raise ValueError("base, preregistration, and implementation commits are required")
         if not 1 <= self.iteration_number <= 5:
             raise ValueError("iteration_number must be between 1 and 5")
         for digest in (
@@ -580,7 +589,7 @@ def validate_iteration_preregistration(
     expected_success_standard_sha256: str,
     expected_ledger_root_sha256: str,
     expected_previous_entry_sha256: str,
-    expected_implementation_commit: str,
+    expected_implementation_base_commit: str,
 ) -> None:
     """Require a concrete, one-candidate rationale before outcome-aware replay."""
 
@@ -615,7 +624,9 @@ def validate_iteration_preregistration(
             )
         )
         and preregistration.get("implementation_commit")
-        == expected_implementation_commit,
+        == expected_implementation_base_commit
+        and preregistration.get("implementation_commit_role")
+        == "prechange_base_commit",
         "inputs": bool(inputs)
         and all(_is_sha256(value) for value in inputs.values()),
         "one_candidate": preregistration.get("candidate_count") == 1,
@@ -856,7 +867,7 @@ def run_historical_development_evaluation(
         expected_success_standard_sha256=config.expected_success_standard_sha256,
         expected_ledger_root_sha256=config.expected_ledger_root_sha256,
         expected_previous_entry_sha256=config.previous_iteration_entry_sha256,
-        expected_implementation_commit=config.implementation_commit,
+        expected_implementation_base_commit=config.implementation_base_commit,
     )
     previous_entry = _validate_previous_iteration_entry(config)
     _verify_sha256(
@@ -876,6 +887,8 @@ def run_historical_development_evaluation(
     report.update(
         {
             "run_id": config.run_id,
+            "implementation_base_commit": config.implementation_base_commit,
+            "preregistration_commit": config.preregistration_commit,
             "implementation_commit": config.implementation_commit,
             "evaluated_at": config.evaluated_at,
             "input_descriptors": {
@@ -900,6 +913,9 @@ def run_historical_development_evaluation(
         "sequence": config.iteration_number,
         "entry_id": f"challenge-historical-development-entry-{config.iteration_number:03d}",
         "previous_entry_sha256": config.previous_iteration_entry_sha256,
+        "implementation_base_commit": config.implementation_base_commit,
+        "preregistration_commit": config.preregistration_commit,
+        "implementation_commit": config.implementation_commit,
         "ledger_root_sha256": config.expected_ledger_root_sha256,
         "development_registry_sha256": config.expected_registry_sha256,
         "success_standard_sha256": config.expected_success_standard_sha256,
@@ -1192,6 +1208,14 @@ def _is_sha256(value: Any) -> bool:
     return (
         isinstance(value, str)
         and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value.lower())
+    )
+
+
+def _is_git_commit(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 40
         and all(character in "0123456789abcdef" for character in value.lower())
     )
 

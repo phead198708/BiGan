@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from bigan.v8.polymarket.challenge_historical_development import (
     validate_historical_development_success_standard,
     validate_iteration_preregistration,
 )
+from examples.v8 import run_challenge_historical_development as runner
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = ROOT / "examples" / "v8" / "polymarket_configs"
@@ -79,7 +81,7 @@ def _passing_rows() -> list[dict]:
 def _preregistration(
     *,
     comparison_sha256: str,
-    implementation_commit: str,
+    implementation_base_commit: str,
 ) -> dict:
     return {
         "schema_version": (
@@ -104,7 +106,8 @@ def _preregistration(
         "input_artifact_sha256s": {
             "synthetic_comparison_rows": comparison_sha256,
         },
-        "implementation_commit": implementation_commit,
+        "implementation_commit": implementation_base_commit,
+        "implementation_commit_role": "prechange_base_commit",
         "candidate_count": 1,
         "grid_search": False,
         "result_selected_parameter_search": False,
@@ -298,7 +301,7 @@ def test_market_order_and_no_trade_accounting_fail_closed() -> None:
 def test_preregistration_binds_candidate_commit_and_one_iteration() -> None:
     preregistration = _preregistration(
         comparison_sha256="a" * 64,
-        implementation_commit="b" * 40,
+        implementation_base_commit="b" * 40,
     )
     validate_iteration_preregistration(
         preregistration,
@@ -314,7 +317,7 @@ def test_preregistration_binds_candidate_commit_and_one_iteration() -> None:
             "challenge_historical_development_iteration_ledger.sha256"
         ),
         expected_previous_entry_sha256=ZERO_SHA256,
-        expected_implementation_commit="b" * 40,
+        expected_implementation_base_commit="b" * 40,
     )
 
     preregistration["grid_search"] = True
@@ -333,7 +336,7 @@ def test_preregistration_binds_candidate_commit_and_one_iteration() -> None:
                 "challenge_historical_development_iteration_ledger.sha256"
             ),
             expected_previous_entry_sha256=ZERO_SHA256,
-            expected_implementation_commit="b" * 40,
+            expected_implementation_base_commit="b" * 40,
         )
 
 
@@ -348,13 +351,15 @@ def test_synthetic_pipeline_dry_run_emits_hash_chained_entry(
         ),
         encoding="utf-8",
     )
-    implementation_commit = "c" * 40
+    implementation_base_commit = "b" * 40
+    preregistration_commit = "c" * 40
+    implementation_commit = "d" * 40
     preregistration_path = tmp_path / "synthetic-preregistration.json"
     preregistration_path.write_text(
         json.dumps(
             _preregistration(
                 comparison_sha256=_sha256(comparison_path),
-                implementation_commit=implementation_commit,
+                implementation_base_commit=implementation_base_commit,
             ),
             indent=2,
             sort_keys=True,
@@ -400,6 +405,8 @@ def test_synthetic_pipeline_dry_run_emits_hash_chained_entry(
             expected_attempt_closure_sha256=_sidecar(
                 "challenge_attempt_001_closure.sha256"
             ),
+            implementation_base_commit=implementation_base_commit,
+            preregistration_commit=preregistration_commit,
             implementation_commit=implementation_commit,
             evaluated_at="synthetic-no-real-labels",
         )
@@ -416,3 +423,62 @@ def test_synthetic_pipeline_dry_run_emits_hash_chained_entry(
         result["iteration_entry_path"]
     )
     assert result["manifest_path"].is_file()
+
+
+def test_cli_requires_preregistration_commit_before_candidate_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test User")
+    base_path = repository / "base.txt"
+    base_path.write_text("base\n", encoding="utf-8")
+    git("add", "base.txt")
+    git("commit", "-m", "base")
+    base_commit = git("rev-parse", "HEAD")
+
+    preregistration_path = repository / "iteration-001.json"
+    preregistration_path.write_text(
+        json.dumps(
+            {
+                "implementation_commit": base_commit,
+                "implementation_commit_role": "prechange_base_commit",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    preregistration_path.with_suffix(".sha256").write_text(
+        _sha256(preregistration_path) + "\n",
+        encoding="ascii",
+    )
+    git("add", "iteration-001.json", "iteration-001.sha256")
+    git("commit", "-m", "preregister iteration 1")
+    preregistration_commit = git("rev-parse", "HEAD")
+
+    candidate_path = repository / "candidate.py"
+    candidate_path.write_text("PRICE_FLOOR = 0.30\n", encoding="utf-8")
+    git("add", "candidate.py")
+    git("commit", "-m", "implement candidate")
+    implementation_commit = git("rev-parse", "HEAD")
+
+    monkeypatch.setattr(runner, "REPO_ROOT", repository)
+    state = runner._require_clean_preregistered_state(preregistration_path)
+
+    assert state["implementation_base_commit"] == base_commit
+    assert state["preregistration_commit"] == preregistration_commit
+    assert state["implementation_commit"] == implementation_commit

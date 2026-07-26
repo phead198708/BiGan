@@ -47,19 +47,22 @@ absolute-LCB gates on a not-yet-collected future window.
 
 ## One development iteration
 
-One iteration uses two commits:
+One iteration uses two ordered commits:
 
-1. Implement exactly one candidate and commit it. Record this candidate
-   implementation commit in the preregistration.
-2. Add and commit one preregistration JSON plus its SHA-256 sidecar. The
-   preregistration explains what changed, why, and the expected mechanism. It
-   must declare one candidate, no grid search, no result-selected parameter
-   search, and all safety flags false.
+1. Add and commit one preregistration JSON plus its SHA-256 sidecar before
+   changing the candidate. The preregistration explains what will change, why,
+   and the expected mechanism. It must declare one candidate, no grid search,
+   no result-selected parameter search, and all safety flags false. Its
+   `implementation_commit` field is the prechange parent commit and its
+   `implementation_commit_role` is `prechange_base_commit`.
+2. Implement exactly that one candidate and commit it without rewriting the
+   preregistration or sidecar.
 
 The evaluator requires a clean worktree. It verifies that only the committed
-preregistration and sidecar differ between the candidate implementation commit
-and the current commit. This makes the preregistration commit precede replay
-without creating a self-referential Git hash.
+preregistration and sidecar differ between the prechange base and the
+preregistration commit, and that candidate implementation changes follow that
+commit. This enforces preregistration before candidate change without creating
+a self-referential Git hash.
 
 Run one evaluation:
 
