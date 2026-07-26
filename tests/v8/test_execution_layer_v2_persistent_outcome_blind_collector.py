@@ -913,6 +913,90 @@ def test_launchd_descriptor_supports_preregistered_bounded_collection(
     _assert_safety(result)
 
 
+def test_launchd_descriptor_requires_and_pins_challenge_runtime_bytes(
+    tmp_path: Path,
+) -> None:
+    candidate_contract = tmp_path / "candidate-contract.json"
+    frozen_binding = tmp_path / "frozen-binding.json"
+    model_artifact = tmp_path / "model-artifact.json"
+    candidate_profile = tmp_path / "candidate-profile.json"
+    for path, payload in (
+        (candidate_contract, '{"candidate":"v8.1"}\n'),
+        (frozen_binding, '{"binding":"frozen"}\n'),
+        (model_artifact, '{"model":"exact-bytes"}\n'),
+        (candidate_profile, '{"profile":"v8.1"}\n'),
+    ):
+        path.write_text(payload, encoding="utf-8")
+
+    result = write_launchd_plist(
+        output_path=tmp_path / "challenge-collector.plist",
+        label="com.bigan.test.challenge-collector",
+        service_root=tmp_path / "challenge-raw-service",
+        protocol_path=PROTOCOL_PATH,
+        protocol_sha256=_sha256(PROTOCOL_PATH),
+        batch_round_count=12,
+        python_executable=sys.executable,
+        max_batches=15,
+        require_challenge_runtime_binding=True,
+        challenge_candidate_contract_path=candidate_contract,
+        challenge_candidate_contract_sha256=_sha256(candidate_contract),
+        challenge_frozen_model_binding_path=frozen_binding,
+        challenge_frozen_model_binding_sha256=_sha256(frozen_binding),
+        challenge_frozen_model_artifact_path=model_artifact,
+        challenge_frozen_model_artifact_sha256=_sha256(model_artifact),
+        challenge_candidate_profile_path=candidate_profile,
+        challenge_candidate_profile_sha256=_sha256(candidate_profile),
+    )
+    with Path(result["launchd_plist_path"]).open("rb") as handle:
+        arguments = plistlib.load(handle)["ProgramArguments"]
+
+    for argument in (
+        "--challenge-candidate-contract",
+        "--challenge-candidate-contract-sha256",
+        "--challenge-frozen-model-binding",
+        "--challenge-frozen-model-binding-sha256",
+        "--challenge-frozen-model-artifact",
+        "--challenge-frozen-model-artifact-sha256",
+        "--challenge-candidate-profile",
+        "--challenge-candidate-profile-sha256",
+    ):
+        assert argument in arguments
+    assert result["challenge_runtime_byte_binding_required"] is True
+    assert result["challenge_runtime_byte_binding_configured"] is True
+    assert result["challenge_frozen_model_artifact_sha256"] == _sha256(
+        model_artifact
+    )
+    _assert_safety(result)
+
+
+def test_launchd_descriptor_rejects_missing_or_partial_challenge_binding(
+    tmp_path: Path,
+) -> None:
+    common = {
+        "output_path": tmp_path / "challenge-collector.plist",
+        "label": "com.bigan.test.challenge-collector",
+        "service_root": tmp_path / "challenge-raw-service",
+        "protocol_path": PROTOCOL_PATH,
+        "protocol_sha256": _sha256(PROTOCOL_PATH),
+        "batch_round_count": 12,
+        "python_executable": sys.executable,
+        "require_challenge_runtime_binding": True,
+    }
+    with pytest.raises(ValueError, match="runtime byte binding"):
+        write_launchd_plist(**common)
+
+    candidate_contract = tmp_path / "candidate-contract.json"
+    candidate_contract.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="required together"):
+        write_launchd_plist(
+            **common,
+            challenge_candidate_contract_path=candidate_contract,
+            challenge_candidate_contract_sha256=_sha256(
+                candidate_contract
+            ),
+        )
+
+
 def test_launchd_descriptor_pins_v6_2_candidate_manifest(tmp_path: Path) -> None:
     candidate_manifest = tmp_path / "candidate.json"
     candidate_manifest.write_text('{"candidate":"v6.2"}\n', encoding="utf-8")

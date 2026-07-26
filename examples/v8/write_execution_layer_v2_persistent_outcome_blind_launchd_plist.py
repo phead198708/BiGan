@@ -43,6 +43,15 @@ def write_launchd_plist(
     v6_9_candidate_manifest_sha256: str | None = None,
     v6_9_collection_plan_path: Path | str | None = None,
     v6_9_collection_plan_sha256: str | None = None,
+    require_challenge_runtime_binding: bool = False,
+    challenge_candidate_contract_path: Path | str | None = None,
+    challenge_candidate_contract_sha256: str | None = None,
+    challenge_frozen_model_binding_path: Path | str | None = None,
+    challenge_frozen_model_binding_sha256: str | None = None,
+    challenge_frozen_model_artifact_path: Path | str | None = None,
+    challenge_frozen_model_artifact_sha256: str | None = None,
+    challenge_candidate_profile_path: Path | str | None = None,
+    challenge_candidate_profile_sha256: str | None = None,
 ) -> dict:
     """Write a KeepAlive service descriptor without starting the service."""
 
@@ -100,6 +109,70 @@ def write_launchd_plist(
             raise ValueError("v6.9 candidate manifest SHA-256 mismatch")
         if _sha256(v6_9_collection_plan_path) != str(v6_9_collection_plan_sha256).lower():
             raise ValueError("v6.9 collection plan SHA-256 mismatch")
+    challenge_values = (
+        challenge_candidate_contract_path,
+        challenge_candidate_contract_sha256,
+        challenge_frozen_model_binding_path,
+        challenge_frozen_model_binding_sha256,
+        challenge_frozen_model_artifact_path,
+        challenge_frozen_model_artifact_sha256,
+        challenge_candidate_profile_path,
+        challenge_candidate_profile_sha256,
+    )
+    if any(value is not None for value in challenge_values) and any(
+        value is None for value in challenge_values
+    ):
+        raise ValueError(
+            "challenge contract, binding, model, and profile paths/hashes "
+            "are required together"
+        )
+    if require_challenge_runtime_binding and not all(
+        value is not None for value in challenge_values
+    ):
+        raise ValueError("challenge runtime byte binding is required")
+    if challenge_candidate_contract_path is not None:
+        challenge_pairs = (
+            (
+                "candidate contract",
+                challenge_candidate_contract_path,
+                challenge_candidate_contract_sha256,
+            ),
+            (
+                "frozen model binding",
+                challenge_frozen_model_binding_path,
+                challenge_frozen_model_binding_sha256,
+            ),
+            (
+                "frozen model artifact",
+                challenge_frozen_model_artifact_path,
+                challenge_frozen_model_artifact_sha256,
+            ),
+            (
+                "candidate profile",
+                challenge_candidate_profile_path,
+                challenge_candidate_profile_sha256,
+            ),
+        )
+        normalized_challenge_paths: dict[str, Path] = {}
+        for label_name, path_value, expected_hash in challenge_pairs:
+            resolved = Path(path_value).expanduser().resolve()
+            if _sha256(resolved) != str(expected_hash).lower():
+                raise ValueError(
+                    f"challenge {label_name} SHA-256 mismatch"
+                )
+            normalized_challenge_paths[label_name] = resolved
+        challenge_candidate_contract_path = normalized_challenge_paths[
+            "candidate contract"
+        ]
+        challenge_frozen_model_binding_path = normalized_challenge_paths[
+            "frozen model binding"
+        ]
+        challenge_frozen_model_artifact_path = normalized_challenge_paths[
+            "frozen model artifact"
+        ]
+        challenge_candidate_profile_path = normalized_challenge_paths[
+            "candidate profile"
+        ]
     output_path = Path(output_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     service_root.mkdir(parents=True, exist_ok=True)
@@ -150,6 +223,27 @@ def write_launchd_plist(
                 str(v6_9_collection_plan_path),
                 "--v6-9-collection-plan-sha256",
                 str(v6_9_collection_plan_sha256).lower(),
+            ]
+        )
+    if challenge_candidate_contract_path is not None:
+        program_arguments.extend(
+            [
+                "--challenge-candidate-contract",
+                str(challenge_candidate_contract_path),
+                "--challenge-candidate-contract-sha256",
+                str(challenge_candidate_contract_sha256).lower(),
+                "--challenge-frozen-model-binding",
+                str(challenge_frozen_model_binding_path),
+                "--challenge-frozen-model-binding-sha256",
+                str(challenge_frozen_model_binding_sha256).lower(),
+                "--challenge-frozen-model-artifact",
+                str(challenge_frozen_model_artifact_path),
+                "--challenge-frozen-model-artifact-sha256",
+                str(challenge_frozen_model_artifact_sha256).lower(),
+                "--challenge-candidate-profile",
+                str(challenge_candidate_profile_path),
+                "--challenge-candidate-profile-sha256",
+                str(challenge_candidate_profile_sha256).lower(),
             ]
         )
     payload = {
@@ -217,6 +311,52 @@ def write_launchd_plist(
             if v6_9_collection_plan_sha256 is not None
             else None
         ),
+        "challenge_runtime_byte_binding_required": (
+            require_challenge_runtime_binding
+        ),
+        "challenge_runtime_byte_binding_configured": (
+            challenge_candidate_contract_path is not None
+        ),
+        "challenge_candidate_contract_path": (
+            str(challenge_candidate_contract_path)
+            if challenge_candidate_contract_path is not None
+            else None
+        ),
+        "challenge_candidate_contract_sha256": (
+            str(challenge_candidate_contract_sha256).lower()
+            if challenge_candidate_contract_sha256 is not None
+            else None
+        ),
+        "challenge_frozen_model_binding_path": (
+            str(challenge_frozen_model_binding_path)
+            if challenge_frozen_model_binding_path is not None
+            else None
+        ),
+        "challenge_frozen_model_binding_sha256": (
+            str(challenge_frozen_model_binding_sha256).lower()
+            if challenge_frozen_model_binding_sha256 is not None
+            else None
+        ),
+        "challenge_frozen_model_artifact_path": (
+            str(challenge_frozen_model_artifact_path)
+            if challenge_frozen_model_artifact_path is not None
+            else None
+        ),
+        "challenge_frozen_model_artifact_sha256": (
+            str(challenge_frozen_model_artifact_sha256).lower()
+            if challenge_frozen_model_artifact_sha256 is not None
+            else None
+        ),
+        "challenge_candidate_profile_path": (
+            str(challenge_candidate_profile_path)
+            if challenge_candidate_profile_path is not None
+            else None
+        ),
+        "challenge_candidate_profile_sha256": (
+            str(challenge_candidate_profile_sha256).lower()
+            if challenge_candidate_profile_sha256 is not None
+            else None
+        ),
         "batch_canary_feature_contract_path": str(batch_canary_feature_contract_path),
         "batch_canary_feature_contract_sha256": batch_canary_feature_contract_sha256.lower(),
         "outcome_blind_collection_only": True,
@@ -270,6 +410,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--v6-9-candidate-manifest-sha256")
     parser.add_argument("--v6-9-collection-plan")
     parser.add_argument("--v6-9-collection-plan-sha256")
+    parser.add_argument(
+        "--require-challenge-runtime-binding",
+        action="store_true",
+    )
+    parser.add_argument("--challenge-candidate-contract")
+    parser.add_argument("--challenge-candidate-contract-sha256")
+    parser.add_argument("--challenge-frozen-model-binding")
+    parser.add_argument("--challenge-frozen-model-binding-sha256")
+    parser.add_argument("--challenge-frozen-model-artifact")
+    parser.add_argument("--challenge-frozen-model-artifact-sha256")
+    parser.add_argument("--challenge-candidate-profile")
+    parser.add_argument("--challenge-candidate-profile-sha256")
     parser.add_argument("--python-executable", default=sys.executable)
     args = parser.parse_args(argv)
     report = write_launchd_plist(
@@ -291,6 +443,31 @@ def main(argv: list[str] | None = None) -> int:
         v6_9_candidate_manifest_sha256=args.v6_9_candidate_manifest_sha256,
         v6_9_collection_plan_path=args.v6_9_collection_plan,
         v6_9_collection_plan_sha256=args.v6_9_collection_plan_sha256,
+        require_challenge_runtime_binding=(
+            args.require_challenge_runtime_binding
+        ),
+        challenge_candidate_contract_path=(
+            args.challenge_candidate_contract
+        ),
+        challenge_candidate_contract_sha256=(
+            args.challenge_candidate_contract_sha256
+        ),
+        challenge_frozen_model_binding_path=(
+            args.challenge_frozen_model_binding
+        ),
+        challenge_frozen_model_binding_sha256=(
+            args.challenge_frozen_model_binding_sha256
+        ),
+        challenge_frozen_model_artifact_path=(
+            args.challenge_frozen_model_artifact
+        ),
+        challenge_frozen_model_artifact_sha256=(
+            args.challenge_frozen_model_artifact_sha256
+        ),
+        challenge_candidate_profile_path=args.challenge_candidate_profile,
+        challenge_candidate_profile_sha256=(
+            args.challenge_candidate_profile_sha256
+        ),
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

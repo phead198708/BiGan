@@ -60,6 +60,13 @@ runtime binding before creating its service root, and every bounded-batch
 canary report and manifest carries the recomputed hashes and verification
 result.
 
+The launchd descriptor generator exposes a fail-closed challenge mode. When
+`--require-challenge-runtime-binding` is set, it refuses to write a plist
+unless the candidate contract, frozen binding, exact model artifact, and
+candidate profile paths and SHA-256 pins are supplied together and verified.
+Writing the plist does not load or start the service; operator authorization
+and a separate launch action remain mandatory.
+
 After that freeze exists,
 `examples/v8/run_challenge_future_post_freeze.py` executes the separately
 hash-pinned `challenge_future_post_freeze_protocol.json`:
