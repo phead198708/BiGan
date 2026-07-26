@@ -1,0 +1,154 @@
+{
+  "alpha_spending_review": {
+    "attempt_001_disposition": {
+      "administratively_closed": true,
+      "attempt_or_alpha_consumed_by_target_access": false,
+      "planned_familywise_window_alpha": 0.025,
+      "planned_per_candidate_alpha": 0.0125,
+      "promotion_evidence_collection_started": false,
+      "raw_outcome_blind_collection_process_started": true,
+      "target_access_claim_written": false
+    },
+    "outcome_aware_evaluations": [
+      {
+        "candidate_id": "retained_v6_7",
+        "consumes_alpha": true,
+        "consumes_attempt": true,
+        "evaluation_id": "issue-238-retained-v6-7-future",
+        "evidence_id": "issue-238-strictly-later-outcomes",
+        "evidence_ledger_entry_sha256": "36d7aac02912366f3c6c143e608f4eab6e3912748a85b03ecc247cf3c9463ac9",
+        "family_id": "legacy-v8-execution-development",
+        "outcomes_opened": true,
+        "promotion_evidence_reusable": false,
+        "terminal": true
+      },
+      {
+        "candidate_id": "v7_7",
+        "consumes_alpha": true,
+        "consumes_attempt": true,
+        "evaluation_id": "issue-241-v7-7-future",
+        "evidence_id": "issue-241-v7-7-holdout-outcomes",
+        "evidence_ledger_entry_sha256": "2f041c330677a71aaa43d67c473ae48973c0340918e5f404449c824e60d86056",
+        "family_id": "legacy-v8-execution-development",
+        "outcomes_opened": true,
+        "promotion_evidence_reusable": false,
+        "terminal": true
+      },
+      {
+        "candidate_id": "v8_1",
+        "consumes_alpha": true,
+        "consumes_attempt": true,
+        "evaluation_id": "issue-246-v8-1-future",
+        "evidence_id": "issue-246-v8-1-holdout-outcomes",
+        "evidence_ledger_entry_sha256": "405d02b091967c71f3c7405e561af190ff37dd70ca11ee995d0a435ea179056f",
+        "family_id": "legacy-v8-execution-development",
+        "outcomes_opened": true,
+        "promotion_evidence_reusable": false,
+        "terminal": true
+      },
+      {
+        "candidate_id": "v8_3",
+        "consumes_alpha": true,
+        "consumes_attempt": true,
+        "evaluation_id": "issue-249-v8-3-future",
+        "evidence_id": "issue-249-v8-3-holdout-outcomes",
+        "evidence_ledger_entry_sha256": "d2bbdfa67d994e2ea27fe3fb3d06e1c10b36605c4109f4dc865f78971fcec7bc",
+        "family_id": "legacy-v8-execution-development",
+        "outcomes_opened": true,
+        "promotion_evidence_reusable": false,
+        "terminal": true
+      },
+      {
+        "candidate_id": "v8_3_hardened_settlement",
+        "consumes_alpha": true,
+        "consumes_attempt": true,
+        "evaluation_id": "issue-250-hardened-future",
+        "evidence_id": "issue-250-hardened-settlement-outcomes",
+        "evidence_ledger_entry_sha256": "919ecc8dd179c840630cb1424320ac46d31f5f880c4caf52ac70962849352c20",
+        "family_id": "legacy-v8-execution-development",
+        "outcomes_opened": true,
+        "promotion_evidence_reusable": false,
+        "terminal": true
+      },
+      {
+        "candidate_id": "v8_1_primary_no_fallback",
+        "consumes_alpha": false,
+        "consumes_attempt": false,
+        "evaluation_id": "issue-260-exact-120-historical-replay",
+        "family_id": "challenge-historical-development",
+        "outcomes_opened": true,
+        "promotion_evidence_reusable": false,
+        "report_sha256": "558a1802513e70426d9bd4c589b2e7736ea0ed11a704f51fdaa613e18ef45988",
+        "role": "outcome_aware_development_screen",
+        "terminal": true
+      },
+      {
+        "candidate_id": "matched_frozen_v6_7",
+        "consumes_alpha": true,
+        "consumes_attempt": true,
+        "evaluation_id": "issue-252-v6-7-exact-195-replay",
+        "family_id": "exact-195-single-use-window",
+        "outcomes_opened": true,
+        "promotion_evidence_reusable": false,
+        "report_sha256": "500b51146f7d9fc0c7284702ba954fd4aac2d36644e8b18f1f61121deb1b0ff4",
+        "role": "original_single_use_outcome_aware_evaluation",
+        "terminal": true
+      },
+      {
+        "candidate_id": "v8_1_primary_no_fallback",
+        "consumes_alpha": false,
+        "consumes_attempt": false,
+        "evaluation_id": "issue-260-v8-1-exact-195-diagnostic",
+        "family_id": "challenge-historical-development",
+        "outcomes_opened": true,
+        "promotion_evidence_reusable": false,
+        "report_sha256": "8d5458ee09a3a4fa28a94042db947caaf8dbe3c0874cf96e0435d34bf20d179a",
+        "role": "outcome_aware_development_baseline_on_already_opened_corpus",
+        "terminal": true
+      }
+    ]
+  },
+  "attempt_id": "v8-5-challenger-parallel-future-attempt-001-provider-complete-corrective-refreeze",
+  "closed_at": "2026-07-26T16:55:35Z",
+  "closure_issue": {
+    "number": 262,
+    "url": "https://github.com/phead198708/BiGan/issues/262"
+  },
+  "closure_reason": {
+    "expected_accepted_markets_in_120": 14.153846153846153,
+    "exact_195_acceptance_rate": 0.11794871794871795,
+    "exact_195_accepted_market_count": 23,
+    "exact_195_market_count": 195,
+    "frozen_minimum_support": 40,
+    "minimum_acceptance_rate_required": 0.3333333333333333,
+    "projected_support_shortfall": 25.846153846153847,
+    "reason_code": "frozen_support_incompatible_with_observed_outcome_blind_acceptance_behavior",
+    "support_is_mathematically_compatible": false
+  },
+  "frozen_lineage": {
+    "collection_plan_sha256": "df9a81b1ed8cc9e3bd50ca580cd617ecde041a97a7d8470d0c5b82e9d79436ff",
+    "supersession_governance_sha256": "b6d8eab500a1ed070827b3dceef0101aa3139db1aa6765d2648d4f9c07294d04",
+    "supersessions_consumed": 5
+  },
+  "raw_collection_audit": {
+    "all_raw_captures_permanently_excluded": true,
+    "batch_canary_report_sha256": "0442a3d5fcbf0e1f7d3613c4064d31fe967cbca5fb4a0a3c3cbc70f3ba9f0840",
+    "collector_index_sha256": "d4ec55d2b8aab5dcc05e66113515bda4b7d3070358b759fe8dbdf2d40f3b68a0",
+    "labels_outcomes_settlement_or_pnl_opened": false,
+    "promotion_eligible_capture_count": 0,
+    "quality_valid_capture_count": 0,
+    "raw_indexed_capture_count": 12,
+    "terminal_reason": "batch_has_zero_quality_valid_markets"
+  },
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-attempt-closure-v1"
+}

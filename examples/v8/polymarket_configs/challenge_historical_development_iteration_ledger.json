@@ -1,0 +1,80 @@
+{
+  "alpha_spending_semantics": {
+    "confirmatory_type_i_error_claim_allowed": false,
+    "development_corpus_is_already_outcome_opened": true,
+    "each_replay_consumes_one_iteration_slot": true,
+    "fresh_promotion_alpha_consumed": false,
+    "nominal_one_sided_alpha_per_iteration": 0.025,
+    "nominal_one_sided_alpha_schedule": [
+      0.025,
+      0.025,
+      0.025,
+      0.025,
+      0.025
+    ],
+    "nominal_total_after_five_iterations": 0.125,
+    "repeated_development_results_are_promotion_evidence": false
+  },
+  "attempt_001_closure_sha256": "9bc138bcff811f2a0d0a05556d3e189b7c74eb23ce03e2062bb397c4149d4414",
+  "append_policy": {
+    "entry_files_are_hash_chained": true,
+    "entry_schema_version": "bigan-v8-challenge-historical-development-iteration-entry-v1",
+    "genesis_previous_entry_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "ledger_root_rewrite_allowed": false,
+    "one_new_entry_file_per_completed_evaluation": true,
+    "preregistration_and_result_are_immutable_entry_descriptors": true
+  },
+  "comprehensive_review_required": false,
+  "development_corpus_registry_sha256": "dd4926b24bbe2b80bb127c5af861f62e432131469bfc202248d85ec4a1380fd4",
+  "development_family_id": "v8-1-challenge-exact-195-outcome-aware-development",
+  "development_iterations": [],
+  "evaluations_completed_after_standard_freeze": 0,
+  "frozen_historical_success_standard_sha256": "07609f09692723dd1e650080cfdd29466a7ee8a0f8c30d8378045a8ee3523114",
+  "issue": 262,
+  "maximum_development_iterations": 5,
+  "next_iteration_number": 1,
+  "prior_outcome_aware_evaluations": [
+    {
+      "candidate_id": "v8_1_primary_no_fallback",
+      "evaluation_id": "issue-260-exact-120-historical-replay",
+      "performed_before_success_standard_freeze": true,
+      "promotion_evidence_eligible": false,
+      "report_sha256": "558a1802513e70426d9bd4c589b2e7736ea0ed11a704f51fdaa613e18ef45988",
+      "role": "prior_development_screen"
+    },
+    {
+      "candidate_id": "matched_frozen_v6_7",
+      "evaluation_id": "issue-252-v6-7-exact-195-replay",
+      "performed_before_success_standard_freeze": true,
+      "promotion_evidence_eligible": false,
+      "report_sha256": "500b51146f7d9fc0c7284702ba954fd4aac2d36644e8b18f1f61121deb1b0ff4",
+      "role": "registered_development_baseline"
+    },
+    {
+      "candidate_id": "v8_1_primary_no_fallback",
+      "evaluation_id": "issue-260-v8-1-exact-195-diagnostic",
+      "performed_before_success_standard_freeze": true,
+      "promotion_evidence_eligible": false,
+      "report_sha256": "8d5458ee09a3a4fa28a94042db947caaf8dbe3c0874cf96e0435d34bf20d179a",
+      "role": "registered_development_candidate_baseline"
+    }
+  ],
+  "preregistration_policy": {
+    "candidate_change_must_precede_replay": true,
+    "one_candidate_per_iteration": true,
+    "preregistration_artifact_sha256_required": true,
+    "unpreregistered_grid_search_allowed": false
+  },
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-historical-development-iteration-ledger-v1",
+  "status": "append_only_genesis_ready_for_preregistered_iteration_1"
+}
