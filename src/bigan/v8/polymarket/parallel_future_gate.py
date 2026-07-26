@@ -212,6 +212,9 @@ def validate_parallel_future_collection_plan(
     excluded_probe = dict(
         supersession.get("excluded_pre_replay_probe") or {}
     )
+    excluded_model_binding_capture = dict(
+        supersession.get("excluded_pre_model_binding_capture") or {}
+    )
     prior_plan_sha256 = str(
         supersession.get("superseded_collection_plan_sha256") or ""
     )
@@ -227,6 +230,35 @@ def validate_parallel_future_collection_plan(
         blockers.append("pre_replay_probe_not_before_refreeze")
     if collection.get("service_root") == excluded_probe.get("service_root"):
         blockers.append("pre_replay_probe_service_root_reused")
+    if (
+        excluded_model_binding_capture.get("excluded_from_fresh_attempt")
+        is not True
+    ):
+        blockers.append("pre_model_binding_capture_not_excluded")
+    if (
+        excluded_model_binding_capture.get("labels_outcomes_or_pnl_opened")
+        is not False
+    ):
+        blockers.append("pre_model_binding_capture_target_access")
+    if (
+        excluded_model_binding_capture.get("consumes_attempt_or_alpha")
+        is not False
+    ):
+        blockers.append("pre_model_binding_capture_attempt_accounting")
+    if (
+        excluded_model_binding_capture.get("index_entry_written")
+        is not False
+    ):
+        blockers.append("pre_model_binding_capture_indexed")
+    if (
+        int(excluded_model_binding_capture.get("market_start_ts") or 0)
+        > freeze_created_ts
+    ):
+        blockers.append("pre_model_binding_capture_not_before_refreeze")
+    if collection.get("service_root") == excluded_model_binding_capture.get(
+        "service_root"
+    ):
+        blockers.append("pre_model_binding_capture_service_root_reused")
     try:
         validate_parallel_frozen_model_binding(
             frozen_model_binding,
