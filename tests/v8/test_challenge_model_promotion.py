@@ -157,6 +157,7 @@ def test_static_issue_prerequisites_pass_but_promotion_waits_for_fresh_evidence(
     report = audit_challenge_model_promotion(repository_root=ROOT)
     assert all(report["static_checks"].values())
     assert all(report["artifact_checks"].values())
+    assert report["static_check_failure_reasons"] == {}
     assert report["static_checks"]["issue_255_next_fresh_gate_statistically_eligible"]
     assert report["static_checks"]["issue_254_parallel_protocol_preregistered"]
     assert report["static_checks"]["issue_257_feature_missingness_governance_valid"]
@@ -187,6 +188,9 @@ def test_semantically_tampered_collection_plan_fails_even_with_new_hash(
 
     assert report["artifact_checks"]["parallel_future_collection_plan.json"] is True
     assert report["static_checks"]["issue_254_parallel_protocol_preregistered"] is False
+    assert report["static_check_failure_reasons"][
+        "issue_254_parallel_protocol_preregistered"
+    ]
     assert report["decision"] == "BLOCKED"
 
 
@@ -204,6 +208,9 @@ def test_issue_257_semantic_weakening_fails_even_with_new_sidecar(
     assert report["artifact_checks"]["feature_missingness_contract.json"] is True
     assert report["static_checks"]["all_issue_contract_artifacts_hash_verified"] is True
     assert report["static_checks"]["issue_257_feature_missingness_governance_valid"] is False
+    assert report["static_check_failure_reasons"][
+        "issue_257_feature_missingness_governance_valid"
+    ]
     assert report["decision"] == "BLOCKED"
 
 
@@ -221,6 +228,9 @@ def test_issue_258_semantic_weakening_fails_even_with_new_sidecar(
     assert report["artifact_checks"]["regime_definition_contract.json"] is True
     assert report["static_checks"]["all_issue_contract_artifacts_hash_verified"] is True
     assert report["static_checks"]["issue_258_regime_diagnostics_governance_valid"] is False
+    assert report["static_check_failure_reasons"][
+        "issue_258_regime_diagnostics_governance_valid"
+    ]
     assert report["decision"] == "BLOCKED"
 
 
@@ -247,6 +257,9 @@ def test_issue_256_template_weakening_fails_even_with_new_sidecar(
     assert report["static_checks"]["all_issue_contract_artifacts_hash_verified"] is True
     assert report["static_checks"]["cross_issue_promotion_evidence_protocol_valid"] is True
     assert report["static_checks"]["issue_256_policy_framework_preregistered"] is False
+    assert report["static_check_failure_reasons"][
+        "issue_256_policy_framework_preregistered"
+    ]
     assert report["decision"] == "BLOCKED"
 
 

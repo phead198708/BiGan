@@ -104,14 +104,18 @@ def audit_challenge_model_promotion(
     historical_replay = (
         _read_json(historical_replay_path) if historical_replay_path.is_file() else {}
     )
+    static_check_failure_reasons: dict[str, str] = {}
     canonical_payload_contract_valid = False
     try:
         validate_canonical_payload_contract(
             _read_json(config_dir / "canonical_payload_contract.json")
         )
         canonical_payload_contract_valid = True
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as error:
         canonical_payload_contract_valid = False
+        static_check_failure_reasons[
+            "issue_259_canonical_payload_contract_valid"
+        ] = str(error)
     budget_decision_valid = False
     try:
         validate_candidate_budget_artifacts(
@@ -159,8 +163,11 @@ def audit_challenge_model_promotion(
             recomputed=recomputed_next_gate,
         )
         budget_decision_valid = True
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as error:
         budget_decision_valid = False
+        static_check_failure_reasons[
+            "issue_255_next_fresh_gate_statistically_eligible"
+        ] = str(error)
     feature_missingness_valid = False
     try:
         validate_feature_missingness_contract(
@@ -170,16 +177,22 @@ def audit_challenge_model_promotion(
             _read_json(config_dir / "feature_missingness_runtime.schema.json")
         )
         feature_missingness_valid = True
-    except (OSError, TypeError, ValueError):
+    except (OSError, TypeError, ValueError) as error:
         feature_missingness_valid = False
+        static_check_failure_reasons[
+            "issue_257_feature_missingness_governance_valid"
+        ] = str(error)
     regime_contract_valid = False
     try:
         validate_regime_definition_contract(
             _read_json(config_dir / "regime_definition_contract.json")
         )
         regime_contract_valid = True
-    except (OSError, TypeError, ValueError):
+    except (OSError, TypeError, ValueError) as error:
         regime_contract_valid = False
+        static_check_failure_reasons[
+            "issue_258_regime_diagnostics_governance_valid"
+        ] = str(error)
     execution_policy_preregistration_valid = False
     try:
         _validate_execution_policy_preregistration(
@@ -187,8 +200,11 @@ def audit_challenge_model_promotion(
             artifact_hashes=artifact_hashes,
         )
         execution_policy_preregistration_valid = True
-    except (KeyError, OSError, TypeError, ValueError):
+    except (KeyError, OSError, TypeError, ValueError) as error:
         execution_policy_preregistration_valid = False
+        static_check_failure_reasons[
+            "issue_256_policy_framework_preregistered"
+        ] = str(error)
     promotion_evidence_protocol_valid = False
     try:
         _validate_promotion_evidence_protocol(
@@ -196,8 +212,11 @@ def audit_challenge_model_promotion(
             artifact_hashes=artifact_hashes,
         )
         promotion_evidence_protocol_valid = True
-    except (KeyError, OSError, TypeError, ValueError):
+    except (KeyError, OSError, TypeError, ValueError) as error:
         promotion_evidence_protocol_valid = False
+        static_check_failure_reasons[
+            "cross_issue_promotion_evidence_protocol_valid"
+        ] = str(error)
 
     candidate_contracts = {
         candidate_id: _read_json(config_dir / filename)
@@ -279,8 +298,11 @@ def audit_challenge_model_promotion(
             ),
         )
         parallel_plan_valid = True
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as error:
         parallel_plan_valid = False
+        static_check_failure_reasons[
+            "issue_254_parallel_protocol_preregistered"
+        ] = str(error)
     static_checks = {
         "all_issue_contract_artifacts_hash_verified": all(artifact_checks.values()),
         "issue_259_canonical_payload_contract_valid": (canonical_payload_contract_valid),
@@ -523,6 +545,7 @@ def audit_challenge_model_promotion(
         "artifact_checks": artifact_checks,
         "artifact_hashes": artifact_hashes,
         "static_checks": static_checks,
+        "static_check_failure_reasons": static_check_failure_reasons,
         "fresh_runtime_evidence_supplied": bool(runtime),
         "evidence_checks": evidence_checks,
         "decision": "PROMOTE_TO_CHAMPION" if eligible else "BLOCKED",
