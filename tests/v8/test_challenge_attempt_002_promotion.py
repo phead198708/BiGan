@@ -18,6 +18,10 @@ from bigan.v8.polymarket.challenge_attempt_002_promotion import (
     attempt_002_promotion_readiness_markdown,
     audit_attempt_002_promotion,
 )
+from bigan.v8.polymarket.challenge_attempt_002_supplemental import (
+    Attempt002SupplementalConfig,
+    run_attempt_002_supplemental_evidence,
+)
 from bigan.v8.polymarket.challenge_historical_development import SAFE_FALSES
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.regime_diagnostics import DIMENSION_BUCKETS
@@ -77,6 +81,8 @@ def _target_free_inputs() -> tuple[list[dict], list[dict], list[dict]]:
             "market_start_ts": start,
             "market_end_ts": start + 300_000,
             "decision_ts": start + 60_000,
+            "policy_grid_decision_ts": start + 60_000,
+            "collector_batch_id": f"batch-{index // 12:02d}",
             "capture_quality_valid": True,
             "target_used_as_decision_input": False,
         }
@@ -426,3 +432,122 @@ def test_hash_tamper_is_rejected_before_promotion(tmp_path: Path) -> None:
             future_evidence_manifest=future,
             supplemental_runtime_evidence=runtime,
         )
+
+
+def test_supplemental_pipeline_builds_all_issue_runtime_evidence(
+    tmp_path: Path,
+) -> None:
+    future, runtime = _real_future_bundle(tmp_path)
+    shared, _, _ = _target_free_inputs()
+    feature_rows = []
+    native_decisions = []
+    for source in shared:
+        market_id = source["market_id"]
+        decision_ts = source["policy_grid_decision_ts"]
+        feature_rows.append(
+            {
+                "market_id": market_id,
+                "decision_ts": decision_ts,
+                "available_at_ts": decision_ts,
+                "max_input_ts": decision_ts,
+                "features": {
+                    "btc_return_5m": 0.001,
+                    "btc_volatility_5m": 0.01,
+                    "combined_spread_bps": 10.0,
+                    "up_liquidity_depth": 1000.0,
+                    "down_liquidity_depth": 1000.0,
+                    "up_queue_fill_probability_proxy": 0.9,
+                    "down_queue_fill_probability_proxy": 0.9,
+                    "recent_up_trade_volume": 1.0,
+                    "recent_up_trade_volume_missing": 0,
+                    "recent_up_trade_volume_coverage_complete": 1,
+                    "recent_down_trade_volume": 1.0,
+                    "recent_down_trade_volume_missing": 0,
+                    "recent_down_trade_volume_coverage_complete": 1,
+                    "trade_tape_collection_mode": "mock",
+                    "trade_tape_provider_timeout": 0,
+                    "trade_tape_truncated": 0,
+                    "trade_tape_censored": 0,
+                    "trade_tape_historical_backfill": 0,
+                    "provider_health_score": 1.0,
+                },
+            }
+        )
+        native_decisions.append(
+            {
+                "market_id": market_id,
+                "baseline_action": "BUY_UP_SELL_BEFORE_CLOSE",
+                "opposite_action": "BUY_DOWN_SELL_BEFORE_CLOSE",
+                "predicted_baseline_return": 0.1,
+                "predicted_opposite_return": 0.05,
+            }
+        )
+    shared_path = tmp_path / "shared-source.jsonl"
+    feature_path = tmp_path / "feature-rows.jsonl"
+    native_path = tmp_path / "native-decisions.jsonl"
+    _write_jsonl(shared_path, shared)
+    _write_jsonl(feature_path, feature_rows)
+    _write_jsonl(native_path, native_decisions)
+    config_dir = ROOT / "examples/v8/polymarket_configs"
+    regime_path = config_dir / "regime_definition_contract.json"
+    policy_path = config_dir / "policy_candidate_manifest.json"
+    compatibility_path = (
+        config_dir / "source_execution_compatibility_manifest.json"
+    )
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    output = run_attempt_002_supplemental_evidence(
+        Attempt002SupplementalConfig(
+            run_id="supplemental-test",
+            output_dir=tmp_path / "supplemental-runs",
+            repository_root=ROOT,
+            future_manifest_path=Path(str(future["path"])),
+            expected_future_manifest_sha256=str(future["sha256"]),
+            operator_authorization_path=Path(
+                str(runtime["operator_authorization"]["path"])
+            ),
+            expected_operator_authorization_sha256=str(
+                runtime["operator_authorization"]["sha256"]
+            ),
+            shared_source_rows_path=shared_path,
+            expected_shared_source_rows_sha256=_sha256(shared_path),
+            feature_rows_path=feature_path,
+            expected_feature_rows_sha256=_sha256(feature_path),
+            native_decisions_path=native_path,
+            expected_native_decisions_sha256=_sha256(native_path),
+            regime_contract_path=regime_path,
+            expected_regime_contract_sha256=_sha256(regime_path),
+            policy_manifest_path=policy_path,
+            expected_policy_manifest_sha256=_sha256(policy_path),
+            compatibility_manifest_path=compatibility_path,
+            expected_compatibility_manifest_sha256=_sha256(
+                compatibility_path
+            ),
+            implementation_commit=commit,
+            generated_at="2026-07-27T02:00:00Z",
+        )
+    )
+
+    supplemental_runtime = _json(output["runtime_evidence_path"])
+    report = audit_attempt_002_promotion(
+        repository_root=ROOT,
+        future_evidence_manifest=future,
+        supplemental_runtime_evidence=supplemental_runtime,
+    )
+
+    assert output["provider_health_report"][
+        "feature_completeness_report"
+    ]["incomplete_feature_row_count"] == 0
+    assert output["regime_report"][
+        "all_dimension_partitions_reconcile"
+    ] is True
+    assert output["parity_report"]["passed"] is True
+    assert output["safety_report"]["passed"] is True
+    assert output["reconciliation_report"]["passed"] is True
+    assert report["decision"] == "PROMOTE_TO_CHAMPION"
+    assert all(report["evidence_checks"].values())
