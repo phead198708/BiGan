@@ -326,10 +326,7 @@ def _apply_entry_price_floor_validated(
         "base_candidate_id": BASE_CANDIDATE_ID,
         "market_id": market_id,
         "decision_ts": decision_ts,
-        "market_close_ts": _integer(
-            base_decision.get("market_close_ts"),
-            field="market_close_ts",
-        ),
+        "market_close_ts": _base_market_close_ts(base_decision),
         "max_input_ts": _base_max_input_ts(base_decision),
         "base_selected_action": base_action,
         "base_selected_side": base_side,
@@ -424,6 +421,21 @@ def _base_max_input_ts(base_decision: Mapping[str, Any]) -> int | None:
             return None
         raise ChallengeEntryPriceFloorError("base decision has no causal max_input_ts")
     return max(timestamps)
+
+
+def _base_market_close_ts(base_decision: Mapping[str, Any]) -> int | None:
+    value = base_decision.get("market_close_ts")
+    if value is not None:
+        return _integer(value, field="market_close_ts")
+    if (
+        base_decision.get("selected_action") == "NO_TRADE"
+        and "v6_7_no_positive_guard_compatible_action"
+        in (base_decision.get("selection_reason_codes") or [])
+    ):
+        return None
+    raise ChallengeEntryPriceFloorError(
+        "base decision has no market_close_ts"
+    )
 
 
 def _validated_entry_price(

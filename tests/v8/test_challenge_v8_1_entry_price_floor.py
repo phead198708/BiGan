@@ -183,6 +183,7 @@ def test_terminal_floor_keeps_or_vetoes_without_changing_controller_state() -> N
         "v6_7_no_positive_guard_compatible_action"
     ]
     no_trade_guard.pop("max_input_ts")
+    no_trade_guard.pop("market_close_ts")
     no_trade = apply_entry_price_floor(
         base_decision=no_trade_guard,
         matched_action_row=None,
@@ -192,6 +193,7 @@ def test_terminal_floor_keeps_or_vetoes_without_changing_controller_state() -> N
     assert no_trade["entry_price_filter_evaluated"] is False
     assert no_trade["entry_price"] is None
     assert no_trade["max_input_ts"] is None
+    assert no_trade["market_close_ts"] is None
 
 
 def test_action_row_target_or_hash_tamper_fails_closed() -> None:
