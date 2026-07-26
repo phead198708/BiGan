@@ -72,6 +72,12 @@ def _runtime(tmp_path: Path):
 def test_static_issue_prerequisites_pass_but_promotion_waits_for_fresh_evidence() -> None:
     report = audit_challenge_model_promotion(repository_root=ROOT)
     assert all(report["static_checks"].values())
+    assert (
+        report["static_checks"][
+            "historical_replay_strictly_superior_before_collection"
+        ]
+        is True
+    )
     assert report["fresh_runtime_evidence_supplied"] is False
     assert report["decision"] == "BLOCKED"
     assert report["promotion_unlocked"] is False

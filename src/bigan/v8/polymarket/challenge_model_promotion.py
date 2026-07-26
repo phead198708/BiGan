@@ -22,6 +22,8 @@ REQUIRED_HASH_PINNED_ARTIFACTS = (
     "execution_policy_contract.json",
     "policy_candidate_manifest.json",
     "source_execution_compatibility_manifest.json",
+    "historical_replay_superiority_contract.json",
+    "historical_replay_superiority_report.json",
 )
 
 
@@ -49,6 +51,14 @@ def audit_challenge_model_promotion(
         artifact_hashes[filename] = actual
     next_gate_path = config_dir / "next_gate_eligibility_decision.json"
     next_gate = _read_json(next_gate_path) if next_gate_path.is_file() else {}
+    historical_replay_path = (
+        config_dir / "historical_replay_superiority_report.json"
+    )
+    historical_replay = (
+        _read_json(historical_replay_path)
+        if historical_replay_path.is_file()
+        else {}
+    )
     static_checks = {
         "all_issue_contract_artifacts_hash_verified": all(artifact_checks.values()),
         "issue_255_next_fresh_gate_statistically_eligible": (
@@ -63,6 +73,23 @@ def audit_challenge_model_promotion(
             "execution_policy_contract.json"
         )
         is True,
+        "historical_replay_strictly_superior_before_collection": (
+            artifact_checks.get("historical_replay_superiority_contract.json")
+            is True
+            and artifact_checks.get("historical_replay_superiority_report.json")
+            is True
+            and historical_replay.get("historical_superiority_gate_passed")
+            is True
+            and historical_replay.get(
+                "future_collection_prerequisite_satisfied"
+            )
+            is True
+            and historical_replay.get("historical_replay_is_promotion_evidence")
+            is False
+            and all(
+                (historical_replay.get("checks") or {}).values()
+            )
+        ),
     }
     runtime = dict(runtime_evidence or {})
     evidence_checks = {

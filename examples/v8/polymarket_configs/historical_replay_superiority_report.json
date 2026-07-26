@@ -1,0 +1,80 @@
+{
+  "#134_resume_allowed": false,
+  "#146_start_allowed": false,
+  "baseline_id": "matched_frozen_v6_7",
+  "blocking_reason_codes": [],
+  "candidate_accepted_market_count": 46,
+  "candidate_action_distribution": {
+    "BUY_DOWN_SELL_BEFORE_CLOSE": 36,
+    "BUY_UP_SELL_BEFORE_CLOSE": 10
+  },
+  "candidate_id": "v8_1_primary_no_fallback",
+  "candidate_name": "adaptive_support_controller_v8_1",
+  "candidate_side_distribution": {
+    "DOWN": 36,
+    "UP": 10
+  },
+  "capital_at_risk": false,
+  "champion_accepted_market_count": 120,
+  "checks": {
+    "all_safety_unlocks_remain_false": true,
+    "candidate_behaviorally_distinct": true,
+    "candidate_contract_is_frozen_v8_1_no_fallback": true,
+    "candidate_largest_winner_removed_pnl_positive": true,
+    "candidate_largest_winner_removed_strictly_better_than_champion": true,
+    "candidate_support_sufficient": true,
+    "candidate_total_pnl_strictly_better_than_champion": true,
+    "exact_same_historical_market_grid": true,
+    "historical_targets_not_used_for_tuning_or_inference": true,
+    "identical_cost_sizing_position_management_and_guard": true,
+    "leakage_audit_passed": true,
+    "lineage_hashes_complete": true,
+    "paired_delta_largest_winner_removed_positive": true,
+    "prediction_and_rank_state_are_strictly_prequential": true,
+    "source_report_metrics_reconciled": true
+  },
+  "evaluation_completed_ts": 1785050104578,
+  "evaluation_market_count": 120,
+  "evaluation_market_ids_hash": "5b154125ee6299eb31f2f95b763cc07f3270b59831a4bf22231485b723cee928",
+  "future_collection_prerequisite_satisfied": true,
+  "historical_replay_is_promotion_evidence": false,
+  "historical_role": "development_screening_only_before_new_collection",
+  "historical_superiority_gate_passed": true,
+  "lineage_sha256s": {
+    "baseline_rows": "82acc593d57c37c77da866f989487273865c3501ab39aa8fe346aa15cedb74df",
+    "candidate_contract": "9a893494600e96b0e7719bde088c96b00d7a1322a5a2942a5ff405124f90a3b1",
+    "candidate_rows": "c26c9164cada8abedcff94c05553cb43bdc9eaa138dbff1293abe09af1f4f59f",
+    "gate_contract": "3ba70dc0c589b0c891dd60ec254e6a733eb203e224598460415be34cffa825fd",
+    "leakage_audit": "234ed6c29317c811799bc435965fa7606b8a4ddca333ab5fb9cd1c31c9c52a5c",
+    "source_manifest": "6aefa30b204ff090db084808cb0560fad29bdbfba92dd725cbaed9325096258b",
+    "source_report": "6b560b914fab7387c794b794575b1e47d411958199bfb596dba9adc2551c23b5"
+  },
+  "live_unlocked": false,
+  "metrics": {
+    "candidate_largest_winner_removed_after_cost_pnl": 0.11275000000000004,
+    "candidate_minus_champion_largest_winner_removed_after_cost_pnl": 0.3266999999999999,
+    "candidate_minus_champion_total_after_cost_pnl": 0.32669999999999993,
+    "candidate_total_after_cost_pnl": 0.23170000000000007,
+    "champion_largest_winner_removed_after_cost_pnl": -0.21394999999999986,
+    "champion_total_after_cost_pnl": -0.09499999999999985,
+    "paired_delta_largest_winner_removed_after_cost_pnl": 0.19869999999999996
+  },
+  "paired_market_bootstrap_diagnostic": {
+    "alpha": 0.0125,
+    "diagnostic_only": true,
+    "eligibility_blocker": false,
+    "lower_confidence_bound": -0.8701500000000003,
+    "method": "paired_market_cluster_percentile",
+    "point_estimate": 0.32669999999999993,
+    "resample_count": 10000,
+    "seed": 260081,
+    "upper_confidence_bound": 1.4655500000000001
+  },
+  "paper_candidate_allowed": false,
+  "policy_difference_market_count": 86,
+  "promotion_unlocked": false,
+  "report_id": "56e081e04697dbd13c9215e15346c99611b994c7a656c6b070059f3cfd6bdd27",
+  "schema_version": "bigan-v8-challenge-historical-replay-report-v1",
+  "wallet_enabled": false,
+  "write_enabled": false
+}
