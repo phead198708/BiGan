@@ -103,32 +103,46 @@ V8_1_BRIDGED_FEATURE_NAMES = (
     "same_side_prior_entry",
     "side_flip_prior_entry",
 )
+V8_1_BRIDGE_LIMITATIONS = (
+    "native_action_score_and_margin_are_unavailable_and_forced_missing",
+    "btc_anchor_direction_is_reconstructed_from_available_causal_15m_inputs",
+    "selected_side_probability_uses_causal_side_mid_for_value_conditioning",
+    "pre_entry_exposure_state_is_unavailable_and_uses_frozen_neutral_state",
+    "bridge_evidence_is_weak_development_evidence_only",
+)
 
 
 def validate_transfer_protocol(
     protocol: Mapping[str, Any],
     *,
     verify_artifact_bytes: bool = True,
+    repository_root: Path | str | None = None,
 ) -> None:
     """Reject semantic drift in the one-shot development transfer diagnostic."""
 
+    repo_root = _repository_root(repository_root)
     trigger = dict(protocol.get("trigger") or {})
     quality = dict(protocol.get("quality_contract") or {})
     v7 = dict(protocol.get("legacy_v7_selected") or {})
     v81 = dict(protocol.get("v8_1_unit_controller") or {})
+    registry = dict(protocol.get("artifact_registry") or {})
+    bundle = dict(v7.get("artifact_bundle") or {})
     reporting = dict(protocol.get("reporting") or {})
     weak_rule = dict(reporting.get("v8_1_weak_signal_rule") or {})
-    artifact_descriptors = [
+    v7_member_descriptors = [
         dict(v7.get("model_artifact") or {}),
         dict(v7.get("settlement_model") or {}),
         dict(v7.get("settlement_residual_model") or {}),
-        dict(v81.get("model_artifact") or {}),
     ]
+    bundle_path = Path(str(bundle.get("path") or ""))
+    bundle_parent = bundle_path.parent
     checks = {
         "schema": protocol.get("schema_version") == TRANSFER_PROTOCOL_SCHEMA_VERSION,
         "lane": protocol.get("lane_id") == "challenge-model-development-btc-updown-15m-v1",
         "role": protocol.get("development_only_forever") is True
         and protocol.get("promotion_evidence_eligible") is False,
+        "registry": _is_repo_local_descriptor(registry)
+        and registry.get("path") == "examples/v8/polymarket_artifacts/manifest.json",
         "trigger": trigger
         == {
             "minimum_quality_valid_outcome_finalized_market_count": 40,
@@ -154,9 +168,21 @@ def validate_transfer_protocol(
         and v81.get("source_action_score_missing_representation")
         == "xgboost_missing_nan_with_availability_flag_false"
         and v81.get("transfer_status") == "bridge_handicapped_not_native"
+        and v81.get("bridge_handicapped_not_native") is True
         and v81.get("native_feature_coverage_must_be_reported") is True
+        and v81.get("native_action_score_coverage") == 0.0
         and v81.get("late_window_pressure_denominator") == "market_horizon_seconds"
         and v81.get("expected_market_horizon_seconds") == 900
+        and v81.get("time_normalized_feature_audit")
+        == [
+            {
+                "feature": "late_window_pressure",
+                "denominator_source": "feature_row.horizon_ms",
+                "required_market_horizon_seconds": 900,
+                "hardcoded_300_seconds_allowed": False,
+            }
+        ]
+        and tuple(v81.get("bridge_limitations") or ()) == V8_1_BRIDGE_LIMITATIONS
         and v81.get("threshold_or_feature_search_allowed") is False,
         "reporting": reporting.get("old_15m_plus_12_39_allowed_as_gate") is False
         and reporting.get("cross_policy_superiority_claim_allowed") is False
@@ -171,11 +197,18 @@ def validate_transfer_protocol(
             "one_sided_confidence": 0.95,
             "pass_condition": "accepted_market_count_gte_5_and_bootstrap_lcb_gt_0",
             "promotion_claim_allowed": False,
-            "full_retrain_conclusion_allowed": False,
+            "strong_transfer_conclusion_allowed": False,
         },
-        "repo_pinned_artifacts": all(
-            _is_repo_content_addressed_descriptor(descriptor)
-            for descriptor in artifact_descriptors
+        "repo_pinned_artifacts": (
+            _is_repo_content_addressed_bundle_descriptor(bundle)
+            and all(
+                _is_repo_local_descriptor(descriptor)
+                and Path(str(descriptor.get("path") or "")).parent == bundle_parent
+                for descriptor in v7_member_descriptors
+            )
+            and _is_repo_content_addressed_descriptor(
+                dict(v81.get("model_artifact") or {})
+            )
         ),
         "safety": protocol.get("safety") == SAFETY,
     }
@@ -183,17 +216,229 @@ def validate_transfer_protocol(
     if blockers:
         raise ValueError("15m transfer protocol invalid: " + ", ".join(blockers))
     if verify_artifact_bytes:
-        for key in (
-            "model_artifact",
-            "settlement_model",
-            "settlement_residual_model",
-        ):
-            descriptor = dict(v7.get(key) or {})
-            _verify_descriptor(descriptor, f"legacy v7 {key}")
+        verify_repository_artifact_registry(protocol, repository_root=repo_root)
+        verify_legacy_v7_artifact_bundle(v7, repository_root=repo_root)
         _verify_descriptor(
             dict(v81.get("model_artifact") or {}),
             "v8.1 model artifact",
+            repository_root=repo_root,
         )
+
+
+def verify_repository_artifact_registry(
+    protocol: Mapping[str, Any],
+    *,
+    repository_root: Path | str | None = None,
+) -> dict[str, Any]:
+    """Resolve and verify the transfer registry without relying on process CWD."""
+
+    repo_root = _repository_root(repository_root)
+    registry_descriptor = dict(protocol.get("artifact_registry") or {})
+    _verify_descriptor(
+        registry_descriptor,
+        "repository artifact registry",
+        repository_root=repo_root,
+    )
+    registry_path = _resolve_pinned_path(
+        registry_descriptor["path"],
+        repository_root=repo_root,
+    )
+    registry = _load_json(registry_path)
+    v7 = dict(protocol.get("legacy_v7_selected") or {})
+    bundle = dict(v7.get("artifact_bundle") or {})
+    v81_artifact = dict(
+        (protocol.get("v8_1_unit_controller") or {}).get("model_artifact") or {}
+    )
+    registered_bundles = list(registry.get("bundles") or [])
+    registered_artifacts = list(registry.get("artifacts") or [])
+    checks = {
+        "schema": (
+            registry.get("schema_version")
+            == "bigan-repository-pinned-model-artifacts-v1"
+        ),
+        "development_only": registry.get("development_only_forever") is True,
+        "not_promotion_evidence": registry.get("promotion_evidence_eligible") is False,
+        "v7_bundle_registered_once": sum(
+            row.get("path") == bundle.get("path")
+            and row.get("bundle_sha256") == bundle.get("bundle_sha256")
+            for row in registered_bundles
+        )
+        == 1,
+        "v8_artifact_registered_once": sum(
+            row.get("path") == v81_artifact.get("path")
+            and row.get("sha256") == v81_artifact.get("sha256")
+            for row in registered_artifacts
+        )
+        == 1,
+    }
+    blockers = [name for name, passed in checks.items() if not passed]
+    if blockers:
+        raise ValueError("repository artifact registry invalid: " + ", ".join(blockers))
+    _verify_descriptor(
+        v81_artifact,
+        "registered v8.1 artifact",
+        repository_root=repo_root,
+    )
+    return {
+        "registry_path": str(registry_path),
+        "registry_sha256": sha256_file(registry_path),
+        "legacy_v7_bundle_sha256": str(bundle["bundle_sha256"]),
+        "v8_1_artifact_sha256": str(v81_artifact["sha256"]),
+        "cwd_independent_resolution": True,
+    }
+
+
+def verify_legacy_v7_artifact_bundle(
+    protocol: Mapping[str, Any],
+    *,
+    repository_root: Path | str | None = None,
+) -> dict[str, Any]:
+    """Verify, load, and smoke-predict every member of the v7 artifact graph."""
+
+    _, _, _, report = _load_legacy_v7_artifact_bundle(
+        protocol,
+        repository_root=_repository_root(repository_root),
+    )
+    return report
+
+
+def _load_legacy_v7_artifact_bundle(
+    protocol: Mapping[str, Any],
+    *,
+    repository_root: Path,
+) -> tuple[dict[str, Any], xgb.Booster, xgb.Booster, dict[str, Any]]:
+    bundle_descriptor = dict(protocol.get("artifact_bundle") or {})
+    _verify_descriptor(
+        bundle_descriptor,
+        "legacy v7 bundle manifest",
+        repository_root=repository_root,
+    )
+    bundle_manifest_path = _resolve_pinned_path(
+        bundle_descriptor["path"],
+        repository_root=repository_root,
+    )
+    bundle_dir = bundle_manifest_path.parent
+    manifest = _load_json(bundle_manifest_path)
+    identity = dict(manifest.get("bundle_identity") or {})
+    bundle_sha256 = str(bundle_descriptor.get("bundle_sha256") or "").lower()
+    members = list(identity.get("artifacts") or [])
+    member_by_filename = {
+        str(member.get("filename") or ""): dict(member) for member in members
+    }
+    expected_members = {
+        "model.json": dict(protocol.get("model_artifact") or {}),
+        "settlement_model.json": dict(protocol.get("settlement_model") or {}),
+        "settlement_residual_model.json": dict(
+            protocol.get("settlement_residual_model") or {}
+        ),
+    }
+    checks = {
+        "schema": (
+            manifest.get("schema_version")
+            == "bigan-content-addressed-model-bundle-manifest-v1"
+        ),
+        "bundle_identity_schema": (
+            identity.get("schema_version")
+            == "bigan-content-addressed-model-bundle-v1"
+        ),
+        "bundle_hash": (
+            manifest.get("bundle_sha256") == bundle_sha256
+            and canonical_json_sha256(identity) == bundle_sha256
+            and bundle_dir.name == bundle_sha256
+        ),
+        "member_identity": set(member_by_filename) == set(expected_members)
+        and len(member_by_filename) == len(members),
+        "relative_resolution": (
+            manifest.get("path_resolution")
+            == "dependencies_resolve_relative_to_verified_bundle_directory"
+        ),
+        "development_only": manifest.get("development_only_forever") is True,
+        "not_promotion_evidence": manifest.get("promotion_evidence_eligible") is False,
+    }
+    blockers = [name for name, passed in checks.items() if not passed]
+    if blockers:
+        raise ValueError("legacy v7 artifact bundle invalid: " + ", ".join(blockers))
+
+    member_paths: dict[str, Path] = {}
+    for filename, descriptor in expected_members.items():
+        if Path(filename).name != filename:
+            raise ValueError("legacy v7 bundle member filename is not local")
+        member = member_by_filename[filename]
+        if member.get("sha256") != descriptor.get("sha256"):
+            raise ValueError(f"legacy v7 bundle member SHA mismatch: {filename}")
+        path = _resolve_pinned_path(
+            descriptor.get("path"),
+            repository_root=repository_root,
+        )
+        if path != bundle_dir / filename:
+            raise ValueError(f"legacy v7 bundle member path mismatch: {filename}")
+        _verify_descriptor(
+            descriptor,
+            f"legacy v7 bundle member {filename}",
+            repository_root=repository_root,
+        )
+        member_paths[filename] = path
+
+    artifact = _load_json(member_paths["model.json"])
+    if artifact.get("schema_version") != "xgboost_v7_settlement_ev_v1":
+        raise ValueError("legacy v7 artifact schema invalid")
+    if tuple(artifact.get("feature_columns") or ()) != V7_FEATURE_NAMES:
+        raise ValueError("legacy v7 feature identity invalid")
+    dependency_graph = dict(manifest.get("dependency_graph") or {}).get(
+        "model.json"
+    ) or {}
+    settlement_relative = str((artifact.get("settlement") or {}).get("path") or "")
+    residual_relative = str(
+        (artifact.get("settlement_residual") or {}).get("path") or ""
+    )
+    if (
+        settlement_relative != "settlement_model.json"
+        or residual_relative != "settlement_residual_model.json"
+        or dependency_graph.get("settlement.path") != settlement_relative
+        or dependency_graph.get("settlement_residual.path") != residual_relative
+    ):
+        raise ValueError("legacy v7 metadata dependency graph invalid")
+
+    settlement_booster = xgb.Booster()
+    settlement_booster.load_model(str(member_paths[settlement_relative]))
+    residual_booster = xgb.Booster()
+    residual_booster.load_model(str(member_paths[residual_relative]))
+    smoke_vector = np.zeros((1, len(V7_FEATURE_NAMES)), dtype=float)
+    smoke_matrix = xgb.DMatrix(
+        smoke_vector,
+        missing=np.nan,
+        feature_names=list(V7_FEATURE_NAMES),
+    )
+    settlement_prediction = np.asarray(
+        settlement_booster.predict(smoke_matrix),
+        dtype=float,
+    ).reshape(-1)
+    residual_prediction = np.asarray(
+        residual_booster.predict(smoke_matrix),
+        dtype=float,
+    ).reshape(-1)
+    if (
+        len(settlement_prediction) != 3
+        or len(residual_prediction) != 1
+        or not np.all(np.isfinite(settlement_prediction))
+        or not np.all(np.isfinite(residual_prediction))
+    ):
+        raise ValueError("legacy v7 bundle synthetic prediction invalid")
+    report = {
+        "bundle_manifest_path": str(bundle_manifest_path),
+        "bundle_manifest_sha256": sha256_file(bundle_manifest_path),
+        "bundle_sha256": bundle_sha256,
+        "metadata_sha256": sha256_file(member_paths["model.json"]),
+        "settlement_model_sha256": sha256_file(member_paths["settlement_model.json"]),
+        "settlement_residual_model_sha256": sha256_file(
+            member_paths["settlement_residual_model.json"]
+        ),
+        "settlement_prediction_shape": [1, 3],
+        "settlement_residual_prediction_shape": [1],
+        "synthetic_prediction_finite": True,
+        "cwd_independent_resolution": True,
+    }
+    return artifact, settlement_booster, residual_booster, report
 
 
 def validate_training_protocol(protocol: Mapping[str, Any]) -> None:
@@ -220,6 +465,9 @@ def validate_training_protocol(protocol: Mapping[str, Any]) -> None:
             "manual_or_implicit_override_allowed": False,
             "collector_cap_consistency": {
                 "maximum_capture_attempts_without_additional_permission": 119,
+                "readiness_count_unit": "quality_valid_outcome_finalized_markets",
+                "collection_capacity_unit": "single_market_capture_attempts",
+                "maximum_quality_valid_market_count_per_attempt": 1,
                 "minimum_required_must_not_exceed_collector_cap": True,
                 "additional_collection_authorization_created": False,
             },
@@ -274,6 +522,13 @@ def validate_training_collector_cap_consistency(
         "training_has_no_additional_authorization": (
             registered.get("additional_collection_authorization_created") is False
         ),
+        "unit_mapping": (
+            registered.get("readiness_count_unit")
+            == "quality_valid_outcome_finalized_markets"
+            and registered.get("collection_capacity_unit")
+            == "single_market_capture_attempts"
+            and registered.get("maximum_quality_valid_market_count_per_attempt") == 1
+        ),
     }
     blockers = [name for name, passed in checks.items() if not passed]
     if blockers:
@@ -281,6 +536,7 @@ def validate_training_collector_cap_consistency(
     return {
         "minimum_quality_valid_outcome_finalized_market_count": minimum,
         "maximum_capture_attempts_without_additional_permission": lane_cap,
+        "maximum_quality_valid_market_count_per_attempt": 1,
     }
 
 
@@ -545,11 +801,16 @@ def run_transfer_diagnostic_if_ready(
             "v8_1_sell_before_close_bridge": {
                 "lifecycle_policy": "SELL_BEFORE_CLOSE",
                 "transfer_status": "bridge_handicapped_not_native",
+                "bridge_handicapped_not_native": True,
                 "native_feature_coverage": v81_summary["native_feature_coverage"],
+                "native_action_score_coverage": v81_summary[
+                    "native_action_score_coverage"
+                ],
+                "bridge_limitations": v81_summary["bridge_limitations"],
                 "metrics": v81_summary,
-                "weak_signal_rule": weak_signal,
-                "full_retrain_conclusion_allowed": False,
+                "weak_evidence": weak_signal,
                 "promotion_claim_allowed": False,
+                "development_only": True,
             },
         },
         "cross_policy_comparison": {
@@ -838,15 +1099,12 @@ def _load_finalized_bundle(
 
 class _LegacyV7:
     def __init__(self, protocol: Mapping[str, Any]) -> None:
-        model_path = _resolve_pinned_path(protocol["model_artifact"]["path"])
-        artifact = _load_json(model_path)
-        if artifact.get("schema_version") != "xgboost_v7_settlement_ev_v1":
-            raise ValueError("legacy v7 artifact schema invalid")
-        if tuple(artifact.get("feature_columns") or ()) != V7_FEATURE_NAMES:
-            raise ValueError("legacy v7 feature identity invalid")
-        settlement_path = _resolve_pinned_path(protocol["settlement_model"]["path"])
-        self.booster = xgb.Booster()
-        self.booster.load_model(str(settlement_path))
+        artifact, self.booster, self.residual_booster, self.bundle_report = (
+            _load_legacy_v7_artifact_bundle(
+                protocol,
+                repository_root=REPO_ROOT,
+            )
+        )
         self.temperature = float(
             (artifact.get("calibration") or {})
             .get("family_temperatures", {})
@@ -1041,6 +1299,7 @@ def _run_v8_1_transfer(
     summary.update(
         {
             "transfer_status": "bridge_handicapped_not_native",
+            "bridge_handicapped_not_native": True,
             "native_feature_coverage": {
                 "native_feature_count": len(V8_1_NATIVE_FEATURE_NAMES),
                 "model_feature_count": len(V8_1_FEATURE_NAMES),
@@ -1049,11 +1308,12 @@ def _run_v8_1_transfer(
                 "forced_missing_feature_names": list(V8_1_FORCED_MISSING_FEATURE_NAMES),
                 "bridged_or_assumed_feature_names": list(V8_1_BRIDGED_FEATURE_NAMES),
             },
+            "native_action_score_coverage": 0.0,
+            "bridge_limitations": list(V8_1_BRIDGE_LIMITATIONS),
             "source_action_score_native_coverage": 0.0,
             "source_action_score_missing_was_explicit": True,
             "source_action_score_forced_missing_as_xgboost_nan": True,
             "controller_seed_score_count": int(state.get("eligible_prediction_score_count") or 0),
-            "full_retrain_conclusion_allowed": False,
             "promotion_claim_allowed": False,
         }
     )
@@ -1318,6 +1578,7 @@ def _policy_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "market_count": len(rows),
         "accepted_market_count": len(accepted),
+        "accepted_count": len(accepted),
         "acceptance_rate": len(accepted) / len(rows) if rows else 0.0,
         "accepted_up_count": sum(row.get("side") == "UP" for row in accepted),
         "accepted_down_count": sum(row.get("side") == "DOWN" for row in accepted),
@@ -1333,6 +1594,7 @@ def _policy_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "total_cost": total_cost,
         "total_unit_net_pnl": sum(float(row["unit_net_pnl"]) for row in rows),
         "mean_unit_net_pnl_per_accepted_market": _mean(accepted_unit_net_pnl),
+        "unit_net_pnl_mean": _mean(accepted_unit_net_pnl),
         "mean_unit_net_pnl_bootstrap_lcb": _bootstrap_mean_lcb(
             accepted_unit_net_pnl,
             resamples=10000,
@@ -1345,6 +1607,12 @@ def _policy_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "seed": 0,
             "one_sided_confidence": 0.95,
         },
+        "unit_net_pnl_bootstrap_interval": _bootstrap_mean_interval(
+            accepted_unit_net_pnl,
+            resamples=10000,
+            seed=0,
+            confidence=0.95,
+        ),
         "aggregate_cost_signal_ratio": (total_cost / total_signal if total_signal else None),
         "true_paired_executable_ask_coverage": 1.0,
         "complement_quote_proxy_used": False,
@@ -1361,20 +1629,27 @@ def _weak_signal_assessment(
     lcb = _finite_or_none(summary.get("mean_unit_net_pnl_bootstrap_lcb"))
     met = accepted >= minimum and lcb is not None and lcb > 0.0
     return {
-        "rule": dict(rule),
+        "predeclared_rule": {
+            "minimum_accepted_market_count": minimum,
+            "metric": rule["metric"],
+            "bootstrap_resamples": int(rule["bootstrap_resamples"]),
+            "bootstrap_seed": int(rule["bootstrap_seed"]),
+            "one_sided_confidence": float(rule["one_sided_confidence"]),
+            "pass_condition": rule["pass_condition"],
+        },
         "accepted_market_count": accepted,
         "mean_unit_net_pnl_per_accepted_market": summary[
             "mean_unit_net_pnl_per_accepted_market"
         ],
         "mean_unit_net_pnl_bootstrap_lcb": lcb,
         "weak_signal_rule_met": met,
-        "interpretation": (
-            "weak_report_only_signal"
+        "weak_evidence_status": (
+            "weak_development_signal_observed"
             if met
-            else "weak_rule_not_met_no_full_retrain_inference"
+            else "weak_development_rule_not_met"
         ),
         "promotion_claim_made": False,
-        "full_retrain_conclusion_made": False,
+        "development_only": True,
     }
 
 
@@ -1394,6 +1669,41 @@ def _bootstrap_mean_lcb(
         axis=1,
     )
     return float(np.quantile(means, 1.0 - one_sided_confidence))
+
+
+def _bootstrap_mean_interval(
+    values: Sequence[float],
+    *,
+    resamples: int,
+    seed: int,
+    confidence: float,
+) -> dict[str, Any]:
+    if not values:
+        return {
+            "method": "market_bootstrap_percentile",
+            "population": "accepted_markets",
+            "resamples": resamples,
+            "seed": seed,
+            "confidence": confidence,
+            "lower": None,
+            "upper": None,
+        }
+    sample = np.asarray(values, dtype=float)
+    rng = np.random.default_rng(seed)
+    means = np.mean(
+        rng.choice(sample, size=(resamples, len(sample)), replace=True),
+        axis=1,
+    )
+    alpha = 1.0 - confidence
+    return {
+        "method": "market_bootstrap_percentile",
+        "population": "accepted_markets",
+        "resamples": resamples,
+        "seed": seed,
+        "confidence": confidence,
+        "lower": float(np.quantile(means, alpha / 2.0)),
+        "upper": float(np.quantile(means, 1.0 - alpha / 2.0)),
+    }
 
 
 def _controller_quantile(history: Sequence[bool]) -> tuple[float, str]:
@@ -1486,29 +1796,57 @@ def _nan_if_missing(value: Any) -> float:
     return float("nan") if result is None else result
 
 
-def _verify_descriptor(descriptor: Mapping[str, Any], label: str) -> None:
-    path = _resolve_pinned_path(descriptor.get("path"))
+def _verify_descriptor(
+    descriptor: Mapping[str, Any],
+    label: str,
+    *,
+    repository_root: Path | str | None = None,
+) -> None:
+    path = _resolve_pinned_path(
+        descriptor.get("path"),
+        repository_root=repository_root,
+    )
     expected = str(descriptor.get("sha256") or "").lower()
     if not path.is_file() or sha256_file(path) != expected:
         raise ValueError(f"{label} bytes do not match pinned SHA-256")
 
 
-def _resolve_pinned_path(raw_path: Any) -> Path:
+def _repository_root(raw_root: Path | str | None) -> Path:
+    return REPO_ROOT if raw_root is None else Path(raw_root).resolve()
+
+
+def _resolve_pinned_path(
+    raw_path: Any,
+    *,
+    repository_root: Path | str | None = None,
+) -> Path:
+    repo_root = _repository_root(repository_root)
     path = Path(str(raw_path or ""))
     if path.is_absolute():
         return path.resolve()
-    resolved = (REPO_ROOT / path).resolve()
-    if not resolved.is_relative_to(REPO_ROOT):
+    resolved = (repo_root / path).resolve()
+    if not resolved.is_relative_to(repo_root):
         raise ValueError("repo-relative pinned path escapes repository root")
     return resolved
 
 
+def _is_repo_local_descriptor(descriptor: Mapping[str, Any]) -> bool:
+    raw_path = Path(str(descriptor.get("path") or ""))
+    expected = str(descriptor.get("sha256") or "").lower()
+    return (
+        not raw_path.is_absolute()
+        and len(expected) == 64
+        and all(character in "0123456789abcdef" for character in expected)
+        and _resolve_pinned_path(raw_path).is_relative_to(REPO_ROOT)
+    )
+
+
 def _is_repo_content_addressed_descriptor(descriptor: Mapping[str, Any]) -> bool:
+    if not _is_repo_local_descriptor(descriptor):
+        return False
     raw_path = Path(str(descriptor.get("path") or ""))
     expected = str(descriptor.get("sha256") or "").lower()
     parts = raw_path.parts
-    if raw_path.is_absolute() or len(expected) != 64:
-        return False
     try:
         sha_index = parts.index("sha256")
     except ValueError:
@@ -1517,6 +1855,30 @@ def _is_repo_content_addressed_descriptor(descriptor: Mapping[str, Any]) -> bool
         sha_index + 1 < len(parts)
         and parts[sha_index + 1] == expected
         and _resolve_pinned_path(raw_path).is_relative_to(REPO_ROOT)
+    )
+
+
+def _is_repo_content_addressed_bundle_descriptor(
+    descriptor: Mapping[str, Any],
+) -> bool:
+    if not _is_repo_local_descriptor(descriptor):
+        return False
+    raw_path = Path(str(descriptor.get("path") or ""))
+    bundle_sha256 = str(descriptor.get("bundle_sha256") or "").lower()
+    parts = raw_path.parts
+    if (
+        len(bundle_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in bundle_sha256)
+    ):
+        return False
+    try:
+        sha_index = parts.index("sha256")
+    except ValueError:
+        return False
+    return (
+        sha_index + 1 < len(parts)
+        and parts[sha_index + 1] == bundle_sha256
+        and raw_path.name == "bundle_manifest.json"
     )
 
 
@@ -1620,7 +1982,7 @@ def _transfer_markdown(report: Mapping[str, Any]) -> str:
     v81_panel = panels["v8_1_sell_before_close_bridge"]
     v81 = v81_panel["metrics"]
     coverage = v81_panel["native_feature_coverage"]
-    weak = v81_panel["weak_signal_rule"]
+    weak = v81_panel["weak_evidence"]
     v7_ratio = v7["aggregate_cost_signal_ratio"]
     v81_ratio = v81["aggregate_cost_signal_ratio"]
     lines = [
@@ -1661,8 +2023,8 @@ def _transfer_markdown(report: Mapping[str, Any]) -> str:
             + "`"
         ),
         f"- predeclared weak rule met: `{str(weak['weak_signal_rule_met']).lower()}`",
-        f"- interpretation: `{weak['interpretation']}`",
-        "- full-retrain conclusion made: `false`",
+        f"- weak evidence status: `{weak['weak_evidence_status']}`",
+        "- bridge limitations: `" + json.dumps(v81_panel["bridge_limitations"]) + "`",
         "- promotion claim made: `false`",
         "",
         "## Cross-policy boundary",

@@ -1,0 +1,117 @@
+{
+  "schema_version": "bigan-challenge-model-15m-transfer-governance-hardening-report-v1",
+  "reviewed_commit": "9bfca2f77555eef4980e9fb0f9fb300c3a6bc73e",
+  "review_date": "2026-07-28",
+  "scope": "governance_hardening_only",
+  "status": "internally_consistent",
+  "lane_freeze_snapshot": {
+    "collector_stopped": true,
+    "outcome_finalizer_stopped": true,
+    "governance_monitor_stopped": true,
+    "attempted_market_count": 32,
+    "quality_valid_outcome_finalized_market_count": 31,
+    "transfer_required_market_count": 40,
+    "transfer_evidence_generated_or_consumed": false,
+    "new_real_outcomes_collected_by_this_review": 0,
+    "training_started": false
+  },
+  "artifact_portability": {
+    "strategy": "option_a_content_addressed_bundle",
+    "registry": {
+      "path": "examples/v8/polymarket_artifacts/manifest.json",
+      "sha256": "983ebd74c1cb96896e614436b9c926f1d6da77804a72181ab7e78fe71bedba00"
+    },
+    "legacy_v7_bundle": {
+      "path": "examples/v8/polymarket_artifacts/sha256/8b7fc96af7f23c1e658cb816fc7d58028c71a9d530d2193bad9b2088547ffbcc/bundle_manifest.json",
+      "bundle_sha256": "8b7fc96af7f23c1e658cb816fc7d58028c71a9d530d2193bad9b2088547ffbcc",
+      "manifest_sha256": "d558238fae53e4fdf89cab034266c93c53350e528dd7727ff5f0da380f508aca",
+      "cwd_independent_resolution": true,
+      "dependency_graph": {
+        "model.json": {
+          "sha256": "9e171d5eb848b7a78faa2ce9b32b0359832e146a3cc67074aa6f3233e7bf4e99",
+          "settlement.path": "settlement_model.json",
+          "settlement_residual.path": "settlement_residual_model.json"
+        },
+        "settlement_model.json": {
+          "sha256": "e01dffd1bf35cf6dbe6e994bdefca3db7c1da7146cf98f75ff6d4907c636b1f5"
+        },
+        "settlement_residual_model.json": {
+          "sha256": "c75cf7ce5f33a72192a0cb33686dd81206ca2470d8c061c2a70223af5ab8922b"
+        }
+      },
+      "fresh_clone_registry_resolution_passed": true,
+      "metadata_load_passed": true,
+      "settlement_model_load_passed": true,
+      "settlement_residual_model_load_passed": true,
+      "synthetic_settlement_prediction_shape": [
+        1,
+        3
+      ],
+      "synthetic_residual_prediction_shape": [
+        1
+      ],
+      "synthetic_predictions_finite": true,
+      "sha_mismatch_fails_closed": true
+    }
+  },
+  "readiness_consistency": {
+    "comparison_unit": "markets_to_single_market_capture_attempts",
+    "minimum_quality_valid_outcome_finalized_market_count": 100,
+    "maximum_authorized_collection_attempts": 119,
+    "maximum_quality_valid_market_count_per_attempt": 1,
+    "mathematically_reachable": true,
+    "authorization_extension_required": false,
+    "attempt_120_authorized": false
+  },
+  "v8_1_bridge_governance": {
+    "bridge_handicapped_not_native": true,
+    "native_action_score_coverage": 0.0,
+    "native_feature_coverage_reported": true,
+    "bridge_limitations_reported": true,
+    "weak_evidence_only": true,
+    "strong_transfer_conclusion_emitted": false,
+    "development_only": true,
+    "promotion_evidence_eligible": false
+  },
+  "time_normalized_feature_audit": [
+    {
+      "feature": "late_window_pressure",
+      "denominator": "feature_row.horizon_ms",
+      "btc_15m_horizon_seconds": 900,
+      "hardcoded_300_seconds_used": false,
+      "status": "passed"
+    }
+  ],
+  "policy_panel_governance": {
+    "legacy_panel": "HOLD_TO_SETTLEMENT",
+    "bridge_panel": "SELL_BEFORE_CLOSE",
+    "panels_separate": true,
+    "cross_policy_superiority_claim_emitted": false,
+    "aggregate_comparison_scope": "diagnostic_only"
+  },
+  "validation": {
+    "targeted_pytest": "8 passed",
+    "governance_test_suite": "13 passed",
+    "ruff": "passed",
+    "git_diff_check": "passed",
+    "git_diff_cached_check": "passed",
+    "protocol_sha256_checks": "passed"
+  },
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false,
+    "capital_at_risk": false
+  },
+  "known_limitations": [
+    "The v8.1 bridge has zero native action-score coverage.",
+    "The bridge reconstructs BTC anchor direction and uses causal side mid-price for value conditioning.",
+    "Pre-entry exposure state is unavailable and remains a frozen neutral bridge assumption.",
+    "Weak evidence uses accepted-market bootstrap summaries and cannot support promotion or a strong retraining conclusion.",
+    "No real 15m transfer diagnostic has run because the lane is paused at 31 of 40 eligible finalized markets."
+  ],
+  "conclusion": "BTC 15m transfer governance protocol is internally consistent."
+}

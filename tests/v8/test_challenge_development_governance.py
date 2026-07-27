@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import shutil
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,8 @@ from bigan.v8.polymarket.challenge_development_governance import (
     validate_training_collector_cap_consistency,
     validate_training_protocol,
     validate_transfer_protocol,
+    verify_legacy_v7_artifact_bundle,
+    verify_repository_artifact_registry,
 )
 from bigan.v8.polymarket.challenge_development_lane import SAFETY, sha256_file
 
@@ -33,22 +36,89 @@ def test_frozen_protocols_preserve_development_only_gates() -> None:
     validate_transfer_protocol(transfer, verify_artifact_bytes=True)
     validate_training_protocol(training)
     consistency = validate_training_collector_cap_consistency(training, lane)
+    registry = verify_repository_artifact_registry(transfer)
+    bundle = verify_legacy_v7_artifact_bundle(transfer["legacy_v7_selected"])
     assert transfer["promotion_evidence_eligible"] is False
     assert training["readiness_gate"]["minimum_quality_valid_outcome_finalized_market_count"] == 100
     assert consistency == {
         "minimum_quality_valid_outcome_finalized_market_count": 100,
         "maximum_capture_attempts_without_additional_permission": 119,
+        "maximum_quality_valid_market_count_per_attempt": 1,
     }
     assert training["representation"]["missing_encoded_as_numeric_zero_allowed"] is False
     assert training["safety"] == SAFETY
+    assert registry["cwd_independent_resolution"] is True
+    assert bundle["synthetic_prediction_finite"] is True
+    assert bundle["settlement_prediction_shape"] == [1, 3]
+    assert bundle["settlement_residual_prediction_shape"] == [1]
+    bundle_descriptor = transfer["legacy_v7_selected"]["artifact_bundle"]
+    bundle_parent = Path(bundle_descriptor["path"]).parent
+    assert bundle_parent.name == bundle_descriptor["bundle_sha256"]
     for descriptor in (
         transfer["legacy_v7_selected"]["model_artifact"],
         transfer["legacy_v7_selected"]["settlement_model"],
         transfer["legacy_v7_selected"]["settlement_residual_model"],
-        transfer["v8_1_unit_controller"]["model_artifact"],
     ):
         assert not Path(descriptor["path"]).is_absolute()
-        assert f"sha256/{descriptor['sha256']}/" in descriptor["path"]
+        assert Path(descriptor["path"]).parent == bundle_parent
+    v81_descriptor = transfer["v8_1_unit_controller"]["model_artifact"]
+    assert not Path(v81_descriptor["path"]).is_absolute()
+    assert f"sha256/{v81_descriptor['sha256']}/" in v81_descriptor["path"]
+
+
+def test_repository_artifact_bundle_is_portable_from_fresh_clone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clone_root = tmp_path / "fresh-clone"
+    destination = clone_root / "examples" / "v8" / "polymarket_artifacts"
+    shutil.copytree(ROOT / "examples" / "v8" / "polymarket_artifacts", destination)
+    outside_cwd = tmp_path / "unrelated-cwd"
+    outside_cwd.mkdir()
+    monkeypatch.chdir(outside_cwd)
+
+    transfer = json.loads(TRANSFER.read_text(encoding="utf-8"))
+    validate_transfer_protocol(
+        transfer,
+        verify_artifact_bytes=True,
+        repository_root=clone_root,
+    )
+    registry = verify_repository_artifact_registry(
+        transfer,
+        repository_root=clone_root,
+    )
+    bundle = verify_legacy_v7_artifact_bundle(
+        transfer["legacy_v7_selected"],
+        repository_root=clone_root,
+    )
+    assert Path(registry["registry_path"]).is_relative_to(clone_root)
+    assert Path(bundle["bundle_manifest_path"]).is_relative_to(clone_root)
+    assert bundle["metadata_sha256"] == transfer["legacy_v7_selected"][
+        "model_artifact"
+    ]["sha256"]
+    assert bundle["settlement_model_sha256"] == transfer["legacy_v7_selected"][
+        "settlement_model"
+    ]["sha256"]
+    assert bundle["settlement_residual_model_sha256"] == transfer[
+        "legacy_v7_selected"
+    ]["settlement_residual_model"]["sha256"]
+    assert bundle["synthetic_prediction_finite"] is True
+
+
+def test_repository_artifact_sha_mismatch_fails_closed(tmp_path: Path) -> None:
+    clone_root = tmp_path / "fresh-clone"
+    destination = clone_root / "examples" / "v8" / "polymarket_artifacts"
+    shutil.copytree(ROOT / "examples" / "v8" / "polymarket_artifacts", destination)
+    transfer = json.loads(TRANSFER.read_text(encoding="utf-8"))
+    residual_path = clone_root / transfer["legacy_v7_selected"][
+        "settlement_residual_model"
+    ]["path"]
+    residual_path.write_bytes(residual_path.read_bytes() + b"\n")
+    with pytest.raises(ValueError, match="bytes do not match pinned SHA-256"):
+        verify_legacy_v7_artifact_bundle(
+            transfer["legacy_v7_selected"],
+            repository_root=clone_root,
+        )
 
 
 def test_readiness_policy_rejects_unreachable_minimum_and_complement_proxy() -> None:
@@ -67,12 +137,28 @@ def test_readiness_policy_rejects_unreachable_minimum_and_complement_proxy() -> 
 
 
 def test_v8_1_bridge_is_handicapped_and_uses_900_second_horizon() -> None:
+    transfer = json.loads(TRANSFER.read_text(encoding="utf-8"))
+    v81 = transfer["v8_1_unit_controller"]
+    assert v81["bridge_handicapped_not_native"] is True
+    assert v81["native_action_score_coverage"] == 0.0
+    assert v81["time_normalized_feature_audit"] == [
+        {
+            "feature": "late_window_pressure",
+            "denominator_source": "feature_row.horizon_ms",
+            "required_market_horizon_seconds": 900,
+            "hardcoded_300_seconds_allowed": False,
+        }
+    ]
     row = _transfer_feature_row("market-bridge", 900_000, time_to_close_seconds=450.0)
     bridge = _v8_1_feature_bridge(row, side="UP")
     assert bridge["action_score_available"] == 0.0
     assert math.isnan(bridge["action_score"])
     assert math.isnan(bridge["action_score_margin"])
     assert bridge["late_window_pressure"] == pytest.approx(0.5)
+    row["features"]["time_to_close_seconds"] = 900.0
+    assert _v8_1_feature_bridge(row, side="UP")["late_window_pressure"] == 0.0
+    row["features"]["time_to_close_seconds"] = 0.0
+    assert _v8_1_feature_bridge(row, side="UP")["late_window_pressure"] == 1.0
 
     row["horizon_ms"] = 300_000
     with pytest.raises(ValueError, match="900-second"):
@@ -218,6 +304,9 @@ def test_synthetic_40_market_transfer_keeps_lifecycles_and_bridge_limits_separat
     assert v7["lifecycle_policy"] == "HOLD_TO_SETTLEMENT"
     assert v81["lifecycle_policy"] == "SELL_BEFORE_CLOSE"
     assert v81["transfer_status"] == "bridge_handicapped_not_native"
+    assert v81["bridge_handicapped_not_native"] is True
+    assert v81["native_action_score_coverage"] == 0.0
+    assert v81["bridge_limitations"]
     coverage = v81["native_feature_coverage"]
     assert 0.0 < coverage["coverage"] < 1.0
     assert coverage["native_feature_count"] + len(
@@ -226,10 +315,19 @@ def test_synthetic_40_market_transfer_keeps_lifecycles_and_bridge_limits_separat
         "model_feature_count"
     ]
     assert v81["metrics"]["source_action_score_forced_missing_as_xgboost_nan"] is True
-    assert v81["weak_signal_rule"]["full_retrain_conclusion_made"] is False
-    assert v81["weak_signal_rule"]["promotion_claim_made"] is False
+    assert v81["metrics"]["accepted_count"] == v81["metrics"]["accepted_market_count"]
+    assert "unit_net_pnl_mean" in v81["metrics"]
+    assert "unit_net_pnl_bootstrap_interval" in v81["metrics"]
+    assert "weak_evidence_status" in v81["weak_evidence"]
+    assert v81["weak_evidence"]["promotion_claim_made"] is False
+    serialized_bridge_panel = json.dumps(v81, sort_keys=True).lower()
+    assert "full_retrain" not in serialized_bridge_panel
+    assert '"winner"' not in serialized_bridge_panel
     assert report["cross_policy_comparison"]["superiority_claim_made"] is False
+    assert report["cross_policy_comparison"]["superiority_claim_allowed"] is False
     assert "judgements" not in report
+    assert "legacy_v7_selected" not in report
+    assert "v8_1_unit_controller" not in report
 
     output = lane / "transfer_diagnostic"
     for path in (

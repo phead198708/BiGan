@@ -5,6 +5,10 @@
   "role": "outcome-aware-development-diagnostic-only",
   "development_only_forever": true,
   "promotion_evidence_eligible": false,
+  "artifact_registry": {
+    "path": "examples/v8/polymarket_artifacts/manifest.json",
+    "sha256": "983ebd74c1cb96896e614436b9c926f1d6da77804a72181ab7e78fe71bedba00"
+  },
   "trigger": {
     "minimum_quality_valid_outcome_finalized_market_count": 40,
     "run_count": 1,
@@ -19,16 +23,21 @@
     "missing_trade_tape_must_not_be_encoded_as_zero": true
   },
   "legacy_v7_selected": {
+    "artifact_bundle": {
+      "path": "examples/v8/polymarket_artifacts/sha256/8b7fc96af7f23c1e658cb816fc7d58028c71a9d530d2193bad9b2088547ffbcc/bundle_manifest.json",
+      "sha256": "d558238fae53e4fdf89cab034266c93c53350e528dd7727ff5f0da380f508aca",
+      "bundle_sha256": "8b7fc96af7f23c1e658cb816fc7d58028c71a9d530d2193bad9b2088547ffbcc"
+    },
     "model_artifact": {
-      "path": "examples/v8/polymarket_artifacts/sha256/9e171d5eb848b7a78faa2ce9b32b0359832e146a3cc67074aa6f3233e7bf4e99/model.json",
+      "path": "examples/v8/polymarket_artifacts/sha256/8b7fc96af7f23c1e658cb816fc7d58028c71a9d530d2193bad9b2088547ffbcc/model.json",
       "sha256": "9e171d5eb848b7a78faa2ce9b32b0359832e146a3cc67074aa6f3233e7bf4e99"
     },
     "settlement_model": {
-      "path": "examples/v8/polymarket_artifacts/sha256/e01dffd1bf35cf6dbe6e994bdefca3db7c1da7146cf98f75ff6d4907c636b1f5/settlement_model.json",
+      "path": "examples/v8/polymarket_artifacts/sha256/8b7fc96af7f23c1e658cb816fc7d58028c71a9d530d2193bad9b2088547ffbcc/settlement_model.json",
       "sha256": "e01dffd1bf35cf6dbe6e994bdefca3db7c1da7146cf98f75ff6d4907c636b1f5"
     },
     "settlement_residual_model": {
-      "path": "examples/v8/polymarket_artifacts/sha256/c75cf7ce5f33a72192a0cb33686dd81206ca2470d8c061c2a70223af5ab8922b/settlement_residual_model.json",
+      "path": "examples/v8/polymarket_artifacts/sha256/8b7fc96af7f23c1e658cb816fc7d58028c71a9d530d2193bad9b2088547ffbcc/settlement_residual_model.json",
       "sha256": "c75cf7ce5f33a72192a0cb33686dd81206ca2470d8c061c2a70223af5ab8922b"
     },
     "historical_evaluator_commit": "12d18d714bbe236dc2111032b76d822d11b081e0",
@@ -59,10 +68,27 @@
     "source_action_score_available": false,
     "source_action_score_missing_representation": "xgboost_missing_nan_with_availability_flag_false",
     "transfer_status": "bridge_handicapped_not_native",
+    "bridge_handicapped_not_native": true,
     "native_feature_coverage_must_be_reported": true,
+    "native_action_score_coverage": 0.0,
     "selected_side_probability_bridge": "causal_side_mid_price_for_value_conditioning_only",
     "late_window_pressure_denominator": "market_horizon_seconds",
     "expected_market_horizon_seconds": 900,
+    "time_normalized_feature_audit": [
+      {
+        "feature": "late_window_pressure",
+        "denominator_source": "feature_row.horizon_ms",
+        "required_market_horizon_seconds": 900,
+        "hardcoded_300_seconds_allowed": false
+      }
+    ],
+    "bridge_limitations": [
+      "native_action_score_and_margin_are_unavailable_and_forced_missing",
+      "btc_anchor_direction_is_reconstructed_from_available_causal_15m_inputs",
+      "selected_side_probability_uses_causal_side_mid_for_value_conditioning",
+      "pre_entry_exposure_state_is_unavailable_and_uses_frozen_neutral_state",
+      "bridge_evidence_is_weak_development_evidence_only"
+    ],
     "side_selection": "higher_predicted_after_cost_return",
     "controller_state_updates": "strictly_prior_scores_and_guard_acceptance_only",
     "threshold_or_feature_search_allowed": false
@@ -97,7 +123,7 @@
       "one_sided_confidence": 0.95,
       "pass_condition": "accepted_market_count_gte_5_and_bootstrap_lcb_gt_0",
       "promotion_claim_allowed": false,
-      "full_retrain_conclusion_allowed": false
+      "strong_transfer_conclusion_allowed": false
     },
     "cross_policy_superiority_claim_allowed": false,
     "hold_to_settlement_and_sell_before_close_must_use_separate_panels": true,

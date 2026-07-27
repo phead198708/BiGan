@@ -14,6 +14,9 @@
     "manual_or_implicit_override_allowed": false,
     "collector_cap_consistency": {
       "maximum_capture_attempts_without_additional_permission": 119,
+      "readiness_count_unit": "quality_valid_outcome_finalized_markets",
+      "collection_capacity_unit": "single_market_capture_attempts",
+      "maximum_quality_valid_market_count_per_attempt": 1,
       "minimum_required_must_not_exceed_collector_cap": true,
       "additional_collection_authorization_created": false
     }
