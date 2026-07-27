@@ -1,0 +1,50 @@
+{
+  "candidate_id": "v8_1_fixed_edge_support_recovery_0_025",
+  "development_contract": {
+    "baseline_declared_position_size": 0.2,
+    "candidate_declared_position_size": 0.2,
+    "comparison_scope": "all_195_markets_in_frozen_chronological_order",
+    "cost_model_changed": false,
+    "declared_sizing_role": "report_only",
+    "historical_development_only": true,
+    "no_trade_after_cost_pnl": 0.0,
+    "position_lifecycle_changed": false,
+    "promotion_evidence_eligible": false,
+    "statistical_gate_position_size": 1.0
+  },
+  "lineage": {
+    "base_v8_1_guard_replay_sha256": "7534b07c41d1a1f2afe3519e7eef9146c9b84bdda72f88a22b9d0351baa9ce2d",
+    "base_v8_1_market_comparison_sha256": "fce95987a10b160d7a7e6cdfd3842cc3e3b34dd138eb27093fb9f86b0a790eae",
+    "exact_195_market_ids_sha256": "fef9eda7b8dac138b88c75f96b010bd40953795b2bcf7424debf77a004e06883",
+    "iteration_003_entry_semantic_sha256": "abe1eb3b6e03530c15cb51326801e783454a0be4d5885edd7dcca8dab22779ae",
+    "preregistration_commit": "f9ccb562596d72c2f466b503a588aa682ad43fc6",
+    "preregistration_sha256": "315865ab003f03c7abe98fb8126758dadcdb44e400a42f71ec419de3cc2cec12",
+    "scale_invariance_governance_sha256": "e8898ef5aa1c4b796109c0d03920d794842472bdfb271f9db7221a100bc8590f",
+    "success_standard_v2_sha256": "01b6d0c80cd9f54cf78523e556788788dd3ac6324dc1865d385f6f4cf2dcb9bb"
+  },
+  "policy": {
+    "adaptive_rolling_quantile_gate_used_for_final_selection": false,
+    "base_candidate_id": "adaptive_support_controller_v8_1",
+    "base_controller_state_transition_changed": false,
+    "fixed_edge_threshold_inclusive": 0.025,
+    "fixed_edge_threshold_source": "existing_v8_1_fixed_edge_buffer",
+    "full_guard_compatible_source_action_required": true,
+    "missing_nonfinite_or_below_threshold_behavior": "fail_closed_to_no_trade",
+    "recovery_source_action_mutated": false,
+    "score_field": "point_selected_predicted_return",
+    "threshold_grid_search_performed": false,
+    "veto_action": "NO_TRADE",
+    "veto_side": "NONE"
+  },
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-v8-1-fixed-edge-support-recovery-profile-v1"
+}
