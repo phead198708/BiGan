@@ -1,0 +1,51 @@
+{
+  "candidate_id": "v8_1_fixed_edge_0_025_price_floor_0_30",
+  "development_contract": {
+    "baseline_declared_position_size": 0.2,
+    "candidate_declared_position_size": 0.2,
+    "comparison_scope": "all_195_markets_in_frozen_chronological_order",
+    "cost_model_changed": false,
+    "declared_sizing_role": "report_only",
+    "historical_development_only": true,
+    "no_trade_after_cost_pnl": 0.0,
+    "position_lifecycle_changed": false,
+    "promotion_evidence_eligible": false,
+    "statistical_gate_position_size": 1.0
+  },
+  "lineage": {
+    "base_v8_1_guard_replay_sha256": "7534b07c41d1a1f2afe3519e7eef9146c9b84bdda72f88a22b9d0351baa9ce2d",
+    "base_v8_1_market_comparison_sha256": "fce95987a10b160d7a7e6cdfd3842cc3e3b34dd138eb27093fb9f86b0a790eae",
+    "exact_195_five_action_rows_sha256": "134425d9f38ffdebbf72043a8b802e95bbb87eebbe7e8d39bfa5d6f8b98828f7",
+    "exact_195_market_ids_sha256": "fef9eda7b8dac138b88c75f96b010bd40953795b2bcf7424debf77a004e06883",
+    "iteration_004_entry_semantic_sha256": "3c1ce6fcddf650ff9bd30bd46c3761b5df7fe785c88b06fa0b07ec9084a265b1",
+    "preregistration_commit": "986e96f6cc3d1d4c418231c6ffd99581696ee21f",
+    "preregistration_sha256": "5e5d37dbc4fe8bf7fd3badec5d4ba458152faaa4c755169fa7de5cbb427d5f6c",
+    "slot_004_profile_sha256": "aaf1b22f6c2b372ca48122ae672fe45b019998048934e611219f088d26746ab2",
+    "success_standard_v2_sha256": "01b6d0c80cd9f54cf78523e556788788dd3ac6324dc1865d385f6f4cf2dcb9bb"
+  },
+  "policy": {
+    "base_candidate_id": "v8_1_fixed_edge_support_recovery_0_025",
+    "base_controller_state_transition_changed": false,
+    "entry_price_floor_inclusive": 0.3,
+    "entry_price_floor_source": "existing_v7_paper_runtime_min_entry_price",
+    "entry_price_source": "matched_outcome_blind_five_action_row.decision_time_features.execution_price",
+    "filter_application_order": "after_fixed_edge_0_025_and_full_guard_before_final_trade",
+    "fixed_edge_threshold_inclusive": 0.025,
+    "missing_nonfinite_or_below_either_threshold_behavior": "fail_closed_to_no_trade",
+    "source_action_mutated": false,
+    "threshold_grid_search_performed": false,
+    "veto_action": "NO_TRADE",
+    "veto_side": "NONE"
+  },
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-v8-1-fixed-edge-price-floor-profile-v1"
+}
