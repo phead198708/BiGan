@@ -1,0 +1,98 @@
+{
+  "schema_version": "bigan-challenge-model-15m-transfer-diagnostic-protocol-v1",
+  "diagnostic_id": "challenge-model-15m-transfer-diagnostic-v1",
+  "lane_id": "challenge-model-development-btc-updown-15m-v1",
+  "role": "outcome-aware-development-diagnostic-only",
+  "development_only_forever": true,
+  "promotion_evidence_eligible": false,
+  "trigger": {
+    "minimum_quality_valid_outcome_finalized_market_count": 40,
+    "run_count": 1,
+    "market_selection": "chronological_earliest_40_quality_valid_outcome_finalized_markets",
+    "same_market_set_required_for_both_policies": true
+  },
+  "quality_contract": {
+    "expected_decision_rows_per_market": 2,
+    "paired_up_down_executable_ask_required_at_every_decision": true,
+    "book_and_chainlink_causality_required": true,
+    "trade_tape_causal_completeness_is_reported_not_imputed_and_not_a_quality_exclusion": true,
+    "missing_trade_tape_must_not_be_encoded_as_zero": true
+  },
+  "legacy_v7_selected": {
+    "model_artifact": {
+      "path": "/Users/tcscoder/Workspaces/BiGan.pre-reclone-20260726/data/model-runs/xgboost-v7/20260606T132859Z-stable-gate/model.json",
+      "sha256": "9e171d5eb848b7a78faa2ce9b32b0359832e146a3cc67074aa6f3233e7bf4e99"
+    },
+    "settlement_model": {
+      "path": "/Users/tcscoder/Workspaces/BiGan.pre-reclone-20260726/data/model-runs/xgboost-v7/20260606T132859Z-stable-gate/settlement_model.json",
+      "sha256": "e01dffd1bf35cf6dbe6e994bdefca3db7c1da7146cf98f75ff6d4907c636b1f5"
+    },
+    "settlement_residual_model": {
+      "path": "/Users/tcscoder/Workspaces/BiGan.pre-reclone-20260726/data/model-runs/xgboost-v7/20260606T132859Z-stable-gate/settlement_residual_model.json",
+      "sha256": "c75cf7ce5f33a72192a0cb33686dd81206ca2470d8c061c2a70223af5ab8922b"
+    },
+    "historical_evaluator_commit": "12d18d714bbe236dc2111032b76d822d11b081e0",
+    "policy_name": "v7_selected_by_pnl_stability",
+    "signal_source": "probability",
+    "minimum_confidence": 0.75,
+    "minimum_expected_edge": 0.04,
+    "selection_cost_assumption": {
+      "buy_slippage_per_contract": 0.02,
+      "fee_bps": 0.0
+    },
+    "one_trade_maximum_per_market": true,
+    "decision_rule": "chronological_first_decision_with_any_passing_side_then_highest_expected_edge",
+    "true_paired_executable_asks_required": true,
+    "complement_quote_proxy_allowed": false,
+    "unavailable_legacy_features": "xgboost_missing_value_not_zero",
+    "threshold_or_feature_search_allowed": false
+  },
+  "v8_1_unit_controller": {
+    "model_artifact": {
+      "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/v8-1-adaptive-support-controller-historical-20260723T134500Z/v8_1_adaptive_support_controller_model.json",
+      "sha256": "b92d2c087de20fbc6e6a142f13e0e48e14ecc25915cf318b485dc2927f958772"
+    },
+    "booster_sha256": "cdadca3758ff84638464e0953479f062805658d31fb5543379b762d1c4ac8918",
+    "candidate_name": "adaptive_support_controller_v8_1",
+    "position_size": 1.0,
+    "decision_rule": "earliest_causal_decision_only_score_both_sides_then_apply_frozen_rolling_controller",
+    "source_action_score_available": false,
+    "source_action_score_missing_replacement": 0.0,
+    "selected_side_probability_bridge": "causal_side_mid_price_for_value_conditioning_only",
+    "side_selection": "higher_predicted_after_cost_return",
+    "controller_state_updates": "strictly_prior_scores_and_guard_acceptance_only",
+    "threshold_or_feature_search_allowed": false
+  },
+  "reporting": {
+    "required_policy_metrics": [
+      "acceptance_rate",
+      "accepted_up_count",
+      "accepted_down_count",
+      "gross_edge",
+      "spread_cost",
+      "fees",
+      "slippage",
+      "liquidity_impact",
+      "unit_net_pnl",
+      "cost_signal_ratio"
+    ],
+    "required_judgements": [
+      "legacy_v7_positive_edge_survives_true_paired_book",
+      "v8_1_has_transferable_signal_or_full_retrain_required"
+    ],
+    "judgement_rules": {
+      "legacy_v7_positive_edge_survives_true_paired_book": "accepted_market_count_gt_0_and_total_unit_net_pnl_gt_0",
+      "v8_1_has_transferable_signal": "accepted_market_count_gt_0_and_total_unit_net_pnl_gt_0",
+      "otherwise": "full_retrain_required"
+    },
+    "old_15m_plus_12_39_allowed_as_gate": false
+  },
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  }
+}

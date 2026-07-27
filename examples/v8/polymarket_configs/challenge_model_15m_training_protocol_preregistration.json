@@ -1,0 +1,60 @@
+{
+  "schema_version": "bigan-challenge-model-15m-training-preregistration-v1",
+  "protocol_id": "challenge-model-15m-model-layer-training-v1",
+  "lane_id": "challenge-model-development-btc-updown-15m-v1",
+  "role": "development-training-only",
+  "development_only_forever": true,
+  "promotion_evidence_eligible": false,
+  "training_start_locked": true,
+  "readiness_gate": {
+    "minimum_quality_valid_outcome_finalized_market_count": 120,
+    "minimum_paired_executable_quote_coverage": 0.95,
+    "transfer_diagnostic_must_be_complete_and_sha256_pinned": true,
+    "all_conditions_required": true,
+    "manual_or_implicit_override_allowed": false
+  },
+  "split": {
+    "method": "chronological_unique_market_groups",
+    "market_order": "market_start_ts_then_market_id",
+    "train_fraction": 0.6,
+    "validation_fraction": 0.2,
+    "test_fraction": 0.2,
+    "all_rows_for_one_market_must_remain_in_one_split": true,
+    "random_row_split_allowed": false,
+    "future_to_past_leakage_allowed": false
+  },
+  "representation": {
+    "one_row_per_market_decision_side": true,
+    "shared_side_symmetric_model": true,
+    "side_specific_model_or_quota_allowed": false,
+    "side_transform": "selected_side_values_plus_signed_side_symmetric_cross_market_features",
+    "missing_value_policy": "explicit_missing_indicator_and_native_missing_value",
+    "missing_encoded_as_numeric_zero_allowed": false
+  },
+  "target": {
+    "target_name": "after_cost_unit_net_pnl",
+    "target_available_only_post_market_close": true,
+    "official_finalized_outcome_required": true,
+    "target_allowed_in_feature_or_split_selection": false,
+    "target_allowed_in_capture_control": false
+  },
+  "development_discipline": {
+    "training_slot_may_open_only_after_readiness_gate": true,
+    "old_15m_plus_12_39_allowed_as_gate": false,
+    "five_minute_exact_195_threshold_mining_allowed": false,
+    "transfer_diagnostic_allowed_as_promotion_evidence": false,
+    "development_lane_allowed_as_promotion_evidence": false
+  },
+  "confirmatory_boundary": {
+    "promotion_requires_separately_preregistered_strict_future_window": true,
+    "development_markets_must_be_excluded_from_confirmatory_evidence": true
+  },
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  }
+}
